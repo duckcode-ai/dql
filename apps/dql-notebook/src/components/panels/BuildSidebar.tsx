@@ -15,7 +15,8 @@ import { blockDomains, filterBlocksForDomain } from './block-domain-filter';
 import { buildNotebookSemanticBlock } from './semantic-notebook-source';
 import { buildBlockLibraryTree, type BlockLibraryTreeNode } from './block-library-tree';
 import { buildFileLibraryTree, type FileLibraryTreeNode } from './file-library-tree';
-import { filterNotebookFiles } from './notebook-sidebar';
+import { DomainScopeSelect } from './DomainScopeSelect';
+import { filterNotebookFiles, notebookDomains } from './notebook-sidebar';
 import {
   buildSemanticTreeFromLayer,
   scopeSemanticTreeForComposition,
@@ -53,7 +54,7 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSem
   onInsertText?: (text: string) => void;
   /** Apply one governed metric/dimension selection to a Block Studio draft. */
   onSemanticCompose?: (metrics: string[], dimensions: string[]) => void;
-  /** Domain scope for the Blocks tab. An empty value selects the first available domain. */
+  /** Domain scope for the Blocks tab. An empty value shows all domains. */
   blockDomain?: string;
   onBlockDomainChange?: (domain: string) => void;
   /** Shows a "+" new-block button beside the search input (Block Studio). */
@@ -76,6 +77,7 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSem
     : TABS;
   const [tab, setTab] = useState<BuildTab>(defaultTab ?? visibleTabs[0]?.id ?? 'notebooks');
   const [search, setSearch] = useState('');
+  const [notebookDomain, setNotebookDomain] = useState('');
 
   useEffect(() => { if (defaultTab) setTab(defaultTab); }, [defaultTab]);
 
@@ -177,7 +179,15 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSem
       )}
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
-        {tab === 'notebooks' && onOpenFile && <NotebooksList t={t} onOpenFile={onOpenFile} search={search} />}
+        {tab === 'notebooks' && onOpenFile && (
+          <NotebooksList
+            t={t}
+            onOpenFile={onOpenFile}
+            search={search}
+            domain={notebookDomain}
+            onDomainChange={setNotebookDomain}
+          />
+        )}
         {tab === 'semantic' && <SemanticList t={t} search={search} onInsert={insertText} notebookMode={!onInsertText || Boolean(onSemanticCompose)} onSemanticCompose={onSemanticCompose} />}
         {tab === 'database' && <DatabaseList t={t} search={search} onInsert={insertText} />}
         {tab === 'blocks' && <BlocksList t={t} search={search} domain={blockDomain} onDomainChange={onBlockDomainChange} onDeleteBlock={onDeleteBlock} refreshKey={blockLibraryRefreshKey} />}
@@ -226,14 +236,23 @@ function columnRelation(colName: string, tableName: string): 'pk' | 'fk' | undef
   return 'fk';
 }
 
-function NotebooksList({ t, onOpenFile, search }: { t: Theme; onOpenFile: (file: NotebookFile) => void; search: string }) {
+function NotebooksList({ t, onOpenFile, search, domain, onDomainChange }: {
+  t: Theme;
+  onOpenFile: (file: NotebookFile) => void;
+  search: string;
+  domain: string;
+  onDomainChange: (domain: string) => void;
+}) {
   const { state, dispatch } = useNotebook();
   const [pendingDelete, setPendingDelete] = useState<NotebookFile | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const allNotebooks = filterNotebookFiles(state.files, '');
-  const notebooks = filterNotebookFiles(state.files, search);
+  const domains = notebookDomains(state.files);
+  const domainOptions = domain && !domains.includes(domain) ? [domain, ...domains] : domains;
+  const allNotebooks = filterNotebookFiles(state.files, '', domain);
+  const notebooks = filterNotebookFiles(state.files, search, domain);
   const notebookTree = buildFileLibraryTree(notebooks, 'notebooks');
+  const scopeLabel = domain || 'all domains';
 
   const confirmDelete = async () => {
     if (!pendingDelete) return;
@@ -255,11 +274,20 @@ function NotebooksList({ t, onOpenFile, search }: { t: Theme; onOpenFile: (file:
   };
   return (
     <div>
+      <DomainScopeSelect
+        id="notebook-domain-filter"
+        ariaLabel="Notebook domain"
+        value={domain}
+        options={domainOptions}
+        onChange={onDomainChange}
+        summary={<>{notebooks.length} notebook{notebooks.length === 1 ? '' : 's'} · {scopeLabel}</>}
+        t={t}
+      />
       {notebooks.length === 0 ? (
         <EmptyNote
           text={allNotebooks.length === 0
-            ? 'No notebooks yet. Use the notebook icon above to create one.'
-            : `No notebooks match “${search.trim()}”.`}
+            ? (domain ? `No notebooks are related to ${domain} yet.` : 'No notebooks yet. Use the notebook icon above to create one.')
+            : `No ${scopeLabel} notebooks match “${search.trim()}”.`}
           t={t}
         />
       ) : (
@@ -817,14 +845,11 @@ function BlocksList({ t, search, domain, onDomainChange, onDeleteBlock, refreshK
   }, [blockFileKey, refreshKey]);
 
   const domains = blockDomains(blocks);
-  const selectedDomain = domain || domains[0] || '';
+  const selectedDomain = domain;
   const domainOptions = selectedDomain && !domains.includes(selectedDomain) ? [selectedDomain, ...domains] : domains;
   const filtered = filterBlocksForDomain(blocks, selectedDomain, search);
   const tree = useMemo(() => buildBlockLibraryTree(filtered, selectedDomain), [filtered, selectedDomain]);
-
-  useEffect(() => {
-    if (!domain && domains[0]) onDomainChange?.(domains[0]);
-  }, [domain, domains.join('|'), onDomainChange]);
+  const scopeLabel = selectedDomain || 'all domains';
 
   const open = (block: BlockEntry) => {
     const file = { name: block.path.split('/').pop() ?? block.name, path: block.path, type: 'block' as const, folder: 'blocks' };
@@ -835,21 +860,17 @@ function BlocksList({ t, search, domain, onDomainChange, onDeleteBlock, refreshK
   if (loading) return <EmptyNote text="Loading blocks…" t={t} />;
   if (blocks.length === 0) return <EmptyNote text="No blocks yet." t={t} />;
   return <div>
-    <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}`, display: 'grid', gap: 5 }}>
-      <label htmlFor="block-domain-filter" style={{ color: t.textMuted, fontSize: 9, fontWeight: 750, letterSpacing: '.06em', textTransform: 'uppercase' }}>Domain</label>
-      <select
-        id="block-domain-filter"
-        aria-label="Block domain"
-        value={selectedDomain}
-        onChange={(event) => onDomainChange?.(event.target.value)}
-        style={{ width: '100%', background: t.inputBg, border: `1px solid ${t.inputBorder}`, borderRadius: 6, color: t.textPrimary, fontFamily: t.font, fontSize: 12, padding: '7px 8px' }}
-      >
-        {domainOptions.map((value) => <option key={value} value={value}>{value}</option>)}
-      </select>
-      <span style={{ color: t.textMuted, fontSize: 10 }}>{filtered.length} {selectedDomain} block{filtered.length === 1 ? '' : 's'}</span>
-    </div>
+    <DomainScopeSelect
+      id="block-domain-filter"
+      ariaLabel="Block domain"
+      value={selectedDomain}
+      options={domainOptions}
+      onChange={(value) => onDomainChange?.(value)}
+      summary={<>{filtered.length} block{filtered.length === 1 ? '' : 's'} · {scopeLabel}</>}
+      t={t}
+    />
     {filtered.length === 0
-      ? <EmptyNote text={search ? `No ${selectedDomain} blocks match this search.` : `No blocks in ${selectedDomain} yet.`} t={t} />
+      ? <EmptyNote text={search ? `No ${scopeLabel} blocks match this search.` : selectedDomain ? `No blocks in ${selectedDomain} yet.` : 'No blocks yet.'} t={t} />
       : <BlockTree
           nodes={tree}
           depth={0}

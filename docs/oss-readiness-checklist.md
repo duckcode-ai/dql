@@ -116,7 +116,7 @@ template lives in `create-dql-app`; the example dbt project is external.
 ## 6. Packaging and Release
 
 - `[x]` public package manifests are present
-- `[x]` `publishing.md` exists for maintainers
+- `[x]` `docs/contribute/releasing.md` exists for maintainers
 - `[x]` CHANGELOG.md has proper version history
 - `[x]` full workspace install validated in a network-enabled environment
 - `[x]` full `pnpm build` completes successfully
@@ -161,7 +161,7 @@ template lives in `create-dql-app`; the example dbt project is external.
 
 ## Current Release Decision
 
-The OSS release candidate correctness gates pass locally for `1.11.2`. Re-run
+The OSS release candidate correctness gates pass locally for `1.12.0`. Re-run
 the published package smoke checks after publishing so `latest` is validated
 against the same version as the repo. The tracked `PERF-001` scale fixture has
 no route-parity, concept-resolution, certified-execution, or invented-ID
@@ -172,7 +172,7 @@ implementer-validated pending independent verification. The governed semantic
 path, target-bound execution, semantic source-integrity, bounded Snowflake
 runtime, resilient request handling, and Trust & Steps acceptance set remains
 implementer-validated pending an enterprise dbt Cloud and Snowflake replay.
-Maintainer approval records these conditions as disclosed `v1.11.2` OSS release
+Maintainer approval records these conditions as disclosed `v1.12.0` OSS release
 exceptions; none is a GA performance claim.
 
 Validated release gates (re-run the browser smoke after the examples

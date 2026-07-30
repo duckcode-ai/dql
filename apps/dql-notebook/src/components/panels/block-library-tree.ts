@@ -25,9 +25,12 @@ export function buildBlockLibraryTree(blocks: BlockEntry[], domain: string): Blo
   const root: MutableFolder = { name: '', path: '', folders: new Map(), blocks: [] };
 
   for (const block of blocks) {
-    const relativePath = blockPathInsideDomain(block.path, domain);
+    const owningDomain = block.domain?.trim() || 'uncategorized';
+    const relativePath = blockPathInsideDomain(block.path, domain || owningDomain);
     const parts = relativePath.split('/').filter(Boolean);
-    const folders = parts.slice(0, -1);
+    // Selected-domain views omit the redundant domain folder. The all-domains
+    // view keeps ownership visible as its top-level grouping.
+    const folders = domain ? parts.slice(0, -1) : [owningDomain, ...parts.slice(0, -1)];
     let cursor = root;
     for (const folderName of folders) {
       const folderPath = [cursor.path, folderName].filter(Boolean).join('/');

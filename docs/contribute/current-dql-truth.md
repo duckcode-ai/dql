@@ -12,15 +12,15 @@ agent memory, issues, old worktrees, and ignored planning files.
 
 ## Verified snapshot
 
-Last checked: **2026-07-28**
+Last checked: **2026-07-30**
 
 | Fact                | Verified state                                                                                                | Evidence                                                                                                                |
 | ------------------- | ------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Primary branch      | Local `main` and `origin/main` both resolved to `5fba1fc37ce5fd38f93c9c05bfdb274bcad4fa46` with no divergence | `git status --short --branch`; `git rev-parse main origin/main`; `git rev-list --left-right --count main...origin/main` |
-| Current OSS release | `1.11.10`                                                                                                     | Release manifests and starter CLI range on `main`                                                                       |
-| npm publication     | All 19 packages in `scripts/release-packages.mjs` reported `version=1.11.10` and `dist-tags.latest=1.11.10`   | Package-by-package `npm view` audit                                                                                     |
-| Published CLI       | Fresh project-local and global installs both reported `dql 1.11.10`                                           | `node scripts/smoke-cli-install.mjs @duckcodeailabs/dql-cli@1.11.10`                                                    |
-| Release tags        | The remote `v1.11.*` tag series currently stops at `v1.11.2`                                                  | `git ls-remote --tags origin 'refs/tags/v1.11.*'`                                                                       |
+| Primary branch      | Local `main` and `origin/main` were synchronized at `2ad6b9f6` before the `1.12.0` release change | `git status --short --branch`; `git rev-parse main origin/main`; `git rev-list --left-right --count main...origin/main` |
+| Release candidate   | `1.12.0` across all 19 publishable packages and the starter CLI range                                        | Release manifests and starter CLI range in this change                                                                  |
+| npm publication     | `1.11.10` remains the last registry-verified release until the `1.12.0` publish and smoke gates finish       | Package-by-package `npm view` audit                                                                                      |
+| Published CLI       | Fresh project-local and global installs last verified `dql 1.11.10`; rerun against `1.12.0` after publish   | `node scripts/smoke-cli-install.mjs @duckcodeailabs/dql-cli@1.11.10`                                                     |
+| Release tags        | The remote `v1.11.*` tag series stops at `v1.11.2`; create `v1.12.0` only after successful publication       | `git ls-remote --tags origin 'refs/tags/v1.11.*'`                                                                        |
 
 The missing `v1.11.3` through `v1.11.10` tags are release-history debt. They do
 not invalidate the verified npm publication, and they must not be created or
@@ -129,8 +129,8 @@ For current-state decisions, use this order:
 
 `ROADMAP.md`, `CHANGELOG.md`, and `docs/oss-readiness-checklist.md` contain
 useful historical release evidence, but their latest named release snapshot is
-`1.11.2`. They must not override the verified `1.11.10` repository and npm
-state.
+`1.11.2`. They must not override the live `1.12.0` release-candidate
+repository state or the separately verified npm publication state.
 
 ## Refresh this snapshot
 

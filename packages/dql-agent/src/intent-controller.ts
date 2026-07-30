@@ -175,7 +175,27 @@ const GRATITUDE_RE =
 const META_CAPABILITY_RE =
   /\b(what\s+can\s+you\s+do|what\s+do\s+you\s+do|how\s+do\s+(you|i)\s+(work|use)|who\s+are\s+you|what\s+are\s+you|what\s+is\s+dql|help\s+me\s+get\s+started|how\s+can\s+you\s+help|what\s+should\s+i\s+ask|how\s+does\s+this\s+work|are\s+you\s+(an?\s+)?(ai|bot|llm))\b/i;
 const CONTEXT_RECAP_RE =
-  /\b(what\s+(?:are|were)\s+we\s+talking\s+about|what\s+we\s+(?:are|were)\s+talking\s+about|what\s+is\s+this\s+about|where\s+were\s+we|remind\s+me|recap(?:\s+this)?|summari[sz]e\s+(?:this|our\s+conversation))\b/i;
+  /\b(?:what\s+(?:(?:are|were|have)\s+we|we\s+(?:are|were|have))\s+(?:been\s+)?talking\s+about|what\s+(?:(?:are|were)\s+we|we\s+(?:are|were))\s+(?:(?:reviewing|discussing|covering)(?:\s+and\s+(?:reviewing|discussing|covering))*|working\s+on)(?:\s+(?:here|so\s+far|in\s+(?:(?:this|the|our|whole)\s+)?(?:chat|conversation|discussion|thread)))?|what\s+(?:is|was)\s+(?:this|the|our|whole)\s+(?:chat|conversation|discussion|thread)\s+about|what\s+is\s+this\s+about|where\s+were\s+we|remind\s+me(?:\s+what\s+we\s+were\s+(?:talking|reviewing|discussing)\s+about)?|recap(?:\s+(?:this|our|the|whole))?(?:\s+(?:chat|conversation|discussion|thread))?|summari[sz]e\s+(?:this|our|the|whole)(?:\s+(?:chat|conversation|discussion|thread))?)\b/;
+
+/**
+ * Normalize only a few high-frequency chat-recap typos. This is intentionally
+ * not general fuzzy matching: analytical questions must not be diverted away
+ * from governed data routing merely because they contain a vaguely similar word.
+ */
+function normalizeConversationRecapText(question: string): string {
+  return question
+    .toLowerCase()
+    .replace(/\bconversaion\b|\bconversaton\b|\bconverstation\b/g, 'conversation')
+    .replace(/\brevewing\b|\breviwing\b/g, 'reviewing')
+    .replace(/\bdiscusing\b|\bdisucssing\b/g, 'discussing')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function looksLikeConversationRecap(question: string): boolean {
+  return CONTEXT_RECAP_RE.test(normalizeConversationRecapText(question));
+}
 
 /**
  * Classify a turn as conversational (greeting / gratitude / meta-capability /
@@ -189,12 +209,15 @@ export function classifyConversationalTurn(
 ): ConversationalKind | undefined {
   const trimmed = question.trim();
   if (!trimmed) return undefined;
+  // A strong conversation-meta phrase wins even when it mentions "results",
+  // "SQL", or a metric by name. It summarizes the existing thread; it must not
+  // replay the prior analytical route as a new data request.
+  if (hasHistory && looksLikeConversationRecap(trimmed)) return 'smalltalk';
   // Any real data ask wins, regardless of a polite opener.
   if (DATA_VOCAB_RE.test(trimmed)) return undefined;
   const words = trimmed.split(/\s+/).length;
 
   if (META_CAPABILITY_RE.test(trimmed)) return 'meta_capability';
-  if (hasHistory && CONTEXT_RECAP_RE.test(trimmed)) return 'smalltalk';
   // Short openers/closers only — a long sentence starting with "hi" is likely a real ask.
   if (words <= 6 && GREETING_RE.test(trimmed)) return 'greeting';
   if (words <= 6 && GRATITUDE_RE.test(trimmed)) return 'gratitude';

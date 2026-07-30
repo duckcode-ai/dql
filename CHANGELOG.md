@@ -6,6 +6,47 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.12.0 - 2026-07-30
+
+### Domain-wide libraries and conversation-aware analytical follow-ups
+
+This minor release makes Git-backed analytical assets easier to navigate across
+Domain Packages and improves in-session AI recaps without merging context
+between Ask, Notebook AI, and Block AI.
+
+### Added
+
+- **All-domain asset views.** Blocks, Notebooks, and the Domain workspace can
+  show every available domain or narrow to one domain through the same compact
+  selector pattern.
+- **Global related products.** Domain workspaces expose all Apps and Notebooks
+  when no domain is selected, while domain-scoped views continue to use
+  owner/uses-domain metadata.
+- **Live notebook discovery.** Related-product results merge Git-tracked
+  notebook files with the compiled manifest so newly created notebooks appear
+  before the next compile.
+
+### Fixed
+
+- **Conversation recap routing.** Phrases such as “what are we reviewing in
+  this chat” are treated as in-session recap requests instead of new analytical
+  queries, including bounded normalization for common spelling mistakes.
+- **Substantive recap context.** Consecutive recap questions summarize the
+  latest analytical or authoring turn and ignore prior recap-only turns.
+- **Result recap fidelity.** Tuple-shaped and object-shaped result samples are
+  both converted into grounded recap facts.
+- **Domain navigation consistency.** Blocks, Notebooks, and Domain views share
+  consistent all-domain semantics, counts, filtering, and artifact routing.
+
+### Verification
+
+- Full DQL agent suite: 102 files and 1,205 tests passed.
+- Full Notebook suite: 39 files and 178 tests passed.
+- Targeted CLI domain-related-products API test passed.
+- Agent, CLI, and Notebook production builds passed.
+- The complete release build, test, pack, publish, registry, and clean-install
+  gates are recorded by the release workflow for this version.
+
 ## v1.11.2 - 2026-07-26
 
 ### Complete unified AI orchestration and explicit Block AI commit

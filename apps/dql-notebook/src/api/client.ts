@@ -298,7 +298,7 @@ export interface DomainWorkspaceSummary {
 }
 
 export interface RelatedDomainProducts {
-  domain: string;
+  domain: string | null;
   apps: Array<{ id: string; name: string; filePath: string; ownerDomain?: string; usesDomains: string[]; purpose?: string; requiredExports: string[]; classification?: string; lifecycle?: string }>;
   notebooks: Array<{ id: string; title: string; filePath: string; ownerDomain?: string; usesDomains: string[]; purpose?: string; requiredExports: string[]; classification?: string }>;
   snapshotId: string;
@@ -2743,6 +2743,10 @@ export const api = {
 
   async getRelatedDomainProducts(domain: string): Promise<RelatedDomainProducts> {
     return request(`/api/domain-workspaces/${encodeURIComponent(domain)}/related-products`);
+  },
+
+  async getAllRelatedDomainProducts(): Promise<RelatedDomainProducts> {
+    return request('/api/domain-workspaces/related-products');
   },
 
   async getDomainKnowledge(domain: string): Promise<DomainKnowledgeResponse> {

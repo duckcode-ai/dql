@@ -8,6 +8,7 @@ import { themes } from '../../themes/notebook-theme';
 import { parseNotebookFile } from '../../utils/parse-workbook';
 import { SkillsPage } from '../skills/SkillsPage';
 import { Knowledge360 } from '../domains/GovernedContextPage';
+import { DomainScopeSelect } from '../panels/DomainScopeSelect';
 import { DomainModelingCanvas, type ColumnDisplayMode, type DiagramDensity, type DiagramLayoutMode, type ModelingViewMode, type RelationshipDraft } from './DomainModelingCanvas';
 import { DOMAIN_STUDIO_NAVIGATION, domainEntityRecords, domainPackageTree, domainStudioLocationHref, entityKindColor, isDomainStudioSection, type DomainStudioSection } from './domain-studio-model';
 import { domainStudioUnavailableState, type DomainStudioUnavailableState } from './domain-studio-readiness';
@@ -126,7 +127,7 @@ export function DbtFirstModelingPage() {
       setUnavailable(null);
       const nextDomain = selectedDomain && result.modeling.packages[selectedDomain]
         ? selectedDomain
-        : (Object.keys(result.modeling.packages).sort()[0] ?? null);
+        : null;
       if (nextDomain !== selectedDomain) {
         setSelectedDomain(nextDomain);
         writeDomainStudioLocation(nextDomain, tab, true);
@@ -602,49 +603,29 @@ function DomainPackageNavigation({
 }) {
   const packages = domainPackageTree(data.modeling.packages);
   return (
-    <nav aria-label="Domain packages" style={{ padding: '10px 7px', borderBottom: `1px solid ${t.headerBorder}` }}>
-      <div style={{ padding: '0 8px 6px', color: t.textMuted, fontSize: 9, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.06em' }}>Domains</div>
-      <button
-        type="button"
-        onClick={() => onSelect(null)}
-        aria-current={selectedDomain === null ? 'page' : undefined}
-        style={workspaceNavButton(t, selectedDomain === null, false)}
-      >
-        <FolderTree size={14} color={selectedDomain === null ? t.accent : t.textMuted} />
-        <span style={{ flex: 1 }}>All domains</span>
-        <small style={{ color: selectedDomain === null ? t.accent : t.textMuted }}>{packages.length}</small>
-      </button>
-      {packages.map((pkg) => {
-        const selected = selectedDomain === pkg.id;
-        const localName = pkg.id.split('.').at(-1) ?? pkg.id;
-        return (
-          <button
-            key={pkg.id}
-            type="button"
-            onClick={() => onSelect(pkg.id)}
-            aria-current={selected ? 'page' : undefined}
-            title={pkg.id}
-            style={{
-              ...workspaceNavButton(t, selected, false),
-              paddingLeft: 9 + pkg.depth * 15,
-            }}
-          >
-            <span aria-hidden="true" style={{ width: 12, color: t.textMuted, textAlign: 'center' }}>{pkg.depth > 0 ? '└' : '•'}</span>
-            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{localName}</span>
-          </button>
-        );
-      })}
+    <nav aria-label="Domain packages">
+      <DomainScopeSelect
+        id="domain-workspace-filter"
+        ariaLabel="Domain workspace"
+        value={selectedDomain ?? ''}
+        options={packages.map((pkg) => ({ value: pkg.id, label: pkg.label }))}
+        onChange={(value) => onSelect(value || null)}
+        summary={<>{packages.length} domain{packages.length === 1 ? '' : 's'} available</>}
+        t={t}
+      />
     </nav>
   );
 }
 
 function DomainWorkspaceNavigation({ data, domain, active, onSelect, t }: { data: DbtFirstModelingResponse; domain: string | null; active: Tab; onSelect: (section: Tab) => void; t: Theme }) {
-  const assets = domain ? (data.domainAssets?.[domain] ?? {}) : {};
+  const assetGroups = domain
+    ? [data.domainAssets?.[domain] ?? {}]
+    : Object.values(data.domainAssets ?? {});
   const entities = domainEntityRecords(data.modeling, domain);
   const counts: Partial<Record<Tab, number>> = {
     diagram: entities.length,
-    skills: assets.skills?.length ?? 0,
-    blocks: assets.blocks?.length ?? 0,
+    skills: assetGroups.reduce((total, assets) => total + (assets.skills?.length ?? 0), 0),
+    blocks: new Set(assetGroups.flatMap((assets) => assets.blocks ?? [])).size,
   };
   return (
     <nav aria-label={domain ? `${domain} workspace` : 'All domains workspace'} style={{ padding: '10px 7px 14px' }}>
@@ -1543,7 +1524,9 @@ function DomainBlocksPanel({ data, domain, t }: { data: DbtFirstModelingResponse
     <ScrollPanel>
       <PanelHeader
         title="Blocks"
-        detail="Reusable blocks owned by this domain. Select one to open the exact source in Block Studio."
+        detail={domain
+          ? `Reusable blocks owned by ${domain}. Select one to open the exact source in Block Studio.`
+          : 'All reusable blocks grouped across the current Domain Packages. Select one to open the exact source in Block Studio.'}
         t={t}
       />
       {openError ? <Message text={openError} t={t} /> : null}
@@ -1551,6 +1534,8 @@ function DomainBlocksPanel({ data, domain, t }: { data: DbtFirstModelingResponse
         <div style={{ display: 'grid', gap: 10 }}>
           {paths.map((path) => {
             const name = (path.split('/').at(-1) ?? path).replace(/\.dql$/i, '');
+            const owningDomain = Object.entries(data.domainAssets ?? {})
+              .find(([, assets]) => assets.blocks?.includes(path))?.[0];
             return (
               <button
                 key={path}
@@ -1562,6 +1547,7 @@ function DomainBlocksPanel({ data, domain, t }: { data: DbtFirstModelingResponse
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <Blocks size={14} color={t.accent} />
                   <b>{name}</b>
+                  {!domain ? <Badge t={t}>{owningDomain ?? 'shared'}</Badge> : null}
                   {openingPath === path ? <Badge t={t}>Opening…</Badge> : null}
                 </div>
                 <code style={{ display: 'block', marginTop: 7, color: t.textMuted, fontSize: 10 }}>{path}</code>
@@ -1579,18 +1565,13 @@ function DomainBlocksPanel({ data, domain, t }: { data: DbtFirstModelingResponse
 function RelatedProductsPanel({ data, domain, kind, t }: { data: DbtFirstModelingResponse; domain: string | null; kind: 'notebooks' | 'apps'; t: Theme }) {
   const { state, dispatch } = useNotebook();
   const [products, setProducts] = useState<Array<Record<string, unknown>>>([]);
-  const [loading, setLoading] = useState(Boolean(domain));
+  const [loading, setLoading] = useState(true);
   const [openingId, setOpeningId] = useState<string | null>(null);
   const [openError, setOpenError] = useState<string | null>(null);
   useEffect(() => {
     let active = true;
-    if (!domain) {
-      setProducts([]);
-      setLoading(false);
-      return;
-    }
     setLoading(true);
-    void api.getRelatedDomainProducts(domain)
+    void (domain ? api.getRelatedDomainProducts(domain) : api.getAllRelatedDomainProducts())
       .then((result) => { if (active) setProducts(result[kind] as unknown as Array<Record<string, unknown>>); })
       .catch(() => { if (active) setProducts([]); })
       .finally(() => { if (active) setLoading(false); });
@@ -1634,8 +1615,10 @@ function RelatedProductsPanel({ data, domain, kind, t }: { data: DbtFirstModelin
   return (
     <ScrollPanel>
       <PanelHeader
-        title={`Related ${label}`}
-        detail={`${label} are global shared products. This view is a backlink from their owner/uses-domain metadata; it does not create a second copy inside the Domain Package.`}
+        title={domain ? `Related ${label}` : `All ${label}`}
+        detail={domain
+          ? `${label} are global shared products related to ${domain}. This backlink does not create a second copy inside the Domain Package.`
+          : `All global ${label.toLowerCase()} across Domain Packages. Select a domain above to narrow by owner/uses-domain metadata.`}
         t={t}
       />
       {openError ? <Message text={openError} t={t} /> : null}

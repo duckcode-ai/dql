@@ -24,6 +24,7 @@ import {
   generateSemanticCompostingDrafts,
   buildSemanticLayerDiagnostics,
   buildSemanticTableMapping,
+  buildConversationContextRecap,
   resolveSemanticTableMapping,
   compileBlockStudioManifest,
   conversationTurnInputFromRun,
@@ -1642,6 +1643,16 @@ describe('domain Related Products backlinks', () => {
     try {
       const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
       const base = `http://127.0.0.1:${port}`;
+      const allRelated = await (await fetch(`${base}/api/domain-workspaces/related-products`)).json() as {
+        domain: string | null;
+        apps: Array<Record<string, unknown>>;
+        notebooks: Array<Record<string, unknown>>;
+      };
+      expect(allRelated.domain).toBeNull();
+      expect(allRelated.apps).toContainEqual(expect.objectContaining({ id: 'growth-revenue' }));
+      expect(allRelated.notebooks).toContainEqual(expect.objectContaining({
+        id: 'notebooks/revenue-acquisition-research.dqlnb',
+      }));
       for (const domain of ['growth', 'commerce']) {
         const related = await (await fetch(`${base}/api/domain-workspaces/${domain}/related-products`)).json() as {
           apps: Array<Record<string, unknown>>;
@@ -1777,6 +1788,36 @@ describe('exploratory result contracts', () => {
 });
 
 describe('agent run runtime API', () => {
+  it('summarizes the latest substantive turn instead of a prior recap turn', () => {
+    const recap = buildConversationContextRecap({
+      activeTurnId: 'turn-recap',
+      turns: [
+        {
+          id: 'turn-data',
+          question: 'what region has most revenue',
+          answerSummary: 'Philadelphia has the highest revenue at $425,467.00.',
+          route: 'semantic_answer',
+          result: {
+            columns: ['location_name', 'revenue'],
+            rowsSample: [['Philadelphia', 425467]],
+            dimensionValues: { location_name: ['Philadelphia', 'Brooklyn'] },
+          },
+        },
+        {
+          id: 'turn-recap',
+          question: 'what we are reviewing in this chat',
+          answerSummary: 'We were reviewing regional revenue.',
+          route: 'conversation',
+        },
+      ],
+    });
+
+    expect(recap).toContain('what region has most revenue');
+    expect(recap).toContain('Philadelphia has the highest revenue');
+    expect(recap).toContain('location_name=Philadelphia');
+    expect(recap).not.toContain('what we are reviewing in this chat');
+  });
+
   it('AGT-012 retains the result-row sample for member values and cross-result compute', () => {
     const rows = Array.from({ length: 10 }, (_, index) => ({
       product_name: index === 9 ? 'flame impala' : 'product_' + index,

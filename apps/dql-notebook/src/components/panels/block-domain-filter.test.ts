@@ -20,6 +20,14 @@ describe('Block Studio domain scope', () => {
     ]);
   });
 
+  it('keeps every unique block in the all-domains view', () => {
+    expect(filterBlocksForDomain(blocks, '').map((block) => block.name)).toEqual([
+      'Customer profile',
+      'Customer revenue',
+      'Campaign performance',
+    ]);
+  });
+
   it('applies search inside the selected domain rather than across all blocks', () => {
     expect(filterBlocksForDomain(blocks, 'customer', 'campaign')).toEqual([]);
     expect(filterBlocksForDomain(blocks, 'growth', 'campaign')).toHaveLength(1);

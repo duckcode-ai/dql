@@ -130,7 +130,7 @@ All packages in this monorepo are released together on the same version cadence.
 Before treating a change as OSS-ready, review the launch checklist:
 
 - [`docs/oss-readiness-checklist.md`](./docs/oss-readiness-checklist.md)
-- [`docs/publishing.md`](./docs/publishing.md)
+- [`docs/contribute/releasing.md`](./docs/contribute/releasing.md)
 
 ## Shared design contract (Governed Analytics Cloud embed)
 

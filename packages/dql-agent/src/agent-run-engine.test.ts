@@ -1401,7 +1401,11 @@ describe("AgentRunEngine — conversation route", () => {
     expect(run.status).toBe("completed");
   });
 
-  it("routes Ask-mode conversation recap questions to conversation when context exists", async () => {
+  it.each([
+    "what we are talking about here?",
+    "what we are reviewing in this chat",
+    "what are we revewing and discussing in whole conversaion?",
+  ])("routes Ask-mode conversation recap '%s' to conversation when context exists", async (question) => {
     const engine = new AgentRunEngine({
       idGenerator: () => "run-context-recap",
       now: fixedClock(),
@@ -1417,7 +1421,7 @@ describe("AgentRunEngine — conversation route", () => {
     });
 
     const run = await engine.run({
-      question: "what we are talking about here?",
+      question,
       requestedMode: "ask",
       conversationContext: {
         sourceQuestion: "Top products by revenue",
@@ -1428,6 +1432,7 @@ describe("AgentRunEngine — conversation route", () => {
     expect(run.route).toBe("conversation");
     expect(run.answerKind).toBe("conversational");
     expect(run.answer).toContain("Top products by revenue");
+    expect(run.artifacts).toHaveLength(0);
   });
 
   it("prefers an injected router decision over the deterministic path", async () => {

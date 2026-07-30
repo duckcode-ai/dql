@@ -5938,6 +5938,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    if (req.method === 'GET' && path === '/api/domain-workspaces/related-products') {
+      const requestId = apiRequestId('domain-related-products');
+      const snapshot = projectSnapshot();
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        requestId,
+        domain: null,
+        ...relatedProductsForDomain(snapshot.manifest, undefined, scanNotebookFiles(projectRoot)),
+        snapshotId: snapshot.snapshotId,
+      }));
+      return;
+    }
+
     if (req.method === 'GET' && path.startsWith('/api/domain-workspaces/')) {
       const requestId = apiRequestId('domain-workspace');
       const suffix = decodeURIComponent(path.slice('/api/domain-workspaces/'.length));
@@ -5970,7 +5983,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON(suffix.endsWith(relatedSuffix)
-        ? { requestId, domain: domainId, ...relatedProductsForDomain(manifest, domainId), snapshotId: snapshot.snapshotId }
+        ? { requestId, domain: domainId, ...relatedProductsForDomain(manifest, domainId, scanNotebookFiles(projectRoot)), snapshotId: snapshot.snapshotId }
         : {
             requestId,
             snapshotId: snapshot.snapshotId,
@@ -14087,12 +14100,16 @@ FROM from_counts, to_counts, joined, unmatched, from_max, to_max`;
   };
 }
 
-function relatedProductsForDomain(manifest: DQLManifest, domainId: string): {
+function relatedProductsForDomain(
+  manifest: DQLManifest,
+  domainId?: string,
+  liveNotebookFiles: NotebookFileEntry[] = [],
+): {
   apps: Array<Record<string, unknown>>;
   notebooks: Array<Record<string, unknown>>;
 } {
   const apps = Object.values(manifest.apps ?? {})
-    .filter((app) => app.ownerDomain === domainId || app.usesDomains.includes(domainId))
+    .filter((app) => !domainId || app.ownerDomain === domainId || app.usesDomains.includes(domainId))
     .map((app) => ({
       id: app.id,
       name: app.name,
@@ -14105,8 +14122,8 @@ function relatedProductsForDomain(manifest: DQLManifest, domainId: string): {
       lifecycle: app.lifecycle,
       legacyLayout: app.filePath.startsWith('domains/'),
     }));
-  const notebooks = Object.entries(manifest.notebooks)
-    .filter(([, notebook]) => notebook.ownerDomain === domainId || notebook.usesDomains.includes(domainId))
+  const compiledNotebooks = Object.entries(manifest.notebooks)
+    .filter(([, notebook]) => !domainId || notebook.ownerDomain === domainId || notebook.usesDomains.includes(domainId))
     .map(([id, notebook]) => ({
       id,
       title: notebook.title,
@@ -14118,6 +14135,26 @@ function relatedProductsForDomain(manifest: DQLManifest, domainId: string): {
       classification: notebook.classification,
       legacyLayout: notebook.filePath.startsWith('domains/'),
     }));
+  const notebooksByPath = new Map(compiledNotebooks.map((notebook) => [String(notebook.filePath), notebook]));
+  for (const file of liveNotebookFiles) {
+    if (file.type !== 'notebook') continue;
+    const usesDomains = file.usesDomains ?? [];
+    if (domainId && file.ownerDomain !== domainId && !usesDomains.includes(domainId)) continue;
+    if (notebooksByPath.has(file.path)) continue;
+    notebooksByPath.set(file.path, {
+      id: file.path,
+      title: file.name,
+      filePath: file.path,
+      ownerDomain: file.ownerDomain,
+      usesDomains,
+      purpose: undefined,
+      requiredExports: [],
+      classification: undefined,
+      legacyLayout: file.path.startsWith('domains/'),
+    });
+  }
+  const notebooks = [...notebooksByPath.values()]
+    .sort((a, b) => String(a.title).localeCompare(String(b.title)));
   return { apps, notebooks };
 }
 
@@ -21346,7 +21383,7 @@ function renderConversationMemoryForPrompt(context: Record<string, unknown> | un
   ].filter(Boolean).join('\n');
 }
 
-function buildConversationContextRecap(context: Record<string, unknown> | undefined): string | undefined {
+export function buildConversationContextRecap(context: Record<string, unknown> | undefined): string | undefined {
   if (!context) return undefined;
   const turnRecap = buildConversationTurnsRecap(context);
   if (turnRecap) return turnRecap;
@@ -21354,10 +21391,7 @@ function buildConversationContextRecap(context: Record<string, unknown> | undefi
   const sourceAnswerSummary = agentRunString(context.sourceAnswerSummary);
   const columns = agentRunStringArray(context.resultColumns ?? context.outputColumns).slice(0, 8);
   const values = agentRunRecord(context.resultDimensionValues);
-  const rows = Array.isArray(context.resultRowsSample)
-    ? context.resultRowsSample.map(agentRunRecord).filter((row): row is Record<string, unknown> => Boolean(row)).slice(0, 1)
-    : [];
-  const firstRow = rows[0];
+  const firstRow = firstConversationResultRow(context.resultRowsSample, columns);
 
   const leadParts = buildPriorValueLeadParts(values);
 
@@ -21391,15 +21425,18 @@ function buildConversationTurnsRecap(context: Record<string, unknown>): string |
   const active = activeTurnId
     ? turns.find((turn) => agentRunString(turn.id) === activeTurnId)
     : undefined;
-  const selected = active ?? turns[turns.length - 1];
+  // A recap turn is persisted like every other turn, but it must not become the
+  // subject of the next recap. Prefer the newest analytical/authoring turn and
+  // fall back to the active turn only when the thread contains conversation alone.
+  const substantiveTurns = turns.filter((turn) => agentRunString(turn.route) !== 'conversation');
+  const selected = active && agentRunString(active.route) !== 'conversation'
+    ? active
+    : substantiveTurns[substantiveTurns.length - 1] ?? active ?? turns[turns.length - 1];
   if (!selected) return undefined;
   const result = agentRunRecord(selected.result);
   const values = agentRunRecord(result?.dimensionValues);
   const columns = agentRunStringArray(result?.columns).slice(0, 8);
-  const rows = Array.isArray(result?.rowsSample)
-    ? result.rowsSample.map(agentRunRecord).filter((row): row is Record<string, unknown> => Boolean(row)).slice(0, 1)
-    : [];
-  const firstRow = rows[0];
+  const firstRow = firstConversationResultRow(result?.rowsSample, columns);
   const leadParts = buildPriorValueLeadParts(values);
   const rowFacts = firstRow
     ? columns
@@ -21411,7 +21448,7 @@ function buildConversationTurnsRecap(context: Record<string, unknown>): string |
         .filter(Boolean)
     : [];
   const previous = turns
-    .filter((turn) => turn !== selected)
+    .filter((turn) => turn !== selected && agentRunString(turn.route) !== 'conversation')
     .map((turn) => agentRunString(turn.question))
     .filter((value): value is string => Boolean(value))
     .slice(-2);
@@ -21424,6 +21461,18 @@ function buildConversationTurnsRecap(context: Record<string, unknown>): string |
     previous.length ? `earlier in this thread: ${previous.join(' / ')}` : '',
   ].filter(Boolean);
   return bits.length > 0 ? `We were talking about ${bits.join('. ')}.` : undefined;
+}
+
+function firstConversationResultRow(
+  value: unknown,
+  columns: string[],
+): Record<string, unknown> | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const first = value[0];
+  const record = agentRunRecord(first);
+  if (record) return record;
+  if (!Array.isArray(first)) return undefined;
+  return Object.fromEntries(columns.map((column, index) => [column, first[index]]));
 }
 
 function agentRunStringArray(value: unknown): string[] {

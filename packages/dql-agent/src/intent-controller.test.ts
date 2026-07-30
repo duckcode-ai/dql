@@ -99,6 +99,25 @@ describe('classifyConversationalTurn', () => {
     }
   });
 
+  it('classifies bounded conversation recap requests, including common typos', () => {
+    for (const q of [
+      'what we are talking about here?',
+      'what we are reviewing in this chat',
+      'what are we reviewing and discussing in the whole conversation?',
+      'what are we revewing and discussing in whole conversaion?',
+      'summarize our conversation',
+      'where were we?',
+    ]) {
+      expect(classifyConversationalTurn(q, true)).toBe('smalltalk');
+    }
+  });
+
+  it('requires prior context and does not steal ordinary analytical review questions', () => {
+    expect(classifyConversationalTurn('what we are reviewing in this chat')).toBeUndefined();
+    expect(classifyConversationalTurn('review revenue by region', true)).toBeUndefined();
+    expect(classifyConversationalTurn('what revenue changed by region?', true)).toBeUndefined();
+  });
+
   it('does NOT claim a real data question, even with a polite opener', () => {
     expect(classifyConversationalTurn('hi, what is total revenue?')).toBeUndefined();
     expect(classifyConversationalTurn('thanks — now break it down by region')).toBeUndefined();

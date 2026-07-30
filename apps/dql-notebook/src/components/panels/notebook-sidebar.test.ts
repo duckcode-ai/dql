@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { NotebookFile } from '../../store/types';
-import { filterNotebookFiles } from './notebook-sidebar';
+import { filterNotebookFiles, notebookDomains } from './notebook-sidebar';
 
 const files: NotebookFile[] = [
   {
@@ -20,6 +20,20 @@ const files: NotebookFile[] = [
     usesDomains: ['operations'],
   },
   {
+    name: 'shared_growth.dqlnb',
+    path: 'notebooks/shared_growth.dqlnb',
+    type: 'notebook',
+    folder: 'notebooks',
+    ownerDomain: 'analytics',
+    usesDomains: ['commerce'],
+  },
+  {
+    name: 'scratchpad.dqlnb',
+    path: 'notebooks/scratchpad.dqlnb',
+    type: 'notebook',
+    folder: 'notebooks',
+  },
+  {
     name: 'revenue.dql',
     path: 'blocks/revenue.dql',
     type: 'block',
@@ -32,12 +46,32 @@ describe('notebook sidebar filtering', () => {
     expect(filterNotebookFiles(files, '').map((file) => file.name)).toEqual([
       'quality_review.dqlnb',
       'retention.dqlnb',
+      'scratchpad.dqlnb',
+      'shared_growth.dqlnb',
     ]);
     expect(filterNotebookFiles(files, 'commerce').map((file) => file.name)).toEqual([
       'retention.dqlnb',
+      'shared_growth.dqlnb',
     ]);
     expect(filterNotebookFiles(files, 'quality').map((file) => file.name)).toEqual([
       'quality_review.dqlnb',
+    ]);
+  });
+
+  it('offers owner and usage domains plus uncategorized', () => {
+    expect(notebookDomains(files)).toEqual(['analytics', 'commerce', 'operations', 'uncategorized']);
+  });
+
+  it('filters backlinks by domain while keeping all notebooks in the global view', () => {
+    expect(filterNotebookFiles(files, '', 'commerce').map((file) => file.name)).toEqual([
+      'retention.dqlnb',
+      'shared_growth.dqlnb',
+    ]);
+    expect(filterNotebookFiles(files, '', 'analytics').map((file) => file.name)).toEqual([
+      'shared_growth.dqlnb',
+    ]);
+    expect(filterNotebookFiles(files, '', 'uncategorized').map((file) => file.name)).toEqual([
+      'scratchpad.dqlnb',
     ]);
   });
 });
