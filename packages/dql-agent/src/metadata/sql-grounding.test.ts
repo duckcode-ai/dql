@@ -128,6 +128,30 @@ describe('sql-grounding', () => {
       const { sql } = resolveRelationsInSql('SELECT * FROM order_items', grounding, { prefer: 'ref' });
       expect(sql).toContain("FROM {{ ref('order_items') }}");
     });
+
+    it('resolves an internal source graph identity to the inspected physical relation', () => {
+      const grounding = buildSchemaGrounding(artifacts);
+      const { sql, rewrites } = resolveRelationsInSql(
+        'SELECT order_id FROM source::dev.order_items',
+        grounding,
+      );
+
+      expect(sql).toBe('SELECT order_id FROM dev.order_items');
+      expect(rewrites).toEqual([
+        { from: 'source::dev.order_items', to: 'dev.order_items' },
+      ]);
+    });
+
+    it('leaves an unresolved internal graph identity intact for fail-closed validation', () => {
+      const grounding = buildSchemaGrounding(artifacts);
+      const { sql, rewrites } = resolveRelationsInSql(
+        'SELECT * FROM source::private.unknown_orders',
+        grounding,
+      );
+
+      expect(sql).toContain('source::private.unknown_orders');
+      expect(rewrites).toEqual([]);
+    });
   });
 
   describe('validateSqlAgainstGrounding', () => {

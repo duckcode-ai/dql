@@ -8,6 +8,7 @@ import type {
 import { sourceSqlShapeColumns } from './sql-shape.js';
 import { shouldClarifyBeforeGeneration } from '../cascade/triage.js';
 import { aggregationIntegrityIssuesForSql } from './grain-ledger.js';
+import { internalRelationIdsInSql } from './sql-grounding.js';
 
 export type SqlContextValidationCode =
   | 'unknown_relation'
@@ -88,6 +89,21 @@ export function validateSqlAgainstLocalContext(
   contextPack: LocalContextPack | undefined,
   options: SqlContextValidationOptions = {},
 ): SqlContextValidationResult {
+  const internalRelationIds = internalRelationIdsInSql(sql);
+  if (internalRelationIds.length > 0) {
+    return {
+      ok: false,
+      code: 'unknown_relation',
+      error: `Generated SQL contains internal DQL graph relation identifier(s): ${internalRelationIds.join(', ')}. These identifiers are only for retrieval and lineage; use the inspected physical database.schema.table relation instead.`,
+      warnings: [],
+      referencedRelations: [],
+      referencedColumns: [],
+      offending: {
+        relation: internalRelationIds[0],
+        relations: internalRelationIds,
+      },
+    };
+  }
   const analysis = analyzeSqlReferences(sql, options.dialect);
   const referencedRelations = analysis.tables;
   const referencedColumns = analysis.columns.map((column) => ({

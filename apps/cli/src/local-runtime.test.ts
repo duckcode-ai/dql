@@ -3340,6 +3340,24 @@ describe('notebook cell execution isolation (API-006, API-007, UI-009, E2E-014)'
         },
       });
 
+      const internalIdResponse = await executeCell(
+        'cell_internal_id',
+        'run_internal_id',
+        'SELECT value FROM source::dev.reporting.monthly_revenue',
+      );
+      expect(internalIdResponse.status).toBe(400);
+      await expect(internalIdResponse.json()).resolves.toMatchObject({
+        code: 'DQL_INTERNAL_RELATION_ID',
+        error: expect.stringContaining('internal DQL graph relation identifier'),
+        details: {
+          phase: 'compilation',
+          executionContext: {
+            cellId: 'cell_internal_id',
+            runId: 'run_internal_id',
+          },
+        },
+      });
+
       const successfulResponse = await executeCell('cell_success', 'run_success', 'SELECT 2 AS value');
       expect(successfulResponse.status).toBe(200);
       await expect(successfulResponse.json()).resolves.toMatchObject({
@@ -3937,6 +3955,14 @@ describe('buildAgentPreviewSql', () => {
   it('rejects generated SQL that is not a single read-only statement', () => {
     expect(() => buildAgentPreviewSql('SELECT 1; DROP TABLE orders')).toThrow('one statement');
     expect(() => buildAgentPreviewSql('DELETE FROM orders')).toThrow('read-only SELECT or WITH');
+  });
+
+  it('rejects internal DQL graph relation identities before preview execution', () => {
+    const preview = () => buildAgentPreviewSql(
+      'SELECT amount FROM source::dev_finance.reporting.monthly_revenue',
+    );
+    expect(preview).toThrow('internal DQL graph relation identifier');
+    expect(preview).toThrow('physical database.schema.table');
   });
 });
 
@@ -6034,20 +6060,30 @@ describe('governed correction lifecycle API', () => {
           question: 'What is net revenue?',
           wrongSql: 'SELECT SUM(amount) FROM orders',
           correctedSql: 'SELECT SUM(net_amount) FROM orders',
-          scope: { metric: 'revenue' },
+          title: 'Use governed net revenue',
+          guidance: 'Use net_amount and exclude refunds for revenue.',
+          rationale: 'The governed metric is net of refunds.',
+          scope: { metric: 'revenue', domain: 'commerce' },
           approve: true,
         }),
       });
       const payload = await response.json() as {
         ok: boolean;
-        hint: { status: string };
+        hint: { status: string; title: string; guidance: string; scope: { metric: string; domain: string } };
+        trace: { rationale?: string };
         approvalRequested: boolean;
         note?: string;
       };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(true);
-      expect(payload.hint.status).toBe('candidate');
+      expect(payload.hint).toMatchObject({
+        status: 'candidate',
+        title: 'Use governed net revenue',
+        guidance: 'Use net_amount and exclude refunds for revenue.',
+        scope: { metric: 'revenue', domain: 'commerce' },
+      });
+      expect(payload.trace.rationale).toBe('The governed metric is net of refunds.');
       expect(payload.approvalRequested).toBe(true);
       expect(payload.note).toContain('Automatic approval is not permitted');
     } finally {

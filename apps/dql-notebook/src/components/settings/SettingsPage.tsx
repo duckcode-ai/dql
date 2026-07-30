@@ -1468,6 +1468,7 @@ function HintReviewQueue({ t, onStatus }: { t: Theme; onStatus: (message: string
       <div style={{ display: 'grid', gap: 5, paddingTop: 6 }}>
         {hint.trace?.question ? <div><b>Question:</b> {hint.trace.question}</div> : null}
         {hint.trace?.wrongAnswer ? <div><b>Previous answer:</b> {hint.trace.wrongAnswer}</div> : null}
+        {hint.trace?.rationale ? <div><b>Why the correction is right:</b> {hint.trace.rationale}</div> : null}
         <div><b>Snapshot:</b> {hint.snapshotId ?? 'missing'}{hint.inspection?.currentSnapshotId ? ` · current ${hint.inspection.currentSnapshotId}` : ''}</div>
         <div><b>Dependencies:</b> {hint.dependencies?.map((item) => `${item.kind}:${item.id}@${item.fingerprint.slice(0, 10)}`).join(', ') || 'none recorded'}</div>
         <div>

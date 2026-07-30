@@ -201,6 +201,7 @@ import {
   type NarrateResultData,
   buildProposePreview,
   buildFromPrompt,
+  internalRelationIdsInSql,
   defaultAgentRunStorePath,
   defaultAgentRunSqlitePath,
   resolveLocalOwner,
@@ -13763,6 +13764,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ cellType: cell.type, result: null }));
           return;
         }
+        const internalRelationError = internalDqlRelationIdValidationError(
+          executableSql,
+          cell.type === 'dql' ? 'DQL query' : 'Notebook query',
+        );
+        if (internalRelationError) throw new DqlInternalRelationIdError(internalRelationError);
 
         const prepared = prepareLocalExecution(
           executableSql,
@@ -13888,13 +13894,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             error: error instanceof Error ? error.message : String(error),
           });
         }
+        const internalRelationCode = error instanceof DqlInternalRelationIdError
+          ? 'DQL_INTERNAL_RELATION_ID'
+          : undefined;
         const semanticCode = semanticExecutionFailureCode(error) ?? semanticRuntimeErrorCode(error);
-        const code = semanticCode ?? classifyAnalyticalFailure(error);
+        const code = internalRelationCode ?? semanticCode ?? classifyAnalyticalFailure(error);
         const semanticDetails = semanticExecutionFailureDetails(error) ?? semanticRuntimeErrorDetails(error);
         const details = semanticDetails && typeof semanticDetails === 'object' && !Array.isArray(semanticDetails)
           ? semanticDetails as Record<string, unknown>
           : {};
-        const status = code === 'EXECUTION_TARGET_MISMATCH' || code === 'SEMANTIC_SOURCE_DRIFT'
+        const status = internalRelationCode
+          ? 400
+          : code === 'EXECUTION_TARGET_MISMATCH' || code === 'SEMANTIC_SOURCE_DRIFT'
           ? 409
           : semanticCode
             ? 400
@@ -13905,7 +13916,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           code,
           details: {
             ...details,
-            phase: typeof details.phase === 'string' ? details.phase : semanticCode ? 'compilation' : 'execution',
+            phase: typeof details.phase === 'string'
+              ? details.phase
+              : internalRelationCode || semanticCode
+                ? 'compilation'
+                : 'execution',
             executionContext: notebookExecutionIdentity(execContext, body?.cell?.id),
             executionTarget: executionTargetDescriptor(
               body && typeof body === 'object' ? body as Record<string, unknown> : {},
@@ -17580,6 +17595,8 @@ function summarizeExploratoryJoinProbe(
 }
 
 function readOnlySqlValidationError(sql: string, subject: string): string | null {
+  const internalRelationError = internalDqlRelationIdValidationError(sql, subject);
+  if (internalRelationError) return internalRelationError;
   const scanSql = stripSqlStringsAndComments(sql).trim();
   if (!/^(select|with)\b/i.test(scanSql)) {
     return `${subject} only supports read-only SELECT or WITH queries.`;
@@ -17593,6 +17610,16 @@ function readOnlySqlValidationError(sql: string, subject: string): string | null
     return `${subject} rejected unsupported statement keyword: ${forbidden.toUpperCase()}.`;
   }
   return null;
+}
+
+function internalDqlRelationIdValidationError(sql: string, subject: string): string | null {
+  const internalIds = internalRelationIdsInSql(stripSqlStringsAndComments(sql));
+  if (internalIds.length === 0) return null;
+  return `${subject} contains internal DQL graph relation identifier${internalIds.length === 1 ? '' : 's'} ${internalIds.join(', ')}. Use the physical database.schema.table relation instead, or choose Ask AI to fix from the notebook error.`;
+}
+
+class DqlInternalRelationIdError extends Error {
+  override readonly name = 'DqlInternalRelationIdError';
 }
 
 function stripSqlStringsAndComments(sql: string): string {

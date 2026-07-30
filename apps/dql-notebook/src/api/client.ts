@@ -3090,8 +3090,11 @@ export const api = {
     question: string;
     correctedSql: string;
     wrongSql?: string;
+    title?: string;
+    guidance?: string;
     rationale?: string;
-    scope?: { metric?: string; dbtModel?: string; domain?: string; term?: string; block?: string };
+    scope?: { metric?: string; dbtModel?: string; domain?: string; dialect?: string; term?: string; block?: string };
+    tags?: string[];
     failedRoute?: string;
   }): Promise<{ ok: boolean; hint?: AgentHint; error?: string }> {
     return request('/api/agent/learnings/correction', {

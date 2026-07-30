@@ -6,6 +6,48 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.12.1 - 2026-07-30
+
+### Governed correction lessons and fail-closed DQL SQL repair
+
+This patch makes Teach DQL corrections reusable and reviewable while preventing
+internal Hint Graph relation identifiers from leaking into executable warehouse
+SQL.
+
+### Added
+
+- **Structured Teach DQL review.** A successful edit now opens a before/after
+  review where the analyst confirms a reusable lesson, at least one meaningful
+  domain/metric/model/term/block scope anchor, and an optional rationale.
+- **Reviewer-visible correction evidence.** Agent Learning shows the analyst's
+  rationale alongside the original question, previous SQL, current snapshot,
+  dependencies, graph connections, evaluations, and lifecycle exclusions.
+- **DQL-cell AI repair.** Notebook DQL failures can use the same focused,
+  review-required AI repair path as SQL cells while preserving the DQL artifact
+  and extracting its embedded SQL as repair context.
+
+### Fixed
+
+- **Physical relation enforcement.** `source::`, `dbt::`, and `semantic::`
+  identities remain retrieval and lineage keys; generation, validation,
+  Notebook execution, preview execution, and repair now resolve a uniquely
+  inspected physical relation or fail closed before reaching the warehouse.
+- **Reusable correction guidance.** SQL-only corrections no longer silently use
+  raw corrected SQL as their human-readable lesson. Older clients receive a
+  conservative reviewable fallback, while explicit analyst guidance remains
+  authoritative.
+- **Accidental project-wide learning.** Notebook teaching requires a confirmed
+  high-signal scope anchor; comments remain provenance and cannot approve,
+  certify, or directly activate shared learning.
+
+### Verification
+
+- Full DQL Agent and Notebook test suites pass.
+- Governed correction HTTP lifecycle tests pass against the real local runtime.
+- Agent and Notebook production builds pass.
+- The synchronized workspace build, test, pack, publish, registry, and clean
+  install gates must be recorded by the release workflow for this version.
+
 ## v1.12.0 - 2026-07-30
 
 ### Domain-wide libraries and conversation-aware analytical follow-ups

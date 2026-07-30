@@ -714,6 +714,7 @@ export {
   renderGroundingForPrompt,
   resolveRelationsInSql,
   validateSqlAgainstGrounding,
+  internalRelationIdsInSql,
   relationKeys,
 } from "./metadata/sql-grounding.js";
 export type {

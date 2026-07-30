@@ -8,6 +8,7 @@ interface ErrorOutputProps {
   themeMode: ThemeMode;
   onFix?: () => void;
   onFixWithAi?: () => void;
+  editableArtifactLabel?: 'SQL' | 'DQL';
   schemaTables?: SchemaTable[];
 }
 
@@ -39,7 +40,14 @@ function closestMatch(name: string, candidates: string[]): string | null {
   return best;
 }
 
-export function ErrorOutput({ message, themeMode, onFix, onFixWithAi, schemaTables }: ErrorOutputProps) {
+export function ErrorOutput({
+  message,
+  themeMode,
+  onFix,
+  onFixWithAi,
+  editableArtifactLabel = 'SQL',
+  schemaTables,
+}: ErrorOutputProps) {
   const t = themes[themeMode];
   const parsed = parseQueryError(message);
 
@@ -202,7 +210,7 @@ export function ErrorOutput({ message, themeMode, onFix, onFixWithAi, schemaTabl
             </ErrorActionButton>
           )}
           <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-            You can also edit the SQL directly and run again.
+            Review the proposed fix before replacing the cell. You can also edit the {editableArtifactLabel} directly and run again.
           </span>
         </div>
       )}

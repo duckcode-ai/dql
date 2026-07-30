@@ -50,6 +50,11 @@ describe('selectCascadeRunRoute', () => {
       question: 'Fix this SQL cell error. Check existing DQL blocks before proposing corrected SQL.',
       requestedMode: 'ask',
     }, answerDecision)).toBe('sql_cell');
+
+    expect(selectCascadeRunRoute({
+      question: 'Fix this notebook DQL cell error and preserve the review-required artifact.',
+      requestedMode: 'ask',
+    }, answerDecision)).toBe('sql_cell');
   });
 
   it('uses decision actions after question-shape authoring checks', () => {

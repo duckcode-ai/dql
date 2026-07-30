@@ -31,6 +31,12 @@ import { TableCell } from "./TableCell";
 import { ChatCell } from "./ChatCell";
 import { SnippetPicker } from "./SnippetPicker";
 import { teachCorrectionEligibility } from './teach-correction';
+import {
+  buildTeachCorrectionDraft,
+  teachScopeHasRecallAnchor,
+  teachScopeLabels,
+  type TeachCorrectionScope,
+} from './teach-correction-draft';
 import { SaveAsBlockModal } from "../modals/SaveAsBlockModal";
 import {
   deriveBlockSource,
@@ -2310,10 +2316,11 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
                   <ErrorOutput
                     message={cell.error}
                     themeMode={state.themeMode}
-                    onFix={isExecutable ? handleFixAndRun : undefined}
-                    onFixWithAi={cell.type === 'sql' && onStartResearch
+                    onFix={cell.type === 'sql' ? handleFixAndRun : undefined}
+                    onFixWithAi={(cell.type === 'sql' || cell.type === 'dql') && onStartResearch
                       ? () => onStartResearch(cell.id, buildCellErrorAiPrompt(cell, state.schemaTables), { autoAsk: true })
                       : undefined}
+                    editableArtifactLabel={cell.type === 'dql' ? 'DQL' : 'SQL'}
                     schemaTables={state.schemaTables}
                   />
                 )}
@@ -2382,13 +2389,19 @@ function buildCellErrorAiPrompt(
   const localDatasets = findDatasetReferences(cell.content, schemaTables);
   const warehouseTables = findWarehouseReferences(cell.content, schemaTables);
   const mixedSource = localDatasets.length > 0 && warehouseTables.length > 0;
+  const isDql = cell.type === 'dql';
+  const embeddedSql = isDql ? extractSqlFromText(cell.content) : cell.content;
   return [
-    'Fix this notebook SQL cell error.',
-    'Use the selected SQL, semantic metadata, certified answers, warehouse schema, and registered local datasets before proposing changes.',
+    `Fix this notebook ${isDql ? 'DQL' : 'SQL'} cell error.`,
+    `Use the selected ${isDql ? 'DQL source and its embedded query SQL' : 'SQL'}, semantic metadata, certified answers, warehouse schema, and registered local datasets before proposing changes.`,
+    isDql
+      ? 'Return a corrected review-required DQL artifact that preserves the block metadata and changes only what is required to repair the query. Never emit source::, dbt::, or semantic:: graph identities in executable SQL; resolve them to inspected physical database.schema.table relations.'
+      : '',
     mixedSource
       ? `This is a mixed-source query: warehouse=${warehouseTables.join(', ')}; local=${localDatasets.map((dataset) => dataset.alias ?? dataset.id).join(', ')}. Do not treat the local dataset as a missing warehouse table and do not execute a direct cross-engine join. Return a warehouse-only extraction that retains the join key, then explain how to use Combine with local data.`
       : 'When repair is appropriate, return corrected read-only SQL plus a concise explanation and next action.',
     'Do not create or certify a governed asset during error repair.',
+    embeddedSql?.trim() ? `Failing embedded SQL:\n${embeddedSql.trim()}` : '',
     cell.error ? `Current error: ${cell.error}` : '',
   ].filter(Boolean).join('\n');
 }
@@ -2728,6 +2741,7 @@ function ExploreStepButton({
 function TeachCorrectionBar({ cell, t }: { cell: Cell; t: Theme }) {
   const [state, setState] = useState<'idle' | 'saving' | 'saved' | 'dismissed' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
 
   const {
     eligible,
@@ -2735,6 +2749,21 @@ function TeachCorrectionBar({ cell, t }: { cell: Cell; t: Theme }) {
     correctedSql: current,
     question,
   } = teachCorrectionEligibility(cell);
+  const initialDraft = useMemo(() => buildTeachCorrectionDraft(cell, {
+    question: question ?? '',
+    previousSql: generated,
+    correctedSql: current,
+    domain: typeof window !== 'undefined'
+      ? (() => {
+          const domain = new URLSearchParams(window.location.search).get('domain');
+          return domain && domain !== 'all' ? domain : undefined;
+        })()
+      : undefined,
+  }), [cell, current, generated, question]);
+  const [title, setTitle] = useState(initialDraft.title);
+  const [guidance, setGuidance] = useState(initialDraft.guidance);
+  const [rationale, setRationale] = useState(initialDraft.rationale);
+  const [scope, setScope] = useState<TeachCorrectionScope>(initialDraft.scope);
 
   if (!eligible || state === 'dismissed') return null;
 
@@ -2767,6 +2796,16 @@ function TeachCorrectionBar({ cell, t }: { cell: Cell; t: Theme }) {
   }
 
   const teach = async () => {
+    if (!title.trim() || !guidance.trim()) {
+      setError('Add a short title and reusable lesson before saving.');
+      setState('error');
+      return;
+    }
+    if (!teachScopeHasRecallAnchor(scope)) {
+      setError('Confirm at least one domain, metric, dbt model, business term, or block so this learning cannot become project-wide by accident.');
+      setState('error');
+      return;
+    }
     setState('saving');
     setError(null);
     try {
@@ -2774,8 +2813,10 @@ function TeachCorrectionBar({ cell, t }: { cell: Cell; t: Theme }) {
         question: question!,
         wrongSql: generated,
         correctedSql: current,
-        rationale: 'Edited in the notebook and ran successfully.',
-        ...(cell.dqlArtifact?.metrics?.[0] ? { scope: { metric: cell.dqlArtifact.metrics[0] } } : {}),
+        title: title.trim(),
+        guidance: guidance.trim(),
+        rationale: rationale.trim() || 'Edited in the notebook and ran successfully.',
+        scope,
       });
       if (result.ok === false) {
         setError(result.error ?? 'Could not save this correction.');
@@ -2826,24 +2867,23 @@ function TeachCorrectionBar({ cell, t }: { cell: Cell; t: Theme }) {
       </div>
       <div style={{ flex: '1 1 300px', minWidth: 0 }}>
         <div style={{ color: state === 'error' ? t.error : t.textPrimary, fontSize: 12.5, fontWeight: 750 }}>
-          {state === 'error' ? 'This correction was not saved' : 'Your working correction is ready to teach'}
+          {state === 'error' ? 'This correction was not saved' : 'Teach DQL from this successful correction'}
         </div>
         <div style={{ marginTop: 3, color: t.textMuted, fontSize: 10.75, lineHeight: 1.45 }}>
           {state === 'error'
             ? (error ?? 'DQL could not create the review candidate. Try again.')
-            : <>Save the AI-generated SQL and your successful edit as a governed review candidate. It will not affect future answers until evaluated and explicitly approved.</>}
+            : <>Review the before/after SQL, explain the reusable lesson, and confirm where it applies. Saving creates a candidate only.</>}
         </div>
       </div>
       <div style={{ display: 'inline-flex', alignItems: 'center', gap: 7, marginLeft: 'auto' }}>
         <button
           type="button"
-          onClick={() => void teach()}
-          disabled={state === 'saving'}
-          title="Save the original AI SQL and your working correction for governed review"
-          style={controlStyle(t, { variant: 'primary', size: 'md', disabled: state === 'saving' })}
+          onClick={() => setReviewOpen((open) => !open)}
+          title="Review the reusable lesson and its governed scope"
+          style={controlStyle(t, { variant: 'primary', size: 'md' })}
         >
           <Sparkles size={14} aria-hidden="true" />
-          {state === 'saving' ? 'Saving correction…' : state === 'error' ? 'Try again' : 'Teach DQL'}
+          {reviewOpen ? 'Close review' : 'Review & teach'}
         </button>
         <button
           type="button"
@@ -2854,6 +2894,108 @@ function TeachCorrectionBar({ cell, t }: { cell: Cell; t: Theme }) {
           Not now
         </button>
       </div>
+      {reviewOpen ? (
+        <div
+          data-teach-review
+          style={{
+            flex: '1 0 100%',
+            display: 'grid',
+            gap: 12,
+            padding: '13px',
+            border: `1px solid ${t.cellBorder}`,
+            borderRadius: 8,
+            background: t.cellBg,
+          }}
+        >
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
+            <details open style={{ border: `1px solid ${t.cellBorder}`, borderRadius: 7, padding: 9 }}>
+              <summary style={{ cursor: 'pointer', color: t.textSecondary, fontSize: 11, fontWeight: 700 }}>Before · AI draft</summary>
+              <pre style={{ margin: '8px 0 0', color: t.textMuted, fontFamily: t.fontMono, fontSize: 10.5, whiteSpace: 'pre-wrap', maxHeight: 180, overflow: 'auto' }}>{generated}</pre>
+            </details>
+            <details open style={{ border: `1px solid ${t.success}55`, borderRadius: 7, padding: 9 }}>
+              <summary style={{ cursor: 'pointer', color: t.success, fontSize: 11, fontWeight: 700 }}>After · successful correction</summary>
+              <pre style={{ margin: '8px 0 0', color: t.textMuted, fontFamily: t.fontMono, fontSize: 10.5, whiteSpace: 'pre-wrap', maxHeight: 180, overflow: 'auto' }}>{current}</pre>
+            </details>
+          </div>
+
+          <label style={{ display: 'grid', gap: 4, color: t.textSecondary, fontSize: 10.5, fontWeight: 650 }}>
+            Learning title
+            <input value={title} onChange={(event) => setTitle(event.target.value)} style={controlStyle(t, { size: 'sm' })} />
+          </label>
+          <label style={{ display: 'grid', gap: 4, color: t.textSecondary, fontSize: 10.5, fontWeight: 650 }}>
+            Reusable lesson
+            <textarea
+              value={guidance}
+              onChange={(event) => setGuidance(event.target.value)}
+              rows={3}
+              placeholder="Explain the business or SQL rule that should guide similar questions."
+              style={{ ...controlStyle(t, { size: 'sm' }), resize: 'vertical', lineHeight: 1.45 }}
+            />
+            <span style={{ color: t.textMuted, fontWeight: 400 }}>This reviewed lesson—not the raw comment—is what matching future questions receive.</span>
+          </label>
+
+          <div>
+            <div style={{ color: t.textSecondary, fontSize: 10.5, fontWeight: 700, marginBottom: 6 }}>Where should this learning apply?</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(145px, 1fr))', gap: 7 }}>
+              {([
+                ['domain', 'Domain'],
+                ['metric', 'Metric'],
+                ['dbtModel', 'dbt model'],
+                ['term', 'Business term'],
+                ['block', 'Block'],
+                ['dialect', 'SQL dialect'],
+              ] as Array<[keyof TeachCorrectionScope, string]>).map(([field, label]) => (
+                <label key={field} style={{ display: 'grid', gap: 3, color: t.textMuted, fontSize: 10 }}>
+                  {label}
+                  <input
+                    value={scope[field] ?? ''}
+                    onChange={(event) => setScope({
+                      ...scope,
+                      [field]: event.target.value || undefined,
+                    })}
+                    placeholder={`Optional ${label.toLowerCase()}`}
+                    style={controlStyle(t, { size: 'sm' })}
+                  />
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <label style={{ display: 'grid', gap: 4, color: t.textSecondary, fontSize: 10.5, fontWeight: 650 }}>
+            Why is this correct? <span style={{ color: t.textMuted, fontWeight: 400 }}>(optional reviewer evidence)</span>
+            <textarea
+              value={rationale}
+              onChange={(event) => setRationale(event.target.value)}
+              rows={2}
+              placeholder="Example: Finance defines revenue as net amount and excludes refunded orders."
+              style={{ ...controlStyle(t, { size: 'sm' }), resize: 'vertical', lineHeight: 1.45 }}
+            />
+          </label>
+
+          <div style={{ border: `1px solid ${teachScopeHasRecallAnchor(scope) ? `${t.success}55` : `${t.warning}66`}`, borderRadius: 7, padding: '9px 10px', background: teachScopeHasRecallAnchor(scope) ? `${t.success}08` : `${t.warning}0A`, display: 'grid', gap: 4, fontSize: 10.5 }}>
+            <div style={{ color: t.textPrimary, fontWeight: 700 }}>
+              Will apply to: {teachScopeLabels(scope).length ? `questions matching ${teachScopeLabels(scope).join(' · ')}` : 'no confirmed scope yet'}
+            </div>
+            <div style={{ color: t.textMuted }}>
+              Will not apply when a confirmed scope value differs. Relations and columns are derived from the corrected SQL and current project snapshot, then used for ranking, drift checks, and review evidence.
+            </div>
+            {!teachScopeHasRecallAnchor(scope) ? <div style={{ color: t.warning }}>Add at least one domain, metric, model, term, or block before saving.</div> : null}
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              onClick={() => void teach()}
+              disabled={state === 'saving' || !teachScopeHasRecallAnchor(scope)}
+              style={controlStyle(t, { variant: 'primary', size: 'md', disabled: state === 'saving' || !teachScopeHasRecallAnchor(scope) })}
+            >
+              <Sparkles size={14} aria-hidden="true" />
+              {state === 'saving' ? 'Saving candidate…' : 'Save learning candidate'}
+            </button>
+            <span style={{ color: t.textMuted, fontSize: 10.25 }}>It remains inactive until evaluation and explicit approval in Agent learning.</span>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

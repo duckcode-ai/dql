@@ -5523,6 +5523,43 @@ describe("answer (block-first loop)", () => {
     expect(provider.calls).toHaveLength(2);
   });
 
+  it("resolves leaked internal source graph identities before generated DQL execution", async () => {
+    const provider = new StubProvider(
+      "```sql\nSELECT SUM(mthly_fcst_consumption_eff_amt) AS total_amount\nFROM source::dev_kkondapaka_reporting.consumption_metrics.consumption_daily_metrics_header_combined\n```",
+    );
+    let executedSql = "";
+    const result = await answer({
+      question: "What is the total monthly forecast consumption amount?",
+      provider,
+      kg,
+      schemaContext: [{
+        relation: "dev_kkondapaka_reporting.consumption_metrics.consumption_daily_metrics_header_combined",
+        schema: "consumption_metrics",
+        name: "consumption_daily_metrics_header_combined",
+        columns: [
+          { name: "mthly_fcst_consumption_eff_amt", type: "DECIMAL" },
+        ],
+      }],
+      executeGeneratedSql: async (sql) => {
+        executedSql = sql;
+        return {
+          columns: ["total_amount"],
+          rows: [{ total_amount: 42 }],
+          rowCount: 1,
+          sql,
+        };
+      },
+    });
+
+    expect(executedSql).toContain(
+      "FROM dev_kkondapaka_reporting.consumption_metrics.consumption_daily_metrics_header_combined",
+    );
+    expect(executedSql).not.toContain("source::");
+    expect(result.proposedSql).toBe(executedSql);
+    expect(result.dqlArtifact?.source).not.toContain("source::");
+    expect(provider.calls).toHaveLength(1);
+  });
+
   it("locally repairs generated SQL alias-column binder errors before retrying the model", async () => {
     const provider = new StubProvider(
       "Order detail for top customers.\n\n" +

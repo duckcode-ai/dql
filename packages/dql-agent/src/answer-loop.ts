@@ -5365,7 +5365,7 @@ function renderContextPrompt(
     ? `\n\n## Knowledge graph join routes\n\nUse these as relationship/navigation evidence for multi-entity analysis. SQL must still use inspected relation columns from the schema or metadata context.\n${kgJoinPathHints.map((hint) => `- ${hint}`).join('\n')}`
     : '';
   const schemaSection = schemaContext.length > 0
-    ? `\n\n## Runtime schema context\n\nUse only these runtime relations and columns when generating SQL unless the dbt manifest context gives an equivalent relation.\n${schemaContext
+    ? `\n\n## Runtime schema context\n\nUse only these physical runtime relations and columns when generating SQL unless the dbt manifest context gives an equivalent physical relation. Internal graph identities such as source::..., dbt::..., and semantic::... are retrieval/lineage keys and MUST NEVER appear in executable SQL.\n${schemaContext
         .slice(0, budget.schemaTableLimit)
         .map((table) => {
           const cols = table.columns
@@ -7484,6 +7484,7 @@ async function requestSqlRepair(input: {
         input.failure.position !== undefined ? `Failure position: ${input.failure.position}` : '',
         'Qualify every source column independently inside each SELECT/CTE scope. Do not repair an ambiguous column by choosing the first FROM relation; use the runtime schema to identify its unique owner, or leave the query unresolved when no unique owner is proven.',
         'Preserve every requested output measure and dimension while repairing the failing reference.',
+        'Never emit internal DQL graph identities such as source::..., dbt::..., or semantic::... in SQL. Use only the physical runtime database.schema.table relations listed below.',
         'Return one corrected read-only SQL query using only the runtime schema below, as a single ```json fenced object with summary, sql, viz, outputs, and optional dql metadata fields.',
         schema,
       ].filter(Boolean).join('\n\n'),

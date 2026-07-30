@@ -128,9 +128,11 @@ export async function recordGovernedCorrection(
     ...(input.correctedSql ? [`corrected SQL: ${compact(input.correctedSql, 400)}`] : []),
     ...context.evidence,
   ]);
+  const hintGuidance = input.hintGuidance?.trim() || deriveCorrectionGuidance(input);
 
   return recordCorrectionTrace(projectRoot, {
     ...input,
+    hintGuidance,
     failedRoute: input.failedRoute?.trim() || 'generated_answer',
     evidence,
     snapshotId: context.snapshotId,
@@ -138,6 +140,35 @@ export async function recordGovernedCorrection(
     dependencies: context.dependencies,
     lifecycleErrors,
   });
+}
+
+/**
+ * Do not let a SQL-only correction silently become the reusable lesson. Older
+ * clients may omit `hintGuidance`, so preserve a human-written correction when
+ * one exists and otherwise derive a conservative, reviewable instruction.
+ */
+export function deriveCorrectionGuidance(input: Pick<
+  RecordGovernedCorrectionInput,
+  'question' | 'scope' | 'correction' | 'correctedSql' | 'hintGuidance'
+>): string {
+  const explicit = input.hintGuidance?.trim();
+  if (explicit) return explicit;
+  const correction = input.correction.trim();
+  const correctedSql = input.correctedSql?.trim();
+  const normalizedCorrection = correction.replace(/\s+/g, ' ');
+  const normalizedSql = correctedSql?.replace(/\s+/g, ' ');
+  if (!correctedSql || normalizedCorrection !== normalizedSql) {
+    return correction;
+  }
+  const scope = [
+    input.scope.domain ? `domain ${input.scope.domain}` : undefined,
+    input.scope.metric ? `metric ${input.scope.metric}` : undefined,
+    input.scope.dbtModel ? `model ${input.scope.dbtModel}` : undefined,
+    input.scope.term ? `term ${input.scope.term}` : undefined,
+    input.scope.block ? `block ${input.scope.block}` : undefined,
+  ].filter(Boolean).join(', ');
+  const question = compact(input.question, 120);
+  return `For ${scope || 'matching governed questions'}, follow the reviewed corrected SQL pattern captured for "${question}". Confirm the pattern against current certified, dbt, and semantic context.`;
 }
 
 /**

@@ -3,6 +3,27 @@ import type { LocalContextPack } from './catalog.js';
 import { validateSqlAgainstLocalContext } from './sql-context-validation.js';
 
 describe('validateSqlAgainstLocalContext', () => {
+  it('rejects unresolved internal graph relation identities before warehouse execution', () => {
+    const result = validateSqlAgainstLocalContext(
+      'SELECT order_id FROM source::analytics.fct_orders',
+      pack(),
+      { dialect: 'snowflake' },
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'unknown_relation',
+      offending: {
+        relation: 'source::analytics.fct_orders',
+        relations: ['source::analytics.fct_orders'],
+      },
+    });
+    if (!result.ok) {
+      expect(result.error).toContain('only for retrieval and lineage');
+      expect(result.error).toContain('physical database.schema.table');
+    }
+  });
+
   it('accepts valid aliases, joins, CTEs, aggregates, and qualified columns', () => {
     const result = validateSqlAgainstLocalContext(`
       WITH enterprise AS (

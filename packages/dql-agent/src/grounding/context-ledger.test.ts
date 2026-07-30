@@ -17,6 +17,26 @@ describe('ContextLedger', () => {
     expect(qualified.rewrites).toEqual([{ from: 'order_items', to: 'dev.order_items' }]);
   });
 
+  it('qualifies graph relation identities through the same runtime schema context', () => {
+    const ledger = createContextLedger({
+      schemaContext: [{
+        relation: 'dev_kkondapaka_reporting.consumption_metrics.consumption_daily_metrics_header_combined',
+        name: 'consumption_daily_metrics_header_combined',
+        columns: [{ name: 'mthly_fcst_consumption_eff_amt' }],
+      }],
+      dialect: 'snowflake',
+    });
+
+    const qualified = ledger.qualifySql(
+      'SELECT SUM(mthly_fcst_consumption_eff_amt) FROM source::dev_kkondapaka_reporting.consumption_metrics.consumption_daily_metrics_header_combined',
+    );
+
+    expect(qualified.sql).toContain(
+      'FROM dev_kkondapaka_reporting.consumption_metrics.consumption_daily_metrics_header_combined',
+    );
+    expect(ledger.validateSql(qualified.sql).ok).toBe(true);
+  });
+
   it('validates SQL against the same runtime schema context used for qualification', () => {
     const ledger = createContextLedger({
       schemaContext: [{

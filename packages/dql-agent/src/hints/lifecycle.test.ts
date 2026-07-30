@@ -10,6 +10,7 @@ import {
   supersedeHint,
 } from './git-store.js';
 import {
+  deriveCorrectionGuidance,
   editGovernedHintCandidate,
   inspectGovernedHint,
   recordGovernedCorrection,
@@ -67,6 +68,27 @@ async function recordCandidate() {
 }
 
 describe('governed v3 hint lifecycle', () => {
+  it('derives reviewable guidance instead of using raw corrected SQL as the lesson', () => {
+    const correctedSql = 'SELECT SUM(net_amount) FROM analytics.fct_orders';
+    expect(deriveCorrectionGuidance({
+      question: 'What is net revenue?',
+      scope: { domain: 'commerce', metric: 'revenue' },
+      correction: correctedSql,
+      correctedSql,
+    })).toBe(
+      'For domain commerce, metric revenue, follow the reviewed corrected SQL pattern captured for "What is net revenue?". Confirm the pattern against current certified, dbt, and semantic context.',
+    );
+  });
+
+  it('preserves explicit human guidance when correction text is separate from SQL', () => {
+    expect(deriveCorrectionGuidance({
+      question: 'What is net revenue?',
+      scope: { metric: 'revenue' },
+      correction: 'Use net amount and exclude refunds.',
+      correctedSql: 'SELECT SUM(net_amount) FROM analytics.fct_orders',
+    })).toBe('Use net amount and exclude refunds.');
+  });
+
   it('persists snapshot, dependencies, required evaluation, and keeps capture candidate-only', async () => {
     const { trace, hint } = await recordCandidate();
 

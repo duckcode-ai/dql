@@ -302,6 +302,20 @@ export interface RelationResolution {
 }
 
 /**
+ * Internal catalog / knowledge-graph identities are retrieval keys, not SQL.
+ * They occasionally appear in model output because the same context contains
+ * both graph nodes and physical relations. Keep detection shared so generation,
+ * validation, and execution surfaces enforce the same boundary.
+ */
+export function internalRelationIdsInSql(sql: string): string[] {
+  const ids = Array.from(
+    sql.matchAll(/\b(?:source|dbt|semantic)::[a-zA-Z_][\w$]*(?:\s*\.\s*[a-zA-Z_][\w$]*){0,2}/gi),
+    (match) => match[0].replace(/\s*\.\s*/g, '.'),
+  );
+  return [...new Set(ids)];
+}
+
+/**
  * Deterministically rewrite any bare / unqualified table name in `FROM` /
  * `JOIN` clauses to its real qualified relation from the grounding. Maps both
  * the model name and its alias to `database.schema.alias`. Already-qualified
@@ -319,9 +333,27 @@ export function resolveRelationsInSql(
   const prefer = options.prefer ?? 'qualified';
   const rewrites: Array<{ from: string; to: string }> = [];
 
+  // A model may copy a graph identity such as
+  // `source::database.schema.table` from retrieved context. Resolve it only
+  // when the suffix proves one of the inspected physical relations. Unknown
+  // identities remain intact so the validator can fail closed rather than
+  // guessing or sending `::` to the warehouse.
+  const internalPattern = /\b(from|join)\s+((?:source|dbt|semantic)::([a-zA-Z_][\w$]*(?:\s*\.\s*[a-zA-Z_][\w$]*){0,2}))/gi;
+  const withoutInternalIds = sql.replace(
+    internalPattern,
+    (match, keyword: string, internalId: string, relationSuffix: string) => {
+      const normalizedSuffix = relationSuffix.replace(/\s*\.\s*/g, '.');
+      const table = lookupTable(normalizedSuffix, grounding);
+      if (!table) return match;
+      const target = prefer === 'ref' && table.refForm ? table.refForm : table.qualifiedRelation;
+      rewrites.push({ from: internalId, to: target });
+      return `${keyword} ${target}`;
+    },
+  );
+
   // Match the relation token after FROM / JOIN (skip subqueries starting with `(`).
   const pattern = /\b(from|join)\s+(?!\()([a-zA-Z_][\w]*(?:\s*\.\s*[a-zA-Z_][\w]*){0,2})/gi;
-  const resolved = sql.replace(pattern, (match, keyword: string, relation: string) => {
+  const resolved = withoutInternalIds.replace(pattern, (match, keyword: string, relation: string) => {
     const normalized = relation.replace(/\s*\.\s*/g, '.');
     // Already a {{ ref() }} / {{ source() }} macro? Leave it.
     if (/\{\{/.test(normalized)) return match;

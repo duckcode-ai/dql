@@ -32,6 +32,7 @@ import {
   correctionProvenanceForDraft,
   useOpenAnswerInNotebook,
 } from "../../utils/answer-to-notebook";
+import { extractSqlFromText } from "../../utils/block-studio";
 
 interface NotebookEditorProps {
   onOpenFile: (file: NotebookFile) => void;
@@ -728,8 +729,13 @@ function NotebookAiDrawer({
   const scopeHint = sourceCell
     ? 'This cell + dbt, semantic metadata, certified blocks, prior AI history'
     : 'Whole notebook + dbt, semantic metadata, certified blocks, prior AI history';
-  const buildContext = sourceCell?.type === 'sql' && sourceCell.content.trim()
-    ? { cellSql: sourceCell.content }
+  const selectedCellSql = sourceCell?.type === 'sql'
+    ? sourceCell.content.trim()
+    : sourceCell?.type === 'dql'
+      ? extractSqlFromText(sourceCell.content)?.trim()
+      : undefined;
+  const buildContext = selectedCellSql
+    ? { cellSql: selectedCellSql }
     : undefined;
   const agentRunSelectedObject = sourceCell
     ? { kind: 'cell' as const, id: sourceCell.id, title: sourceCell.name, path: notebookPath }
