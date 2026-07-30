@@ -39,7 +39,11 @@ import type { ReasoningEffort } from './providers/reasoning-effort.js';
 import type { Skill } from './skills/loader.js';
 import { buildSkillBlockHints, buildSkillMetricHints, buildSkillsPrompt, expandQuestionWithSkillVocabulary, selectRelevantSkills } from './skills/loader.js';
 import type { AgentMemory } from './memory/sqlite-memory.js';
-import type { ConversationSnapshot } from './conversation/snapshot.js';
+import {
+  conversationTurnContextState,
+  type ConversationSnapshot,
+} from './conversation/snapshot.js';
+import { renderStructuredConversationSummary } from './conversation/rolling-summary.js';
 import { detectResultSetOperation, computeResultSetOperation } from './conversation/result-ops.js';
 import { classifyGovernedQueryShape } from './semantic-bridge/query-shape.js';
 import type { LocalContextPack, MetadataAgentIntent, MetadataRouteDecision } from './metadata/catalog.js';
@@ -5463,8 +5467,11 @@ function renderConversationSnapshot(snapshot: ConversationSnapshot): string {
   } else if (snapshot.topicRelation) {
     parts.push(`Working state: topic=${snapshot.topicRelation}`);
   }
-  if (snapshot.rollingSummary) {
-    parts.push(`Earlier in this conversation (compacted):\n${snapshot.rollingSummary.slice(0, 600)}`);
+  const structuredSummary = renderStructuredConversationSummary(snapshot.structuredSummary);
+  if (structuredSummary) {
+    parts.push(`Earlier in this conversation (source-attributed):\n${structuredSummary}`);
+  } else if (snapshot.rollingSummary) {
+    parts.push(`Earlier in this conversation (legacy compacted view):\n${snapshot.rollingSummary.slice(0, 600)}`);
   }
   if (snapshot.recentTurns.length > 0) {
     const turns = snapshot.recentTurns.slice(-4).map((turn, index) => {
@@ -5472,17 +5479,21 @@ function renderConversationSnapshot(snapshot: ConversationSnapshot): string {
     });
     parts.push(`Recent turns:\n${turns.join('\n')}`);
   }
-  if (snapshot.recalledTurns?.length) {
-    parts.push(`Recalled earlier turns (semantic match):\n${snapshot.recalledTurns.slice(0, 3)
+  const recalledTurns = snapshot.recalledTurns
+    ?.filter((turn) => conversationTurnContextState(turn) !== 'blocked')
+    .slice(0, 3);
+  if (recalledTurns?.length) {
+    parts.push(`Recalled earlier turns (semantic match):\n${recalledTurns
       .map((turn) => `- ${renderConversationSnapshotTurnLine(turn, 520)}`)
       .join('\n')}`);
   }
-  parts.push('Use this only where the question refers to it. On a new topic, answer fresh.');
+  parts.push('Use this only where the question refers to it. Provisional, unresolved, and blocked turns are not verified facts. On a new topic, answer fresh.');
   return parts.join('\n\n');
 }
 
 function renderConversationSnapshotTurnLine(turn: ConversationSnapshot['recentTurns'][number], max: number): string {
   const line = [
+    `state: ${conversationTurnContextState(turn)}`,
     `Q: ${turn.question}`,
     turn.answerSummary ? `A: ${turn.answerSummary}` : '',
     turn.resultColumns?.length ? `cols: ${turn.resultColumns.slice(0, 6).join(', ')}` : '',

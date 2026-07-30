@@ -813,7 +813,8 @@ function priorContextPackIdFromSnapshot(snapshot: ConversationSnapshot | undefin
 function conversationSnapshotFromContext(
   context: AgentRunRequest['conversationContext'],
 ): ConversationSnapshot | undefined {
-  const raw = (context as Record<string, unknown> | undefined)?.serverSnapshot;
+  const record = context as Record<string, unknown> | undefined;
+  const raw = record?.conversationEnvelope ?? record?.serverSnapshot;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   const snapshot = raw as ConversationSnapshot;
   return typeof snapshot.threadId === 'string' && Array.isArray(snapshot.recentTurns)
@@ -1020,6 +1021,9 @@ function snapshotTurnToConversationRecord(
     answerSummary: turn.answerSummary,
     sourceCertifiedBlock: turn.sourceCertifiedBlock,
     route: turn.route,
+    trustLabel: turn.trustLabel,
+    runStatus: turn.runStatus,
+    stopReason: turn.stopReason,
     contextPackId: turn.contextPackId,
     sourceSql: turn.sourceSql,
     dqlArtifact: turn.dqlArtifact,
@@ -1058,7 +1062,10 @@ function activeConversationTurn(
   const activeMatch = activeId
     ? turns.find((turn) => cleanOptionalString(turn.id) === activeId)
     : undefined;
-  const recalled = turns.filter((turn) => cleanOptionalString(turn.snapshotSource) === 'recalled' && turnHasUsefulResult(turn));
+  const recalled = turns.filter((turn) =>
+    cleanOptionalString(turn.snapshotSource) === 'recalled'
+    && !turnIsBlockedContext(turn)
+    && turnHasUsefulResult(turn));
   if (recalled.length > 0) {
     const bestRecalled = recalled
       .map((turn) => ({ turn, score: scoreTurnForQuestion(turn, question) }))
@@ -1069,11 +1076,17 @@ function activeConversationTurn(
     }
   }
   if (activeId) {
-    if (activeMatch) return activeMatch;
+    if (activeMatch && !turnIsBlockedContext(activeMatch)) return activeMatch;
   }
   return [...turns].reverse().find((turn) => {
-    return turnHasUsefulResult(turn);
+    return !turnIsBlockedContext(turn) && turnHasUsefulResult(turn);
   }) ?? turns[turns.length - 1];
+}
+
+function turnIsBlockedContext(turn: Record<string, unknown>): boolean {
+  return cleanOptionalString(turn.runStatus) === 'blocked'
+    || cleanOptionalString(turn.trustLabel) === 'blocked'
+    || cleanOptionalString(turn.route) === 'blocked';
 }
 
 function turnHasUsefulResult(turn: Record<string, unknown>): boolean {

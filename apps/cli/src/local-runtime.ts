@@ -141,7 +141,9 @@ import {
   ConversationStore,
   advanceThreadState,
   buildConversationSnapshot,
+  conversationHistoryFromContext,
   recallRelevantTurns,
+  renderConversationEnvelopeForPrompt,
   GeminiProvider,
   MemoryStore,
   OllamaProvider,
@@ -950,6 +952,8 @@ async function conversationContextFromThread(
       sourceCertifiedBlock: turn.sourceCertifiedBlock,
       route: turn.route,
       trustLabel: turn.trustLabel,
+      runStatus: turn.runStatus,
+      stopReason: turn.stopReason,
       certification: turn.certification,
       contextPackId: turn.contextPackId,
       dqlArtifact: turn.dqlArtifact,
@@ -985,6 +989,7 @@ async function conversationContextFromThread(
     ...(clientContext ?? {}),
     conversationStateVersion: 1,
     threadId,
+    ...(serverSnapshot ? { conversationEnvelope: serverSnapshot } : {}),
     ...(serverSnapshot ? { serverSnapshot } : {}),
     ...(thread?.rollingSummary ? { conversationSummary: thread.rollingSummary } : {}),
     ...(turns.length > 0 ? { turns, activeTurnId: (turns[turns.length - 1] as { id?: string }).id } : {}),
@@ -1040,6 +1045,8 @@ export function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInp
     answerText: run.answer,
     route: run.route,
     trustLabel: agentRunString(payload?.trustLabel) ?? run.trustState,
+    runStatus: run.status,
+    stopReason: run.stopReason,
     certification: agentRunString(payload?.certification),
     sourceCertifiedBlock: agentRunString(payload?.sourceCertifiedBlock)
       ?? (artifact?.kind === 'answer' ? agentRunString(artifact.ref) : undefined),
@@ -2957,13 +2964,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         message: 'Building catalog-grounded research plan.',
         route: 'research',
       });
+      const conversationHistory = request.history?.length
+        ? request.history
+        : conversationHistoryFromContext(request.conversationContext);
       const plan = await planResearch({
         question: request.question,
         metrics,
         blocks,
         intent: request.intent,
-        isFollowUp: Boolean(request.history?.length),
-        history: request.history,
+        isFollowUp: conversationHistory.length > 0,
+        history: conversationHistory,
         // When the user explicitly picked research, investigate — don't collapse to one step.
         forceInvestigate: request.requestedMode === 'research',
         rootPlan: routeDecision?.resolvedAnalyticalPlan,
@@ -3519,7 +3529,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // this only inside the provider adapter allowed stale catalog matches to win
     // before "they" / "this amount" became customer-scoped context.
     const followUp = resolveAgentFollowUpContext(request.conversationContext, request.question);
-    const serverSnapshot = agentRunRecord(request.conversationContext?.serverSnapshot);
+    const serverSnapshot = agentRunRecord(
+      request.conversationContext?.conversationEnvelope
+        ?? request.conversationContext?.serverSnapshot,
+    );
     const topicRelation = agentRunString(serverSnapshot?.topicRelation);
     // The readiness marker is source-versioned. When it matches, pass the
     // already-built metadata identity into retrieval so buildLocalContextPack
@@ -21322,13 +21335,15 @@ function buildConversationSystemPrompt(
 }
 
 function renderConversationMemoryForPrompt(context: Record<string, unknown> | undefined): string | undefined {
+  const envelope = renderConversationEnvelopeForPrompt(context);
   const recap = buildConversationContextRecap(context);
-  if (!recap) return undefined;
+  if (!recap && !envelope) return undefined;
   return [
     'Current conversation context:',
+    envelope,
     recap,
     'If the user asks what this conversation is about, summarize this context directly. Do not query data or invent values.',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 function buildConversationContextRecap(context: Record<string, unknown> | undefined): string | undefined {

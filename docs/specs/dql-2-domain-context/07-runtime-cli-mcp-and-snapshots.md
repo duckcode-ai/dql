@@ -183,6 +183,18 @@ that project-local thread index; browser storage is only a rendering cache, so
 changing ports, rebuilding the frontend, or upgrading DQL cannot hide durable
 threads (`API-008`).
 
+Ask, Notebook AI, and Block AI keep separate threads. Within one thread, the
+runtime builds one bounded conversation envelope and supplies it consistently
+to routing, meaning resolution, planning, and execution. The envelope contains
+the active analytical working state, a few recent verbatim turns, scoped recall
+of older turns, pending clarification, topic relation, and a deterministic
+source-attributed summary. Summary entries retain `confirmed`, `provisional`,
+`unresolved`, `blocked`, or neutral context state; failed or review-required
+model output cannot become confirmed session truth through summarization.
+Persisted turns retain their terminal run status and stop reason so remounts do
+not reconstruct blocked or review-required work as completed (`AGT-013`,
+`API-008`).
+
 Repair never mutates the source run. A parameter-only rerun, derived DQL edit,
 SQL Notebook copy, snapshot refresh, or authorized connection change creates a
 new run and receipt according to the trust-transition matrix in spec 10.

@@ -23,6 +23,7 @@ let analyticalInspectorContract: typeof UnifiedAgentRunPanelModule.analyticalIns
 let analyticalInspectorSections: typeof UnifiedAgentRunPanelModule.analyticalInspectorSections;
 let analyticalRepairActionLabels: typeof UnifiedAgentRunPanelModule.analyticalRepairActionLabels;
 let askInspectorTabsForState: typeof UnifiedAgentRunPanelModule.askInspectorTabsForState;
+let threadItemsFromTurns: typeof UnifiedAgentRunPanelModule.threadItemsFromTurns;
 
 describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
   beforeAll(async () => {
@@ -48,6 +49,7 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     analyticalInspectorSections = module.analyticalInspectorSections;
     analyticalRepairActionLabels = module.analyticalRepairActionLabels;
     askInspectorTabsForState = module.askInspectorTabsForState;
+    threadItemsFromTurns = module.threadItemsFromTurns;
   });
 
   it('UI-012 exposes the complete seven-section analytical inspector for success and failure payloads', () => {
@@ -596,6 +598,50 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
       { role: 'user', text: 'Who are the top beverage customers?' },
       { role: 'assistant', text: 'Rank by total beverage spend or by individual product?' },
     ]);
+  });
+});
+
+describe('persisted conversation hydration', () => {
+  it('preserves blocked lifecycle truth instead of fabricating a completed run', () => {
+    const items = threadItemsFromTurns([{
+      id: 'turn_blocked',
+      threadId: 'thread_1',
+      seq: 1,
+      question: 'show restricted payroll',
+      answerSummary: 'Access was denied.',
+      route: 'blocked',
+      trustLabel: 'blocked',
+      runStatus: 'blocked',
+      stopReason: 'blocked',
+      createdAt: '2026-07-29T00:00:00.000Z',
+    }]);
+    const run = items.find((item) => item.kind === 'run');
+    expect(run?.kind === 'run' ? run.run : undefined).toMatchObject({
+      status: 'blocked',
+      stopReason: 'blocked',
+      trustState: 'blocked',
+    });
+  });
+
+  it('preserves review-required lifecycle truth after reload', () => {
+    const items = threadItemsFromTurns([{
+      id: 'turn_review',
+      threadId: 'thread_1',
+      seq: 2,
+      question: 'forecast next quarter',
+      answerSummary: 'Generated forecast draft.',
+      route: 'generated_answer',
+      trustLabel: 'review_required',
+      runStatus: 'needs_review',
+      stopReason: 'human_review_required',
+      createdAt: '2026-07-29T00:01:00.000Z',
+    }]);
+    const run = items.find((item) => item.kind === 'run');
+    expect(run?.kind === 'run' ? run.run : undefined).toMatchObject({
+      status: 'needs_review',
+      stopReason: 'human_review_required',
+      trustState: 'review_required',
+    });
   });
 });
 

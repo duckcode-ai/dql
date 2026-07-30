@@ -45,6 +45,10 @@ import {
   solveAnalyticalCompatibility,
 } from "./analytical-compatibility.js";
 import { buildDeterministicAnalyticalFrame } from "./analytical-frame.js";
+import {
+  conversationHistoryFromContext,
+  renderConversationEnvelopeForPrompt,
+} from "./conversation/snapshot.js";
 
 /** The router's fine-grained classification of a turn. */
 export interface RouterClassification {
@@ -185,13 +189,24 @@ function buildSystemPrompt(): string {
   ].join("\n");
 }
 
+function effectiveConversationHistory(
+  request: AgentRunRequest,
+): NonNullable<AgentRunRequest['history']> {
+  return request.history?.length
+    ? request.history
+    : conversationHistoryFromContext(request.conversationContext);
+}
+
 function buildUserPrompt(request: AgentRunRequest, catalogContext?: string): string {
   const lines: string[] = [];
   lines.push(`Turn: ${request.question}`);
-  if (request.history?.length) {
-    const recent = request.history.slice(-4).map((turn) => `${turn.role}: ${turn.text}`).join("\n");
+  const history = effectiveConversationHistory(request);
+  if (history.length) {
+    const recent = history.slice(-4).map((turn) => `${turn.role}: ${turn.text}`).join("\n");
     lines.push(`Recent conversation:\n${recent}`);
   }
+  const envelope = renderConversationEnvelopeForPrompt(request.conversationContext);
+  if (envelope) lines.push(`Structured conversation state:\n${envelope}`);
   if (request.signals) lines.push(`Retrieval signals: ${JSON.stringify(request.signals)}`);
   if (catalogContext) lines.push(`Available governed data (so you can tell data from general knowledge):\n${catalogContext}`);
   lines.push("Return the classification as JSON.");
@@ -311,12 +326,15 @@ function buildMeaningUserPrompt(
     `Parsed request hints: ${JSON.stringify(compactQueryIntent(defaultQueryIntent(evidence)))}`,
     `Candidate cards: ${JSON.stringify(cards)}`,
   ];
-  if (request.history?.length) {
-    lines.push(`Recent conversation: ${JSON.stringify(request.history.slice(-4).map((turn) => ({
+  const history = effectiveConversationHistory(request);
+  if (history.length) {
+    lines.push(`Recent conversation: ${JSON.stringify(history.slice(-4).map((turn) => ({
       role: turn.role,
       text: compactText(turn.text, 1_200),
     })))}`);
   }
+  const envelope = renderConversationEnvelopeForPrompt(request.conversationContext);
+  if (envelope) lines.push(`Structured conversation state: ${JSON.stringify(envelope)}`);
   lines.push("Resolve the intended meaning and return JSON only.");
   return lines.join("\n");
 }
@@ -434,13 +452,15 @@ function cacheKey(
   catalogContext?: string,
 ): string {
   const q = request.question.trim().toLowerCase().replace(/\s+/g, " ");
-  const last = request.history?.length ? request.history[request.history.length - 1].text.trim().toLowerCase() : "";
+  const history = effectiveConversationHistory(request);
+  const last = history.length ? history[history.length - 1].text.trim().toLowerCase() : "";
+  const envelope = renderConversationEnvelopeForPrompt(request.conversationContext) ?? "";
   const evidenceVersion = evidence
     ? evidence.sourceFingerprint
       ?? evidence.snapshotId
       ?? evidence.candidates.map((candidate) => `${candidate.id}:${candidate.relevanceScore}:${candidate.compatibility}`).join("|")
     : catalogContext ?? "";
-  return `${q}\u0000${last}\u0000${evidenceVersion}`;
+  return `${q}\u0000${last}\u0000${envelope}\u0000${evidenceVersion}`;
 }
 
 function retrievalTrace(
@@ -1011,12 +1031,13 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
   };
 
   const deterministic = (request: AgentRunRequest): IntentDecision => {
-    const conversationalKind = classifyConversationalTurn(request.question, (request.history?.length ?? 0) > 0);
+    const history = effectiveConversationHistory(request);
+    const conversationalKind = classifyConversationalTurn(request.question, history.length > 0);
     return decideAgentAction({
       question: request.question,
       intent: request.intent ?? (conversationalKind ? "clarify" : "ad_hoc_ranking"),
       signals: request.signals,
-      history: request.history,
+      history,
     });
   };
 
@@ -1125,7 +1146,13 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
 
           try {
             const resolution = options.resolveMeaning
-              ? await options.resolveMeaning({ question: request.question, history: request.history, evidence, candidates, signal: request.signal ?? options.signal })
+              ? await options.resolveMeaning({
+                  question: request.question,
+                  history: effectiveConversationHistory(request),
+                  evidence,
+                  candidates,
+                  signal: request.signal ?? options.signal,
+                })
               : options.complete
                 ? parseMeaningResolution(await options.complete({
                     system: buildMeaningSystemPrompt(),

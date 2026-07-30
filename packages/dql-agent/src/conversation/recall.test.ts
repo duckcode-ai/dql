@@ -3,7 +3,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ConversationStore, defaultConversationPath } from './session-store.js';
-import { buildConversationSnapshot, recallRelevantTurns } from './snapshot.js';
+import {
+  buildConversationSnapshot,
+  conversationHistoryFromContext,
+  recallRelevantTurns,
+  renderConversationEnvelopeForPrompt,
+} from './snapshot.js';
 import { MemoryStore, defaultMemoryPath } from '../memory/sqlite-memory.js';
 
 describe('semantic recall over conversation history', () => {
@@ -101,6 +106,34 @@ describe('semantic recall over conversation history', () => {
         },
       },
     });
+    expect(snapshot).toMatchObject({
+      version: 1,
+      threadId: thread.id,
+      surface: 'notebook',
+    });
+  });
+
+  it('projects one bounded, trust-labelled envelope for every orchestration stage', () => {
+    const thread = store.createThread({ surface: 'ask' });
+    store.appendTurn(thread.id, {
+      question: 'show restricted payroll',
+      answerSummary: 'Access was denied.',
+      route: 'blocked',
+      trustLabel: 'blocked',
+      runStatus: 'blocked',
+      stopReason: 'blocked',
+    });
+    const snapshot = buildConversationSnapshot(store, thread.id, {
+      question: 'what happened with that request?',
+    });
+    const context = { conversationEnvelope: snapshot };
+
+    expect(conversationHistoryFromContext(context)).toEqual([
+      { role: 'user', text: 'show restricted payroll' },
+      { role: 'assistant', text: '[blocked] Access was denied.' },
+    ]);
+    expect(renderConversationEnvelopeForPrompt(context)).toContain(`thread: ${thread.id}`);
+    expect(renderConversationEnvelopeForPrompt(context)).toContain('surface: ask');
   });
 
   it('promotion is the only path into durable memory (isolation)', () => {

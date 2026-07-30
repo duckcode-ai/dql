@@ -1832,6 +1832,7 @@ describe('agent run runtime API', () => {
       id: 'agent-run-1',
       question: 'what is revenue?',
       status: 'blocked',
+      stopReason: 'blocked',
       route: 'semantic_answer',
       trustState: 'blocked',
       artifacts: [{
@@ -1874,6 +1875,8 @@ describe('agent run runtime API', () => {
     expect(turn).toMatchObject({
       agentRunId: 'agent-run-1',
       question: 'what is revenue?',
+      runStatus: 'blocked',
+      stopReason: 'blocked',
       sql,
       dqlArtifact: {
         kind: 'semantic_block',

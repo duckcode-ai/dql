@@ -30,6 +30,8 @@ export interface AgentConversationContext {
   activeTurnId?: string;
   activeTopic?: string;
   conversationSummary?: string;
+  /** Canonical v1 server envelope shared by routing, planning, and execution. */
+  conversationEnvelope?: ConversationSnapshot;
   /** Server-built bounded snapshot: recent turns, semantic recall, working state, and topic relation. */
   serverSnapshot?: ConversationSnapshot;
   turns?: AgentConversationTurn[];

@@ -76,6 +76,8 @@ describe('ConversationStore', () => {
       answerSummary: 'Food and Drink revenue split.',
       route: 'certified_answer',
       trustLabel: 'certified',
+      runStatus: 'completed',
+      stopReason: 'certified_answer_found',
       sourceCertifiedBlock: 'food_vs_drink_revenue',
       contextPackId: 'ctx_abc',
       knowledgeLens: {
@@ -141,6 +143,8 @@ describe('ConversationStore', () => {
     expect(stored.result?.rowCount).toBe(2);
     expect(stored.contract).toEqual({ measures: ['revenue'], dimensions: ['category'] });
     expect(stored.sourceCertifiedBlock).toBe('food_vs_drink_revenue');
+    expect(stored.runStatus).toBe('completed');
+    expect(stored.stopReason).toBe('certified_answer_found');
     expect(stored.contextPackId).toBe('ctx_abc');
     expect(stored.knowledgeLens).toEqual({
       mode: 'pinned', activeDomainId: 'commerce', skillRefs: ['commerce::skill::revenue'],

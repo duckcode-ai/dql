@@ -21,6 +21,7 @@ import {
 } from "./cascade/budgets.js";
 import type { MetadataAgentIntent } from "./metadata/catalog.js";
 import type { ReasoningEffort, ThinkingMode } from "./providers/reasoning-effort.js";
+import { conversationHistoryFromContext } from "./conversation/snapshot.js";
 
 export type AgentRunRequestedMode = "auto" | "ask" | "research" | "sql" | "block" | "app";
 
@@ -1862,9 +1863,12 @@ export function defaultSuccessCriteria(route: AgentRunRoute): string[] {
 
 function buildIntentDecision(request: AgentRunRequest): IntentDecision {
   const hasConversationContext = Boolean(request.conversationContext && Object.keys(request.conversationContext).length > 0);
+  const history = request.history?.length
+    ? request.history
+    : conversationHistoryFromContext(request.conversationContext);
   const conversationalKind = classifyConversationalTurn(
     request.question,
-    Boolean((request.history?.length ?? 0) > 0 || hasConversationContext),
+    Boolean(history.length > 0 || hasConversationContext),
   );
   if (request.requestedMode === "ask" && conversationalKind && hasConversationContext) {
     return {
@@ -1883,14 +1887,14 @@ function buildIntentDecision(request: AgentRunRequest): IntentDecision {
       action: forcedAction,
       confidence: 1,
       reason: `User selected ${request.requestedMode} mode.`,
-      followsUp: Boolean(request.history?.length),
+      followsUp: history.length > 0,
     };
   }
   return decideAgentAction({
     question: request.question,
     intent: request.intent ?? "ad_hoc_ranking",
     signals: request.signals,
-    history: request.history,
+    history,
   });
 }
 

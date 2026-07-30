@@ -1254,6 +1254,16 @@ export interface AgentConversationThread {
   title?: string;
   notebookPath?: string;
   rollingSummary?: string;
+  structuredSummary?: {
+    version: 1;
+    entries: Array<{
+      sourceTurnId: string;
+      state: 'confirmed' | 'provisional' | 'unresolved' | 'blocked' | 'context';
+      question: string;
+      answerSummary?: string;
+      evidenceRefs?: string[];
+    }>;
+  };
   archived: boolean;
   createdAt: string;
   updatedAt: string;
@@ -1278,6 +1288,8 @@ export interface AgentConversationTurn {
   answerText?: string;
   route?: string;
   trustLabel?: string;
+  runStatus?: string;
+  stopReason?: string;
   certification?: string;
   sourceCertifiedBlock?: string;
   contextPackId?: string;

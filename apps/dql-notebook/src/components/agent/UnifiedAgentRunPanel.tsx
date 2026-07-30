@@ -42,8 +42,10 @@ import {
   type AgentRunRequestedMode,
   type AgentRunRoute,
   type AgentRunSelectedObject,
+  type AgentRunStatus,
   type AgentRunStep,
   type AgentRunStepStatus,
+  type AgentRunStopReason,
   type AgentRunTrustState,
   type AgentThinkingMode,
   type AppBuildProposal,
@@ -1057,6 +1059,19 @@ const AGENT_RUN_ROUTES = new Set<AgentRunRoute>([
 const AGENT_RUN_TRUST_STATES = new Set<AgentRunTrustState>([
   'certified', 'governed', 'grounded', 'review_required', 'blocked', 'not_applicable',
 ]);
+const AGENT_RUN_STATUSES = new Set<AgentRunStatus>([
+  'completed', 'needs_review', 'needs_clarification', 'blocked',
+]);
+const AGENT_RUN_STOP_REASONS = new Set<AgentRunStopReason>([
+  'conversational_reply',
+  'certified_answer_found',
+  'governed_semantic_answer',
+  'generated_review_required',
+  'artifact_created',
+  'needs_clarification',
+  'human_review_required',
+  'blocked',
+]);
 
 /**
  * Rebuild the panel's thread items from server-persisted conversation turns.
@@ -1085,6 +1100,22 @@ function runFromConversationTurn(turn: AgentConversationTurn): AgentRun {
     : turn.certification === 'certified'
       ? 'certified'
       : 'not_applicable';
+  const status: AgentRunStatus = AGENT_RUN_STATUSES.has(turn.runStatus as AgentRunStatus)
+    ? (turn.runStatus as AgentRunStatus)
+    : 'completed';
+  const stopReason: AgentRunStopReason = AGENT_RUN_STOP_REASONS.has(turn.stopReason as AgentRunStopReason)
+    ? (turn.stopReason as AgentRunStopReason)
+    : status === 'blocked'
+      ? 'blocked'
+      : status === 'needs_clarification'
+        ? 'needs_clarification'
+        : status === 'needs_review'
+          ? 'human_review_required'
+          : route === 'conversation'
+            ? 'conversational_reply'
+            : trustState === 'certified'
+              ? 'certified_answer_found'
+              : 'artifact_created';
   const columns = (turn.result?.columns ?? []).filter((column): column is string => typeof column === 'string');
   // Stored samples are positional arrays; rebuild keyed rows for the result view.
   const rows = (turn.result?.rowsSample ?? [])
@@ -1119,13 +1150,9 @@ function runFromConversationTurn(turn: AgentConversationTurn): AgentRun {
     question: turn.question,
     requestedMode: 'auto',
     route,
-    status: 'completed',
+    status,
     trustState,
-    stopReason: route === 'conversation'
-      ? 'conversational_reply'
-      : trustState === 'certified'
-        ? 'certified_answer_found'
-        : 'artifact_created',
+    stopReason,
     startedAt: turn.createdAt,
     completedAt: turn.createdAt,
     summary: turn.answerSummary ?? turn.question,

@@ -14,9 +14,14 @@ import {
   type ConversationWorkingState,
   type TopicRelation,
 } from './working-state.js';
-import { updateRollingSummary } from './rolling-summary.js';
+import {
+  renderStructuredConversationSummary,
+  updateRollingSummary,
+  updateStructuredConversationSummary,
+  type ConversationSummaryV1,
+} from './rolling-summary.js';
 import { buildAnalysisQuestionPlan } from '../metadata/analysis-planner.js';
-import { hybridRank } from '../embeddings/provider.js';
+import { envEmbeddingProvider, hybridRank } from '../embeddings/provider.js';
 
 const RECENT_TURNS = 4;
 
@@ -25,6 +30,9 @@ export interface ConversationSnapshotTurn {
   question: string;
   answerSummary?: string;
   route?: string;
+  trustLabel?: string;
+  runStatus?: string;
+  stopReason?: string;
   sourceCertifiedBlock?: string;
   contextPackId?: string;
   knowledgeLens?: KnowledgeLens;
@@ -36,15 +44,31 @@ export interface ConversationSnapshotTurn {
   cascade?: CascadeAnswerResult;
 }
 
-export interface ConversationSnapshot {
+export interface ConversationEnvelopeV1 {
+  /** Present on every newly built envelope; optional only for persisted v0 compatibility. */
+  version?: 1;
   threadId: string;
+  /** Present on every newly built envelope; optional only for persisted v0 compatibility. */
+  surface?: string;
   rollingSummary?: string;
+  /** Trust-aware, source-attributed summary of turns outside the recent window. */
+  structuredSummary?: ConversationSummaryV1;
   workingState?: ConversationWorkingState;
   recentTurns: ConversationSnapshotTurn[];
   /** Semantic-recall hits over older turns (P5). */
   recalledTurns?: ConversationSnapshotTurn[];
   /** How the NEW question relates to the ongoing topic (when a question is supplied). */
   topicRelation?: TopicRelation;
+  /** Latest clarification that is still the current turn. */
+  pendingClarification?: { sourceTurnId: string; question: string };
+}
+
+/** Compatibility name retained for existing API/provider consumers. */
+export type ConversationSnapshot = ConversationEnvelopeV1;
+
+export interface ConversationHistoryMessage {
+  role: 'user' | 'assistant';
+  text: string;
 }
 
 /**
@@ -68,12 +92,22 @@ export function buildConversationSnapshot(
       workingState = { ...workingState, filters: [] };
     }
   }
+  const latest = recent[recent.length - 1];
   return {
+    version: 1,
     threadId,
+    surface: thread.surface,
     rollingSummary: thread.rollingSummary,
+    structuredSummary: thread.structuredSummary,
     workingState: hasWorkingState(workingState) ? workingState : undefined,
     recentTurns: recent.map(snapshotTurn),
     topicRelation,
+    pendingClarification: latest && (latest.route === 'clarify' || latest.runStatus === 'needs_clarification')
+      ? {
+          sourceTurnId: latest.id,
+          question: latest.answerSummary ?? latest.answerText ?? latest.question,
+        }
+      : undefined,
   };
 }
 
@@ -95,9 +129,16 @@ export function advanceThreadState(store: ConversationStore, threadId: string, t
     const rollingSummary = compactable.length > 0
       ? updateRollingSummary({ previousSummary: thread.rollingSummary, compactedTurns: compactable })
       : thread.rollingSummary;
+    const structuredSummary = compactable.length > 0
+      ? updateStructuredConversationSummary({
+          previousSummary: thread.structuredSummary,
+          compactedTurns: compactable,
+        })
+      : thread.structuredSummary;
     store.updateThreadState(threadId, {
       workingState: state as unknown as Record<string, unknown>,
       rollingSummary,
+      ...(structuredSummary ? { structuredSummary } : {}),
       summaryTurnSeq: compactable.length > 0
         ? compactable[compactable.length - 1].seq
         : thread.summaryTurnSeq,
@@ -109,9 +150,10 @@ export function advanceThreadState(store: ConversationStore, threadId: string, t
 
 /**
  * Semantic recall over the thread's OLDER turns ("what did we discuss about X?").
- * FTS candidates re-ranked with the deterministic hash-embedding blend
- * (alpha 0.4 — FTS still dominates). Turns already in the recent verbatim
- * window are excluded; returns at most `limit` hits. Never throws.
+ * FTS candidates are re-ranked with the configured project embedding provider
+ * (and the deterministic local fallback when no provider is configured).
+ * Turns already in the recent verbatim window are excluded; returns at most
+ * `limit` hits. Never throws.
  */
 export async function recallRelevantTurns(
   store: ConversationStore,
@@ -132,12 +174,90 @@ export async function recallRelevantTurns(
         ftsScore: 1 - index / candidates.length,
         text: `${turn.question} ${turn.answerSummary ?? ''}`,
       })),
-      { alpha: 0.4 },
+      { alpha: 0.4, provider: envEmbeddingProvider() },
     );
     return ranked.slice(0, options.limit ?? 3).map((entry) => snapshotTurn(entry.item));
   } catch {
     return [];
   }
+}
+
+/** Read the canonical server envelope while accepting the original key during upgrades. */
+export function conversationEnvelopeFromContext(
+  context: Record<string, unknown> | undefined,
+): ConversationEnvelopeV1 | undefined {
+  if (!context) return undefined;
+  const raw = context.conversationEnvelope ?? context.serverSnapshot;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const envelope = raw as Partial<ConversationEnvelopeV1>;
+  if (typeof envelope.threadId !== 'string' || !Array.isArray(envelope.recentTurns)) return undefined;
+  return {
+    ...envelope,
+    version: 1,
+    surface: typeof envelope.surface === 'string' ? envelope.surface : 'agent',
+    threadId: envelope.threadId,
+    recentTurns: envelope.recentTurns,
+  } as ConversationEnvelopeV1;
+}
+
+/**
+ * One bounded history projection for routing, meaning resolution, planning and
+ * execution fallbacks. Review/blocked state is explicit so prose cannot silently
+ * become trusted analytical context.
+ */
+export function conversationHistoryFromContext(
+  context: Record<string, unknown> | undefined,
+  limit = 6,
+): ConversationHistoryMessage[] {
+  const envelope = conversationEnvelopeFromContext(context);
+  if (!envelope) return [];
+  return envelope.recentTurns.slice(-Math.max(1, limit)).flatMap((turn) => {
+    const answer = turn.answerSummary?.trim();
+    return [
+      { role: 'user' as const, text: turn.question },
+      ...(answer
+        ? [{
+            role: 'assistant' as const,
+            text: `[${conversationTurnContextState(turn)}] ${answer}`,
+          }]
+        : []),
+    ];
+  });
+}
+
+/** Compact non-prose context shared by every orchestration stage. */
+export function renderConversationEnvelopeForPrompt(
+  context: Record<string, unknown> | undefined,
+): string | undefined {
+  const envelope = conversationEnvelopeFromContext(context);
+  if (!envelope) return undefined;
+  const state = envelope.workingState
+    ? parseWorkingState(envelope.workingState as unknown as Record<string, unknown>)
+    : undefined;
+  const summary = renderStructuredConversationSummary(envelope.structuredSummary)
+    ?? envelope.rollingSummary;
+  const stateLines = state
+    ? [
+        state.topicKey ? `active topic: ${state.topicKey}` : '',
+        state.entities.length ? `entities: ${state.entities.join(', ')}` : '',
+        state.measures.length ? `measures: ${state.measures.join(', ')}` : '',
+        state.dimensions.length ? `dimensions: ${state.dimensions.join(', ')}` : '',
+        state.filters.length ? `filters: ${state.filters.map((filter) => filter.value).join(', ')}` : '',
+        state.timeframe ? `timeframe: ${state.timeframe}` : '',
+        state.limit !== undefined ? `limit: ${state.limit}` : '',
+      ].filter(Boolean)
+    : [];
+  const lines = [
+    `thread: ${envelope.threadId}`,
+    `surface: ${envelope.surface}`,
+    envelope.topicRelation ? `new-turn relation: ${envelope.topicRelation}` : '',
+    ...stateLines,
+    envelope.pendingClarification
+      ? `pending clarification: ${envelope.pendingClarification.question}`
+      : '',
+    summary ? `older trusted-state summary:\n${summary}` : '',
+  ].filter(Boolean);
+  return lines.length > 0 ? lines.join('\n') : undefined;
 }
 
 /** Classify the NEW question against the current topic key (same Jaccard rule as the reducer). */
@@ -172,6 +292,9 @@ function snapshotTurn(turn: ConversationTurn): ConversationSnapshotTurn {
     question: turn.question,
     answerSummary: turn.answerSummary,
     route: turn.route,
+    trustLabel: turn.trustLabel,
+    runStatus: turn.runStatus,
+    stopReason: turn.stopReason,
     sourceCertifiedBlock: turn.sourceCertifiedBlock,
     contextPackId: turn.contextPackId,
     knowledgeLens: turn.knowledgeLens,
@@ -182,6 +305,22 @@ function snapshotTurn(turn: ConversationTurn): ConversationSnapshotTurn {
     dqlArtifact: turn.dqlArtifact,
     cascade: turn.cascade,
   };
+}
+
+export function conversationTurnContextState(turn: ConversationSnapshotTurn): string {
+  if (turn.runStatus === 'blocked' || turn.trustLabel === 'blocked' || turn.route === 'blocked') {
+    return 'blocked';
+  }
+  if (turn.runStatus === 'needs_clarification' || turn.route === 'clarify') {
+    return 'unresolved';
+  }
+  if (turn.runStatus === 'needs_review' || turn.trustLabel === 'review_required') {
+    return 'provisional';
+  }
+  if (turn.trustLabel === 'certified' || turn.trustLabel === 'governed' || turn.trustLabel === 'grounded') {
+    return 'confirmed';
+  }
+  return 'context';
 }
 
 function hasWorkingState(state: ConversationWorkingState): boolean {

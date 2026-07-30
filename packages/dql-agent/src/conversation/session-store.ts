@@ -18,6 +18,7 @@ import { sanitizeFtsQuery } from '../memory/fts-query.js';
 import type { AgentDqlArtifactReference } from '../answer-loop.js';
 import type { CascadeAnswerResult } from '../cascade/cascade.js';
 import type { KnowledgeLens } from '../domain-context.js';
+import type { ConversationSummaryV1 } from './rolling-summary.js';
 
 const require = createRequire(import.meta.url);
 let databaseCtor: typeof Database | null = null;
@@ -49,6 +50,8 @@ export interface ConversationThread {
   /** Opaque working-state JSON — owned/typed by conversation/working-state.ts. */
   workingState: Record<string, unknown>;
   rollingSummary?: string;
+  /** Trust-aware structured compaction. `rollingSummary` remains the v1 text compatibility view. */
+  structuredSummary?: ConversationSummaryV1;
   /** Highest turn seq already folded into rollingSummary (compaction cursor). */
   summaryTurnSeq: number;
   archived: boolean;
@@ -72,6 +75,8 @@ export interface ConversationTurnInput {
   answerText?: string;
   route?: string;
   trustLabel?: string;
+  runStatus?: string;
+  stopReason?: string;
   certification?: string;
   sourceCertifiedBlock?: string;
   contextPackId?: string;
@@ -161,6 +166,7 @@ export class ConversationStore {
         notebook_path      TEXT,
         working_state_json TEXT NOT NULL DEFAULT '{}',
         rolling_summary    TEXT,
+        summary_json       TEXT NOT NULL DEFAULT '{}',
         summary_turn_seq   INTEGER NOT NULL DEFAULT 0,
         archived           INTEGER NOT NULL DEFAULT 0,
         created_at         TEXT NOT NULL,
@@ -180,6 +186,8 @@ export class ConversationStore {
         answer_text            TEXT,
         route                  TEXT,
         trust_label            TEXT,
+        run_status             TEXT,
+        stop_reason            TEXT,
         certification          TEXT,
         source_certified_block TEXT,
         context_pack_id        TEXT,
@@ -209,6 +217,9 @@ export class ConversationStore {
     this.ensureColumn('conversation_turns', 'cascade_json', "TEXT NOT NULL DEFAULT '{}'");
     this.ensureColumn('conversation_turns', 'knowledge_lens_json', "TEXT NOT NULL DEFAULT '{}'");
     this.ensureColumn('conversation_turns', 'agent_run_id', 'TEXT');
+    this.ensureColumn('conversation_turns', 'run_status', 'TEXT');
+    this.ensureColumn('conversation_turns', 'stop_reason', 'TEXT');
+    this.ensureColumn('conversation_threads', 'summary_json', "TEXT NOT NULL DEFAULT '{}'");
   }
 
   private ensureColumn(table: string, column: string, ddl: string): void {
@@ -227,6 +238,7 @@ export class ConversationStore {
       notebookPath: input.notebookPath?.trim() || undefined,
       workingState: {},
       rollingSummary: undefined,
+      structuredSummary: undefined,
       summaryTurnSeq: 0,
       archived: false,
       createdAt: now,
@@ -234,9 +246,9 @@ export class ConversationStore {
     };
     this.db.prepare(`
       INSERT INTO conversation_threads (
-        id, surface, title, notebook_path, working_state_json, rolling_summary,
+        id, surface, title, notebook_path, working_state_json, rolling_summary, summary_json,
         summary_turn_seq, archived, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, '{}', NULL, 0, 0, ?, ?)
+      ) VALUES (?, ?, ?, ?, '{}', NULL, '{}', 0, 0, ?, ?)
     `).run(thread.id, thread.surface, thread.title ?? null, thread.notebookPath ?? null, now, now);
     return thread;
   }
@@ -288,10 +300,10 @@ export class ConversationStore {
       this.db.prepare(`
         INSERT INTO conversation_turns (
           id, thread_id, agent_run_id, seq, question, answer_summary, answer_text, route,
-          trust_label, certification, source_certified_block, context_pack_id,
+          trust_label, run_status, stop_reason, certification, source_certified_block, context_pack_id,
           knowledge_lens_json, sql, dql_artifact_json, cascade_json, result_json,
           contract_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         turn.id,
         threadId,
@@ -302,6 +314,8 @@ export class ConversationStore {
         turn.answerText ?? null,
         turn.route ?? null,
         turn.trustLabel ?? null,
+        turn.runStatus ?? null,
+        turn.stopReason ?? null,
         turn.certification ?? null,
         turn.sourceCertifiedBlock ?? null,
         turn.contextPackId ?? null,
@@ -387,7 +401,12 @@ export class ConversationStore {
 
   updateThreadState(
     threadId: string,
-    input: { workingState?: Record<string, unknown>; rollingSummary?: string; summaryTurnSeq?: number },
+    input: {
+      workingState?: Record<string, unknown>;
+      rollingSummary?: string;
+      structuredSummary?: ConversationSummaryV1;
+      summaryTurnSeq?: number;
+    },
   ): void {
     const sets: string[] = ['updated_at = ?'];
     const params: unknown[] = [new Date().toISOString()];
@@ -398,6 +417,10 @@ export class ConversationStore {
     if (input.rollingSummary !== undefined) {
       sets.push('rolling_summary = ?');
       params.push(input.rollingSummary || null);
+    }
+    if (input.structuredSummary !== undefined) {
+      sets.push('summary_json = ?');
+      params.push(JSON.stringify(input.structuredSummary));
     }
     if (input.summaryTurnSeq !== undefined) {
       sets.push('summary_turn_seq = ?');
@@ -551,6 +574,7 @@ type ThreadRow = {
   notebook_path: string | null;
   working_state_json: string;
   rolling_summary: string | null;
+  summary_json: string;
   summary_turn_seq: number;
   archived: number;
   created_at: string;
@@ -567,6 +591,8 @@ type TurnRow = {
   answer_text: string | null;
   route: string | null;
   trust_label: string | null;
+  run_status: string | null;
+  stop_reason: string | null;
   certification: string | null;
   source_certified_block: string | null;
   context_pack_id: string | null;
@@ -587,6 +613,7 @@ function rowToThread(row: ThreadRow): ConversationThread {
     notebookPath: row.notebook_path ?? undefined,
     workingState: safeJSON(row.working_state_json, {} as Record<string, unknown>),
     rollingSummary: row.rolling_summary ?? undefined,
+    structuredSummary: nonEmptySummary(safeJSON(row.summary_json, {} as ConversationSummaryV1)),
     summaryTurnSeq: row.summary_turn_seq,
     archived: Boolean(row.archived),
     createdAt: row.created_at,
@@ -610,6 +637,8 @@ function rowToTurn(row: TurnRow): ConversationTurn {
     answerText: row.answer_text ?? undefined,
     route: row.route ?? undefined,
     trustLabel: row.trust_label ?? undefined,
+    runStatus: row.run_status ?? undefined,
+    stopReason: row.stop_reason ?? undefined,
     certification: row.certification ?? undefined,
     sourceCertifiedBlock: row.source_certified_block ?? undefined,
     contextPackId: row.context_pack_id ?? undefined,
@@ -621,6 +650,10 @@ function rowToTurn(row: TurnRow): ConversationTurn {
     contract: Object.keys(contract).length > 0 ? contract : undefined,
     createdAt: row.created_at,
   };
+}
+
+function nonEmptySummary(summary: ConversationSummaryV1): ConversationSummaryV1 | undefined {
+  return summary?.version === 1 && Array.isArray(summary.entries) ? summary : undefined;
 }
 
 function safeJSON<T>(raw: string | null | undefined, fallback: T): T {

@@ -593,13 +593,28 @@ export type {
   ConversationWorkingState,
   TopicRelation,
 } from "./conversation/working-state.js";
-export { updateRollingSummary } from "./conversation/rolling-summary.js";
+export {
+  renderStructuredConversationSummary,
+  updateRollingSummary,
+  updateStructuredConversationSummary,
+} from "./conversation/rolling-summary.js";
+export type {
+  ConversationSummaryEntryState,
+  ConversationSummaryEntryV1,
+  ConversationSummaryV1,
+} from "./conversation/rolling-summary.js";
 export {
   advanceThreadState,
   buildConversationSnapshot,
+  conversationEnvelopeFromContext,
+  conversationHistoryFromContext,
+  conversationTurnContextState,
   recallRelevantTurns,
+  renderConversationEnvelopeForPrompt,
 } from "./conversation/snapshot.js";
 export type {
+  ConversationEnvelopeV1,
+  ConversationHistoryMessage,
   ConversationSnapshot,
   ConversationSnapshotTurn,
 } from "./conversation/snapshot.js";

@@ -9,19 +9,27 @@ export type NotebookTemplate =
   | 'experiment';
 
 export const NOTEBOOK_TEMPLATE_LABELS: Record<NotebookTemplate, string> = {
-  blank: 'Blank',
-  analysis: 'Analysis',
-  metric_diagnostic: 'Metric diagnostic',
-  data_quality: 'Data-quality investigation',
-  experiment: 'Experiment log',
+  blank: 'Start empty',
+  analysis: 'Explore a question',
+  metric_diagnostic: 'Investigate a metric',
+  data_quality: 'Check data quality',
+  experiment: 'Review an experiment',
 };
 
 export const NOTEBOOK_TEMPLATE_DESCRIPTIONS: Record<NotebookTemplate, string> = {
-  blank: 'Start from a research question and choose the right source.',
-  analysis: 'A decision-ready research narrative from context through takeaways.',
-  metric_diagnostic: 'Trace a metric change through segments, time, and validation checks.',
-  data_quality: 'Profile a source, document issues, and record validation evidence.',
-  experiment: 'Capture a hypothesis, method, results, and decision.',
+  blank: 'Add Ask, DQL, SQL, or notes only when you need them.',
+  analysis: 'Move from a business question to evidence, findings, and a decision.',
+  metric_diagnostic: 'Trend a metric, break down its drivers, and record the diagnosis.',
+  data_quality: 'Profile a source, run checks, and document ownership and remediation.',
+  experiment: 'Capture the hypothesis, metrics, results, guardrails, and decision.',
+};
+
+export const NOTEBOOK_TEMPLATE_CELL_SUMMARIES: Record<NotebookTemplate, string> = {
+  blank: 'Empty canvas · 0 starter cells',
+  analysis: '1 DQL query · 4 note sections',
+  metric_diagnostic: '2 DQL queries · 2 note sections',
+  data_quality: '2 DQL queries · 2 note sections',
+  experiment: '1 DQL query · 3 note sections',
 };
 
 export function buildTemplateCells(template: NotebookTemplate): Cell[] {

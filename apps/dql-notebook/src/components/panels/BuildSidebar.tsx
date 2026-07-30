@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Blocks, Box, Calendar, ChevronDown, ChevronRight, Database, FileText, Folder, FolderOpen, Hash, KeyRound, Layers, Link2, Plus, Search, Trash2, Type } from 'lucide-react';
+import { Blocks, Box, Calendar, ChevronDown, ChevronRight, Database, FileText, Folder, FolderOpen, Hash, KeyRound, Layers, Link2, NotebookPen, Plus, Search, Trash2, Type } from 'lucide-react';
 import { api, DqlApiError } from '../../api/client';
 import { insertSemanticReference } from '../../editor/semantic-completions';
 import { controlStyle } from '../../themes/control-tokens';
@@ -15,6 +15,7 @@ import { blockDomains, filterBlocksForDomain } from './block-domain-filter';
 import { buildNotebookSemanticBlock } from './semantic-notebook-source';
 import { buildBlockLibraryTree, type BlockLibraryTreeNode } from './block-library-tree';
 import { buildFileLibraryTree, type FileLibraryTreeNode } from './file-library-tree';
+import { filterNotebookFiles } from './notebook-sidebar';
 import {
   buildSemanticTreeFromLayer,
   scopeSemanticTreeForComposition,
@@ -121,8 +122,34 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSem
         ) : null}
       </div>
 
-      {/* Search (all tabs except notebooks, which has its own + button) */}
-      {tab !== 'notebooks' && (
+      {/* Compact tab toolbar. Notebook creation lives beside notebook search
+          instead of occupying a full-width content row. */}
+      {tab === 'notebooks' ? (
+        <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}`, display: 'flex', gap: 6 }}>
+          <div style={{ position: 'relative', flex: 1 }}>
+            <Search size={12} style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', color: t.textMuted }} />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search notebooks…"
+              aria-label="Search notebooks"
+              style={{
+                width: '100%', boxSizing: 'border-box', background: t.inputBg, border: `1px solid ${t.inputBorder}`,
+                borderRadius: 6, color: t.textPrimary, fontSize: 12, fontFamily: t.font, padding: '6px 8px 6px 26px', outline: 'none',
+              }}
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => dispatch({ type: 'OPEN_NEW_NOTEBOOK_MODAL' })}
+            title="Create notebook"
+            aria-label="Create notebook"
+            style={{ width: 28, height: 28, flexShrink: 0, borderRadius: 7, border: `1px solid ${t.accent}55`, background: 'var(--accent-dim)', color: t.accent, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
+          >
+            <NotebookPen size={14} strokeWidth={2} aria-hidden="true" />
+          </button>
+        </div>
+      ) : (
         <div style={{ padding: 8, borderBottom: `1px solid ${t.headerBorder}`, display: 'flex', gap: 6 }}>
           <div style={{ position: 'relative', flex: 1 }}>
             <Search size={12} style={{ position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)', color: t.textMuted }} />
@@ -150,7 +177,7 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSem
       )}
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
-        {tab === 'notebooks' && onOpenFile && <NotebooksList t={t} onOpenFile={onOpenFile} />}
+        {tab === 'notebooks' && onOpenFile && <NotebooksList t={t} onOpenFile={onOpenFile} search={search} />}
         {tab === 'semantic' && <SemanticList t={t} search={search} onInsert={insertText} notebookMode={!onInsertText || Boolean(onSemanticCompose)} onSemanticCompose={onSemanticCompose} />}
         {tab === 'database' && <DatabaseList t={t} search={search} onInsert={insertText} />}
         {tab === 'blocks' && <BlocksList t={t} search={search} domain={blockDomain} onDomainChange={onBlockDomainChange} onDeleteBlock={onDeleteBlock} refreshKey={blockLibraryRefreshKey} />}
@@ -199,14 +226,13 @@ function columnRelation(colName: string, tableName: string): 'pk' | 'fk' | undef
   return 'fk';
 }
 
-function NotebooksList({ t, onOpenFile }: { t: Theme; onOpenFile: (file: NotebookFile) => void }) {
+function NotebooksList({ t, onOpenFile, search }: { t: Theme; onOpenFile: (file: NotebookFile) => void; search: string }) {
   const { state, dispatch } = useNotebook();
   const [pendingDelete, setPendingDelete] = useState<NotebookFile | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const notebooks = Array.from(
-    new Map(state.files.filter((f) => f.type === 'notebook').map((f) => [f.path, f])).values(),
-  ).sort((a, b) => a.name.localeCompare(b.name));
+  const allNotebooks = filterNotebookFiles(state.files, '');
+  const notebooks = filterNotebookFiles(state.files, search);
   const notebookTree = buildFileLibraryTree(notebooks, 'notebooks');
 
   const confirmDelete = async () => {
@@ -229,19 +255,13 @@ function NotebooksList({ t, onOpenFile }: { t: Theme; onOpenFile: (file: Noteboo
   };
   return (
     <div>
-      <button
-        type="button"
-        onClick={() => dispatch({ type: 'OPEN_NEW_NOTEBOOK_MODAL' })}
-        style={{
-          display: 'flex', alignItems: 'center', gap: 6, width: '100%', boxSizing: 'border-box',
-          padding: '8px 10px', border: 'none', borderBottom: `1px solid ${t.headerBorder}`,
-          background: 'transparent', color: t.accent, cursor: 'pointer', fontFamily: t.font, fontSize: 12, fontWeight: 700,
-        }}
-      >
-        <Plus size={14} /> New notebook
-      </button>
       {notebooks.length === 0 ? (
-        <EmptyNote text="No notebooks yet. Create one to start building." t={t} />
+        <EmptyNote
+          text={allNotebooks.length === 0
+            ? 'No notebooks yet. Use the notebook icon above to create one.'
+            : `No notebooks match “${search.trim()}”.`}
+          t={t}
+        />
       ) : (
         <NotebookLibraryTree
           nodes={notebookTree}

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { emptyWorkingState, reduceWorkingState, type ConversationWorkingState } from './working-state.js';
-import { updateRollingSummary } from './rolling-summary.js';
+import {
+  renderStructuredConversationSummary,
+  updateRollingSummary,
+  updateStructuredConversationSummary,
+} from './rolling-summary.js';
 import type { ConversationTurn } from './session-store.js';
 
 function turn(input: Partial<ConversationTurn> & { question: string }): ConversationTurn {
@@ -118,5 +122,50 @@ describe('updateRollingSummary', () => {
     });
     expect(second).toContain('alpha question');
     expect(second).toContain('beta question');
+  });
+});
+
+describe('trust-aware structured conversation summary', () => {
+  it('keeps source attribution and never upgrades failed or review-required turns', () => {
+    const summary = updateStructuredConversationSummary({
+      compactedTurns: [
+        turn({
+          id: 'turn_certified',
+          question: 'revenue by category',
+          answerSummary: 'Food and Drink revenue split.',
+          runStatus: 'completed',
+          trustLabel: 'certified',
+          sourceCertifiedBlock: 'food_vs_drink_revenue',
+        }),
+        turn({
+          id: 'turn_review',
+          question: 'forecast next quarter',
+          answerSummary: 'Generated forecast draft.',
+          runStatus: 'needs_review',
+          trustLabel: 'review_required',
+        }),
+        turn({
+          id: 'turn_blocked',
+          question: 'show restricted payroll',
+          answerSummary: 'Access was denied.',
+          runStatus: 'blocked',
+          trustLabel: 'blocked',
+        }),
+      ],
+    });
+
+    expect(summary?.entries).toEqual([
+      expect.objectContaining({
+        sourceTurnId: 'turn_certified',
+        state: 'confirmed',
+        evidenceRefs: ['food_vs_drink_revenue'],
+      }),
+      expect.objectContaining({ sourceTurnId: 'turn_review', state: 'provisional' }),
+      expect.objectContaining({ sourceTurnId: 'turn_blocked', state: 'blocked' }),
+    ]);
+    const rendered = renderStructuredConversationSummary(summary);
+    expect(rendered).toContain('[confirmed; turn=turn_certified]');
+    expect(rendered).toContain('[provisional; turn=turn_review]');
+    expect(rendered).toContain('[blocked; turn=turn_blocked]');
   });
 });

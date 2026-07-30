@@ -153,7 +153,6 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
     'business-views': true,
     dashboards: false,
   });
-  const [newBtnHover, setNewBtnHover] = useState(false);
   const fileSignature = state.files.map((file) => file.path).join('|');
   const { byPath: researchByNotebookPath } = useNotebookResearchSummary({ refreshKey: fileSignature });
 
@@ -174,39 +173,22 @@ export function FilesPanel({ onOpenFile }: FilesPanelProps) {
     setExpandedFolders((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const newNotebookButton = (
-    <div style={{ padding: '0 8px 8px' }}>
-      <button
-        onClick={() => dispatch({ type: 'OPEN_NEW_NOTEBOOK_MODAL' })}
-        onMouseEnter={() => setNewBtnHover(true)}
-        onMouseLeave={() => setNewBtnHover(false)}
-        style={{
-          width: '100%',
-          height: 30,
-          background: 'transparent',
-          border: `1px dashed ${newBtnHover ? t.accent : t.cellBorder}`,
-          borderRadius: 6,
-          color: newBtnHover ? t.accent : t.textSecondary,
-          cursor: 'pointer',
-          fontSize: 12,
-          fontFamily: t.font,
-          fontWeight: 500,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 6,
-          transition: 'border-color 0.15s, color 0.15s',
-        }}
-      >
-        <Plus size={15} strokeWidth={2} aria-hidden="true" />
-        New Notebook
-      </button>
-    </div>
-  );
-
   return (
-    <PanelFrame title="Files" bodyPadding={0}>
-      {newNotebookButton}
+    <PanelFrame
+      title="Files"
+      bodyPadding={0}
+      actions={(
+        <button
+          type="button"
+          onClick={() => dispatch({ type: 'OPEN_NEW_NOTEBOOK_MODAL' })}
+          title="Create notebook"
+          aria-label="Create notebook"
+          style={{ width: 28, height: 28, borderRadius: 7, border: `1px solid ${t.accent}55`, background: 'var(--accent-dim)', color: t.accent, display: 'inline-grid', placeItems: 'center', cursor: 'pointer' }}
+        >
+          <BookOpenText size={14} strokeWidth={2} aria-hidden="true" />
+        </button>
+      )}
+    >
 
       {state.filesLoading && (
         <div style={{ padding: '8px 14px', color: t.textMuted, fontSize: 12, fontFamily: t.font }}>

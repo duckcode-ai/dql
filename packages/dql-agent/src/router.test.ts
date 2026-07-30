@@ -35,6 +35,38 @@ describe("createHybridRouter", () => {
     expect(decision.source).toBe("llm");
   });
 
+  it("uses the server conversation envelope when client history is absent", async () => {
+    const complete = vi.fn(async () => JSON.stringify({
+      category: "data_lookup",
+      depth: "quick",
+      needsClarification: false,
+      rationale: "follow-up lookup",
+    }));
+    const router = createHybridRouter({ complete });
+    await router.decide(ask("widgets", {
+      conversationContext: {
+        conversationEnvelope: {
+          version: 1,
+          threadId: "thread_revenue",
+          surface: "ask",
+          recentTurns: [{
+            id: "turn_1",
+            question: "revenue by region",
+            answerSummary: "West led revenue.",
+            trustLabel: "certified",
+            runStatus: "completed",
+          }],
+        },
+      },
+    }));
+
+    expect(complete).toHaveBeenCalledTimes(1);
+    const prompt = complete.mock.calls[0][0].user;
+    expect(prompt).toContain("user: revenue by region");
+    expect(prompt).toContain("assistant: [confirmed] West led revenue.");
+    expect(prompt).toContain("thread: thread_revenue");
+  });
+
   it("maps general_knowledge to a converse action (rendered as a general-knowledge reply)", async () => {
     const complete = vi.fn(async () => JSON.stringify({ category: "general_knowledge", depth: "quick", needsClarification: false, rationale: "world knowledge" }));
     const router = createHybridRouter({ complete });
