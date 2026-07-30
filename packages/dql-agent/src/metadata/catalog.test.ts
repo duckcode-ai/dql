@@ -11,6 +11,7 @@ import {
   defaultMetadataPath,
   ensureMetadataCatalogFresh,
   MetadataCatalog,
+  latestRuntimeSchemaSnapshotForProject,
   openMetadataCatalog,
   planAgentAnswer,
   recordRuntimeSchemaSnapshot,
@@ -2360,6 +2361,59 @@ Use the finance model area.
     expect(pack.evidenceRoles.some((role) => role.role === 'value_match')).toBe(false);
     const relation = pack.allowedSqlContext.relations.find((item) => item.relation === 'NBA_DB.RAW.player_box_scores');
     expect(relation?.columns.find((column) => column.name === 'player_name')?.sampleValues ?? []).toEqual([]);
+  });
+
+  it('round-trips the activated warehouse generation contract without sample values (CTX-005, PERF-002, SEC-003)', () => {
+    recordRuntimeSchemaSnapshot(projectRoot, {
+      version: 1,
+      generationId: 'warehouse_generation_1',
+      scopeFingerprint: 'scope_fingerprint_1',
+      connectionId: 'primary',
+      status: 'ready',
+      source: 'activated warehouse metadata generation',
+      capturedAt: '2026-07-29T12:00:00.000Z',
+      observedTarget: {
+        driver: 'snowflake',
+        accountOrWorkspace: 'ACME-PROD',
+        role: 'ANALYST',
+        warehouse: 'REPORTING_WH',
+        defaultCatalogOrDatabase: 'ANALYTICS_PROD',
+        defaultSchema: 'SALES',
+      },
+      scopes: [{ catalogOrDatabase: 'ANALYTICS_PROD', schemas: ['SALES'] }],
+      queryCount: 1,
+      durationMs: 25,
+      tables: [{
+        relation: 'ANALYTICS_PROD.SALES.ORDERS',
+        catalogOrDatabase: 'ANALYTICS_PROD',
+        schema: 'SALES',
+        name: 'ORDERS',
+        columns: [{ name: 'CUSTOMER_ID', type: 'NUMBER', sampleValues: ['42'] }],
+      }],
+    });
+
+    expect(latestRuntimeSchemaSnapshotForProject(projectRoot)).toEqual(
+      expect.objectContaining({
+        generationId: 'warehouse_generation_1',
+        scopeFingerprint: 'scope_fingerprint_1',
+        connectionId: 'primary',
+        status: 'ready',
+        queryCount: 1,
+        durationMs: 25,
+        scopes: [{ catalogOrDatabase: 'ANALYTICS_PROD', schemas: ['SALES'] }],
+        observedTarget: expect.objectContaining({
+          driver: 'snowflake',
+          defaultCatalogOrDatabase: 'ANALYTICS_PROD',
+        }),
+        tables: [
+          expect.objectContaining({
+            relation: 'ANALYTICS_PROD.SALES.ORDERS',
+            catalogOrDatabase: 'ANALYTICS_PROD',
+            columns: [{ name: 'CUSTOMER_ID', type: 'NUMBER' }],
+          }),
+        ],
+      }),
+    );
   });
 
   it('retrieves a relevant table from a 3,000-table runtime schema without hydrating the full database catalog (CTX-005, PERF-002, E2E-006)', async () => {

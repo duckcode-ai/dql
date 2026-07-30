@@ -1,7 +1,7 @@
 /**
  * Server-side conversation session store: threads + ordered turns, persisted in
- * `.dql/cache/agent-conversations.sqlite` so multi-turn context survives page
- * refreshes and process restarts.
+ * `.dql/local/agent-conversations.sqlite` so multi-turn context survives page
+ * refreshes, process restarts, cache rebuilds, and DQL upgrades.
  *
  * This is the SESSION layer — auto-captured, compactable, per-thread. It is
  * strictly separate from the governed durable memory (`MemoryStore`): raw chat
@@ -10,7 +10,7 @@
  * (better-sqlite3, WAL, FTS5 porter).
  */
 
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import type Database from 'better-sqlite3';
@@ -99,7 +99,46 @@ export interface ConversationTurnSearchOptions {
 }
 
 export function defaultConversationPath(projectRoot: string): string {
+  return join(projectRoot, '.dql', 'local', 'agent-conversations.sqlite');
+}
+
+export function legacyConversationPath(projectRoot: string): string {
   return join(projectRoot, '.dql', 'cache', 'agent-conversations.sqlite');
+}
+
+/**
+ * Move the original conversation database out of rebuildable cache storage.
+ * SQLite backup reads committed WAL pages too, so history is retained even
+ * when the legacy store last closed with a non-empty WAL file.
+ *
+ * Keep the legacy database as a recovery copy until `.dql/cache` is next
+ * cleared. Only the durable `.dql/local` copy is opened after migration.
+ */
+export async function prepareConversationPath(projectRoot: string): Promise<string> {
+  const target = defaultConversationPath(projectRoot);
+  const legacy = legacyConversationPath(projectRoot);
+  if (existsSync(target) || !existsSync(legacy)) return target;
+
+  mkdirSync(dirname(target), { recursive: true });
+  const temporaryTarget = `${target}.migrating-${process.pid}-${Date.now()}`;
+  const Database = loadDatabase();
+  const legacyDb = new Database(legacy, { readonly: true });
+  try {
+    await legacyDb.backup(temporaryTarget);
+    if (existsSync(target)) {
+      rmSync(temporaryTarget, { force: true });
+    } else {
+      renameSync(temporaryTarget, target);
+    }
+  } catch {
+    rmSync(temporaryTarget, { force: true });
+    // History availability must not block Notebook startup. Keep using the
+    // intact legacy store for this process and retry migration next restart.
+    return legacy;
+  } finally {
+    legacyDb.close();
+  }
+  return target;
 }
 
 export class ConversationStore {

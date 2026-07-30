@@ -154,7 +154,7 @@ import {
   buildLocalContextPack,
   applyContextPackCompatibility,
   toAgentRetrievalEvidence,
-  defaultConversationPath,
+  prepareConversationPath,
   defaultMemoryPath,
   ensureDefaultMemoryFiles,
   ensureAgentProjectReady,
@@ -411,6 +411,13 @@ import {
 import type { MetricFlowTargetMetadata } from './semantic-execution/target-binding.js';
 import { buildSemanticTargetBinding } from './semantic-execution/target-binding.js';
 import {
+  normalizeConnectionMetadataScope,
+  syncWarehouseMetadata,
+  warehouseMetadataStatus,
+  type ConnectionMetadataScopeInput,
+  type ConnectionMetadataScopeV1,
+} from './warehouse-metadata.js';
+import {
   NotebookDatasetWorkspace,
   type DatasetSource,
 } from "./notebook-datasets.js";
@@ -458,6 +465,7 @@ export interface ProjectConfig {
       searchSafeColumns?: string[];
     };
   };
+  metadataScopes?: Record<string, ConnectionMetadataScopeInput>;
   /** Optional `dql propose` conventions (classifier + bounded selection). */
   propose?: ProposeConfigInput;
 }
@@ -1938,7 +1946,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       semanticDriver = undefined;
     }
     const semanticTableMapping = semanticLayer && semanticConnection
-      ? await resolveSemanticTableMapping(executor, semanticConnection, semanticLayer)
+      ? await resolveSemanticTableMapping(executor, semanticConnection, semanticLayer, projectRoot)
       : undefined;
     const requestedDomain = normalizeAgentRunDomain(agentRunWorkspaceValue(request, 'domain'));
     const requestedPurpose = agentRunWorkspaceValue(request, 'purpose');
@@ -3672,6 +3680,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     path: defaultAgentRunSqlitePath(projectRoot),
     legacyJsonPath: defaultAgentRunStorePath(projectRoot),
   });
+  const conversationStorePath = await prepareConversationPath(projectRoot);
   // A run may outlive its streaming browser connection, so cancellation is
   // server-owned and keyed by run id rather than relying on fetch abort alone.
   const activeAgentRunControllers = new Map<string, AbortController>();
@@ -3682,7 +3691,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const getConversationStore = (): ConversationStore | null => {
     if (conversationStoreInstance !== undefined) return conversationStoreInstance;
     try {
-      conversationStoreInstance = new ConversationStore(defaultConversationPath(projectRoot));
+      conversationStoreInstance = new ConversationStore(conversationStorePath);
     } catch {
       conversationStoreInstance = null;
     }
@@ -3749,7 +3758,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           };
           const resolved = resolveNotebookBlockReferenceCell(cell, projectRoot);
           const activeConnection = requireActiveConnection();
-          const tableMapping = await resolveSemanticTableMapping(executor, activeConnection, semanticLayer);
+          const tableMapping = await resolveSemanticTableMapping(executor, activeConnection, semanticLayer, projectRoot);
           const semanticCompose = resolved.cell.type === 'dql'
             && semanticLayer
             && /\btype\s*=\s*"semantic"/i.test(resolved.cell.source)
@@ -3850,7 +3859,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const activeConnection = requireActiveConnection();
     const precompiledSemanticQuery = Boolean(extractBlockStudioSql(source));
     const tableMapping = !precompiledSemanticQuery
-      ? await resolveSemanticTableMapping(executor, activeConnection, semanticLayer)
+      ? await resolveSemanticTableMapping(executor, activeConnection, semanticLayer, projectRoot)
       : undefined;
     const semanticCompose = semanticLayer
       ? await composeSemanticBlockSqlForRuntime(source, semanticLayer, {
@@ -4193,6 +4202,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       };
     };
     const catalogContext = await buildAgentSchemaContextFromCatalog(projectRoot, question, preparedContextPack).catch(() => []);
+    const activeScope = connection
+      ? optionalActiveConnectionMetadataScope(
+          projectRoot,
+          projectConfig,
+          connection,
+          projectConfig.defaultConnectionName ?? 'default',
+        )
+      : null;
+    const activeRuntimeSnapshot = latestRuntimeSchemaSnapshotForProject(projectRoot);
+    const hasActivatedMetadataGeneration = Boolean(
+      activeScope
+      && activeRuntimeSnapshot?.scopeFingerprint === activeScope.scopeFingerprint
+      && activeRuntimeSnapshot.status !== 'stale',
+    );
     const valueGrounding = resolveAgentRuntimeValueGrounding(projectConfig);
     if (catalogContext.length > 0) {
       if (!connection || valueGrounding.mode !== 'safe_automatic') return catalogContext;
@@ -4206,9 +4229,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         connection,
         valueGrounding.searchSafeColumns,
       );
-      recordAgentRuntimeSchemaSnapshot(projectRoot, catalogContext, 'catalog runtime schema');
+      if (!hasActivatedMetadataGeneration) {
+        recordAgentRuntimeSchemaSnapshot(projectRoot, catalogContext, 'catalog runtime schema');
+      }
       return enriched;
     }
+
+    // An activated, scope-qualified warehouse generation is the complete warm
+    // metadata authority. A lexical miss is not permission to rescan every
+    // visible schema for each question; the governed planner may clarify or the
+    // user may explicitly refresh the selected scope.
+    if (hasActivatedMetadataGeneration) return [];
 
     if (!connection) return [];
     try {
@@ -5072,17 +5103,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const activeConnection = requireActiveConnection(targetConnection);
     let tableMapping: Record<string, string> | undefined;
     if (semanticLayer) {
-      try {
-        const tablesResult = await executor.executeQuery(
-          `SELECT table_schema, table_name
-           FROM information_schema.tables
-           WHERE UPPER(table_schema) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')`,
-          [], {}, activeConnection,
-        );
-        tableMapping = buildSemanticTableMapping(semanticLayer, tablesResult.rows);
-      } catch {
-        tableMapping = undefined;
-      }
+      tableMapping = await resolveSemanticTableMapping(
+        executor,
+        activeConnection,
+        semanticLayer,
+        projectRoot,
+      );
     }
     const invocation = prepareBlockInvocation({ source, parameters, surface: 'block_studio' });
     if (invocation.errors.length > 0) throw new Error(invocation.errors.join(' '));
@@ -5142,7 +5168,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   ): Promise<TestResultSummary> => {
     const activeConnection = requireActiveConnection(targetConnection);
     const start = Date.now();
-    const tableMapping = await resolveSemanticTableMapping(executor, activeConnection, semanticLayer);
+    const tableMapping = await resolveSemanticTableMapping(executor, activeConnection, semanticLayer, projectRoot);
     // Run tests against the SAME SQL the preview runs: for a semantic block with a
     // pre-compiled query, that's the query (not a recompiled metric), so the test's
     // output columns match the block's declared outputs.
@@ -8140,7 +8166,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               const missingModels = item.semantic.semanticModelRefs.filter((model) => !knownModels.has(model));
               if (missingModels.length) throw new Error(`Semantic definition changed; missing model(s): ${missingModels.join(', ')}`);
               const targetConnection = requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection);
-              const tableMapping = await resolveSemanticTableMapping(executor, targetConnection, semanticLayer);
+              const tableMapping = await resolveSemanticTableMapping(executor, targetConnection, semanticLayer, projectRoot);
               const activeFilters = Object.entries(dashboardVariables)
                 .filter(([field, value]) => item.semantic!.dimensions?.includes(field) && value !== undefined && value !== null && value !== '')
                 .map(([dimension, value]) => ({ dimension, operator: 'equals', values: Array.isArray(value) ? value.map(String) : [String(value)] }));
@@ -8208,7 +8234,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             const absBlockPath = join(projectRoot, block.filePath);
             const source = readFileSync(absBlockPath, 'utf-8');
             const targetConnection = isConnectionConfig(body.connection) ? body.connection : connection;
-            const tableMapping = await resolveSemanticTableMapping(executor, targetConnection, semanticLayer);
+            const tableMapping = await resolveSemanticTableMapping(executor, targetConnection, semanticLayer, projectRoot);
             const boundParameters = dashboardTileParameterValues({
               item,
               dashboardValues: dashboardVariables,
@@ -9272,13 +9298,51 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const schemaLimit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 200));
         const schemaOffset = Math.max(0, Number(url.searchParams.get('offset')) || 0);
         const schemaSearch = (url.searchParams.get('q') ?? '').trim();
-        const { tables, columnsByPath } = connection
-          ? await introspectSchema(executor, connection, {
-              limit: schemaLimit,
-              offset: schemaOffset,
-              search: schemaSearch,
-            })
-          : { tables: [], columnsByPath: new Map<string, Array<{ name: string; type: string }>>() };
+        const activeScope = connection
+          ? optionalActiveConnectionMetadataScope(
+              projectRoot,
+              projectConfig,
+              connection,
+              projectConfig.defaultConnectionName ?? 'default',
+            )
+          : null;
+        const cachedSnapshot = latestRuntimeSchemaSnapshotForProject(projectRoot);
+        const cachedScopeMatches = Boolean(
+          cachedSnapshot
+          && activeScope
+          && cachedSnapshot.scopeFingerprint === activeScope.scopeFingerprint,
+        );
+        const cachedTables = cachedScopeMatches
+          ? cachedSnapshot!.tables
+              .filter((table) => {
+                if (!schemaSearch) return true;
+                const needle = schemaSearch.toLowerCase();
+                return table.relation.toLowerCase().includes(needle)
+                  || table.name?.toLowerCase().includes(needle)
+                  || table.schema?.toLowerCase().includes(needle);
+              })
+              .slice(schemaOffset, schemaOffset + schemaLimit)
+          : [];
+        const { tables, columnsByPath } = cachedScopeMatches
+          ? {
+              tables: cachedTables.map((table) => ({
+                schema: table.schema ?? '',
+                name: table.name ?? table.relation.split('.').at(-1) ?? table.relation,
+                path: table.relation,
+                type: 'TABLE',
+              })),
+              columnsByPath: new Map(cachedTables.map((table) => [
+                table.relation,
+                table.columns.map((column) => ({ name: column.name, type: column.type ?? '' })),
+              ])),
+            }
+          : connection
+            ? await introspectSchema(executor, connection, {
+                limit: schemaLimit,
+                offset: schemaOffset,
+                search: schemaSearch,
+              })
+            : { tables: [], columnsByPath: new Map<string, Array<{ name: string; type: string }>>() };
         const dbTables = tables.map((t) => ({
           name: t.path,
           path: t.path,
@@ -9792,7 +9856,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         const activeConnection = requireActiveConnection();
-        const tableMapping = await resolveSemanticTableMapping(executor, activeConnection, semanticLayer);
+        const tableMapping = await resolveSemanticTableMapping(executor, activeConnection, semanticLayer, projectRoot);
         const semanticCompose = semanticLayer
           ? await composeSemanticBlockSqlForRuntime(source, semanticLayer, {
               driver: activeConnection.driver,
@@ -10739,7 +10803,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           driver = undefined;
         }
         const tableMapping = composeConnection
-          ? await resolveSemanticTableMapping(executor, composeConnection, semanticLayer)
+          ? await resolveSemanticTableMapping(executor, composeConnection, semanticLayer, projectRoot)
           : undefined;
         const composed = composeSemanticQueryForQuestion({
           semanticLayer,
@@ -10961,6 +11025,122 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    const metadataScopePreviewMatch = path.match(/^\/api\/connections\/([^/]+)\/metadata-scope\/preview$/);
+    const metadataScopeMatch = path.match(/^\/api\/connections\/([^/]+)\/metadata-scope$/);
+    const metadataSyncMatch = path.match(/^\/api\/connections\/([^/]+)\/metadata-sync$/);
+
+    if (metadataScopePreviewMatch && req.method === 'POST') {
+      try {
+        const connectionId = decodeURIComponent(metadataScopePreviewMatch[1]!);
+        const cfg = loadProjectConfig(projectRoot);
+        const selectedConnection = projectConnectionById(projectRoot, cfg, connectionId);
+        if (!selectedConnection) throw new Error(`Unknown connection "${connectionId}".`);
+        const body = await readJSON(req).catch(() => ({})) as ConnectionMetadataScopeInput;
+        const scope = normalizeConnectionMetadataScope(
+          connectionId,
+          selectedConnection,
+          body,
+          metadataScopeDbtDefaults(projectRoot, cfg),
+        );
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          scope,
+          status: warehouseMetadataStatus(projectRoot, scope.scopeFingerprint),
+        }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (metadataScopeMatch && req.method === 'GET') {
+      try {
+        const connectionId = decodeURIComponent(metadataScopeMatch[1]!);
+        const cfg = loadProjectConfig(projectRoot);
+        const selectedConnection = projectConnectionById(projectRoot, cfg, connectionId);
+        if (!selectedConnection) throw new Error(`Unknown connection "${connectionId}".`);
+        const scope = normalizeConnectionMetadataScope(
+          connectionId,
+          selectedConnection,
+          configuredMetadataScopeInput(cfg, connectionId),
+          metadataScopeDbtDefaults(projectRoot, cfg),
+        );
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          scope,
+          status: warehouseMetadataStatus(projectRoot, scope.scopeFingerprint),
+        }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (metadataScopeMatch && req.method === 'PUT') {
+      try {
+        const connectionId = decodeURIComponent(metadataScopeMatch[1]!);
+        const cfg = loadProjectConfig(projectRoot);
+        const selectedConnection = projectConnectionById(projectRoot, cfg, connectionId);
+        if (!selectedConnection) throw new Error(`Unknown connection "${connectionId}".`);
+        const body = await readJSON(req) as ConnectionMetadataScopeInput;
+        const scope = normalizeConnectionMetadataScope(
+          connectionId,
+          selectedConnection,
+          body,
+          metadataScopeDbtDefaults(projectRoot, cfg),
+        );
+        const synced = await syncWarehouseMetadata({
+          projectRoot,
+          executor,
+          connection: selectedConnection,
+          scope,
+        });
+        persistConnectionMetadataScope(projectRoot, connectionId, scope);
+        projectConfig = loadProjectConfig(projectRoot);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          scope: synced.scope,
+          status: warehouseMetadataStatus(projectRoot, synced.scope.scopeFingerprint),
+        }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (metadataSyncMatch && req.method === 'POST') {
+      try {
+        const connectionId = decodeURIComponent(metadataSyncMatch[1]!);
+        const cfg = loadProjectConfig(projectRoot);
+        const selectedConnection = projectConnectionById(projectRoot, cfg, connectionId);
+        if (!selectedConnection) throw new Error(`Unknown connection "${connectionId}".`);
+        const scope = normalizeConnectionMetadataScope(
+          connectionId,
+          selectedConnection,
+          configuredMetadataScopeInput(cfg, connectionId),
+          metadataScopeDbtDefaults(projectRoot, cfg),
+        );
+        const synced = await syncWarehouseMetadata({
+          projectRoot,
+          executor,
+          connection: selectedConnection,
+          scope,
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          scope: synced.scope,
+          status: warehouseMetadataStatus(projectRoot, synced.scope.scopeFingerprint),
+        }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
     if (req.method === 'GET' && path === '/api/connections') {
       const cfg = loadProjectConfig(projectRoot);
       const connections = getProjectConnectionsForApi(cfg);
@@ -10979,8 +11159,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ...(Object.keys(connections).length === 0 && activeDbtProfile ? { profileId: activeDbtProfile.id } : {}),
       } : null;
       const connectorStatus = getConnectorInstallStatuses(projectRoot);
+      const metadataScope = connection
+        ? optionalActiveConnectionMetadataScope(projectRoot, cfg, connection, defaultKey)
+        : null;
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(serializeJSON({ default: defaultKey, connections, dbtProfiles, activeConnection, connectorStatus }));
+      res.end(serializeJSON({
+        default: defaultKey,
+        connections,
+        dbtProfiles,
+        activeConnection,
+        connectorStatus,
+        metadataScope,
+        metadataStatus: metadataScope
+          ? warehouseMetadataStatus(projectRoot, metadataScope.scopeFingerprint)
+          : warehouseMetadataStatus(projectRoot),
+      }));
       return;
     }
 
@@ -12598,7 +12791,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           body as Record<string, unknown>,
         );
         const tableMapping = hasStandaloneSemanticRef(body.sql)
-          ? await resolveSemanticTableMapping(executor, executionConnection, semanticLayer)
+          ? await resolveSemanticTableMapping(executor, executionConnection, semanticLayer, projectRoot)
           : undefined;
         const semantic = prepareSemanticSql(body.sql, semanticLayer, { tableMapping });
         if (semantic.unresolvedRefs.length > 0) {
@@ -12751,7 +12944,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           metricFlow,
           compile: async () => {
             const tableMapping = plannedAdapter === 'native'
-              ? await resolveSemanticTableMapping(executor, targetConnection, semanticLayer)
+              ? await resolveSemanticTableMapping(executor, targetConnection, semanticLayer, projectRoot)
               : undefined;
             return composeRuntimeSemanticQuery({
               metrics,
@@ -12863,7 +13056,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           metricFlow,
           compile: async () => {
             const tableMapping = plannedAdapter === 'native'
-              ? await resolveSemanticTableMapping(executor, targetConnection, semanticLayer)
+              ? await resolveSemanticTableMapping(executor, targetConnection, semanticLayer, projectRoot)
               : undefined;
             return composeRuntimeSemanticQuery({
               metrics,
@@ -12984,7 +13177,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         const targetConnection = await resolveExecutionConnection(body as Record<string, unknown>);
-        const tableMapping = await resolveSemanticTableMapping(executor, targetConnection, semanticLayer);
+        const tableMapping = await resolveSemanticTableMapping(executor, targetConnection, semanticLayer, projectRoot);
         const composed = await composeRuntimeSemanticQuery({
           metrics,
           dimensions,
@@ -13514,7 +13707,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           body as Record<string, unknown>,
         );
         const tableMapping = needsSemanticTableMapping(executableCell)
-          ? await resolveSemanticTableMapping(executor, cellConnection, semanticLayer)
+          ? await resolveSemanticTableMapping(executor, cellConnection, semanticLayer, projectRoot)
           : undefined;
         const semanticCompose = executableCell.type === 'dql'
           && semanticLayer
@@ -16027,6 +16220,97 @@ function getProjectConnectionsForApi(config: ProjectConfig | Record<string, unkn
   return connections;
 }
 
+function metadataScopeDbtDefaults(
+  projectRoot: string,
+  config: ProjectConfig,
+): { relations: string[]; dbtFingerprint?: string } {
+  const manifestPath = resolveDbtManifestPath(projectRoot, config);
+  if (!manifestPath || !existsSync(manifestPath)) return { relations: [] };
+  try {
+    const source = readFileSync(manifestPath, 'utf-8');
+    const lookup = buildDbtRelationLookup(JSON.parse(source));
+    return {
+      relations: Array.from(new Set([...lookup.models.values(), ...lookup.sources.values()])).sort(),
+      dbtFingerprint: createHash('sha256').update(source).digest('hex'),
+    };
+  } catch {
+    return { relations: [] };
+  }
+}
+
+function configuredMetadataScopeInput(
+  config: ProjectConfig,
+  connectionId: string,
+): ConnectionMetadataScopeInput | undefined {
+  const value = config.metadataScopes?.[connectionId];
+  return value && typeof value === 'object' ? value : undefined;
+}
+
+function activeConnectionMetadataScope(
+  projectRoot: string,
+  config: ProjectConfig,
+  activeConnection: ConnectionConfig,
+  connectionId: string = config.defaultConnectionName ?? 'default',
+) {
+  return normalizeConnectionMetadataScope(
+    connectionId,
+    activeConnection,
+    configuredMetadataScopeInput(config, connectionId),
+    metadataScopeDbtDefaults(projectRoot, config),
+  );
+}
+
+function optionalActiveConnectionMetadataScope(
+  projectRoot: string,
+  config: ProjectConfig,
+  activeConnection: ConnectionConfig,
+  connectionId: string,
+) {
+  try {
+    return activeConnectionMetadataScope(projectRoot, config, activeConnection, connectionId);
+  } catch {
+    return null;
+  }
+}
+
+function projectConnectionById(
+  projectRoot: string,
+  config: ProjectConfig,
+  connectionId: string,
+): ConnectionConfig | null {
+  const stored = getStoredConnections(config as unknown as Record<string, unknown>);
+  const normalized = normalizeStoredConnection(stored[connectionId]);
+  if (normalized) return normalizeProjectConnection(normalized, projectRoot);
+  if (connectionId === (config.defaultConnectionName ?? 'default') && config.defaultConnection) {
+    return normalizeProjectConnection(config.defaultConnection, projectRoot);
+  }
+  return null;
+}
+
+function persistConnectionMetadataScope(
+  projectRoot: string,
+  connectionId: string,
+  scope: ConnectionMetadataScopeV1,
+): void {
+  const configPath = join(projectRoot, 'dql.config.json');
+  const raw = existsSync(configPath)
+    ? JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>
+    : {};
+  const existing = raw.metadataScopes && typeof raw.metadataScopes === 'object' && !Array.isArray(raw.metadataScopes)
+    ? raw.metadataScopes as Record<string, unknown>
+    : {};
+  raw.metadataScopes = {
+    ...existing,
+    [connectionId]: {
+      mode: scope.mode,
+      scopes: scope.selectedScopes,
+      relations: scope.relations.length > 0 ? scope.relations : undefined,
+      dbtFingerprint: scope.dbtFingerprint,
+    },
+  };
+  writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
+}
+
 const CONNECTOR_INSTALLS: Record<string, Omit<ConnectorInstallStatus, 'installed' | 'installPath' | 'installCommand'>> = {
   duckdb: {
     driver: 'duckdb',
@@ -18044,8 +18328,23 @@ export async function resolveSemanticTableMapping(
   executor: QueryExecutor,
   connection: ConnectionConfig,
   semanticLayer?: SemanticLayer,
+  projectRoot?: string,
 ): Promise<Record<string, string> | undefined> {
   if (!semanticLayer) return undefined;
+  if (projectRoot) {
+    const snapshot = latestRuntimeSchemaSnapshotForProject(projectRoot);
+    if (snapshot?.scopeFingerprint && snapshot.tables.length) {
+      return buildSemanticTableMapping(
+        semanticLayer,
+        snapshot.tables.map((table) => ({
+          table_catalog: table.catalogOrDatabase,
+          table_schema: table.schema,
+          table_name: table.name ?? table.relation.split('.').at(-1),
+          table_relation: table.relation,
+        })),
+      );
+    }
+  }
   try {
     const tablesResult = await executor.executeQuery(
       `SELECT table_schema, table_name
@@ -18069,9 +18368,10 @@ export function buildSemanticTableMapping(
   for (const row of rows) {
     const schema = String(row['table_schema'] ?? '');
     const name = String(row['table_name'] ?? '');
+    const relation = typeof row['table_relation'] === 'string' ? row['table_relation'] : undefined;
     if (!name) continue;
     dbTableNames.add(name);
-    schemaQualified.set(name, schema ? `${schema}.${name}` : name);
+    schemaQualified.set(name, relation ?? (schema ? `${schema}.${name}` : name));
   }
 
   const tableMapping: Record<string, string> = {};

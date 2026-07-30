@@ -3,11 +3,19 @@ import { CheckCircle2, Database, GitBranch, Settings2, Sparkles } from 'lucide-r
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import type { Theme } from '../../themes/notebook-theme';
-import { api, type DbtOnboardingJob, type DbtProfileConnectionCandidate, type ProviderSettings } from '../../api/client';
+import {
+  api,
+  type ConnectionMetadataScopeV1,
+  type DbtOnboardingJob,
+  type DbtProfileConnectionCandidate,
+  type ProviderSettings,
+  type WarehouseMetadataStatus,
+} from '../../api/client';
 import { PanelFrame } from '@duckcodeailabs/dql-ui';
 import { DriverLogo } from './DriverLogo';
 import { ConnectionRuntimeSettings } from '../settings/SettingsPage';
 import { DbtProjectEditor } from '../settings/DbtProjectEditor';
+import { formatMetadataScopeEditor, parseMetadataScopeEditor } from './connection-metadata-scope';
 
 interface ConnectorFieldSchema {
   key: string;
@@ -31,6 +39,8 @@ interface ConnectionInfo {
   activeConnection?: { source: 'dql_config' | 'dbt_profile' | 'runtime'; driver: string; profileId?: string } | null;
   dbtProfiles?: DbtProfileConnectionCandidate[];
   connectorStatus?: ConnectorInstallStatus[];
+  metadataScope?: ConnectionMetadataScopeV1 | null;
+  metadataStatus?: WarehouseMetadataStatus;
 }
 
 interface ConnectorInstallStatus {
@@ -344,6 +354,10 @@ export function ConnectionPanel({
   const [providerReadiness, setProviderReadiness] = useState<ProviderSettings[]>([]);
   const [dbtConfigured, setDbtConfigured] = useState(false);
   const [dbtPreparation, setDbtPreparation] = useState<DbtOnboardingJob | null>(null);
+  const [metadataMode, setMetadataMode] = useState<ConnectionMetadataScopeV1['mode']>('dbt_relations');
+  const [metadataScopeText, setMetadataScopeText] = useState('');
+  const [metadataSyncing, setMetadataSyncing] = useState(false);
+  const [metadataMessage, setMetadataMessage] = useState<string | null>(null);
 
   // Edit form state (inline editor for the "manage all connections" list)
   const [editName, setEditName] = useState('');
@@ -360,6 +374,10 @@ export function ConnectionPanel({
   useEffect(() => {
     api.getConnections().then((connInfo) => {
       setInfo(connInfo);
+      if (connInfo.metadataScope) {
+        setMetadataMode(connInfo.metadataScope.mode);
+        setMetadataScopeText(formatMetadataScopeEditor(connInfo.metadataScope.scopes));
+      }
       // Auto-test only a real configured connection. The starter in-memory
       // DuckDB placeholder is intentionally reported as Missing everywhere.
       if (Object.values(connInfo.connections).some((connection) => !isPlaceholderLocalConnection(connection))) {
@@ -440,6 +458,64 @@ export function ConnectionPanel({
     setTestResult(result);
     if (result.ok) onConfigured?.(result.message);
     setTesting(false);
+  };
+
+  const applyMetadataResponse = (response: {
+    scope: ConnectionMetadataScopeV1;
+    status: WarehouseMetadataStatus;
+  }) => {
+    setInfo((current) => current ? {
+      ...current,
+      metadataScope: response.scope,
+      metadataStatus: response.status,
+    } : current);
+    setMetadataMode(response.scope.mode);
+    setMetadataScopeText(formatMetadataScopeEditor(response.scope.scopes));
+  };
+
+  const handleMetadataApply = async () => {
+    if (!info?.default) return;
+    const scopes = parseMetadataScopeEditor(metadataScopeText);
+    if (metadataMode === 'selected_scopes' && scopes.length === 0) {
+      setMetadataMessage('Add at least one line such as ANALYTICS_PROD: SALES, FINANCE.');
+      return;
+    }
+    setMetadataSyncing(true);
+    setMetadataMessage('Synchronizing selected metadata into local SQLite…');
+    try {
+      const response = await api.applyConnectionMetadataScope(info.default, {
+        mode: metadataMode,
+        ...(metadataMode === 'dbt_relations' ? {} : { scopes }),
+      });
+      applyMetadataResponse(response);
+      setMetadataMessage(
+        `Ready · ${response.status.relationCount.toLocaleString()} relations · `
+        + `${response.status.columnCount.toLocaleString()} columns · `
+        + `${response.status.queryCount ?? 0} metadata queries`,
+      );
+    } catch (error) {
+      setMetadataMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMetadataSyncing(false);
+    }
+  };
+
+  const handleMetadataRefresh = async () => {
+    if (!info?.default) return;
+    setMetadataSyncing(true);
+    setMetadataMessage('Refreshing the applied metadata scope…');
+    try {
+      const response = await api.refreshConnectionMetadata(info.default);
+      applyMetadataResponse(response);
+      setMetadataMessage(
+        `Refreshed · ${response.status.relationCount.toLocaleString()} relations · `
+        + `${response.status.columnCount.toLocaleString()} columns`,
+      );
+    } catch (error) {
+      setMetadataMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMetadataSyncing(false);
+    }
   };
 
   const startEdit = (key: string, cfg: any) => {
@@ -530,6 +606,10 @@ export function ConnectionPanel({
       // Refresh
       const refreshed = await api.getConnections();
       setInfo(refreshed);
+      if (refreshed.metadataScope) {
+        setMetadataMode(refreshed.metadataScope.mode);
+        setMetadataScopeText(formatMetadataScopeEditor(refreshed.metadataScope.scopes));
+      }
       setSaveMsg('Saved. Testing connection...');
       setEditing(null);
       setAddingNew(false);
@@ -1143,6 +1223,89 @@ export function ConnectionPanel({
   );
 
   const connected = Boolean(info && Object.values(info.connections ?? {}).some((connection) => !isPlaceholderLocalConnection(connection)));
+  const metadataStatus = info?.metadataStatus;
+  const metadataScopeEditor = connected ? (
+    <div style={{ maxWidth: 640, border: `1px solid ${t.cellBorder}`, borderRadius: 12, background: t.cellBg, padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div>
+        <div style={{ fontSize: 14, fontWeight: 700, color: t.textPrimary, fontFamily: t.font }}>Metadata scope</div>
+        <div style={{ fontSize: 11.5, color: t.textMuted, marginTop: 3, lineHeight: 1.5, fontFamily: t.font }}>
+          DQL synchronizes this authorized scope into local SQLite. Warm Ask, Notebook, and Block Studio searches use that index instead of scanning the warehouse.
+        </div>
+      </div>
+      <label style={{ display: 'flex', flexDirection: 'column', gap: 5, fontFamily: t.font }}>
+        <span style={{ fontSize: 11.5, fontWeight: 650, color: t.textSecondary }}>Index mode</span>
+        <select
+          value={metadataMode}
+          onChange={(event) => setMetadataMode(event.target.value as ConnectionMetadataScopeV1['mode'])}
+          disabled={metadataSyncing}
+          style={{ height: 34, borderRadius: 7, border: `1px solid ${t.cellBorder}`, background: t.cellBg, color: t.textPrimary, padding: '0 10px', fontFamily: t.font }}
+        >
+          <option value="dbt_relations">Use exact dbt project relations (recommended)</option>
+          <option value="dbt_plus_selected">dbt relations plus selected schemas</option>
+          <option value="selected_scopes">Selected databases/catalogs and schemas</option>
+        </select>
+      </label>
+      {metadataMode !== 'dbt_relations' ? (
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 5, fontFamily: t.font }}>
+          <span style={{ fontSize: 11.5, fontWeight: 650, color: t.textSecondary }}>Databases/catalogs and schemas</span>
+          <textarea
+            value={metadataScopeText}
+            onChange={(event) => setMetadataScopeText(event.target.value)}
+            disabled={metadataSyncing}
+            placeholder={'ANALYTICS_PROD: SALES, FINANCE\nREFERENCE_DATA: SHARED'}
+            rows={4}
+            style={{ resize: 'vertical', borderRadius: 7, border: `1px solid ${t.cellBorder}`, background: t.cellBg, color: t.textPrimary, padding: '8px 10px', fontFamily: t.fontMono, fontSize: 11.5, lineHeight: 1.5 }}
+          />
+          <span style={{ fontSize: 10.5, color: t.textMuted }}>One database or catalog per line. DQL never discovers every database automatically.</span>
+        </label>
+      ) : null}
+      {metadataStatus ? (
+        <div style={{ fontSize: 11.5, color: metadataStatus.state === 'ready' ? 'var(--status-success)' : 'var(--status-warning)', fontFamily: t.font }}>
+          {metadataStatus.state === 'ready' ? 'Ready' : metadataStatus.state === 'stale' ? 'Refresh required' : 'Not synchronized'}
+          {' · '}{metadataStatus.relationCount.toLocaleString()} relations
+          {' · '}{metadataStatus.columnCount.toLocaleString()} columns
+          {metadataStatus.capturedAt ? ` · ${new Date(metadataStatus.capturedAt).toLocaleString()}` : ''}
+        </div>
+      ) : null}
+      {metadataStatus?.observedTarget ? (
+        <div style={{ fontSize: 10.5, color: t.textMuted, fontFamily: t.fontMono }}>
+          {[
+            metadataStatus.observedTarget.accountOrWorkspace,
+            metadataStatus.observedTarget.role,
+            metadataStatus.observedTarget.warehouse,
+            metadataStatus.observedTarget.defaultCatalogOrDatabase,
+            metadataStatus.observedTarget.defaultSchema,
+          ].filter(Boolean).join(' · ')}
+        </div>
+      ) : null}
+      {metadataMessage ? (
+        <div style={{ fontSize: 11.5, color: metadataMessage.toLowerCase().includes('failed') || metadataMessage.toLowerCase().includes('error') ? 'var(--status-error)' : t.textSecondary, fontFamily: t.font }}>
+          {metadataMessage}
+        </div>
+      ) : null}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button
+          type="button"
+          onClick={() => void handleMetadataApply()}
+          disabled={metadataSyncing || !testResult?.ok}
+          style={{ height: 32, padding: '0 13px', borderRadius: 8, border: 'none', background: t.accent, color: 'var(--accent-fg)', fontSize: 12, fontWeight: 700, cursor: metadataSyncing || !testResult?.ok ? 'not-allowed' : 'pointer', opacity: metadataSyncing || !testResult?.ok ? 0.55 : 1, fontFamily: t.font }}
+        >
+          {metadataSyncing ? 'Synchronizing…' : 'Apply and synchronize'}
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleMetadataRefresh()}
+          disabled={metadataSyncing || metadataStatus?.state === 'missing'}
+          style={{ height: 32, padding: '0 13px', borderRadius: 8, border: `1px solid ${t.cellBorder}`, background: t.cellBg, color: t.textSecondary, fontSize: 12, fontWeight: 650, cursor: metadataSyncing ? 'not-allowed' : 'pointer', fontFamily: t.font }}
+        >
+          Refresh metadata
+        </button>
+      </div>
+      {!testResult?.ok ? (
+        <div style={{ fontSize: 10.5, color: t.textMuted, fontFamily: t.font }}>Test the active connection before applying its metadata scope.</div>
+      ) : null}
+    </div>
+  ) : null;
   const databaseEditor = (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <div>
@@ -1185,6 +1348,7 @@ export function ConnectionPanel({
         installing={installingDriver === primaryDriver}
         onInstall={() => void handleInstallConnector(primaryDriver)}
       />
+      {metadataScopeEditor}
     </div>
   );
 

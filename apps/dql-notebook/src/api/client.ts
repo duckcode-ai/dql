@@ -2654,6 +2654,49 @@ export interface ConnectionsResponse {
     installCommand?: string;
   }>;
   dbtProfiles?: DbtProfileConnectionCandidate[];
+  metadataScope?: ConnectionMetadataScopeV1 | null;
+  metadataStatus?: WarehouseMetadataStatus;
+}
+
+export interface ConnectionMetadataScopeV1 {
+  version: 1;
+  connectionId: string;
+  driver: string;
+  mode: 'dbt_relations' | 'selected_scopes' | 'dbt_plus_selected';
+  scopes: Array<{ catalogOrDatabase: string; schemas: string[] }>;
+  selectedScopes?: Array<{ catalogOrDatabase: string; schemas: string[] }>;
+  relations: string[];
+  dbtFingerprint?: string;
+  scopeFingerprint: string;
+}
+
+export interface WarehouseMetadataStatus {
+  state: 'missing' | 'ready' | 'stale';
+  scopeFingerprint?: string;
+  generationId?: string;
+  capturedAt?: string;
+  relationCount: number;
+  columnCount: number;
+  queryCount?: number;
+  durationMs?: number;
+  truncated?: boolean;
+  source?: string;
+  scopes: Array<{ catalogOrDatabase: string; schemas: string[] }>;
+  observedTarget?: {
+    driver: string;
+    accountOrWorkspace?: string;
+    role?: string;
+    warehouse?: string;
+    defaultCatalogOrDatabase?: string;
+    defaultSchema?: string;
+  };
+}
+
+export interface ConnectionMetadataScopeInput {
+  mode?: ConnectionMetadataScopeV1['mode'];
+  scopes?: Array<{ catalogOrDatabase: string; schemas: string[] }>;
+  relations?: string[];
+  dbtFingerprint?: string;
 }
 
 export const api = {
@@ -4220,6 +4263,40 @@ export const api = {
     return request<{ ok: boolean }>('/api/connections', {
       method: 'PUT',
       body: JSON.stringify({ connections, defaultConnectionName }),
+    });
+  },
+
+  async previewConnectionMetadataScope(
+    connectionId: string,
+    input: ConnectionMetadataScopeInput = {},
+  ): Promise<{ scope: ConnectionMetadataScopeV1; status: WarehouseMetadataStatus }> {
+    return request(`/api/connections/${encodeURIComponent(connectionId)}/metadata-scope/preview`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  async getConnectionMetadataScope(
+    connectionId: string,
+  ): Promise<{ scope: ConnectionMetadataScopeV1; status: WarehouseMetadataStatus }> {
+    return request(`/api/connections/${encodeURIComponent(connectionId)}/metadata-scope`);
+  },
+
+  async applyConnectionMetadataScope(
+    connectionId: string,
+    input: ConnectionMetadataScopeInput,
+  ): Promise<{ scope: ConnectionMetadataScopeV1; status: WarehouseMetadataStatus }> {
+    return request(`/api/connections/${encodeURIComponent(connectionId)}/metadata-scope`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    });
+  },
+
+  async refreshConnectionMetadata(
+    connectionId: string,
+  ): Promise<{ scope: ConnectionMetadataScopeV1; status: WarehouseMetadataStatus }> {
+    return request(`/api/connections/${encodeURIComponent(connectionId)}/metadata-sync`, {
+      method: 'POST',
     });
   },
 

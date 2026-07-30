@@ -115,7 +115,7 @@ async function runBlockTests(
       semanticLayer = semanticResult.layer;
     }
     await registerDataViews(executor, connection, projectRoot, projectConfig);
-    const tableMapping = await resolveSemanticTableMapping(executor, connection, semanticLayer);
+    const tableMapping = await resolveSemanticTableMapping(executor, connection, semanticLayer, projectRoot);
     const plan = buildExecutionPlan(cell, { semanticLayer, driver: connection.driver, tableMapping });
     if (!plan) {
       return {

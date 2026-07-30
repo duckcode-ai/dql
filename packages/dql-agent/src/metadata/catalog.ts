@@ -377,6 +377,7 @@ export interface RuntimeSchemaColumn {
 
 export interface RuntimeSchemaTable {
   relation: string;
+  catalogOrDatabase?: string;
   schema?: string;
   name?: string;
   description?: string;
@@ -384,9 +385,33 @@ export interface RuntimeSchemaTable {
   source?: string;
 }
 
+export interface RuntimeSchemaScope {
+  catalogOrDatabase: string;
+  schemas: string[];
+}
+
+export interface RuntimeSchemaObservedTarget {
+  driver: string;
+  accountOrWorkspace?: string;
+  role?: string;
+  warehouse?: string;
+  defaultCatalogOrDatabase?: string;
+  defaultSchema?: string;
+}
+
 export interface RuntimeSchemaSnapshot {
+  version?: 1;
+  generationId?: string;
+  scopeFingerprint?: string;
+  connectionId?: string;
+  status?: 'ready' | 'partial' | 'stale';
   source?: string;
   capturedAt?: string;
+  observedTarget?: RuntimeSchemaObservedTarget;
+  scopes?: RuntimeSchemaScope[];
+  queryCount?: number;
+  durationMs?: number;
+  truncated?: boolean;
   tables: RuntimeSchemaTable[];
 }
 
@@ -3299,11 +3324,21 @@ export class MetadataCatalog {
     const capturedAt = snapshot.capturedAt ?? new Date().toISOString();
     const normalizedTables = normalizeRuntimeSchemaTables(snapshot.tables).slice(0, 10_000);
     const cleanSnapshot: RuntimeSchemaSnapshot = {
+      version: 1,
+      generationId: snapshot.generationId,
+      scopeFingerprint: snapshot.scopeFingerprint,
+      connectionId: snapshot.connectionId,
+      status: snapshot.status ?? 'ready',
       source: snapshot.source,
       capturedAt,
+      observedTarget: normalizeRuntimeSchemaObservedTarget(snapshot.observedTarget),
+      scopes: normalizeRuntimeSchemaScopes(snapshot.scopes),
+      queryCount: boundedRuntimeSchemaNumber(snapshot.queryCount),
+      durationMs: boundedRuntimeSchemaNumber(snapshot.durationMs),
+      truncated: snapshot.truncated === true || undefined,
       tables: normalizedTables,
     };
-    const id = `schema_${Date.parse(capturedAt) || Date.now()}`;
+    const id = snapshot.generationId?.trim() || `schema_${Date.parse(capturedAt) || Date.now()}`;
     const insertSnapshot = this.db.prepare(`
       INSERT OR REPLACE INTO runtime_schema_snapshots (
         id, source, payload_json, captured_at
@@ -3370,6 +3405,10 @@ export class MetadataCatalog {
       setState.run('runtime_value_index_captured_at', capturedAt);
       setState.run('runtime_schema_table_count', String(normalizedTables.length));
       setState.run('runtime_schema_index_captured_at', capturedAt);
+      setState.run('runtime_schema_generation_id', id);
+      if (cleanSnapshot.scopeFingerprint) {
+        setState.run('runtime_schema_scope_fingerprint', cleanSnapshot.scopeFingerprint);
+      }
     });
     txn();
     return cleanSnapshot;
@@ -6919,6 +6958,7 @@ function runtimeSchemaTableObject(
     sourceSystem: snapshotSource ?? table.source ?? 'runtime schema snapshot',
     payload: compactObject({
       relation,
+      catalogOrDatabase: table.catalogOrDatabase,
       schema: table.schema,
       columnCompleteness: 'complete',
       columns: table.columns,
@@ -7276,6 +7316,7 @@ function normalizeRuntimeSchemaTables(tables: RuntimeSchemaTable[]): RuntimeSche
     const current = byRelation.get(key);
     const normalized: RuntimeSchemaTable = {
       relation,
+      catalogOrDatabase: table.catalogOrDatabase,
       schema: table.schema,
       name: table.name ?? relation.split('.').at(-1) ?? relation,
       description: table.description,
@@ -7305,10 +7346,55 @@ function safeRuntimeSchemaSnapshot(value: unknown): RuntimeSchemaSnapshot | null
   const record = value as Record<string, unknown>;
   if (!Array.isArray(record.tables)) return null;
   return {
+    version: 1,
+    generationId: stringValue(record.generationId),
+    scopeFingerprint: stringValue(record.scopeFingerprint),
+    connectionId: stringValue(record.connectionId),
+    status: record.status === 'partial' || record.status === 'stale' ? record.status : 'ready',
     source: stringValue(record.source),
     capturedAt: stringValue(record.capturedAt),
+    observedTarget: normalizeRuntimeSchemaObservedTarget(record.observedTarget),
+    scopes: normalizeRuntimeSchemaScopes(record.scopes),
+    queryCount: boundedRuntimeSchemaNumber(record.queryCount),
+    durationMs: boundedRuntimeSchemaNumber(record.durationMs),
+    truncated: record.truncated === true || undefined,
     tables: normalizeRuntimeSchemaTables(record.tables as RuntimeSchemaTable[]),
   };
+}
+
+function normalizeRuntimeSchemaObservedTarget(value: unknown): RuntimeSchemaObservedTarget | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const driver = stringValue(record.driver);
+  if (!driver) return undefined;
+  return {
+    driver,
+    accountOrWorkspace: stringValue(record.accountOrWorkspace),
+    role: stringValue(record.role),
+    warehouse: stringValue(record.warehouse),
+    defaultCatalogOrDatabase: stringValue(record.defaultCatalogOrDatabase),
+    defaultSchema: stringValue(record.defaultSchema),
+  };
+}
+
+function normalizeRuntimeSchemaScopes(value: unknown): RuntimeSchemaScope[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const scopes = value.flatMap((entry): RuntimeSchemaScope[] => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+    const record = entry as Record<string, unknown>;
+    const catalogOrDatabase = stringValue(record.catalogOrDatabase);
+    if (!catalogOrDatabase) return [];
+    const schemas = Array.isArray(record.schemas)
+      ? Array.from(new Set(record.schemas.map(stringValue).filter((item): item is string => Boolean(item))))
+      : [];
+    return [{ catalogOrDatabase, schemas }];
+  });
+  return scopes.length > 0 ? scopes : undefined;
+}
+
+function boundedRuntimeSchemaNumber(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined;
+  return Math.min(Number.MAX_SAFE_INTEGER, Math.floor(value));
 }
 
 function metadataRuntimeColumns(value: unknown): RuntimeSchemaColumn[] {

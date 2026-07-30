@@ -461,7 +461,13 @@ export function UnifiedAgentRunPanel({
       if (!threadIdRef.current) {
         try {
           const thread = await api.createAgentThread({
-            surface: 'notebook',
+            surface: askLayout
+              ? 'ask'
+              : typeof workspaceContext?.surface === 'string'
+                ? workspaceContext.surface
+                : notebookPath
+                  ? 'notebook'
+                  : 'agent',
             title: text,
             ...(notebookPath ? { notebookPath } : {}),
           });

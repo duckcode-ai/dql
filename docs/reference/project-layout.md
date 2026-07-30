@@ -129,14 +129,23 @@ my-dql-project/
   committed governed-learning source. A clone rebuilds its local Hint Graph
   index from these files. Candidates are reviewable but not retrievable;
   approval still requires the lifecycle's evidence and human review gates.
-- **`.dql/cache/`** — ignored, rebuildable metadata, memory, and Hint Graph
-  indexes. SQLite is never the shared source of truth.
+- **`.dql/cache/`** — ignored, rebuildable metadata, advisory-memory, and Hint
+  Graph indexes. `metadata.sqlite` contains the activated, scope-qualified
+  warehouse relation/column generation used by warm Ask, schema browsing, and
+  semantic table mapping. It stores no credentials or sampled values. It never
+  contains canonical chat history and SQLite is never the shared governed
+  source of truth.
 - **`.dql/imports/`** — local import review sessions. AI SQL imports follow
   `extract -> parameterize -> match/reuse -> validate -> review -> certify`.
   The session stores draft candidates, parameter decisions, evidence, and
   duplicate/reuse recommendations.
 - **`.dql/local/apps.sqlite`** — private single-user state such as local Apps,
   layout overrides, AI pins, and saved views.
+- **`.dql/local/agent-conversations.sqlite`** and
+  **`.dql/local/agent-runs.sqlite`** — private project chat threads and bounded
+  execution history. They survive cache rebuilds and DQL upgrades, remain
+  outside Git, and can be removed explicitly when a user wants to clear local
+  history.
 
 Do not add a broad `.dql/` rule to `.gitignore`: it hides the governed Hint
 Graph files. DQL scaffolds and notebook startup use granular ignores for

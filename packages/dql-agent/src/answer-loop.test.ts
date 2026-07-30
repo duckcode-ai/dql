@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse, SemanticLayer, type DQLManifest } from "@duckcodeailabs/dql-core";
 import { KGStore } from "./kg/sqlite-fts.js";
-import { answer as answerBase, inferAnalyticalEntityIds, missingRankedGrainOutput, parseProposal, probeSemanticJoinFanout, compactSemanticRuntimeFailure, repairAmbiguousColumn, semanticTraceAfterExecution, tightenSourceTargetFlowProjection } from "./answer-loop.js";
+import { answer as answerBase, inferAnalyticalEntityIds, missingRankedGrainOutput, parseProposal, probeSemanticJoinFanout, compactSemanticRuntimeFailure, normalizeWarehouseSqlFailure, repairAmbiguousColumn, semanticTraceAfterExecution, tightenSourceTargetFlowProjection } from "./answer-loop.js";
 import { buildLocalContextPack } from "./metadata/catalog.js";
 import type { KGNode } from "./kg/types.js";
 import { buildAnalysisQuestionPlan, type CertifiedBlockApplicability } from "./metadata/analysis-planner.js";
@@ -5379,7 +5379,7 @@ describe("answer (block-first loop)", () => {
       ],
       executeGeneratedSql: async (sql) => {
         attempts += 1;
-        if (attempts === 1) throw new Error('Runtime Error: transient preview execution failure');
+        if (attempts === 1) throw new Error('Snowflake SQL compilation error: syntax error line 1 at position 14');
         return {
           columns: ["customer_name", "revenue"],
           rows: [{ customer_name: "Acme", revenue: 10 }],
@@ -5401,6 +5401,53 @@ describe("answer (block-first loop)", () => {
         }),
       ]),
     );
+  });
+
+  it("does not spend a model-repair turn on authorization failures", async () => {
+    const provider = new StubProvider([
+      "Draft using available columns.\n\n```sql\nSELECT customer_name, SUM(order_total) AS revenue FROM dev.orders GROUP BY customer_name\n```\n\nViz: bar",
+      "This response must not be requested.",
+    ]);
+    let attempts = 0;
+    const result = await answer({
+      question: "Revenue by customer",
+      provider,
+      kg,
+      semanticDriver: "snowflake",
+      schemaContext: [{
+        relation: "dev.orders",
+        schema: "dev",
+        name: "orders",
+        columns: [
+          { name: "customer_name", type: "VARCHAR" },
+          { name: "order_total", type: "DECIMAL" },
+        ],
+      }],
+      executeGeneratedSql: async () => {
+        attempts += 1;
+        throw Object.assign(new Error("Insufficient privileges to operate on table ORDERS"), {
+          driver: "snowflake",
+          vendorCode: "002003",
+          sqlState: "42501",
+          queryId: "01b-safe-query-id",
+          retryable: false,
+        });
+      },
+    });
+
+    expect(attempts).toBe(1);
+    expect(provider.calls).toHaveLength(1);
+    expect(result.analysisPlan?.repairAttempts).toBe(0);
+    expect(result.warehouseFailure).toMatchObject({
+      version: 1,
+      category: "permission",
+      retryDisposition: "change_authorized_access",
+      driver: "snowflake",
+      vendorCode: "002003",
+      sqlState: "42501",
+      queryId: "01b-safe-query-id",
+      retryable: false,
+    });
   });
 
   it("does not repair generated SQL when the execution repair budget is exhausted", async () => {
@@ -5427,12 +5474,12 @@ describe("answer (block-first loop)", () => {
       ],
       executeGeneratedSql: async () => {
         attempts += 1;
-        throw new Error('Runtime Error: transient preview execution failure');
+        throw new Error('Snowflake SQL compilation error: syntax error line 1 at position 14');
       },
     });
 
     expect(result.kind).toBe("uncertified");
-    expect(result.executionError).toContain("transient preview execution failure");
+    expect(result.executionError).toContain("syntax error");
     expect(result.analysisPlan?.repairAttempts).toBe(0);
     expect(attempts).toBe(1);
     expect(provider.calls).toHaveLength(1);
@@ -5463,7 +5510,7 @@ describe("answer (block-first loop)", () => {
       executeGeneratedSql: async (sql) => {
         attempts += 1;
         if (/shadow_orders/i.test(sql)) throw new Error("shadow repair should not execute");
-        throw new Error("Runtime Error: transient preview execution failure");
+        throw new Error("Snowflake SQL compilation error: syntax error line 1 at position 14");
       },
     });
 
@@ -8594,6 +8641,46 @@ describe("probeSemanticJoinFanout (governed semantic fanout gate)", () => {
   });
 });
 
+
+describe("normalizeWarehouseSqlFailure", () => {
+  it("preserves safe Snowflake diagnostics and chooses dialect repair for syntax failures", () => {
+    const failure = normalizeWarehouseSqlFailure(Object.assign(
+      new Error("SQL compilation error: syntax error line 3 at position 7 unexpected 'QUALIFY'"),
+      {
+        driver: "snowflake",
+        vendorCode: "001003",
+        sqlState: "42000",
+        queryId: "01b-query",
+        line: 3,
+        position: 7,
+        retryable: false,
+      },
+    ));
+    expect(failure).toMatchObject({
+      category: "syntax",
+      retryDisposition: "model_repair",
+      driver: "snowflake",
+      vendorCode: "001003",
+      sqlState: "42000",
+      queryId: "01b-query",
+      line: 3,
+      position: 7,
+    });
+  });
+
+  it.each([
+    ["Object ORDERS does not exist", "unknown_relation", "refresh_metadata"],
+    ["Statement timed out after 60 seconds", "timeout", "explicit_retry"],
+    ["Authentication failed: token=super-secret", "authentication", "change_authorized_access"],
+    ["Unsafe statement: DELETE is not read-only", "unsafe", "terminal"],
+    ["Connection reset by peer", "unknown", "terminal"],
+  ])("classifies %s without creating a noisy retry loop", (message, category, disposition) => {
+    const failure = normalizeWarehouseSqlFailure(message, "snowflake");
+    expect(failure.category).toBe(category);
+    expect(failure.retryDisposition).toBe(disposition);
+    expect(failure.redactedMessage).not.toContain("super-secret");
+  });
+});
 
 describe("compactSemanticRuntimeFailure", () => {
   it("reduces a MetricFlow group-by resolver dump to one actionable sentence", () => {

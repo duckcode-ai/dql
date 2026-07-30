@@ -175,6 +175,14 @@ including stable code, failed phase/bindings, recoverability, and safe actions.
 Equivalent Browser Ask, Notebook, CLI, MCP, and Chat requests expose the same
 failure identity and trust transition (`API-007`).
 
+Private conversation threads and bounded agent-run history live under
+`.dql/local`, never rebuildable `.dql/cache` and never Git. Notebook startup
+migrates the legacy cache conversation database with SQLite snapshot semantics,
+including committed WAL state. The Ask sidebar hydrates its recent list from
+that project-local thread index; browser storage is only a rendering cache, so
+changing ports, rebuilding the frontend, or upgrading DQL cannot hide durable
+threads (`API-008`).
+
 Repair never mutates the source run. A parameter-only rerun, derived DQL edit,
 SQL Notebook copy, snapshot refresh, or authorized connection change creates a
 new run and receipt according to the trust-transition matrix in spec 10.

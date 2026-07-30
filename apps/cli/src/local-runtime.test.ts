@@ -495,6 +495,100 @@ describe('local runtime network boundary', () => {
   });
 });
 
+describe('warehouse metadata scope runtime API (CTX-005, PERF-002, API-006, SEC-003)', () => {
+  it('applies a selected multi-catalog scope and serves schema UI from the activated generation', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-metadata-scope-api-'));
+    tempDirs.push(projectRoot);
+    const connection = {
+      driver: 'databricks' as const,
+      host: 'adb.example.test',
+      httpPath: '/sql/1.0/warehouses/test',
+      token: 'not-persisted-by-scope',
+      catalog: 'analytics_prod',
+      schema: 'sales',
+    };
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'metadata-scope-api',
+      connections: { default: connection },
+      defaultConnectionName: 'default',
+    }));
+    const executePositional = vi.fn(async (sql: string): Promise<QueryResult> => ({
+      columns: [],
+      rows: sql.includes('reference_data')
+        ? [{
+            table_catalog: 'reference_data',
+            table_schema: 'shared',
+            table_name: 'calendar',
+            column_name: 'calendar_date',
+            data_type: 'DATE',
+            ordinal_position: 1,
+          }]
+        : [{
+            table_catalog: 'analytics_prod',
+            table_schema: 'sales',
+            table_name: 'orders',
+            column_name: 'customer_id',
+            data_type: 'BIGINT',
+            ordinal_position: 1,
+          }],
+      rowCount: 1,
+      executionTimeMs: 1,
+      truncated: false,
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executePositional } as unknown as QueryExecutor,
+        connection,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const scopeBody = {
+        mode: 'selected_scopes',
+        scopes: [
+          { catalogOrDatabase: 'analytics_prod', schemas: ['sales'] },
+          { catalogOrDatabase: 'reference_data', schemas: ['shared'] },
+        ],
+      };
+      const applied = await fetch(`${base}/api/connections/default/metadata-scope`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(scopeBody),
+      });
+      expect(applied.status).toBe(200);
+      expect(await applied.json()).toMatchObject({
+        scope: {
+          mode: 'selected_scopes',
+          scopes: scopeBody.scopes,
+        },
+        status: {
+          state: 'ready',
+          relationCount: 2,
+          columnCount: 2,
+        },
+      });
+      expect(executePositional).toHaveBeenCalledTimes(2);
+
+      const schema = await fetch(`${base}/api/schema`);
+      expect(schema.status).toBe(200);
+      expect(await schema.json()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ path: 'analytics_prod.sales.orders' }),
+        expect.objectContaining({ path: 'reference_data.shared.calendar' }),
+      ]));
+      expect(executePositional).toHaveBeenCalledTimes(2);
+
+      const persisted = JSON.parse(readFileSync(join(projectRoot, 'dql.config.json'), 'utf8'));
+      expect(persisted.metadataScopes.default).toEqual(scopeBody);
+      expect(JSON.stringify(persisted.metadataScopes)).not.toContain(connection.token);
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+});
+
 describe('unified provider draft testing (CFG-004)', () => {
   it('tests unsaved OpenAI and Anthropic enterprise URLs through governed adapters without persisting drafts', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-provider-draft-test-'));

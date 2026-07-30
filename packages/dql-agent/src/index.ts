@@ -78,7 +78,13 @@ export type {
   SeedDefaultSkillsOptions,
   SeedDefaultSkillsResult,
 } from "./skills/defaults.js";
-export { answer, parseProposal, compactSemanticRuntimeFailure, materializeKnowledgeLensSkills } from "./answer-loop.js";
+export {
+  answer,
+  parseProposal,
+  compactSemanticRuntimeFailure,
+  materializeKnowledgeLensSkills,
+  normalizeWarehouseSqlFailure,
+} from "./answer-loop.js";
 export {
   classifyAnalyticalFailure,
   createAnalyticalFailure,
@@ -293,6 +299,9 @@ export type {
   AnswerLoopInput,
   AiRoute,
   AiRouteTier,
+  WarehouseSqlFailureCategory,
+  WarehouseSqlFailureV1,
+  WarehouseSqlRetryDisposition,
 } from "./answer-loop.js";
 export { buildResolvedAnalyticalPlan, deriveResolvedAnalyticalPlan, resolvePlanTimeRange } from './resolved-analytical-plan.js';
 export type {
@@ -564,6 +573,8 @@ export type {
 export {
   ConversationStore,
   defaultConversationPath,
+  legacyConversationPath,
+  prepareConversationPath,
 } from "./conversation/session-store.js";
 export type {
   ConversationThread,
@@ -834,6 +845,8 @@ export type {
   RuntimeSchemaSnapshot,
   RuntimeSchemaTable,
   RuntimeSchemaColumn,
+  RuntimeSchemaScope,
+  RuntimeSchemaObservedTarget,
 } from "./metadata/catalog.js";
 export type {
   SqlContextValidationCode,

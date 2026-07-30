@@ -420,7 +420,7 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
       kind: 'semantic_block',
       name: 'monthly_revenue',
       sourcePath: 'semantic-layer/blocks/revenue/monthly_revenue.yaml',
-      source: 'block "monthly_revenue" {\n    type = "semantic"\n    metric = "total_revenue"\n  }',
+      source: '  block "monthly_revenue" {\n    type = "semantic"\n    metric = "total_revenue"\n  }\n',
     });
     expect(artifactSqlDisclosureLabel(Boolean(artifact))).toBe('View compiled SQL preview');
   });

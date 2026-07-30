@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Plus, MessageSquare, Trash2, Loader2, ShieldCheck } from 'lucide-react';
+import { api, type AgentConversationThread } from '../../api/client';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
 import type { Cell } from '../../store/types';
 import { initialDomainScope, persistDomainScope, type DomainScope } from './domain-scope';
@@ -27,7 +28,7 @@ import {
  * conversation threads grouped and resumable.
  */
 
-interface Conversation {
+export interface Conversation {
   id: string;
   title: string;
   createdAt: string;
@@ -39,7 +40,7 @@ interface Conversation {
 
 const STORAGE_KEY = 'dql-ask-conversations';
 const ACTIVE_CONVERSATION_STORAGE_KEY = 'dql-ask-active-conversation';
-const MAX_CONVERSATIONS = 40;
+const MAX_CONVERSATIONS = 100;
 
 function askNotebookCellName(value: string | undefined): string {
   const clean = (value ?? 'AI analysis')
@@ -94,6 +95,44 @@ export function askNotebookCellFromPayload(payload: InsertDqlPayload): Cell | un
 
 function makeConversationId(): string {
   return `conv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function recoveredConversationId(threadId: string): string {
+  return `conv_server_${threadId}`;
+}
+
+/**
+ * Browser storage is only a rendering cache. Rebuild the sidebar from durable
+ * project threads so a new port, browser profile, or frontend upgrade does not
+ * make existing conversations appear to be gone.
+ */
+export function mergePersistedAskConversations(
+  local: Conversation[],
+  threads: AgentConversationThread[],
+): Conversation[] {
+  const localByThread = new Map(
+    local.flatMap((conversation) => conversation.threadId ? [[conversation.threadId, conversation] as const] : []),
+  );
+  const recovered = threads.map((thread): Conversation => {
+    const existing = localByThread.get(thread.id);
+    return {
+      id: existing?.id ?? recoveredConversationId(thread.id),
+      title: existing?.title && existing.title !== 'New chat'
+        ? existing.title
+        : thread.title?.trim() || 'Recovered chat',
+      createdAt: existing?.createdAt ?? thread.createdAt,
+      updatedAt: thread.updatedAt > (existing?.updatedAt ?? '') ? thread.updatedAt : existing?.updatedAt ?? thread.updatedAt,
+      items: existing?.items ?? [],
+      threadId: thread.id,
+    };
+  });
+  const recoveredIds = new Set(threads.map((thread) => thread.id));
+  return [
+    ...recovered,
+    ...local.filter((conversation) => !conversation.threadId || !recoveredIds.has(conversation.threadId)),
+  ]
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    .slice(0, MAX_CONVERSATIONS);
 }
 
 // Defensive: persisted/edited runs from any source must have the arrays RunCard
@@ -198,6 +237,8 @@ export function AnalyticsHome() {
   const [domainContext, setDomainContext] = useState<DomainScope | undefined>(() => initialDomainScope());
 
   const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations());
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const startedWithLocalHistory = useMemo(() => conversations.length > 0, []);
   // Keep the selected thread across a page remount/reload. The panel's pending-run
   // handoff uses this server thread id to reconnect rather than asking again.
   const [activeId, setActiveId] = useState<string>(() => {
@@ -214,6 +255,32 @@ export function AnalyticsHome() {
   useEffect(() => {
     try { window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, activeId); } catch { /* best-effort */ }
   }, [activeId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.listAgentThreads({ limit: MAX_CONVERSATIONS })
+      .then(({ threads }) => {
+        if (cancelled) return;
+        // New clients label Ask threads explicitly. Older Ask threads used the
+        // generic notebook label without a notebook path, so include those for
+        // lossless upgrade recovery.
+        const askThreads = threads.filter((thread) =>
+          thread.surface === 'ask'
+          || (thread.surface === 'notebook' && !thread.notebookPath));
+        setConversations((current) => persistConversations(mergePersistedAskConversations(current, askThreads)));
+        if (!startedWithLocalHistory && askThreads[0]) {
+          setActiveId(recoveredConversationId(askThreads[0].id));
+        }
+      })
+      .catch(() => {
+        // Local browser history remains available if the server store cannot
+        // be opened. The next mount retries canonical thread discovery.
+      })
+      .finally(() => {
+        if (!cancelled) setHistoryLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [startedWithLocalHistory]);
 
   const activeItems = useMemo(
     () => conversations.find((c) => c.id === activeId)?.items ?? [],
@@ -272,10 +339,12 @@ export function AnalyticsHome() {
   const deleteConversation = useCallback(
     (id: string) => {
       if (isRunning) return;
+      const threadId = conversations.find((conversation) => conversation.id === id)?.threadId;
+      if (threadId) void api.archiveAgentThread(threadId).catch(() => undefined);
       setConversations((prev) => persistConversations(prev.filter((c) => c.id !== id)));
       if (id === activeId) setActiveId(makeConversationId());
     },
-    [activeId, isRunning],
+    [activeId, conversations, isRunning],
   );
 
   const openApp = (appId: string, dashboardId?: string) => {
@@ -317,6 +386,7 @@ export function AnalyticsHome() {
         conversations={conversations}
         activeId={activeId}
         busy={isRunning}
+        loading={historyLoading}
         onNewChat={newChat}
         onSelect={selectConversation}
         onDelete={deleteConversation}
@@ -359,6 +429,7 @@ function ConversationSidebar({
   conversations,
   activeId,
   busy,
+  loading,
   onNewChat,
   onSelect,
   onDelete,
@@ -367,6 +438,7 @@ function ConversationSidebar({
   conversations: Conversation[];
   activeId: string;
   busy?: boolean;
+  loading?: boolean;
   onNewChat: () => void;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
@@ -415,7 +487,12 @@ function ConversationSidebar({
         Recent
       </div>
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '0 8px 12px', display: 'flex', flexDirection: 'column', gap: 2 }}>
-        {conversations.length === 0 ? (
+        {loading && conversations.length === 0 ? (
+          <div style={{ padding: '10px 8px', display: 'flex', alignItems: 'center', gap: 7, fontSize: 11.5, color: t.textMuted }}>
+            <Loader2 size={13} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} />
+            Restoring project chats…
+          </div>
+        ) : conversations.length === 0 ? (
           <div style={{ padding: '10px 8px', fontSize: 11.5, color: t.textMuted, lineHeight: 1.5 }}>
             No past chats yet. Your conversations show up here so you can pick up where you left off.
           </div>
@@ -489,7 +566,7 @@ function ConversationSidebar({
       </div>
       <div style={{ padding: '10px 12px', borderTop: `1px solid ${t.headerBorder}`, display: 'flex', alignItems: 'center', gap: 7, fontSize: 11, color: t.textMuted }}>
         <ShieldCheck size={12} style={{ flexShrink: 0, color: t.success }} />
-        <span>Answers grounded in governed data</span>
+        <span>Private project history · not committed to Git</span>
       </div>
     </aside>
   );

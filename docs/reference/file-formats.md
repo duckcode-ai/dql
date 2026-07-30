@@ -186,6 +186,14 @@ Lives at the project root. Written by `dql init` and `create-dql-app`.
   "connections": {
     "default": { "driver": "duckdb", "filepath": ":memory:" }
   },
+  "metadataScopes": {
+    "default": {
+      "mode": "selected_scopes",
+      "scopes": [
+        { "catalogOrDatabase": "jaffle_shop", "schemas": ["main"] }
+      ]
+    }
+  },
   "semanticLayer": { "provider": "dql", "path": "semantic-layer" },
   "dbt": {
     "projectDir": "../dbt",
@@ -207,6 +215,12 @@ Fields:
   keep shared agent guidance in visible `skills/`; legacy `.dql/skills/` is
   read only for migration compatibility.
 - **`connections`** — named database connections. `default` is used unless a block overrides it
+- **`metadataScopes`** — optional per-connection warehouse metadata allowlists.
+  The notebook Database panel writes this only after the connection target and
+  bounded metadata synchronization succeed. `dbt_relations` indexes exact
+  current manifest relations; `selected_scopes` indexes only the named
+  databases/catalogs and schemas; `dbt_plus_selected` combines both. Secrets,
+  observed target identity, and generated fingerprints are never stored here.
 - **`semanticLayer`** — `{ provider, path, projectPath }`. Providers: `dql` (local YAML), `dbt`, `cubejs`, `snowflake`
 - **`dbt`** — `{ projectDir, manifestPath }` for in-place or sibling dbt projects. `dql compile` and `dql sync dbt` read from here
 - **`datalex`** — optional `{ manifestPath }` for validating `datalex_contract` references. DQL works without DataLex; this only enables interop checks when a DataLex manifest exists

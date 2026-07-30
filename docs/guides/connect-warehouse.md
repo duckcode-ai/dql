@@ -88,6 +88,29 @@ dql doctor
 If that passes, the notebook and CLI resolve table references against this
 connection.
 
+## 5. Apply a metadata scope
+
+In **Settings → Database**, test the connection, then use **Metadata scope**:
+
+- **Use exact dbt project relations** is the recommended default when a current
+  dbt manifest is configured.
+- **dbt relations plus selected schemas** adds only the databases/catalogs and
+  schemas you name.
+- **Selected databases/catalogs and schemas** is the explicit non-dbt mode.
+
+Use one line per database or catalog:
+
+```text
+ANALYTICS_PROD: SALES, FINANCE
+REFERENCE_DATA: SHARED
+```
+
+**Apply and synchronize** validates the observed target and builds the local
+`.dql/cache/metadata.sqlite` generation. A failed, empty, or truncated refresh
+does not replace the previous valid generation. Normal warm Ask and schema UI
+reads use this local generation; DQL does not enumerate every database in the
+account.
+
 ## Multiple connections
 
 ```json

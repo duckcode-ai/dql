@@ -2,11 +2,12 @@ import { beforeAll, describe, expect, it, vi } from 'vitest';
 import type * as AnalyticsHomeModule from './AnalyticsHome';
 
 let askNotebookCellFromPayload: typeof AnalyticsHomeModule.askNotebookCellFromPayload;
+let mergePersistedAskConversations: typeof AnalyticsHomeModule.mergePersistedAskConversations;
 
 describe('Ask AI Notebook repair handoff', () => {
   beforeAll(async () => {
     vi.stubGlobal('window', { location: { origin: 'http://localhost' } });
-    ({ askNotebookCellFromPayload } = await import('./AnalyticsHome'));
+    ({ askNotebookCellFromPayload, mergePersistedAskConversations } = await import('./AnalyticsHome'));
   });
 
   it('UI-013 opens failed semantic DQL with attempted SQL and trust metadata intact', () => {
@@ -69,6 +70,49 @@ describe('Ask AI Notebook repair handoff', () => {
         generatedSql: 'SELECT broken FROM missing_table',
         sourceRunId: 'run-sql-repair',
       },
+    });
+  });
+
+  it('API-008 rebuilds Ask history from durable server threads after browser storage is reset', () => {
+    const recovered = mergePersistedAskConversations([], [{
+      id: 'thr_revenue',
+      surface: 'ask',
+      title: 'Top revenue customers',
+      archived: false,
+      createdAt: '2026-07-28T10:00:00.000Z',
+      updatedAt: '2026-07-29T10:00:00.000Z',
+    }]);
+    expect(recovered).toEqual([expect.objectContaining({
+      id: 'conv_server_thr_revenue',
+      title: 'Top revenue customers',
+      threadId: 'thr_revenue',
+      items: [],
+    })]);
+  });
+
+  it('keeps the richer browser rendering cache while refreshing thread recency', () => {
+    const local: AnalyticsHomeModule.Conversation = {
+      id: 'conv_local',
+      title: 'Revenue analysis',
+      threadId: 'thr_revenue',
+      createdAt: '2026-07-28T10:00:00.000Z',
+      updatedAt: '2026-07-28T11:00:00.000Z',
+      items: [{ kind: 'user', id: 'user_1', text: 'Who are the top customers?' }],
+    };
+    const [merged] = mergePersistedAskConversations([local], [{
+      id: 'thr_revenue',
+      surface: 'ask',
+      title: 'Top revenue customers',
+      archived: false,
+      createdAt: local.createdAt,
+      updatedAt: '2026-07-29T10:00:00.000Z',
+    }]);
+    expect(merged).toMatchObject({
+      id: 'conv_local',
+      title: 'Revenue analysis',
+      updatedAt: '2026-07-29T10:00:00.000Z',
+      items: local.items,
+      threadId: 'thr_revenue',
     });
   });
 });

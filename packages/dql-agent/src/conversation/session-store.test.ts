@@ -1,8 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ConversationStore, defaultConversationPath } from './session-store.js';
+import {
+  ConversationStore,
+  defaultConversationPath,
+  legacyConversationPath,
+  prepareConversationPath,
+} from './session-store.js';
 
 describe('ConversationStore', () => {
   let root: string;
@@ -32,6 +37,36 @@ describe('ConversationStore', () => {
     ]);
     // Thread title defaults to the first question.
     expect(store.getThread(thread.id)?.title).toBe('revenue by category');
+  });
+
+  it('keeps conversation history in durable local state', () => {
+    expect(defaultConversationPath(root)).toBe(join(root, '.dql', 'local', 'agent-conversations.sqlite'));
+  });
+
+  it('migrates the legacy cache database including committed WAL state', async () => {
+    store.close();
+    rmSync(defaultConversationPath(root), { force: true });
+    const legacyStore = new ConversationStore(legacyConversationPath(root));
+    const thread = legacyStore.createThread({ surface: 'ask', title: 'Revenue history' });
+    legacyStore.appendTurn(thread.id, {
+      question: 'Who are the top revenue customers?',
+      answerSummary: 'Melissa Lopez is first.',
+    });
+    legacyStore.close();
+
+    const migratedPath = await prepareConversationPath(root);
+    expect(migratedPath).toBe(defaultConversationPath(root));
+    expect(existsSync(migratedPath)).toBe(true);
+    expect(existsSync(legacyConversationPath(root))).toBe(true);
+
+    store = new ConversationStore(migratedPath);
+    expect(store.getThread(thread.id)?.title).toBe('Revenue history');
+    expect(store.recentTurns(thread.id)).toEqual([
+      expect.objectContaining({
+        question: 'Who are the top revenue customers?',
+        answerSummary: 'Melissa Lopez is first.',
+      }),
+    ]);
   });
 
   it('persists turn payloads with caps applied', () => {

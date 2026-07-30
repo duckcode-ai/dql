@@ -34,3 +34,7 @@ graph and does not depend on a warehouse, vector service, or hosted component.
 The one-domain refresh measurement is labeled as an atomic full-snapshot
 fallback until dependency-sharded compilation is implemented; the documented
 two-second budget is still enforced.
+
+The target-scoped warehouse synchronization, zero-live-metadata warm path, and
+bounded dialect-repair gates are defined in the
+[warehouse metadata sync and dialect repair delivery plan](warehouse-metadata-sync-and-dialect-repair-plan.md).

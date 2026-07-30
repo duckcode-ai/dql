@@ -966,6 +966,8 @@ export interface AgentAnswer {
   result?: AgentResultPayload;
   /** Certified path execution failure, if the block matched but execution failed. */
   executionError?: string;
+  /** Structured, redacted warehouse failure used by bounded repair and Inspect UI. */
+  warehouseFailure?: WarehouseSqlFailureV1;
   /** Uncertified path: the LLM-proposed SQL the analyst should review. */
   proposedSql?: string;
   /**
@@ -1064,6 +1066,47 @@ export interface AgentResultPayload {
   semanticExecutionReceipt?: object;
   semanticTargetBinding?: object;
   semanticTrace?: SemanticExecutionTrace;
+}
+
+export type WarehouseSqlFailureCategory =
+  | 'syntax'
+  | 'unknown_relation'
+  | 'unknown_column'
+  | 'ambiguous_column'
+  | 'unsupported_function'
+  | 'type_mismatch'
+  | 'permission'
+  | 'authentication'
+  | 'timeout'
+  | 'cancelled'
+  | 'unsafe'
+  | 'unknown';
+
+export type WarehouseSqlRetryDisposition =
+  | 'model_repair'
+  | 'refresh_metadata'
+  | 'explicit_retry'
+  | 'change_authorized_access'
+  | 'terminal';
+
+/**
+ * Redacted, connector-neutral execution failure surfaced to every Ask host.
+ * Connector errors are duck-typed so dql-agent does not depend on the connector
+ * package, while vendor codes and safe positions remain available to repair
+ * prompts and Inspect surfaces.
+ */
+export interface WarehouseSqlFailureV1 {
+  version: 1;
+  category: WarehouseSqlFailureCategory;
+  retryDisposition: WarehouseSqlRetryDisposition;
+  redactedMessage: string;
+  driver?: string;
+  vendorCode?: string;
+  sqlState?: string;
+  queryId?: string;
+  line?: number;
+  position?: number;
+  retryable?: boolean;
 }
 
 export interface CertifiedBlockInvocationInput {
@@ -3811,6 +3854,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   ];
   let result: AgentResultPayload | undefined;
   let executionError: string | undefined;
+  let warehouseFailure: WarehouseSqlFailureV1 | undefined;
   let repairAttempts = 0;
   // The repair turn returns error-recovery prose ("the column X was not recognized…"),
   // NOT a user-facing answer. Keep it for the trace only — never as the answer text.
@@ -3820,6 +3864,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   }
   if (deepCandidateExecutionError) {
     executionError = deepCandidateExecutionError;
+    warehouseFailure = normalizeWarehouseSqlFailure(deepCandidateExecutionError, input.semanticDriver);
   }
   const executeCurrentSql = (): Promise<AgentResultPayload> => {
     const requestedLimit = questionPlan.requestedShape.topN?.scope === 'per_group'
@@ -3877,10 +3922,12 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     try {
       if (!executionError) result = await executeCurrentSql();
     } catch (err) {
-      executionError = err instanceof Error ? err.message : String(err);
+      warehouseFailure = normalizeWarehouseSqlFailure(err, input.semanticDriver);
+      executionError = warehouseFailure.redactedMessage;
     }
     if (executionError && !fanoutContradiction && !authoritativeSemanticBinding) {
-      if (isRetryableGeneratedSqlError(executionError)) {
+      warehouseFailure ??= normalizeWarehouseSqlFailure(executionError, input.semanticDriver);
+      if (isRetryableGeneratedSqlError(warehouseFailure)) {
         const localRepairSql = repairGeneratedSqlLocally(parsed.sql, executionError, schemaContext);
         if (localRepairSql && canUseLaneRepair(repairBudgetState, 'execution')) {
           recordLaneRepair(repairBudgetState, 'execution');
@@ -3905,21 +3952,28 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
             try {
               result = await executeCurrentSql();
               executionError = undefined;
+              warehouseFailure = undefined;
             } catch (retryErr) {
-              executionError = retryErr instanceof Error ? retryErr.message : String(retryErr);
+              warehouseFailure = normalizeWarehouseSqlFailure(retryErr, input.semanticDriver);
+              executionError = warehouseFailure.redactedMessage;
             }
           } else {
             executionError = localRepairValidation.error;
+            warehouseFailure = normalizeWarehouseSqlFailure(localRepairValidation.error, input.semanticDriver);
           }
         }
-        if (executionError && canUseLaneRepair(repairBudgetState, 'execution')) {
+        if (
+          executionError
+          && warehouseFailure?.retryDisposition === 'model_repair'
+          && canUseLaneRepair(repairBudgetState, 'execution')
+        ) {
           recordLaneRepair(repairBudgetState, 'execution');
           const repairedRaw = await requestSqlRepair({
             provider,
             baseMessages: messages,
             question,
             parsed,
-            executionError,
+            failure: warehouseFailure,
             schemaContext,
             signal: input.signal,
             reasoningEffort: input.reasoningEffort,
@@ -3951,11 +4005,14 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
               try {
                 result = await executeCurrentSql();
                 executionError = undefined;
+                warehouseFailure = undefined;
               } catch (retryErr) {
-                executionError = retryErr instanceof Error ? retryErr.message : String(retryErr);
+                warehouseFailure = normalizeWarehouseSqlFailure(retryErr, input.semanticDriver);
+                executionError = warehouseFailure.redactedMessage;
               }
             } else {
               executionError = repairedValidation.error;
+              warehouseFailure = normalizeWarehouseSqlFailure(repairedValidation.error, input.semanticDriver);
             }
           }
         }
@@ -4115,6 +4172,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       sql: parsed.sql,
       result,
       executionError,
+      ...(warehouseFailure ? { warehouseFailure } : {}),
       ...(finalSemanticExecutionTrace ? { semanticExecutionTrace: finalSemanticExecutionTrace } : {}),
       ...(governedMetricExecutionFailure ? { refusalCode: 'grounding_gap' as const } : {}),
       suggestedViz: parsed.viz ?? 'table',
@@ -7384,7 +7442,7 @@ async function requestSqlRepair(input: {
   baseMessages: AgentMessage[];
   question: string;
   parsed: ParsedProposal;
-  executionError: string;
+  failure: WarehouseSqlFailureV1;
   schemaContext: AgentSchemaTable[];
   signal?: AbortSignal;
   reasoningEffort?: ReasoningEffort;
@@ -7406,12 +7464,18 @@ async function requestSqlRepair(input: {
       content: [
         'The SQL preview for the review-required DQL artifact failed during bounded preview execution.',
         `Question: ${input.question}`,
-        `Execution error: ${input.executionError}`,
+        `Warehouse dialect: ${input.failure.driver ?? 'unknown'}`,
+        `Failure category: ${input.failure.category}`,
+        `Execution error: ${input.failure.redactedMessage}`,
+        input.failure.vendorCode ? `Vendor code: ${input.failure.vendorCode}` : '',
+        input.failure.sqlState ? `SQL state: ${input.failure.sqlState}` : '',
+        input.failure.line !== undefined ? `Failure line: ${input.failure.line}` : '',
+        input.failure.position !== undefined ? `Failure position: ${input.failure.position}` : '',
         'Qualify every source column independently inside each SELECT/CTE scope. Do not repair an ambiguous column by choosing the first FROM relation; use the runtime schema to identify its unique owner, or leave the query unresolved when no unique owner is proven.',
         'Preserve every requested output measure and dimension while repairing the failing reference.',
         'Return one corrected read-only SQL query using only the runtime schema below, as a single ```json fenced object with summary, sql, viz, outputs, and optional dql metadata fields.',
         schema,
-      ].join('\n\n'),
+      ].filter(Boolean).join('\n\n'),
     },
   ], {
     signal: input.signal,
@@ -7741,8 +7805,107 @@ function summarizeEvidencePayload(value: unknown, maxLength = 700): string | und
   return compact.length <= maxLength ? compact : `${compact.slice(0, maxLength - 3)}...`;
 }
 
-function isRetryableGeneratedSqlError(error: string): boolean {
-  return !/\b(read-only|readonly|select or with|unsafe|delete|insert|update|drop|alter|create|attach|copy|pragma)\b/i.test(error);
+export function normalizeWarehouseSqlFailure(
+  error: unknown,
+  fallbackDriver?: string,
+): WarehouseSqlFailureV1 {
+  const record = error && typeof error === 'object'
+    ? error as Record<string, unknown>
+    : undefined;
+  const rawMessage = error instanceof Error
+    ? error.message
+    : typeof error === 'string'
+      ? error
+      : typeof record?.message === 'string'
+        ? record.message
+        : String(error);
+  const message = redactWarehouseSqlFailureMessage(rawMessage);
+  const category = classifyWarehouseSqlFailure(message);
+  return {
+    version: 1,
+    category,
+    retryDisposition: warehouseSqlRetryDisposition(category),
+    redactedMessage: message,
+    ...(stringField(record, 'driver') ?? fallbackDriver
+      ? { driver: stringField(record, 'driver') ?? fallbackDriver }
+      : {}),
+    ...(stringField(record, 'vendorCode') ? { vendorCode: stringField(record, 'vendorCode') } : {}),
+    ...(stringField(record, 'sqlState') ? { sqlState: stringField(record, 'sqlState') } : {}),
+    ...(stringField(record, 'queryId') ? { queryId: stringField(record, 'queryId') } : {}),
+    ...(numberField(record, 'line') !== undefined ? { line: numberField(record, 'line') } : {}),
+    ...(numberField(record, 'position') !== undefined ? { position: numberField(record, 'position') } : {}),
+    ...(typeof record?.retryable === 'boolean' ? { retryable: record.retryable } : {}),
+  };
+}
+
+function redactWarehouseSqlFailureMessage(message: string): string {
+  const compact = message.replace(/\s+/g, ' ').trim()
+    .replace(/\b(password|token|secret|private[_ -]?key)\s*[=:]\s*([^\s,;]+)/gi, '$1=[redacted]')
+    .replace(/\b(?:https?|snowflake|postgres(?:ql)?):\/\/[^\s]+/gi, '[redacted connection]');
+  return (compact || 'Warehouse query failed.').slice(0, 700);
+}
+
+function classifyWarehouseSqlFailure(message: string): WarehouseSqlFailureCategory {
+  if (/\b(read-only|readonly|select or with|unsafe statement|not permitted sql|delete|insert|update|drop|alter|create|attach|copy|pragma)\b/i.test(message)) {
+    return 'unsafe';
+  }
+  if (/\b(authentication|authenticate|invalid credentials?|incorrect username|login failed|oauth|expired token)\b/i.test(message)) {
+    return 'authentication';
+  }
+  if (/\b(permission denied|insufficient privileges?|not authorized|access denied|authorization failed|does not have privilege)\b/i.test(message)) {
+    return 'permission';
+  }
+  if (/\b(cancelled|canceled|aborted by user)\b/i.test(message)) return 'cancelled';
+  if (/\b(timeout|timed out|deadline exceeded|statement timeout)\b/i.test(message)) return 'timeout';
+  if (/\bambiguous\s+(?:reference|column(?:\s+name)?)\b/i.test(message)) return 'ambiguous_column';
+  if (/\b(column|identifier|field)\b.*\b(not found|does not exist|not recognized|invalid identifier|unknown)\b/i.test(message)
+    || /\bdoes not have a column named\b/i.test(message)
+    || /\binvalid identifier\b/i.test(message)) {
+    return 'unknown_column';
+  }
+  if (/\b(table|relation|view|object)\b.*\b(not found|does not exist|unknown|not exist|not authorized)\b/i.test(message)) {
+    return 'unknown_relation';
+  }
+  if (/\b(function|routine)\b.*\b(not found|does not exist|unknown|unsupported|no matching signature)\b/i.test(message)) {
+    return 'unsupported_function';
+  }
+  if (/\b(type mismatch|cannot cast|conversion error|invalid argument types?|operator does not exist)\b/i.test(message)) {
+    return 'type_mismatch';
+  }
+  if (/\b(parser error|parse error|syntax error|sql compilation error|unexpected token|unexpected keyword)\b/i.test(message)) {
+    return 'syntax';
+  }
+  return 'unknown';
+}
+
+function warehouseSqlRetryDisposition(
+  category: WarehouseSqlFailureCategory,
+): WarehouseSqlRetryDisposition {
+  if (category === 'syntax'
+    || category === 'unknown_column'
+    || category === 'ambiguous_column'
+    || category === 'unsupported_function'
+    || category === 'type_mismatch') {
+    return 'model_repair';
+  }
+  if (category === 'unknown_relation') return 'refresh_metadata';
+  if (category === 'timeout') return 'explicit_retry';
+  if (category === 'permission' || category === 'authentication') return 'change_authorized_access';
+  return 'terminal';
+}
+
+function stringField(record: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function numberField(record: Record<string, unknown> | undefined, key: string): number | undefined {
+  const value = record?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function isRetryableGeneratedSqlError(failure: WarehouseSqlFailureV1): boolean {
+  return failure.retryDisposition === 'model_repair';
 }
 
 /**
