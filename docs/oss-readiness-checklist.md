@@ -161,9 +161,9 @@ template lives in `create-dql-app`; the example dbt project is external.
 
 ## Current Release Decision
 
-The OSS release candidate correctness gates pass locally for `1.12.0`. Re-run
-the published package smoke checks after publishing so `latest` is validated
-against the same version as the repo. The tracked `PERF-001` scale fixture has
+The OSS release correctness gates and published package smoke checks pass for
+`1.12.0`; npm `latest`, the repository manifests, and clean local/global CLI
+installs resolve to the same version. The tracked `PERF-001` scale fixture has
 no route-parity, concept-resolution, certified-execution, or invented-ID
 failures, but several cold-start and warm-context latency budgets remain above
 target. RFC 0005 acceptance remains implementer-validated pending independent
@@ -195,6 +195,10 @@ jaffle-shop-duckdb repo):
 
 ## Recommended Next Actions
 
-1. Commit the OSS release candidate changes.
-2. Push `main` with the current release state.
-3. Publish/tag the release, smoke `latest`, then open the GitHub repo to public.
+1. Keep the package manifests, starter CLI range, changelog, roadmap, and
+   current-truth snapshot synchronized for the next release.
+2. Re-run the built-CLI browser smoke against the external
+   jaffle-shop-duckdb example after changes to Notebook navigation or database
+   execution.
+3. Continue closing the disclosed independent-verification and `PERF-001`
+   latency gaps without expanding the OSS/commercial boundary.
