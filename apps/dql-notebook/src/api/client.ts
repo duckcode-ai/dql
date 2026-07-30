@@ -64,6 +64,7 @@ import type {
   SkillPathSettings,
   Domain,
 } from '../store/types';
+import { withServerAuthorization } from './server-auth';
 
 const EMPTY_PLAN = {
   totals: { modelsScanned: 0, businessModels: 0, plumbingExcluded: 0, metricsFound: 0 },
@@ -2119,9 +2120,11 @@ function formatRequestError(res: Response, text: string): DqlApiError {
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   let res: Response;
   try {
+    const headers = withServerAuthorization(options?.headers);
+    if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
     res = await fetch(`${BASE}${path}`, {
-      headers: { 'Content-Type': 'application/json' },
       ...options,
+      headers,
     });
   } catch (error) {
     if (options?.signal?.aborted) throw error;
@@ -2897,7 +2900,7 @@ export const api = {
     try {
       res = await fetch(`${BASE}/api/agent-runs?stream=1`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: withServerAuthorization({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(input),
         signal,
       });
@@ -3631,7 +3634,7 @@ export const api = {
     blockers?: string[];
   }> {
     const res = await fetch(`${BASE}/api/block-studio/certify`, {
-      headers: { 'Content-Type': 'application/json' },
+      headers: withServerAuthorization({ 'Content-Type': 'application/json' }),
       method: 'POST',
       body: JSON.stringify(payload),
     });
@@ -3853,6 +3856,7 @@ export const api = {
       }
       const response = await fetch(`${BASE}/api/datasets/import`, {
         method: "POST",
+        headers: withServerAuthorization(),
         body: form,
       });
       if (!response.ok) {
@@ -4235,7 +4239,9 @@ export const api = {
 
   async getSchema(): Promise<SchemaTable[]> {
     try {
-      const res = await fetch(`${BASE}/api/schema`);
+      const res = await fetch(`${BASE}/api/schema`, {
+        headers: withServerAuthorization(),
+      });
       if (res.ok) {
         return (await res.json()) as SchemaTable[];
       }
