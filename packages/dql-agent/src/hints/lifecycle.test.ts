@@ -97,6 +97,12 @@ describe('governed v3 hint lifecycle', () => {
     expect(hint.dependencies).toEqual([dependency]);
     expect(hint.requiredEvaluation).toContain('What is net revenue?');
     expect(trace.dependencies).toEqual([dependency]);
+    expect(hint.lesson).toMatchObject({
+      version: 1,
+      rule: hint.guidance,
+      intentExamples: ['What is net revenue?'],
+    });
+    expect(trace.lesson).toEqual(hint.lesson);
   });
 
   it('persists a failed evaluation and allows a later approval retry', async () => {
@@ -247,6 +253,13 @@ describe('governed v3 hint lifecycle', () => {
       hintId: hint.id,
       title: 'Use governed net revenue',
       correctedSql: 'SELECT SUM(governed_net_amount) FROM analytics.fct_orders',
+      lesson: {
+        category: 'semantic_rule',
+        rule: 'Use governed net revenue from the modeled amount.',
+        intentExamples: ['Net revenue', 'Recognized revenue'],
+        avoid: ['Do not use the raw amount.'],
+        expectedOutcome: 'A single governed revenue value.',
+      },
       snapshotId: 'snapshot-v2',
       resolveContext: context({ snapshotId: 'snapshot-v2', dependencies: [dependencyV2] }),
     });
@@ -258,6 +271,14 @@ describe('governed v3 hint lifecycle', () => {
       evaluationId: undefined,
       evaluationStatus: undefined,
       status: 'candidate',
+      guidance: 'Use governed net revenue from the modeled amount.',
+      lesson: {
+        category: 'semantic_rule',
+        rule: 'Use governed net revenue from the modeled amount.',
+        intentExamples: ['Net revenue', 'Recognized revenue'],
+        avoid: ['Do not use the raw amount.'],
+        expectedOutcome: 'A single governed revenue value.',
+      },
     });
   });
 

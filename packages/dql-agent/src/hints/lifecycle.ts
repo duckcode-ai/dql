@@ -22,6 +22,7 @@ import type {
   HintEvaluation,
   HintEvaluationCheck,
   HintLifecycleFailure,
+  HintLesson,
   HintScope,
   Hint,
   CorrectionTrace,
@@ -96,6 +97,7 @@ export interface EditGovernedHintCandidateInput {
   hintId: string;
   title?: string;
   guidance?: string;
+  lesson?: Partial<HintLesson>;
   correctedSql?: string;
   scope?: HintScope;
   snapshotId?: string;
@@ -431,6 +433,7 @@ export async function editGovernedHintCandidate(
     hintId: hint.id,
     title: input.title,
     guidance: input.guidance,
+    lesson: input.lesson,
     correctedSql,
     scope,
     snapshotId: current.snapshotId,

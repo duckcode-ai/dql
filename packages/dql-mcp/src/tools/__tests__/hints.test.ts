@@ -38,6 +38,13 @@ describe('correction-memory MCP tools', () => {
       question: 'What is net revenue for growth last quarter?',
       wrongAnswer: 'SELECT SUM(amount) FROM orders',
       correction: 'Use net_amount and exclude refunds.',
+      lesson: {
+        category: 'filter_rule',
+        rule: 'Use net amount and exclude refunds for recognized revenue.',
+        intentExamples: ['Net revenue by region'],
+        avoid: ['Do not sum gross amount.'],
+        expectedOutcome: 'Recognized revenue excludes refunded orders.',
+      },
       scope: { metric: 'revenue', domain: 'growth' },
       author: 'analyst',
     }) as { ok: boolean; hintId: string; status: string };
@@ -60,10 +67,17 @@ describe('correction-memory MCP tools', () => {
 
     const approvedList = listHints(ctx, { status: 'approved', metric: 'revenue' }) as {
       count: number;
-      hints: Array<{ scope: { metric?: string; domain?: string } }>;
+      hints: Array<{
+        scope: { metric?: string; domain?: string };
+        lesson?: { category: string; intentExamples: string[] };
+      }>;
     };
     expect(approvedList.count).toBe(1);
     expect(approvedList.hints[0].scope).toMatchObject({ metric: 'revenue', domain: 'growth' });
+    expect(approvedList.hints[0].lesson).toMatchObject({
+      category: 'filter_rule',
+      intentExamples: ['Net revenue by region'],
+    });
   });
 
   it('approve_hint errors clearly for an unknown hint', async () => {

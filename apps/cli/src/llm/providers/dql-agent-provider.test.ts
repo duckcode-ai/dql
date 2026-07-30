@@ -44,6 +44,24 @@ describe('resolveEffectiveQuestion — clarify follow-up folding', () => {
     ]));
     expect(out).toBe('revenue by product');
   });
+
+  it('does not merge a complete new analytical question after clarification', () => {
+    const out = resolveEffectiveQuestion(req([
+      { role: 'user', content: 'which customer should I use?' },
+      { role: 'assistant', content: 'Needs clarification: which customer should define the answer?' },
+      { role: 'user', content: 'what region has the most revenue' },
+    ]));
+    expect(out).toBe('what region has the most revenue');
+  });
+
+  it('does not merge a compact standalone analytical request after clarification', () => {
+    const out = resolveEffectiveQuestion(req([
+      { role: 'user', content: 'which breakdown should I use?' },
+      { role: 'assistant', content: 'I need one more detail: which metric and dimension should define the answer?' },
+      { role: 'user', content: 'revenue by region' },
+    ]));
+    expect(out).toBe('revenue by region');
+  });
 });
 
 describe('answer-loop tool surface', () => {

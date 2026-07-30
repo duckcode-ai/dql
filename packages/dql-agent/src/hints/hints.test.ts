@@ -81,7 +81,13 @@ describe('scoped correction memory — lifecycle', () => {
     expect(matches).toHaveLength(1);
     expect(matches[0].hint.id).toBe(hint.id);
     expect(matches[0].hint.guidance).toContain('net_amount');
+    expect(matches[0].hint.lesson).toMatchObject({
+      category: 'semantic_rule',
+      rule: expect.stringContaining('net_amount'),
+      intentExamples: ['What is revenue for the growth team last quarter?'],
+    });
     expect(matches[0].scopeReason).toContain('metric=revenue');
+    expect(matches[0].matchSignals.lexicalScore).toBeGreaterThan(0);
   });
 
   it('approved hints do not apply outside their scope', async () => {
@@ -153,6 +159,11 @@ describe('scoped correction memory — lifecycle', () => {
     const store = new HintStore(indexPath());
     try {
       expect(store.get(hint.id)?.title).toBe(hint.title);
+      expect(store.get(hint.id)?.lesson).toMatchObject({
+        version: 1,
+        category: 'semantic_rule',
+        rule: hint.guidance,
+      });
       expect(store.edgesForHint(hint.id)).toEqual(expect.arrayContaining([
         expect.objectContaining({ kind: 'belongs_to_domain', targetId: 'domain:commerce' }),
         expect.objectContaining({ kind: 'uses_relation', targetId: 'relation:analytics.fct_orders' }),
@@ -175,6 +186,48 @@ describe('scoped correction memory — lifecycle', () => {
     expect(ensureHintIndexFresh(projectRoot)).toMatchObject({
       hintCount: 1,
       rebuilt: true,
+    });
+  });
+
+  it('indexes reviewer-authored intent examples and exposes explainable lexical ranking', async () => {
+    const broad = recordCorrectionTrace(projectRoot, {
+      question: 'Revenue overview',
+      scope: { metric: 'revenue', domain: 'commerce' },
+      wrongAnswer: 'SELECT SUM(gross_amount) FROM orders',
+      correction: 'Use governed revenue.',
+      lesson: {
+        category: 'semantic_rule',
+        rule: 'Use governed revenue.',
+        intentExamples: ['General revenue report'],
+      },
+    }).hint;
+    const specific = recordCorrectionTrace(projectRoot, {
+      question: 'Which customers have the most revenue?',
+      scope: { metric: 'revenue', domain: 'commerce' },
+      wrongAnswer: 'SELECT customer_name, SUM(gross_amount) FROM orders GROUP BY customer_name',
+      correction: 'Use recognized net revenue when ranking customers.',
+      lesson: {
+        category: 'aggregation_rule',
+        rule: 'Use recognized net revenue when ranking customers.',
+        intentExamples: ['Top customers by recognized revenue', 'Customer revenue leaderboard'],
+        avoid: ['Do not rank customers by gross order amount.'],
+        expectedOutcome: 'One row per customer ordered by recognized revenue.',
+      },
+    }).hint;
+    reviewHint(projectRoot, { hintId: broad.id, decision: 'approved', reviewer: 'lead' });
+    reviewHint(projectRoot, { hintId: specific.id, decision: 'approved', reviewer: 'lead' });
+
+    const matches = await searchApproved({
+      metric: 'revenue',
+      domain: 'commerce',
+      text: 'top customers by recognized revenue',
+    });
+
+    expect(matches[0].hint.id).toBe(specific.id);
+    expect(matches[0].hint.lesson?.intentExamples).toContain('Top customers by recognized revenue');
+    expect(matches[0].matchSignals).toMatchObject({
+      lexicalRank: 0,
+      lexicalScore: 0.55,
     });
   });
 
@@ -346,6 +399,8 @@ describe('Git hint file format', () => {
     const body = readFileSync(join(hintsDir(projectRoot), hintFile!), 'utf-8');
     expect(body).toContain('status: candidate');
     expect(body).toContain('metric: revenue');
+    expect(body).toContain('lesson:');
+    expect(body).toContain('intentExamples:');
     expect(listHintsFromGit(projectRoot).map((h) => h.id)).toContain(hint.id);
   });
 });

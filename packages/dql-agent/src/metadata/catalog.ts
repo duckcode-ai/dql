@@ -113,10 +113,16 @@ export interface AppliedContextHint {
   hintId: string;
   title: string;
   guidance: string;
+  lesson: import('../hints/types.js').HintLesson;
   scopeReason: string;
   /** Matching domain/model/relation/column graph connections. */
   graphReason?: string;
   score: number;
+  matchSignals?: {
+    lexicalScore: number;
+    graphScore: number;
+    lexicalRank?: number;
+  };
   correctedSql?: string;
   traceId?: string;
 }

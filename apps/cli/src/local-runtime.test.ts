@@ -497,6 +497,92 @@ describe('local runtime network boundary', () => {
 });
 
 describe('warehouse metadata scope runtime API (CTX-005, PERF-002, API-006, SEC-003)', () => {
+  it('discovers visible schemas and marks dbt-covered schemas without persisting scope changes', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-metadata-discovery-api-'));
+    tempDirs.push(projectRoot);
+    const connection = {
+      driver: 'databricks' as const,
+      host: 'adb.example.test',
+      httpPath: '/sql/1.0/warehouses/test',
+      token: 'discovery-token',
+      catalog: 'analytics_prod',
+      schema: 'sales',
+    };
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'metadata-discovery-api',
+      connections: { default: connection },
+      defaultConnectionName: 'default',
+    }));
+    mkdirSync(join(projectRoot, 'target'), { recursive: true });
+    writeFileSync(join(projectRoot, 'target', 'manifest.json'), JSON.stringify({
+      nodes: {
+        'model.demo.orders': {
+          resource_type: 'model',
+          name: 'orders',
+          database: 'analytics_prod',
+          schema: 'sales',
+          alias: 'orders',
+        },
+      },
+      sources: {},
+    }));
+    const executePositional = vi.fn(async (sql: string): Promise<QueryResult> => {
+      if (sql === 'SHOW CATALOGS') {
+        return {
+          columns: [],
+          rows: [{ catalog: 'analytics_prod' }, { catalog: 'reporting_prod' }],
+          rowCount: 2,
+          executionTimeMs: 1,
+        };
+      }
+      return {
+        columns: [],
+        rows: sql.includes('analytics_prod')
+          ? [{ databaseName: 'sales' }, { databaseName: 'gold' }]
+          : [{ databaseName: 'finance' }],
+        rowCount: sql.includes('analytics_prod') ? 2 : 1,
+        executionTimeMs: 1,
+      };
+    });
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executePositional } as unknown as QueryExecutor,
+        connection,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(
+        `http://127.0.0.1:${port}/api/connections/default/metadata-scope/discovery`,
+        { method: 'POST' },
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        supported: true,
+        dbtScopes: [{ catalogOrDatabase: 'analytics_prod', schemas: ['sales'] }],
+        scopes: [
+          {
+            catalogOrDatabase: 'analytics_prod',
+            schemas: [
+              { name: 'gold', inDbtProject: false },
+              { name: 'sales', inDbtProject: true, dbtRelationCount: 1 },
+            ],
+          },
+          {
+            catalogOrDatabase: 'reporting_prod',
+            schemas: [{ name: 'finance', inDbtProject: false }],
+          },
+        ],
+      });
+      expect(executePositional).toHaveBeenCalledTimes(3);
+      expect(JSON.parse(readFileSync(join(projectRoot, 'dql.config.json'), 'utf8')).metadataScopes).toBeUndefined();
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
   it('applies a selected multi-catalog scope and serves schema UI from the activated generation', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-metadata-scope-api-'));
     tempDirs.push(projectRoot);
@@ -6113,8 +6199,24 @@ describe('governed correction lifecycle API', () => {
           wrongSql: 'SELECT SUM(amount) FROM orders',
           correctedSql: 'SELECT SUM(net_amount) FROM orders',
           scope: { metric: 'revenue' },
+          lesson: {
+            category: 'aggregation_rule',
+            rule: 'Use net amount for recognized revenue.',
+            intentExamples: ['Recognized revenue', 'Net revenue total'],
+            avoid: ['Do not sum the raw amount.'],
+            expectedOutcome: 'A single recognized-revenue value.',
+          },
         }),
-      }).then((response) => response.json()) as { hint: { id: string } };
+      }).then((response) => response.json()) as {
+        hint: {
+          id: string;
+          lesson?: { category: string; intentExamples: string[] };
+        };
+      };
+      expect(captured.hint.lesson).toMatchObject({
+        category: 'aggregation_rule',
+        intentExamples: ['Recognized revenue', 'Net revenue total'],
+      });
 
       const listed = await fetch(`${base}/api/agent/hints`).then((response) => response.json()) as {
         hints: Array<{
@@ -6144,13 +6246,31 @@ describe('governed correction lifecycle API', () => {
         body: JSON.stringify({
           title: 'Use governed net revenue',
           guidance: 'Prefer net_amount for revenue.',
+          lesson: {
+            category: 'semantic_rule',
+            rule: 'Prefer net_amount for revenue.',
+            intentExamples: ['Revenue after refunds'],
+            avoid: ['Do not use gross amount.'],
+            expectedOutcome: 'One governed revenue value.',
+          },
           correctedSql: 'SELECT SUM(net_amount) FROM governed_orders',
           scope: { metric: 'net_revenue', dbtModel: 'governed_orders' },
         }),
       });
-      const edited = await editedResponse.json() as { ok: boolean; hint: { title: string; status: string } };
+      const edited = await editedResponse.json() as {
+        ok: boolean;
+        hint: {
+          title: string;
+          status: string;
+          lesson?: { category: string; intentExamples: string[] };
+        };
+      };
       expect(editedResponse.status).toBe(200);
       expect(edited).toMatchObject({ ok: true, hint: { title: 'Use governed net revenue', status: 'candidate' } });
+      expect(edited.hint.lesson).toMatchObject({
+        category: 'semantic_rule',
+        intentExamples: ['Revenue after refunds'],
+      });
 
       const retiredResponse = await fetch(`${base}/api/agent/hints/${encodeURIComponent(captured.hint.id)}/lifecycle`, {
         method: 'POST',

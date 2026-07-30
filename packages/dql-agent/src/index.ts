@@ -609,6 +609,7 @@ export {
   conversationEnvelopeFromContext,
   conversationHistoryFromContext,
   conversationTurnContextState,
+  isLikelyClarificationReply,
   recallRelevantTurns,
   renderConversationEnvelopeForPrompt,
 } from "./conversation/snapshot.js";
@@ -971,6 +972,12 @@ export {
   hintsConflict,
 } from "./hints/types.js";
 export {
+  deriveHintLesson,
+  lessonForHint,
+  normalizeHintLesson,
+  hintLessonSearchText,
+} from "./hints/lesson.js";
+export {
   buildHintGraphEdges,
   questionHintGraphTargetIds,
   highSignalHintGraphTargetIds,
@@ -987,6 +994,7 @@ export type {
   HintDependencyKind,
   HintGraphEdge,
   HintGraphEdgeKind,
+  HintLesson,
   HintLifecycleFailure,
   HintReview,
   HintScope,

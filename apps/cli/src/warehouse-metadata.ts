@@ -57,6 +57,30 @@ export interface WarehouseMetadataStatus {
   observedTarget?: RuntimeSchemaObservedTarget;
 }
 
+export interface WarehouseMetadataDiscoveredSchema {
+  name: string;
+  inDbtProject: boolean;
+  dbtRelationCount: number;
+}
+
+export interface WarehouseMetadataDiscoveredScope {
+  catalogOrDatabase: string;
+  schemas: WarehouseMetadataDiscoveredSchema[];
+}
+
+export interface WarehouseMetadataDiscoveryResult {
+  version: 1;
+  connectionId: string;
+  driver: string;
+  discoveredAt: string;
+  supported: boolean;
+  scopes: WarehouseMetadataDiscoveredScope[];
+  dbtScopes: RuntimeSchemaScope[];
+  queryCount: number;
+  truncated: boolean;
+  message: string;
+}
+
 const MAX_SCOPES = 20;
 const MAX_SCHEMAS = 100;
 const MAX_RELATIONS = 5_000;
@@ -65,6 +89,9 @@ const MAX_COLUMNS_PER_TABLE = 160;
 const MAX_METADATA_ROWS_PER_QUERY = 50_000;
 const MAX_METADATA_BYTES_PER_QUERY = 24 * 1024 * 1024;
 const METADATA_QUERY_DEADLINE_MS = 60_000;
+const MAX_DISCOVERY_CATALOGS = 40;
+const MAX_DISCOVERY_SCHEMAS = 1_000;
+const DISCOVERY_DEADLINE_MS = 30_000;
 
 export function normalizeConnectionMetadataScope(
   connectionId: string,
@@ -213,6 +240,136 @@ export async function syncWarehouseMetadata(input: {
     tables: normalizedTables,
   });
   return { scope: input.scope, snapshot };
+}
+
+/**
+ * Explicit setup-time discovery of database/catalog and schema names visible to
+ * the configured connection. This is never called by Ask and never persists or
+ * broadens a metadata scope. The user must still select and apply additional
+ * non-dbt schemas before DQL indexes their tables and columns.
+ */
+export async function discoverWarehouseMetadataScopes(input: {
+  connectionId: string;
+  executor: QueryExecutor;
+  connection: ConnectionConfig;
+  dbtRelations?: string[];
+}): Promise<WarehouseMetadataDiscoveryResult> {
+  const observedIdentity = await observeWarehouseTargetIdentity(input.executor, input.connection);
+  assertObservedScopeCompatible(input.connection, observedIdentity.redactedContext);
+  const dbtScopes = scopesFromRelations(
+    input.dbtRelations ?? [],
+    cleanIdentifier(input.connection.catalog ?? input.connection.database),
+    cleanIdentifier(input.connection.schema),
+  );
+  const dbtCounts = dbtRelationCountsByScope(input.dbtRelations ?? [], input.connection);
+  const discovered = new Map<string, { catalogOrDatabase: string; schemas: Map<string, string> }>();
+  let queryCount = 0;
+  let truncated = false;
+  let supported = true;
+
+  const add = (catalogValue: string | undefined, schemaValue: string | undefined): void => {
+    const catalogOrDatabase = cleanIdentifier(catalogValue);
+    const schema = cleanIdentifier(schemaValue);
+    if (!catalogOrDatabase || !schema || isSystemSchema(schema)) return;
+    const catalogKey = normalizeIdentifierKey(catalogOrDatabase);
+    const current = discovered.get(catalogKey) ?? {
+      catalogOrDatabase,
+      schemas: new Map<string, string>(),
+    };
+    if (current.schemas.size < MAX_SCHEMAS) {
+      current.schemas.set(normalizeIdentifierKey(schema), schema);
+    } else {
+      truncated = true;
+    }
+    discovered.set(catalogKey, current);
+  };
+
+  if (input.connection.driver === 'snowflake') {
+    const result = await input.executor.executePositional(
+      `SHOW TERSE SCHEMAS IN ACCOUNT LIMIT ${MAX_DISCOVERY_SCHEMAS}`,
+      [],
+      input.connection,
+      discoveryQueryOptions(),
+    );
+    queryCount += 1;
+    truncated ||= result.truncated === true || result.rows.length >= MAX_DISCOVERY_SCHEMAS;
+    for (const row of result.rows) {
+      add(
+        firstRowString(row, ['database_name', 'database', 'catalog_name']),
+        firstRowString(row, ['name', 'schema_name', 'schema']),
+      );
+    }
+  } else if (input.connection.driver === 'databricks') {
+    const catalogsResult = await input.executor.executePositional(
+      'SHOW CATALOGS',
+      [],
+      input.connection,
+      discoveryQueryOptions(),
+    );
+    queryCount += 1;
+    const catalogs = uniqueStrings(catalogsResult.rows
+      .map((row) => firstRowString(row, ['catalog', 'catalog_name', 'catalogName']))
+      .filter((value): value is string => Boolean(value)));
+    truncated ||= catalogsResult.truncated === true || catalogs.length > MAX_DISCOVERY_CATALOGS;
+    for (const catalog of catalogs.slice(0, MAX_DISCOVERY_CATALOGS)) {
+      const schemasResult = await input.executor.executePositional(
+        `SHOW SCHEMAS IN ${quoteIdentifier(catalog, '`')}`,
+        [],
+        input.connection,
+        discoveryQueryOptions(),
+      );
+      queryCount += 1;
+      truncated ||= schemasResult.truncated === true;
+      for (const row of schemasResult.rows) {
+        add(
+          catalog,
+          firstRowString(row, ['databaseName', 'schema_name', 'schema', 'namespace', 'name']),
+        );
+      }
+    }
+  } else {
+    supported = false;
+    add(
+      input.connection.catalog ?? input.connection.database ?? defaultCatalogForDriver(input.connection.driver),
+      input.connection.schema ?? defaultSchemaForDriver(input.connection.driver),
+    );
+  }
+
+  const scopes = Array.from(discovered.values())
+    .map((scope) => ({
+      catalogOrDatabase: scope.catalogOrDatabase,
+      schemas: Array.from(scope.schemas.values())
+        .sort((left, right) => left.localeCompare(right))
+        .map((schema) => {
+          const count = dbtCounts.get(scopeKey(scope.catalogOrDatabase, schema)) ?? 0;
+          return {
+            name: schema,
+            inDbtProject: count > 0,
+            dbtRelationCount: count,
+          };
+        }),
+    }))
+    .filter((scope) => scope.schemas.length > 0)
+    .sort((left, right) => left.catalogOrDatabase.localeCompare(right.catalogOrDatabase));
+  const additionalCount = scopes.reduce(
+    (count, scope) => count + scope.schemas.filter((schema) => !schema.inDbtProject).length,
+    0,
+  );
+
+  return {
+    version: 1,
+    connectionId: input.connectionId,
+    driver: input.connection.driver,
+    discoveredAt: new Date().toISOString(),
+    supported,
+    scopes,
+    dbtScopes,
+    queryCount,
+    truncated,
+    message: supported
+      ? `Found ${additionalCount} additional schema${additionalCount === 1 ? '' : 's'} outside the dbt project. Nothing was added or synchronized.`
+      : 'Live catalog discovery is not available for this connector. The configured database and schema are shown when available.',
+  };
 }
 
 export function warehouseMetadataStatus(
@@ -461,6 +618,55 @@ function rowString(row: Record<string, unknown>, key: string): string | undefine
     return cleanIdentifier(typeof value === 'string' ? value : value == null ? undefined : String(value));
   }
   return undefined;
+}
+
+function firstRowString(row: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = rowString(row, key);
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function discoveryQueryOptions(): {
+  maxRows: number;
+  maxBytes: number;
+  batchSize: number;
+  deadlineMs: number;
+} {
+  return {
+    maxRows: MAX_DISCOVERY_SCHEMAS,
+    maxBytes: 2 * 1024 * 1024,
+    batchSize: 500,
+    deadlineMs: DISCOVERY_DEADLINE_MS,
+  };
+}
+
+function dbtRelationCountsByScope(
+  relations: string[],
+  connection: ConnectionConfig,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  const fallbackDatabase = cleanIdentifier(connection.catalog ?? connection.database);
+  const fallbackSchema = cleanIdentifier(connection.schema);
+  for (const relation of relations) {
+    const parts = relationParts(relation);
+    const catalog = parts.catalogOrDatabase ?? fallbackDatabase;
+    const schema = parts.schema ?? fallbackSchema;
+    if (!catalog || !schema) continue;
+    const key = scopeKey(catalog, schema);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function scopeKey(catalogOrDatabase: string, schema: string): string {
+  return `${normalizeIdentifierKey(catalogOrDatabase)}::${normalizeIdentifierKey(schema)}`;
+}
+
+function isSystemSchema(schema: string): boolean {
+  return ['information_schema', 'pg_catalog', 'sys', 'system']
+    .includes(normalizeIdentifierKey(schema));
 }
 
 function defaultCatalogForDriver(driver: string): string | undefined {

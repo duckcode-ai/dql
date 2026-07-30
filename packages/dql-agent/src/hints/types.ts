@@ -36,6 +36,35 @@ export interface HintScope {
   block?: string;
 }
 
+/**
+ * The reusable, human-reviewed instruction distilled from one correction.
+ *
+ * `guidance` remains on {@link Hint} for backwards compatibility. New writers
+ * keep `guidance === lesson.rule`; the structured fields make the experience
+ * searchable and tell the agent when to apply it without treating the old SQL
+ * as a template to copy.
+ */
+export interface HintLesson {
+  version: 1;
+  category:
+    | 'semantic_rule'
+    | 'filter_rule'
+    | 'join_rule'
+    | 'aggregation_rule'
+    | 'grain_rule'
+    | 'time_rule'
+    | 'relation_rule'
+    | 'dialect_rule';
+  /** The concise, reusable instruction approved by the analyst. */
+  rule: string;
+  /** Representative questions/intents this lesson should help with. */
+  intentExamples: string[];
+  /** Explicit mistakes or approaches the next draft should avoid. */
+  avoid: string[];
+  /** Optional result/shape expectation used as advisory validation context. */
+  expectedOutcome?: string;
+}
+
 export type HintStatus = 'candidate' | 'approved' | 'rejected' | 'retired';
 export type HintEvaluationStatus = 'passed' | 'failed';
 
@@ -146,6 +175,8 @@ export interface CorrectionTrace {
   wrongAnswer: string;
   /** The analyst's correction (corrected SQL, rule, or guidance). */
   correction: string;
+  /** Proposed reusable lesson captured with the immutable correction trace. */
+  lesson?: HintLesson;
   /** Optional free-text rationale from the analyst. */
   rationale?: string;
   /** Who recorded the correction. */
@@ -180,6 +211,8 @@ export interface Hint {
   title: string;
   /** The guidance the agent should apply within scope (plain language / rule). */
   guidance: string;
+  /** Structured governed experience; absent on older Git hints. */
+  lesson?: HintLesson;
   /** The scope this hint applies within. */
   scope: HintScope;
   /** Lifecycle state. Approved-only is enforced at retrieval. */
@@ -235,6 +268,12 @@ export interface ScopedHintMatch {
   scopeReason: string;
   /** Matching graph connections used to rank this hint for the question. */
   graphReason?: string;
+  /** Explainable score components; none can bypass lifecycle or scope gates. */
+  matchSignals?: {
+    lexicalScore: number;
+    graphScore: number;
+    lexicalRank?: number;
+  };
   /** Snippet from the FTS match, if any. */
   snippet?: string;
 }

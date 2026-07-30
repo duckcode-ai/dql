@@ -5,6 +5,7 @@ import { Sparkles } from 'lucide-react';
 import {
   api,
   type AgentHint,
+  type AgentHintLesson,
   type AgentMemory,
   type OAuthProviderId,
   type OAuthStatus,
@@ -1328,6 +1329,26 @@ function ProviderCard({
 }
 
 
+function hintLessonForEdit(hint: AgentHint): AgentHintLesson {
+  return hint.lesson ?? {
+    version: 1,
+    category: 'semantic_rule',
+    rule: hint.guidance,
+    intentExamples: hint.trace?.question ? [hint.trace.question] : [],
+    avoid: [],
+  };
+}
+
+function parseHintLessonLines(value: string): string[] {
+  return [...new Map(
+    value
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .map((item) => [item.toLowerCase(), item] as const),
+  ).values()].slice(0, 8);
+}
+
 /**
  * CTX-005 / API-003: governed correction review and lifecycle resolution.
  *
@@ -1413,6 +1434,10 @@ function HintReviewQueue({ t, onStatus }: { t: Theme; onStatus: (message: string
       const result = await api.updateAgentHint(editing.id, {
         title: editing.title,
         guidance: editing.guidance,
+        lesson: {
+          ...hintLessonForEdit(editing),
+          rule: editing.guidance,
+        },
         correctedSql: editing.correctedSql,
         scope: editing.scope,
       });
@@ -1519,6 +1544,83 @@ function HintReviewQueue({ t, onStatus }: { t: Theme; onStatus: (message: string
           <>
             <input value={editing.title} onChange={(event) => setEditing({ ...editing, title: event.target.value })} placeholder="Hint title" style={controlStyle(t, { size: 'sm' })} />
             <textarea value={editing.guidance} onChange={(event) => setEditing({ ...editing, guidance: event.target.value })} placeholder="Guidance for matching questions" rows={3} style={{ ...controlStyle(t, { size: 'sm' }), resize: 'vertical' }} />
+            <details style={{ border: `1px solid ${t.cellBorder}`, borderRadius: 7, padding: '7px 8px' }}>
+              <summary style={{ cursor: 'pointer', fontSize: 10.5, color: t.textSecondary, fontWeight: 650 }}>Structured lesson</summary>
+              <div style={{ display: 'grid', gap: 7, paddingTop: 7 }}>
+                <select
+                  value={hintLessonForEdit(editing).category}
+                  onChange={(event) => setEditing({
+                    ...editing,
+                    lesson: {
+                      ...hintLessonForEdit(editing),
+                      category: event.target.value as AgentHintLesson['category'],
+                    },
+                  })}
+                  style={controlStyle(t, { size: 'sm' })}
+                >
+                  <option value="semantic_rule">Business definition</option>
+                  <option value="filter_rule">Filter rule</option>
+                  <option value="join_rule">Join rule</option>
+                  <option value="aggregation_rule">Aggregation rule</option>
+                  <option value="grain_rule">Grain rule</option>
+                  <option value="time_rule">Time rule</option>
+                  <option value="relation_rule">Table or column rule</option>
+                  <option value="dialect_rule">SQL dialect rule</option>
+                </select>
+                <textarea
+                  value={hintLessonForEdit(editing).intentExamples.join('\n')}
+                  onChange={(event) => setEditing({
+                    ...editing,
+                    lesson: {
+                      ...hintLessonForEdit(editing),
+                      intentExamples: event.target.value.split(/\r?\n/),
+                    },
+                  })}
+                  onBlur={() => setEditing({
+                    ...editing,
+                    lesson: {
+                      ...hintLessonForEdit(editing),
+                      intentExamples: parseHintLessonLines(hintLessonForEdit(editing).intentExamples.join('\n')),
+                    },
+                  })}
+                  placeholder="Similar questions, one per line"
+                  rows={3}
+                  style={{ ...controlStyle(t, { size: 'sm' }), resize: 'vertical' }}
+                />
+                <textarea
+                  value={hintLessonForEdit(editing).avoid.join('\n')}
+                  onChange={(event) => setEditing({
+                    ...editing,
+                    lesson: {
+                      ...hintLessonForEdit(editing),
+                      avoid: event.target.value.split(/\r?\n/),
+                    },
+                  })}
+                  onBlur={() => setEditing({
+                    ...editing,
+                    lesson: {
+                      ...hintLessonForEdit(editing),
+                      avoid: parseHintLessonLines(hintLessonForEdit(editing).avoid.join('\n')),
+                    },
+                  })}
+                  placeholder="Known mistakes to avoid, one per line"
+                  rows={2}
+                  style={{ ...controlStyle(t, { size: 'sm' }), resize: 'vertical' }}
+                />
+                <input
+                  value={hintLessonForEdit(editing).expectedOutcome ?? ''}
+                  onChange={(event) => setEditing({
+                    ...editing,
+                    lesson: {
+                      ...hintLessonForEdit(editing),
+                      expectedOutcome: event.target.value || undefined,
+                    },
+                  })}
+                  placeholder="Expected outcome or result shape"
+                  style={controlStyle(t, { size: 'sm' })}
+                />
+              </div>
+            </details>
             <textarea value={editing.correctedSql ?? ''} onChange={(event) => setEditing({ ...editing, correctedSql: event.target.value })} placeholder="Read-only corrected SQL" rows={5} style={{ ...controlStyle(t, { size: 'sm' }), resize: 'vertical', fontFamily: t.fontMono }} />
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 7 }}>
               {([
@@ -1551,6 +1653,14 @@ function HintReviewQueue({ t, onStatus }: { t: Theme; onStatus: (message: string
         ) : (
           <>
             <div style={{ fontSize: 11.5, color: t.textSecondary, lineHeight: 1.5 }}>{hint.guidance}</div>
+            {hint.lesson ? (
+              <div style={{ display: 'grid', gap: 3, padding: '7px 8px', borderRadius: 6, background: t.btnBg, fontSize: 10.5, color: t.textMuted }}>
+                <div><b>Lesson type:</b> {hint.lesson.category.replace(/_/g, ' ')}</div>
+                {hint.lesson.intentExamples.length ? <div><b>Similar questions:</b> {hint.lesson.intentExamples.join(' · ')}</div> : null}
+                {hint.lesson.avoid.length ? <div><b>Avoid:</b> {hint.lesson.avoid.join(' · ')}</div> : null}
+                {hint.lesson.expectedOutcome ? <div><b>Expected:</b> {hint.lesson.expectedOutcome}</div> : null}
+              </div>
+            ) : null}
             {hint.correctedSql ? <pre style={{ margin: 0, fontSize: 10.5, fontFamily: t.fontMono, color: t.textMuted, whiteSpace: 'pre-wrap', maxHeight: 120, overflow: 'auto' }}>{hint.correctedSql}</pre> : null}
             {renderEvidence(hint)}
             <textarea
@@ -1564,7 +1674,7 @@ function HintReviewQueue({ t, onStatus }: { t: Theme; onStatus: (message: string
               {hint.status === 'candidate' ? (
                 <>
                   <button type="button" disabled={busy === hint.id} onClick={() => void review(hint, 'approved')} style={controlStyle(t, { variant: 'primary', size: 'sm', disabled: busy === hint.id })}>{busy === hint.id ? 'Checking…' : hintReviewActionLabel(hint)}</button>
-                  <button type="button" disabled={busy === hint.id} onClick={() => setEditing({ ...hint })} style={controlStyle(t, { size: 'sm', disabled: busy === hint.id })}>Edit candidate</button>
+                  <button type="button" disabled={busy === hint.id} onClick={() => setEditing({ ...hint, lesson: hintLessonForEdit(hint) })} style={controlStyle(t, { size: 'sm', disabled: busy === hint.id })}>Edit candidate</button>
                   <button type="button" disabled={busy === hint.id} onClick={() => void review(hint, 'rejected')} style={controlStyle(t, { variant: 'danger', size: 'sm', disabled: busy === hint.id })}>Reject</button>
                 </>
               ) : null}

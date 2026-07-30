@@ -71,6 +71,34 @@ export interface ConversationHistoryMessage {
   text: string;
 }
 
+const STANDALONE_QUESTION_START_RE =
+  /^(?:who|what|why|where|when|how|show|give|list|compare|build|create|which|calculate|find|tell)\b/i;
+
+/**
+ * A pending clarification is deliberately one-shot. Only a short, incomplete
+ * value/choice should bind to it; a complete analytical request starts a fresh
+ * turn even when the previous turn asked for clarification.
+ */
+export function isLikelyClarificationReply(value: string): boolean {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (!normalized) return false;
+  const words = normalized.split(' ').filter(Boolean);
+  if (words.length > 40) return false;
+  if (words.length >= 4 && STANDALONE_QUESTION_START_RE.test(normalized)) return false;
+  if (words.length >= 7 && /\?\s*$/.test(normalized)) return false;
+
+  // Compact analytical phrases such as "revenue by region" are complete Ask
+  // turns even without a verb or question mark. A terse choice such as
+  // "by region", "last quarter", or "use order date" remains a clarification.
+  if (words.length >= 3) {
+    const plan = buildAnalysisQuestionPlan(normalized);
+    const hasMeasure = plan.metricTerms.length > 0;
+    const hasSubject = plan.entities.length > 0 || plan.dimensionTerms.length > 0;
+    if ((hasMeasure && hasSubject) || plan.entities.length >= 2) return false;
+  }
+  return true;
+}
+
 /**
  * Build the snapshot for a new question. When the question starts a genuinely
  * new topic (shift), the carried filters are deterministically cleared in the
@@ -93,6 +121,11 @@ export function buildConversationSnapshot(
     }
   }
   const latest = recent[recent.length - 1];
+  const latestNeedsClarification = Boolean(
+    latest && (latest.route === 'clarify' || latest.runStatus === 'needs_clarification'),
+  );
+  const carryPendingClarification = latestNeedsClarification
+    && (!options.question || isLikelyClarificationReply(options.question));
   return {
     version: 1,
     threadId,
@@ -102,7 +135,7 @@ export function buildConversationSnapshot(
     workingState: hasWorkingState(workingState) ? workingState : undefined,
     recentTurns: recent.map(snapshotTurn),
     topicRelation,
-    pendingClarification: latest && (latest.route === 'clarify' || latest.runStatus === 'needs_clarification')
+    pendingClarification: latest && carryPendingClarification
       ? {
           sourceTurnId: latest.id,
           question: latest.answerSummary ?? latest.answerText ?? latest.question,
@@ -164,7 +197,8 @@ export async function recallRelevantTurns(
   try {
     const excluded = new Set(options.excludeTurnIds ?? []);
     const candidates = store.searchTurns({ query: question, threadId, limit: 24 })
-      .filter((turn) => !excluded.has(turn.id));
+      .filter((turn) => !excluded.has(turn.id))
+      .filter((turn) => isUsableAnalyticalContextTurn(snapshotTurn(turn)));
     if (candidates.length === 0) return [];
     const ranked = await hybridRank(
       question,
@@ -211,18 +245,21 @@ export function conversationHistoryFromContext(
 ): ConversationHistoryMessage[] {
   const envelope = conversationEnvelopeFromContext(context);
   if (!envelope) return [];
-  return envelope.recentTurns.slice(-Math.max(1, limit)).flatMap((turn) => {
-    const answer = turn.answerSummary?.trim();
-    return [
-      { role: 'user' as const, text: turn.question },
-      ...(answer
-        ? [{
-            role: 'assistant' as const,
-            text: `[${conversationTurnContextState(turn)}] ${answer}`,
-          }]
-        : []),
-    ];
-  });
+  return envelope.recentTurns
+    .filter(isUsableAnalyticalContextTurn)
+    .slice(-Math.max(1, limit))
+    .flatMap((turn) => {
+      const answer = turn.answerSummary?.trim();
+      return [
+        { role: 'user' as const, text: turn.question },
+        ...(answer
+          ? [{
+              role: 'assistant' as const,
+              text: `[${conversationTurnContextState(turn)}] ${answer}`,
+            }]
+          : []),
+      ];
+    });
 }
 
 /** Compact non-prose context shared by every orchestration stage. */
@@ -321,6 +358,17 @@ export function conversationTurnContextState(turn: ConversationSnapshotTurn): st
     return 'confirmed';
   }
   return 'context';
+}
+
+function isUsableAnalyticalContextTurn(turn: ConversationSnapshotTurn): boolean {
+  const state = conversationTurnContextState(turn);
+  if (state === 'blocked' || state === 'unresolved') return false;
+  if (
+    turn.runStatus
+    && turn.runStatus !== 'completed'
+    && turn.runStatus !== 'needs_review'
+  ) return false;
+  return true;
 }
 
 function hasWorkingState(state: ConversationWorkingState): boolean {

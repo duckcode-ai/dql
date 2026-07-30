@@ -15,6 +15,7 @@ import {
   hintAppliesToScope,
   type Hint,
   type HintGraphEdge,
+  type HintLesson,
   type HintScope,
   type HintStatus,
   type QuestionScope,
@@ -34,6 +35,7 @@ import {
   type EmbeddingProvider,
 } from '../embeddings/provider.js';
 import { sanitizeFtsQuery } from '../memory/fts-query.js';
+import { hintLessonSearchText, lessonForHint } from './lesson.js';
 
 const require = createRequire(import.meta.url);
 let databaseCtor: typeof Database | null = null;
@@ -68,6 +70,7 @@ export class HintStore {
         id            TEXT PRIMARY KEY,
         title         TEXT NOT NULL,
         guidance      TEXT NOT NULL,
+        lesson_json   TEXT NOT NULL DEFAULT '{}',
         status        TEXT NOT NULL DEFAULT 'candidate',
         metric        TEXT,
         dbt_model     TEXT,
@@ -126,6 +129,7 @@ export class HintStore {
       );
     `);
     this.ensureColumn('snapshot_id', 'TEXT');
+    this.ensureColumn('lesson_json', "TEXT NOT NULL DEFAULT '{}'");
     this.ensureColumn('required_evaluation', 'TEXT');
     this.ensureColumn('evaluation_id', 'TEXT');
     this.ensureColumn('evaluation_status', 'TEXT');
@@ -144,11 +148,11 @@ export class HintStore {
   rebuild(hints: Hint[], projectionFingerprint?: string): void {
     const insert = this.db.prepare(`
       INSERT OR REPLACE INTO agent_hints (
-        id, title, guidance, status, metric, dbt_model, domain, dialect, term, block,
+        id, title, guidance, lesson_json, status, metric, dbt_model, domain, dialect, term, block,
         trace_id, corrected_sql, tags_json, author, reviewer, snapshot_id,
         required_evaluation, evaluation_id, evaluation_status, dependencies_json,
         lifecycle_errors_json, supersedes, created_at, updated_at, source_path
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertFts = this.db.prepare(`
       INSERT INTO agent_hints_fts (id, title, guidance, tags, scope)
@@ -179,11 +183,11 @@ export class HintStore {
   upsert(hint: Hint): void {
     const insert = this.db.prepare(`
       INSERT OR REPLACE INTO agent_hints (
-        id, title, guidance, status, metric, dbt_model, domain, dialect, term, block,
+        id, title, guidance, lesson_json, status, metric, dbt_model, domain, dialect, term, block,
         trace_id, corrected_sql, tags_json, author, reviewer, snapshot_id,
         required_evaluation, evaluation_id, evaluation_status, dependencies_json,
         lifecycle_errors_json, supersedes, created_at, updated_at, source_path
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertFts = this.db.prepare(`
       INSERT INTO agent_hints_fts (id, title, guidance, tags, scope)
@@ -217,6 +221,7 @@ export class HintStore {
       hint.id,
       hint.title,
       hint.guidance,
+      JSON.stringify(lessonForHint(hint)),
       hint.status,
       hint.scope.metric ?? null,
       hint.scope.dbtModel ?? null,
@@ -243,7 +248,7 @@ export class HintStore {
     insertFts.run(
       hint.id,
       hint.title,
-      hint.guidance,
+      hintLessonSearchText(hint),
       (hint.tags ?? []).join(' '),
       scopeText(hint.scope),
     );
@@ -329,7 +334,7 @@ export class HintStore {
     const graphRows = recallTargets.length > 0
       ? this.approvedHintsForTargets(recallTargets, Math.max(limit * 4, 24))
       : [];
-    const ftsIds = new Set(ftsRows.map((row) => row.id));
+    const ftsRanks = new Map(ftsRows.map((row, index) => [row.id, index]));
     const candidates = new Map<string, HintRow & { rank: number }>();
     for (const row of [...ftsRows, ...graphRows]) {
       if (!candidates.has(row.id)) candidates.set(row.id, row);
@@ -341,14 +346,22 @@ export class HintStore {
         const hint = rowToHint(row);
         const verdict = hintAppliesToScope(hint.scope, questionScope);
         const edges = this.edgesForHint(hint.id);
-        const graphScore = hintGraphOverlapScore(edges, allGraphTargets);
-        const lexicalScore = ftsIds.has(row.id)
-          ? (row.rank ? 1 / (1 + Math.max(0, row.rank)) : 0.01)
-          : 0;
+        const rawGraphScore = hintGraphOverlapScore(edges, allGraphTargets);
+        const graphScore = Math.min(rawGraphScore / 0.85, 1) * 0.45;
+        const lexicalRank = ftsRanks.get(row.id);
+        // FTS5 bm25 values are negative, so treating them as a positive
+        // distance made every lexical match score 1. Reciprocal result rank is
+        // deterministic, bounded, and preserves FTS5 ordering.
+        const lexicalScore = lexicalRank === undefined ? 0 : 0.55 / (1 + lexicalRank);
         return {
           hint,
           verdict,
           graphReason: describeHintGraphOverlap(edges, allGraphTargets),
+          matchSignals: {
+            lexicalScore,
+            graphScore,
+            lexicalRank,
+          },
           retrievalScore: Math.min(lexicalScore + graphScore, 1),
         };
       })
@@ -361,7 +374,7 @@ export class HintStore {
       questionScope.text,
       scoped.map((entry) => ({
         item: entry,
-        text: `${entry.hint.title} ${entry.hint.guidance} ${(entry.hint.tags ?? []).join(' ')}`,
+        text: `${entry.hint.title} ${hintLessonSearchText(entry.hint)} ${(entry.hint.tags ?? []).join(' ')}`,
         ftsScore: entry.retrievalScore,
       })),
       {
@@ -375,6 +388,7 @@ export class HintStore {
       score: entry.score,
       scopeReason: entry.item.verdict.reason,
       graphReason: entry.item.graphReason,
+      matchSignals: entry.item.matchSignals,
       snippet: undefined,
     }));
   }
@@ -438,6 +452,7 @@ type HintRow = {
   id: string;
   title: string;
   guidance: string;
+  lesson_json: string;
   status: string;
   metric: string | null;
   dbt_model: string | null;
@@ -485,10 +500,15 @@ function rowToHintGraphEdge(row: HintGraphEdgeRow): HintGraphEdge {
 }
 
 function rowToHint(row: HintRow): Hint {
+  const lesson = lessonForHint({
+    guidance: row.guidance,
+    lesson: safeJSON<HintLesson | undefined>(row.lesson_json, undefined),
+  });
   return {
     id: row.id,
     title: row.title,
     guidance: row.guidance,
+    lesson,
     status: row.status as HintStatus,
     scope: {
       metric: row.metric ?? undefined,

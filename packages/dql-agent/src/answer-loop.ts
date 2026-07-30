@@ -5393,9 +5393,18 @@ function renderContextPrompt(
   // still must NOT override a certified artifact that already answers exactly.
   const appliedHints = contextPack?.appliedHints ?? [];
   const hintsSection = appliedHints.length > 0
-    ? `\n\n## Applied governed hints (human-approved corrections)\n\nReviewed, scope-matched corrections from your team. Apply them when preparing a SQL preview to avoid known mistakes; they refine the DQL artifact's SQL preview but MUST NOT override a certified artifact that already answers the question.\n${appliedHints
+    ? `\n\n## Applied governed experience (human-approved lessons)\n\nReviewed, scope-matched lessons from this Git project. Use the lesson rule and avoid-patterns to prepare a better draft, then validate against CURRENT certified artifacts, semantic/dbt context, and inspected schema. A prior corrected SQL statement is an example of the lesson, not a template to copy. These lessons MUST NOT override current governed truth or certify the new answer.\n${appliedHints
         .slice(0, 6)
-        .map((h) => `- \`${h.title}\`: ${h.guidance}${h.graphReason ? `\n  matched graph context: ${h.graphReason}` : ''}${h.correctedSql ? `\n  corrected SQL pattern: ${h.correctedSql.replace(/\s+/g, ' ').trim().slice(0, 240)}` : ''}`)
+        .map((h) => {
+          const lesson = h.lesson;
+          return `- \`${h.title}\` (${lesson?.category?.replace(/_/g, ' ') ?? 'reviewed rule'}): ${lesson?.rule ?? h.guidance}`
+            + `${lesson?.intentExamples?.length ? `\n  similar intents: ${lesson.intentExamples.slice(0, 4).join(' | ')}` : ''}`
+            + `${lesson?.avoid?.length ? `\n  avoid: ${lesson.avoid.slice(0, 4).join(' | ')}` : ''}`
+            + `${lesson?.expectedOutcome ? `\n  expected outcome: ${lesson.expectedOutcome}` : ''}`
+            + `\n  matched scope: ${h.scopeReason}`
+            + `${h.graphReason ? `\n  matched graph context: ${h.graphReason}` : ''}`
+            + `${h.correctedSql ? `\n  reviewed SQL example (adapt and revalidate): ${h.correctedSql.replace(/\s+/g, ' ').trim().slice(0, 240)}` : ''}`;
+        })
         .join('\n')}`
     : '';
   const extraSection = extraContext?.trim()

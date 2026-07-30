@@ -14,15 +14,23 @@ import { defaultHintIndexPath } from './git-store.js';
 import { HintStore } from './store.js';
 import { hintsConflict, type Hint, type QuestionScope, type ScopedHintMatch } from './types.js';
 import { assessHintFreshness } from './dependencies.js';
+import { lessonForHint } from './lesson.js';
 import type { EmbeddingProvider } from '../embeddings/provider.js';
+import type { HintLesson } from './types.js';
 
 export interface AppliedHint {
   hintId: string;
   title: string;
   guidance: string;
+  lesson: HintLesson;
   scopeReason: string;
   graphReason?: string;
   score: number;
+  matchSignals?: {
+    lexicalScore: number;
+    graphScore: number;
+    lexicalRank?: number;
+  };
   correctedSql?: string;
   traceId?: string;
 }
@@ -161,9 +169,11 @@ function toAppliedHint(match: ScopedHintMatch): AppliedHint {
     hintId: match.hint.id,
     title: match.hint.title,
     guidance: match.hint.guidance,
+    lesson: lessonForHint(match.hint),
     scopeReason: match.scopeReason,
     graphReason: match.graphReason,
     score: match.score,
+    matchSignals: match.matchSignals,
     correctedSql: match.hint.correctedSql,
     traceId: match.hint.traceId,
   };

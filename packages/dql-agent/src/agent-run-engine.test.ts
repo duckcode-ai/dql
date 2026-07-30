@@ -1080,6 +1080,50 @@ describe("clarification continuations", () => {
     expect(continuation).toBeUndefined();
   });
 
+  it("recovers to a previously successful analytical question after clarification", () => {
+    const continuation = resolveClarificationContinuation({
+      question: "what region has the most revenue",
+      conversationContext: {
+        serverSnapshot: {
+          recentTurns: [
+            {
+              question: "what region has the most revenue",
+              answerSummary: "Philadelphia has the highest revenue.",
+              route: "answer",
+              runStatus: "completed",
+            },
+            {
+              question: "filter that customer",
+              answerSummary: "Which customer column should define the answer?",
+              route: "clarify",
+              runStatus: "needs_clarification",
+            },
+          ],
+        },
+      },
+    });
+
+    expect(continuation).toBeUndefined();
+  });
+
+  it("treats a compact metric-by-dimension request as a fresh turn", () => {
+    const continuation = resolveClarificationContinuation({
+      question: "revenue by region",
+      conversationContext: {
+        serverSnapshot: {
+          recentTurns: [{
+            question: "filter that customer",
+            answerSummary: "Which customer column should define the answer?",
+            route: "clarify",
+            runStatus: "needs_clarification",
+          }],
+        },
+      },
+    });
+
+    expect(continuation).toBeUndefined();
+  });
+
   it("recovers the original question and actual clarifying question from persisted turns", () => {
     const continuation = resolveClarificationContinuation({
       question: "yes",

@@ -4095,11 +4095,55 @@ function appliedLearningsFromRun(run: AgentRun): AppliedLearning[] {
     const hints = Array.isArray(payload.appliedHints) ? payload.appliedHints : [];
     for (const raw of hints) {
       if (!raw || typeof raw !== 'object') continue;
-      const h = raw as { title?: unknown; guidance?: unknown };
+      const h = raw as {
+        hintId?: unknown;
+        title?: unknown;
+        guidance?: unknown;
+        scopeReason?: unknown;
+        graphReason?: unknown;
+        matchSignals?: {
+          lexicalScore?: unknown;
+          graphScore?: unknown;
+          lexicalRank?: unknown;
+        };
+        lesson?: {
+          rule?: unknown;
+          category?: unknown;
+          avoid?: unknown;
+          expectedOutcome?: unknown;
+        };
+      };
       const label = typeof h.title === 'string' ? h.title.trim() : '';
       if (!label || seen.has(`h:${label}`)) continue;
       seen.add(`h:${label}`);
-      out.push({ kind: 'hint', label, detail: typeof h.guidance === 'string' ? h.guidance : undefined });
+      const rule = typeof h.lesson?.rule === 'string'
+        ? h.lesson.rule
+        : typeof h.guidance === 'string'
+          ? h.guidance
+          : undefined;
+      const matched = [
+        typeof h.scopeReason === 'string' ? h.scopeReason : undefined,
+        typeof h.graphReason === 'string' ? h.graphReason : undefined,
+      ].filter(Boolean).join('; ');
+      const lexicalScore = typeof h.matchSignals?.lexicalScore === 'number'
+        ? h.matchSignals.lexicalScore
+        : undefined;
+      const graphScore = typeof h.matchSignals?.graphScore === 'number'
+        ? h.matchSignals.graphScore
+        : undefined;
+      const scoreEvidence = lexicalScore !== undefined || graphScore !== undefined
+        ? `Signals: lexical ${(lexicalScore ?? 0).toFixed(2)}, graph ${(graphScore ?? 0).toFixed(2)}`
+        : undefined;
+      out.push({
+        kind: 'hint',
+        id: typeof h.hintId === 'string' ? h.hintId : undefined,
+        label,
+        detail: [
+          rule,
+          matched ? `Matched: ${matched}` : undefined,
+          scoreEvidence,
+        ].filter(Boolean).join(' · ') || undefined,
+      });
     }
   }
   return out.slice(0, 6);
@@ -4134,7 +4178,7 @@ function AppliedLearnings({ run, t }: { run: AgentRun; t: Theme }) {
         <div style={appliedListStyle(t)}>
           {items.map((it) => (
             <div key={`${it.kind}:${it.label}`} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-              <span style={appliedTagStyle(t, it.kind)}>{it.kind === 'hint' ? 'correction' : 'memory'}</span>
+              <span style={appliedTagStyle(t, it.kind)}>{it.kind === 'hint' ? 'governed lesson' : 'memory'}</span>
               <div style={{ minWidth: 0, flex: 1 }}>
                 <div style={{ fontSize: 11.5, fontWeight: 650, color: t.textPrimary }}>{it.label}</div>
                 {it.detail ? <div style={{ fontSize: 11, color: t.textMuted, lineHeight: 1.4, marginTop: 1 }}>{it.detail}</div> : null}

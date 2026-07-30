@@ -1181,10 +1181,28 @@ export interface AgentHintGraphEdge {
   source: 'scope' | 'dependency' | 'corrected_sql' | 'lifecycle';
 }
 
+export interface AgentHintLesson {
+  version: 1;
+  category:
+    | 'semantic_rule'
+    | 'filter_rule'
+    | 'join_rule'
+    | 'aggregation_rule'
+    | 'grain_rule'
+    | 'time_rule'
+    | 'relation_rule'
+    | 'dialect_rule';
+  rule: string;
+  intentExamples: string[];
+  avoid: string[];
+  expectedOutcome?: string;
+}
+
 export interface AgentHint {
   id: string;
   title: string;
   guidance: string;
+  lesson?: AgentHintLesson;
   status: AgentHintStatus;
   scope: { metric?: string; dbtModel?: string; domain?: string; dialect?: string; term?: string; block?: string };
   correctedSql?: string;
@@ -2714,6 +2732,26 @@ export interface ConnectionMetadataScopeInput {
   dbtFingerprint?: string;
 }
 
+export interface WarehouseMetadataDiscovery {
+  version: 1;
+  connectionId: string;
+  driver: string;
+  discoveredAt: string;
+  supported: boolean;
+  scopes: Array<{
+    catalogOrDatabase: string;
+    schemas: Array<{
+      name: string;
+      inDbtProject: boolean;
+      dbtRelationCount: number;
+    }>;
+  }>;
+  dbtScopes: Array<{ catalogOrDatabase: string; schemas: string[] }>;
+  queryCount: number;
+  truncated: boolean;
+  message: string;
+}
+
 export const api = {
   /** Read the compiled dbt-first overlay. dbt-owned details stay in dbt artifacts. */
   async getDbtFirstModeling(): Promise<DbtFirstModelingResponse> {
@@ -3092,6 +3130,7 @@ export const api = {
     wrongSql?: string;
     title?: string;
     guidance?: string;
+    lesson?: Partial<AgentHintLesson>;
     rationale?: string;
     scope?: { metric?: string; dbtModel?: string; domain?: string; dialect?: string; term?: string; block?: string };
     tags?: string[];
@@ -3117,7 +3156,7 @@ export const api = {
 
   async updateAgentHint(
     hintId: string,
-    input: Pick<AgentHint, 'title' | 'guidance' | 'correctedSql' | 'scope'>,
+    input: Pick<AgentHint, 'title' | 'guidance' | 'correctedSql' | 'scope' | 'lesson'>,
   ): Promise<{ ok: boolean; hint?: AgentHint; error?: string }> {
     return request(`/api/agent/hints/${encodeURIComponent(hintId)}`, {
       method: 'PATCH',
@@ -4298,6 +4337,14 @@ export const api = {
     return request(`/api/connections/${encodeURIComponent(connectionId)}/metadata-scope/preview`, {
       method: 'POST',
       body: JSON.stringify(input),
+    });
+  },
+
+  async discoverConnectionMetadataScopes(
+    connectionId: string,
+  ): Promise<WarehouseMetadataDiscovery> {
+    return request(`/api/connections/${encodeURIComponent(connectionId)}/metadata-scope/discovery`, {
+      method: 'POST',
     });
   },
 

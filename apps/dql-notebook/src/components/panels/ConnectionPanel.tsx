@@ -9,13 +9,20 @@ import {
   type DbtOnboardingJob,
   type DbtProfileConnectionCandidate,
   type ProviderSettings,
+  type WarehouseMetadataDiscovery,
   type WarehouseMetadataStatus,
 } from '../../api/client';
 import { PanelFrame } from '@duckcodeailabs/dql-ui';
 import { DriverLogo } from './DriverLogo';
 import { ConnectionRuntimeSettings } from '../settings/SettingsPage';
 import { DbtProjectEditor } from '../settings/DbtProjectEditor';
-import { formatMetadataScopeEditor, parseMetadataScopeEditor } from './connection-metadata-scope';
+import {
+  additionalDiscoveredSchemaCount,
+  formatMetadataScopeEditor,
+  metadataScopeIncludes,
+  parseMetadataScopeEditor,
+  toggleAdditionalMetadataScope,
+} from './connection-metadata-scope';
 
 interface ConnectorFieldSchema {
   key: string;
@@ -358,6 +365,8 @@ export function ConnectionPanel({
   const [metadataScopeText, setMetadataScopeText] = useState('');
   const [metadataSyncing, setMetadataSyncing] = useState(false);
   const [metadataMessage, setMetadataMessage] = useState<string | null>(null);
+  const [metadataDiscovery, setMetadataDiscovery] = useState<WarehouseMetadataDiscovery | null>(null);
+  const [metadataDiscovering, setMetadataDiscovering] = useState(false);
 
   // Edit form state (inline editor for the "manage all connections" list)
   const [editName, setEditName] = useState('');
@@ -376,7 +385,9 @@ export function ConnectionPanel({
       setInfo(connInfo);
       if (connInfo.metadataScope) {
         setMetadataMode(connInfo.metadataScope.mode);
-        setMetadataScopeText(formatMetadataScopeEditor(connInfo.metadataScope.scopes));
+        setMetadataScopeText(formatMetadataScopeEditor(
+          connInfo.metadataScope.selectedScopes ?? connInfo.metadataScope.scopes,
+        ));
       }
       // Auto-test only a real configured connection. The starter in-memory
       // DuckDB placeholder is intentionally reported as Missing everywhere.
@@ -470,7 +481,42 @@ export function ConnectionPanel({
       metadataStatus: response.status,
     } : current);
     setMetadataMode(response.scope.mode);
-    setMetadataScopeText(formatMetadataScopeEditor(response.scope.scopes));
+    setMetadataScopeText(formatMetadataScopeEditor(
+      response.scope.selectedScopes ?? response.scope.scopes,
+    ));
+  };
+
+  const handleMetadataDiscovery = async () => {
+    if (!info?.default || !testResult?.ok) return;
+    setMetadataDiscovering(true);
+    setMetadataMessage('Finding databases/catalogs and schemas visible to this connection…');
+    try {
+      const discovery = await api.discoverConnectionMetadataScopes(info.default);
+      setMetadataDiscovery(discovery);
+      setMetadataMessage(discovery.message);
+    } catch (error) {
+      setMetadataDiscovery(null);
+      setMetadataMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMetadataDiscovering(false);
+    }
+  };
+
+  const setAdditionalMetadataScope = (
+    catalogOrDatabase: string,
+    schema: string,
+    selected: boolean,
+  ) => {
+    const next = toggleAdditionalMetadataScope(
+      parseMetadataScopeEditor(metadataScopeText),
+      catalogOrDatabase,
+      schema,
+      selected,
+    );
+    setMetadataScopeText(formatMetadataScopeEditor(next));
+    setMetadataMode((metadataDiscovery?.dbtScopes.length ?? 0) > 0
+      ? 'dbt_plus_selected'
+      : 'selected_scopes');
   };
 
   const handleMetadataApply = async () => {
@@ -608,8 +654,11 @@ export function ConnectionPanel({
       setInfo(refreshed);
       if (refreshed.metadataScope) {
         setMetadataMode(refreshed.metadataScope.mode);
-        setMetadataScopeText(formatMetadataScopeEditor(refreshed.metadataScope.scopes));
+        setMetadataScopeText(formatMetadataScopeEditor(
+          refreshed.metadataScope.selectedScopes ?? refreshed.metadataScope.scopes,
+        ));
       }
+      setMetadataDiscovery(null);
       setSaveMsg('Saved. Testing connection...');
       setEditing(null);
       setAddingNew(false);
@@ -1224,6 +1273,7 @@ export function ConnectionPanel({
 
   const connected = Boolean(info && Object.values(info.connections ?? {}).some((connection) => !isPlaceholderLocalConnection(connection)));
   const metadataStatus = info?.metadataStatus;
+  const selectedAdditionalMetadataScopes = parseMetadataScopeEditor(metadataScopeText);
   const metadataScopeEditor = connected ? (
     <div style={{ maxWidth: 640, border: `1px solid ${t.cellBorder}`, borderRadius: 12, background: t.cellBg, padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div>
@@ -1231,6 +1281,76 @@ export function ConnectionPanel({
         <div style={{ fontSize: 11.5, color: t.textMuted, marginTop: 3, lineHeight: 1.5, fontFamily: t.font }}>
           DQL synchronizes this authorized scope into local SQLite. Warm Ask, Notebook, and Block Studio searches use that index instead of scanning the warehouse.
         </div>
+      </div>
+      <div style={{ border: `1px solid ${t.cellBorder}`, borderRadius: 9, padding: '11px 12px', background: t.editorBg, display: 'flex', flexDirection: 'column', gap: 9 }}>
+        <div style={{ fontSize: 11.5, lineHeight: 1.5, color: t.textSecondary, fontFamily: t.font }}>
+          <strong style={{ color: t.textPrimary }}>Only add schemas outside the configured dbt project.</strong>
+          {' '}Relations already present in the current dbt manifest are indexed automatically and should not be selected again.
+        </div>
+        <div>
+          <button
+            type="button"
+            onClick={() => void handleMetadataDiscovery()}
+            disabled={metadataDiscovering || metadataSyncing || !testResult?.ok}
+            style={{ height: 31, padding: '0 12px', borderRadius: 8, border: `1px solid ${t.cellBorder}`, background: t.cellBg, color: t.textSecondary, fontSize: 11.5, fontWeight: 650, cursor: metadataDiscovering || metadataSyncing || !testResult?.ok ? 'not-allowed' : 'pointer', opacity: !testResult?.ok ? 0.55 : 1, fontFamily: t.font }}
+          >
+            {metadataDiscovering ? 'Finding available schemas…' : 'Find available databases & schemas'}
+          </button>
+        </div>
+        {metadataDiscovery ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ fontSize: 10.5, color: t.textMuted, fontFamily: t.font }}>
+              {metadataDiscovery.dbtScopes.reduce((count, scope) => count + scope.schemas.length, 0).toLocaleString()} dbt-covered schema(s)
+              {' · '}{additionalDiscoveredSchemaCount(metadataDiscovery).toLocaleString()} additional schema(s) available
+              {' · '}{metadataDiscovery.queryCount.toLocaleString()} discovery query(s)
+            </div>
+            {metadataDiscovery.scopes.map((scope) => (
+              <div key={scope.catalogOrDatabase} style={{ borderTop: `1px solid ${t.cellBorder}`, paddingTop: 7 }}>
+                <div style={{ fontSize: 10.5, fontWeight: 700, color: t.textPrimary, fontFamily: t.fontMono, marginBottom: 5 }}>
+                  {scope.catalogOrDatabase}
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 5 }}>
+                  {scope.schemas.map((schema) => {
+                    const selected = metadataScopeIncludes(
+                      selectedAdditionalMetadataScopes,
+                      scope.catalogOrDatabase,
+                      schema.name,
+                    );
+                    return (
+                      <label
+                        key={`${scope.catalogOrDatabase}.${schema.name}`}
+                        style={{ display: 'flex', alignItems: 'flex-start', gap: 7, fontSize: 11, lineHeight: 1.35, color: schema.inDbtProject ? t.textMuted : t.textSecondary, fontFamily: t.font, cursor: schema.inDbtProject ? 'default' : 'pointer' }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={schema.inDbtProject || selected}
+                          disabled={schema.inDbtProject || metadataSyncing}
+                          onChange={(event) => setAdditionalMetadataScope(
+                            scope.catalogOrDatabase,
+                            schema.name,
+                            event.target.checked,
+                          )}
+                          style={{ marginTop: 1 }}
+                        />
+                        <span>
+                          <span style={{ fontFamily: t.fontMono }}>{schema.name}</span>
+                          {schema.inDbtProject
+                            ? ` · in dbt (${schema.dbtRelationCount} relation${schema.dbtRelationCount === 1 ? '' : 's'}), included automatically`
+                            : ' · outside dbt, select only if reporting needs it'}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+            {metadataDiscovery.truncated ? (
+              <div style={{ fontSize: 10.5, color: 'var(--status-warning)', fontFamily: t.font }}>
+                Discovery reached its safety limit. Narrow the connection role or enter another known database/schema manually.
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </div>
       <label style={{ display: 'flex', flexDirection: 'column', gap: 5, fontFamily: t.font }}>
         <span style={{ fontSize: 11.5, fontWeight: 650, color: t.textSecondary }}>Index mode</span>
@@ -1256,7 +1376,9 @@ export function ConnectionPanel({
             rows={4}
             style={{ resize: 'vertical', borderRadius: 7, border: `1px solid ${t.cellBorder}`, background: t.cellBg, color: t.textPrimary, padding: '8px 10px', fontFamily: t.fontMono, fontSize: 11.5, lineHeight: 1.5 }}
           />
-          <span style={{ fontSize: 10.5, color: t.textMuted }}>One database or catalog per line. DQL never discovers every database automatically.</span>
+          <span style={{ fontSize: 10.5, color: t.textMuted }}>
+            Only additional schemas outside dbt belong here. Discovery is explicit and setup-only; Ask AI never scans the warehouse for available schemas.
+          </span>
         </label>
       ) : null}
       {metadataStatus ? (

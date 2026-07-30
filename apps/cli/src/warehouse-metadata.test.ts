@@ -1,11 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { latestRuntimeSchemaSnapshotForProject } from '@duckcodeailabs/dql-agent';
-import type { ConnectionConfig } from '@duckcodeailabs/dql-connectors';
+import type {
+  ConnectionConfig,
+  QueryExecutor,
+  QueryResult,
+} from '@duckcodeailabs/dql-connectors';
 import {
   buildWarehouseMetadataQueries,
+  discoverWarehouseMetadataScopes,
   normalizeConnectionMetadataScope,
   syncWarehouseMetadata,
 } from './warehouse-metadata.js';
@@ -125,6 +130,117 @@ describe('warehouse metadata scope', () => {
 
     expect(scope.relations).toEqual(['ANALYTICS_PROD.SALES.CURRENT_MODEL']);
     expect(scope.dbtFingerprint).toBe('current-manifest');
+  });
+
+  it('discovers visible Snowflake schemas and labels dbt-covered scopes without selecting them', async () => {
+    const executePositional = vi.fn(async (sql: string): Promise<QueryResult> => {
+      if (sql.includes('CURRENT_ACCOUNT')) {
+        return {
+          columns: [],
+          rows: [{
+            DQL_ACCOUNT: 'ACME-PROD',
+            DQL_ACCOUNT_LOCATOR: 'XY123',
+            DQL_ACCOUNT_NAME: 'PROD',
+            DQL_ORGANIZATION: 'ACME',
+            DQL_DATABASE: 'ANALYTICS_PROD',
+            DQL_SCHEMA: 'SALES',
+            DQL_ROLE: 'ANALYST',
+            DQL_WAREHOUSE: 'REPORTING_WH',
+          }],
+          rowCount: 1,
+          executionTimeMs: 1,
+        };
+      }
+      return {
+        columns: [],
+        rows: [
+          { database_name: 'ANALYTICS_PROD', name: 'SALES' },
+          { database_name: 'ANALYTICS_PROD', name: 'GOLD' },
+          { database_name: 'REFERENCE_DATA', name: 'SHARED' },
+          { database_name: 'ANALYTICS_PROD', name: 'INFORMATION_SCHEMA' },
+        ],
+        rowCount: 4,
+        executionTimeMs: 1,
+      };
+    });
+
+    const discovery = await discoverWarehouseMetadataScopes({
+      connectionId: 'primary',
+      executor: { executePositional } as unknown as QueryExecutor,
+      connection: snowflakeConnection,
+      dbtRelations: ['ANALYTICS_PROD.SALES.ORDERS'],
+    });
+
+    expect(discovery).toMatchObject({
+      supported: true,
+      dbtScopes: [{ catalogOrDatabase: 'ANALYTICS_PROD', schemas: ['SALES'] }],
+      scopes: [
+        {
+          catalogOrDatabase: 'ANALYTICS_PROD',
+          schemas: [
+            { name: 'GOLD', inDbtProject: false, dbtRelationCount: 0 },
+            { name: 'SALES', inDbtProject: true, dbtRelationCount: 1 },
+          ],
+        },
+        {
+          catalogOrDatabase: 'REFERENCE_DATA',
+          schemas: [{ name: 'SHARED', inDbtProject: false, dbtRelationCount: 0 }],
+        },
+      ],
+    });
+    expect(discovery.message).toContain('2 additional schemas outside the dbt project');
+    expect(executePositional).toHaveBeenCalledTimes(2);
+  });
+
+  it('discovers Databricks catalogs and schemas only during explicit discovery', async () => {
+    const connection: ConnectionConfig = {
+      driver: 'databricks',
+      host: 'adb.example.test',
+      token: 'secret',
+      warehouse: 'warehouse-1',
+      catalog: 'analytics_prod',
+      schema: 'sales',
+    };
+    const executePositional = vi.fn(async (sql: string): Promise<QueryResult> => {
+      if (sql === 'SHOW CATALOGS') {
+        return {
+          columns: [],
+          rows: [{ catalog: 'analytics_prod' }, { catalog: 'reference_data' }],
+          rowCount: 2,
+          executionTimeMs: 1,
+        };
+      }
+      return {
+        columns: [],
+        rows: sql.includes('analytics_prod')
+          ? [{ databaseName: 'sales' }, { databaseName: 'gold' }]
+          : [{ databaseName: 'shared' }],
+        rowCount: sql.includes('analytics_prod') ? 2 : 1,
+        executionTimeMs: 1,
+      };
+    });
+
+    const discovery = await discoverWarehouseMetadataScopes({
+      connectionId: 'default',
+      executor: { executePositional } as unknown as QueryExecutor,
+      connection,
+      dbtRelations: ['analytics_prod.sales.orders'],
+    });
+
+    expect(discovery.scopes).toEqual([
+      {
+        catalogOrDatabase: 'analytics_prod',
+        schemas: [
+          { name: 'gold', inDbtProject: false, dbtRelationCount: 0 },
+          { name: 'sales', inDbtProject: true, dbtRelationCount: 1 },
+        ],
+      },
+      {
+        catalogOrDatabase: 'reference_data',
+        schemas: [{ name: 'shared', inDbtProject: false, dbtRelationCount: 0 }],
+      },
+    ]);
+    expect(discovery.queryCount).toBe(3);
   });
 
   it('activates one bounded generation after identity and scoped metadata checks pass', async () => {

@@ -182,6 +182,7 @@ import {
   retireHint,
   supersedeHint,
   hintsConflict,
+  type HintLesson,
   mineJoinPatterns,
   type JoinPatternCandidate,
   reviewGovernedHint,
@@ -414,6 +415,7 @@ import {
 import type { MetricFlowTargetMetadata } from './semantic-execution/target-binding.js';
 import { buildSemanticTargetBinding } from './semantic-execution/target-binding.js';
 import {
+  discoverWarehouseMetadataScopes,
   normalizeConnectionMetadataScope,
   syncWarehouseMetadata,
   warehouseMetadataStatus,
@@ -7836,6 +7838,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           hintId,
           title: typeof body.title === 'string' ? body.title : undefined,
           guidance: typeof body.guidance === 'string' ? body.guidance : undefined,
+          lesson: parseHintLessonInput(body.lesson),
           correctedSql: typeof body.correctedSql === 'string' ? body.correctedSql : undefined,
           scope: rawScope ? {
             metric: scopeValue('metric'),
@@ -8012,6 +8015,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           requiredEvaluation: correctionEvaluation,
           hintTitle: typeof body.title === 'string' && body.title.trim() ? body.title.trim() : undefined,
           hintGuidance: typeof body.guidance === 'string' && body.guidance.trim() ? body.guidance.trim() : undefined,
+          lesson: parseHintLessonInput(body.lesson),
           tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
         });
         // `approve` is intentionally ignored: capture never promotes a hint.
@@ -11053,8 +11057,31 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
 
     const metadataScopePreviewMatch = path.match(/^\/api\/connections\/([^/]+)\/metadata-scope\/preview$/);
+    const metadataDiscoveryMatch = path.match(/^\/api\/connections\/([^/]+)\/metadata-scope\/discovery$/);
     const metadataScopeMatch = path.match(/^\/api\/connections\/([^/]+)\/metadata-scope$/);
     const metadataSyncMatch = path.match(/^\/api\/connections\/([^/]+)\/metadata-sync$/);
+
+    if (metadataDiscoveryMatch && req.method === 'POST') {
+      try {
+        const connectionId = decodeURIComponent(metadataDiscoveryMatch[1]!);
+        const cfg = loadProjectConfig(projectRoot);
+        const selectedConnection = projectConnectionById(projectRoot, cfg, connectionId);
+        if (!selectedConnection) throw new Error(`Unknown connection "${connectionId}".`);
+        const defaults = metadataScopeDbtDefaults(projectRoot, cfg);
+        const discovery = await discoverWarehouseMetadataScopes({
+          connectionId,
+          executor,
+          connection: selectedConnection,
+          dbtRelations: defaults.relations,
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(discovery));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
 
     if (metadataScopePreviewMatch && req.method === 'POST') {
       try {
@@ -17616,6 +17643,24 @@ function internalDqlRelationIdValidationError(sql: string, subject: string): str
   const internalIds = internalRelationIdsInSql(stripSqlStringsAndComments(sql));
   if (internalIds.length === 0) return null;
   return `${subject} contains internal DQL graph relation identifier${internalIds.length === 1 ? '' : 's'} ${internalIds.join(', ')}. Use the physical database.schema.table relation instead, or choose Ask AI to fix from the notebook error.`;
+}
+
+function parseHintLessonInput(value: unknown): Partial<HintLesson> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const stringList = (field: string): string[] | undefined => Array.isArray(raw[field])
+    ? (raw[field] as unknown[]).filter((item): item is string => typeof item === 'string')
+    : undefined;
+  return {
+    version: 1,
+    category: typeof raw.category === 'string'
+      ? raw.category as HintLesson['category']
+      : undefined,
+    rule: typeof raw.rule === 'string' ? raw.rule : undefined,
+    intentExamples: stringList('intentExamples'),
+    avoid: stringList('avoid'),
+    expectedOutcome: typeof raw.expectedOutcome === 'string' ? raw.expectedOutcome : undefined,
+  };
 }
 
 class DqlInternalRelationIdError extends Error {

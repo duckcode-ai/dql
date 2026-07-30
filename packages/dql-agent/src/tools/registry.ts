@@ -754,6 +754,21 @@ const CORE_TOOL_DEFINITIONS = [
         correctedSql: { type: 'string', description: 'Canonical corrected SQL. Required before a dbt-first v3 candidate can be approved.' },
         hintTitle: { type: 'string', description: 'Override the derived hint title.' },
         hintGuidance: { type: 'string', description: 'Override the hint guidance.' },
+        lesson: {
+          type: 'object',
+          additionalProperties: false,
+          description: 'Structured reusable experience. The approved rule remains advisory to current governed truth.',
+          properties: {
+            category: {
+              type: 'string',
+              enum: ['semantic_rule', 'filter_rule', 'join_rule', 'aggregation_rule', 'grain_rule', 'time_rule', 'relation_rule', 'dialect_rule'],
+            },
+            rule: { type: 'string', description: 'Concise reusable rule; aligned to hintGuidance by the shared lifecycle.' },
+            intentExamples: { type: 'array', items: { type: 'string' }, description: 'Representative similar questions.' },
+            avoid: { type: 'array', items: { type: 'string' }, description: 'Known mistakes or approaches to avoid.' },
+            expectedOutcome: { type: 'string', description: 'Optional result or shape expectation.' },
+          },
+        },
         tags: { type: 'array', items: { type: 'string' }, description: 'Searchable keywords.' },
         anchorObjectKey: { type: 'string', description: 'Context pack, block, or object id the correction anchored to.' },
       },

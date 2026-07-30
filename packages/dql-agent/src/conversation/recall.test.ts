@@ -6,6 +6,7 @@ import { ConversationStore, defaultConversationPath } from './session-store.js';
 import {
   buildConversationSnapshot,
   conversationHistoryFromContext,
+  isLikelyClarificationReply,
   recallRelevantTurns,
   renderConversationEnvelopeForPrompt,
 } from './snapshot.js';
@@ -46,6 +47,25 @@ describe('semantic recall over conversation history', () => {
       excludeTurnIds: [first.id],
     });
     expect(hits).toHaveLength(0);
+  });
+
+  it('never semantically recalls blocked or unresolved turns', async () => {
+    const thread = store.createThread();
+    store.appendTurn(thread.id, {
+      question: 'revenue by dangerous payroll region',
+      answerSummary: 'Which payroll definition should I use?',
+      route: 'clarify',
+      runStatus: 'needs_clarification',
+    });
+    store.appendTurn(thread.id, {
+      question: 'revenue by safe region',
+      answerSummary: 'Philadelphia leads.',
+      trustLabel: 'grounded',
+      runStatus: 'completed',
+    });
+
+    const hits = await recallRelevantTurns(store, thread.id, 'revenue region', { limit: 4 });
+    expect(hits.map((turn) => turn.question)).toEqual(['revenue by safe region']);
   });
 
   it('keeps prior result refs rich enough for follow-up grounding', () => {
@@ -113,7 +133,7 @@ describe('semantic recall over conversation history', () => {
     });
   });
 
-  it('projects one bounded, trust-labelled envelope for every orchestration stage', () => {
+  it('keeps blocked turns in the audit envelope but excludes them from analytical history', () => {
     const thread = store.createThread({ surface: 'ask' });
     store.appendTurn(thread.id, {
       question: 'show restricted payroll',
@@ -128,12 +148,66 @@ describe('semantic recall over conversation history', () => {
     });
     const context = { conversationEnvelope: snapshot };
 
-    expect(conversationHistoryFromContext(context)).toEqual([
-      { role: 'user', text: 'show restricted payroll' },
-      { role: 'assistant', text: '[blocked] Access was denied.' },
-    ]);
+    expect(snapshot?.recentTurns).toHaveLength(1);
+    expect(conversationHistoryFromContext(context)).toEqual([]);
     expect(renderConversationEnvelopeForPrompt(context)).toContain(`thread: ${thread.id}`);
     expect(renderConversationEnvelopeForPrompt(context)).toContain('surface: ask');
+  });
+
+  it('makes clarification pending only for a short clarification reply', () => {
+    const thread = store.createThread({ surface: 'ask' });
+    store.appendTurn(thread.id, {
+      question: 'filter this to one customer',
+      answerSummary: 'Which customer should define the answer?',
+      route: 'clarify',
+      runStatus: 'needs_clarification',
+    });
+
+    const replySnapshot = buildConversationSnapshot(store, thread.id, { question: 'Melissa Lopez' });
+    expect(replySnapshot?.pendingClarification).toMatchObject({
+      question: 'Which customer should define the answer?',
+    });
+
+    const freshSnapshot = buildConversationSnapshot(store, thread.id, {
+      question: 'what region has the most revenue',
+    });
+    expect(freshSnapshot?.pendingClarification).toBeUndefined();
+    expect(renderConversationEnvelopeForPrompt({ conversationEnvelope: freshSnapshot }))
+      .not.toContain('pending clarification:');
+  });
+
+  it('excludes unresolved turns while preserving the prior successful analytical context', () => {
+    const thread = store.createThread({ surface: 'ask' });
+    store.appendTurn(thread.id, {
+      question: 'what region has the most revenue',
+      answerSummary: 'Philadelphia has the highest revenue.',
+      route: 'answer',
+      trustLabel: 'grounded',
+      runStatus: 'completed',
+    });
+    store.appendTurn(thread.id, {
+      question: 'filter this to one customer',
+      answerSummary: 'Which customer column should define the answer?',
+      route: 'clarify',
+      runStatus: 'needs_clarification',
+    });
+
+    const snapshot = buildConversationSnapshot(store, thread.id, {
+      question: 'what region has the most revenue',
+    });
+    const history = conversationHistoryFromContext({ conversationEnvelope: snapshot });
+    expect(history).toEqual([
+      { role: 'user', text: 'what region has the most revenue' },
+      { role: 'assistant', text: '[confirmed] Philadelphia has the highest revenue.' },
+    ]);
+    expect(snapshot?.pendingClarification).toBeUndefined();
+  });
+
+  it('distinguishes short clarification choices from complete analytical requests', () => {
+    expect(isLikelyClarificationReply('yes, per product')).toBe(true);
+    expect(isLikelyClarificationReply('Melissa Lopez')).toBe(true);
+    expect(isLikelyClarificationReply('what region has the most revenue')).toBe(false);
+    expect(isLikelyClarificationReply('revenue by region')).toBe(false);
   });
 
   it('promotion is the only path into durable memory (isolation)', () => {

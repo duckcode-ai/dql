@@ -21,7 +21,10 @@ import {
 } from "./cascade/budgets.js";
 import type { MetadataAgentIntent } from "./metadata/catalog.js";
 import type { ReasoningEffort, ThinkingMode } from "./providers/reasoning-effort.js";
-import { conversationHistoryFromContext } from "./conversation/snapshot.js";
+import {
+  conversationHistoryFromContext,
+  isLikelyClarificationReply,
+} from "./conversation/snapshot.js";
 
 export type AgentRunRequestedMode = "auto" | "ask" | "research" | "sql" | "block" | "app";
 
@@ -592,7 +595,7 @@ export interface ClarificationContinuation {
  */
 export function resolveClarificationContinuation(request: AgentRunRequest): ClarificationContinuation | undefined {
   const reply = request.question.trim();
-  if (!reply || looksLikeNewQuestionAfterClarification(reply)) return undefined;
+  if (!reply || !isLikelyClarificationReply(reply)) return undefined;
 
   const fromServer = latestClarificationFromConversationContext(request.conversationContext);
   const fromHistory = latestClarificationFromHistory(request.history);
@@ -611,22 +614,6 @@ export function resolveClarificationContinuation(request: AgentRunRequest): Clar
   };
 }
 
-function looksLikeNewQuestionAfterClarification(value: string): boolean {
-  const words = value.split(/\s+/).filter(Boolean);
-  if (words.length > 40) return true;
-  // Natural-language Ask does not require terminal punctuation. Treat a
-  // substantive interrogative/imperative as a new analytical turn before we
-  // consider it a reply to a pending clarification. The old `?` requirement
-  // caused questions such as "who are the customers who used beverage
-  // products" to be appended to the previous clarification and sent to the
-  // provider as one polluted prompt.
-  if (
-    words.length >= 4
-    && /^(?:who|what|why|where|when|how|show|give|list|compare|build|create|which|calculate|find|tell)\b/i.test(value)
-  ) return true;
-  return words.length >= 7 && /\?\s*$/.test(value);
-}
-
 function latestClarificationFromHistory(
   history: AgentRunRequest['history'],
 ): Pick<ClarificationContinuation, 'sourceQuestion' | 'clarifyingQuestion'> | undefined {
@@ -638,7 +625,7 @@ function latestClarificationFromHistory(
     for (let prior = index - 1; prior >= 0; prior -= 1) {
       if (history[prior].role === 'user' && history[prior].text.trim()) {
         fallbackQuestion = history[prior].text;
-        if (looksLikeNewQuestionAfterClarification(history[prior].text)) {
+        if (!isLikelyClarificationReply(history[prior].text)) {
           return { sourceQuestion: history[prior].text, clarifyingQuestion: turn.text };
         }
       }
@@ -673,7 +660,7 @@ function latestClarificationFromConversationContext(
       const question = clarificationString(candidate?.question);
       if (!question) continue;
       sourceQuestion = question;
-      if (looksLikeNewQuestionAfterClarification(question)) break;
+      if (!isLikelyClarificationReply(question)) break;
     }
     if (sourceQuestion) {
       return { sourceQuestion, clarifyingQuestion };

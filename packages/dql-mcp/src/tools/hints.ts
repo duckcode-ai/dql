@@ -18,6 +18,7 @@ import {
   recordGovernedCorrection,
   reviewGovernedHint,
   type Hint,
+  type HintLesson,
 } from '@duckcodeailabs/dql-agent';
 import { zodInputShapeForTool } from '../tool-schema.js';
 
@@ -42,6 +43,7 @@ export async function recordCorrection(
     correctedSql?: string;
     hintTitle?: string;
     hintGuidance?: string;
+    lesson?: Partial<HintLesson>;
     tags?: string[];
     anchorObjectKey?: string;
   },
@@ -56,6 +58,7 @@ export async function recordCorrection(
     correctedSql: args.correctedSql,
     hintTitle: args.hintTitle,
     hintGuidance: args.hintGuidance,
+    lesson: args.lesson,
     tags: args.tags,
     anchorObjectKey: args.anchorObjectKey,
     failedRoute: 'mcp_generated_answer',
@@ -136,6 +139,7 @@ function summarizeHint(hint: Hint) {
     title: hint.title,
     status: hint.status,
     guidance: hint.guidance,
+    lesson: hint.lesson,
     scope: hint.scope,
     correctedSql: hint.correctedSql,
     traceId: hint.traceId,

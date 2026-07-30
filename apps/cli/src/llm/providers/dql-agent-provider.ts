@@ -13,6 +13,7 @@ import {
   buildLocalContextPack,
   contextRetrievalBudgetForQuestion,
   ensureAgentProjectReady,
+  isLikelyClarificationReply,
   type AgentAnswer,
   type AgentDqlArtifactReference,
   type CertifiedFitConfirmation,
@@ -595,6 +596,7 @@ export function resolveEffectiveQuestion(req: AgentRunRequest): string {
   }
   if (assistantIdx < 0) return current;
   if (!CLARIFY_MARKER_RE.test(msgs[assistantIdx].content)) return current;
+  if (!isLikelyClarificationReply(current)) return current;
   // Find the original user question that prompted the clarification.
   let original = '';
   for (let i = assistantIdx - 1; i >= 0; i--) {

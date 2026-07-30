@@ -36,15 +36,17 @@ import type {
   HintEvaluationCheck,
   HintDependency,
   HintLifecycleFailure,
+  HintLesson,
   HintReview,
   HintScope,
 } from './types.js';
+import { deriveHintLesson, normalizeHintLesson } from './lesson.js';
 
 const TRACES_DIR = ['.dql', 'traces'];
 const HINTS_DIR = ['.dql', 'hints'];
 const EVALUATIONS_DIR = ['.dql', 'evaluations'];
 const REVIEWS_DIR = ['.dql', 'reviews'];
-const HINT_INDEX_PROJECTION_VERSION = 'hint-graph-v1';
+const HINT_INDEX_PROJECTION_VERSION = 'hint-graph-v2-lessons';
 
 export function tracesDir(projectRoot: string): string {
   return join(projectRoot, ...TRACES_DIR);
@@ -97,6 +99,8 @@ export interface RecordCorrectionTraceInput {
   hintTitle?: string;
   /** Override the derived candidate hint's guidance (defaults to the correction). */
   hintGuidance?: string;
+  /** Structured reusable experience. New writers keep its rule aligned to guidance. */
+  lesson?: Partial<HintLesson>;
   correctedSql?: string;
   tags?: string[];
 }
@@ -146,6 +150,14 @@ export function recordCorrectionTrace(
   const traceId = genId('trace');
   const hintId = genId('hint');
   const createdAt = nowIso();
+  const guidance = (input.hintGuidance ?? input.correction).trim();
+  const lesson = deriveHintLesson({
+    question: input.question,
+    wrongAnswer: input.wrongAnswer,
+    correctedSql: input.correctedSql,
+    guidance,
+    lesson: input.lesson,
+  });
 
   const trace: CorrectionTrace = {
     id: traceId,
@@ -154,6 +166,7 @@ export function recordCorrectionTrace(
     scope: cleanScope(input.scope),
     wrongAnswer: input.wrongAnswer,
     correction: input.correction,
+    lesson,
     rationale: input.rationale,
     author: input.author,
     anchorObjectKey: input.anchorObjectKey,
@@ -169,7 +182,8 @@ export function recordCorrectionTrace(
   const hint: Hint = {
     id: hintId,
     title: input.hintTitle?.trim() || deriveTitle(input.question, input.scope),
-    guidance: (input.hintGuidance ?? input.correction).trim(),
+    guidance: lesson.rule,
+    lesson,
     scope: cleanScope(input.scope),
     status: 'candidate',
     traceId,
@@ -211,6 +225,7 @@ export function writeHintFile(projectRoot: string, hint: Hint): void {
     id: hint.id,
     title: hint.title,
     guidance: hint.guidance,
+    lesson: hint.lesson,
     status: hint.status,
     scope: cleanScope(hint.scope),
     traceId: hint.traceId,
@@ -244,6 +259,7 @@ export function readHintFile(path: string, sourcePath?: string): Hint | null {
       id: String(raw.id ?? ''),
       title: String(raw.title ?? ''),
       guidance: String(raw.guidance ?? ''),
+      lesson: lessonFromRaw(raw.lesson, String(raw.guidance ?? '')),
       status: (raw.status as Hint['status']) ?? 'candidate',
       scope: {
         metric: strOrUndef(scope.metric),
@@ -454,6 +470,7 @@ export interface UpdateHintCandidateInput {
   hintId: string;
   title?: string;
   guidance?: string;
+  lesson?: Partial<HintLesson>;
   correctedSql?: string;
   scope?: HintScope;
   snapshotId: string;
@@ -471,15 +488,22 @@ export function updateHintCandidate(
     throw new HintLifecycleError('HINT_NOT_CANDIDATE', `Hint ${input.hintId} is ${hint.status}; only candidates can be edited.`);
   }
   const title = input.title?.trim() || hint.title;
-  const guidance = input.guidance?.trim() || hint.guidance;
+  const guidance = input.guidance?.trim() || input.lesson?.rule?.trim() || hint.guidance;
   const correctedSql = input.correctedSql?.trim() || hint.correctedSql;
   if (!title || !guidance) {
     throw new HintLifecycleError('HINT_CONTENT_REQUIRED', 'A candidate requires a title and guidance.');
   }
+  const lesson = normalizeHintLesson(input.lesson ?? hint.lesson, {
+    rule: guidance,
+    category: hint.lesson?.category ?? 'semantic_rule',
+    intentExamples: hint.lesson?.intentExamples ?? [],
+  });
+  lesson.rule = guidance;
   const updated: Hint = {
     ...hint,
     title,
-    guidance,
+    guidance: lesson.rule,
+    lesson,
     correctedSql,
     scope: input.scope ? cleanScope(input.scope) : hint.scope,
     snapshotId: input.snapshotId,
@@ -816,6 +840,19 @@ function appendLifecycleError(
   next: HintLifecycleFailure,
 ): HintLifecycleFailure[] {
   return [...(existing ?? []), next].slice(-20);
+}
+
+function lessonFromRaw(raw: unknown, guidance: string): HintLesson | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  try {
+    return normalizeHintLesson(raw as Partial<HintLesson>, {
+      rule: guidance,
+      category: 'semantic_rule',
+      intentExamples: [],
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 function stripUndefined<T extends Record<string, unknown>>(obj: T): Partial<T> {

@@ -1,4 +1,7 @@
-import type { ConnectionMetadataScopeV1 } from '../../api/client';
+import type {
+  ConnectionMetadataScopeV1,
+  WarehouseMetadataDiscovery,
+} from '../../api/client';
 
 export function formatMetadataScopeEditor(scopes: ConnectionMetadataScopeV1['scopes']): string {
   return scopes
@@ -23,4 +26,51 @@ export function parseMetadataScopeEditor(value: string): ConnectionMetadataScope
     catalogOrDatabase: scope.catalogOrDatabase,
     schemas: Array.from(scope.schemas),
   }));
+}
+
+export function metadataScopeIncludes(
+  scopes: ConnectionMetadataScopeV1['scopes'],
+  catalogOrDatabase: string,
+  schema: string,
+): boolean {
+  return scopes.some((scope) =>
+    scope.catalogOrDatabase.toLowerCase() === catalogOrDatabase.toLowerCase()
+    && scope.schemas.some((candidate) => candidate.toLowerCase() === schema.toLowerCase()));
+}
+
+export function toggleAdditionalMetadataScope(
+  scopes: ConnectionMetadataScopeV1['scopes'],
+  catalogOrDatabase: string,
+  schema: string,
+  selected: boolean,
+): ConnectionMetadataScopeV1['scopes'] {
+  const grouped = new Map(scopes.map((scope) => [
+    scope.catalogOrDatabase.toLowerCase(),
+    {
+      catalogOrDatabase: scope.catalogOrDatabase,
+      schemas: new Map(scope.schemas.map((candidate) => [candidate.toLowerCase(), candidate])),
+    },
+  ]));
+  const key = catalogOrDatabase.toLowerCase();
+  const current = grouped.get(key) ?? {
+    catalogOrDatabase,
+    schemas: new Map<string, string>(),
+  };
+  if (selected) current.schemas.set(schema.toLowerCase(), schema);
+  else current.schemas.delete(schema.toLowerCase());
+  if (current.schemas.size > 0) grouped.set(key, current);
+  else grouped.delete(key);
+  return Array.from(grouped.values()).map((scope) => ({
+    catalogOrDatabase: scope.catalogOrDatabase,
+    schemas: Array.from(scope.schemas.values()),
+  }));
+}
+
+export function additionalDiscoveredSchemaCount(
+  discovery: WarehouseMetadataDiscovery,
+): number {
+  return discovery.scopes.reduce(
+    (count, scope) => count + scope.schemas.filter((schema) => !schema.inDbtProject).length,
+    0,
+  );
 }

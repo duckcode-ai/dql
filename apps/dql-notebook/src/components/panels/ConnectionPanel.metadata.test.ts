@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  additionalDiscoveredSchemaCount,
   formatMetadataScopeEditor,
+  metadataScopeIncludes,
   parseMetadataScopeEditor,
+  toggleAdditionalMetadataScope,
 } from './connection-metadata-scope';
 
 describe('ConnectionPanel metadata scope editor', () => {
@@ -24,5 +27,35 @@ describe('ConnectionPanel metadata scope editor', () => {
     ].join('\n'))).toEqual([
       { catalogOrDatabase: 'REFERENCE_DATA', schemas: ['SHARED'] },
     ]);
+  });
+
+  it('adds and removes only explicitly selected additional scopes', () => {
+    const added = toggleAdditionalMetadataScope([], 'REPORTING_PROD', 'GOLD', true);
+    expect(added).toEqual([
+      { catalogOrDatabase: 'REPORTING_PROD', schemas: ['GOLD'] },
+    ]);
+    expect(metadataScopeIncludes(added, 'reporting_prod', 'gold')).toBe(true);
+    expect(toggleAdditionalMetadataScope(added, 'REPORTING_PROD', 'GOLD', false)).toEqual([]);
+  });
+
+  it('counts only discovered schemas outside the dbt project', () => {
+    expect(additionalDiscoveredSchemaCount({
+      version: 1,
+      connectionId: 'default',
+      driver: 'snowflake',
+      discoveredAt: '2026-07-30T00:00:00.000Z',
+      supported: true,
+      scopes: [{
+        catalogOrDatabase: 'ANALYTICS_PROD',
+        schemas: [
+          { name: 'DBT_MARTS', inDbtProject: true, dbtRelationCount: 12 },
+          { name: 'GOLD', inDbtProject: false, dbtRelationCount: 0 },
+        ],
+      }],
+      dbtScopes: [{ catalogOrDatabase: 'ANALYTICS_PROD', schemas: ['DBT_MARTS'] }],
+      queryCount: 1,
+      truncated: false,
+      message: 'Found 1 additional schema.',
+    })).toBe(1);
   });
 });

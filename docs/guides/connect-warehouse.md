@@ -98,6 +98,19 @@ In **Settings → Database**, test the connection, then use **Metadata scope**:
   schemas you name.
 - **Selected databases/catalogs and schemas** is the explicit non-dbt mode.
 
+After the connection test passes, **Find available databases & schemas** can
+perform a bounded, setup-only discovery of the database objects visible to the
+configured warehouse credentials. The list clearly distinguishes:
+
+- schemas already represented by the current dbt manifest, which are included
+  automatically and should not be selected again; and
+- additional schemas outside the dbt project, which remain optional until you
+  explicitly select and apply them.
+
+Discovery only shows the available scope. It does not save a selection, extract
+table or column metadata, or widen Ask access. Select an additional schema only
+when reporting needs relations outside the configured dbt project.
+
 Use one line per database or catalog:
 
 ```text

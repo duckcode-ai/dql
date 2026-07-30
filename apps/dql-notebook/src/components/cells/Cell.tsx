@@ -33,6 +33,7 @@ import { SnippetPicker } from "./SnippetPicker";
 import { teachCorrectionEligibility } from './teach-correction';
 import {
   buildTeachCorrectionDraft,
+  parseTeachLessonLines,
   teachScopeHasRecallAnchor,
   teachScopeLabels,
   type TeachCorrectionScope,
@@ -2763,6 +2764,7 @@ function TeachCorrectionBar({ cell, t }: { cell: Cell; t: Theme }) {
   const [title, setTitle] = useState(initialDraft.title);
   const [guidance, setGuidance] = useState(initialDraft.guidance);
   const [rationale, setRationale] = useState(initialDraft.rationale);
+  const [lesson, setLesson] = useState(initialDraft.lesson);
   const [scope, setScope] = useState<TeachCorrectionScope>(initialDraft.scope);
 
   if (!eligible || state === 'dismissed') return null;
@@ -2815,6 +2817,11 @@ function TeachCorrectionBar({ cell, t }: { cell: Cell; t: Theme }) {
         correctedSql: current,
         title: title.trim(),
         guidance: guidance.trim(),
+        lesson: {
+          ...lesson,
+          version: 1,
+          rule: guidance.trim(),
+        },
         rationale: rationale.trim() || 'Edited in the notebook and ran successfully.',
         scope,
       });
@@ -2926,13 +2933,90 @@ function TeachCorrectionBar({ cell, t }: { cell: Cell; t: Theme }) {
             Reusable lesson
             <textarea
               value={guidance}
-              onChange={(event) => setGuidance(event.target.value)}
+              onChange={(event) => {
+                setGuidance(event.target.value);
+                setLesson((currentLesson) => ({ ...currentLesson, rule: event.target.value }));
+              }}
               rows={3}
               placeholder="Explain the business or SQL rule that should guide similar questions."
               style={{ ...controlStyle(t, { size: 'sm' }), resize: 'vertical', lineHeight: 1.45 }}
             />
             <span style={{ color: t.textMuted, fontWeight: 400 }}>This reviewed lesson—not the raw comment—is what matching future questions receive.</span>
           </label>
+
+          <details style={{ border: `1px solid ${t.cellBorder}`, borderRadius: 7, padding: '9px 10px' }}>
+            <summary style={{ cursor: 'pointer', color: t.textSecondary, fontSize: 10.5, fontWeight: 700 }}>
+              Help DQL generalize this lesson <span style={{ color: t.textMuted, fontWeight: 400 }}>(optional)</span>
+            </summary>
+            <div style={{ display: 'grid', gap: 9, paddingTop: 9 }}>
+              <label style={{ display: 'grid', gap: 4, color: t.textMuted, fontSize: 10 }}>
+                Lesson type
+                <select
+                  value={lesson.category}
+                  onChange={(event) => setLesson({
+                    ...lesson,
+                    category: event.target.value as typeof lesson.category,
+                  })}
+                  style={controlStyle(t, { size: 'sm' })}
+                >
+                  <option value="semantic_rule">Business definition</option>
+                  <option value="filter_rule">Filter rule</option>
+                  <option value="join_rule">Join rule</option>
+                  <option value="aggregation_rule">Aggregation rule</option>
+                  <option value="grain_rule">Grain rule</option>
+                  <option value="time_rule">Time rule</option>
+                  <option value="relation_rule">Table or column rule</option>
+                  <option value="dialect_rule">SQL dialect rule</option>
+                </select>
+              </label>
+              <label style={{ display: 'grid', gap: 4, color: t.textMuted, fontSize: 10 }}>
+                Similar questions <span>one per line; used for retrieval, never as automatic truth</span>
+                <textarea
+                  value={lesson.intentExamples.join('\n')}
+                  onChange={(event) => setLesson({
+                    ...lesson,
+                    intentExamples: event.target.value.split(/\r?\n/),
+                  })}
+                  onBlur={() => setLesson({
+                    ...lesson,
+                    intentExamples: parseTeachLessonLines(lesson.intentExamples.join('\n')),
+                  })}
+                  rows={3}
+                  placeholder={'Revenue by region\nWhich markets generate the most net sales?'}
+                  style={{ ...controlStyle(t, { size: 'sm' }), resize: 'vertical', lineHeight: 1.4 }}
+                />
+              </label>
+              <label style={{ display: 'grid', gap: 4, color: t.textMuted, fontSize: 10 }}>
+                Avoid these known mistakes <span>one per line</span>
+                <textarea
+                  value={lesson.avoid.join('\n')}
+                  onChange={(event) => setLesson({
+                    ...lesson,
+                    avoid: event.target.value.split(/\r?\n/),
+                  })}
+                  onBlur={() => setLesson({
+                    ...lesson,
+                    avoid: parseTeachLessonLines(lesson.avoid.join('\n')),
+                  })}
+                  rows={2}
+                  placeholder="Do not include refunded orders."
+                  style={{ ...controlStyle(t, { size: 'sm' }), resize: 'vertical', lineHeight: 1.4 }}
+                />
+              </label>
+              <label style={{ display: 'grid', gap: 4, color: t.textMuted, fontSize: 10 }}>
+                Expected outcome or result shape
+                <input
+                  value={lesson.expectedOutcome ?? ''}
+                  onChange={(event) => setLesson({
+                    ...lesson,
+                    expectedOutcome: event.target.value || undefined,
+                  })}
+                  placeholder="One row per region using net revenue"
+                  style={controlStyle(t, { size: 'sm' })}
+                />
+              </label>
+            </div>
+          </details>
 
           <div>
             <div style={{ color: t.textSecondary, fontSize: 10.5, fontWeight: 700, marginBottom: 6 }}>Where should this learning apply?</div>

@@ -60,6 +60,31 @@ flowchart TD
 Hints are not mirrored into advisory memory. Git is authoritative; the
 `.dql/cache/agent-kg.sqlite` index is rebuildable.
 
+### What a reusable lesson stores
+
+The before/after SQL remains evidence in the correction trace and hint, but it
+is not the instruction copied into future queries. A new hint also carries a
+reviewable `lesson`:
+
+```yaml
+lesson:
+  version: 1
+  category: filter_rule
+  rule: Exclude refunded orders when calculating recognized revenue.
+  intentExamples:
+    - Which regions generate the most recognized revenue?
+  avoid:
+    - Do not rank customers by gross order amount.
+  expectedOutcome: One row per region using recognized revenue.
+```
+
+`rule` is the reusable instruction and stays aligned with the legacy
+`guidance` field. Similar questions improve lexical recall; category, avoid
+patterns, and expected outcome help the agent adapt and validate a new draft.
+They do not grant authority. Existing hints without `lesson` are normalized in
+the local projection at read time, so an older Git project remains compatible
+without a source rewrite.
+
 ### The Hint Graph projection
 
 Each hint is a governed node in the rebuildable `agent_hints` index. DQL also
@@ -89,13 +114,21 @@ rebuilds it when missing or changed. Therefore an OSS clone receives the shared
 governed history from Git without committing or copying `.dql/cache`; an
 unchanged project keeps its current local index.
 
-For a new question, explicit domain/metric/model/term/block overlap can recall an
-approved hint even when the wording differs. Relation and column overlap then
-ranks and explains the match. Relation or column overlap alone cannot make a
-hint applicable; every declared scope field must still match, and current
-dependency fingerprints must pass. This lets a reviewed rule such as "revenue
-uses net amount and excludes refunds" transfer from revenue-by-customer to
-revenue-by-region without leaking into customer-count or headcount questions.
+For a new question, the rebuildable index searches the lesson rule, similar
+questions, avoid patterns, expected outcome, title, tags, and scope. Explicit
+domain/metric/model/term/block overlap can also recall an approved hint when the
+wording differs. Lexical rank and graph overlap are combined into bounded,
+inspectable match signals; relation and column overlap ranks and explains the
+match. Relation or column overlap alone cannot make a hint applicable; every
+declared scope field must still match, and current dependency fingerprints must
+pass. This lets a reviewed rule such as "revenue uses net amount and excludes
+refunds" transfer from revenue-by-customer to revenue-by-region without leaking
+into customer-count or headcount questions.
+
+Applied lessons enter the generation prompt after current certified, semantic,
+and dbt context. The agent is told to adapt the lesson and revalidate every
+identifier against current context; the corrected SQL is a reviewed example,
+not a query template.
 
 ## The closed loop
 
@@ -107,7 +140,7 @@ sequenceDiagram
     participant G as Git + SQLite index
 
     U->>L: ask a question
-    L->>R: recall_experience(question, scope)
+    L->>R: retrieve current context + approved scoped lessons
     R-->>L: prior lessons + certified-block exemplars
     L-->>U: grounded answer (shaped by lessons)
     U->>L: correct / certify the draft
@@ -118,6 +151,11 @@ sequenceDiagram
     U->>G: approve only after passed evaluation
     Note over G,R: next similar question retrieves the lesson → mistake not repeated
 ```
+
+This is governed experience reuse, not online reinforcement learning. DQL does
+not change model weights, silently raise confidence after successful runs, or
+learn from raw outcomes. New experience becomes shared only through the same
+explicit candidate, evaluation, and review lifecycle.
 
 ## Few-shot from certified blocks (DAIL-SQL)
 
@@ -174,5 +212,8 @@ implemented by this local lifecycle.
   bounded execution where available, result shape, and explicit human semantic review are recorded.
 - **Fail-closed retrieval** — stale, explicitly superseded, and unresolved conflicting hints are
   withheld. No confidence-decay mechanism silently changes authority.
+- **Explainable matching** — review surfaces show the reusable lesson, declared
+  scope, graph overlap, and lexical/graph match signals instead of presenting a
+  correction as unexplained model memory.
 
 ← Back to the [master overview](./README.md)

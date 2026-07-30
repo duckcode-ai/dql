@@ -1,5 +1,5 @@
 import type { Cell } from '../../store/types';
-import type { AgentHint } from '../../api/client';
+import type { AgentHint, AgentHintLesson } from '../../api/client';
 
 export type TeachCorrectionScope = AgentHint['scope'];
 
@@ -7,6 +7,7 @@ export interface TeachCorrectionDraft {
   title: string;
   guidance: string;
   rationale: string;
+  lesson: AgentHintLesson;
   scope: TeachCorrectionScope;
   changedIdentifiers: {
     added: string[];
@@ -82,6 +83,20 @@ export function teachScopeLabels(scope: TeachCorrectionScope): string[] {
   ].filter((value): value is string => Boolean(value));
 }
 
+export function parseTeachLessonLines(value: string): string[] {
+  const seen = new Set<string>();
+  return value
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (!item || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 8);
+}
+
 export function buildTeachCorrectionDraft(
   cell: Cell,
   input: {
@@ -117,13 +132,27 @@ export function buildTeachCorrectionDraft(
   if (filtersChanged) lessonParts.push('apply the corrected filter conditions');
   if (lessonParts.length === 0) lessonParts.push('follow the reviewed SQL pattern');
   const shortQuestion = input.question.trim().replace(/\s+/g, ' ').slice(0, 70);
+  const lessonCategory: AgentHintLesson['category'] = filtersChanged
+    ? 'filter_rule'
+    : changes.added.length > 0 || changes.removed.length > 0
+      ? 'relation_rule'
+      : 'semantic_rule';
+  const guidance = `For ${subject}, ${lessonParts.join(' and ')}. Confirm this lesson against the reviewed SQL and current governed context.`;
 
   return {
     title: scope.metric
       ? `Correct ${scope.metric} logic`
       : `Correction for: ${shortQuestion}`,
-    guidance: `For ${subject}, ${lessonParts.join(' and ')}. Confirm this lesson against the reviewed SQL and current governed context.`,
+    guidance,
     rationale: '',
+    lesson: {
+      version: 1,
+      category: lessonCategory,
+      rule: guidance,
+      intentExamples: [input.question.trim()].filter(Boolean),
+      avoid: [],
+      expectedOutcome: undefined,
+    },
     scope,
     changedIdentifiers: changes,
     filtersChanged,
