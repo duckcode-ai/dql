@@ -45,8 +45,9 @@ SQL.
 - Full DQL Agent and Notebook test suites pass.
 - Governed correction HTTP lifecycle tests pass against the real local runtime.
 - Agent and Notebook production builds pass.
-- The synchronized workspace build, test, pack, publish, registry, and clean
-  install gates must be recorded by the release workflow for this version.
+- The synchronized workspace build, test, pack, and publish gates passed; all
+  19 npm packages report `version` and `latest` as `1.12.1`.
+- Fresh project-local and global CLI installs both report `dql 1.12.1`.
 
 ## v1.12.0 - 2026-07-30
 
