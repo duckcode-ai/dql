@@ -168,6 +168,7 @@ export type {
   AgentRunDiagnosticFailureV1,
   AgentRunDiagnosticReceiptV1,
   AgentRunEvent,
+  AgentRunExecutionTarget,
   AgentRunExecutors,
   AgentRunGate,
   AgentRunGateContext,

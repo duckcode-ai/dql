@@ -230,6 +230,10 @@ export interface AgentRunSelectedObject {
   path?: string;
 }
 
+export type AgentRunExecutionTarget =
+  | { target: "connection"; connectionName?: string }
+  | { target: "local" };
+
 export interface AgentRunRequest {
   question: string;
   /** Exact candidate selected from a prior structured clarification. */
@@ -240,6 +244,8 @@ export interface AgentRunRequest {
   intent?: MetadataAgentIntent;
   signals?: IntentSignals;
   selectedObject?: AgentRunSelectedObject;
+  /** Explicit data target. All planning, metadata, compilation, and execution for this run use it. */
+  executionTarget?: AgentRunExecutionTarget;
   workspaceContext?: Record<string, unknown>;
   conversationContext?: Record<string, unknown>;
   history?: Array<{ role: "user" | "assistant"; text: string }>;

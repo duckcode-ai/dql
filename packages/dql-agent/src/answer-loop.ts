@@ -1081,6 +1081,7 @@ export type WarehouseSqlFailureCategory =
   | 'type_mismatch'
   | 'permission'
   | 'authentication'
+  | 'connection'
   | 'timeout'
   | 'cancelled'
   | 'unsafe'
@@ -7873,8 +7874,18 @@ function classifyWarehouseSqlFailure(message: string): WarehouseSqlFailureCatego
   if (/\b(authentication|authenticate|invalid credentials?|incorrect username|login failed|oauth|expired token)\b/i.test(message)) {
     return 'authentication';
   }
+  // Snowflake deliberately combines missing-object and authorization wording
+  // ("Schema X does not exist or not authorized"). Treat that as relation
+  // visibility drift first; a broad permission match would otherwise suppress
+  // metadata refresh and make Ask disagree with a working Notebook query.
+  if (/\b(table|relation|view|object|schema)\b.*\b(not found|does not exist|unknown|not exist|not authorized)\b/i.test(message)) {
+    return 'unknown_relation';
+  }
   if (/\b(permission denied|insufficient privileges?|not authorized|access denied|authorization failed|does not have privilege)\b/i.test(message)) {
     return 'permission';
+  }
+  if (/\b(terminated connection|connection (?:is )?(?:closed|lost|terminated|reset)|not connected|session (?:has )?(?:expired|terminated)|invalid session|econnreset|socket hang up|broken pipe)\b/i.test(message)) {
+    return 'connection';
   }
   if (/\b(cancelled|canceled|aborted by user)\b/i.test(message)) return 'cancelled';
   if (/\b(timeout|timed out|deadline exceeded|statement timeout)\b/i.test(message)) return 'timeout';
@@ -7883,9 +7894,6 @@ function classifyWarehouseSqlFailure(message: string): WarehouseSqlFailureCatego
     || /\bdoes not have a column named\b/i.test(message)
     || /\binvalid identifier\b/i.test(message)) {
     return 'unknown_column';
-  }
-  if (/\b(table|relation|view|object)\b.*\b(not found|does not exist|unknown|not exist|not authorized)\b/i.test(message)) {
-    return 'unknown_relation';
   }
   if (/\b(function|routine)\b.*\b(not found|does not exist|unknown|unsupported|no matching signature)\b/i.test(message)) {
     return 'unsupported_function';
@@ -7910,7 +7918,7 @@ function warehouseSqlRetryDisposition(
     return 'model_repair';
   }
   if (category === 'unknown_relation') return 'refresh_metadata';
-  if (category === 'timeout') return 'explicit_retry';
+  if (category === 'timeout' || category === 'connection') return 'explicit_retry';
   if (category === 'permission' || category === 'authentication') return 'change_authorized_access';
   return 'terminal';
 }

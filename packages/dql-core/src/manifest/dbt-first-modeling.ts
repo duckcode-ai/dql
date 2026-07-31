@@ -1051,6 +1051,8 @@ function hasDbtTests(node: UnknownRecord): boolean {
 }
 
 function relationName(node: UnknownRecord, name: string): string | undefined {
+  const dbtRelationName = stringValue(node.relation_name);
+  if (dbtRelationName) return dbtRelationName;
   const database = stringValue(node.database);
   const schema = stringValue(node.schema);
   return [database, schema, name].filter(Boolean).join('.') || undefined;

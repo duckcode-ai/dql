@@ -130,6 +130,45 @@ describe('governed relational compiler (AGT-015 / API-006)', () => {
     expect(result.receipt.sqlFingerprint).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  it('preserves Snowflake unquoted dbt relation and column semantics', () => {
+    const snowflakeRegistry = registry();
+    snowflakeRegistry.relations[0] = {
+      ...snowflakeRegistry.relations[0]!,
+      sqlName: 'DEV_KKONDAPAKA_TRANSFORMED.sales.orders',
+    };
+    const result = compileGovernedRelationalPlan({
+      plan: plan(),
+      registry: snowflakeRegistry,
+      driver: 'snowflake',
+    });
+    expect(result.status).toBe('compiled');
+    if (result.status !== 'compiled') return;
+    expect(result.sql).toContain('FROM DEV_KKONDAPAKA_TRANSFORMED.sales.orders AS r0');
+    expect(result.sql).toContain('SUM(r0.amount) AS "revenue"');
+    expect(result.sql).not.toContain('"sales"');
+    expect(result.sql).not.toContain('r0."amount"');
+  });
+
+  it('keeps explicitly quoted Snowflake relation and column names intact', () => {
+    const snowflakeRegistry = registry();
+    snowflakeRegistry.relations[0] = {
+      ...snowflakeRegistry.relations[0]!,
+      sqlName: '"Dev Database"."sales.with.dot"."Order Facts"',
+      columns: snowflakeRegistry.relations[0]!.columns.map((column) => (
+        column.name === 'amount' ? { ...column, name: '"CaseSensitiveAmount"' } : column
+      )),
+    };
+    const result = compileGovernedRelationalPlan({
+      plan: plan(),
+      registry: snowflakeRegistry,
+      driver: 'snowflake',
+    });
+    expect(result.status).toBe('compiled');
+    if (result.status !== 'compiled') return;
+    expect(result.sql).toContain('FROM "Dev Database"."sales.with.dot"."Order Facts" AS r0');
+    expect(result.sql).toContain('SUM(r0."CaseSensitiveAmount") AS "revenue"');
+  });
+
   it('fails closed when join proof is absent or stale', () => {
     expect(compileGovernedRelationalPlan({
       plan: plan(),

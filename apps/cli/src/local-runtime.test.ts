@@ -2031,6 +2031,10 @@ describe('agent run runtime API', () => {
       reasoningEffort: 'high',
       analysisDepth: 'deep',
       thinkingMode: 'low',
+      executionTarget: {
+        target: 'connection',
+        connectionName: 'reporting',
+      },
     });
 
     expect(parsed.error).toBeUndefined();
@@ -2038,6 +2042,10 @@ describe('agent run runtime API', () => {
     expect(parsed.request?.analysisDepth).toBe('deep');
     expect(parsed.request?.thinkingMode).toBe('low');
     expect(parsed.request?.selectedEvidenceId).toBe('semantic:metric:customer_lifetime_spend');
+    expect(parsed.request?.executionTarget).toEqual({
+      target: 'connection',
+      connectionName: 'reporting',
+    });
     expect(parsed.request?.conversationContext).toEqual({
       sourceCertifiedBlock: 'food_vs_drink_revenue',
       resultColumns: ['category', 'revenue'],
@@ -2052,12 +2060,14 @@ describe('agent run runtime API', () => {
       reasoningEffort: 'maximum',
       analysisDepth: 'wide',
       thinkingMode: 'turbo',
+      executionTarget: { target: 'unknown', connectionName: 'reporting' },
     });
 
     expect(parsed.error).toBeUndefined();
     expect(parsed.request?.reasoningEffort).toBeUndefined();
     expect(parsed.request?.analysisDepth).toBeUndefined();
     expect(parsed.request?.thinkingMode).toBeUndefined();
+    expect(parsed.request?.executionTarget).toBeUndefined();
   });
 
   it('saves an answer block with an owner and returns either a certified block or a labelled draft', async () => {

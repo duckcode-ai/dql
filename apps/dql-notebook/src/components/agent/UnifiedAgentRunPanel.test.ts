@@ -24,6 +24,7 @@ let analyticalInspectorSections: typeof UnifiedAgentRunPanelModule.analyticalIns
 let analyticalRepairActionLabels: typeof UnifiedAgentRunPanelModule.analyticalRepairActionLabels;
 let askInspectorTabsForState: typeof UnifiedAgentRunPanelModule.askInspectorTabsForState;
 let threadItemsFromTurns: typeof UnifiedAgentRunPanelModule.threadItemsFromTurns;
+let selectAgentExecutionConnection: typeof UnifiedAgentRunPanelModule.selectAgentExecutionConnection;
 
 describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
   beforeAll(async () => {
@@ -50,6 +51,15 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     analyticalRepairActionLabels = module.analyticalRepairActionLabels;
     askInspectorTabsForState = module.askInspectorTabsForState;
     threadItemsFromTurns = module.threadItemsFromTurns;
+    selectAgentExecutionConnection = module.selectAgentExecutionConnection;
+  });
+
+  it('keeps Ask on an explicit valid connection and falls back to the server default', () => {
+    const names = ['analytics', 'reporting'];
+    expect(selectAgentExecutionConnection(names, 'analytics', 'reporting')).toBe('reporting');
+    expect(selectAgentExecutionConnection(names, 'analytics', 'deleted-connection')).toBe('analytics');
+    expect(selectAgentExecutionConnection(names, 'missing-default')).toBe('analytics');
+    expect(selectAgentExecutionConnection([], 'analytics')).toBeUndefined();
   });
 
   it('UI-012 exposes the complete seven-section analytical inspector for success and failure payloads', () => {

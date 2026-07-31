@@ -86,6 +86,17 @@ describe('manifest v3 dbt-first modeling', () => {
     expect(manifest.diagnostics?.some((diagnostic) => diagnostic.kind === 'modeling' && diagnostic.message.includes('stale'))).toBe(true);
   });
 
+  it('uses dbt relation_name as the physical relation without changing its quoting semantics', () => {
+    const raw = JSON.parse(requireManifest(dbtManifestPath)) as Record<string, any>;
+    raw.nodes['model.commerce.fct_orders'].relation_name = '"ANALYTICS"."sales"."Order Facts"';
+    writeFileSync(dbtManifestPath, JSON.stringify(raw));
+
+    const manifest = buildManifest({ projectRoot, dbtManifestPath });
+
+    expect(manifest.dbtProvenance?.nodes['model.commerce.fct_orders'].relation)
+      .toBe('"ANALYTICS"."sales"."Order Facts"');
+  });
+
   it('qualifies duplicate local entity ids across domains without guessing', () => {
     const growthEntities = join(projectRoot, 'domains', 'growth', 'modeling', 'entities.dql.yaml');
     writeFileSync(growthEntities, `${readFileSync(growthEntities, 'utf8')}  - id: order\n    dbt_model: model.growth.fct_campaign_touches\n`);

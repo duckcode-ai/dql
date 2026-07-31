@@ -1111,6 +1111,7 @@ export interface CreateAgentRunInput {
   intent?: string;
   signals?: Record<string, unknown>;
   selectedObject?: AgentRunSelectedObject;
+  executionTarget?: ExecutionTarget;
   workspaceContext?: Record<string, unknown>;
   conversationContext?: AgentConversationContext;
   context?: Record<string, unknown>;

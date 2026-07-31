@@ -8707,10 +8707,12 @@ describe("normalizeWarehouseSqlFailure", () => {
 
   it.each([
     ["Object ORDERS does not exist", "unknown_relation", "refresh_metadata"],
+    ['Schema \'DEV_KKONDAPAKA_TRANSFORMED."sales"\' does not exist or not authorized', "unknown_relation", "refresh_metadata"],
     ["Statement timed out after 60 seconds", "timeout", "explicit_retry"],
     ["Authentication failed: token=super-secret", "authentication", "change_authorized_access"],
     ["Unsafe statement: DELETE is not read-only", "unsafe", "terminal"],
-    ["Connection reset by peer", "unknown", "terminal"],
+    ["Connection reset by peer", "connection", "explicit_retry"],
+    ["Unable to perform operation using terminated connection", "connection", "explicit_retry"],
   ])("classifies %s without creating a noisy retry loop", (message, category, disposition) => {
     const failure = normalizeWarehouseSqlFailure(message, "snowflake");
     expect(failure.category).toBe(category);

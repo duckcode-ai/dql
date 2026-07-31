@@ -11,6 +11,7 @@ import {
   ChevronUp,
   Code2,
   Copy,
+  Database,
   FileSearch,
   Save,
   GitBranch,
@@ -253,6 +254,8 @@ export function UnifiedAgentRunPanel({
   // The composer "thinking" selection, sticky across refreshes. `auto` defers to
   // the engine's shape-adaptive routing; the user can change it mid-conversation.
   const [thinkingMode, setThinkingMode] = useState<AgentThinkingMode>(() => readStoredThinkingMode());
+  const [executionConnectionNames, setExecutionConnectionNames] = useState<string[]>([]);
+  const [executionConnectionName, setExecutionConnectionName] = useState<string>();
   const changeThinkingMode = useCallback((mode: AgentThinkingMode) => {
     setThinkingMode(mode);
     try { window.localStorage.setItem(THINKING_MODE_STORAGE_KEY, mode); } catch { /* best-effort */ }
@@ -265,6 +268,47 @@ export function UnifiedAgentRunPanel({
   const pendingRunRef = useRef<PendingAgentRun | null>(null);
   const recoveryTimerRef = useRef<number | null>(null);
   const recoveryEpochRef = useRef(0);
+  const contextualExecutionTarget = workspaceContext?.executionTarget;
+  const contextualExecutionConnectionName = contextualExecutionTarget
+    && typeof contextualExecutionTarget === 'object'
+    && !Array.isArray(contextualExecutionTarget)
+    && (contextualExecutionTarget as Record<string, unknown>).target === 'connection'
+    && typeof (contextualExecutionTarget as Record<string, unknown>).connectionName === 'string'
+    ? String((contextualExecutionTarget as Record<string, unknown>).connectionName)
+    : undefined;
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.getConnections()
+      .then((info) => {
+        if (cancelled) return;
+        const names = Object.keys(info.connections ?? {}).sort((left, right) => left.localeCompare(right));
+        let persisted: string | undefined;
+        try {
+          persisted = window.localStorage.getItem(EXECUTION_CONNECTION_STORAGE_KEY) ?? undefined;
+        } catch {
+          // Storage is advisory; the server-reported default remains authoritative.
+        }
+        setExecutionConnectionNames(names);
+        setExecutionConnectionName(selectAgentExecutionConnection(
+          names,
+          info.default,
+          contextualExecutionConnectionName ?? persisted,
+        ));
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setExecutionConnectionNames([]);
+          setExecutionConnectionName(undefined);
+        }
+      });
+    return () => { cancelled = true; };
+  }, [contextualExecutionConnectionName]);
+
+  const changeExecutionConnection = useCallback((name: string) => {
+    setExecutionConnectionName(name);
+    try { window.localStorage.setItem(EXECUTION_CONNECTION_STORAGE_KEY, name); } catch { /* best-effort */ }
+  }, []);
 
   // ── Ask redesign (askLayout) state ────────────────────────────────────────
   // Which artifact is open in the right inspector, and its active tab. Null =
@@ -489,6 +533,9 @@ export function UnifiedAgentRunPanel({
         requestedMode: activeMode,
         audience,
         selectedObject: selectedObject ?? (notebookPath ? { kind: 'notebook' as const, path: notebookPath } : undefined),
+        ...(executionConnectionName
+          ? { executionTarget: { target: 'connection' as const, connectionName: executionConnectionName } }
+          : {}),
         workspaceContext: {
           ...(workspaceContext ?? {}),
           ...(notebookPath ? { notebookPath } : {}),
@@ -766,6 +813,12 @@ export function UnifiedAgentRunPanel({
                 />
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px 10px 12px' }}>
                   <ThinkingModeControl t={t} value={thinkingMode} onChange={changeThinkingMode} />
+                  <AgentExecutionConnectionControl
+                    names={executionConnectionNames}
+                    value={executionConnectionName}
+                    onChange={changeExecutionConnection}
+                    t={t}
+                  />
                   <div style={{ flex: 1 }} />
                   {running ? (
                     <button type="button" className="dql-hover" onClick={handleStop} title="Stop the active agent run" style={{ height: 34, padding: '0 12px', borderRadius: 10, border: `1px solid ${t.error}`, background: t.btnBg, color: t.error, display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontFamily: t.font, fontSize: 12.5, fontWeight: 600 }}>
@@ -921,7 +974,15 @@ export function UnifiedAgentRunPanel({
             <span>{scopeHint}</span>
             {onClearScope ? <button type="button" onClick={onClearScope} aria-label="Clear modeling scope" title="Clear modeling scope" style={{ border: 0, background: 'transparent', color: t.textMuted, cursor: 'pointer', display: 'grid', placeItems: 'center', padding: 2 }}><X size={12} /></button> : null}
           </div>
-          <ThinkingModeControl t={t} value={thinkingMode} onChange={changeThinkingMode} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <AgentExecutionConnectionControl
+              names={executionConnectionNames}
+              value={executionConnectionName}
+              onChange={changeExecutionConnection}
+              t={t}
+            />
+            <ThinkingModeControl t={t} value={thinkingMode} onChange={changeThinkingMode} />
+          </div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
           <textarea
@@ -1042,6 +1103,66 @@ function findActiveAgentRun(threadId?: string): PendingAgentRun | undefined {
 }
 
 const THINKING_MODE_STORAGE_KEY = 'dql.agent.thinkingMode';
+const EXECUTION_CONNECTION_STORAGE_KEY = 'dql.agent.executionConnection.v1';
+
+export function selectAgentExecutionConnection(
+  names: string[],
+  defaultName?: string,
+  preferredName?: string,
+): string | undefined {
+  if (preferredName && names.includes(preferredName)) return preferredName;
+  if (defaultName && names.includes(defaultName)) return defaultName;
+  return names[0];
+}
+
+function AgentExecutionConnectionControl({
+  names,
+  value,
+  onChange,
+  t,
+}: {
+  names: string[];
+  value?: string;
+  onChange: (name: string) => void;
+  t: Theme;
+}): JSX.Element | null {
+  if (names.length === 0 || !value) return null;
+  return (
+    <label
+      title="Database connection used for metadata, compilation, and execution in this conversation"
+      style={{
+        height: 30,
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 5,
+        padding: '0 7px',
+        border: '1px solid var(--border-default)',
+        borderRadius: 8,
+        background: 'var(--bg-2)',
+        color: t.textMuted,
+        fontSize: 11,
+      }}
+    >
+      <Database size={12} />
+      <select
+        aria-label="Ask AI database connection"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        style={{
+          maxWidth: 150,
+          border: 0,
+          outline: 0,
+          background: 'transparent',
+          color: t.textSecondary,
+          font: 'inherit',
+          cursor: names.length > 1 ? 'pointer' : 'default',
+        }}
+      >
+        {names.map((name) => <option key={name} value={name}>{name}</option>)}
+      </select>
+    </label>
+  );
+}
 
 function readStoredThinkingMode(): AgentThinkingMode {
   try {

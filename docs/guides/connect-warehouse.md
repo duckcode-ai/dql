@@ -143,12 +143,27 @@ Reference a non-default connection from a cell:
 select count(*) from analytics.orders
 ```
 
+Ask AI shows the active database connection beside the Thinking control. Pick a
+named connection there when reporting runs outside the default dbt target. One
+Ask run uses that same connection for metadata grounding, semantic compilation,
+certified/generated execution, and bounded validation; DQL does not silently
+switch connections during a run.
+
+If a cached Snowflake or Databricks session is terminated while the Notebook is
+open, DQL evicts that session and reconnects once for a single read-only
+`SELECT`/`WITH` statement. Mutating SQL and multi-statement scripts are never
+replayed automatically. A second connection failure remains visible and can be
+retried explicitly after the connection is checked.
+
 ## Troubleshooting
 
 - **`driver package is not installed`** — open the notebook connection panel
   and install the project-local driver for DuckDB or Snowflake.
 - **`connection refused`** — firewall, VPN, wrong host, or wrong port. Run
   `dql doctor` after checking the resolved environment variables.
+- **`terminated connection`** — DQL retries one read-only query with a fresh
+  session. If it still fails, test the selected Ask/Notebook connection and
+  check the warehouse session, VPN, and authentication lifetime.
 - **`role does not have USAGE on schema`** — warehouse permissions. DQL needs
   `USAGE` on the schema and `SELECT` on queried objects.
 - **Snowflake key-pair auth** — set `authMethod` to `key_pair` and provide

@@ -131,4 +131,31 @@ describe('ConnectionPoolManager singleflight', () => {
     expect(await first).toBe(connector);
     expect(await second).toBe(connector);
   });
+
+  it('does not let a slow stale disconnect evict a concurrent replacement', async () => {
+    const pool = new ConnectionPoolManager();
+    let releaseDisconnect: (() => void) | undefined;
+    const stale = {
+      driverName: 'snowflake' as const,
+      connect: async () => undefined,
+      execute: async () => ({ columns: [], rows: [], rowCount: 0, executionTimeMs: 0 }),
+      disconnect: async () => new Promise<void>((resolve) => { releaseDisconnect = resolve; }),
+      ping: async () => true,
+    };
+    const fresh = {
+      ...stale,
+      disconnect: async () => undefined,
+    };
+    let created = 0;
+    (pool as any).createConnector = () => created++ === 0 ? stale : fresh;
+    const config = { driver: 'snowflake' as const, account: 'acct', username: 'user' };
+    expect(await pool.getConnector(config)).toBe(stale);
+
+    const removal = pool.removeConnector(config, stale);
+    expect(await pool.getConnector(config)).toBe(fresh);
+    releaseDisconnect?.();
+    await removal;
+
+    expect(await pool.getConnector(config)).toBe(fresh);
+  });
 });

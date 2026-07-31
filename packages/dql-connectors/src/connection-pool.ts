@@ -125,12 +125,20 @@ export class ConnectionPoolManager {
     return connectPromise;
   }
 
-  async removeConnector(config: ConnectionConfig): Promise<void> {
+  async removeConnector(
+    config: ConnectionConfig,
+    expectedConnector?: DatabaseConnector,
+  ): Promise<void> {
     const key = this.configKey(config);
     const connector = this.connectors.get(key);
-    if (connector) {
+    if (!connector || (expectedConnector && connector !== expectedConnector)) return;
+    // Evict before disconnecting. A slow vendor disconnect must not delete a
+    // replacement connector established concurrently by another query.
+    this.connectors.delete(key);
+    try {
       await connector.disconnect();
-      this.connectors.delete(key);
+    } catch {
+      // The stale connector is already evicted; reconnect remains available.
     }
   }
 

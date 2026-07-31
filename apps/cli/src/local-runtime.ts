@@ -715,6 +715,18 @@ export function parseAgentRunRequestBody(body: unknown): { request?: AgentRunReq
   const question = agentRunString(record.question) ?? agentRunString(record.prompt) ?? agentRunString(record.message);
   if (!question) return { error: 'question is required.' };
   const selectedObject = parseAgentRunSelectedObject(record.selectedObject);
+  const rawExecutionTarget = agentRunRecord(record.executionTarget)
+    ?? agentRunRecord(agentRunRecord(record.workspaceContext)?.executionTarget);
+  const executionTarget = rawExecutionTarget?.target === 'local'
+    ? { target: 'local' as const }
+    : rawExecutionTarget?.target === 'connection'
+      ? {
+          target: 'connection' as const,
+          ...(agentRunString(rawExecutionTarget.connectionName)
+            ? { connectionName: agentRunString(rawExecutionTarget.connectionName) }
+            : {}),
+        }
+      : undefined;
   const workspaceContext = agentRunRecord(record.workspaceContext) ?? agentRunRecord(record.context);
   const signals = agentRunRecord(record.signals);
   const requestedMode = parseAgentRunRequestedMode(record.requestedMode) ?? parseAgentRunRequestedMode(record.mode);
@@ -730,6 +742,7 @@ export function parseAgentRunRequestBody(body: unknown): { request?: AgentRunReq
       intent: agentRunString(record.intent) as AgentRunRequest['intent'],
       signals: signals as AgentRunRequest['signals'],
       selectedObject,
+      executionTarget,
       workspaceContext,
       conversationContext: agentRunRecord(record.conversationContext),
       history: parseAgentRunHistory(record.history),
@@ -1468,6 +1481,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       isConnectionConfig(body.connection) ? body.connection : connection,
     );
   };
+  const resolveAgentRunExecutionConnection = (
+    request: AgentRunRequest,
+  ): Promise<ConnectionConfig> => resolveExecutionConnection(
+    request.executionTarget ? { executionTarget: request.executionTarget } : {},
+  );
   const executionTargetDescriptor = (
     body: Record<string, unknown>,
   ): { target: 'local' } | { target: 'connection'; connectionName?: string } => {
@@ -1947,14 +1965,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // Best-effort active warehouse dialect so Lane-2 semantic compiles emit
     // dialect-correct SQL (e.g. DATE_TRUNC / identifier quoting). Absent when no
     // connection is configured — the compiler then uses its default dialect.
-    let semanticDriver: string | undefined;
     let semanticConnection: ConnectionConfig | undefined;
     try {
-      semanticConnection = requireActiveConnection();
-      semanticDriver = semanticConnection.driver;
-    } catch {
-      semanticDriver = undefined;
+      semanticConnection = await resolveAgentRunExecutionConnection(request);
+    } catch (error) {
+      // An explicit target is a contract and must fail closed. Without one,
+      // conversational/non-data runs retain the existing no-connection path;
+      // any later analytical execution will surface the normal setup action.
+      if (request.executionTarget) throw error;
     }
+    const semanticDriver = semanticConnection?.driver;
     const semanticTableMapping = semanticLayer && semanticConnection
       ? await resolveSemanticTableMapping(executor, semanticConnection, semanticLayer, projectRoot)
       : undefined;
@@ -2161,10 +2181,30 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ? { resolvedAnalyticalPlan: routeDecision.resolvedAnalyticalPlan }
           : {}),
         analyticalReferenceInstant: new Date().toISOString(),
-        executeCertifiedBlock: executeCertifiedBlockForAgent,
-        executeGeneratedSql: (sql, artifact) => executeGeneratedArtifactForAgent(request.question, sql, artifact),
-        executeDqlArtifact: (artifact) => executeArtifactReferenceForAgent(artifact, request.question),
-        getSchemaContext: getSchemaContextForAgent,
+        executeCertifiedBlock: (node, invocation) => executeCertifiedBlockForAgent(
+          node,
+          invocation,
+          semanticConnection,
+        ),
+        executeGeneratedSql: (sql, artifact) => executeGeneratedArtifactForAgent(
+          request.question,
+          sql,
+          artifact,
+          semanticConnection,
+        ),
+        executeDqlArtifact: (artifact) => executeArtifactReferenceForAgent(
+          artifact,
+          request.question,
+          semanticConnection,
+        ),
+        getSchemaContext: (question, preparedContextPack) => getSchemaContextForAgent(
+          question,
+          preparedContextPack,
+          semanticConnection,
+          request.executionTarget?.target === 'connection'
+            ? request.executionTarget.connectionName
+            : undefined,
+        ),
       },
       (turn) => {
         if (turn.kind === 'thinking') onProgress?.(turn.text);
@@ -2427,6 +2467,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           governedAnswer.contextPack?.questionPlan.requestedShape.topN?.scope === 'overall'
             ? governedAnswer.contextPack.questionPlan.requestedShape.topN.n
             : undefined,
+          await resolveAgentRunExecutionConnection(request),
         );
         const probeSummary = exploration.proofs.length > 0
           ? `${exploration.proofs.length} bounded join probe${exploration.proofs.length === 1 ? '' : 's'} completed.`
@@ -3860,6 +3901,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       parameterSources?: Record<string, 'policy' | 'explicit' | 'question' | 'prior_result' | 'surface' | 'default'>;
       rowLimit?: number;
     },
+    executionConnection?: ConnectionConfig,
   ): Promise<AgentResultPayload> => {
     const invocation = prepareBlockInvocation({
       source,
@@ -3872,7 +3914,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (invocation.unresolvedParameters.length > 0) {
       throw new Error(`I need values for: ${invocation.unresolvedParameters.join(', ')}.`);
     }
-    const activeConnection = requireActiveConnection();
+    const activeConnection = requireActiveConnection(executionConnection);
     const precompiledSemanticQuery = Boolean(extractBlockStudioSql(source));
     const tableMapping = !precompiledSemanticQuery
       ? await resolveSemanticTableMapping(executor, activeConnection, semanticLayer, projectRoot)
@@ -3968,6 +4010,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     blockName: string,
     invocationInput?: CertifiedBlockInvocationInput,
     requireCertified = false,
+    executionConnection?: ConnectionConfig,
   ): Promise<AgentResultPayload> => {
     const manifest = buildManifest({ projectRoot });
     const block = manifest.blocks[blockName];
@@ -3983,7 +4026,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       path: block.filePath,
       domain: block.domain,
       chartType: block.chartType,
-    }, invocationInput);
+    }, invocationInput, executionConnection);
     return {
       ...result,
       dqlArtifact: {
@@ -4006,6 +4049,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const executeCertifiedBlockForAgent = async (
     node: KGNode,
     invocationInput?: CertifiedBlockInvocationInput,
+    executionConnection?: ConnectionConfig,
   ): Promise<AgentResultPayload> => {
     if (node.kind !== 'block') {
       throw new Error(`Certified ${node.kind} "${node.name}" is a navigation artifact and cannot be executed as a block.`);
@@ -4013,6 +4057,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     return executeCertifiedBlockByNameForAgent(
       node.name || node.nodeId.replace(/^block:/, ''),
       invocationInput,
+      false,
+      executionConnection,
     );
   };
 
@@ -4031,6 +4077,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const executeArtifactReferenceForAgent = async (
     artifact: DqlArtifactReference,
     question: string,
+    executionConnection?: ConnectionConfig,
   ): Promise<AgentResultPayload> => {
     const invocation = prepareBlockInvocation({
       source: artifact.source,
@@ -4050,6 +4097,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         parameters: invocation.values,
         rowLimit: artifact.limit ?? 200,
       },
+      executionConnection,
     );
     return {
       ...result,
@@ -4067,11 +4115,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     question: string,
     sql: string,
     seed?: DqlArtifactReference,
+    executionConnection?: ConnectionConfig,
   ): Promise<AgentResultPayload> => {
     const artifact = generatedSqlArtifactContract(question, sql, seed);
     return executeArtifactReferenceForAgent(
       { ...artifact, limit: seed?.limit ?? artifact.limit ?? 200 },
       question,
+      executionConnection,
     );
   };
 
@@ -4088,6 +4138,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     schemaContext: AgentSchemaTable[] = [],
     question = '',
     requestedTopN?: number,
+    executionConnection?: ConnectionConfig,
   ): Promise<{
     result?: AgentResultPayload;
     proofs: Array<{ summary: string }>;
@@ -4095,7 +4146,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     repairs: string[];
     error?: string;
   }> => {
-    const activeConnection = requireActiveConnection();
+    const activeConnection = requireActiveConnection(executionConnection);
     const preflight = repairExploratorySqlBeforeExecution(candidate.sql, schemaContext, question, activeConnection.driver);
     const boundedSql = applyRequestedTopNToExploratorySql(preflight.sql, requestedTopN);
     const repairs = boundedSql === preflight.sql
@@ -4196,20 +4247,31 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return { proofs, sql: boundedSql, repairs, error: contradiction };
         }
       }
-      const result = await executeGeneratedArtifactForAgent(question, boundedSql);
+      const result = await executeGeneratedArtifactForAgent(
+        question,
+        boundedSql,
+        undefined,
+        activeConnection,
+      );
       return { result, proofs, sql: boundedSql, repairs };
     } catch (error) {
       return { proofs, sql: boundedSql, repairs, error: error instanceof Error ? error.message : String(error) };
     }
   };
 
-  const getSchemaContextForAgent = async (question: string, preparedContextPack?: LocalContextPack): Promise<AgentSchemaTable[]> => {
+  const getSchemaContextForAgent = async (
+    question: string,
+    preparedContextPack?: LocalContextPack,
+    executionConnection?: ConnectionConfig,
+    executionConnectionName?: string,
+  ): Promise<AgentSchemaTable[]> => {
+    const schemaConnection = executionConnection ?? connection;
     const scanRuntimeSchema = async (): Promise<{ ranked: AgentSchemaTable[]; snapshot: AgentSchemaTable[] }> => {
-      if (!connection) return { ranked: [], snapshot: [] };
+      if (!schemaConnection) return { ranked: [], snapshot: [] };
       const result = await executor.executePositional(
         buildRuntimeSchemaSearchSql(question),
         [],
-        connection,
+        schemaConnection,
         { maxRows: 600, maxBytes: 2 * 1024 * 1024, batchSize: 200, deadlineMs: 30_000 },
       );
       return {
@@ -4218,12 +4280,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       };
     };
     const catalogContext = await buildAgentSchemaContextFromCatalog(projectRoot, question, preparedContextPack).catch(() => []);
-    const activeScope = connection
+    const activeScope = schemaConnection
       ? optionalActiveConnectionMetadataScope(
           projectRoot,
           projectConfig,
-          connection,
-          projectConfig.defaultConnectionName ?? 'default',
+          schemaConnection,
+          executionConnectionName ?? projectConfig.defaultConnectionName ?? 'default',
         )
       : null;
     const activeRuntimeSnapshot = latestRuntimeSchemaSnapshotForProject(projectRoot);
@@ -4234,7 +4296,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     );
     const valueGrounding = resolveAgentRuntimeValueGrounding(projectConfig);
     if (catalogContext.length > 0) {
-      if (!connection || valueGrounding.mode !== 'safe_automatic') return catalogContext;
+      if (!schemaConnection || valueGrounding.mode !== 'safe_automatic') return catalogContext;
       // The immutable dbt/DQL snapshot already owns schema discovery. A named
       // row value must not turn a warm Ask into an information_schema scan over
       // thousands of enterprise tables; only field-scoped value probes are live.
@@ -4242,7 +4304,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         question,
         catalogContext,
         executor,
-        connection,
+        schemaConnection,
         valueGrounding.searchSafeColumns,
       );
       if (!hasActivatedMetadataGeneration) {
@@ -4257,7 +4319,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // user may explicitly refresh the selected scope.
     if (hasActivatedMetadataGeneration) return [];
 
-    if (!connection) return [];
+    if (!schemaConnection) return [];
     try {
       const schemaContext = await scanRuntimeSchema();
       const enriched = valueGrounding.mode === 'safe_automatic'
@@ -4265,7 +4327,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           question,
           schemaContext.ranked,
           executor,
-          connection,
+          schemaConnection,
           valueGrounding.searchSafeColumns,
         )
         : schemaContext.ranked;

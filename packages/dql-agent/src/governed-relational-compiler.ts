@@ -508,7 +508,7 @@ export function renderGovernedRelationalAst(
   };
   const expression = (columnId: string): string => {
     const { relation, column } = locateColumn(columnId);
-    return `${aliases.get(relation.qualifiedId)}.${dialect.quoteIdentifier(column.name)}`;
+    return `${aliases.get(relation.qualifiedId)}.${renderPhysicalIdentifier(column.name, driver, dialect.quoteIdentifier.bind(dialect))}`;
   };
   const selections = [
     ...ast.dimensions.map((item) => {
@@ -521,13 +521,13 @@ export function renderGovernedRelationalAst(
       return `${aggregate} AS ${dialect.quoteIdentifier(item.alias)}`;
     }),
   ];
-  let sql = `SELECT\n  ${selections.join(',\n  ')}\nFROM ${quoteRelation(relations.get(ast.fromRelationId)!.sqlName, dialect.quoteIdentifier.bind(dialect))} AS r0`;
+  let sql = `SELECT\n  ${selections.join(',\n  ')}\nFROM ${renderPhysicalRelation(relations.get(ast.fromRelationId)!.sqlName, driver, dialect.quoteIdentifier.bind(dialect))} AS r0`;
   const joined = new Set([ast.fromRelationId]);
   for (const join of ast.joins) {
     const relationship = registry.relationships.find((candidate) => candidate.qualifiedId === join.relationshipId)!;
     const relation = relations.get(join.relationId)!;
     const conditions = relationship.keys.map((key) => `${expression(key.fromColumnId)} = ${expression(key.toColumnId)}`);
-    sql += `\n${join.joinType.toUpperCase()} JOIN ${quoteRelation(relation.sqlName, dialect.quoteIdentifier.bind(dialect))} AS ${aliases.get(relation.qualifiedId)} ON ${conditions.join(' AND ')}`;
+    sql += `\n${join.joinType.toUpperCase()} JOIN ${renderPhysicalRelation(relation.sqlName, driver, dialect.quoteIdentifier.bind(dialect))} AS ${aliases.get(relation.qualifiedId)} ON ${conditions.join(' AND ')}`;
     joined.add(relation.qualifiedId);
   }
   if (ast.filters.length) {
@@ -637,8 +637,78 @@ function safeAlias(value: string, fallback: string): string {
   return value.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || fallback;
 }
 
-function quoteRelation(value: string, quote: (value: string) => string): string {
-  return value.split('.').map(quote).join('.');
+function isExplicitlyQuotedIdentifier(value: string): boolean {
+  return value.length >= 2 && (
+    value.startsWith('"') && value.endsWith('"')
+    || value.startsWith('`') && value.endsWith('`')
+    || value.startsWith('[') && value.endsWith(']')
+  );
+}
+
+function splitQualifiedRelation(value: string): string[] {
+  const segments: string[] = [];
+  let current = '';
+  let quote: '"' | '`' | ']' | null = null;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index]!;
+    if (quote) {
+      current += char;
+      if (char === quote) {
+        // SQL doubles quote characters inside quoted identifiers.
+        if (value[index + 1] === quote && quote !== ']') {
+          current += value[index + 1];
+          index += 1;
+        } else {
+          quote = null;
+        }
+      }
+      continue;
+    }
+    if (char === '"' || char === '`' || char === '[') {
+      quote = char === '[' ? ']' : char;
+      current += char;
+      continue;
+    }
+    if (char === '.') {
+      if (current.trim()) segments.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) segments.push(current.trim());
+  return segments;
+}
+
+function renderPhysicalIdentifier(
+  value: string,
+  driver: string | undefined,
+  quote: (value: string) => string,
+): string {
+  const trimmed = value.trim();
+  if (isExplicitlyQuotedIdentifier(trimmed)) return trimmed;
+  // dbt manifests commonly contain lowercase logical names for unquoted
+  // Snowflake objects. Quoting those names changes their meaning because
+  // Snowflake otherwise folds them to uppercase. Preserve normal unquoted
+  // physical identifiers and quote only names that actually require it.
+  if (
+    driver?.toLowerCase() === 'snowflake'
+    && /^[A-Za-z_][A-Za-z0-9_$]*$/.test(trimmed)
+    && (trimmed === trimmed.toLowerCase() || trimmed === trimmed.toUpperCase())
+  ) {
+    return trimmed;
+  }
+  return quote(trimmed);
+}
+
+function renderPhysicalRelation(
+  value: string,
+  driver: string | undefined,
+  quote: (value: string) => string,
+): string {
+  return splitQualifiedRelation(value)
+    .map((segment) => renderPhysicalIdentifier(segment, driver, quote))
+    .join('.');
 }
 
 function unique(values: Array<string | undefined>): string[] {
