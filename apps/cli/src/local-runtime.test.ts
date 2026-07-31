@@ -11,6 +11,7 @@ import {
   boundedAgentMeaningSignal,
   applyDashboardFiltersToBlockExecution,
   buildAgentPreviewSql,
+  buildRowBoundedSql,
   buildExploratoryJoinProbeSql,
   repairExploratorySqlBeforeExecution,
   buildAgentSchemaContext,
@@ -4197,12 +4198,99 @@ describe('prepareLocalExecution', () => {
   });
 });
 
-describe('buildAgentPreviewSql', () => {
-  it('wraps read-only generated SQL in a bounded preview', () => {
-    expect(buildAgentPreviewSql('SELECT status, COUNT(*) AS n FROM orders GROUP BY status;')).toBe(
-      'SELECT * FROM (\nSELECT status, COUNT(*) AS n FROM orders GROUP BY status\n) AS dql_agent_preview LIMIT 200',
-    );
+describe('buildRowBoundedSql', () => {
+  // The old wrapper was `SELECT * FROM (<sql>) AS dql_agent_preview LIMIT n`.
+  // It is not a no-op: a CTE inside a derived table is a syntax error on
+  // MSSQL/Fabric, duplicate output aliases break on several engines, and the
+  // inner ORDER BY stops being guaranteed. All showed up as "fails in Ask but
+  // runs in the notebook" for byte-identical SQL.
+  it('never wraps the statement in a derived table', () => {
+    const shapes = [
+      'SELECT status, COUNT(*) AS n FROM orders GROUP BY status',
+      'WITH recent AS (SELECT * FROM orders) SELECT * FROM recent',
+      'SELECT a FROM x UNION ALL SELECT a FROM y',
+      'SELECT o.id, c.id FROM orders o JOIN customers c ON c.id = o.customer_id',
+      'SELECT * FROM orders ORDER BY total DESC',
+    ];
+    for (const shape of shapes) {
+      expect(buildRowBoundedSql(shape, 200).sql).not.toContain('dql_agent_preview');
+    }
   });
+
+  it('appends a bound to a plain SELECT that has none', () => {
+    const bound = buildRowBoundedSql('SELECT status FROM orders;', 200);
+    expect(bound.outcome).toBe('appended');
+    expect(bound.sql).toBe('SELECT status FROM orders\nLIMIT 200');
+  });
+
+  it('appends after a WITH…SELECT without disturbing the CTE', () => {
+    const bound = buildRowBoundedSql('WITH recent AS (SELECT * FROM orders) SELECT * FROM recent', 50);
+    expect(bound.outcome).toBe('appended');
+    expect(bound.sql).toBe('WITH recent AS (SELECT * FROM orders) SELECT * FROM recent\nLIMIT 50');
+  });
+
+  it("never overrides a bound the statement already carries", () => {
+    for (const sql of [
+      'SELECT status FROM orders LIMIT 5',
+      'SELECT TOP 5 status FROM orders',
+      'SELECT status FROM orders OFFSET 0 ROWS FETCH NEXT 5 ROWS ONLY',
+    ]) {
+      const bound = buildRowBoundedSql(sql, 200);
+      // Whether it is recognised as an existing bound or simply not parseable
+      // under this dialect, the statement must come back untouched.
+      expect(bound.outcome).not.toBe('appended');
+      expect(bound.sql).toBe(sql);
+    }
+  });
+
+  it('detects an existing LIMIT rather than doubling it', () => {
+    expect(buildRowBoundedSql('SELECT status FROM orders LIMIT 5', 200).outcome).toBe('existing');
+  });
+
+  it('leaves the statement alone on dialects where a trailing LIMIT is invalid', () => {
+    for (const dialect of ['mssql', 'fabric']) {
+      const bound = buildRowBoundedSql('SELECT status FROM orders', 200, dialect);
+      expect(bound.outcome).toBe('skipped');
+      expect(bound.sql).toBe('SELECT status FROM orders');
+    }
+  });
+
+  it('does not rewrite SQL it cannot parse', () => {
+    const bound = buildRowBoundedSql('SELECT status FROM orders QUALIFY ~~~ nonsense', 200);
+    expect(bound.outcome).toBe('skipped');
+    expect(bound.sql).toBe('SELECT status FROM orders QUALIFY ~~~ nonsense');
+  });
+
+  it('applies no bound when none is requested (the notebook contract)', () => {
+    const bound = buildRowBoundedSql('SELECT status FROM orders', undefined);
+    expect(bound.outcome).toBe('skipped');
+    expect(bound.sql).toBe('SELECT status FROM orders');
+  });
+});
+
+describe('readOnlySqlValidationError', () => {
+  // The keyword blacklist matched IDENTIFIERS, so a CTE or alias named `load`,
+  // `merge`, or `copy` was rejected as if it were DDL. The AST check accepts
+  // them; `set` stays rejected because it is a reserved word the parser cannot
+  // read, and an unparseable statement keeps the conservative treatment.
+  it('accepts a parseable SELECT whose CTE or alias collides with a DDL keyword', () => {
+    for (const sql of [
+      'SELECT total AS load FROM orders',
+      'WITH merge AS (SELECT 1 AS a) SELECT a FROM merge',
+      'SELECT total AS copy FROM orders',
+      'WITH analyze_step AS (SELECT 1 AS a) SELECT a FROM analyze_step',
+    ]) {
+      expect(buildAgentPreviewSql(sql)).toContain('SELECT');
+    }
+  });
+
+  it('still refuses genuine DML and multi-statement input', () => {
+    expect(() => buildAgentPreviewSql('DELETE FROM orders')).toThrow('read-only SELECT or WITH');
+    expect(() => buildAgentPreviewSql('SELECT 1; DROP TABLE orders')).toThrow('one statement');
+  });
+});
+
+describe('buildAgentPreviewSql', () => {
 
   it('rejects generated SQL that is not a single read-only statement', () => {
     expect(() => buildAgentPreviewSql('SELECT 1; DROP TABLE orders')).toThrow('one statement');

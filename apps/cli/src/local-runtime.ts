@@ -4211,6 +4211,118 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     };
   };
 
+  /**
+   * Build the reusable DQL artifact for an answer that HAS ALREADY EXECUTED,
+   * and check that it recompiles.
+   *
+   * AGT-010 requires the attached artifact to be the one used for execution, so
+   * that "Apply" cannot diverge from what Ask displayed. The old code satisfied
+   * that invariant backwards: it made EXECUTION follow the artifact, routing the
+   * model's SQL through `parameterizeSqlForDqlImport` → `candidateToDqlSource` →
+   * the DQL parser → `processSQL` before running anything. Every one of those
+   * stages could fail on SQL the warehouse would have accepted, and each failure
+   * destroyed the whole answer.
+   *
+   * Now the executed string is the source of truth and the artifact is derived
+   * from it. Building the artifact is a SAVE concern, so a failure here degrades
+   * the artifact to review-required and never throws: the user still gets their
+   * answer, and only "Save as block" is affected.
+   */
+  const buildVerifiedGeneratedArtifact = (
+    question: string,
+    sql: string,
+    executedSql: string,
+    seed: DqlArtifactReference | undefined,
+    warnings: string[],
+  ): DqlArtifactReference | undefined => {
+    let artifact: DqlArtifactReference;
+    try {
+      artifact = generatedSqlArtifactContract(question, sql, seed);
+    } catch (error) {
+      warnings.push(`This answer could not be captured as a reusable DQL block: ${apiErrorMessage(error)}`);
+      return undefined;
+    }
+
+    try {
+      const invocation = prepareBlockInvocation({ source: artifact.source, question, surface: 'ask_ai' });
+      const divergence = invocation.errors.length > 0
+        ? invocation.errors.join(' ')
+        : invocation.unresolvedParameters.length > 0
+          ? `it still needs values for ${invocation.unresolvedParameters.join(', ')}`
+          : undefined;
+      if (divergence) {
+        warnings.push(`The reusable DQL block for this answer needs review before reuse: ${divergence}`);
+        return { ...artifact, trustState: 'review_required', compiledSql: executedSql };
+      }
+      return {
+        ...artifact,
+        compiledSql: executedSql,
+        ...(invocation.parameters.length > 0 ? { parameters: invocation.parameters } : {}),
+        ...(Object.keys(invocation.values).length > 0 ? { parameterValues: invocation.values } : {}),
+      };
+    } catch (error) {
+      warnings.push(`The reusable DQL block for this answer needs review before reuse: ${apiErrorMessage(error)}`);
+      return { ...artifact, trustState: 'review_required', compiledSql: executedSql };
+    }
+  };
+
+  /**
+   * Execute the model's SQL EXACTLY as validated — the same way a notebook cell
+   * runs it. This is the fix for "the query Ask generated fails in Ask but runs
+   * in the notebook": both paths now reach `executor.executeQuery` with the same
+   * string, so the only remaining reasons to differ are the connection and the
+   * governance gates, both of which report themselves honestly.
+   */
+  const executeGeneratedSqlDirect = async (
+    question: string,
+    sql: string,
+    seed?: DqlArtifactReference,
+    executionConnection?: ConnectionConfig,
+  ): Promise<AgentResultPayload> => {
+    const activeConnection = requireActiveConnection(executionConnection);
+    const rowBound = clampAnalyticalRowBound(seed?.limit ?? 200);
+    const trimmed = sql.trim().replace(/;\s*$/, '').trim();
+    if (!trimmed) throw analyticalError('The generated SQL was empty.', { origin: 'host', stage: 'execute' });
+
+    const readOnlyError = readOnlySqlValidationError(trimmed, 'Generated SQL', activeConnection.driver);
+    if (readOnlyError) {
+      throw analyticalError(readOnlyError, { origin: 'governance_gate', stage: 'validation', code: 'unsafe_sql' });
+    }
+
+    const prepared = prepareLocalExecution(trimmed, activeConnection, projectRoot, projectConfig);
+    const bounded = buildRowBoundedSql(prepared.sql, rowBound, activeConnection.driver);
+    const app = loadRuntimeApp(projectRoot, activePersonaAppId());
+    const sourceDomain = seed?.source?.match(/\bdomain\s*=\s*"([^"]+)"/i)?.[1];
+    assertAppAccess({ app, domain: sourceDomain ?? app?.domain, level: 'execute' });
+
+    const rawResult = await executor.executeQuery(bounded.sql, [], runtimeVariables({}), prepared.connection);
+    const normalized = normalizeQueryResult(rawResult);
+    // The authoritative bound. `buildRowBoundedSql` may legitimately decline to
+    // touch the statement, and only one of 15 drivers honours a maxRows hint, so
+    // the host is the only layer correctness may depend on.
+    const truncated = normalized.rows.length > rowBound;
+    const rows = truncated ? normalized.rows.slice(0, rowBound) : normalized.rows;
+
+    const warnings: string[] = [];
+    const artifact = buildVerifiedGeneratedArtifact(question, trimmed, bounded.sql, seed, warnings);
+    return {
+      columns: normalized.columns,
+      rows,
+      rowCount: rows.length,
+      executionTime: normalized.executionTime,
+      sql: bounded.sql,
+      ...(truncated ? { truncated: true } : {}),
+      ...(artifact ? { dqlArtifact: { ...artifact, limit: rowBound } } : {}),
+      ...(warnings.length > 0 ? { validationWarnings: warnings } : {}),
+      executionReceipt: createDqlArtifactExecutionReceipt(
+        artifact?.source ?? trimmed,
+        bounded.sql,
+        {},
+        { columns: normalized.columns, rows, rowCount: rows.length },
+      ),
+    };
+  };
+
   const executeGeneratedArtifactForAgent = async (
     question: string,
     sql: string,
@@ -4218,13 +4330,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     executionConnection?: ConnectionConfig,
     executionConnectionName?: string,
   ): Promise<AgentResultPayload> => {
-    const artifact = generatedSqlArtifactContract(question, sql, seed);
-    return executeArtifactReferenceForAgent(
-      { ...artifact, limit: seed?.limit ?? artifact.limit ?? 200 },
-      question,
-      executionConnection,
-      executionConnectionName,
-    );
+    // A seed that is already a certified/saved artifact keeps the DQL-first
+    // path: there the `.dql` source IS the contract, and its parameters and
+    // semantic refs must be compiled, not bypassed.
+    if (seed && seed.kind !== 'sql_block') {
+      return executeArtifactReferenceForAgent(
+        { ...seed, limit: seed.limit ?? 200 },
+        question,
+        executionConnection,
+        executionConnectionName,
+      );
+    }
+    return executeGeneratedSqlDirect(question, sql, seed, executionConnection);
   };
 
   /**
@@ -17344,19 +17461,89 @@ function withAnalyticalCompilationOrigin<T>(stage: AnalyticalErrorStage, fn: () 
   return withAnalyticalErrorOriginSync({ origin: 'dql_compilation', stage }, fn);
 }
 
+export function clampAnalyticalRowBound(rowLimit: number): number {
+  return Number.isFinite(rowLimit) ? Math.max(1, Math.min(10_000, Math.floor(rowLimit))) : 200;
+}
+
+/**
+ * Dialects where a bare trailing `LIMIT n` is valid on a top-level SELECT.
+ * MSSQL/Fabric need `TOP`/`OFFSET…FETCH` in positions that depend on the rest
+ * of the statement, so we never rewrite there — the host-side truncation below
+ * is the guarantee, and appending is only an optimization.
+ */
+const TRAILING_LIMIT_DIALECTS = new Set([
+  'duckdb', 'postgres', 'postgresql', 'redshift', 'snowflake', 'bigquery',
+  'databricks', 'trino', 'presto', 'clickhouse', 'mysql', 'mariadb', 'sqlite', 'athena',
+]);
+
+export type AnalyticalRowBoundOutcome = 'appended' | 'existing' | 'skipped';
+
+export interface AnalyticalRowBoundResult {
+  sql: string;
+  outcome: AnalyticalRowBoundOutcome;
+  reason?: string;
+}
+
+/**
+ * Bound a result set WITHOUT rewriting the statement's shape.
+ *
+ * The previous approach wrapped every Ask query as
+ * `SELECT * FROM (<sql>) AS dql_agent_preview LIMIT n`. That is not a no-op:
+ *   - `SELECT * FROM (WITH x AS (…) SELECT …) AS t` is a syntax error on
+ *     MSSQL/Fabric, and the model emits CTEs constantly;
+ *   - duplicate output column names are legal at top level but not as a
+ *     derived table on several engines;
+ *   - the inner `ORDER BY` stops being guaranteed, silently breaking top-N.
+ * All three produced "fails in Ask, runs in the notebook" for identical SQL.
+ *
+ * Appending is skipped whenever it cannot be proven safe. Callers must still
+ * truncate rows host-side — that, not this, is what actually enforces the bound.
+ */
+export function buildRowBoundedSql(
+  sql: string,
+  rowLimit: number | undefined,
+  dialect = 'duckdb',
+): AnalyticalRowBoundResult {
+  const trimmed = sql.trim().replace(/;\s*$/, '').trim();
+  if (!rowLimit) return { sql: trimmed, outcome: 'skipped', reason: 'no row bound requested' };
+  if (!TRAILING_LIMIT_DIALECTS.has(dialect.toLowerCase())) {
+    return { sql: trimmed, outcome: 'skipped', reason: `trailing LIMIT is not portable on ${dialect}` };
+  }
+
+  const analysis = analyzeSqlReferences(trimmed, dialect);
+  if (!analysis.parsed) {
+    return { sql: trimmed, outcome: 'skipped', reason: 'statement did not parse; not rewriting it' };
+  }
+  const statements = analysis.statementTypes ?? [];
+  if (statements.length !== 1 || statements[0]?.toLowerCase() !== 'select') {
+    return { sql: trimmed, outcome: 'skipped', reason: 'not a single SELECT statement' };
+  }
+
+  // Any existing bound — LIMIT, FETCH FIRST/NEXT, TOP — wins. Detection is
+  // deliberately greedy: a false positive costs nothing (host truncation still
+  // applies), a false negative would override the author's own bound.
+  const scan = stripSqlStringsAndComments(trimmed);
+  if (/\blimit\b/i.test(scan) || /\bfetch\s+(first|next)\b/i.test(scan) || /\btop\s*\(?\s*\d/i.test(scan)) {
+    return { sql: trimmed, outcome: 'existing', reason: 'statement already carries its own bound' };
+  }
+
+  return { sql: `${trimmed}\nLIMIT ${clampAnalyticalRowBound(rowLimit)}`, outcome: 'appended' };
+}
+
+/**
+ * @deprecated Kept for one release so any out-of-tree caller keeps working.
+ * Use {@link executeAnalyticalSql}, which bounds rows without wrapping.
+ */
 export function buildAgentPreviewSql(sql: string, rowLimit = 200): string {
   const trimmed = sql.trim();
   if (!trimmed) throw analyticalError('Generated SQL preview is empty.', { origin: 'host', stage: 'execute' });
-  const boundedRowLimit = Number.isFinite(rowLimit)
-    ? Math.max(1, Math.min(10_000, Math.floor(rowLimit)))
-    : 200;
   const withoutTrailingSemicolon = trimmed.replace(/;\s*$/, '').trim();
   const readOnlyError = readOnlySqlValidationError(withoutTrailingSemicolon, 'Generated SQL preview');
   // A deliberate read-only refusal, not a warehouse rejection.
   if (readOnlyError) {
     throw analyticalError(readOnlyError, { origin: 'governance_gate', stage: 'validation', code: 'unsafe_sql' });
   }
-  return `SELECT * FROM (\n${withoutTrailingSemicolon}\n) AS dql_agent_preview LIMIT ${boundedRowLimit}`;
+  return buildRowBoundedSql(withoutTrailingSemicolon, rowLimit).sql;
 }
 
 export interface ExploratorySqlPreflightResult {
@@ -17812,7 +17999,7 @@ function summarizeExploratoryJoinProbe(
   return `${leftRelation}.${leftColumn} ↔ ${rightRelation}.${rightColumn}: sample left=${number('left_sample_rows')}, right=${number('right_sample_rows')}, joined=${number('joined_rows')}, unmatched left/right=${number('unmatched_left_sample_rows')}/${number('unmatched_right_sample_rows')}, max matches left/right=${number('max_matches_per_left_key')}/${number('max_matches_per_right_key')}`;
 }
 
-function readOnlySqlValidationError(sql: string, subject: string): string | null {
+function readOnlySqlValidationError(sql: string, subject: string, dialect = 'duckdb'): string | null {
   const internalRelationError = internalDqlRelationIdValidationError(sql, subject);
   if (internalRelationError) return internalRelationError;
   const scanSql = stripSqlStringsAndComments(sql).trim();
@@ -17822,6 +18009,23 @@ function readOnlySqlValidationError(sql: string, subject: string): string | null
   if (scanSql.includes(';')) {
     return `${subject} only supports one statement.`;
   }
+
+  // Prefer the parser. The keyword blacklist matches IDENTIFIERS, so a CTE or
+  // column alias legitimately named `set`, `load`, `merge`, or `copy` was
+  // rejected as if it were DDL — a false failure on SQL the notebook runs fine.
+  // The blacklist stays as the conservative fallback for statements the dialect
+  // parser cannot read.
+  const analysis = analyzeSqlReferences(scanSql, dialect);
+  if (analysis.parsed) {
+    const statements = analysis.statementTypes ?? [];
+    const offending = statements.find((statement) => statement.toLowerCase() !== 'select');
+    if (offending) {
+      return `${subject} rejected unsupported statement keyword: ${offending.toUpperCase()}.`;
+    }
+    if (statements.length > 1) return `${subject} only supports one statement.`;
+    return null;
+  }
+
   const forbiddenPattern = new RegExp(`\\b(${AGENT_PREVIEW_FORBIDDEN_SQL.join('|')})\\b`, 'i');
   const forbidden = scanSql.match(forbiddenPattern)?.[1];
   if (forbidden) {

@@ -1059,6 +1059,17 @@ export interface AgentResultPayload {
   rows: unknown[];
   rowCount: number;
   executionTime?: number;
+  /**
+   * The row bound actually cut rows off. Previously a bounded result was
+   * indistinguishable from a complete one, so "the top 200" silently read as
+   * "all of them".
+   */
+  truncated?: boolean;
+  /**
+   * Host-side notes about this execution — for example that the reusable DQL
+   * block could not be rebuilt. These never mean the RESULT is wrong.
+   */
+  validationWarnings?: string[];
   chartConfig?: unknown;
   sql?: string;
   blockName?: string;

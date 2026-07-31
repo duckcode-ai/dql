@@ -78,6 +78,10 @@ function inferQuestionValues(question: string, definitions: BlockParameterDefini
   const years = Array.from(question.matchAll(/\b(19\d{2}|20\d{2})\b/g)).map((match) => Number(match[1]));
   const dates = Array.from(question.matchAll(/\b(20\d{2}-\d{2}-\d{2})\b/g)).map((match) => match[1]);
 
+  // Inference legitimately overrides a block DEFAULT — "top 3" against a block
+  // declaring `top_n = 10` must return 3. It is scoped to values the question
+  // states outright (limit, dates, years); labels such as regions and ids stay
+  // unresolved rather than being guessed (see the note at the end of the loop).
   for (const definition of definitions) {
     if ((definition.name === 'top_n' || definition.binding?.kind === 'limit') && topN) {
       out[definition.name] = Number(topN);
