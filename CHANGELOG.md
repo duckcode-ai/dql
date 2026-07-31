@@ -47,8 +47,11 @@ work from normal Notebook navigation.
 - A real loopback API check verified that deleted chat sessions remain deleted.
 - Built-CLI browser checks against `jaffle-shop-duckdb` verified cached
   navigation with no browser errors.
-- The synchronized workspace build, test, pack, publish, registry, and clean
-  install gates must be recorded by the release workflow for this version.
+- The synchronized workspace release gate passed: all 22 workspace builds,
+  the full test graph, and all 19 npm tarballs completed successfully.
+- All 19 npm packages report `version` and `latest` as `1.12.3`.
+- Fresh project-local and global CLI installs both report `dql 1.12.3`, and
+  `create-dql-app@1.12.3 --help` resolves successfully.
 
 ## v1.12.2 - 2026-07-30
 
