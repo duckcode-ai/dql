@@ -238,6 +238,12 @@ export interface AgentRunRequest {
   question: string;
   /** Exact candidate selected from a prior structured clarification. */
   selectedEvidenceId?: string;
+  /**
+   * When `question` is a clarification continuation, the user's ORIGINAL
+   * analytical question. Used for artifact naming and planning so the
+   * clarification prose in `question` does not leak into either.
+   */
+  clarificationSourceQuestion?: string;
   requestedMode?: AgentRunRequestedMode;
   /** Defaults to "analyst" (Notebook). Stakeholder surfaces pass "stakeholder". */
   audience?: AgentRunAudience;
@@ -649,6 +655,27 @@ function latestClarificationFromConversationContext(
 ): Pick<ClarificationContinuation, 'sourceQuestion' | 'clarifyingQuestion'> | undefined {
   const contextRecord = clarificationRecord(context);
   const snapshot = clarificationRecord(contextRecord?.serverSnapshot);
+  const envelope = clarificationRecord(contextRecord?.conversationEnvelope);
+
+  // PRIMARY: the envelope's own pending clarification. `buildConversationSnapshot`
+  // already detects one correctly (`route === 'clarify' || runStatus ===
+  // 'needs_clarification'`) and applies the one-shot reply guard — but nothing
+  // consumed it, so the scan below was the only path, and it matched on
+  // `route === 'clarify'` alone. On the Ask surface a clarification persisted
+  // the RESOLVED analytical route, so the scan never matched, the reply ran
+  // context-free, and the same clarification was asked again.
+  //
+  // Both envelope keys are read; neither may be dropped while older clients
+  // still write only `serverSnapshot`.
+  for (const source of [envelope, snapshot]) {
+    const pending = clarificationRecord(source?.pendingClarification);
+    const clarifyingQuestion = clarificationString(pending?.question);
+    const sourceQuestion = clarificationString(pending?.sourceQuestion);
+    if (clarifyingQuestion && sourceQuestion) return { sourceQuestion, clarifyingQuestion };
+  }
+
+  // FALLBACK: the legacy turn scan, for envelopes persisted before the write
+  // side recorded `route: 'clarify'`.
   const sources = [snapshot?.recentTurns, contextRecord?.turns];
   for (const source of sources) {
     if (!Array.isArray(source) || source.length === 0) continue;
@@ -941,12 +968,15 @@ export class AgentRunEngine {
     if (clarificationContinuation) {
       request = {
         ...request,
-        // A structured choice is already an exact meaning binding. Retrieve and
-        // execute against the original analytical question so artifact names,
-        // planning, and SQL shape are not polluted by clarification prose.
+        // A structured choice is already an exact meaning binding, carried
+        // separately as `selectedEvidenceId`. Retrieve and execute against the
+        // original analytical question so artifact names, planning, and SQL
+        // shape are not polluted by clarification prose. A FREE-TEXT reply has
+        // no such binding, so it must be folded into the question.
         question: request.selectedEvidenceId
           ? clarificationContinuation.sourceQuestion
           : clarificationContinuation.resolvedQuestion,
+        clarificationSourceQuestion: clarificationContinuation.sourceQuestion,
       };
     }
     const runId = request.runId ?? this.idGenerator();

@@ -64,7 +64,19 @@ export interface ConversationEnvelopeV1 {
   /** How the NEW question relates to the ongoing topic (when a question is supplied). */
   topicRelation?: TopicRelation;
   /** Latest clarification that is still the current turn. */
-  pendingClarification?: { sourceTurnId: string; question: string };
+  /**
+   * The clarification the last turn asked, and the analytical question it was
+   * asked ABOUT. Both are needed: replying "by region" only makes sense
+   * alongside the original request, and the engine has to restore that pairing
+   * or the reply runs context-free and gets clarified again.
+   */
+  pendingClarification?: {
+    sourceTurnId: string;
+    /** The clarifying question DQL asked. */
+    question: string;
+    /** The user's original analytical question that triggered it. */
+    sourceQuestion?: string;
+  };
 }
 
 /** Compatibility name retained for existing API/provider consumers. */
@@ -162,9 +174,28 @@ export function buildConversationSnapshot(
       ? {
           sourceTurnId: latest.id,
           question: latest.answerSummary ?? latest.answerText ?? latest.question,
+          // Walk back past any intermediate short replies to the last real
+          // analytical question, so a repeated clarify chain still recovers the
+          // request rather than a terse "yes".
+          sourceQuestion: analyticalQuestionBefore(recent, recent.length - 1),
         }
       : undefined,
   };
+}
+
+/**
+ * Walk back from `index` to the last turn whose question is a real analytical
+ * request rather than a clarification reply. A repeated clarify chain
+ * (original question → "yes" → clarify again) must recover the ORIGINAL
+ * request; returning the intermediate "yes" is how the loop kept restarting
+ * from a context-free word.
+ */
+function analyticalQuestionBefore(turns: ConversationTurn[], index: number): string | undefined {
+  for (let cursor = index; cursor >= 0; cursor -= 1) {
+    const question = turns[cursor]?.question?.trim();
+    if (question && !isLikelyClarificationReply(question)) return question;
+  }
+  return turns[Math.max(0, index)]?.question?.trim() || undefined;
 }
 
 /**

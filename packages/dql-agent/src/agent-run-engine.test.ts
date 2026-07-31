@@ -1067,6 +1067,87 @@ describe("AgentRunEngine audience", () => {
   });
 });
 
+describe("clarification continuations — Ask surface", () => {
+  /**
+   * The reported clarify loop. On the Ask surface a clarification persists the
+   * RESOLVED analytical route (`generated_answer`) with
+   * `runStatus: 'needs_clarification'`, and thread runs clear `history`. The
+   * engine's only lookup matched `route === 'clarify'`, so it never found the
+   * pending clarification: the reply ran context-free and was clarified again.
+   *
+   * `buildConversationSnapshot` publishes `pendingClarification` correctly —
+   * nothing consumed it. Now the engine reads it first.
+   */
+  function askSurfaceContext(overrides: Record<string, unknown> = {}) {
+    return {
+      conversationContext: {
+        conversationEnvelope: {
+          threadId: "thr_1",
+          recentTurns: [{
+            id: "trn_1",
+            question: "What is total revenue?",
+            answerSummary: "Do you mean gross or net revenue?",
+            // The route the run WOULD have taken — not 'clarify'.
+            route: "generated_answer",
+            runStatus: "needs_clarification",
+          }],
+          pendingClarification: {
+            sourceTurnId: "trn_1",
+            question: "Do you mean gross or net revenue?",
+            sourceQuestion: "What is total revenue?",
+          },
+          ...overrides,
+        },
+      },
+    };
+  }
+
+  it("recovers the original question from the envelope when the route is not 'clarify'", () => {
+    // `history` is empty — thread runs clear it — so the envelope is the ONLY
+    // source. Before this, the turn scan required `route === 'clarify'` and
+    // found nothing, so the reply ran as a bare context-free word.
+    const continuation = resolveClarificationContinuation({
+      question: "net",
+      history: [],
+      ...askSurfaceContext(),
+    });
+
+    expect(continuation).toBeDefined();
+    expect(continuation!.sourceQuestion).toBe("What is total revenue?");
+    expect(continuation!.clarifyingQuestion).toBe("Do you mean gross or net revenue?");
+    expect(continuation!.resolvedQuestion).toContain("What is total revenue?");
+    expect(continuation!.resolvedQuestion).toContain("net");
+  });
+
+  it("still works from a legacy envelope carrying only serverSnapshot", () => {
+    const continuation = resolveClarificationContinuation({
+      question: "net",
+      history: [],
+      conversationContext: {
+        serverSnapshot: {
+          recentTurns: [{
+            question: "What is total revenue?",
+            answerSummary: "Do you mean gross or net revenue?",
+            route: "clarify",
+          }],
+        },
+      },
+    });
+
+    expect(continuation?.sourceQuestion).toBe("What is total revenue?");
+  });
+
+  it("does not fold a complete new question into a pending clarification", () => {
+    const continuation = resolveClarificationContinuation({
+      question: "Which warehouses shipped late last quarter?",
+      history: [],
+      ...askSurfaceContext(),
+    });
+
+    expect(continuation).toBeUndefined();
+  });
+});
+
 describe("clarification continuations", () => {
   it("treats a substantive new question without punctuation as a fresh turn", () => {
     const continuation = resolveClarificationContinuation({

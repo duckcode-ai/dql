@@ -2674,7 +2674,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ],
       };
     }
-    const resolvedRoute = resolvedRunRouteFromAnswer(governedAnswer) ?? route;
+    const answeredRoute = resolvedRunRouteFromAnswer(governedAnswer) ?? route;
     const isCertified = governedAnswer.certification === 'certified' || governedAnswer.kind === 'certified';
     const isSemantic = governedAnswer.route?.tier === 'semantic_metric';
     const requestedNotebookDataset = findMentionedNotebookDataset(
@@ -2710,6 +2710,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // provider outages are blocked so the UI can offer an explicit retry.
     const needsClarification = governedAnswer.kind === 'no_answer'
       && !isGroundingGap && !isProviderError && !isModelDeclined && !isPolicyBlocked;
+    // A run that ASKED THE USER A QUESTION is a clarify turn, whatever route it
+    // would have taken had it answered. Persisting the resolved analytical route
+    // instead (`generated_answer`) meant the engine's clarification-continuation
+    // lookup — which matches on `route === 'clarify'` — never found it, so the
+    // reply ran context-free and was clarified again: the reported clarify loop.
+    const resolvedRoute = needsClarification ? 'clarify' as const : answeredRoute;
     const sql = governedAnswer.proposedSql ?? governedAnswer.sql;
     const runnableSql = governedAnswer.kind === 'no_answer' || isExecutionFailure || (isExploratory && !governedAnswer.result)
       ? undefined
