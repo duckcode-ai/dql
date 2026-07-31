@@ -273,6 +273,11 @@ export interface BuildLocalContextPackRequest {
   objectTypes?: string[];
   intent?: MetadataAgentIntent;
   surface?: 'cli' | 'notebook' | 'block' | 'app' | 'research' | 'mcp' | string;
+  /**
+   * Draft blocks are authoring material, never normal Ask evidence. Hosts may
+   * opt in only for an explicit Block Studio/review workflow.
+   */
+  includeDraftBlocks?: boolean;
   followUp?: MetadataFollowUpContext | unknown;
   selectedContext?: unknown;
   runtimeSchemaSnapshot?: RuntimeSchemaSnapshot;
@@ -1304,6 +1309,7 @@ export async function buildLocalContextPack(
   const runtimeCatalog = openMetadataCatalog(projectRoot);
   try {
     const mode = request.mode ?? 'question';
+    const includeDraftBlocks = allowsDraftBlockRetrieval(request);
     const followUp = normalizeFollowUpContext(request.followUp);
     const questionPlan = buildAnalysisQuestionPlan(request.question, followUp ?? undefined);
     if (questionPlan.requestedShape.filters.length > 0) {
@@ -1347,7 +1353,8 @@ export async function buildLocalContextPack(
     const priorPackFresh = Boolean(
       priorPack
       && priorPack.freshness.fingerprint === catalog.state('fingerprint')
-      && runtimeSchemaIdentityMatches,
+      && runtimeSchemaIdentityMatches
+      && (includeDraftBlocks || !priorPack.objects.some(isUncertifiedDqlBlock)),
     );
     if (
       priorPack
@@ -1428,7 +1435,10 @@ export async function buildLocalContextPack(
     // Skill guidance is injected only through selectContextPackSkills below.
     // Leaving it in generic FTS results would bypass status/domain/area/exclusion
     // eligibility simply because a word in its body matched the question.
-    const retrievalObjects = (rows: MetadataObject[]) => scopeObjects(rows).filter((row) => row.objectType !== 'skill');
+    const retrievalObjects = (rows: MetadataObject[]) => scopeObjects(rows).filter((row) =>
+      row.objectType !== 'skill'
+      && (includeDraftBlocks || !isUncertifiedDqlBlock(row))
+    );
     const snapshotRetrieval = await retrieveMetadataSnapshotCandidates(catalog, {
       question: request.question,
       searchQueries,
@@ -5713,6 +5723,17 @@ function findExactCertifiedObject(question: string, intent: MetadataAgentIntent,
 
 function isCertifiedMetadataObject(object: MetadataObject): boolean {
   return object.status === 'certified' || object.status === 'approved' || object.payload?.certification === 'certified';
+}
+
+function isUncertifiedDqlBlock(object: MetadataObject): boolean {
+  return object.objectType === 'dql_block' && !isCertifiedMetadataObject(object);
+}
+
+function allowsDraftBlockRetrieval(request: BuildLocalContextPackRequest): boolean {
+  if (request.includeDraftBlocks === true) return true;
+  if (request.surface === 'block') return true;
+  if (request.mode && request.mode !== 'question') return true;
+  return /\b(?:draft|review|edit|certif(?:y|ied|ication)|block studio|this block)\b/i.test(request.question);
 }
 
 function objectNameInQuestion(question: string, object: MetadataObject): boolean {

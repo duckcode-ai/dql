@@ -11,6 +11,13 @@ The intended flow is:
 Connect dbt -> Pick model or metric -> Build block -> Validate -> Save draft -> Certify -> Use in Apps
 ```
 
+The editor toolbar keeps the two trust transitions separate: **Save draft**
+persists review-required work, while **Certify** runs the validation, execution,
+test, chart, and lineage gates before changing the status. A draft may be used
+inside Block Studio for authoring and review, but normal Ask retrieval does not
+offer it as answer evidence; Ask can route through a block only after that block
+is certified.
+
 DQL does not replace dbt. dbt owns models, transformations, tests, and semantic
 definitions. DQL owns reusable answer blocks, chart configuration, notebooks,
 Apps, AI pins, certification labels, and answer-level lineage.

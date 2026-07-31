@@ -25,6 +25,7 @@ import {
   buildSemanticLayerDiagnostics,
   buildSemanticTableMapping,
   buildConversationContextRecap,
+  buildPriorAnswerExplanation,
   resolveSemanticTableMapping,
   compileBlockStudioManifest,
   conversationTurnInputFromRun,
@@ -1981,6 +1982,65 @@ describe('agent run runtime API', () => {
     expect(recap).toContain('Philadelphia has the highest revenue');
     expect(recap).toContain('location_name=Philadelphia');
     expect(recap).not.toContain('what we are reviewing in this chat');
+  });
+
+  it('explains the latest answer grain without rerunning or using a recap turn', () => {
+    const context = {
+      activeTurnId: 'turn-recap',
+      turns: [
+        {
+          id: 'turn-data',
+          question: 'show top customers by revenue',
+          answerSummary: 'Here are the top customers.',
+          route: 'semantic_answer',
+          requestedMeasures: ['total_revenue'],
+          requestedDimensions: ['customer_name'],
+          dqlArtifact: {
+            source: 'block "top_customers" {}',
+            name: 'top_customers',
+            metrics: ['total_revenue'],
+            dimensions: ['customer_name'],
+            filters: [{ dimension: 'status', operator: 'equals', values: ['completed'] }],
+            timeDimension: { name: 'order_date', granularity: 'month' },
+          },
+          result: {
+            columns: ['order_date', 'customer_name', 'total_revenue'],
+            rowsSample: [['2026-01-01', 'Melissa Lopez', 4200]],
+          },
+        },
+        {
+          id: 'turn-recap',
+          question: 'what are we discussing?',
+          answerSummary: 'We are discussing customer revenue.',
+          route: 'conversation',
+        },
+      ],
+    };
+
+    const explanation = buildPriorAnswerExplanation('is it monthly or daily revenue?', context);
+    expect(explanation).toContain('monthly grain');
+    expect(explanation).toContain('order date');
+    expect(explanation).toContain('status equals completed');
+    expect(explanation).not.toContain('what are we discussing');
+  });
+
+  it('fails closed when the prior answer does not declare a time grain', () => {
+    const explanation = buildPriorAnswerExplanation('what period does this result cover?', {
+      activeTurnId: 'turn-data',
+      turns: [{
+        id: 'turn-data',
+        question: 'show top customers by revenue',
+        route: 'generated_answer',
+        dqlArtifact: {
+          source: 'block "top_customers" {}',
+          metrics: ['total_revenue'],
+          dimensions: ['customer_name'],
+        },
+      }],
+    });
+
+    expect(explanation).toContain('does not declare a daily or monthly time grain');
+    expect(explanation).toContain('ask me to show or group it that way');
   });
 
   it('AGT-012 retains the result-row sample for member values and cross-result compute', () => {

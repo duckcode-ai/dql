@@ -12,6 +12,7 @@ import {
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { dbtPreparationFromResponse } from './dbt-preparation-model';
+import { watchMetricFlowInstall } from './metricflow-install-watch';
 
 function looksLikeGitRepository(value: string): boolean {
   return /^(?:https?:\/\/|ssh:\/\/|git@|file:\/\/)/i.test(value.trim());
@@ -115,19 +116,30 @@ export function DbtProjectEditor({
   useEffect(() => {
     const job = metricFlowInstaller?.job;
     if (!job || (job.state !== 'queued' && job.state !== 'running')) return;
-    let alive = true;
-    const timer = window.setTimeout(() => {
-      void loadMetricFlowInstaller().then(async (next) => {
-        if (!alive || next.job?.state !== 'completed') return;
+    let cancelled = false;
+    void watchMetricFlowInstall({
+      jobId: job.id,
+      loadStatus: loadMetricFlowInstaller,
+      isCancelled: () => cancelled,
+      onCompleted: async (next) => {
         await loadSemanticRuntime();
         const layer = await api.getSemanticLayer();
-        if (alive) dispatch({ type: 'SET_SEMANTIC_LAYER', layer });
-      }).catch((error) => {
-        if (alive) setSemanticMessage({ ok: false, text: error instanceof Error ? error.message : String(error) });
-      });
-    }, 700);
-    return () => { alive = false; window.clearTimeout(timer); };
-  }, [dispatch, loadMetricFlowInstaller, loadSemanticRuntime, metricFlowInstaller?.job?.id, metricFlowInstaller?.job?.state, metricFlowInstaller?.job?.updatedAt]);
+        if (cancelled) return;
+        dispatch({ type: 'SET_SEMANTIC_LAYER', layer });
+        setSemanticMessage({ ok: true, text: next.job?.message || 'Local MetricFlow is installed and ready.' });
+      },
+      onFailed: (next) => {
+        if (cancelled) return;
+        setSemanticMessage({
+          ok: false,
+          text: next.job?.error || next.job?.message || 'Local MetricFlow installation failed.',
+        });
+      },
+    }).catch((error) => {
+      if (!cancelled) setSemanticMessage({ ok: false, text: error instanceof Error ? error.message : String(error) });
+    });
+    return () => { cancelled = true; };
+  }, [dispatch, loadMetricFlowInstaller, loadSemanticRuntime, metricFlowInstaller?.job?.id]);
 
   useEffect(() => {
     if (!preparation || (preparation.status !== 'queued' && preparation.status !== 'running')) return;

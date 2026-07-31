@@ -15,9 +15,14 @@ describe('semantic value formatting', () => {
     expect(formatDisplayValue('market_share', 8.2)).toBe('8.2%');
   });
 
-  it('keeps dates readable while leaving exports free to use raw values', () => {
-    expect(formatDisplayValue('ordered_at', '2026-01-01T00:00:00.000Z')).toBe('2026-01-01');
-    expect(formatDisplayValue('event_time', '2026-01-01T14:30:00Z')).toBe('2026-01-01 14:30:00');
+  it('formats years, months, dates, and timestamps by their semantic role', () => {
+    expect(formatDisplayValue('fiscal_year', 2006)).toBe('2006');
+    expect(formatDisplayValue('fiscal_year', '2006')).toBe('2006');
+    expect(formatDisplayValue('reporting_month', 1)).toBe('Jan');
+    expect(formatDisplayValue('reporting_month', '2026-01')).toBe('Jan 2026');
+    expect(formatDisplayValue('order_date', '2026-01-01')).toBe('Jan 1, 2026');
+    expect(formatDisplayValue('ordered_at', '2026-01-01T00:00:00.000Z')).toBe('Jan 1, 2026');
+    expect(formatDisplayValue('event_time', '2026-01-01T14:30:00Z')).toBe('Jan 1, 2026, 2:30 PM');
   });
 
   it('lets authored formatting override a neutral column name', () => {

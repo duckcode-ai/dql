@@ -445,6 +445,38 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     expect(selectRoute({ question: "Total CCU Count", selectedEvidenceId: selected.id }, decision)).toBe("semantic_answer");
   });
 
+  it("consumes an incomplete structured choice once and continues through the governed cascade", async () => {
+    const selected = candidate({
+      id: "semantic:sales:lost_opportunities_count",
+      name: "Lost Opportunities Count",
+      aliases: ["lost_opportunities_count"],
+      dimensions: ["fiscal_month"],
+    });
+    const router = createHybridRouter({
+      getEvidence: async () => ({
+        ...evidence([selected]),
+        parsedIntent: {
+          measures: ["lost opportunities count", "lost amount"],
+          dimensions: ["fiscal month"],
+          filters: [{ field: "competitor", value: "Splunk" }],
+        },
+      }),
+    });
+    const ask = {
+      question: "Lost opportunities count and lost amount by fiscal month where competitor is Splunk",
+      selectedEvidenceId: selected.id,
+    };
+
+    const decision = await router.decide(ask);
+
+    expect(decision.action).toBe("answer");
+    expect(decision.requiresClarification).toBe(false);
+    expect(decision.clarificationOptions).toBeUndefined();
+    expect(decision.meaningResolution).toBeUndefined();
+    expect(decision.reason).toContain("selection is consumed once");
+    expect(selectRoute(ask, decision)).toBe("generated_answer");
+  });
+
   it("uses the recommended compatible certified executor only after meaning resolution", async () => {
     const block = candidate({
       id: "block:consumption:customer_rollover_report",

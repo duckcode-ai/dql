@@ -1359,6 +1359,48 @@ describe("clarification continuations", () => {
     expect(run.status).toBe("needs_clarification");
     expect(run.clarificationOptions).toEqual(clarificationOptions);
   });
+
+  it("does not return the same clarification option after that structured choice was consumed", async () => {
+    const selectedEvidenceId = "semantic:metric:sales.lost_opportunities_count";
+    const repeatedOptions = [{
+      id: selectedEvidenceId,
+      label: "Lost Opportunities Count",
+      kind: "semantic_metric",
+    }];
+    const engine = new AgentRunEngine({
+      idGenerator: () => "run-no-repeated-clarification",
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: "answer",
+          confidence: 0.8,
+          reason: "Continue the governed cascade after consuming the selected identity.",
+          source: "heuristic",
+          category: "data_lookup",
+        }),
+      },
+      executors: {
+        generated_answer: () => ({
+          status: "needs_clarification",
+          trustState: "not_applicable",
+          stopReason: "needs_clarification",
+          answerRefusalCode: "ambiguous",
+          answer: "Which governed metric should I use?",
+          clarificationOptions: repeatedOptions,
+        }),
+      },
+    });
+
+    const run = await engine.run({
+      question: "Lost Opportunities Count",
+      selectedEvidenceId,
+    });
+
+    expect(run.status).toBe("needs_review");
+    expect(run.trustState).toBe("review_required");
+    expect(run.clarificationOptions).toBeUndefined();
+    expect(run.answer).toContain("does not cover every requested metric");
+  });
 });
 
 describe("selectRoute", () => {

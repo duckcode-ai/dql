@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Check, Download, Loader2, ShieldCheck, ShieldAlert, RefreshCw } from 'lucide-react';
-import { api } from '../../api/client';
+import { api, type EmbeddingSettingsResponse } from '../../api/client';
 import type { Theme } from '../../themes/notebook-theme';
+import { embeddingReindexOutcome } from './embedding-reindex-model';
 
 type ProviderId = 'hashed' | 'ollama' | 'openai';
 interface ModelOption {
@@ -33,6 +34,15 @@ export function EmbeddingSettings({ t, onStatus }: { t: Theme; onStatus?: (messa
   const [active, setActive] = useState<{ id: string; semantic: boolean; reindexRequired: boolean }>({ id: '', semantic: false, reindexRequired: false });
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [operationStatus, setOperationStatus] = useState<{ ok: boolean; message: string } | null>(null);
+
+  const applyCurrentSettings = useCallback((current: EmbeddingSettingsResponse) => {
+    setProvider(current.settings.provider);
+    setEndpoint(current.settings.endpoint || DEFAULT_ENDPOINT);
+    setModel(current.settings.model);
+    setApiKeySet(current.settings.apiKeySet);
+    setActive({ id: current.activeProviderId, semantic: current.semantic, reindexRequired: current.reindexRequired });
+  }, []);
 
   const refreshModels = useCallback(async (url: string) => {
     try {
@@ -47,21 +57,18 @@ export function EmbeddingSettings({ t, onStatus }: { t: Theme; onStatus?: (messa
     void (async () => {
       try {
         const current = await api.getEmbeddingSettings();
-        setProvider(current.settings.provider);
-        setEndpoint(current.settings.endpoint || DEFAULT_ENDPOINT);
-        setModel(current.settings.model);
-        setApiKeySet(current.settings.apiKeySet);
-        setActive({ id: current.activeProviderId, semantic: current.semantic, reindexRequired: current.reindexRequired });
+        applyCurrentSettings(current);
         await refreshModels(current.settings.endpoint || DEFAULT_ENDPOINT);
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : String(cause));
       }
     })();
-  }, [refreshModels]);
+  }, [applyCurrentSettings, refreshModels]);
 
   const run = async (key: string, action: () => Promise<void>) => {
     setBusy(key);
     setError(null);
+    setOperationStatus(null);
     try {
       await action();
     } catch (cause) {
@@ -205,7 +212,7 @@ export function EmbeddingSettings({ t, onStatus }: { t: Theme; onStatus?: (messa
                         await api.saveEmbeddingSettings({ provider: 'ollama', endpoint, model: option.model });
                         setModel(option.model);
                         const current = await api.getEmbeddingSettings();
-                        setActive({ id: current.activeProviderId, semantic: current.semantic, reindexRequired: current.reindexRequired });
+                        applyCurrentSettings(current);
                         onStatus?.(`${option.model} installed and selected. Re-index to apply it.`);
                       })}
                       style={button(true)}
@@ -231,12 +238,14 @@ export function EmbeddingSettings({ t, onStatus }: { t: Theme; onStatus?: (messa
         </button>
         <button type="button" disabled={busy !== null} onClick={() => void run('reindex', async () => {
           const result = await api.reindexEmbeddings();
-          setActive((current) => ({ ...current, reindexRequired: false }));
-          onStatus?.(result.upgraded
-            ? `Catalog re-embedded with ${result.providerId}.`
-            : `No re-index needed — ${result.reason ?? 'already current'}.`);
+          const current = await api.getEmbeddingSettings();
+          applyCurrentSettings(current);
+          const outcome = embeddingReindexOutcome(result, current);
+          setOperationStatus(outcome);
+          onStatus?.(outcome.message);
         })} style={button(active.reindexRequired)}>
-          {busy === 'reindex' ? <Loader2 size={12} className="dql-spin" /> : <RefreshCw size={12} />} Re-index catalog
+          {busy === 'reindex' ? <Loader2 size={12} className="dql-spin" /> : <RefreshCw size={12} />}
+          {busy === 'reindex' ? 'Re-indexing…' : 'Re-index catalog'}
         </button>
         <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono }}>active: {active.id || '—'}</span>
       </div>
@@ -245,6 +254,16 @@ export function EmbeddingSettings({ t, onStatus }: { t: Theme; onStatus?: (messa
         <div style={{ fontSize: 11.5, color: 'var(--status-warning)', marginTop: 8, lineHeight: 1.5 }}>
           The catalog still holds vectors from the previous embedder. Re-index to search with the new one —
           until then the vector lane keeps using the old index.
+        </div>
+      )}
+      {busy === 'reindex' && (
+        <div role="status" style={{ fontSize: 11.5, color: t.textSecondary, marginTop: 8, lineHeight: 1.5 }}>
+          Rebuilding the local vector index. This page will update automatically when it finishes.
+        </div>
+      )}
+      {operationStatus && (
+        <div role={operationStatus.ok ? 'status' : 'alert'} style={{ fontSize: 11.5, color: operationStatus.ok ? 'var(--status-success)' : 'var(--status-error)', marginTop: 8, lineHeight: 1.5 }}>
+          {operationStatus.message}
         </div>
       )}
       {error && <div style={{ fontSize: 11.5, color: t.error, marginTop: 8, lineHeight: 1.5 }}>{error}</div>}

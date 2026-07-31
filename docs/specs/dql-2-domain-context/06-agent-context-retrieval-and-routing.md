@@ -201,6 +201,11 @@ candidate, and rebuilds the immutable context pack with that candidate as focus.
 For semantic evidence this must include its governed `table` binding plus matched
 dbt/runtime columns before SQL preview validation. Display labels and generated
 clarification prose are never used as evidence identity (`AGT-011`).
+If the selected candidate cannot prove the complete requested tuple, the choice
+is still consumed: routing continues through the governed semantic/relational
+cascade without dropping requested measures. The same identifier-bound choice
+must not be returned as another clarification; an unresolved result becomes an
+actionable modeling/review gap.
 
 Data members use the same identity-preserving rule. A value resolved from the
 question, a prior result, or a clarification becomes a typed member binding:

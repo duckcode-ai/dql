@@ -10,6 +10,7 @@ import { TrustBadge, DerivationWalkPanel, type TrustState } from '@duckcodeailab
 import type { Business360ResultV2 } from '@duckcodeailabs/dql-core/lineage';
 import { buildDerivationWalk, type DerivationWalk } from '@duckcodeailabs/dql-core/lineage/derivation';
 import { useNotebook } from '../../store/NotebookStore';
+import { formatDisplayValue } from '../../utils/value-format';
 import { GuidedBySkills, RouteBadge } from './AiBuildResult';
 
 type AnswerTab = 'answer' | 'dql' | 'visual' | 'data' | 'lineage' | 'context' | 'sql' | 'review';
@@ -1588,7 +1589,7 @@ function ResultPreview({ result, t, compact }: { result: QueryResult; t: Theme; 
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
                   }}>
-                    {formatPreviewValue(row[column])}
+                    {formatPreviewValue(column, row[column], rows.map((item) => item[column]))}
                   </td>
                 ))}
               </tr>
@@ -2157,17 +2158,9 @@ function formatJoinPath(join: NonNullable<AgentAnalysisPlan['candidateJoins']>[n
   return join.reason ? `${path} (${join.reason})` : path;
 }
 
-function formatPreviewValue(value: unknown): string {
+function formatPreviewValue(column: string, value: unknown, values: unknown[]): string {
   if (value === null || value === undefined) return '-';
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) return String(value);
-    return Math.abs(value) >= 1000 || !Number.isInteger(value)
-      ? value.toLocaleString(undefined, { maximumFractionDigits: 2 })
-      : value.toLocaleString();
-  }
-  if (typeof value === 'boolean') return value ? 'true' : 'false';
-  if (typeof value === 'string') return value;
-  return JSON.stringify(value);
+  return formatDisplayValue(column, value, values);
 }
 
 function formatBusinessTier(value: string): string {

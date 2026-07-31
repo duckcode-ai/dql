@@ -189,7 +189,10 @@ export function ResultView({ result, themeMode, t, chartConfig, embedded = false
     () => showTechnicalFields ? result : businessResult(result, hiddenTechnicalColumns),
     [hiddenTechnicalColumns, result, showTechnicalFields],
   );
-  const [view, setView] = useState<'chart' | 'table'>(chartable ? 'chart' : 'table');
+  // Results open as a scannable table even when a chart recommendation exists.
+  // The visualization remains one click away and keeps the authored/agent chart
+  // configuration; this changes presentation preference, not analytical intent.
+  const [view, setView] = useState<'chart' | 'table'>('table');
   const tabStyle = (active: boolean): React.CSSProperties => ({
     border: 'none', background: 'transparent', cursor: 'pointer', fontFamily: t.font,
     fontSize: 11, fontWeight: 700, padding: '2px 4px', color: active ? t.accent : t.textMuted,
@@ -205,9 +208,8 @@ export function ResultView({ result, themeMode, t, chartConfig, embedded = false
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', padding: embedded ? '9px 14px' : '5px 9px', borderBottom: `1px solid ${t.headerBorder}` }}>
         {/* Chart tab shows whenever the data can be plotted; the picker + gear let
             the user pick the chart type and axes manually. */}
-        {embedded && chartable && <button type="button" onClick={() => setView('table')} style={tabStyle(view === 'table')}>{tabLabels?.table ?? 'Table'}</button>}
+        {chartable && <button type="button" onClick={() => setView('table')} style={tabStyle(view === 'table')}>{tabLabels?.table ?? 'Table'}</button>}
         {chartable && <button type="button" onClick={() => setView('chart')} style={tabStyle(view === 'chart')}>{tabLabels?.chart ?? 'Chart'}</button>}
-        {!embedded && chartable && <button type="button" onClick={() => setView('table')} style={tabStyle(view === 'table')}>{tabLabels?.table ?? 'Table'}</button>}
         {!chartable && !isEmpty && <span style={{ fontSize: 11, fontWeight: 700, color: t.textMuted }}>{tabLabels?.table ?? 'Table'}</span>}
         {chartable && view === 'chart' ? (
           <select
@@ -266,7 +268,7 @@ export function ResultView({ result, themeMode, t, chartConfig, embedded = false
             ) : null}
           </>
         ) : null}
-        {chartable && effectiveChart.rationale ? (
+        {chartable && view === 'chart' && effectiveChart.rationale ? (
           <span title={effectiveChart.rationale} style={{ fontSize: 10.5, color: t.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 230 }}>
             Smart chart · {effectiveChart.chart}
           </span>

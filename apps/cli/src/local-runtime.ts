@@ -2965,41 +2965,50 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const kind = routeDecision?.conversationalKind ?? 'smalltalk';
     const isGeneralKnowledge = routeDecision?.category === 'general_knowledge';
     const answerKind = isGeneralKnowledge ? 'general_knowledge' : 'conversational';
-    const catalogContext = buildAgentRunCatalogContext();
+    const catalogContext = kind === 'answer_explanation' ? '' : buildAgentRunCatalogContext();
     const suggestions = buildConversationSuggestions(projectRoot, kind);
     const nextActions: AgentRunNextAction[] = suggestions.map((prompt, index) => ({
       id: `suggest-question-${index + 1}`,
       label: prompt,
     }));
 
-    let text: string | undefined;
-	    try {
-	      const provider = await createBlockStudioAssistProvider(projectRoot);
-	      if (provider) {
-	        const system = buildConversationSystemPrompt(kind, isGeneralKnowledge, catalogContext, request.audience ?? 'analyst');
-	        const conversationMemory = renderConversationMemoryForPrompt(request.conversationContext);
-	        const messages = [
-	          { role: 'system' as const, content: system },
-	          ...(conversationMemory ? [{ role: 'system' as const, content: conversationMemory }] : []),
-	          ...(request.history ?? []).slice(-6).map((message) => ({ role: message.role, content: message.text })),
-	          { role: 'user' as const, content: request.question },
-	        ];
-        text = (await provider.generate(messages, { maxTokens: 320, temperature: 0.6 })).trim();
-        // Perceived-latency: surface the reply as one delta for surfaces wired to stream.
-        if (text) emitAnswerDelta?.(text);
+    // A question about the latest answer is an evidence lookup, not another
+    // warehouse run. Resolve it from the persisted artifact contract before
+    // considering a provider-generated conversational reply.
+    let text = kind === 'answer_explanation'
+      ? buildPriorAnswerExplanation(request.question, request.conversationContext)
+      : undefined;
+    if (text) {
+      emitAnswerDelta?.(text);
+    } else {
+      try {
+        const provider = await createBlockStudioAssistProvider(projectRoot);
+        if (provider) {
+          const system = buildConversationSystemPrompt(kind, isGeneralKnowledge, catalogContext, request.audience ?? 'analyst');
+          const conversationMemory = renderConversationMemoryForPrompt(request.conversationContext);
+          const messages = [
+            { role: 'system' as const, content: system },
+            ...(conversationMemory ? [{ role: 'system' as const, content: conversationMemory }] : []),
+            ...(request.history ?? []).slice(-6).map((message) => ({ role: message.role, content: message.text })),
+            { role: 'user' as const, content: request.question },
+          ];
+          text = (await provider.generate(messages, { maxTokens: 320, temperature: 0.6 })).trim();
+          // Perceived-latency: surface the reply as one delta for surfaces wired to stream.
+          if (text) emitAnswerDelta?.(text);
+        }
+      } catch {
+        // Provider unavailable / errored — fall through to the deterministic reply.
+        text = undefined;
       }
-    } catch {
-      // Provider unavailable / errored — fall through to the deterministic reply.
-      text = undefined;
-	    }
-	    if (!text) {
-	      text = buildConversationContextRecap(request.conversationContext)
-	        ?? buildConversationalFallback(kind, isGeneralKnowledge, request.question, suggestions);
-	      emitAnswerDelta?.(text);
-	    }
+    }
+    if (!text) {
+      text = buildConversationContextRecap(request.conversationContext)
+        ?? buildConversationalFallback(kind, isGeneralKnowledge, request.question, suggestions);
+      emitAnswerDelta?.(text);
+    }
 
     return {
-      summary: 'Replied conversationally.',
+      summary: kind === 'answer_explanation' ? 'Explained the previous answer.' : 'Replied conversationally.',
       answer: text,
       answerKind,
       status: 'completed',
@@ -3597,6 +3606,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ?? request.conversationContext?.serverSnapshot,
     );
     const topicRelation = agentRunString(serverSnapshot?.topicRelation);
+    const workspaceSurface = agentRunWorkspaceValue(request, 'surface');
+    const blockAuthoringContext = request.requestedMode === 'block'
+      || workspaceSurface === 'block-studio';
     // The readiness marker is source-versioned. When it matches, pass the
     // already-built metadata identity into retrieval so buildLocalContextPack
     // opens the immutable snapshot directly instead of rebuilding all metadata
@@ -3630,6 +3642,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const task = buildLocalContextPack(projectRoot, {
       question: request.question,
       focusObjectKey: request.selectedEvidenceId,
+      mode: blockAuthoringContext ? 'build' : 'question',
+      includeDraftBlocks: blockAuthoringContext,
       followUp,
       priorContextPackId: agentRunString(request.conversationContext?.contextPackId),
       conversationTopicRelation: topicRelation === 'continuation'
@@ -3643,7 +3657,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       reusePolicy: 'seed',
       preparedMetadataFingerprint,
       ...(runtimeSchemaSnapshot ? { runtimeSchemaSnapshot } : {}),
-      surface: 'notebook',
+      surface: blockAuthoringContext
+        ? 'block'
+        : workspaceSurface ?? 'notebook',
       selectedContext: {
         selectedObject: request.selectedObject,
         workspaceContext: request.workspaceContext,
@@ -21557,7 +21573,7 @@ function agentResultToSynthesisPreview(result: AgentAnswer['result']): Synthesiz
 
 /** Up to three example questions built from real catalog blocks (falls back to generic asks). */
 function buildConversationSuggestions(projectRoot: string, kind: ConversationalKind): string[] {
-  if (kind === 'gratitude') return [];
+  if (kind === 'gratitude' || kind === 'answer_explanation') return [];
   let names: string[] = [];
   try {
     let blocks = collectPlanBlocks(projectRoot, { certifiedOnly: true });
@@ -21661,9 +21677,11 @@ export function buildConversationContextRecap(context: Record<string, unknown> |
   return `We were talking about ${contextBits.join('. ')}.`;
 }
 
-function buildConversationTurnsRecap(context: Record<string, unknown>): string | undefined {
+function latestSubstantiveConversationTurn(
+  context: Record<string, unknown>,
+): Record<string, unknown> | undefined {
   const turns = Array.isArray(context.turns)
-    ? context.turns.map(agentRunRecord).filter((turn): turn is Record<string, unknown> => Boolean(turn)).slice(-3)
+    ? context.turns.map(agentRunRecord).filter((turn): turn is Record<string, unknown> => Boolean(turn)).slice(-6)
     : [];
   if (turns.length === 0) return undefined;
   const activeTurnId = agentRunString(context.activeTurnId);
@@ -21674,9 +21692,138 @@ function buildConversationTurnsRecap(context: Record<string, unknown>): string |
   // subject of the next recap. Prefer the newest analytical/authoring turn and
   // fall back to the active turn only when the thread contains conversation alone.
   const substantiveTurns = turns.filter((turn) => agentRunString(turn.route) !== 'conversation');
-  const selected = active && agentRunString(active.route) !== 'conversation'
+  return active && agentRunString(active.route) !== 'conversation'
     ? active
     : substantiveTurns[substantiveTurns.length - 1] ?? active ?? turns[turns.length - 1];
+}
+
+/**
+ * Explain the latest successful answer from its persisted artifact contract.
+ * This is intentionally deterministic and never executes SQL: missing evidence
+ * is reported as missing instead of being guessed or converted into a new metric.
+ */
+export function buildPriorAnswerExplanation(
+  question: string,
+  context: Record<string, unknown> | undefined,
+): string | undefined {
+  if (!context) return undefined;
+  const selected = latestSubstantiveConversationTurn(context);
+  const artifact = agentRunRecord(selected?.dqlArtifact) ?? agentRunRecord(context.dqlArtifact);
+  const result = agentRunRecord(selected?.result);
+  const metrics = agentRunStringArray(
+    artifact?.metrics
+      ?? selected?.requestedMeasures
+      ?? context.priorMeasures,
+  );
+  const dimensions = agentRunStringArray(
+    artifact?.dimensions
+      ?? selected?.requestedDimensions
+      ?? context.requestedDimensions,
+  );
+  const timeDimension = agentRunRecord(artifact?.timeDimension);
+  const timeName = agentRunString(timeDimension?.name);
+  const granularity = agentRunString(timeDimension?.granularity);
+  const filters = formatPriorAnswerFilters(
+    artifact?.filters,
+    selected?.requestedFilters ?? context.requestedFilters,
+  );
+  const topN = typeof selected?.topN === 'number'
+    ? selected.topN
+    : typeof context.priorLimit === 'number'
+      ? context.priorLimit
+      : undefined;
+  const source = agentRunString(artifact?.name)
+    ?? agentRunString(selected?.sourceCertifiedBlock)
+    ?? agentRunString(context.sourceCertifiedBlock);
+  const columns = agentRunStringArray(result?.columns ?? context.resultColumns).slice(0, 8);
+  const metricText = metrics.length > 0 ? metrics.map(humanizeArtifactField).join(', ') : undefined;
+  const dimensionText = dimensions.length > 0 ? dimensions.map(humanizeArtifactField).join(', ') : undefined;
+  const normalizedQuestion = question.toLowerCase();
+
+  if (/\b(?:daily|monthly|weekly|quarterly|yearly|annual|grain|period|timeframe|date range)\b/.test(normalizedQuestion)) {
+    if (granularity) {
+      return [
+        `The previous result uses${metricText ? ` ${metricText}` : ' the recorded metric'} and is grouped`
+          + `${timeName ? ` by ${humanizeArtifactField(timeName)}` : ''} at a ${formatTimeGranularity(granularity)} grain.`,
+        filters.length > 0 ? `Applied filters: ${filters.join('; ')}.` : '',
+      ].filter(Boolean).join(' ');
+    }
+    return [
+      `The previous result does not declare a daily or monthly time grain${metricText ? ` for ${metricText}` : ''}.`,
+      dimensionText ? `Its recorded grouping is ${dimensionText}.` : 'It is an aggregate across the applied result scope.',
+      filters.length > 0 ? `Applied filters: ${filters.join('; ')}.` : '',
+      'If you want a new monthly or daily breakdown, ask me to show or group it that way.',
+    ].filter(Boolean).join(' ');
+  }
+
+  if (/\b(?:which|what)\s+(?:metric|measure)\b|\bmetric\s+(?:did|does|was|is)\b/.test(normalizedQuestion)) {
+    return metricText
+      ? `The previous answer used ${metricText}${source ? ` from ${humanizeArtifactField(source)}` : ''}.`
+      : 'The previous answer did not retain a qualified metric identifier, so I cannot name one without rerunning or reviewing its DQL.';
+  }
+
+  if (/\bfilter|include|exclude\b/.test(normalizedQuestion)) {
+    return filters.length > 0
+      ? `The previous answer applied these filters: ${filters.join('; ')}.`
+      : 'The previous artifact does not record any explicit filters.';
+  }
+
+  const facts = [
+    metricText ? `Metric: ${metricText}.` : '',
+    dimensionText ? `Grouped by: ${dimensionText}.` : '',
+    granularity ? `Time grain: ${formatTimeGranularity(granularity)}${timeName ? ` on ${humanizeArtifactField(timeName)}` : ''}.` : '',
+    filters.length > 0 ? `Filters: ${filters.join('; ')}.` : '',
+    topN ? `Limit: top ${topN}.` : '',
+    source ? `Source: ${humanizeArtifactField(source)}.` : '',
+    columns.length > 0 ? `Returned fields: ${columns.map(humanizeArtifactField).join(', ')}.` : '',
+  ].filter(Boolean);
+  return facts.length > 0
+    ? facts.join(' ')
+    : 'The previous answer did not retain enough artifact metadata to explain its metric, filters, or grain safely.';
+}
+
+function formatPriorAnswerFilters(primary: unknown, fallback: unknown): string[] {
+  const fromArtifact = Array.isArray(primary)
+    ? primary.map(agentRunRecord).filter((filter): filter is Record<string, unknown> => Boolean(filter)).flatMap((filter) => {
+        const dimension = agentRunString(filter.dimension);
+        const operator = agentRunString(filter.operator) ?? 'equals';
+        const values = agentRunStringArray(filter.values);
+        return dimension && values.length > 0
+          ? [`${humanizeArtifactField(dimension)} ${operator.replace(/_/g, ' ')} ${values.join(', ')}`]
+          : [];
+      })
+    : [];
+  return fromArtifact.length > 0
+    ? fromArtifact
+    : agentRunStringArray(fallback).map((value) => value.replace(/_/g, ' '));
+}
+
+function humanizeArtifactField(value: string): string {
+  return value
+    .split('.')
+    .at(-1)!
+    .replace(/::/g, ' ')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function formatTimeGranularity(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  return ({
+    day: 'daily',
+    week: 'weekly',
+    month: 'monthly',
+    quarter: 'quarterly',
+    year: 'yearly',
+  } as Record<string, string>)[normalized] ?? humanizeArtifactField(value);
+}
+
+function buildConversationTurnsRecap(context: Record<string, unknown>): string | undefined {
+  const turns = Array.isArray(context.turns)
+    ? context.turns.map(agentRunRecord).filter((turn): turn is Record<string, unknown> => Boolean(turn)).slice(-3)
+    : [];
+  const selected = latestSubstantiveConversationTurn(context);
   if (!selected) return undefined;
   const result = agentRunRecord(selected.result);
   const values = agentRunRecord(result?.dimensionValues);

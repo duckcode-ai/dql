@@ -168,7 +168,7 @@ export function BlockStudio() {
   const [blockLibraryRefreshKey, setBlockLibraryRefreshKey] = useState(0);
   const [saveIdentityOpen, setSaveIdentityOpen] = useState(false);
   const [dirtyGuardOpen, setDirtyGuardOpen] = useState(false);
-  const saveAfterIdentityRef = useRef(false);
+  const pendingIdentityActionRef = useRef<'save' | 'certify' | null>(null);
   const newAfterSaveRef = useRef(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [historyEntries, setHistoryEntries] = useState<Array<{ hash: string; date: string; author: string; message: string }>>([]);
@@ -615,6 +615,7 @@ export function BlockStudio() {
 
   const handleSave = async (): Promise<boolean> => {
     if (!state.blockStudioMetadata?.name.trim() || !state.blockStudioMetadata.owner.trim()) {
+      pendingIdentityActionRef.current = 'save';
       setSaveIdentityOpen(true);
       return false;
     }
@@ -673,6 +674,7 @@ export function BlockStudio() {
 
   const handleCertify = async (): Promise<boolean> => {
     if (!state.blockStudioMetadata?.name.trim() || !state.blockStudioMetadata.owner.trim()) {
+      pendingIdentityActionRef.current = 'certify';
       setSaveIdentityOpen(true);
       return false;
     }
@@ -716,9 +718,11 @@ export function BlockStudio() {
   };
 
   useEffect(() => {
-    if (!saveAfterIdentityRef.current || !state.blockStudioMetadata?.name.trim() || !state.blockStudioMetadata.owner.trim()) return;
-    saveAfterIdentityRef.current = false;
-    void handleSave().then((saved) => {
+    const action = pendingIdentityActionRef.current;
+    if (!action || !state.blockStudioMetadata?.name.trim() || !state.blockStudioMetadata.owner.trim()) return;
+    pendingIdentityActionRef.current = null;
+    const operation = action === 'certify' ? handleCertify() : handleSave();
+    void operation.then((saved) => {
       if (saved && newAfterSaveRef.current) {
         newAfterSaveRef.current = false;
         resetToBlockStudioHome();
@@ -1216,9 +1220,18 @@ export function BlockStudio() {
               <TemplateButton
                 label={saving ? 'Saving' : 'Save draft'}
                 Icon={CheckCircle2}
-                variant="primary"
+                variant="secondary"
                 busy={saving}
                 onClick={() => void handleSave()}
+                title="Save changes as a review-required draft"
+              />
+              <TemplateButton
+                label={state.blockStudioMetadata?.reviewStatus === 'certified' ? 'Re-certify' : 'Certify'}
+                Icon={ShieldCheck}
+                variant="primary"
+                busy={saving}
+                onClick={() => void handleCertify()}
+                title="Run validation, query, tests, chart, and lineage gates before certification"
               />
             </>
           )}
@@ -1616,13 +1629,15 @@ export function BlockStudio() {
       {saveIdentityOpen && state.blockStudioMetadata && (
         <BlockIdentityDialog
           metadata={state.blockStudioMetadata}
-          onCancel={() => setSaveIdentityOpen(false)}
+          onCancel={() => {
+            pendingIdentityActionRef.current = null;
+            setSaveIdentityOpen(false);
+          }}
           onConfirm={(identity) => {
             let draft = setBlockName(state.blockStudioDraft, identity.name);
             draft = setBlockStringField(draft, 'owner', identity.owner);
             dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...state.blockStudioMetadata!, ...identity } });
             dispatch({ type: 'SET_BLOCK_STUDIO_DRAFT', draft });
-            saveAfterIdentityRef.current = true;
             setSaveIdentityOpen(false);
           }}
           t={t}

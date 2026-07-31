@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { classifyConversationalTurn, decideAgentAction, looksLikeComposeApp, looksLikeFollowUp } from './intent-controller.js';
+import {
+  classifyConversationalTurn,
+  decideAgentAction,
+  looksLikeComposeApp,
+  looksLikeFollowUp,
+  looksLikePriorAnswerExplanation,
+} from './intent-controller.js';
 
 describe('decideAgentAction', () => {
   it('composes an app when asked to build a dashboard, regardless of match', () => {
@@ -149,6 +155,20 @@ describe('decideAgentAction — conversational tier', () => {
     const d = decideAgentAction({ question: 'hi, what is total revenue?', intent: 'exact_certified_lookup', signals: { metricScore: 0.8 } });
     expect(d.action).toBe('answer');
   });
+
+  it('explains the latest result without starting another analytical run', () => {
+    const d = decideAgentAction({
+      question: 'is it monthly or daily revenue?',
+      intent: 'exact_certified_lookup',
+      signals: { metricScore: 0.9 },
+      history: [
+        { role: 'user', text: 'show top customers by revenue' },
+        { role: 'assistant', text: 'Here are the top customers.' },
+      ],
+    });
+    expect(d.action).toBe('converse');
+    expect(d.conversationalKind).toBe('answer_explanation');
+  });
 });
 
 describe('follow-up + compose-app detection', () => {
@@ -163,5 +183,16 @@ describe('follow-up + compose-app detection', () => {
     expect(looksLikeFollowUp('why?', false)).toBe(false);
     expect(looksLikeFollowUp('what is total revenue', true)).toBe(false);
     expect(looksLikeFollowUp('what product they bought for this amount?', true)).toBe(true);
+  });
+
+  it('distinguishes prior-answer explanations from requested recalculations', () => {
+    expect(looksLikePriorAnswerExplanation('is it monthly or daily revenue?', true)).toBe(true);
+    expect(looksLikePriorAnswerExplanation('was that result monthly or daily?', true)).toBe(true);
+    expect(looksLikePriorAnswerExplanation('which metric did you use?', true)).toBe(true);
+    expect(looksLikePriorAnswerExplanation('what period does this result cover?', true)).toBe(true);
+    expect(looksLikePriorAnswerExplanation('what does this amount represent?', true)).toBe(true);
+    expect(looksLikePriorAnswerExplanation('is it monthly or daily revenue?', false)).toBe(false);
+    expect(looksLikePriorAnswerExplanation('show it monthly', true)).toBe(false);
+    expect(looksLikePriorAnswerExplanation('break this down by day', true)).toBe(false);
   });
 });

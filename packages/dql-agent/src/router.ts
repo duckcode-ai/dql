@@ -542,6 +542,25 @@ function routeDecisionForResolution(
   };
 }
 
+function continueCascadeAfterIncompleteSelection(
+  base: IntentDecision,
+  evidence: AgentRetrievalEvidence,
+  candidates: AgentEvidenceCandidate[],
+  selected: AgentEvidenceCandidate,
+): IntentDecision {
+  return {
+    ...base,
+    action: 'answer',
+    confidence: 0.78,
+    reason: `The user selected ${selected.name}, but that evidence does not prove the complete requested metric, dimension, filter, and grain tuple. The selection is consumed once; continue through the governed semantic/SQL cascade without dropping any requested part.`,
+    source: 'heuristic',
+    category: 'data_lookup',
+    depth: 'quick',
+    retrievalEvidence: retrievalTrace(evidence, candidates),
+    requiresClarification: false,
+  };
+}
+
 function enforceAnalyticalCompatibility(
   resolution: MeaningResolution,
   evidence: AgentRetrievalEvidence,
@@ -1077,7 +1096,7 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
         if (candidates.length > 0) {
           const explicit = selectedEvidence ?? findExplicitEvidenceReference(request.question, candidates);
           if (explicit && explicit.compatibility !== "incompatible") {
-            return routeDecisionForResolution(
+            const decision = routeDecisionForResolution(
               base,
               evidence,
               candidates,
@@ -1086,6 +1105,9 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
               request.question,
               options.resolvedPlanMode ?? 'authoritative',
             );
+            return selectedEvidence && decision.requiresClarification
+              ? continueCascadeAfterIncompleteSelection(base, evidence, candidates, selectedEvidence)
+              : decision;
           }
 
           const multiMetricPrimary = exactMultiMetricPrimary(request.question, evidence, candidates);

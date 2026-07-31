@@ -184,6 +184,20 @@ export interface MetricFlowInstallerStatus {
   semanticManifestFound: boolean;
 }
 
+export interface EmbeddingSettingsResponse {
+  settings: { provider: 'hashed' | 'ollama' | 'openai'; endpoint: string; model: string; apiKeySet: boolean };
+  activeProviderId: string;
+  semantic: boolean;
+  indexedProviderId?: string;
+  reindexRequired: boolean;
+}
+
+export interface EmbeddingReindexResult {
+  upgraded: boolean;
+  providerId: string;
+  reason?: string;
+}
+
 export interface GitGovernedContextGroup {
   total: number;
   tracked: number;
@@ -5815,13 +5829,7 @@ export const api = {
   /** Delete a skill. → DELETE /api/skills/:id */
 // --- Embeddings ------------------------------------------------------
   // Whether retrieval can match MEANING or only shared words.
-  async getEmbeddingSettings(): Promise<{
-    settings: { provider: 'hashed' | 'ollama' | 'openai'; endpoint: string; model: string; apiKeySet: boolean };
-    activeProviderId: string;
-    semantic: boolean;
-    indexedProviderId?: string;
-    reindexRequired: boolean;
-  }> {
+  async getEmbeddingSettings(): Promise<EmbeddingSettingsResponse> {
     return request('/api/settings/embeddings');
   },
 
@@ -5854,7 +5862,7 @@ export const api = {
     return request('/api/settings/embeddings/test', { method: 'POST' });
   },
 
-  async reindexEmbeddings(): Promise<{ upgraded: boolean; providerId: string; reason?: string }> {
+  async reindexEmbeddings(): Promise<EmbeddingReindexResult> {
     return request('/api/settings/embeddings/reindex', { method: 'POST' });
   },
 

@@ -2302,6 +2302,40 @@ Use the finance model area.
     expect(pack.allowedSqlContext.relations.map((relation) => relation.relation)).not.toContain('draft_only_table');
   });
 
+  it('keeps draft blocks out of normal Ask retrieval while preserving explicit Block Studio review', async () => {
+    mkdirSync(join(projectRoot, 'blocks', '_drafts'), { recursive: true });
+    writeFileSync(
+      join(projectRoot, 'blocks', '_drafts', 'draft_customer_revenue.dql'),
+      `block "Draft Customer Revenue" {
+  domain = "sales"
+  type = "custom"
+  status = "draft"
+  description = "Unreviewed customer revenue experiment."
+  query = """SELECT customer_id, revenue FROM draft_customer_revenue"""
+}`,
+      'utf-8',
+    );
+
+    const askPack = await buildLocalContextPack(projectRoot, {
+      question: 'Who are the top customers by revenue?',
+      surface: 'notebook',
+      mode: 'question',
+      limit: 30,
+    });
+    expect(askPack.objects.map((row) => row.objectKey)).not.toContain('dql:block:Draft Customer Revenue');
+
+    const studioPack = await buildLocalContextPack(projectRoot, {
+      question: 'Review this customer revenue block',
+      surface: 'block',
+      mode: 'build',
+      includeDraftBlocks: true,
+      limit: 30,
+    });
+    expect(studioPack.objects.map((row) => row.objectKey)).toContain('dql:block:Draft Customer Revenue');
+    expect(studioPack.allowedSqlContext.sourceBlockSql.map((source) => source.objectKey))
+      .not.toContain('dql:block:Draft Customer Revenue');
+  });
+
   it('asks for missing baseline context instead of proxying change analysis to an unrelated table', async () => {
     const pack = await buildLocalContextPack(projectRoot, {
       question: 'What changed in Player Stats Data Availability?',

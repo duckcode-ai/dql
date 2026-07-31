@@ -1160,6 +1160,7 @@ export class AgentRunEngine {
             emit,
             emitAnswerDelta: onAnswerDelta,
           });
+          result = consumeRepeatedClarificationSelection(request, routeDecision, result);
 
           evaluations = this.evaluate({ route, request, routeDecision, result, attempt });
           for (const evaluation of evaluations) {
@@ -1749,6 +1750,28 @@ function computeStepOutcome(
     stopReason,
     summary: result.summary ?? fallback.summary,
     ...(result.answerTier ? { terminalTier: result.answerTier } : {}),
+  };
+}
+
+function consumeRepeatedClarificationSelection(
+  request: AgentRunRequest,
+  routeDecision: IntentDecision,
+  result: AgentRouteExecutorResult,
+): AgentRouteExecutorResult {
+  const selectedEvidenceId = request.selectedEvidenceId;
+  if (!selectedEvidenceId || result.status !== 'needs_clarification') return result;
+  const options = result.clarificationOptions ?? routeDecision.clarificationOptions ?? [];
+  if (!options.some((option) => option.id === selectedEvidenceId)) return result;
+  const { clarificationOptions: _repeatedOptions, ...withoutRepeatedOptions } = result;
+  const message = 'I used the selected governed meaning, but it does not cover every requested metric, dimension, filter, and grain. DQL did not drop any part of the question or ask you to choose the same option again. Review the missing modeling capability or continue with a review-required generated query.';
+  return {
+    ...withoutRepeatedOptions,
+    status: 'needs_review',
+    trustState: 'review_required',
+    stopReason: 'human_review_required',
+    answerRefusalCode: 'modeling_gap',
+    summary: message,
+    answer: message,
   };
 }
 
