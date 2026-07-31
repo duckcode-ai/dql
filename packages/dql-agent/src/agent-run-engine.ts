@@ -342,6 +342,8 @@ export interface AgentRun {
   startedAt: string;
   completedAt: string;
   selectedObject?: AgentRunSelectedObject;
+  /** Exact data target used for planning, compilation, and execution. */
+  executionTarget?: AgentRunExecutionTarget;
   routeDecision?: IntentDecision;
   plan?: AgentRunPlan;
   steps: AgentRunStep[];
@@ -377,6 +379,7 @@ export interface AgentRunProgressV1 {
   question: string;
   requestedMode: AgentRunRequestedMode;
   selectedObject?: AgentRunSelectedObject;
+  executionTarget?: AgentRunExecutionTarget;
   route?: AgentRunRoute;
   trustState?: AgentRunTrustState;
   plan?: AgentRunPlan;
@@ -958,6 +961,7 @@ export class AgentRunEngine {
       question: submittedQuestion,
       requestedMode,
       selectedObject: request.selectedObject,
+      executionTarget: request.executionTarget,
       steps: [],
       artifacts: [],
       evaluations: [],
@@ -1442,6 +1446,7 @@ export class AgentRunEngine {
         startedAt,
         completedAt,
         selectedObject: request.selectedObject,
+        executionTarget: request.executionTarget,
         routeDecision,
         plan,
         steps: executedSteps,
@@ -1498,6 +1503,7 @@ export class AgentRunEngine {
         startedAt: input.startedAt,
         completedAt,
         selectedObject: input.request.selectedObject,
+        executionTarget: input.request.executionTarget,
         routeDecision: input.routeDecision,
         plan: input.plan,
         steps: input.steps,
@@ -1539,6 +1545,7 @@ export class AgentRunEngine {
       startedAt: input.startedAt,
       completedAt,
       selectedObject: input.request.selectedObject,
+      executionTarget: input.request.executionTarget,
       routeDecision: input.routeDecision,
       plan: input.plan,
       steps: input.steps,

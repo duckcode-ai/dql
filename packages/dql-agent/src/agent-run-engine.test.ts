@@ -100,6 +100,7 @@ describe("AgentRunEngine", () => {
     const run = await engine.run({
       question: "what is total revenue?",
       intent: "exact_certified_lookup",
+      executionTarget: { target: "connection", connectionName: "reporting" },
     }, (event) => events.push(event));
 
     expect(run).toMatchObject({
@@ -109,6 +110,7 @@ describe("AgentRunEngine", () => {
       trustState: "certified",
       stopReason: "certified_answer_found",
       answer: "Revenue is $2.8M.",
+      executionTarget: { target: "connection", connectionName: "reporting" },
     });
     expect(run.artifacts[0]).toMatchObject({ kind: "answer", trustState: "certified" });
     expect(run.lifecycle).toMatchObject({ state: "terminal", phase: "run.completed" });
@@ -128,7 +130,10 @@ describe("AgentRunEngine", () => {
       "step.completed",
       "run.completed",
     ]);
-    expect(store.get("run-certified")?.route).toBe("certified_answer");
+    expect(store.get("run-certified")).toMatchObject({
+      route: "certified_answer",
+      executionTarget: { target: "connection", connectionName: "reporting" },
+    });
   });
 
   it("API-007 records blocked outcomes as run.failed with the precise failure class", async () => {

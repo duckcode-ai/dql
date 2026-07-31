@@ -375,8 +375,9 @@ export async function discoverWarehouseMetadataScopes(input: {
 export function warehouseMetadataStatus(
   projectRoot: string,
   expectedScopeFingerprint?: string,
+  connectionId?: string,
 ): WarehouseMetadataStatus {
-  const snapshot = latestRuntimeSchemaSnapshotForProject(projectRoot);
+  const snapshot = latestRuntimeSchemaSnapshotForProject(projectRoot, connectionId);
   if (!snapshot) {
     return { state: 'missing', relationCount: 0, columnCount: 0, scopes: [] };
   }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import {
   ArrowLeft,
@@ -46,13 +46,17 @@ import {
 } from '../../api/client';
 import type { AppSummary, AppWorkspaceExperience, AppWorkspaceSection } from '../../store/types';
 import { themes, type ThemeMode } from '../../themes/notebook-theme';
-import { StructuredAnswerText } from '../agent/AgentAnswerCard';
 import { AiSidePanel, AI_SIDE_PANEL_EXPANDED_WIDTH } from '../agent/AiSidePanel';
-import { UnifiedAgentRunPanel, usePersistedAgentThreadId } from '../agent/UnifiedAgentRunPanel';
+import { usePersistedAgentThreadId } from '../agent/usePersistedAgentThreadId';
 import { AppBuildProposalPanel, defaultProposalSelection } from './AppBuildProposalPanel';
 import { DashboardRenderer } from './DashboardRenderer';
 import { PersonaSwitcher } from './PersonaSwitcher';
 import { defaultParameterFilterValue, deriveDashboardFilters } from './dashboard-filters';
+
+const UnifiedAgentRunPanel = lazy(() => import('../agent/UnifiedAgentRunPanel')
+  .then((module) => ({ default: module.UnifiedAgentRunPanel })));
+const StructuredAnswerText = lazy(() => import('../agent/AgentAnswerCard')
+  .then((module) => ({ default: module.StructuredAnswerText })));
 
 type AppSurface = 'library' | 'create' | 'workspace';
 type AppExperience = AppWorkspaceExperience;
@@ -1877,26 +1881,28 @@ function UnifiedAppAiPanel({
       ariaLabel="App AI"
       className="dql-app-explain-panel dql-app-assistant-panel"
     >
-      <UnifiedAgentRunPanel
-        key={`${appId}:${dashboardId}`}
-        themeMode={themeMode}
-        title="App AI"
-        scopeHint={scopeHint}
-        audience="stakeholder"
-        selectedObject={selectedObject}
-        workspaceContext={workspaceContext}
-        initialMode="auto"
-        autoRun={askSeed?.text ? { text: askSeed.text, mode: 'ask', nonce: askSeed.nonce } : undefined}
-        threadId={agentThread.threadId}
-        onThreadIdChange={agentThread.onThreadIdChange}
-        onRunningChange={setAppAiRunning}
-        answerFirstCards
-        examplePrompts={[
-          { label: 'Explain this dashboard', prompt: 'Explain the most important business story in this dashboard and what action it suggests.' },
-          { label: 'Find the main driver', prompt: 'What is the main driver behind the current result? Use the active app filters and governed evidence.' },
-          { label: 'Check this result', prompt: 'Validate the current result against its certified block, semantic definitions, and lineage.' },
-        ]}
-      />
+      <Suspense fallback={<div style={{ padding: 16, fontSize: 12, color: t.textSecondary }}>Loading App AI…</div>}>
+        <UnifiedAgentRunPanel
+          key={`${appId}:${dashboardId}`}
+          themeMode={themeMode}
+          title="App AI"
+          scopeHint={scopeHint}
+          audience="stakeholder"
+          selectedObject={selectedObject}
+          workspaceContext={workspaceContext}
+          initialMode="auto"
+          autoRun={askSeed?.text ? { text: askSeed.text, mode: 'ask', nonce: askSeed.nonce } : undefined}
+          threadId={agentThread.threadId}
+          onThreadIdChange={agentThread.onThreadIdChange}
+          onRunningChange={setAppAiRunning}
+          answerFirstCards
+          examplePrompts={[
+            { label: 'Explain this dashboard', prompt: 'Explain the most important business story in this dashboard and what action it suggests.' },
+            { label: 'Find the main driver', prompt: 'What is the main driver behind the current result? Use the active app filters and governed evidence.' },
+            { label: 'Check this result', prompt: 'Validate the current result against its certified block, semantic definitions, and lineage.' },
+          ]}
+        />
+      </Suspense>
     </AiSidePanel>
   );
 }

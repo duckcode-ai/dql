@@ -115,4 +115,32 @@ describe('Ask AI Notebook repair handoff', () => {
       threadId: 'thr_revenue',
     });
   });
+
+  it('does not restore a locally deleted thread while its server deletion is pending', () => {
+    const local: AnalyticsHomeModule.Conversation = {
+      id: 'conv_keep',
+      title: 'Keep this conversation',
+      threadId: 'thr_keep',
+      createdAt: '2026-07-28T10:00:00.000Z',
+      updatedAt: '2026-07-28T11:00:00.000Z',
+      items: [],
+    };
+    const merged = mergePersistedAskConversations([local], [{
+      id: 'thr_deleted',
+      surface: 'ask',
+      title: 'Deleted conversation',
+      archived: false,
+      createdAt: '2026-07-28T10:00:00.000Z',
+      updatedAt: '2026-07-29T10:00:00.000Z',
+    }, {
+      id: 'thr_keep',
+      surface: 'ask',
+      title: 'Keep this conversation',
+      archived: false,
+      createdAt: local.createdAt,
+      updatedAt: local.updatedAt,
+    }], new Set(['thr_deleted']));
+
+    expect(merged.map((conversation) => conversation.threadId)).toEqual(['thr_keep']);
+  });
 });

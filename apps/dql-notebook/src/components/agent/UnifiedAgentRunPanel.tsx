@@ -189,6 +189,8 @@ export interface InsertDqlPayload {
   sourceRunId?: string;
   /** The question this artifact answered, so an authoring host can recompose it. */
   question?: string;
+  /** Preserve the exact Ask execution target when the artifact moves to Notebook. */
+  executionTarget?: Cell['executionTarget'];
 }
 
 const ROUTE_LABEL: Record<AgentRunRoute, string> = {
@@ -283,17 +285,11 @@ export function UnifiedAgentRunPanel({
       .then((info) => {
         if (cancelled) return;
         const names = Object.keys(info.connections ?? {}).sort((left, right) => left.localeCompare(right));
-        let persisted: string | undefined;
-        try {
-          persisted = window.localStorage.getItem(EXECUTION_CONNECTION_STORAGE_KEY) ?? undefined;
-        } catch {
-          // Storage is advisory; the server-reported default remains authoritative.
-        }
         setExecutionConnectionNames(names);
         setExecutionConnectionName(selectAgentExecutionConnection(
           names,
           info.default,
-          contextualExecutionConnectionName ?? persisted,
+          contextualExecutionConnectionName,
         ));
       })
       .catch(() => {
@@ -307,7 +303,6 @@ export function UnifiedAgentRunPanel({
 
   const changeExecutionConnection = useCallback((name: string) => {
     setExecutionConnectionName(name);
-    try { window.localStorage.setItem(EXECUTION_CONNECTION_STORAGE_KEY, name); } catch { /* best-effort */ }
   }, []);
 
   // ── Ask redesign (askLayout) state ────────────────────────────────────────
@@ -1032,34 +1027,7 @@ const EXAMPLE_PROMPTS: ExamplePrompt[] = [
  * `threadId`/`onThreadIdChange` straight into `UnifiedAgentRunPanel` props;
  * `resetThreadId` starts a fresh conversation on the next question.
  */
-export function usePersistedAgentThreadId(scope: string): {
-  threadId: string | undefined;
-  onThreadIdChange: (id: string) => void;
-  resetThreadId: () => void;
-} {
-  const storageKey = `dql.agent.threadId.${scope}`;
-  const [threadId, setThreadId] = useState<string | undefined>(() => readStoredThreadId(storageKey));
-  useEffect(() => {
-    setThreadId(readStoredThreadId(storageKey));
-  }, [storageKey]);
-  const onThreadIdChange = useCallback((id: string) => {
-    setThreadId(id);
-    try { window.localStorage.setItem(storageKey, id); } catch { /* best-effort */ }
-  }, [storageKey]);
-  const resetThreadId = useCallback(() => {
-    setThreadId(undefined);
-    try { window.localStorage.removeItem(storageKey); } catch { /* best-effort */ }
-  }, [storageKey]);
-  return { threadId, onThreadIdChange, resetThreadId };
-}
-
-function readStoredThreadId(storageKey: string): string | undefined {
-  try {
-    return window.localStorage.getItem(storageKey) ?? undefined;
-  } catch {
-    return undefined;
-  }
-}
+export { usePersistedAgentThreadId } from './usePersistedAgentThreadId';
 
 function readActiveAgentRuns(): PendingAgentRun[] {
   try {
@@ -1103,8 +1071,6 @@ function findActiveAgentRun(threadId?: string): PendingAgentRun | undefined {
 }
 
 const THINKING_MODE_STORAGE_KEY = 'dql.agent.thinkingMode';
-const EXECUTION_CONNECTION_STORAGE_KEY = 'dql.agent.executionConnection.v1';
-
 export function selectAgentExecutionConnection(
   names: string[],
   defaultName?: string,
@@ -4384,6 +4350,7 @@ export function artifactReadyPayloadFromRun(run: AgentRun): InsertDqlPayload | u
         mixedSourcePlan,
         sourceRunId: run.id,
         question: run.question,
+        executionTarget: run.executionTarget,
       };
     }
     if (mixedSourcePlan) {
@@ -4394,6 +4361,7 @@ export function artifactReadyPayloadFromRun(run: AgentRun): InsertDqlPayload | u
         mixedSourcePlan,
         sourceRunId: run.id,
         question: run.question,
+        executionTarget: run.executionTarget,
       };
     }
   }
@@ -4403,6 +4371,7 @@ export function artifactReadyPayloadFromRun(run: AgentRun): InsertDqlPayload | u
     title: dqlArtifact?.name ?? run.question,
     sourceRunId: run.id,
     question: run.question,
+    executionTarget: run.executionTarget,
   };
 }
 

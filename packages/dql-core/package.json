@@ -19,6 +19,10 @@
       "types": "./dist/lineage/index.d.ts",
       "import": "./dist/lineage/index.js"
     },
+    "./lineage/derivation": {
+      "types": "./dist/lineage/derivation.d.ts",
+      "import": "./dist/lineage/derivation.js"
+    },
     "./artifacts": {
       "types": "./dist/artifacts/index.d.ts",
       "import": "./dist/artifacts/index.js"

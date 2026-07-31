@@ -995,6 +995,7 @@ export interface AgentRunProgressV1 {
   question: string;
   requestedMode: AgentRunRequestedMode;
   selectedObject?: AgentRunSelectedObject;
+  executionTarget?: ExecutionTarget;
   route?: AgentRunRoute;
   trustState?: AgentRunTrustState;
   plan?: AgentRunPlan;
@@ -1016,6 +1017,7 @@ export interface AgentRun {
   startedAt: string;
   completedAt: string;
   selectedObject?: AgentRunSelectedObject;
+  executionTarget?: ExecutionTarget;
   routeDecision?: unknown;
   plan?: AgentRunPlan;
   steps: AgentRunStep[];
@@ -3025,6 +3027,10 @@ export const api = {
 
   async archiveAgentThread(id: string): Promise<{ ok: boolean }> {
     return request<{ ok: boolean }>(`/api/agent/threads/${encodeURIComponent(id)}/archive`, { method: 'POST' });
+  },
+
+  async deleteAgentThread(id: string): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>(`/api/agent/threads/${encodeURIComponent(id)}`, { method: 'DELETE' });
   },
 
   /**

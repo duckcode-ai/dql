@@ -504,8 +504,12 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     expect(artifactReadyPayloadFromRun({
       id: 'generated',
       question: 'unmatched analysis',
+      executionTarget: { target: 'connection', connectionName: 'reporting' },
       artifacts: [{ kind: 'answer', payload: { sql: 'SELECT region, SUM(revenue) AS revenue FROM orders GROUP BY region' } }],
-    } as any)).toMatchObject({ sql: expect.stringContaining('SELECT region') });
+    } as any)).toMatchObject({
+      sql: expect.stringContaining('SELECT region'),
+      executionTarget: { target: 'connection', connectionName: 'reporting' },
+    });
 
     expect(artifactReadyPayloadFromRun({
       id: 'block-run',

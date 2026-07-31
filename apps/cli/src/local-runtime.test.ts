@@ -58,6 +58,7 @@ import {
   resolveAgentRuntimeValueGrounding,
   resolveDbtMacrosForExecution,
   resolveProjectRelativeSqlPaths,
+  runtimeSchemaSnapshotForAgentConnection,
   runtimeSnapshotStale,
   saveBlockStudioArtifacts,
   saveBlockStudioDraftArtifacts,
@@ -66,6 +67,7 @@ import {
   shouldAugmentAgentRuntimeSchema,
   shouldSynthesizeAgentRunAnswer,
   serializeJSON,
+  staticResponseCacheControl,
   startLocalServer,
   validateBlockStudioSource,
   validateConnectionForTest,
@@ -97,6 +99,15 @@ afterEach(() => {
     const dir = tempDirs.pop();
     if (dir) rmSync(dir, { recursive: true, force: true });
   }
+});
+
+describe('notebook static asset caching', () => {
+  it('keeps the HTML shell fresh while caching fingerprinted build assets', () => {
+    expect(staticResponseCacheControl(join('/runtime', 'index.html'))).toBe('no-cache');
+    expect(staticResponseCacheControl(join('/runtime', 'assets', 'dql-notebook', 'index.html'))).toBe('no-cache');
+    expect(staticResponseCacheControl(join('/runtime', 'assets', 'index-abc123.js')))
+      .toBe('public, max-age=31536000, immutable');
+  });
 });
 
 describe('Block AI domain normalization (UI-016 / E2E-015)', () => {
@@ -232,6 +243,40 @@ describe('semantic runtime table mapping', () => {
     expect(mapping).toEqual({ table_3000: 'analytics.table_3000' });
     expect(String(executeQuery.mock.calls[0]?.[0])).not.toMatch(/LIMIT\s+2000/i);
   });
+
+  it('matches Snowflake uppercase and quoted relations without changing the semantic key', () => {
+    const semanticLayer = new SemanticLayer({
+      metrics: [{
+        name: 'revenue', label: 'Revenue', description: '', domain: 'commerce',
+        sql: 'SUM(amount)', type: 'sum', table: 'sales.orders',
+      }],
+      dimensions: [],
+    });
+
+    expect(buildSemanticTableMapping(semanticLayer, [{
+      table_catalog: 'ANALYTICS',
+      table_schema: 'SALES',
+      table_name: 'ORDERS',
+      table_relation: '"ANALYTICS"."SALES"."ORDERS"',
+    }])).toEqual({
+      'sales.orders': '"ANALYTICS"."SALES"."ORDERS"',
+    });
+  });
+
+  it('refuses an ambiguous unqualified semantic table instead of guessing a schema', () => {
+    const semanticLayer = new SemanticLayer({
+      metrics: [{
+        name: 'revenue', label: 'Revenue', description: '', domain: 'commerce',
+        sql: 'SUM(amount)', type: 'sum', table: 'orders',
+      }],
+      dimensions: [],
+    });
+
+    expect(buildSemanticTableMapping(semanticLayer, [
+      { table_catalog: 'ANALYTICS', table_schema: 'SALES', table_name: 'ORDERS' },
+      { table_catalog: 'ANALYTICS', table_schema: 'FINANCE', table_name: 'ORDERS' },
+    ])).toBeUndefined();
+  });
 });
 
 describe('runtimeSnapshotStale (P6 live-schema freshness)', () => {
@@ -276,6 +321,40 @@ describe('runtimeSnapshotStale (P6 live-schema freshness)', () => {
     }
     // The prune must never delete the newest row — it's the only one ever read.
     expect(latestRuntimeSchemaSnapshotForProject(dir)?.source).toBe('scan-7');
+  });
+
+  it('never gives an Ask run metadata from another selected connection', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ask-connection-metadata-'));
+    tempDirs.push(dir);
+    mkdirSync(join(dir, '.dql', 'cache'), { recursive: true });
+    recordRuntimeSchemaSnapshot(dir, {
+      generationId: 'primary-generation',
+      connectionId: 'primary',
+      scopeFingerprint: 'primary-scope',
+      status: 'ready',
+      capturedAt: '2026-07-29T12:00:00.000Z',
+      tables: [{ relation: 'PROD.SALES.ORDERS', name: 'ORDERS', columns: [{ name: 'ID' }] }],
+    });
+    recordRuntimeSchemaSnapshot(dir, {
+      generationId: 'reporting-generation',
+      connectionId: 'reporting',
+      scopeFingerprint: 'reporting-scope',
+      status: 'ready',
+      capturedAt: '2026-07-29T12:01:00.000Z',
+      tables: [{ relation: 'GOLD.COMMON.REVENUE', name: 'REVENUE', columns: [{ name: 'AMOUNT' }] }],
+    });
+
+    expect(runtimeSchemaSnapshotForAgentConnection(dir, 'primary', 'primary-scope').tables[0]?.relation)
+      .toBe('PROD.SALES.ORDERS');
+    expect(runtimeSchemaSnapshotForAgentConnection(dir, 'primary', 'drifted-scope')).toMatchObject({
+      connectionId: 'primary',
+      status: 'partial',
+      tables: [],
+    });
+    expect(runtimeSchemaSnapshotForAgentConnection(dir, 'missing')).toMatchObject({
+      connectionId: 'missing',
+      tables: [],
+    });
   });
 });
 
@@ -2622,6 +2701,23 @@ describe('agent run runtime API', () => {
         },
       });
       const base = `http://127.0.0.1:${port}`;
+
+      const createThreadResponse = await fetch(`${base}/api/agent/threads`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ surface: 'ask', title: 'Disposable Ask thread' }),
+      });
+      expect(createThreadResponse.status).toBe(201);
+      const createdThread = await createThreadResponse.json() as { thread: { id: string } };
+      expect((await fetch(`${base}/api/agent/threads/${encodeURIComponent(createdThread.thread.id)}`)).status).toBe(200);
+      const deleteThreadResponse = await fetch(
+        `${base}/api/agent/threads/${encodeURIComponent(createdThread.thread.id)}`,
+        { method: 'DELETE' },
+      );
+      const deleteThreadPayload = await deleteThreadResponse.json() as { ok?: boolean; error?: string };
+      expect(deleteThreadResponse.status, deleteThreadPayload.error).toBe(200);
+      expect(deleteThreadPayload).toEqual({ ok: true });
+      expect((await fetch(`${base}/api/agent/threads/${encodeURIComponent(createdThread.thread.id)}`)).status).toBe(404);
 
       const createResponse = await fetch(`${base}/api/agent-runs`, {
         method: 'POST',

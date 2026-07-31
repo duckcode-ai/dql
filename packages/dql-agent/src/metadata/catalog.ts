@@ -699,6 +699,11 @@ export interface LocalContextPack {
     catalogPath: string;
     builtAt: string | null;
     fingerprint: string | null;
+    /** Runtime metadata identity used by this pack; prevents cross-connection reuse. */
+    runtimeSchemaConnectionId?: string;
+    runtimeSchemaScopeFingerprint?: string;
+    runtimeSchemaGenerationId?: string;
+    runtimeSchemaCapturedAt?: string;
   };
 }
 
@@ -1329,7 +1334,21 @@ export async function buildLocalContextPack(
       && request.conversationTopicRelation !== 'shift'
       ? runtimeCatalog.getContextPack(request.priorContextPackId)
       : null;
-    const priorPackFresh = Boolean(priorPack && priorPack.freshness.fingerprint === catalog.state('fingerprint'));
+    const runtimeSchemaIdentityMatches = Boolean(
+      (priorPack?.freshness.runtimeSchemaConnectionId ?? undefined)
+        === (request.runtimeSchemaSnapshot?.connectionId ?? undefined)
+      && (priorPack?.freshness.runtimeSchemaScopeFingerprint ?? undefined)
+        === (request.runtimeSchemaSnapshot?.scopeFingerprint ?? undefined)
+      && (priorPack?.freshness.runtimeSchemaGenerationId ?? undefined)
+        === (request.runtimeSchemaSnapshot?.generationId ?? undefined)
+      && (priorPack?.freshness.runtimeSchemaCapturedAt ?? undefined)
+        === (request.runtimeSchemaSnapshot?.capturedAt ?? undefined),
+    );
+    const priorPackFresh = Boolean(
+      priorPack
+      && priorPack.freshness.fingerprint === catalog.state('fingerprint')
+      && runtimeSchemaIdentityMatches,
+    );
     if (
       priorPack
       && priorPackFresh
@@ -1351,6 +1370,18 @@ export async function buildLocalContextPack(
           catalogPath: snapshotPath,
           builtAt: catalog.state('built_at'),
           fingerprint: catalog.state('fingerprint'),
+          ...(request.runtimeSchemaSnapshot?.connectionId
+            ? { runtimeSchemaConnectionId: request.runtimeSchemaSnapshot.connectionId }
+            : {}),
+          ...(request.runtimeSchemaSnapshot?.scopeFingerprint
+            ? { runtimeSchemaScopeFingerprint: request.runtimeSchemaSnapshot.scopeFingerprint }
+            : {}),
+          ...(request.runtimeSchemaSnapshot?.generationId
+            ? { runtimeSchemaGenerationId: request.runtimeSchemaSnapshot.generationId }
+            : {}),
+          ...(request.runtimeSchemaSnapshot?.capturedAt
+            ? { runtimeSchemaCapturedAt: request.runtimeSchemaSnapshot.capturedAt }
+            : {}),
         },
       };
       delete (reusedPayload as Partial<LocalContextPack>).id;
@@ -1609,6 +1640,18 @@ export async function buildLocalContextPack(
         catalogPath: snapshotPath,
         builtAt: catalog.state('built_at'),
         fingerprint: catalog.state('fingerprint'),
+        ...(request.runtimeSchemaSnapshot?.connectionId
+          ? { runtimeSchemaConnectionId: request.runtimeSchemaSnapshot.connectionId }
+          : {}),
+        ...(request.runtimeSchemaSnapshot?.scopeFingerprint
+          ? { runtimeSchemaScopeFingerprint: request.runtimeSchemaSnapshot.scopeFingerprint }
+          : {}),
+        ...(request.runtimeSchemaSnapshot?.generationId
+          ? { runtimeSchemaGenerationId: request.runtimeSchemaSnapshot.generationId }
+          : {}),
+        ...(request.runtimeSchemaSnapshot?.capturedAt
+          ? { runtimeSchemaCapturedAt: request.runtimeSchemaSnapshot.capturedAt }
+          : {}),
       },
     };
     const packPayload = { ...payload };
@@ -1759,11 +1802,21 @@ export function recordRuntimeSchemaSnapshot(projectRoot: string, snapshot: Runti
   }
 }
 
-/** The most-recent stored live-warehouse schema snapshot for a project, or null. */
-export function latestRuntimeSchemaSnapshotForProject(projectRoot: string): RuntimeSchemaSnapshot | null {
+/**
+ * The most-recent stored live-warehouse schema snapshot for a project.
+ *
+ * When a connection id is supplied, never fall back to a snapshot captured for
+ * another connection. Ask may target a different warehouse connection than the
+ * project default, so a project-global "latest" snapshot is not safe evidence
+ * for planning or semantic table resolution.
+ */
+export function latestRuntimeSchemaSnapshotForProject(
+  projectRoot: string,
+  connectionId?: string,
+): RuntimeSchemaSnapshot | null {
   const catalog = openMetadataCatalog(projectRoot);
   try {
-    return catalog.latestRuntimeSchemaSnapshot();
+    return catalog.latestRuntimeSchemaSnapshot(connectionId);
   } finally {
     catalog.close();
   }
@@ -3370,12 +3423,14 @@ export class MetadataCatalog {
         JSON.stringify(cleanSnapshot),
         capturedAt,
       );
-      // Only the most-recent snapshot is ever read; rows otherwise accumulate one per
-      // question forever. Keep a small margin and prune the rest (P7).
+      // Preserve a bounded history across multiple named connections. Ask
+      // resolves the latest snapshot for its selected connection, so retaining
+      // only five project-global rows could evict a valid but less-recent
+      // warehouse as soon as another connection was refreshed repeatedly.
       this.db.prepare(`
         DELETE FROM runtime_schema_snapshots
         WHERE id NOT IN (
-          SELECT id FROM runtime_schema_snapshots ORDER BY captured_at DESC LIMIT 5
+          SELECT id FROM runtime_schema_snapshots ORDER BY captured_at DESC LIMIT 50
         )
       `).run();
       this.db.prepare('DELETE FROM runtime_value_fts').run();
@@ -3447,14 +3502,19 @@ export class MetadataCatalog {
     return rows.map(rowToObject);
   }
 
-  latestRuntimeSchemaSnapshot(): RuntimeSchemaSnapshot | null {
-    const row = this.db.prepare(`
+  latestRuntimeSchemaSnapshot(connectionId?: string): RuntimeSchemaSnapshot | null {
+    const rows = this.db.prepare(`
       SELECT payload_json
       FROM runtime_schema_snapshots
       ORDER BY captured_at DESC
-      LIMIT 1
-    `).get() as { payload_json: string } | undefined;
-    return row ? safeRuntimeSchemaSnapshot(safeJson(row.payload_json, null)) : null;
+      LIMIT 50
+    `).all() as Array<{ payload_json: string }>;
+    for (const row of rows) {
+      const snapshot = safeRuntimeSchemaSnapshot(safeJson(row.payload_json, null));
+      if (!snapshot) continue;
+      if (!connectionId || snapshot.connectionId === connectionId) return snapshot;
+    }
+    return null;
   }
 
   getContextPack(id: string): LocalContextPack | null {

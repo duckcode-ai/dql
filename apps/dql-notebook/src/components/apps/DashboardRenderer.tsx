@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
 import { AlertTriangle, BarChart3, Bot, GitBranch, GripVertical, LineChart, Maximize2, PieChart, Plus, ShieldCheck, SlidersHorizontal, Sparkles, Table2, Trash2, Wand2, X } from 'lucide-react';
 import { api, type AppBlockRecommendation, type DashboardDocumentResponse, type DashboardRunResponse, type DashboardStoryBrief } from '../../api/client';
@@ -6,13 +6,16 @@ import { useNotebook } from '../../store/NotebookStore';
 import type { CellChartConfig, QueryResult, ThemeMode } from '../../store/types';
 import { ChartOutput, CHART_TYPE_OPTIONS, type ChartType } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
-import { UnifiedAgentRunPanel, usePersistedAgentThreadId } from '../agent/UnifiedAgentRunPanel';
+import { usePersistedAgentThreadId } from '../agent/usePersistedAgentThreadId';
 import { AiSidePanel, AI_SIDE_PANEL_EXPANDED_WIDTH, AI_SIDE_PANEL_WIDTH } from '../agent/AiSidePanel';
 import { renderMarkdown } from '../cells/MarkdownCellEditor';
 import { inferColumnKind, columnKindToChartRole, type ChartColumnRole } from '../../utils/column-kind';
 import { classifyColumns } from '../../utils/semantic-fields';
 import { NODE_TYPE_COLORS, TYPE_LABELS, TYPE_TITLES } from '../lineage/lineage-constants';
 import { themes, type ThemeMode as NotebookThemeMode } from '../../themes/notebook-theme';
+
+const UnifiedAgentRunPanel = lazy(() => import('../agent/UnifiedAgentRunPanel')
+  .then((module) => ({ default: module.UnifiedAgentRunPanel })));
 
 type DashboardLayoutItem = DashboardDocumentResponse['dashboard']['layout']['items'][number];
 type DashboardRunTile = DashboardRunResponse['tiles'][number];
@@ -711,17 +714,19 @@ export function DashboardRenderer({
           ariaLabel="Dashboard AI"
           style={dashboardChatDrawerStyle(chatExpanded)}
         >
-          <UnifiedAgentRunPanel
-            key={`${appId}:${dashboard.id}`}
-            themeMode={state.themeMode}
-            title="Dashboard AI"
-            scopeHint="Scoped to this App dashboard first"
-            audience="stakeholder"
-            workspaceContext={{ appId, dashboardId: dashboard.id, dashboardContext: chatContext }}
-            initialMode="auto"
-            threadId={agentThread.threadId}
-            onThreadIdChange={agentThread.onThreadIdChange}
-          />
+          <Suspense fallback={<div style={{ padding: 16, fontSize: 12, color: t.textSecondary }}>Loading Dashboard AI…</div>}>
+            <UnifiedAgentRunPanel
+              key={`${appId}:${dashboard.id}`}
+              themeMode={state.themeMode}
+              title="Dashboard AI"
+              scopeHint="Scoped to this App dashboard first"
+              audience="stakeholder"
+              workspaceContext={{ appId, dashboardId: dashboard.id, dashboardContext: chatContext }}
+              initialMode="auto"
+              threadId={agentThread.threadId}
+              onThreadIdChange={agentThread.onThreadIdChange}
+            />
+          </Suspense>
         </AiSidePanel>
       )}
 

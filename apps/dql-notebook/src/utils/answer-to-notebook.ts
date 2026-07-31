@@ -70,7 +70,9 @@ export function buildNotebookCellsFromAnswer(
     const extractionCell = makeCell('sql', sql);
     extractionCell.name = safeCellName(payload.title ?? 'Warehouse extraction');
     extractionCell.mixedSourcePlan = plan;
-    extractionCell.executionTarget = { target: 'connection' };
+    extractionCell.executionTarget = payload.executionTarget?.target === 'connection'
+      ? payload.executionTarget
+      : { target: 'connection' };
     extractionCell.datasetRefs = [{
       id: plan.datasetId ?? plan.localDataset,
       alias: plan.localDataset,
@@ -87,6 +89,7 @@ export function buildNotebookCellsFromAnswer(
     cell.executionCount = 1;
   }
   if (payload.chartConfig) cell.chartConfig = payload.chartConfig;
+  if (payload.executionTarget) cell.executionTarget = payload.executionTarget;
   cell.correctionProvenance = correctionProvenanceForDraft({
     question: payload.question,
     generatedSql: payload.sql ?? payload.dqlArtifact?.compiledSql,

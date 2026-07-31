@@ -273,6 +273,23 @@ export class ConversationStore {
   }
 
   /**
+   * Permanently delete one conversation thread and its searchable turn history.
+   * Explicitly promoted memories and immutable agent-run audit receipts live in
+   * separate stores and are not silently deleted with chat presentation state.
+   */
+  deleteThread(id: string): boolean {
+    let deleted = false;
+    const txn = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM conversation_turns_fts WHERE thread_id = ?').run(id);
+      this.db.prepare('DELETE FROM conversation_turns WHERE thread_id = ?').run(id);
+      const result = this.db.prepare('DELETE FROM conversation_threads WHERE id = ?').run(id);
+      deleted = result.changes > 0;
+    });
+    txn();
+    return deleted;
+  }
+
+  /**
    * Append a turn to a thread (assigns the next seq, dual-writes the FTS index,
    * bumps the thread, and sets the thread title from the first question).
    */
@@ -461,10 +478,7 @@ export class ConversationStore {
         'SELECT id FROM conversation_threads WHERE archived = 1 AND updated_at < ?'
       ).all(cutoff) as Array<{ id: string }>;
       for (const { id } of stale) {
-        this.db.prepare('DELETE FROM conversation_turns_fts WHERE thread_id = ?').run(id);
-        this.db.prepare('DELETE FROM conversation_turns WHERE thread_id = ?').run(id);
-        this.db.prepare('DELETE FROM conversation_threads WHERE id = ?').run(id);
-        pruned += 1;
+        if (this.deleteThread(id)) pruned += 1;
       }
     });
     txn();

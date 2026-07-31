@@ -40,6 +40,7 @@ export interface Conversation {
 
 const STORAGE_KEY = 'dql-ask-conversations';
 const ACTIVE_CONVERSATION_STORAGE_KEY = 'dql-ask-active-conversation';
+const DELETED_THREAD_STORAGE_KEY = 'dql-ask-deleted-thread-queue';
 const MAX_CONVERSATIONS = 100;
 
 function askNotebookCellName(value: string | undefined): string {
@@ -109,11 +110,13 @@ function recoveredConversationId(threadId: string): string {
 export function mergePersistedAskConversations(
   local: Conversation[],
   threads: AgentConversationThread[],
+  deletedThreadIds: ReadonlySet<string> = new Set(),
 ): Conversation[] {
+  const visibleThreads = threads.filter((thread) => !deletedThreadIds.has(thread.id));
   const localByThread = new Map(
     local.flatMap((conversation) => conversation.threadId ? [[conversation.threadId, conversation] as const] : []),
   );
-  const recovered = threads.map((thread): Conversation => {
+  const recovered = visibleThreads.map((thread): Conversation => {
     const existing = localByThread.get(thread.id);
     return {
       id: existing?.id ?? recoveredConversationId(thread.id),
@@ -126,13 +129,46 @@ export function mergePersistedAskConversations(
       threadId: thread.id,
     };
   });
-  const recoveredIds = new Set(threads.map((thread) => thread.id));
+  const recoveredIds = new Set(visibleThreads.map((thread) => thread.id));
   return [
     ...recovered,
-    ...local.filter((conversation) => !conversation.threadId || !recoveredIds.has(conversation.threadId)),
+    ...local.filter((conversation) =>
+      (!conversation.threadId || !recoveredIds.has(conversation.threadId))
+      && (!conversation.threadId || !deletedThreadIds.has(conversation.threadId))),
   ]
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
     .slice(0, MAX_CONVERSATIONS);
+}
+
+function loadDeletedThreadIds(): Set<string> {
+  if (typeof window === 'undefined') return new Set();
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(DELETED_THREAD_STORAGE_KEY) ?? '[]');
+    return new Set(Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function persistDeletedThreadIds(ids: ReadonlySet<string>): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(DELETED_THREAD_STORAGE_KEY, JSON.stringify([...ids].slice(-MAX_CONVERSATIONS)));
+  } catch {
+    // The queue is a race-safety layer; server deletion remains authoritative.
+  }
+}
+
+function queueDeletedThreadId(threadId: string): void {
+  const ids = loadDeletedThreadIds();
+  ids.add(threadId);
+  persistDeletedThreadIds(ids);
+}
+
+function clearDeletedThreadId(threadId: string): void {
+  const ids = loadDeletedThreadIds();
+  ids.delete(threadId);
+  persistDeletedThreadIds(ids);
 }
 
 // Defensive: persisted/edited runs from any source must have the arrays RunCard
@@ -160,7 +196,10 @@ function loadConversations(): Conversation[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return (parsed as Conversation[]).map((c) => ({ ...c, items: normalizeItems(c.items) }));
+    const deletedThreadIds = loadDeletedThreadIds();
+    return (parsed as Conversation[])
+      .filter((conversation) => !conversation.threadId || !deletedThreadIds.has(conversation.threadId))
+      .map((c) => ({ ...c, items: normalizeItems(c.items) }));
   } catch {
     return [];
   }
@@ -257,7 +296,22 @@ export function AnalyticsHome() {
   }, [activeId]);
 
   useEffect(() => {
+    // A page may close after the browser copy was removed but before the DELETE
+    // response arrived. Retry that bounded queue before canonical history is
+    // allowed to repopulate the sidebar.
+    for (const threadId of loadDeletedThreadIds()) {
+      void api.deleteAgentThread(threadId)
+        .then(() => clearDeletedThreadId(threadId))
+        .catch(() => undefined);
+    }
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
+    // Keep the request-start tombstones for this response even if a concurrent
+    // retry DELETE succeeds first. Otherwise an older in-flight GET could
+    // briefly resurrect the just-deleted thread from its stale response body.
+    const deletedAtRequestStart = loadDeletedThreadIds();
     void api.listAgentThreads({ limit: MAX_CONVERSATIONS })
       .then(({ threads }) => {
         if (cancelled) return;
@@ -267,9 +321,16 @@ export function AnalyticsHome() {
         const askThreads = threads.filter((thread) =>
           thread.surface === 'ask'
           || (thread.surface === 'notebook' && !thread.notebookPath));
-        setConversations((current) => persistConversations(mergePersistedAskConversations(current, askThreads)));
-        if (!startedWithLocalHistory && askThreads[0]) {
-          setActiveId(recoveredConversationId(askThreads[0].id));
+        const deletedThreadIds = new Set([
+          ...deletedAtRequestStart,
+          ...loadDeletedThreadIds(),
+        ]);
+        const visibleAskThreads = askThreads.filter((thread) => !deletedThreadIds.has(thread.id));
+        setConversations((current) => persistConversations(
+          mergePersistedAskConversations(current, visibleAskThreads, deletedThreadIds),
+        ));
+        if (!startedWithLocalHistory && visibleAskThreads[0]) {
+          setActiveId(recoveredConversationId(visibleAskThreads[0].id));
         }
       })
       .catch(() => {
@@ -340,7 +401,12 @@ export function AnalyticsHome() {
     (id: string) => {
       if (isRunning) return;
       const threadId = conversations.find((conversation) => conversation.id === id)?.threadId;
-      if (threadId) void api.archiveAgentThread(threadId).catch(() => undefined);
+      if (threadId) {
+        queueDeletedThreadId(threadId);
+        void api.deleteAgentThread(threadId)
+          .then(() => clearDeletedThreadId(threadId))
+          .catch(() => undefined);
+      }
       setConversations((prev) => persistConversations(prev.filter((c) => c.id !== id)));
       if (id === activeId) setActiveId(makeConversationId());
     },

@@ -7,7 +7,8 @@ import { ChartOutput, CHART_TYPE_OPTIONS, resolveChartType } from '../output/Cha
 import { TableOutput } from '../output/TableOutput';
 import { deriveResultChartConfig } from '../output/ResultView';
 import { TrustBadge, DerivationWalkPanel, type TrustState } from '@duckcodeailabs/dql-ui';
-import { buildDerivationWalk, type Business360ResultV2, type DerivationWalk } from '@duckcodeailabs/dql-core/lineage';
+import type { Business360ResultV2 } from '@duckcodeailabs/dql-core/lineage';
+import { buildDerivationWalk, type DerivationWalk } from '@duckcodeailabs/dql-core/lineage/derivation';
 import { useNotebook } from '../../store/NotebookStore';
 import { GuidedBySkills, RouteBadge } from './AiBuildResult';
 

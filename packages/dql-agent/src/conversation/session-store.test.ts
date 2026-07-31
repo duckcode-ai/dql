@@ -242,6 +242,21 @@ describe('ConversationStore', () => {
     expect(all).toHaveLength(2);
   });
 
+  it('permanently deletes a thread, its turns, and its search index entries', () => {
+    const thread = store.createThread({ surface: 'ask', title: 'Delete me' });
+    store.appendTurn(thread.id, {
+      question: 'Show permanently deleted revenue history',
+      answerSummary: 'This result must not return after refresh.',
+    });
+
+    expect(store.searchTurns({ query: 'permanently deleted', threadId: thread.id })).toHaveLength(1);
+    expect(store.deleteThread(thread.id)).toBe(true);
+    expect(store.getThread(thread.id)).toBeNull();
+    expect(store.recentTurns(thread.id)).toEqual([]);
+    expect(store.searchTurns({ query: 'permanently deleted' })).toEqual([]);
+    expect(store.deleteThread(thread.id)).toBe(false);
+  });
+
   it('returns turns for compaction between the cursor and the recent window', () => {
     const thread = store.createThread();
     for (let i = 1; i <= 6; i++) {

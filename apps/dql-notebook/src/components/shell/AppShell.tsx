@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState, useEffect } from 'react';
+import React, { lazy, Suspense, useCallback, useRef, useState, useEffect } from 'react';
 import { CommandPalette } from '../palette/CommandPalette';
 import { InspectorPanel } from './InspectorPanel';
 import { useNotebook } from '../../store/NotebookStore';
@@ -7,33 +7,34 @@ import { ActivityBar } from './ActivityBar';
 import { Sidebar } from './Sidebar';
 import { Header } from './Header';
 import { DevPanel } from './DevPanel';
-import { HomePage } from '../home/HomePage';
-import { AnalyticsHome } from '../home/AnalyticsHome';
-import { GlobalAiRail } from '../agent/GlobalAiRail';
-import { NotebookEditor } from '../notebook/NotebookEditor';
-import { NewNotebookModal } from '../modals/NewNotebookModal';
-import { NewBlockModal } from '../modals/NewBlockModal';
-import { SetupOnboarding } from '../modals/SetupOnboarding';
-import { BlockStudio } from '../block-studio/BlockStudio';
-import { BusinessArtifactView } from '../panels/BusinessArtifactView';
-import { LineageDetailView } from '../panels/LineageDetailView';
-import { LineageDAG } from '../panels/LineageDAG';
-import { HelpDocsPage } from '../help/HelpDocsPage';
-import { ConnectionPanel } from '../panels/ConnectionPanel';
-import { GitPage } from '../git/GitPage';
-import { ReadinessPage } from '../readiness/ReadinessPage';
-import { AgentLogPage } from '../agent/AgentLogPage';
-import { GovernedContextPage } from '../domains/GovernedContextPage';
-import { DbtFirstModelingPage } from '../modeling/DbtFirstModelingPage';
-import { AppsView } from '../apps/AppsView';
-import { LineageDrawer } from '../lineage/LineageDrawer';
-import { AiBuildDialog } from '../agent/AiBuildDialog';
 import { api, type SetupLaunchResponse } from '../../api/client';
 import { parseNotebookFile } from '../../utils/parse-workbook';
 import { makeCell } from '../../store/NotebookStore';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { useRunSnapshotAutosave } from '../../hooks/useRunSnapshotAutosave';
 import type { NotebookFile } from '../../store/types';
+
+const HomePage = lazy(() => import('../home/HomePage').then((module) => ({ default: module.HomePage })));
+const AnalyticsHome = lazy(() => import('../home/AnalyticsHome').then((module) => ({ default: module.AnalyticsHome })));
+const GlobalAiRail = lazy(() => import('../agent/GlobalAiRail').then((module) => ({ default: module.GlobalAiRail })));
+const NotebookEditor = lazy(() => import('../notebook/NotebookEditor').then((module) => ({ default: module.NotebookEditor })));
+const NewNotebookModal = lazy(() => import('../modals/NewNotebookModal').then((module) => ({ default: module.NewNotebookModal })));
+const NewBlockModal = lazy(() => import('../modals/NewBlockModal').then((module) => ({ default: module.NewBlockModal })));
+const SetupOnboarding = lazy(() => import('../modals/SetupOnboarding').then((module) => ({ default: module.SetupOnboarding })));
+const BlockStudio = lazy(() => import('../block-studio/BlockStudio').then((module) => ({ default: module.BlockStudio })));
+const BusinessArtifactView = lazy(() => import('../panels/BusinessArtifactView').then((module) => ({ default: module.BusinessArtifactView })));
+const LineageDetailView = lazy(() => import('../panels/LineageDetailView').then((module) => ({ default: module.LineageDetailView })));
+const LineageDAG = lazy(() => import('../panels/LineageDAG').then((module) => ({ default: module.LineageDAG })));
+const HelpDocsPage = lazy(() => import('../help/HelpDocsPage').then((module) => ({ default: module.HelpDocsPage })));
+const ConnectionPanel = lazy(() => import('../panels/ConnectionPanel').then((module) => ({ default: module.ConnectionPanel })));
+const GitPage = lazy(() => import('../git/GitPage').then((module) => ({ default: module.GitPage })));
+const ReadinessPage = lazy(() => import('../readiness/ReadinessPage').then((module) => ({ default: module.ReadinessPage })));
+const AgentLogPage = lazy(() => import('../agent/AgentLogPage').then((module) => ({ default: module.AgentLogPage })));
+const GovernedContextPage = lazy(() => import('../domains/GovernedContextPage').then((module) => ({ default: module.GovernedContextPage })));
+const DbtFirstModelingPage = lazy(() => import('../modeling/DbtFirstModelingPage').then((module) => ({ default: module.DbtFirstModelingPage })));
+const AppsView = lazy(() => import('../apps/AppsView').then((module) => ({ default: module.AppsView })));
+const LineageDrawer = lazy(() => import('../lineage/LineageDrawer').then((module) => ({ default: module.LineageDrawer })));
+const AiBuildDialog = lazy(() => import('../agent/AiBuildDialog').then((module) => ({ default: module.AiBuildDialog })));
 
 export function AppShell() {
   const { state, dispatch } = useNotebook();
@@ -220,60 +221,62 @@ export function AppShell() {
             minWidth: 0,
           }}
         >
-          {state.mainView === 'home' ? (
-            <HomePage />
-          ) : state.mainView === 'ask' ? (
-            <AnalyticsHome />
-          ) : state.mainView === 'business_artifact' ? (
-            <BusinessArtifactView />
-          ) : state.mainView === 'lineage' ? (
-            <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-              <LineageDAG />
-            </div>
-          ) : state.mainView === 'lineage_detail' ? (
-            <LineageDetailView />
-          ) : state.mainView === 'help' ? (
-            <HelpDocsPage />
-          ) : state.mainView === 'connection' || state.mainView === 'settings' ? (
-            <ConnectionWorkspace>
-              <ConnectionPanel variant="page" />
-            </ConnectionWorkspace>
-          ) : state.mainView === 'git' ? (
-            <GitPage />
-          ) : state.mainView === 'readiness' ? (
-            <ReadinessPage />
-          ) : state.mainView === 'skills' ? (
-            <GovernedContextPage initialTab="skills" />
-          ) : state.mainView === 'domains' || state.mainView === 'modeling' ? (
-            <DbtFirstModelingPage />
-          ) : state.mainView === 'apps' ? (
-            <AppsView />
-          ) : state.mainView === 'agent_log' ? (
-            <FullPageSection
-              title="Agent steps"
-              description="What the agent did to answer this question, and where the time went — route, tools, checks, and per-step timing."
-            >
-              <AgentLogPage />
-            </FullPageSection>
-          ) : (
-            <>
-              {state.mainView === 'imports' || state.mainView === 'block_studio' ? (
-                <BlockStudio key="block-editor" />
-              ) : (
-                <>
-                  <NotebookEditor
-                    onOpenFile={handleOpenFile}
-                    registerCellRef={registerCellRef}
-                  />
-                  {state.appMode === 'studio' && <DevPanel />}
-                </>
-              )}
-            </>
-          )}
+          <Suspense fallback={<PageLoading t={t} />}>
+            {state.mainView === 'home' ? (
+              <HomePage />
+            ) : state.mainView === 'ask' ? (
+              <AnalyticsHome />
+            ) : state.mainView === 'business_artifact' ? (
+              <BusinessArtifactView />
+            ) : state.mainView === 'lineage' ? (
+              <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                <LineageDAG />
+              </div>
+            ) : state.mainView === 'lineage_detail' ? (
+              <LineageDetailView />
+            ) : state.mainView === 'help' ? (
+              <HelpDocsPage />
+            ) : state.mainView === 'connection' || state.mainView === 'settings' ? (
+              <ConnectionWorkspace>
+                <ConnectionPanel variant="page" />
+              </ConnectionWorkspace>
+            ) : state.mainView === 'git' ? (
+              <GitPage />
+            ) : state.mainView === 'readiness' ? (
+              <ReadinessPage />
+            ) : state.mainView === 'skills' ? (
+              <GovernedContextPage initialTab="skills" />
+            ) : state.mainView === 'domains' || state.mainView === 'modeling' ? (
+              <DbtFirstModelingPage />
+            ) : state.mainView === 'apps' ? (
+              <AppsView />
+            ) : state.mainView === 'agent_log' ? (
+              <FullPageSection
+                title="Agent steps"
+                description="What the agent did to answer this question, and where the time went — route, tools, checks, and per-step timing."
+              >
+                <AgentLogPage />
+              </FullPageSection>
+            ) : (
+              <>
+                {state.mainView === 'imports' || state.mainView === 'block_studio' ? (
+                  <BlockStudio key="block-editor" />
+                ) : (
+                  <>
+                    <NotebookEditor
+                      onOpenFile={handleOpenFile}
+                      registerCellRef={registerCellRef}
+                    />
+                    {state.appMode === 'studio' && <DevPanel />}
+                  </>
+                )}
+              </>
+            )}
+          </Suspense>
         </div>
 
         {state.appMode === 'studio' && state.lineageDrawerOpen && !state.lineageFullscreen && !state.dashboardMode && (
-          <LineageDrawer />
+          <Suspense fallback={null}><LineageDrawer /></Suspense>
         )}
 
         {state.appMode === 'studio' && state.inspectorOpen && !state.lineageFullscreen && !state.lineageDrawerOpen && !state.dashboardMode && (
@@ -283,24 +286,50 @@ export function AppShell() {
         {/* App copilot rail — only on the Apps surface (tile follow-up). Analyst
             surfaces (Notebook, Block Studio) have their own AI; Ask is its own chat.
             Scoping here avoids a redundant second AI on those pages. */}
-        {state.globalAi.open && state.mainView === 'apps' && <GlobalAiRail />}
+        {state.globalAi.open && state.mainView === 'apps' && (
+          <Suspense fallback={null}><GlobalAiRail /></Suspense>
+        )}
 
       </div>
 
       {/* Modals */}
-      {state.newNotebookModalOpen && <NewNotebookModal onFileOpened={handleOpenFile} />}
-      {state.newBlockModalOpen && <NewBlockModal onFileOpened={handleOpenFile} />}
+      {state.newNotebookModalOpen && (
+        <Suspense fallback={null}><NewNotebookModal onFileOpened={handleOpenFile} /></Suspense>
+      )}
+      {state.newBlockModalOpen && (
+        <Suspense fallback={null}><NewBlockModal onFileOpened={handleOpenFile} /></Suspense>
+      )}
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       {/* Spec 14 — shared AI Build surface for the non-notebook front doors. */}
-      <AiBuildDialog />
+      <Suspense fallback={null}><AiBuildDialog /></Suspense>
       {/* Short Guided Setup workflow launched from Settings Overview or first run. */}
       {state.setupOpen && (
-        <SetupOnboarding
-          launch={setupLaunch?.shouldOpen ? setupLaunch : undefined}
-          onAcknowledged={() => setSetupLaunch((current) => current ? { ...current, shouldOpen: false, reason: null } : current)}
-        />
+        <Suspense fallback={<SetupLaunchGate t={t} />}>
+          <SetupOnboarding
+            launch={setupLaunch?.shouldOpen ? setupLaunch : undefined}
+            onAcknowledged={() => setSetupLaunch((current) => current ? { ...current, shouldOpen: false, reason: null } : current)}
+          />
+        </Suspense>
       )}
       {!setupLaunchChecked && <SetupLaunchGate t={t} />}
+    </div>
+  );
+}
+
+function PageLoading({ t }: { t: (typeof themes)[keyof typeof themes] }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        flex: 1, minWidth: 0, display: 'grid', placeItems: 'center',
+        background: t.appBg, color: t.textSecondary, fontFamily: t.font,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12.5 }}>
+        <span style={{ width: 8, height: 8, borderRadius: 999, background: t.accent }} />
+        Loading workspace…
+      </div>
     </div>
   );
 }

@@ -2416,6 +2416,34 @@ Use the finance model area.
     );
   });
 
+  it('isolates runtime schema snapshots by named connection', () => {
+    recordRuntimeSchemaSnapshot(projectRoot, {
+      generationId: 'warehouse_primary',
+      connectionId: 'primary',
+      capturedAt: '2026-07-29T12:00:00.000Z',
+      status: 'ready',
+      source: 'primary metadata',
+      tables: [{ relation: 'PROD.SALES.ORDERS', name: 'ORDERS', columns: [{ name: 'ID' }] }],
+    });
+    recordRuntimeSchemaSnapshot(projectRoot, {
+      generationId: 'warehouse_reporting',
+      connectionId: 'reporting',
+      capturedAt: '2026-07-29T12:01:00.000Z',
+      status: 'ready',
+      source: 'reporting metadata',
+      tables: [{ relation: 'GOLD.MARTS.REVENUE', name: 'REVENUE', columns: [{ name: 'AMOUNT' }] }],
+    });
+
+    expect(latestRuntimeSchemaSnapshotForProject(projectRoot)?.connectionId).toBe('reporting');
+    expect(latestRuntimeSchemaSnapshotForProject(projectRoot, 'primary')).toEqual(
+      expect.objectContaining({
+        connectionId: 'primary',
+        tables: [expect.objectContaining({ relation: 'PROD.SALES.ORDERS' })],
+      }),
+    );
+    expect(latestRuntimeSchemaSnapshotForProject(projectRoot, 'missing')).toBeNull();
+  });
+
   it('retrieves a relevant table from a 3,000-table runtime schema without hydrating the full database catalog (CTX-005, PERF-002, E2E-006)', async () => {
     const prepared = await ensureMetadataCatalogFresh(projectRoot, { force: true });
     const tables = Array.from({ length: 3_000 }, (_, index) => ({
