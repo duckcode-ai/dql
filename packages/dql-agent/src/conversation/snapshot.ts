@@ -121,7 +121,26 @@ export function buildConversationSnapshot(
   if (options.question && workingState.topicKey) {
     topicRelation = classifyQuestionRelation(workingState, options.question);
     if (topicRelation === 'shift') {
-      workingState = { ...workingState, filters: [] };
+      // A new topic clears the WHOLE carried shape, not just the filters.
+      // Leaving `topicKey`, entities, measures, dimensions and the prior result
+      // columns in place meant a genuinely new question was still rendered under
+      // "active topic: <the old one>" with the old measures and dimensions
+      // attached — the reported "when I ask a different question it doesn't give
+      // the right solution". `reduceWorkingState` already clears these on shift;
+      // this path only cleared `filters`.
+      workingState = {
+        ...workingState,
+        filters: [],
+        entities: [],
+        measures: [],
+        dimensions: [],
+        topicKey: undefined,
+        timeframe: undefined,
+        limit: undefined,
+        sourceCertifiedBlock: undefined,
+        lastResultColumns: undefined,
+        lastResultDimensionValues: undefined,
+      };
     }
   }
   const latest = recent[recent.length - 1];
@@ -309,7 +328,14 @@ function classifyQuestionRelation(state: ConversationWorkingState, question: str
     ...plan.metricTerms.map(normalizeTerm),
   ].filter(Boolean));
   const topicTerms = new Set((state.topicKey ?? '').split('|').filter(Boolean));
-  if (terms.size === 0) return 'continuation';
+  // A question the planner could not read is NOT evidence that the user stayed
+  // on topic. Calling it a continuation carried the previous question's
+  // entities, measures and filters onto an unrelated ask. Unless the question
+  // is clearly deictic ("break that down", "same for EMEA"), treat an unreadable
+  // question as a new topic and answer it fresh.
+  if (terms.size === 0) {
+    return referencesPriorTurn(question) ? 'continuation' : 'shift';
+  }
   if (topicTerms.size === 0) return 'continuation';
   let shared = 0;
   for (const term of terms) if (topicTerms.has(term)) shared += 1;
@@ -323,8 +349,22 @@ function classifyQuestionRelation(state: ConversationWorkingState, question: str
     return frameTerms.size > 0 && hit / (terms.size + frameTerms.size - hit) >= 0.5;
   });
   if (returned) return 'return';
+  // A question carrying no measure, dimension or entity is only a "refinement"
+  // if it actually points back at the previous turn. Otherwise it is simply a
+  // question the planner's vocabulary does not cover, and treating it as a
+  // refinement let it inherit — and reuse the entire context pack of — an
+  // unrelated prior question.
   const onlyRefinement = plan.dimensionTerms.length === 0 && plan.metricTerms.length === 0 && plan.entities.length === 0;
-  return onlyRefinement ? 'refinement' : 'shift';
+  return onlyRefinement && referencesPriorTurn(question) ? 'refinement' : 'shift';
+}
+
+/**
+ * Does the question explicitly point at what came before? Deictic reference is
+ * the one reliable signal that the user means "carry the previous context",
+ * independent of whether the analysis planner recognised any of the vocabulary.
+ */
+function referencesPriorTurn(question: string): boolean {
+  return /\b(it|its|that|this|those|these|them|their|there|same|above|previous|prior|instead|also|too)\b/i.test(question);
 }
 
 function snapshotTurn(turn: ConversationTurn): ConversationSnapshotTurn {

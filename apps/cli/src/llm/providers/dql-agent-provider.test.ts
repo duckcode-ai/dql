@@ -162,6 +162,51 @@ describe('governed answer formatting', () => {
   });
 });
 
+describe('drilldown classification', () => {
+  // A drilldown INHERITS the prior turn's filters and dimensions, so the bar has
+  // to be a reference to that turn. Firing on a bare `by`/`for`/`only`/`where`
+  // made nearly every new analytical question a drilldown of whatever came
+  // before, which silently applied stale filters to it.
+  it('does not classify a new analytical question as a drilldown', () => {
+    for (const question of [
+      'Show revenue by region',
+      'Revenue for enterprise accounts',
+      'List customers where status is active',
+      'Compare margin across channels',
+    ]) {
+      expect(__test__.isDrilldownFollowUp(question, []), question).toBe(false);
+    }
+  });
+
+  it('classifies an explicit drill or deictic reference as a drilldown', () => {
+    for (const question of [
+      'break that down by region',
+      'why did it drop',
+      'show the drivers of the decline',
+      'slice this by segment',
+      'show me their orders',
+    ]) {
+      expect(__test__.isDrilldownFollowUp(question, []), question).toBe(true);
+    }
+  });
+
+  // A pre-existing guard keeps definition questions ("what is/what are …") out
+  // of the drilldown lane, so a drill noun phrased that way stays contextual.
+  it('leaves definition-shaped questions out of the drilldown lane', () => {
+    expect(__test__.isDrilldownFollowUp('what are the drivers', [])).toBe(false);
+    expect(__test__.isDrilldownFollowUp('what is net revenue', [])).toBe(false);
+  });
+
+  // Evidence beats vocabulary: reusing the prior RESULT's own column names is a
+  // reference to that result whatever words the question uses.
+  it('treats reuse of the prior result shape as a drilldown', () => {
+    const priorTerms = ['customer', 'beverage', 'revenue'];
+    expect(__test__.isDrilldownFollowUp('who are the customers by region', priorTerms)).toBe(true);
+    // The same phrasing with no shared shape is a new question.
+    expect(__test__.isDrilldownFollowUp('who are the customers by region', ['shipment', 'warehouse'])).toBe(false);
+  });
+});
+
 describe('conversation context follow-up routing', () => {
   it('AGT-021 carries every prior semantic metric for "other metrics" follow-ups', () => {
     const metrics = [

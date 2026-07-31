@@ -7201,11 +7201,25 @@ export function isFilterOnlyRefinement(prior: AnalysisQuestionPlan, next: Analys
   if (prior.mode !== next.mode) return false;
   const priorShape = prior.requestedShape;
   const nextShape = next.requestedShape;
+  // Every check below is a set comparison, so two plans the planner extracted
+  // NOTHING from compared equal and were declared "the same query with
+  // different filters". Two unrelated questions the vocabulary does not cover
+  // then reused the earlier context pack wholesale — including its committed
+  // route decision. Reuse requires actual evidence of sameness on both sides.
+  if (!hasPlanSignal(prior) || !hasPlanSignal(next)) return false;
   return setEqual(priorShape.measures, nextShape.measures)
     && setEqual(priorShape.dimensions, nextShape.dimensions)
     && setEqual(priorShape.requiredOutputs, nextShape.requiredOutputs)
     && (priorShape.grain ?? '') === (nextShape.grain ?? '')
     && setEqual(prior.entities.map((entity) => entity.text.toLowerCase()), next.entities.map((entity) => entity.text.toLowerCase()));
+}
+
+/** Did the planner actually read anything out of this question? */
+function hasPlanSignal(plan: AnalysisQuestionPlan): boolean {
+  return plan.requestedShape.measures.length > 0
+    || plan.requestedShape.dimensions.length > 0
+    || plan.requestedShape.requiredOutputs.length > 0
+    || plan.entities.length > 0;
 }
 
 function setEqual(a: string[], b: string[]): boolean {

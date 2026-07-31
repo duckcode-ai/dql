@@ -848,7 +848,29 @@ function applyTopicShiftGuard(
   };
 }
 
+/**
+ * Resolve the prior-turn context a follow-up may build on.
+ *
+ * The topic-shift guard is applied HERE rather than by the caller. It used to
+ * be invoked at the provider call site only, while the retrieval call site
+ * (`buildLocalContextPack`) took the raw result — so on a detected topic shift
+ * the context pack was still built with the previous question's filters and
+ * dimensions, and the retrieval query text was seeded with the previous
+ * question and answer. Folding the guard in makes it impossible to forget at a
+ * third call site.
+ */
 export function resolveAgentFollowUpContext(
+  rawContext: Record<string, unknown> | undefined,
+  question: string,
+  snapshot?: ConversationSnapshot,
+): AgentFollowUpContext | undefined {
+  return applyTopicShiftGuard(
+    resolveAgentFollowUpContextRaw(rawContext, question),
+    snapshot ?? conversationSnapshotFromContext(rawContext as AgentRunRequest['conversationContext']),
+  );
+}
+
+function resolveAgentFollowUpContextRaw(
   rawContext: Record<string, unknown> | undefined,
   question: string,
 ): AgentFollowUpContext | undefined {
@@ -878,7 +900,7 @@ export function resolveAgentFollowUpContext(
     ? 'drilldown'
     : isGenericFollowUp(question)
     ? 'generic'
-    : isDrilldownFollowUp(question)
+    : isDrilldownFollowUp(question, priorShapeTerms(priorResultColumns, focusedPriorResultValues))
       ? 'drilldown'
       : null;
   // Always-on carry: the regexes only CLASSIFY the follow-up kind — they no longer
@@ -1527,6 +1549,7 @@ function normalizePriorValueDimension(value: string): string {
 
 export const __test__ = {
   applyTopicShiftGuard,
+  isDrilldownFollowUp,
   buildAnswerLoopTools,
   createCertifiedFitConfirmation,
   followUpFromConversationContext,
@@ -1561,12 +1584,57 @@ function isGenericFollowUp(question: string): boolean {
   return meaningful.length === 0;
 }
 
-function isDrilldownFollowUp(question: string): boolean {
+/**
+ * A drilldown INHERITS the previous turn's filters and dimensions, so the bar
+ * for classifying one has to be a reference to that previous turn.
+ *
+ * This used to fire on a bare `by`, `for`, `only`, `where`, `compare` or a noun
+ * like `regions`, which is present in almost every analytical question. "Show
+ * revenue by region" on a brand-new topic was therefore treated as a drilldown
+ * of whatever came before and silently inherited its filters — the reported
+ * "when I ask a different question it's not giving the right solution".
+ *
+ * Now it needs either a deictic reference to the prior result, or an explicit
+ * drill verb that only makes sense relative to something already on screen.
+ */
+function isDrilldownFollowUp(question: string, priorTerms: string[] = []): boolean {
   const lower = question.toLowerCase();
   const deicticDrilldown = /\b(?:this|that|these|those|same|above|previous|prior)\s+(?:amount|value|orders?|results?|rows?|customers?|products?|cat(?:egor|agor|ogor)(?:y|ies)|segments?|regions?)\b/.test(lower)
     || /\b(?:they|their|them)\b/.test(lower);
-  return /\b(drill|break\s*down|slice|segment|filter|compare|split|why|changed?|change|driver|root cause|increase|decrease|drop|spike|variance|by|for|only|where|last week|this week|last month|this month|enterprise|regions?|customers?|channels?|products?|category|categories|catagor(?:y|ies)|catogor(?:y|ies))\b/.test(lower)
-    && (deicticDrilldown || !/\b(what is|what are|define|definition|meaning of)\b/.test(lower));
+  // `break ... down` is split by its object more often than not ("break that
+  // down", "break the revenue down"), so the verb and particle are matched with
+  // a short gap between them rather than adjacently.
+  const explicitDrillVerb = /\b(drills?|breakdowns?|slices?|segments?|splits?|why|drivers?|root cause|variance)\b/.test(lower)
+    || /\bbreak\b.{0,16}\bdown\b/.test(lower);
+  // Evidence, not vocabulary: a question that reuses the PRIOR RESULT's own
+  // column or dimension names is talking about that result, whatever words it
+  // uses to do it. This is what distinguishes "who are the customers by region"
+  // asked after a customers table (a drilldown) from the same phrasing asked on
+  // a brand-new topic (not one).
+  const reusesPriorShape = priorTerms.some((term) => term && lower.includes(term));
+  if (!deicticDrilldown && !explicitDrillVerb && !reusesPriorShape) return false;
+  return deicticDrilldown || !/\b(what is|what are|define|definition|meaning of)\b/.test(lower);
+}
+
+/**
+ * Lower-cased words from the prior result's columns and dimension keys, used to
+ * detect that a follow-up is about that result.
+ */
+function priorShapeTerms(
+  columns: string[] | undefined,
+  dimensionValues: Record<string, string[]> | undefined,
+): string[] {
+  const names = [...(columns ?? []), ...Object.keys(dimensionValues ?? {})];
+  const terms = new Set<string>();
+  for (const name of names) {
+    for (const part of name.toLowerCase().split(/[^a-z0-9]+/)) {
+      // Skip short and generic tokens that would match almost any question.
+      if (part.length >= 4 && !['name', 'total', 'count', 'value', 'date', 'time'].includes(part)) {
+        terms.add(part);
+      }
+    }
+  }
+  return [...terms];
 }
 
 function extractDrilldownFilters(question: string): string[] {
