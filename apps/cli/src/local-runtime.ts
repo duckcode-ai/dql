@@ -294,6 +294,7 @@ import {
   type PlanBlock,
   type ReasoningEffort,
   loadAgentSemanticLayer,
+  isTrustedConversationTurn,
   analyticalError,
   withAnalyticalErrorOrigin,
   withAnalyticalErrorOriginSync,
@@ -975,6 +976,9 @@ async function conversationContextFromThread(
       trustLabel: turn.trustLabel,
       runStatus: turn.runStatus,
       stopReason: turn.stopReason,
+      // Carried so every consumer can compute trust from the same fields.
+      refusalCode: turn.refusalCode,
+      executionError: turn.executionError,
       certification: turn.certification,
       contextPackId: turn.contextPackId,
       dqlArtifact: turn.dqlArtifact,
@@ -1013,8 +1017,29 @@ async function conversationContextFromThread(
     ...(serverSnapshot ? { conversationEnvelope: serverSnapshot } : {}),
     ...(serverSnapshot ? { serverSnapshot } : {}),
     ...(thread?.rollingSummary ? { conversationSummary: thread.rollingSummary } : {}),
-    ...(turns.length > 0 ? { turns, activeTurnId: (turns[turns.length - 1] as { id?: string }).id } : {}),
+    // `activeTurnId` is the FOLLOW-UP ANCHOR: the turn whose filters, prior DQL
+    // artifact, and source SQL the next question builds on. Anchoring it to the
+    // last turn unconditionally meant a failed turn became the anchor, and its
+    // broken artifact and failing SQL were handed to the next question as
+    // authoritative context — the sticky-error loop. `latestTurnId` keeps the
+    // real tail for presentation.
+    ...(turns.length > 0
+      ? {
+          turns,
+          activeTurnId: lastTrustedTurnId(turns) ?? undefined,
+          latestTurnId: (turns[turns.length - 1] as { id?: string }).id,
+        }
+      : {}),
   };
+}
+
+/** The most recent turn a follow-up may safely build on. */
+function lastTrustedTurnId(turns: Array<Record<string, unknown>>): string | undefined {
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index] as Record<string, unknown> & { id?: string };
+    if (isTrustedConversationTurn(turn as Parameters<typeof isTrustedConversationTurn>[0])) return turn.id;
+  }
+  return undefined;
 }
 
 /** Best-effort: persist a completed run as a conversation turn (never throws). */
@@ -1028,8 +1053,12 @@ function recordConversationTurn(store: ConversationStore | null, threadId: strin
     // turn folding its (possibly misparsed) filters and measures into working
     // state poisoned every subsequent ask: the SAME question that worked once
     // then failed forever because the bad turn's phantom state carried forward.
-    const producedAnswer = run.status === 'completed' || run.status === 'needs_review';
-    if (producedAnswer) advanceThreadState(store, threadId, turn);
+    //
+    // The previous guard tested `run.status`, which cannot express this: a
+    // grounding-gap refusal and a perfectly good uncertified answer are BOTH
+    // `needs_review`, so the guard admitted exactly the failures its comment
+    // was written to exclude. Trust is now derived from answer state.
+    if (isTrustedConversationTurn(turn)) advanceThreadState(store, threadId, turn);
   } catch {
     // Conversation persistence is additive; a failed write must not fail the run.
   }
@@ -1068,6 +1097,11 @@ export function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInp
     trustLabel: agentRunString(payload?.trustLabel) ?? run.trustState,
     runStatus: run.status,
     stopReason: run.stopReason,
+    // Persisted so a later turn can tell a refusal from an answer. `runStatus`
+    // alone cannot: a grounding gap and a good uncertified answer are both
+    // `needs_review`.
+    refusalCode: agentRunString(payload?.refusalCode),
+    executionError: agentRunString(payload?.executionError),
     certification: agentRunString(payload?.certification),
     sourceCertifiedBlock: agentRunString(payload?.sourceCertifiedBlock)
       ?? (artifact?.kind === 'answer' ? agentRunString(artifact.ref) : undefined),
@@ -2727,31 +2761,45 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         synthesizedAnswer = undefined;
       }
     }
+    // A grounding/modeling gap is a REFUSAL. It was computed above but never
+    // reached this ternary, so it fell through to `needs_review` — the same
+    // status as a perfectly good uncertified answer. Every downstream trust
+    // check then treated the refusal as a usable turn, which is how one failed
+    // answer poisoned every later question in the thread.
     const status: AgentRunStatus = isTerminalFailure
       ? 'blocked'
       : needsClarification
         ? 'needs_clarification'
-        : isCertified || isSemantic
-          ? 'completed'
-          : 'needs_review';
+        : isGroundingGap || isModelDeclined
+          ? 'blocked'
+          : isCertified || isSemantic
+            ? 'completed'
+            : 'needs_review';
     const trustState: AgentRunTrustState = isTerminalFailure
       ? 'blocked'
       : needsClarification
         ? 'not_applicable'
-        : isCertified
-          ? 'certified'
-            : isSemantic
-              ? 'governed'
-              : 'review_required';
+        : isGroundingGap || isModelDeclined
+          ? 'blocked'
+          : isCertified
+            ? 'certified'
+              : isSemantic
+                ? 'governed'
+                : 'review_required';
     const stopReason: AgentRunStopReason = isTerminalFailure
       ? 'blocked'
       : needsClarification
         ? 'needs_clarification'
-        : isCertified
-          ? 'certified_answer_found'
-            : isSemantic
-              ? 'governed_semantic_answer'
-              : 'human_review_required';
+        // A gap is terminal, but it is NOT a provider outage: it still owes the
+        // user its evidence trace, and its next-actions below stay the
+        // grounding-gap set rather than "retry the provider".
+        : isGroundingGap || isModelDeclined
+          ? 'human_review_required'
+          : isCertified
+            ? 'certified_answer_found'
+              : isSemantic
+                ? 'governed_semantic_answer'
+                : 'human_review_required';
     const terminalFailureActions: AgentRunNextAction[] = governedAnswer.analyticalFailure
       ? governedAnswer.analyticalFailure.code === 'PERMISSION_DENIED'
         ? [{ id: 'repair-access', label: 'Change connection or request access', route: 'blocked' }]

@@ -20,6 +20,7 @@ import {
   updateStructuredConversationSummary,
   type ConversationSummaryV1,
 } from './rolling-summary.js';
+import { isTrustedConversationTurn } from './turn-trust.js';
 import { buildAnalysisQuestionPlan } from '../metadata/analysis-planner.js';
 import { envEmbeddingProvider, hybridRank } from '../embeddings/provider.js';
 
@@ -33,6 +34,9 @@ export interface ConversationSnapshotTurn {
   trustLabel?: string;
   runStatus?: string;
   stopReason?: string;
+  /** Carried so trust can be computed without re-reading the run. */
+  refusalCode?: string;
+  executionError?: string;
   sourceCertifiedBlock?: string;
   contextPackId?: string;
   knowledgeLens?: KnowledgeLens;
@@ -338,6 +342,8 @@ function snapshotTurn(turn: ConversationTurn): ConversationSnapshotTurn {
     resultColumns: turn.result?.columns,
     resultRowCount: turn.result?.rowCount,
     resultDimensionValues: turn.result?.dimensionValues,
+    refusalCode: turn.refusalCode,
+    executionError: turn.executionError,
     sourceSql: turn.sql,
     dqlArtifact: turn.dqlArtifact,
     cascade: turn.cascade,
@@ -361,14 +367,10 @@ export function conversationTurnContextState(turn: ConversationSnapshotTurn): st
 }
 
 function isUsableAnalyticalContextTurn(turn: ConversationSnapshotTurn): boolean {
-  const state = conversationTurnContextState(turn);
-  if (state === 'blocked' || state === 'unresolved') return false;
-  if (
-    turn.runStatus
-    && turn.runStatus !== 'completed'
-    && turn.runStatus !== 'needs_review'
-  ) return false;
-  return true;
+  // One predicate, shared with the provider layer, the working-state reducer and
+  // the prompt renderer. They used to disagree, and a failed turn slipped
+  // through every one of them.
+  return isTrustedConversationTurn(turn);
 }
 
 function hasWorkingState(state: ConversationWorkingState): boolean {

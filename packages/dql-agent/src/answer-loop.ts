@@ -43,6 +43,7 @@ import {
   conversationTurnContextState,
   type ConversationSnapshot,
 } from './conversation/snapshot.js';
+import { isTrustedConversationTurn } from './conversation/turn-trust.js';
 import { renderStructuredConversationSummary } from './conversation/rolling-summary.js';
 import { detectResultSetOperation, computeResultSetOperation } from './conversation/result-ops.js';
 import { classifyGovernedQueryShape } from './semantic-bridge/query-shape.js';
@@ -5542,6 +5543,18 @@ function renderConversationSnapshot(snapshot: ConversationSnapshot): string {
 }
 
 function renderConversationSnapshotTurnLine(turn: ConversationSnapshot['recentTurns'][number], max: number): string {
+  // An UNTRUSTED turn renders as one line: the question, and the fact that it
+  // was not answered. Its failure prose, its result shape, and above all its
+  // FAILING SQL are withheld. Feeding those back is how the model was led to
+  // re-emit the same broken query on the next question — the reported loop
+  // where one error made every later answer the same error.
+  //
+  // The question itself stays visible on purpose: the model needs to see that
+  // the user is re-asking, so it tries a genuinely different approach rather
+  // than treating the follow-up as unrelated.
+  if (!isTrustedConversationTurn(turn)) {
+    return `state: ${conversationTurnContextState(turn)} | Q: ${turn.question} | not answered — do not reuse this attempt`.slice(0, max);
+  }
   const line = [
     `state: ${conversationTurnContextState(turn)}`,
     `Q: ${turn.question}`,

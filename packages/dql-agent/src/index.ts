@@ -636,6 +636,8 @@ export type {
   ConversationSnapshot,
   ConversationSnapshotTurn,
 } from "./conversation/snapshot.js";
+export { conversationTurnTrust, isTrustedConversationTurn } from "./conversation/turn-trust.js";
+export type { ConversationTurnTrust, ConversationTurnTrustInput } from "./conversation/turn-trust.js";
 export {
   MetadataCatalog,
   buildLocalContextPack,

@@ -77,6 +77,14 @@ export interface ConversationTurnInput {
   trustLabel?: string;
   runStatus?: string;
   stopReason?: string;
+  /**
+   * Refusal code and execution error from the underlying run. Persisted so
+   * `conversationTurnTrust` can tell a genuine answer from a refusal — a
+   * grounding gap and a good uncertified answer share `runStatus`, so without
+   * these a failed turn is indistinguishable from a usable one.
+   */
+  refusalCode?: string;
+  executionError?: string;
   certification?: string;
   sourceCertifiedBlock?: string;
   contextPackId?: string;
@@ -188,6 +196,8 @@ export class ConversationStore {
         trust_label            TEXT,
         run_status             TEXT,
         stop_reason            TEXT,
+        refusal_code           TEXT,
+        execution_error        TEXT,
         certification          TEXT,
         source_certified_block TEXT,
         context_pack_id        TEXT,
@@ -219,6 +229,8 @@ export class ConversationStore {
     this.ensureColumn('conversation_turns', 'agent_run_id', 'TEXT');
     this.ensureColumn('conversation_turns', 'run_status', 'TEXT');
     this.ensureColumn('conversation_turns', 'stop_reason', 'TEXT');
+    this.ensureColumn('conversation_turns', 'refusal_code', 'TEXT');
+    this.ensureColumn('conversation_turns', 'execution_error', 'TEXT');
     this.ensureColumn('conversation_threads', 'summary_json', "TEXT NOT NULL DEFAULT '{}'");
   }
 
@@ -317,10 +329,11 @@ export class ConversationStore {
       this.db.prepare(`
         INSERT INTO conversation_turns (
           id, thread_id, agent_run_id, seq, question, answer_summary, answer_text, route,
-          trust_label, run_status, stop_reason, certification, source_certified_block, context_pack_id,
+          trust_label, run_status, stop_reason, refusal_code, execution_error,
+          certification, source_certified_block, context_pack_id,
           knowledge_lens_json, sql, dql_artifact_json, cascade_json, result_json,
           contract_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         turn.id,
         threadId,
@@ -333,6 +346,8 @@ export class ConversationStore {
         turn.trustLabel ?? null,
         turn.runStatus ?? null,
         turn.stopReason ?? null,
+        turn.refusalCode ?? null,
+        turn.executionError ?? null,
         turn.certification ?? null,
         turn.sourceCertifiedBlock ?? null,
         turn.contextPackId ?? null,
@@ -607,6 +622,9 @@ type TurnRow = {
   trust_label: string | null;
   run_status: string | null;
   stop_reason: string | null;
+  /** Nullable on rows written before these columns existed (see ensureColumn). */
+  refusal_code?: string | null;
+  execution_error?: string | null;
   certification: string | null;
   source_certified_block: string | null;
   context_pack_id: string | null;
@@ -653,6 +671,8 @@ function rowToTurn(row: TurnRow): ConversationTurn {
     trustLabel: row.trust_label ?? undefined,
     runStatus: row.run_status ?? undefined,
     stopReason: row.stop_reason ?? undefined,
+    refusalCode: row.refusal_code ?? undefined,
+    executionError: row.execution_error ?? undefined,
     certification: row.certification ?? undefined,
     sourceCertifiedBlock: row.source_certified_block ?? undefined,
     contextPackId: row.context_pack_id ?? undefined,

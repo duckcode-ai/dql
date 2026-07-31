@@ -26,6 +26,7 @@ import {
   type ConversationSnapshot,
   type LocalContextPack,
   type Skill,
+  isTrustedConversationTurn,
 } from '@duckcodeailabs/dql-agent';
 import { buildManifest, normalizeDqlArtifactReference, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
 import { existsSync } from 'node:fs';
@@ -1066,7 +1067,7 @@ function activeConversationTurn(
     : undefined;
   const recalled = turns.filter((turn) =>
     cleanOptionalString(turn.snapshotSource) === 'recalled'
-    && !turnIsBlockedContext(turn)
+    && !turnIsUntrustedContext(turn)
     && turnHasUsefulResult(turn));
   if (recalled.length > 0) {
     const bestRecalled = recalled
@@ -1078,17 +1079,24 @@ function activeConversationTurn(
     }
   }
   if (activeId) {
-    if (activeMatch && !turnIsBlockedContext(activeMatch)) return activeMatch;
+    if (activeMatch && !turnIsUntrustedContext(activeMatch)) return activeMatch;
   }
+  // When nothing in the thread is trustworthy there is NO anchor. Falling back
+  // to the last turn regardless meant a thread whose turns had all failed kept
+  // anchoring each new question to the most recent failure.
   return [...turns].reverse().find((turn) => {
-    return !turnIsBlockedContext(turn) && turnHasUsefulResult(turn);
-  }) ?? turns[turns.length - 1];
+    return !turnIsUntrustedContext(turn) && turnHasUsefulResult(turn);
+  }) ?? [...turns].reverse().find((turn) => !turnIsUntrustedContext(turn));
 }
 
-function turnIsBlockedContext(turn: Record<string, unknown>): boolean {
-  return cleanOptionalString(turn.runStatus) === 'blocked'
-    || cleanOptionalString(turn.trustLabel) === 'blocked'
-    || cleanOptionalString(turn.route) === 'blocked';
+/**
+ * A turn the next question may build on. This used to exclude only `blocked`,
+ * so a refused turn ("I couldn't find the answer") stayed eligible as the
+ * follow-up anchor and handed its broken DQL artifact and failing SQL to the
+ * next question as authoritative prior context.
+ */
+function turnIsUntrustedContext(turn: Record<string, unknown>): boolean {
+  return !isTrustedConversationTurn(turn as Parameters<typeof isTrustedConversationTurn>[0]);
 }
 
 function turnHasUsefulResult(turn: Record<string, unknown>): boolean {
