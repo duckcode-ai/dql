@@ -6,6 +6,49 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.12.2 - 2026-07-30
+
+### Ask AI and Notebook warehouse execution parity
+
+This patch removes the main execution differences that allowed a DQL artifact
+to run in Notebook while the equivalent Ask AI answer failed against the same
+warehouse.
+
+### Added
+
+- **Explicit Ask execution target.** Ask AI shows the selected database beside
+  Thinking and uses that one connection for metadata grounding, semantic
+  compilation, certified/generated execution, and bounded validation.
+- **Safe stale-session recovery.** A terminated warehouse session is evicted and
+  reconnected once for a single read-only `SELECT` or `WITH` statement. DQL
+  never replays mutating or multi-statement SQL automatically.
+
+### Fixed
+
+- **Snowflake physical identifiers.** Governed compilation preserves dbt
+  `relation_name`, explicit quoting, and Snowflake's normal unquoted
+  case-folding instead of turning lowercase dbt schema and column names into
+  different case-sensitive objects.
+- **Cross-surface connection drift.** Certified blocks, generated DQL, schema
+  context, semantic queries, and exploratory validation no longer silently
+  fall back to a different default connection during an Ask run.
+- **Warehouse recovery classification.** Terminated sessions are explicitly
+  retryable, while Snowflake's combined “does not exist or not authorized”
+  relation message routes through metadata refresh instead of fabricated SQL
+  repair or an unrecoverable permission dead end.
+
+### Verification
+
+- Full DQL Agent suite: 103 files and 1,226 tests passed.
+- Full Notebook suite: 41 files and 186 tests passed.
+- Full CLI suite and all 28 connector tests passed.
+- Core dbt-first modeling tests and Agent, Connector, Core, CLI, and Notebook
+  production builds passed.
+- The built CLI was browser-verified against a dbt-first fixture with the
+  selected Ask database visible beside Thinking.
+- The synchronized workspace build, test, pack, publish, registry, and clean
+  install gates must be recorded by the release workflow for this version.
+
 ## v1.12.1 - 2026-07-30
 
 ### Governed correction lessons and fail-closed DQL SQL repair

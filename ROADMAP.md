@@ -7,7 +7,7 @@ and inspect lineage from source data to dashboard pages.
 
 For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
-## Current State (v1.12.1)
+## Current State (v1.12.2)
 
 DQL OSS is ready for local-first use cases:
 
@@ -107,6 +107,12 @@ DQL OSS is ready for local-first use cases:
   uncertified status, source receipts, and policy validation.
 - Require existing OSS projects to preview and reapply dbt context after an npm
   CLI upgrade so their immutable snapshot matches the running DQL version.
+- Keep one explicit warehouse connection bound across Ask metadata retrieval,
+  semantic compilation, generated/certified execution, and bounded validation,
+  with the selected target visible in the Ask composer.
+- Preserve dbt physical relation quoting and Snowflake's default identifier
+  case-folding, and recover one read-only query from a terminated pooled session
+  without replaying writes or multi-statement SQL.
 - Capture successful AI-query corrections as reviewable reusable lessons with
   explicit domain, metric, model, term, block, and dialect scope while keeping
   comments as provenance and approval separate from certification.
@@ -143,7 +149,7 @@ The OSS release is intentionally local and single-user:
 - The notebook browser happy path needs a hard-gated Playwright suite before the
   project should be called GA.
 - The `PERF-001` enterprise-scale correctness fixture passes, but several
-  cold-start and warm-context latency budgets remain above target. The v1.12.1
+  cold-start and warm-context latency budgets remain above target. The v1.12.2
   release treats this as a disclosed OSS exception, not a GA performance claim.
 
 ## Next Priorities
