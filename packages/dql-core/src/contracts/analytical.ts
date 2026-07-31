@@ -193,6 +193,17 @@ export interface AnalyticalFailureV1 {
   dqlFingerprint?: string;
   sqlFingerprint?: string;
   safeActions: string[];
+  /**
+   * The redacted PRODUCER text behind `message`, for the inspector only.
+   *
+   * `message` is a fixed safe string chosen by failure code — that redaction is
+   * the governance contract and stays. But discarding the driver/compiler text
+   * entirely meant a real error like `Binder Error: column "amt" not found` was
+   * unrecoverable even for the person debugging it, and every unclassified
+   * failure read as the same generic sentence. Credentials, connection strings
+   * and quoted literals are already stripped by `redactAnalyticalDiagnostic`.
+   */
+  diagnostic?: string;
 }
 
 export type AnalyticalFailureCodeV2 =

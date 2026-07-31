@@ -62,6 +62,13 @@ import type {
 import type { GroundingContextExpander } from './grounding/regrounding.js';
 import { createContextLedger, type ContextLedger } from './grounding/context-ledger.js';
 import { validateAnswerResultShape } from './answer-shape.js';
+import {
+  analyticalErrorDetail,
+  type AnalyticalErrorDetailV1,
+  type AnalyticalErrorOffending,
+  type AnalyticalErrorOrigin,
+  type AnalyticalErrorStage,
+} from './analytical-error.js';
 import { fanoutWarningsForSql } from './metadata/grain-ledger.js';
 import { evaluateDbtFirstGeneratedSql } from './metadata/dbt-first-safety.js';
 import {
@@ -1102,9 +1109,20 @@ export type WarehouseSqlRetryDisposition =
  */
 export interface WarehouseSqlFailureV1 {
   version: 1;
+  /**
+   * WHO produced this failure. Assigned at the throw site (see
+   * `analytical-error.ts`); only a genuine connector error is `warehouse`.
+   * Everything downstream — gate copy, repair eligibility, UI action — keys off
+   * this rather than off regexes over the message text.
+   */
+  origin: AnalyticalErrorOrigin;
+  stage?: AnalyticalErrorStage;
   category: WarehouseSqlFailureCategory;
   retryDisposition: WarehouseSqlRetryDisposition;
   redactedMessage: string;
+  /** Full untruncated producer text, inspector-only. */
+  diagnostic?: string;
+  offending?: AnalyticalErrorOffending;
   driver?: string;
   vendorCode?: string;
   sqlState?: string;
@@ -3861,6 +3879,10 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   let executionError: string | undefined;
   let warehouseFailure: WarehouseSqlFailureV1 | undefined;
   let repairAttempts = 0;
+  // Repair candidates that were generated but rejected before execution. These
+  // are diagnostics ABOUT the recovery attempt, not the reason the run failed,
+  // so they are reported alongside the original error rather than replacing it.
+  const repairNotes: string[] = [];
   // The repair turn returns error-recovery prose ("the column X was not recognized…"),
   // NOT a user-facing answer. Keep it for the trace only — never as the answer text.
   let repairNarrative: string | undefined;
@@ -3963,8 +3985,13 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
               executionError = warehouseFailure.redactedMessage;
             }
           } else {
-            executionError = localRepairValidation.error;
-            warehouseFailure = normalizeWarehouseSqlFailure(localRepairValidation.error, input.semanticDriver);
+            // The REPAIR candidate failed validation — the original warehouse
+            // error is still the reason this run has no data, so it stays
+            // primary. Overwriting it here used to show the user a gate message
+            // for a failure that actually happened in the warehouse, and it
+            // also clobbered `retryDisposition`, silently skipping the model
+            // repair lane below.
+            repairNotes.push(`Local SQL repair rejected by context validation: ${localRepairValidation.error}`);
           }
         }
         if (
@@ -4016,8 +4043,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
                 executionError = warehouseFailure.redactedMessage;
               }
             } else {
-              executionError = repairedValidation.error;
-              warehouseFailure = normalizeWarehouseSqlFailure(repairedValidation.error, input.semanticDriver);
+              // As above: the model's repair candidate was rejected, but the
+              // warehouse error remains the true cause of the missing answer.
+              repairNotes.push(`Model SQL repair rejected by context validation: ${repairedValidation.error}`);
             }
           }
         }
@@ -4078,6 +4106,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         : []),
       ...contextValidation.warnings,
       ...deepCandidateNotes,
+      ...repairNotes,
       ...(resultShape?.warnings ?? []),
       ...(partialShapeWarning ? [partialShapeWarning] : []),
       ...(topNTrimNote ? [topNTrimNote] : []),
@@ -7842,11 +7871,23 @@ export function normalizeWarehouseSqlFailure(
         ? record.message
         : String(error);
   const message = redactWarehouseSqlFailureMessage(rawMessage);
-  const category = classifyWarehouseSqlFailure(message);
+  // An error tagged at its throw site already knows what it is. Running the
+  // warehouse regex classifier over it is how `I need values for: region.`
+  // came to be reported as a warehouse execution failure.
+  const tagged = analyticalErrorDetail(error);
+  const category = tagged
+    ? categoryForTaggedFailure(tagged)
+    : classifyWarehouseSqlFailure(message);
   return {
     version: 1,
+    origin: tagged?.origin ?? 'warehouse',
+    ...(tagged?.stage ? { stage: tagged.stage } : {}),
+    ...(tagged?.diagnostic ? { diagnostic: tagged.diagnostic } : { diagnostic: rawMessage }),
+    ...(tagged?.offending ? { offending: tagged.offending } : {}),
     category,
-    retryDisposition: warehouseSqlRetryDisposition(category),
+    retryDisposition: tagged
+      ? retryDispositionForOrigin(tagged.origin)
+      : warehouseSqlRetryDisposition(category),
     redactedMessage: message,
     ...(stringField(record, 'driver') ?? fallbackDriver
       ? { driver: stringField(record, 'driver') ?? fallbackDriver }
@@ -7858,6 +7899,40 @@ export function normalizeWarehouseSqlFailure(
     ...(numberField(record, 'position') !== undefined ? { position: numberField(record, 'position') } : {}),
     ...(typeof record?.retryable === 'boolean' ? { retryable: record.retryable } : {}),
   };
+}
+
+/**
+ * A tagged failure carries its producer's own code. Map it onto the existing
+ * category vocabulary where the meaning genuinely matches (so metadata-refresh
+ * and repair affordances keep working), and to `unknown` otherwise — never by
+ * pattern-matching the message.
+ */
+function categoryForTaggedFailure(detail: AnalyticalErrorDetailV1): WarehouseSqlFailureCategory {
+  switch (detail.code) {
+    case 'unknown_relation':
+      return 'unknown_relation';
+    case 'unknown_column':
+      return 'unknown_column';
+    case 'ambiguous_filter':
+    case 'ambiguous_column':
+      return 'ambiguous_column';
+    case 'unsafe_sql':
+      return 'unsafe';
+    default:
+      return 'unknown';
+  }
+}
+
+/**
+ * Repair eligibility by origin. Only a warehouse error is evidence that the SQL
+ * itself is wrong, so only a warehouse error may spend a model-repair call.
+ * Re-prompting the model to "fix the SQL" after a DQL block-compilation failure
+ * or a governance refusal burns budget regenerating SQL that was already fine.
+ */
+function retryDispositionForOrigin(origin: AnalyticalErrorOrigin): WarehouseSqlRetryDisposition {
+  if (origin === 'retrieval_gap') return 'refresh_metadata';
+  if (origin === 'provider') return 'explicit_retry';
+  return 'terminal';
 }
 
 function redactWarehouseSqlFailureMessage(message: string): string {

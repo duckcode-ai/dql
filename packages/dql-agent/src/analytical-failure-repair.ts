@@ -223,6 +223,13 @@ export function classifyAnalyticalFailure(error: unknown, fallback: AnalyticalFa
   return fallback;
 }
 
+/** Redacted producer text for the inspector, or undefined when there was nothing to say. */
+function analyticalFailureDiagnostic(error: unknown): string | undefined {
+  if (error === undefined || error === null) return undefined;
+  const text = redactAnalyticalDiagnostic(error).trim();
+  return text && text !== 'undefined' && text !== 'null' ? text : undefined;
+}
+
 /** Create the one redacted failure envelope returned by every analytical surface. */
 export function createAnalyticalFailure(input: CreateAnalyticalFailureInput): AnalyticalFailureV1 {
   const code = input.code ?? classifyAnalyticalFailure(input.error, fallbackCodeForPhase(input.phase));
@@ -254,6 +261,10 @@ export function createAnalyticalFailure(input: CreateAnalyticalFailureInput): An
     code,
     phase: input.phase,
     message: safe.message,
+    // The safe headline stays the user-facing copy; the producer's own words go
+    // to the inspector so the true cause is recoverable. Without this, every
+    // unclassified failure collapsed into one indistinguishable sentence.
+    ...(analyticalFailureDiagnostic(input.error) ? { diagnostic: analyticalFailureDiagnostic(input.error) } : {}),
     recoverability: safe.recoverability,
     failedBindings,
     snapshotId,

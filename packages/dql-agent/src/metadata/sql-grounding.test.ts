@@ -152,6 +152,59 @@ describe('sql-grounding', () => {
       expect(sql).toContain('source::private.unknown_orders');
       expect(rewrites).toEqual([]);
     });
+
+    // A CTE that shadows a grounded relation name used to be rewritten to the
+    // physical relation. The query still EXECUTED and returned the unfiltered
+    // total — a wrong number under a passing trust label.
+    it('never rewrites a CTE that shadows a grounded relation name', () => {
+      const grounding = buildSchemaGrounding(artifacts);
+      const { sql, rewrites } = resolveRelationsInSql(
+        `WITH order_items AS (
+           SELECT order_id, amount FROM dev.order_items WHERE amount > 0
+         )
+         SELECT SUM(amount) AS total FROM order_items`,
+        grounding,
+      );
+
+      expect(sql).toContain('FROM order_items');
+      expect(sql).not.toMatch(/FROM dev\.order_items WHERE amount > 0[\s\S]*FROM dev\.order_items/);
+      expect(rewrites).toEqual([]);
+    });
+
+    it('qualifies a real relation joined against a shadowing CTE', () => {
+      const grounding = buildSchemaGrounding(artifacts);
+      const { sql, rewrites } = resolveRelationsInSql(
+        `WITH order_items AS (SELECT order_id FROM dev.order_items)
+         SELECT * FROM order_items oi JOIN stg_orders o ON oi.order_id = o.order_id`,
+        grounding,
+      );
+
+      expect(sql).toContain('FROM order_items oi');
+      expect(sql).toContain('JOIN dev.stg_orders o');
+      expect(rewrites).toEqual([{ from: 'stg_orders', to: 'dev.stg_orders' }]);
+    });
+
+    it('leaves a CTE name alone even when the statement does not parse', () => {
+      const grounding = buildSchemaGrounding(artifacts);
+      const { sql, rewrites } = resolveRelationsInSql(
+        `WITH order_items AS (SELECT 1) SELECT * FROM order_items QUALIFY ~~~ broken`,
+        grounding,
+      );
+
+      expect(sql).toContain('FROM order_items QUALIFY');
+      expect(rewrites).toEqual([]);
+    });
+
+    it('leaves a subquery alias that shadows a grounded relation name', () => {
+      const grounding = buildSchemaGrounding(artifacts);
+      const { sql, rewrites } = resolveRelationsInSql(
+        'SELECT * FROM (SELECT order_id FROM dev.stg_orders) AS order_items',
+        grounding,
+      );
+
+      expect(sql).toBe('SELECT * FROM (SELECT order_id FROM dev.stg_orders) AS order_items');
+      expect(rewrites).toEqual([]);
+    });
   });
 
   describe('validateSqlAgainstGrounding', () => {

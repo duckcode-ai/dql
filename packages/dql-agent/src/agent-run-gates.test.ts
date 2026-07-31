@@ -21,6 +21,52 @@ describe("defaultAgentRunGates", () => {
     expect(exec?.suggestedRepair).toBeUndefined();
   });
 
+  // The reported symptom: DQL's own block-compiler throw was reported to the
+  // user as a warehouse execution failure, sending people to debug SQL that ran
+  // fine in a notebook because the warehouse never saw it.
+  it("names DQL itself — not the warehouse — when the block compiler is what failed", () => {
+    const evaluations = gateFor("generated_answer", {
+      answer: "Here is the result.",
+      artifacts: [{
+        id: "a",
+        kind: "answer",
+        title: "Answer",
+        trustState: "review_required",
+        payload: {
+          executionError: "I need values for: region.",
+          warehouseFailure: { version: 1, origin: "dql_compilation", stage: "bind", category: "unknown", retryDisposition: "terminal", redactedMessage: "I need values for: region." },
+        },
+      }],
+    });
+
+    const exec = evaluations.find((evaluation) => evaluation.id === "execution-error");
+    expect(exec?.passed).toBe(false);
+    expect(exec?.message).toContain("DQL could not turn this answer into a reusable block");
+    expect(exec?.message).not.toContain("failed to execute against the bounded preview");
+    expect(exec?.message).toContain("I need values for: region.");
+  });
+
+  it("still names the warehouse for a real driver rejection", () => {
+    const evaluations = gateFor("generated_answer", {
+      answer: "Here is the result.",
+      artifacts: [{
+        id: "a",
+        kind: "answer",
+        title: "Answer",
+        trustState: "review_required",
+        payload: {
+          executionError: "Binder Error: no such column: foo",
+          warehouseFailure: { version: 1, origin: "warehouse", category: "unknown_column", retryDisposition: "model_repair", redactedMessage: "Binder Error: no such column: foo" },
+        },
+      }],
+    });
+
+    const exec = evaluations.find((evaluation) => evaluation.id === "execution-error");
+    expect(exec?.label).toBe("Warehouse execution");
+    expect(exec?.message).toContain("The warehouse rejected the query.");
+    expect(exec?.message).toContain("no such column: foo");
+  });
+
   it("answer gate keeps an empty lookup terminal instead of silently starting research", () => {
     const evaluations = gateFor("generated_answer", { answer: "", artifacts: [] });
     const grounding = evaluations.find((evaluation) => evaluation.id === "grounding");

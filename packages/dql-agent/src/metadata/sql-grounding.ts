@@ -316,10 +316,36 @@ export function internalRelationIdsInSql(sql: string): string[] {
 }
 
 /**
+ * Relation tokens that are QUERY-INTERNAL — CTE names and subquery aliases —
+ * and therefore never physical relations, however much their names look like
+ * one. Derived from the parsed statement, with the lexical fallback used when
+ * the dialect parser cannot read the SQL (`analyzeSqlReferences` populates
+ * `ctes` on both paths, so the exclusion set is always available).
+ */
+function queryLocalRelationNames(sql: string, dialect?: string): Set<string> {
+  const analysis = analyzeSqlReferences(sql, dialect ?? 'duckdb');
+  const local = new Set<string>();
+  // Defensive spread: this crosses a package boundary, and a qualifier that
+  // throws is worse than one that misses an exclusion.
+  for (const name of [...(analysis.ctes ?? []), ...(analysis.derivedRelations ?? [])]) {
+    const cleaned = name.replace(/["`\[\]]/g, '').trim().toLowerCase();
+    if (cleaned) local.add(cleaned);
+  }
+  return local;
+}
+
+/**
  * Deterministically rewrite any bare / unqualified table name in `FROM` /
  * `JOIN` clauses to its real qualified relation from the grounding. Maps both
  * the model name and its alias to `database.schema.alias`. Already-qualified
  * relations that match the grounding are left untouched.
+ *
+ * A CTE or subquery alias that SHADOWS a real relation name keeps its local
+ * meaning. Rewriting `FROM orders` inside
+ * `WITH orders AS (SELECT … WHERE region = 'EMEA') SELECT SUM(amt) FROM orders`
+ * detaches the CTE: the query still executes, and returns the UNFILTERED total
+ * under a passing trust label. A wrong number with a green check is worse than
+ * a refusal, so query-local names are never rewritten.
  *
  * For BLOCK SQL the caller may request the `{{ ref() }}` form instead of the
  * qualified relation via `prefer: 'ref'`.
@@ -327,7 +353,7 @@ export function internalRelationIdsInSql(sql: string): string[] {
 export function resolveRelationsInSql(
   sql: string,
   grounding: SchemaGrounding,
-  options: { prefer?: 'qualified' | 'ref' } = {},
+  options: { prefer?: 'qualified' | 'ref'; dialect?: string } = {},
 ): RelationResolution {
   if (!sql || grounding.tables.length === 0) return { sql, rewrites: [] };
   const prefer = options.prefer ?? 'qualified';
@@ -351,12 +377,16 @@ export function resolveRelationsInSql(
     },
   );
 
+  const queryLocal = queryLocalRelationNames(withoutInternalIds, options.dialect);
+
   // Match the relation token after FROM / JOIN (skip subqueries starting with `(`).
   const pattern = /\b(from|join)\s+(?!\()([a-zA-Z_][\w]*(?:\s*\.\s*[a-zA-Z_][\w]*){0,2})/gi;
   const resolved = withoutInternalIds.replace(pattern, (match, keyword: string, relation: string) => {
     const normalized = relation.replace(/\s*\.\s*/g, '.');
     // Already a {{ ref() }} / {{ source() }} macro? Leave it.
     if (/\{\{/.test(normalized)) return match;
+    // A CTE / subquery alias owns its name for the length of the statement.
+    if (queryLocal.has(normalized.toLowerCase())) return match;
     const table = lookupTable(normalized, grounding);
     if (!table) return match; // unknown relation — validator will flag it.
     const target = prefer === 'ref' && table.refForm ? table.refForm : table.qualifiedRelation;

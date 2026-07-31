@@ -294,6 +294,10 @@ import {
   type PlanBlock,
   type ReasoningEffort,
   loadAgentSemanticLayer,
+  analyticalError,
+  withAnalyticalErrorOrigin,
+  withAnalyticalErrorOriginSync,
+  type AnalyticalErrorStage,
 } from '@duckcodeailabs/dql-agent';
 import { gatherProposeEnrichment } from './propose-enrich.js';
 import { handleAppsApi, proposeAppAiBuild, recommendVisualization } from './apps-api.js';
@@ -3966,16 +3970,31 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     executionConnection?: ConnectionConfig,
     executionConnectionName?: string,
   ): Promise<AgentResultPayload> => {
-    const invocation = prepareBlockInvocation({
+    // Everything from here to the executor call is DQL's OWN block compiler:
+    // parse, parameter resolution, plan build, semantic compose. A failure in
+    // any of it means DQL could not rebuild its artifact — the warehouse was
+    // never contacted. Tagging the origin here stops the answer loop from
+    // reporting these as "the generated SQL failed to execute".
+    const invocation = withAnalyticalCompilationOrigin('bind', () => prepareBlockInvocation({
       source,
       parameters: invocationInput?.parameters,
       parameterSources: invocationInput?.parameterSources,
       question: invocationInput?.question,
       surface: 'ask_ai',
-    });
-    if (invocation.errors.length > 0) throw new Error(invocation.errors.join(' '));
+    }));
+    if (invocation.errors.length > 0) {
+      throw analyticalError(invocation.errors.join(' '), { origin: 'dql_compilation', stage: 'compile' });
+    }
     if (invocation.unresolvedParameters.length > 0) {
-      throw new Error(`I need values for: ${invocation.unresolvedParameters.join(', ')}.`);
+      throw analyticalError(
+        `I need values for: ${invocation.unresolvedParameters.join(', ')}.`,
+        {
+          origin: 'dql_compilation',
+          stage: 'bind',
+          code: 'unresolved_parameter',
+          offending: { parameter: invocation.unresolvedParameters[0] },
+        },
+      );
     }
     const activeConnection = requireActiveConnection(executionConnection);
     const precompiledSemanticQuery = Boolean(extractBlockStudioSql(source));
@@ -3988,17 +4007,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           executionConnectionName,
         )
       : undefined;
-    const semanticCompose = semanticLayer
-      ? await composeSemanticBlockSqlForRuntime(source, semanticLayer, {
-          driver: activeConnection.driver,
-          tableMapping,
-          projectRoot,
-          projectConfig,
-          detectedProvider: semanticDetectedProvider,
-          parameters: invocation.values,
-        })
+    const composeLayer = semanticLayer;
+    const semanticCompose = composeLayer
+      ? await withAnalyticalErrorOrigin(
+          { origin: 'dql_compilation', stage: 'compile' },
+          () => composeSemanticBlockSqlForRuntime(source, composeLayer, {
+            driver: activeConnection.driver,
+            tableMapping,
+            projectRoot,
+            projectConfig,
+            detectedProvider: semanticDetectedProvider,
+            parameters: invocation.values,
+          }),
+        )
       : null;
-    const plan = buildExecutionPlan(
+    const plan = withAnalyticalCompilationOrigin('compile', () => buildExecutionPlan(
       { id: `agent-${metadata.name ?? 'dql-artifact'}`, type: 'dql', source, title: metadata.name ?? 'DQL artifact' },
       {
         semanticLayer,
@@ -4007,10 +4030,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         parameters: invocation.values,
         semanticSql: semanticCompose?.sql ?? undefined,
       },
-    );
+    ));
     if (!plan && !semanticCompose?.sql) {
       const semanticError = semanticCompose?.diagnostics.find((diagnostic) => diagnostic.severity === 'error')?.message;
-      throw new Error(semanticError ?? `DQL artifact "${metadata.name ?? 'draft'}" produced no executable SQL.`);
+      throw analyticalError(
+        semanticError ?? `DQL artifact "${metadata.name ?? 'draft'}" produced no executable SQL.`,
+        { origin: 'dql_compilation', stage: 'compile' },
+      );
     }
 
     const prepared = prepareLocalExecution(
@@ -17310,15 +17336,26 @@ const AGENT_PREVIEW_FORBIDDEN_SQL = [
   'vacuum',
 ];
 
+/**
+ * Run DQL's own block-compiler machinery with an honest origin. Anything these
+ * stages throw is a DQL-artifact failure, never a warehouse failure.
+ */
+function withAnalyticalCompilationOrigin<T>(stage: AnalyticalErrorStage, fn: () => T): T {
+  return withAnalyticalErrorOriginSync({ origin: 'dql_compilation', stage }, fn);
+}
+
 export function buildAgentPreviewSql(sql: string, rowLimit = 200): string {
   const trimmed = sql.trim();
-  if (!trimmed) throw new Error('Generated SQL preview is empty.');
+  if (!trimmed) throw analyticalError('Generated SQL preview is empty.', { origin: 'host', stage: 'execute' });
   const boundedRowLimit = Number.isFinite(rowLimit)
     ? Math.max(1, Math.min(10_000, Math.floor(rowLimit)))
     : 200;
   const withoutTrailingSemicolon = trimmed.replace(/;\s*$/, '').trim();
   const readOnlyError = readOnlySqlValidationError(withoutTrailingSemicolon, 'Generated SQL preview');
-  if (readOnlyError) throw new Error(readOnlyError);
+  // A deliberate read-only refusal, not a warehouse rejection.
+  if (readOnlyError) {
+    throw analyticalError(readOnlyError, { origin: 'governance_gate', stage: 'validation', code: 'unsafe_sql' });
+  }
   return `SELECT * FROM (\n${withoutTrailingSemicolon}\n) AS dql_agent_preview LIMIT ${boundedRowLimit}`;
 }
 

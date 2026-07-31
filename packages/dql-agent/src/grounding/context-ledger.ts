@@ -55,7 +55,7 @@ export class ContextLedger {
 
   qualifySql(sql: string): RelationResolution {
     if (!this.grounding) return { sql, rewrites: [] };
-    return resolveRelationsInSql(sql, this.grounding, { prefer: 'qualified' });
+    return resolveRelationsInSql(sql, this.grounding, { prefer: 'qualified', dialect: this.dialect });
   }
 
   validateSql(

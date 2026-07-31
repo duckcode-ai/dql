@@ -25,6 +25,7 @@ import type {
   AgentRouteExecutorResult,
 } from "./agent-run-engine.js";
 import { validateAnswerResultShape } from "./answer-shape.js";
+import { analyticalErrorHeadline, type AnalyticalErrorOrigin } from "./analytical-error.js";
 import { buildAnalysisQuestionPlan } from "./metadata/analysis-planner.js";
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -36,6 +37,17 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 function primaryArtifactPayload(result: AgentRouteExecutorResult): Record<string, unknown> | undefined {
   const artifact = result.artifacts?.[0];
   return artifact ? asRecord(artifact.payload) : undefined;
+}
+
+/**
+ * The origin recorded on the payload's warehouse failure. Untagged payloads
+ * (older runs, or lanes that set only `executionError`) keep the historical
+ * warehouse reading.
+ */
+function failureOrigin(payload: Record<string, unknown> | undefined): AnalyticalErrorOrigin {
+  const failure = asRecord(payload?.warehouseFailure);
+  const origin = failure?.origin;
+  return typeof origin === "string" ? origin as AnalyticalErrorOrigin : "warehouse";
 }
 
 function baseEvaluations(result: AgentRouteExecutorResult): AgentRunEvaluation[] {
@@ -190,12 +202,16 @@ const answerGate: AgentRunGate = (context: AgentRunGateContext): AgentRunEvaluat
     ?? evaluations.find((evaluation) => evaluation.id === "execution-error" && !evaluation.passed)?.message;
 
   if (executionError) {
+    // The message must name the REAL producer. Reporting a DQL block-compile
+    // failure or a governance refusal as "the generated SQL failed to execute"
+    // sent people debugging SQL that the warehouse never even saw.
+    const origin = failureOrigin(payload);
     evaluations = upsert(evaluations, {
       id: "execution-error",
-      label: "Preview execution",
+      label: origin === "warehouse" ? "Warehouse execution" : "Preview execution",
       passed: false,
       severity: "warning",
-      message: `The generated SQL failed to execute against the bounded preview: ${executionError}`,
+      message: `${analyticalErrorHeadline(origin)} ${executionError}`,
     });
   }
 

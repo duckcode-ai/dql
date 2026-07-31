@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { parse, SemanticLayer, type DQLManifest } from "@duckcodeailabs/dql-core";
 import { KGStore } from "./kg/sqlite-fts.js";
 import { answer as answerBase, inferAnalyticalEntityIds, missingRankedGrainOutput, parseProposal, probeSemanticJoinFanout, compactSemanticRuntimeFailure, normalizeWarehouseSqlFailure, repairAmbiguousColumn, semanticTraceAfterExecution, tightenSourceTargetFlowProjection } from "./answer-loop.js";
+import { analyticalError } from "./analytical-error.js";
 import { buildLocalContextPack } from "./metadata/catalog.js";
 import type { KGNode } from "./kg/types.js";
 import { buildAnalysisQuestionPlan, type CertifiedBlockApplicability } from "./metadata/analysis-planner.js";
@@ -5486,6 +5487,51 @@ describe("answer (block-first loop)", () => {
     expect(result.evidence?.route.map((step) => step.tool)).not.toContain("cascade_budget");
   });
 
+  // The host executor throws for DQL's OWN reasons too (block parse, unresolved
+  // parameters, no compiled SQL). Those must never spend a model SQL-repair
+  // call, and must never be reported as a warehouse failure.
+  it("carries a host DQL-compilation origin through instead of blaming the warehouse", async () => {
+    const provider = new StubProvider([
+      "Draft using available columns.\n\n```sql\nSELECT customer_name, SUM(order_total) AS revenue FROM dev.orders GROUP BY customer_name\n```\n\nViz: bar",
+      "A repair must not be requested for a block-compilation failure.\n\n```sql\nSELECT 1\n```",
+    ]);
+    let attempts = 0;
+    const result = await answer({
+      question: "Repair revenue by customer",
+      provider,
+      kg,
+      schemaContext: [
+        {
+          relation: "dev.orders",
+          schema: "dev",
+          name: "orders",
+          columns: [
+            { name: "customer_name", type: "VARCHAR" },
+            { name: "order_total", type: "DECIMAL" },
+          ],
+        },
+      ],
+      executeGeneratedSql: async () => {
+        attempts += 1;
+        throw analyticalError("I need values for: region.", {
+          origin: "dql_compilation",
+          stage: "bind",
+          code: "unresolved_parameter",
+          offending: { parameter: "region" },
+        });
+      },
+    });
+
+    expect(attempts).toBe(1);
+    expect(result.warehouseFailure?.origin).toBe("dql_compilation");
+    expect(result.warehouseFailure?.offending?.parameter).toBe("region");
+    expect(result.warehouseFailure?.retryDisposition).toBe("terminal");
+    expect(result.executionError).toContain("I need values for: region.");
+    // One provider call: drafting. No SQL-repair round trip.
+    expect(provider.calls).toHaveLength(1);
+    expect(result.analysisPlan?.repairAttempts).toBe(0);
+  });
+
   it("does not execute repaired SQL that fails the grounded context guard", async () => {
     const provider = new StubProvider([
       "Draft using available columns.\n\n```sql\nSELECT customer_name, SUM(order_total) AS revenue FROM dev.orders GROUP BY customer_name\n```\n\nViz: bar",
@@ -5518,7 +5564,14 @@ describe("answer (block-first loop)", () => {
     expect(attempts).toBe(1);
     expect(result.proposedSql).toContain("FROM dev.orders");
     expect(result.proposedSql).not.toContain("shadow_orders");
-    expect(result.executionError).toContain("outside the inspected metadata context");
+    // The REPAIR candidate was rejected by the context guard, but the reason
+    // this run has no data is still the warehouse error. Replacing it with the
+    // guard message showed the user a governance refusal for a failure that
+    // actually happened in the warehouse.
+    expect(result.executionError).toContain("syntax error");
+    expect(result.executionError).not.toContain("outside the inspected metadata context");
+    expect(result.warehouseFailure?.origin).toBe("warehouse");
+    expect(result.validationWarnings?.join(" ")).toContain("outside the inspected metadata context");
     expect(result.analysisPlan?.repairAttempts).toBe(0);
     expect(provider.calls).toHaveLength(2);
   });

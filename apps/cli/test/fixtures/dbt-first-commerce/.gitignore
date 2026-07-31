@@ -15,3 +15,5 @@ dql-manifest.json
 **/.dql/mcp-servers.json
 **/.dql-user-prefs.json
 **/.dql/runtimes/
+
+node_modules/

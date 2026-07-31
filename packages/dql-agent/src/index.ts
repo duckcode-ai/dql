@@ -91,6 +91,22 @@ export {
   deriveAnalyticalRepair,
   redactAnalyticalDiagnostic,
 } from './analytical-failure-repair.js';
+export {
+  analyticalError,
+  analyticalErrorBlocksAnswer,
+  analyticalErrorDetail,
+  analyticalErrorHeadline,
+  tagAnalyticalError,
+  withAnalyticalErrorOrigin,
+  withAnalyticalErrorOriginSync,
+  ANALYTICAL_ERROR_PROPERTY,
+} from './analytical-error.js';
+export type {
+  AnalyticalErrorDetailV1,
+  AnalyticalErrorOffending,
+  AnalyticalErrorOrigin,
+  AnalyticalErrorStage,
+} from './analytical-error.js';
 export { resolveAnalyticalPeriods } from './analytical-period-resolution.js';
 export type {
   AnalyticalFreshnessObservationV1,
