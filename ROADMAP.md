@@ -7,7 +7,7 @@ and inspect lineage from source data to dashboard pages.
 
 For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
-## Current State (v1.12.2)
+## Current State (v1.12.3)
 
 DQL OSS is ready for local-first use cases:
 
@@ -63,6 +63,8 @@ DQL OSS is ready for local-first use cases:
   lineage, trust evidence, steps, and safe repair guidance after reload, and
   fail closed when all requested metrics cannot share one governed execution
   path.
+- Delete local Ask sessions durably from the persisted conversation store and
+  prevent overlapping stale history responses from restoring deleted threads.
 - Add generated DQL to a notebook or replace the selected cell only after an
   explicit user action; save ownerless Block AI proposals as Git-backed draft
   artifacts and open them directly in Block Studio's visual builder.
@@ -113,6 +115,9 @@ DQL OSS is ready for local-first use cases:
 - Preserve dbt physical relation quoting and Snowflake's default identifier
   case-folding, and recover one read-only query from a terminated pooled session
   without replaying writes or multi-statement SQL.
+- Reuse valid fingerprinted metadata catalogs at startup, lazy-load large
+  Notebook routes, and cache fingerprinted static assets without caching the
+  HTML shell.
 - Capture successful AI-query corrections as reviewable reusable lessons with
   explicit domain, metric, model, term, block, and dialect scope while keeping
   comments as provenance and approval separate from certification.
@@ -149,7 +154,7 @@ The OSS release is intentionally local and single-user:
 - The notebook browser happy path needs a hard-gated Playwright suite before the
   project should be called GA.
 - The `PERF-001` enterprise-scale correctness fixture passes, but several
-  cold-start and warm-context latency budgets remain above target. The v1.12.2
+  cold-start and warm-context latency budgets remain above target. The v1.12.3
   release treats this as a disclosed OSS exception, not a GA performance claim.
 
 ## Next Priorities

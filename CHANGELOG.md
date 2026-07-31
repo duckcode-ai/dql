@@ -6,6 +6,50 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.12.3 - 2026-07-30
+
+### Durable Ask AI execution and faster Notebook navigation
+
+This patch completes the Ask AI and Notebook execution-parity work, makes chat
+deletion durable across refreshes, and removes avoidable UI and metadata-cache
+work from normal Notebook navigation.
+
+### Fixed
+
+- **Connection-scoped Ask execution.** Ask AI now carries the selected
+  connection and its current metadata snapshot through planning, generated DQL,
+  semantic-table resolution, execution, and Notebook handoff instead of
+  resolving part of the run against a stale or different catalog.
+- **Durable conversation deletion.** Deleting an Ask session removes its
+  persisted thread, turns, and search rows, while UI tombstones prevent an
+  overlapping stale history response from restoring the deleted session.
+- **Notebook handoff parity.** Generated answers preserve the execution target
+  when opened in Notebook so rerunning the artifact uses the same connection as
+  the original governed run.
+
+### Performance
+
+- **Route-level UI loading.** Notebook routes and large analytical surfaces are
+  loaded on demand instead of entering the initial shell bundle.
+- **Narrow lineage import.** The UI imports derivation helpers through a focused
+  DQL Core subpath rather than pulling the SQL parser barrel into the main
+  bundle.
+- **Reusable startup metadata.** A valid fingerprinted catalog is reused at
+  startup, and immutable fingerprinted assets receive long-lived browser cache
+  headers while HTML remains revalidated.
+
+### Verification
+
+- Full DQL Agent suite: 103 files and 1,228 tests passed.
+- Full Notebook suite: 42 files and 188 tests passed.
+- Focused CLI runtime/metadata suite: 10 tests passed.
+- DQL Core, Notebook UI, and CLI production builds passed.
+- A real loopback API check verified that deleted chat sessions remain deleted.
+- Built-CLI browser checks against `jaffle-shop-duckdb` verified cached
+  navigation with no browser errors.
+- The synchronized workspace build, test, pack, publish, registry, and clean
+  install gates must be recorded by the release workflow for this version.
+
 ## v1.12.2 - 2026-07-30
 
 ### Ask AI and Notebook warehouse execution parity
