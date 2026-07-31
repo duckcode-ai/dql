@@ -46,8 +46,11 @@ warehouse.
   production builds passed.
 - The built CLI was browser-verified against a dbt-first fixture with the
   selected Ask database visible beside Thinking.
-- The synchronized workspace build, test, pack, publish, registry, and clean
-  install gates must be recorded by the release workflow for this version.
+- The synchronized workspace release gate passed: 22/22 builds, 41/41 test
+  tasks, and all 19 npm tarballs completed successfully.
+- All 19 npm packages report `version` and `latest` as `1.12.2`.
+- Fresh project-local and global CLI installs both report `dql 1.12.2`, and
+  `create-dql-app@1.12.2 --help` resolves successfully.
 
 ## v1.12.1 - 2026-07-30
 
