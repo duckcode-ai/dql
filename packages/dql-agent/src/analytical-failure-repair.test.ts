@@ -181,3 +181,53 @@ describe('immutable analytical repair derivation (API-007 / SEC-004)', () => {
     })).toMatchObject({ status: 'blocked', code: 'SOURCE_FINGERPRINT_MISMATCH' });
   });
 });
+
+/**
+ * `message` is a fixed SAFE_FAILURES headline per failure code — the default,
+ * "The selected route could not compile its immutable analytical plan", covers
+ * everything unclassified, so a MetricFlow compile error and a dialect mismatch
+ * read identically and neither tells the user what to change. `diagnostic`
+ * carries the producer's own words, already stripped of credentials, connection
+ * strings, and quoted literals.
+ */
+describe('analytical failures keep a usable diagnostic', () => {
+  it('records the producer text alongside the safe headline', () => {
+    const failure = createAnalyticalFailure({
+      code: 'COMPILATION_FAILED',
+      phase: 'compilation',
+      snapshotId: 'snapshot-1',
+      error: new Error("MetricFlow compile failed: group-by-items do not include 'metric_time'"),
+    });
+
+    expect(failure.message).toBeTruthy();
+    // The producer's SENTENCE survives, which is what turns a dead end into a
+    // fixable error. Note the quoted token itself is redacted — the redactor
+    // cannot tell a schema identifier from a row value, so it strips both. The
+    // headline alone would have said only "could not compile its immutable
+    // analytical plan", which is the default for anything unclassified.
+    expect(failure.diagnostic).toContain('MetricFlow compile failed');
+    expect(failure.diagnostic).toContain('group-by-items do not include');
+    expect(failure.diagnostic).not.toBe(failure.message);
+  });
+
+  it('redacts credentials and quoted literals out of the diagnostic', () => {
+    const failure = createAnalyticalFailure({
+      code: 'COMPILATION_FAILED',
+      phase: 'compilation',
+      snapshotId: 'snapshot-1',
+      error: new Error("failed for password=hunter2 on region 'EMEA'"),
+    });
+
+    expect(failure.diagnostic).not.toContain('hunter2');
+    expect(failure.diagnostic).not.toContain('EMEA');
+  });
+
+  it('omits the diagnostic when there was nothing to report', () => {
+    const failure = createAnalyticalFailure({
+      code: 'COMPILATION_FAILED',
+      phase: 'compilation',
+      snapshotId: 'snapshot-1',
+    });
+    expect(failure.diagnostic).toBeUndefined();
+  });
+});

@@ -13,6 +13,9 @@ import {
   buildAgentPreviewSql,
   buildRowBoundedSql,
   extractBlockStudioSql,
+  maskDqlStringContents,
+  parseBlockStudioArrayField,
+  parseBlockStudioStringField,
   buildExploratoryJoinProbeSql,
   repairExploratorySqlBeforeExecution,
   buildAgentSchemaContext,
@@ -6627,5 +6630,64 @@ describe('extractBlockStudioSql', () => {
   it('still reads a loose raw-SQL source that is not a block', () => {
     expect(extractBlockStudioSql('SELECT status FROM orders')).toBe('SELECT status FROM orders');
     expect(extractBlockStudioSql('WITH t AS (SELECT 1) SELECT * FROM t')).toBe('WITH t AS (SELECT 1) SELECT * FROM t');
+  });
+});
+
+/**
+ * A block's `description` is FREE TEXT — on an AI-generated block it is literally
+ * the user's question. Field lookups scan the whole source for `key = ...`, so a
+ * description mentioning a field name was matched as if it WERE that field and
+ * silently replaced the real one. Same class as the `extractBlockStudioSql`
+ * "with" bug: a regex over a structured source that ignores string boundaries.
+ */
+describe('block field parsing ignores content inside string literals', () => {
+  function block(description: string): string {
+    return `block "b" {
+  domain = "sales"
+  type = "semantic"
+  description = "${description}"
+  metrics = ["real_metric"]
+  dimensions = ["real_dim"]
+  time_dimension = "orders.close_date"
+  granularity = "month"
+}`;
+  }
+
+  const HOSTILE = [
+    'give me lost opportunities by month for FY26',
+    'counts and amounts with % and qty',
+    'show rows where granularity = "day" please',
+    'what is the opportunity type = "won" count',
+    'compare dimensions = ["a","b"] side by side',
+    'the metrics = ["fake_metric"] should be ignored',
+    // Escaped, as every DQL writer emits it (`candidateToDqlSource` escapes `"""`).
+    'run query = \\"\\"\\"SELECT 1\\"\\"\\" for me',
+  ];
+
+  it('reads the real fields regardless of what the description says', () => {
+    for (const description of HOSTILE) {
+      const source = block(description);
+      expect(parseBlockStudioStringField(source, 'type'), description).toBe('semantic');
+      expect(parseBlockStudioStringField(source, 'granularity'), description).toBe('month');
+      expect(parseBlockStudioStringField(source, 'time_dimension'), description).toBe('orders.close_date');
+      expect(parseBlockStudioArrayField(source, 'metrics'), description).toEqual(['real_metric']);
+      expect(parseBlockStudioArrayField(source, 'dimensions'), description).toEqual(['real_dim']);
+      expect(extractBlockStudioSql(source), description).toBeNull();
+    }
+  });
+
+  it('still reads the description itself', () => {
+    expect(parseBlockStudioStringField(block('plain text'), 'description')).toBe('plain text');
+  });
+
+  it('masking preserves length and offsets exactly', () => {
+    for (const source of [...HOSTILE.map(block), 'block "b" { query = """SELECT 1""" }']) {
+      expect(maskDqlStringContents(source)).toHaveLength(source.length);
+    }
+  });
+
+  it('still returns a real query and its exact text', () => {
+    const source = `block "b" {\n  description = "run query = \\"\\"\\"nope\\"\\"\\""\n  query = """\nSELECT 1 AS n\n"""\n}`;
+    expect(extractBlockStudioSql(source)).toBe('SELECT 1 AS n');
   });
 });

@@ -2284,6 +2284,36 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     return governedAnswer;
   }
 
+  /**
+   * The user-facing line for a terminal analytical failure.
+   *
+   * `message` is a fixed SAFE_FAILURES headline chosen by failure code — that
+   * redaction is the governance contract and stays. But on its own it says
+   * nothing actionable: "The selected route could not compile its immutable
+   * analytical plan" is the DEFAULT for anything unclassified, so a MetricFlow
+   * compile error and a dialect mismatch read identically and neither tells the
+   * user what to change.
+   *
+   * `diagnostic` carries the producer's own words, already stripped of
+   * credentials, connection strings, and quoted literals by
+   * `redactAnalyticalDiagnostic`. Appending it costs nothing and is the
+   * difference between a dead end and a fixable error.
+   */
+  function analyticalFailureSummary(
+    failure: AgentAnswer['analyticalFailure'],
+  ): string | undefined {
+    if (!failure) return undefined;
+    const headline = failure.message?.trim();
+    const diagnostic = failure.diagnostic?.trim();
+    if (!headline) return diagnostic || undefined;
+    if (!diagnostic) return headline;
+    // Avoid saying the same thing twice when the producer text is already the
+    // headline (or is contained in it).
+    const normalize = (value: string): string => value.toLowerCase().replace(/\s+/g, ' ');
+    if (normalize(headline).includes(normalize(diagnostic))) return headline;
+    return `${headline} ${diagnostic}`;
+  }
+
   function resolvedRunRouteFromAnswer(governedAnswer: AgentAnswer): AgentRunRoute | undefined {
     return routeForCascadeAnswerTier(governedAnswer.route?.tier as CascadeAnswerRouteTier | undefined);
   }
@@ -2853,7 +2883,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       answerRefusalCode: governedAnswer.kind === 'no_answer' ? governedAnswer.refusalCode : undefined,
       answerTier: governedAnswer.route?.tier,
       summary: isTerminalFailure
-        ? governedAnswer.analyticalFailure?.message
+        ? analyticalFailureSummary(governedAnswer.analyticalFailure)
           ?? governedAnswer.executionError
           ?? governedAnswer.answer
           ?? governedAnswer.text
@@ -19039,14 +19069,67 @@ interface ParsedSemanticBlockConfig {
   limit?: number;
 }
 
-function parseBlockStudioArrayField(source: string, key: string): string[] {
-  const match = source.match(new RegExp(`\\b${key}\\s*=\\s*\\[([\\s\\S]*?)\\]`, 'i'));
-  if (!match) return [];
-  return (match[1].match(/"([^"]*)"/g) ?? []).map((value) => value.slice(1, -1)).filter(Boolean);
+/**
+ * Replace the CONTENTS of every string literal with same-length filler, keeping
+ * the quotes and every offset intact.
+ *
+ * Field lookups below scan the whole block source for `key = ...`. A block's
+ * `description` is free text — on an AI-generated block it is literally the
+ * user's question — so a description mentioning `granularity = "day"` or
+ * `dimensions = [...]` was matched as if it were the field itself and silently
+ * replaced the real one. Masking first means a match can only ever land on a
+ * real assignment; reading the value back from the ORIGINAL at the same offsets
+ * keeps it exact.
+ */
+export function maskDqlStringContents(source: string): string {
+  const chars = source.split('');
+  let index = 0;
+  while (index < chars.length) {
+    if (source.startsWith('\"\"\"', index)) {
+      const end = source.indexOf('\"\"\"', index + 3);
+      const contentEnd = end === -1 ? chars.length : end;
+      for (let cursor = index + 3; cursor < contentEnd; cursor += 1) {
+        if (chars[cursor] !== '\n') chars[cursor] = 'x';
+      }
+      index = end === -1 ? chars.length : end + 3;
+      continue;
+    }
+    if (chars[index] === '"') {
+      let cursor = index + 1;
+      while (cursor < chars.length && chars[cursor] !== '"') {
+        if (chars[cursor] === '\\') { cursor += 2; continue; }
+        cursor += 1;
+      }
+      for (let inner = index + 1; inner < Math.min(cursor, chars.length); inner += 1) {
+        if (chars[inner] !== '\n') chars[inner] = 'x';
+      }
+      index = cursor + 1;
+      continue;
+    }
+    index += 1;
+  }
+  return chars.join('');
 }
 
-function parseBlockStudioStringField(source: string, key: string): string | undefined {
-  return source.match(new RegExp(`\\b${key}\\s*=\\s*"([^"]*)"`, 'i'))?.[1] ?? undefined;
+export function parseBlockStudioArrayField(source: string, key: string): string[] {
+  const masked = maskDqlStringContents(source);
+  const match = masked.match(new RegExp(`\\b${key}\\s*=\\s*\\[`, 'i'));
+  if (!match || match.index === undefined) return [];
+  const start = match.index + match[0].length;
+  const end = masked.indexOf(']', start);
+  if (end === -1) return [];
+  return (source.slice(start, end).match(/"([^"]*)"/g) ?? [])
+    .map((value) => value.slice(1, -1))
+    .filter(Boolean);
+}
+
+export function parseBlockStudioStringField(source: string, key: string): string | undefined {
+  const masked = maskDqlStringContents(source);
+  const match = masked.match(new RegExp(`\\b${key}\\s*=\\s*"`, 'i'));
+  if (!match || match.index === undefined) return undefined;
+  const start = match.index + match[0].length;
+  const end = masked.indexOf('"', start);
+  return end === -1 ? undefined : source.slice(start, end);
 }
 
 function parseSemanticRequestedFilters(source: string): Array<{ dimension: string; operator: string; values: string[] }> {
@@ -22454,8 +22537,15 @@ function extractBlockStudioChartConfig(source: string): {
 }
 
 export function extractBlockStudioSql(source: string): string | null {
-  const tripleQuoteMatch = source.match(/query\s*=\s*"""([\s\S]*?)"""/i);
-  if (tripleQuoteMatch) return tripleQuoteMatch[1].trim() || null;
+  // Masked lookup for the same reason the field parsers use one: a `description`
+  // is free text and must never be able to present itself as the query.
+  const masked = maskDqlStringContents(source);
+  const tripleQuoteMatch = masked.match(/query\s*=\s*"""/i);
+  if (tripleQuoteMatch && tripleQuoteMatch.index !== undefined) {
+    const start = tripleQuoteMatch.index + tripleQuoteMatch[0].length;
+    const end = masked.indexOf('"""', start);
+    if (end !== -1) return source.slice(start, end).trim() || null;
+  }
   const bareTripleMatch = source.match(/"""([\s\S]*?)"""/);
   if (bareTripleMatch) return bareTripleMatch[1].trim() || null;
   if (/^\s*(dashboard|workbook)\s+"/i.test(source)) return null;
