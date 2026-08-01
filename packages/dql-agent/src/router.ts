@@ -455,12 +455,47 @@ function cacheKey(
   const history = effectiveConversationHistory(request);
   const last = history.length ? history[history.length - 1].text.trim().toLowerCase() : "";
   const envelope = renderConversationEnvelopeForPrompt(request.conversationContext) ?? "";
+  // WHERE THE THREAD IS, not just what it knows.
+  //
+  // The envelope renders working state and the summary — neither of which a
+  // FAILED turn advances. Re-asking after a failure therefore produced a
+  // byte-identical key and the router replayed its cached decision, so the same
+  // question failed the same way for the full 10-minute TTL. A new thread got a
+  // different `thread:` line, re-routed, and answered — which is exactly why the
+  // same question worked in a new session and not in the current one.
+  //
+  // Every appended turn must invalidate the entry: a retry is a new decision.
+  const position = conversationPositionToken(request.conversationContext);
   const evidenceVersion = evidence
     ? evidence.sourceFingerprint
       ?? evidence.snapshotId
       ?? evidence.candidates.map((candidate) => `${candidate.id}:${candidate.relevanceScore}:${candidate.compatibility}`).join("|")
     : catalogContext ?? "";
-  return `${q}\u0000${last}\u0000${envelope}\u0000${evidenceVersion}`;
+  return `${q}\u0000${last}\u0000${envelope}\u0000${position}\u0000${evidenceVersion}`;
+}
+
+/**
+ * A compact token identifying how far along the thread is. Any appended turn —
+ * answered OR failed — changes it, so a cached routing decision can never
+ * outlive the turn it was made for.
+ */
+function conversationPositionToken(context: Record<string, unknown> | undefined): string {
+  if (!context) return "";
+  const turns = Array.isArray(context.turns) ? context.turns : [];
+  const latest = typeof context.latestTurnId === "string"
+    ? context.latestTurnId
+    : typeof context.activeTurnId === "string"
+      ? context.activeTurnId
+      : "";
+  const envelope = context.conversationEnvelope ?? context.serverSnapshot;
+  const recent = envelope && typeof envelope === "object" && !Array.isArray(envelope)
+    && Array.isArray((envelope as { recentTurns?: unknown }).recentTurns)
+    ? ((envelope as { recentTurns: unknown[] }).recentTurns).length
+    : 0;
+  const tailId = recent > 0
+    ? String(((envelope as { recentTurns: Array<{ id?: unknown }> }).recentTurns.at(-1)?.id) ?? "")
+    : "";
+  return `${latest}:${turns.length}:${recent}:${tailId}`;
 }
 
 function retrievalTrace(

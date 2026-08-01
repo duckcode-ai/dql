@@ -12,6 +12,7 @@ import {
   applyDashboardFiltersToBlockExecution,
   buildAgentPreviewSql,
   buildRowBoundedSql,
+  extractBlockStudioSql,
   buildExploratoryJoinProbeSql,
   repairExploratorySqlBeforeExecution,
   buildAgentSchemaContext,
@@ -6586,5 +6587,45 @@ describe('governed correction lifecycle API', () => {
     } finally {
       await new Promise<void>((resolveClose) => server?.close(() => resolveClose()) ?? resolveClose());
     }
+  });
+});
+
+describe('extractBlockStudioSql', () => {
+  const SEMANTIC_BLOCK = `block "daily_percent_dod_bic_bcm_qty" {
+  domain = "sm_consumption_daily_metrics_detail"
+  type = "semantic"
+  status = "draft"
+  description = "Can you give me the DOD BIC metrics for all info including ACM, BCM with % and qty ?"
+  metrics = ["percent_dod_bic_bcm_qty"]
+  dimensions = []
+  time_dimension = "metric_time"
+  granularity = "day"
+}`;
+
+  // Reported: a semantic block failed with `SQL compilation error: syntax error
+  // line 1 at position 5 unexpected '%'`, and removing the DESCRIPTION fixed it.
+  // The keyword fallback scanned the block's prose fields and matched the word
+  // "with" inside `description`, returning the tail of the block as if it were
+  // SQL. Callers read a non-null result as "already precompiled", so the
+  // semantic/MetricFlow compile was skipped AND the fragment went to Snowflake.
+  it('never mistakes a prose field for inline SQL', () => {
+    expect(extractBlockStudioSql(SEMANTIC_BLOCK)).toBeNull();
+  });
+
+  it('is not fooled by any SQL keyword appearing in prose', () => {
+    for (const word of ['with', 'select', 'create', 'drop', 'update', 'describe']) {
+      const block = `block "b" {\n  type = "semantic"\n  description = "please ${word} the metrics"\n  metrics = ["m"]\n}`;
+      expect(extractBlockStudioSql(block), word).toBeNull();
+    }
+  });
+
+  it('still returns the SQL a block actually declares', () => {
+    const block = `block "b" {\n  type = "custom"\n  description = "revenue with detail"\n  query = """\nSELECT 1 AS n\n"""\n}`;
+    expect(extractBlockStudioSql(block)).toBe('SELECT 1 AS n');
+  });
+
+  it('still reads a loose raw-SQL source that is not a block', () => {
+    expect(extractBlockStudioSql('SELECT status FROM orders')).toBe('SELECT status FROM orders');
+    expect(extractBlockStudioSql('WITH t AS (SELECT 1) SELECT * FROM t')).toBe('WITH t AS (SELECT 1) SELECT * FROM t');
   });
 });

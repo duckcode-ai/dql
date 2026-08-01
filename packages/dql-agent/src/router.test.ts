@@ -106,3 +106,68 @@ describe("createHybridRouter", () => {
     expect(decision.source).toBe("heuristic");
   });
 });
+
+/**
+ * REPORTED: "when any chat output got an error, the following questions get the
+ * same error in that session. The same question in a NEW session works."
+ *
+ * The routing cache key rendered the conversation ENVELOPE — working state,
+ * summary, thread id — none of which a FAILED turn advances. Re-asking after a
+ * failure produced a byte-identical key, so the router replayed its cached
+ * decision for the full TTL and the question failed the same way. A new thread
+ * changed the `thread:` line, missed the cache, re-routed, and answered.
+ */
+describe("routing cache must not outlive the turn it was made for", () => {
+  function contextAfter(turnIds: string[]) {
+    return {
+      threadId: "thr_1",
+      latestTurnId: turnIds.at(-1),
+      turns: turnIds.map((id) => ({ id })),
+      conversationEnvelope: {
+        threadId: "thr_1",
+        recentTurns: turnIds.map((id) => ({ id, question: "q" })),
+      },
+    };
+  }
+
+  it("re-routes after a failed turn is appended, instead of replaying the cache", async () => {
+    let calls = 0;
+    const router = createHybridRouter({
+      llmThreshold: 2, // force the classification path every time
+      complete: async () => {
+        calls += 1;
+        return JSON.stringify({
+          category: "data_lookup", depth: "quick", needsClarification: false, rationale: "r",
+        });
+      },
+      getCatalogContext: () => "catalog",
+    });
+
+    const question = "give me Lost Opportunities by month for FY26";
+    await router.decide({ question, conversationContext: contextAfter(["t1"]) } as never);
+    const first = calls;
+
+    // Same question, same thread — but a turn (the failure) has been appended.
+    await router.decide({ question, conversationContext: contextAfter(["t1", "t2_failed"]) } as never);
+    expect(calls, "the router replayed a stale decision after a failed turn").toBe(first + 1);
+  });
+
+  it("still caches a genuinely identical repeat at the same conversation position", async () => {
+    let calls = 0;
+    const router = createHybridRouter({
+      llmThreshold: 2,
+      complete: async () => {
+        calls += 1;
+        return JSON.stringify({
+          category: "data_lookup", depth: "quick", needsClarification: false, rationale: "r",
+        });
+      },
+      getCatalogContext: () => "catalog",
+    });
+    const request = { question: "total revenue", conversationContext: contextAfter(["t1"]) } as never;
+    await router.decide(request);
+    const second = await router.decide(request);
+    expect(calls).toBe(1);
+    expect(second.source).toBe("cache");
+  });
+});

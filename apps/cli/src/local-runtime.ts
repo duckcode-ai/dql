@@ -22453,12 +22453,23 @@ function extractBlockStudioChartConfig(source: string): {
   };
 }
 
-function extractBlockStudioSql(source: string): string | null {
+export function extractBlockStudioSql(source: string): string | null {
   const tripleQuoteMatch = source.match(/query\s*=\s*"""([\s\S]*?)"""/i);
   if (tripleQuoteMatch) return tripleQuoteMatch[1].trim() || null;
   const bareTripleMatch = source.match(/"""([\s\S]*?)"""/);
   if (bareTripleMatch) return bareTripleMatch[1].trim() || null;
   if (/^\s*(dashboard|workbook)\s+"/i.test(source)) return null;
+  const singleLineQuery = source.match(/\bquery\s*=\s*"((?:[^"\\]|\\.)*)"/i);
+  if (singleLineQuery) return singleLineQuery[1].trim() || null;
+  // A DQL BLOCK declares its SQL in `query` and nowhere else. The keyword scan
+  // below is for LOOSE sources that are already raw SQL; letting it run over a
+  // block scans its PROSE FIELDS too, and `description = "... BCM with % and
+  // qty ?"` matched on the word "with". That returned the tail of the block as
+  // if it were SQL, which both skipped the semantic/MetricFlow compile (callers
+  // read a non-null result as "already precompiled") and sent the fragment to
+  // the warehouse — surfacing as `syntax error ... unexpected '%'`. A block with
+  // no `query` field has no inline SQL; say so.
+  if (/^\s*block\s+"/i.test(source)) return null;
   const sqlKeywordMatch = source.match(/\b(SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|SHOW|DESCRIBE|EXPLAIN)\b([\s\S]*)/i);
   if (!sqlKeywordMatch) return null;
   let raw = sqlKeywordMatch[0];
