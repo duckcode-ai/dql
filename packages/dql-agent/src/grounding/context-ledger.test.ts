@@ -37,6 +37,29 @@ describe('ContextLedger', () => {
     expect(ledger.validateSql(qualified.sql).ok).toBe(true);
   });
 
+  it('decodes qualified graph identities when runtime schema retrieval is empty', () => {
+    const ledger = createContextLedger({ schemaContext: [], dialect: 'snowflake' });
+
+    const qualified = ledger.qualifySql(
+      'SELECT order_id FROM source::analytics.reporting.orders',
+    );
+
+    expect(qualified.sql).toBe('SELECT order_id FROM analytics.reporting.orders');
+    expect(qualified.rewrites).toEqual([{
+      from: 'source::analytics.reporting.orders',
+      to: 'analytics.reporting.orders',
+    }]);
+  });
+
+  it('keeps bare graph identities unresolved without a unique runtime relation', () => {
+    const ledger = createContextLedger({ schemaContext: [] });
+
+    expect(ledger.qualifySql('SELECT order_id FROM source::orders')).toEqual({
+      sql: 'SELECT order_id FROM source::orders',
+      rewrites: [],
+    });
+  });
+
   it('validates SQL against the same runtime schema context used for qualification', () => {
     const ledger = createContextLedger({
       schemaContext: [{

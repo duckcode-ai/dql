@@ -613,6 +613,22 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
       { role: 'assistant', text: 'Rank by total beverage spend or by individual product?' },
     ]);
   });
+
+  it('does not feed a failed SQL turn into the following fallback prompt', () => {
+    expect(agentRunHistoryFromItems([
+      { kind: 'user', id: 'q1', text: 'Show revenue by source.' },
+      {
+        kind: 'run',
+        id: 'r1',
+        run: {
+          status: 'blocked',
+          summary: 'The warehouse rejected the query.',
+          artifacts: [{ payload: { executionError: 'syntax error near source::' } }],
+        } as any,
+      },
+      { kind: 'user', id: 'q2', text: 'Show total revenue.' },
+    ])).toEqual([{ role: 'user', text: 'Show total revenue.' }]);
+  });
 });
 
 describe('persisted conversation hydration', () => {
@@ -1009,9 +1025,17 @@ describe('failure card origin and detail', () => {
     }
   });
 
-  it('falls back to warehouse for an unknown or missing origin', () => {
-    expect(askFailureOrigin(runWith({}))).toBe('warehouse');
-    expect(askFailureOrigin(runWith({ warehouseFailure: { origin: 'not_a_real_origin' } }))).toBe('warehouse');
+  it('recognizes provider failures even when an older run has no warehouse attribution', () => {
+    expect(askFailureOrigin(runWith({ providerFailure: { code: 'AI_PROVIDER_FAILURE' } }))).toBe('provider');
+    expect(askFailureOrigin(runWith({ refusalCode: 'provider_error' }))).toBe('provider');
+    expect(askFailureOrigin(runWith({}, {
+      diagnosticReceipt: { failure: { code: 'AI_PROVIDER_FAILURE', message: 'provider unavailable' } },
+    }))).toBe('provider');
+  });
+
+  it('keeps an unknown or missing origin unattributed', () => {
+    expect(askFailureOrigin(runWith({}))).toBe('unknown');
+    expect(askFailureOrigin(runWith({ warehouseFailure: { origin: 'not_a_real_origin' } }))).toBe('unknown');
   });
 
   it('gives every origin its own title and guidance', () => {

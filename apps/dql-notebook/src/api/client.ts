@@ -1046,6 +1046,13 @@ export interface AgentRun {
   repairAttempts: number;
   lifecycle?: AgentRunLifecycleV1;
   diagnosticReceipt?: AgentRunDiagnosticReceiptV1;
+  derivation?: {
+    version: 1;
+    kind: 'analytical_repair';
+    sourceRunId: string;
+    sourceFailureId?: string;
+    attempt: 1;
+  };
 }
 
 export type AgentRunStateResponse =
@@ -3035,6 +3042,13 @@ export const api = {
     });
   },
 
+  async repairAgentRunExecution(id: string, threadId?: string): Promise<{ run: AgentRun }> {
+    return request<{ run: AgentRun }>(`/api/agent-runs/${encodeURIComponent(id)}/repair-execution`, {
+      method: 'POST',
+      body: JSON.stringify({ threadId }),
+    });
+  },
+
   async cancelAgentRun(id: string): Promise<{ ok: boolean; id?: string }> {
     return request<{ ok: boolean; id?: string }>(`/api/agent-runs/${encodeURIComponent(id)}/cancel`, {
       method: 'POST',
@@ -3452,10 +3466,11 @@ export const api = {
     resultColumns: string[],
     column: string,
     value: unknown,
+    executionTarget?: ExecutionTarget,
   ): Promise<{ artifact: DqlArtifactReference; parameterName: string }> {
     const raw = await request<any>('/api/dql/artifacts/add-filter', {
       method: 'POST',
-      body: JSON.stringify({ artifact, resultColumns, column, value }),
+      body: JSON.stringify({ artifact, resultColumns, column, value, executionTarget }),
     });
     const normalized = normalizeDqlArtifactReference(raw?.artifact);
     if (!normalized) throw new Error('Adding the filter input returned an invalid artifact contract.');
@@ -3467,10 +3482,11 @@ export const api = {
     parameters: Record<string, unknown>,
     question?: string,
     blockName?: string,
+    executionTarget?: ExecutionTarget,
   ): Promise<DqlArtifactInvocationResponse> {
     const raw = await request<any>('/api/dql/artifacts/execute', {
       method: 'POST',
-      body: JSON.stringify({ artifact, parameters, question, blockName }),
+      body: JSON.stringify({ artifact, parameters, question, blockName, executionTarget }),
     });
     const normalizedArtifact = normalizeDqlArtifactReference(raw?.artifact);
     if (!normalizedArtifact) throw new Error('DQL artifact execution returned an invalid artifact contract.');

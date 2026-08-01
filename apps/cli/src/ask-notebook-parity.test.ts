@@ -170,16 +170,23 @@ describe('Ask ↔ Notebook execution parity', () => {
     for (const step of [
       'prepareSemanticSql',
       'resolveSemanticTableMapping',
-      'prepareLocalExecution',
+      'prepareAnalyticalExecutionSql',
       'executeTargetBoundSemanticQuery',
     ]) {
       expect(direct, `the direct executor no longer performs ${step}`).toContain(step);
     }
-    expect(direct).toContain('readOnlySqlValidationError(prepared.sql');
+    const gateway = source.slice(
+      source.indexOf('export async function prepareAnalyticalExecutionSql'),
+      source.indexOf('export function dashboardRuntimeVariables'),
+    );
+    expect(gateway).toContain('resolveInternalRelationIds');
+    expect(gateway).toContain('resolveBareInternalRelationIds');
+    expect(gateway).toContain('prepareLocalExecution');
+    expect(gateway).toContain('readOnlySqlValidationError');
     expect(
-      direct.indexOf('prepareLocalExecution'),
+      gateway.indexOf('prepareLocalExecution'),
       'read-only enforcement must run on the resolved statement',
-    ).toBeLessThan(direct.indexOf('readOnlySqlValidationError'));
+    ).toBeLessThan(gateway.indexOf('readOnlySqlValidationError'));
   });
 
   it('accepts every fixture shape through the generated-SQL read-only gate', async () => {

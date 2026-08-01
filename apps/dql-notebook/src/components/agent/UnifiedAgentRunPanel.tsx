@@ -62,7 +62,7 @@ import { DraftReviewCard } from '../blocks/DraftReviewCard';
 import { SaveAsBlockModal } from '../modals/SaveAsBlockModal';
 import { BlockParameterControls, isRuntimeEditableParameter } from '../parameters/BlockParameterControls';
 export { deriveResultChartConfig } from '../output/ResultView';
-import type { QueryResult, AppSummary, CellChartConfig, Cell, BlockParameterDefinition } from '../../store/types';
+import type { QueryResult, AppSummary, CellChartConfig, Cell, BlockParameterDefinition, ExecutionTarget } from '../../store/types';
 import { useNotebook } from '../../store/NotebookStore';
 import { buildConversationContext } from './agentConversationContext';
 import type { AgentConversationDqlArtifact } from '../../llm/types';
@@ -78,11 +78,25 @@ export type ThreadItem =
  * the generic run summary ("Needs clarification...") cannot resolve a reply.
  */
 export function agentRunHistoryFromItems(items: ThreadItem[]): Array<{ role: 'user' | 'assistant'; text: string }> {
-  return items.map((item) => (
-    item.kind === 'user'
-      ? { role: 'user' as const, text: item.text }
-      : { role: 'assistant' as const, text: item.run.answer?.trim() || item.run.summary }
-  )).slice(-12);
+  const history: Array<{ role: 'user' | 'assistant'; text: string }> = [];
+  for (const item of items) {
+    if (item.kind === 'user') {
+      history.push({ role: 'user', text: item.text });
+      continue;
+    }
+    const failed = item.run.status === 'blocked' || item.run.artifacts?.some((artifact) => {
+      const payload = payloadOf(artifact);
+      return Boolean(payload.executionError || payload.warehouseFailure || payload.analyticalFailure);
+    });
+    if (failed) {
+      // A failed turn cannot become fallback prompt authority. Remove its paired
+      // user message too; the next submission already carries the new question.
+      if (history.at(-1)?.role === 'user') history.pop();
+      continue;
+    }
+    history.push({ role: 'assistant', text: item.run.answer?.trim() || item.run.summary });
+  }
+  return history.slice(-12);
 }
 
 /** A submitted run that may outlive this mounted panel (tab switch, reload, or navigation). */
@@ -779,6 +793,7 @@ export function UnifiedAgentRunPanel({
                   run={item.run}
                   t={t}
                   themeMode={themeMode}
+                  threadId={threadIdRef.current}
                   appContext={appContext}
                   selectedArtifactId={inspector?.runId === item.run.id ? inspector.artifactId : undefined}
                   onOpenArtifact={(artifactId, tab) => openInspector(item.run.id, artifactId, tab)}
@@ -933,6 +948,7 @@ export function UnifiedAgentRunPanel({
             run={item.run}
             t={t}
             themeMode={themeMode}
+            threadId={threadIdRef.current}
             appContext={appContext}
             onOpenApp={onOpenApp}
             onInsertSql={onInsertSql}
@@ -1915,6 +1931,7 @@ function InlineAskResultCard({
           initialResult={result}
           initialChartConfig={chartConfig}
           payload={payload}
+          executionTarget={run.executionTarget}
           t={t}
           themeMode={themeMode}
           embedded
@@ -1933,27 +1950,11 @@ function InlineAskResultCard({
   );
 }
 
-function AskRunCard({
-  run,
-  t,
-  themeMode,
-  appContext,
-  selectedArtifactId,
-  onOpenArtifact,
-  onOpenApp,
-  onInsertSql,
-  onInsertDql,
-  onReplaceDql,
-  insertDqlActionLabel,
-  replaceDqlActionLabel,
-  onOpenBlock,
-  onOpenResearch,
-  onSelectClarification,
-  onNextAction,
-}: {
+interface AskRunCardProps {
   run: AgentRun;
   t: Theme;
   themeMode: ThemeMode;
+  threadId?: string;
   appContext?: { appId?: string; dashboardId?: string };
   selectedArtifactId?: string;
   onOpenArtifact?: (artifactId: string, tab: AskInspectorTab) => void;
@@ -1967,10 +1968,37 @@ function AskRunCard({
   onOpenResearch?: (id: string, notebookPath?: string) => void;
   onSelectClarification?: (option: AgentRunClarificationOption) => void;
   onNextAction: (action: AgentRun['nextActions'][number]) => void;
-}) {
+}
+
+function AskRunCard(props: AskRunCardProps) {
+  const {
+  run,
+  t,
+  themeMode,
+  threadId,
+  appContext,
+  selectedArtifactId,
+  onOpenArtifact,
+  onOpenApp,
+  onInsertSql,
+  onInsertDql,
+  onReplaceDql,
+  insertDqlActionLabel,
+  replaceDqlActionLabel,
+  onOpenBlock,
+  onOpenResearch,
+  onSelectClarification,
+  onNextAction,
+  } = props;
   const { dispatch } = useNotebook();
   const [copied, setCopied] = useState(false);
+  const [repairedRun, setRepairedRun] = useState<AgentRun | null>(null);
+  useEffect(() => setRepairedRun(null), [run.id]);
   const openArtifact = onOpenArtifact ?? (() => dispatch({ type: 'OPEN_AGENT_LOG', run }));
+
+  // Replace the failed presentation in place while preserving the immutable
+  // source run in the server trace. The derived card owns fresh local state.
+  if (repairedRun) return <AskRunCard {...props} run={repairedRun} />;
 
   // Conversational replies stay a plain bubble — no trust line, chips, or actions.
   if (run.route === 'conversation') {
@@ -2001,7 +2029,7 @@ function AskRunCard({
   const needsClarification = run.status === 'needs_clarification';
   const presentationAnswer = blocked || needsClarification ? undefined : run.answer;
   const outcomeLabel = blocked
-    ? 'Blocked — no answer produced'
+    ? 'Couldn’t run this query'
     : needsClarification
       ? 'Needs clarification'
       : certified
@@ -2066,7 +2094,7 @@ function AskRunCard({
           <StructuredAnswerText text={cleanAnswerText(presentationAnswer)} t={t} />
         </div>
       ) : failureMessage ? (
-        <AskFailureCard run={run} detail={failureMessage} t={t} />
+        <AskFailureCard run={run} detail={failureMessage} threadId={threadId} onRepaired={setRepairedRun} t={t} />
       ) : run.summary ? (
         <div data-followup="answer" style={{ fontSize: 14, lineHeight: 1.6, color: t.textSecondary }}>{cleanPresentationText(run.summary)}</div>
       ) : null}
@@ -3319,6 +3347,7 @@ function ExecutableDqlResult({
   initialResult,
   initialChartConfig,
   payload,
+  executionTarget,
   t,
   themeMode,
   embedded = false,
@@ -3328,6 +3357,7 @@ function ExecutableDqlResult({
   initialResult: QueryResult;
   initialChartConfig?: CellChartConfig;
   payload: Record<string, unknown>;
+  executionTarget?: ExecutionTarget;
   t: Theme;
   themeMode: ThemeMode;
   embedded?: boolean;
@@ -3386,7 +3416,7 @@ function ExecutableDqlResult({
     setRunning(true);
     setError(null);
     try {
-      const response = await api.invokeDqlArtifact(activeArtifact, values, undefined, certifiedBlockName);
+      const response = await api.invokeDqlArtifact(activeArtifact, values, undefined, certifiedBlockName, executionTarget);
       setResult(response.result);
       setActiveArtifact(response.artifact);
       if (response.result.chartConfig && typeof response.result.chartConfig === 'object') {
@@ -3419,7 +3449,7 @@ function ExecutableDqlResult({
       // predicate, so the server owns that edit. A semantic block binds to a
       // declared dimension and stays local.
       const added = activeArtifact.kind === 'sql_block'
-        ? await api.addDqlArtifactResultFilter(activeArtifact, result.columns, filterColumn, filterValue)
+        ? await api.addDqlArtifactResultFilter(activeArtifact, result.columns, filterColumn, filterValue, executionTarget)
         : addAskResultFilter(activeArtifact, result, filterColumn, filterValue);
       setActiveArtifact(added.artifact as typeof activeArtifact);
       setParameters(added.artifact.parameters ?? []);
@@ -4766,24 +4796,74 @@ const ASK_FAILURE_PRESENTATION: Record<string, { title: string; hint: string }> 
     title: 'DQL hit an internal error',
     hint: 'This is a defect in DQL. The detail below is what to report.',
   },
+  unknown: {
+    title: 'The query could not be completed',
+    hint: 'Inspect the details or use the bounded repair when it is available.',
+  },
 };
 
-/** The failure origin recorded on the run, defaulting to a warehouse error. */
+/** The failure origin recorded on the run. Missing attribution stays unknown. */
 function askFailureOrigin(run: AgentRun): string {
   for (const artifact of run.artifacts ?? []) {
-    const payload = payloadOf(artifact) as { warehouseFailure?: { origin?: unknown } } | undefined;
+    const payload = payloadOf(artifact) as {
+      warehouseFailure?: { origin?: unknown };
+      providerFailure?: unknown;
+      refusalCode?: unknown;
+    } | undefined;
     const origin = payload?.warehouseFailure?.origin;
     if (typeof origin === 'string' && origin in ASK_FAILURE_PRESENTATION) return origin;
+    if (payload?.providerFailure || payload?.refusalCode === 'provider_error') return 'provider';
   }
-  return 'warehouse';
+  if (run.diagnosticReceipt?.failure?.code === 'AI_PROVIDER_FAILURE') return 'provider';
+  return 'unknown';
+}
+
+function askRunAllowsExecutionRepair(run: AgentRun): boolean {
+  if (run.status !== 'blocked' || !answerSqlFromRun(run)) return false;
+  for (const artifact of run.artifacts ?? []) {
+    const payload = payloadOf(artifact) as { warehouseFailure?: { category?: unknown } } | undefined;
+    const category = payload?.warehouseFailure?.category;
+    if (typeof category === 'string' && ['permission', 'authentication', 'unsafe', 'cancelled'].includes(category)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**
  * A failure the user can act on: what happened, in whose words, and what to try.
  */
-function AskFailureCard({ run, detail, t }: { run: AgentRun; detail: string; t: Theme }): JSX.Element {
+function AskFailureCard({
+  run,
+  detail,
+  threadId,
+  onRepaired,
+  t,
+}: {
+  run: AgentRun;
+  detail: string;
+  threadId?: string;
+  onRepaired: (run: AgentRun) => void;
+  t: Theme;
+}): JSX.Element {
   const origin = askFailureOrigin(run);
-  const presentation = ASK_FAILURE_PRESENTATION[origin] ?? ASK_FAILURE_PRESENTATION.warehouse;
+  const presentation = ASK_FAILURE_PRESENTATION[origin] ?? ASK_FAILURE_PRESENTATION.unknown;
+  const [repairing, setRepairing] = useState(false);
+  const [repairError, setRepairError] = useState<string | null>(null);
+  const canRepair = askRunAllowsExecutionRepair(run);
+  const repair = async () => {
+    if (repairing) return;
+    setRepairing(true);
+    setRepairError(null);
+    try {
+      const response = await api.repairAgentRunExecution(run.id, threadId);
+      onRepaired(response.run);
+    } catch (cause) {
+      setRepairError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRepairing(false);
+    }
+  };
   return (
     <div
       data-followup="answer"
@@ -4801,6 +4881,23 @@ function AskFailureCard({ run, detail, t }: { run: AgentRun; detail: string; t: 
         {cleanPresentationText(detail)}
       </div>
       <div style={{ fontSize: 11.5, lineHeight: 1.5, color: t.textMuted }}>{presentation.hint}</div>
+      {canRepair ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 2 }}>
+          <button
+            type="button"
+            className="dql-hover"
+            disabled={repairing}
+            onClick={() => void repair()}
+            style={{ ...smallButtonStyle(t), opacity: repairing ? 0.7 : 1 }}
+          >
+            <Wrench size={12} /> {repairing ? 'Fixing and retrying…' : 'Fix and retry'}
+          </button>
+          <span style={{ fontSize: 10.5, color: t.textMuted }}>One bounded repair attempt on the same data target.</span>
+        </div>
+      ) : null}
+      {repairError ? (
+        <div role="alert" style={{ fontSize: 11.5, lineHeight: 1.45, color: t.error }}>{cleanPresentationText(repairError)}</div>
+      ) : null}
     </div>
   );
 }

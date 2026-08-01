@@ -22,7 +22,11 @@ import {
   buildAgentSchemaContext,
   buildRuntimeSchemaSearchSql,
   buildNamedRelationProbeSql,
+  prepareAnalyticalExecutionSql,
+  repairableSqlFromAgentRun,
   resolveBareInternalRelationIds,
+  sqlMayContainJoin,
+  analyticalFailureAllowsDeterministicRetry,
   buildDbtStatus,
   buildDbtParseArgs,
   buildProposeReadiness,
@@ -841,7 +845,10 @@ describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-0
     mkdirSync(blockDir, { recursive: true });
     writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
       project: 'parameter-api',
-      connections: { default: { driver: 'duckdb', filepath: join(projectRoot, 'parameter-api.duckdb') } },
+      connections: {
+        default: { driver: 'databricks', host: 'default.example.test' },
+        reporting: { driver: 'databricks', host: 'reporting.example.test' },
+      },
       defaultConnectionName: 'default',
     }));
     writeFileSync(join(blockDir, 'runtime_parameter.dql'), `block "Runtime Parameter" {
@@ -865,7 +872,15 @@ describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-0
   query = """SELECT 'wrong_source' AS selected_category, 999 AS selected_limit"""
 }`);
 
-    const executeQuery = vi.fn(async (sql, _params, variables: Record<string, unknown>): Promise<QueryResult> => ({
+    const executionConnections: Array<{ host?: string } | undefined> = [];
+    const executeQuery = vi.fn(async (
+      sql,
+      _params,
+      variables: Record<string, unknown>,
+      executionConnection?: { host?: string },
+    ): Promise<QueryResult> => {
+      executionConnections.push(executionConnection);
+      return {
       columns: [
         { name: 'selected_category', type: 'string', driverType: 'VARCHAR' },
         { name: 'selected_limit', type: 'number', driverType: 'INTEGER' },
@@ -875,14 +890,15 @@ describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-0
         : { selected_category: variables.category, selected_limit: variables.top_n }],
       rowCount: 1,
       executionTimeMs: 1,
-    }));
+      };
+    });
     let server: Server | undefined;
     try {
       const port = await startLocalServer({
         rootDir: projectRoot,
         projectRoot,
         executor: { executeQuery } as unknown as QueryExecutor,
-        connection: { driver: 'duckdb', filepath: join(projectRoot, 'parameter-api.duckdb') },
+        connection: { driver: 'databricks', host: 'default.example.test' },
         preferredPort: 0,
         captureServer: (created) => { server = created; },
       });
@@ -926,6 +942,7 @@ describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-0
         body: JSON.stringify({
           artifact: { kind: 'sql_block', name: 'Generated Runtime Parameter', source: generatedSource, persistence: 'transient', trustState: 'review_required' },
           parameters: { category: 'Tea', top_n: 7 },
+          executionTarget: { target: 'connection', connectionName: 'reporting' },
         }),
       });
       const generated = await generatedResponse.json() as {
@@ -942,6 +959,7 @@ describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-0
       };
       expect({ status: generatedResponse.status, error: generated.error }).toEqual({ status: 200, error: undefined });
       expect(generated.result.rows).toEqual([{ selected_category: 'Tea', selected_limit: 7 }]);
+      expect(executionConnections.at(-1)?.host).toBe('reporting.example.test');
       expect(generated.artifact).toMatchObject({
         trustState: 'review_required',
         persistence: 'transient',
@@ -2500,6 +2518,114 @@ describe('agent run runtime API', () => {
           requiresRecompile: true,
         },
       });
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
+  it('API-007 executes a deterministic derived repair without mutating the failed run', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-executable-repair-api-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    let server: Server | undefined;
+    const failedSql = 'SELECT order_id FROM source::analytics.main.orders';
+    const failedAnswerExecutor = () => ({
+      summary: 'The query could not be completed.',
+      status: 'blocked' as const,
+      trustState: 'blocked' as const,
+      stopReason: 'blocked' as const,
+      artifacts: [{
+        id: 'answer:failed-source-id',
+        kind: 'answer' as const,
+        title: 'Failed analytical run',
+        trustState: 'blocked' as const,
+        payload: {
+          kind: 'no_answer',
+          proposedSql: failedSql,
+          sql: failedSql,
+          executionError: 'syntax error near source::',
+          warehouseFailure: {
+            version: 1,
+            origin: 'warehouse',
+            stage: 'execution',
+            category: 'syntax',
+            retryDisposition: 'model_repair',
+            redactedMessage: 'syntax error near source::',
+            driver: 'duckdb',
+          },
+        },
+      }],
+      evaluations: [],
+      nextActions: [],
+    });
+    const executor = {
+      executeQuery: vi.fn(async (sql: string) => ({
+        columns: ['order_id'],
+        rows: [{ order_id: 42 }],
+        rowCount: 1,
+        sql,
+      })),
+    } as unknown as QueryExecutor;
+
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor,
+        connection: { driver: 'duckdb', filepath: ':memory:' },
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+        agentRunExecutors: {
+          conversation: failedAnswerExecutor,
+          certified_answer: failedAnswerExecutor,
+          semantic_answer: failedAnswerExecutor,
+          generated_answer: failedAnswerExecutor,
+          research: failedAnswerExecutor,
+          clarify: failedAnswerExecutor,
+          blocked: failedAnswerExecutor,
+        },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const createdResponse = await fetch(`${base}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'Show orders', requestedMode: 'ask' }),
+      });
+      const created = await createdResponse.json() as { run: { id: string } };
+
+      const repairedResponse = await fetch(`${base}/api/agent-runs/${encodeURIComponent(created.run.id)}/repair-execution`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(repairedResponse.status).toBe(201);
+      const repaired = await repairedResponse.json() as { run: any };
+      expect(repaired.run).toMatchObject({
+        id: `${created.run.id}:repair:1`,
+        status: 'needs_review',
+        trustState: 'review_required',
+        repairAttempts: 1,
+        derivation: {
+          version: 1,
+          kind: 'analytical_repair',
+          sourceRunId: created.run.id,
+          attempt: 1,
+        },
+      });
+      expect(repaired.run.artifacts[0].payload.sql).not.toContain('source::');
+      expect(repaired.run.artifacts[0].payload.result.rows).toEqual([{ order_id: 42 }]);
+
+      const sourceResponse = await fetch(`${base}/api/agent-runs/${encodeURIComponent(created.run.id)}`);
+      const sourceState = await sourceResponse.json() as { lifecycleState: string; run: any };
+      expect(sourceState.run.status).toBe('blocked');
+      expect(sourceState.run.artifacts[0].payload.sql).toBe(failedSql);
+
+      const idempotent = await fetch(`${base}/api/agent-runs/${encodeURIComponent(created.run.id)}/repair-execution`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(idempotent.status).toBe(200);
+      await expect(idempotent.json()).resolves.toMatchObject({ run: { id: repaired.run.id } });
+      expect(executor.executeQuery).toHaveBeenCalledTimes(1);
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
@@ -4292,6 +4418,92 @@ describe('resolveBareInternalRelationIds', () => {
   });
 });
 
+describe('prepareAnalyticalExecutionSql', () => {
+  const connection = { name: 'default', driver: 'duckdb', filepath: ':memory:' } as never;
+
+  it('decodes a qualified internal source identity before connector execution', async () => {
+    const executor = { executeQuery: vi.fn() } as never;
+    const prepared = await prepareAnalyticalExecutionSql({
+      sql: 'SELECT * FROM source::analytics.reporting.orders',
+      subject: 'Ask AI query',
+      executor,
+      connection,
+      projectRoot: '/tmp/dql-shared-preparation',
+      projectConfig: {},
+      enforceReadOnly: true,
+      rowLimit: 200,
+    });
+
+    expect(prepared.decodedSql).toBe('SELECT * FROM analytics.reporting.orders');
+    expect(prepared.executedSql).not.toContain('source::');
+    expect(prepared.executedSql).toMatch(/LIMIT 200$/i);
+    expect((executor as unknown as { executeQuery: ReturnType<typeof vi.fn> }).executeQuery)
+      .not.toHaveBeenCalled();
+  });
+
+  it('resolves a unique bare source identity through the bounded catalog probe', async () => {
+    const executor = {
+      executeQuery: vi.fn(async () => ({
+        rows: [{ table_schema: 'main', table_name: 'orders' }],
+        columns: [],
+        rowCount: 1,
+      })),
+    } as never;
+    const prepared = await prepareAnalyticalExecutionSql({
+      sql: 'SELECT * FROM source::orders',
+      subject: 'Ask AI query',
+      executor,
+      connection,
+      projectRoot: '/tmp/dql-shared-preparation',
+      projectConfig: {},
+      enforceReadOnly: true,
+    });
+
+    expect(prepared.decodedSql).toBe('SELECT * FROM main.orders');
+    expect(prepared.rewrites).toContainEqual({ from: 'source::orders', to: 'main.orders' });
+    expect((executor as unknown as { executeQuery: ReturnType<typeof vi.fn> }).executeQuery)
+      .toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an ambiguous bare identity instead of guessing a schema', async () => {
+    const executor = {
+      executeQuery: vi.fn(async () => ({
+        rows: [
+          { table_schema: 'main', table_name: 'orders' },
+          { table_schema: 'staging', table_name: 'orders' },
+        ],
+        columns: [],
+        rowCount: 2,
+      })),
+    } as never;
+
+    await expect(prepareAnalyticalExecutionSql({
+      sql: 'SELECT * FROM source::orders',
+      subject: 'Ask AI query',
+      executor,
+      connection,
+      projectRoot: '/tmp/dql-shared-preparation',
+      projectConfig: {},
+      enforceReadOnly: true,
+    })).rejects.toMatchObject({ name: 'DqlInternalRelationIdError' });
+  });
+});
+
+describe('bounded analytical repair inputs', () => {
+  it('retains the exact proposed SQL from the immutable failed run', () => {
+    expect(repairableSqlFromAgentRun({
+      artifacts: [{ payload: { proposedSql: 'SELECT * FROM source::analytics.main.orders' } }],
+    } as never)).toBe('SELECT * FROM source::analytics.main.orders');
+  });
+
+  it('never retries access, authentication, unsafe, or cancelled failures', () => {
+    for (const category of ['permission', 'authentication', 'unsafe', 'cancelled'] as const) {
+      expect(analyticalFailureAllowsDeterministicRetry({ category } as never)).toBe(false);
+    }
+    expect(analyticalFailureAllowsDeterministicRetry({ category: 'syntax' } as never)).toBe(true);
+  });
+});
+
 describe('buildNamedRelationProbeSql', () => {
   // `getSchemaContextForAgent` returns nothing on a lexical miss — right for
   // bulk retrieval, but it meant a relation the model named explicitly, and
@@ -4332,6 +4544,18 @@ describe('buildNamedRelationProbeSql', () => {
   it('still excludes system schemas', () => {
     expect(buildNamedRelationProbeSql(['sales.orders'])!)
       .toContain("UPPER(table_schema) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')");
+  });
+});
+
+describe('sqlMayContainJoin', () => {
+  it('recognizes explicit and comma joins without treating commas in functions as joins', () => {
+    expect(sqlMayContainJoin('SELECT * FROM orders JOIN customers ON orders.customer_id = customers.id')).toBe(true);
+    expect(sqlMayContainJoin('SELECT * FROM orders o, customers c WHERE o.customer_id = c.id')).toBe(true);
+    expect(sqlMayContainJoin('SELECT COALESCE(region, \'unknown\') FROM orders')).toBe(false);
+  });
+
+  it('ignores join keywords inside comments and strings', () => {
+    expect(sqlMayContainJoin("SELECT 'join customers' AS note FROM orders -- JOIN hidden")).toBe(false);
   });
 });
 

@@ -168,6 +168,8 @@ import {
   readIndexedKnowledge360,
   compactSemanticRuntimeFailure,
   classifyAnalyticalFailure,
+  normalizeWarehouseSqlFailure,
+  parseProposal,
   propose,
   proposePlan,
   recordGovernedCorrection,
@@ -228,6 +230,7 @@ import {
   type Skill,
   type WriteSkillInput,
   type AgentAnswer,
+  type WarehouseSqlFailureV1,
   type CertifiedBlockInvocationInput,
   type ConversationTurnInput,
   type AgentResultPayload,
@@ -298,6 +301,7 @@ import {
   isTrustedConversationTurn,
   resolveInternalRelationIds,
   analyticalError,
+  tagAnalyticalError,
   type GroundingExpansionResult,
   type RuntimeSchemaTable,
   withAnalyticalErrorOrigin,
@@ -935,6 +939,36 @@ export function analyticalFailedRunFromAgentRun(run: AgentRun): AnalyticalFailed
     };
   }
   return undefined;
+}
+
+/** Exact failed statement retained on an immutable run, if one exists. */
+export function repairableSqlFromAgentRun(run: AgentRun): string | undefined {
+  for (const artifact of run.artifacts) {
+    const payload = agentRunRecord(artifact.payload);
+    if (!payload) continue;
+    const dqlArtifact = normalizeDqlArtifactReference(payload.dqlArtifact);
+    const sql = agentRunString(payload.proposedSql)
+      ?? agentRunString(payload.sql)
+      ?? dqlArtifact?.compiledSql;
+    if (sql?.trim()) return sql.trim();
+  }
+  return undefined;
+}
+
+/** Structured producer failure retained on the source run. */
+export function warehouseFailureFromAgentRun(run: AgentRun): WarehouseSqlFailureV1 | undefined {
+  for (const artifact of run.artifacts) {
+    const payload = agentRunRecord(artifact.payload);
+    const failure = agentRunRecord(payload?.warehouseFailure);
+    if (failure?.version !== 1 || typeof failure.redactedMessage !== 'string') continue;
+    return failure as unknown as WarehouseSqlFailureV1;
+  }
+  return undefined;
+}
+
+/** Permission, authentication, policy and unsafe-query failures are never AI-repaired. */
+export function analyticalFailureAllowsDeterministicRetry(failure?: WarehouseSqlFailureV1): boolean {
+  return !failure || !['permission', 'authentication', 'unsafe', 'cancelled'].includes(failure.category);
 }
 
 function businessNarrativeGaps(warnings: string[] | undefined): string[] | undefined {
@@ -2696,6 +2730,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           sql: exploration.sql,
           exploratoryCandidate: repairedExploratoryCandidate,
           executionError: exploration.error,
+          warehouseFailure: exploration.warehouseFailure,
           text: explorationAnswer,
           answer: explorationAnswer,
           trustLabel: 'Exploratory · DBT-grounded',
@@ -4192,15 +4227,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       );
     }
 
-    const prepared = prepareLocalExecution(
-      semanticCompose?.sql ?? plan!.sql,
-      activeConnection,
+    const preparation = await prepareAnalyticalExecutionSql({
+      sql: semanticCompose?.sql ?? plan!.sql,
+      subject: 'DQL artifact query',
+      executor,
+      connection: activeConnection,
       projectRoot,
       projectConfig,
-    );
-    const executionSql = invocationInput?.rowLimit
-      ? buildAgentPreviewSql(prepared.sql, invocationInput.rowLimit)
-      : prepared.sql;
+      // Preserve the existing contract: previewed Ask artifacts are explicitly
+      // read-only and bounded; saved/manual DQL execution keeps its compiler-
+      // governed behavior when no preview bound was requested.
+      enforceReadOnly: invocationInput?.rowLimit !== undefined,
+      rowLimit: invocationInput?.rowLimit,
+    });
+    const prepared = { sql: preparation.preparedSql, connection: preparation.connection };
+    const executionSql = preparation.executedSql;
     const app = loadRuntimeApp(projectRoot, activePersonaAppId());
     const sourceDomain = metadata.domain ?? source.match(/\bdomain\s*=\s*"([^"]+)"/i)?.[1];
     assertAppAccess({ app, domain: sourceDomain ?? app?.domain, level: 'execute' });
@@ -4477,15 +4518,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         { origin: 'dql_compilation', stage: 'compile', code: 'semantic_ref' },
       );
     }
-    const prepared = prepareLocalExecution(semantic.sql, activeConnection, projectRoot, projectConfig);
-
-    // Read-only enforcement runs on the statement that will ACTUALLY execute.
-    const readOnlyError = readOnlySqlValidationError(prepared.sql, 'Generated SQL', activeConnection.driver);
-    if (readOnlyError) {
-      throw analyticalError(readOnlyError, { origin: 'governance_gate', stage: 'validation', code: 'unsafe_sql' });
-    }
-
-    const bounded = buildRowBoundedSql(prepared.sql, rowBound, activeConnection.driver);
+    const preparation = await prepareAnalyticalExecutionSql({
+      sql: semantic.sql,
+      subject: 'Generated SQL',
+      executor,
+      connection: activeConnection,
+      projectRoot,
+      projectConfig,
+      enforceReadOnly: true,
+      rowLimit: rowBound,
+    });
+    const prepared = { sql: preparation.preparedSql, connection: preparation.connection };
+    const bounded = preparation.rowBound!;
     const app = loadRuntimeApp(projectRoot, activePersonaAppId());
     // Generated SQL is governed as 'uncategorized' unless its seed declares a
     // domain — the same value `generatedSqlArtifactContract` stamps into the
@@ -4515,7 +4559,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       : null;
 
     const rawResult = semanticExecution?.result
-      ?? await executor.executeQuery(bounded.sql, [], runtimeVariables({}), prepared.connection);
+      ?? await executor.executeQuery(preparation.executedSql, [], runtimeVariables({}), preparation.connection);
     const normalized = normalizeQueryResult(rawResult, semantic.semanticRefs);
     // The authoritative bound. `buildRowBoundedSql` may legitimately decline to
     // touch the statement, and only one of 15 drivers honours a maxRows hint, so
@@ -4586,29 +4630,77 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     sql: string;
     repairs: string[];
     error?: string;
+    warehouseFailure?: WarehouseSqlFailureV1;
   }> => {
     const activeConnection = requireActiveConnection(executionConnection);
-    const preflight = repairExploratorySqlBeforeExecution(candidate.sql, schemaContext, question, activeConnection.driver);
+    const failed = (
+      message: string,
+      sql: string,
+      repairs: string[],
+      proofs: Array<{ summary: string }> = [],
+      code = 'exploratory_validation_failed',
+    ) => ({
+      proofs,
+      sql,
+      repairs,
+      error: message,
+      warehouseFailure: normalizeWarehouseSqlFailure(
+        analyticalError(message, {
+          origin: 'governance_gate',
+          stage: 'validation',
+          code,
+        }),
+        activeConnection.driver,
+      ),
+    });
+
+    let normalizedCandidateSql: string;
+    try {
+      normalizedCandidateSql = (await prepareAnalyticalExecutionSql({
+        sql: candidate.sql,
+        subject: question || 'this exploratory query',
+        executor,
+        connection: activeConnection,
+        projectRoot,
+        projectConfig,
+        enforceReadOnly: true,
+      })).preparedSql;
+    } catch (error) {
+      const failure = normalizeWarehouseSqlFailure(error, activeConnection.driver);
+      return {
+        proofs: [],
+        sql: candidate.sql,
+        repairs: [],
+        error: failure.redactedMessage,
+        warehouseFailure: failure,
+      };
+    }
+
+    const preflight = repairExploratorySqlBeforeExecution(normalizedCandidateSql, schemaContext, question, activeConnection.driver);
     const boundedSql = applyRequestedTopNToExploratorySql(preflight.sql, requestedTopN);
     const repairs = boundedSql === preflight.sql
       ? [...preflight.repairs]
       : [...preflight.repairs, `Applied the requested overall top-${requestedTopN} bound before exploratory execution.`];
     if (preflight.blockedReason) {
-      return {
-        proofs: [],
-        sql: boundedSql,
-        repairs,
-        error: preflight.blockedReason,
-      };
+      return failed(preflight.blockedReason, boundedSql, repairs, [], 'exploratory_preflight_blocked');
     }
     const analysis = analyzeSqlReferences(boundedSql, activeConnection.driver);
+    if (!analysis.parsed && sqlMayContainJoin(boundedSql)) {
+      return failed(
+        'DQL could not parse the exploratory SQL to validate its join predicates. Nothing was sent to the warehouse.',
+        boundedSql,
+        repairs,
+        [],
+        'exploratory_join_parse_failed',
+      );
+    }
     if (!analysis.parsed) {
-      return { proofs: [], sql: boundedSql, repairs, error: 'DQL could not parse the exploratory SQL to validate its join predicates.' };
+      repairs.push('The local DQL parser could not inspect this join-free statement; warehouse read-only execution will provide the authoritative syntax check.');
     }
     const probeableJoins = probeableExploratoryJoins(
-      analysis.joins,
-      analysis.ctes,
-      analysis.derivedRelations,
+      analysis.parsed ? analysis.joins : [],
+      analysis.parsed ? analysis.ctes : [],
+      analysis.parsed ? analysis.derivedRelations : [],
     );
 
     // A normal customer → order → order-item → product question needs three
@@ -4617,10 +4709,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // joins are counted physically (they appear in analysis.joins with their
     // physical endpoints); joins ON a CTE are restructuring, not new paths.
     if (probeableJoins.length > 4) {
-      return { proofs: [], sql: boundedSql, repairs, error: 'This exploratory query has more than four joins and requires an analyst to review the relationship path.' };
+      return failed('This exploratory query has more than four joins and requires an analyst to review the relationship path.', boundedSql, repairs, [], 'exploratory_join_limit');
     }
     if (probeableJoins.some((join) => !join.leftRelation || !join.rightRelation)) {
-      return { proofs: [], sql: boundedSql, repairs, error: 'This exploratory query has a join endpoint DQL could not resolve for bounded validation.' };
+      return failed('This exploratory query has a join endpoint DQL could not resolve for bounded validation.', boundedSql, repairs, [], 'exploratory_join_unresolved');
     }
 
     // Structural binding: when the candidate carries a declared draft join path,
@@ -4635,23 +4727,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           declaredExploratoryRelationMatches(join.leftRelation!, value.fromRelation) && declaredExploratoryRelationMatches(join.rightRelation!, value.toRelation)
           || declaredExploratoryRelationMatches(join.leftRelation!, value.toRelation) && declaredExploratoryRelationMatches(join.rightRelation!, value.fromRelation));
         if (!edge) {
-          return {
-            proofs: [],
-            sql: boundedSql,
+          return failed(
+            `The join between ${join.leftRelation} and ${join.rightRelation} is not part of the declared relationship path, so DQL did not execute it. Declare the relationship in the DQL model to enable it.`,
+            boundedSql,
             repairs,
-            error: `The join between ${join.leftRelation} and ${join.rightRelation} is not part of the declared relationship path, so DQL did not execute it. Declare the relationship in the DQL model to enable it.`,
-          };
+            [],
+            'undeclared_relationship',
+          );
         }
         const keyMatches = edge.keys.some((key) =>
           exploratoryColumnsMatch(join.leftColumn, key.from) && exploratoryColumnsMatch(join.rightColumn, key.to)
           || exploratoryColumnsMatch(join.leftColumn, key.to) && exploratoryColumnsMatch(join.rightColumn, key.from));
         if (!keyMatches) {
-          return {
-            proofs: [],
-            sql: boundedSql,
+          return failed(
+            `The join ${join.leftColumn} = ${join.rightColumn} uses different keys than relationship "${edge.relationshipId}" declares (${edge.keys.map((key) => `${key.from}=${key.to}`).join(', ')}). Review the declared keys before executing.`,
+            boundedSql,
             repairs,
-            error: `The join ${join.leftColumn} = ${join.rightColumn} uses different keys than relationship "${edge.relationshipId}" declares (${edge.keys.map((key) => `${key.from}=${key.to}`).join(', ')}). Review the declared keys before executing.`,
-          };
+            [],
+            'relationship_key_mismatch',
+          );
         }
         joinEdges.set(index, edge);
       }
@@ -4663,7 +4757,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       }
     }
 
-    if (probeableJoins.length < analysis.joins.length) {
+    if (analysis.parsed && probeableJoins.length < analysis.joins.length) {
       repairs.push(`Skipped join probes for ${analysis.joins.length - probeableJoins.length} join(s) on derived (CTE) relations; the final query execution validates them.`);
     }
 
@@ -4685,7 +4779,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         // answer — these gates only inspect the raw key samples.
         const contradiction = exploratoryProbeContradiction(raw.rows, join, joinEdges.get(index));
         if (contradiction) {
-          return { proofs, sql: boundedSql, repairs, error: contradiction };
+          return failed(contradiction, boundedSql, repairs, proofs, 'relationship_probe_contradiction');
         }
       }
       const result = await executeGeneratedArtifactForAgent(
@@ -4696,7 +4790,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       );
       return { result, proofs, sql: boundedSql, repairs };
     } catch (error) {
-      return { proofs, sql: boundedSql, repairs, error: error instanceof Error ? error.message : String(error) };
+      const failure = normalizeWarehouseSqlFailure(error, activeConnection.driver);
+      return {
+        proofs,
+        sql: boundedSql,
+        repairs,
+        error: failure.redactedMessage,
+        warehouseFailure: failure,
+      };
     }
   };
 
@@ -6008,8 +6109,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
    */
   const MIN_COMPRESS_BYTES = 1024;
   const COMPRESSIBLE = /^(?:text\/(?!event-stream)|application\/(?:json|javascript|xml|wasm)|image\/svg)/i;
-  const withCompression = (request: IncomingMessage, response: ServerResponse): ServerResponse => {
-    if (!/\bgzip\b/i.test(String(request.headers['accept-encoding'] ?? ''))) return response;
+  const withCompression = <T>(request: IncomingMessage, rawResponse: T): T => {
+    const response = rawResponse as unknown as ServerResponse;
+    if (!/\bgzip\b/i.test(String(request.headers['accept-encoding'] ?? ''))) return rawResponse;
     const writeHead = response.writeHead.bind(response);
     const end = response.end.bind(response);
     const write = response.write.bind(response);
@@ -6079,7 +6181,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       } as never);
       return end(gz);
     }) as typeof response.end;
-    return response;
+    return rawResponse;
   };
 
   const server = createServer((req, res) => {
@@ -6931,7 +7033,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         if (!body.relationship) throw new Error('A relationship is required.');
         if (!body.expectedSnapshotId || body.expectedSnapshotId !== snapshot.snapshotId) throw Object.assign(new Error('Project sources changed before relationship validation.'), { code: 'SOURCE_CHANGED' });
         const manifest = snapshot.manifest;
-        const activeConnection = requireActiveConnection();
+        const activeConnection = await resolveExecutionConnection(body as Record<string, unknown>);
         const evidence = await validateModelingRelationship(
           body.relationship,
           manifest,
@@ -6959,6 +7061,291 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         .slice(0, limit);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ runs, total: agentRunStore.list().length, limit }));
+      return;
+    }
+
+    /**
+     * One-click bounded execution repair.
+     *
+     * The source run is immutable. First, retry its exact SQL through the
+     * shared deterministic preparation boundary (this repairs internal IDs and
+     * dialect-safe row bounds without an LLM). Only a connector-classified
+     * model-repair failure may spend one provider call to rewrite the SQL. The
+     * derived SQL is still read-only, bounded, and executed on the source run's
+     * exact target before a replacement card is returned.
+     *
+     * Acceptance: API-003, API-007, UI-012, UI-013, SEC-004, E2E-014.
+     */
+    if (req.method === 'POST' && /^\/api\/agent-runs\/[^/]+\/repair-execution$/.test(path)) {
+      const match = path.match(/^\/api\/agent-runs\/([^/]+)\/repair-execution$/);
+      const sourceRunId = decodeURIComponent(match?.[1] ?? '');
+      const sourceRun = await agentRunStore.get(sourceRunId);
+      if (!sourceRun) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'Agent run not found.' }));
+        return;
+      }
+
+      const derivedRunId = `${sourceRun.id}:repair:1`;
+      const existing = await agentRunStore.get(derivedRunId);
+      if (existing) {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ run: existing }));
+        return;
+      }
+
+      const sourceSql = repairableSqlFromAgentRun(sourceRun);
+      const retainedFailure = warehouseFailureFromAgentRun(sourceRun);
+      if (!sourceSql || !analyticalFailureAllowsDeterministicRetry(retainedFailure)) {
+        res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          error: sourceSql
+            ? 'This failure requires authorized access or a policy change and cannot be repaired by AI.'
+            : 'This run has no retained SQL statement to repair.',
+          ...(retainedFailure ? { warehouseFailure: retainedFailure } : {}),
+        }));
+        return;
+      }
+
+      const body = agentRunRecord(await readJSON(req).catch(() => null));
+      const threadId = agentRunString(body?.threadId);
+      let targetConnection: ConnectionConfig;
+      try {
+        targetConnection = await resolveAgentRunExecutionConnection({
+          question: sourceRun.question,
+          executionTarget: sourceRun.executionTarget,
+        });
+      } catch (error) {
+        res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: apiErrorMessage(error) }));
+        return;
+      }
+      const targetConnectionName = sourceRun.executionTarget?.target === 'connection'
+        ? sourceRun.executionTarget.connectionName
+        : sourceRun.executionTarget?.target === 'local'
+          ? 'local'
+          : projectConfig.defaultConnectionName;
+
+      let result: AgentResultPayload | undefined;
+      let repairedSql = sourceSql;
+      let repairMode: 'deterministic' | 'ai' = 'deterministic';
+      let firstFailure: WarehouseSqlFailureV1 | undefined;
+      try {
+        result = await executeGeneratedSqlDirect(
+          sourceRun.question,
+          sourceSql,
+          undefined,
+          targetConnection,
+        );
+      } catch (error) {
+        firstFailure = normalizeWarehouseSqlFailure(error, targetConnection.driver);
+      }
+
+      if (!result) {
+        if (firstFailure?.retryDisposition !== 'model_repair') {
+          res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({
+            error: firstFailure?.redactedMessage ?? 'The deterministic repair did not produce an executable query.',
+            ...(firstFailure ? { warehouseFailure: firstFailure } : {}),
+          }));
+          return;
+        }
+
+        const provider = await createBlockStudioAssistProvider(projectRoot);
+        if (!provider) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Configure an available AI provider in Settings to repair this query.' }));
+          return;
+        }
+        let schemaContext: AgentSchemaTable[];
+        try {
+          schemaContext = await getSchemaContextForAgent(
+            sourceRun.question,
+            undefined,
+            targetConnection,
+            targetConnectionName,
+          );
+        } catch (error) {
+          const failure = normalizeWarehouseSqlFailure(error, targetConnection.driver);
+          res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: failure.redactedMessage, warehouseFailure: failure }));
+          return;
+        }
+        const boundedSchema = schemaContext.slice(0, 16).map((table) => ({
+          relation: table.relation,
+          columns: table.columns.slice(0, 40).map((column) => ({ name: column.name, type: column.type })),
+        }));
+        let raw: string;
+        try {
+          raw = await provider.generate([
+            {
+              role: 'system',
+              content: [
+                'Repair one failed read-only analytical SQL statement.',
+                'Return exactly one JSON object in a ```json fence with keys summary, sql, viz, outputs.',
+                'Preserve the user question, selected grain, filters, and aggregation semantics.',
+                'Use only relations and columns present in the supplied schema context.',
+                'Never emit internal DQL relation identities such as source::, model::, seed::, or snapshot::.',
+                'Do not add writes, DDL, multiple statements, or commentary outside the JSON fence.',
+              ].join(' '),
+            },
+            {
+              role: 'user',
+              content: JSON.stringify({
+                question: sourceRun.question,
+                driver: targetConnection.driver,
+                failure: firstFailure.redactedMessage,
+                sql: sourceSql,
+                schema: boundedSchema,
+              }),
+            },
+          ], { maxTokens: 1200, temperature: 0 });
+        } catch {
+          res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'The AI provider could not complete this repair. Check Provider Settings and retry.' }));
+          return;
+        }
+        const proposal = parseProposal(raw);
+        if (!proposal.sql?.trim()) {
+          res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'The AI repair did not return an executable SQL statement.' }));
+          return;
+        }
+        repairedSql = proposal.sql.trim();
+        repairMode = 'ai';
+        try {
+          result = await executeGeneratedSqlDirect(
+            sourceRun.question,
+            repairedSql,
+            undefined,
+            targetConnection,
+          );
+        } catch (error) {
+          const failure = normalizeWarehouseSqlFailure(error, targetConnection.driver);
+          res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({
+            error: failure.redactedMessage,
+            warehouseFailure: failure,
+          }));
+          return;
+        }
+      }
+
+      const completedAt = new Date().toISOString();
+      const preview = agentResultToSynthesisPreview(result);
+      const synthesis = await synthesizeAnswer({
+        question: sourceRun.question,
+        audience: 'stakeholder',
+        resultPreview: preview,
+        sql: repairedSql,
+        draftText: `The repaired query returned ${result.rowCount} row${result.rowCount === 1 ? '' : 's'}.`,
+        ...(preview ? { columnFormats: agentColumnDisplayFormats(projectRoot, preview.columns) } : {}),
+      });
+      const sourceFailure = analyticalFailedRunFromAgentRun(sourceRun)?.failure;
+      const artifact = agentRunArtifact(
+        'answer',
+        'Repaired analytical answer',
+        {
+          kind: 'uncertified',
+          certification: 'analyst_review_required',
+          reviewStatus: 'analyst_review_required',
+          trustLabel: 'AI-generated · review required',
+          answer: synthesis.text,
+          text: synthesis.text,
+          result,
+          proposedSql: repairedSql,
+          sql: result.sql ?? repairedSql,
+          dqlArtifact: result.dqlArtifact,
+          previousAttempt: {
+            sourceRunId: sourceRun.id,
+            sql: sourceSql,
+            failure: retainedFailure ?? firstFailure,
+          },
+          repair: { attempt: 1, mode: repairMode },
+        },
+        undefined,
+        'review_required',
+      );
+      const evaluation: AgentRunEvaluation = {
+        id: `${derivedRunId}:execution`,
+        label: 'Repaired query execution',
+        passed: true,
+        severity: 'info',
+        message: `The ${repairMode === 'ai' ? 'AI-repaired' : 'deterministically normalized'} read-only query executed on the original target.`,
+      };
+      const repairStep = {
+        id: `${derivedRunId}:step`,
+        index: 0,
+        route: 'generated_answer' as const,
+        resolvedRoute: 'generated_answer' as const,
+        goal: 'Repair and execute the failed analytical query on its original target.',
+        successCriteria: ['Read-only validation passes.', 'The original execution target returns a bounded result.'],
+        status: 'repaired' as const,
+        attempts: 1,
+        summary: evaluation.message,
+        evaluations: [evaluation],
+        artifacts: [artifact],
+      };
+      const events: AgentRunEvent[] = [
+        { id: `${derivedRunId}:repair`, runId: derivedRunId, type: 'repair.attempted', at: completedAt, message: 'Started one bounded query repair.', route: 'generated_answer' },
+        { id: `${derivedRunId}:artifact`, runId: derivedRunId, type: 'artifact.created', at: completedAt, message: 'Created the repaired result artifact.', route: 'generated_answer', trustState: 'review_required' },
+        { id: `${derivedRunId}:complete`, runId: derivedRunId, type: 'run.completed', at: completedAt, message: 'The repaired query executed successfully.', route: 'generated_answer', status: 'needs_review', trustState: 'review_required' },
+      ];
+      const derivedRun: AgentRun = {
+        id: derivedRunId,
+        question: sourceRun.question,
+        requestedMode: sourceRun.requestedMode,
+        route: 'generated_answer',
+        status: 'needs_review',
+        trustState: 'review_required',
+        stopReason: 'generated_review_required',
+        startedAt: completedAt,
+        completedAt,
+        selectedObject: sourceRun.selectedObject,
+        executionTarget: sourceRun.executionTarget,
+        routeDecision: sourceRun.routeDecision,
+        plan: sourceRun.plan,
+        steps: [repairStep],
+        summary: synthesis.text,
+        answer: synthesis.text,
+        answerKind: 'governed',
+        artifacts: [artifact],
+        evaluations: [evaluation],
+        events,
+        nextActions: sourceRun.nextActions,
+        repairAttempts: 1,
+        lifecycle: {
+          version: 1,
+          state: 'terminal',
+          phase: 'run.completed',
+          revision: 1,
+          eventCursor: events.length,
+          startedAt: completedAt,
+          updatedAt: completedAt,
+          completedAt,
+        },
+        diagnosticReceipt: {
+          version: 1,
+          runId: derivedRunId,
+          phase: 'run.completed',
+          route: 'generated_answer',
+          plan: sourceRun.plan,
+          steps: [repairStep],
+          artifacts: [artifact],
+          evaluations: [evaluation],
+        },
+        derivation: {
+          version: 1,
+          kind: 'analytical_repair',
+          sourceRunId: sourceRun.id,
+          ...(sourceFailure?.failureId ? { sourceFailureId: sourceFailure.failureId } : {}),
+          attempt: 1,
+        },
+      };
+      await agentRunStore.save(derivedRun);
+      recordConversationTurn(threadId ? getConversationStore() : null, threadId, derivedRun);
+      res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ run: derivedRun }));
       return;
     }
 
@@ -13551,12 +13938,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }));
           return;
         }
-        const prepared = prepareLocalExecution(
-          semantic.sql,
-          executionConnection,
+        const preparation = await prepareAnalyticalExecutionSql({
+          sql: semantic.sql,
+          subject: 'Notebook query',
+          executor,
+          connection: executionConnection,
           projectRoot,
           projectConfig,
-        );
+        });
+        const prepared = { sql: preparation.preparedSql, connection: preparation.connection };
         const app = loadRuntimeApp(projectRoot, typeof body.appId === 'string' ? body.appId : activePersonaAppId());
         const domain = typeof body.domain === 'string' ? body.domain : app?.domain;
         assertAppAccess({ app, domain, level: 'execute' });
@@ -13589,8 +13979,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ...normalized,
           executionContext: notebookExecutionIdentity(execContext),
           executionTarget: executionTargetDescriptor(body as Record<string, unknown>),
-          compiledSql: semantic.sql,
-          executedSql: prepared.sql,
+          compiledSql: preparation.decodedSql,
+          executedSql: preparation.executedSql,
         });
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(payload);
@@ -14314,6 +14704,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'POST' && path === '/api/dql/artifacts/execute') {
       try {
         const body = await readJSON(req);
+        const targetConnection = await resolveExecutionConnection(body as Record<string, unknown>);
+        const targetDescriptor = executionTargetDescriptor(body as Record<string, unknown>);
+        const targetConnectionName = targetDescriptor.target === 'connection'
+          ? targetDescriptor.connectionName
+          : 'local';
         const requestedArtifact = normalizeDqlArtifactReference(body.artifact);
         const requestedBlockName = typeof body.blockName === 'string' ? body.blockName.trim() : '';
         let source = requestedArtifact?.source ?? '';
@@ -14370,7 +14765,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           parameters,
           question: typeof body.question === 'string' ? body.question : undefined,
           rowLimit: requestedArtifact?.limit,
-        });
+        }, targetConnection, targetConnectionName);
         const actualReceipt = result.executionReceipt;
         // Same reasoning: if the canonical block was reloaded, its compiled SQL
         // is EXPECTED to differ, so this determinism check would fire on a
@@ -14530,34 +14925,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ cellType: cell.type, result: null }));
           return;
         }
-        // DECODE, THEN VALIDATE. A leaked `source::db.schema.table` is an internal
-        // retrieval key whose suffix IS the physical relation, so rejecting the
-        // cell and asking the user (or another AI round trip) to repair it was
-        // busywork for a mechanical substitution. Anything still unresolvable
-        // after this — a BARE `source::orders`, which names no database or
-        // schema — genuinely cannot be decoded and still fails here.
-        let decodedSql = resolveInternalRelationIds(executableSql, EMPTY_SCHEMA_GROUNDING);
-        let bareResolution: Awaited<ReturnType<typeof resolveBareInternalRelationIds>> | null = null;
-        if (internalDqlRelationIdValidationError(decodedSql, 'x')) {
-          bareResolution = await resolveBareInternalRelationIds(decodedSql, executor, cellConnection);
-          decodedSql = bareResolution.sql;
-        }
-        const internalRelationError = internalDqlRelationIdValidationError(
-          decodedSql,
-          cell.type === 'dql' ? 'DQL query' : 'Notebook query',
-          // A probe that came back empty is PROOF the relation is not visible
-          // to this connection, so the refusal states that instead of sending
-          // the user to an AI repair that cannot conjure a missing table.
-          bareResolution ? { probed: true, ambiguous: bareResolution.ambiguous } : undefined,
-        );
-        if (internalRelationError) throw new DqlInternalRelationIdError(internalRelationError);
-
-        const prepared = prepareLocalExecution(
-          decodedSql,
-          cellConnection,
+        const preparation = await prepareAnalyticalExecutionSql({
+          sql: executableSql,
+          subject: cell.type === 'dql' ? 'DQL query' : 'Notebook query',
+          executor,
+          connection: cellConnection,
           projectRoot,
           projectConfig,
-        );
+        });
+        const decodedSql = preparation.decodedSql;
+        const prepared = { sql: preparation.preparedSql, connection: preparation.connection };
         const app = loadRuntimeApp(projectRoot, typeof body.appId === 'string' ? body.appId : activePersonaAppId());
         assertAppAccess({ app, domain: resolved.domain ?? app?.domain, level: 'execute' });
         const semanticExecution = semanticCompose?.compiled
@@ -17440,6 +17817,112 @@ export function prepareLocalExecution(
       ? resolveProjectRelativeSqlPaths(dbtResolvedSql, projectRoot, projectConfig.dataDir)
       : dbtResolvedSql,
     connection: normalizedConnection,
+  };
+}
+
+export interface AnalyticalExecutionPreparation {
+  /** SQL supplied by the caller, before host-owned normalization. */
+  sourceSql: string;
+  /** SQL after internal graph identities have been decoded. */
+  decodedSql: string;
+  /** SQL after dbt macros and project-relative paths have been resolved. */
+  preparedSql: string;
+  /** Exact statement handed to the connector (may include a safe row bound). */
+  executedSql: string;
+  connection: ConnectionConfig;
+  rewrites: Array<{ from: string; to: string }>;
+  rowBound?: AnalyticalRowBoundResult;
+}
+
+/**
+ * One host-owned SQL preparation boundary shared by Ask and Notebook.
+ *
+ * Surface-specific compilation happens before this function and surface policy
+ * (for example exploratory join proof) may run around it, but no analytical
+ * entrypoint may decode internal IDs, resolve dbt paths, enforce read-only
+ * execution, or append a preview bound differently anymore.
+ *
+ * Acceptance: API-003, API-006, API-007, EXP-001, E2E-014.
+ */
+export async function prepareAnalyticalExecutionSql(input: {
+  sql: string;
+  subject: string;
+  executor: QueryExecutor;
+  connection: ConnectionConfig;
+  projectRoot: string;
+  projectConfig: ProjectConfig;
+  enforceReadOnly?: boolean;
+  rowLimit?: number;
+}): Promise<AnalyticalExecutionPreparation> {
+  const sourceSql = input.sql.trim();
+  const rewrites: Array<{ from: string; to: string }> = [];
+  let decodedSql = resolveInternalRelationIds(
+    sourceSql,
+    EMPTY_SCHEMA_GROUNDING,
+    'qualified',
+    rewrites,
+  );
+  let bareResolution: Awaited<ReturnType<typeof resolveBareInternalRelationIds>> | null = null;
+  if (internalDqlRelationIdValidationError(decodedSql, 'x')) {
+    bareResolution = await resolveBareInternalRelationIds(
+      decodedSql,
+      input.executor,
+      input.connection,
+    );
+    decodedSql = bareResolution.sql;
+    rewrites.push(...bareResolution.resolved);
+  }
+
+  const internalRelationError = internalDqlRelationIdValidationError(
+    decodedSql,
+    input.subject,
+    bareResolution
+      ? { probed: true, ambiguous: bareResolution.ambiguous }
+      : undefined,
+  );
+  if (internalRelationError) {
+    throw tagAnalyticalError(
+      new DqlInternalRelationIdError(internalRelationError),
+      {
+        origin: bareResolution?.ambiguous.length ? 'ambiguity' : 'retrieval_gap',
+        stage: 'grounding',
+        code: bareResolution?.ambiguous.length ? 'ambiguous_relation' : 'unknown_relation',
+      },
+    );
+  }
+
+  const prepared = prepareLocalExecution(
+    decodedSql,
+    input.connection,
+    input.projectRoot,
+    input.projectConfig,
+  );
+  if (input.enforceReadOnly) {
+    const readOnlyError = readOnlySqlValidationError(
+      prepared.sql,
+      input.subject,
+      input.connection.driver,
+    );
+    if (readOnlyError) {
+      throw analyticalError(readOnlyError, {
+        origin: 'governance_gate',
+        stage: 'validation',
+        code: 'unsafe_sql',
+      });
+    }
+  }
+
+  const rowBound = input.rowLimit === undefined
+    ? undefined
+    : buildRowBoundedSql(prepared.sql, input.rowLimit, input.connection.driver);
+  return {
+    sourceSql,
+    decodedSql,
+    preparedSql: prepared.sql,
+    executedSql: rowBound?.sql ?? prepared.sql,
+    connection: prepared.connection,
+    rewrites,
+    ...(rowBound ? { rowBound } : {}),
   };
 }
 
@@ -26563,6 +27046,33 @@ ${predicates.map((predicate) => `    ${predicate}`).join(' OR\n')}
   )
 ORDER BY table_schema, table_name, ordinal_position
 LIMIT 400`;
+}
+
+/**
+ * Conservative fallback for deciding whether an unparsed statement still
+ * needs DQL's structural join validation. Join-free SELECT syntax may be
+ * newer than the local parser and can safely continue to the read-only
+ * warehouse boundary; an unparsed join must never bypass relationship proof.
+ */
+export function sqlMayContainJoin(sql: string): boolean {
+  const normalized = stripSqlStringsAndComments(sql)
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (/\bjoin\b/i.test(normalized)) return true;
+
+  const fromMatch = /\bfrom\b/i.exec(normalized);
+  if (!fromMatch) return false;
+  const tail = normalized.slice(fromMatch.index + fromMatch[0].length);
+  const clauseMatch = /\b(where|group\s+by|having|qualify|order\s+by|limit|fetch|union|intersect|except)\b/i.exec(tail);
+  const fromClause = clauseMatch ? tail.slice(0, clauseMatch.index) : tail;
+
+  let depth = 0;
+  for (const char of fromClause) {
+    if (char === '(') depth += 1;
+    else if (char === ')') depth = Math.max(0, depth - 1);
+    else if (char === ',' && depth === 0) return true;
+  }
+  return false;
 }
 
 /**

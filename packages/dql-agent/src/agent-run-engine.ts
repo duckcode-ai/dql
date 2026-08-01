@@ -337,6 +337,15 @@ export interface AgentRunStep {
   artifacts: AgentRunArtifact[];
 }
 
+/** Immutable provenance for a user-triggered derived execution. */
+export interface AgentRunDerivationV1 {
+  version: 1;
+  kind: "analytical_repair";
+  sourceRunId: string;
+  sourceFailureId?: string;
+  attempt: 1;
+}
+
 export interface AgentRun {
   id: string;
   question: string;
@@ -370,6 +379,8 @@ export interface AgentRun {
   budgetUsage?: CascadeBudgetTrace;
   lifecycle?: AgentRunLifecycleV1;
   diagnosticReceipt?: AgentRunDiagnosticReceiptV1;
+  /** The source run remains immutable; repaired executions are new runs. */
+  derivation?: AgentRunDerivationV1;
 }
 
 /**

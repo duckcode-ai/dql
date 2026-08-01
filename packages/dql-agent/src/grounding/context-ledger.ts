@@ -54,8 +54,16 @@ export class ContextLedger {
   }
 
   qualifySql(sql: string): RelationResolution {
-    if (!this.grounding) return { sql, rewrites: [] };
-    return resolveRelationsInSql(sql, this.grounding, { prefer: 'qualified', dialect: this.dialect });
+    // Qualified internal graph identities encode their physical relation in the
+    // suffix, so decoding them does not require a populated runtime schema. The
+    // resolver already has an explicit empty-grounding path; always calling it
+    // keeps thin Ask retrieval from leaking `source::...` into validation or the
+    // warehouse while leaving genuinely ambiguous bare identities unresolved.
+    return resolveRelationsInSql(
+      sql,
+      this.grounding ?? EMPTY_SCHEMA_GROUNDING,
+      { prefer: 'qualified', dialect: this.dialect },
+    );
   }
 
   validateSql(
@@ -85,6 +93,12 @@ export class ContextLedger {
     };
   }
 }
+
+const EMPTY_SCHEMA_GROUNDING: SchemaGrounding = {
+  tables: [],
+  joinKeys: [],
+  byKey: new Map(),
+};
 
 export function createContextLedger(input: ContextLedgerInput = {}): ContextLedger {
   return new ContextLedger(input);
