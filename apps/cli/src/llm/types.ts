@@ -8,6 +8,7 @@ import type {
   AnalyticalFreshnessObservationV1,
   AnalyticalFreshnessRequestV1,
   ConversationSnapshot,
+  GroundingExpansionResult,
   KGNode,
   LocalContextPack,
   ReasoningEffort,
@@ -147,6 +148,13 @@ export interface AgentRunRequest {
   executeGeneratedSql?: (sql: string, artifact?: AgentDqlArtifactReference) => Promise<AgentResultPayload>;
   executeDqlArtifact?: (artifact: AgentDqlArtifactReference) => Promise<AgentResultPayload>;
   getSchemaContext?: (question: string, contextPack?: LocalContextPack) => Promise<AgentSchemaTable[]>;
+  /**
+   * Bounded, equality-predicated lookup of specific relations the model
+   * referenced but retrieval never inspected. Used only after the cached
+   * catalog misses, so a real table is not refused without ever asking the
+   * warehouse whether it exists.
+   */
+  probeNamedRelations?: (relations: string[]) => Promise<GroundingExpansionResult | undefined>;
   /** Active warehouse dialect so Lane-2 semantic compiles emit dialect-correct SQL. */
   semanticDriver?: string;
   /** Logical->physical table mapping for the semantic compiler, when resolved. */

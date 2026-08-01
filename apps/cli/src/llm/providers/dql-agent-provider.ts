@@ -505,7 +505,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             executeDqlArtifact: req.executeDqlArtifact
               ? async (...args) => { guardSnapshot(); return req.executeDqlArtifact!(...args); }
               : undefined,
-            expandGroundingContext: createGroundingContextExpander(req.projectRoot),
+            expandGroundingContext: createGroundingContextExpander(req.projectRoot, req.probeNamedRelations),
             answerLoopTools,
             // NOTE: no captureGeneratedDraft here — a plain answer/research question must NOT
             // auto-write a draft into the blocks space. A draft is created only when the user

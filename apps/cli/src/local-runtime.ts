@@ -296,6 +296,8 @@ import {
   loadAgentSemanticLayer,
   isTrustedConversationTurn,
   analyticalError,
+  type GroundingExpansionResult,
+  type RuntimeSchemaTable,
   withAnalyticalErrorOrigin,
   withAnalyticalErrorOriginSync,
   type AnalyticalErrorStage,
@@ -2262,6 +2264,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             ? request.executionTarget.connectionName
             : undefined,
         ),
+        probeNamedRelations: (relations) => probeNamedRelationsForAgent(relations, semanticConnection),
       },
       (turn) => {
         if (turn.kind === 'thinking') onProgress?.(turn.text);
@@ -4530,6 +4533,61 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     } catch (error) {
       return { proofs, sql: boundedSql, repairs, error: error instanceof Error ? error.message : String(error) };
     }
+  };
+
+  /**
+   * Ask the warehouse whether specific named relations exist, AFTER the cached
+   * catalog has already missed them.
+   *
+   * `getSchemaContextForAgent` deliberately returns nothing on a lexical miss —
+   * "a lexical miss is not permission to rescan every visible schema". That is
+   * right for BULK retrieval, but it also meant a relation the model named
+   * explicitly, and that the notebook queries without complaint, was refused as
+   * "outside the inspected metadata context" without the warehouse ever being
+   * asked. A point lookup of up to four named `(schema, table)` pairs is not a
+   * rescan.
+   *
+   * The payoff is honesty as much as recall: after this probe, a miss is
+   * evidence. The refusal can say the relation is not visible to this
+   * connection, rather than only that DQL had not looked at it.
+   */
+  const probeNamedRelationsForAgent = async (
+    relations: string[],
+    probeConnection?: ConnectionConfig,
+  ): Promise<GroundingExpansionResult | undefined> => {
+    const probeTarget = probeConnection ?? connection;
+    if (!probeTarget) return undefined;
+    // Same operator switch that governs live value grounding: a deployment that
+    // wants zero live metadata traffic keeps it.
+    if (resolveAgentRuntimeValueGrounding(projectConfig).mode !== 'safe_automatic') return undefined;
+    const sql = buildNamedRelationProbeSql(relations);
+    if (!sql) return undefined;
+
+    const prepared = prepareLocalExecution(sql, probeTarget, projectRoot, projectConfig);
+    const result = await executor.executeQuery(prepared.sql, [], runtimeVariables({}), prepared.connection);
+    const rows = normalizeQueryResult(result).rows as Array<Record<string, unknown>>;
+    if (rows.length === 0) return undefined;
+
+    const tables = buildAgentSchemaContext('', rows, { includeUnscored: true, limit: 8 });
+    if (tables.length === 0) return undefined;
+    return {
+      relations: tables.map((table) => ({
+        relation: table.relation,
+        name: table.name,
+        // Provenance is explicit: these columns came from a live lookup, not
+        // from the immutable snapshot.
+        source: 'scoped live probe',
+        columns: table.columns.map((column) => ({ name: column.name, type: column.type })),
+        columnCompleteness: 'complete' as const,
+      })),
+      schemaContext: tables.map((table) => ({
+        relation: table.relation,
+        schema: table.schema,
+        name: table.name,
+        columns: table.columns,
+      })) as RuntimeSchemaTable[],
+      notes: tables.map((table) => `${table.relation} resolved by a scoped live probe`),
+    };
   };
 
   const getSchemaContextForAgent = async (
@@ -26026,6 +26084,47 @@ const RUNTIME_SCHEMA_SEARCH_STOPWORDS = new Set([
  * execution target. Tokens are reduced to safe identifier characters before
  * interpolation, so user text cannot become SQL syntax.
  */
+/**
+ * Point-lookup of NAMED relations in `information_schema.columns`.
+ *
+ * This is deliberately not `buildRuntimeSchemaSearchSql`. That one matches
+ * `LOWER(table_name) LIKE '%term%'` across every visible schema, which is the
+ * unbounded rescan the "a lexical miss is not permission to rescan" policy
+ * exists to prevent. This one asks about specific `(schema, table)` pairs the
+ * model actually referenced, with equality predicates — a metadata point
+ * lookup, not a scan.
+ *
+ * Returns null when nothing safe to ask about survives normalization.
+ */
+export function buildNamedRelationProbeSql(relations: string[], maxRelations = 4): string | null {
+  const predicates: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of relations) {
+    const parts = raw.replace(/["`\[\]]/g, '').trim().split('.').filter(Boolean);
+    const table = parts.at(-1);
+    // Identifiers only — never interpolate anything that could carry SQL.
+    if (!table || !/^[A-Za-z_][A-Za-z0-9_$]*$/.test(table)) continue;
+    const schema = parts.length >= 2 ? parts.at(-2) : undefined;
+    if (schema && !/^[A-Za-z_][A-Za-z0-9_$]*$/.test(schema)) continue;
+    const key = `${schema ?? ''}.${table}`.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    predicates.push(schema
+      ? `(LOWER(table_schema) = '${schema.toLowerCase()}' AND LOWER(table_name) = '${table.toLowerCase()}')`
+      : `(LOWER(table_name) = '${table.toLowerCase()}')`);
+    if (predicates.length >= maxRelations) break;
+  }
+  if (predicates.length === 0) return null;
+  return `SELECT table_schema, table_name, column_name, data_type
+FROM information_schema.columns
+WHERE UPPER(table_schema) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')
+  AND (
+${predicates.map((predicate) => `    ${predicate}`).join(' OR\n')}
+  )
+ORDER BY table_schema, table_name, ordinal_position
+LIMIT 400`;
+}
+
 export function buildRuntimeSchemaSearchSql(question: string): string {
   const terms = Array.from(agentSchemaTokens(question))
     .map((term) => term.toLowerCase().replace(/[^a-z0-9_]/g, ''))

@@ -16,6 +16,7 @@ import {
   repairExploratorySqlBeforeExecution,
   buildAgentSchemaContext,
   buildRuntimeSchemaSearchSql,
+  buildNamedRelationProbeSql,
   buildDbtStatus,
   buildDbtParseArgs,
   buildProposeReadiness,
@@ -4195,6 +4196,49 @@ describe('prepareLocalExecution', () => {
       projectRoot,
       {},
     )).toThrow(/target\/manifest\.json was not available/);
+  });
+});
+
+describe('buildNamedRelationProbeSql', () => {
+  // `getSchemaContextForAgent` returns nothing on a lexical miss — right for
+  // bulk retrieval, but it meant a relation the model named explicitly, and
+  // that a notebook queries happily, was refused as "outside the inspected
+  // metadata context" without the warehouse ever being asked. This probe asks,
+  // and it must remain a point lookup rather than the scan the policy forbids.
+  it('uses equality predicates, never a LIKE scan', () => {
+    const sql = buildNamedRelationProbeSql(['analytics.sales.orders'])!;
+    expect(sql).toContain("LOWER(table_schema) = 'sales'");
+    expect(sql).toContain("LOWER(table_name) = 'orders'");
+    expect(sql).not.toContain('LIKE');
+  });
+
+  it('matches on the leaf name when no schema was given', () => {
+    const sql = buildNamedRelationProbeSql(['orders'])!;
+    expect(sql).toContain("LOWER(table_name) = 'orders'");
+    expect(sql).not.toContain('table_schema =');
+  });
+
+  it('bounds how many relations one probe may ask about', () => {
+    const sql = buildNamedRelationProbeSql(['a.one', 'b.two', 'c.three', 'd.four', 'e.five', 'f.six'])!;
+    expect(sql.match(/LOWER\(table_name\) =/g)).toHaveLength(4);
+    expect(sql).toContain('LIMIT 400');
+  });
+
+  it('refuses anything that is not a plain identifier', () => {
+    expect(buildNamedRelationProbeSql(["orders'; DROP TABLE users --"])).toBeNull();
+    expect(buildNamedRelationProbeSql(['a b c'])).toBeNull();
+    expect(buildNamedRelationProbeSql([''])).toBeNull();
+    expect(buildNamedRelationProbeSql([])).toBeNull();
+  });
+
+  it('deduplicates and tolerates quoted identifiers', () => {
+    const sql = buildNamedRelationProbeSql(['"SALES"."ORDERS"', 'sales.orders'])!;
+    expect(sql.match(/LOWER\(table_name\) =/g)).toHaveLength(1);
+  });
+
+  it('still excludes system schemas', () => {
+    expect(buildNamedRelationProbeSql(['sales.orders'])!)
+      .toContain("UPPER(table_schema) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')");
   });
 });
 

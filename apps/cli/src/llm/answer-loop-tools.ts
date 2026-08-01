@@ -3,6 +3,7 @@ import {
   expandGroundingFromCatalog,
   openMetadataCatalog,
   type AgentToolDefinition,
+  type GroundingExpansionResult,
 } from "@duckcodeailabs/dql-agent";
 import { DQLContext } from "@duckcodeailabs/dql-mcp";
 import { spawn } from "node:child_process";
@@ -12,13 +13,46 @@ import { buildAgentTools } from "./tools.js";
 import { QueryExecutor } from "@duckcodeailabs/dql-connectors";
 import { NotebookDatasetWorkspace } from "../notebook-datasets.js";
 
-export function createGroundingContextExpander(projectRoot: string) {
+/**
+ * A bounded, equality-predicated lookup of NAMED relations against the live
+ * warehouse. Supplied by the host, which owns the connection and the activated
+ * metadata scope.
+ */
+export type LiveRelationProbe = (
+  relations: string[],
+) => Promise<GroundingExpansionResult | undefined>;
+
+export function createGroundingContextExpander(projectRoot: string, liveProbe?: LiveRelationProbe) {
   return async (request: Parameters<typeof expandGroundingFromCatalog>[1]) => {
     const catalog = openMetadataCatalog(projectRoot);
+    let fromCatalog: GroundingExpansionResult | undefined;
     try {
-      return expandGroundingFromCatalog(catalog, request);
+      fromCatalog = expandGroundingFromCatalog(catalog, request);
     } finally {
       catalog.close();
+    }
+    if (fromCatalog) return fromCatalog;
+
+    // The catalog does not know this relation. That is NOT proof it does not
+    // exist: `getSchemaContextForAgent` deliberately returns nothing on a
+    // lexical miss, so a real table the notebook queries happily is reported as
+    // "outside the inspected metadata context" without the warehouse ever being
+    // asked. A targeted lookup of named relations is not the unbounded rescan
+    // that policy exists to prevent, so try it before refusing.
+    if (!liveProbe) return undefined;
+    if (request.code !== 'unknown_relation' && request.code !== 'unknown_column') return undefined;
+    const named = (request.offending?.relations?.length
+      ? request.offending.relations
+      : request.offending?.relation
+        ? [request.offending.relation]
+        : []
+    ).filter((relation): relation is string => Boolean(relation?.trim())).slice(0, 4);
+    if (named.length === 0) return undefined;
+    try {
+      return await liveProbe(named);
+    } catch {
+      // A probe failure must never turn a refusal into a crash.
+      return undefined;
     }
   };
 }
