@@ -381,7 +381,9 @@ export function normalizeSemanticRuntimeQueryRequest(
     orderBy: request.orderBy?.map((order) => ({ ...order })),
     ...(request.timeDimension ? { timeDimension: { ...request.timeDimension } } : {}),
   };
-  if (normalized.savedQuery || normalized.timeDimension || hasMetricTimeGrouping(normalized.dimensions)) {
+  // A saved query owns its own group-by contract, and an explicit `metric_time`
+  // grouping already satisfies the compiler.
+  if (normalized.savedQuery || hasMetricTimeGrouping(normalized.dimensions) || isMetricTimeName(normalized.timeDimension?.name)) {
     return normalized;
   }
 
@@ -393,10 +395,34 @@ export function normalizeSemanticRuntimeQueryRequest(
     const metric = resolveMetricDefinition(metricName, metrics, metricByName);
     if (metric) collectMetricOffsetGrains(metric, metrics, metricByName, visited, grains);
   }
-  const granularity = finestTimeGrain(grains);
-  return granularity
-    ? { ...normalized, timeDimension: { name: 'metric_time', granularity } }
-    : normalized;
+  const offsetGrain = finestTimeGrain(grains);
+  // No offset metric in play — whatever time dimension the caller chose stands.
+  if (!offsetGrain) return normalized;
+
+  // An offset metric REQUIRES `metric_time`, and an entity-qualified time
+  // dimension cannot satisfy it: MetricFlow rejects the query with "group-by-items
+  // do not [include] 'metric_time'". This used to bail out whenever ANY time
+  // dimension was set, so the requirement this function exists to enforce was
+  // never applied to exactly the case that needs it — a block combining
+  // `previous_month_acm` with `..._header.close_date` failed every compile.
+  //
+  // `metric_time` IS the metrics' aggregation time dimension, so substituting it
+  // preserves the intent ("by month"); the caller's requested granularity is kept
+  // and only falls back to the offset grain when none was given.
+  return {
+    ...normalized,
+    timeDimension: {
+      name: 'metric_time',
+      granularity: normalized.timeDimension?.granularity ?? offsetGrain,
+    },
+  };
+}
+
+/** `metric_time`, with or without a grain suffix (`metric_time__month`). */
+function isMetricTimeName(name: string | undefined): boolean {
+  if (!name) return false;
+  const value = name.replace(/["`\[\]]/g, '').toLowerCase();
+  return value === 'metric_time' || value.startsWith('metric_time__');
 }
 
 function hasMetricTimeGrouping(dimensions: string[]): boolean {

@@ -127,6 +127,47 @@ describe('shared semantic runtime selector', () => {
     });
   });
 
+  /**
+   * REPORTED: a semantic block combining an offset metric with an
+   * entity-qualified time dimension failed every compile with
+   * "The query includes a metric ... that specifies a time offset ... However,
+   * group-by-items do not [include] 'metric_time'."
+   *
+   * The normalizer bailed out whenever ANY time dimension was set, so the
+   * requirement it exists to enforce was never applied to exactly the case that
+   * needs it. `metric_time` IS the metrics' aggregation time dimension, so
+   * substituting it preserves the requested grain and intent.
+   */
+  it('substitutes metric_time when an offset metric is grouped by a qualified time dimension', () => {
+    expect(normalizeSemanticRuntimeQueryRequest({
+      metrics: ['previous_day_revenue'],
+      dimensions: [],
+      timeDimension: { name: 'orders.close_date', granularity: 'month' },
+    }, layer())).toMatchObject({
+      timeDimension: { name: 'metric_time', granularity: 'month' },
+    });
+  });
+
+  it('keeps a qualified time dimension when no metric uses an offset', () => {
+    expect(normalizeSemanticRuntimeQueryRequest({
+      metrics: ['revenue'],
+      dimensions: [],
+      timeDimension: { name: 'orders.close_date', granularity: 'month' },
+    }, layer())).toMatchObject({
+      timeDimension: { name: 'orders.close_date', granularity: 'month' },
+    });
+  });
+
+  it('falls back to the offset grain when the caller gave no granularity', () => {
+    expect(normalizeSemanticRuntimeQueryRequest({
+      metrics: ['previous_day_revenue'],
+      dimensions: [],
+      timeDimension: { name: 'orders.close_date' } as never,
+    }, layer())).toMatchObject({
+      timeDimension: { name: 'metric_time', granularity: 'day' },
+    });
+  });
+
   it('uses the bundled native compiler for composable metrics', async () => {
     const result = await compileSemanticRuntimeQuery({ metrics: ['revenue'], dimensions: [] }, {
       projectRoot: root,
