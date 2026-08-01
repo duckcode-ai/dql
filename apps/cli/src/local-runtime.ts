@@ -4363,19 +4363,60 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const trimmed = sql.trim().replace(/;\s*$/, '').trim();
     if (!trimmed) throw analyticalError('The generated SQL was empty.', { origin: 'host', stage: 'execute' });
 
-    const readOnlyError = readOnlySqlValidationError(trimmed, 'Generated SQL', activeConnection.driver);
+    // RESOLVE FIRST, VALIDATE SECOND. Executing verbatim means executing the
+    // statement the notebook would execute — and the notebook resolves
+    // `@metric()` / `@dim()` refs and dbt macros before it runs anything.
+    // Skipping that here made Ask fail on semantic refs and MetricFlow
+    // (`metric_time`) queries the notebook runs fine, and validating the raw
+    // model SQL first meant `source::` identities and macro-shaped text were
+    // rejected before the step that would have resolved them ever ran.
+    const semanticMapping = semanticLayer && hasStandaloneSemanticRef(trimmed)
+      ? await resolveSemanticTableMapping(executor, activeConnection, semanticLayer, projectRoot)
+      : undefined;
+    const semantic = semanticLayer
+      ? prepareSemanticSql(trimmed, semanticLayer, { tableMapping: semanticMapping })
+      : { sql: trimmed, unresolvedRefs: [] as string[], semanticRefs: undefined };
+    if (semantic.unresolvedRefs.length > 0) {
+      throw analyticalError(
+        `Unknown semantic reference${semantic.unresolvedRefs.length > 1 ? 's' : ''}: ${semantic.unresolvedRefs.join(', ')}`,
+        { origin: 'dql_compilation', stage: 'compile', code: 'semantic_ref' },
+      );
+    }
+    const prepared = prepareLocalExecution(semantic.sql, activeConnection, projectRoot, projectConfig);
+
+    // Read-only enforcement runs on the statement that will ACTUALLY execute.
+    const readOnlyError = readOnlySqlValidationError(prepared.sql, 'Generated SQL', activeConnection.driver);
     if (readOnlyError) {
       throw analyticalError(readOnlyError, { origin: 'governance_gate', stage: 'validation', code: 'unsafe_sql' });
     }
 
-    const prepared = prepareLocalExecution(trimmed, activeConnection, projectRoot, projectConfig);
     const bounded = buildRowBoundedSql(prepared.sql, rowBound, activeConnection.driver);
     const app = loadRuntimeApp(projectRoot, activePersonaAppId());
     const sourceDomain = seed?.source?.match(/\bdomain\s*=\s*"([^"]+)"/i)?.[1];
     assertAppAccess({ app, domain: sourceDomain ?? app?.domain, level: 'execute' });
 
-    const rawResult = await executor.executeQuery(bounded.sql, [], runtimeVariables({}), prepared.connection);
-    const normalized = normalizeQueryResult(rawResult);
+    // A semantic query the loop already compiled (MetricFlow / dbt Cloud) must
+    // execute through its pinned target binding, not as loose SQL.
+    const pinnedSemanticCompile = compiledSemanticQueries.get(executionFingerprint(prepared.sql))
+      ?? compiledSemanticQueries.get(executionFingerprint(trimmed));
+    const semanticExecution = pinnedSemanticCompile
+      ? await executeTargetBoundSemanticQuery({
+          executor,
+          connection: activeConnection,
+          projectRoot,
+          plannedAdapter: pinnedSemanticCompile.engine,
+          metricFlow: pinnedSemanticCompile.engine === 'metricflow-cli'
+            ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
+            : undefined,
+          compile: async () => pinnedSemanticCompile,
+          prepareSql: () => ({ sql: bounded.sql, connection: prepared.connection }),
+          rowBound,
+        })
+      : null;
+
+    const rawResult = semanticExecution?.result
+      ?? await executor.executeQuery(bounded.sql, [], runtimeVariables({}), prepared.connection);
+    const normalized = normalizeQueryResult(rawResult, semantic.semanticRefs);
     // The authoritative bound. `buildRowBoundedSql` may legitimately decline to
     // touch the statement, and only one of 15 drivers honours a maxRows hint, so
     // the host is the only layer correctness may depend on.

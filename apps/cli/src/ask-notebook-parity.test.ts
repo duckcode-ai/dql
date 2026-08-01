@@ -14,7 +14,7 @@
  * the warehouse the same statement (Ask may append a row bound, and only that),
  * and return the same columns and rows.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
@@ -143,6 +143,43 @@ describe('Ask ↔ Notebook execution parity', () => {
         expect(bounded.outcome, `overrode an author bound: ${sql}`).toBe('existing');
       }
     }
+  });
+
+  /**
+   * REGRESSION GUARD (structural, on purpose).
+   *
+   * The first cut of the direct executor called `executeQuery` and nothing
+   * else. It skipped `prepareSemanticSql`, the semantic table mapping, and the
+   * pinned MetricFlow compile — all of which `/api/query` performs — so Ask
+   * broke on `@metric()` refs and `metric_time` queries the notebook ran fine.
+   * It also validated the RAW model SQL before those steps, rejecting
+   * `source::` identities ahead of the resolution that would have cleared them.
+   *
+   * Reproducing that behaviourally needs a semantic-layer + MetricFlow fixture;
+   * asserting the pipeline still contains those steps, in the right order, is
+   * the cheap check that would have caught it.
+   */
+  it('resolves what the notebook resolves, and validates only after resolving', () => {
+    const source = readFileSync(new URL('./local-runtime.ts', import.meta.url), 'utf8');
+    const direct = source.slice(
+      source.indexOf('const executeGeneratedSqlDirect = async'),
+      source.indexOf('const executeGeneratedArtifactForAgent = async'),
+    );
+    expect(direct.length).toBeGreaterThan(0);
+
+    for (const step of [
+      'prepareSemanticSql',
+      'resolveSemanticTableMapping',
+      'prepareLocalExecution',
+      'executeTargetBoundSemanticQuery',
+    ]) {
+      expect(direct, `the direct executor no longer performs ${step}`).toContain(step);
+    }
+    expect(direct).toContain('readOnlySqlValidationError(prepared.sql');
+    expect(
+      direct.indexOf('prepareLocalExecution'),
+      'read-only enforcement must run on the resolved statement',
+    ).toBeLessThan(direct.indexOf('readOnlySqlValidationError'));
   });
 
   it('accepts every fixture shape through the generated-SQL read-only gate', async () => {
