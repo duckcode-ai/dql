@@ -14,6 +14,7 @@ import {
   buildRowBoundedSql,
   extractBlockStudioSql,
   maskDqlStringContents,
+  slimAgentRunForHistory,
   parseBlockStudioArrayField,
   parseBlockStudioStringField,
   buildExploratoryJoinProbeSql,
@@ -6689,5 +6690,66 @@ describe('block field parsing ignores content inside string literals', () => {
   it('still returns a real query and its exact text', () => {
     const source = `block "b" {\n  description = "run query = \\"\\"\\"nope\\"\\"\\""\n  query = """\nSELECT 1 AS n\n"""\n}`;
     expect(extractBlockStudioSql(source)).toBe('SELECT 1 AS n');
+  });
+});
+
+/**
+ * Thread history was taking ~10s to load. A stored run averages ~700 KB and can
+ * exceed 2 MB, and the endpoint fetched up to 50 of them — tens of megabytes to
+ * read, parse, re-serialize and ship before the sidebar could draw.
+ *
+ * Almost none of it is content. On a real 2.4 MB run the renderable part
+ * (`payload.result`) was 3 KB; the rest was the SAME artifacts stored four
+ * times over: `run.artifacts`, `run.steps[].artifacts`, one progress event's
+ * payload, and `diagnosticReceipt` — itself held twice, top-level and inside the
+ * artifact payload, each embedding its own copy of steps and artifacts.
+ *
+ * The projection drops duplicates only. Nothing is truncated, and the complete
+ * record stays available from `GET /api/agent-runs/:id`.
+ */
+describe('slimAgentRunForHistory', () => {
+  function runWithDuplicatedDiagnostics() {
+    const bulk = { rows: Array.from({ length: 400 }, (_, i) => ({ id: i, value: `v${i}` })) };
+    const receipt = { version: 1, runId: 'r1', failure: { message: 'the real cause' }, steps: [bulk], artifacts: [bulk] };
+    return {
+      id: 'r1',
+      question: 'q',
+      artifacts: [{ id: 'a', kind: 'answer', title: 'Answer', payload: { result: { columns: ['id'], rows: [{ id: 1 }] }, considered: bulk, diagnosticReceipt: receipt } }],
+      diagnosticReceipt: receipt,
+      steps: [{ id: 's1', goal: 'g', artifacts: [bulk] }],
+      events: [{ id: 'e1', runId: 'r1', message: 'small', payload: { ok: true } }, { id: 'e2', runId: 'r1', message: 'big', payload: bulk }],
+    } as never;
+  }
+
+  it('cuts the payload dramatically without touching what renders', () => {
+    const run = runWithDuplicatedDiagnostics();
+    const slim = slimAgentRunForHistory(run);
+    const before = JSON.stringify(run).length;
+    const after = JSON.stringify(slim).length;
+    expect(after).toBeLessThan(before * 0.3);
+
+    const payload = (slim.artifacts?.[0] as { payload?: Record<string, unknown> })?.payload ?? {};
+    expect(payload.result).toEqual({ columns: ['id'], rows: [{ id: 1 }] });
+  });
+
+  it('keeps the failure message the UI reads', () => {
+    const slim = slimAgentRunForHistory(runWithDuplicatedDiagnostics());
+    expect((slim.diagnosticReceipt as unknown as { failure?: { message?: string } })?.failure?.message).toBe('the real cause');
+  });
+
+  it('drops only duplicates: nested receipt steps/artifacts, step artifacts, unread considered', () => {
+    const slim = slimAgentRunForHistory(runWithDuplicatedDiagnostics());
+    const receipt = slim.diagnosticReceipt as unknown as Record<string, unknown>;
+    expect(receipt.steps).toBeUndefined();
+    expect(receipt.artifacts).toBeUndefined();
+    expect((slim.steps?.[0] as unknown as Record<string, unknown>)?.artifacts).toBeUndefined();
+    expect((slim.artifacts?.[0] as { payload?: Record<string, unknown> })?.payload?.considered).toBeUndefined();
+  });
+
+  it('keeps small event payloads and omits only oversized ones', () => {
+    const slim = slimAgentRunForHistory(runWithDuplicatedDiagnostics());
+    const [small, big] = slim.events as unknown as Array<{ payload?: Record<string, unknown> }>;
+    expect(small.payload).toEqual({ ok: true });
+    expect(big.payload).toMatchObject({ omitted: 'oversized' });
   });
 });

@@ -1067,6 +1067,68 @@ function recordConversationTurn(store: ConversationStore | null, threadId: strin
   }
 }
 
+/**
+ * Presentation projection of a stored run, for thread history.
+ *
+ * A stored run is dominated by DUPLICATED diagnostics rather than content. On a
+ * real 2.4 MB run: `diagnosticReceipt` is held twice — once top-level and once
+ * inside `artifacts[0].payload`, byte-identical — and each copy embeds its own
+ * full `steps` and `artifacts`, which embed the payload again. The part the UI
+ * actually renders (`payload.result`) was 3 KB.
+ *
+ * Everything the thread view reads is preserved, including
+ * `diagnosticReceipt.failure.message`; only the self-referential nesting and the
+ * unread `considered` block are dropped. The complete record stays available
+ * from `GET /api/agent-runs/:id`.
+ */
+export function slimAgentRunForHistory(run: AgentRun): AgentRun {
+  const slimReceipt = (receipt: unknown): unknown => {
+    const record = agentRunRecord(receipt);
+    if (!record) return receipt;
+    // `steps`/`artifacts` inside the receipt duplicate the run's own.
+    const { steps: _steps, artifacts: _artifacts, ...rest } = record;
+    return rest;
+  };
+  const artifacts = (run.artifacts ?? []).map((artifact) => {
+    const payload = agentRunRecord(artifact.payload);
+    if (!payload) return artifact;
+    const { considered: _considered, ...restPayload } = payload;
+    return {
+      ...artifact,
+      payload: {
+        ...restPayload,
+        ...(payload.diagnosticReceipt ? { diagnosticReceipt: slimReceipt(payload.diagnosticReceipt) } : {}),
+      },
+    };
+  });
+  // `steps[].artifacts` is a THIRD copy of the run's own artifacts, and one
+  // progress event carries a FOURTH as its payload. Both are dropped rather than
+  // truncated: the data itself is unchanged and still on `run.artifacts`.
+  const MAX_EVENT_PAYLOAD_BYTES = 8 * 1024;
+  const steps = (run.steps ?? []).map((step) => {
+    const record = agentRunRecord(step);
+    if (!record?.artifacts) return step;
+    const { artifacts: _stepArtifacts, ...rest } = record;
+    return rest as unknown as typeof step;
+  });
+  const events = (run.events ?? []).slice(-20).map((event) => {
+    const record = agentRunRecord(event);
+    if (!record?.payload) return event;
+    const encoded = JSON.stringify(record.payload) ?? '';
+    if (encoded.length <= MAX_EVENT_PAYLOAD_BYTES) return event;
+    return { ...record, payload: { omitted: 'oversized', bytes: encoded.length } } as unknown as typeof event;
+  });
+  return {
+    ...run,
+    artifacts,
+    steps,
+    events,
+    ...(run.diagnosticReceipt
+      ? { diagnosticReceipt: slimReceipt(run.diagnosticReceipt) as AgentRun['diagnosticReceipt'] }
+      : {}),
+  };
+}
+
 export function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInput {
   const artifact = run.artifacts.find((candidate) => candidate.kind === 'answer')
     ?? run.artifacts.find((candidate) => candidate.kind === 'research_run')
@@ -7024,6 +7086,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // DRAFT proposals (each with its stored Certifier verdict) so the notebook
     // "Get Started" surface can route them into human review. dryRun preview —
     // nothing is written or certified by this call.
+    // The COMPLETE stored run. Thread history ships a presentation projection
+    // (see `slimAgentRunForHistory`); anything that needs the full diagnostic
+    // record — the inspector, "How it was answered" — fetches it here on demand
+    // instead of every conversation load paying for it.
+    if (req.method === 'GET' && /^\/api\/agent-runs\/[^/]+$/.test(path)) {
+      const runId = decodeURIComponent(path.slice('/api/agent-runs/'.length));
+      const run = agentRunStore.get(runId);
+      if (!run) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'Unknown run id.' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ run }));
+      return;
+    }
+
     if (req.method === 'GET' && path === '/api/agent-runs/tier-distribution') {
       try {
         const store = getConversationStore();
@@ -8144,7 +8223,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             const runs = turns.flatMap((turn) => {
               if (!turn.agentRunId) return [];
               const run = agentRunStore.get(turn.agentRunId);
-              return run ? [run] : [];
+              // Thread history is a PRESENTATION payload. A stored run averages
+              // ~700 KB and can exceed 2 MB, almost none of it renderable, so
+              // fetching 50 of them meant tens of megabytes to read, parse,
+              // re-serialize and ship before the sidebar could draw — the
+              // reported ~10s load. `GET /api/agent-runs/:id` serves the full
+              // record when the inspector actually needs it.
+              return run ? [slimAgentRunForHistory(run)] : [];
             });
             res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
             res.end(serializeJSON({
