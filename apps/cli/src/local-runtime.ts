@@ -1,6 +1,7 @@
 import type { SemanticDisplayFormat } from '@duckcodeailabs/dql-core';
 import { execFileSync, execSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import { createServer } from "node:http";
 import {
   existsSync,
@@ -5991,7 +5992,73 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     response.write(`data: ${serializeJSON(data)}\n\n`);
   };
 
+  /**
+   * Gzip text responses.
+   *
+   * Nothing was compressed before: the main bundle went out at 592 KB where gzip
+   * makes it 154 KB (73% smaller), and JSON API responses — which compress even
+   * better — were also sent raw. One wrapper here rather than a change at
+   * hundreds of `res.end(...)` call sites.
+   *
+   * STREAMING IS EXEMPT. Buffering an SSE response in order to compress it would
+   * defeat streaming entirely, so any response that calls `res.write()` opts
+   * itself out permanently, as does `text/event-stream`.
+   */
+  const MIN_COMPRESS_BYTES = 1024;
+  const COMPRESSIBLE = /^(?:text\/(?!event-stream)|application\/(?:json|javascript|xml|wasm)|image\/svg)/i;
+  const withCompression = (request: IncomingMessage, response: ServerResponse): ServerResponse => {
+    if (!/\bgzip\b/i.test(String(request.headers['accept-encoding'] ?? ''))) return response;
+    const writeHead = response.writeHead.bind(response);
+    const end = response.end.bind(response);
+    const write = response.write.bind(response);
+    let status = 200;
+    let headers: Record<string, unknown> = {};
+    let captured = false;
+    let streaming = false;
+
+    response.writeHead = ((code: number, hdrs?: Record<string, unknown>) => {
+      status = code;
+      headers = hdrs ?? {};
+      captured = true;
+      return response;
+    }) as typeof response.writeHead;
+
+    response.write = ((...args: Parameters<typeof write>) => {
+      if (captured && !streaming) { streaming = true; writeHead(status, headers as never); }
+      return write(...args);
+    }) as typeof response.write;
+
+    response.end = ((...args: Parameters<typeof end>) => {
+      const body = args[0];
+      const contentType = String(headers['Content-Type'] ?? '');
+      const encodable = captured
+        && !streaming
+        && (typeof body === 'string' || Buffer.isBuffer(body))
+        && COMPRESSIBLE.test(contentType);
+      if (!encodable) {
+        if (captured && !streaming) { streaming = true; writeHead(status, headers as never); }
+        return end(...args);
+      }
+      const raw = Buffer.isBuffer(body) ? body : Buffer.from(body as string, 'utf8');
+      streaming = true;
+      if (raw.byteLength < MIN_COMPRESS_BYTES) {
+        writeHead(status, headers as never);
+        return end(raw);
+      }
+      const gz = gzipSync(raw);
+      writeHead(status, {
+        ...headers,
+        'Content-Encoding': 'gzip',
+        'Content-Length': gz.byteLength,
+        Vary: 'Accept-Encoding, Origin',
+      } as never);
+      return end(gz);
+    }) as typeof response.end;
+    return response;
+  };
+
   const server = createServer((req, res) => {
+    res = withCompression(req, res);
     const requestUrl = req.url || '/';
     const url = new URL(requestUrl, 'http://127.0.0.1');
     const path = url.pathname || '/';

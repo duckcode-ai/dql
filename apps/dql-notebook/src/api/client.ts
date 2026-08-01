@@ -2154,7 +2154,37 @@ function formatRequestError(res: Response, text: string): DqlApiError {
   }
 }
 
+/**
+ * Collapse CONCURRENT identical GETs into one network round trip.
+ *
+ * Several independent panels fetch the same status on mount — the workbench
+ * loaded `/api/onboarding/status` and `/api/block-studio/dbt-status` twice each
+ * on every boot, and more as panels open. Each owns its own effect, so the
+ * duplication is structural rather than a bug in any one of them.
+ *
+ * Deliberately in-flight only, with no TTL: a later call still hits the network,
+ * so nothing can read stale data. This only merges requests that overlap in
+ * time, which is exactly the mount storm.
+ */
+const inFlightGets = new Map<string, Promise<unknown>>();
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const method = (options?.method ?? 'GET').toUpperCase();
+  // Only idempotent, unaborted, bodyless reads are safe to share.
+  const shareable = method === 'GET' && !options?.signal && !options?.body;
+  if (shareable) {
+    const pending = inFlightGets.get(path);
+    if (pending) return pending as Promise<T>;
+    const started = requestUncached<T>(path, options).finally(() => {
+      inFlightGets.delete(path);
+    });
+    inFlightGets.set(path, started);
+    return started;
+  }
+  return requestUncached<T>(path, options);
+}
+
+async function requestUncached<T>(path: string, options?: RequestInit): Promise<T> {
   let res: Response;
   try {
     const headers = withServerAuthorization(options?.headers);
