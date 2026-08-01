@@ -1177,6 +1177,8 @@ const AGENT_RUN_STOP_REASONS = new Set<AgentRunStopReason>([
  * RunCard (route, trust, answer, result preview) and for
  * `buildConversationContext` to keep working as the no-threadId fallback.
  */
+export { askFailureOrigin, askFailureDetail, ASK_FAILURE_PRESENTATION };
+
 export function threadItemsFromTurns(turns: AgentConversationTurn[], runs: AgentRun[] = []): ThreadItem[] {
   const runsById = new Map(runs.map((run) => [run.id, run]));
   return turns.flatMap((turn): ThreadItem[] => {
@@ -2005,9 +2007,10 @@ function AskRunCard({
       : certified
         ? 'Certified answer'
         : 'AI-generated answer';
-  const failureMessage = blocked
-    ? run.diagnosticReceipt?.failure?.message ?? run.summary
-    : undefined;
+  // The card supplies its own headline, so the body wants the most SPECIFIC text
+  // available: the producer's own message beats the canned per-code headline,
+  // which is the same sentence for everything unclassified.
+  const failureMessage = blocked ? askFailureDetail(run) : undefined;
   const passedChecks = run.evaluations.filter((e) => e.severity === 'info').length;
   const evidence = evidenceFromRun(run);
   const inlineResultArtifacts = run.artifacts.filter((artifact) => {
@@ -2063,7 +2066,7 @@ function AskRunCard({
           <StructuredAnswerText text={cleanAnswerText(presentationAnswer)} t={t} />
         </div>
       ) : failureMessage ? (
-        <div data-followup="answer" style={{ fontSize: 13.5, lineHeight: 1.6, color: t.textSecondary }}>{cleanPresentationText(failureMessage)}</div>
+        <AskFailureCard run={run} detail={failureMessage} t={t} />
       ) : run.summary ? (
         <div data-followup="answer" style={{ fontSize: 14, lineHeight: 1.6, color: t.textSecondary }}>{cleanPresentationText(run.summary)}</div>
       ) : null}
@@ -4722,4 +4725,104 @@ function askParameterControlStyle(t: Theme): React.CSSProperties {
 
 function smallButtonStyle(t: Theme): React.CSSProperties {
   return controlStyle(t, { variant: 'secondary', size: 'sm' });
+}
+
+/**
+ * What a failure of each ORIGIN means, and what the user can do about it.
+ *
+ * Before this, every failure rendered as one grey paragraph, so a warehouse
+ * rejection, a governance refusal and a DQL block-compile problem were
+ * indistinguishable — and the most common line, "The selected route could not
+ * compile its immutable analytical plan", is the DEFAULT for anything
+ * unclassified. The origin is decided at the throw site (see
+ * `analytical-error.ts`), so the card can finally say which of them happened.
+ */
+const ASK_FAILURE_PRESENTATION: Record<string, { title: string; hint: string }> = {
+  warehouse: {
+    title: 'The warehouse rejected the query',
+    hint: 'The SQL reached your warehouse and it refused. The message below is the driver\u2019s own.',
+  },
+  dql_compilation: {
+    title: 'DQL could not build a reusable block',
+    hint: 'The query itself is fine \u2014 only saving this answer as a block is affected.',
+  },
+  governance_gate: {
+    title: 'DQL stopped this before running it',
+    hint: 'A governance check refused the query, so it never reached the warehouse.',
+  },
+  retrieval_gap: {
+    title: 'DQL could not confirm this data exists',
+    hint: 'The relation was not in the inspected metadata. Refreshing the connection scope usually resolves it.',
+  },
+  ambiguity: {
+    title: 'One detail is missing',
+    hint: 'Answer the question above and DQL will continue.',
+  },
+  provider: {
+    title: 'The AI provider failed',
+    hint: 'Nothing was run. Retry, or check the provider in Settings.',
+  },
+  host: {
+    title: 'DQL hit an internal error',
+    hint: 'This is a defect in DQL. The detail below is what to report.',
+  },
+};
+
+/** The failure origin recorded on the run, defaulting to a warehouse error. */
+function askFailureOrigin(run: AgentRun): string {
+  for (const artifact of run.artifacts ?? []) {
+    const payload = payloadOf(artifact) as { warehouseFailure?: { origin?: unknown } } | undefined;
+    const origin = payload?.warehouseFailure?.origin;
+    if (typeof origin === 'string' && origin in ASK_FAILURE_PRESENTATION) return origin;
+  }
+  return 'warehouse';
+}
+
+/**
+ * A failure the user can act on: what happened, in whose words, and what to try.
+ */
+function AskFailureCard({ run, detail, t }: { run: AgentRun; detail: string; t: Theme }): JSX.Element {
+  const origin = askFailureOrigin(run);
+  const presentation = ASK_FAILURE_PRESENTATION[origin] ?? ASK_FAILURE_PRESENTATION.warehouse;
+  return (
+    <div
+      data-followup="answer"
+      style={{
+        display: 'flex', flexDirection: 'column', gap: 6,
+        padding: '11px 13px', borderRadius: 9,
+        border: `1px solid ${t.error}33`, background: `${t.error}0d`,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+        <ShieldAlert size={13} color={t.error} style={{ flexShrink: 0 }} />
+        <span style={{ fontSize: 12.5, fontWeight: 700, color: t.textPrimary }}>{presentation.title}</span>
+      </div>
+      <div style={{ fontSize: 12.5, lineHeight: 1.6, color: t.textSecondary, wordBreak: 'break-word' }}>
+        {cleanPresentationText(detail)}
+      </div>
+      <div style={{ fontSize: 11.5, lineHeight: 1.5, color: t.textMuted }}>{presentation.hint}</div>
+    </div>
+  );
+}
+
+/**
+ * The most specific failure text a run carries.
+ *
+ * Preference order matters: `warehouseFailure.redactedMessage` is the producer's
+ * own words, `run.summary` is the safe headline plus its diagnostic, and
+ * `diagnosticReceipt.failure.message` is the bare per-code headline — the least
+ * informative of the three and identical across every unclassified failure.
+ */
+function askFailureDetail(run: AgentRun): string | undefined {
+  for (const artifact of run.artifacts ?? []) {
+    const payload = payloadOf(artifact) as {
+      warehouseFailure?: { redactedMessage?: unknown; diagnostic?: unknown };
+      executionError?: unknown;
+    } | undefined;
+    const failure = payload?.warehouseFailure;
+    const specific = [failure?.redactedMessage, failure?.diagnostic, payload?.executionError]
+      .find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+    if (specific) return specific;
+  }
+  return run.summary || run.diagnosticReceipt?.failure?.message;
 }

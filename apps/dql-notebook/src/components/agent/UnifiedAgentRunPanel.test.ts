@@ -974,3 +974,69 @@ describe('a refusal is still inspectable', () => {
     expect(hasContract({ sql: 'select 1', result: { columns: [], rows: [] } })).toBe(false);
   });
 });
+
+/**
+ * Every failure used to render as one grey paragraph, so a warehouse rejection,
+ * a governance refusal and a DQL block-compile problem looked identical — and
+ * the most common line, "could not compile its immutable analytical plan", is
+ * the DEFAULT for anything unclassified. The card keys off the origin recorded
+ * at the throw site.
+ */
+describe('failure card origin and detail', () => {
+  let askFailureOrigin: typeof UnifiedAgentRunPanelModule.askFailureOrigin;
+  let askFailureDetail: typeof UnifiedAgentRunPanelModule.askFailureDetail;
+  let ASK_FAILURE_PRESENTATION: typeof UnifiedAgentRunPanelModule.ASK_FAILURE_PRESENTATION;
+
+  beforeAll(async () => {
+    vi.stubGlobal('window', { location: { origin: 'http://localhost' } });
+    const module = await import('./UnifiedAgentRunPanel');
+    askFailureOrigin = module.askFailureOrigin;
+    askFailureDetail = module.askFailureDetail;
+    ASK_FAILURE_PRESENTATION = module.ASK_FAILURE_PRESENTATION;
+  });
+
+  function runWith(payload: Record<string, unknown>, extra: Record<string, unknown> = {}) {
+    return {
+      id: 'r', question: 'q', summary: 'safe headline. real cause from summary',
+      artifacts: [{ id: 'a', kind: 'answer', title: 'Answer', payload }],
+      ...extra,
+    } as never;
+  }
+
+  it('reads the origin recorded on the run', () => {
+    for (const origin of ['warehouse', 'dql_compilation', 'governance_gate', 'retrieval_gap', 'provider', 'host']) {
+      expect(askFailureOrigin(runWith({ warehouseFailure: { origin } }))).toBe(origin);
+    }
+  });
+
+  it('falls back to warehouse for an unknown or missing origin', () => {
+    expect(askFailureOrigin(runWith({}))).toBe('warehouse');
+    expect(askFailureOrigin(runWith({ warehouseFailure: { origin: 'not_a_real_origin' } }))).toBe('warehouse');
+  });
+
+  it('gives every origin its own title and guidance', () => {
+    const titles = Object.values(ASK_FAILURE_PRESENTATION).map((p) => p.title);
+    expect(new Set(titles).size).toBe(titles.length);
+    expect(Object.values(ASK_FAILURE_PRESENTATION).every((p) => p.hint.trim().length > 0)).toBe(true);
+  });
+
+  // A block-compile failure happens AFTER the query ran, so it must not read as
+  // a query failure.
+  it('does not describe a DQL block failure as a query failure', () => {
+    const p = ASK_FAILURE_PRESENTATION.dql_compilation;
+    expect(p.title).not.toMatch(/warehouse|rejected/i);
+    expect(p.hint).toMatch(/query itself is fine/i);
+  });
+
+  it('prefers the producer message over the canned headline', () => {
+    const detail = askFailureDetail(runWith({
+      warehouseFailure: { origin: 'warehouse', redactedMessage: 'Binder Error: no such column: amt' },
+    }, { diagnosticReceipt: { failure: { message: 'could not compile its immutable analytical plan' } } }));
+    expect(detail).toBe('Binder Error: no such column: amt');
+  });
+
+  it('falls back through executionError, then summary', () => {
+    expect(askFailureDetail(runWith({ executionError: 'exec blew up' }))).toBe('exec blew up');
+    expect(askFailureDetail(runWith({}))).toBe('safe headline. real cause from summary');
+  });
+});
