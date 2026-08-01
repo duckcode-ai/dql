@@ -3410,10 +3410,15 @@ function ExecutableDqlResult({
     setAddingFilter(true);
     setError(null);
   };
-  const addResultFilter = () => {
+  const addResultFilter = async () => {
     try {
-      const added = addAskResultFilter(activeArtifact, result, filterColumn, filterValue);
-      setActiveArtifact(added.artifact);
+      // A generated SQL answer needs a real dialect parse to place the
+      // predicate, so the server owns that edit. A semantic block binds to a
+      // declared dimension and stays local.
+      const added = activeArtifact.kind === 'sql_block'
+        ? await api.addDqlArtifactResultFilter(activeArtifact, result.columns, filterColumn, filterValue)
+        : addAskResultFilter(activeArtifact, result, filterColumn, filterValue);
+      setActiveArtifact(added.artifact as typeof activeArtifact);
       setParameters(added.artifact.parameters ?? []);
       setValues((current) => ({ ...current, ...(added.artifact.parameterValues ?? {}) }));
       setAddingFilter(false);
@@ -3487,7 +3492,7 @@ function ExecutableDqlResult({
                   ))}
                 </datalist>
               </label>
-              <button type="button" onClick={addResultFilter} style={{ ...smallButtonStyle(t), color: t.accent }}>Add input</button>
+              <button type="button" onClick={() => { void addResultFilter(); }} style={{ ...smallButtonStyle(t), color: t.accent }}>Add input</button>
               <button type="button" onClick={() => setAddingFilter(false)} style={smallButtonStyle(t)}>Cancel</button>
             </div>
           ) : null}

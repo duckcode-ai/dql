@@ -54,6 +54,15 @@ export interface DqlArtifactReference {
   compiledSql?: string;
   /** Exact execution contract used for the displayed result. */
   executionReceipt?: DqlArtifactExecutionReceipt;
+  /**
+   * Result columns that may safely be promoted to a runtime filter input.
+   *
+   * Computed server-side from the executed SQL, because deciding this needs a
+   * real dialect parse: only plain source columns qualify, never aggregate
+   * outputs. Present on generated `sql_block` answers; semantic blocks derive
+   * their own candidates from `dimensions`.
+   */
+  filterableColumns?: Array<{ column: string; predicateTarget: string }>;
 }
 
 export function normalizeDqlArtifactReference(value: unknown): DqlArtifactReference | undefined {
@@ -79,6 +88,7 @@ export function normalizeDqlArtifactReference(value: unknown): DqlArtifactRefere
     trustState: normalizeDqlArtifactTrustState(record.trustState),
     compiledSql: cleanString(record.compiledSql),
     executionReceipt: normalizeExecutionReceipt(record.executionReceipt),
+    filterableColumns: normalizeFilterableColumns(record.filterableColumns),
     ...(limit === undefined ? {} : { limit }),
   };
 }
@@ -90,6 +100,17 @@ export function normalizeDqlArtifactReference(value: unknown): DqlArtifactRefere
  */
 function executableText(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+function normalizeFilterableColumns(value: unknown): DqlArtifactReference['filterableColumns'] {
+  if (!Array.isArray(value)) return undefined;
+  const out = value.flatMap((entry) => {
+    const record = objectRecord(entry);
+    const column = cleanString(record?.column);
+    const predicateTarget = cleanString(record?.predicateTarget);
+    return column && predicateTarget ? [{ column, predicateTarget }] : [];
+  });
+  return out.length > 0 ? out : undefined;
 }
 
 function normalizeExecutionReceipt(value: unknown): DqlArtifactExecutionReceipt | undefined {

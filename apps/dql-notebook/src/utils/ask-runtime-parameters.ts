@@ -40,6 +40,19 @@ export function askResultFilterCandidates(
   artifact: DqlArtifactReference,
   result: QueryResult,
 ): AskResultFilterCandidate[] {
+  // A GENERATED SQL answer gets its candidates from the server, which parsed the
+  // executed statement and kept only plain source columns — an aggregate output
+  // would need HAVING, whose post-aggregation meaning is not what picking a
+  // column off the table implies. The browser deliberately does not re-derive
+  // this; guessing it here is how a filter lands on the wrong query.
+  if (artifact.kind === 'sql_block') {
+    const columns = new Map(result.columns.map((column) => [column.toLowerCase(), column]));
+    return (artifact.filterableColumns ?? []).flatMap((candidate) => {
+      const column = columns.get(candidate.column.toLowerCase());
+      if (!column) return [];
+      return [{ column, field: candidate.predicateTarget, values: uniqueScalarValues(result.rows.map((row) => row[column])) }];
+    });
+  }
   if (artifact.kind !== 'semantic_block' || artifact.persistence !== 'transient') return [];
   const columns = new Map(result.columns.map((column) => [column.toLowerCase(), column]));
   const boundFields = new Set(

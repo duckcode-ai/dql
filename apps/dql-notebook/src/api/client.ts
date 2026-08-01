@@ -3399,6 +3399,26 @@ export const api = {
     };
   },
 
+  /**
+   * Promote a result column into a runtime filter input. The SQL edit is done
+   * on the server, where a real dialect parser can decide where the predicate
+   * may safely go.
+   */
+  async addDqlArtifactResultFilter(
+    artifact: DqlArtifactReference,
+    resultColumns: string[],
+    column: string,
+    value: unknown,
+  ): Promise<{ artifact: DqlArtifactReference; parameterName: string }> {
+    const raw = await request<any>('/api/dql/artifacts/add-filter', {
+      method: 'POST',
+      body: JSON.stringify({ artifact, resultColumns, column, value }),
+    });
+    const normalized = normalizeDqlArtifactReference(raw?.artifact);
+    if (!normalized) throw new Error('Adding the filter input returned an invalid artifact contract.');
+    return { artifact: normalized, parameterName: String(raw?.parameterName ?? column) };
+  },
+
   async invokeDqlArtifact(
     artifact: DqlArtifactReference,
     parameters: Record<string, unknown>,

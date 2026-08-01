@@ -302,6 +302,7 @@ import {
   withAnalyticalErrorOriginSync,
   type AnalyticalErrorStage,
 } from '@duckcodeailabs/dql-agent';
+import { addSqlResultFilter, filterableResultColumns, replaceBlockStudioSql } from './sql-result-filter.js';
 import { gatherProposeEnrichment } from './propose-enrich.js';
 import { handleAppsApi, proposeAppAiBuild, recommendVisualization } from './apps-api.js';
 import {
@@ -4291,7 +4292,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     executedSql: string,
     seed: DqlArtifactReference | undefined,
     warnings: string[],
+    resultColumns: string[] = [],
+    dialect = 'duckdb',
   ): DqlArtifactReference | undefined => {
+    // Which result columns the user may promote to a filter input. Decided here
+    // because it needs a real dialect parse of the SQL that actually ran.
+    const filterableColumns = resultColumns.length > 0
+      ? filterableResultColumns(executedSql, resultColumns, dialect)
+      : [];
+    const withCandidates = <T extends DqlArtifactReference>(artifact: T): T => (
+      filterableColumns.length > 0 ? { ...artifact, filterableColumns } : artifact
+    );
     let artifact: DqlArtifactReference;
     try {
       artifact = generatedSqlArtifactContract(question, sql, seed);
@@ -4314,23 +4325,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         // parameter-input surface needs the list in order to ASK for them —
         // dropping it would leave the user a review-required block with no way
         // to see, or supply, what it wants.
-        return {
+        return withCandidates({
           ...artifact,
           trustState: 'review_required',
           compiledSql: executedSql,
           ...(invocation.parameters.length > 0 ? { parameters: invocation.parameters } : {}),
           ...(Object.keys(invocation.values).length > 0 ? { parameterValues: invocation.values } : {}),
-        };
+        });
       }
-      return {
+      return withCandidates({
         ...artifact,
         compiledSql: executedSql,
         ...(invocation.parameters.length > 0 ? { parameters: invocation.parameters } : {}),
         ...(Object.keys(invocation.values).length > 0 ? { parameterValues: invocation.values } : {}),
-      };
+      });
     } catch (error) {
       warnings.push(`The reusable DQL block for this answer needs review before reuse: ${apiErrorMessage(error)}`);
-      return { ...artifact, trustState: 'review_required', compiledSql: executedSql };
+      return withCandidates({ ...artifact, trustState: 'review_required', compiledSql: executedSql });
     }
   };
 
@@ -4372,7 +4383,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const rows = truncated ? normalized.rows.slice(0, rowBound) : normalized.rows;
 
     const warnings: string[] = [];
-    const artifact = buildVerifiedGeneratedArtifact(question, trimmed, bounded.sql, seed, warnings);
+    const artifact = buildVerifiedGeneratedArtifact(
+      question, trimmed, bounded.sql, seed, warnings, normalized.columns, activeConnection.driver,
+    );
     return {
       columns: normalized.columns,
       rows,
@@ -13984,6 +13997,58 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
       res.writeHead(200, { 'Content-Type': contentTypeFor(filePath) });
       res.end(readFileSync(filePath));
+      return;
+    }
+
+    /**
+     * Promote a RESULT COLUMN into a runtime filter input on a generated answer.
+     *
+     * The SQL edit happens here, not in the browser: deciding where a predicate
+     * may go needs a real dialect parse, and shipping a SQL parser to the client
+     * to guess at it is exactly how a filter ends up silently attached to the
+     * wrong query. The client sends a column; it gets back an artifact.
+     */
+    if (req.method === 'POST' && path === '/api/dql/artifacts/add-filter') {
+      try {
+        const body = await readJSON(req);
+        const artifact = normalizeDqlArtifactReference(body.artifact);
+        const column = typeof body.column === 'string' ? body.column.trim() : '';
+        const value = body.value;
+        const resultColumns = Array.isArray(body.resultColumns)
+          ? body.resultColumns.filter((entry: unknown): entry is string => typeof entry === 'string')
+          : [];
+        if (!artifact) throw new Error('A DQL artifact is required to add a filter input.');
+        if (!column) throw new Error('Choose a result column to filter on.');
+        if (value === undefined || value === null || String(value).trim() === '') {
+          throw new Error('Choose a default filter value before adding the input.');
+        }
+        const sql = extractBlockStudioSql(artifact.source);
+        if (!sql) throw new Error('This answer has no editable SQL to filter.');
+
+        const activeConnection = requireActiveConnection();
+        const existingNames = (artifact.parameters ?? []).map((parameter) => parameter.name);
+        const added = addSqlResultFilter(sql, resultColumns, column, existingNames, activeConnection.driver);
+        const source = replaceBlockStudioSql(artifact.source, added.sql, added.parameterName, value);
+        // Re-parse so the returned contract is what the block ACTUALLY declares,
+        // rather than what this endpoint believes it wrote.
+        const invocation = prepareBlockInvocation({ source, surface: 'ask_ai' });
+        if (invocation.errors.length > 0) throw new Error(invocation.errors.join(' '));
+
+        const { executionReceipt: _receipt, compiledSql: _compiled, ...unexecuted } = artifact;
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          artifact: {
+            ...unexecuted,
+            source,
+            parameters: invocation.parameters,
+            parameterValues: { ...(artifact.parameterValues ?? {}), [added.parameterName]: value },
+          },
+          parameterName: added.parameterName,
+        }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: apiErrorMessage(error) }));
+      }
       return;
     }
 
