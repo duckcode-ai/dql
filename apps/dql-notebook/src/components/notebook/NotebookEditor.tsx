@@ -33,6 +33,7 @@ import {
   useOpenAnswerInNotebook,
 } from "../../utils/answer-to-notebook";
 import { extractSqlFromText } from "../../utils/block-studio";
+import { useQueryExecution } from "../../hooks/useQueryExecution";
 
 interface NotebookEditorProps {
   onOpenFile: (file: NotebookFile) => void;
@@ -350,6 +351,8 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
     [aiSourceCellId, datasets, dispatch],
   );
 
+  const { executeCell } = useQueryExecution();
+
   const replaceSelectedCellFromAi = useCallback(
     (payload: InsertDqlPayload) => {
       if (!aiSourceCellId) return;
@@ -399,8 +402,17 @@ export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorPr
         },
       });
       focusInsertedNotebookCell(aiSourceCellId);
+      // An AI repair that lands as an unrun cell has not fixed anything yet —
+      // the user still has to press run to find out whether it worked. When the
+      // fix arrives without a result of its own, run it, the same way
+      // "Format & Run" does. The 80ms tick lets the dispatched cell reach the
+      // state ref that `executeCell` reads.
+      if (!payload.result) {
+        const cellId = aiSourceCellId;
+        setTimeout(() => { void executeCell(cellId); }, 80);
+      }
     },
-    [aiSourceCellId, dispatch],
+    [aiSourceCellId, dispatch, executeCell],
   );
 
   const askFromHistory = useCallback((run: NotebookResearchRun) => {
@@ -806,7 +818,12 @@ function NotebookAiDrawer({
           onReplaceDql={sourceCell ? onReplaceDql : undefined}
           answerFirstCards
           insertDqlActionLabel="Add to notebook"
-          replaceDqlActionLabel={sourceCell ? 'Replace selected cell' : undefined}
+          replaceDqlActionLabel={sourceCell
+            // The button both replaces AND runs, so it has to say so. Opened
+            // from a cell error it is the repair itself, and naming it that
+            // way is the difference between "a suggestion" and "the fix".
+            ? (autoAsk ? 'Apply fix & run' : 'Replace cell & run')
+            : undefined}
           onOpenBlock={(path, name) => { void openBlockInStudio(path, name ?? path); }}
           onOpenResearch={(id, path) => { void onOpenResearch(id, path); }}
         />
