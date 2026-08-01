@@ -14,7 +14,7 @@ import {
   buildRowBoundedSql,
   extractBlockStudioSql,
   maskDqlStringContents,
-  slimAgentRunForHistory,
+  slimAgentRunForTransport,
   parseBlockStudioArrayField,
   parseBlockStudioStringField,
   buildExploratoryJoinProbeSql,
@@ -6707,7 +6707,7 @@ describe('block field parsing ignores content inside string literals', () => {
  * The projection drops duplicates only. Nothing is truncated, and the complete
  * record stays available from `GET /api/agent-runs/:id`.
  */
-describe('slimAgentRunForHistory', () => {
+describe('slimAgentRunForTransport', () => {
   function runWithDuplicatedDiagnostics() {
     const bulk = { rows: Array.from({ length: 400 }, (_, i) => ({ id: i, value: `v${i}` })) };
     const receipt = { version: 1, runId: 'r1', failure: { message: 'the real cause' }, steps: [bulk], artifacts: [bulk] };
@@ -6723,7 +6723,7 @@ describe('slimAgentRunForHistory', () => {
 
   it('cuts the payload dramatically without touching what renders', () => {
     const run = runWithDuplicatedDiagnostics();
-    const slim = slimAgentRunForHistory(run);
+    const slim = slimAgentRunForTransport(run);
     const before = JSON.stringify(run).length;
     const after = JSON.stringify(slim).length;
     expect(after).toBeLessThan(before * 0.3);
@@ -6733,12 +6733,12 @@ describe('slimAgentRunForHistory', () => {
   });
 
   it('keeps the failure message the UI reads', () => {
-    const slim = slimAgentRunForHistory(runWithDuplicatedDiagnostics());
+    const slim = slimAgentRunForTransport(runWithDuplicatedDiagnostics());
     expect((slim.diagnosticReceipt as unknown as { failure?: { message?: string } })?.failure?.message).toBe('the real cause');
   });
 
   it('drops only duplicates: nested receipt steps/artifacts, step artifacts, unread considered', () => {
-    const slim = slimAgentRunForHistory(runWithDuplicatedDiagnostics());
+    const slim = slimAgentRunForTransport(runWithDuplicatedDiagnostics());
     const receipt = slim.diagnosticReceipt as unknown as Record<string, unknown>;
     expect(receipt.steps).toBeUndefined();
     expect(receipt.artifacts).toBeUndefined();
@@ -6747,7 +6747,7 @@ describe('slimAgentRunForHistory', () => {
   });
 
   it('keeps small event payloads and omits only oversized ones', () => {
-    const slim = slimAgentRunForHistory(runWithDuplicatedDiagnostics());
+    const slim = slimAgentRunForTransport(runWithDuplicatedDiagnostics());
     const [small, big] = slim.events as unknown as Array<{ payload?: Record<string, unknown> }>;
     expect(small.payload).toEqual({ ok: true });
     expect(big.payload).toMatchObject({ omitted: 'oversized' });

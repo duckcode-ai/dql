@@ -1069,7 +1069,8 @@ function recordConversationTurn(store: ConversationStore | null, threadId: strin
 }
 
 /**
- * Presentation projection of a stored run, for thread history.
+ * Presentation projection of a run, for anything that SHIPS it — thread history
+ * and the live SSE stream alike.
  *
  * A stored run is dominated by DUPLICATED diagnostics rather than content. On a
  * real 2.4 MB run: `diagnosticReceipt` is held twice — once top-level and once
@@ -1082,7 +1083,7 @@ function recordConversationTurn(store: ConversationStore | null, threadId: strin
  * unread `considered` block are dropped. The complete record stays available
  * from the existing `GET /api/agent-runs/:id` run-state route.
  */
-export function slimAgentRunForHistory(run: AgentRun): AgentRun {
+export function slimAgentRunForTransport(run: AgentRun): AgentRun {
   const slimReceipt = (receipt: unknown): unknown => {
     const record = agentRunRecord(receipt);
     if (!record) return receipt;
@@ -7081,7 +7082,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-answer-delta', { runId: parsed.request!.runId, delta });
             });
             recordConversationTurn(conversationStore, parsed.request.threadId, run);
-            writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-complete', run);
+            // The terminal frame carried the whole stored run — 2.4 MB on a real
+            // question, of which the renderable part was ~3 KB. The rest was the
+            // same artifacts repeated four times over. The client renders from
+            // the projection and fetches the full record from the run-state
+            // route only if something needs it.
+            writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-complete', slimAgentRunForTransport(run));
             res.end();
             return;
           }
@@ -8320,7 +8326,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               // re-serialize and ship before the sidebar could draw — the
               // reported ~10s load. `GET /api/agent-runs/:id` serves the full
               // record when the inspector actually needs it.
-              return run ? [slimAgentRunForHistory(run)] : [];
+              return run ? [slimAgentRunForTransport(run)] : [];
             });
             res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
             res.end(serializeJSON({
