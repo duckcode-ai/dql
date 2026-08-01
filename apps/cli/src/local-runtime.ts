@@ -4309,7 +4309,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           : undefined;
       if (divergence) {
         warnings.push(`The reusable DQL block for this answer needs review before reuse: ${divergence}`);
-        return { ...artifact, trustState: 'review_required', compiledSql: executedSql };
+        // Keep the declared parameter contract even when the block cannot run
+        // as-is. This branch is precisely "it still needs values for X", so the
+        // parameter-input surface needs the list in order to ASK for them —
+        // dropping it would leave the user a review-required block with no way
+        // to see, or supply, what it wants.
+        return {
+          ...artifact,
+          trustState: 'review_required',
+          compiledSql: executedSql,
+          ...(invocation.parameters.length > 0 ? { parameters: invocation.parameters } : {}),
+          ...(Object.keys(invocation.values).length > 0 ? { parameterValues: invocation.values } : {}),
+        };
       }
       return {
         ...artifact,
