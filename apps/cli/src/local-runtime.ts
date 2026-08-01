@@ -4392,8 +4392,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     const bounded = buildRowBoundedSql(prepared.sql, rowBound, activeConnection.driver);
     const app = loadRuntimeApp(projectRoot, activePersonaAppId());
-    const sourceDomain = seed?.source?.match(/\bdomain\s*=\s*"([^"]+)"/i)?.[1];
-    assertAppAccess({ app, domain: sourceDomain ?? app?.domain, level: 'execute' });
+    // Generated SQL is governed as 'uncategorized' unless its seed declares a
+    // domain — the same value `generatedSqlArtifactContract` stamps into the
+    // block source. Falling through to `app.domain` instead would evaluate the
+    // policy against the app's OWN domain and could allow a query the previous
+    // release denied; a governance boundary must not move as a side effect.
+    const sourceDomain = seed?.source?.match(/\bdomain\s*=\s*"([^"]+)"/i)?.[1] ?? 'uncategorized';
+    assertAppAccess({ app, domain: sourceDomain, level: 'execute' });
 
     // A semantic query the loop already compiled (MetricFlow / dbt Cloud) must
     // execute through its pinned target binding, not as loose SQL.

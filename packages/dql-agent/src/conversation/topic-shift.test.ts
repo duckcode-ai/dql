@@ -71,19 +71,28 @@ describe('topic shift clears carried context', () => {
     }
   });
 
-  // An unreadable question is not evidence that the user stayed on topic.
-  it('treats a question the planner cannot read as a new topic unless it points back', () => {
+  // A short fragment the planner cannot read is the MOST COMMON follow-up shape.
+  // Treating those as a new topic threw away the measure and timeframe the
+  // follow-up depends on — which is how a MetricFlow query lost `metric_time`.
+  // Preserving context is the safer default: a stale carry gives a wrong-ish
+  // answer the user can redirect, a dropped carry breaks the follow-up outright.
+  it('keeps context for short follow-up fragments the planner cannot read', () => {
     const { store, threadId } = threadWithAnsweredTurn();
+    for (const question of [
+      'and by month?', 'now by region', 'what about 2023', 'show monthly', 'by month', 'also weekly',
+    ]) {
+      const snapshot = buildConversationSnapshot(store, threadId, { question })!;
+      expect(snapshot.topicRelation, question).not.toBe('shift');
+      expect(JSON.stringify(snapshot.workingState ?? {}), question).toContain('beverage');
+    }
+  });
 
-    const unrelated = buildConversationSnapshot(store, threadId, {
-      question: 'zzqq widget frobnication',
+  it('still shifts on a self-contained new question', () => {
+    const { store, threadId } = threadWithAnsweredTurn();
+    const snapshot = buildConversationSnapshot(store, threadId, {
+      question: 'How many warehouse shipments were delayed last quarter?',
     })!;
-    expect(unrelated.topicRelation).toBe('shift');
-
-    const deictic = buildConversationSnapshot(store, threadId, {
-      question: 'show me the same for them',
-    })!;
-    expect(deictic.topicRelation).not.toBe('shift');
+    expect(snapshot.topicRelation).toBe('shift');
   });
 });
 

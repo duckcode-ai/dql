@@ -359,13 +359,19 @@ function classifyQuestionRelation(state: ConversationWorkingState, question: str
     ...plan.metricTerms.map(normalizeTerm),
   ].filter(Boolean));
   const topicTerms = new Set((state.topicKey ?? '').split('|').filter(Boolean));
-  // A question the planner could not read is NOT evidence that the user stayed
-  // on topic. Calling it a continuation carried the previous question's
-  // entities, measures and filters onto an unrelated ask. Unless the question
-  // is clearly deictic ("break that down", "same for EMEA"), treat an unreadable
-  // question as a new topic and answer it fresh.
+  // An unreadable question DEFAULTS TO CONTINUATION.
+  //
+  // A short fragment — "and by month?", "now by region", "what about 2023" — is
+  // the single most common follow-up shape, and the analysis planner reads none
+  // of it. Treating those as a new topic threw away the measure and timeframe
+  // the follow-up depends on, which is how a MetricFlow query ended up missing
+  // `metric_time` and how generated SQL lost the relations it needed.
+  //
+  // Only a question that plainly stands on its own is a shift. Preserving
+  // context is the safer default: a stale carry produces a wrong-ish answer the
+  // user can redirect, while a dropped carry breaks the follow-up outright.
   if (terms.size === 0) {
-    return referencesPriorTurn(question) ? 'continuation' : 'shift';
+    return standsAloneAsNewQuestion(question) ? 'shift' : 'continuation';
   }
   if (topicTerms.size === 0) return 'continuation';
   let shared = 0;
@@ -380,22 +386,38 @@ function classifyQuestionRelation(state: ConversationWorkingState, question: str
     return frameTerms.size > 0 && hit / (terms.size + frameTerms.size - hit) >= 0.5;
   });
   if (returned) return 'return';
-  // A question carrying no measure, dimension or entity is only a "refinement"
-  // if it actually points back at the previous turn. Otherwise it is simply a
-  // question the planner's vocabulary does not cover, and treating it as a
-  // refinement let it inherit — and reuse the entire context pack of — an
-  // unrelated prior question.
+  // A question carrying no measure, dimension or entity stays a REFINEMENT, as
+  // it always has. The danger this used to feed — a refinement silently reusing
+  // an unrelated question's whole context pack, route decision included — is now
+  // blocked at its real source by `isFilterOnlyRefinement`, which requires both
+  // plans to carry actual signal. Narrowing the classifier as well was belt and
+  // braces that cost genuine follow-ups their context.
   const onlyRefinement = plan.dimensionTerms.length === 0 && plan.metricTerms.length === 0 && plan.entities.length === 0;
-  return onlyRefinement && referencesPriorTurn(question) ? 'refinement' : 'shift';
+  return onlyRefinement ? 'refinement' : 'shift';
 }
 
 /**
- * Does the question explicitly point at what came before? Deictic reference is
- * the one reliable signal that the user means "carry the previous context",
- * independent of whether the analysis planner recognised any of the vocabulary.
+ * A question that reads as a complete, self-contained request rather than a
+ * fragment continuing the last one. Deliberately demanding: it must open with an
+ * interrogative or command verb AND carry enough words to stand alone AND not
+ * point back at the previous turn. "How many warehouse shipments were delayed?"
+ * qualifies; "what about 2023", "show monthly" and "by month" do not.
+ */
+function standsAloneAsNewQuestion(question: string): boolean {
+  const normalized = question.replace(/\s+/g, ' ').trim();
+  const words = normalized.split(' ').filter(Boolean);
+  if (words.length < 5) return false;
+  if (referencesPriorTurn(normalized)) return false;
+  return /^(who|what|which|when|where|why|how|show|list|give|count|find|compare|calculate)\b/i.test(normalized);
+}
+
+/**
+ * Does the question explicitly point at what came before? Deictic and additive
+ * connectives are both reliable signals that the user means "carry the previous
+ * context", independent of whether the planner recognised any vocabulary.
  */
 function referencesPriorTurn(question: string): boolean {
-  return /\b(it|its|that|this|those|these|them|their|there|same|above|previous|prior|instead|also|too)\b/i.test(question);
+  return /\b(it|its|that|this|those|these|them|their|there|same|above|previous|prior|instead|also|too|and|now|next|then|plus|about)\b/i.test(question);
 }
 
 function snapshotTurn(turn: ConversationTurn): ConversationSnapshotTurn {
