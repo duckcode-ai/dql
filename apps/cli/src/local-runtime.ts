@@ -6041,13 +6041,36 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       }
       const raw = Buffer.isBuffer(body) ? body : Buffer.from(body as string, 'utf8');
       streaming = true;
+
+      // VALIDATOR CACHING. API responses carried no ETag or Last-Modified, so a
+      // browser could never revalidate: every panel switch re-downloaded every
+      // read in full. An ETag with `Cache-Control: no-cache` means the browser
+      // always ASKS but the server answers 304 with no body when nothing
+      // changed — freshness is unchanged, the bytes are not re-sent.
+      const cacheableRead = request.method === 'GET' && status === 200;
+      const etag = cacheableRead
+        ? `W/"${createHash('sha1').update(raw).digest('base64url')}"`
+        : undefined;
+      if (etag && String(request.headers['if-none-match'] ?? '') === etag) {
+        writeHead(304, {
+          ETag: etag,
+          'Cache-Control': headers['Cache-Control'] ?? 'no-cache',
+          Vary: 'Accept-Encoding, Origin',
+        } as never);
+        return end();
+      }
+      const validatorHeaders = etag
+        ? { ETag: etag, 'Cache-Control': headers['Cache-Control'] ?? 'no-cache' }
+        : {};
+
       if (raw.byteLength < MIN_COMPRESS_BYTES) {
-        writeHead(status, headers as never);
+        writeHead(status, { ...headers, ...validatorHeaders } as never);
         return end(raw);
       }
       const gz = gzipSync(raw);
       writeHead(status, {
         ...headers,
+        ...validatorHeaders,
         'Content-Encoding': 'gzip',
         'Content-Length': gz.byteLength,
         Vary: 'Accept-Encoding, Origin',
