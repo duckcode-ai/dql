@@ -7,7 +7,7 @@ and inspect lineage from source data to dashboard pages.
 
 For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
-## Current State (v1.12.3)
+## Current State (v1.12.10)
 
 DQL OSS is ready for local-first use cases:
 
@@ -52,6 +52,10 @@ DQL OSS is ready for local-first use cases:
 - Run Ask AI, Notebook AI, and Block AI through one durable orchestration
   lifecycle with canonical progress, failure diagnostics, history hydration,
   and explicit surface-specific artifact actions.
+- Prepare Ask AI and Notebook SQL through one target-bound execution gateway,
+  resolve physical source references before execution, isolate failed turns
+  from subsequent questions, and offer one bounded same-target repair action
+  without mutating the original attempt.
 - Keep conversation recaps inside the current AI surface, recognize common
   recap wording and typos without launching another data query, and summarize
   the latest substantive analytical turn instead of recursively summarizing a
@@ -154,7 +158,7 @@ The OSS release is intentionally local and single-user:
 - The notebook browser happy path needs a hard-gated Playwright suite before the
   project should be called GA.
 - The `PERF-001` enterprise-scale correctness fixture passes, but several
-  cold-start and warm-context latency budgets remain above target. The v1.12.3
+  cold-start and warm-context latency budgets remain above target. The v1.12.10
   release treats this as a disclosed OSS exception, not a GA performance claim.
 
 ## Next Priorities

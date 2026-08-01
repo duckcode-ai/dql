@@ -6,6 +6,45 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.12.10 - 2026-08-01
+
+### Smooth, bounded Ask AI query repair
+
+This patch removes the main execution-path differences that let a query fail in
+Ask AI even when the same analytical work could run in Notebook. Failed Ask
+turns now offer a clean, reviewable repair action without contaminating the
+context used by the user's next question.
+
+### Fixed
+
+- **Shared Ask and Notebook SQL preparation.** Both surfaces now use the same
+  execution preparation path for generated SQL and DQL-derived SQL, including
+  physical `source::` reference resolution and target-aware validation.
+- **Bounded one-click repair.** A failed read-only analytical query can create
+  one immutable derived repair attempt on the same execution target. DQL first
+  applies deterministic corrections, then permits at most one AI repair retry
+  instead of entering an open-ended regeneration loop.
+- **Failure isolation.** Rejected SQL and repair-only diagnostics are excluded
+  from the normal context for a following user question, so one bad turn does
+  not cause otherwise valid follow-up questions to inherit the same failure.
+- **Clean failure presentation.** Ask AI shows typed, concise failure states and
+  replaces the failed answer in place after a successful repair instead of
+  exposing internal blocker and parser noise as the primary result.
+- **Notebook behavior preserved.** Notebook keeps its existing review-first AI
+  correction flow while sharing the same preparation and execution boundary.
+
+### Verification
+
+- The synchronized release dry run passed all 22 workspace builds and all 41
+  workspace test tasks.
+- Full DQL Agent suite: 107 files and 1,290 tests passed.
+- Full CLI suite: 55 files passed with 678 tests passed and 3 skipped.
+- Full Notebook suite: 45 files and 204 tests passed.
+- All 4 Ask AI and Notebook execution-parity tests passed.
+- Built-CLI browser QA verified the repaired Ask AI experience.
+- All 19 npm packages report `version` and `latest` as `1.12.10`.
+- Fresh project-local and global CLI installs both report `dql 1.12.10`.
+
 ## v1.12.3 - 2026-07-30
 
 ### Durable Ask AI execution and faster Notebook navigation

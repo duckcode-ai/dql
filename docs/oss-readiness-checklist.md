@@ -162,7 +162,7 @@ template lives in `create-dql-app`; the example dbt project is external.
 ## Current Release Decision
 
 The OSS release correctness gates and published package smoke checks pass for
-`1.12.3`; npm `latest`, the repository manifests, and clean local/global CLI
+`1.12.10`; npm `latest`, the repository manifests, and clean local/global CLI
 installs resolve to the same version. The tracked `PERF-001` scale fixture has
 no route-parity, concept-resolution, certified-execution, or invented-ID
 failures, but several cold-start and warm-context latency budgets remain above
@@ -172,7 +172,7 @@ implementer-validated pending independent verification. The governed semantic
 path, target-bound execution, semantic source-integrity, bounded Snowflake
 runtime, resilient request handling, and Trust & Steps acceptance set remains
 implementer-validated pending an enterprise dbt Cloud and Snowflake replay.
-Maintainer approval records these conditions as disclosed `v1.12.3` OSS
+Maintainer approval records these conditions as disclosed `v1.12.10` OSS
 release exceptions; none is a GA performance claim.
 
 Validated release gates (re-run the browser smoke after the examples
