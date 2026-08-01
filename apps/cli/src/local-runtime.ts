@@ -296,6 +296,7 @@ import {
   type ReasoningEffort,
   loadAgentSemanticLayer,
   isTrustedConversationTurn,
+  resolveInternalRelationIds,
   analyticalError,
   type GroundingExpansionResult,
   type RuntimeSchemaTable,
@@ -14529,14 +14530,30 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ cellType: cell.type, result: null }));
           return;
         }
+        // DECODE, THEN VALIDATE. A leaked `source::db.schema.table` is an internal
+        // retrieval key whose suffix IS the physical relation, so rejecting the
+        // cell and asking the user (or another AI round trip) to repair it was
+        // busywork for a mechanical substitution. Anything still unresolvable
+        // after this — a BARE `source::orders`, which names no database or
+        // schema — genuinely cannot be decoded and still fails here.
+        let decodedSql = resolveInternalRelationIds(executableSql, EMPTY_SCHEMA_GROUNDING);
+        let bareResolution: Awaited<ReturnType<typeof resolveBareInternalRelationIds>> | null = null;
+        if (internalDqlRelationIdValidationError(decodedSql, 'x')) {
+          bareResolution = await resolveBareInternalRelationIds(decodedSql, executor, cellConnection);
+          decodedSql = bareResolution.sql;
+        }
         const internalRelationError = internalDqlRelationIdValidationError(
-          executableSql,
+          decodedSql,
           cell.type === 'dql' ? 'DQL query' : 'Notebook query',
+          // A probe that came back empty is PROOF the relation is not visible
+          // to this connection, so the refusal states that instead of sending
+          // the user to an AI repair that cannot conjure a missing table.
+          bareResolution ? { probed: true, ambiguous: bareResolution.ambiguous } : undefined,
         );
         if (internalRelationError) throw new DqlInternalRelationIdError(internalRelationError);
 
         const prepared = prepareLocalExecution(
-          executableSql,
+          decodedSql,
           cellConnection,
           projectRoot,
           projectConfig,
@@ -14605,7 +14622,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           tests: plan?.tests,
           result: normalized,
           executionTarget: executionTargetDescriptor(body as Record<string, unknown>),
-          compiledSql: semanticCompose?.compiled?.sql ?? executableSql,
+          // Report the statement that ACTUALLY ran. `executableSql` is the
+          // pre-decode text, so showing it would put a `source::` identity in
+          // front of the user that the warehouse never saw.
+          compiledSql: semanticCompose?.compiled?.sql ?? decodedSql,
           engine: semanticCompose?.compiled?.engine,
           ...(semanticExecution ? {
             semanticTrace: semanticExecution.semanticTrace,
@@ -17907,6 +17927,9 @@ function withAnalyticalCompilationOrigin<T>(stage: AnalyticalErrorStage, fn: () 
   return withAnalyticalErrorOriginSync({ origin: 'dql_compilation', stage }, fn);
 }
 
+/** No dbt grounding — decoding an internal id needs none for a qualified suffix. */
+const EMPTY_SCHEMA_GROUNDING = { tables: [], joinKeys: [], byKey: new Map() };
+
 export function clampAnalyticalRowBound(rowLimit: number): number {
   return Number.isFinite(rowLimit) ? Math.max(1, Math.min(10_000, Math.floor(rowLimit))) : 200;
 }
@@ -18480,10 +18503,22 @@ function readOnlySqlValidationError(sql: string, subject: string, dialect = 'duc
   return null;
 }
 
-function internalDqlRelationIdValidationError(sql: string, subject: string): string | null {
+function internalDqlRelationIdValidationError(
+  sql: string,
+  subject: string,
+  probe?: { probed: boolean; ambiguous: string[] },
+): string | null {
   const internalIds = internalRelationIdsInSql(stripSqlStringsAndComments(sql));
   if (internalIds.length === 0) return null;
-  return `${subject} contains internal DQL graph relation identifier${internalIds.length === 1 ? '' : 's'} ${internalIds.join(', ')}. Use the physical database.schema.table relation instead, or choose Ask AI to fix from the notebook error.`;
+  const plural = internalIds.length === 1 ? '' : 's';
+  const head = `${subject} contains internal DQL graph relation identifier${plural} ${internalIds.join(', ')}.`;
+  if (probe?.ambiguous.length) {
+    return `${head} ${probe.ambiguous.join(', ')} matched more than one schema in this connection, so the name alone does not identify a relation. Qualify it as database.schema.table.`;
+  }
+  if (probe?.probed) {
+    return `${head} DQL checked this connection and no relation with that name is visible to it. Qualify it as database.schema.table, or connect to the source that holds it.`;
+  }
+  return `${head} Use the physical database.schema.table relation instead, or choose Ask AI to fix from the notebook error.`;
 }
 
 function parseHintLessonInput(value: unknown): Partial<HintLesson> | undefined {
@@ -26528,6 +26563,64 @@ ${predicates.map((predicate) => `    ${predicate}`).join(' OR\n')}
   )
 ORDER BY table_schema, table_name, ordinal_position
 LIMIT 400`;
+}
+
+/**
+ * Resolve a BARE internal graph identity (`source::orders` — a name with no
+ * database or schema) against the warehouse.
+ *
+ * A qualified identity decodes mechanically, but a bare one carries no
+ * location, so the old behaviour was to reject the cell and hand the user an
+ * "Ask AI to fix" button. That was an LLM round trip for a lookup: the name is
+ * unambiguous whenever exactly one relation in the connection answers to it.
+ * Probe for it, and only refuse when the answer is genuinely zero or many —
+ * at which point the refusal can say which it was.
+ *
+ * Runs ONLY after a decode has already failed, so the happy path pays nothing.
+ */
+export async function resolveBareInternalRelationIds(
+  sql: string,
+  executor: QueryExecutor,
+  connection: ConnectionConfig,
+): Promise<{ sql: string; resolved: Array<{ from: string; to: string }>; ambiguous: string[] }> {
+  const bare = internalRelationIdsInSql(stripSqlStringsAndComments(sql))
+    .filter((id) => !id.slice(id.indexOf('::') + 2).includes('.'));
+  if (bare.length === 0) return { sql, resolved: [], ambiguous: [] };
+
+  const names = bare.map((id) => id.slice(id.indexOf('::') + 2));
+  const probeSql = buildNamedRelationProbeSql(names);
+  if (!probeSql) return { sql, resolved: [], ambiguous: [] };
+
+  let rows: Array<Record<string, unknown>> = [];
+  try {
+    const probe = await executor.executeQuery(probeSql, [], {}, connection);
+    rows = (probe?.rows ?? []) as Array<Record<string, unknown>>;
+  } catch {
+    // The probe is best-effort. A warehouse that cannot answer it leaves the
+    // identity unresolved, which is the same outcome as not probing at all.
+    return { sql, resolved: [], ambiguous: [] };
+  }
+
+  const resolved: Array<{ from: string; to: string }> = [];
+  const ambiguous: string[] = [];
+  let out = sql;
+  for (const id of bare) {
+    const name = id.slice(id.indexOf('::') + 2).toLowerCase();
+    const matches = new Set(
+      rows
+        .filter((row) => String(row.table_name ?? '').toLowerCase() === name)
+        .map((row) => `${String(row.table_schema ?? '')}.${String(row.table_name ?? '')}`),
+    );
+    if (matches.size !== 1) {
+      if (matches.size > 1) ambiguous.push(id);
+      continue;
+    }
+    const target = [...matches][0]!;
+    const idPattern = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`\\b${idPattern}`, 'g'), target);
+    resolved.push({ from: id, to: target });
+  }
+  return { sql: out, resolved, ambiguous };
 }
 
 export function buildRuntimeSchemaSearchSql(question: string): string {

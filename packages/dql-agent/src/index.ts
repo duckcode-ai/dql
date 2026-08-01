@@ -733,6 +733,7 @@ export {
   buildGroundingFromRuntimeRelations,
   renderGroundingForPrompt,
   resolveRelationsInSql,
+  resolveInternalRelationIds,
   validateSqlAgainstGrounding,
   internalRelationIdsInSql,
   relationKeys,

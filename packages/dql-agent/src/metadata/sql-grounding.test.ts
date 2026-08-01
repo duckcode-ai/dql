@@ -142,14 +142,50 @@ describe('sql-grounding', () => {
       ]);
     });
 
-    it('leaves an unresolved internal graph identity intact for fail-closed validation', () => {
+    /**
+     * REPORTED REPEATEDLY. The original rule only rewrote an internal identity
+     * when the grounding already proved the relation, so the bug looked fixed
+     * whenever retrieval happened to include the table and returned the moment
+     * it did not — and the leftover `source::` is rejected 100% of the time.
+     * A QUALIFIED suffix is the physical relation by construction.
+     */
+    it('strips a qualified internal identity even when retrieval never saw the table', () => {
       const grounding = buildSchemaGrounding(artifacts);
       const { sql, rewrites } = resolveRelationsInSql(
-        'SELECT * FROM source::private.unknown_orders',
+        'SELECT * FROM source::transformed_staging.semantic_models.metricflow_time_spine time_spine_src',
         grounding,
       );
 
-      expect(sql).toContain('source::private.unknown_orders');
+      expect(sql).toContain('FROM transformed_staging.semantic_models.metricflow_time_spine time_spine_src');
+      expect(sql).not.toContain('source::');
+      expect(rewrites).toEqual([{
+        from: 'source::transformed_staging.semantic_models.metricflow_time_spine',
+        to: 'transformed_staging.semantic_models.metricflow_time_spine',
+      }]);
+    });
+
+    it('strips every internal identity in one statement', () => {
+      const grounding = buildSchemaGrounding(artifacts);
+      const { sql } = resolveRelationsInSql(
+        'SELECT * FROM source::dev_kkondapaka_reporting.consumption_metrics.consumption_daily_metrics_detail d'
+        + ' JOIN source::transformed_staging.semantic_models.metricflow_time_spine t ON t.d = d.d',
+        grounding,
+      );
+      expect(sql).not.toContain('source::');
+      expect(sql).toContain('FROM dev_kkondapaka_reporting.consumption_metrics.consumption_daily_metrics_detail d');
+      expect(sql).toContain('JOIN transformed_staging.semantic_models.metricflow_time_spine t');
+    });
+
+    // A BARE identity carries no database or schema, so there is nothing to
+    // decode — the validator's complaint is the right outcome there.
+    it('leaves an unqualified internal graph identity intact for fail-closed validation', () => {
+      const grounding = buildSchemaGrounding(artifacts);
+      const { sql, rewrites } = resolveRelationsInSql(
+        'SELECT * FROM source::unknown_orders',
+        grounding,
+      );
+
+      expect(sql).toContain('source::unknown_orders');
       expect(rewrites).toEqual([]);
     });
 
@@ -267,5 +303,35 @@ describe('sql-grounding', () => {
       const { sql } = resolveRelationsInSql('SELECT order_id FROM order_items', grounding);
       expect(sql).toContain('FROM dev.order_items');
     });
+  });
+});
+
+/**
+ * The decisive case. A leaked `source::` identity survives precisely when
+ * retrieval came back thin — and an empty grounding used to make
+ * `resolveRelationsInSql` return immediately, before any decoding happened.
+ * That early return is why this bug kept reappearing.
+ */
+describe('internal identities are decoded even with no grounding at all', () => {
+  const EMPTY = { tables: [], joinKeys: [], byKey: new Map() };
+
+  it('strips qualified identities when the grounding is empty', () => {
+    const { sql, rewrites } = resolveRelationsInSql(
+      'SELECT * FROM source::transformed_staging.semantic_models.metricflow_time_spine t',
+      EMPTY as never,
+    );
+    expect(sql).not.toContain('source::');
+    expect(sql).toContain('FROM transformed_staging.semantic_models.metricflow_time_spine t');
+    expect(rewrites).toHaveLength(1);
+  });
+
+  it('still leaves a bare identity for the validator', () => {
+    const { sql } = resolveRelationsInSql('SELECT * FROM source::orders', EMPTY as never);
+    expect(sql).toContain('source::orders');
+  });
+
+  it('leaves ordinary SQL untouched when there is no grounding', () => {
+    const sqlText = 'SELECT a FROM db.schema.table t WHERE t.a > 1';
+    expect(resolveRelationsInSql(sqlText, EMPTY as never).sql).toBe(sqlText);
   });
 });

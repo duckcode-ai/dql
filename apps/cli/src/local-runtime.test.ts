@@ -22,6 +22,7 @@ import {
   buildAgentSchemaContext,
   buildRuntimeSchemaSearchSql,
   buildNamedRelationProbeSql,
+  resolveBareInternalRelationIds,
   buildDbtStatus,
   buildDbtParseArgs,
   buildProposeReadiness,
@@ -3599,10 +3600,15 @@ describe('notebook cell execution isolation (API-006, API-007, UI-009, E2E-014)'
         },
       });
 
+      // A BARE internal identity names no database or schema. DQL probes
+      // information_schema for the name; this fixture has no such relation, so
+      // the refusal stands — and now says the connection was actually checked
+      // rather than sending the user to an AI repair. (A QUALIFIED identity is
+      // decoded mechanically and runs — covered separately below.)
       const internalIdResponse = await executeCell(
         'cell_internal_id',
         'run_internal_id',
-        'SELECT value FROM source::dev.reporting.monthly_revenue',
+        'SELECT value FROM source::monthly_revenue',
       );
       expect(internalIdResponse.status).toBe(400);
       await expect(internalIdResponse.json()).resolves.toMatchObject({
@@ -3616,6 +3622,20 @@ describe('notebook cell execution isolation (API-006, API-007, UI-009, E2E-014)'
           },
         },
       });
+
+      /**
+       * REPORTED REPEATEDLY. A model leaks `source::db.schema.table` into SQL
+       * despite the prompt forbidding it. The suffix IS the physical relation,
+       * and DQL's own error already said "use the physical relation instead" —
+       * so rejecting the cell made the user (or another AI round trip) perform a
+       * substitution DQL can do itself. It is decoded, then run.
+       */
+      const qualifiedInternalId = await executeCell(
+        'cell_qualified_id',
+        'run_qualified_id',
+        'SELECT value FROM source::dev.reporting.monthly_revenue',
+      );
+      expect(qualifiedInternalId.status).toBe(200);
 
       const successfulResponse = await executeCell('cell_success', 'run_success', 'SELECT 2 AS value');
       expect(successfulResponse.status).toBe(200);
@@ -3662,7 +3682,10 @@ describe('notebook cell execution isolation (API-006, API-007, UI-009, E2E-014)'
         compiledSql: 'SELECT 2 AS value',
         executedSql: 'SELECT 2 AS value',
       });
-      expect(executeQuery).toHaveBeenCalledTimes(3);
+      // 5: the failed cell, the DECODED qualified internal id, the plain
+      // success, the SQL cell, and the information_schema probe that proves the
+      // bare internal id names nothing visible. The bare id itself is never run.
+      expect(executeQuery).toHaveBeenCalledTimes(5);
 
       const health = await fetch(`${base}/api/health`);
       expect(health.status).toBe(200);
@@ -4201,6 +4224,71 @@ describe('prepareLocalExecution', () => {
       projectRoot,
       {},
     )).toThrow(/target\/manifest\.json was not available/);
+  });
+});
+
+describe('resolveBareInternalRelationIds', () => {
+  // A QUALIFIED `source::db.schema.table` decodes without asking anyone. A BARE
+  // `source::orders` does not, and the old behaviour was to fail the cell and
+  // offer "Ask AI to fix" — an LLM round trip for what is a name lookup. The
+  // name is unambiguous whenever exactly one relation answers to it.
+  const executorWith = (rows: Array<Record<string, unknown>>) => ({
+    executeQuery: vi.fn(async () => ({ rows, columns: [], rowCount: rows.length })),
+  }) as never;
+  const connection = { name: 'default', driver: 'duckdb' } as never;
+
+  it('resolves a bare identity when exactly one relation answers to the name', async () => {
+    const out = await resolveBareInternalRelationIds(
+      'SELECT COUNT(*) FROM source::stg_orders',
+      executorWith([{ table_schema: 'main', table_name: 'stg_orders' }]),
+      connection,
+    );
+    expect(out.sql).toBe('SELECT COUNT(*) FROM main.stg_orders');
+    expect(out.resolved).toEqual([{ from: 'source::stg_orders', to: 'main.stg_orders' }]);
+    expect(out.ambiguous).toEqual([]);
+  });
+
+  it('refuses to guess when the name matches more than one schema', async () => {
+    const out = await resolveBareInternalRelationIds(
+      'SELECT 1 FROM source::orders',
+      executorWith([
+        { table_schema: 'main', table_name: 'orders' },
+        { table_schema: 'staging', table_name: 'orders' },
+      ]),
+      connection,
+    );
+    expect(out.sql).toContain('source::orders');
+    expect(out.ambiguous).toEqual(['source::orders']);
+  });
+
+  it('leaves the identity alone when the warehouse knows nothing about it', async () => {
+    const out = await resolveBareInternalRelationIds(
+      'SELECT 1 FROM source::nope',
+      executorWith([]),
+      connection,
+    );
+    expect(out.sql).toContain('source::nope');
+    expect(out.resolved).toEqual([]);
+    expect(out.ambiguous).toEqual([]);
+  });
+
+  it('never probes for an identity that already carries a schema', async () => {
+    const executor = executorWith([]);
+    const out = await resolveBareInternalRelationIds(
+      'SELECT 1 FROM source::db.main.orders',
+      executor,
+      connection,
+    );
+    expect((executor as unknown as { executeQuery: { mock: { calls: unknown[] } } }).executeQuery)
+      .not.toHaveBeenCalled();
+    expect(out.sql).toBe('SELECT 1 FROM source::db.main.orders');
+  });
+
+  it('survives a warehouse that cannot answer the probe', async () => {
+    const executor = { executeQuery: vi.fn(async () => { throw new Error('no information_schema'); }) } as never;
+    const out = await resolveBareInternalRelationIds('SELECT 1 FROM source::orders', executor, connection);
+    expect(out.sql).toBe('SELECT 1 FROM source::orders');
+    expect(out.resolved).toEqual([]);
   });
 });
 

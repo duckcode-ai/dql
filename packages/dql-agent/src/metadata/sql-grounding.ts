@@ -316,6 +316,54 @@ export function internalRelationIdsInSql(sql: string): string[] {
 }
 
 /**
+ * Rewrite internal graph identities (`source::`, `dbt::`, `semantic::`) in
+ * FROM/JOIN position to the physical relation they encode.
+ *
+ * These are retrieval keys, not SQL. Models copy them out of retrieved context
+ * despite explicit prompt instructions not to, and the read-only validator then
+ * rejects the whole query.
+ *
+ * The original rule was "rewrite ONLY when the suffix proves a relation in the
+ * grounding, otherwise leave it so the validator fails closed". That fails
+ * closed on the wrong axis: for a QUALIFIED identity the suffix IS the physical
+ * relation by construction, so leaving it does not protect anything — it just
+ * guarantees a rejection for any table retrieval happened not to include. The
+ * bug therefore looked fixed whenever the table was in context and returned the
+ * moment it was not.
+ *
+ * So: prefer the grounding (it can correct the qualification, and knows the
+ * `{{ ref() }}` form), and otherwise strip the prefix from a qualified suffix —
+ * decoding, not guessing. A BARE identity such as `source::orders` carries no
+ * database or schema, so it is still left alone: there the validator's complaint
+ * is genuinely the right outcome.
+ */
+export function resolveInternalRelationIds(
+  sql: string,
+  grounding: SchemaGrounding,
+  prefer: 'qualified' | 'ref' = 'qualified',
+  rewrites: Array<{ from: string; to: string }> = [],
+): string {
+  const internalPattern = /\b(from|join)\s+((?:source|dbt|semantic)::([a-zA-Z_][\w$]*(?:\s*\.\s*[a-zA-Z_][\w$]*){0,2}))/gi;
+  return sql.replace(
+    internalPattern,
+    (match, keyword: string, internalId: string, relationSuffix: string) => {
+      const normalizedSuffix = relationSuffix.replace(/\s*\.\s*/g, '.');
+      const table = lookupTable(normalizedSuffix, grounding);
+      if (table) {
+        const target = prefer === 'ref' && table.refForm ? table.refForm : table.qualifiedRelation;
+        rewrites.push({ from: internalId, to: target });
+        return `${keyword} ${target}`;
+      }
+      // Not in the grounding. A qualified suffix still names a real relation;
+      // an unqualified one does not, and is left for the validator.
+      if (!normalizedSuffix.includes('.')) return match;
+      rewrites.push({ from: internalId, to: normalizedSuffix });
+      return `${keyword} ${normalizedSuffix}`;
+    },
+  );
+}
+
+/**
  * Relation tokens that are QUERY-INTERNAL — CTE names and subquery aliases —
  * and therefore never physical relations, however much their names look like
  * one. Derived from the parsed statement, with the lexical fallback used when
@@ -355,27 +403,22 @@ export function resolveRelationsInSql(
   grounding: SchemaGrounding,
   options: { prefer?: 'qualified' | 'ref'; dialect?: string } = {},
 ): RelationResolution {
-  if (!sql || grounding.tables.length === 0) return { sql, rewrites: [] };
+  if (!sql) return { sql, rewrites: [] };
+  // An EMPTY grounding is precisely the case where a leaked `source::` identity
+  // survives to the validator, so internal ids are decoded before the
+  // grounding-dependent work is skipped. Bailing out first is what made this
+  // bug reappear whenever retrieval came back thin.
+  if (grounding.tables.length === 0) {
+    const rewritesWithoutGrounding: Array<{ from: string; to: string }> = [];
+    return {
+      sql: resolveInternalRelationIds(sql, grounding, options.prefer ?? 'qualified', rewritesWithoutGrounding),
+      rewrites: rewritesWithoutGrounding,
+    };
+  }
   const prefer = options.prefer ?? 'qualified';
   const rewrites: Array<{ from: string; to: string }> = [];
 
-  // A model may copy a graph identity such as
-  // `source::database.schema.table` from retrieved context. Resolve it only
-  // when the suffix proves one of the inspected physical relations. Unknown
-  // identities remain intact so the validator can fail closed rather than
-  // guessing or sending `::` to the warehouse.
-  const internalPattern = /\b(from|join)\s+((?:source|dbt|semantic)::([a-zA-Z_][\w$]*(?:\s*\.\s*[a-zA-Z_][\w$]*){0,2}))/gi;
-  const withoutInternalIds = sql.replace(
-    internalPattern,
-    (match, keyword: string, internalId: string, relationSuffix: string) => {
-      const normalizedSuffix = relationSuffix.replace(/\s*\.\s*/g, '.');
-      const table = lookupTable(normalizedSuffix, grounding);
-      if (!table) return match;
-      const target = prefer === 'ref' && table.refForm ? table.refForm : table.qualifiedRelation;
-      rewrites.push({ from: internalId, to: target });
-      return `${keyword} ${target}`;
-    },
-  );
+  const withoutInternalIds = resolveInternalRelationIds(sql, grounding, prefer, rewrites);
 
   const queryLocal = queryLocalRelationNames(withoutInternalIds, options.dialect);
 
