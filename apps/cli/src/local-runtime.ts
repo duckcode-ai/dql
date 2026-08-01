@@ -1079,7 +1079,7 @@ function recordConversationTurn(store: ConversationStore | null, threadId: strin
  * Everything the thread view reads is preserved, including
  * `diagnosticReceipt.failure.message`; only the self-referential nesting and the
  * unread `considered` block are dropped. The complete record stays available
- * from `GET /api/agent-runs/:id`.
+ * from the existing `GET /api/agent-runs/:id` run-state route.
  */
 export function slimAgentRunForHistory(run: AgentRun): AgentRun {
   const slimReceipt = (receipt: unknown): unknown => {
@@ -7086,23 +7086,6 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // DRAFT proposals (each with its stored Certifier verdict) so the notebook
     // "Get Started" surface can route them into human review. dryRun preview —
     // nothing is written or certified by this call.
-    // The COMPLETE stored run. Thread history ships a presentation projection
-    // (see `slimAgentRunForHistory`); anything that needs the full diagnostic
-    // record — the inspector, "How it was answered" — fetches it here on demand
-    // instead of every conversation load paying for it.
-    if (req.method === 'GET' && /^\/api\/agent-runs\/[^/]+$/.test(path)) {
-      const runId = decodeURIComponent(path.slice('/api/agent-runs/'.length));
-      const run = agentRunStore.get(runId);
-      if (!run) {
-        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ error: 'Unknown run id.' }));
-        return;
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(serializeJSON({ run }));
-      return;
-    }
-
     if (req.method === 'GET' && path === '/api/agent-runs/tier-distribution') {
       try {
         const store = getConversationStore();
@@ -8174,6 +8157,24 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             store.archiveThread(threadId);
             res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
             res.end(serializeJSON({ ok: true }));
+            return;
+          }
+          // Rename / pin. Both are housekeeping on an existing conversation, so
+          // neither moves `updated_at` — see the store methods.
+          if (req.method === 'PATCH' && !action) {
+            const body = await readJSON(req).catch(() => null);
+            const record = agentRunRecord(body) ?? {};
+            const title = agentRunString(record.title);
+            const favorite = typeof record.favorite === 'boolean' ? record.favorite : undefined;
+            if (title === undefined && favorite === undefined) {
+              res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(serializeJSON({ error: 'Provide a title or a favorite flag.' }));
+              return;
+            }
+            if (title !== undefined) store.renameThread(threadId, title);
+            if (favorite !== undefined) store.setThreadFavorite(threadId, favorite);
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON({ thread: store.getThread(threadId) }));
             return;
           }
           if (req.method === 'DELETE' && !action) {

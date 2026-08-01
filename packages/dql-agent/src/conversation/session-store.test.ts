@@ -278,3 +278,54 @@ describe('ConversationStore', () => {
     expect(store.searchTurns({ query: 'old question' })).toHaveLength(0);
   });
 });
+
+describe('renaming and pinning a conversation', () => {
+  function store(): { store: ConversationStore; threadId: string } {
+    const root = mkdtempSync(join(tmpdir(), 'dql-thread-meta-'));
+    const conversations = new ConversationStore(join(root, 'c.sqlite'));
+    return { store: conversations, threadId: conversations.createThread({ surface: 'ask' }).id };
+  }
+
+  it('renames a thread', () => {
+    const { store: s, threadId } = store();
+    expect(s.renameThread(threadId, '  Q3 pipeline review  ')).toBe(true);
+    expect(s.getThread(threadId)?.title).toBe('Q3 pipeline review');
+  });
+
+  it('clears the title when renamed to blank', () => {
+    const { store: s, threadId } = store();
+    s.renameThread(threadId, 'something');
+    s.renameThread(threadId, '   ');
+    expect(s.getThread(threadId)?.title).toBeUndefined();
+  });
+
+  it('reports false for an unknown thread', () => {
+    const { store: s } = store();
+    expect(s.renameThread('thr_missing', 'x')).toBe(false);
+    expect(s.setThreadFavorite('thr_missing', true)).toBe(false);
+  });
+
+  // Renaming or pinning is housekeeping. Bumping `updated_at` would jump the
+  // thread to the top of a recency-ordered list and reshuffle the sidebar under
+  // the user's cursor.
+  it('does not change recency', () => {
+    const { store: s, threadId } = store();
+    const before = s.getThread(threadId)!.updatedAt;
+    s.renameThread(threadId, 'renamed');
+    s.setThreadFavorite(threadId, true);
+    expect(s.getThread(threadId)!.updatedAt).toBe(before);
+  });
+
+  it('lists pinned conversations first, then by recency', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dql-thread-order-'));
+    const s = new ConversationStore(join(root, 'c.sqlite'));
+    const older = s.createThread({ surface: 'ask', title: 'older' }).id;
+    const newer = s.createThread({ surface: 'ask', title: 'newer' }).id;
+    s.appendTurn(newer, { question: 'q' });      // makes `newer` the most recent
+    s.setThreadFavorite(older, true);
+
+    expect(s.listThreads({ limit: 10 }).map((thread) => thread.id)).toEqual([older, newer]);
+    expect(s.getThread(older)?.favorite).toBe(true);
+    expect(s.getThread(newer)?.favorite).toBe(false);
+  });
+});

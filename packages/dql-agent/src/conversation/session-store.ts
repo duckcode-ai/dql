@@ -55,6 +55,8 @@ export interface ConversationThread {
   /** Highest turn seq already folded into rollingSummary (compaction cursor). */
   summaryTurnSeq: number;
   archived: boolean;
+  /** User-pinned conversation, surfaced ahead of the rest in the sidebar. */
+  favorite: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -177,6 +179,7 @@ export class ConversationStore {
         summary_json       TEXT NOT NULL DEFAULT '{}',
         summary_turn_seq   INTEGER NOT NULL DEFAULT 0,
         archived           INTEGER NOT NULL DEFAULT 0,
+        favorite           INTEGER NOT NULL DEFAULT 0,
         created_at         TEXT NOT NULL,
         updated_at         TEXT NOT NULL
       );
@@ -232,6 +235,7 @@ export class ConversationStore {
     this.ensureColumn('conversation_turns', 'refusal_code', 'TEXT');
     this.ensureColumn('conversation_turns', 'execution_error', 'TEXT');
     this.ensureColumn('conversation_threads', 'summary_json', "TEXT NOT NULL DEFAULT '{}'");
+    this.ensureColumn('conversation_threads', 'favorite', 'INTEGER NOT NULL DEFAULT 0');
   }
 
   private ensureColumn(table: string, column: string, ddl: string): void {
@@ -253,6 +257,7 @@ export class ConversationStore {
       structuredSummary: undefined,
       summaryTurnSeq: 0,
       archived: false,
+      favorite: false,
       createdAt: now,
       updatedAt: now,
     };
@@ -271,10 +276,13 @@ export class ConversationStore {
   }
 
   listThreads(options: { limit?: number; includeArchived?: boolean } = {}): ConversationThread[] {
+    // Pinned conversations lead, then recency. Ordering here rather than in the
+    // client keeps the `limit` meaningful: a favourite must not fall off the end
+    // of the page simply because it has not been used lately.
     const rows = options.includeArchived
-      ? this.db.prepare('SELECT * FROM conversation_threads ORDER BY updated_at DESC LIMIT ?')
+      ? this.db.prepare('SELECT * FROM conversation_threads ORDER BY favorite DESC, updated_at DESC LIMIT ?')
           .all(options.limit ?? 50)
-      : this.db.prepare('SELECT * FROM conversation_threads WHERE archived = 0 ORDER BY updated_at DESC LIMIT ?')
+      : this.db.prepare('SELECT * FROM conversation_threads WHERE archived = 0 ORDER BY favorite DESC, updated_at DESC LIMIT ?')
           .all(options.limit ?? 50);
     return (rows as ThreadRow[]).map(rowToThread);
   }
@@ -282,6 +290,27 @@ export class ConversationStore {
   archiveThread(id: string): void {
     this.db.prepare('UPDATE conversation_threads SET archived = 1, updated_at = ? WHERE id = ?')
       .run(new Date().toISOString(), id);
+  }
+
+  /**
+   * Rename a conversation. `updated_at` deliberately does NOT move: renaming is
+   * housekeeping, and bumping it would jump the thread to the top of a list
+   * ordered by recency and reshuffle the sidebar under the user's cursor.
+   */
+  renameThread(id: string, title: string): boolean {
+    const clean = title.trim().slice(0, 200);
+    const result = this.db
+      .prepare('UPDATE conversation_threads SET title = ? WHERE id = ?')
+      .run(clean || null, id);
+    return result.changes > 0;
+  }
+
+  /** Pin or unpin a conversation. Same recency rule as renaming. */
+  setThreadFavorite(id: string, favorite: boolean): boolean {
+    const result = this.db
+      .prepare('UPDATE conversation_threads SET favorite = ? WHERE id = ?')
+      .run(favorite ? 1 : 0, id);
+    return result.changes > 0;
   }
 
   /**
@@ -606,6 +635,8 @@ type ThreadRow = {
   summary_json: string;
   summary_turn_seq: number;
   archived: number;
+  /** Nullable on rows written before the column existed (see ensureColumn). */
+  favorite?: number | null;
   created_at: string;
   updated_at: string;
 };
@@ -648,6 +679,7 @@ function rowToThread(row: ThreadRow): ConversationThread {
     structuredSummary: nonEmptySummary(safeJSON(row.summary_json, {} as ConversationSummaryV1)),
     summaryTurnSeq: row.summary_turn_seq,
     archived: Boolean(row.archived),
+    favorite: Boolean(row.favorite),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

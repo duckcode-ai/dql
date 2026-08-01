@@ -1301,6 +1301,8 @@ export interface AgentConversationThread {
     }>;
   };
   archived: boolean;
+  /** User-pinned conversation, surfaced ahead of the rest in the sidebar. */
+  favorite?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -3037,6 +3039,17 @@ export const api = {
       turns: AgentConversationTurn[];
       runs: AgentRun[];
     }>(`/api/agent/threads/${encodeURIComponent(id)}`);
+  },
+
+  /** Rename and/or pin a conversation. Neither changes its recency. */
+  async updateAgentThread(
+    id: string,
+    patch: { title?: string; favorite?: boolean },
+  ): Promise<{ thread: AgentConversationThread }> {
+    return request<{ thread: AgentConversationThread }>(
+      `/api/agent/threads/${encodeURIComponent(id)}`,
+      { method: 'PATCH', body: JSON.stringify(patch) },
+    );
   },
 
   async archiveAgentThread(id: string): Promise<{ ok: boolean }> {
