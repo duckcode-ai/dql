@@ -90,6 +90,10 @@ describe('Ask AI Notebook repair handoff', () => {
     })]);
   });
 
+  // The browser cache stays authoritative for ITEMS (it holds the rendered
+  // conversation), but NOT for the title: renaming a chat writes the title to
+  // the server, so a stale local copy must never win — that would silently undo
+  // a rename made in another tab or before a refresh.
   it('keeps the richer browser rendering cache while refreshing thread recency', () => {
     const local: AnalyticsHomeModule.Conversation = {
       id: 'conv_local',
@@ -109,8 +113,10 @@ describe('Ask AI Notebook repair handoff', () => {
     }]);
     expect(merged).toMatchObject({
       id: 'conv_local',
-      title: 'Revenue analysis',
+      // The server title is the user's rename and wins.
+      title: 'Top revenue customers',
       updatedAt: '2026-07-29T10:00:00.000Z',
+      // The locally cached items are still preserved — that is what this guards.
       items: local.items,
       threadId: 'thr_revenue',
     });
@@ -142,5 +148,40 @@ describe('Ask AI Notebook repair handoff', () => {
     }], new Set(['thr_deleted']));
 
     expect(merged.map((conversation) => conversation.threadId)).toEqual(['thr_keep']);
+  });
+});
+
+describe('conversation rename and pinning', () => {
+  it('falls back to the local title when the server thread has none', () => {
+    const local: AnalyticsHomeModule.Conversation = {
+      id: 'conv_local',
+      title: 'My analysis',
+      threadId: 'thr_1',
+      createdAt: '2026-07-28T10:00:00.000Z',
+      updatedAt: '2026-07-28T11:00:00.000Z',
+      items: [],
+    };
+    const [merged] = mergePersistedAskConversations([local], [{
+      id: 'thr_1', surface: 'ask', archived: false,
+      createdAt: local.createdAt, updatedAt: local.updatedAt,
+    }]);
+    expect(merged.title).toBe('My analysis');
+  });
+
+  it('carries the pinned flag from the server thread', () => {
+    const [merged] = mergePersistedAskConversations([], [{
+      id: 'thr_1', surface: 'ask', title: 'Pinned chat', archived: false, favorite: true,
+      createdAt: '2026-07-28T10:00:00.000Z', updatedAt: '2026-07-28T11:00:00.000Z',
+    }]);
+    expect(merged.favorite).toBe(true);
+    expect(merged.title).toBe('Pinned chat');
+  });
+
+  it('defaults to not pinned when the server does not say', () => {
+    const [merged] = mergePersistedAskConversations([], [{
+      id: 'thr_1', surface: 'ask', title: 'Chat', archived: false,
+      createdAt: '2026-07-28T10:00:00.000Z', updatedAt: '2026-07-28T11:00:00.000Z',
+    }]);
+    expect(merged.favorite).toBe(false);
   });
 });

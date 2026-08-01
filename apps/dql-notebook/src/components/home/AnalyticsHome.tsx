@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Plus, MessageSquare, Trash2, Loader2, ShieldCheck } from 'lucide-react';
+import { Plus, MessageSquare, Trash2, Loader2, ShieldCheck, Star, Pencil } from 'lucide-react';
 import { api, type AgentConversationThread } from '../../api/client';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
 import type { Cell } from '../../store/types';
@@ -36,6 +36,8 @@ export interface Conversation {
   items: ThreadItem[];
   /** Server-side conversation thread id — the runs' turns persist server-side too. */
   threadId?: string;
+  /** Pinned by the user; pinned chats are listed in their own group. */
+  favorite?: boolean;
 }
 
 const STORAGE_KEY = 'dql-ask-conversations';
@@ -120,13 +122,16 @@ export function mergePersistedAskConversations(
     const existing = localByThread.get(thread.id);
     return {
       id: existing?.id ?? recoveredConversationId(thread.id),
-      title: existing?.title && existing.title !== 'New chat'
-        ? existing.title
-        : thread.title?.trim() || 'Recovered chat',
+      // A server title is authoritative: it is what the user typed when they
+      // renamed the chat. Only fall back to the local one when the server has
+      // none (a thread whose title was never set).
+      title: thread.title?.trim()
+        || (existing?.title && existing.title !== 'New chat' ? existing.title : 'Recovered chat'),
       createdAt: existing?.createdAt ?? thread.createdAt,
       updatedAt: thread.updatedAt > (existing?.updatedAt ?? '') ? thread.updatedAt : existing?.updatedAt ?? thread.updatedAt,
       items: existing?.items ?? [],
       threadId: thread.id,
+      favorite: thread.favorite ?? existing?.favorite ?? false,
     };
   });
   const recoveredIds = new Set(visibleThreads.map((thread) => thread.id));
@@ -394,6 +399,30 @@ export function AnalyticsHome() {
     [activeId],
   );
 
+  /**
+   * Rename and pin write through to the server thread when there is one, so the
+   * change survives a refresh and other surfaces see it. Local state updates
+   * first: these are instant, low-stakes edits and should not wait on a round
+   * trip. A thread that has not been created yet (no question asked) simply
+   * keeps the change locally.
+   */
+  const renameConversation = useCallback((id: string, title: string) => {
+    const clean = title.trim();
+    if (!clean) return;
+    setConversations((current) => persistConversations(current.map((conversation) =>
+      conversation.id === id ? { ...conversation, title: clean } : conversation)));
+    const threadId = conversations.find((conversation) => conversation.id === id)?.threadId;
+    if (threadId) void api.updateAgentThread(threadId, { title: clean }).catch(() => undefined);
+  }, [conversations]);
+
+  const toggleConversationFavorite = useCallback((id: string) => {
+    const target = conversations.find((conversation) => conversation.id === id);
+    const next = !target?.favorite;
+    setConversations((current) => persistConversations(current.map((conversation) =>
+      conversation.id === id ? { ...conversation, favorite: next } : conversation)));
+    if (target?.threadId) void api.updateAgentThread(target.threadId, { favorite: next }).catch(() => undefined);
+  }, [conversations]);
+
   const newChat = useCallback(() => { if (!isRunning) setActiveId(makeConversationId()); }, [isRunning]);
   const selectConversation = useCallback((id: string) => { if (!isRunning) setActiveId(id); }, [isRunning]);
 
@@ -456,6 +485,8 @@ export function AnalyticsHome() {
         onNewChat={newChat}
         onSelect={selectConversation}
         onDelete={deleteConversation}
+        onRename={renameConversation}
+        onToggleFavorite={toggleConversationFavorite}
       />
 
       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -499,6 +530,8 @@ function ConversationSidebar({
   onNewChat,
   onSelect,
   onDelete,
+  onRename,
+  onToggleFavorite,
 }: {
   t: Theme;
   conversations: Conversation[];
@@ -508,9 +541,102 @@ function ConversationSidebar({
   onNewChat: () => void;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
+  onRename: (id: string, title: string) => void;
+  onToggleFavorite: (id: string) => void;
 }) {
   const switchTitle = busy ? 'Finish the current question first' : undefined;
   const [hoverId, setHoverId] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [draftTitle, setDraftTitle] = useState('');
+  const favorites = conversations.filter((conversation) => conversation.favorite);
+  const rest = conversations.filter((conversation) => !conversation.favorite);
+
+  const beginRename = (conversation: Conversation): void => {
+    setRenamingId(conversation.id);
+    setDraftTitle(conversation.title);
+  };
+  const commitRename = (): void => {
+    if (renamingId && draftTitle.trim()) onRename(renamingId, draftTitle);
+    setRenamingId(null);
+  };
+
+  const renderConversationRow = (conv: Conversation): JSX.Element => {
+    const active = conv.id === activeId;
+    const hovered = hoverId === conv.id;
+    const renaming = renamingId === conv.id;
+    return (
+      <div
+        key={conv.id}
+        onMouseEnter={() => setHoverId(conv.id)}
+        onMouseLeave={() => setHoverId((cur) => (cur === conv.id ? null : cur))}
+        style={{ position: 'relative', display: 'flex', alignItems: 'center' }}
+      >
+        {renaming ? (
+          <input
+            autoFocus
+            value={draftTitle}
+            onChange={(event) => setDraftTitle(event.target.value)}
+            onBlur={commitRename}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') { event.preventDefault(); commitRename(); }
+              if (event.key === 'Escape') { event.preventDefault(); setRenamingId(null); }
+            }}
+            aria-label="Conversation name"
+            style={{
+              flex: 1, minWidth: 0, padding: '7px 10px', borderRadius: 7,
+              border: `1px solid ${t.accent}`, background: t.appBg,
+              color: t.textPrimary, fontSize: 12.5, fontWeight: 600,
+            }}
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={() => onSelect(conv.id)}
+            onDoubleClick={() => beginRename(conv)}
+            disabled={busy && !active}
+            title={busy && !active ? switchTitle : `${conv.title} — double-click to rename`}
+            style={{
+              flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 8,
+              padding: '8px 10px', borderRadius: 7, border: 'none',
+              background: active ? `${t.accent}1f` : hovered ? `${t.textPrimary}0d` : 'transparent',
+              color: active ? t.accent : t.textSecondary,
+              cursor: busy && !active ? 'not-allowed' : 'pointer',
+              opacity: busy && !active ? 0.5 : 1,
+              textAlign: 'left', fontSize: 12.5, fontWeight: active ? 600 : 500,
+              paddingRight: hovered ? 56 : 10,
+            }}
+          >
+            {active && busy
+              ? <Loader2 size={13} style={{ flexShrink: 0, color: t.accent, animation: 'dql-agent-run-spin 0.8s linear infinite' }} />
+              : conv.favorite
+                ? <Star size={13} style={{ flexShrink: 0, color: t.accent }} fill="currentColor" />
+                : <MessageSquare size={13} style={{ flexShrink: 0, opacity: 0.7 }} />}
+            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {active && busy ? 'Working…' : conv.title}
+            </span>
+            {!hovered ? (
+              <span style={{ flexShrink: 0, fontSize: 10, color: active && busy ? t.accent : t.textMuted, fontWeight: active && busy ? 650 : 400 }}>
+                {active && busy ? 'Live' : relativeTime(conv.updatedAt)}
+              </span>
+            ) : null}
+          </button>
+        )}
+        {hovered && !renaming ? (
+          <div style={{ position: 'absolute', right: 4, display: 'inline-flex', gap: 2 }}>
+            <RowAction t={t} label={conv.favorite ? 'Unpin conversation' : 'Pin conversation'} onClick={() => onToggleFavorite(conv.id)}>
+              <Star size={12} fill={conv.favorite ? 'currentColor' : 'none'} />
+            </RowAction>
+            <RowAction t={t} label="Rename conversation" onClick={() => beginRename(conv)}>
+              <Pencil size={12} />
+            </RowAction>
+            <RowAction t={t} label="Delete conversation" onClick={() => onDelete(conv.id)}>
+              <Trash2 size={12} />
+            </RowAction>
+          </div>
+        ) : null}
+      </div>
+    );
+  };
   return (
     <aside
       style={{
@@ -549,9 +675,6 @@ function ConversationSidebar({
           <Plus size={15} strokeWidth={2.4} /> New chat
         </button>
       </div>
-      <div style={{ padding: '0 8px 4px', fontSize: 10, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.textMuted }}>
-        Recent
-      </div>
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '0 8px 12px', display: 'flex', flexDirection: 'column', gap: 2 }}>
         {loading && conversations.length === 0 ? (
           <div style={{ padding: '10px 8px', display: 'flex', alignItems: 'center', gap: 7, fontSize: 11.5, color: t.textMuted }}>
@@ -563,71 +686,18 @@ function ConversationSidebar({
             No past chats yet. Your conversations show up here so you can pick up where you left off.
           </div>
         ) : (
-          conversations.map((conv) => {
-            const active = conv.id === activeId;
-            const hovered = hoverId === conv.id;
-            return (
-              <div
-                key={conv.id}
-                onMouseEnter={() => setHoverId(conv.id)}
-                onMouseLeave={() => setHoverId((cur) => (cur === conv.id ? null : cur))}
-                style={{ position: 'relative', display: 'flex', alignItems: 'center' }}
-              >
-                <button
-                  type="button"
-                  onClick={() => onSelect(conv.id)}
-                  disabled={busy && !active}
-                  title={busy && !active ? switchTitle : conv.title}
-                  style={{
-                    flex: 1,
-                    minWidth: 0,
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    padding: '8px 10px',
-                    borderRadius: 7,
-                    border: 'none',
-                    background: active ? `${t.accent}1f` : hovered ? `${t.textPrimary}0d` : 'transparent',
-                    color: active ? t.accent : t.textSecondary,
-                    cursor: busy && !active ? 'not-allowed' : 'pointer',
-                    opacity: busy && !active ? 0.5 : 1,
-                    textAlign: 'left',
-                    fontSize: 12.5,
-                    fontWeight: active ? 600 : 500,
-                  }}
-                >
-                  {active && busy
-                    ? <Loader2 size={13} style={{ flexShrink: 0, color: t.accent, animation: 'dql-agent-run-spin 0.8s linear infinite' }} />
-                    : <MessageSquare size={13} style={{ flexShrink: 0, opacity: 0.7 }} />}
-                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{active && busy ? 'Working…' : conv.title}</span>
-                  <span style={{ flexShrink: 0, fontSize: 10, color: active && busy ? t.accent : t.textMuted, fontWeight: active && busy ? 650 : 400 }}>{active && busy ? 'Live' : relativeTime(conv.updatedAt)}</span>
-                </button>
-                {hovered ? (
-                  <button
-                    type="button"
-                    aria-label="Delete conversation"
-                    onClick={() => onDelete(conv.id)}
-                    style={{
-                      position: 'absolute',
-                      right: 4,
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      width: 22,
-                      height: 22,
-                      borderRadius: 5,
-                      border: 'none',
-                      background: t.cellBg,
-                      color: t.textMuted,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                ) : null}
-              </div>
-            );
-          })
+          <>
+            {favorites.length > 0 ? (
+              <>
+                <GroupLabel t={t}>Favourites</GroupLabel>
+                {favorites.map((conv) => renderConversationRow(conv))}
+                <GroupLabel t={t}>Recent</GroupLabel>
+              </>
+            ) : (
+              <GroupLabel t={t}>Recent</GroupLabel>
+            )}
+            {rest.map((conv) => renderConversationRow(conv))}
+          </>
         )}
       </div>
       <div style={{ padding: '10px 12px', borderTop: `1px solid ${t.headerBorder}`, display: 'flex', alignItems: 'center', gap: 7, fontSize: 11, color: t.textMuted }}>
@@ -635,5 +705,38 @@ function ConversationSidebar({
         <span>Private project history · not committed to Git</span>
       </div>
     </aside>
+  );
+}
+
+/** Section heading in the conversation sidebar. */
+function GroupLabel({ t, children }: { t: Theme; children: React.ReactNode }): JSX.Element {
+  return (
+    <div style={{ padding: '8px 8px 4px', fontSize: 10, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: t.textMuted }}>
+      {children}
+    </div>
+  );
+}
+
+/** Small hover action on a conversation row. */
+function RowAction({ t, label, onClick, children }: {
+  t: Theme;
+  label: string;
+  onClick: () => void;
+  children: React.ReactNode;
+}): JSX.Element {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={(event) => { event.stopPropagation(); onClick(); }}
+      style={{
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        width: 22, height: 22, borderRadius: 5, border: 'none',
+        background: t.cellBg, color: t.textMuted, cursor: 'pointer',
+      }}
+    >
+      {children}
+    </button>
   );
 }
