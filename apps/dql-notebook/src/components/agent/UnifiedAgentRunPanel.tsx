@@ -278,6 +278,14 @@ export function UnifiedAgentRunPanel({
     && typeof (contextualExecutionTarget as Record<string, unknown>).connectionName === 'string'
     ? String((contextualExecutionTarget as Record<string, unknown>).connectionName)
     : undefined;
+  // A notebook working against imported datasets runs on the LOCAL DuckDB
+  // workspace. Ask could only ever emit `{target:'connection'}`, so it sent the
+  // same question to the default warehouse — where those dataset tables do not
+  // exist — and refused a query the notebook beside it runs happily.
+  const contextualLocalTarget = contextualExecutionTarget
+    && typeof contextualExecutionTarget === 'object'
+    && !Array.isArray(contextualExecutionTarget)
+    && (contextualExecutionTarget as Record<string, unknown>).target === 'local';
 
   useEffect(() => {
     let cancelled = false;
@@ -528,9 +536,11 @@ export function UnifiedAgentRunPanel({
         requestedMode: activeMode,
         audience,
         selectedObject: selectedObject ?? (notebookPath ? { kind: 'notebook' as const, path: notebookPath } : undefined),
-        ...(executionConnectionName
-          ? { executionTarget: { target: 'connection' as const, connectionName: executionConnectionName } }
-          : {}),
+        ...(contextualLocalTarget
+          ? { executionTarget: { target: 'local' as const } }
+          : executionConnectionName
+            ? { executionTarget: { target: 'connection' as const, connectionName: executionConnectionName } }
+            : {}),
         workspaceContext: {
           ...(workspaceContext ?? {}),
           ...(notebookPath ? { notebookPath } : {}),
