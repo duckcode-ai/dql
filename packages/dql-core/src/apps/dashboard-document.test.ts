@@ -235,6 +235,9 @@ describe('parseDashboardDocument', () => {
             orderBy: [{ field: 'revenue', direction: 'desc' }],
             limit: 10,
             semanticModelRefs: ['orders'],
+            qualifiedMetricIds: ['revenue.metrics.revenue'],
+            qualifiedModelIds: ['revenue.semantic_models.orders'],
+            resolvedPlanFingerprint: 'sha256:resolved-plan-v1',
             definitionFingerprint: 'sha256:semantic-v1',
             snapshotId: 'snapshot-1',
           },
@@ -246,7 +249,53 @@ describe('parseDashboardDocument', () => {
     const { document, errors } = parseDashboardDocument(JSON.stringify(doc));
     expect(errors).toEqual([]);
     expect(document?.story).toMatchObject({ goal: 'Explain beverage revenue and its customer drivers.' });
-    expect(document?.layout.items[0]?.semantic).toMatchObject({ metrics: ['revenue'], provider: 'metricflow' });
+    expect(document?.layout.items[0]?.semantic).toMatchObject({
+      metrics: ['revenue'],
+      provider: 'metricflow',
+      qualifiedMetricIds: ['revenue.metrics.revenue'],
+      qualifiedModelIds: ['revenue.semantic_models.orders'],
+      resolvedPlanFingerprint: 'sha256:resolved-plan-v1',
+    });
+  });
+
+  it('round-trips an explicitly accepted app-scoped analysis draft', () => {
+    const doc = {
+      ...minimal,
+      layout: {
+        ...minimal.layout,
+        items: [{
+          i: 'new-analysis', x: 0, y: 0, w: 8, h: 4,
+          draftAnalysis: {
+            ref: 'drafts/new-analysis.dql',
+            artifactFingerprint: 'sha256:draft-v1',
+            snapshotId: 'snapshot-1',
+            executionReceiptId: 'receipt-1',
+          },
+          viz: { type: 'bar' },
+          sourceClass: 'exploratory_analysis',
+          review: {
+            status: 'required',
+            sourceFingerprint: 'sha256:draft-v1',
+            preflightReceiptId: 'receipt-1',
+          },
+          trustState: 'review_required',
+          reviewStatus: 'review_required',
+        }],
+      },
+    };
+
+    const { document, errors } = parseDashboardDocument(JSON.stringify(doc));
+
+    expect(errors).toEqual([]);
+    expect(document?.layout.items[0]).toMatchObject({
+      draftAnalysis: {
+        ref: 'drafts/new-analysis.dql',
+        artifactFingerprint: 'sha256:draft-v1',
+        executionReceiptId: 'receipt-1',
+      },
+      sourceClass: 'exploratory_analysis',
+      review: { status: 'required', preflightReceiptId: 'receipt-1' },
+    });
   });
 
   it('rejects semantic sources without reviewed model references or fingerprints', () => {
@@ -297,7 +346,7 @@ describe('parseDashboardDocument', () => {
     };
     const { document, errors } = parseDashboardDocument(JSON.stringify(bad));
     expect(document).toBeNull();
-    expect(errors[0].message).toMatch(/must have a block, semantic, text, or aiPin source/);
+    expect(errors[0].message).toMatch(/must have a block, semantic, draftAnalysis, text, or aiPin source/);
   });
 
   it('rejects non-grid layouts (single supported kind today)', () => {

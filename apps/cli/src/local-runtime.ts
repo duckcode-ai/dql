@@ -310,7 +310,14 @@ import {
 } from '@duckcodeailabs/dql-agent';
 import { addSqlResultFilter, filterableResultColumns, replaceBlockStudioSql } from './sql-result-filter.js';
 import { gatherProposeEnrichment } from './propose-enrich.js';
-import { handleAppsApi, proposeAppAiBuild, recommendVisualization } from './apps-api.js';
+import {
+  handleAppsApi,
+  proposeAppAiBuild,
+  recommendVisualization,
+  type AppBuildGeneratedAnswer,
+  type AppContextEnvelopeV1,
+  type AppExecutionRepairTrace,
+} from './apps-api.js';
 import {
   getActiveProvider,
   getEffectiveProviderConfig,
@@ -971,6 +978,11 @@ export function analyticalFailureAllowsDeterministicRetry(failure?: WarehouseSql
   return !failure || !['permission', 'authentication', 'unsafe', 'cancelled'].includes(failure.category);
 }
 
+/** Structured policy/access refusals stay terminal even when retained SQL exists. */
+export function analyticalFailureAllowsAppRepair(failure?: AgentAnswer['analyticalFailure']): boolean {
+  return !failure || !['PERMISSION_DENIED', 'POLICY_DENIED'].includes(failure.code);
+}
+
 function businessNarrativeGaps(warnings: string[] | undefined): string[] | undefined {
   const businessRelevant = (warnings ?? []).filter((warning) => !(
     /missing requested output column/i.test(warning)
@@ -1390,6 +1402,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     filterFingerprint: string;
     resultFingerprint: string;
     personaFingerprint: string;
+    successfulTileIds: string[];
+    /** Semantic tiles that executed from compiler-owned SQL without AI repair. */
+    semanticApprovalEligibleTileIds: string[];
     facts: ReturnType<typeof buildDeterministicDashboardStory>['facts'];
     story: ReturnType<typeof buildDeterministicDashboardStory>['story'];
     expiresAt: number;
@@ -3690,7 +3705,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               message: `Generating review-required SQL for an uncovered question: ${question}`,
               route: 'app_build',
             });
-            return runGovernedAgentAnswerForRun({ question } as AgentRunRequest);
+            return generateAppBuildAnswerWithRepair(question);
           },
         });
       } catch (error) {
@@ -5101,6 +5116,178 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
 
     return { result, repairedSql, repairMode, firstFailure, rewrites };
+  };
+
+  /**
+   * App proposal parity with Ask/Notebook repair. The first governed attempt is
+   * retained unchanged. Only an execution failure with retained read-only SQL
+   * may spend the shared one-attempt repair budget, on the same connection.
+   * The repaired candidate is still exploratory and review-required.
+   */
+  const generateAppBuildAnswerWithRepair = async (
+    question: string,
+    appContext?: AppContextEnvelopeV1,
+  ): Promise<AppBuildGeneratedAnswer> => {
+    const request: AgentRunRequest = {
+      question,
+      audience: 'stakeholder',
+      workspaceContext: appContext
+        ? { surface: 'app_builder', appContext }
+        : { surface: 'app_builder' },
+    };
+    const answer = await runGovernedAgentAnswerForRun(request);
+    const sourceSql = answer.proposedSql?.trim() || answer.sql?.trim();
+    const hasExecutionFailure = agentAnswerHasExecutionFailure(answer)
+      || Boolean(answer.warehouseFailure)
+      || Boolean(answer.analyticalFailure);
+    if (answer.result || !sourceSql || !hasExecutionFailure) return answer;
+
+    const attemptedAt = new Date().toISOString();
+    const originalFailure = answer.warehouseFailure?.redactedMessage
+      ?? answer.executionError
+      ?? 'The generated query did not execute.';
+    const originalSqlFingerprint = `sha256:${createHash('sha256').update(sourceSql).digest('hex')}`;
+    const failedTrace = (message: string): AppExecutionRepairTrace => ({
+      version: 1,
+      status: 'failed',
+      source: 'query_generator',
+      attemptedAt,
+      originalFailure,
+      originalSqlFingerprint,
+      approvalEligible: false,
+      message,
+    });
+
+    if (
+      !analyticalFailureAllowsDeterministicRetry(answer.warehouseFailure)
+      || !analyticalFailureAllowsAppRepair(answer.analyticalFailure)
+    ) {
+      return {
+        ...answer,
+        appBuilderRepair: failedTrace('This failure needs an access, policy, or connection decision and was not sent to AI repair.'),
+      };
+    }
+
+    try {
+      const targetConnection = await resolveAgentRunExecutionConnection(request);
+      const targetConnectionName = request.executionTarget?.target === 'connection'
+        ? request.executionTarget.connectionName
+        : request.executionTarget?.target === 'local'
+          ? 'local'
+          : projectConfig.defaultConnectionName;
+      const repaired = await executeBoundedSqlRepair({
+        question,
+        sourceSql,
+        targetConnection,
+        targetConnectionName,
+      });
+      const repair: AppExecutionRepairTrace = {
+        version: 1,
+        status: 'repaired',
+        source: 'query_generator',
+        mode: repaired.repairMode,
+        attemptedAt,
+        originalFailure,
+        originalSqlFingerprint,
+        repairedSqlFingerprint: `sha256:${createHash('sha256').update(repaired.repairedSql).digest('hex')}`,
+        approvalEligible: false,
+        message: `${repaired.repairMode === 'ai' ? 'AI' : 'Deterministic'} repair executed successfully on the same data target. Review the repaired query before adding it to the private App draft.`,
+      };
+      return {
+        ...answer,
+        result: repaired.result,
+        proposedSql: repaired.repairedSql,
+        sql: repaired.repairedSql,
+        executionError: undefined,
+        warehouseFailure: undefined,
+        analyticalFailure: undefined,
+        validationWarnings: [
+          ...(answer.validationWarnings ?? []),
+          repair.message,
+        ],
+        appBuilderRepair: repair,
+      };
+    } catch (error) {
+      return {
+        ...answer,
+        appBuilderRepair: failedTrace(
+          error instanceof Error
+            ? `The bounded repair could not complete: ${error.message}`
+            : 'The bounded repair could not complete.',
+        ),
+      };
+    }
+  };
+
+  const repairFailedAppTileExecution = async (input: {
+    source: 'semantic_query' | 'draft_analysis';
+    question: string;
+    sourceSql?: string;
+    error: unknown;
+    targetConnection?: ConnectionConfig;
+    targetConnectionName?: string;
+    sqlParams?: SQLParamSpec[];
+    variables?: Record<string, unknown>;
+  }): Promise<
+    | { ok: true; result: AgentResultPayload; repairedSql: string; repair: AppExecutionRepairTrace }
+    | { ok: false; repair: AppExecutionRepairTrace }
+  > => {
+    const attemptedAt = new Date().toISOString();
+    const driver = input.targetConnection?.driver ?? connection?.driver ?? 'duckdb';
+    const failure = normalizeWarehouseSqlFailure(input.error, driver);
+    const originalFailure = failure.redactedMessage;
+    const originalSqlFingerprint = input.sourceSql
+      ? `sha256:${createHash('sha256').update(input.sourceSql).digest('hex')}`
+      : undefined;
+    const failed = (message: string): { ok: false; repair: AppExecutionRepairTrace } => ({
+      ok: false,
+      repair: {
+        version: 1,
+        status: 'failed',
+        source: input.source,
+        attemptedAt,
+        originalFailure,
+        ...(originalSqlFingerprint ? { originalSqlFingerprint } : {}),
+        approvalEligible: false,
+        message,
+      },
+    });
+    if (!input.sourceSql?.trim()) {
+      return failed('DQL retained the failure, but no read-only SQL was available for bounded repair.');
+    }
+    if (!input.targetConnection) {
+      return failed('Configure the original data target before retrying this App tile.');
+    }
+    if (!analyticalFailureAllowsDeterministicRetry(failure)) {
+      return failed('This failure needs an access, policy, or connection decision and was not sent to AI repair.');
+    }
+    try {
+      const repaired = await executeBoundedSqlRepair({
+        question: input.question,
+        sourceSql: input.sourceSql,
+        targetConnection: input.targetConnection,
+        targetConnectionName: input.targetConnectionName,
+        sqlParams: input.sqlParams,
+        variables: input.variables,
+      });
+      const repair: AppExecutionRepairTrace = {
+        version: 1,
+        status: 'repaired',
+        source: input.source,
+        mode: repaired.repairMode,
+        attemptedAt,
+        originalFailure,
+        ...(originalSqlFingerprint ? { originalSqlFingerprint } : {}),
+        repairedSqlFingerprint: `sha256:${createHash('sha256').update(repaired.repairedSql).digest('hex')}`,
+        approvalEligible: false,
+        message: `${repaired.repairMode === 'ai' ? 'AI' : 'Deterministic'} repair executed successfully on the same data target. The result remains review-required.`,
+      };
+      return { ok: true, result: repaired.result, repairedSql: repaired.repairedSql, repair };
+    } catch (error) {
+      return failed(error instanceof Error
+        ? `The bounded repair could not complete: ${error.message}`
+        : 'The bounded repair could not complete.');
+    }
   };
 
   const generateInvestigationSqlForApp = async (input: {
@@ -9405,6 +9592,91 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             });
             continue;
           }
+          if (item.draftAnalysis) {
+            try {
+              const draftPath = join(loaded.appDir, item.draftAnalysis.ref);
+              const appRelativePath = relative(loaded.appDir, draftPath);
+              if (appRelativePath.startsWith('..') || appRelativePath.startsWith('/')) {
+                throw new Error('App-scoped analysis reference escapes the App directory.');
+              }
+              const source = readFileSync(draftPath, 'utf-8');
+              const fingerprint = `sha256:${createHash('sha256').update(source).digest('hex')}`;
+              if (fingerprint !== item.draftAnalysis.artifactFingerprint) {
+                throw new Error('App-scoped analysis changed after approval. Review the draft again.');
+              }
+              const parameters = dashboardTileParameterValues({
+                item,
+                dashboardValues: dashboardVariables,
+                requestValues: variables,
+              });
+              const targetConnection = isConnectionConfig(body.connection)
+                ? body.connection
+                : connection ?? undefined;
+              const repairPlan = buildExecutionPlan(
+                { id: item.i, type: 'dql', source, title: item.title ?? item.i },
+                {
+                  semanticLayer,
+                  driver: targetConnection?.driver ?? 'duckdb',
+                  parameters,
+                },
+              );
+              let result: AgentResultPayload;
+              let repair: AppExecutionRepairTrace | undefined;
+              try {
+                result = await executeDqlArtifactSourceForAgent(
+                  source,
+                  { name: item.title ?? item.i, path: appRelativePath },
+                  { question: item.title, parameters },
+                );
+              } catch (executionError) {
+                const repaired = await repairFailedAppTileExecution({
+                  source: 'draft_analysis',
+                  question: item.title ?? item.i,
+                  sourceSql: repairPlan?.sql,
+                  error: executionError,
+                  targetConnection,
+                  sqlParams: repairPlan?.sqlParams,
+                  variables: { ...(repairPlan?.variables ?? {}), ...parameters },
+                });
+                if (!repaired.ok) {
+                  tiles.push({
+                    tileId: item.i,
+                    status: 'error',
+                    tileType: 'draftAnalysis',
+                    title: item.title ?? item.i,
+                    error: executionError instanceof Error ? executionError.message : String(executionError),
+                    trustState: 'review_required',
+                    repair: repaired.repair,
+                  });
+                  continue;
+                }
+                result = repaired.result;
+                repair = repaired.repair;
+              }
+              tiles.push({
+                tileId: item.i,
+                status: 'ok',
+                tileType: 'draftAnalysis',
+                title: item.title ?? item.i,
+                viz: item.viz,
+                chartConfig: mergeDashboardChartConfig(result.chartConfig as object | undefined, item),
+                result,
+                trustState: 'review_required',
+                citation: { kind: repair ? 'app_draft_analysis_repaired' : 'app_draft_analysis', name: item.title ?? item.i, path: appRelativePath },
+                ...(repair ? { repair } : {}),
+              });
+            } catch (err) {
+              tiles.push({
+                tileId: item.i,
+                status: 'error',
+                tileType: 'draftAnalysis',
+                title: item.title ?? item.i,
+                error: err instanceof Error ? err.message : String(err),
+                trustState: 'review_required',
+              });
+            }
+            continue;
+          }
           if (item.semantic) {
             try {
               if (!semanticLayer) throw new Error('Semantic layer is not available for this governed query.');
@@ -9441,16 +9713,44 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               });
               if (!composed) throw new Error('The governed semantic query could not be composed.');
               const prepared = prepareLocalExecution(composed.sql, targetConnection, projectRoot, projectConfig);
-              const result = await executor.executeQuery(prepared.sql, [], {}, prepared.connection);
+              let normalizedResult: ReturnType<typeof normalizeQueryResult>;
+              let repair: AppExecutionRepairTrace | undefined;
+              try {
+                const result = await executor.executeQuery(prepared.sql, [], {}, prepared.connection);
+                normalizedResult = normalizeQueryResult(result);
+              } catch (executionError) {
+                const repaired = await repairFailedAppTileExecution({
+                  source: 'semantic_query',
+                  question: item.title ?? item.semantic.id,
+                  sourceSql: composed.sql,
+                  error: executionError,
+                  targetConnection,
+                });
+                if (!repaired.ok) {
+                  tiles.push({
+                    tileId: item.i,
+                    status: 'error',
+                    tileType: 'semantic',
+                    title: item.title ?? item.semantic.id,
+                    error: executionError instanceof Error ? executionError.message : String(executionError),
+                    trustState: 'review_required',
+                    repair: repaired.repair,
+                  });
+                  continue;
+                }
+                normalizedResult = normalizeQueryResult(repaired.result);
+                repair = repaired.repair;
+              }
               tiles.push({
                 tileId: item.i,
                 status: 'ok',
                 tileType: 'semantic',
                 title: item.title ?? item.semantic.id,
                 viz: item.viz,
-                result: normalizeQueryResult(result),
+                result: normalizedResult,
                 trustState: 'review_required',
-                citation: { kind: 'semantic_query', name: item.semantic.id },
+                citation: { kind: repair ? 'semantic_query_repaired' : 'semantic_query', name: item.semantic.id },
+                ...(repair ? { repair } : {}),
               });
             } catch (err) {
               tiles.push({
@@ -9635,6 +9935,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           filterFingerprint,
           resultFingerprint,
           personaFingerprint,
+          successfulTileIds: tiles.filter((tile) => tile.status === 'ok').map((tile) => tile.tileId),
+          semanticApprovalEligibleTileIds: tiles.filter((tile) => (
+            tile.status === 'ok'
+            && tile.tileType === 'semantic'
+            && (!('repair' in tile) || tile.repair?.approvalEligible !== false)
+          )).map((tile) => tile.tileId),
           facts: storyResult.facts,
           story: storyResult.story,
           expiresAt: Date.now() + 15 * 60_000,
@@ -9683,7 +9989,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           // Two-phase app build gap-fill: bounded governed answers for uncovered
           // questions. Throws when no provider is configured — propose degrades
           // gracefully by listing the gap instead.
-          generateGovernedAnswer: (question) => runGovernedAgentAnswerForRun({ question } as AgentRunRequest),
+          generateGovernedAnswer: (question, appContext) => generateAppBuildAnswerWithRepair(question, appContext),
+          verifyDashboardRun: ({ runId, appId, dashboardId, tileIds }) => {
+            const evidence = dashboardRunEvidence.get(runId);
+            if (!evidence || evidence.expiresAt < Date.now()) return { ok: false, error: 'The dashboard run receipt expired. Run the dashboard again.' };
+            if (evidence.appId !== appId || evidence.dashboardId !== dashboardId) return { ok: false, error: 'The dashboard run receipt does not match this App page.' };
+            const successful = new Set(evidence.successfulTileIds);
+            const failed = tileIds.filter((tileId) => !successful.has(tileId));
+            if (failed.length > 0) return { ok: false, error: `These semantic tiles did not complete successfully: ${failed.join(', ')}` };
+            const approvalEligible = new Set(evidence.semanticApprovalEligibleTileIds);
+            const repaired = tileIds.filter((tileId) => !approvalEligible.has(tileId));
+            if (repaired.length > 0) {
+              return { ok: false, error: `These semantic previews required SQL repair and cannot be approved as governed semantic results: ${repaired.join(', ')}. Review them as exploratory App analysis instead.` };
+            }
+            return { ok: true, snapshotId: evidence.snapshotId, resultFingerprint: evidence.resultFingerprint };
+          },
           // Story narration for commit — LLM-backed with deterministic fallback.
           narrate: narrateForAgentRun,
         });
@@ -16051,14 +16371,14 @@ function loadAppDashboard(
   projectRoot: string,
   appId: string,
   dashboardId: string,
-): { app: AppDocument; dashboard: DashboardDocument } | null {
+): { app: AppDocument; dashboard: DashboardDocument; appDir: string } | null {
   for (const p of findAppDocuments(projectRoot)) {
     const { document: app } = loadAppDocument(p);
     if (!app || app.id !== appId) continue;
     const appDir = p.slice(0, -'/dql.app.json'.length);
     for (const d of findDashboardsForApp(appDir)) {
       const { document: dashboard } = loadDashboardDocument(d);
-      if (dashboard?.id === dashboardId) return { app, dashboard };
+      if (dashboard?.id === dashboardId) return { app, dashboard, appDir };
     }
   }
   return null;

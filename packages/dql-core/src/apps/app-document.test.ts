@@ -45,9 +45,22 @@ describe('parseAppDocument', () => {
     expect(document?.id).toBe('growth-cxo');
     expect(document?.members).toHaveLength(2);
     expect(document?.visibility).toBe('shared');
+    expect(document?.publicationIntent).toBe('shared_project');
     expect(document?.lifecycle).toBe('draft');
     // enabled defaults to true when omitted
     expect(document?.policies[0].enabled).toBe(true);
+  });
+
+  it('preserves an explicit shared publication target on a private draft', () => {
+    const { document, errors } = parseAppDocument(JSON.stringify({
+      ...minimalApp,
+      visibility: 'private',
+      publicationIntent: 'shared_project',
+    }));
+
+    expect(errors).toEqual([]);
+    expect(document?.visibility).toBe('private');
+    expect(document?.publicationIntent).toBe('shared_project');
   });
 
   it('parses OSS scope metadata and attached notebook refs', () => {

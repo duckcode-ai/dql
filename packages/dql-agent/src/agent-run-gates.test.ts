@@ -374,4 +374,17 @@ describe("defaultAgentRunGates", () => {
     });
     expect(evaluations.some((evaluation) => evaluation.id === "app-coverage" && !evaluation.passed)).toBe(false);
   });
+
+  it("app build gate accepts a governed semantic proposal without a certified block", () => {
+    const evaluations = gateFor("app_build", {
+      artifacts: [{
+        id: "a",
+        kind: "app_draft",
+        title: "App",
+        trustState: "review_required",
+        payload: { proposal: { tiles: [{ certification: "reviewed_semantic" }] } },
+      }],
+    });
+    expect(evaluations.some((evaluation) => evaluation.id === "app-coverage" && !evaluation.passed)).toBe(false);
+  });
 });

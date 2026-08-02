@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { DashboardDocumentResponse } from '../../api/client';
 import { deriveDashboardFilters } from './dashboard-filters';
+import { semanticApprovalState } from './app-semantic-approval';
 
 type RuntimeFilter = NonNullable<DashboardDocumentResponse['dashboard']['filters']>[number] & {
   sourceBlockId?: string;
@@ -45,5 +46,36 @@ describe('App dashboard filter wiring (UI-001, E2E-001)', () => {
 
     expect((filter as RuntimeFilter).sourceBlockId).toBe('Revenue by Category');
     expect(filter.bindsTo).toBe('category_name');
+  });
+});
+
+describe('App semantic repair approval (AGT-023, UI-018)', () => {
+  it('does not treat an AI-repaired semantic preview as governed approval evidence', () => {
+    const run = {
+      tiles: [{
+        tileId: 'semantic-revenue',
+        status: 'ok',
+        tileType: 'semantic',
+        repair: {
+          version: 1,
+          status: 'repaired',
+          source: 'semantic_query',
+          mode: 'ai',
+          attemptedAt: '2026-08-02T00:00:00.000Z',
+          originalFailure: 'Column not found.',
+          approvalEligible: false,
+          message: 'AI repair completed; review required.',
+        },
+      }],
+    } as never;
+
+    expect(semanticApprovalState(['semantic-revenue'], run)).toEqual({
+      ready: false,
+      repairedTileIds: ['semantic-revenue'],
+    });
+    const unrepairedRun = {
+      tiles: [{ tileId: 'semantic-revenue', status: 'ok', tileType: 'semantic' }],
+    } as never;
+    expect(semanticApprovalState(['semantic-revenue'], unrepairedRun)).toEqual({ ready: true, repairedTileIds: [] });
   });
 });

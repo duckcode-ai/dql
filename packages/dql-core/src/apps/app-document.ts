@@ -78,6 +78,7 @@ export type AppHomepage =
 
 export type AppVisibility = 'shared' | 'private' | 'template';
 export type AppLifecycle = 'draft' | 'review' | 'certified' | 'deprecated';
+export type AppPublicationIntent = 'personal' | 'shared_project';
 
 export type AppNotebookRef = {
   path: string;
@@ -100,6 +101,8 @@ export interface AppDocument extends ProductDomainContext {
   caveats?: string[];
   /** OSS organization metadata. Not an access-control boundary. */
   visibility?: AppVisibility;
+  /** Desired destination. Generated Apps remain private drafts until publish. */
+  publicationIntent?: AppPublicationIntent;
   /** v2 compatibility alias for ownerDomain. */
   domain: string;
   subdomain?: string;
@@ -276,6 +279,7 @@ function validateAppDocument(raw: unknown, path: string): AppDocumentLoadResult 
   const caveats = obj.caveats === undefined ? undefined : stringArray(obj, 'caveats', err);
   const tags = obj.tags === undefined ? [] : stringArray(obj, 'tags', err);
   const visibility = enumField(obj, 'visibility', ['shared', 'private', 'template'] as const, err, 'shared');
+  const publicationIntent = enumField(obj, 'publicationIntent', ['personal', 'shared_project'] as const, err, visibility === 'private' ? 'personal' : 'shared_project');
   const subdomain = optionalString(obj, 'subdomain', err);
   const groups = obj.groups === undefined ? [] : stringArray(obj, 'groups', err);
   const audience = optionalString(obj, 'audience', err);
@@ -325,6 +329,7 @@ function validateAppDocument(raw: unknown, path: string): AppDocumentLoadResult 
     businessRules,
     caveats,
     visibility,
+    publicationIntent,
     ...productContext,
     domain,
     subdomain,

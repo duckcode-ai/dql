@@ -225,6 +225,7 @@ export interface AppSummary {
   status?: 'ready' | 'empty' | 'review';
   storage?: 'shared' | 'mine' | 'template';
   visibility?: 'shared' | 'private' | 'template';
+  publicationIntent?: 'personal' | 'shared_project';
   owners: string[];
   tags: string[];
   members: number;

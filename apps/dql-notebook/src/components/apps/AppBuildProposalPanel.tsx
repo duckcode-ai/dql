@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { CheckCircle2, ChevronDown, ChevronRight, Code2, FileSearch, Loader2, ShieldAlert, ShieldCheck, Sparkles } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronRight, Code2, FileSearch, Loader2, ShieldAlert, ShieldCheck, Sparkles, Wrench } from 'lucide-react';
 import type { Theme } from '../../themes/notebook-theme';
 import type { AppBuildProposal, AppBuildProposalTile } from '../../api/client';
 
@@ -11,7 +11,7 @@ export function defaultProposalSelection(proposal: AppBuildProposal): Set<string
 /**
  * The confirmable pre-create content list for the two-phase app build: every
  * proposed tile with a trust badge and an include/exclude toggle, uncovered
- * questions listed as gaps, and a single "Create app" confirm. Shared by the
+ * questions listed as gaps, and a single "Build draft" confirm. Shared by the
  * Apps hero builder and the chat `app_proposal` artifact card.
  */
 export function AppBuildProposalPanel({
@@ -39,17 +39,21 @@ export function AppBuildProposalPanel({
   const generatedSelected = selectable.filter((tile) => selected.has(tile.id) && tile.certification === 'ai_generated').length;
   const semanticSelected = selectable.filter((tile) => selected.has(tile.id) && tile.certification === 'reviewed_semantic').length;
   const certifiedSelected = selectable.filter((tile) => selected.has(tile.id) && tile.certification === 'certified').length;
-  const canCreate = certifiedSelected + semanticSelected > 0;
+  const canCreate = certifiedSelected + semanticSelected > 0
+    || (proposal.intent.target === 'personal' && generatedSelected > 0);
 
   return (
     <div style={{ display: 'grid', gap: 10 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 12.5, fontWeight: 800, color: t.textPrimary }}>Proposed app content</span>
+        <span style={{ fontSize: 12.5, fontWeight: 800, color: t.textPrimary }}>Build Brief</span>
         <span style={{ fontSize: 11, color: t.textMuted }}>
           {proposal.coverage.certifiedTiles} certified
-          {proposal.coverage.semanticTiles > 0 ? ` · ${proposal.coverage.semanticTiles} reviewed semantic` : ''}
-          {proposal.coverage.generatedTiles > 0 ? ` · ${proposal.coverage.generatedTiles} AI-generated` : ''}
+          {proposal.coverage.semanticTiles > 0 ? ` · ${proposal.coverage.semanticTiles} governed semantic` : ''}
+          {proposal.coverage.generatedTiles > 0 ? ` · ${proposal.coverage.generatedTiles} exploratory` : ''}
           {proposal.coverage.gaps > 0 ? ` · ${proposal.coverage.gaps} uncovered` : ''}
+        </span>
+        <span style={{ fontSize: 10.5, color: t.textMuted }}>
+          {proposal.intent.target === 'personal' ? 'Personal Draft' : 'Shared Project target'} · starts private
         </span>
       </div>
 
@@ -100,16 +104,18 @@ export function AppBuildProposalPanel({
           style={createButtonStyle(t, canCreate && !busy)}
         >
           {busy ? <Loader2 size={13} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} /> : <CheckCircle2 size={13} />}
-          <span>{busy ? 'Creating app…' : `Create app (${selectedCount} tile${selectedCount === 1 ? '' : 's'})`}</span>
+          <span>{busy ? 'Building draft…' : `Build draft (${selectedCount} tile${selectedCount === 1 ? '' : 's'})`}</span>
         </button>
         <span style={{ fontSize: 11, color: t.textMuted }}>
           {!canCreate
-            ? 'Select at least one certified block or reviewed semantic tile.'
+            ? proposal.intent.target === 'personal'
+              ? 'Select a certified, semantic, or explicitly accepted exploratory tile.'
+              : 'Select at least one certified block or governed semantic tile.'
             : semanticSelected > 0
-              ? `${semanticSelected} semantic tile${semanticSelected === 1 ? '' : 's'} will compile against the governed semantic layer at run time.`
+              ? `${semanticSelected} semantic tile${semanticSelected === 1 ? '' : 's'} will compile against the governed semantic layer and still require result review.`
             : generatedSelected > 0
               ? `${generatedSelected} AI-generated tile${generatedSelected === 1 ? '' : 's'} will stay review-required until certified.`
-              : 'Nothing is created until you confirm.'}
+              : 'No App files are written until you confirm this brief.'}
         </span>
       </div>
     </div>
@@ -151,11 +157,12 @@ function ProposalTileRow({
             </span>
           ) : semantic ? (
             <span style={badgeStyle(t.accent)}>
-              <Sparkles size={10} /> reviewed semantic
+              <Sparkles size={10} /> governed semantic · review required
             </span>
           ) : (
             <span style={badgeStyle(t.warning)}>
-              <Sparkles size={10} /> AI-generated · needs review
+              {tile.repair?.status === 'repaired' ? <Wrench size={10} /> : <Sparkles size={10} />}
+              {tile.repair?.status === 'repaired' ? 'auto-repaired · needs review' : 'AI-generated · needs review'}
             </span>
           )}
           <span style={{ fontSize: 10, color: t.textMuted }}>{tile.viz}</span>
@@ -165,6 +172,16 @@ function ProposalTileRow({
         ) : null}
         {tile.question && tile.question !== tile.title ? (
           <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2 }}>Answers: {tile.question}</div>
+        ) : null}
+        {!compact ? (
+          <div style={{ fontSize: 10.5, color: tile.preflight.status === 'passed' ? t.success : tile.preflight.status === 'blocked' ? t.error : t.textMuted, marginTop: 2 }}>
+            Preflight: {tile.preflight.status.replace('_', ' ')} · {tile.preflight.message}
+          </div>
+        ) : null}
+        {tile.repair ? (
+          <div style={{ fontSize: 10.5, color: tile.repair.status === 'repaired' ? t.warning : t.error, marginTop: 3, lineHeight: 1.4 }}>
+            Repair evidence: {tile.repair.message}
+          </div>
         ) : null}
         {hasDetail ? (
           <button

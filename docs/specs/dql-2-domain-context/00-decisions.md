@@ -19,6 +19,7 @@ an acceptance-matrix update.
 | PRD-002 | Domain Studio shows Apps/Notebooks as Related Products backlinks. |
 | PRD-003 | Global products declare owner/used domains and required exports. |
 | PRD-004 | App Builder composes governed dashboards requirement-first: compatible certified blocks first, governed semantic queries only for uncovered requirements, and visible gaps otherwise. |
+| PRD-005 | App creation begins with an explicit Personal Draft or Shared Project target; certified blocks are the fastest route, not a prerequisite, and every generated App begins as a private draft until an explicit publication action succeeds. |
 | REL-001 | dbt lineage and matching column names are never automatic join proof. |
 | REL-002 | Only certified, fresh, exported, fanout-safe relationships authorize generated joins. |
 | REL-003 | Cross-domain knowledge compiles as explicit `observed`, `authorized`, `blocked`, or `stale` routes; only the full provider export → contract → consumer import → validated relationship chain can authorize use, and dbt transformation lineage remains observation only. |
@@ -51,6 +52,9 @@ an acceptance-matrix update.
 | AGT-019 | Multi-period comparison and ranking compile as a typed executable graph that aggregates at the declared entity grain, aligns governed periods, computes decimal-safe deltas, ranks after aggregation, applies deterministic ties, and validates every requested output. |
 | AGT-020 | Analytical answers and stories verbalize only deterministic result facts bound to execution receipts, including freshness and caveats; unsupported numbers, causal claims, grain/filter drift, and hidden partial-period claims fail closed. |
 | AGT-021 | An explicit multi-metric question preserves every requested metric in one analytical frame and output contract; execution requires one provably compatible governed tuple, otherwise the run returns a modeling gap instead of silently dropping a metric. |
+| AGT-022 | App Copilot consumes one server-owned App context envelope covering every visible tile and the settled run receipts; it may answer, research, or propose typed App changes, but cannot silently mutate App source or accept client-injected trust evidence. |
+| AGT-023 | App-generated and App-executed SQL failures may use the same single bounded same-target repair boundary as Ask and Notebook; the original failure remains immutable, unsafe/access/policy failures never enter AI repair, and repaired semantic SQL is downgraded to review-required exploration rather than inheriting semantic approval. |
+| EXP-004 | An exploratory App result remains transient until explicit approval materializes an app-scoped review DQL draft; that draft cannot be published, promoted, or certified automatically. |
 | API-001 | Domain, modeling, onboarding, and context APIs return stable codes and snapshot IDs. |
 | API-002 | App proposal is write-free; commit is snapshot/hash guarded and atomic; dashboard run/story APIs bind filters, results, persona, trust, and evidence to stable fingerprints. |
 | API-003 | Browser Ask, CLI, MCP, and Chat use the same snapshot, retrieval, meaning-resolution, route, trust, and error contracts and expose only redacted phase diagnostics. |
@@ -59,6 +63,8 @@ an acceptance-matrix update.
 | API-006 | Browser Ask, CLI, MCP, Chat, Notebook, Preview, and Block Studio use versioned resolved-plan, executable-plan, result-contract, and execution-receipt interfaces with identical fingerprints for equivalent requests. |
 | API-007 | Every failed analytical run returns one versioned, redacted failure/repair contract binding stable code, phase, failed qualified bindings, recoverability, immutable plan/DQL/SQL fingerprints, safe actions, and derived-artifact trust transitions consistently across Browser Ask, Notebook, CLI, MCP, and Chat. |
 | API-008 | Agent runs persist bounded lifecycle checkpoints and one terminal diagnostic receipt; conversation turns bind the canonical run ID so remounts hydrate the complete DQL, SQL, lineage, trust, steps, and failure contract rather than reconstructing lossy client state. |
+| API-009 | Editable App plans, source preflight, existing-App changes, and publication apply only through versioned snapshot/proposal/source/app hashes and atomic commits; stale inputs return conflicts without partial writes. |
+| API-010 | App repair returns a versioned trace with repair status/mode, redacted original failure, original/repaired SQL fingerprints, and explicit semantic-approval ineligibility; it never silently writes the repaired SQL into App or semantic source. |
 | UI-001 | Domain Studio uses vertical contextual navigation; global product navigation stays stable. |
 | UI-002 | dbt-owned metadata is read-only and edited only through previewed source patches. |
 | UI-004 | Generated Apps render page navigation, an apply/reset filter row, a live Business Story row, KPI band, analysis tiles, detail evidence, then reviewer appendix. |
@@ -73,6 +79,8 @@ an acceptance-matrix update.
 | UI-014 | Leaving and returning to Ask or another AI surface continues the accepted run in the background and hydrates current progress or the canonical terminal run without displaying a false reconnect state or dropping inspector sections. |
 | UI-015 | Notebook AI uses the universal run result and exposes explicit add-cell and replace-selected-cell actions; it never edits notebook content merely because generation completed. |
 | UI-016 | Block AI uses the universal run result and exposes an explicit Add to Block Studio commit that stores an ownerless review draft as DQL and opens the saved draft in the visual builder; generation alone performs no editor mutation or certification. |
+| UI-017 | App Builder presents an editable Build Brief with requirement coverage, source/trust evidence, bounded previews, filters, pages, visualizations, and layout before the explicit Build Draft action. |
+| UI-018 | Build Brief and App dashboard tiles visibly distinguish successful original execution, bounded repaired preview, and blocked repair; an AI-repaired semantic preview cannot enable the governed semantic approval action. |
 | MIG-001 | Manifest v2 and legacy domain-local product paths remain readable through DQL 3.x. |
 | MIG-002 | DataLex/legacy migration is deterministic, idempotent, loss-reporting, and never upgrades lifecycle. |
 | PERF-001 | Large projects use indexed snapshots, pagination, batch detail, and bounded graph neighborhoods. |
@@ -96,6 +104,8 @@ an acceptance-matrix update.
 | E2E-013 | Release proves complete analytical composition for revenue-today, named-customer filtering, and current-versus-prior top-customer comparison, including exact roles, governed time/completeness, additivity/join proof, ranking/output contracts, receipt-backed stories, ambiguity/gap failures, route equivalence, and cross-surface parity. |
 | E2E-014 | Release proves transparent repair for missing column/relation, permission, ambiguity, dialect, drift, timeout, and result-contract failures; original artifacts remain immutable, permissions never broaden, edits follow trust transitions, and every surface returns identical failure/repair identity. |
 | E2E-015 | Release proves multi-metric Ask, durable navigation/remount, complete failed-run diagnostics, canonical history hydration, explicit Notebook add/replace, and explicit ownerless Block draft commit in the built CLI. |
+| E2E-016 | Release proves certified-only, semantic-only, mixed, and exploratory Personal Draft App flows; modification and stale-change rejection; publication gates; and whole-App/section Copilot plus previewed Add-to-App in the built CLI. |
+| E2E-017 | Release proves App query-generation, semantic-execution, and draft-analysis repair parity with Ask/Notebook, including one-attempt bounds, same-target execution, immutable evidence, access/policy refusal, semantic trust downgrade, and unchanged successful paths in the built CLI. |
 
 ## OSS and Cloud boundary
 

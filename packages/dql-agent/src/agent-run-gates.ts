@@ -324,27 +324,28 @@ const blockDraftGate: AgentRunGate = ({ result }: AgentRunGateContext): AgentRun
   return evaluations;
 };
 
-/** App build: missing certified coverage escalates to creating the gap blocks first. */
+/** App build: a governed source may be a certified block or a canonical semantic query. */
 const appBuildGate: AgentRunGate = ({ result }: AgentRunGateContext): AgentRunEvaluation[] => {
   const evaluations = baseEvaluations(result);
   const payload = primaryArtifactPayload(result);
   const coverageIssue: AgentRunEvaluation = {
     id: "app-coverage",
-    label: "Certified coverage",
+    label: "Governed coverage",
     passed: false,
     severity: "blocking",
-    message: "No certified app tiles matched the request, so the app cannot be assembled yet.",
-    suggestedRepair: "Create certified DQL drafts for the missing tiles, then rebuild the app.",
-    repairAction: { kind: "escalate", route: "dql_block_draft", hint: "Draft the missing certified blocks." },
+    message: "No certified block or governed semantic query matched the request, so the app has no governed result tile yet.",
+    suggestedRepair: "Refine the request, add semantic context, or create a DQL draft for the uncovered analysis.",
+    repairAction: { kind: "escalate", route: "dql_block_draft", hint: "Draft the uncovered analysis when no governed source exists." },
   };
-  // Two-phase build: a proposal needs at least one CERTIFIED tile to be a real app —
-  // an app must have a certified anchor (commit rejects a certified-less selection),
-  // so an AI-generated-only proposal escalates to drafting blocks instead of a dead end.
+  // Two-phase build: certified and canonical semantic tiles are governed lanes.
+  // Exploratory SQL remains review-required and cannot silently satisfy this gate.
   const proposal = asRecord(payload?.proposal);
   const proposalTiles = Array.isArray(proposal?.tiles) ? (proposal.tiles as Array<Record<string, unknown>>) : null;
   if (proposalTiles) {
-    const hasCertified = proposalTiles.some((tile) => tile.certification === "certified" && !tile.error);
-    return hasCertified ? evaluations : upsert(evaluations, coverageIssue);
+    const hasGoverned = proposalTiles.some((tile) => (
+      (tile.certification === "certified" || tile.certification === "reviewed_semantic") && !tile.error
+    ));
+    return hasGoverned ? evaluations : upsert(evaluations, coverageIssue);
   }
   const session = asRecord(payload?.session) ?? payload;
   // Prefer the build session's own status; fall back to the executor's app-coverage eval.

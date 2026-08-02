@@ -222,6 +222,7 @@ export interface AppDocumentSummary {
     subdomain?: string;
     groups?: string[];
     visibility?: 'shared' | 'private' | 'template';
+    publicationIntent?: 'personal' | 'shared_project';
     audience?: string;
     lifecycle?: 'draft' | 'review' | 'certified' | 'deprecated';
     owners: string[];
@@ -1557,14 +1558,31 @@ export interface DashboardDocumentResponse {
           orderBy?: Array<{ field: string; direction: 'asc' | 'desc' }>;
           limit?: number;
           semanticModelRefs: string[];
+          qualifiedMetricIds?: string[];
+          qualifiedModelIds?: string[];
+          resolvedPlanFingerprint?: string;
           definitionFingerprint: string;
           snapshotId?: string;
+        };
+        draftAnalysis?: {
+          ref: string;
+          artifactFingerprint: string;
+          snapshotId?: string;
+          executionReceiptId?: string;
         };
         viz: { type: string; options?: Record<string, unknown> };
         display?: DashboardDisplayMetadata;
         filterBindings?: DashboardTileFilterBinding[];
         parameterBindings?: DashboardTileParameterBinding[];
         sourceEvidence?: DashboardTileSourceEvidence[];
+        sourceClass?: 'certified_block' | 'governed_semantic' | 'exploratory_analysis' | 'narrative';
+        review?: {
+          status: 'not_required' | 'required' | 'approved';
+          sourceFingerprint?: string;
+          preflightReceiptId?: string;
+          reviewedAt?: string;
+          reviewedBy?: string;
+        };
         trustState?: DashboardDisplayMetadata['trustState'];
         reviewStatus?: DashboardDisplayMetadata['reviewStatus'];
         title?: string;
@@ -1573,6 +1591,19 @@ export interface DashboardDocumentResponse {
       }>;
     };
   };
+}
+
+export interface AppExecutionRepairTrace {
+  version: 1;
+  status: 'repaired' | 'failed';
+  source: 'query_generator' | 'semantic_query' | 'draft_analysis';
+  mode?: 'deterministic' | 'ai';
+  attemptedAt: string;
+  originalFailure: string;
+  originalSqlFingerprint?: string;
+  repairedSqlFingerprint?: string;
+  approvalEligible: false;
+  message: string;
 }
 
 export interface DashboardRunResponse {
@@ -1589,7 +1620,7 @@ export interface DashboardRunResponse {
   tiles: Array<{
     tileId: string;
     status: 'ok' | 'unauthorized' | 'error' | 'unresolved';
-    tileType?: 'block' | 'text' | 'aiPin' | 'semantic';
+    tileType?: 'block' | 'text' | 'aiPin' | 'semantic' | 'draftAnalysis';
     blockId?: string;
     blockPath?: string;
     certificationStatus?: string | null;
@@ -1613,6 +1644,7 @@ export interface DashboardRunResponse {
       auditId: string;
     };
     citation?: { kind: string; name: string; path?: string };
+    repair?: AppExecutionRepairTrace;
     error?: string;
   }>;
 }
@@ -1688,11 +1720,14 @@ export interface GenerateAppRequest {
   selectedBlockIds?: string[];
   plannerMode?: 'deterministic' | 'ai_assisted';
   mode?: 'personal' | 'stakeholder';
+  exploreGaps?: boolean;
+  maxGeneratedTiles?: number;
 }
 
 export interface GeneratedAppPlan {
   version: 2;
   mode: 'personal' | 'stakeholder';
+  publicationIntent: 'personal' | 'shared_project';
   snapshotId?: string;
   requirements: Array<{ id: string; question: string; role: string; measures: string[]; dimensions: string[]; filters: string[] }>;
   requirementCoverage: Array<{ requirementId: string; status: 'covered' | 'gap'; source: 'certified_block' | 'semantic_query' | 'gap'; tileId?: string; sourceId?: string; trustState: string; reasons: string[] }>;
@@ -1819,8 +1854,21 @@ export interface AppBuildProposalTile {
   answer?: string;
   semantic?: DashboardDocumentResponse['dashboard']['layout']['items'][number]['semantic'];
   viz: string;
+  allowedVisualizations?: string[];
   certification: 'certified' | 'reviewed_semantic' | 'ai_generated';
+  sourceClass: 'certified_block' | 'governed_semantic' | 'exploratory_analysis';
+  reviewStatus: 'not_required' | 'required' | 'approved';
+  requirementIds?: string[];
+  sourceEvidence?: DashboardTileSourceEvidence[];
+  preflight: {
+    status: 'passed' | 'review_required' | 'blocked';
+    snapshotId?: string;
+    sourceFingerprint?: string;
+    receiptId?: string;
+    message: string;
+  };
   preview?: { columns: string[]; rows: Array<Record<string, unknown>>; rowCount?: number };
+  repair?: AppExecutionRepairTrace;
   error?: string;
   selectedByDefault: boolean;
   followUps?: string[];
@@ -1833,6 +1881,7 @@ export interface AppBuildProposalGap {
 }
 
 export interface AppBuildProposal {
+  intent: { target: 'personal' | 'shared_project'; initialVisibility: 'private' };
   tiles: AppBuildProposalTile[];
   gaps: AppBuildProposalGap[];
   followUps: string[];
@@ -1855,6 +1904,11 @@ export interface AppAiBuildSession {
   snapshotId?: string;
   proposalHash?: string;
   committedTileIds?: string[];
+  committedBrief?: {
+    appName: string;
+    audience: string;
+    tileOverrides: Record<string, { title?: string; viz?: string }>;
+  };
   warnings: string[];
   reviewTasks: string[];
   inputs: {
@@ -1863,6 +1917,8 @@ export interface AppAiBuildSession {
     audience?: string;
     notebookPath?: string;
     existingAppId?: string;
+    mode?: 'personal' | 'stakeholder';
+    exploreGaps?: boolean;
     selectedBlockIds: string[];
   };
   error?: string;
@@ -5445,7 +5501,14 @@ export const api = {
   },
 
   /** Two-phase build, step 2: the user confirmed — create the app from the selection. */
-  async commitAppAiBuild(sessionId: string, input: { selectedTileIds?: string[]; force?: boolean; expectedProposalHash?: string } = {}): Promise<
+  async commitAppAiBuild(sessionId: string, input: {
+    selectedTileIds?: string[];
+    force?: boolean;
+    expectedProposalHash?: string;
+    appName?: string;
+    audience?: string;
+    tileOverrides?: Record<string, { title?: string; viz?: string }>;
+  } = {}): Promise<
     { ok: true; session: AppAiBuildSession; app: AppSummary | null; dashboardId: string | null } | { ok: false; error: string }
   > {
     try {
@@ -5755,11 +5818,29 @@ export const api = {
     }
   },
 
-  async promoteApp(appId: string, input?: { lifecycle?: 'draft' | 'review' | 'certified' | 'deprecated' }): Promise<{ ok: true; app: AppDocumentSummary['app']; paths: string[]; removedLocalTiles: number } | { ok: false; error: string }> {
+  async promoteApp(appId: string, input?: { lifecycle?: 'draft' | 'review' | 'certified' | 'deprecated' }): Promise<
+    | { ok: true; app: AppDocumentSummary['app']; paths: string[]; removedLocalTiles: number; readiness: { ready: true; governedTiles: number; blockers: [] } }
+    | { ok: false; error: string; readiness?: { ready: false; governedTiles: number; blockers: Array<{ dashboardId: string; tileId: string; code: string; message: string }> } }
+  > {
     try {
       return await request(
         `/api/apps/${encodeURIComponent(appId)}/promote`,
         { method: 'POST', body: JSON.stringify(input ?? {}) },
+      );
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  async approveAppSemanticTiles(
+    appId: string,
+    dashboardId: string,
+    input: { runId: string; tileIds: string[]; expectedDashboardFingerprint: string; reviewer?: string },
+  ): Promise<{ ok: true; dashboard: DashboardDocumentResponse['dashboard']; path: string } | { ok: false; error: string }> {
+    try {
+      return await request(
+        `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/approve-semantic`,
+        { method: 'POST', body: JSON.stringify(input) },
       );
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };

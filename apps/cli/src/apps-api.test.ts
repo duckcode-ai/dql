@@ -2,9 +2,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
+import { loadDashboardDocument } from '@duckcodeailabs/dql-core';
 import { defaultLocalAppsDbPath, defaultPersonaRegistry, LocalAppStorage } from '@duckcodeailabs/dql-project';
 import {
   __test__,
+  approveAppSemanticTiles,
   commitAppAiBuild,
   createAppAiBuildSession,
   createAppPackage,
@@ -375,15 +378,28 @@ describe('Apps command center API helpers', () => {
     expect(session.status).toBe('proposed');
     const selected = session.proposal!.tiles.map((tile) => tile.id);
 
-    const committed = await commitAppAiBuild(root, session.id, { selectedTileIds: selected, expectedProposalHash: session.proposalHash });
+    const committed = await commitAppAiBuild(root, session.id, {
+      selectedTileIds: selected,
+      expectedProposalHash: session.proposalHash,
+      appName: 'Leadership Revenue Brief',
+      audience: 'Finance leadership',
+      tileOverrides: { [selected[0]]: { title: 'Revenue pulse', viz: 'bar' } },
+    });
     expect(committed.ok).toBe(true);
     if (!committed.ok) return;
     expect(committed.session.status).toBe('ready');
     expect(committed.session.committedTileIds).toEqual(selected);
+    expect(committed.session.committedBrief).toMatchObject({ appName: 'Leadership Revenue Brief', audience: 'Finance leadership' });
     expect(committed.session.generatedPaths.some((path) => path.endsWith('dql.app.json'))).toBe(true);
     for (const path of committed.session.generatedPaths) {
       expect(existsSync(join(root, path))).toBe(true);
     }
+    const manifestPath = committed.session.generatedPaths.find((path) => path.endsWith('dql.app.json'))!;
+    expect(JSON.parse(readFileSync(join(root, manifestPath), 'utf-8'))).toMatchObject({ name: 'Leadership Revenue Brief', audience: 'Finance leadership' });
+    const dashboardPath = committed.session.generatedPaths.find((path) => path.endsWith('.dqld'))!;
+    expect(JSON.parse(readFileSync(join(root, dashboardPath), 'utf-8')).layout.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ i: selected[0], title: 'Revenue pulse', viz: expect.objectContaining({ type: 'bar' }) }),
+    ]));
 
     // Double-commit is refused — the app already exists.
     const again = await commitAppAiBuild(root, session.id, { selectedTileIds: selected, expectedProposalHash: session.proposalHash });
@@ -451,6 +467,142 @@ describe('Apps command center API helpers', () => {
     expect(aiPinItems).toEqual([]);
     expect(doc.story?.goal).toContain('explain why revenue is changing');
     expect(doc.layout.items.some((item) => item.text?.markdown?.includes('SELECT '))).toBe(false);
+  });
+
+  it('materializes explicitly accepted Personal Draft exploration as app-scoped review DQL', async () => {
+    const root = createProject();
+    writeBlock(root, 'revenue/total_revenue.dql', {
+      name: 'Total Revenue',
+      domain: 'revenue',
+      status: 'certified',
+      tags: ['revenue', 'kpi'],
+      description: 'Executive revenue KPI',
+      chart: 'single_value',
+    });
+
+    const session = await proposeAppAiBuild(root, {
+      prompt: 'Build a revenue app and explain why revenue is changing.',
+      domain: 'revenue',
+      owner: 'owner@local',
+      mode: 'personal',
+      exploreGaps: true,
+      maxGeneratedTiles: 1,
+    }, {
+      generateGovernedAnswer: async (question) => ({
+        text: `Exploration for ${question}`,
+        sql: 'SELECT region, SUM(revenue) AS revenue FROM analytics.orders GROUP BY region',
+        suggestedViz: 'bar',
+        result: {
+          columns: ['region', 'revenue'],
+          rows: [{ region: 'NA', revenue: 100 }],
+          rowCount: 1,
+        },
+      } as never),
+    });
+
+    expect(session.status).toBe('proposed');
+    expect(session.proposal?.intent).toEqual({ target: 'personal', initialVisibility: 'private' });
+    const exploratory = session.proposal!.tiles.find((tile) => tile.source === 'ai_generated' && !tile.error);
+    expect(exploratory).toMatchObject({
+      selectedByDefault: false,
+      sourceClass: 'exploratory_analysis',
+      reviewStatus: 'required',
+      preflight: { status: 'passed' },
+    });
+    expect(existsSync(join(root, 'apps'))).toBe(false);
+
+    const committed = await commitAppAiBuild(root, session.id, {
+      selectedTileIds: [exploratory!.id],
+      expectedProposalHash: session.proposalHash,
+    });
+    expect(committed.ok).toBe(true);
+    if (!committed.ok) return;
+
+    const manifestPath = committed.session.generatedPaths.find((path) => path.endsWith('dql.app.json'))!;
+    const manifest = JSON.parse(readFileSync(join(root, manifestPath), 'utf-8')) as { visibility: string; publicationIntent: string };
+    expect(manifest).toMatchObject({ visibility: 'private', publicationIntent: 'personal' });
+    const draftPath = committed.session.generatedPaths.find((path) => path.includes('/drafts/') && path.endsWith('.dql'));
+    expect(draftPath).toBeTruthy();
+    expect(readFileSync(join(root, draftPath!), 'utf-8')).toContain('status = "review"');
+
+    const dashboardPath = committed.session.generatedPaths.find((path) => path.endsWith('.dqld'))!;
+    const dashboard = JSON.parse(readFileSync(join(root, dashboardPath), 'utf-8')) as {
+      layout: { items: Array<{ draftAnalysis?: { ref: string }; sourceClass?: string; review?: { status: string }; text?: { markdown: string } }> };
+    };
+    expect(dashboard.layout.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        draftAnalysis: expect.objectContaining({ ref: expect.stringMatching(/^drafts\/.+\.dql$/) }),
+        sourceClass: 'exploratory_analysis',
+        review: expect.objectContaining({ status: 'required' }),
+      }),
+    ]));
+    expect(dashboard.layout.items.some((item) => item.text?.markdown?.includes('SELECT '))).toBe(false);
+  });
+
+  it('retains bounded App repair evidence and only makes a successful repaired preview selectable', async () => {
+    const root = createProject();
+    writeBlock(root, 'revenue/total_revenue.dql', {
+      name: 'Total Revenue', domain: 'revenue', status: 'certified', tags: ['revenue'], description: 'Revenue KPI', chart: 'single_value',
+    });
+    const repairedSql = 'SELECT region, SUM(revenue) AS revenue FROM analytics.orders GROUP BY region';
+    const session = await proposeAppAiBuild(root, {
+      prompt: 'Build a revenue app and explain why revenue is changing.',
+      domain: 'revenue', owner: 'owner@local', mode: 'personal', exploreGaps: true, maxGeneratedTiles: 1,
+    }, {
+      generateGovernedAnswer: async () => ({
+        kind: 'uncertified',
+        text: 'Review the repaired regional analysis.',
+        sql: repairedSql,
+        result: { columns: ['region', 'revenue'], rows: [{ region: 'NA', revenue: 100 }], rowCount: 1 },
+        appBuilderRepair: {
+          version: 1,
+          status: 'repaired',
+          source: 'query_generator',
+          mode: 'ai',
+          attemptedAt: '2026-08-02T00:00:00.000Z',
+          originalFailure: 'Column revenue_total was not found.',
+          originalSqlFingerprint: `sha256:${'a'.repeat(64)}`,
+          repairedSqlFingerprint: `sha256:${createHash('sha256').update(repairedSql).digest('hex')}`,
+          approvalEligible: false,
+          message: 'AI repair executed successfully on the same data target. Review the repaired query.',
+        },
+      } as never),
+    });
+
+    const repairedTile = session.proposal?.tiles.find((tile) => tile.source === 'ai_generated');
+    expect(repairedTile).toMatchObject({
+      sql: repairedSql,
+      selectedByDefault: false,
+      preflight: { status: 'passed' },
+      repair: { status: 'repaired', mode: 'ai', approvalEligible: false },
+    });
+    expect(repairedTile?.error).toBeUndefined();
+
+    const failed = await proposeAppAiBuild(root, {
+      prompt: 'Build a revenue app and explain why revenue is changing.',
+      domain: 'revenue', owner: 'owner@local', mode: 'personal', exploreGaps: true, maxGeneratedTiles: 1,
+    }, {
+      generateGovernedAnswer: async () => ({
+        kind: 'no_answer',
+        text: 'The query failed.',
+        sql: 'SELECT missing_column FROM analytics.orders',
+        executionError: 'Column missing_column was not found.',
+        appBuilderRepair: {
+          version: 1,
+          status: 'failed',
+          source: 'query_generator',
+          attemptedAt: '2026-08-02T00:00:00.000Z',
+          originalFailure: 'Column missing_column was not found.',
+          approvalEligible: false,
+          message: 'The bounded repair could not complete.',
+        },
+      } as never),
+    });
+    expect(failed.proposal?.tiles.find((tile) => tile.source === 'ai_generated')).toMatchObject({
+      error: 'Column missing_column was not found.',
+      preflight: { status: 'blocked' },
+      repair: { status: 'failed', approvalEligible: false },
+    });
   });
 
   it('keeps gaps as research questions when no provider is available and lists other failures transparently', async () => {
@@ -653,15 +805,18 @@ describe('Apps command center API helpers', () => {
     });
     expect(appResult.ok).toBe(true);
     if (!appResult.ok) return;
+    expect(createDashboardForApp(root, 'nba-performance', { id: 'team-view', title: 'Team View' }).ok).toBe(true);
 
     let governedCalls = 0;
+    let receivedAppContext: unknown;
     const ctx = {
       projectRoot: root, req: {} as any, res: {} as any,
       url: new URL('http://local.test/api/apps/nba-performance/ask'),
       path: '/api/apps/nba-performance/ask',
       // Governed loop returns a DIFFERENT answer than the focused-tile narration.
-      generateGovernedAnswer: async (_q: string) => {
+      generateGovernedAnswer: async (_q: string, appContext?: unknown) => {
         governedCalls += 1;
+        receivedAppContext = appContext;
         return {
           kind: 'uncertified', certification: 'ai_generated', reviewStatus: 'draft_ready',
           text: 'Assists leader: Chris Paul with 892 assists.',
@@ -683,6 +838,15 @@ describe('Apps command center API helpers', () => {
     expect(result.route).toBe('generated_answer');
     expect(result.answer).toContain('Chris Paul');
     expect(result.trustState).toBe('review_required');
+    expect(receivedAppContext).toMatchObject({
+      version: 1,
+      app: { id: 'nba-performance', domain: 'nba' },
+      focus: { dashboardId: 'nba-overview', blockId: 'Top Scorers' },
+      dashboards: expect.arrayContaining([
+        expect.objectContaining({ id: 'nba-overview', tiles: expect.arrayContaining([expect.objectContaining({ blockId: 'Top Scorers' })]) }),
+        expect.objectContaining({ id: 'team-view' }),
+      ]),
+    });
   });
 
   it('narrates the focused tile ONLY for questions about it, without calling the governed loop', async () => {
@@ -1060,6 +1224,86 @@ describe('Apps command center API helpers', () => {
     expect(promotedApp.lifecycle).toBe('review');
     expect(promotedDashboard.layout.items).toHaveLength(0);
     expect(promotedDashboard.metadata.lifecycle).toBe('review');
+  });
+
+  it('blocks shared publication while an app contains exploratory draft analysis', () => {
+    const root = createProject();
+    const app = createAppPackage(root, {
+      name: 'Exploration App',
+      domain: 'revenue',
+      owners: ['owner@local'],
+      tags: [],
+      selectedBlockIds: [],
+    });
+    expect(app.ok).toBe(true);
+    if (!app.ok) return;
+    const appPath = join(root, 'apps/exploration-app/dql.app.json');
+    const beforeManifest = readFileSync(appPath, 'utf-8');
+    const dashboardPath = join(root, 'apps/exploration-app/dashboards/overview.dqld');
+    const dashboard = JSON.parse(readFileSync(dashboardPath, 'utf-8'));
+    dashboard.layout.items.push({
+      i: 'draft-driver', x: 0, y: 0, w: 6, h: 3,
+      draftAnalysis: { ref: 'drafts/draft-driver.dql', artifactFingerprint: 'sha256:draft' },
+      viz: { type: 'bar' },
+      sourceClass: 'exploratory_analysis',
+      review: { status: 'required', sourceFingerprint: 'sha256:draft' },
+      trustState: 'review_required',
+      reviewStatus: 'review_required',
+    });
+    writeFileSync(dashboardPath, JSON.stringify(dashboard, null, 2));
+
+    const result = promoteAppForStakeholders(root, 'exploration-app');
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.readiness?.blockers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'exploratory_source', tileId: 'draft-driver' }),
+    ]));
+    expect(readFileSync(appPath, 'utf-8')).toBe(beforeManifest);
+  });
+
+  it('publishes semantic Apps only after snapshot-bound run approval', () => {
+    const root = createProject();
+    const app = createAppPackage(root, {
+      name: 'Semantic App', domain: 'revenue', owners: ['owner@local'], tags: [], selectedBlockIds: [],
+    });
+    expect(app.ok).toBe(true);
+    if (!app.ok) return;
+    const dashboardPath = join(root, 'apps/semantic-app/dashboards/overview.dqld');
+    const dashboard = JSON.parse(readFileSync(dashboardPath, 'utf-8'));
+    dashboard.layout.items.push({
+      i: 'semantic-revenue', x: 0, y: 0, w: 6, h: 3,
+      semantic: {
+        id: 'semantic-revenue', provider: 'metricflow', metrics: ['revenue'], semanticModelRefs: ['orders'],
+        qualifiedMetricIds: ['metric:revenue'], qualifiedModelIds: ['semantic_model:orders'],
+        resolvedPlanFingerprint: 'sha256:plan', definitionFingerprint: 'sha256:definition', snapshotId: 'proposal-snapshot',
+      },
+      viz: { type: 'single_value' },
+      sourceClass: 'governed_semantic',
+      review: { status: 'required', sourceFingerprint: 'sha256:definition' },
+      trustState: 'review_required', reviewStatus: 'review_required',
+    });
+    writeFileSync(dashboardPath, JSON.stringify(dashboard, null, 2));
+
+    const blocked = promoteAppForStakeholders(root, 'semantic-app');
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) expect(blocked.readiness?.blockers.map((item) => item.code)).toEqual(expect.arrayContaining(['semantic_review', 'semantic_preflight']));
+
+    const loaded = loadDashboardDocument(dashboardPath).document!;
+    const expectedDashboardFingerprint = `sha256:${createHash('sha256').update(JSON.stringify(loaded)).digest('hex')}`;
+    const approved = approveAppSemanticTiles(root, 'semantic-app', 'overview', {
+      tileIds: ['semantic-revenue'], runId: 'app_run_verified', snapshotId: 'execution-snapshot',
+      expectedDashboardFingerprint, reviewer: 'analyst@local',
+    });
+    expect(approved.ok).toBe(true);
+    if (!approved.ok) return;
+    expect(approved.dashboard.layout.items[0]).toMatchObject({
+      semantic: { snapshotId: 'execution-snapshot' },
+      review: { status: 'approved', preflightReceiptId: 'app_run_verified', reviewedBy: 'analyst@local' },
+    });
+
+    const published = promoteAppForStakeholders(root, 'semantic-app');
+    expect(published.ok).toBe(true);
   });
 
   it('rejects unsupported governed visualization combinations', () => {

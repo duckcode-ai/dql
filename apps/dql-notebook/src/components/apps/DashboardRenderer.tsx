@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
-import { AlertTriangle, BarChart3, Bot, GitBranch, GripVertical, LineChart, Maximize2, PieChart, Plus, ShieldCheck, SlidersHorizontal, Sparkles, Table2, Trash2, Wand2, X } from 'lucide-react';
+import { AlertTriangle, BarChart3, Bot, GitBranch, GripVertical, LineChart, Maximize2, PieChart, Plus, ShieldCheck, SlidersHorizontal, Sparkles, Table2, Trash2, Wand2, Wrench, X } from 'lucide-react';
 import { api, type AppBlockRecommendation, type DashboardDocumentResponse, type DashboardRunResponse, type DashboardStoryBrief } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import type { CellChartConfig, QueryResult, ThemeMode } from '../../store/types';
@@ -227,6 +227,7 @@ export function DashboardRenderer({
       const blockRef = item.block
         ? ('blockId' in item.block ? item.block.blockId : item.block.ref)
         : item.semantic ? `semantic:${item.semantic.id}`
+          : item.draftAnalysis ? `draft:${item.draftAnalysis.ref}`
           : item.aiPin ? `aiPin:${item.aiPin.id}` : 'text';
       return {
         title: item.title,
@@ -797,6 +798,8 @@ function DashboardTile({
     ? `block:${blockId}`
     : item.semantic
       ? `semantic:${item.semantic.id}`
+    : item.draftAnalysis
+      ? `draft:${item.draftAnalysis.ref}`
     : item.aiPin
       ? `aiPin:${item.aiPin.id}`
       : 'text';
@@ -808,6 +811,7 @@ function DashboardTile({
     ? tile.aiPin?.certification === 'certified' ? 'certified' : 'review_required'
     : undefined;
   const generatedTrust = genUi?.trustState ?? aiPinTrust ?? (tile?.certificationStatus === 'certified' ? 'certified' : undefined);
+  const repair = tile?.repair;
   const isGeneratedUi = Boolean(genUi);
   const isCompactMetric = item.h <= 2 && (vizType === 'single_value' || vizType === 'kpi' || vizType === 'gauge');
   const [hovered, setHovered] = useState(false);
@@ -998,6 +1002,11 @@ function DashboardTile({
               </div>
               <div style={generatedMetaRowStyle}>
                 {generatedTrust ? <TrustPill trust={generatedTrust} /> : null}
+                {repair ? (
+                  <span style={generatedMetaPillStyle} title={repair.message}>
+                    <Wrench size={9} /> {repair.status === 'repaired' ? `${repair.mode === 'ai' ? 'AI ' : ''}repaired · review` : 'repair blocked'}
+                  </span>
+                ) : null}
                 {genUi ? <span style={generatedMetaPillStyle}>{componentLabelForGenUi(genUi)}</span> : null}
                 {genUi?.layoutIntent ? <span style={generatedMetaPillStyle}>{formatGenUiLabel(String(genUi.layoutIntent))}</span> : null}
               </div>
@@ -1023,10 +1032,15 @@ function DashboardTile({
           <div style={{ fontSize: isCompactMetric ? 12 : 13, fontWeight: 720, lineHeight: 1.25, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {item.title ?? blockRef}
           </div>
-          {aiPinTrust ? (
+          {aiPinTrust || repair ? (
             <div style={{ marginTop: 5, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-              <TrustPill trust={aiPinTrust} />
-              <span style={generatedMetaPillStyle}>AI generated</span>
+              {aiPinTrust ? <TrustPill trust={aiPinTrust} /> : null}
+              {aiPinTrust ? <span style={generatedMetaPillStyle}>AI generated</span> : null}
+              {repair ? (
+                <span style={generatedMetaPillStyle} title={repair.message}>
+                  <Wrench size={9} /> {repair.status === 'repaired' ? `${repair.mode === 'ai' ? 'AI ' : ''}repaired · review` : 'repair blocked'}
+                </span>
+              ) : null}
             </div>
           ) : !isCompactMetric ? (
             <div style={{ marginTop: 5, fontSize: 10.5, opacity: 0.58, fontFamily: 'var(--font-mono, monospace)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{blockRef}</div>
@@ -1359,7 +1373,12 @@ function TileBody({
   if (!tile) return <span>No run result.</span>;
   if (tile.status === 'unauthorized') return <span>Not authorized.</span>;
   if (tile.status === 'unresolved') return <span>{tile.error ?? 'Block reference unresolved.'}</span>;
-  if (tile.status === 'error') return <span>{tile.error ?? 'Tile failed.'}</span>;
+  if (tile.status === 'error') return (
+    <span>
+      {tile.error ?? 'Tile failed.'}
+      {tile.repair?.status === 'failed' ? <small style={{ display: 'block', marginTop: 6 }}>{tile.repair.message}</small> : null}
+    </span>
+  );
   if (!tile.result) return <span>No result.</span>;
 
   const chartConfig = mergeTileChartConfig(item, tile.chartConfig as CellChartConfig | undefined);

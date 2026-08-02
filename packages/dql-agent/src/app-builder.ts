@@ -209,6 +209,8 @@ export interface AppBuilderSkill {
 export interface AppPlan {
   version: 2;
   mode: AppMode;
+  /** Build destination selected before planning. Generated output is always a private draft. */
+  publicationIntent: "personal" | "shared_project";
   snapshotId?: string;
   requirements: AppRequirement[];
   requirementCoverage: RequirementCoverage[];
@@ -495,6 +497,9 @@ function semanticTileForRequirement(
       limit: requirement.ranking.limit,
     } : {}),
     semanticModelRefs,
+    qualifiedMetricIds: [metric.nodeId],
+    qualifiedModelIds: modelNodes.slice(0, 4).map((node) => node.nodeId),
+    resolvedPlanFingerprint: `sha256:${createHash("sha256").update(fingerprintPayload).digest("hex")}`,
     definitionFingerprint: `sha256:${createHash("sha256").update(fingerprintPayload).digest("hex")}`,
     ...(snapshotId ? { snapshotId } : {}),
   };
@@ -513,7 +518,7 @@ function semanticTileForRequirement(
     trustState: "review_required",
     rationale: "Governed semantic coverage for a requirement not fully covered by a compatible certified block.",
     sourceEvidence: [
-      { source: metric.nodeId, nodeId: metric.nodeId, kind: metric.kind, reason: "Reviewed semantic metric", trustState: "review_required" },
+      { source: metric.nodeId, nodeId: metric.nodeId, kind: metric.kind, reason: "Governed semantic metric; result review is still required", trustState: "review_required" },
       ...modelNodes.slice(0, 4).map((node) => ({ source: node.nodeId, nodeId: node.nodeId, kind: node.kind, reason: "Semantic model used by the canonical query", trustState: "review_required" as const })),
     ],
     reviewTasks: ["Review semantic definition freshness and result shape before stakeholder publication."],
@@ -607,7 +612,15 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
   // requirement unless the compatibility check above succeeds.
   // Compatible blocks close requirements; other strongly related certified
   // blocks may still appear as supporting context, but never change coverage.
-  const certifiedTiles = candidateCertifiedTiles;
+  // Preserve strongly related or explicitly selected certified blocks as
+  // supporting context. Only selectedCertifiedIds close requirements above;
+  // supporting tiles never change the coverage ratio or replace semantic gaps.
+  const certifiedTiles = candidateCertifiedTiles.map((tile) => ({
+    ...tile,
+    requirementIds: tile.sourceNodeId && selectedCertifiedIds.has(tile.sourceNodeId)
+      ? coverage.filter((item) => item.sourceId === tile.sourceNodeId).map((item) => item.requirementId)
+      : [],
+  }));
   const dashboardTiles = [...certifiedTiles, ...semanticTiles];
   const scopedReports = inferScopedReports(
     prompt,
@@ -644,6 +657,7 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
   return {
     version: 2,
     mode: input.mode ?? "stakeholder",
+    publicationIntent: input.mode === "personal" ? "personal" : "shared_project",
     ...(input.snapshotId ? { snapshotId: input.snapshotId } : {}),
     requirements,
     requirementCoverage: coverage,
@@ -900,7 +914,8 @@ export function generateAppFromPlan(
       "Certified tiles must reference existing certified blocks.",
     ],
     caveats: plan.caveats,
-    visibility: plan.mode === "personal" ? "private" : "shared",
+    visibility: "private",
+    publicationIntent: plan.publicationIntent ?? (plan.mode === "personal" ? "personal" : "shared_project"),
     ownerDomain: plan.domain,
     usesDomains: usedDomains,
     requiredExports,
@@ -972,7 +987,7 @@ export function generateAppFromPlan(
         description: page.description ?? plan.planning.displayStrategy,
         domain: plan.domain,
         audience: plan.audience,
-        visibility: plan.mode === "personal" ? "private" : "shared",
+        visibility: "private",
         lifecycle: "draft",
         tags: plan.tags,
         businessOutcome: plan.planning.normalizedGoal,
@@ -1913,6 +1928,13 @@ function buildLayoutItems(tiles: AppPlanTile[]): DashboardGridItem[] {
       ...(tile.filterBindings?.length ? { filterBindings: tile.filterBindings } : {}),
       ...(tile.parameterBindings?.length ? { parameterBindings: tile.parameterBindings } : {}),
       ...(tile.sourceEvidence?.length ? { sourceEvidence: tile.sourceEvidence } : {}),
+      sourceClass: tile.kind === "certified_block" ? "certified_block" : "governed_semantic",
+      review: tile.kind === "certified_block"
+        ? { status: "not_required", sourceFingerprint: tile.sourceNodeId }
+        : {
+            status: "required",
+            sourceFingerprint: tile.semantic?.definitionFingerprint,
+          },
       trustState: tile.trustState ?? tile.display?.trustState ?? (tile.certification === "certified" ? "certified" : "draft_ready"),
       reviewStatus: tile.reviewStatus,
     };

@@ -4,7 +4,7 @@
  * dispatcher — returns `true` if the request was handled, `false` otherwise.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, type Dirent, type Stats } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, type Dirent, type Stats } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, dirname, relative, basename } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -52,16 +52,64 @@ interface Ctx {
   planResearch?: (input: { question: string; isFollowUp?: boolean }) => Promise<AppResearchPlan>;
   /** Governed answer generator — supplied by the runtime. Lets the two-phase app
    *  build fill coverage gaps with bounded, review-required generated SQL. */
-  generateGovernedAnswer?: (question: string) => Promise<AgentAnswer>;
+  generateGovernedAnswer?: (question: string, context?: AppContextEnvelopeV1) => Promise<AppBuildGeneratedAnswer>;
   /** Story narrator — supplied by the runtime (LLM-backed with a deterministic
    *  fallback). Commit uses it to write the app's narrated story sections. */
   narrate?: (input: NarrateInput) => Promise<NarrateResult>;
+  verifyDashboardRun?: (input: { runId: string; appId: string; dashboardId: string; tileIds: string[] }) =>
+    | { ok: true; snapshotId: string; resultFingerprint: string }
+    | { ok: false; error: string };
 }
 
 /** Runtime hooks the two-phase app build can use during propose (all optional —
  *  without them, gaps stay listed as uncovered research questions). */
 export interface AppBuildHooks {
-  generateGovernedAnswer?: (question: string) => Promise<AgentAnswer>;
+  generateGovernedAnswer?: (question: string, context?: AppContextEnvelopeV1) => Promise<AppBuildGeneratedAnswer>;
+}
+
+/**
+ * One bounded repair trace shared by App proposal and dashboard execution.
+ * Repaired SQL never inherits semantic certification: the trace is evidence that
+ * the result is useful for review, not permission to publish it as governed.
+ */
+export interface AppExecutionRepairTrace {
+  version: 1;
+  status: 'repaired' | 'failed';
+  source: 'query_generator' | 'semantic_query' | 'draft_analysis';
+  mode?: 'deterministic' | 'ai';
+  attemptedAt: string;
+  originalFailure: string;
+  originalSqlFingerprint?: string;
+  repairedSqlFingerprint?: string;
+  approvalEligible: false;
+  message: string;
+}
+
+export type AppBuildGeneratedAnswer = AgentAnswer & {
+  appBuilderRepair?: AppExecutionRepairTrace;
+};
+
+export interface AppContextEnvelopeV1 {
+  version: 1;
+  app: {
+    id: string;
+    name: string;
+    domain: string;
+    audience?: string;
+    lifecycle: string;
+    visibility: string;
+    publicationIntent: 'personal' | 'shared_project';
+    businessOutcome?: string;
+    caveats: string[];
+  };
+  dashboards: Array<{
+    id: string;
+    title: string;
+    filters: DashboardDocument['filters'];
+    story?: DashboardDocument['story'];
+    tiles: Array<Record<string, unknown>>;
+  }>;
+  focus?: { dashboardId?: string; tileId?: string; blockId?: string };
 }
 
 /** Runtime hooks for the commit step (all optional — commit falls back to the
@@ -231,6 +279,37 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
       sendJson(res, 200, result);
     } catch (err) {
       sendJson(res, 500, { ok: false, error: (err as Error).message });
+    }
+    return true;
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/dashboards\/([^/]+)\/approve-semantic$/);
+  if (m && req.method === 'POST') {
+    const appId = decodeURIComponent(m[1]);
+    const dashboardId = decodeURIComponent(m[2]);
+    try {
+      const body = await readJson<AppSemanticApprovalRequest>(req);
+      const runId = cleanString(body.runId);
+      const tileIds = unique((body.tileIds ?? []).map(cleanString).filter(Boolean));
+      if (!runId || tileIds.length === 0 || !ctx.verifyDashboardRun) {
+        sendJson(res, 400, { ok: false, error: 'A successful dashboard run and semantic tile selection are required.' });
+        return true;
+      }
+      const verified = ctx.verifyDashboardRun({ runId, appId, dashboardId, tileIds });
+      if (!verified.ok) {
+        sendJson(res, 409, { ok: false, error: verified.error });
+        return true;
+      }
+      const result = approveAppSemanticTiles(projectRoot, appId, dashboardId, {
+        tileIds,
+        runId,
+        snapshotId: verified.snapshotId,
+        expectedDashboardFingerprint: cleanString(body.expectedDashboardFingerprint),
+        reviewer: cleanString(body.reviewer) || 'local-reviewer',
+      });
+      sendJson(res, result.ok ? 200 : 409, result);
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) });
     }
     return true;
   }
@@ -830,6 +909,7 @@ type AppListEntry = {
   status?: 'ready' | 'empty' | 'review';
   storage: 'shared' | 'mine' | 'template';
   visibility: NonNullable<AppDocument['visibility']>;
+  publicationIntent: NonNullable<AppDocument['publicationIntent']>;
   owners: string[];
   tags: string[];
   members: number;
@@ -874,6 +954,7 @@ function collectAppsList(projectRoot: string): AppListEntry[] {
       status: document.lifecycle === 'review' ? 'review' : dashboards.length > 0 ? 'ready' : 'empty',
       storage: document.visibility === 'private' ? 'mine' : document.visibility === 'template' ? 'template' : 'shared',
       visibility: document.visibility ?? 'shared',
+      publicationIntent: document.publicationIntent ?? (document.visibility === 'private' ? 'personal' : 'shared_project'),
       owners: document.owners,
       tags: document.tags ?? [],
       members: document.members.length,
@@ -943,6 +1024,8 @@ interface AppGenerateRequest {
   notebookPath?: string;
   existingAppId?: string;
   mode?: 'personal' | 'stakeholder';
+  /** Explicit opt-in to analyze uncovered questions as app-scoped review drafts. */
+  exploreGaps?: boolean;
   /** Gap-fill budget: how many uncovered questions may get generated SQL (default 3, hard cap 5). */
   maxGeneratedTiles?: number;
 }
@@ -965,6 +1048,11 @@ interface AppAiBuildSession {
   proposalHash?: string;
   /** Tile ids the user confirmed at commit time (audit trail). */
   committedTileIds?: string[];
+  committedBrief?: {
+    appName: string;
+    audience: string;
+    tileOverrides: Record<string, { title?: string; viz?: string }>;
+  };
   warnings: string[];
   reviewTasks: string[];
   inputs: {
@@ -974,6 +1062,7 @@ interface AppAiBuildSession {
     notebookPath?: string;
     existingAppId?: string;
     mode?: 'personal' | 'stakeholder';
+    exploreGaps?: boolean;
     selectedBlockIds: string[];
   };
   error?: string;
@@ -994,9 +1083,23 @@ export interface AppBuildProposalTile {
   sql?: string;
   answer?: string;
   viz: string;
+  allowedVisualizations?: string[];
   certification: 'certified' | 'reviewed_semantic' | 'ai_generated';
+  sourceClass: 'certified_block' | 'governed_semantic' | 'exploratory_analysis';
+  reviewStatus: 'not_required' | 'required' | 'approved';
+  requirementIds?: string[];
+  sourceEvidence?: DashboardGridItem['sourceEvidence'];
+  preflight: {
+    status: 'passed' | 'review_required' | 'blocked';
+    snapshotId?: string;
+    sourceFingerprint?: string;
+    receiptId?: string;
+    message: string;
+  };
   /** Bounded preview rows from executing the generated SQL (Phase 2). */
   preview?: { columns: string[]; rows: Array<Record<string, unknown>>; rowCount?: number };
+  /** Immutable evidence from the shared one-attempt Ask/Notebook repair boundary. */
+  repair?: AppExecutionRepairTrace;
   /** Generation failed — listed for transparency, not selectable. */
   error?: string;
   selectedByDefault: boolean;
@@ -1011,6 +1114,7 @@ export interface AppBuildProposalGap {
 }
 
 export interface AppBuildProposal {
+  intent: { target: 'personal' | 'shared_project'; initialVisibility: 'private' };
   tiles: AppBuildProposalTile[];
   gaps: AppBuildProposalGap[];
   followUps: string[];
@@ -1038,6 +1142,13 @@ interface AppAskDecision {
 
 interface AppPromoteRequest {
   lifecycle?: AppDocument['lifecycle'];
+}
+
+interface AppSemanticApprovalRequest {
+  runId?: string;
+  tileIds?: string[];
+  expectedDashboardFingerprint?: string;
+  reviewer?: string;
 }
 
 interface DashboardTileRecommendationRequest extends VisualizationRecommendationRequest {
@@ -1367,12 +1478,12 @@ export async function generateAppPackage(
       owner: cleanString(input.owner) || undefined,
       preferredBlockIds: selectedBlockIds,
       plannerMode: input.plannerMode === 'ai_assisted' ? 'ai_assisted' : 'deterministic',
+      mode: input.mode === 'personal' ? 'personal' : 'stakeholder',
     });
     const validation = validateAppPlan(plan, kg);
-    const certifiedTiles = typeof (validation as { certifiedTiles?: unknown }).certifiedTiles === 'number'
-      ? (validation as { certifiedTiles: number }).certifiedTiles
-      : 0;
-    if (certifiedTiles === 0) {
+    const governedTiles = plan.pages.flatMap((page) => page.tiles)
+      .filter((tile) => tile.kind === 'certified_block' || tile.kind === 'semantic_query').length;
+    if (governedTiles === 0) {
       return {
         ok: false,
         error: appBuildBlockedMessage(validation, plan as unknown as Record<string, unknown>),
@@ -1421,6 +1532,7 @@ export async function createAppAiBuildSession(
       notebookPath: cleanString(input.notebookPath) || undefined,
       existingAppId: cleanString(input.existingAppId) || undefined,
       mode: input.mode === 'personal' ? 'personal' : 'stakeholder',
+      exploreGaps: input.mode === 'personal' && input.exploreGaps === true,
       selectedBlockIds,
     },
   };
@@ -1488,7 +1600,18 @@ function buildAppProposal(plan: AppPlan): AppBuildProposal {
           description: tile.description,
           blockId: tile.blockId,
           viz: tile.viz,
+          allowedVisualizations: tile.display?.genUi.allowedVisualizations ?? [tile.viz, 'table'],
           certification: 'certified',
+          sourceClass: 'certified_block',
+          reviewStatus: 'not_required',
+          requirementIds: tile.requirementIds,
+          sourceEvidence: tile.sourceEvidence,
+          preflight: {
+            status: 'passed',
+            snapshotId: plan.snapshotId,
+            sourceFingerprint: tile.sourceNodeId,
+            message: 'Certified source and requirement compatibility were validated against this project snapshot.',
+          },
           selectedByDefault: true,
         });
       } else if (tile.kind === 'semantic_query' && tile.semantic) {
@@ -1500,7 +1623,18 @@ function buildAppProposal(plan: AppPlan): AppBuildProposal {
           question: tile.title,
           semantic: tile.semantic,
           viz: tile.viz,
+          allowedVisualizations: tile.display?.genUi.allowedVisualizations ?? [tile.viz, 'table'],
           certification: 'reviewed_semantic',
+          sourceClass: 'governed_semantic',
+          reviewStatus: 'required',
+          requirementIds: tile.requirementIds,
+          sourceEvidence: tile.sourceEvidence,
+          preflight: {
+            status: 'review_required',
+            snapshotId: plan.snapshotId,
+            sourceFingerprint: tile.semantic.definitionFingerprint,
+            message: 'Semantic identities are resolved; run and review the result before shared publication.',
+          },
           selectedByDefault: true,
         });
       }
@@ -1528,6 +1662,10 @@ function buildAppProposal(plan: AppPlan): AppBuildProposal {
     gaps.push({ id: `gap_${gaps.length + 1}`, question, reason: 'No certified block covers this question.' });
   }
   return {
+    intent: {
+      target: plan.publicationIntent,
+      initialVisibility: 'private',
+    },
     tiles,
     gaps,
     followUps: gaps.map((gap) => gap.question).slice(0, 4),
@@ -1610,6 +1748,11 @@ async function fillProposalGaps(
         remaining.push(gap);
         continue;
       }
+      const preview = previewFromAgentResult(answer.result);
+      const repair = answer.appBuilderRepair;
+      const unresolvedExecutionError = !preview
+        ? cleanString(answer.executionError ?? answer.warehouseFailure?.redactedMessage ?? '')
+        : '';
       // Gap-fill tiles are AI-generated by definition (they answer questions the
       // certified blocks did NOT cover). They are ALWAYS ai_generated / review-
       // required — never auto-certified, even if the governed loop happened to
@@ -1623,8 +1766,28 @@ async function fillProposalGaps(
         answer: cleanString(answer.answer ?? answer.text ?? '') || undefined,
         viz: normalizeGeneratedViz(answer.suggestedViz),
         certification: 'ai_generated',
-        preview: previewFromAgentResult(answer.result),
-        selectedByDefault: true,
+        sourceClass: 'exploratory_analysis',
+        reviewStatus: 'required',
+        preflight: {
+          status: preview ? 'passed' : unresolvedExecutionError ? 'blocked' : 'review_required',
+          sourceFingerprint: `sha256:${createHash('sha256').update(sql).digest('hex')}`,
+          receiptId: preview
+            ? `preview:${createHash('sha256').update(JSON.stringify(preview)).digest('hex')}`
+            : undefined,
+          message: preview
+            ? repair?.status === 'repaired'
+              ? 'The shared bounded repair produced a successful preview; the query remains review-required.'
+              : 'A bounded preview ran successfully; business review is still required.'
+            : repair?.status === 'failed'
+              ? repair.message
+              : unresolvedExecutionError
+                ? 'The generated query failed its bounded preview and could not be selected.'
+                : 'SQL was generated but has no successful preview receipt yet.',
+        },
+        preview,
+        ...(repair ? { repair } : {}),
+        ...(unresolvedExecutionError ? { error: unresolvedExecutionError } : {}),
+        selectedByDefault: false,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1642,6 +1805,12 @@ async function fillProposalGaps(
         question: gap.question,
         viz: 'table',
         certification: 'ai_generated',
+        sourceClass: 'exploratory_analysis',
+        reviewStatus: 'required',
+        preflight: {
+          status: 'blocked',
+          message: 'Exploratory analysis generation failed.',
+        },
         error: message,
         selectedByDefault: false,
       });
@@ -1686,6 +1855,7 @@ export async function proposeAppAiBuild(
       notebookPath: cleanString(input.notebookPath) || undefined,
       existingAppId: cleanString(input.existingAppId) || undefined,
       mode: input.mode === 'personal' ? 'personal' : 'stakeholder',
+      exploreGaps: input.mode === 'personal' && input.exploreGaps === true,
       selectedBlockIds,
     },
   };
@@ -1724,8 +1894,11 @@ export async function proposeAppAiBuild(
     });
     const validation = validateAppPlan(plan, kg);
     const proposal = buildAppProposal(plan);
-    // App Builder v2 never turns generated SQL into a primary dashboard tile.
-    // Uncovered requirements stay visible gaps for Research/Copilot.
+    // Raw SQL exploration is opt-in, personal-only, preview-bounded, and remains
+    // unselected until the user explicitly accepts it in the Build Brief.
+    if (base.inputs.exploreGaps) {
+      await fillProposalGaps(proposal, hooks, input.maxGeneratedTiles);
+    }
     const proposalHash = createHash('sha256').update(JSON.stringify({ plan, proposal })).digest('hex');
     const session: AppAiBuildSession = {
       ...base,
@@ -1755,12 +1928,11 @@ export async function proposeAppAiBuild(
 }
 
 /**
- * Persist selected AI-generated candidates as aiPins (certification preserved,
- * never upgraded; review-required) and append them as dashboard tiles below the
- * certified layout. The dashboard doc was just written by generateAppFromPlan, so
- * this rewrites it with the extra items — the renderer already badges aiPin tiles.
+ * Materialize explicitly selected exploratory candidates as Git-owned, app-scoped
+ * review DQL. They are never promoted into the shared block library and the
+ * dashboard stores a fingerprinted reference instead of inline SQL.
  */
-function attachGeneratedTiles(
+function attachGeneratedDraftAnalyses(
   projectRoot: string,
   plan: AppPlan,
   generatedPaths: string[],
@@ -1773,7 +1945,7 @@ function attachGeneratedTiles(
   const absolutePath = join(projectRoot, dashboardPath);
   if (!existsSync(absolutePath)) return;
   const doc = JSON.parse(readFileSync(absolutePath, 'utf-8')) as DashboardDocument;
-  // Story layout: generated tiles live in the review appendix. Classic grids
+  // Story layout: exploratory tiles live in the review appendix. Classic grids
   // (no sections) just append at the bottom, untagged.
   const storyMode = Array.isArray(doc.sections) && doc.sections.length > 0;
   if (storyMode && !doc.sections!.some((section) => section.kind === 'appendix')) {
@@ -1784,36 +1956,62 @@ function attachGeneratedTiles(
       order: doc.sections!.length,
     });
   }
-  const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
-  try {
-    let y = doc.layout.items.reduce((max, item) => Math.max(max, item.y + item.h), 0);
-    let x = 0;
-    for (const tile of candidates) {
-      const certified = tile.certification === 'certified';
-      const pin = storage.createAiPin({
-        appId: plan.appId,
-        dashboardId: doc.id,
-        title: tile.title,
-        answer: tile.answer ?? tile.question ?? tile.title,
-        question: tile.question,
-        sql: tile.sql,
-        certification: certified ? 'certified' : 'ai_generated',
-        reviewStatus: certified ? 'certified' : 'needs_review',
-        refreshCadence: 'none',
-        result: tile.preview,
-        followUps: tile.followUps ?? [],
-      });
+  let y = doc.layout.items.reduce((max, item) => Math.max(max, item.y + item.h), 0);
+  let x = 0;
+  const draftsDir = join(projectRoot, 'apps', plan.appId, 'drafts');
+  mkdirSync(draftsDir, { recursive: true });
+  for (const tile of candidates) {
+      if (!tile.sql) continue;
+      if (tile.sql.includes('"""')) throw new Error(`Exploratory SQL for "${tile.title}" contains an unsupported triple-quote delimiter.`);
+      const draftId = slugify(tile.title) || slugify(tile.id) || `analysis-${Date.now()}`;
+      const draftPath = join(draftsDir, `${draftId}.dql`);
+      const source = [
+        `block "${escapeDqlString(draftId)}" {`,
+        `  domain = "${escapeDqlString(plan.domain)}"`,
+        '  type = "custom"',
+        '  status = "review"',
+        `  owner = "${escapeDqlString(plan.owner)}"`,
+        `  description = "${escapeDqlString((tile.answer ?? tile.question ?? tile.title).slice(0, 240))}"`,
+        tile.question ? `  llmContext = "${escapeDqlString(`App-scoped exploratory analysis. Question: ${tile.question}`)}"` : '',
+        tile.question ? `  examples = [{ question = "${escapeDqlString(tile.question)}" }]` : '',
+        '  caveats = ["AI-generated app draft. Validate joins, filters, grain, and business interpretation before promotion or publication."]',
+        '  tags = ["app-scoped", "ai-generated", "needs-review"]',
+        '',
+        '  query = """',
+        tile.sql,
+        '  """',
+        '',
+        '  visualization {',
+        `    chart = "${escapeDqlString(normalizeGeneratedViz(tile.viz))}"`,
+        '  }',
+        '}',
+        '',
+      ].filter(Boolean).join('\n');
+      const fingerprint = `sha256:${createHash('sha256').update(source).digest('hex')}`;
+      writeFileSync(draftPath, source, 'utf-8');
+      generatedPaths.push(relative(projectRoot, draftPath));
       const item: DashboardGridItem = {
-        i: `aipin_${pin.id}`,
+        i: `draft_${draftId}`,
         x,
         y,
         w: 6,
         h: 4,
-        aiPin: { id: pin.id },
+        draftAnalysis: {
+          ref: `drafts/${draftId}.dql`,
+          artifactFingerprint: fingerprint,
+          ...(plan.snapshotId ? { snapshotId: plan.snapshotId } : {}),
+          ...(tile.preflight.receiptId ? { executionReceiptId: tile.preflight.receiptId } : {}),
+        },
         viz: { type: normalizeGeneratedViz(tile.viz) as DashboardGridItem['viz']['type'] },
         title: tile.title,
-        trustState: certified ? 'certified' : 'review_required',
-        reviewStatus: certified ? 'certified' : 'review_required',
+        sourceClass: 'exploratory_analysis',
+        review: {
+          status: 'required',
+          sourceFingerprint: fingerprint,
+          ...(tile.preflight.receiptId ? { preflightReceiptId: tile.preflight.receiptId } : {}),
+        },
+        trustState: 'review_required',
+        reviewStatus: 'review_required',
         ...(storyMode ? { sectionId: 'appendix' } : {}),
       };
       doc.layout.items.push(item);
@@ -1823,11 +2021,12 @@ function attachGeneratedTiles(
         x = 0;
         y += 4;
       }
-    }
-    writeFileSync(absolutePath, JSON.stringify(doc, null, 2) + '\n', 'utf-8');
-  } finally {
-    storage.close();
   }
+  const parsed = parseDashboardDocument(JSON.stringify(doc), absolutePath);
+  if (!parsed.document || parsed.errors.length > 0) {
+    throw new Error(`Exploratory App dashboard is invalid: ${parsed.errors.map((error) => error.message).join('; ')}`);
+  }
+  writeFileSync(absolutePath, JSON.stringify(doc, null, 2) + '\n', 'utf-8');
 }
 
 export interface CommitAppAiBuildInput {
@@ -1835,6 +2034,10 @@ export interface CommitAppAiBuildInput {
   selectedTileIds?: string[];
   force?: boolean;
   expectedProposalHash?: string;
+  /** User-approved Build Brief edits that do not alter governed source identity. */
+  appName?: string;
+  audience?: string;
+  tileOverrides?: Record<string, { title?: string; viz?: string }>;
 }
 
 /**
@@ -1863,6 +2066,13 @@ export async function commitAppAiBuild(
 
   const plan = session.plan as AppPlan;
   const proposal = session.proposal;
+  const proposalTileIds = new Set(proposal.tiles.map((tile) => tile.id));
+  const tileOverrides = Object.fromEntries(Object.entries(input.tileOverrides ?? {})
+    .filter(([tileId, value]) => proposalTileIds.has(tileId) && value && typeof value === 'object')
+    .map(([tileId, value]) => [tileId, {
+      ...(cleanString(value.title) ? { title: cleanString(value.title).slice(0, 120) } : {}),
+      ...(cleanString(value.viz) ? { viz: normalizeGeneratedViz(value.viz) } : {}),
+    }]));
   const selectable = new Set(proposal.tiles.filter((tile) => !tile.error).map((tile) => tile.id));
   const selected = new Set(
     (input.selectedTileIds ?? Array.from(selectable)).filter((tileId) => selectable.has(tileId)),
@@ -1875,11 +2085,41 @@ export async function commitAppAiBuild(
   // tiles (narrative, draft placeholders) stay — they document the story + gaps.
   const committedPlan: AppPlan = {
     ...plan,
+    ...(cleanString(input.appName) ? { name: cleanString(input.appName).slice(0, 120) } : {}),
+    ...(cleanString(input.audience) ? { audience: cleanString(input.audience).slice(0, 120) } : {}),
     pages: plan.pages.map((page) => ({
       ...page,
-      tiles: page.tiles.filter((tile) => !['certified_block', 'semantic_query'].includes(tile.kind) || selected.has(tile.id)),
+      tiles: page.tiles
+        .filter((tile) => !['certified_block', 'semantic_query'].includes(tile.kind) || selected.has(tile.id))
+        .map((tile) => {
+          const override = tileOverrides[tile.id];
+          if (!override) return tile;
+          const viz = override.viz as AppPlan['pages'][number]['tiles'][number]['viz'] | undefined;
+          return {
+            ...tile,
+            ...(override.title ? { title: override.title } : {}),
+            ...(viz ? { viz } : {}),
+            ...(viz && tile.display ? {
+              display: {
+                ...tile.display,
+                recommendedDisplayType: viz,
+                genUi: {
+                  ...tile.display.genUi,
+                  defaultVisualization: viz,
+                  allowedVisualizations: Array.from(new Set([viz, ...tile.display.genUi.allowedVisualizations])),
+                },
+              },
+            } : {}),
+          };
+        }),
     })),
   };
+  const selectedExploratory = proposal.tiles.filter((tile) => (
+    tile.source === 'ai_generated' && selected.has(tile.id) && !tile.error && Boolean(tile.sql)
+  )).map((tile) => ({ ...tile, ...tileOverrides[tile.id] }));
+  if (plan.mode !== 'personal' && selectedExploratory.length > 0) {
+    return { ok: false, error: 'Exploratory SQL can only be accepted into a Personal Draft.', status: 400 };
+  }
 
   const {
     KGStore,
@@ -1899,8 +2139,8 @@ export async function commitAppAiBuild(
     const validation = validateAppPlan(committedPlan, kg);
     const governedTileCount = committedPlan.pages.flatMap((page) => page.tiles)
       .filter((tile) => tile.kind === 'certified_block' || tile.kind === 'semantic_query').length;
-    if (governedTileCount === 0) {
-      return { ok: false, error: 'Select at least one certified block or governed semantic query.', status: 409 };
+    if (governedTileCount === 0 && selectedExploratory.length === 0) {
+      return { ok: false, error: 'Select a certified block, governed semantic query, or explicitly accepted Personal Draft analysis.', status: 409 };
     }
     // Copilot follow-ups the created app carries: still-uncovered gaps first, then
     // the questions behind any candidates the user chose to leave out.
@@ -1918,6 +2158,9 @@ export async function commitAppAiBuild(
     rmSync(stagingRoot, { recursive: true, force: true });
     try {
       generated = generateAppFromPlan(stagingRoot, committedPlan, kg, { overwrite: true, copilotQuestions });
+      if (selectedExploratory.length > 0) {
+        attachGeneratedDraftAnalyses(stagingRoot, committedPlan, generated.paths, selectedExploratory);
+      }
       mkdirSync(dirname(targetAppDir), { recursive: true });
       if (existsSync(targetAppDir)) {
         if (!input.force) return { ok: false, error: `App already exists: apps/${committedPlan.appId}`, status: 409 };
@@ -1948,6 +2191,11 @@ export async function commitAppAiBuild(
       validation,
       generatedPaths: generated.paths,
       committedTileIds: Array.from(selected),
+      committedBrief: {
+        appName: committedPlan.name,
+        audience: committedPlan.audience,
+        tileOverrides,
+      },
       warnings: [...session.warnings, ...attachWarnings],
     };
     writeAppAiBuildSession(projectRoot, next);
@@ -2028,6 +2276,11 @@ async function routeAppAskQuestion(
     (input.blockId && item.block && 'blockId' in item.block && item.block.blockId === input.blockId),
   );
   const blockId = cleanString(input.blockId) || (tile?.block && 'blockId' in tile.block ? tile.block.blockId : undefined);
+  const appContext = buildAppContextEnvelope(loaded.app, loaded.appDir, {
+    dashboardId,
+    tileId: cleanString(input.tileId) || undefined,
+    blockId,
+  });
   const citations = [
     { kind: 'app', name: loaded.app.name, path: loaded.appPath },
     ...(dashboard ? [{ kind: 'dashboard', name: dashboard.metadata.title, path: `${loaded.appPath}/dashboards/${dashboard.id}.dqld` }] : []),
@@ -2052,11 +2305,20 @@ async function routeAppAskQuestion(
       decision,
       proposal: {
         type: 'app_change',
+        version: 1,
         dashboardId,
         tileId: input.tileId,
         blockId,
         question,
         reviewRequired: true,
+        expectedDashboardFingerprint: dashboard
+          ? `sha256:${createHash('sha256').update(JSON.stringify(dashboard)).digest('hex')}`
+          : undefined,
+        operations: [{
+          op: 'review_in_build_mode',
+          target: cleanString(input.tileId) || dashboardId || appId,
+          suggestion: appChangeSuggestion(question),
+        }],
       },
     };
   }
@@ -2087,6 +2349,7 @@ async function routeAppAskQuestion(
         variables: input.variables,
         selectedTile: tile ? appAskTileContext(tile) : undefined,
         userContext: input.context,
+        appContext,
       },
     };
 
@@ -2123,6 +2386,7 @@ async function routeAppAskQuestion(
           variables: input.variables,
           selectedTile: tile ? appAskTileContext(tile) : undefined,
           userContext: input.context,
+          appContext,
           routeDecision: decision,
         },
       });
@@ -2175,7 +2439,7 @@ async function routeAppAskQuestion(
   // surfaces use: question-first retrieval finds the best-matching certified block
   // across the app, generates review-required SQL, or digs deeper — instead of
   // narrating whichever tile happens to be focused.
-  const governed = await tryGovernedAppAnswer(ctx, question, { blockId, appName: loaded.app.name, citations });
+  const governed = await tryGovernedAppAnswer(ctx, question, { blockId, appName: loaded.app.name, citations, appContext });
   if (governed) return governed;
 
   // Offline / no AI provider: keep the focused tile as a graceful fallback.
@@ -2316,11 +2580,11 @@ function mapGovernedToAppAsk(
 async function tryGovernedAppAnswer(
   ctx: Ctx,
   question: string,
-  input: { blockId?: string; appName: string; citations: Array<{ kind: string; name: string; path?: string }> },
+  input: { blockId?: string; appName: string; citations: Array<{ kind: string; name: string; path?: string }>; appContext: AppContextEnvelopeV1 },
 ): Promise<AppAskSuccess | null> {
   if (!ctx.generateGovernedAnswer) return null;
   try {
-    const governed = await ctx.generateGovernedAnswer(question);
+    const governed = await ctx.generateGovernedAnswer(question, input.appContext);
     return governed ? mapGovernedToAppAsk(governed, { question, ...input }) : null;
   } catch {
     return null; // no provider / transient — caller falls back to tile or metadata
@@ -2528,26 +2792,35 @@ export function promoteAppForStakeholders(
   projectRoot: string,
   appId: string,
   input: AppPromoteRequest = {},
-): { ok: true; app: AppDocument; paths: string[]; removedLocalTiles: number } | { ok: false; error: string } {
+): { ok: true; app: AppDocument; paths: string[]; removedLocalTiles: number; readiness: AppPublicationReadiness } | { ok: false; error: string; readiness?: AppPublicationReadiness } {
   const loaded = loadAppById(projectRoot, appId);
   if (!loaded) return { ok: false, error: `App "${appId}" not found` };
+  const dashboardSources = findDashboardsForApp(loaded.appDir)
+    .map((path) => ({ path, document: loadDashboardDocument(path).document }))
+    .filter((item): item is { path: string; document: DashboardDocument } => Boolean(item.document));
+  const readiness = appPublicationReadiness(dashboardSources.map((item) => item.document));
+  if (!readiness.ready) {
+    return {
+      ok: false,
+      error: `App is not ready for shared publication: ${readiness.blockers.map((blocker) => blocker.message).join('; ')}`,
+      readiness,
+    };
+  }
   const lifecycle = input.lifecycle === 'certified' || input.lifecycle === 'deprecated' ? input.lifecycle : 'review';
   const app: AppDocument = {
     ...loaded.app,
     visibility: 'shared',
+    publicationIntent: 'shared_project',
     lifecycle,
   };
   const appPath = join(loaded.appDir, 'dql.app.json');
   const parsedApp = parseAppDocument(JSON.stringify(app), appPath);
   if (!parsedApp.document) return { ok: false, error: parsedApp.errors.map((err) => err.message).join('; ') };
-  writeFileSync(appPath, JSON.stringify(parsedApp.document, null, 2) + '\n', 'utf-8');
 
   let removedLocalTiles = 0;
-  const paths = [relative(projectRoot, appPath)];
-  for (const dashboardPath of findDashboardsForApp(loaded.appDir)) {
-    const loadedDashboard = loadDashboardDocument(dashboardPath).document;
-    if (!loadedDashboard) continue;
-    const items = loadedDashboard.layout.items
+  const dashboards: Array<{ sourcePath: string; document: DashboardDocument }> = [];
+  for (const source of dashboardSources) {
+    const items = source.document.layout.items
       .filter((item) => {
         if (item.aiPin) {
           removedLocalTiles += 1;
@@ -2557,23 +2830,141 @@ export function promoteAppForStakeholders(
       })
       .map((item) => promoteSharedDashboardItem(item));
     const dashboard: DashboardDocument = {
-      ...loadedDashboard,
+      ...source.document,
       metadata: {
-        ...loadedDashboard.metadata,
+        ...source.document.metadata,
         visibility: 'shared',
         lifecycle,
       },
       layout: {
-        ...loadedDashboard.layout,
+        ...source.document.layout,
         items,
       },
     };
-    const parsed = parseDashboardDocument(JSON.stringify(dashboard), dashboardPath);
+    const parsed = parseDashboardDocument(JSON.stringify(dashboard), source.path);
     if (!parsed.document) return { ok: false, error: parsed.errors.map((err) => err.message).join('; ') };
-    writeFileSync(dashboardPath, JSON.stringify(parsed.document, null, 2) + '\n', 'utf-8');
-    paths.push(relative(projectRoot, dashboardPath));
+    dashboards.push({ sourcePath: source.path, document: parsed.document });
   }
-  return { ok: true, app: parsedApp.document, paths, removedLocalTiles };
+
+  // Stage and swap the whole App directory so validation or write failures do
+  // not leave a partially published manifest/dashboard set.
+  const stagingBase = join(projectRoot, '.dql', 'local', 'app-publish-staging');
+  const stagedAppDir = join(stagingBase, `${appId}-next`);
+  const backupAppDir = join(stagingBase, `${appId}-backup`);
+  rmSync(stagedAppDir, { recursive: true, force: true });
+  rmSync(backupAppDir, { recursive: true, force: true });
+  mkdirSync(stagingBase, { recursive: true });
+  cpSync(loaded.appDir, stagedAppDir, { recursive: true });
+  writeFileSync(join(stagedAppDir, 'dql.app.json'), JSON.stringify(parsedApp.document, null, 2) + '\n', 'utf-8');
+  for (const dashboard of dashboards) {
+    const stagedPath = join(stagedAppDir, relative(loaded.appDir, dashboard.sourcePath));
+    writeFileSync(stagedPath, JSON.stringify(dashboard.document, null, 2) + '\n', 'utf-8');
+  }
+  try {
+    renameSync(loaded.appDir, backupAppDir);
+    renameSync(stagedAppDir, loaded.appDir);
+    rmSync(backupAppDir, { recursive: true, force: true });
+  } catch (error) {
+    if (existsSync(backupAppDir) && !existsSync(loaded.appDir)) renameSync(backupAppDir, loaded.appDir);
+    throw error;
+  }
+  const paths = [relative(projectRoot, appPath), ...dashboards.map((dashboard) => relative(projectRoot, dashboard.sourcePath))];
+  return { ok: true, app: parsedApp.document, paths, removedLocalTiles, readiness };
+}
+
+export interface AppPublicationReadiness {
+  ready: boolean;
+  governedTiles: number;
+  blockers: Array<{ dashboardId: string; tileId: string; code: 'exploratory_source' | 'semantic_review' | 'semantic_preflight'; message: string }>;
+}
+
+export function approveAppSemanticTiles(
+  projectRoot: string,
+  appId: string,
+  dashboardId: string,
+  input: {
+    tileIds: string[];
+    runId: string;
+    snapshotId: string;
+    expectedDashboardFingerprint: string;
+    reviewer: string;
+  },
+): { ok: true; dashboard: DashboardDocument; path: string } | { ok: false; error: string } {
+  const loaded = loadDashboardForApp(projectRoot, appId, dashboardId);
+  if (!loaded) return { ok: false, error: `Dashboard "${dashboardId}" not found in App "${appId}".` };
+  const currentFingerprint = `sha256:${createHash('sha256').update(JSON.stringify(loaded.dashboard)).digest('hex')}`;
+  if (!input.expectedDashboardFingerprint || input.expectedDashboardFingerprint !== currentFingerprint) {
+    return { ok: false, error: 'The dashboard changed after the reviewed run. Run it again before approval.' };
+  }
+  const selected = new Set(input.tileIds);
+  const semanticIds = new Set(loaded.dashboard.layout.items.filter((item) => item.semantic).map((item) => item.i));
+  const invalid = input.tileIds.filter((tileId) => !semanticIds.has(tileId));
+  if (invalid.length > 0) return { ok: false, error: `Only semantic tiles can be approved here: ${invalid.join(', ')}` };
+  const reviewedAt = new Date().toISOString();
+  const dashboard: DashboardDocument = {
+    ...loaded.dashboard,
+    layout: {
+      ...loaded.dashboard.layout,
+      items: loaded.dashboard.layout.items.map((item) => {
+        if (!selected.has(item.i) || !item.semantic) return item;
+        return {
+          ...item,
+          semantic: { ...item.semantic, snapshotId: input.snapshotId },
+          review: {
+            status: 'approved',
+            sourceFingerprint: item.semantic.definitionFingerprint,
+            preflightReceiptId: input.runId,
+            reviewedAt,
+            reviewedBy: input.reviewer,
+          },
+          trustState: 'review_required',
+          reviewStatus: 'review_required',
+        };
+      }),
+    },
+  };
+  const parsed = parseDashboardDocument(JSON.stringify(dashboard), loaded.path);
+  if (!parsed.document) return { ok: false, error: parsed.errors.map((error) => error.message).join('; ') };
+  writeFileSync(loaded.path, JSON.stringify(parsed.document, null, 2) + '\n', 'utf-8');
+  return { ok: true, dashboard: parsed.document, path: relative(projectRoot, loaded.path) };
+}
+
+function appPublicationReadiness(dashboards: DashboardDocument[]): AppPublicationReadiness {
+  const blockers: AppPublicationReadiness['blockers'] = [];
+  let governedTiles = 0;
+  for (const dashboard of dashboards) {
+    for (const item of dashboard.layout.items) {
+      if (item.block) governedTiles += 1;
+      if (item.draftAnalysis) {
+        blockers.push({
+          dashboardId: dashboard.id,
+          tileId: item.i,
+          code: 'exploratory_source',
+          message: `${dashboard.id}/${item.i} references app-scoped exploratory DQL; promote it to governed semantic logic or a certified block first.`,
+        });
+      }
+      if (item.semantic) {
+        governedTiles += 1;
+        if (item.review?.status !== 'approved') {
+          blockers.push({
+            dashboardId: dashboard.id,
+            tileId: item.i,
+            code: 'semantic_review',
+            message: `${dashboard.id}/${item.i} semantic result has not been explicitly approved.`,
+          });
+        }
+        if (!item.semantic.snapshotId || !item.review?.preflightReceiptId) {
+          blockers.push({
+            dashboardId: dashboard.id,
+            tileId: item.i,
+            code: 'semantic_preflight',
+            message: `${dashboard.id}/${item.i} needs a snapshot-bound semantic preflight receipt.`,
+          });
+        }
+      }
+    }
+  }
+  return { ready: blockers.length === 0, governedTiles, blockers };
 }
 
 function appAiBuildSessionDir(projectRoot: string): string {
@@ -2663,12 +3054,49 @@ function appAskTileContext(tile: DashboardGridItem): Record<string, unknown> {
     tileId: tile.i,
     title: tile.title,
     blockId: tile.block && 'blockId' in tile.block ? tile.block.blockId : undefined,
+    semantic: tile.semantic,
+    draftAnalysis: tile.draftAnalysis,
+    sourceClass: tile.sourceClass ?? (tile.block ? 'certified_block' : tile.semantic ? 'governed_semantic' : tile.draftAnalysis ? 'exploratory_analysis' : 'narrative'),
+    review: tile.review,
     viz: tile.viz.type,
     trustState: tile.trustState ?? tile.display?.trustState,
     reviewStatus: tile.reviewStatus ?? tile.display?.reviewStatus,
     filterBindings: tile.filterBindings,
     parameterBindings: tile.parameterBindings,
-    sourceEvidence: tile.sourceEvidence,
+        sourceEvidence: tile.sourceEvidence,
+  };
+}
+
+function buildAppContextEnvelope(
+  app: AppDocument,
+  appDir: string,
+  focus: { dashboardId?: string; tileId?: string; blockId?: string },
+): AppContextEnvelopeV1 {
+  const dashboards = findDashboardsForApp(appDir)
+    .map((path) => loadDashboardDocument(path).document)
+    .filter((document): document is DashboardDocument => Boolean(document))
+    .map((document) => ({
+      id: document.id,
+      title: document.metadata.title,
+      filters: document.filters,
+      story: document.story,
+      tiles: document.layout.items.map(appAskTileContext),
+    }));
+  return {
+    version: 1,
+    app: {
+      id: app.id,
+      name: app.name,
+      domain: app.domain,
+      audience: app.audience,
+      lifecycle: app.lifecycle ?? 'draft',
+      visibility: app.visibility ?? 'shared',
+      publicationIntent: app.publicationIntent ?? (app.visibility === 'private' ? 'personal' : 'shared_project'),
+      businessOutcome: app.businessOutcome,
+      caveats: app.caveats ?? [],
+    },
+    dashboards,
+    focus,
   };
 }
 
@@ -5928,7 +6356,7 @@ function loadDashboardForApp(
   projectRoot: string,
   appId: string,
   dashboardId: string,
-): { app: AppDocument; dashboard: DashboardDocument } | null {
+): { app: AppDocument; dashboard: DashboardDocument; path: string } | null {
   for (const p of findAppDocuments(projectRoot)) {
     const { document } = loadAppDocument(p);
     if (!document || document.id !== appId) continue;
@@ -5936,7 +6364,7 @@ function loadDashboardForApp(
     for (const d of findDashboardsForApp(appDir)) {
       const { document: dd } = loadDashboardDocument(d);
       if (dd && dd.id === dashboardId) {
-        return { app: document, dashboard: dd };
+        return { app: document, dashboard: dd, path: d };
       }
     }
   }

@@ -32,6 +32,7 @@ import {
   resolveBareInternalRelationIds,
   sqlMayContainJoin,
   analyticalFailureAllowsDeterministicRetry,
+  analyticalFailureAllowsAppRepair,
   buildDbtStatus,
   buildDbtDatabaseSchemaTree,
   schemaColumnsFromDescribeRows,
@@ -106,11 +107,13 @@ import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import type { Server } from 'node:http';
 import { createWarehouseTargetIdentity, loadSemanticLayerFromDir, SemanticLayer } from '@duckcodeailabs/dql-core';
 import { createAnalyticalFailure, recordRuntimeSchemaSnapshot, latestRuntimeSchemaSnapshotForProject } from '@duckcodeailabs/dql-agent';
 import type { DatabaseConnector, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
 import { saveTestedSemanticRuntimeSettings } from './semantic-runtime-settings.js';
+import { createAppPackage } from './apps-api.js';
 
 const tempDirs: string[] = [];
 
@@ -2879,6 +2882,101 @@ describe('agent run runtime API', () => {
     }
   });
 
+  it('uses the shared bounded repair for App draft-analysis execution without mutating source (AGT-023, API-010)', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-app-tile-repair-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    const created = createAppPackage(projectRoot, {
+      name: 'Repair App',
+      domain: 'revenue',
+      owners: ['owner@local'],
+      tags: [],
+      selectedBlockIds: [],
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const draftDir = join(projectRoot, 'apps/repair-app/drafts');
+    mkdirSync(draftDir, { recursive: true });
+    const source = `block "Regional revenue repair" {
+  domain = "revenue"
+  type = "custom"
+  status = "review"
+  owner = "owner@local"
+  query = """
+SELECT missing_revenue FROM analytics.orders
+  """
+  visualization { chart = "table" }
+}\n`;
+    const draftPath = join(draftDir, 'regional-revenue-repair.dql');
+    writeFileSync(draftPath, source);
+    const dashboardPath = join(projectRoot, 'apps/repair-app/dashboards/overview.dqld');
+    const dashboardBefore = JSON.parse(readFileSync(dashboardPath, 'utf-8')) as any;
+    dashboardBefore.layout.items.push({
+      i: 'draft-repair', x: 0, y: 0, w: 6, h: 3,
+      draftAnalysis: {
+        ref: 'drafts/regional-revenue-repair.dql',
+        artifactFingerprint: `sha256:${createHash('sha256').update(source).digest('hex')}`,
+      },
+      viz: { type: 'table' },
+      title: 'Regional revenue repair',
+      sourceClass: 'exploratory_analysis',
+      review: { status: 'required' },
+      trustState: 'review_required',
+      reviewStatus: 'review_required',
+    });
+    writeFileSync(dashboardPath, `${JSON.stringify(dashboardBefore, null, 2)}\n`);
+    const dashboardSourceBefore = readFileSync(dashboardPath, 'utf-8');
+    let server: Server | undefined;
+    let attempt = 0;
+    const executor = {
+      executeQuery: vi.fn(async (sql: string) => {
+        attempt += 1;
+        if (attempt === 1) throw new Error('Binder Error: Referenced column missing_revenue not found');
+        return {
+          columns: ['revenue'],
+          rows: [{ revenue: 125 }],
+          rowCount: 1,
+          sql,
+        };
+      }),
+    } as unknown as QueryExecutor;
+
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor,
+        connection: { driver: 'file' },
+        preferredPort: 0,
+        captureServer: (createdServer) => { server = createdServer; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/apps/repair-app/dashboards/overview/run`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const payload = await response.json() as any;
+      expect(response.status, JSON.stringify(payload)).toBe(200);
+      expect(payload.tiles).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          tileId: 'draft-repair',
+          status: 'ok',
+          result: expect.objectContaining({ rows: [{ revenue: 125 }] }),
+          repair: expect.objectContaining({
+            version: 1,
+            status: 'repaired',
+            source: 'draft_analysis',
+            mode: 'deterministic',
+            approvalEligible: false,
+          }),
+        }),
+      ]));
+      expect(executor.executeQuery).toHaveBeenCalledTimes(2);
+      expect(readFileSync(draftPath, 'utf-8')).toBe(source);
+      expect(readFileSync(dashboardPath, 'utf-8')).toBe(dashboardSourceBefore);
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
   it('threads conversation context through the HTTP agent-run endpoint into the route executor', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-context-'));
     tempDirs.push(projectRoot);
@@ -4799,6 +4897,12 @@ describe('bounded analytical repair inputs', () => {
       expect(analyticalFailureAllowsDeterministicRetry({ category } as never)).toBe(false);
     }
     expect(analyticalFailureAllowsDeterministicRetry({ category: 'syntax' } as never)).toBe(true);
+  });
+
+  it('never repairs structured access or policy refusals retained by the agent', () => {
+    expect(analyticalFailureAllowsAppRepair({ code: 'PERMISSION_DENIED' } as never)).toBe(false);
+    expect(analyticalFailureAllowsAppRepair({ code: 'POLICY_DENIED' } as never)).toBe(false);
+    expect(analyticalFailureAllowsAppRepair({ code: 'COLUMN_NOT_FOUND' } as never)).toBe(true);
   });
 });
 

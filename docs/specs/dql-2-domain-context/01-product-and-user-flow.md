@@ -90,10 +90,42 @@ filters, parameters, ranking, freshness, and purpose fully cover the
 requirement. Governed semantic queries cover only remaining requirements;
 uncovered needs remain visible typed gaps (`PRD-004`, `AGT-007`).
 
+Before planning, the user selects either **Personal Draft** or **Shared Project
+target**. Both paths create a private draft first. Certified blocks remain the
+fastest reusable route, but are not an onboarding prerequisite. Governed
+semantic queries may back uncovered requirements after exact compatibility and
+runtime preflight. Bounded exploratory SQL is available only through an
+explicit gap-research action and remains a review-required app-scoped DQL draft
+until separately promoted or replaced (`PRD-005`, `EXP-004`).
+
+The write-free Build Brief exposes each requirement, selected source,
+alternatives, compatibility and lineage evidence, trust/review state, bounded
+preview, filters, page, visualization, and layout. Editing any requirement or
+source invalidates the affected preflight receipt and proposal hash. The final
+action is **Build draft**, never an implicit certification or publication
+action (`API-009`, `UI-017`).
+
+If generated App SQL or an App dashboard semantic/draft query fails at
+execution, DQL may spend one bounded repair attempt through the same repair
+boundary used by Ask and Notebook. The retry stays on the original data target,
+retains the redacted failure and SQL fingerprints, and never runs for access,
+permission, policy, unsafe-query, or cancellation failures. A repaired query is
+shown as a review-required preview and is never written over the source
+silently. In particular, repaired compiler SQL from a semantic tile is no
+longer eligible for semantic approval or shared publication; it must be reviewed
+as exploratory App analysis (`AGT-023`, `API-010`, `UI-018`).
+
 Proposal is write-free. Selected sources are preflighted before commit, and a
 snapshot or proposal-hash change fails with a conflict. Commit writes the App,
 dashboard, and derived `ProductDomainContext` atomically. Personal Apps begin as
 private drafts; stakeholder Apps must satisfy governed publication gates.
+
+Shared publication permits current certified blocks and explicitly approved,
+successfully preflighted semantic queries. It rejects required gaps, local AI
+pins, exploratory App drafts, stale semantic definitions, failed source/filter
+preflight, or stories not bound to one settled dashboard run. Apps containing
+approved semantic sources remain reviewed rather than certified; only an
+all-certified App may use certified lifecycle state.
 
 Generated App pages use this reading order (`UI-004`):
 

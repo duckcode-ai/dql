@@ -249,7 +249,14 @@ describe("planAppFromPrompt", () => {
         expect.objectContaining({ source: "semantic_query", status: "covered", trustState: "review_required" }),
       ]));
       const semantic = plan.pages[0].tiles.find((tile) => tile.kind === "semantic_query");
-      expect(semantic?.semantic).toMatchObject({ metrics: ["revenue"], semanticModelRefs: ["orders"], snapshotId: "snapshot-1" });
+      expect(semantic?.semantic).toMatchObject({
+        metrics: ["revenue"],
+        semanticModelRefs: ["orders"],
+        qualifiedMetricIds: ["metric:revenue"],
+        qualifiedModelIds: ["semantic_model:orders"],
+        resolvedPlanFingerprint: expect.stringMatching(/^sha256:/),
+        snapshotId: "snapshot-1",
+      });
       expect(plan.storyEvidencePlan.eligibleTileIds).toContain(semantic?.id);
     }));
 
@@ -632,6 +639,54 @@ describe("validateAppPlan", () => {
 });
 
 describe("generateAppFromPlan", () => {
+  it("builds a private draft directly from governed semantic context without a certified block", () =>
+    withKg([
+      {
+        nodeId: "metric:revenue",
+        kind: "metric",
+        name: "revenue",
+        domain: "commerce",
+        status: "review",
+        description: "Governed order revenue",
+        sourceTier: "semantic_layer",
+        provenance: "MetricFlow semantic manifest",
+      },
+      {
+        nodeId: "semantic_model:orders",
+        kind: "semantic_model",
+        name: "orders",
+        domain: "commerce",
+        status: "review",
+        description: "Orders semantic model with customer dimensions",
+        sourceTier: "semantic_layer",
+      },
+    ], (kg, dir) => {
+      const projectRoot = join(dir, "project");
+      const plan = planAppFromPrompt({
+        prompt: "Build revenue by customer",
+        kg,
+        domain: "commerce",
+        snapshotId: "snapshot-semantic",
+      });
+      const validation = validateAppPlan(plan, kg);
+
+      expect(validation.ok).toBe(true);
+      expect(validation.certifiedTiles).toBe(0);
+      expect(plan.pages[0].tiles.some((tile) => tile.kind === "semantic_query")).toBe(true);
+
+      const generated = generateAppFromPlan(projectRoot, plan, kg);
+      const app = JSON.parse(readFileSync(join(projectRoot, generated.paths[0]), "utf-8"));
+      const dashboard = JSON.parse(readFileSync(join(projectRoot, generated.paths[1]), "utf-8"));
+      expect(app).toMatchObject({ visibility: "private", publicationIntent: "shared_project" });
+      expect(dashboard.layout.items).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          sourceClass: "governed_semantic",
+          semantic: expect.objectContaining({ qualifiedMetricIds: ["metric:revenue"] }),
+          review: expect.objectContaining({ status: "required" }),
+        }),
+      ]));
+    }));
+
   it("writes deterministic app and dashboard files that parse cleanly", () =>
     withKg(revenueNodes, (kg, dir) => {
       const projectRoot = join(dir, "project");
@@ -660,6 +715,10 @@ describe("generateAppFromPlan", () => {
       expect(parseAppDocument(appText).errors).toEqual([]);
       expect(parseDashboardDocument(dashboardText).errors).toEqual([]);
 
+      const app = JSON.parse(appText);
+      expect(app.visibility).toBe("private");
+      expect(app.publicationIntent).toBe("shared_project");
+
       const dashboard = JSON.parse(dashboardText);
       expect(dashboard.layout.items.every((item: { block?: unknown }) => Boolean(item.block))).toBe(true);
       expect(dashboard.layout.items.some((item: { text?: unknown }) => Boolean(item.text))).toBe(false);
@@ -676,6 +735,8 @@ describe("generateAppFromPlan", () => {
         expect.arrayContaining([
           expect.objectContaining({
             block: { blockId: "revenue_total" },
+            sourceClass: "certified_block",
+            review: expect.objectContaining({ status: "not_required" }),
             display: expect.objectContaining({
               mode: "block_hint",
               component: expect.any(String),

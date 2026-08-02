@@ -142,6 +142,29 @@ export type DashboardAiPinRef = {
   id: string;
 };
 
+/** Git-owned, review-required App analysis. SQL lives in the referenced DQL
+ * draft, never inline in the dashboard document. */
+export type DashboardDraftAnalysisRef = {
+  ref: string;
+  artifactFingerprint: string;
+  snapshotId?: string;
+  executionReceiptId?: string;
+};
+
+export type DashboardTileSourceClass =
+  | 'certified_block'
+  | 'governed_semantic'
+  | 'exploratory_analysis'
+  | 'narrative';
+
+export type DashboardTileReview = {
+  status: 'not_required' | 'required' | 'approved';
+  sourceFingerprint?: string;
+  preflightReceiptId?: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+};
+
 /** Canonical governed semantic query. This stores intent and reviewed semantic
  * references, never copied/generated SQL. The runtime compiles it against the
  * active snapshot before every execution. */
@@ -155,6 +178,10 @@ export type DashboardSemanticQueryRef = {
   orderBy?: Array<{ field: string; direction: 'asc' | 'desc' }>;
   limit?: number;
   semanticModelRefs: string[];
+  /** Qualified snapshot identities; names above remain the v1 execution projection. */
+  qualifiedMetricIds?: string[];
+  qualifiedModelIds?: string[];
+  resolvedPlanFingerprint?: string;
   definitionFingerprint: string;
   snapshotId?: string;
 };
@@ -217,6 +244,8 @@ export type DashboardGridItem = {
   aiPin?: DashboardAiPinRef;
   /** Governed semantic query compiled against the current snapshot. */
   semantic?: DashboardSemanticQueryRef;
+  /** Explicitly accepted, app-scoped exploratory DQL draft. */
+  draftAnalysis?: DashboardDraftAnalysisRef;
   viz: DashboardVizConfig;
   /** Governed GenUI/display contract for this specific App or notebook tile. */
   display?: DashboardDisplayMetadata;
@@ -226,6 +255,8 @@ export type DashboardGridItem = {
   parameterBindings?: DashboardTileParameterBinding[];
   /** Evidence used by AI/App Builder to choose this tile and presentation. */
   sourceEvidence?: DashboardTileSourceEvidence[];
+  sourceClass?: DashboardTileSourceClass;
+  review?: DashboardTileReview;
   /** Denormalized trust marker for stakeholder and source-control surfaces. */
   trustState?: DashboardDisplayTrustState;
   /** Denormalized review marker for stakeholder and source-control surfaces. */
@@ -610,6 +641,7 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
     const textRaw = it.text as Record<string, unknown> | undefined;
     const aiPinRaw = it.aiPin as Record<string, unknown> | undefined;
     const semantic = readSemanticQueryRef(it.semantic, i, err);
+    const draftAnalysis = readDraftAnalysisRef(it.draftAnalysis, i, err);
     let block: DashboardBlockRef | null = null;
     if (blockRaw && typeof blockRaw.blockId === 'string') {
       block = { blockId: blockRaw.blockId, version: typeof blockRaw.version === 'string' ? blockRaw.version : undefined };
@@ -622,8 +654,8 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
     const aiPin = aiPinRaw && typeof aiPinRaw.id === 'string'
       ? { id: aiPinRaw.id }
       : null;
-    if (!block && !text && !aiPin && !semantic) {
-      err(`layout.items[${i}] must have a block, semantic, text, or aiPin source`);
+    if (!block && !text && !aiPin && !semantic && !draftAnalysis) {
+      err(`layout.items[${i}] must have a block, semantic, draftAnalysis, text, or aiPin source`);
       continue;
     }
 
@@ -646,6 +678,8 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
     const filterBindings = readTileFilterBindings(it.filterBindings, i, err);
     const parameterBindings = readTileParameterBindings(it.parameterBindings, i, err);
     const sourceEvidence = readTileSourceEvidence(it.sourceEvidence, i, err);
+    const sourceClass = enumOrUndefined(it.sourceClass, `layout.items[${i}].sourceClass`, ['certified_block', 'governed_semantic', 'exploratory_analysis', 'narrative'] as const, err);
+    const review = readTileReview(it.review, i, err);
     const trustState = enumOrUndefined(it.trustState, `layout.items[${i}].trustState`, ['certified', 'review_required', 'draft_ready'] as const, err);
     const reviewStatus = enumOrUndefined(it.reviewStatus, `layout.items[${i}].reviewStatus`, ['certified', 'draft_ready', 'review_required'] as const, err);
 
@@ -656,11 +690,14 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
       ...(text ? { text } : {}),
       ...(aiPin ? { aiPin } : {}),
       ...(semantic ? { semantic } : {}),
+      ...(draftAnalysis ? { draftAnalysis } : {}),
       viz: { type: vizRaw.type as DashboardVizConfig['type'], options: opts },
       ...(display ? { display } : {}),
       ...(filterBindings.length > 0 ? { filterBindings } : {}),
       ...(parameterBindings.length > 0 ? { parameterBindings } : {}),
       ...(sourceEvidence.length > 0 ? { sourceEvidence } : {}),
+      ...(sourceClass ? { sourceClass } : {}),
+      ...(review ? { review } : {}),
       ...(trustState ? { trustState } : {}),
       ...(reviewStatus ? { reviewStatus } : {}),
       title: typeof it.title === 'string' ? it.title : undefined,
@@ -669,6 +706,55 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
   }
 
   return { kind: 'grid', cols, rowHeight, items };
+}
+
+function readDraftAnalysisRef(
+  raw: unknown,
+  index: number,
+  err: (m: string) => void,
+): DashboardDraftAnalysisRef | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    err(`layout.items[${index}].draftAnalysis must be an object`);
+    return undefined;
+  }
+  const item = raw as Record<string, unknown>;
+  if (typeof item.ref !== 'string' || !item.ref) {
+    err(`layout.items[${index}].draftAnalysis.ref must be a non-empty string`);
+    return undefined;
+  }
+  if (typeof item.artifactFingerprint !== 'string' || !item.artifactFingerprint) {
+    err(`layout.items[${index}].draftAnalysis.artifactFingerprint must be a non-empty string`);
+    return undefined;
+  }
+  return {
+    ref: item.ref,
+    artifactFingerprint: item.artifactFingerprint,
+    snapshotId: typeof item.snapshotId === 'string' ? item.snapshotId : undefined,
+    executionReceiptId: typeof item.executionReceiptId === 'string' ? item.executionReceiptId : undefined,
+  };
+}
+
+function readTileReview(
+  raw: unknown,
+  index: number,
+  err: (m: string) => void,
+): DashboardTileReview | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    err(`layout.items[${index}].review must be an object`);
+    return undefined;
+  }
+  const item = raw as Record<string, unknown>;
+  const status = enumValue(item.status, ['not_required', 'required', 'approved'] as const, `layout.items[${index}].review.status`, err);
+  if (!status) return undefined;
+  return {
+    status,
+    sourceFingerprint: typeof item.sourceFingerprint === 'string' ? item.sourceFingerprint : undefined,
+    preflightReceiptId: typeof item.preflightReceiptId === 'string' ? item.preflightReceiptId : undefined,
+    reviewedAt: typeof item.reviewedAt === 'string' ? item.reviewedAt : undefined,
+    reviewedBy: typeof item.reviewedBy === 'string' ? item.reviewedBy : undefined,
+  };
 }
 
 function readSemanticQueryRef(
@@ -728,6 +814,9 @@ function readSemanticQueryRef(
     ...(orderBy.length ? { orderBy } : {}),
     limit: typeof item.limit === 'number' && item.limit > 0 ? Math.floor(item.limit) : undefined,
     semanticModelRefs: modelRefs,
+    qualifiedMetricIds: stringArrayOrUndefined(item.qualifiedMetricIds, `layout.items[${index}].semantic.qualifiedMetricIds`, err),
+    qualifiedModelIds: stringArrayOrUndefined(item.qualifiedModelIds, `layout.items[${index}].semantic.qualifiedModelIds`, err),
+    resolvedPlanFingerprint: typeof item.resolvedPlanFingerprint === 'string' ? item.resolvedPlanFingerprint : undefined,
     definitionFingerprint: item.definitionFingerprint,
     snapshotId: typeof item.snapshotId === 'string' ? item.snapshotId : undefined,
   };
