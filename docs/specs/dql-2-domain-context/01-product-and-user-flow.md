@@ -105,6 +105,17 @@ source invalidates the affected preflight receipt and proposal hash. The final
 action is **Build draft**, never an implicit certification or publication
 action (`API-009`, `UI-017`).
 
+App creation is deliberately incremental: one AI request proposes one page.
+From an existing App, **+ Add page** starts the same write-free Build Brief for
+exactly one additional page, inheriting the server-owned App domain, audience,
+owner, and publication intent. Approval may edit the proposed page title, tile
+selection, tile titles, and visualizations; it cannot rename the App or rewrite
+an existing page. Personal Apps may explicitly include bounded AI-SQL gap
+exploration; shared-project Apps remain certified/semantic-only. The commit
+binds both the metadata snapshot and an exact
+fingerprint of the existing App package, stages a full candidate copy, and
+atomically swaps it only if neither source has changed (`API-009`, `UI-017`).
+
 If generated App SQL or an App dashboard semantic/draft query fails at
 execution, DQL may spend one bounded repair attempt through the same repair
 boundary used by Ask and Notebook. The retry stays on the original data target,
@@ -119,6 +130,13 @@ Proposal is write-free. Selected sources are preflighted before commit, and a
 snapshot or proposal-hash change fails with a conflict. Commit writes the App,
 dashboard, and derived `ProductDomainContext` atomically. Personal Apps begin as
 private drafts; stakeholder Apps must satisfy governed publication gates.
+
+App Copilot is not the App planning orchestrator. It adapts the server-owned
+whole-App or focused-section context into the shared governed AgentRun used by
+Ask, Notebook, and Block AI for retrieval, semantic routing, execution, repair,
+and evidence. App-specific answers, investigations, and typed Add-to-App
+proposals remain explicit and cannot silently mutate App source (`AGT-007`,
+`AGT-022`).
 
 Shared publication permits current certified blocks and explicitly approved,
 successfully preflighted semantic queries. It rejects required gaps, local AI

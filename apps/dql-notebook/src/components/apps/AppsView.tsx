@@ -191,6 +191,7 @@ export function AppsView(): JSX.Element {
   const builderDomainOptions = useMemo(() => authoredDomainOptions(state.authoredDomains), [state.authoredDomains]);
   const [builderOwner, setBuilderOwner] = useState('analytics');
   const [builderAudience, setBuilderAudience] = useState('stakeholders');
+  const [builderExistingAppId, setBuilderExistingAppId] = useState<string | null>(null);
   const [catalog, setCatalog] = useState<AppBlockRecommendation[]>([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [selectedBlocks, setSelectedBlocks] = useState<Set<string>>(() => new Set());
@@ -203,6 +204,7 @@ export function AppsView(): JSX.Element {
   const [builderSaving, setBuilderSaving] = useState(false);
   const [addPageOpen, setAddPageOpen] = useState(false);
   const [addPageTitle, setAddPageTitle] = useState('');
+  const [addPageExploreGaps, setAddPageExploreGaps] = useState(false);
   const [addPageError, setAddPageError] = useState<string | null>(null);
   const [dashboardFilterValues, setDashboardFilterValues] = useState<Record<string, unknown>>({});
   const [appliedDashboardFilterValues, setAppliedDashboardFilterValues] = useState<Record<string, unknown>>({});
@@ -364,6 +366,7 @@ export function AppsView(): JSX.Element {
     target: AppBuildTarget = builderTarget,
     exploreGaps = false,
   ) => {
+    setBuilderExistingAppId(null);
     setBuilderMode('ai');
     setBuilderTarget(target);
     setBuilderExploreGaps(target === 'personal' && exploreGaps);
@@ -381,6 +384,7 @@ export function AppsView(): JSX.Element {
   };
 
   const startClassicBuilder = () => {
+    setBuilderExistingAppId(null);
     setBuilderMode('classic');
     setBuilderError(null);
     setGenerated(null);
@@ -418,6 +422,7 @@ export function AppsView(): JSX.Element {
     // list with per-tile toggles and confirms before anything is created.
     const sessionResult = await api.proposeAppAiBuild({
       prompt,
+      existingAppId: builderExistingAppId ?? undefined,
       domain: builderDomain.trim() || undefined,
       owner: builderOwner.trim() || undefined,
       force: false,
@@ -437,9 +442,10 @@ export function AppsView(): JSX.Element {
     setGenerated(null);
     setProposalSelection(session.proposal ? defaultProposalSelection(session.proposal) : new Set());
     setProposalEdits(Object.fromEntries((session.proposal?.tiles ?? []).map((tile) => [tile.id, { title: tile.title, viz: tile.viz }])));
-    const planName = (session.plan as GeneratedAppPlan | undefined)?.name;
+    const sessionPlan = session.plan as GeneratedAppPlan | undefined;
+    const planName = builderExistingAppId ? sessionPlan?.pages[0]?.title : sessionPlan?.name;
     if (planName) setBuilderName(planName);
-    const planAudience = (session.plan as GeneratedAppPlan | undefined)?.audience;
+    const planAudience = sessionPlan?.audience;
     if (planAudience) setBuilderAudience(planAudience);
   };
 
@@ -481,7 +487,9 @@ export function AppsView(): JSX.Element {
     const result = await api.commitAppAiBuild(buildSession.id, {
       selectedTileIds: Array.from(proposalSelection),
       expectedProposalHash: buildSession.proposalHash,
-      appName: builderName.trim() || undefined,
+      ...(builderExistingAppId
+        ? { pageTitle: builderName.trim() || undefined }
+        : { appName: builderName.trim() || undefined }),
       audience: builderAudience.trim() || undefined,
       tileOverrides: proposalEdits,
     });
@@ -544,29 +552,35 @@ export function AppsView(): JSX.Element {
     setSurface('workspace');
   };
 
-  const createDashboardPage = async () => {
-    if (!state.activeAppId) return;
-    const title = addPageTitle.trim();
-    if (!title) {
-      setAddPageError('Enter a dashboard page name.');
+  const startDashboardPageBuilder = () => {
+    if (!state.activeAppId || !appDoc) return;
+    const request = addPageTitle.trim();
+    if (!request) {
+      setAddPageError('Describe the business question this page should answer.');
       return;
     }
     setAddPageError(null);
-    const result = await api.createAppDashboard(state.activeAppId, { title });
-    if (!result.ok) {
-      setAddPageError(result.error);
-      return;
-    }
+    setBuilderExistingAppId(state.activeAppId);
+    setBuilderMode('ai');
+    setBuilderPrompt(request);
+    setBuilderName('New App page');
+    setBuilderDomain(resolveAuthoredDomainId(appDoc.app.domain, state.authoredDomains));
+    setBuilderOwner(appDoc.app.owners[0] ?? 'analytics');
+    setBuilderAudience(appDoc.app.audience ?? 'stakeholders');
+    const target = appDoc.app.publicationIntent
+      ?? (appDoc.app.visibility === 'private' ? 'personal' : 'shared_project');
+    setBuilderTarget(target);
+    setBuilderExploreGaps(target === 'personal' && addPageExploreGaps);
+    setSelectedBlocks(new Set());
+    setBuilderError(null);
+    setGenerated(null);
+    setBuildSession(null);
+    setProposalEdits({});
     setAddPageOpen(false);
     setAddPageTitle('');
-    dispatch({
-      type: 'OPEN_APP',
-      appId: state.activeAppId,
-      dashboardId: result.dashboard.id,
-      experience,
-      section,
-    });
-    await refreshApps(state.activeAppId, result.dashboard.id, 'workspace');
+    setAddPageExploreGaps(false);
+    setSurface('create');
+    setAutoBuildNonce((nonce) => nonce + 1);
   };
 
   const dashboardVariables = useMemo(() => ({ ...appliedDashboardFilterValues }), [appliedDashboardFilterValues]);
@@ -614,6 +628,7 @@ export function AppsView(): JSX.Element {
       ) : surface === 'create' ? (
         <AppCreateSurface
           mode={builderMode}
+          existingAppId={builderExistingAppId}
           appName={builderName}
           prompt={builderPrompt}
           domain={builderDomain}
@@ -639,7 +654,7 @@ export function AppsView(): JSX.Element {
           onAddBlock={addBlockToProposal}
           saving={builderSaving}
           error={builderError}
-          onBack={() => setSurface('library')}
+          onBack={() => setSurface(builderExistingAppId ? 'workspace' : 'library')}
           onModeChange={(nextMode) => {
             setBuilderMode(nextMode);
             if (nextMode === 'ai') setSelectedBlocks(new Set());
@@ -675,7 +690,10 @@ export function AppsView(): JSX.Element {
           onResetDashboardFilters={resetDashboardFilters}
           onExplainChange={handleExplainChange}
           onExplainExpandedChange={setExplainExpanded}
-          onAddPage={() => setAddPageOpen(true)}
+          onAddPage={() => {
+            setAddPageExploreGaps(false);
+            setAddPageOpen(true);
+          }}
           onOpenDashboard={(dashboardId) => dispatch({ type: 'OPEN_DASHBOARD', dashboardId })}
           onDashboardChanged={(dashboard) => {
             setDashboardDoc((current) => current ? { ...current, dashboard } : current);
@@ -703,13 +721,18 @@ export function AppsView(): JSX.Element {
       {addPageOpen && (
         <AddPageDialog
           title={addPageTitle}
+          allowExploration={appDoc?.app.publicationIntent === 'personal'
+            || (!appDoc?.app.publicationIntent && appDoc?.app.visibility === 'private')}
+          exploreGaps={addPageExploreGaps}
           error={addPageError}
           onChange={setAddPageTitle}
+          onExploreGapsChange={setAddPageExploreGaps}
           onCancel={() => {
             setAddPageOpen(false);
+            setAddPageExploreGaps(false);
             setAddPageError(null);
           }}
-          onCreate={() => void createDashboardPage()}
+          onCreate={startDashboardPageBuilder}
         />
       )}
     </div>
@@ -917,6 +940,7 @@ function AppCard({
 
 function AppCreateSurface({
   mode,
+  existingAppId,
   appName,
   prompt,
   domain,
@@ -951,6 +975,7 @@ function AppCreateSurface({
   onAddBlock,
 }: {
   mode: BuilderMode;
+  existingAppId: string | null;
   appName: string;
   prompt: string;
   domain: string;
@@ -997,6 +1022,7 @@ function AppCreateSurface({
   const certifiedPlanTiles = planTiles.filter(isCertifiedPlanTile);
   const sessionWarnings = buildSession?.warnings ?? [];
   const scopedReportCount = planScopedReportCount(plan);
+  const isPageBuild = Boolean(existingAppId);
 
   // ── Redesigned AI build flow (Apps Redesign.dc.html) ──────────────────────
   // library send → user bubble → building stream (orb + shimmer + staggered
@@ -1030,8 +1056,10 @@ function AppCreateSurface({
       <div className="dql-app-flow-scroll">
         <div className="dql-app-flow">
           <div className="dql-app-flow-head">
-            <h2>Build an app</h2>
-            <p>DQL resolves certified blocks and semantic metrics, then waits for your approval before writing a private App draft.</p>
+            <h2>{isPageBuild ? 'Build a new App page' : 'Build an app'}</h2>
+            <p>{isPageBuild
+              ? 'DQL plans one page from the existing App context, then waits for approval without changing any current page.'
+              : 'DQL resolves certified blocks and semantic metrics, then waits for your approval before writing a private App draft.'}</p>
           </div>
 
           {/* sent prompt */}
@@ -1058,12 +1086,14 @@ function AppCreateSurface({
               <span className="dql-app-buildorb still"><Sparkles size={14} /></span>
               <div className="dql-app-buildbody wide">
                 <div className="dql-app-proposal-lede">
-                  <strong>Build Brief · {proposal.intent.target === 'personal' ? 'Personal Draft' : 'Shared Project target'}</strong><br />
+                  <strong>{isPageBuild ? 'Page Build Brief' : 'Build Brief'} · {proposal.intent.target === 'personal' ? 'Personal Draft' : 'Shared Project target'}</strong><br />
                   Found {certifiedTileCount} certified block{certifiedTileCount === 1 ? '' : 's'}{semanticTileCount > 0 ? ` and ${semanticTileCount} governed semantic view${semanticTileCount === 1 ? '' : 's'}` : ''}.
-                  Every generated App starts private; review-required sources must pass publication checks before sharing.
+                  {isPageBuild
+                    ? ' The approved page is added atomically; existing pages remain unchanged.'
+                    : ' Every generated App starts private; review-required sources must pass publication checks before sharing.'}
                 </div>
                 <label className="dql-app-buildbrief-name">
-                  <span>Draft name</span>
+                  <span>{isPageBuild ? 'Page name' : 'Draft name'}</span>
                   <input value={appName} onChange={(event) => onAppNameChange(event.target.value)} maxLength={120} />
                 </label>
                 <label className="dql-app-buildbrief-name">
@@ -1176,9 +1206,11 @@ function AppCreateSurface({
                 <div className="dql-app-flow-actions">
                   <button type="button" className="dql-app-flow-build" onClick={onCommitProposal} disabled={committing || selectedCount === 0}>
                     <LayoutDashboard size={13} />
-                    {committing ? 'Building draft…' : `Build private draft with ${selectedCount} tile${selectedCount === 1 ? '' : 's'}`}
+                    {committing
+                      ? (isPageBuild ? 'Adding page…' : 'Building draft…')
+                      : `${isPageBuild ? 'Add page' : 'Build private draft'} with ${selectedCount} tile${selectedCount === 1 ? '' : 's'}`}
                   </button>
-                  <button type="button" className="dql-app-flow-reset" onClick={onBack}>Start over</button>
+                  <button type="button" className="dql-app-flow-reset" onClick={onBack}>{isPageBuild ? 'Back to app' : 'Start over'}</button>
                 </div>
               </div>
             </div>
@@ -1190,7 +1222,7 @@ function AppCreateSurface({
               <button type="button" className="dql-app-flow-build" onClick={onBuild}>
                 <Sparkles size={13} /> Create Build Brief
               </button>
-              <button type="button" className="dql-app-flow-reset" onClick={onBack}>Start over</button>
+              <button type="button" className="dql-app-flow-reset" onClick={onBack}>{isPageBuild ? 'Back to app' : 'Start over'}</button>
             </div>
           ) : null}
 
@@ -4386,27 +4418,55 @@ function EmptyPanel({ title, detail, compact = false }: { title: string; detail:
 
 function AddPageDialog({
   title,
+  allowExploration,
+  exploreGaps,
   error,
   onChange,
+  onExploreGapsChange,
   onCancel,
   onCreate,
 }: {
   title: string;
+  allowExploration: boolean;
+  exploreGaps: boolean;
   error: string | null;
   onChange: (value: string) => void;
+  onExploreGapsChange: (value: boolean) => void;
   onCancel: () => void;
   onCreate: () => void;
 }) {
   return (
     <div className="dql-app-modal-backdrop">
       <div className="dql-app-modal">
-        <h3>Add dashboard page</h3>
-        <p>Create a new page inside this local App package.</p>
-        <label>Page name<input value={title} onChange={(event) => onChange(event.target.value)} autoFocus placeholder="Executive Overview" /></label>
+        <h3>Build a new App page</h3>
+        <p>Describe the business question. AI will propose exactly one page for review before changing the App.</p>
+        <label>What should this page answer?
+          <textarea
+            value={title}
+            onChange={(event) => onChange(event.target.value)}
+            autoFocus
+            rows={4}
+            placeholder="Show quarterly revenue drivers by region and segment for leadership."
+          />
+        </label>
+        {allowExploration ? (
+          <button
+            type="button"
+            className={`dql-app-page-explore ${exploreGaps ? 'on' : ''}`}
+            onClick={() => onExploreGapsChange(!exploreGaps)}
+            aria-pressed={exploreGaps}
+          >
+            <span>{exploreGaps ? <Check size={11} strokeWidth={3} /> : null}</span>
+            <b>Explore uncovered gaps with AI SQL</b>
+            <small>Personal App only · bounded preview · review required</small>
+          </button>
+        ) : (
+          <small className="dql-app-page-source-policy">Shared-project pages use certified blocks and governed semantic metrics.</small>
+        )}
         {error ? <div className="dql-app-error">{error}</div> : null}
         <div>
           <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={onCancel}>Cancel</button>
-          <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onCreate}>Create page</button>
+          <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onCreate}>Create Build Brief</button>
         </div>
       </div>
     </div>
@@ -5636,7 +5696,8 @@ const APP_STYLES = `
 .dql-app-composer textarea,
 .dql-app-form-grid input,
 .dql-app-select-label select,
-.dql-app-modal input {
+.dql-app-modal input,
+.dql-app-modal textarea {
   width: 100%;
   border: 1px solid var(--dql-app-line);
   border-radius: 7px;
@@ -5646,6 +5707,7 @@ const APP_STYLES = `
   padding: 8px 10px;
   font: 12.5px var(--font-ui);
 }
+.dql-app-modal textarea { resize: vertical; min-height: 96px; line-height: 1.45; }
 
 .dql-app-composer textarea { resize: vertical; min-height: 92px; line-height: 1.45; }
 .dql-app-composer.ai-clean textarea {
@@ -8504,6 +8566,25 @@ const APP_STYLES = `
 .dql-app-modal h3 { margin: 0; }
 .dql-app-modal p { margin: 0; color: var(--dql-app-muted); font-size: 12px; }
 .dql-app-modal > div:last-child { display: flex; justify-content: flex-end; gap: 8px; }
+.dql-app-page-explore {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  gap: 2px 8px;
+  align-items: center;
+  text-align: left;
+  border: 1px solid var(--dql-app-line);
+  border-radius: 8px;
+  background: var(--dql-app-control);
+  color: var(--dql-app-ink);
+  padding: 9px 10px;
+  cursor: pointer;
+}
+.dql-app-page-explore.on { border-color: var(--dql-app-accent); background: var(--dql-app-accent-soft); }
+.dql-app-page-explore > span { grid-row: 1 / span 2; display: grid; place-items: center; width: 18px; height: 18px; border: 1px solid var(--dql-app-line-2); border-radius: 5px; }
+.dql-app-page-explore.on > span { border-color: var(--dql-app-accent); color: var(--dql-app-accent); }
+.dql-app-page-explore b { font-size: 12px; }
+.dql-app-page-explore small,
+.dql-app-page-source-policy { color: var(--dql-app-muted); font-size: 10.5px; line-height: 1.35; }
 
 @media (max-width: 1120px) {
   .dql-apps-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

@@ -715,14 +715,59 @@ describe('Apps command center API helpers', () => {
     expect(existsSync(join(root, 'apps'))).toBe(false);
   });
 
-  it('rejects existing-App updates until patch semantics are explicit', async () => {
+  it('adds one approved AI page without rewriting existing App content and rejects stale App drift (API-009, UI-017, E2E-016)', async () => {
     const root = createProject();
-    const session = await proposeAppAiBuild(root, {
-      prompt: 'Update the revenue app', existingAppId: 'revenue-app', domain: 'revenue', owner: 'owner@local',
+    writeBlock(root, 'revenue/total_revenue.dql', {
+      name: 'Total Revenue', domain: 'revenue', status: 'certified', tags: ['revenue'], description: 'Revenue KPI', chart: 'single_value',
     });
-    expect(session.status).toBe('error');
-    expect(session.error).toMatch(/not supported yet/i);
-    expect(existsSync(join(root, 'apps'))).toBe(false);
+    const created = createAppPackage(root, {
+      name: 'Revenue App', domain: 'revenue', dashboardTitle: 'Overview', selectedBlockIds: ['Total Revenue'], owners: ['owner@local'],
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const appPath = join(root, 'apps/revenue-app/dql.app.json');
+    const originalDashboardPath = join(root, 'apps/revenue-app/dashboards/overview.dqld');
+    const originalAppSource = readFileSync(appPath, 'utf-8');
+    const originalDashboardSource = readFileSync(originalDashboardPath, 'utf-8');
+
+    const session = await proposeAppAiBuild(root, {
+      prompt: 'Add a revenue driver page for leadership', existingAppId: 'revenue-app',
+    });
+    expect(session.status).toBe('proposed');
+    expect(session.appId).toBe('revenue-app');
+    expect(session.dashboardId).not.toBe('overview');
+    expect(readFileSync(appPath, 'utf-8')).toBe(originalAppSource);
+    expect(readFileSync(originalDashboardPath, 'utf-8')).toBe(originalDashboardSource);
+
+    const selectedTileIds = session.proposal!.tiles.filter((tile) => !tile.error).map((tile) => tile.id);
+    const committed = await commitAppAiBuild(root, session.id, {
+      selectedTileIds,
+      expectedProposalHash: session.proposalHash,
+      pageTitle: 'Leadership Revenue Drivers',
+      appName: 'This must not rename the App',
+    });
+    expect(committed.ok).toBe(true);
+    if (!committed.ok) return;
+    expect(readFileSync(appPath, 'utf-8')).toBe(originalAppSource);
+    expect(readFileSync(originalDashboardPath, 'utf-8')).toBe(originalDashboardSource);
+    expect(committed.session.generatedPaths).toEqual([
+      `apps/revenue-app/dashboards/${committed.dashboardId}.dqld`,
+    ]);
+    const added = loadDashboardDocument(join(root, committed.session.generatedPaths[0]));
+    expect(added.document?.metadata.title).toBe('Leadership Revenue Drivers');
+
+    const staleSession = await proposeAppAiBuild(root, {
+      prompt: 'Add a quarterly revenue outlook page', existingAppId: 'revenue-app',
+    });
+    expect(staleSession.status).toBe('proposed');
+    writeFileSync(join(root, 'apps/revenue-app/README.md'), '# Concurrent edit\n', 'utf-8');
+    const staleCommit = await commitAppAiBuild(root, staleSession.id, {
+      selectedTileIds: staleSession.proposal!.tiles.filter((tile) => !tile.error).map((tile) => tile.id),
+      expectedProposalHash: staleSession.proposalHash,
+    });
+    expect(staleCommit.ok).toBe(false);
+    if (!staleCommit.ok) expect(staleCommit.status).toBe(409);
+    expect(existsSync(join(root, `apps/revenue-app/dashboards/${staleSession.dashboardId}.dqld`))).toBe(false);
   });
 
   it('returns a research proposal without creating an investigation when context is required', async () => {

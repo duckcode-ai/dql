@@ -11,6 +11,7 @@ import {
   boundedAgentMeaningSignal,
   applyDashboardFiltersToBlockExecution,
   buildAgentPreviewSql,
+  buildAppCopilotResearchAgentRequest,
   buildRowBoundedSql,
   extractBlockStudioSql,
   maskDqlStringContents,
@@ -116,6 +117,55 @@ import { saveTestedSemanticRuntimeSettings } from './semantic-runtime-settings.j
 import { createAppPackage } from './apps-api.js';
 
 const tempDirs: string[] = [];
+
+describe('App Copilot uniform orchestration (AGT-007, AGT-022)', () => {
+  it('adapts App research evidence into a deep stakeholder AgentRun', () => {
+    const request = buildAppCopilotResearchAgentRequest({
+      appId: 'revenue-watch',
+      dashboardId: 'drivers',
+      sourceTileId: 'regional-revenue',
+      question: 'Why did EMEA revenue decline?',
+      intent: 'driver_analysis',
+      context: { filters: { region: 'EMEA' }, settledRunReceipt: 'run-123' },
+    });
+
+    expect(request).toMatchObject({
+      question: 'Why did EMEA revenue decline?',
+      requestedMode: 'research',
+      audience: 'stakeholder',
+      analysisDepth: 'deep',
+      selectedObject: { kind: 'app', id: 'revenue-watch' },
+      workspaceContext: {
+        surface: 'app_copilot',
+        appId: 'revenue-watch',
+        dashboardId: 'drivers',
+        appResearch: {
+          mode: 'app_research',
+          intent: 'driver_analysis',
+          context: { filters: { region: 'EMEA' }, settledRunReceipt: 'run-123' },
+        },
+      },
+    });
+  });
+
+  it('keeps memo-only work evidence-bound and explicitly suppresses replacement SQL', () => {
+    const request = buildAppCopilotResearchAgentRequest({
+      appId: 'revenue-watch',
+      question: 'Summarize the selected result',
+      intent: 'business_readout',
+      mode: 'memo_only',
+      generatedSql: 'select 1',
+      resultPreviews: [{ rows: [{ revenue: 42 }] }],
+    });
+
+    expect(request.question).toContain('using only the evidence envelope');
+    expect(request.workspaceContext?.appResearch).toMatchObject({
+      generationMode: 'memo_only',
+      generatedSql: 'select 1',
+    });
+    expect(JSON.stringify(request.workspaceContext)).toContain('Do not generate replacement SQL');
+  });
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();

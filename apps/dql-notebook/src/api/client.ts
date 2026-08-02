@@ -1722,6 +1722,8 @@ export interface GenerateAppRequest {
   mode?: 'personal' | 'stakeholder';
   exploreGaps?: boolean;
   maxGeneratedTiles?: number;
+  /** Add exactly one reviewed page to this App instead of creating a new App. */
+  existingAppId?: string;
 }
 
 export interface GeneratedAppPlan {
@@ -1902,10 +1904,12 @@ export interface AppAiBuildSession {
   validation?: GenerateAppResponse['validation'];
   proposal?: AppBuildProposal;
   snapshotId?: string;
+  existingAppFingerprint?: string;
   proposalHash?: string;
   committedTileIds?: string[];
   committedBrief?: {
-    appName: string;
+    appName?: string;
+    pageTitle?: string;
     audience: string;
     tileOverrides: Record<string, { title?: string; viz?: string }>;
   };
@@ -5506,6 +5510,7 @@ export const api = {
     force?: boolean;
     expectedProposalHash?: string;
     appName?: string;
+    pageTitle?: string;
     audience?: string;
     tileOverrides?: Record<string, { title?: string; viz?: string }>;
   } = {}): Promise<

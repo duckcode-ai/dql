@@ -4,7 +4,7 @@
  * dispatcher — returns `true` if the request was handled, `false` otherwise.
  */
 
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, type Dirent, type Stats } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync, type Dirent, type Stats } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, dirname, relative, basename } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -1045,11 +1045,14 @@ interface AppAiBuildSession {
   /** The reviewable content list shown to the user before commit. */
   proposal?: AppBuildProposal;
   snapshotId?: string;
+  /** Existing-App builds also bind to the exact App package reviewed at propose time. */
+  existingAppFingerprint?: string;
   proposalHash?: string;
   /** Tile ids the user confirmed at commit time (audit trail). */
   committedTileIds?: string[];
   committedBrief?: {
-    appName: string;
+    appName?: string;
+    pageTitle?: string;
     audience: string;
     tileOverrides: Record<string, { title?: string; viz?: string }>;
   };
@@ -1864,10 +1867,22 @@ export async function proposeAppAiBuild(
     writeAppAiBuildSession(projectRoot, session);
     return session;
   }
-  if (base.inputs.existingAppId) {
-    const session = { ...base, status: 'error' as const, error: 'Updating an existing App is not supported yet. Create a new App so no existing content is silently replaced.' };
+  const existingApp = base.inputs.existingAppId ? loadAppById(projectRoot, base.inputs.existingAppId) : null;
+  if (base.inputs.existingAppId && !existingApp) {
+    const session = { ...base, status: 'error' as const, error: `App "${base.inputs.existingAppId}" not found.` };
     writeAppAiBuildSession(projectRoot, session);
     return session;
+  }
+  if (existingApp) {
+    // Existing-App page generation inherits server-owned App context. The prompt
+    // controls the new page, never the identity or governance boundary of the App.
+    base.inputs.domain = existingApp.app.domain;
+    base.inputs.audience = existingApp.app.audience;
+    base.inputs.owner = existingApp.app.businessOwner ?? existingApp.app.owners[0];
+    const publicationIntent = existingApp.app.publicationIntent
+      ?? (existingApp.app.visibility === 'private' ? 'personal' : 'shared_project');
+    base.inputs.mode = publicationIntent === 'personal' ? 'personal' : 'stakeholder';
+    base.inputs.exploreGaps = base.inputs.mode === 'personal' && input.exploreGaps === true;
   }
 
   const {
@@ -1881,7 +1896,7 @@ export async function proposeAppAiBuild(
   const index = await reindexProject(projectRoot, { kgPath });
   const kg = new KGStore(kgPath);
   try {
-    const plan = planAppFromPrompt({
+    const planned = planAppFromPrompt({
       prompt: base.prompt,
       kg,
       domain: base.inputs.domain,
@@ -1889,9 +1904,26 @@ export async function proposeAppAiBuild(
       owner: base.inputs.owner,
       preferredBlockIds: selectedBlockIds,
       plannerMode: input.plannerMode === 'ai_assisted' ? 'ai_assisted' : 'deterministic',
-      mode: input.mode === 'personal' ? 'personal' : 'stakeholder',
+      mode: base.inputs.mode === 'personal' ? 'personal' : 'stakeholder',
       snapshotId: index.kgFingerprint,
     });
+    const firstPage = planned.pages[0];
+    if (!firstPage) throw new Error('The App planner did not return a page.');
+    const existingDashboardIds = new Set(existingApp?.dashboards.map((dashboard) => dashboard.id) ?? []);
+    const pageId = existingApp
+      ? uniqueAppPageId(slugify(firstPage.title) || 'page', existingDashboardIds)
+      : firstPage.id;
+    const plan: AppPlan = existingApp ? {
+      ...planned,
+      appId: existingApp.app.id,
+      name: existingApp.app.name,
+      domain: existingApp.app.domain,
+      audience: existingApp.app.audience ?? planned.audience,
+      owner: existingApp.app.businessOwner ?? existingApp.app.owners[0] ?? planned.owner,
+      publicationIntent: existingApp.app.publicationIntent
+        ?? (existingApp.app.visibility === 'private' ? 'personal' : 'shared_project'),
+      pages: [{ ...firstPage, id: pageId }],
+    } : planned;
     const validation = validateAppPlan(plan, kg);
     const proposal = buildAppProposal(plan);
     // Raw SQL exploration is opt-in, personal-only, preview-bounded, and remains
@@ -1899,7 +1931,10 @@ export async function proposeAppAiBuild(
     if (base.inputs.exploreGaps) {
       await fillProposalGaps(proposal, hooks, input.maxGeneratedTiles);
     }
-    const proposalHash = createHash('sha256').update(JSON.stringify({ plan, proposal })).digest('hex');
+    const existingAppFingerprint = existingApp ? fingerprintAppDirectory(existingApp.appDir) : undefined;
+    const proposalHash = createHash('sha256')
+      .update(JSON.stringify({ plan, proposal, existingAppFingerprint }))
+      .digest('hex');
     const session: AppAiBuildSession = {
       ...base,
       appId: plan.appId,
@@ -1908,6 +1943,7 @@ export async function proposeAppAiBuild(
       validation,
       proposal,
       snapshotId: index.kgFingerprint,
+      ...(existingAppFingerprint ? { existingAppFingerprint } : {}),
       proposalHash,
       warnings: appBuildWarnings(validation, plan as unknown as Record<string, unknown>),
       reviewTasks: reviewTasksFromPlan(plan as unknown as Record<string, unknown>),
@@ -2036,6 +2072,8 @@ export interface CommitAppAiBuildInput {
   expectedProposalHash?: string;
   /** User-approved Build Brief edits that do not alter governed source identity. */
   appName?: string;
+  /** Existing-App page builds may rename only the proposed page, never the App. */
+  pageTitle?: string;
   audience?: string;
   tileOverrides?: Record<string, { title?: string; viz?: string }>;
 }
@@ -2065,6 +2103,20 @@ export async function commitAppAiBuild(
   }
 
   const plan = session.plan as AppPlan;
+  const existingAppId = cleanString(session.inputs.existingAppId);
+  const isExistingPageBuild = Boolean(existingAppId);
+  const existingApp = existingAppId ? loadAppById(projectRoot, existingAppId) : null;
+  if (isExistingPageBuild) {
+    if (!existingApp) return { ok: false, error: `App "${existingAppId}" no longer exists.`, status: 409 };
+    if (!session.existingAppFingerprint
+      || fingerprintAppDirectory(existingApp.appDir) !== session.existingAppFingerprint) {
+      return {
+        ok: false,
+        error: 'The App changed after this page proposal was created. Refresh and review the page proposal again.',
+        status: 409,
+      };
+    }
+  }
   const proposal = session.proposal;
   const proposalTileIds = new Set(proposal.tiles.map((tile) => tile.id));
   const tileOverrides = Object.fromEntries(Object.entries(input.tileOverrides ?? {})
@@ -2085,10 +2137,13 @@ export async function commitAppAiBuild(
   // tiles (narrative, draft placeholders) stay — they document the story + gaps.
   const committedPlan: AppPlan = {
     ...plan,
-    ...(cleanString(input.appName) ? { name: cleanString(input.appName).slice(0, 120) } : {}),
-    ...(cleanString(input.audience) ? { audience: cleanString(input.audience).slice(0, 120) } : {}),
-    pages: plan.pages.map((page) => ({
+    ...(!isExistingPageBuild && cleanString(input.appName) ? { name: cleanString(input.appName).slice(0, 120) } : {}),
+    ...(!isExistingPageBuild && cleanString(input.audience) ? { audience: cleanString(input.audience).slice(0, 120) } : {}),
+    pages: plan.pages.map((page, pageIndex) => ({
       ...page,
+      ...(isExistingPageBuild && pageIndex === 0 && cleanString(input.pageTitle)
+        ? { title: cleanString(input.pageTitle).slice(0, 120) }
+        : {}),
       tiles: page.tiles
         .filter((tile) => !['certified_block', 'semantic_query'].includes(tile.kind) || selected.has(tile.id))
         .map((tile) => {
@@ -2152,31 +2207,93 @@ export async function commitAppAiBuild(
     ]).slice(0, 4);
     let generated: ReturnType<typeof generateAppFromPlan>;
     const stagingRoot = join(projectRoot, '.dql', 'local', 'app-build-staging', session.id);
-    const stagedAppDir = join(stagingRoot, 'apps', committedPlan.appId);
+    const generatedRoot = isExistingPageBuild ? join(stagingRoot, 'generated') : stagingRoot;
+    const generatedAppDir = join(generatedRoot, 'apps', committedPlan.appId);
+    const stagedAppDir = isExistingPageBuild
+      ? join(stagingRoot, 'candidate', 'apps', committedPlan.appId)
+      : generatedAppDir;
     const targetAppDir = join(projectRoot, 'apps', committedPlan.appId);
     const backupAppDir = join(projectRoot, '.dql', 'local', 'app-build-staging', `${session.id}-backup`);
     rmSync(stagingRoot, { recursive: true, force: true });
     try {
-      generated = generateAppFromPlan(stagingRoot, committedPlan, kg, { overwrite: true, copilotQuestions });
+      generated = generateAppFromPlan(generatedRoot, committedPlan, kg, { overwrite: true, copilotQuestions });
       if (selectedExploratory.length > 0) {
-        attachGeneratedDraftAnalyses(stagingRoot, committedPlan, generated.paths, selectedExploratory);
+        attachGeneratedDraftAnalyses(generatedRoot, committedPlan, generated.paths, selectedExploratory);
       }
       mkdirSync(dirname(targetAppDir), { recursive: true });
-      if (existsSync(targetAppDir)) {
+      if (isExistingPageBuild) {
+        if (!existingApp || !existsSync(targetAppDir)) {
+          return { ok: false, error: `App "${existingAppId}" no longer exists.`, status: 409 };
+        }
+        if (fingerprintAppDirectory(existingApp.appDir) !== session.existingAppFingerprint) {
+          return {
+            ok: false,
+            error: 'The App changed while this page was being prepared. Refresh and review the page proposal again.',
+            status: 409,
+          };
+        }
+        const page = committedPlan.pages[0];
+        if (!page) return { ok: false, error: 'The approved plan has no page to add.', status: 400 };
+        const generatedDashboardPath = join(generatedAppDir, 'dashboards', `${page.id}.dqld`);
+        const targetDashboardPath = join(stagedAppDir, 'dashboards', `${page.id}.dqld`);
+        if (existingApp.dashboards.some((dashboard) => dashboard.id === page.id)) {
+          return { ok: false, error: `Dashboard page already exists: ${page.id}`, status: 409 };
+        }
+        cpSync(existingApp.appDir, stagedAppDir, { recursive: true });
+        if (existsSync(targetDashboardPath)) {
+          return { ok: false, error: `Dashboard page already exists: ${page.id}`, status: 409 };
+        }
+        mkdirSync(dirname(targetDashboardPath), { recursive: true });
+        cpSync(generatedDashboardPath, targetDashboardPath);
+        const committedPaths = [relative(projectRoot, join(targetAppDir, 'dashboards', `${page.id}.dqld`))];
+        for (const generatedPath of generated.paths.filter((path) => path.includes('/drafts/') && path.endsWith('.dql'))) {
+          const sourcePath = join(generatedRoot, generatedPath);
+          const packageRelativePath = relative(generatedAppDir, sourcePath);
+          const candidatePath = join(stagedAppDir, packageRelativePath);
+          const finalPath = join(targetAppDir, packageRelativePath);
+          if (existsSync(candidatePath)) {
+            return { ok: false, error: `App draft already exists: ${relative(projectRoot, finalPath)}`, status: 409 };
+          }
+          mkdirSync(dirname(candidatePath), { recursive: true });
+          cpSync(sourcePath, candidatePath);
+          committedPaths.push(relative(projectRoot, finalPath));
+        }
+        generated = { ...generated, paths: committedPaths };
+        if (fingerprintAppDirectory(existingApp.appDir) !== session.existingAppFingerprint) {
+          return {
+            ok: false,
+            error: 'The App changed while this page was being staged. Refresh and review the page proposal again.',
+            status: 409,
+          };
+        }
+        rmSync(backupAppDir, { recursive: true, force: true });
+        renameSync(targetAppDir, backupAppDir);
+        try {
+          renameSync(stagedAppDir, targetAppDir);
+        } catch (error) {
+          if (!existsSync(targetAppDir) && existsSync(backupAppDir)) renameSync(backupAppDir, targetAppDir);
+          throw error;
+        }
+        rmSync(backupAppDir, { recursive: true, force: true });
+      } else if (existsSync(targetAppDir)) {
         if (!input.force) return { ok: false, error: `App already exists: apps/${committedPlan.appId}`, status: 409 };
         rmSync(backupAppDir, { recursive: true, force: true });
         renameSync(targetAppDir, backupAppDir);
-      }
-      try {
+        try {
+          renameSync(stagedAppDir, targetAppDir);
+          rmSync(backupAppDir, { recursive: true, force: true });
+        } catch (error) {
+          if (existsSync(backupAppDir) && !existsSync(targetAppDir)) renameSync(backupAppDir, targetAppDir);
+          throw error;
+        }
+      } else {
         renameSync(stagedAppDir, targetAppDir);
-        rmSync(backupAppDir, { recursive: true, force: true });
-      } catch (error) {
-        if (existsSync(backupAppDir) && !existsSync(targetAppDir)) renameSync(backupAppDir, targetAppDir);
-        throw error;
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return { ok: false, error: message, status: message.includes('already exists') ? 409 : 400 };
+    } finally {
+      rmSync(stagingRoot, { recursive: true, force: true });
     }
     const attachWarnings: string[] = [];
     await ensureMetadataCatalogFresh(projectRoot, { force: true });
@@ -2192,7 +2309,9 @@ export async function commitAppAiBuild(
       generatedPaths: generated.paths,
       committedTileIds: Array.from(selected),
       committedBrief: {
-        appName: committedPlan.name,
+        ...(isExistingPageBuild
+          ? { pageTitle: committedPlan.pages[0]?.title }
+          : { appName: committedPlan.name }),
         audience: committedPlan.audience,
         tileOverrides,
       },
@@ -5594,6 +5713,42 @@ function slugify(value: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
+}
+
+function uniqueAppPageId(base: string, existingIds: Set<string>): string {
+  if (!existingIds.has(base)) return base;
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${base}-${index}`;
+    if (!existingIds.has(candidate)) return candidate;
+  }
+  return `${base}-${Date.now()}`;
+}
+
+/**
+ * API-009: bind an existing-App proposal to every Git-owned byte in the package. This is
+ * deliberately stricter than the metadata snapshot: page, notebook, draft, and
+ * App-document edits all invalidate approval before the atomic directory swap.
+ */
+function fingerprintAppDirectory(appDir: string): string {
+  const files: Array<{ path: string; symbolicLink: boolean }> = [];
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const absolutePath = join(directory, entry.name);
+      if (entry.isDirectory()) visit(absolutePath);
+      else if (entry.isFile() || entry.isSymbolicLink()) {
+        files.push({ path: absolutePath, symbolicLink: entry.isSymbolicLink() });
+      }
+    }
+  };
+  visit(appDir);
+  const hash = createHash('sha256');
+  for (const file of files.sort((left, right) => left.path.localeCompare(right.path))) {
+    hash.update(relative(appDir, file.path));
+    hash.update('\0');
+    hash.update(file.symbolicLink ? `link:${readlinkSync(file.path)}` : readFileSync(file.path));
+    hash.update('\0');
+  }
+  return `sha256:${hash.digest('hex')}`;
 }
 
 function resolveAppPackageDir(projectRoot: string, id: string): string {

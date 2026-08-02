@@ -613,6 +613,85 @@ export interface LocalServerOptions {
 }
 
 const AGENT_RUN_REQUESTED_MODES = new Set<AgentRunRequestedMode>(['auto', 'ask', 'research', 'sql', 'block', 'app']);
+
+export interface AppCopilotResearchAgentInput {
+  appId: string;
+  dashboardId?: string;
+  sourceTileId?: string;
+  sourceBlockId?: string;
+  title?: string;
+  question: string;
+  intent: string;
+  context?: unknown;
+  mode?: 'sql_and_memo' | 'memo_only';
+  generatedSql?: string;
+  metrics?: Record<string, unknown>;
+  drivers?: Array<Record<string, unknown>>;
+  resultPreviews?: unknown[];
+  summaryHint?: string;
+  recommendationHint?: string;
+  sqlError?: string;
+  sqlErrorKind?: string;
+  hasReportEvidence?: boolean;
+}
+
+/** AGT-007 / AGT-022: App-specific context adapter into the uniform AgentRun. */
+export function buildAppCopilotResearchAgentRequest(input: AppCopilotResearchAgentInput): AgentRunRequest {
+  const memoOnly = input.mode === 'memo_only';
+  const appResearch = {
+    mode: 'app_research',
+    generationMode: input.mode ?? 'sql_and_memo',
+    intent: input.intent,
+    appId: input.appId,
+    dashboardId: input.dashboardId,
+    sourceTileId: input.sourceTileId,
+    sourceBlockId: input.sourceBlockId,
+    title: input.title,
+    instruction: [
+      'Answer as an app-scoped analyst. Start from certified block/result context, active filters, dbt/semantic metadata, and schema evidence.',
+      memoOnly
+        ? 'Write the stakeholder memo from the supplied selected result, preview rows, generated SQL, metrics, drivers, filters, and caveats. Do not generate replacement SQL unless the user explicitly asks to fix SQL.'
+        : 'Generate review-required read-only SQL only when the certified result does not exactly answer the requested analysis grain. Execute only through the bounded generated SQL preview path.',
+      'In the natural-language answer, write a stakeholder analysis memo, not a generic chat answer. Use Markdown headings chosen for the question, usually Executive answer, Key numbers, Drivers or Business readout, Caveats, and Next action.',
+      'Use concrete numbers from the selected result or preview when available. If baseline, segment, grain, lineage, or source proof is missing, say that explicitly instead of inventing a driver story.',
+      'Keep raw SQL in proposedSql/sql. Do not put SQL code fences or implementation trace in the memo body.',
+    ].join(' '),
+    generatedSql: input.generatedSql,
+    metrics: input.metrics,
+    drivers: input.drivers,
+    resultPreviews: input.resultPreviews,
+    summaryHint: input.summaryHint,
+    recommendationHint: input.recommendationHint,
+    sqlError: input.sqlError,
+    sqlErrorKind: input.sqlErrorKind,
+    hasReportEvidence: input.hasReportEvidence,
+    context: input.context,
+  };
+  return {
+    question: memoOnly
+      ? [
+          `Research question: ${input.question}`,
+          'Write the business memo now using only the evidence envelope supplied as upstream context.',
+          'Return Markdown sections. Keep SQL, query text, implementation trace, and raw routing details out of the memo body.',
+          'If the evidence is insufficient, state the gap and the next reviewer action instead of filling the story with generic text.',
+        ].join('\n')
+      : input.question,
+    requestedMode: 'research',
+    audience: 'stakeholder',
+    selectedObject: {
+      kind: 'app',
+      id: input.appId,
+      title: input.title,
+    },
+    analysisDepth: 'deep',
+    workspaceContext: {
+      surface: 'app_copilot',
+      appId: input.appId,
+      dashboardId: input.dashboardId,
+      appResearch,
+    },
+  };
+}
 const AGENT_RUN_SELECTED_OBJECT_KINDS = new Set<AgentRunSelectedObject['kind']>([
   'notebook',
   'cell',
@@ -5290,26 +5369,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
   };
 
-  const generateInvestigationSqlForApp = async (input: {
-    appId: string;
-    dashboardId?: string;
-    sourceTileId?: string;
-    sourceBlockId?: string;
-    title?: string;
-    question: string;
-    intent: string;
-    context?: unknown;
-    mode?: 'sql_and_memo' | 'memo_only';
-    generatedSql?: string;
-    metrics?: Record<string, unknown>;
-    drivers?: Array<Record<string, unknown>>;
-    resultPreviews?: unknown[];
-    summaryHint?: string;
-    recommendationHint?: string;
-    sqlError?: string;
-    sqlErrorKind?: string;
-    hasReportEvidence?: boolean;
-  }): Promise<{
+  const generateInvestigationSqlForApp = async (input: AppCopilotResearchAgentInput): Promise<{
     sql?: string;
     answer?: string;
     result?: AgentResultPayload;
@@ -5320,89 +5380,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     executionError?: string;
     providerUsed?: string;
   }> => {
-    const governed = resolveGovernedAnswerRunner(projectRoot);
-    const resolvedProvider = governed?.provider ?? null;
-    const runner = governed?.runner ?? null;
-    if (!resolvedProvider || !runner) {
-      throw new Error('No AI provider is configured. Configure a subscription (Claude Code / Codex), OpenAI, Gemini, Ollama, or a custom OpenAI-compatible endpoint in Settings.');
-    }
-
-    let governedAnswer: AgentAnswer | undefined;
-    let providerError: string | undefined;
-    const memoOnly = input.mode === 'memo_only';
-    const reasoningEffort = resolveRunReasoningEffort(projectRoot, resolvedProvider, 'research', false);
-    const contextEnvelope = {
-      mode: 'app_research',
-      generationMode: input.mode ?? 'sql_and_memo',
-      intent: input.intent,
-      appId: input.appId,
-      dashboardId: input.dashboardId,
-      sourceTileId: input.sourceTileId,
-      sourceBlockId: input.sourceBlockId,
-      title: input.title,
-      instruction: [
-        'Answer as an app-scoped analyst. Start from certified block/result context, active filters, dbt/semantic metadata, and schema evidence.',
-        memoOnly
-          ? 'Write the stakeholder memo from the supplied selected result, preview rows, generated SQL, metrics, drivers, filters, and caveats. Do not generate replacement SQL unless the user explicitly asks to fix SQL.'
-          : 'Generate review-required read-only SQL only when the certified result does not exactly answer the requested analysis grain. Execute only through the bounded generated SQL preview path.',
-        'In the natural-language answer, write a stakeholder analysis memo, not a generic chat answer. Use Markdown headings chosen for the question, usually Executive answer, Key numbers, Drivers or Business readout, Caveats, and Next action.',
-        'Use concrete numbers from the selected result or preview when available. If baseline, segment, grain, lineage, or source proof is missing, say that explicitly instead of inventing a driver story.',
-        'Keep raw SQL in proposedSql/sql. Do not put SQL code fences or implementation trace in the memo body.',
-      ].join(' '),
-      generatedSql: input.generatedSql,
-      metrics: input.metrics,
-      drivers: input.drivers,
-      resultPreviews: input.resultPreviews,
-      summaryHint: input.summaryHint,
-      recommendationHint: input.recommendationHint,
-      sqlError: input.sqlError,
-      sqlErrorKind: input.sqlErrorKind,
-      hasReportEvidence: input.hasReportEvidence,
-      context: input.context,
-    };
-    const controller = new AbortController();
-    await runner.run(
-      {
-        provider: resolvedProvider,
-        messages: [{
-          role: 'user',
-          content: memoOnly
-            ? [
-                `Research question: ${input.question}`,
-                'Write the business memo now using only the evidence envelope supplied as upstream context.',
-                'Return Markdown sections. Keep SQL, query text, implementation trace, and raw routing details out of the memo body.',
-                'If the evidence is insufficient, state the gap and the next reviewer action instead of filling the story with generic text.',
-              ].join('\n')
-            : input.question,
-        }],
-        upstream: {
-          cellId: `app-research:${input.appId}:${input.dashboardId ?? 'app'}`,
-          sql: JSON.stringify(contextEnvelope, null, 2),
-        },
-        reasoningEffort,
-        analysisDepth: 'deep',
-        projectRoot,
-        executeCertifiedBlock: executeCertifiedBlockForAgent,
-        executeGeneratedSql: executeGeneratedSqlForAgent,
-        getSchemaContext: getSchemaContextForAgent,
-      },
-      (turn) => {
-        if (turn.kind === 'tool_result' && turn.id === 'governed_answer') {
-          governedAnswer = turn.output as AgentAnswer;
-        }
-        if (turn.kind === 'error') {
-          providerError = turn.message;
-        }
-      },
-      controller.signal,
-    );
-
-    if (!governedAnswer) {
-      throw new Error(providerError ?? 'The AI provider did not return a governed answer.');
-    }
+    const request = buildAppCopilotResearchAgentRequest(input);
+    // AGT-007 / AGT-022: App Copilot keeps its server-owned App evidence
+    // adapter, while routing the actual investigation through the uniform
+    // snapshot, retrieval, trust, execution, and bounded-repair orchestration.
+    const governedAnswer = await runGovernedAgentAnswerForRun(request, undefined, 'research');
 
     return {
-      sql: memoOnly ? undefined : governedAnswer.proposedSql ?? governedAnswer.sql,
+      sql: input.mode === 'memo_only' ? undefined : governedAnswer.proposedSql ?? governedAnswer.sql,
       answer: governedAnswer.answer ?? governedAnswer.text,
       result: governedAnswer.result,
       analysisPlan: governedAnswer.analysisPlan,
