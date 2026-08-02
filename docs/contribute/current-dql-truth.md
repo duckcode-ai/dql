@@ -17,10 +17,10 @@ Last checked: **2026-08-01**
 | Fact                | Verified state                                                                                          | Evidence                                                                                                                |
 | ------------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | Primary branch      | Local `main` and `origin/main` are synchronized at the verified release baseline                        | `git status --short --branch`; `git rev-parse main origin/main`; `git rev-list --left-right --count main...origin/main` |
-| Current OSS release | `1.12.10` across all 19 publishable packages and the starter CLI range                                  | Release manifests and starter CLI range on `main`                                                                        |
-| npm publication     | All 19 packages report `version=1.12.10` and `dist-tags.latest=1.12.10`                                 | Package-by-package `npm view` audit                                                                                       |
-| Published CLI       | Fresh project-local and global installs both reported `dql 1.12.10`                                    | `node scripts/smoke-cli-install.mjs @duckcodeailabs/dql-cli@1.12.10`                                                     |
-| Release tag         | `v1.12.10` identifies the final Git release baseline                                                   | `git rev-parse v1.12.10`; `git ls-remote --tags origin refs/tags/v1.12.10`                                               |
+| Current OSS release | `1.12.11` across all 19 publishable packages and the starter CLI range                                  | Release manifests and starter CLI range on `main`                                                                        |
+| npm publication     | All 19 packages report `version=1.12.11` and `dist-tags.latest=1.12.11`                                 | Package-by-package `npm view` audit                                                                                       |
+| Published CLI       | Fresh project-local and global installs both reported `dql 1.12.11`                                    | `node scripts/smoke-cli-install.mjs @duckcodeailabs/dql-cli@1.12.11`                                                     |
+| Release tag         | `v1.12.11` identifies the final Git release baseline                                                   | `git rev-parse v1.12.11`; `git ls-remote --tags origin refs/tags/v1.12.11`                                               |
 
 The missing `v1.11.3` through `v1.11.10` and `v1.12.4` through `v1.12.9` tags
 are release-history debt. They do not invalidate the verified npm publication,
@@ -129,7 +129,7 @@ For current-state decisions, use this order:
    observations as advisory context only.
 
 `ROADMAP.md`, `CHANGELOG.md`, and `docs/oss-readiness-checklist.md` contain
-useful historical release evidence. Their latest `1.12.10` entries are release
+useful historical release evidence. Their latest `1.12.11` entries are release
 documentation, while the live repository, registry audit, install smoke, and
 release tag remain the authoritative publication evidence.
 

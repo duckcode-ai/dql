@@ -7,7 +7,7 @@ and inspect lineage from source data to dashboard pages.
 
 For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
-## Current State (v1.12.10)
+## Current State (v1.12.11)
 
 DQL OSS is ready for local-first use cases:
 
@@ -128,6 +128,16 @@ DQL OSS is ready for local-first use cases:
 - Keep internal Hint Graph relation identities out of executable SQL, resolve
   them only through inspected physical relations, and offer focused
   review-required repair for both SQL and DQL Notebook cells.
+- Repair eligible failed SQL and SQL-backed DQL Notebook cells through one quiet
+  same-target `Fix and retry` action without sending repair context into
+  Notebook AI; keep unsafe or user-action failures explicit.
+- Use only first-class, human-authored Domain workspace declarations in
+  Notebook, Block Studio, Models, Skills, Apps, and their filters while keeping
+  metric and dimension catalog folders separate.
+- Browse only physical models and sources from the connected dbt manifest in
+  the Database panel, with 25-object pages, server-side search, and columns
+  loaded only on expansion; keep this display scope separate from agent
+  metadata retrieval.
 
 ## OSS Boundaries
 
@@ -158,7 +168,7 @@ The OSS release is intentionally local and single-user:
 - The notebook browser happy path needs a hard-gated Playwright suite before the
   project should be called GA.
 - The `PERF-001` enterprise-scale correctness fixture passes, but several
-  cold-start and warm-context latency budgets remain above target. The v1.12.10
+  cold-start and warm-context latency budgets remain above target. The v1.12.11
   release treats this as a disclosed OSS exception, not a GA performance claim.
 
 ## Next Priorities

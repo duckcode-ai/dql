@@ -6,6 +6,53 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.12.11 - 2026-08-01
+
+### Quiet Notebook repair and governed authoring context
+
+This patch brings Ask AI's bounded repair experience into Notebook, makes
+business-domain choices consistent across authoring surfaces, and replaces the
+eager warehouse tree with a dbt-scoped database browser.
+
+### Added
+
+- **Quiet Notebook repair.** Failed SQL and SQL-backed DQL cells offer a simple
+  `Fix and retry` action that repairs and reruns the same cell on the same data
+  target without opening Notebook AI or adding repair chatter to its context.
+- **Reviewable repair evidence.** A successful repair replaces only the current
+  cell, marks changed artifacts as review-required, and retains the original
+  source, SQL, error, run, and target evidence in Trust & Steps.
+- **dbt-scoped Database browser.** Database search now returns only physical
+  models and sources from the connected dbt manifest, loads 25 objects at a
+  time, searches on the server, and fetches columns only when a relation is
+  expanded.
+
+### Fixed
+
+- **Safe repair eligibility.** Permission, policy, credential, parameter,
+  dependency, cross-engine, target-drift, semantic, ambiguous, and stale-cell
+  failures remain explicit user decisions instead of being rewritten
+  automatically.
+- **Uniform authored domains.** Notebook, Block Studio, Models, Skills, Apps,
+  and related filters now use only first-class domains created in the Domain
+  workspace. Metric and dimension catalog folders no longer appear as business
+  domains, while legacy assignments remain visible until the user remaps them.
+- **Display-only catalog scope.** Restricting the Database browser to dbt
+  relations does not mutate the DQL manifest or the metadata and indexes used
+  by agent retrieval.
+
+### Verification
+
+- The synchronized release gate passed all 22 workspace builds and all 41
+  workspace test tasks.
+- Full DQL Agent suite: 107 files and 1,290 tests passed.
+- Full CLI suite: 55 files passed with 685 tests passed and 3 skipped.
+- Full Notebook suite: 47 files and 210 tests passed.
+- The release dry run packed all 19 npm packages successfully.
+- All 19 npm packages report `version` and `latest` as `1.12.11`.
+- Fresh project-local and global CLI installs both report `dql 1.12.11`;
+  published CLI help and `create-dql-app@1.12.11 --help` also resolve.
+
 ## v1.12.10 - 2026-08-01
 
 ### Smooth, bounded Ask AI query repair
