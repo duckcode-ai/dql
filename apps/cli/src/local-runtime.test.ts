@@ -24,10 +24,18 @@ import {
   buildNamedRelationProbeSql,
   prepareAnalyticalExecutionSql,
   repairableSqlFromAgentRun,
+  notebookCellRepairSql,
+  replaceNotebookDqlQueryForRepair,
+  applyNotebookRepairRewrites,
+  restoreNotebookDqlParameterInterpolations,
+  notebookFailureAllowsBackgroundRepair,
   resolveBareInternalRelationIds,
   sqlMayContainJoin,
   analyticalFailureAllowsDeterministicRetry,
   buildDbtStatus,
+  buildDbtDatabaseSchemaTree,
+  schemaColumnsFromDescribeRows,
+  splitQualifiedRelationIdentifier,
   buildDbtParseArgs,
   buildProposeReadiness,
   buildProposeCandidatePreview,
@@ -1454,6 +1462,130 @@ describe('dbt-first onboarding runtime API', () => {
     }
   });
 
+  it('serves a dbt-scoped first page and late search without scanning the warehouse (CTX-005, PERF-001, UI-009)', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-bounded-dbt-catalog-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'target'), { recursive: true });
+    const nodes = Object.fromEntries(Array.from({ length: 60 }, (_, index) => {
+      const suffix = String(index).padStart(3, '0');
+      const name = `model_${suffix}`;
+      return [`model.shop.${name}`, {
+        unique_id: `model.shop.${name}`,
+        resource_type: 'model',
+        name,
+        alias: name,
+        relation_name: `ANALYTICS.COMMERCE.${name.toUpperCase()}`,
+        database: 'ANALYTICS',
+        schema: 'COMMERCE',
+        original_file_path: `models/${name}.sql`,
+        columns: { id: { name: 'id' } },
+        depends_on: { nodes: [] },
+        tags: [],
+      }];
+    }));
+    writeFileSync(join(projectRoot, 'target', 'manifest.json'), JSON.stringify({
+      metadata: { project_name: 'shop' },
+      nodes: {
+        ...nodes,
+        'model.shop.ephemeral_helper': {
+          unique_id: 'model.shop.ephemeral_helper', resource_type: 'model', name: 'ephemeral_helper',
+          config: { materialized: 'ephemeral' }, original_file_path: 'models/ephemeral_helper.sql',
+          columns: {}, depends_on: { nodes: [] }, tags: [],
+        },
+      },
+      sources: {}, exposures: {}, semantic_models: {}, groups: {}, metrics: {}, child_map: {}, parent_map: {},
+    }));
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'shop', manifestVersion: 3, modeling: { mode: 'dbt-first' },
+      dbt: { projectDir: '.', manifestPath: 'target/manifest.json' },
+    }));
+    const executeQuery = vi.fn(async () => {
+      throw new Error('A dbt-scoped catalog must not scan the warehouse');
+    });
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery } as unknown as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const generic = await (await fetch(`${base}/api/modeling/dbt-first/inventory?limit=25`)).json() as {
+        total: number;
+        scope?: string;
+      };
+      expect(generic).toMatchObject({ total: 61 });
+      expect(generic.scope).toBeUndefined();
+
+      const first = await (await fetch(`${base}/api/modeling/dbt-first/inventory?physicalOnly=true&limit=25`)).json() as {
+        items: Array<{ uniqueId: string; relation: string }>;
+        total: number;
+        nextCursor: number | null;
+        scope: string;
+      };
+      expect(first).toMatchObject({ total: 60, nextCursor: 25, scope: 'dbt_relations' });
+      expect(first.items).toHaveLength(25);
+      expect(first.items.every((item) => item.relation.startsWith('ANALYTICS.COMMERCE.'))).toBe(true);
+
+      const late = await (await fetch(`${base}/api/modeling/dbt-first/inventory?physicalOnly=true&q=model_059&limit=25`)).json() as {
+        items: Array<{ uniqueId: string }>;
+        total: number;
+        nextCursor: number | null;
+      };
+      expect(late).toEqual(expect.objectContaining({
+        total: 1,
+        nextCursor: null,
+        items: [expect.objectContaining({ uniqueId: 'model.shop.model_059' })],
+      }));
+
+      const catalog = await (await fetch(`${base}/api/block-studio/catalog?includeSemantic=false`)).json() as {
+        databaseTree: Array<{ children?: unknown[] }>;
+      };
+      expect(catalog.databaseTree.flatMap((schema) => schema.children ?? [])).toHaveLength(25);
+      expect(executeQuery).not.toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+    }
+  });
+
+  it('builds the Block Studio tree from dbt relations only (CTX-005, PERF-001)', () => {
+    const tree = buildDbtDatabaseSchemaTree({
+      dbtProvenance: {
+        manifestPath: 'target/manifest.json', manifestFingerprint: 'manifest', metricFlow: {},
+        nodes: {
+          'model.shop.orders': {
+            uniqueId: 'model.shop.orders', resourceType: 'model', name: 'orders',
+            relation: 'ANALYTICS.COMMERCE.ORDERS', identityFingerprint: 'orders',
+            available: { description: false, columns: true, tests: false, catalogTypes: false, dqlMeta: false },
+          },
+          'model.shop.ephemeral': {
+            uniqueId: 'model.shop.ephemeral', resourceType: 'model', name: 'ephemeral', identityFingerprint: 'ephemeral',
+            relation: 'ANALYTICS.COMMERCE.EPHEMERAL',
+            available: { description: false, columns: false, tests: false, catalogTypes: false, dqlMeta: false },
+          },
+        },
+      },
+    } as unknown as import('@duckcodeailabs/dql-core').DQLManifest, 25, new Set(['model.shop.orders']));
+
+    expect(tree).toEqual([expect.objectContaining({
+      label: 'ANALYTICS.COMMERCE',
+      children: [expect.objectContaining({ label: 'ORDERS', path: 'ANALYTICS.COMMERCE.ORDERS', type: 'DBT_MODEL', children: [] })],
+    })]);
+    expect(schemaColumnsFromDescribeRows([
+      { name: 'ORDER_ID', type: 'NUMBER' },
+      { COLUMN_NAME: 'CREATED_AT', DATA_TYPE: 'TIMESTAMP_NTZ' },
+    ])).toEqual([
+      { name: 'ORDER_ID', type: 'NUMBER' },
+      { name: 'CREATED_AT', type: 'TIMESTAMP_NTZ' },
+    ]);
+    expect(splitQualifiedRelationIdentifier('"ANALYTICS"."sales"."Order Facts"')).toEqual([
+      'ANALYTICS', 'sales', 'Order Facts',
+    ]);
+    expect(splitQualifiedRelationIdentifier('ANALYTICS.COMMERCE.ORDERS; DROP TABLE USERS')).toBeNull();
+  });
+
   it('reports disabled modeling separately from a missing dbt manifest (CFG-003, UI-007, E2E-003)', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-domain-studio-disabled-'));
     tempDirs.push(projectRoot);
@@ -2626,6 +2758,122 @@ describe('agent run runtime API', () => {
       expect(idempotent.status).toBe(200);
       await expect(idempotent.json()).resolves.toMatchObject({ run: { id: repaired.run.id } });
       expect(executor.executeQuery).toHaveBeenCalledTimes(1);
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
+  it('repairs and reruns a notebook cell without creating an agent conversation', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-notebook-background-repair-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    let server: Server | undefined;
+    const executor = {
+      executeQuery: vi.fn(async (sql: string) => ({
+        columns: ['order_id'],
+        rows: [{ order_id: 42 }],
+        rowCount: 1,
+        sql,
+      })),
+    } as unknown as QueryExecutor;
+
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor,
+        connection: { driver: 'file' },
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const repairedResponse = await fetch(`${base}/api/notebook/repair-execution`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cell: {
+            id: 'cell_1',
+            type: 'sql',
+            source: 'SELECT order_id FROM source::analytics.main.orders',
+            title: 'Orders',
+          },
+          error: 'syntax error near source::',
+        }),
+      });
+
+      expect(repairedResponse.status).toBe(200);
+      const repaired = await repairedResponse.json() as any;
+      expect(repaired).toMatchObject({
+        ok: true,
+        repairMode: 'deterministic',
+        result: { rows: [{ order_id: 42 }], rowCount: 1 },
+      });
+      expect(repaired.source).not.toContain('source::');
+      expect(repaired.repairedSql).not.toContain('source::');
+      expect(executor.executeQuery).toHaveBeenCalledTimes(1);
+
+      const dqlSource = [
+        'block "Order lookup" {',
+        '  type = "custom"',
+        '  description = "Order lookup"',
+        '  query = """',
+        'SELECT order_id FROM source::analytics.main.orders',
+        '  """',
+        '}',
+      ].join('\n');
+      const repairedDqlResponse = await fetch(`${base}/api/notebook/repair-execution`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cell: { id: 'cell_dql', type: 'dql', source: dqlSource, title: 'Order lookup' },
+          error: 'syntax error near source::',
+        }),
+      });
+      const repairedDqlText = await repairedDqlResponse.text();
+      expect(repairedDqlResponse.status, repairedDqlText).toBe(200);
+      const repairedDql = JSON.parse(repairedDqlText) as any;
+      expect(repairedDql.source).toContain('description = "Order lookup"');
+      expect(repairedDql.source).not.toContain('source::');
+      expect(executor.executeQuery).toHaveBeenCalledTimes(2);
+
+      const parameterizedDqlSource = `block "Filtered orders" {
+  type = "custom"
+  params {
+    category: string = "Beverage"
+  }
+  query = """SELECT order_id FROM source::analytics.main.orders WHERE category = \${category}"""
+}`;
+      const parameterizedResponse = await fetch(`${base}/api/notebook/repair-execution`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cell: { id: 'cell_parameterized', type: 'dql', source: parameterizedDqlSource },
+          error: 'syntax error near source::',
+          parameters: { category: 'Tea' },
+        }),
+      });
+      const parameterizedText = await parameterizedResponse.text();
+      expect(parameterizedResponse.status, parameterizedText).toBe(200);
+      const parameterized = JSON.parse(parameterizedText) as any;
+      expect(parameterized.source).toContain('${category}');
+      expect(parameterized.source).not.toContain('source::');
+      expect(executor.executeQuery).toHaveBeenCalledTimes(3);
+      expect((executor.executeQuery as any).mock.calls[2][1]).toEqual([{ name: 'category', position: 1 }]);
+      expect((executor.executeQuery as any).mock.calls[2][2]).toMatchObject({ category: 'Tea' });
+
+      const runs = await (await fetch(`${base}/api/agent-runs`)).json() as { total: number };
+      expect(runs.total).toBe(0);
+
+      const refused = await fetch(`${base}/api/notebook/repair-execution`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cell: { id: 'cell_2', type: 'sql', source: 'SELECT * FROM secret.orders' },
+          error: 'permission denied for table orders',
+        }),
+      });
+      expect(refused.status).toBe(409);
+      expect(executor.executeQuery).toHaveBeenCalledTimes(3);
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
@@ -4415,6 +4663,56 @@ describe('resolveBareInternalRelationIds', () => {
     const out = await resolveBareInternalRelationIds('SELECT 1 FROM source::orders', executor, connection);
     expect(out.sql).toBe('SELECT 1 FROM source::orders');
     expect(out.resolved).toEqual([]);
+  });
+});
+
+describe('notebook background repair source handling', () => {
+  it('extracts and replaces only the embedded DQL query', () => {
+    const source = [
+      'block revenue {',
+      '  description = "Revenue by customer"',
+      '  query = """',
+      'SELECT customer_id, SUM(revenue) AS revenue',
+      'FROM source::analytics.main.orders',
+      'GROUP BY 1',
+      '  """',
+      '}',
+    ].join('\n');
+
+    expect(notebookCellRepairSql({ id: 'dql_1', type: 'dql', source })).toContain('source::analytics.main.orders');
+    const repaired = replaceNotebookDqlQueryForRepair(
+      source,
+      'SELECT customer_id, SUM(revenue) AS revenue FROM analytics.main.orders GROUP BY 1',
+    );
+    expect(repaired).toContain('description = "Revenue by customer"');
+    expect(repaired).toContain('FROM analytics.main.orders');
+    expect(repaired).not.toContain('source::');
+  });
+
+  it('refuses semantic DQL without an editable embedded query', () => {
+    expect(notebookCellRepairSql({
+      id: 'dql_2',
+      type: 'dql',
+      source: 'query revenue { metric = @metric(revenue) }',
+    })).toBeUndefined();
+  });
+
+  it('preserves DQL parameters while applying only proven relation rewrites', () => {
+    expect(applyNotebookRepairRewrites(
+      'SELECT * FROM source::analytics.main.orders WHERE category = ${category}',
+      [{ from: 'source::analytics.main.orders', to: 'analytics.main.orders' }],
+    )).toBe('SELECT * FROM analytics.main.orders WHERE category = ${category}');
+    expect(restoreNotebookDqlParameterInterpolations(
+      'SELECT * FROM analytics.main.orders WHERE category = $1 LIMIT $2',
+      [{ name: 'category', position: 1 }, { name: 'top_n', position: 2 }],
+    )).toBe('SELECT * FROM analytics.main.orders WHERE category = ${category} LIMIT ${top_n}');
+  });
+
+  it('refuses background repair for failures that require user decisions', () => {
+    expect(notebookFailureAllowsBackgroundRepair({ message: 'syntax error near source::' })).toBe(true);
+    expect(notebookFailureAllowsBackgroundRepair({ code: 'UPSTREAM_RESULT_UNAVAILABLE', message: 'Unavailable' })).toBe(false);
+    expect(notebookFailureAllowsBackgroundRepair({ message: 'permission denied for table orders' })).toBe(false);
+    expect(notebookFailureAllowsBackgroundRepair({ message: 'Provide required parameter: region.' })).toBe(false);
   });
 });
 

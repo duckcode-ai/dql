@@ -69,6 +69,7 @@ const initialState: NotebookState = {
   notebookDirty: false,
   schemaTables: [],
   schemaLoading: false,
+  authoredDomains: [],
   semanticLayer: {
     available: false,
     provider: null,
@@ -426,8 +427,30 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
     case 'SET_SCHEMA':
       return { ...state, schemaTables: action.tables };
 
+    case 'MERGE_SCHEMA_TABLES': {
+      const merged = new Map(
+        state.schemaTables.map((table) => [table.path.toLowerCase(), table] as const),
+      );
+      for (const table of action.tables) {
+        const key = table.path.toLowerCase();
+        const existing = merged.get(key);
+        merged.set(key, existing
+          ? {
+              ...existing,
+              ...table,
+              columns: table.columns.length > 0 ? table.columns : existing.columns,
+              expanded: existing.expanded,
+            }
+          : table);
+      }
+      return { ...state, schemaTables: Array.from(merged.values()) };
+    }
+
     case 'SET_SCHEMA_LOADING':
       return { ...state, schemaLoading: action.loading };
+
+    case 'SET_AUTHORED_DOMAINS':
+      return { ...state, authoredDomains: action.domains };
 
     case 'TOGGLE_SCHEMA_TABLE':
       return {

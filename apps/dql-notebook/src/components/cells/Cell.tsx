@@ -14,7 +14,7 @@ import {
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
-import { makeCell, useNotebook } from "../../store/NotebookStore";
+import { makeCell, makeCellId, useNotebook } from "../../store/NotebookStore";
 import { controlStyle } from '../../themes/control-tokens';
 import { themes } from "../../themes/notebook-theme";
 import { useQueryExecution } from "../../hooks/useQueryExecution";
@@ -58,12 +58,12 @@ import type { Cell, BlockBinding, BlockParameterDefinition } from "../../store/t
 import type { CellResearchState } from "../../utils/notebook-research";
 import { format as formatSQL } from "sql-formatter";
 import { api, type DatasetSource } from "../../api/client";
-import { extractSqlFromText } from "../../utils/block-studio";
 import { CellChrome } from "@duckcodeailabs/dql-ui";
 import { CombineDataPanel, type CombineDataRequest } from '../notebook/CombineDataPanel';
-import { buildCombinedDatasetCell, findDatasetReferences, findWarehouseReferences } from '../../utils/dataset-references';
+import { buildCombinedDatasetCell } from '../../utils/dataset-references';
 import { BlockParameterControls } from '../parameters/BlockParameterControls';
 import { NotebookDqlParameterEditor } from '../parameters/NotebookDqlParameterEditor';
+import { canBackgroundRepairNotebookCell } from '../../utils/notebook-background-repair';
 
 interface CellProps {
   cell: Cell;
@@ -1050,6 +1050,24 @@ function ExecutionTrustPanel({ cell, t }: { cell: Cell; t: Theme }) {
           </div>
         )}
 
+        {execution.repair && (
+          <div style={{ border: `1px solid ${t.warning}55`, borderRadius: 6, padding: "7px 8px", background: `${t.warning}0d` }}>
+            <div style={{ ...sectionLabelStyle, color: t.warning }}>
+              Background repair · {execution.repair.mode}
+            </div>
+            <div style={{ marginTop: 4, color: t.textSecondary, fontSize: 11, lineHeight: 1.45 }}>
+              The original failed run remains below for review. The repair changed only this notebook cell and reran it on the same target.
+            </div>
+            <pre style={codeBlockStyle}>{evidenceJson({
+              sourceRunId: execution.repair.sourceRunId,
+              originalError: execution.repair.originalError,
+              originalSource: execution.repair.originalSource,
+              originalCompiledSql: execution.repair.originalCompiledSql,
+              originalExecutedSql: execution.repair.originalExecutedSql,
+            })}</pre>
+          </div>
+        )}
+
         {execution.error && (
           <div style={{ border: `1px solid ${t.error}55`, borderRadius: 6, padding: "7px 8px", background: `${t.error}0d` }}>
             <div style={{ ...sectionLabelStyle, color: t.error }}>
@@ -1092,6 +1110,11 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
   const [defaultConnection, setDefaultConnection] = useState("default");
   const [staging, setStaging] = useState(false);
   const [combineOpen, setCombineOpen] = useState(Boolean(cell.mixedSourcePlan));
+  const [repairing, setRepairing] = useState(false);
+  const [repairError, setRepairError] = useState<string | null>(null);
+  const [repairNotice, setRepairNotice] = useState<string | null>(null);
+  const liveCellRef = useRef(cell);
+  liveCellRef.current = cell;
 
   useEffect(() => {
     if (cell.type !== "sql" && cell.type !== "dql") return;
@@ -1160,6 +1183,8 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
 
   const handleRun = useCallback(() => {
     if (isExecutable) {
+      setRepairNotice(null);
+      setRepairError(null);
       executeCell(cell.id);
     }
   }, [cell.id, executeCell, isExecutable]);
@@ -1177,6 +1202,8 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
       }
       dispatch({ type: 'UPDATE_CELL', id: cell.id, updates });
       setIsDirty(content !== savedContentRef.current);
+      setRepairNotice(null);
+      setRepairError(null);
     },
     [cell.id, cell.blockBinding, dispatch]
   );
@@ -1207,6 +1234,118 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
     handleFormat();
     setTimeout(() => executeCell(cell.id), 80);
   }, [handleFormat, executeCell, cell.id]);
+
+  const handleBackgroundRepair = useCallback(async () => {
+    if (!canBackgroundRepairNotebookCell(cell) || !cell.error || repairing) return;
+    const originalSource = cell.content;
+    const originalExecution = cell.execution;
+    const originalError = cell.error;
+    const startedAt = new Date().toISOString();
+    const startedMs = Date.now();
+    const runId = `cellrepair_${cell.id}_${startedMs}`;
+    setRepairing(true);
+    setRepairError(null);
+    setRepairNotice(null);
+    try {
+      const repaired = await api.repairNotebookCellExecution(cell, cell.error, {
+        notebookPath: state.activeFile?.path,
+        cellId: cell.id,
+        cellName: cell.name,
+        source: cell.type === 'dql' ? 'notebook_dql_cell' : 'notebook_sql_cell',
+        runId,
+      });
+      const liveCell = liveCellRef.current;
+      if (
+        liveCell.content !== originalSource
+        || liveCell.error !== originalError
+        || liveCell.execution?.runId !== originalExecution?.runId
+      ) {
+        throw new Error('The cell changed while repair was running. Its stale repair was not applied.');
+      }
+      const completedAt = new Date().toISOString();
+      const durationMs = Date.now() - startedMs;
+      const result = {
+        ...repaired.result,
+        executionTime: repaired.result.executionTime ?? durationMs,
+        rowCount: repaired.result.rowCount ?? repaired.result.rows.length,
+      };
+      const blockBinding = cell.blockBinding
+        ? { ...cell.blockBinding, state: 'forked' as const }
+        : undefined;
+      const dqlArtifact = cell.type === 'dql' && cell.dqlArtifact
+        ? {
+            ...cell.dqlArtifact,
+            source: repaired.source,
+            sql: repaired.repairedSql,
+            compiledSql: repaired.compiledSql ?? repaired.repairedSql,
+            trustState: 'review_required' as const,
+            reviewState: 'review_required' as const,
+          }
+        : cell.dqlArtifact;
+      dispatch({
+        type: 'UPDATE_CELL',
+        id: cell.id,
+        updates: {
+          content: repaired.source,
+          status: 'success',
+          result,
+          error: undefined,
+          executionCount: (cell.executionCount ?? 0) + 1,
+          executionTarget: repaired.executionTarget ?? cell.executionTarget,
+          stale: false,
+          fromSnapshot: false,
+          ...(blockBinding ? { blockBinding } : {}),
+          ...(dqlArtifact ? { dqlArtifact } : {}),
+          execution: {
+            version: 1,
+            runId,
+            cellId: cell.id,
+            route: cell.type === 'dql' ? 'notebook_dql_cell' : 'notebook_sql_cell',
+            status: 'success',
+            startedAt,
+            completedAt,
+            durationMs,
+            executionTarget: repaired.executionTarget ?? cell.executionTarget,
+            compiledSql: repaired.compiledSql ?? repaired.repairedSql,
+            executedSql: repaired.executedSql ?? repaired.repairedSql,
+            executionReceipt: repaired.executionReceipt,
+            repair: {
+              mode: repaired.repairMode,
+              sourceRunId: originalExecution?.runId,
+              originalSource,
+              originalCompiledSql: originalExecution?.compiledSql,
+              originalExecutedSql: originalExecution?.executedSql,
+              originalError: originalExecution?.error ?? {
+                message: originalError,
+                phase: 'execution',
+              },
+            },
+          },
+        },
+      });
+      dispatch({
+        type: 'APPEND_QUERY_LOG',
+        entry: {
+          id: makeCellId(),
+          cellName: cell.name ?? cell.id,
+          rows: result.rowCount,
+          time: result.executionTime,
+          ts: new Date(),
+        },
+      });
+      setIsDirty(true);
+      setRepairNotice(repaired.source === originalSource
+        ? 'Retried successfully.'
+        : `Fixed and reran. Review the changed ${cell.type === 'dql' ? 'DQL' : 'SQL'} before saving.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setRepairError(/stale repair|cell changed/i.test(message)
+        ? message
+        : 'Automatic repair could not finish safely. Edit this cell and run again.');
+    } finally {
+      setRepairing(false);
+    }
+  }, [cell, dispatch, repairing, state.activeFile?.path]);
 
   const onCellUpdate = useCallback(
     (updates: Partial<Cell>) => dispatch({ type: 'UPDATE_CELL', id: cell.id, updates }),
@@ -2305,6 +2444,20 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
 
             {showOutput && (
               <>
+                {repairNotice && !cell.error && (
+                  <div
+                    role="status"
+                    style={{
+                      padding: '8px 12px',
+                      borderLeft: `3px solid ${t.success}`,
+                      background: `${t.success}10`,
+                      color: t.textSecondary,
+                      font: `500 11px ${t.font}`,
+                    }}
+                  >
+                    {repairNotice}
+                  </div>
+                )}
                 {cell.status === 'running' && isExecutable && (
                   <RunningOutput
                     cellType={cell.type}
@@ -2318,9 +2471,11 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
                     message={cell.error}
                     themeMode={state.themeMode}
                     onFix={cell.type === 'sql' ? handleFixAndRun : undefined}
-                    onFixWithAi={(cell.type === 'sql' || cell.type === 'dql') && onStartResearch
-                      ? () => onStartResearch(cell.id, buildCellErrorAiPrompt(cell, state.schemaTables), { autoAsk: true })
+                    onBackgroundRepair={canBackgroundRepairNotebookCell(cell)
+                      ? () => void handleBackgroundRepair()
                       : undefined}
+                    repairing={repairing}
+                    repairError={repairError}
                     editableArtifactLabel={cell.type === 'dql' ? 'DQL' : 'SQL'}
                     schemaTables={state.schemaTables}
                   />
@@ -2381,30 +2536,6 @@ function normalizeNotebookChartType(value: string): ChartType {
       : normalized;
   const match = CHART_TYPE_OPTIONS.find((option) => option.value === chartValue);
   return match?.value ?? 'table';
-}
-
-function buildCellErrorAiPrompt(
-  cell: Cell,
-  schemaTables: import('../../store/types').SchemaTable[],
-): string {
-  const localDatasets = findDatasetReferences(cell.content, schemaTables);
-  const warehouseTables = findWarehouseReferences(cell.content, schemaTables);
-  const mixedSource = localDatasets.length > 0 && warehouseTables.length > 0;
-  const isDql = cell.type === 'dql';
-  const embeddedSql = isDql ? extractSqlFromText(cell.content) : cell.content;
-  return [
-    `Fix this notebook ${isDql ? 'DQL' : 'SQL'} cell error.`,
-    `Use the selected ${isDql ? 'DQL source and its embedded query SQL' : 'SQL'}, semantic metadata, certified answers, warehouse schema, and registered local datasets before proposing changes.`,
-    isDql
-      ? 'Return a corrected review-required DQL artifact that preserves the block metadata and changes only what is required to repair the query. Never emit source::, dbt::, or semantic:: graph identities in executable SQL; resolve them to inspected physical database.schema.table relations.'
-      : '',
-    mixedSource
-      ? `This is a mixed-source query: warehouse=${warehouseTables.join(', ')}; local=${localDatasets.map((dataset) => dataset.alias ?? dataset.id).join(', ')}. Do not treat the local dataset as a missing warehouse table and do not execute a direct cross-engine join. Return a warehouse-only extraction that retains the join key, then explain how to use Combine with local data.`
-      : 'When repair is appropriate, return corrected read-only SQL plus a concise explanation and next action.',
-    'Do not create or certify a governed asset during error repair.',
-    embeddedSql?.trim() ? `Failing embedded SQL:\n${embeddedSql.trim()}` : '',
-    cell.error ? `Current error: ${cell.error}` : '',
-  ].filter(Boolean).join('\n');
 }
 
 function makeLocalDatasetQueryCell(dataset: DatasetSource): Cell {

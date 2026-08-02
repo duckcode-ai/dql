@@ -4,6 +4,7 @@ import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import type { AppSummary, NotebookFile } from '../../store/types';
+import { authoredDomainIds, authoredDomainOptions } from '../domains/authored-domain-options';
 
 interface AppsPanelProps {
   onOpenFile: (file: NotebookFile) => void;
@@ -28,11 +29,14 @@ export function AppsPanel(_props: AppsPanelProps) {
 
   useEffect(() => { refresh(); }, []);
 
-  const domains = [...new Set(apps.map((a) => a.domain))].sort();
+  const domainIds = authoredDomainIds(state.authoredDomains);
+  const domains = authoredDomainOptions(state.authoredDomains);
+  const hasUnassigned = apps.some((app) => !domainIds.has(app.domain?.trim() ?? ''));
   const filtered = apps.filter((a) => {
     const s = search.toLowerCase();
     if (s && !a.name.toLowerCase().includes(s) && !(a.description ?? '').toLowerCase().includes(s)) return false;
-    if (domainFilter && a.domain !== domainFilter) return false;
+    if (domainFilter === 'uncategorized' && domainIds.has(a.domain?.trim() ?? '')) return false;
+    if (domainFilter && domainFilter !== 'uncategorized' && (!domainIds.has(domainFilter) || a.domain !== domainFilter)) return false;
     return true;
   });
 
@@ -82,7 +86,8 @@ export function AppsPanel(_props: AppsPanelProps) {
       />
       <select value={domainFilter} onChange={(e) => setDomainFilter(e.target.value)} style={selectStyle}>
         <option value="">All domains</option>
-        {domains.map((d) => <option key={d} value={d}>{d}</option>)}
+        {domains.map((domain) => <option key={domain.value} value={domain.value}>{domain.label}</option>)}
+        {hasUnassigned ? <option value="uncategorized">Unassigned</option> : null}
       </select>
     </PanelToolbar>
   );

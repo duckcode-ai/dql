@@ -2,6 +2,11 @@ import { describe, expect, it } from 'vitest';
 import type { NotebookFile } from '../../store/types';
 import { filterNotebookFiles, notebookDomains } from './notebook-sidebar';
 
+const domains = [
+  { id: 'commerce', name: 'Commerce' },
+  { id: 'operations', name: 'Operations' },
+];
+
 const files: NotebookFile[] = [
   {
     name: 'retention.dqlnb',
@@ -58,19 +63,17 @@ describe('notebook sidebar filtering', () => {
     ]);
   });
 
-  it('offers owner and usage domains plus uncategorized', () => {
-    expect(notebookDomains(files)).toEqual(['analytics', 'commerce', 'operations', 'uncategorized']);
+  it('offers only authored domains plus one unassigned recovery scope', () => {
+    expect(notebookDomains(files, domains)).toEqual(['commerce', 'operations', 'uncategorized']);
   });
 
   it('filters backlinks by domain while keeping all notebooks in the global view', () => {
-    expect(filterNotebookFiles(files, '', 'commerce').map((file) => file.name)).toEqual([
+    expect(filterNotebookFiles(files, '', 'commerce', domains).map((file) => file.name)).toEqual([
       'retention.dqlnb',
       'shared_growth.dqlnb',
     ]);
-    expect(filterNotebookFiles(files, '', 'analytics').map((file) => file.name)).toEqual([
-      'shared_growth.dqlnb',
-    ]);
-    expect(filterNotebookFiles(files, '', 'uncategorized').map((file) => file.name)).toEqual([
+    expect(filterNotebookFiles(files, '', 'analytics', domains)).toEqual([]);
+    expect(filterNotebookFiles(files, '', 'uncategorized', domains).map((file) => file.name)).toEqual([
       'scratchpad.dqlnb',
     ]);
   });

@@ -4493,6 +4493,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     sql: string,
     seed?: DqlArtifactReference,
     executionConnection?: ConnectionConfig,
+    bindings?: {
+      sqlParams?: SQLParamSpec[];
+      variables?: Record<string, unknown>;
+    },
   ): Promise<AgentResultPayload> => {
     const activeConnection = requireActiveConnection(executionConnection);
     const rowBound = clampAnalyticalRowBound(seed?.limit ?? 200);
@@ -4559,7 +4563,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       : null;
 
     const rawResult = semanticExecution?.result
-      ?? await executor.executeQuery(preparation.executedSql, [], runtimeVariables({}), preparation.connection);
+      ?? await executor.executeQuery(
+        preparation.executedSql,
+        bindings?.sqlParams ?? [],
+        runtimeVariables(bindings?.variables ?? {}),
+        preparation.connection,
+      );
     const normalized = normalizeQueryResult(rawResult, semantic.semanticRefs);
     // The authoritative bound. `buildRowBoundedSql` may legitimately decline to
     // touch the statement, and only one of 15 drivers honours a maxRows hint, so
@@ -4938,6 +4947,160 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     } catch {
       return [];
     }
+  };
+
+  type BoundedSqlRepairResult = {
+    result: AgentResultPayload;
+    repairedSql: string;
+    repairMode: 'deterministic' | 'ai';
+    firstFailure?: WarehouseSqlFailureV1;
+    rewrites: Array<{ from: string; to: string }>;
+  };
+
+  const boundedRepairError = (
+    message: string,
+    status: number,
+    warehouseFailure?: WarehouseSqlFailureV1,
+  ): Error & { status: number; warehouseFailure?: WarehouseSqlFailureV1 } => Object.assign(
+    new Error(message),
+    { status, ...(warehouseFailure ? { warehouseFailure } : {}) },
+  );
+
+  /**
+   * Shared one-attempt SQL repair for Ask and Notebook. It never creates a
+   * conversation, writes a DQL file, changes targets, or promotes trust.
+   */
+  const executeBoundedSqlRepair = async (input: {
+    question: string;
+    sourceSql: string;
+    targetConnection: ConnectionConfig;
+    targetConnectionName?: string;
+    sqlParams?: SQLParamSpec[];
+    variables?: Record<string, unknown>;
+  }): Promise<BoundedSqlRepairResult> => {
+    let result: AgentResultPayload | undefined;
+    let repairedSql = input.sourceSql;
+    let repairMode: 'deterministic' | 'ai' = 'deterministic';
+    let firstFailure: WarehouseSqlFailureV1 | undefined;
+    try {
+      result = await executeGeneratedSqlDirect(
+        input.question,
+        input.sourceSql,
+        undefined,
+        input.targetConnection,
+        { sqlParams: input.sqlParams, variables: input.variables },
+      );
+    } catch (error) {
+      firstFailure = normalizeWarehouseSqlFailure(error, input.targetConnection.driver);
+    }
+
+    if (!result) {
+      if (firstFailure?.retryDisposition !== 'model_repair') {
+        throw boundedRepairError(
+          firstFailure?.redactedMessage ?? 'The deterministic repair did not produce an executable query.',
+          422,
+          firstFailure,
+        );
+      }
+
+      const provider = await createBlockStudioAssistProvider(projectRoot);
+      if (!provider) {
+        throw boundedRepairError('Configure an available AI provider in Settings to repair this query.', 409);
+      }
+      let schemaContext: AgentSchemaTable[];
+      try {
+        schemaContext = await getSchemaContextForAgent(
+          input.question,
+          undefined,
+          input.targetConnection,
+          input.targetConnectionName,
+        );
+      } catch (error) {
+        const failure = normalizeWarehouseSqlFailure(error, input.targetConnection.driver);
+        throw boundedRepairError(failure.redactedMessage, 422, failure);
+      }
+      const boundedSchema = schemaContext.slice(0, 16).map((table) => ({
+        relation: table.relation,
+        columns: table.columns.slice(0, 40).map((column) => ({ name: column.name, type: column.type })),
+      }));
+      let raw: string;
+      try {
+        raw = await provider.generate([
+          {
+            role: 'system',
+            content: [
+              'Repair one failed read-only analytical SQL statement.',
+              'Return exactly one JSON object in a ```json fence with keys summary, sql, viz, outputs.',
+              'Preserve the requested grain, filters, output columns, and aggregation semantics.',
+              input.sqlParams?.length
+                ? 'Preserve every positional parameter placeholder exactly; do not add, remove, or renumber placeholders.'
+                : '',
+              'Use only relations and columns present in the supplied schema context.',
+              'Never emit internal DQL relation identities such as source::, model::, seed::, or snapshot::.',
+              'Do not add writes, DDL, multiple statements, or commentary outside the JSON fence.',
+            ].join(' '),
+          },
+          {
+            role: 'user',
+            content: JSON.stringify({
+              question: input.question,
+              driver: input.targetConnection.driver,
+              failure: firstFailure.redactedMessage,
+              sql: input.sourceSql,
+              parameters: input.sqlParams?.map((parameter) => ({
+                name: parameter.name,
+                placeholder: `$${parameter.position}`,
+              })),
+              schema: boundedSchema,
+            }),
+          },
+        ], { maxTokens: 1200, temperature: 0 });
+      } catch {
+        throw boundedRepairError('The AI provider could not complete this repair. Check Provider Settings and retry.', 502);
+      }
+      const proposal = parseProposal(raw);
+      if (!proposal.sql?.trim()) {
+        throw boundedRepairError('The AI repair did not return an executable SQL statement.', 422);
+      }
+      repairedSql = proposal.sql.trim();
+      const requiredPlaceholders = (input.sqlParams ?? []).map((parameter) => `$${parameter.position}`);
+      if (requiredPlaceholders.some((placeholder) => !new RegExp(`${placeholder.replace('$', '\\$')}\\b`).test(repairedSql))) {
+        throw boundedRepairError('The repair changed this cell\'s parameter contract, so DQL stopped it before execution.', 422);
+      }
+      repairMode = 'ai';
+      try {
+        result = await executeGeneratedSqlDirect(
+          input.question,
+          repairedSql,
+          undefined,
+          input.targetConnection,
+          { sqlParams: input.sqlParams, variables: input.variables },
+        );
+      } catch (error) {
+        const failure = normalizeWarehouseSqlFailure(error, input.targetConnection.driver);
+        throw boundedRepairError(failure.redactedMessage, 422, failure);
+      }
+    }
+
+    // Keep preview-only row bounds out of editable notebook source. The one
+    // deterministic source rewrite we do persist is decoding internal graph
+    // identities, because those can never execute as warehouse SQL.
+    let rewrites: Array<{ from: string; to: string }> = [];
+    if (internalRelationIdsInSql(repairedSql).length > 0) {
+      const normalizedSource = await prepareAnalyticalExecutionSql({
+        sql: repairedSql,
+        subject: 'Repaired SQL',
+        executor,
+        connection: input.targetConnection,
+        projectRoot,
+        projectConfig,
+        enforceReadOnly: true,
+      });
+      repairedSql = normalizedSource.decodedSql;
+      rewrites = normalizedSource.rewrites;
+    }
+
+    return { result, repairedSql, repairMode, firstFailure, rewrites };
   };
 
   const generateInvestigationSqlForApp = async (input: {
@@ -6853,15 +7016,77 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     if (req.method === 'GET' && path === '/api/modeling/dbt-first/inventory') {
       const requestId = apiRequestId('modeling-inventory');
-      const snapshot = projectSnapshot();
+      const physicalOnly = url.searchParams.get('physicalOnly') === 'true';
+      const modelingEnabled = projectConfig.manifestVersion === 3 && projectConfig.modeling?.mode === 'dbt-first';
+      if (physicalOnly && !modelingEnabled) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({
+          requestId,
+          code: 'DBT_FIRST_NOT_ENABLED',
+          message: 'dbt-first modeling is not enabled. Connect and apply a dbt project from Settings → Project & dbt.',
+          nextActions: ['Open Settings → Project & dbt and apply a valid dbt project.'],
+        })));
+        return;
+      }
+      const dbtProjectDir = findDbtProjectPath(projectRoot, projectConfig);
+      const configuredManifestPath = projectConfig.dbt?.manifestPath ?? 'target/manifest.json';
+      const expectedManifestPath = resolve(dbtProjectDir, configuredManifestPath);
+      if (physicalOnly && !existsSync(expectedManifestPath)) {
+        res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({
+          requestId,
+          code: 'DBT_MANIFEST_NOT_FOUND',
+          message: `The configured dbt manifest was not found at ${configuredManifestPath}.`,
+          details: { manifestPath: configuredManifestPath },
+          nextActions: ['Run dbt parse, dbt compile, or dbt build, then refresh the database catalog.'],
+        })));
+        return;
+      }
+      let snapshot: ReturnType<typeof projectSnapshot>;
+      if (physicalOnly) {
+        try {
+          snapshot = projectSnapshot();
+        } catch (error) {
+          res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON(apiErrorEnvelope({
+            requestId,
+            code: 'DBT_MANIFEST_COMPILE_FAILED',
+            message: apiErrorMessage(error),
+            details: { manifestPath: configuredManifestPath },
+            nextActions: ['Fix or rebuild the dbt manifest, then refresh the database catalog.'],
+          })));
+          return;
+        }
+      } else {
+        snapshot = projectSnapshot();
+      }
       const manifest = snapshot.manifest;
-      const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 50));
+      if (physicalOnly && (manifest.manifestVersion !== 3 || !manifest.modeling || !manifest.dbtProvenance)) {
+        res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({
+          requestId,
+          snapshotId: snapshot.snapshotId,
+          code: 'DBT_MANIFEST_COMPILE_FAILED',
+          message: snapshot.error ?? 'DQL could not compile the dbt database catalog.',
+          details: { manifestPath: configuredManifestPath },
+          nextActions: ['Review the dbt artifact, rebuild it, then refresh the database catalog.'],
+        })));
+        return;
+      }
+      // PERF-001 / CTX-005: only the Database browser opts into the smaller,
+      // physical-relation contract. Existing modeling consumers retain their
+      // original inventory scope and pagination defaults.
+      const maxLimit = physicalOnly ? 100 : 200;
+      const defaultLimit = physicalOnly ? 25 : 50;
+      const limit = Math.min(maxLimit, Math.max(1, Number(url.searchParams.get('limit')) || defaultLimit));
       const cursor = Math.max(0, Number(url.searchParams.get('cursor')) || 0);
       const query = (url.searchParams.get('q') ?? '').trim().toLowerCase();
       const queryTokens = query.split(/[^a-z0-9]+/).filter(Boolean);
       const domain = (url.searchParams.get('domain') ?? '').trim();
       const boundByDbtId = new Map(Object.values(manifest.modeling?.entities ?? {}).map((entity) => [entity.dbtUniqueId, entity]));
+      const physicalIds = physicalOnly ? physicalDbtRelationIds(expectedManifestPath) : undefined;
       const nodes = Object.values(manifest.dbtProvenance?.nodes ?? {})
+        .filter((node) => !physicalOnly || (Boolean(node.relation) && (!physicalIds || physicalIds.has(node.uniqueId))))
         .filter((node) => {
           if (!queryTokens.length) return true;
           const haystack = `${node.name} ${node.uniqueId} ${node.relation ?? ''} ${node.sourcePath ?? ''}`.toLowerCase();
@@ -6889,6 +7114,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         nextCursor: cursor + limit < nodes.length ? cursor + limit : null,
         total: nodes.length,
         snapshotId: snapshot.snapshotId,
+        ...(physicalOnly ? {
+          manifestPath: manifest.dbtProvenance!.manifestPath,
+          projectName: manifest.dbtProvenance!.projectName,
+          scope: 'dbt_relations',
+        } : {}),
       }));
       return;
     }
@@ -7126,110 +7356,24 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ? 'local'
           : projectConfig.defaultConnectionName;
 
-      let result: AgentResultPayload | undefined;
-      let repairedSql = sourceSql;
-      let repairMode: 'deterministic' | 'ai' = 'deterministic';
-      let firstFailure: WarehouseSqlFailureV1 | undefined;
+      let repaired: BoundedSqlRepairResult;
       try {
-        result = await executeGeneratedSqlDirect(
-          sourceRun.question,
+        repaired = await executeBoundedSqlRepair({
+          question: sourceRun.question,
           sourceSql,
-          undefined,
           targetConnection,
-        );
+          targetConnectionName,
+        });
       } catch (error) {
-        firstFailure = normalizeWarehouseSqlFailure(error, targetConnection.driver);
-      }
-
-      if (!result) {
-        if (firstFailure?.retryDisposition !== 'model_repair') {
-          res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({
-            error: firstFailure?.redactedMessage ?? 'The deterministic repair did not produce an executable query.',
-            ...(firstFailure ? { warehouseFailure: firstFailure } : {}),
-          }));
-          return;
-        }
-
-        const provider = await createBlockStudioAssistProvider(projectRoot);
-        if (!provider) {
-          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ error: 'Configure an available AI provider in Settings to repair this query.' }));
-          return;
-        }
-        let schemaContext: AgentSchemaTable[];
-        try {
-          schemaContext = await getSchemaContextForAgent(
-            sourceRun.question,
-            undefined,
-            targetConnection,
-            targetConnectionName,
-          );
-        } catch (error) {
-          const failure = normalizeWarehouseSqlFailure(error, targetConnection.driver);
-          res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ error: failure.redactedMessage, warehouseFailure: failure }));
-          return;
-        }
-        const boundedSchema = schemaContext.slice(0, 16).map((table) => ({
-          relation: table.relation,
-          columns: table.columns.slice(0, 40).map((column) => ({ name: column.name, type: column.type })),
+        const repairError = error as Error & { status?: number; warehouseFailure?: WarehouseSqlFailureV1 };
+        res.writeHead(repairError.status ?? 500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          error: repairError.message,
+          ...(repairError.warehouseFailure ? { warehouseFailure: repairError.warehouseFailure } : {}),
         }));
-        let raw: string;
-        try {
-          raw = await provider.generate([
-            {
-              role: 'system',
-              content: [
-                'Repair one failed read-only analytical SQL statement.',
-                'Return exactly one JSON object in a ```json fence with keys summary, sql, viz, outputs.',
-                'Preserve the user question, selected grain, filters, and aggregation semantics.',
-                'Use only relations and columns present in the supplied schema context.',
-                'Never emit internal DQL relation identities such as source::, model::, seed::, or snapshot::.',
-                'Do not add writes, DDL, multiple statements, or commentary outside the JSON fence.',
-              ].join(' '),
-            },
-            {
-              role: 'user',
-              content: JSON.stringify({
-                question: sourceRun.question,
-                driver: targetConnection.driver,
-                failure: firstFailure.redactedMessage,
-                sql: sourceSql,
-                schema: boundedSchema,
-              }),
-            },
-          ], { maxTokens: 1200, temperature: 0 });
-        } catch {
-          res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ error: 'The AI provider could not complete this repair. Check Provider Settings and retry.' }));
-          return;
-        }
-        const proposal = parseProposal(raw);
-        if (!proposal.sql?.trim()) {
-          res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ error: 'The AI repair did not return an executable SQL statement.' }));
-          return;
-        }
-        repairedSql = proposal.sql.trim();
-        repairMode = 'ai';
-        try {
-          result = await executeGeneratedSqlDirect(
-            sourceRun.question,
-            repairedSql,
-            undefined,
-            targetConnection,
-          );
-        } catch (error) {
-          const failure = normalizeWarehouseSqlFailure(error, targetConnection.driver);
-          res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({
-            error: failure.redactedMessage,
-            warehouseFailure: failure,
-          }));
-          return;
-        }
+        return;
       }
+      const { result, repairedSql, repairMode, firstFailure } = repaired;
 
       const completedAt = new Date().toISOString();
       const preview = agentResultToSynthesisPreview(result);
@@ -11789,10 +11933,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         // of the same 7,500+ object catalog while keeping the route compatible
         // for older clients.
         const includeSemantic = url.searchParams.get('includeSemantic') !== 'false';
+        const dbtManifestPath = resolveDbtManifestPath(projectRoot, cfg);
+        let databaseTree: ReturnType<typeof buildDbtDatabaseSchemaTree> = [];
+        if (cfg.manifestVersion === 3 && cfg.modeling?.mode === 'dbt-first' && dbtManifestPath) {
+          try {
+            databaseTree = buildDbtDatabaseSchemaTree(
+              projectSnapshot().manifest,
+              25,
+              physicalDbtRelationIds(dbtManifestPath),
+            );
+          } catch {
+            // Keep the rest of Block Studio available while dbt is rebuilt.
+          }
+        }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           semanticTree: includeSemantic && semanticLayer ? buildSemanticTree(semanticLayer, semanticImportManifest) : null,
-          databaseTree: await buildDatabaseSchemaTree(projectRoot, executor, connection),
+          databaseTree,
           connection: {
             default: defaultKey,
             current: defaultKey,
@@ -13760,13 +13917,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // GET /api/describe-table?table=schema.table — returns columns for a specific table
     if (req.method === 'GET' && path === '/api/describe-table') {
       try {
-        const tablePath = url.searchParams.get('table') ?? '';
-        const schemaName = url.searchParams.get('schema') ?? undefined;
-        if (!tablePath) {
+        const requestedRelation = url.searchParams.get('relation')?.trim() ?? '';
+        const legacyTable = url.searchParams.get('table')?.trim() ?? '';
+        const legacySchema = url.searchParams.get('schema')?.trim() ?? '';
+        const relationParts = splitQualifiedRelationIdentifier(
+          requestedRelation || [legacySchema, legacyTable].filter(Boolean).join('.'),
+        );
+        if (!relationParts?.length) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ error: 'Missing table parameter' }));
+          res.end(serializeJSON({ error: 'A safe dbt relation is required.' }));
           return;
         }
+        const tablePath = relationParts.at(-1)!;
+        const schemaName = relationParts.length > 1 ? relationParts.slice(0, -1).join('.') : undefined;
         // Try connector.listColumns() first
         let columns: Array<{ name: string; type: string }> = [];
         const activeConnection = connection;
@@ -13774,7 +13937,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           if (!activeConnection) throw new Error('No active connection');
           const connector = await executor.getConnector(activeConnection);
           if (typeof connector.listColumns === 'function') {
-            const rawCols = await connector.listColumns(schemaName, tablePath);
+            // Connector contracts accept one schema plus one table. For a
+            // three-part dbt relation, the active connection owns the database
+            // and the final namespace segment is the schema.
+            const connectorSchema = schemaName?.split('.').filter(Boolean).at(-1);
+            const rawCols = await connector.listColumns(connectorSchema, tablePath);
             columns = rawCols.map((c) => ({ name: c.name, type: c.dataType }));
           }
         } catch {
@@ -13785,16 +13952,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           try {
             const isFile = /\.(csv|parquet|json)$/i.test(tablePath) || tablePath.startsWith('data/');
             const safePath = tablePath.replace(/'/g, "''");
-            const qualifiedIdentifier = tablePath.split('.').map((p) => `"${p.replace(/"/g, '""')}"`).join('.');
+            if (!activeConnection) throw new Error('No active connection');
+            const dialect = getDialect(activeConnection.driver);
+            const qualifiedIdentifier = relationParts.map((part) => dialect.quoteIdentifier(part)).join('.');
             const sql = isFile
               ? `DESCRIBE SELECT * FROM read_csv_auto('${safePath}') LIMIT 0`
               : `DESCRIBE ${qualifiedIdentifier}`;
-            if (!activeConnection) throw new Error('No active connection');
             const result = await executor.executeQuery(sql, [], {}, activeConnection);
-            columns = result.rows.map((row) => ({
-              name: String(row['column_name'] ?? row['Field'] ?? ''),
-              type: String(row['column_type'] ?? row['Type'] ?? ''),
-            }));
+            columns = schemaColumnsFromDescribeRows(result.rows);
           } catch {
             // empty columns
           }
@@ -13888,6 +14053,195 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         res.end(serializeJSON({
           ok: false,
           error: error instanceof Error ? error.message : String(error),
+        }));
+      }
+      return;
+    }
+
+    /**
+     * Repair an editable notebook cell without starting Notebook AI research.
+     * The returned source is applied only to the in-memory notebook cell by the
+     * client; this endpoint never writes a block/domain/dbt source file.
+     */
+    if (req.method === 'POST' && path === '/api/notebook/repair-execution') {
+      let body: Record<string, unknown> = {};
+      let execContext: NotebookExecutionContextInput | null = null;
+      const start = Date.now();
+      try {
+        body = await readJSON(req) as Record<string, unknown>;
+        execContext = notebookExecutionContext(body.executionContext);
+        const cell = normalizeNotebookCell(body.cell);
+        if (!cell || (cell.type !== 'sql' && cell.type !== 'dql')) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'An editable SQL or DQL notebook cell is required.' }));
+          return;
+        }
+        if (cell.type === 'dql' && /^\s*@block\(/i.test(cell.source)) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Customize the bound block as a notebook copy before repairing it.' }));
+          return;
+        }
+        const embeddedSourceSql = notebookCellRepairSql(cell);
+        if (!embeddedSourceSql) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Background repair supports SQL cells and DQL cells with an embedded query. Edit this semantic DQL definition directly.' }));
+          return;
+        }
+        if (cell.type === 'sql' && /\{\{[^}]+\}\}/.test(cell.source)) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Run or repair the referenced upstream cell before repairing this dependent query.' }));
+          return;
+        }
+
+        const targetConnection = await resolveExecutionConnection(body);
+        const submittedError = typeof body.error === 'string' ? body.error.trim() : '';
+        const submittedFailure = body.failure && typeof body.failure === 'object' && !Array.isArray(body.failure)
+          ? body.failure as Record<string, unknown>
+          : undefined;
+        const failureCode = typeof submittedFailure?.code === 'string' ? submittedFailure.code : undefined;
+        if (!notebookFailureAllowsBackgroundRepair({ code: failureCode, message: submittedError })) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'This failure needs a data, access, parameter, or notebook dependency change and cannot be auto-fixed safely.' }));
+          return;
+        }
+        const retainedFailure = submittedError
+          ? normalizeWarehouseSqlFailure({ code: failureCode, message: submittedError }, targetConnection.driver)
+          : undefined;
+        if (!analyticalFailureAllowsDeterministicRetry(retainedFailure)) {
+          res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({
+            error: 'This failure requires authorized access or a policy change and cannot be repaired in the background.',
+            warehouseFailure: retainedFailure,
+          }));
+          return;
+        }
+
+        const parameters = body.parameters && typeof body.parameters === 'object' && !Array.isArray(body.parameters)
+          ? body.parameters as Record<string, unknown>
+          : {};
+        const invocation = cell.type === 'dql'
+          ? prepareBlockInvocation({ source: cell.source, parameters, surface: 'notebook' })
+          : null;
+        if (invocation?.errors.length) {
+          throw boundedRepairError(invocation.errors.join(' '), 409);
+        }
+        if (invocation?.unresolvedParameters.length) {
+          throw boundedRepairError(
+            `Provide required parameter${invocation.unresolvedParameters.length === 1 ? '' : 's'} before retrying: ${invocation.unresolvedParameters.join(', ')}.`,
+            409,
+          );
+        }
+        const plan = cell.type === 'dql'
+          ? buildExecutionPlan(cell, {
+              semanticLayer,
+              driver: targetConnection.driver,
+              parameters: invocation?.values,
+            })
+          : null;
+        const attemptedSql = typeof body.attemptedSql === 'string' && body.attemptedSql.trim()
+          ? body.attemptedSql.trim()
+          : embeddedSourceSql;
+        const sourceSql = plan?.sql ?? attemptedSql;
+        const sqlParams = plan?.sqlParams ?? [];
+        const variables = {
+          ...(plan?.variables ?? {}),
+          ...(invocation?.values ?? {}),
+        };
+
+        const executionTarget = executionTargetDescriptor(body);
+        const targetConnectionName = executionTarget.target === 'connection'
+          ? executionTarget.connectionName
+          : executionTarget.target === 'local'
+            ? 'local'
+            : projectConfig.defaultConnectionName;
+        const question = [
+          `Repair notebook cell ${cell.title?.trim() || cell.id}.`,
+          submittedError ? `Failure: ${submittedError.slice(0, 1_000)}` : '',
+        ].filter(Boolean).join(' ');
+        const repaired = await executeBoundedSqlRepair({
+          question,
+          sourceSql,
+          targetConnection,
+          targetConnectionName,
+          sqlParams,
+          variables,
+        });
+        let repairedSource: string | undefined;
+        if (cell.type === 'dql') {
+          const originalQuery = notebookCellRepairSql(cell)!;
+          const repairedQuery = repaired.repairMode === 'deterministic'
+            ? applyNotebookRepairRewrites(originalQuery, repaired.rewrites)
+            : restoreNotebookDqlParameterInterpolations(repaired.repairedSql, sqlParams);
+          repairedSource = replaceNotebookDqlQueryForRepair(cell.source, repairedQuery);
+        } else {
+          repairedSource = repaired.repairedSql;
+        }
+        if (!repairedSource) {
+          throw boundedRepairError('DQL could not safely replace the embedded query in this cell.', 422);
+        }
+
+        // Prove the repaired DQL wrapper still compiles. SQL execution above
+        // already proved the corrected statement on the selected target.
+        if (cell.type === 'dql') {
+          const validationPlan = buildExecutionPlan({ ...cell, source: repairedSource }, {
+            semanticLayer,
+            driver: targetConnection.driver,
+            parameters: invocation?.values,
+          });
+          if (!validationPlan?.sql) {
+            throw boundedRepairError('The repaired SQL ran, but the DQL wrapper no longer compiles.', 422);
+          }
+          const beforeParameters = sqlParams.map((parameter) => `${parameter.position}:${parameter.name}`);
+          const afterParameters = validationPlan.sqlParams.map((parameter) => `${parameter.position}:${parameter.name}`);
+          if (beforeParameters.join('|') !== afterParameters.join('|')) {
+            throw boundedRepairError('The repaired DQL changed the cell parameter contract, so the update was stopped.', 422);
+          }
+        }
+
+        if (execContext?.notebookPath) {
+          recordNotebookQueryRun(projectRoot, {
+            notebookPath: execContext.notebookPath,
+            cellId: execContext.cellId ?? cell.id,
+            cellName: execContext.cellName ?? cell.title,
+            source: execContext.source ?? (cell.type === 'dql' ? 'notebook_dql_cell' : 'notebook_sql_cell'),
+            status: 'success',
+            rowCount: repaired.result.rowCount ?? repaired.result.rows.length,
+            durationMs: Date.now() - start,
+            sql: repaired.repairedSql,
+          });
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          ok: true,
+          source: repairedSource,
+          repairedSql: repaired.repairedSql,
+          repairMode: repaired.repairMode,
+          result: repaired.result,
+          executionTarget,
+          executionContext: notebookExecutionIdentity(execContext, cell.id),
+          compiledSql: repaired.repairedSql,
+          executedSql: repaired.result.sql ?? repaired.repairedSql,
+          executionReceipt: repaired.result.executionReceipt,
+        }));
+      } catch (error) {
+        const repairError = error as Error & { status?: number; warehouseFailure?: WarehouseSqlFailureV1 };
+        if (execContext?.notebookPath) {
+          recordNotebookQueryRun(projectRoot, {
+            notebookPath: execContext.notebookPath,
+            cellId: execContext.cellId,
+            cellName: execContext.cellName,
+            source: execContext.source ?? 'notebook_cell_repair',
+            status: 'error',
+            durationMs: Date.now() - start,
+            errorCode: repairError.warehouseFailure?.category ?? repairError.message,
+            sql: typeof body.attemptedSql === 'string' ? body.attemptedSql : undefined,
+          });
+        }
+        res.writeHead(repairError.status ?? 500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          error: repairError.message,
+          ...(repairError.warehouseFailure ? { warehouseFailure: repairError.warehouseFailure } : {}),
         }));
       }
       return;
@@ -19305,6 +19659,73 @@ function normalizeNotebookCell(value: unknown): NotebookCell | null {
   };
 }
 
+export function notebookCellRepairSql(cell: NotebookCell): string | undefined {
+  if (cell.type === 'sql') return cell.source.trim() || undefined;
+  if (cell.type !== 'dql') return undefined;
+  const match = /\bquery\s*=\s*"""([\s\S]*?)"""/i.exec(cell.source);
+  return match?.[1]?.trim() || undefined;
+}
+
+export function replaceNotebookDqlQueryForRepair(source: string, sql: string): string | undefined {
+  const queryField = /\b(query\s*=\s*""")([\s\S]*?)(""")/i;
+  if (!queryField.test(source) || !sql.trim()) return undefined;
+  return source.replace(queryField, (_match, open: string, _body: string, close: string) => (
+    `${open}\n${sql.trim()}\n  ${close}`
+  ));
+}
+
+const NOTEBOOK_BACKGROUND_REPAIR_BLOCKED_CODES = new Set([
+  'AMBIGUOUS_NOTEBOOK_DEPENDENCY',
+  'CROSS_ENGINE_JOIN_REQUIRED',
+  'EXECUTION_TARGET_MISMATCH',
+  'SEMANTIC_SOURCE_DRIFT',
+  'STALE_CELL_EXECUTION',
+  'UPSTREAM_RESULT_UNAVAILABLE',
+  'UNAUTHORIZED',
+]);
+
+/**
+ * Notebook background repair is deliberately narrower than conversational
+ * repair. Access, policy, target, parameter, and dependency failures require a
+ * user decision; only query-shape failures may enter the one-attempt loop.
+ * Acceptance: API-006, API-007, UI-012, UI-013, SEC-004, E2E-014.
+ */
+export function notebookFailureAllowsBackgroundRepair(input: {
+  code?: string;
+  message?: string;
+}): boolean {
+  const code = input.code?.trim().toUpperCase();
+  const message = input.message?.trim() ?? '';
+  if (!message) return false;
+  if (code && NOTEBOOK_BACKGROUND_REPAIR_BLOCKED_CODES.has(code)) return false;
+  return !/(?:permission|not authorized|unauthori[sz]ed|access denied|authentication|credential|policy|unsafe|read[- ]only|cancel(?:led|ed)|required parameters?|provide required|cross[- ]engine|upstream (?:cell|result)|notebook dependency|target mismatch|source drift|matched more than one schema)/i.test(message);
+}
+
+export function applyNotebookRepairRewrites(
+  sql: string,
+  rewrites: Array<{ from: string; to: string }>,
+): string {
+  return rewrites.reduce((current, rewrite) => {
+    const pattern = rewrite.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return current.replace(new RegExp(pattern, 'g'), rewrite.to);
+  }, sql);
+}
+
+export function restoreNotebookDqlParameterInterpolations(
+  sql: string,
+  parameters: SQLParamSpec[],
+): string {
+  return [...parameters]
+    .sort((left, right) => right.position - left.position)
+    .reduce(
+      (current, parameter) => current.replace(
+        new RegExp(`\\$${parameter.position}\\b`, 'g'),
+        `\${${parameter.name}}`,
+      ),
+      sql,
+    );
+}
+
 function resolveNotebookBlockReferenceCell(
   cell: NotebookCell,
   projectRoot: string,
@@ -19523,6 +19944,67 @@ function writeUserPrefs(userPrefsPath: string, prefs: UserPrefs): void {
   writeFileSync(userPrefsPath, JSON.stringify(prefs, null, 2) + '\n', 'utf-8');
 }
 
+/** Normalize DESCRIBE output across Snowflake, DuckDB, and PostgreSQL shapes. */
+export function schemaColumnsFromDescribeRows(
+  rows: Array<Record<string, unknown>>,
+): Array<{ name: string; type: string }> {
+  return rows.map((row) => ({
+    name: String(row['column_name'] ?? row['COLUMN_NAME'] ?? row['Field'] ?? row['FIELD'] ?? row['name'] ?? row['NAME'] ?? ''),
+    type: String(row['column_type'] ?? row['COLUMN_TYPE'] ?? row['data_type'] ?? row['DATA_TYPE'] ?? row['Type'] ?? row['TYPE'] ?? row['type'] ?? ''),
+  })).filter((column) => Boolean(column.name));
+}
+
+/** Parse dbt relation strings without letting relation text become SQL syntax. */
+export function splitQualifiedRelationIdentifier(value: string): string[] | null {
+  const rawParts: string[] = [];
+  let current = '';
+  let quote: '"' | '`' | ']' | null = null;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index]!;
+    if (quote) {
+      current += char;
+      if (char === quote) {
+        const next = value[index + 1];
+        if ((quote === '"' || quote === '`') && next === quote) {
+          current += next;
+          index += 1;
+        } else {
+          quote = null;
+        }
+      }
+      continue;
+    }
+    if (char === '"' || char === '`') {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === '[') {
+      quote = ']';
+      current += char;
+      continue;
+    }
+    if (char === '.') {
+      rawParts.push(current);
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  if (quote) return null;
+  rawParts.push(current);
+  if (rawParts.length === 0 || rawParts.length > 4) return null;
+
+  const decoded = rawParts.map((raw) => {
+    const token = raw.trim();
+    if (/^"(?:[^"]|"")+"$/.test(token)) return token.slice(1, -1).replace(/""/g, '"');
+    if (/^`(?:[^`]|``)+`$/.test(token)) return token.slice(1, -1).replace(/``/g, '`');
+    if (/^\[[^\]]+\]$/.test(token)) return token.slice(1, -1).replace(/\]\]/g, ']');
+    return /^[A-Za-z_][A-Za-z0-9_$]*$/.test(token) ? token : null;
+  });
+  return decoded.every((part): part is string => Boolean(part)) ? decoded : null;
+}
+
 async function introspectSchema(
   executor: QueryExecutor,
   connection: ConnectionConfig,
@@ -19593,115 +20075,101 @@ async function introspectSchema(
   return { tables, columnsByPath };
 }
 
-function buildDatabaseSchemaTree(
-  projectRoot: string,
-  executor: QueryExecutor,
-  connection: ConnectionConfig | null,
-): Promise<Array<{
+const dbtPhysicalRelationCache = new Map<string, { version: string; ids: ReadonlySet<string> }>();
+
+/**
+ * Display-only physical relation filter sourced from the raw dbt artifact.
+ * This deliberately does not mutate DQLManifest or the agent metadata/indexes.
+ */
+function physicalDbtRelationIds(manifestPath: string): ReadonlySet<string> | undefined {
+  try {
+    const stat = statSync(manifestPath);
+    const version = `${stat.size}:${stat.mtimeMs}`;
+    const cached = dbtPhysicalRelationCache.get(manifestPath);
+    if (cached?.version === version) return cached.ids;
+
+    const raw = JSON.parse(readFileSync(manifestPath, 'utf-8')) as Record<string, unknown>;
+    const ids = new Set<string>();
+    for (const collectionName of ['nodes', 'sources'] as const) {
+      const collection = raw[collectionName];
+      if (!collection || typeof collection !== 'object' || Array.isArray(collection)) continue;
+      for (const [fallbackId, value] of Object.entries(collection)) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+        const node = value as Record<string, unknown>;
+        const resourceType = String(node.resource_type ?? (collectionName === 'sources' ? 'source' : ''));
+        if (resourceType !== 'model' && resourceType !== 'source') continue;
+        const config = node.config && typeof node.config === 'object' && !Array.isArray(node.config)
+          ? node.config as Record<string, unknown>
+          : {};
+        if (resourceType === 'model' && String(config.materialized ?? '').toLowerCase() === 'ephemeral') continue;
+        ids.add(typeof node.unique_id === 'string' ? node.unique_id : fallbackId);
+      }
+    }
+    dbtPhysicalRelationCache.set(manifestPath, { version, ids });
+    return ids;
+  } catch {
+    return undefined;
+  }
+}
+
+export function buildDbtDatabaseSchemaTree(
+  manifest: DQLManifest,
+  limit = 25,
+  physicalIds?: ReadonlySet<string>,
+): Array<{
   id: string;
   label: string;
   kind: 'schema' | 'table' | 'column';
   path?: string;
   type?: string;
   children?: Array<{ id: string; label: string; kind: 'schema' | 'table' | 'column'; path?: string; type?: string; children?: unknown[] }>;
-}>> {
-  return (async () => {
-    const dataFiles = scanDataFiles(projectRoot);
-    const dbTables = connection
-      ? (await introspectSchema(executor, connection, { limit: 1_000 })).tables
-      : [];
+}> {
+  // PERF-001 / CTX-005: Block Studio must not enumerate the connected account.
+  // Its initial editor context is the first bounded page of physical relations
+  // declared by the connected dbt artifact; columns remain lazy point-lookups.
+  const boundedLimit = Math.min(100, Math.max(1, Math.floor(limit)));
+  const seen = new Set<string>();
+  const tables = Object.values(manifest.dbtProvenance?.nodes ?? {})
+    .filter((node) => Boolean(node.relation) && (!physicalIds || physicalIds.has(node.uniqueId)))
+    .sort((a, b) => a.uniqueId.localeCompare(b.uniqueId))
+    .flatMap((node) => {
+      const path = node.relation!;
+      const key = path.toLowerCase();
+      if (seen.has(key)) return [];
+      seen.add(key);
+      const parts = path.split('.').filter(Boolean);
+      return [{
+        schema: parts.length > 1 ? parts.slice(0, -1).join('.') : 'default',
+        name: parts.at(-1) ?? node.name,
+        path,
+        type: node.resourceType === 'source' ? 'DBT_SOURCE' : 'DBT_MODEL',
+      }];
+    })
+    .slice(0, boundedLimit);
 
-    const schemaMap = new Map<string, Array<{ name: string; path: string; type?: string }>>();
-    for (const table of dbTables) {
-      const schemaName = table.schema || 'default';
-      const existing = schemaMap.get(schemaName) ?? [];
-      existing.push({ name: table.name, path: table.path, type: table.type });
-      schemaMap.set(schemaName, existing);
-    }
-
-    const databaseNodes: Array<{
-      id: string;
-      label: string;
-      kind: 'schema';
-      children: Array<{
-        id: string;
-        label: string;
-        kind: 'table';
-        path: string;
-        type?: string;
-        children: Array<{
-          id: string;
-          label: string;
-          kind: 'column';
-          path: string;
-          type: string;
-        }>;
-      }>;
-    }> = Array.from(schemaMap.entries())
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([schemaName, tables]) => ({
-        id: `db-schema:${schemaName}`,
-        label: schemaName,
-        kind: 'schema' as const,
-        children: tables
-          .sort((a, b) => a.name.localeCompare(b.name))
-          .map((table) => ({
-            id: `db-table:${table.path}`,
-            label: table.name,
-            kind: 'table' as const,
-            path: table.path,
-            type: table.type,
-            // Warehouse columns are loaded lazily for the selected table.
-            children: [],
-          })),
-      }));
-
-    // Eagerly resolve file columns via DuckDB DESCRIBE
-    if (dataFiles.length > 0) {
-      const fileChildren: Array<{
-        id: string; label: string; kind: 'table'; path: string; type: string;
-        children: Array<{ id: string; label: string; kind: 'column'; path: string; type: string }>;
-      }> = [];
-      for (const file of dataFiles) {
-        let columns: Array<{ id: string; label: string; kind: 'column'; path: string; type: string }> = [];
-        if (connection) {
-          try {
-            const ext = file.name.split('.').pop()?.toLowerCase();
-            const readFn = ext === 'parquet' ? 'read_parquet' : ext === 'json' ? 'read_json_auto' : 'read_csv_auto';
-            const descResult = await executor.executeQuery(
-              `DESCRIBE SELECT * FROM ${readFn}('${file.path.replace(/'/g, "''")}') LIMIT 0`,
-              [], {}, connection,
-            );
-            columns = descResult.rows.map((row) => ({
-              id: `db-column:${file.path}:${String(row['column_name'] ?? '')}`,
-              label: String(row['column_name'] ?? ''),
-              kind: 'column' as const,
-              path: file.path,
-              type: String(row['column_type'] ?? ''),
-            }));
-          } catch {
-            // file column discovery failed — empty children is fine
-          }
-        }
-        fileChildren.push({
-          id: `db-table:${file.path}`,
-          label: file.name,
-          kind: 'table',
-          path: file.path,
-          type: 'FILE',
-          children: columns,
-        });
-      }
-      databaseNodes.unshift({
-        id: 'db-schema:files',
-        label: 'files',
-        kind: 'schema' as const,
-        children: fileChildren,
-      });
-    }
-
-    return databaseNodes;
-  })();
+  const bySchema = new Map<string, typeof tables>();
+  for (const table of tables) {
+    const current = bySchema.get(table.schema) ?? [];
+    current.push(table);
+    bySchema.set(table.schema, current);
+  }
+  return Array.from(bySchema.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([schema, schemaTables]) => ({
+      id: `db-schema:${schema}`,
+      label: schema,
+      kind: 'schema' as const,
+      children: schemaTables
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((table) => ({
+          id: `db-table:${table.path}`,
+          label: table.name,
+          kind: 'table' as const,
+          path: table.path,
+          type: table.type,
+          children: [],
+        })),
+    }));
 }
 
 export function openBlockStudioDocument(

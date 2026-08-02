@@ -1,7 +1,10 @@
-/** Keep the current value visible while presenting a stable, compact domain menu. */
-export function blockDomainOptions(currentDomain: string | null | undefined, domains: readonly string[]): string[] {
-  const current = currentDomain?.trim() ?? '';
-  const normalized = domains.map((domain) => domain.trim()).filter(Boolean);
-  const unique = [...new Set(normalized)].sort((left, right) => left.localeCompare(right));
-  return current ? [current, ...unique.filter((domain) => domain !== current)] : unique;
+import type { Domain } from '../../store/types';
+import { authoredDomainOptionsWithCurrent, type AuthoredDomainOption } from '../domains/authored-domain-options';
+
+/** Keep legacy metadata visible, but only human-authored domains selectable. */
+export function blockDomainOptions(
+  currentDomain: string | null | undefined,
+  domains: readonly Domain[],
+): AuthoredDomainOption[] {
+  return authoredDomainOptionsWithCurrent(currentDomain, domains);
 }

@@ -71,6 +71,12 @@ function AppInner() {
       // so we never force the setup page as the landing.
       didLand.current = true;
     });
+    // UI-001/UI-006: load the authored Domain-page inventory independently of
+    // semantic catalog discovery. Ownership pickers must never use metric or
+    // dimension folder groupings as business domains.
+    api.getDomains().then(({ domains }) => {
+      dispatch({ type: 'SET_AUTHORED_DOMAINS', domains });
+    });
   }, [dispatch]);
 
   // Hot reload — watches project files via SSE and refreshes state

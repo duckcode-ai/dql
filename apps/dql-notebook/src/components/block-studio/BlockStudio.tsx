@@ -20,6 +20,7 @@ import type {
   BlockParameterDefinition,
   SemanticDimension,
   SemanticCompatibility,
+  Domain,
 } from '../../store/types';
 
 /** Display name for the engine that will actually execute a semantic query. */
@@ -1314,7 +1315,7 @@ export function BlockStudio() {
                     metadata={state.blockStudioMetadata}
                     semanticLayer={state.semanticLayer}
                     dbtStatus={state.blockStudioDbtStatus}
-                    domainOptions={state.semanticLayer.domains}
+                    domainOptions={state.authoredDomains}
                     chartConfig={currentChart}
                     onChange={handleDraftChange}
                     onMetadataChange={(next) => state.blockStudioMetadata && dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...state.blockStudioMetadata, ...next } })}
@@ -1330,7 +1331,7 @@ export function BlockStudio() {
                     key={`sql-${state.activeBlockPath ?? draftSessionId}`}
                     source={state.blockStudioDraft}
                     metadata={state.blockStudioMetadata}
-                    domainOptions={state.semanticLayer.domains}
+                    domainOptions={state.authoredDomains}
                     chartConfig={currentChart}
                     onChange={handleDraftChange}
                     onMetadataChange={(next) => state.blockStudioMetadata && dispatch({ type: 'SET_BLOCK_STUDIO_METADATA', metadata: { ...state.blockStudioMetadata, ...next } })}
@@ -2649,7 +2650,7 @@ function SemanticBlockBuilder({
   metadata: BlockStudioOpenPayload['metadata'] | null;
   semanticLayer: SemanticLayerState;
   dbtStatus: BlockStudioDbtStatus | null;
-  domainOptions: string[];
+  domainOptions: Domain[];
   chartConfig: { chart?: string; x?: string; y?: string; color?: string; title?: string };
   onChange: (next: string) => void;
   onMetadataChange: (next: Partial<BlockStudioOpenPayload['metadata']>) => void;
@@ -2940,7 +2941,7 @@ function CompactBlockIdentity({
   t,
 }: {
   metadata: BlockStudioOpenPayload['metadata'] | null;
-  domains: string[];
+  domains: Domain[];
   onTextChange: (field: 'name' | 'domain' | 'description' | 'owner', value: string) => void;
   onFolderChange: (folderPath: string) => void;
   onTagsChange: (tags: string[]) => void;
@@ -2955,7 +2956,11 @@ function CompactBlockIdentity({
         <FieldLabel label="Domain" t={t}>
           <select aria-label="Block domain" value={metadata?.domain ?? ''} onChange={(event) => onTextChange('domain', event.target.value)} style={input}>
             <option value="">Select domain…</option>
-            {options.map((domain) => <option key={domain} value={domain}>{domain}</option>)}
+            {options.map((domain) => (
+              <option key={domain.value} value={domain.value} disabled={domain.disabled}>
+                {domain.label}
+              </option>
+            ))}
           </select>
         </FieldLabel>
         <FieldLabel label="Owner" t={t}><input value={metadata?.owner ?? ''} onChange={(event) => onTextChange('owner', event.target.value)} placeholder="Required to save" style={input} /></FieldLabel>
@@ -3180,7 +3185,7 @@ function SqlBlockVisualBuilder({
 }: {
   source: string;
   metadata: BlockStudioOpenPayload['metadata'] | null;
-  domainOptions: string[];
+  domainOptions: Domain[];
   chartConfig: { chart?: string; x?: string; y?: string; color?: string; title?: string };
   onChange: (next: string) => void;
   onMetadataChange: (next: Partial<BlockStudioOpenPayload['metadata']>) => void;

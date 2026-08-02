@@ -52,6 +52,7 @@ import { AppBuildProposalPanel, defaultProposalSelection } from './AppBuildPropo
 import { DashboardRenderer } from './DashboardRenderer';
 import { PersonaSwitcher } from './PersonaSwitcher';
 import { defaultParameterFilterValue, deriveDashboardFilters } from './dashboard-filters';
+import { authoredDomainOptions, resolveAuthoredDomainId, type AuthoredDomainOption } from '../domains/authored-domain-options';
 
 const UnifiedAgentRunPanel = lazy(() => import('../agent/UnifiedAgentRunPanel')
   .then((module) => ({ default: module.UnifiedAgentRunPanel })));
@@ -180,6 +181,7 @@ export function AppsView(): JSX.Element {
   const [builderPrompt, setBuilderPrompt] = useState(DEFAULT_PROMPT);
   const [builderName, setBuilderName] = useState('Business Analytics');
   const [builderDomain, setBuilderDomain] = useState('');
+  const builderDomainOptions = useMemo(() => authoredDomainOptions(state.authoredDomains), [state.authoredDomains]);
   const [builderOwner, setBuilderOwner] = useState('analytics');
   const [catalog, setCatalog] = useState<AppBlockRecommendation[]>([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
@@ -350,7 +352,7 @@ export function AppsView(): JSX.Element {
   const startAiBuilder = (prompt = builderPrompt, domain?: string) => {
     setBuilderMode('ai');
     setBuilderPrompt(prompt);
-    setBuilderDomain(domain ?? '');
+    setBuilderDomain(resolveAuthoredDomainId(domain, state.authoredDomains));
     setSelectedBlocks(new Set());
     setBuilderError(null);
     setGenerated(null);
@@ -589,6 +591,7 @@ export function AppsView(): JSX.Element {
           appName={builderName}
           prompt={builderPrompt}
           domain={builderDomain}
+          domainOptions={builderDomainOptions}
           owner={builderOwner}
           promptExamples={APP_PROMPT_EXAMPLES}
           catalog={catalog}
@@ -866,6 +869,7 @@ function AppCreateSurface({
   appName,
   prompt,
   domain,
+  domainOptions,
   owner,
   promptExamples,
   catalog,
@@ -895,6 +899,7 @@ function AppCreateSurface({
   appName: string;
   prompt: string;
   domain: string;
+  domainOptions: AuthoredDomainOption[];
   owner: string;
   promptExamples: AppPromptExample[];
   catalog: AppBlockRecommendation[];
@@ -1147,7 +1152,11 @@ function AppCreateSurface({
               {promptExamples.slice(0, 4).map((item) => (
                 <button key={item.title} type="button" onClick={() => {
                   onPromptChange(item.prompt);
-                  onDomainChange(item.domain);
+                  const option = domainOptions.find((candidate) => (
+                    candidate.value.toLowerCase() === item.domain.toLowerCase()
+                    || candidate.label.toLowerCase() === item.domain.toLowerCase()
+                  ));
+                  onDomainChange(option?.value ?? '');
                 }}>
                   {item.title}
                 </button>
@@ -1161,7 +1170,12 @@ function AppCreateSurface({
                 <ChevronDown size={14} />
               </summary>
               <div className="dql-app-ai-context-grid">
-                <label>Domain<input value={domain} onChange={(event) => onDomainChange(event.target.value)} /></label>
+                <label>Domain
+                  <select value={domain} onChange={(event) => onDomainChange(event.target.value)}>
+                    <option value="">Global / cross-domain</option>
+                    {domainOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select>
+                </label>
                 <label>Owner<input value={owner} onChange={(event) => onOwnerChange(event.target.value)} /></label>
                 <label>Build mode
                   <select value={mode} onChange={(event) => onModeChange(event.target.value as BuilderMode)}>

@@ -73,7 +73,7 @@ function emptyDraft(): Domain {
 }
 
 export function DomainsPage({ embedded = false }: { embedded?: boolean } = {}): JSX.Element {
-  const { state } = useNotebook();
+  const { state, dispatch } = useNotebook();
   const t = themes[state.themeMode];
 
   const [domains, setDomains] = useState<Domain[]>([]);
@@ -97,7 +97,9 @@ export function DomainsPage({ embedded = false }: { embedded?: boolean } = {}): 
       .getDomains()
       .then((res) => {
         if (cancelled) return;
-        setDomains(Array.isArray(res?.domains) ? res.domains : []);
+        const next = Array.isArray(res?.domains) ? res.domains : [];
+        setDomains(next);
+        dispatch({ type: 'SET_AUTHORED_DOMAINS', domains: next });
       })
       .catch((error: unknown) => {
         if (cancelled) return;
@@ -114,7 +116,7 @@ export function DomainsPage({ embedded = false }: { embedded?: boolean } = {}): 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [dispatch]);
 
   useEffect(() => load(), [load]);
 
@@ -154,13 +156,13 @@ export function DomainsPage({ embedded = false }: { embedded?: boolean } = {}): 
   const handleSaved = useCallback((saved: Domain) => {
     setDomains((prev) => {
       const idx = prev.findIndex((d) => d.id === saved.id);
-      if (idx === -1) return [...prev, saved];
-      const next = [...prev];
-      next[idx] = saved;
+      const next = idx === -1 ? [...prev, saved] : [...prev];
+      if (idx !== -1) next[idx] = saved;
+      dispatch({ type: 'SET_AUTHORED_DOMAINS', domains: next });
       return next;
     });
     setForm(null);
-  }, []);
+  }, [dispatch]);
 
   const confirmDelete = useCallback(async () => {
     if (!pendingDelete) return;
@@ -168,14 +170,18 @@ export function DomainsPage({ embedded = false }: { embedded?: boolean } = {}): 
     setDeleteError(null);
     try {
       await api.deleteDomain(pendingDelete.id);
-      setDomains((prev) => prev.filter((d) => d.id !== pendingDelete.id));
+      setDomains((prev) => {
+        const next = prev.filter((d) => d.id !== pendingDelete.id);
+        dispatch({ type: 'SET_AUTHORED_DOMAINS', domains: next });
+        return next;
+      });
       setPendingDelete(null);
     } catch (error) {
       setDeleteError(error instanceof Error && error.message ? error.message : 'Could not delete this domain.');
     } finally {
       setDeleting(false);
     }
-  }, [pendingDelete]);
+  }, [dispatch, pendingDelete]);
 
   const startBootstrap = useCallback(async () => {
     setBootstrapLoading(true);

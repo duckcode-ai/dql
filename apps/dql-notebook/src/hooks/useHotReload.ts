@@ -41,12 +41,18 @@ export function useHotReload() {
             api.listNotebooks().then((files) => {
               dispatch({ type: 'SET_FILES', files });
             });
+            api.getDomains().then(({ domains }) => {
+              dispatch({ type: 'SET_AUTHORED_DOMAINS', domains });
+            });
           }
 
           if (event.type === 'file-changed') {
             // Refresh file list
             api.listNotebooks().then((files) => {
               dispatch({ type: 'SET_FILES', files });
+            });
+            api.getDomains().then(({ domains }) => {
+              dispatch({ type: 'SET_AUTHORED_DOMAINS', domains });
             });
           }
 

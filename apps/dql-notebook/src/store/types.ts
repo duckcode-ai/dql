@@ -579,6 +579,20 @@ export interface NotebookCellExecutionEvidence {
   };
   targetBinding?: Record<string, unknown>;
   executionReceipt?: Record<string, unknown>;
+  /** Immutable failure provenance retained when a one-click repair succeeds. */
+  repair?: {
+    mode: "deterministic" | "ai";
+    sourceRunId?: string;
+    originalSource: string;
+    originalCompiledSql?: string;
+    originalExecutedSql?: string;
+    originalError: {
+      code?: string;
+      phase?: string;
+      message: string;
+      details?: unknown;
+    };
+  };
   error?: {
     code?: string;
     phase?: string;
@@ -757,6 +771,10 @@ export interface SchemaTable {
   expanded?: boolean;
   source?: 'file' | 'database';
   objectType?: string;
+  /** dbt identity for a relation loaded from the bounded dbt catalog. */
+  dbtUniqueId?: string;
+  dbtResourceType?: 'model' | 'source';
+  dbtSourcePath?: string;
   datasetId?: string;
   fileFingerprint?: string;
   storageMode?: 'local' | 'project' | 'staged';
@@ -974,6 +992,7 @@ export interface SemanticLayerState {
   hierarchies: SemanticHierarchy[];
   semanticModels: SemanticModel[];
   savedQueries: SemanticSavedQuery[];
+  /** Semantic-catalog grouping only; never use as artifact ownership options. */
   domains: string[];
   tags: string[];
   favorites: string[];
@@ -1345,6 +1364,8 @@ export interface NotebookState {
   notebookDirty: boolean;
   schemaTables: SchemaTable[];
   schemaLoading: boolean;
+  /** First-class human-authored Domain page declarations from `/api/domains`. */
+  authoredDomains: Domain[];
   semanticLayer: SemanticLayerState;
   devPanelOpen: boolean;
   devPanelTab: DevPanelTab;
@@ -1413,7 +1434,9 @@ export type NotebookAction =
   | { type: 'DELETE_CELL'; id: string }
   | { type: 'MOVE_CELL'; id: string; direction: 'up' | 'down' }
   | { type: 'SET_SCHEMA'; tables: SchemaTable[] }
+  | { type: 'MERGE_SCHEMA_TABLES'; tables: SchemaTable[] }
   | { type: 'SET_SCHEMA_LOADING'; loading: boolean }
+  | { type: 'SET_AUTHORED_DOMAINS'; domains: Domain[] }
   | { type: 'TOGGLE_SCHEMA_TABLE'; tableName: string }
   | { type: 'TOGGLE_DEV_PANEL' }
   | { type: 'SET_DEV_PANEL_TAB'; tab: DevPanelTab }

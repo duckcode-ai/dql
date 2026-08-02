@@ -9,6 +9,7 @@ import { parseNotebookFile } from '../../utils/parse-workbook';
 import { SkillsPage } from '../skills/SkillsPage';
 import { Knowledge360 } from '../domains/GovernedContextPage';
 import { DomainScopeSelect } from '../panels/DomainScopeSelect';
+import { authoredDomainOptions } from '../domains/authored-domain-options';
 import { DomainModelingCanvas, type ColumnDisplayMode, type DiagramDensity, type DiagramLayoutMode, type ModelingViewMode, type RelationshipDraft } from './DomainModelingCanvas';
 import { DOMAIN_STUDIO_NAVIGATION, domainEntityRecords, domainPackageTree, domainStudioLocationHref, entityKindColor, isDomainStudioSection, type DomainStudioSection } from './domain-studio-model';
 import { domainStudioUnavailableState, type DomainStudioUnavailableState } from './domain-studio-readiness';
@@ -601,14 +602,16 @@ function DomainPackageNavigation({
   onSelect: (domain: string | null) => void;
   t: Theme;
 }) {
+  const { state } = useNotebook();
   const packages = domainPackageTree(data.modeling.packages);
+  const authoredLabels = new Map(authoredDomainOptions(state.authoredDomains).map((option) => [option.value, option.label]));
   return (
     <nav aria-label="Domain packages">
       <DomainScopeSelect
         id="domain-workspace-filter"
         ariaLabel="Domain workspace"
         value={selectedDomain ?? ''}
-        options={packages.map((pkg) => ({ value: pkg.id, label: pkg.label }))}
+        options={packages.map((pkg) => ({ value: pkg.id, label: authoredLabels.get(pkg.id) ?? pkg.label }))}
         onChange={(value) => onSelect(value || null)}
         summary={<>{packages.length} domain{packages.length === 1 ? '' : 's'} available</>}
         t={t}

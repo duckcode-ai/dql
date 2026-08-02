@@ -7,7 +7,9 @@ interface ErrorOutputProps {
   message: string;
   themeMode: ThemeMode;
   onFix?: () => void;
-  onFixWithAi?: () => void;
+  onBackgroundRepair?: () => void;
+  repairing?: boolean;
+  repairError?: string | null;
   editableArtifactLabel?: 'SQL' | 'DQL';
   schemaTables?: SchemaTable[];
 }
@@ -44,7 +46,9 @@ export function ErrorOutput({
   message,
   themeMode,
   onFix,
-  onFixWithAi,
+  onBackgroundRepair,
+  repairing = false,
+  repairError,
   editableArtifactLabel = 'SQL',
   schemaTables,
 }: ErrorOutputProps) {
@@ -191,7 +195,7 @@ export function ErrorOutput({
         </div>
       )}
 
-      {(showFormatFix || onFixWithAi) && (
+      {(showFormatFix || onBackgroundRepair) && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 2 }}>
           {showFormatFix && (
             <ErrorActionButton t={t} onClick={onFix}>
@@ -201,17 +205,22 @@ export function ErrorOutput({
               Format & Run
             </ErrorActionButton>
           )}
-          {onFixWithAi && (
-            <ErrorActionButton t={t} onClick={onFixWithAi}>
+          {onBackgroundRepair && (
+            <ErrorActionButton t={t} onClick={onBackgroundRepair} disabled={repairing}>
               <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
                 <path d="M8 0a.75.75 0 0 1 .704.49l1.08 2.927 2.927 1.08a.75.75 0 0 1 0 1.406l-2.927 1.08-1.08 2.927a.75.75 0 0 1-1.408 0l-1.08-2.927-2.927-1.08a.75.75 0 0 1 0-1.406l2.927-1.08L7.296.49A.75.75 0 0 1 8 0Zm4.75 9.5a.75.75 0 0 1 .704.49l.41 1.11 1.11.41a.75.75 0 0 1 0 1.408l-1.11.41-.41 1.11a.75.75 0 0 1-1.408 0l-.41-1.11-1.11-.41a.75.75 0 0 1 0-1.408l1.11-.41.41-1.11a.75.75 0 0 1 .704-.49Z" />
               </svg>
-              Ask AI to fix
+              {repairing ? 'Fixing and retrying…' : 'Fix and retry'}
             </ErrorActionButton>
           )}
           <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.font }}>
-            Review the proposed fix before replacing the cell. You can also edit the {editableArtifactLabel} directly and run again.
+            Runs once on the same data target and updates only this cell. You can also edit the {editableArtifactLabel} and run again.
           </span>
+        </div>
+      )}
+      {repairError && (
+        <div role="alert" style={{ fontSize: 11, color: t.error, fontFamily: t.font }}>
+          {repairError}
         </div>
       )}
     </div>
@@ -221,15 +230,18 @@ export function ErrorOutput({
 function ErrorActionButton({
   children,
   onClick,
+  disabled = false,
   t,
 }: {
   children: React.ReactNode;
   onClick?: () => void;
+  disabled?: boolean;
   t: Theme;
 }) {
   return (
     <button
       onClick={onClick}
+      disabled={disabled}
       style={{
         padding: '5px 12px',
         background: `${t.accent}15`,
@@ -239,16 +251,19 @@ function ErrorActionButton({
         fontSize: 12,
         fontFamily: t.font,
         fontWeight: 500,
-        cursor: 'pointer',
+        cursor: disabled ? 'wait' : 'pointer',
+        opacity: disabled ? 0.7 : 1,
         display: 'flex',
         alignItems: 'center',
         gap: 6,
         transition: 'all 0.15s',
       }}
       onMouseEnter={(e) => {
+        if (disabled) return;
         (e.currentTarget as HTMLButtonElement).style.background = `${t.accent}25`;
       }}
       onMouseLeave={(e) => {
+        if (disabled) return;
         (e.currentTarget as HTMLButtonElement).style.background = `${t.accent}15`;
       }}
     >

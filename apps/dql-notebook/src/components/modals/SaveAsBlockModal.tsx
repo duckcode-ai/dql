@@ -3,6 +3,7 @@ import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
 import type { Cell } from '../../store/types';
+import { authoredDomainOptionsWithCurrent } from '../domains/authored-domain-options';
 
 interface SaveAsBlockModalProps {
   cell: Cell;
@@ -93,7 +94,7 @@ export function SaveAsBlockModal({
     return () => document.removeEventListener('keydown', handler);
   }, [onClose]);
 
-  const knownDomains = state.semanticLayer.domains;
+  const knownDomains = authoredDomainOptionsWithCurrent(domain, state.authoredDomains);
   const blockPath = `${domain.trim() ? `blocks/${slugify(domain)}/` : 'blocks/'}${slugify(name) || 'new-block'}.dql`;
 
   const handleSave = async () => {
@@ -228,16 +229,18 @@ export function SaveAsBlockModal({
               <label style={{ fontSize: 12, color: t.textSecondary, fontFamily: t.font }}>
                 Domain
               </label>
-              <input
+              <select
                 value={domain}
                 onChange={(e) => setDomain(e.target.value)}
-                list="semantic-domain-options"
                 style={inputStyle}
-                placeholder="finance"
-              />
-              <datalist id="semantic-domain-options">
-                {knownDomains.map((value) => <option key={value} value={value} />)}
-              </datalist>
+              >
+                <option value="">Global / cross-domain</option>
+                {knownDomains.map((option) => (
+                  <option key={option.value} value={option.value} disabled={option.disabled}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
 

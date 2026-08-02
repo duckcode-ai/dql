@@ -12,7 +12,8 @@ import {
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
-import type { Domain, NotebookFile } from '../../store/types';
+import type { NotebookFile } from '../../store/types';
+import { authoredDomainOptions } from '../domains/authored-domain-options';
 import {
   buildTemplateCells,
   NOTEBOOK_TEMPLATE_CELL_SUMMARIES,
@@ -54,7 +55,6 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
 
   const [name, setName] = useState('');
   const [template, setTemplate] = useState<NotebookTemplate>('blank');
-  const [domains, setDomains] = useState<Domain[]>([]);
   const [ownerDomain, setOwnerDomain] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -62,12 +62,9 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
 
   useEffect(() => {
     nameRef.current?.focus();
-    let active = true;
-    void api.getDomains().then((result) => {
-      if (active) setDomains(result.domains);
-    });
-    return () => { active = false; };
   }, []);
+
+  const domainOptions = authoredDomainOptions(state.authoredDomains);
 
   // Close on Escape
   useEffect(() => {
@@ -297,9 +294,9 @@ export function NewNotebookModal({ onFileOpened }: NewNotebookModalProps) {
                 }}
               >
                 <option value="">Global / cross-domain</option>
-                {domains.map((domain) => (
-                  <option key={domain.id} value={domain.id}>
-                    {domain.id}
+                {domainOptions.map((domain) => (
+                  <option key={domain.value} value={domain.value}>
+                    {domain.label}
                   </option>
                 ))}
               </select>

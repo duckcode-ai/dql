@@ -302,6 +302,39 @@ export interface DbtFirstModelingResponse {
   snapshot?: { id: string; stale: boolean; error?: string };
 }
 
+export interface DbtModelInventoryItem {
+  uniqueId: string;
+  resourceType: 'model' | 'source';
+  name: string;
+  packageName?: string;
+  relation?: string;
+  sourcePath?: string;
+  identityFingerprint: string;
+  available: {
+    description: boolean;
+    columns: boolean;
+    tests: boolean;
+    catalogTypes: boolean;
+    dqlMeta: boolean;
+  };
+  binding?: {
+    domain?: string;
+    businessName?: string;
+    owner?: string;
+    status?: string;
+  };
+}
+
+export interface DbtModelInventoryResponse {
+  items: DbtModelInventoryItem[];
+  nextCursor: number | null;
+  total: number;
+  snapshotId: string;
+  manifestPath?: string;
+  projectName?: string;
+  scope?: 'dbt_relations';
+}
+
 export interface DomainWorkspaceSummary {
   id: string;
   parent?: string;
@@ -2667,6 +2700,18 @@ export interface NotebookQueryExecutionResult extends QueryResult {
   executionReceipt?: Record<string, unknown>;
 }
 
+export interface NotebookRepairExecutionResponse {
+  ok: true;
+  source: string;
+  repairedSql: string;
+  repairMode: 'deterministic' | 'ai';
+  result: QueryResult;
+  executionTarget?: ExecutionTarget;
+  compiledSql?: string;
+  executedSql?: string;
+  executionReceipt?: Record<string, unknown>;
+}
+
 export interface DatasetColumn {
   name: string;
   type: string;
@@ -2822,13 +2867,14 @@ export const api = {
     return request('/api/modeling/dbt-first/nodes/batch', { method: 'POST', body: JSON.stringify({ uniqueIds }) });
   },
 
-  async getDbtModelInventory(options: { q?: string; domain?: string; cursor?: number; limit?: number } = {}): Promise<{ items: Array<Record<string, unknown>>; nextCursor: number | null; total: number; snapshotId: string }> {
+  async getDbtModelInventory(options: { q?: string; domain?: string; cursor?: number; limit?: number; physicalOnly?: boolean } = {}): Promise<DbtModelInventoryResponse> {
     const query = new URLSearchParams();
     if (options.q) query.set('q', options.q);
     if (options.domain) query.set('domain', options.domain);
     if (options.cursor !== undefined) query.set('cursor', String(options.cursor));
     if (options.limit !== undefined) query.set('limit', String(options.limit));
-    return request(`/api/modeling/dbt-first/inventory?${query.toString()}`);
+    if (options.physicalOnly) query.set('physicalOnly', 'true');
+    return request<DbtModelInventoryResponse>(`/api/modeling/dbt-first/inventory?${query.toString()}`);
   },
 
   async getDomainWorkspaces(): Promise<{ domains: DomainWorkspaceSummary[]; unassignedModels: number; snapshot: { id: string; stale: boolean; error?: string } }> {
@@ -3047,6 +3093,67 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ threadId }),
     });
+  },
+
+  async repairNotebookCellExecution(
+    cell: Cell,
+    error: string,
+    executionContext?: NotebookExecutionContext,
+  ): Promise<NotebookRepairExecutionResponse> {
+    const raw = await request<any>('/api/notebook/repair-execution', {
+      method: 'POST',
+      body: JSON.stringify({
+        cell: {
+          id: cell.id,
+          type: cell.type,
+          source: cell.content,
+          title: cell.name,
+          config: cell.chartConfig,
+        },
+        error,
+        failure: cell.execution?.error,
+        attemptedSql: cell.execution?.compiledSql ?? cell.content,
+        executionTarget: cell.executionTarget,
+        parameters: cell.blockBinding?.state === 'bound'
+          ? cell.blockBinding.parameterValues
+          : cell.dqlParameterValues,
+        executionContext,
+      }),
+    });
+    if (
+      executionContext?.runId
+      && typeof raw?.executionContext?.runId === 'string'
+      && raw.executionContext.runId !== executionContext.runId
+    ) {
+      throw new DqlApiError({
+        message: 'The notebook server returned a repair for a different cell run. The stale result was rejected.',
+        status: 409,
+        code: 'STALE_CELL_EXECUTION',
+        details: { expected: executionContext, received: raw.executionContext },
+      });
+    }
+    return {
+      ok: true,
+      source: String(raw.source ?? cell.content),
+      repairedSql: String(raw.repairedSql ?? ''),
+      repairMode: raw.repairMode === 'ai' ? 'ai' : 'deterministic',
+      result: normalizeQueryResultPayload(raw.result),
+      executionTarget: raw?.executionTarget?.target === 'local'
+        ? { target: 'local' }
+        : raw?.executionTarget?.target === 'connection'
+          ? {
+              target: 'connection',
+              ...(typeof raw.executionTarget.connectionName === 'string'
+                ? { connectionName: raw.executionTarget.connectionName }
+                : {}),
+            }
+          : undefined,
+      compiledSql: typeof raw?.compiledSql === 'string' ? raw.compiledSql : undefined,
+      executedSql: typeof raw?.executedSql === 'string' ? raw.executedSql : undefined,
+      executionReceipt: raw?.executionReceipt && typeof raw.executionReceipt === 'object'
+        ? raw.executionReceipt as Record<string, unknown>
+        : undefined,
+    };
   },
 
   async cancelAgentRun(id: string): Promise<{ ok: boolean; id?: string }> {
@@ -4938,12 +5045,9 @@ export const api = {
   },
 
   async describeTable(tablePath: string): Promise<SchemaColumn[]> {
-    // Extract schema from qualified path (e.g. "public.orders" → schema=public, table=orders)
-    const parts = tablePath.split('.');
-    const table = parts.length > 1 ? parts[parts.length - 1] : tablePath;
-    const schema = parts.length > 1 ? parts.slice(0, -1).join('.') : '';
-    const params = new URLSearchParams({ table });
-    if (schema) params.set('schema', schema);
+    // Preserve the dbt relation exactly. The server parses quoted three-part
+    // identifiers safely and performs one relation-level column lookup.
+    const params = new URLSearchParams({ relation: tablePath });
     try {
       return await request<SchemaColumn[]>(`/api/describe-table?${params.toString()}`);
     } catch {

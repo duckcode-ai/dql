@@ -19,6 +19,7 @@ import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import type { Skill, SkillPathSettings, Domain } from '../../store/types';
 import { skillMatchesModelingScope } from './modeling-scope';
+import { authoredDomainOptionsWithCurrent } from '../domains/authored-domain-options';
 
 type FormMode = { kind: 'create' } | { kind: 'edit'; skill: Skill };
 
@@ -69,8 +70,8 @@ export function SkillsPage({ embedded = false, domainFilter = null, modelAreaFil
     metrics: string[];
     blocks: string[];
   }>({ metrics: [], blocks: [] });
-  // Spec 17 (part B) — domains feed the form's domain picker. Best-effort.
-  const [domains, setDomains] = useState<Domain[]>([]);
+  // Spec 17 (part B) — only authored Domain pages feed the form's picker.
+  const domains = state.authoredDomains;
   const [pathSettings, setPathSettings] = useState<SkillPathSettings | null>(null);
   const [showPathEditor, setShowPathEditor] = useState(false);
   const [pathDraft, setPathDraft] = useState('skills');
@@ -111,15 +112,6 @@ export function SkillsPage({ embedded = false, domainFilter = null, modelAreaFil
       })
       .catch(() => {
         if (!cancelled) setOptions({ metrics: [], blocks: [] });
-      });
-    // Domains are best-effort — a failure just leaves the picker with no options.
-    void api
-      .getDomains()
-      .then((res) => {
-        if (!cancelled) setDomains(Array.isArray(res?.domains) ? res.domains : []);
-      })
-      .catch(() => {
-        if (!cancelled) setDomains([]);
       });
     void api
       .getSkillPathSettings()
@@ -480,6 +472,7 @@ function SkillFormDrawer({ mode, options, domains, defaultDomain = null, default
 
   const idCollision = !editing && draft.id.length > 0 && existingIds.includes(draft.id);
   const canSave = draft.id.trim().length > 0 && draft.body.trim().length > 0 && !idCollision && !saving;
+  const domainOptions = authoredDomainOptionsWithCurrent(draft.domain, domains);
 
   const onSave = useCallback(async () => {
     const payload: Skill = {
@@ -580,9 +573,9 @@ function SkillFormDrawer({ mode, options, domains, defaultDomain = null, default
                   style={{ ...inputStyle(t), cursor: 'pointer', color: draft.domain ? t.textPrimary : t.textMuted }}
                 >
                   <option value="">{domains.length === 0 ? 'No domains yet' : 'No domain'}</option>
-                  {domains.map((domain) => (
-                    <option key={domain.id} value={domain.id}>
-                      {domain.name}
+                  {domainOptions.map((domain) => (
+                    <option key={domain.value} value={domain.value} disabled={domain.disabled}>
+                      {domain.label}
                     </option>
                   ))}
                 </select>

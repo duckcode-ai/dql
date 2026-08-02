@@ -2,8 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
-import type { Domain, NotebookFile } from '../../store/types';
+import type { NotebookFile } from '../../store/types';
 import { blockGitPath } from './artifact-location';
+import { authoredDomainOptions } from '../domains/authored-domain-options';
 
 interface NewBlockModalProps {
   onFileOpened: (file: NotebookFile) => void;
@@ -30,7 +31,6 @@ export function NewBlockModal({ onFileOpened }: NewBlockModalProps) {
 
   const [name, setName] = useState('');
   const [blockType, setBlockType] = useState<'custom' | 'semantic'>(state.newBlockModalDefaultType);
-  const [domains, setDomains] = useState<Domain[]>([]);
   const [domain, setDomain] = useState('');
   const [folderPath, setFolderPath] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -39,12 +39,10 @@ export function NewBlockModal({ onFileOpened }: NewBlockModalProps) {
 
   useEffect(() => {
     nameRef.current?.focus();
-    let active = true;
-    void api.getDomains().then((result) => {
-      if (active) setDomains(result.domains);
-    });
-    return () => { active = false; };
   }, []);
+
+  const domains = state.authoredDomains;
+  const domainOptions = authoredDomainOptions(domains);
 
   useEffect(() => {
     setBlockType(state.newBlockModalDefaultType);
@@ -277,7 +275,7 @@ export function NewBlockModal({ onFileOpened }: NewBlockModalProps) {
                 }}
               >
                 <option value="">Global / cross-domain</option>
-                {domains.map((item) => <option key={item.id} value={item.id}>{item.id}</option>)}
+                {domainOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
               </select>
             </label>
             <label style={{ display: 'grid', gap: 6, fontSize: 12, fontWeight: 500, color: t.textSecondary, fontFamily: t.font }}>

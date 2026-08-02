@@ -44,7 +44,8 @@ import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { controlStyle } from '../../themes/control-tokens';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
-import type { AiBuildResult as AiBuildResultPayload, AiBuildTarget, AiBuildMode, AiRoute, Domain, NotebookFile } from '../../store/types';
+import type { AiBuildResult as AiBuildResultPayload, AiBuildTarget, AiBuildMode, AiRoute, NotebookFile } from '../../store/types';
+import { authoredDomainOptionsWithCurrent } from '../domains/authored-domain-options';
 
 interface AiBuildResultProps {
   themeMode: ThemeMode;
@@ -948,16 +949,8 @@ function DomainPicker({
   value?: string;
   onChange: (next: string | undefined) => void;
 }): JSX.Element {
-  const { dispatch } = useNotebook();
-  const [domains, setDomains] = useState<Domain[]>([]);
-
-  useEffect(() => {
-    let cancelled = false;
-    api.getDomains()
-      .then((res) => { if (!cancelled) setDomains(Array.isArray(res?.domains) ? res.domains : []); })
-      .catch(() => { if (!cancelled) setDomains([]); });
-    return () => { cancelled = true; };
-  }, []);
+  const { state, dispatch } = useNotebook();
+  const domains = authoredDomainOptionsWithCurrent(value, state.authoredDomains);
 
   return (
     <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -978,7 +971,7 @@ function DomainPicker({
       >
         <option value="">{domains.length === 0 ? 'No domains yet' : 'No domain'}</option>
         {domains.map((domain) => (
-          <option key={domain.id} value={domain.id}>{domain.name}</option>
+          <option key={domain.value} value={domain.value} disabled={domain.disabled}>{domain.label}</option>
         ))}
       </select>
       <button

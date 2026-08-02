@@ -3,6 +3,8 @@ import { api } from '../../api/client';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import type { ThemeMode } from '../../store/types';
 import { STATUS_COLORS, type BlockEntry } from './block-types';
+import { useNotebook } from '../../store/NotebookStore';
+import { authoredDomainIds, authoredDomainOptions } from '../domains/authored-domain-options';
 
 export type { BlockEntry } from './block-types';
 
@@ -15,6 +17,7 @@ interface BlockPickerProps {
 }
 
 export function BlockPicker({ themeMode, onPick, autoFocus = true, compact = true }: BlockPickerProps) {
+  const { state } = useNotebook();
   const t = themes[themeMode];
   const [blocks, setBlocks] = useState<BlockEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -39,7 +42,9 @@ export function BlockPicker({ themeMode, onPick, autoFocus = true, compact = tru
     }
   }, [autoFocus]);
 
-  const domains = useMemo(() => [...new Set(blocks.map((b) => b.domain))].sort(), [blocks]);
+  const domainIds = useMemo(() => authoredDomainIds(state.authoredDomains), [state.authoredDomains]);
+  const domains = useMemo(() => authoredDomainOptions(state.authoredDomains), [state.authoredDomains]);
+  const hasUnassigned = useMemo(() => blocks.some((block) => !domainIds.has(block.domain?.trim() ?? '')), [blocks, domainIds]);
   const statuses = useMemo(() => [...new Set(blocks.map((b) => b.status))].sort(), [blocks]);
 
   const filtered = useMemo(() => blocks.filter((b) => {
@@ -59,13 +64,14 @@ export function BlockPicker({ themeMode, onPick, autoFocus = true, compact = tru
         .toLowerCase();
       if (!evidence.includes(needle)) return false;
     }
-    if (domainFilter && b.domain !== domainFilter) return false;
+    if (domainFilter === 'uncategorized' && domainIds.has(b.domain?.trim() ?? '')) return false;
+    if (domainFilter && domainFilter !== 'uncategorized' && (!domainIds.has(domainFilter) || b.domain !== domainFilter)) return false;
     if (statusFilter && b.status !== statusFilter) return false;
     return true;
   }).sort((a, b) => {
     const certified = Number(b.status === 'certified') - Number(a.status === 'certified');
     return certified || a.name.localeCompare(b.name);
-  }), [blocks, search, domainFilter, statusFilter]);
+  }), [blocks, search, domainFilter, statusFilter, domainIds]);
 
   const selectStyle: React.CSSProperties = {
     background: t.inputBg,
@@ -91,7 +97,8 @@ export function BlockPicker({ themeMode, onPick, autoFocus = true, compact = tru
         />
         <select aria-label="Filter blocks by domain" value={domainFilter} onChange={(e) => setDomainFilter(e.target.value)} style={selectStyle}>
           <option value="">All domains</option>
-          {domains.map((d) => <option key={d} value={d}>{d}</option>)}
+          {domains.map((domain) => <option key={domain.value} value={domain.value}>{domain.label}</option>)}
+          {hasUnassigned ? <option value="uncategorized">Unassigned</option> : null}
         </select>
         <select aria-label="Filter blocks by status" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={selectStyle}>
           <option value="">Any</option>

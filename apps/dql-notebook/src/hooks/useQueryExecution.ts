@@ -114,6 +114,7 @@ function errorEvidence(input: {
   message: string;
   error?: unknown;
   status?: "error" | "cancelled" | "blocked";
+  attemptedSql?: string;
 }): NotebookCellExecutionEvidence {
   const apiError = input.error instanceof DqlApiError ? input.error : undefined;
   const details = recordOf(apiError?.details);
@@ -129,6 +130,7 @@ function errorEvidence(input: {
     durationMs: input.durationMs,
     executionTarget:
       input.cell.executionTarget ?? executionTargetOf(details?.executionTarget),
+    compiledSql: input.attemptedSql,
     semanticTrace: semanticTrace as NotebookCellExecutionEvidence["semanticTrace"],
     targetBinding: recordOf(details?.targetBinding),
     executionReceipt: recordOf(details?.executionReceipt),
@@ -219,6 +221,7 @@ export function useQueryExecution() {
         runningExecutions.get(cellId)?.runId === runId
         && latestRunIds.get(cellId) === runId;
       const nextCount = (cell.executionCount ?? 0) + 1;
+      let attemptedSql = rawSql ?? undefined;
 
       dispatch({
         type: "UPDATE_CELL",
@@ -248,6 +251,7 @@ export function useQueryExecution() {
           message,
           error,
           status,
+          attemptedSql,
         });
         if (isCurrent()) {
           dispatch({
@@ -433,6 +437,8 @@ export function useQueryExecution() {
             }),
           );
         }
+
+        attemptedSql = substitution.sql;
 
         const resultPayload = await api.executeQuery(
           substitution.sql,

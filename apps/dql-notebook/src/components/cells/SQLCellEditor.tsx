@@ -8,7 +8,7 @@ import {
   highlightActiveLineGutter,
   hoverTooltip,
 } from '@codemirror/view';
-import { EditorState, Compartment, StateField, StateEffect } from '@codemirror/state';
+import { EditorState, Annotation, Compartment, StateField, StateEffect } from '@codemirror/state';
 import { defaultKeymap, indentWithTab, toggleComment, historyKeymap, history, undo, redo } from '@codemirror/commands';
 import { sql } from '@codemirror/lang-sql';
 import {
@@ -121,6 +121,7 @@ function parseErrorLocation(msg: string): { line: number; col: number } | null {
 
 // Effect to update error decorations
 const setErrorEffect = StateEffect.define<{ from: number; to: number; message: string } | null>();
+const externalValueSync = Annotation.define<boolean>();
 
 const errorDecoField = StateField.define({
   create() {
@@ -308,6 +309,7 @@ export function SQLCellEditor({
         if (!view) return;
         view.dispatch({
           changes: { from: 0, to: view.state.doc.length, insert: newValue },
+          annotations: externalValueSync.of(true),
         });
       },
     };
@@ -343,7 +345,8 @@ export function SQLCellEditor({
     ]);
 
     const updateListener = EditorView.updateListener.of((update) => {
-      if (update.docChanged) {
+      const externalSync = update.transactions.some((transaction) => transaction.annotation(externalValueSync));
+      if (update.docChanged && !externalSync) {
         onChangeRef.current(update.state.doc.toString());
       }
     });
@@ -443,6 +446,7 @@ export function SQLCellEditor({
     if (currentValue !== value) {
       view.dispatch({
         changes: { from: 0, to: currentValue.length, insert: value },
+        annotations: externalValueSync.of(true),
       });
     }
   }, [value]);

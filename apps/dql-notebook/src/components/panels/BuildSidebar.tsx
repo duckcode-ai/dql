@@ -1,11 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Blocks, Box, Calendar, ChevronDown, ChevronRight, Database, FileText, Folder, FolderOpen, Hash, KeyRound, Layers, Link2, NotebookPen, Plus, Search, Trash2, Type } from 'lucide-react';
+import { Blocks, Box, ChevronDown, ChevronRight, Database, FileText, Folder, FolderOpen, Layers, NotebookPen, Plus, Search, Trash2 } from 'lucide-react';
 import { api, DqlApiError } from '../../api/client';
 import { insertSemanticReference } from '../../editor/semantic-completions';
 import { controlStyle } from '../../themes/control-tokens';
 import { makeCell, useNotebook } from '../../store/NotebookStore';
-import type { ExecutionTarget, NotebookFile, SchemaTable } from '../../store/types';
-import { DataSourceIcon, describeSchemaObject } from './DataSourceIcon';
+import type { ExecutionTarget, NotebookFile } from '../../store/types';
 import type { Theme } from '../../themes/notebook-theme';
 import { themes } from '../../themes/notebook-theme';
 import type { BlockEntry } from '../blocks/block-types';
@@ -17,6 +16,8 @@ import { buildBlockLibraryTree, type BlockLibraryTreeNode } from './block-librar
 import { buildFileLibraryTree, type FileLibraryTreeNode } from './file-library-tree';
 import { DomainScopeSelect } from './DomainScopeSelect';
 import { filterNotebookFiles, notebookDomains } from './notebook-sidebar';
+import { authoredDomainOptions } from '../domains/authored-domain-options';
+import { DbtDatabaseList } from './DbtDatabaseList';
 import {
   buildSemanticTreeFromLayer,
   scopeSemanticTreeForComposition,
@@ -189,7 +190,7 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSem
           />
         )}
         {tab === 'semantic' && <SemanticList t={t} search={search} onInsert={insertText} notebookMode={!onInsertText || Boolean(onSemanticCompose)} onSemanticCompose={onSemanticCompose} />}
-        {tab === 'database' && <DatabaseList t={t} search={search} onInsert={insertText} />}
+        {tab === 'database' && <DbtDatabaseList t={t} search={search} onInsert={insertText} />}
         {tab === 'blocks' && <BlocksList t={t} search={search} domain={blockDomain} onDomainChange={onBlockDomainChange} onDeleteBlock={onDeleteBlock} refreshKey={blockLibraryRefreshKey} />}
       </div>
 
@@ -214,28 +215,6 @@ function EmptyNote({ text, t }: { text: string; t: Theme }) {
   return <div style={{ padding: '16px 12px', fontSize: 11.5, color: t.textMuted, textAlign: 'center' }}>{text}</div>;
 }
 
-/** A data-type-aware icon for a database column, database-studio style. */
-function columnTypeIcon(type: string): React.ComponentType<any> {
-  const s = (type ?? '').toLowerCase();
-  if (/int|float|numeric|decimal|double|real|number|bigint|money|serial/.test(s)) return Hash;
-  if (/date|time|timestamp|interval/.test(s)) return Calendar;
-  return Type;
-}
-
-/**
- * Best-effort relational role for a column from its name (the schema only carries
- * name + type). `<table>_id` / `id` reads as a primary key; any other `*_id`/`*_key`
- * reads as a foreign key — so relations surface with a key/link icon when present.
- */
-function columnRelation(colName: string, tableName: string): 'pk' | 'fk' | undefined {
-  const c = colName.toLowerCase();
-  if (!(/(?:_id|_key|_uuid|_fk|_pk)$/.test(c) || c === 'id' || c === 'pk')) return undefined;
-  const table = tableName.toLowerCase().replace(/^(?:dim|fct|fact|stg|staging|raw|base)_/, '');
-  const singular = table.replace(/s$/, '');
-  if (c === 'id' || c === 'pk' || c === `${table}_id` || c === `${singular}_id` || c === `${table}id` || c === `${singular}id`) return 'pk';
-  return 'fk';
-}
-
 function NotebooksList({ t, onOpenFile, search, domain, onDomainChange }: {
   t: Theme;
   onOpenFile: (file: NotebookFile) => void;
@@ -247,12 +226,17 @@ function NotebooksList({ t, onOpenFile, search, domain, onDomainChange }: {
   const [pendingDelete, setPendingDelete] = useState<NotebookFile | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const domains = notebookDomains(state.files);
-  const domainOptions = domain && !domains.includes(domain) ? [domain, ...domains] : domains;
-  const allNotebooks = filterNotebookFiles(state.files, '', domain);
-  const notebooks = filterNotebookFiles(state.files, search, domain);
+  const domains = notebookDomains(state.files, state.authoredDomains);
+  const selectedDomain = domains.includes(domain) ? domain : '';
+  const authoredOptions = authoredDomainOptions(state.authoredDomains);
+  const domainOptions = [
+    ...authoredOptions.filter((option) => domains.includes(option.value)),
+    ...(domains.includes('uncategorized') ? [{ value: 'uncategorized', label: 'Unassigned' }] : []),
+  ];
+  const allNotebooks = filterNotebookFiles(state.files, '', selectedDomain, state.authoredDomains);
+  const notebooks = filterNotebookFiles(state.files, search, selectedDomain, state.authoredDomains);
   const notebookTree = buildFileLibraryTree(notebooks, 'notebooks');
-  const scopeLabel = domain || 'all domains';
+  const scopeLabel = selectedDomain === 'uncategorized' ? 'unassigned' : selectedDomain || 'all domains';
 
   const confirmDelete = async () => {
     if (!pendingDelete) return;
@@ -277,7 +261,7 @@ function NotebooksList({ t, onOpenFile, search, domain, onDomainChange }: {
       <DomainScopeSelect
         id="notebook-domain-filter"
         ariaLabel="Notebook domain"
-        value={domain}
+        value={selectedDomain}
         options={domainOptions}
         onChange={onDomainChange}
         summary={<>{notebooks.length} notebook{notebooks.length === 1 ? '' : 's'} · {scopeLabel}</>}
@@ -286,7 +270,7 @@ function NotebooksList({ t, onOpenFile, search, domain, onDomainChange }: {
       {notebooks.length === 0 ? (
         <EmptyNote
           text={allNotebooks.length === 0
-            ? (domain ? `No notebooks are related to ${domain} yet.` : 'No notebooks yet. Use the notebook icon above to create one.')
+            ? (selectedDomain ? `No notebooks are related to ${scopeLabel} yet.` : 'No notebooks yet. Use the notebook icon above to create one.')
             : `No ${scopeLabel} notebooks match “${search.trim()}”.`}
           t={t}
         />
@@ -757,77 +741,6 @@ function SemanticList({ t, search, onInsert, notebookMode, onSemanticCompose }: 
   </div>;
 }
 
-function DatabaseList({ t, search, onInsert }: { t: Theme; search: string; onInsert: (text: string) => void }) {
-  const { state } = useNotebook();
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const q = search.trim().toLowerCase();
-  const tables = (state.schemaTables ?? []).filter((tb: SchemaTable) =>
-    !q || tb.name.toLowerCase().includes(q) || tb.columns.some((c) => c.name.toLowerCase().includes(q)));
-
-  if (tables.length === 0) {
-    return <EmptyNote text={q ? 'No matches.' : 'Connect a database to browse tables.'} t={t} />;
-  }
-  const toggle = (name: string) => setExpanded((prev) => {
-    const next = new Set(prev);
-    if (next.has(name)) next.delete(name); else next.add(name);
-    return next;
-  });
-  return (
-    <div>
-      {tables.map((tb) => {
-        const open = expanded.has(tb.name);
-        return (
-          <div key={tb.path || tb.name}>
-            <div style={{ ...rowStyle(t), justifyContent: 'flex-start' }}>
-              <button
-                type="button"
-                onClick={() => toggle(tb.name)}
-                title={open ? 'Collapse' : 'Expand columns'}
-                style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: t.textMuted, display: 'flex', padding: 0 }}
-              >
-                {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-              </button>
-              <button
-                type="button"
-                onClick={() => onInsert(`SELECT * FROM ${tb.path || tb.name} LIMIT 100`)}
-                title="Insert a SELECT for this table"
-                style={{ flex: 1, minWidth: 0, border: 'none', background: 'transparent', cursor: 'pointer', color: t.textPrimary, textAlign: 'left', display: 'flex', alignItems: 'center', gap: 7, padding: 0, fontFamily: t.font }}
-              >
-                <DataSourceIcon
-                  table={tb}
-                  colors={{ accent: t.accent, success: t.success, warning: t.warning, muted: t.textMuted }}
-                />
-                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, fontFamily: t.fontMono }}>{tb.name}</span>
-                <span style={{ fontSize: 8.5, color: t.textMuted, textTransform: 'uppercase', letterSpacing: '.04em', flexShrink: 0 }}>{describeSchemaObject(tb).label}</span>
-                <span style={{ fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{tb.columns.length}</span>
-              </button>
-            </div>
-            {open && tb.columns.map((col) => {
-              const relation = columnRelation(col.name, tb.name);
-              return (
-                <button
-                  key={col.name}
-                  type="button"
-                  onClick={() => onInsert(col.name)}
-                  title={relation === 'pk' ? `Primary key · insert ${col.name}` : relation === 'fk' ? `Foreign key · insert ${col.name}` : `Insert column ${col.name}`}
-                  style={{ ...rowStyle(t), paddingLeft: 32, gap: 7 }}
-                >
-                  {/* Prototype ER glyphs: mono PK/FK text in the key column. */}
-                  <span style={{ flexShrink: 0, width: 18, fontSize: 8.5, fontWeight: 700, fontFamily: t.fontMono, color: relation === 'pk' ? 'var(--pk)' : relation === 'fk' ? 'var(--fk)' : t.textMuted }}>
-                    {relation === 'pk' ? 'PK' : relation === 'fk' ? 'FK' : ''}
-                  </span>
-                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11.5, fontFamily: t.fontMono, color: t.textSecondary }}>{col.name}</span>
-                  <span style={{ fontSize: 10, color: t.textMuted, flexShrink: 0, fontFamily: t.fontMono }}>{col.type}</span>
-                </button>
-              );
-            })}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 function BlocksList({ t, search, domain, onDomainChange, onDeleteBlock, refreshKey }: { t: Theme; search: string; domain: string; onDomainChange?: (domain: string) => void; onDeleteBlock?: (block: BlockEntry) => void; refreshKey: number }) {
   const { state, dispatch } = useNotebook();
   const [blocks, setBlocks] = useState<BlockEntry[]>([]);
@@ -844,12 +757,16 @@ function BlocksList({ t, search, domain, onDomainChange, onDeleteBlock, refreshK
     return () => { active = false; };
   }, [blockFileKey, refreshKey]);
 
-  const domains = blockDomains(blocks);
-  const selectedDomain = domain;
-  const domainOptions = selectedDomain && !domains.includes(selectedDomain) ? [selectedDomain, ...domains] : domains;
-  const filtered = filterBlocksForDomain(blocks, selectedDomain, search);
+  const domains = blockDomains(blocks, state.authoredDomains);
+  const selectedDomain = domains.includes(domain) ? domain : '';
+  const authoredOptions = authoredDomainOptions(state.authoredDomains);
+  const domainOptions = [
+    ...authoredOptions.filter((option) => domains.includes(option.value)),
+    ...(domains.includes('uncategorized') ? [{ value: 'uncategorized', label: 'Unassigned' }] : []),
+  ];
+  const filtered = filterBlocksForDomain(blocks, selectedDomain, search, state.authoredDomains);
   const tree = useMemo(() => buildBlockLibraryTree(filtered, selectedDomain), [filtered, selectedDomain]);
-  const scopeLabel = selectedDomain || 'all domains';
+  const scopeLabel = selectedDomain === 'uncategorized' ? 'unassigned' : selectedDomain || 'all domains';
 
   const open = (block: BlockEntry) => {
     const file = { name: block.path.split('/').pop() ?? block.name, path: block.path, type: 'block' as const, folder: 'blocks' };
