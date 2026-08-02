@@ -1,7 +1,7 @@
 import type { SemanticDisplayFormat } from '@duckcodeailabs/dql-core';
 import { execFileSync, execSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { gzipSync } from "node:zlib";
+import { gzip } from "node:zlib";
 import { createServer } from "node:http";
 import {
   existsSync,
@@ -14,6 +14,12 @@ import {
   watch,
   writeFileSync,
 } from "node:fs";
+import {
+  mkdir as mkdirAsync,
+  rename as renameAsync,
+  rm as rmAsync,
+  writeFile as writeFileAsync,
+} from 'node:fs/promises';
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -28,6 +34,11 @@ import {
 } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
+import {
+  LocalOperationCoordinator,
+  type LocalOperation,
+} from './local-operation-coordinator.js';
+import { ProjectRefreshCoordinator } from './project-refresh-coordinator.js';
 import {
   buildMixedSourceWarehouseFallbackSql,
   findMentionedNotebookDataset,
@@ -1800,6 +1811,42 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   // unchanged. Explicit refresh, save, and certification paths still request
   // the default forced rebuild below.
   await refreshLocalMetadataCatalog(projectRoot, undefined, undefined, false);
+
+  // PERF-001 / API-001: project mutations acknowledge after their source file
+  // is durable. Rebuildable manifest, lineage, metadata, and KG projections run
+  // in one coalesced worker lane and remain observable across page navigation.
+  const operationCoordinator = new LocalOperationCoordinator(
+    join(projectRoot, '.dql', 'cache', 'operations.sqlite'),
+  );
+  const operationSseClients = new Set<ServerResponse>();
+  const operationIdempotency = new Map<string, string>();
+  const projectRefreshCoordinator = new ProjectRefreshCoordinator(
+    operationCoordinator,
+    () => {
+      projectSnapshots.invalidate();
+      dbtNodeDetailCache.clear();
+      invalidateAgentProjectState(projectRoot);
+      _lineageCache.delete(projectRoot);
+    },
+  );
+  const scheduleProjectRefresh = (reason: string, writeManifest = true): LocalOperation => (
+    projectRefreshCoordinator.schedule({
+      projectRoot,
+      dbtManifestPath: resolveDbtManifestPath(projectRoot, projectConfig) ?? undefined,
+      writeManifest,
+      reason,
+    })
+  );
+  const unsubscribeOperationEvents = operationCoordinator.subscribe((operation) => {
+    const payload = serializeJSON(operation);
+    for (const client of operationSseClients) {
+      try {
+        client.write(`event: operation\ndata: ${payload}\n\n`);
+      } catch {
+        operationSseClients.delete(client);
+      }
+    }
+  });
   const startupDbtManifestPath = resolveDbtManifestPath(projectRoot, projectConfig);
   if (startupDbtManifestPath && !isAgentProjectIndexReady(projectRoot)) {
     try {
@@ -6007,16 +6054,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
   // SSE clients for /api/watch hot-reload
   const sseClients = new Set<ServerResponse>();
+  const projectWatchers: Array<ReturnType<typeof watch>> = [];
+  let runtimeClosing = false;
 
   // Watch all Git-owned authoring roots. Domain Packages are recursive and are
   // the canonical home for modeling, skills, blocks, notebooks, Apps, and evals.
   if (projectRoot) {
-    let sourceRefreshTimer: ReturnType<typeof setTimeout> | undefined;
     for (const dir of ['domains', 'skills', 'tests', 'notebooks', 'workbooks', 'blocks', 'apps', 'dashboards', 'semantic-layer', 'data']) {
       const watchDir = join(projectRoot, dir);
       if (!existsSync(watchDir)) continue;
       try {
-        watch(watchDir, { persistent: false, recursive: true }, (eventType, filename) => {
+        const watcher = watch(watchDir, { persistent: false, recursive: true }, (eventType, filename) => {
+          if (runtimeClosing) return;
           if (!filename) return;
           const path = `${dir}/${filename}`;
           const payload = JSON.stringify({ type: eventType === 'rename' ? 'file-added' : 'file-changed', path });
@@ -6025,10 +6074,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
           if (['domains', 'skills', 'tests', 'blocks', 'apps', 'notebooks'].includes(dir)) {
             invalidateAgentProjectState(projectRoot);
-            if (sourceRefreshTimer) clearTimeout(sourceRefreshTimer);
-            sourceRefreshTimer = setTimeout(() => {
-              void refreshUnifiedProjectIndexes(projectRoot).catch(() => undefined);
-            }, 250);
+            scheduleProjectRefresh(`file:${path}`);
           }
           // Hot-reload semantic layer on change and notify frontend
           if (dir === 'semantic-layer') {
@@ -6041,18 +6087,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             }).catch(() => { /* reload errors are non-fatal */ });
           }
         });
+        projectWatchers.push(watcher);
       } catch { /* dir not watchable */ }
     }
     const configuredDbtManifest = resolveDbtManifestPath(projectRoot, projectConfig);
     if (configuredDbtManifest && existsSync(dirname(configuredDbtManifest))) {
       try {
-        watch(dirname(configuredDbtManifest), { persistent: false }, (_eventType, filename) => {
+        const watcher = watch(dirname(configuredDbtManifest), { persistent: false }, (_eventType, filename) => {
+          if (runtimeClosing) return;
           if (!filename || !['manifest.json', 'catalog.json', 'semantic_manifest.json', 'run_results.json'].includes(String(filename))) return;
           invalidateAgentProjectState(projectRoot);
-          if (sourceRefreshTimer) clearTimeout(sourceRefreshTimer);
-          sourceRefreshTimer = setTimeout(() => {
-            void refreshUnifiedProjectIndexes(projectRoot).catch(() => undefined);
-          }, 250);
+          scheduleProjectRefresh(`dbt:${String(filename)}`);
           const payload = JSON.stringify({ type: 'dbt-artifacts-changed', path: String(filename) });
           for (const client of sseClients) {
             try { client.write(`event: change\ndata: ${payload}\n\n`); } catch { sseClients.delete(client); }
@@ -6064,6 +6109,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             }
           }).catch(() => { /* artifact reload errors are exposed in diagnostics */ });
         });
+        projectWatchers.push(watcher);
       } catch { /* dbt artifact directory not watchable */ }
     }
   }
@@ -6114,6 +6160,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     result: ReturnType<typeof normalizeQueryResult>;
     chartConfig: { chart?: string; x?: string; y?: string; color?: string; title?: string } | null;
     invocation: ReturnType<typeof prepareBlockInvocation>;
+    tests: NonNullable<ReturnType<typeof buildExecutionPlan>>['tests'];
   }> => {
     const activeConnection = requireActiveConnection(targetConnection);
     let tableMapping: Record<string, string> | undefined;
@@ -6174,15 +6221,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       result: normalizeQueryResult(result),
       chartConfig: plan?.chartConfig ?? validation.chartConfig ?? null,
       invocation,
+      tests: plan?.tests ?? [],
     };
   };
 
   const runBlockStudioTestSummary = async (
     source: string,
     targetConnection?: ConnectionConfig | null,
+    executedPreview?: Awaited<ReturnType<typeof runBlockStudioPreviewSource>>,
   ): Promise<TestResultSummary> => {
-    const activeConnection = requireActiveConnection(targetConnection);
     const start = Date.now();
+    if (executedPreview) {
+      return evaluateBlockStudioTests(
+        executedPreview.tests,
+        executedPreview.result.rows,
+        executedPreview.result.columns,
+        start,
+      );
+    }
+    const activeConnection = requireActiveConnection(targetConnection);
     const tableMapping = await resolveSemanticTableMapping(executor, activeConnection, semanticLayer, projectRoot);
     // Run tests against the SAME SQL the preview runs: for a semantic block with a
     // pre-compiled query, that's the query (not a recompiled metric), so the test's
@@ -6235,40 +6292,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const columns = Array.isArray(rawResult?.columns)
       ? rawResult.columns.map((column: any) => typeof column === 'string' ? column : column?.name ?? String(column))
       : [];
-    const assertions: TestAssertionResult[] = [];
-    let passed = 0;
-    let failed = 0;
-
-    for (const test of tests) {
-      const name = `assert ${test.field} ${test.operator} ${formatBlockStudioExpected(test.expected)}`;
-      let actual: unknown;
-      if (test.field === 'row_count') {
-        actual = rows.length;
-      } else if (!columns.includes(test.field)) {
-        assertions.push({ name, passed: false, expected: test.expected, error: `Column '${test.field}' not found in results` });
-        failed += 1;
-        continue;
-      } else {
-        actual = rows[0]?.[test.field];
-      }
-
-      const ok = compareBlockStudioValues(actual, test.operator, test.expected);
-      if (ok) {
-        assertions.push({ name, passed: true, actual, expected: test.expected });
-        passed += 1;
-      } else {
-        assertions.push({
-          name,
-          passed: false,
-          actual,
-          expected: test.expected,
-          error: `${String(actual)} ${test.operator} ${formatBlockStudioExpected(test.expected)} is false`,
-        });
-        failed += 1;
-      }
-    }
-
-    return { passed, failed, skipped: 0, duration: Date.now() - start, assertions, runAt: new Date() };
+    return evaluateBlockStudioTests(tests, rows, columns, start);
   };
 
   const saveDqlGenerationDraft = (
@@ -6341,7 +6365,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
 
     try {
-      testResults = await runBlockStudioTestSummary(source);
+      testResults = preview
+        ? await runBlockStudioTestSummary(source, undefined, preview)
+        : await runBlockStudioTestSummary(source);
     } catch (error) {
       testResults = {
         passed: 0,
@@ -6506,15 +6532,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         writeHead(status, { ...headers, ...validatorHeaders } as never);
         return end(raw);
       }
-      const gz = gzipSync(raw);
-      writeHead(status, {
-        ...headers,
-        ...validatorHeaders,
-        'Content-Encoding': 'gzip',
-        'Content-Length': gz.byteLength,
-        Vary: 'Accept-Encoding, Origin',
-      } as never);
-      return end(gz);
+      gzip(raw, (error, gz) => {
+        if (response.destroyed || response.writableEnded) return;
+        if (error) {
+          writeHead(status, { ...headers, ...validatorHeaders } as never);
+          end(raw);
+          return;
+        }
+        writeHead(status, {
+          ...headers,
+          ...validatorHeaders,
+          'Content-Encoding': 'gzip',
+          'Content-Length': gz.byteLength,
+          Vary: 'Accept-Encoding, Origin',
+        } as never);
+        end(gz);
+      });
+      return response;
     }) as typeof response.end;
     return rawResponse;
   };
@@ -6534,7 +6568,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (requestOrigin && originAllowed) res.setHeader('Access-Control-Allow-Origin', requestOrigin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key');
     if (!originAllowed && path.startsWith('/api/')) {
       res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ error: 'Origin is not allowed.' }));
@@ -6568,6 +6602,43 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       });
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ status: 'ok', version: runtimeVersion, versionStatus, retrievalHealth }));
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/operations/events') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+      res.write(': connected\n\n');
+      operationSseClients.add(res as unknown as ServerResponse);
+      for (const operation of operationCoordinator.list(20).reverse()) {
+        res.write(`event: operation\ndata: ${serializeJSON(operation)}\n\n`);
+      }
+      req.on('close', () => operationSseClients.delete(res as unknown as ServerResponse));
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/operations') {
+      const limit = Number(url.searchParams.get('limit') ?? 50);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ operations: operationCoordinator.list(limit) }));
+      return;
+    }
+
+    const operationMatch = path.match(/^\/api\/operations\/([^/]+)$/);
+    if (operationMatch && req.method === 'GET') {
+      const operation = operationCoordinator.get(decodeURIComponent(operationMatch[1]));
+      res.writeHead(operation ? 200 : 404, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(operation ?? { error: 'Operation not found.' }));
+      return;
+    }
+    if (operationMatch && req.method === 'DELETE') {
+      const operation = operationCoordinator.cancel(decodeURIComponent(operationMatch[1]));
+      res.writeHead(operation ? 200 : 404, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON(operation ?? { error: 'Operation not found.' }));
       return;
     }
 
@@ -10170,13 +10241,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'Invalid path' }));
           return;
         }
-        mkdirSync(dirname(absPath), { recursive: true });
+        await mkdirAsync(dirname(absPath), { recursive: true });
         const toWrite = absPath.endsWith('.dql')
           ? canonicalizeSafe(content)
           : absPath.endsWith('.dqlnb')
             ? canonicalizeNotebookSafe(content)
             : content;
-        writeFileSync(absPath, toWrite, 'utf-8');
+        const tempPath = `${absPath}.tmp-${process.pid}-${Date.now()}`;
+        try {
+          await writeFileAsync(tempPath, toWrite, 'utf-8');
+          await renameAsync(tempPath, absPath);
+        } catch (error) {
+          await rmAsync(tempPath, { force: true }).catch(() => undefined);
+          throw error;
+        }
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: true }));
       } catch (error) {
@@ -11549,6 +11627,179 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    if (req.method === 'POST' && path === '/api/block-studio/certifications') {
+      try {
+        const body = await readJSON(req);
+        const source = typeof body.source === 'string' ? body.source : '';
+        const suppliedMetadata = body.metadata && typeof body.metadata === 'object'
+          ? body.metadata as Record<string, unknown>
+          : {};
+        const currentPath = typeof body.path === 'string'
+          ? normalize(body.path).replace(/^\/+/, '').replaceAll('\\', '/')
+          : undefined;
+        const expectedSourceFingerprint = typeof body.expectedSourceFingerprint === 'string'
+          ? body.expectedSourceFingerprint
+          : undefined;
+        const idempotencyKey = typeof req.headers['idempotency-key'] === 'string'
+          ? req.headers['idempotency-key'].trim()
+          : '';
+
+        if (!source.trim()) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'source is required' }));
+          return;
+        }
+        if (idempotencyKey) {
+          const existingId = operationIdempotency.get(idempotencyKey);
+          const existing = existingId ? operationCoordinator.get(existingId) : null;
+          if (existing) {
+            res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON({ operation: existing, deduplicated: true }));
+            return;
+          }
+        }
+        if (currentPath && expectedSourceFingerprint) {
+          const absoluteCurrentPath = safeJoin(projectRoot, currentPath);
+          if (!absoluteCurrentPath || !existsSync(absoluteCurrentPath)) {
+            res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON({ error: 'The block changed or moved. Reopen it before certifying.', code: 'SOURCE_CHANGED' }));
+            return;
+          }
+          const actualFingerprint = createHash('sha256')
+            .update(readFileSync(absoluteCurrentPath, 'utf-8'))
+            .digest('hex');
+          if (actualFingerprint !== expectedSourceFingerprint) {
+            res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(serializeJSON({ error: 'The block changed after it was opened. Reopen it before certifying.', code: 'SOURCE_CHANGED' }));
+            return;
+          }
+        }
+
+        const draftSource = setBlockStudioStatusInSource(source, 'draft');
+        const parsed = parseBlockSourceMetadata(draftSource);
+        const name = typeof suppliedMetadata.name === 'string' && suppliedMetadata.name.trim()
+          ? suppliedMetadata.name.trim()
+          : parsed.name;
+        if (!name) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'Block name is required.' }));
+          return;
+        }
+        const canonicalPath = currentPath && !isDraftBlockPath(currentPath) ? currentPath : undefined;
+        const stableSuffix = createHash('sha256')
+          .update(currentPath ?? `${name}:${draftSource}`)
+          .digest('hex')
+          .slice(0, 16);
+        const draftPath = saveBlockStudioDraftArtifacts(projectRoot, {
+          currentPath: currentPath && isDraftBlockPath(currentPath) ? currentPath : undefined,
+          source: draftSource,
+          name,
+          domain: typeof suppliedMetadata.domain === 'string' ? suppliedMetadata.domain : parsed.domain,
+          description: typeof suppliedMetadata.description === 'string' ? suppliedMetadata.description : parsed.description,
+          owner: typeof suppliedMetadata.owner === 'string' ? suppliedMetadata.owner : parsed.owner,
+          tags: Array.isArray(suppliedMetadata.tags) ? suppliedMetadata.tags.map(String) : parsed.tags,
+          lineage: Array.isArray(suppliedMetadata.lineage) ? suppliedMetadata.lineage.map(String) : undefined,
+          stableSuffix,
+        });
+        const operation = operationCoordinator.create({
+          type: 'block_certification',
+          scope: `block:${draftPath}`,
+          resourceRevision: typeof body.clientRevision === 'string'
+            ? body.clientRevision
+            : createHash('sha256').update(draftSource).digest('hex'),
+          message: `Certification queued for ${name}.`,
+          cancellable: true,
+        });
+        if (idempotencyKey) {
+          operationIdempotency.set(idempotencyKey, operation.id);
+          while (operationIdempotency.size > 100) {
+            const oldest = operationIdempotency.keys().next().value;
+            if (typeof oldest !== 'string') break;
+            operationIdempotency.delete(oldest);
+          }
+        }
+
+        operationCoordinator.run(operation.id, async (signal, report) => {
+          report({ phase: 'validating', progress: 15, message: 'Validating and running the saved draft once.' });
+          const result = await certifyBlockStudioSource(draftSource, draftPath, { enterprise: body.enterprise === true });
+          const blockers = Array.from(new Set(result.checklist.blockers));
+          if (signal.aborted) throw Object.assign(new Error('Certification cancelled.'), { code: 'OPERATION_CANCELLED' });
+          if (!result.certification.certified || blockers.length > 0) {
+            return {
+              outcome: 'draft_saved_with_blockers',
+              oldPath: currentPath ?? draftPath,
+              draftPath,
+              blockers,
+              checklist: result.checklist,
+              block: openBlockStudioDocument(projectRoot, draftPath, semanticLayer),
+            };
+          }
+
+          report({ phase: 'publishing', progress: 80, message: 'Publishing the certified block.' });
+          const certifiedSource = setBlockStudioStatusInSource(draftSource, 'certified');
+          const certifiedMetadata = parseBlockSourceMetadata(certifiedSource);
+          const savedPath = saveBlockStudioArtifacts(projectRoot, {
+            currentPath: canonicalPath ?? draftPath,
+            source: certifiedSource,
+            name: certifiedMetadata.name || name,
+            domain: certifiedMetadata.domain,
+            description: certifiedMetadata.description,
+            owner: certifiedMetadata.owner,
+            tags: certifiedMetadata.tags,
+          });
+          if (canonicalPath && draftPath !== savedPath) {
+            try { deleteBlockStudioArtifacts(projectRoot, draftPath); } catch { /* certified source is already durable */ }
+          }
+
+          // Shared learning remains the same deterministic, advisory write used
+          // by the synchronous compatibility route. It never gates publication.
+          try {
+            const learnedOutputs = Array.isArray(certifiedMetadata.outputs)
+              ? certifiedMetadata.outputs.filter((output): output is string => typeof output === 'string')
+              : [];
+            if (certifiedMetadata.name) {
+              const memory = new MemoryStore(defaultMemoryPath(projectRoot));
+              memory.upsert({
+                id: `mem_certify_${certifiedMetadata.name}`,
+                scope: 'project',
+                title: `Certified block: ${certifiedMetadata.name}`,
+                content: `Prefer the certified block "${certifiedMetadata.name}" for ${certifiedMetadata.description?.trim() || `questions in the ${certifiedMetadata.domain ?? 'analytics'} domain`}.${certifiedMetadata.grain ? ` Grain: ${certifiedMetadata.grain}.` : ''}${learnedOutputs.length ? ` Outputs: ${learnedOutputs.slice(0, 8).join(', ')}.` : ''} It is the trusted source — reuse it instead of generating new SQL.`,
+                tags: [certifiedMetadata.domain, certifiedMetadata.name, ...learnedOutputs.slice(0, 4)].filter((value): value is string => Boolean(value)),
+                source: 'certify',
+                confidence: 0.95,
+                importance: 0.85,
+                enabled: true,
+              });
+            }
+          } catch {
+            /* best-effort: learning capture must never block certification */
+          }
+          const refreshOperation = scheduleProjectRefresh('block-studio-certification');
+          return {
+            outcome: 'certified',
+            oldPath: currentPath ?? draftPath,
+            draftPath,
+            newPath: savedPath,
+            block: openBlockStudioDocument(projectRoot, savedPath, semanticLayer),
+            checklist: result.checklist,
+            indexRefresh: { status: 'queued', operationId: refreshOperation.id },
+          };
+        });
+
+        res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          operation: operationCoordinator.get(operation.id) ?? operation,
+          draft: openBlockStudioDocument(projectRoot, draftPath, semanticLayer),
+        }));
+      } catch (error) {
+        const code = apiErrorCode(error, 'CERTIFICATION_REQUEST_FAILED');
+        const status = code === 'SOURCE_CHANGED' || apiErrorMessage(error) === 'BLOCK_EXISTS' ? 409 : 500;
+        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: apiErrorMessage(error), code }));
+      }
+      return;
+    }
+
     if (req.method === 'POST' && path === '/api/block-studio/certify') {
       try {
         const body = await readJSON(req);
@@ -11616,7 +11867,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         } catch {
           /* best-effort: learning capture must never block certification */
         }
-        await refreshLocalMetadataCatalog(projectRoot);
+        const refreshOperation = scheduleProjectRefresh('block-studio-certify');
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           ok: true,
@@ -11627,6 +11878,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           metadata: certifiedPayload?.metadata,
           companionPath: certifiedPayload?.companionPath ?? null,
           validation: certifiedPayload?.validation ?? result.validation,
+          lineageRefresh: { status: 'queued', operationId: refreshOperation.id },
         }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -12520,28 +12772,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               stableSuffix: metadata.candidateId,
             })
           : saveBlockStudioArtifacts(projectRoot, saveOptions);
-        let compiledManifest: DQLManifest | undefined;
-        let lineageRefresh: {
-          status: 'ready' | 'failed';
-          compiledAt?: string;
-          message?: string;
-        };
-        try {
-          compiledManifest = compileBlockStudioManifest(projectRoot, projectConfig);
-          lineageRefresh = { status: 'ready', compiledAt: new Date().toISOString() };
-        } catch (error) {
-          // The block is already safely stored. Preserve it and report the
-          // rebuild failure separately instead of turning a successful save
-          // into a misleading 500 response.
-          lineageRefresh = {
-            status: 'failed',
-            message: error instanceof Error ? error.message : String(error),
-          };
-        }
-        await refreshLocalMetadataCatalog(projectRoot, compiledManifest, semanticLayer);
+        const refreshOperation = scheduleProjectRefresh('block-studio-save');
         const payload = {
           ...openBlockStudioDocument(projectRoot, savedPath, semanticLayer),
-          lineageRefresh,
+          lineageRefresh: {
+            status: 'queued' as const,
+            operationId: refreshOperation.id,
+          },
         };
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(payload));
@@ -12561,24 +12798,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       try {
         const blockPath = url.searchParams.get('path');
         const deleted = deleteBlockStudioArtifacts(projectRoot, blockPath ?? '');
-        let compiledManifest: DQLManifest | undefined;
-        let lineageRefresh: {
-          status: 'ready' | 'failed';
-          compiledAt?: string;
-          message?: string;
-        };
-        try {
-          compiledManifest = compileBlockStudioManifest(projectRoot, projectConfig);
-          lineageRefresh = { status: 'ready', compiledAt: new Date().toISOString() };
-        } catch (error) {
-          lineageRefresh = {
-            status: 'failed',
-            message: error instanceof Error ? error.message : String(error),
-          };
-        }
-        await refreshLocalMetadataCatalog(projectRoot, compiledManifest, semanticLayer);
+        const refreshOperation = scheduleProjectRefresh('block-studio-delete');
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ ok: true, ...deleted, lineageRefresh }));
+        res.end(serializeJSON({
+          ok: true,
+          ...deleted,
+          lineageRefresh: { status: 'queued', operationId: refreshOperation.id },
+        }));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const status = message.startsWith('File not found:')
@@ -15840,6 +16066,19 @@ table: ${table}${tagList}
           : ['Retry the request.', 'Open Trust & Steps for the stable failure details.'],
       })));
     });
+  });
+
+  server.once('close', () => {
+    runtimeClosing = true;
+    for (const watcher of projectWatchers) watcher.close();
+    projectWatchers.length = 0;
+    unsubscribeOperationEvents();
+    projectRefreshCoordinator.close();
+    for (const client of operationSseClients) {
+      try { client.end(); } catch { /* connection already closed */ }
+    }
+    operationSseClients.clear();
+    operationCoordinator.close();
   });
 
   opts.captureServer?.(server);
@@ -20493,6 +20732,7 @@ export function openBlockStudioDocument(
     owner: string;
     tags: string[];
     reviewStatus?: string;
+    sourceFingerprint: string;
   };
   companionPath: string | null;
   validation: ReturnType<typeof validateBlockStudioSource>;
@@ -20519,6 +20759,7 @@ export function openBlockStudioDocument(
     owner: parsedMetadata.owner || companion?.owner || '',
     tags: parsedMetadata.tags.length > 0 ? parsedMetadata.tags : companion?.tags ?? [],
     reviewStatus: parsedMetadata.status || companion?.reviewStatus || 'draft',
+    sourceFingerprint: createHash('sha256').update(source).digest('hex'),
   };
   return {
     path: normalizedPath,
@@ -22318,6 +22559,55 @@ function formatBlockStudioExpected(expected: unknown): string {
   if (normalized === null || normalized === undefined) return 'null';
   if (typeof normalized === 'string' || typeof normalized === 'number' || typeof normalized === 'boolean') return String(normalized);
   return JSON.stringify(normalized);
+}
+
+type BlockStudioExecutionTest = NonNullable<
+  NonNullable<ReturnType<typeof buildExecutionPlan>>['tests']
+>[number];
+
+function evaluateBlockStudioTests(
+  tests: BlockStudioExecutionTest[],
+  rows: Array<Record<string, unknown>>,
+  columns: string[],
+  startedAt: number,
+): TestResultSummary {
+  if (tests.length === 0) {
+    return { passed: 0, failed: 0, skipped: 0, duration: Date.now() - startedAt, assertions: [], runAt: new Date() };
+  }
+  const assertions: TestAssertionResult[] = [];
+  let passed = 0;
+  let failed = 0;
+
+  for (const test of tests) {
+    const name = `assert ${test.field} ${test.operator} ${formatBlockStudioExpected(test.expected)}`;
+    let actual: unknown;
+    if (test.field === 'row_count') {
+      actual = rows.length;
+    } else if (!columns.includes(test.field)) {
+      assertions.push({ name, passed: false, expected: test.expected, error: `Column '${test.field}' not found in results` });
+      failed += 1;
+      continue;
+    } else {
+      actual = rows[0]?.[test.field];
+    }
+
+    const ok = compareBlockStudioValues(actual, test.operator, test.expected);
+    if (ok) {
+      assertions.push({ name, passed: true, actual, expected: test.expected });
+      passed += 1;
+    } else {
+      assertions.push({
+        name,
+        passed: false,
+        actual,
+        expected: test.expected,
+        error: `${String(actual)} ${test.operator} ${formatBlockStudioExpected(test.expected)} is false`,
+      });
+      failed += 1;
+    }
+  }
+
+  return { passed, failed, skipped: 0, duration: Date.now() - startedAt, assertions, runAt: new Date() };
 }
 
 function buildBlockStudioCertificationChecklist(input: {

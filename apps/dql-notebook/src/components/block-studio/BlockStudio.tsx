@@ -1,8 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
+import { useQuery } from '@tanstack/react-query';
 import { renderSemanticBlockSource } from '@duckcodeailabs/dql-core/blocks';
 import { AlertTriangle, Blocks, Bot, CheckCircle2, CheckSquare, ChevronLeft, ChevronRight, Code2, Database, FileInput, Loader2, MoreHorizontal, PanelRightOpen, Pencil, Play, Plus, Search, ShieldCheck, Sparkles, Square, Trash2, X, type LucideIcon } from 'lucide-react';
-import { api } from '../../api/client';
-import { useNotebook } from '../../store/NotebookStore';
+import { api, type BlockCertificationOperationResult } from '../../api/client';
+import { useDispatch, useNotebookStore } from '../../store/NotebookStore';
+import { useOperations } from '../../operations/OperationsProvider';
 import { controlStyle } from '../../themes/control-tokens';
 import { CommaListInput } from '../common/CommaListInput';
 import { SourceTextField } from '../common/SourceTextField';
@@ -123,7 +126,23 @@ const TREE_ROW_HEIGHT = 31;
 const TREE_OVERSCAN = 10;
 
 export function BlockStudio() {
-  const { state, dispatch } = useNotebook();
+  const state = useNotebookStore(useShallow((store) => ({
+    activeBlockPath: store.activeBlockPath,
+    authoredDomains: store.authoredDomains,
+    blockStudioDbtStatus: store.blockStudioDbtStatus,
+    blockStudioDirty: store.blockStudioDirty,
+    blockStudioDraft: store.blockStudioDraft,
+    blockStudioImportOpen: store.blockStudioImportOpen,
+    blockStudioMetadata: store.blockStudioMetadata,
+    blockStudioPreview: store.blockStudioPreview,
+    blockStudioValidation: store.blockStudioValidation,
+    files: store.files,
+    schemaTables: store.schemaTables,
+    semanticLayer: store.semanticLayer,
+    themeMode: store.themeMode,
+  })));
+  const dispatch = useDispatch();
+  const { operations, track: trackOperation } = useOperations();
   const t = themes[state.themeMode];
   const [draftSessionId, setDraftSessionId] = useState(() => readBlockStudioDraftId());
   const agentScope = state.activeBlockPath
@@ -158,6 +177,8 @@ export function BlockStudio() {
   const [runElapsedMs, setRunElapsedMs] = useState(0);
   const [parameterValues, setParameterValues] = useState<Record<string, unknown>>({});
   const [saving, setSaving] = useState(false);
+  const [certificationOperationId, setCertificationOperationId] = useState<string | null>(null);
+  const mutationInFlightRef = useRef(false);
   // One-shot: how the NEXT block open should present. 'builder' skips the
   // read-only detail overview when the user just created the block from an answer.
   const openIntentRef = useRef<'builder' | null>(null);
@@ -207,6 +228,7 @@ export function BlockStudio() {
   const [contextInspectorOpen, setContextInspectorOpen] = useState(false);
   const [certificationResult, setCertificationResult] = useState<{
     ok?: boolean;
+    pending?: boolean;
     checklist?: {
       metadata: boolean;
       validation: boolean;
@@ -228,42 +250,74 @@ export function BlockStudio() {
   } | null>(null);
   const lastActiveBlockPathRef = useRef<string | null>(state.activeBlockPath);
 
+  const catalogQuery = useQuery({
+    queryKey: ['block-studio', 'catalog', 'summary'],
+    queryFn: () => api.getBlockStudioCatalog({ includeSemantic: false }),
+    staleTime: 30_000,
+  });
+  const dbtStatusQuery = useQuery({
+    queryKey: ['block-studio', 'dbt-status'],
+    queryFn: () => api.getBlockStudioDbtStatus(),
+    staleTime: 30_000,
+  });
+  const semanticLayerQuery = useQuery({
+    queryKey: ['semantic-layer'],
+    queryFn: () => api.getSemanticLayer(),
+    staleTime: 30_000,
+  });
+
   useEffect(() => {
-    let active = true;
-    dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG_LOADING', loading: true });
-    dispatch({ type: 'SET_SEMANTIC_LOADING', loading: true });
-    setCatalogError(null);
-    // UI-009 / PERF-001: load independent readiness signals independently. A
-    // large semantic payload must not delay dbt status or make the screen claim
-    // that already-parsed artifacts are missing.
-    void api.getBlockStudioCatalog({ includeSemantic: false })
-      .then((catalog) => {
-        if (!active) return;
-        dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG', catalog });
-        setDatabaseTree(catalog.databaseTree);
-      })
-      .catch(() => {
-        if (active) setCatalogError('Failed to load schema. Check your connection and try refreshing.');
-      })
-      .finally(() => {
-        if (active) dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG_LOADING', loading: false });
+    const invalidate = () => setBlockLibraryRefreshKey((current) => current + 1);
+    window.addEventListener('dql:block-library-invalidated', invalidate);
+    return () => window.removeEventListener('dql:block-library-invalidated', invalidate);
+  }, []);
+
+  useEffect(() => {
+    if (!certificationOperationId) return;
+    const operation = operations.find((candidate) => candidate.id === certificationOperationId);
+    if (!operation || operation.status === 'queued' || operation.status === 'running') return;
+    if (operation.status === 'succeeded') {
+      const result = operation.result as BlockCertificationOperationResult | undefined;
+      setCertificationResult({
+        pending: false,
+        ok: result?.outcome === 'certified',
+        checklist: result?.checklist,
+        blockers: result?.blockers ?? result?.checklist?.blockers,
+        error: result?.outcome === 'draft_saved_with_blockers'
+          ? 'The draft was saved. Resolve the certification blockers and try again.'
+          : undefined,
       });
-    void api.getBlockStudioDbtStatus()
-      .then((status) => {
-        if (active) dispatch({ type: 'SET_BLOCK_STUDIO_DBT_STATUS', status });
-      })
-      .catch(() => {
-        if (active) dispatch({ type: 'SET_BLOCK_STUDIO_DBT_STATUS', status: null });
-      });
-    void api.getSemanticLayer()
-      .then((layer) => {
-        if (active) dispatch({ type: 'SET_SEMANTIC_LAYER', layer });
-      })
-      .finally(() => {
-        if (active) dispatch({ type: 'SET_SEMANTIC_LOADING', loading: false });
-      });
-    return () => { active = false; };
-  }, [dispatch]);
+      if (result?.outcome === 'draft_saved_with_blockers') {
+        setSaveError('Draft saved. Certification needs attention; review the checklist below.');
+      }
+    } else {
+      setSaveError(operation.error?.message ?? 'Certification did not complete. The draft remains saved.');
+      setCertificationResult({ pending: false, error: operation.error?.message ?? operation.message });
+    }
+    setCertificationOperationId(null);
+    setResultTab('save');
+  }, [certificationOperationId, operations]);
+
+  useEffect(() => {
+    dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG_LOADING', loading: catalogQuery.isLoading });
+    if (catalogQuery.data) {
+      dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG', catalog: catalogQuery.data });
+      setDatabaseTree(catalogQuery.data.databaseTree);
+      setCatalogError(null);
+    } else if (catalogQuery.isError) {
+      setCatalogError('Failed to load schema. Check your connection and try refreshing.');
+    }
+  }, [catalogQuery.data, catalogQuery.isError, catalogQuery.isLoading, dispatch]);
+
+  useEffect(() => {
+    if (dbtStatusQuery.data) dispatch({ type: 'SET_BLOCK_STUDIO_DBT_STATUS', status: dbtStatusQuery.data });
+    else if (dbtStatusQuery.isError) dispatch({ type: 'SET_BLOCK_STUDIO_DBT_STATUS', status: null });
+  }, [dbtStatusQuery.data, dbtStatusQuery.isError, dispatch]);
+
+  useEffect(() => {
+    dispatch({ type: 'SET_SEMANTIC_LOADING', loading: semanticLayerQuery.isLoading });
+    if (semanticLayerQuery.data) dispatch({ type: 'SET_SEMANTIC_LAYER', layer: semanticLayerQuery.data });
+  }, [dispatch, semanticLayerQuery.data, semanticLayerQuery.isLoading]);
 
   const refreshImportSessions = useCallback(async () => {
     setImportSessionsLoading(true);
@@ -291,13 +345,19 @@ export function BlockStudio() {
   }, [state.activeBlockPath, dispatch]);
 
   useEffect(() => {
+    const controller = new AbortController();
     const timer = window.setTimeout(() => {
       if (!state.blockStudioDraft.trim()) return;
-      void api.validateBlockStudio(state.blockStudioDraft, state.activeBlockPath)
-        .then((validation) => dispatch({ type: 'SET_BLOCK_STUDIO_VALIDATION', validation }))
+      void api.validateBlockStudio(state.blockStudioDraft, state.activeBlockPath, controller.signal)
+        .then((validation) => {
+          if (!controller.signal.aborted) dispatch({ type: 'SET_BLOCK_STUDIO_VALIDATION', validation });
+        })
         .catch(() => undefined);
     }, 250);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
   }, [state.blockStudioDraft, state.activeBlockPath, dispatch]);
 
   const filteredDatabaseTree = useMemo(
@@ -604,9 +664,9 @@ export function BlockStudio() {
       });
     }
     if (payload.lineageRefresh?.status === 'ready') {
-      // The name normally does not change during save, so the name-based effect
-      // will not rerun. Refresh explicitly against the newly compiled snapshot.
-      await loadBlockLineage(payload.metadata.name);
+      // Compatibility with older runtimes. New runtimes publish this refresh as
+      // a background task so save acknowledgement is never held by compilation.
+      void loadBlockLineage(payload.metadata.name);
     } else if (payload.lineageRefresh?.status === 'failed') {
       setSaveError(`Block saved, but lineage refresh failed: ${payload.lineageRefresh.message ?? 'compile failed'}`);
       setTimeout(() => setSaveError(null), 7000);
@@ -679,7 +739,8 @@ export function BlockStudio() {
       setSaveIdentityOpen(true);
       return false;
     }
-    let persisted = false;
+    if (mutationInFlightRef.current || certificationOperationId) return false;
+    mutationInFlightRef.current = true;
     setSaving(true);
     setSaveError(null);
     try {
@@ -687,33 +748,33 @@ export function BlockStudio() {
       const sourceToSave = state.blockStudioMetadata.reviewStatus === 'certified' && state.blockStudioDirty
         ? setBlockStringField(state.blockStudioDraft, 'status', 'draft')
         : state.blockStudioDraft;
-      const saved = await persistBlockStudioDraft(sourceToSave);
-      persisted = true;
-      const result = await api.certifyBlockStudio({ source: saved.source, path: saved.path });
-      setCertificationResult(result);
-      if (result.ok && result.status) {
-        const nextPath = result.path || saved.path;
-        const nextPayload: BlockStudioOpenPayload = {
-          path: nextPath,
-          source: result.source ?? setBlockStringField(saved.source, 'status', result.status),
-          metadata: result.metadata ?? { ...saved.metadata, path: nextPath, reviewStatus: result.status },
-          companionPath: result.companionPath ?? saved.companionPath ?? null,
-          validation: result.validation ?? saved.validation,
-        };
-        dispatch({
-          type: 'OPEN_BLOCK_STUDIO',
-          file: { name: `${nextPayload.metadata.name}.dql`, path: nextPath, type: 'block', folder: 'blocks', isNew: false },
-          payload: nextPayload,
-        });
-      }
+      const clientRevision = `${state.blockStudioMetadata.sourceFingerprint ?? 'new'}:${Date.now()}`;
+      const idempotencyKey = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `block-certification-${clientRevision}`;
+      const accepted = await api.requestBlockStudioCertification({
+        source: sourceToSave,
+        path: state.activeBlockPath,
+        metadata: state.blockStudioMetadata,
+        expectedSourceFingerprint: state.blockStudioMetadata.sourceFingerprint,
+        clientRevision,
+        idempotencyKey,
+      });
+      trackOperation(accepted.operation);
+      setCertificationOperationId(accepted.operation.id);
+      dispatch({ type: 'BLOCK_CERTIFICATION_ACCEPTED', source: sourceToSave });
+      setCertificationResult({
+        pending: true,
+      });
       setResultTab('save');
       return true;
     } catch (err: any) {
       const msg = err?.message ?? 'Save failed';
       setSaveError(msg.includes('409') || msg.includes('BLOCK_EXISTS') ? 'A block with this name already exists. Rename and try again.' : msg);
       setTimeout(() => setSaveError(null), 5000);
-      return persisted;
+      return false;
     } finally {
+      mutationInFlightRef.current = false;
       setSaving(false);
     }
   };
@@ -998,13 +1059,13 @@ export function BlockStudio() {
 
   const refreshDatabaseTree = useCallback(async () => {
     try {
-      const catalog = await api.getBlockStudioCatalog({ includeSemantic: false });
+      const catalog = (await catalogQuery.refetch()).data;
       if (catalog?.databaseTree) {
         setDatabaseTree(catalog.databaseTree);
       }
-      dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG', catalog });
+      if (catalog) dispatch({ type: 'SET_BLOCK_STUDIO_CATALOG', catalog });
     } catch { /* non-fatal */ }
-  }, [dispatch]);
+  }, [catalogQuery, dispatch]);
 
   useEffect(() => {
     if (!running || !runStartedAt) return;
@@ -1230,7 +1291,7 @@ export function BlockStudio() {
                 label={state.blockStudioMetadata?.reviewStatus === 'certified' ? 'Re-certify' : 'Certify'}
                 Icon={ShieldCheck}
                 variant="primary"
-                busy={saving}
+                busy={saving || Boolean(certificationOperationId)}
                 onClick={() => void handleCertify()}
                 title="Run validation, query, tests, chart, and lineage gates before certification"
               />
@@ -1701,8 +1762,7 @@ function ExplorerTabButton({
   variant?: 'primary' | 'secondary' | 'danger';
   title?: string;
 }) {
-  const { state } = useNotebook();
-  const t = themes[state.themeMode];
+  const t = themes[useNotebookStore((state) => state.themeMode)];
   const primary = variant === 'primary';
   const danger = variant === 'danger';
   // One shape for every toolbar control — same height, radius, icon size and
@@ -1713,6 +1773,8 @@ function ExplorerTabButton({
   return (
     <button
       onClick={onClick}
+      disabled={busy}
+      aria-busy={busy || undefined}
       title={title ?? label}
       style={{
         background: primary ? t.accent : danger ? `${t.error}0d` : active ? `${t.accent}18` : t.btnBg,
@@ -1720,7 +1782,7 @@ function ExplorerTabButton({
         borderRadius: 6,
         height: 28,
         color: primary ? '#ffffff' : danger ? t.error : active ? t.accent : t.textSecondary,
-        cursor: 'pointer',
+        cursor: busy ? 'wait' : 'pointer',
         display: 'inline-flex',
         alignItems: 'center',
         gap: 6,
@@ -5162,14 +5224,12 @@ function BlockInvocationSnapshot({ values, t }: { values: Array<{ name: string; 
 }
 
 function EmptyPanel({ message }: { message: string }) {
-  const { state } = useNotebook();
-  const t = themes[state.themeMode];
+  const t = themes[useNotebookStore((state) => state.themeMode)];
   return <div style={{ padding: 16, fontSize: 12, color: t.textMuted }}>{message}</div>;
 }
 
 function BlockStudioRunStatusCard({ elapsedMs }: { elapsedMs: number }) {
-  const { state } = useNotebook();
-  const t = themes[state.themeMode];
+  const t = themes[useNotebookStore((state) => state.themeMode)];
   return (
     <div style={{ padding: 12 }}>
       <div style={{
@@ -5198,8 +5258,7 @@ function BlockStudioRunStatusCard({ elapsedMs }: { elapsedMs: number }) {
 }
 
 function BlockStudioRunErrorCard({ message }: { message: string }) {
-  const { state } = useNotebook();
-  const t = themes[state.themeMode];
+  const t = themes[useNotebookStore((state) => state.themeMode)];
   return (
     <div style={{ padding: 12 }}>
       <div style={{
@@ -5309,6 +5368,7 @@ function CertificationChecklistPanel({
 }: {
   result: {
     ok?: boolean;
+    pending?: boolean;
     checklist?: {
       metadata: boolean;
       validation: boolean;
@@ -5341,16 +5401,19 @@ function CertificationChecklistPanel({
   ] as const : [];
   const blockers = Array.from(new Set((result.blockers?.length ? result.blockers : checklist?.blockers ?? []).map(formatCertificationBlocker)));
   const missingSummary = summarizeCertificationBlockers(blockers);
+  const accent = result.pending ? t.accent : result.ok ? '#3fb950' : '#d29922';
   return (
-    <div style={{ margin: '12px 12px 0', border: `1px solid ${result.ok ? '#3fb95055' : '#d2992255'}`, borderRadius: 8, background: result.ok ? '#3fb9500d' : '#d299220d', padding: 12, display: 'grid', gap: 10 }}>
+    <div style={{ margin: '12px 12px 0', border: `1px solid ${accent}55`, borderRadius: 8, background: `${accent}0d`, padding: 12, display: 'grid', gap: 10 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span style={{ fontSize: 12, fontWeight: 800, color: result.ok ? '#3fb950' : '#d29922', fontFamily: t.font }}>
-          {result.ok ? 'Block certified' : 'Unable to certify'}
+        <span style={{ fontSize: 12, fontWeight: 800, color: accent, fontFamily: t.font }}>
+          {result.pending ? 'Certification running' : result.ok ? 'Block certified' : 'Unable to certify'}
         </span>
         {checklist?.checkedAt && <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.fontMono }}>{checklist.checkedAt}</span>}
       </div>
       <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.45 }}>
-        {result.ok
+        {result.pending
+          ? 'The exact draft is saved and the certification gates are running in the background. You may switch pages or continue other work.'
+          : result.ok
           ? 'Latest edits were saved, the block ran successfully, tests passed, and status was updated to certified.'
           : missingSummary
             ? `Latest edits were saved, but certification cannot finish because ${missingSummary}. Fix it, then click Certify again.`
@@ -5703,7 +5766,7 @@ function SemanticRow({
   setExpanded: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
   onInsert: (item: SemanticObjectDetail) => void;
   favorites: Set<string>;
-  dispatch: ReturnType<typeof useNotebook>['dispatch'];
+  dispatch: ReturnType<typeof useDispatch>;
   t: Theme;
 }) {
   const { node, depth, hasChildren, isExpanded } = row;

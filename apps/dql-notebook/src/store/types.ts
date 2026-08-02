@@ -1060,6 +1060,8 @@ export interface BlockStudioMetadata {
   owner: string;
   tags: string[];
   reviewStatus?: string;
+  /** Fingerprint of the source that was opened; used for save/certify conflict checks. */
+  sourceFingerprint?: string;
   sourceKind?: string;
   sourcePath?: string;
   importId?: string;
@@ -1340,7 +1342,8 @@ export interface BlockStudioOpenPayload {
   validation: BlockStudioValidation;
   /** Redacted save-time compiler outcome; the block may still be safely saved when this fails. */
   lineageRefresh?: {
-    status: 'ready' | 'failed';
+    status: 'queued' | 'ready' | 'failed';
+    operationId?: string;
     compiledAt?: string;
     message?: string;
   };
@@ -1466,6 +1469,15 @@ export type NotebookAction =
   | { type: 'REORDER_CELL'; fromIndex: number; toIndex: number }
   | { type: 'TOGGLE_DASHBOARD_MODE' }
   | { type: 'OPEN_BLOCK_STUDIO'; file: NotebookFile; payload: BlockStudioOpenPayload }
+  | { type: 'BLOCK_CERTIFICATION_ACCEPTED'; source: string }
+  | {
+      type: 'RECONCILE_BLOCK_CERTIFICATION';
+      outcome: 'certified' | 'draft_saved_with_blockers';
+      oldPath: string;
+      draftPath: string;
+      newPath?: string;
+      payload: BlockStudioOpenPayload;
+    }
   | { type: 'START_NEW_BLOCK_WORKSPACE'; blockType?: 'custom' | 'semantic' }
   | { type: 'SET_BLOCK_STUDIO_DRAFT'; draft: string }
   | { type: 'SET_BLOCK_STUDIO_DIRTY'; dirty: boolean }

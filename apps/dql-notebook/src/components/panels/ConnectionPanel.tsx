@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { CheckCircle2, Database, GitBranch, Settings2, Sparkles } from 'lucide-react';
-import { useNotebook } from '../../store/NotebookStore';
+import { useDispatch, useNotebookStore } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import type { Theme } from '../../themes/notebook-theme';
 import {
@@ -342,7 +343,11 @@ export function ConnectionPanel({
   variant?: 'panel' | 'page' | 'setup';
   onConfigured?: (detail: string) => void;
 } = {}) {
-  const { state, dispatch } = useNotebook();
+  const state = useNotebookStore(useShallow((store) => ({
+    settingsTab: store.settingsTab,
+    themeMode: store.themeMode,
+  })));
+  const dispatch = useDispatch();
   const t = themes[state.themeMode];
   const isPage = variant === 'page';
   const isSetup = variant === 'setup';
@@ -389,13 +394,25 @@ export function ConnectionPanel({
           connInfo.metadataScope.selectedScopes ?? connInfo.metadataScope.scopes,
         ));
       }
-      // Auto-test only a real configured connection. The starter in-memory
-      // DuckDB placeholder is intentionally reported as Missing everywhere.
-      if (Object.values(connInfo.connections).some((connection) => !isPlaceholderLocalConnection(connection))) {
-        api.testConnection().then(setTestResult);
-      }
     });
   }, []);
+
+  const connectionIdentity = info
+    ? `${info.default}:${JSON.stringify(info.connections?.[info.default] ?? null)}`
+    : '';
+  useEffect(() => {
+    if (!info || (isPage && state.settingsTab !== 'database')) return;
+    if (!Object.values(info.connections).some((candidate) => !isPlaceholderLocalConnection(candidate))) return;
+    let active = true;
+    setTesting(true);
+    void api.testConnection()
+      .then((result) => { if (active) setTestResult(result); })
+      .catch((error) => {
+        if (active) setTestResult({ ok: false, message: error instanceof Error ? error.message : String(error) });
+      })
+      .finally(() => { if (active) setTesting(false); });
+    return () => { active = false; };
+  }, [connectionIdentity, isPage, state.settingsTab]);
 
   useEffect(() => {
     if (!isPage) return;
@@ -1575,8 +1592,9 @@ function SettingsOverview({
   databaseTest: { ok: boolean; message: string } | null;
   providers: ProviderSettings[];
 }) {
-  const { state, dispatch } = useNotebook();
-  const t = themes[state.themeMode];
+  const themeMode = useNotebookStore((state) => state.themeMode);
+  const dispatch = useDispatch();
+  const t = themes[themeMode];
   const activeProvider = providers.find((provider) => provider.active && provider.configured)
     ?? providers.find((provider) => provider.enabled && provider.configured);
   const cards: Array<{

@@ -11,6 +11,7 @@
 // certifies or auto-promotes — promotion is a separate human action.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import type { CSSProperties } from 'react';
 import {
   ShieldCheck,
@@ -30,12 +31,13 @@ import {
 } from 'lucide-react';
 import { TrustBadge } from '@duckcodeailabs/dql-ui';
 import { api } from '../../api/client';
-import { useNotebook } from '../../store/NotebookStore';
+import { useDispatch, useNotebookStore } from '../../store/NotebookStore';
 import { openAiBuild } from '../../utils/ai-build-bus';
 import type { ProposeReadiness, ProposePlanDomain, ProposePlanCandidate, NotebookFile } from '../../store/types';
 
 export function ReadinessPage(): JSX.Element {
-  const { state, dispatch } = useNotebook();
+  const state = useNotebookStore(useShallow((store) => ({ files: store.files })));
+  const dispatch = useDispatch();
   const [readiness, setReadiness] = useState<ProposeReadiness | null>(null);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -76,7 +78,10 @@ export function ReadinessPage(): JSX.Element {
       // Default the approved scope to the entire planned selection.
       const allSlugs = result.ready ? result.plan.domains.flatMap((d) => d.candidates.map((c) => c.slug)) : [];
       setSelected(new Set(allSlugs));
-      setLoading(false);
+    }).catch(() => {
+      if (!cancelled) setReadiness(null);
+    }).finally(() => {
+      if (!cancelled) setLoading(false);
     });
     return () => {
       cancelled = true;
@@ -118,17 +123,22 @@ export function ReadinessPage(): JSX.Element {
     if (slugs.length === 0) return;
     setGenerating(true);
     setGenerateError(null);
-    const result = await api.generateProposeDrafts({ slugs });
-    setGenerating(false);
-    if (!result.ready) {
-      setGenerateError(result.reason ?? 'Could not generate drafts.');
-      return;
-    }
-    const firstSaved = result.proposals.find((proposal) => proposal.path);
-    if (firstSaved?.path) {
-      void openInBlockStudio(firstSaved.path, firstSaved.slug);
-    } else {
-      openBlockStudio();
+    try {
+      const result = await api.generateProposeDrafts({ slugs });
+      if (!result.ready) {
+        setGenerateError(result.reason ?? 'Could not generate drafts.');
+        return;
+      }
+      const firstSaved = result.proposals.find((proposal) => proposal.path);
+      if (firstSaved?.path) {
+        void openInBlockStudio(firstSaved.path, firstSaved.slug);
+      } else {
+        openBlockStudio();
+      }
+    } catch (error) {
+      setGenerateError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setGenerating(false);
     }
   }, [selected, openBlockStudio, openInBlockStudio]);
 

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { Boxes, MessageCircle, Settings } from 'lucide-react';
 import { Tooltip } from '@duckcodeailabs/dql-ui';
 import {
@@ -11,7 +12,7 @@ import {
   BlockIcon,
   LineageNodeIcon,
 } from '@duckcodeailabs/dql-ui/icons';
-import { useNotebook } from '../../store/NotebookStore';
+import { useDispatch, useNotebookStore } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import type { SidebarPanel } from '../../store/types';
 
@@ -108,7 +109,13 @@ function RailItem({ title, icon, active, expanded, onClick, t }: RailItemProps) 
 }
 
 export function ActivityBar() {
-  const { state, dispatch } = useNotebook();
+  const state = useNotebookStore(useShallow((store) => ({
+    mainView: store.mainView,
+    sidebarOpen: store.sidebarOpen,
+    sidebarPanel: store.sidebarPanel,
+    themeMode: store.themeMode,
+  })));
+  const dispatch = useDispatch();
   const t = themes[state.themeMode];
   const [expanded, setExpanded] = useState<boolean>(readInitialExpanded);
 

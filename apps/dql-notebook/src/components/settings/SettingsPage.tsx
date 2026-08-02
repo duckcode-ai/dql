@@ -17,7 +17,7 @@ import {
   type RemoteMcpSettings,
   type SettingsEnvGroup,
 } from '../../api/client';
-import { useNotebook } from '../../store/NotebookStore';
+import { useNotebookStore } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import { controlStyle } from '../../themes/control-tokens';
 import {
@@ -70,8 +70,7 @@ export function ConnectionRuntimeSettings({
   editorMode?: 'settings' | 'setup';
   onProviderConfigured?: (provider: ProviderSettings) => void;
 }) {
-  const { state } = useNotebook();
-  const t = themes[state.themeMode];
+  const t = themes[useNotebookStore((state) => state.themeMode)];
   const [groups, setGroups] = useState<SettingsEnvGroup[]>([]);
   const [providers, setProviders] = useState<ProviderSettings[]>([]);
   const [cliStatus, setCliStatus] = useState<Partial<Record<ProviderSettingsId, ProviderCliStatus>>>({});
@@ -83,11 +82,14 @@ export function ConnectionRuntimeSettings({
   const refresh = async () => {
     setLoading(true);
     try {
+      const loadProviders = !section || section === 'providers';
+      const loadMemory = includeMemory && (!section || section === 'memory');
+      const loadAdvanced = !section || section === 'advanced';
       const [env, providerRes, mcpRes, memoryRes] = await Promise.all([
-        api.getSettingsEnvStatus(),
-        api.getProviderSettings(),
-        api.getRemoteMcpSettings(),
-        includeMemory ? api.listAgentMemory() : Promise.resolve({ memories: [] }),
+        loadAdvanced ? api.getSettingsEnvStatus() : Promise.resolve({ groups: [] }),
+        loadProviders ? api.getProviderSettings() : Promise.resolve({ providers: [] }),
+        loadAdvanced ? api.getRemoteMcpSettings() : Promise.resolve({ settings: { path: '', entries: [], warnings: [] } }),
+        loadMemory ? api.listAgentMemory() : Promise.resolve({ memories: [] }),
       ]);
       setGroups(env.groups);
       setProviders(providerRes.providers);
@@ -105,7 +107,7 @@ export function ConnectionRuntimeSettings({
   // Detect installed/logged-in subscription CLIs separately — it spawns the CLIs,
   // so it must not block the main settings load.
   useEffect(() => {
-    if (loading) return;
+    if (loading || (section && section !== 'providers')) return;
     let cancelled = false;
     void api.getProviderCliStatus().then((res) => {
       if (!cancelled) setCliStatus(res.status ?? {});

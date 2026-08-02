@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { useNotebook } from '../../store/NotebookStore';
+import { useShallow } from 'zustand/react/shallow';
+import { notebookStoreApi, useDispatch, useNotebookStore } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import type { Theme } from '../../themes/notebook-theme';
 import { api } from '../../api/client';
@@ -7,6 +8,60 @@ import { serializeDqlNotebook } from '../../utils/parse-workbook';
 import { useQueryExecution } from '../../hooks/useQueryExecution';
 import { downloadDashboard } from '../../utils/export-dashboard';
 import { setBlockName } from '../../utils/block-studio';
+import { TaskCenter } from './TaskCenter';
+
+interface NotebookSaveWaiter {
+  resolve: () => void;
+  reject: (error: unknown) => void;
+}
+
+interface NotebookSaveLane {
+  running: boolean;
+  pending?: { content: string; waiters: NotebookSaveWaiter[] };
+}
+
+const notebookSaveLanes = new Map<string, NotebookSaveLane>();
+
+function enqueueNotebookSave(path: string, content: string): Promise<void> {
+  let lane = notebookSaveLanes.get(path);
+  if (!lane) {
+    lane = { running: false };
+    notebookSaveLanes.set(path, lane);
+  }
+  const activeLane = lane;
+  const promise = new Promise<void>((resolve, reject) => {
+    if (activeLane.pending) {
+      activeLane.pending.content = content;
+      activeLane.pending.waiters.push({ resolve, reject });
+    } else {
+      activeLane.pending = { content, waiters: [{ resolve, reject }] };
+    }
+  });
+  if (!activeLane.running) {
+    activeLane.running = true;
+    void (async () => {
+      while (activeLane.pending) {
+        const batch = activeLane.pending;
+        activeLane.pending = undefined;
+        try {
+          await api.saveNotebook(path, batch.content);
+          for (const waiter of batch.waiters) waiter.resolve();
+        } catch (error) {
+          for (const waiter of batch.waiters) waiter.reject(error);
+        }
+      }
+    })().finally(() => {
+      activeLane.running = false;
+      if (!activeLane.pending) notebookSaveLanes.delete(path);
+    });
+  }
+  return promise;
+}
+
+function notebookSavePending(path: string): boolean {
+  const lane = notebookSaveLanes.get(path);
+  return Boolean(lane?.running || lane?.pending);
+}
 
 function DQLLogo({ t }: { t: Theme }) {
   return (
@@ -38,7 +93,24 @@ function DQLLogo({ t }: { t: Theme }) {
 }
 
 export function Header() {
-  const { state, dispatch } = useNotebook();
+  const state = useNotebookStore(useShallow((store) => ({
+    activeBlockPath: store.activeBlockPath,
+    activeFile: store.activeFile,
+    appMode: store.appMode,
+    autoSave: store.autoSave,
+    blockStudioDirty: store.blockStudioDirty,
+    blockStudioDraft: store.blockStudioDraft,
+    blockStudioMetadata: store.blockStudioMetadata,
+    cells: store.cells,
+    files: store.files,
+    mainView: store.mainView,
+    notebookDirty: store.notebookDirty,
+    notebookMetadata: store.notebookMetadata,
+    notebookTitle: store.notebookTitle,
+    savingFile: store.savingFile,
+    themeMode: store.themeMode,
+  })));
+  const dispatch = useDispatch();
   const t = themes[state.themeMode];
   const { executeAll } = useQueryExecution();
 
@@ -127,21 +199,22 @@ export function Header() {
   };
 
   const handleSave = useCallback(async () => {
-    if (!state.activeFile) return;
+    const runtime = notebookStoreApi.getState();
+    if (!runtime.activeFile) return;
     dispatch({ type: 'SET_SAVING', saving: true });
     try {
-      if (state.mainView === 'block_studio') {
-        if (!state.blockStudioMetadata) return;
+      if (runtime.mainView === 'block_studio') {
+        if (!runtime.blockStudioMetadata) return;
         const payload = await api.saveBlockStudio({
-          path: state.activeBlockPath,
-          source: state.blockStudioDraft,
+          path: runtime.activeBlockPath,
+          source: runtime.blockStudioDraft,
           metadata: {
-            name: state.blockStudioMetadata.name,
-            domain: state.blockStudioMetadata.domain,
-            folderPath: state.blockStudioMetadata.folderPath,
-            description: state.blockStudioMetadata.description,
-            owner: state.blockStudioMetadata.owner,
-            tags: state.blockStudioMetadata.tags,
+            name: runtime.blockStudioMetadata.name,
+            domain: runtime.blockStudioMetadata.domain,
+            folderPath: runtime.blockStudioMetadata.folderPath,
+            description: runtime.blockStudioMetadata.description,
+            owner: runtime.blockStudioMetadata.owner,
+            tags: runtime.blockStudioMetadata.tags,
           },
         });
         dispatch({
@@ -154,7 +227,7 @@ export function Header() {
           },
           payload,
         });
-        if (!state.files.some((file) => file.path === payload.path)) {
+        if (!runtime.files.some((file) => file.path === payload.path)) {
           dispatch({
             type: 'FILE_ADDED',
             file: {
@@ -166,31 +239,33 @@ export function Header() {
           });
         }
       } else {
-        const content = state.activeFile.type === 'block'
-          ? (state.cells[0]?.content ?? '')
-          : serializeDqlNotebook(state.notebookTitle, state.cells, state.notebookMetadata);
-        await api.saveNotebook(state.activeFile.path, content);
-        dispatch({ type: 'SET_NOTEBOOK_DIRTY', dirty: false });
+        const savedFile = runtime.activeFile;
+        const savedCells = runtime.cells;
+        const savedTitle = runtime.notebookTitle;
+        const savedMetadata = runtime.notebookMetadata;
+        const content = savedFile.type === 'block'
+          ? (savedCells[0]?.content ?? '')
+          : serializeDqlNotebook(savedTitle, savedCells, savedMetadata);
+        await enqueueNotebookSave(savedFile.path, content);
+        const latest = notebookStoreApi.getState();
+        if (
+          latest.activeFile?.path === savedFile.path
+          && latest.cells === savedCells
+          && latest.notebookTitle === savedTitle
+          && latest.notebookMetadata === savedMetadata
+        ) {
+          dispatch({ type: 'SET_NOTEBOOK_DIRTY', dirty: false });
+        }
       }
       setSavedFlash(true);
       setTimeout(() => setSavedFlash(false), 2000);
     } catch (err) {
       console.error('Save failed:', err);
     } finally {
-      dispatch({ type: 'SET_SAVING', saving: false });
+      const activePath = notebookStoreApi.getState().activeFile?.path;
+      if (!activePath || !notebookSavePending(activePath)) dispatch({ type: 'SET_SAVING', saving: false });
     }
-  }, [
-    state.activeFile,
-    state.activeBlockPath,
-    state.blockStudioDraft,
-    state.blockStudioMetadata,
-    state.files,
-    state.mainView,
-    state.notebookTitle,
-    state.notebookMetadata,
-    state.cells,
-    dispatch,
-  ]);
+  }, [dispatch]);
 
   // Cmd/Ctrl+S keyboard shortcut
   useEffect(() => {
@@ -381,6 +456,7 @@ export function Header() {
       {/* Right: actions. Apps are opened from the sidebar, so the header stays
           focused on the active authoring surface. */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <TaskCenter />
         {state.appMode === 'studio' && hasActiveEditorFile && state.mainView !== 'block_studio' && (
           <>
             {/* v1.3.3 Hex handoff — Run all pill. Accent purple primary CTA. */}

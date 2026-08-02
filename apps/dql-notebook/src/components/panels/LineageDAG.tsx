@@ -18,7 +18,8 @@ import '@xyflow/react/dist/style.css';
 import Dagre from '@dagrejs/dagre';
 import { ShieldCheck } from 'lucide-react';
 import { api } from '../../api/client';
-import { useNotebook } from '../../store/NotebookStore';
+import { useShallow } from 'zustand/react/shallow';
+import { useDispatch, useNotebookStore } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import {
   NODE_TYPE_COLORS,
@@ -153,7 +154,11 @@ function DagNode({ data, selected }: NodeProps) {
 const nodeTypes = { dagNode: DagNode };
 
 export function LineageDAG() {
-  const { state, dispatch } = useNotebook();
+  const state = useNotebookStore(useShallow((store) => ({
+    lineageFocusNodeId: store.lineageFocusNodeId,
+    themeMode: store.themeMode,
+  })));
+  const dispatch = useDispatch();
   const t = themes[state.themeMode];
 
   const [loading, setLoading] = useState(true);
@@ -187,9 +192,12 @@ export function LineageDAG() {
 
   const loadFullGraph = useCallback(async () => {
     setLoading(true);
-    const data = await api.fetchLineage();
-    setFullGraph({ nodes: data.nodes ?? [], edges: data.edges ?? [] });
-    setLoading(false);
+    try {
+      const data = await api.fetchLineage();
+      setFullGraph({ nodes: data.nodes ?? [], edges: data.edges ?? [] });
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -211,10 +219,13 @@ export function LineageDAG() {
     setDimSelId(null);
     setSelectedNode(null);
     setScopeLoading(true);
-    const result = await api.queryLineage({ focus: nodeId, upstreamDepth: 12, downstreamDepth: 12 });
-    setGraphData(result.graph ?? { nodes: [], edges: [] });
-    setFocalNode((result.focalNode as LineageNode) ?? null);
-    setScopeLoading(false);
+    try {
+      const result = await api.queryLineage({ focus: nodeId, upstreamDepth: 12, downstreamDepth: 12 });
+      setGraphData(result.graph ?? { nodes: [], edges: [] });
+      setFocalNode((result.focalNode as LineageNode) ?? null);
+    } finally {
+      setScopeLoading(false);
+    }
   }, []);
 
   // Return to the picker (clears the deep-link focus so it doesn't re-select).

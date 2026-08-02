@@ -2196,6 +2196,45 @@ export interface AgentMemory {
 
 const BASE = window.location.origin;
 
+export type LocalOperationStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted';
+
+export interface LocalOperation<TResult = unknown> {
+  id: string;
+  type: string;
+  scope: string;
+  resourceRevision?: string;
+  status: LocalOperationStatus;
+  phase: string;
+  progress: number;
+  message: string;
+  cancellable: boolean;
+  result?: TResult;
+  error?: { code: string; message: string; retryable: boolean };
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BlockCertificationOperationResult {
+  outcome: 'certified' | 'draft_saved_with_blockers';
+  oldPath: string;
+  draftPath: string;
+  newPath?: string;
+  blockers?: string[];
+  checklist?: {
+    metadata: boolean;
+    validation: boolean;
+    run: boolean;
+    tests: boolean;
+    chart: boolean;
+    lineage: boolean;
+    aiReviewed: boolean;
+    blockers: string[];
+    checkedAt?: string;
+  };
+  block: BlockStudioOpenPayload;
+  indexRefresh?: { status: 'queued'; operationId: string };
+}
+
 export class DqlApiError extends Error {
   readonly status: number;
   readonly code?: DbtOnboardingErrorCode | string;
@@ -2914,6 +2953,39 @@ export interface WarehouseMetadataDiscovery {
 }
 
 export const api = {
+  async listOperations(limit = 50): Promise<{ operations: LocalOperation[] }> {
+    return request(`/api/operations?limit=${Math.max(1, Math.min(100, Math.floor(limit)))}`);
+  },
+
+  async cancelOperation(operationId: string): Promise<LocalOperation> {
+    return request(`/api/operations/${encodeURIComponent(operationId)}`, { method: 'DELETE' });
+  },
+
+  async requestBlockStudioCertification(payload: {
+    source: string;
+    path?: string | null;
+    metadata: BlockStudioOpenPayload['metadata'];
+    expectedSourceFingerprint?: string;
+    clientRevision: string;
+    idempotencyKey: string;
+  }): Promise<{
+    operation: LocalOperation<BlockCertificationOperationResult>;
+    draft: BlockStudioOpenPayload;
+    deduplicated?: boolean;
+  }> {
+    return request('/api/block-studio/certifications', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': payload.idempotencyKey },
+      body: JSON.stringify({
+        source: payload.source,
+        path: payload.path,
+        metadata: payload.metadata,
+        expectedSourceFingerprint: payload.expectedSourceFingerprint,
+        clientRevision: payload.clientRevision,
+      }),
+    });
+  },
+
   /** Read the compiled dbt-first overlay. dbt-owned details stay in dbt artifacts. */
   async getDbtFirstModeling(): Promise<DbtFirstModelingResponse> {
     return request<DbtFirstModelingResponse>('/api/modeling/dbt-first');
@@ -3582,10 +3654,11 @@ export const api = {
     );
   },
 
-  async validateBlockStudio(source: string, path?: string | null): Promise<BlockStudioValidation> {
+  async validateBlockStudio(source: string, path?: string | null, signal?: AbortSignal): Promise<BlockStudioValidation> {
     return request<BlockStudioValidation>('/api/block-studio/validate', {
       method: 'POST',
       body: JSON.stringify({ source, path }),
+      signal,
     });
   },
 
@@ -3728,7 +3801,7 @@ export const api = {
     ok: boolean;
     path: string;
     companionPath: string | null;
-    lineageRefresh?: { status: 'ready' | 'failed'; compiledAt?: string; message?: string };
+    lineageRefresh?: { status: 'queued' | 'ready' | 'failed'; operationId?: string; compiledAt?: string; message?: string };
   }> {
     return request(`/api/block-studio/block?path=${encodeURIComponent(path)}`, {
       method: 'DELETE',
@@ -5440,14 +5513,16 @@ export const api = {
     purpose?: string;
     audience?: string;
     certifiedOnly?: boolean;
-  }): Promise<AppBlockRecommendation[]> {
+  }, signal?: AbortSignal): Promise<AppBlockRecommendation[]> {
     try {
       const { blocks } = await request<{ blocks: AppBlockRecommendation[] }>('/api/apps/recommend-blocks', {
         method: 'POST',
         body: JSON.stringify(input),
+        signal,
       });
       return blocks;
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw error;
       return [];
     }
   },

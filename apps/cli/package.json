@@ -8,7 +8,7 @@
     "dql": "./dist/index.js"
   },
   "scripts": {
-    "build": "rm -rf dist tsconfig.tsbuildinfo && tsc -b && node ./scripts/copy-runtime-assets.mjs",
+    "build": "pnpm --filter @duckcodeailabs/dql-notebook-app build && rm -rf dist tsconfig.tsbuildinfo && tsc -b && node ./scripts/copy-runtime-assets.mjs",
     "dev": "tsx src/index.ts",
     "test": "vitest run --passWithNoTests",
     "bench:manifest": "tsx bench/manifest-bench.ts",
@@ -37,6 +37,7 @@
     "@duckcodeailabs/dql-notebook": "workspace:*",
     "@duckcodeailabs/dql-project": "workspace:*",
     "@duckcodeailabs/dql-slack": "workspace:*",
+    "better-sqlite3": "^12.11.1",
     "isomorphic-git": "^1.27.0",
     "js-yaml": "^4.1.0",
     "node-cron": "^3.0.3",
@@ -45,6 +46,7 @@
   },
   "devDependencies": {
     "@duckcodeailabs/dql-notebook-app": "workspace:*",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/js-yaml": "^4.0.9",
     "@types/node-cron": "^3.0.11",
     "@types/nodemailer": "^6.4.17",

@@ -1,7 +1,8 @@
 import type { Theme } from "../../themes/notebook-theme";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useShallow } from 'zustand/react/shallow';
 import { Clock3, History, Sparkles } from "lucide-react";
-import { makeCell, useNotebook } from "../../store/NotebookStore";
+import { makeCell, useDispatch, useNotebookStore } from "../../store/NotebookStore";
 import { themes } from "../../themes/notebook-theme";
 import {
   api,
@@ -53,7 +54,17 @@ const EMPTY_AI_HISTORY_BADGE: AiHistoryBadge = {
 };
 
 export function NotebookEditor({ onOpenFile, registerCellRef }: NotebookEditorProps) {
-  const { state, dispatch } = useNotebook();
+  const state = useNotebookStore(useShallow((store) => ({
+    activeFile: store.activeFile,
+    cells: store.cells,
+    dashboardMode: store.dashboardMode,
+    files: store.files,
+    notebookMetadata: store.notebookMetadata,
+    notebookTitle: store.notebookTitle,
+    queryLog: store.queryLog,
+    themeMode: store.themeMode,
+  })));
+  const dispatch = useDispatch();
   const openAnswerInNotebook = useOpenAnswerInNotebook();
   const t = themes[state.themeMode];
   const [aiOpen, setAiOpen] = useState(false);
@@ -563,10 +574,13 @@ function NotebookToolbar({
   onToggleAi: () => void;
   onToggleHistory: () => void;
 }) {
-  const { state } = useNotebook();
+  const state = useNotebookStore(useShallow((store) => ({
+    cellCount: store.cells.length,
+    notebookDirty: store.notebookDirty,
+  })));
 
   // Format last saved placeholder (we don't track real save times yet)
-  const cellCount = state.cells.length;
+  const cellCount = state.cellCount;
   const historyTone = historyBadge.blocked > 0
     ? t.error
     : historyBadge.active > 0
@@ -725,7 +739,10 @@ function NotebookAiDrawer({
   onOpenResearch: (id: string, notebookPath?: string) => void | Promise<void>;
   compact: boolean;
 }) {
-  const { state } = useNotebook();
+  const state = useNotebookStore(useShallow((store) => ({
+    notebookTitle: store.notebookTitle,
+    themeMode: store.themeMode,
+  })));
   const openBlockInStudio = useOpenBlockInStudio();
   // Server-persisted conversation thread, keyed per notebook so a page refresh
   // resumes the same conversation.
@@ -1125,10 +1142,10 @@ function historyRunTone(run: NotebookResearchRun, t: Theme): string {
 }
 
 function Breadcrumb({ t }: { t: Theme }) {
-  const { state } = useNotebook();
-  if (!state.activeFile) return null;
+  const activeFile = useNotebookStore((state) => state.activeFile);
+  if (!activeFile) return null;
 
-  const parts = state.activeFile.path.split('/').filter(Boolean);
+  const parts = activeFile.path.split('/').filter(Boolean);
 
   return (
     <div

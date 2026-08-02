@@ -1,5 +1,5 @@
-import { useCallback, useRef } from "react";
-import { useNotebook, makeCellId } from "../store/NotebookStore";
+import { useCallback } from "react";
+import { notebookStoreApi, useDispatch, makeCellId } from "../store/NotebookStore";
 import { api, DqlApiError } from "../api/client";
 import { substituteNotebookVariables } from "./useVariableSubstitution";
 import type {
@@ -180,16 +180,14 @@ function applyOutcomeToCells(
 }
 
 export function useQueryExecution() {
-  const { state, dispatch } = useNotebook();
-  const stateRef = useRef(state);
-  stateRef.current = state;
+  const dispatch = useDispatch();
 
   const executeCell = useCallback(
     async (
       cellId: string,
       scopedCells?: Cell[],
     ): Promise<CellExecutionOutcome> => {
-      const runtimeState = stateRef.current;
+      const runtimeState = notebookStoreApi.getState();
       const cells = scopedCells ?? runtimeState.cells;
       const cell = cells.find((candidate) => candidate.id === cellId);
       if (!cell) return { cellId, status: "skipped" };
@@ -544,7 +542,7 @@ export function useQueryExecution() {
   );
 
   const executeAll = useCallback(async () => {
-    const cellsAtStart = stateRef.current.cells;
+    const cellsAtStart = notebookStoreApi.getState().cells;
     const plan = planNotebookExecution(cellsAtStart);
     let workingCells = cellsAtStart.map((cell) => ({ ...cell }));
     const outcomes = new Map<string, CellExecutionOutcome>();
@@ -673,7 +671,7 @@ export function useQueryExecution() {
     async (paramName: string) => {
       if (!paramName) return;
       const pattern = `{{${paramName}}}`;
-      let workingCells = stateRef.current.cells.map((cell) => ({ ...cell }));
+      let workingCells = notebookStoreApi.getState().cells.map((cell) => ({ ...cell }));
       for (const cell of workingCells) {
         if (
           cell.type === "markdown"
@@ -699,7 +697,7 @@ export function useQueryExecution() {
         latestRunIds.delete(cellId);
       }
       const completedAt = new Date().toISOString();
-      const cell = stateRef.current.cells.find(
+      const cell = notebookStoreApi.getState().cells.find(
         (candidate) => candidate.id === cellId,
       );
       dispatch({

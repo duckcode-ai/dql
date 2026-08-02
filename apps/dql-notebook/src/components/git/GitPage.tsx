@@ -15,7 +15,7 @@ import {
   Search, ChevronDown, X, Plus, Check, ExternalLink,
   ShieldCheck, Sparkles, GitPullRequest,
 } from 'lucide-react';
-import { useNotebook } from '../../store/NotebookStore';
+import { useNotebookStore } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import { api, type GitGovernedContextGroup } from '../../api/client';
 
@@ -83,8 +83,7 @@ function expandChanges(raw: RawChange[]): FileEntry[] {
 interface ToastMsg { kind: 'ok' | 'err'; text: string }
 
 export function GitPage() {
-  const { state } = useNotebook();
-  const t = themes[state.themeMode];
+  const t = themes[useNotebookStore((state) => state.themeMode)];
 
   const [status, setStatus] = useState<Status | null>(null);
   const [branchInfo, setBranchInfo] = useState<{ current: string | null; branches: string[] }>({ current: null, branches: [] });
@@ -145,7 +144,12 @@ export function GitPage() {
   // Quiet poll so external git activity (terminal commits, branch switches)
   // shows up in the UI without the user clicking refresh.
   useEffect(() => {
-    const id = window.setInterval(() => { void refreshAll(); }, 4000);
+    let polling = false;
+    const id = window.setInterval(() => {
+      if (document.visibilityState !== 'visible' || polling) return;
+      polling = true;
+      void refreshAll().finally(() => { polling = false; });
+    }, 4000);
     return () => window.clearInterval(id);
   }, [refreshAll]);
 
@@ -163,8 +167,8 @@ export function GitPage() {
   }, [branchMenuOpen]);
 
   const selectedFileStatus = useMemo(
-    () => (status?.changes ?? []).map((change) => `${change.status}:${change.path}`).sort().join('|'),
-    [status],
+    () => (status?.changes ?? []).find((change) => change.path === selectedPath)?.status ?? '',
+    [selectedPath, status?.changes],
   );
 
   // A selected diff changes only when its file/status changes, not whenever the
@@ -180,7 +184,6 @@ export function GitPage() {
     let cancelled = false;
     setDiffLoading(true);
     setDiffError(null);
-    setDiff(null);
     void api.fetchGitDiff(selectedPath, selectedStaged)
       .then((d) => {
         if (!cancelled) setDiff(d);

@@ -1,14 +1,28 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect } from 'react';
+import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { ThemeProvider, TooltipProvider } from '@duckcodeailabs/dql-ui';
-import { NotebookProvider, useNotebook } from './store/NotebookStore';
+import { NotebookProvider, useNotebookStore } from './store/NotebookStore';
 import { AppShell } from './components/shell/AppShell';
 import { themes } from './themes/notebook-theme';
 import { api } from './api/client';
 import { useHotReload } from './hooks/useHotReload';
+import { OperationsProvider } from './operations/OperationsProvider';
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 15_000,
+      gcTime: 5 * 60_000,
+      retry: 1,
+      refetchOnWindowFocus: false,
+    },
+  },
+});
 
 function AppInner() {
-  const { state, dispatch } = useNotebook();
-  const t = themes[state.themeMode];
+  const themeMode = useNotebookStore((state) => state.themeMode);
+  const dispatch = useNotebookStore((state) => state.dispatch);
+  const t = themes[themeMode];
 
   // Inject global CSS reset and scrollbar styles. Resolve against Luna CSS
   // vars so switching `data-theme` re-skins the body without a re-inject.
@@ -53,37 +67,40 @@ function AppInner() {
   // state from earlier v1.3 releases still loads.
   useEffect(() => {
     const luna =
-      state.themeMode === 'dark' || state.themeMode === 'midnight' ? 'obsidian'
-      : state.themeMode === 'light' ? 'paper'
-      : state.themeMode === 'arctic' ? 'white'
-      : state.themeMode;
+      themeMode === 'dark' || themeMode === 'midnight' ? 'obsidian'
+      : themeMode === 'light' ? 'paper'
+      : themeMode === 'arctic' ? 'white'
+      : themeMode;
     document.documentElement.setAttribute('data-theme', luna);
-  }, [state.themeMode]);
+  }, [themeMode]);
 
-  // Load notebooks on mount + decide the initial landing once files are known.
-  const didLand = useRef(false);
+  const notebooksQuery = useQuery({
+    queryKey: ['notebooks'],
+    queryFn: () => api.listNotebooks(),
+  });
+  const domainsQuery = useQuery({
+    queryKey: ['authored-domains'],
+    queryFn: () => api.getDomains(),
+  });
+
+  // Load independent startup resources without blocking the first workspace
+  // paint. Query caching also prevents page remounts from recreating the same
+  // request storm.
   useEffect(() => {
-    dispatch({ type: 'SET_FILES_LOADING', loading: true });
-    api.listNotebooks().then((files) => {
-      dispatch({ type: 'SET_FILES', files });
-      dispatch({ type: 'SET_FILES_LOADING', loading: false });
-      // Apps is the home view (store default). Setup lives under its own nav item,
-      // so we never force the setup page as the landing.
-      didLand.current = true;
-    });
-    // UI-001/UI-006: load the authored Domain-page inventory independently of
-    // semantic catalog discovery. Ownership pickers must never use metric or
-    // dimension folder groupings as business domains.
-    api.getDomains().then(({ domains }) => {
-      dispatch({ type: 'SET_AUTHORED_DOMAINS', domains });
-    });
-  }, [dispatch]);
+    dispatch({ type: 'SET_FILES_LOADING', loading: notebooksQuery.isLoading });
+    if (notebooksQuery.data) dispatch({ type: 'SET_FILES', files: notebooksQuery.data });
+  }, [dispatch, notebooksQuery.data, notebooksQuery.isLoading]);
+
+  useEffect(() => {
+    // UI-001/UI-006: ownership pickers only consume authored Domain pages.
+    if (domainsQuery.data) dispatch({ type: 'SET_AUTHORED_DOMAINS', domains: domainsQuery.data.domains });
+  }, [dispatch, domainsQuery.data]);
 
   // Hot reload — watches project files via SSE and refreshes state
   useHotReload();
 
   return (
-    <ThemeProvider theme={state.themeMode} applyGlobal>
+    <ThemeProvider theme={themeMode} applyGlobal>
       <TooltipProvider delayDuration={200} skipDelayDuration={400}>
         <AppShell />
       </TooltipProvider>
@@ -93,8 +110,12 @@ function AppInner() {
 
 export function App() {
   return (
-    <NotebookProvider>
-      <AppInner />
-    </NotebookProvider>
+    <QueryClientProvider client={queryClient}>
+      <NotebookProvider>
+        <OperationsProvider>
+          <AppInner />
+        </OperationsProvider>
+      </NotebookProvider>
+    </QueryClientProvider>
   );
 }

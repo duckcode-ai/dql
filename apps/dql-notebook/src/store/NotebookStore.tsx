@@ -331,6 +331,53 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         lineageFocusNodeId: action.payload.metadata?.name ? `block:${action.payload.metadata.name}` : null,
       };
 
+    case 'BLOCK_CERTIFICATION_ACCEPTED':
+      return {
+        ...state,
+        blockStudioDraft: action.source,
+        blockStudioDirty: false,
+        blockStudioPreview: null,
+        blockStudioMetadata: state.blockStudioMetadata
+          ? { ...state.blockStudioMetadata, reviewStatus: 'draft' }
+          : null,
+      };
+
+    case 'RECONCILE_BLOCK_CERTIFICATION': {
+      const nextPath = action.newPath ?? action.payload.path;
+      const nextFile: NotebookState['files'][number] = {
+        name: `${action.payload.metadata.name}.dql`,
+        path: nextPath,
+        type: 'block',
+        folder: 'blocks',
+        isNew: false,
+      };
+      const pathsToRemove = action.outcome === 'certified'
+        ? new Set([action.draftPath, action.oldPath].filter((path) => path !== nextPath && path.includes('/_drafts/')))
+        : new Set<string>();
+      const files = state.files.filter((file) => !pathsToRemove.has(file.path));
+      const existingIndex = files.findIndex((file) => file.path === nextPath);
+      const nextFiles = existingIndex >= 0
+        ? files.map((file, index) => index === existingIndex ? { ...file, ...nextFile } : file)
+        : [...files, nextFile];
+      const activeMatches = state.mainView === 'block_studio'
+        && !state.blockStudioDirty
+        && (!state.activeBlockPath || [action.oldPath, action.draftPath, nextPath].includes(state.activeBlockPath));
+      if (!activeMatches) return { ...state, files: nextFiles };
+      return {
+        ...state,
+        files: nextFiles,
+        activeFile: nextFile,
+        activeBlockPath: nextPath,
+        notebookTitle: action.payload.metadata.name,
+        blockStudioDraft: action.payload.source,
+        blockStudioDirty: false,
+        blockStudioPreview: null,
+        blockStudioValidation: action.payload.validation,
+        blockStudioMetadata: action.payload.metadata,
+        lineageFocusNodeId: `block:${action.payload.metadata.name}`,
+      };
+    }
+
     case 'SET_CELLS':
       return { ...state, cells: ensureUniqueCellIds(action.cells), notebookDirty: true };
 

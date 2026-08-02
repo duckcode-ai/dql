@@ -284,6 +284,29 @@ export function UnifiedAgentRunPanel({
   const pendingRunRef = useRef<PendingAgentRun | null>(null);
   const recoveryTimerRef = useRef<number | null>(null);
   const recoveryEpochRef = useRef(0);
+  const streamingDeltaBufferRef = useRef('');
+  const streamingFrameRef = useRef<number | null>(null);
+  const resetStreamingAnswer = useCallback(() => {
+    streamingDeltaBufferRef.current = '';
+    if (streamingFrameRef.current !== null) {
+      window.cancelAnimationFrame(streamingFrameRef.current);
+      streamingFrameRef.current = null;
+    }
+    setStreamingAnswer('');
+  }, []);
+  const appendStreamingDelta = useCallback((delta: string) => {
+    streamingDeltaBufferRef.current += delta;
+    if (streamingFrameRef.current !== null) return;
+    streamingFrameRef.current = window.requestAnimationFrame(() => {
+      streamingFrameRef.current = null;
+      const buffered = streamingDeltaBufferRef.current;
+      streamingDeltaBufferRef.current = '';
+      if (buffered) setStreamingAnswer((current) => current + buffered);
+    });
+  }, []);
+  useEffect(() => () => {
+    if (streamingFrameRef.current !== null) window.cancelAnimationFrame(streamingFrameRef.current);
+  }, []);
   const contextualExecutionTarget = workspaceContext?.executionTarget;
   const contextualExecutionConnectionName = contextualExecutionTarget
     && typeof contextualExecutionTarget === 'object'
@@ -375,7 +398,7 @@ export function UnifiedAgentRunPanel({
     pendingRunRef.current = null;
     setBackgroundRun(null);
     setRunningEvents(run.events.slice(-8));
-    setStreamingAnswer('');
+    resetStreamingAnswer();
     setItems((current) => {
       if (current.some((item) => item.kind === 'run' && item.run.id === run.id)) {
         return current.map((item) => item.kind === 'run' && item.run.id === run.id
@@ -395,7 +418,7 @@ export function UnifiedAgentRunPanel({
       const ready = artifactReadyPayloadFromRun(run);
       if (ready) onArtifactReadyRef.current?.(ready, run);
     }
-  }, []);
+  }, [resetStreamingAnswer]);
 
   const recoverPendingRun = useCallback((pending: PendingAgentRun) => {
     if (recoveryTimerRef.current !== null) window.clearTimeout(recoveryTimerRef.current);
@@ -404,7 +427,7 @@ export function UnifiedAgentRunPanel({
     pendingRunRef.current = pending;
     setBackgroundRun(pending);
     setRunning(true);
-    setStreamingAnswer('');
+    resetStreamingAnswer();
     setRunningEvents([]);
 
     const check = async () => {
@@ -506,7 +529,7 @@ export function UnifiedAgentRunPanel({
     setError(null);
     setRunning(true);
     setRunningEvents([]);
-    setStreamingAnswer('');
+    resetStreamingAnswer();
     const controller = new AbortController();
     abortRef.current = controller;
     const runId = makeId('run');
@@ -570,7 +593,7 @@ export function UnifiedAgentRunPanel({
         if (message.kind === 'event') {
           setRunningEvents((current) => [...current, message.event].slice(-8));
         } else if (message.kind === 'answer-delta') {
-          setStreamingAnswer((current) => current + message.delta);
+          appendStreamingDelta(message.delta);
         } else {
           setRunningEvents(message.run.events.slice(-8));
         }
@@ -614,7 +637,7 @@ export function UnifiedAgentRunPanel({
     activeRunIdRef.current = null;
     pendingRunRef.current = null;
     setBackgroundRun(null);
-    setStreamingAnswer('');
+    resetStreamingAnswer();
     setRunningEvents([]);
     setRunning(false);
     setError('Stopped. No answer or draft was saved.');

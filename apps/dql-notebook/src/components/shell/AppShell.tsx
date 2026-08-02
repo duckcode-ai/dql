@@ -1,7 +1,8 @@
 import React, { lazy, Suspense, useCallback, useRef, useState, useEffect } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { CommandPalette } from '../palette/CommandPalette';
 import { InspectorPanel } from './InspectorPanel';
-import { useNotebook } from '../../store/NotebookStore';
+import { useDispatch, useNotebookStore } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { ActivityBar } from './ActivityBar';
 import { Sidebar } from './Sidebar';
@@ -37,14 +38,28 @@ const LineageDrawer = lazy(() => import('../lineage/LineageDrawer').then((module
 const AiBuildDialog = lazy(() => import('../agent/AiBuildDialog').then((module) => ({ default: module.AiBuildDialog })));
 
 export function AppShell() {
-  const { state, dispatch } = useNotebook();
+  const state = useNotebookStore(useShallow((store) => ({
+    appMode: store.appMode,
+    dashboardMode: store.dashboardMode,
+    globalAi: store.globalAi,
+    inspectorOpen: store.inspectorOpen,
+    lineageDrawerOpen: store.lineageDrawerOpen,
+    lineageFullscreen: store.lineageFullscreen,
+    mainView: store.mainView,
+    newBlockModalOpen: store.newBlockModalOpen,
+    newNotebookModalOpen: store.newNotebookModalOpen,
+    setupOpen: store.setupOpen,
+    sidebarOpen: store.sidebarOpen,
+    sidebarPanel: store.sidebarPanel,
+    themeMode: store.themeMode,
+  })));
+  const dispatch = useDispatch();
   const t = themes[state.themeMode];
   const cellRefs = useRef<Record<string, HTMLDivElement>>({});
   const blockWorkspaceOpen = state.mainView === 'block_studio' || state.mainView === 'imports';
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [setupLaunch, setSetupLaunch] = useState<SetupLaunchResponse | null>(null);
-  const [setupLaunchChecked, setSetupLaunchChecked] = useState(false);
 
   // UI-007 / E2E-005: a fresh install and each installed CLI version get one
   // project-local setup review before the user enters the product.
@@ -58,9 +73,6 @@ export function AppShell() {
       })
       .catch(() => {
         // A launch-check failure must not trap users outside the local product.
-      })
-      .finally(() => {
-        if (alive) setSetupLaunchChecked(true);
       });
     return () => { alive = false; };
   }, [dispatch]);
@@ -311,7 +323,6 @@ export function AppShell() {
           />
         </Suspense>
       )}
-      {!setupLaunchChecked && <SetupLaunchGate t={t} />}
     </div>
   );
 }

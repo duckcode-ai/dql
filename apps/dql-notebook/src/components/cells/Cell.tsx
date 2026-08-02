@@ -7,6 +7,7 @@ import React, {
   useMemo,
   useRef,
 } from "react";
+import { useShallow } from 'zustand/react/shallow';
 import {
   Check,
   Database,
@@ -14,7 +15,7 @@ import {
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
-import { makeCell, makeCellId, useNotebook } from "../../store/NotebookStore";
+import { makeCell, makeCellId, notebookStoreApi, useDispatch, useNotebookStore } from "../../store/NotebookStore";
 import { controlStyle } from '../../themes/control-tokens';
 import { themes } from "../../themes/notebook-theme";
 import { useQueryExecution } from "../../hooks/useQueryExecution";
@@ -1083,8 +1084,15 @@ function ExecutionTrustPanel({ cell, t }: { cell: Cell; t: Theme }) {
   );
 }
 
-export function CellComponent({ cell, index, onStartResearch, researchState }: CellProps) {
-  const { state, dispatch } = useNotebook();
+function CellComponentInner({ cell, index, onStartResearch, researchState }: CellProps) {
+  const state = useNotebookStore(useShallow((store) => ({
+    activeFile: store.activeFile,
+    appMode: store.appMode,
+    schemaTables: store.schemaTables,
+    themeMode: store.themeMode,
+  })));
+  const dispatch = useDispatch();
+  const cells = notebookStoreApi.getState().cells;
   const t = themes[state.themeMode];
   const { executeCell, executeDependents, cancelCell } = useQueryExecution();
 
@@ -1143,9 +1151,9 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
           derivedFromUpstream: true,
         };
       }
-      return deriveBlockSource(cell, state.cells);
+      return deriveBlockSource(cell, cells);
     },
-    [saveAsBlockOpen, cell, state.cells]
+    [saveAsBlockOpen, cell, cells]
   );
   const canSaveAsBlock =
     cell.type === 'sql' || cell.type === 'dql' || cell.type === 'chart'
@@ -1358,7 +1366,7 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
       const base = `result_${index + 1}`;
       upstream = base;
       let suffix = 2;
-      while (state.cells.some((candidate) => candidate.id !== cell.id && candidate.name === upstream)) {
+      while (notebookStoreApi.getState().cells.some((candidate) => candidate.id !== cell.id && candidate.name === upstream)) {
         upstream = `${base}_${suffix}`;
         suffix += 1;
       }
@@ -1372,7 +1380,7 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
     const stepBase = `${upstream}_${stepName}`;
     let nextName = stepBase;
     let nextSuffix = 2;
-    while (state.cells.some((candidate) => candidate.name === nextName)) {
+    while (notebookStoreApi.getState().cells.some((candidate) => candidate.name === nextName)) {
       nextName = `${stepBase}_${nextSuffix}`;
       nextSuffix += 1;
     }
@@ -1387,7 +1395,7 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
       next.singleValueConfig = { ...next.singleValueConfig, upstream };
     }
     dispatch({ type: 'ADD_CELL', cell: next, afterId: cell.id });
-  }, [cell.id, cell.name, dispatch, index, state.cells]);
+  }, [cell.id, cell.name, dispatch, index]);
 
   const handleRecommendChart = useCallback(async () => {
     if (!cell.result) return;
@@ -1569,42 +1577,42 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
   if (cell.type === 'pivot') {
     return (
       <CellToolbarWrap {...toolbarProps}>
-        <PivotCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
+        <PivotCell cell={cell} cells={cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
       </CellToolbarWrap>
     );
   }
   if (cell.type === 'single_value') {
     return (
       <CellToolbarWrap {...toolbarProps}>
-        <SingleValueCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
+        <SingleValueCell cell={cell} cells={cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
       </CellToolbarWrap>
     );
   }
   if (cell.type === 'filter') {
     return (
       <CellToolbarWrap {...toolbarProps}>
-        <FilterCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
+        <FilterCell cell={cell} cells={cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
       </CellToolbarWrap>
     );
   }
   if (cell.type === 'chart') {
     return (
       <CellToolbarWrap {...toolbarProps}>
-        <ChartCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
+        <ChartCell cell={cell} cells={cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
       </CellToolbarWrap>
     );
   }
   if (cell.type === 'table') {
     return (
       <CellToolbarWrap {...toolbarProps}>
-        <TableCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
+        <TableCell cell={cell} cells={cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
       </CellToolbarWrap>
     );
   }
   if (cell.type === 'chat') {
     return (
       <CellToolbarWrap {...toolbarProps}>
-        <ChatCell cell={cell} cells={state.cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
+        <ChatCell cell={cell} cells={cells} index={index} themeMode={state.themeMode} onUpdate={onCellUpdate} />
       </CellToolbarWrap>
     );
   }
@@ -1784,7 +1792,7 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
 
             {(cell.type === 'sql' || cell.type === 'dql') && (
               <DataframeChip
-                cells={state.cells}
+                cells={cells}
                 index={index}
                 content={cell.content}
                 themeMode={state.themeMode}
@@ -2513,7 +2521,7 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
             compiledSql={cell.dqlArtifact?.compiledSql ?? cell.dqlArtifact?.sql}
             cellId={cell.id}
             cellName={cell.name}
-            cells={state.cells}
+            cells={cells}
             themeMode={state.themeMode}
             t={t}
             onFocusNode={(nodeId) => {
@@ -2526,6 +2534,16 @@ export function CellComponent({ cell, index, onStartResearch, researchState }: C
     </div>
   );
 }
+
+export const CellComponent = React.memo(
+  CellComponentInner,
+  (previous, next) => (
+    previous.cell === next.cell
+    && previous.index === next.index
+    && previous.onStartResearch === next.onStartResearch
+    && JSON.stringify(previous.researchState ?? null) === JSON.stringify(next.researchState ?? null)
+  ),
+);
 
 function normalizeNotebookChartType(value: string): ChartType {
   const normalized = value.toLowerCase().replace(/-/g, '_');

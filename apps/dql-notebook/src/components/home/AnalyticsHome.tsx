@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { Plus, MessageSquare, Trash2, Loader2, ShieldCheck, Star, Pencil } from 'lucide-react';
 import { api, type AgentConversationThread } from '../../api/client';
-import { makeCell, useNotebook } from '../../store/NotebookStore';
+import { makeCell, useDispatch, useNotebookStore } from '../../store/NotebookStore';
 import type { Cell } from '../../store/types';
 import { initialDomainScope, persistDomainScope, type DomainScope } from './domain-scope';
 import { themes, type Theme } from '../../themes/notebook-theme';
@@ -275,7 +276,11 @@ function relativeTime(iso: string): string {
 }
 
 export function AnalyticsHome() {
-  const { state, dispatch } = useNotebook();
+  const state = useNotebookStore(useShallow((store) => ({
+    activeFile: store.activeFile,
+    themeMode: store.themeMode,
+  })));
+  const dispatch = useDispatch();
   const openAnswerInNotebook = useOpenAnswerInNotebook();
   const t = themes[state.themeMode];
   const [domainContext, setDomainContext] = useState<DomainScope | undefined>(() => initialDomainScope());

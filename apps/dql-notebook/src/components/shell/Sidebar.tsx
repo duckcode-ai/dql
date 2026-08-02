@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { api } from '../../api/client';
-import { useNotebook } from '../../store/NotebookStore';
+import { useDispatch, useNotebookStore } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { BuildSidebar } from '../panels/BuildSidebar';
 import { ConnectionPanel } from '../panels/ConnectionPanel';
@@ -23,7 +24,13 @@ const PANEL_TITLES: Record<string, string> = {
 };
 
 export function Sidebar({ onOpenFile }: SidebarProps) {
-  const { state, dispatch } = useNotebook();
+  const state = useNotebookStore(useShallow((store) => ({
+    schemaTables: store.schemaTables,
+    semanticLayer: store.semanticLayer,
+    sidebarPanel: store.sidebarPanel,
+    themeMode: store.themeMode,
+  })));
+  const dispatch = useDispatch();
   const t = themes[state.themeMode];
   const [collapseHover, setCollapseHover] = useState(false);
   // Match Block Studio's explorer width so all four Build tabs retain their

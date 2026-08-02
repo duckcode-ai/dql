@@ -1,5 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { useShallow } from 'zustand/react/shallow';
 import {
   ArrowLeft,
   ArrowRight,
@@ -34,7 +36,7 @@ import {
   Wrench,
   Workflow,
 } from 'lucide-react';
-import { useNotebook } from '../../store/NotebookStore';
+import { useDispatch, useNotebookStore } from '../../store/NotebookStore';
 import {
   api,
   type AppBlockRecommendation,
@@ -165,7 +167,17 @@ function normalizeAppTheme(themeMode: string): 'obsidian' | 'paper' | 'white' {
 }
 
 export function AppsView(): JSX.Element {
-  const { state, dispatch } = useNotebook();
+  const state = useNotebookStore(useShallow((store) => ({
+    activeAppExperience: store.activeAppExperience,
+    activeAppId: store.activeAppId,
+    activeAppSection: store.activeAppSection,
+    activeDashboardId: store.activeDashboardId,
+    apps: store.apps,
+    appsLoading: store.appsLoading,
+    authoredDomains: store.authoredDomains,
+    themeMode: store.themeMode,
+  })));
+  const dispatch = useDispatch();
   const appTheme = useMemo(() => normalizeAppTheme(state.themeMode), [state.themeMode]);
   const [surface, setSurface] = useState<AppSurface>(() => state.activeAppId ? 'workspace' : 'library');
   const experience = state.activeAppExperience;
@@ -218,40 +230,45 @@ export function AppsView(): JSX.Element {
   // proposal once the create surface mounts (library send → building stream).
   const [autoBuildNonce, setAutoBuildNonce] = useState(0);
   const autoBuildRanRef = useRef(0);
+  const appsQuery = useQuery({
+    queryKey: ['apps'],
+    queryFn: () => api.listAppsStrict(),
+    staleTime: 30_000,
+  });
+  const personaQuery = useQuery({
+    queryKey: ['persona'],
+    queryFn: () => api.getPersona(),
+    staleTime: 60_000,
+  });
 
   useEffect(() => {
-    let cancelled = false;
-    dispatch({ type: 'SET_APPS_LOADING', loading: true });
-    void api.listApps().then((apps) => {
-      if (cancelled) return;
-      dispatch({ type: 'SET_APPS', apps });
-      dispatch({ type: 'SET_APPS_LOADING', loading: false });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [dispatch]);
+    dispatch({ type: 'SET_APPS_LOADING', loading: appsQuery.isLoading });
+    if (appsQuery.data) dispatch({ type: 'SET_APPS', apps: appsQuery.data });
+  }, [appsQuery.data, appsQuery.isLoading, dispatch]);
 
   useEffect(() => {
-    void api.getPersona().then((persona) => dispatch({ type: 'SET_ACTIVE_PERSONA', persona }));
-  }, [dispatch]);
+    if (personaQuery.data) dispatch({ type: 'SET_ACTIVE_PERSONA', persona: personaQuery.data });
+  }, [dispatch, personaQuery.data]);
 
   useEffect(() => {
     if (surface !== 'create') return;
-    let cancelled = false;
-    setCatalogLoading(true);
-    void api.recommendAppBlocks({
-      domain: builderDomain || undefined,
-      purpose: builderPrompt,
-      audience: 'stakeholder',
-      certifiedOnly: true,
-    }).then((blocks) => {
-      if (!cancelled) setCatalog(blocks);
-    }).finally(() => {
-      if (!cancelled) setCatalogLoading(false);
-    });
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      setCatalogLoading(true);
+      void api.recommendAppBlocks({
+        domain: builderDomain || undefined,
+        purpose: builderPrompt,
+        audience: 'stakeholder',
+        certifiedOnly: true,
+      }, controller.signal).then((blocks) => {
+        if (!controller.signal.aborted) setCatalog(blocks);
+      }).catch(() => undefined).finally(() => {
+        if (!controller.signal.aborted) setCatalogLoading(false);
+      });
+    }, 300);
     return () => {
-      cancelled = true;
+      window.clearTimeout(timer);
+      controller.abort();
     };
   }, [surface, builderMode, builderDomain, builderPrompt]);
 
@@ -263,19 +280,17 @@ export function AppsView(): JSX.Element {
     }
     let cancelled = false;
     setAppLoading(true);
-    void api.getApp(state.activeAppId).then((doc) => {
+    const appRequest = api.getApp(state.activeAppId).then((doc) => {
       if (!cancelled) setAppDoc(doc);
     });
-    if (state.activeDashboardId) {
-      void api.getDashboard(state.activeAppId, state.activeDashboardId).then((doc) => {
-        if (!cancelled) setDashboardDoc(doc);
-      }).finally(() => {
-        if (!cancelled) setAppLoading(false);
-      });
-    } else {
-      setDashboardDoc(null);
-      setAppLoading(false);
-    }
+    const dashboardRequest = state.activeDashboardId
+      ? api.getDashboard(state.activeAppId, state.activeDashboardId).then((doc) => {
+          if (!cancelled) setDashboardDoc(doc);
+        })
+      : Promise.resolve().then(() => { if (!cancelled) setDashboardDoc(null); });
+    void Promise.allSettled([appRequest, dashboardRequest]).finally(() => {
+      if (!cancelled) setAppLoading(false);
+    });
     return () => {
       cancelled = true;
     };
@@ -1486,7 +1501,7 @@ function AppWorkspaceSurface({
   onInvestigationsChanged: (investigations: LocalAppInvestigation[]) => void;
   onOpenLineageNode: (nodeId: string) => void;
 }) {
-  const { dispatch } = useNotebook();
+  const dispatch = useDispatch();
   const certifiedCount = dashboardDoc?.dashboard.layout.items.filter((item) => Boolean(item.block)).length ?? 0;
   const draftCount = appDoc?.drafts?.length ?? 0;
   const dashboardBlockIds = useMemo(() => {

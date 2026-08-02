@@ -1,6 +1,7 @@
 import type { Theme } from '../../themes/notebook-theme';
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import { useNotebook, makeCell } from '../../store/NotebookStore';
+import { useShallow } from 'zustand/react/shallow';
+import { useDispatch, useNotebookStore, makeCell } from '../../store/NotebookStore';
 import { useQueryExecution } from '../../hooks/useQueryExecution';
 import { themes } from '../../themes/notebook-theme';
 import { CellComponent } from '../cells/Cell';
@@ -23,7 +24,14 @@ interface CellListProps {
 }
 
 export function CellList({ registerCellRef, onStartResearch, researchRefreshKey }: CellListProps) {
-  const { state, dispatch } = useNotebook();
+  const state = useNotebookStore(useShallow((store) => ({
+    activeFile: store.activeFile,
+    appMode: store.appMode,
+    cells: store.cells,
+    inspectorOpen: store.inspectorOpen,
+    themeMode: store.themeMode,
+  })));
+  const dispatch = useDispatch();
   const { executeCell } = useQueryExecution();
   const t = themes[state.themeMode];
   const sourceCells = useMemo(
@@ -31,6 +39,10 @@ export function CellList({ registerCellRef, onStartResearch, researchRefreshKey 
     [state.cells],
   );
   const sourceCellById = useMemo(() => new Map(sourceCells.map((cell) => [cell.id, cell])), [sourceCells]);
+  const sourceCellSignature = useMemo(
+    () => sourceCells.map((cell) => `${cell.id}:${cell.fingerprint}`).join('|'),
+    [sourceCells],
+  );
   const [researchRunsByCellId, setResearchRunsByCellId] = useState<Map<string, NotebookResearchRun>>(new Map());
 
   // focusedCellId: the cell selected in command mode (not editing)
@@ -76,7 +88,10 @@ export function CellList({ registerCellRef, onStartResearch, researchRefreshKey 
 
     let cancelled = false;
     let timer: number | undefined;
+    let loadingCoverage = false;
     const loadCoverage = () => {
+      if (loadingCoverage || document.visibilityState !== 'visible') return;
+      loadingCoverage = true;
       api.listNotebookResearchSourceCoverage({
         path: notebookPath,
         sourceCellIds: sourceCells.map((cell) => cell.id),
@@ -86,7 +101,7 @@ export function CellList({ registerCellRef, onStartResearch, researchRefreshKey 
           type: cell.type,
           fingerprint: cell.fingerprint,
         })),
-        limit: 10_000,
+        limit: Math.max(100, Math.min(2_000, sourceCells.length * 4)),
       })
         .then((coverage) => {
           if (cancelled) return;
@@ -100,7 +115,8 @@ export function CellList({ registerCellRef, onStartResearch, researchRefreshKey 
         })
         .catch(() => {
           if (!cancelled) setResearchRunsByCellId(new Map());
-        });
+        })
+        .finally(() => { loadingCoverage = false; });
     };
 
     loadCoverage();
@@ -116,7 +132,7 @@ export function CellList({ registerCellRef, onStartResearch, researchRefreshKey 
       window.removeEventListener(NOTEBOOK_RESEARCH_CHANGED_EVENT, handleResearchChanged);
       if (timer) window.clearInterval(timer);
     };
-  }, [researchRefreshKey, sourceCells, state.activeFile?.path]);
+  }, [researchRefreshKey, sourceCellSignature, state.activeFile?.path]);
 
   // Global keyboard handler for command mode shortcuts
   useEffect(() => {
@@ -361,7 +377,8 @@ export function CellList({ registerCellRef, onStartResearch, researchRefreshKey 
 }
 
 function EmptyState({ t }: { t: Theme }) {
-  const { state, dispatch } = useNotebook();
+  const themeMode = useNotebookStore((state) => state.themeMode);
+  const dispatch = useDispatch();
   const [blockPickerOpen, setBlockPickerOpen] = useState(false);
 
   const insertBoundBlock = async (block: BlockEntry) => {
@@ -439,7 +456,7 @@ function EmptyState({ t }: { t: Theme }) {
       {blockPickerOpen && (
         <div style={{ border: `1px solid ${t.cellBorder}`, borderRadius: 10, padding: 10, background: t.cellBg }}>
           <BlockPicker
-            themeMode={state.themeMode}
+            themeMode={themeMode}
             compact={false}
             onPick={(block) => void insertBoundBlock(block)}
           />

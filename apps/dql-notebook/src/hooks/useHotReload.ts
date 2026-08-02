@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
-import { useNotebook } from '../store/NotebookStore';
+import { useQueryClient } from '@tanstack/react-query';
+import { useDispatch } from '../store/NotebookStore';
 import { api } from '../api/client';
 
 interface WatchEvent {
@@ -15,20 +16,59 @@ interface WatchEvent {
  * - file-changed → if it's the active file, re-read and prompt user
  */
 export function useHotReload() {
-  const { state, dispatch } = useNotebook();
-  const activePathRef = useRef<string | null>(null);
+  const dispatch = useDispatch();
+  const queryClient = useQueryClient();
   const esRef = useRef<EventSource | null>(null);
-
-  // Keep activePathRef in sync without re-subscribing SSE
-  useEffect(() => {
-    activePathRef.current = state.activeFile?.path ?? null;
-  }, [state.activeFile]);
 
   useEffect(() => {
     // Only connect if the browser supports SSE and the server is reachable
     if (typeof EventSource === 'undefined') return;
 
+    let alive = true;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let filesTimer: ReturnType<typeof setTimeout> | null = null;
+    let domainsTimer: ReturnType<typeof setTimeout> | null = null;
+    let semanticTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleFiles = () => {
+      if (filesTimer) clearTimeout(filesTimer);
+      filesTimer = setTimeout(() => {
+        filesTimer = null;
+        void api.listNotebooks().then((files) => {
+          if (alive) {
+            queryClient.setQueryData(['notebooks'], files);
+            dispatch({ type: 'SET_FILES', files });
+          }
+        }).catch(() => undefined);
+      }, 150);
+    };
+    const scheduleDomains = () => {
+      if (domainsTimer) clearTimeout(domainsTimer);
+      domainsTimer = setTimeout(() => {
+        domainsTimer = null;
+        void api.getDomains().then(({ domains }) => {
+          if (alive) {
+            queryClient.setQueryData(['authored-domains'], { domains });
+            dispatch({ type: 'SET_AUTHORED_DOMAINS', domains });
+          }
+        }).catch(() => undefined);
+      }, 150);
+    };
+    const scheduleSemantic = () => {
+      if (semanticTimer) clearTimeout(semanticTimer);
+      semanticTimer = setTimeout(() => {
+        semanticTimer = null;
+        dispatch({ type: 'SET_SEMANTIC_LOADING', loading: true });
+        void api.getSemanticLayer().then((layer) => {
+          if (alive) {
+            queryClient.setQueryData(['semantic-layer'], layer);
+            dispatch({ type: 'SET_SEMANTIC_LAYER', layer });
+          }
+        }).catch(() => undefined);
+      }, 100);
+    };
+
     const connect = () => {
+      if (!alive) return;
       const es = new EventSource(`${window.location.origin}/api/watch`);
       esRef.current = es;
 
@@ -36,32 +76,17 @@ export function useHotReload() {
         try {
           const event: WatchEvent = JSON.parse(e.data as string);
 
-          if (event.type === 'file-added' || event.type === 'file-deleted') {
-            // Refresh the file list
-            api.listNotebooks().then((files) => {
-              dispatch({ type: 'SET_FILES', files });
-            });
-            api.getDomains().then(({ domains }) => {
-              dispatch({ type: 'SET_AUTHORED_DOMAINS', domains });
-            });
-          }
-
-          if (event.type === 'file-changed') {
-            // Refresh file list
-            api.listNotebooks().then((files) => {
-              dispatch({ type: 'SET_FILES', files });
-            });
-            api.getDomains().then(({ domains }) => {
-              dispatch({ type: 'SET_AUTHORED_DOMAINS', domains });
-            });
+          if (event.type === 'file-added' || event.type === 'file-deleted' || event.type === 'file-changed') {
+            const changedPath = event.path ?? '';
+            if (/^(?:notebooks|workbooks|blocks|skills|apps|dashboards)\//.test(changedPath)) scheduleFiles();
+            if (changedPath.startsWith('domains/')) {
+              scheduleFiles();
+              scheduleDomains();
+            }
           }
 
           if (event.type === 'semantic-reload') {
-            // Re-fetch semantic layer so the panel reflects the updated YAML
-            dispatch({ type: 'SET_SEMANTIC_LOADING', loading: true });
-            api.getSemanticLayer().then((layer) => {
-              dispatch({ type: 'SET_SEMANTIC_LAYER', layer });
-            });
+            scheduleSemantic();
           }
         } catch {
           // ignore parse errors
@@ -70,16 +95,21 @@ export function useHotReload() {
 
       es.addEventListener('error', () => {
         es.close();
-        // Reconnect after 5s
-        setTimeout(connect, 5000);
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(connect, 5000);
       });
     };
 
     connect();
 
     return () => {
+      alive = false;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (filesTimer) clearTimeout(filesTimer);
+      if (domainsTimer) clearTimeout(domainsTimer);
+      if (semanticTimer) clearTimeout(semanticTimer);
       esRef.current?.close();
       esRef.current = null;
     };
-  }, [dispatch]); // only mount/unmount once
+  }, [dispatch, queryClient]); // only mount/unmount once
 }
