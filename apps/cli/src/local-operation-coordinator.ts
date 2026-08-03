@@ -142,9 +142,9 @@ export class LocalOperationCoordinator {
       signal: AbortSignal,
       report: (progress: Partial<LocalOperationProgress>) => void,
     ) => Promise<TResult>,
-  ): void {
+  ): Promise<LocalOperation<TResult> | null> {
     const operation = this.get(operationId);
-    if (!operation || operation.status !== 'queued') return;
+    if (!operation || operation.status !== 'queued') return Promise.resolve(null);
     const controller = new AbortController();
     this.controllers.set(operationId, controller);
     this.update(operationId, {
@@ -154,16 +154,16 @@ export class LocalOperationCoordinator {
       message: 'Starting.',
     });
 
-    void task(controller.signal, (progress) => {
+    return task(controller.signal, (progress) => {
       if (this.closed) return;
       const current = this.get(operationId);
       if (!current || current.status !== 'running') return;
       this.update(operationId, progress);
     }).then((result) => {
-      if (this.closed) return;
+      if (this.closed) return null;
       const current = this.get(operationId);
-      if (!current || current.status !== 'running') return;
-      this.update(operationId, {
+      if (!current || current.status !== 'running') return current as LocalOperation<TResult> | null;
+      return this.update(operationId, {
         status: 'succeeded',
         phase: 'complete',
         progress: 100,
@@ -171,13 +171,13 @@ export class LocalOperationCoordinator {
         result,
         cancellable: false,
         error: undefined,
-      });
+      }) as LocalOperation<TResult> | null;
     }).catch((error: unknown) => {
-      if (this.closed) return;
+      if (this.closed) return null;
       const current = this.get(operationId);
-      if (!current || current.status === 'cancelled') return;
+      if (!current || current.status === 'cancelled') return current as LocalOperation<TResult> | null;
       const aborted = controller.signal.aborted;
-      this.update(operationId, {
+      return this.update(operationId, {
         status: aborted ? 'cancelled' : 'failed',
         phase: aborted ? 'cancelled' : 'failed',
         message: aborted ? 'Cancelled.' : 'Operation failed.',
@@ -189,7 +189,7 @@ export class LocalOperationCoordinator {
             : error instanceof Error ? error.message : String(error),
           retryable: !aborted,
         },
-      });
+      }) as LocalOperation<TResult> | null;
     }).finally(() => {
       this.controllers.delete(operationId);
       if (!this.closed) this.prune();

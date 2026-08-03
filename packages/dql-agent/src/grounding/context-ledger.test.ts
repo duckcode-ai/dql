@@ -78,6 +78,38 @@ describe('ContextLedger', () => {
     });
   });
 
+  it('does not reintroduce stale catalog columns after complete target verification', () => {
+    const ledger = createContextLedger({
+      contextPack: {
+        allowedSqlContext: {
+          relations: [{
+            relation: 'jaffle_shop.main.dim_customers',
+            name: 'dim_customers',
+            source: 'dbt metadata',
+            columnCompleteness: 'partial',
+            columns: [
+              { name: 'customer_id' },
+              { name: 'customer_name', description: 'Stale declared customer name' },
+            ],
+          }],
+          sourceBlockSql: [],
+        },
+      } as never,
+      schemaContext: [{
+        relation: 'jaffle_shop.main.dim_customers',
+        name: 'dim_customers',
+        columns: [{ name: 'customer_id' }, { name: 'name' }],
+      }],
+    });
+
+    expect(ledger.validateSql('SELECT name FROM jaffle_shop.main.dim_customers').ok).toBe(true);
+    expect(ledger.validateSql('SELECT customer_name FROM jaffle_shop.main.dim_customers')).toMatchObject({
+      ok: false,
+      code: 'unknown_column',
+      offending: { column: 'customer_name' },
+    });
+  });
+
   it('merges grounding expansion into the validation and qualification ledger', () => {
     const ledger = createContextLedger({
       schemaContext: [{

@@ -13,6 +13,7 @@ import {
   createAppPackage,
   createDashboardForApp,
   createNotebookForApp,
+  deleteAppPackage,
   generateAppPackage,
   getAppAiBuildSession,
   promoteAppForStakeholders,
@@ -163,6 +164,34 @@ describe('Apps command center API helpers', () => {
       trustState: 'certified',
     });
     expect(result.app.dashboards).toEqual([{ id: 'overview', title: 'Overview' }]);
+  });
+
+  it('deletes only the selected App package and moves it to recoverable local trash', () => {
+    const root = createProject();
+    const first = createAppPackage(root, {
+      name: 'Growth CXO',
+      domain: 'growth',
+      owners: ['owner@local'],
+      selectedBlockIds: [],
+    });
+    const second = createAppPackage(root, {
+      name: 'Finance CXO',
+      domain: 'finance',
+      owners: ['owner@local'],
+      selectedBlockIds: [],
+    });
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+
+    const deleted = deleteAppPackage(root, 'growth-cxo');
+
+    expect(deleted.ok).toBe(true);
+    if (!deleted.ok) return;
+    expect(deleted.deletedPath).toBe('apps/growth-cxo');
+    expect(existsSync(join(root, 'apps/growth-cxo'))).toBe(false);
+    expect(existsSync(join(root, deleted.trashPath, 'dql.app.json'))).toBe(true);
+    expect(existsSync(join(root, 'apps/finance-cxo/dql.app.json'))).toBe(true);
+    expect(deleteAppPackage(root, '../finance-cxo')).toMatchObject({ ok: false, status: 400 });
   });
 
   it('creates App packages globally with exact domain backlinks when a domain folder exists', () => {
@@ -342,12 +371,14 @@ describe('Apps command center API helpers', () => {
     });
 
     const session = await proposeAppAiBuild(root, {
+      sessionId: 'app_build_test_resume_001',
       prompt: 'Build a revenue app for leadership.',
       domain: 'revenue',
       owner: 'owner@local',
     });
 
     expect(session.status).toBe('proposed');
+    expect(session.id).toBe('app_build_test_resume_001');
     expect(session.generatedPaths).toEqual([]);
     expect(session.proposal).toBeTruthy();
     expect(session.proposal!.tiles.length).toBeGreaterThan(0);

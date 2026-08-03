@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useShallow } from 'zustand/react/shallow';
 import {
   ArrowLeft,
@@ -31,6 +31,7 @@ import {
   Star,
   Share2,
   Table2,
+  Trash2,
   User,
   Users,
   Wrench,
@@ -59,6 +60,7 @@ import { PersonaSwitcher } from './PersonaSwitcher';
 import { defaultParameterFilterValue, deriveDashboardFilters } from './dashboard-filters';
 import { semanticApprovalState } from './app-semantic-approval';
 import { authoredDomainOptions, resolveAuthoredDomainId, type AuthoredDomainOption } from '../domains/authored-domain-options';
+import { useOperations } from '../../operations/OperationsProvider';
 
 const UnifiedAgentRunPanel = lazy(() => import('../agent/UnifiedAgentRunPanel')
   .then((module) => ({ default: module.UnifiedAgentRunPanel })));
@@ -111,6 +113,44 @@ interface AgentSkillCard {
 }
 
 const DEFAULT_PROMPT = 'Build an analytics app from my certified DQL blocks and available warehouse tables.';
+const ACTIVE_APP_BUILD_STORAGE_KEY = 'dql.apps.active-ai-build.v1';
+
+interface PersistedAppBuild {
+  sessionId: string;
+  operationId?: string;
+  prompt: string;
+  existingAppId?: string;
+  createdAt: string;
+}
+
+function readPersistedAppBuild(): PersistedAppBuild | null {
+  try {
+    const raw = window.localStorage.getItem(ACTIVE_APP_BUILD_STORAGE_KEY);
+    if (!raw) return null;
+    const value = JSON.parse(raw) as Partial<PersistedAppBuild>;
+    return typeof value.sessionId === 'string' && typeof value.prompt === 'string' && typeof value.createdAt === 'string'
+      ? value as PersistedAppBuild
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistAppBuild(value: PersistedAppBuild | null): void {
+  try {
+    if (value) window.localStorage.setItem(ACTIVE_APP_BUILD_STORAGE_KEY, JSON.stringify(value));
+    else window.localStorage.removeItem(ACTIVE_APP_BUILD_STORAGE_KEY);
+  } catch {
+    // The server operation still completes when browser storage is unavailable.
+  }
+}
+
+function createAppBuildSessionId(): string {
+  const suffix = typeof window.crypto?.randomUUID === 'function'
+    ? window.crypto.randomUUID().replace(/-/g, '').slice(0, 12)
+    : Math.random().toString(36).slice(2, 14);
+  return `app_build_${Date.now()}_${suffix}`;
+}
 
 const APP_PROMPT_EXAMPLES: AppPromptExample[] = [
   {
@@ -178,6 +218,8 @@ export function AppsView(): JSX.Element {
     themeMode: store.themeMode,
   })));
   const dispatch = useDispatch();
+  const queryClient = useQueryClient();
+  const { operations, track: trackOperation } = useOperations();
   const appTheme = useMemo(() => normalizeAppTheme(state.themeMode), [state.themeMode]);
   const [surface, setSurface] = useState<AppSurface>(() => state.activeAppId ? 'workspace' : 'library');
   const experience = state.activeAppExperience;
@@ -209,6 +251,10 @@ export function AppsView(): JSX.Element {
   const [selectedBlocks, setSelectedBlocks] = useState<Set<string>>(() => new Set());
   const [generated, setGenerated] = useState<GenerateAppResponse | null>(null);
   const [buildSession, setBuildSession] = useState<AppAiBuildSession | null>(null);
+  const initialPersistedBuildRef = useRef<PersistedAppBuild | null>(readPersistedAppBuild());
+  const [durableBuildSessionId, setDurableBuildSessionId] = useState<string | null>(initialPersistedBuildRef.current?.sessionId ?? null);
+  const [buildOperationId, setBuildOperationId] = useState<string | null>(initialPersistedBuildRef.current?.operationId ?? null);
+  const loadedBuildSessionRef = useRef<string | null>(null);
   const [proposalSelection, setProposalSelection] = useState<Set<string>>(new Set());
   const [proposalEdits, setProposalEdits] = useState<Record<string, { title?: string; viz?: string }>>({});
   const [committing, setCommitting] = useState(false);
@@ -218,6 +264,9 @@ export function AppsView(): JSX.Element {
   const [addPageTitle, setAddPageTitle] = useState('');
   const [addPageExploreGaps, setAddPageExploreGaps] = useState(false);
   const [addPageError, setAddPageError] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<AppSummary | null>(null);
+  const [deletingApp, setDeletingApp] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [dashboardFilterValues, setDashboardFilterValues] = useState<Record<string, unknown>>({});
   const [appliedDashboardFilterValues, setAppliedDashboardFilterValues] = useState<Record<string, unknown>>({});
   const [explainOpen, setExplainOpen] = useState(false);
@@ -249,6 +298,95 @@ export function AppsView(): JSX.Element {
   useEffect(() => {
     if (personaQuery.data) dispatch({ type: 'SET_ACTIVE_PERSONA', persona: personaQuery.data });
   }, [dispatch, personaQuery.data]);
+
+  const applyRecoveredBuildSession = useCallback((session: AppAiBuildSession) => {
+    setBuildSession(session);
+    setSurface('create');
+    setBuilderMode('ai');
+    setBuilderPrompt(session.prompt || DEFAULT_PROMPT);
+    setBuilderExistingAppId(session.inputs.existingAppId ?? null);
+    setBuilderDomain(resolveAuthoredDomainId(session.inputs.domain, state.authoredDomains));
+    setBuilderOwner(session.inputs.owner ?? 'analytics');
+    setBuilderAudience(session.inputs.audience ?? 'stakeholders');
+    setBuilderTarget(session.inputs.mode === 'personal' ? 'personal' : 'shared_project');
+    setBuilderExploreGaps(session.inputs.mode === 'personal' && session.inputs.exploreGaps === true);
+    if (session.status === 'building') {
+      setBuilderSaving(true);
+      return;
+    }
+    setBuilderSaving(false);
+    if (session.status === 'error') {
+      setBuilderError(session.error ?? 'The App proposal did not complete.');
+      return;
+    }
+    setBuilderError(null);
+    setProposalSelection(session.proposal ? defaultProposalSelection(session.proposal) : new Set());
+    setProposalEdits(Object.fromEntries((session.proposal?.tiles ?? []).map((tile) => [tile.id, { title: tile.title, viz: tile.viz }])));
+    const plan = session.plan as GeneratedAppPlan | undefined;
+    const planName = session.inputs.existingAppId ? plan?.pages[0]?.title : plan?.name;
+    if (planName) setBuilderName(planName);
+    if (plan?.audience) setBuilderAudience(plan.audience);
+  }, [state.authoredDomains]);
+
+  const activeBuildOperation = useMemo(() => {
+    if (!durableBuildSessionId) return null;
+    return operations.find((operation) => operation.id === buildOperationId)
+      ?? operations.find((operation) => operation.type === 'app_ai_build' && operation.scope === `app-build:${durableBuildSessionId}`)
+      ?? null;
+  }, [buildOperationId, durableBuildSessionId, operations]);
+
+  useEffect(() => {
+    const persisted = initialPersistedBuildRef.current;
+    if (!persisted) return;
+    initialPersistedBuildRef.current = null;
+    setBuilderPrompt(persisted.prompt);
+    setBuilderExistingAppId(persisted.existingAppId ?? null);
+    setBuilderMode('ai');
+    setBuilderSaving(true);
+    setSurface('create');
+  }, []);
+
+  useEffect(() => {
+    if (!durableBuildSessionId) return;
+    if (activeBuildOperation?.id && activeBuildOperation.id !== buildOperationId) {
+      setBuildOperationId(activeBuildOperation.id);
+      const current = readPersistedAppBuild();
+      if (current?.sessionId === durableBuildSessionId) persistAppBuild({ ...current, operationId: activeBuildOperation.id });
+    }
+    if (activeBuildOperation && (activeBuildOperation.status === 'queued' || activeBuildOperation.status === 'running')) {
+      setBuilderSaving(true);
+      setSurface('create');
+    }
+
+    let cancelled = false;
+    let timer: number | undefined;
+    const recover = async () => {
+      const session = await api.getAppAiBuild(durableBuildSessionId);
+      if (cancelled) return;
+      if (!session || session.status === 'building') {
+        if (session) applyRecoveredBuildSession(session);
+        if (activeBuildOperation && ['failed', 'cancelled', 'interrupted'].includes(activeBuildOperation.status)) {
+          setBuilderSaving(false);
+          setBuilderError(activeBuildOperation.error?.message ?? (
+            activeBuildOperation.status === 'cancelled'
+              ? 'The App proposal was cancelled.'
+              : 'The App proposal did not complete.'
+          ));
+          return;
+        }
+        timer = window.setTimeout(() => { void recover(); }, 900);
+        return;
+      }
+      if (loadedBuildSessionRef.current === session.id && buildSession?.status === session.status) return;
+      loadedBuildSessionRef.current = session.id;
+      applyRecoveredBuildSession(session);
+    };
+    void recover();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [activeBuildOperation, applyRecoveredBuildSession, buildOperationId, buildSession?.status, durableBuildSessionId]);
 
   useEffect(() => {
     if (surface !== 'create') return;
@@ -381,6 +519,9 @@ export function AppsView(): JSX.Element {
     target: AppBuildTarget = builderTarget,
     exploreGaps = false,
   ) => {
+    persistAppBuild(null);
+    setDurableBuildSessionId(null);
+    setBuildOperationId(null);
     setBuilderExistingAppId(null);
     setBuilderMode('ai');
     setBuilderTarget(target);
@@ -399,6 +540,9 @@ export function AppsView(): JSX.Element {
   };
 
   const startClassicBuilder = () => {
+    persistAppBuild(null);
+    setDurableBuildSessionId(null);
+    setBuildOperationId(null);
     setBuilderExistingAppId(null);
     setBuilderMode('classic');
     setBuilderError(null);
@@ -434,34 +578,45 @@ export function AppsView(): JSX.Element {
           ...extras,
         ]));
     // Two-phase build: propose first (no files) — the user reviews the content
-    // list with per-tile toggles and confirms before anything is created.
-    const sessionResult = await api.proposeAppAiBuild({
+    // list with per-tile toggles and confirms before anything is created. The
+    // client owns the session id before the request starts, so route changes can
+    // reconnect even during the server-acceptance window.
+    const sessionId = createAppBuildSessionId();
+    const persisted: PersistedAppBuild = {
+      sessionId,
       prompt,
-      existingAppId: builderExistingAppId ?? undefined,
-      domain: builderDomain.trim() || undefined,
-      owner: builderOwner.trim() || undefined,
-      force: false,
-      selectedBlockIds: preferredBlockIds,
-      plannerMode: 'ai_assisted',
-      mode: builderTarget === 'personal' ? 'personal' : 'stakeholder',
-      exploreGaps: builderTarget === 'personal' && builderExploreGaps,
-    });
-    setBuilderSaving(false);
-    if (!sessionResult.ok) {
-      setBuilderError(sessionResult.error);
-      if (sessionResult.session) setBuildSession(sessionResult.session);
-      return;
-    }
-    const session = sessionResult.session;
-    setBuildSession(session);
+      ...(builderExistingAppId ? { existingAppId: builderExistingAppId } : {}),
+      createdAt: new Date().toISOString(),
+    };
+    persistAppBuild(persisted);
+    setDurableBuildSessionId(sessionId);
+    setBuildOperationId(null);
+    loadedBuildSessionRef.current = null;
+    setBuildSession(null);
     setGenerated(null);
-    setProposalSelection(session.proposal ? defaultProposalSelection(session.proposal) : new Set());
-    setProposalEdits(Object.fromEntries((session.proposal?.tiles ?? []).map((tile) => [tile.id, { title: tile.title, viz: tile.viz }])));
-    const sessionPlan = session.plan as GeneratedAppPlan | undefined;
-    const planName = builderExistingAppId ? sessionPlan?.pages[0]?.title : sessionPlan?.name;
-    if (planName) setBuilderName(planName);
-    const planAudience = sessionPlan?.audience;
-    if (planAudience) setBuilderAudience(planAudience);
+    try {
+      const accepted = await api.proposeAppAiBuildInBackground({
+        sessionId,
+        prompt,
+        existingAppId: builderExistingAppId ?? undefined,
+        domain: builderDomain.trim() || undefined,
+        owner: builderOwner.trim() || undefined,
+        force: false,
+        selectedBlockIds: preferredBlockIds,
+        plannerMode: 'ai_assisted',
+        mode: builderTarget === 'personal' ? 'personal' : 'stakeholder',
+        exploreGaps: builderTarget === 'personal' && builderExploreGaps,
+      });
+      trackOperation(accepted.operation);
+      setBuildOperationId(accepted.operation.id);
+      persistAppBuild({ ...persisted, operationId: accepted.operation.id });
+    } catch (error) {
+      setBuilderSaving(false);
+      setBuilderError(error instanceof Error ? error.message : String(error));
+      persistAppBuild(null);
+      setDurableBuildSessionId(null);
+      setBuildOperationId(null);
+    }
   };
 
   // Auto-run the proposal after startAiBuilder lands on the create surface.
@@ -515,6 +670,9 @@ export function AppsView(): JSX.Element {
     }
     const session = result.session;
     setBuildSession(session);
+    persistAppBuild(null);
+    setDurableBuildSessionId(null);
+    setBuildOperationId(null);
     const response: GenerateAppResponse = {
       ok: true,
       plan: session.plan as GeneratedAppPlan,
@@ -575,6 +733,9 @@ export function AppsView(): JSX.Element {
       return;
     }
     setAddPageError(null);
+    persistAppBuild(null);
+    setDurableBuildSessionId(null);
+    setBuildOperationId(null);
     setBuilderExistingAppId(state.activeAppId);
     setBuilderMode('ai');
     setBuilderPrompt(request);
@@ -615,6 +776,29 @@ export function AppsView(): JSX.Element {
     setAppliedDashboardFilterValues(defaults);
   }, [dashboardFilters]);
 
+  const confirmDeleteApp = async () => {
+    if (!deleteTarget || deletingApp) return;
+    setDeletingApp(true);
+    setDeleteError(null);
+    try {
+      await api.deleteApp(deleteTarget.id);
+      setFavorites((current) => {
+        const next = new Set(current);
+        next.delete(deleteTarget.id);
+        return next;
+      });
+      dispatch({ type: 'SET_APPS', apps: state.apps.filter((app) => app.id !== deleteTarget.id) });
+      if (state.activeAppId === deleteTarget.id) dispatch({ type: 'CLOSE_APP' });
+      setDeleteTarget(null);
+      setSurface('library');
+      await queryClient.invalidateQueries({ queryKey: ['apps'] });
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDeletingApp(false);
+    }
+  };
+
   return (
     <div className={`dql-apps-waterline dql-apps-theme-${appTheme}`}>
       <style>{APP_STYLES}</style>
@@ -639,6 +823,10 @@ export function AppsView(): JSX.Element {
           onStartAi={(prompt, target, exploreGaps) => startAiBuilder(prompt, undefined, target, exploreGaps)}
           onStartClassic={startClassicBuilder}
           onOpenApp={openApp}
+          onDeleteApp={(app) => {
+            setDeleteError(null);
+            setDeleteTarget(app);
+          }}
         />
       ) : surface === 'create' ? (
         <AppCreateSurface
@@ -750,6 +938,19 @@ export function AppsView(): JSX.Element {
           onCreate={startDashboardPageBuilder}
         />
       )}
+      {deleteTarget && (
+        <DeleteAppDialog
+          app={deleteTarget}
+          deleting={deletingApp}
+          error={deleteError}
+          onCancel={() => {
+            if (deletingApp) return;
+            setDeleteTarget(null);
+            setDeleteError(null);
+          }}
+          onConfirm={() => void confirmDeleteApp()}
+        />
+      )}
     </div>
   );
 }
@@ -767,6 +968,7 @@ function AppLibrarySurface({
   onStartAi,
   onStartClassic,
   onOpenApp,
+  onDeleteApp,
 }: {
   apps: AppSummary[];
   allApps: AppSummary[];
@@ -780,6 +982,7 @@ function AppLibrarySurface({
   onStartAi: (prompt: string, target: AppBuildTarget, exploreGaps: boolean) => void;
   onStartClassic: () => void;
   onOpenApp: (app: AppSummary, experience?: AppExperience) => void;
+  onDeleteApp: (app: AppSummary) => void;
 }) {
   const counts = libraryCounts(allApps, favorites);
   const [draftPrompt, setDraftPrompt] = useState(DEFAULT_PROMPT);
@@ -881,6 +1084,7 @@ function AppLibrarySurface({
               onToggleFavorite={() => onToggleFavorite(app.id)}
               onOpen={() => onOpenApp(app, 'view')}
               onEdit={() => onOpenApp(app, 'build')}
+              onDelete={() => onDeleteApp(app)}
             />
           ))}
         </div>
@@ -895,12 +1099,14 @@ function AppCard({
   onToggleFavorite,
   onOpen,
   onEdit,
+  onDelete,
 }: {
   app: AppSummary;
   favorite: boolean;
   onToggleFavorite: () => void;
   onOpen: () => void;
   onEdit: () => void;
+  onDelete: () => void;
 }) {
   const certified = app.certification === 'certified' || app.lifecycle === 'certified';
   const draftCount = app.drafts?.length ?? 0;
@@ -948,8 +1154,61 @@ function AppCard({
         <button type="button" className="dql-app-card-act" onClick={onEdit} title="Edit app">
           <Pencil size={12} /> Edit
         </button>
+        <button type="button" className="dql-app-card-act danger" onClick={onDelete} title="Delete app">
+          <Trash2 size={12} /> Delete
+        </button>
       </div>
     </article>
+  );
+}
+
+function DeleteAppDialog({
+  app,
+  deleting,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  app: AppSummary;
+  deleting: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const [confirmation, setConfirmation] = useState('');
+  const confirmed = confirmation.trim() === app.name;
+  return (
+    <div
+      role="presentation"
+      onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}
+      style={{ position: 'fixed', inset: 0, zIndex: 1800, background: 'rgba(0,0,0,0.42)', display: 'grid', placeItems: 'center', padding: 24 }}
+    >
+      <section role="dialog" aria-modal="true" aria-labelledby="delete-app-title" style={{ width: 'min(460px, 100%)', borderRadius: 14, border: '1px solid var(--border-default)', background: 'var(--bg-1)', color: 'var(--text-primary)', boxShadow: '0 22px 60px rgba(0,0,0,0.28)', padding: 20, display: 'grid', gap: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ width: 34, height: 34, borderRadius: 9, display: 'grid', placeItems: 'center', background: 'var(--status-error-bg)', color: 'var(--status-error)', border: '1px solid var(--status-error-border)' }}><Trash2 size={16} /></span>
+          <div>
+            <h2 id="delete-app-title" style={{ margin: 0, fontSize: 16 }}>Delete {app.name}?</h2>
+            <p style={{ margin: '3px 0 0', color: 'var(--text-tertiary)', fontSize: 11.5 }}>The App package will leave the project and move to local DQL trash for recovery.</p>
+          </div>
+        </div>
+        <label style={{ display: 'grid', gap: 6, color: 'var(--text-secondary)', fontSize: 11.5 }}>
+          Type <strong style={{ color: 'var(--text-primary)' }}>{app.name}</strong> to confirm
+          <input
+            autoFocus
+            value={confirmation}
+            onChange={(event) => setConfirmation(event.target.value)}
+            onKeyDown={(event) => { if (event.key === 'Enter' && confirmed && !deleting) onConfirm(); }}
+            disabled={deleting}
+            style={{ height: 36, borderRadius: 8, border: '1px solid var(--border-default)', background: 'var(--bg-2)', color: 'var(--text-primary)', padding: '0 10px', outline: 'none', font: '12px var(--font-ui)' }}
+          />
+        </label>
+        {error ? <div role="alert" style={{ color: 'var(--status-error)', fontSize: 11.5 }}>{error}</div> : null}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <button type="button" onClick={onCancel} disabled={deleting} style={{ height: 34, borderRadius: 8, border: '1px solid var(--border-default)', background: 'var(--bg-2)', color: 'var(--text-secondary)', padding: '0 13px', cursor: deleting ? 'default' : 'pointer' }}>Cancel</button>
+          <button type="button" onClick={onConfirm} disabled={!confirmed || deleting} style={{ height: 34, borderRadius: 8, border: 0, background: 'var(--status-error)', color: '#fff', padding: '0 13px', cursor: confirmed && !deleting ? 'pointer' : 'default', opacity: confirmed && !deleting ? 1 : 0.5 }}>{deleting ? 'Deleting…' : 'Delete App'}</button>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -5064,6 +5323,10 @@ const APP_STYLES = `
 .dql-app-card-act:hover {
   border-color: var(--dql-app-accent) !important;
   color: var(--dql-app-accent) !important;
+}
+.dql-app-card-act.danger:hover {
+  border-color: var(--status-error-border) !important;
+  color: var(--status-error) !important;
 }
 
 .dql-app-block-cite i,

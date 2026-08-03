@@ -192,18 +192,27 @@ function mergeAllowedRelations(relations: MetadataAllowedSqlRelation[]): Metadat
     const key = relationKey(relation.relation);
     if (!key) continue;
     const existing = byRelation.get(key);
-    byRelation.set(key, existing
-      ? {
-          ...existing,
-          objectKey: existing.objectKey ?? relation.objectKey,
-          source: existing.source === relation.source ? existing.source : 'expanded metadata context',
-          columnCompleteness: mergeRelationCompleteness(existing.columnCompleteness, relation.columnCompleteness),
-          columns: mergeColumns(existing.columns, relation.columns),
-        }
-      : {
+    if (!existing) {
+      byRelation.set(key, {
           ...relation,
           columns: mergeColumns([], relation.columns),
-        });
+      });
+      continue;
+    }
+    const existingComplete = existing.columnCompleteness === 'complete';
+    const incomingComplete = relation.columnCompleteness === 'complete';
+    const authoritative = existingComplete
+      ? mergeMatchingColumnMetadata(existing.columns, relation.columns)
+      : incomingComplete
+        ? mergeMatchingColumnMetadata(relation.columns, existing.columns)
+        : mergeColumns(existing.columns, relation.columns);
+    byRelation.set(key, {
+      ...(incomingComplete && !existingComplete ? relation : existing),
+      objectKey: existing.objectKey ?? relation.objectKey,
+      source: existing.source === relation.source ? existing.source : 'expanded metadata context',
+      columnCompleteness: mergeRelationCompleteness(existing.columnCompleteness, relation.columnCompleteness),
+      columns: authoritative,
+    });
   }
   return Array.from(byRelation.values());
 }
@@ -228,19 +237,45 @@ function mergeRuntimeSchemaTables(
     const key = relationKey(table.relation);
     if (!key) continue;
     const existing = byRelation.get(key);
-    byRelation.set(key, existing
-      ? {
-          ...existing,
-          description: existing.description ?? table.description,
-          source: existing.source === table.source ? existing.source : 'expanded metadata context',
-          columns: mergeColumns(existing.columns, table.columns),
-        }
-      : {
+    if (!existing) {
+      byRelation.set(key, {
           ...table,
           columns: mergeColumns([], table.columns),
-        });
+      });
+      continue;
+    }
+    const existingComplete = existing.columnCompleteness === 'complete';
+    const incomingComplete = table.columnCompleteness === 'complete';
+    byRelation.set(key, {
+      ...(incomingComplete && !existingComplete ? table : existing),
+      description: existing.description ?? table.description,
+      source: existing.source === table.source ? existing.source : 'expanded metadata context',
+      columnCompleteness: existingComplete || incomingComplete ? 'complete' : 'partial',
+      columns: existingComplete
+        ? mergeMatchingColumnMetadata(existing.columns, table.columns)
+        : incomingComplete
+          ? mergeMatchingColumnMetadata(table.columns, existing.columns)
+          : mergeColumns(existing.columns, table.columns),
+    });
   }
   return Array.from(byRelation.values());
+}
+
+/** Enrich an authoritative column set without adding names absent from it. */
+function mergeMatchingColumnMetadata<T extends RuntimeSchemaColumn>(
+  authoritative: T[],
+  advisory: T[],
+): T[] {
+  const advisoryByName = new Map(advisory.map((column) => [normalizeName(column.name), column] as const));
+  return authoritative.map((column) => {
+    const metadata = advisoryByName.get(normalizeName(column.name));
+    return {
+      ...column,
+      type: column.type ?? metadata?.type,
+      description: column.description ?? metadata?.description,
+      sampleValues: uniqueStrings([...(column.sampleValues ?? []), ...(metadata?.sampleValues ?? [])]).slice(0, 8),
+    };
+  });
 }
 
 function mergeColumns<T extends RuntimeSchemaColumn>(left: T[], right: T[]): T[] {

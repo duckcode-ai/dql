@@ -657,7 +657,8 @@ export function UnifiedAgentRunPanel({
   }, [autoRun?.nonce, autoRun?.text, autoRun?.mode, initialMode, running]);
 
   useEffect(() => () => {
-    abortRef.current?.abort();
+    // Route changes only detach this view. The server-owned run and its fetch
+    // handshake must continue; only the explicit Stop action cancels provider work.
     recoveryEpochRef.current += 1;
     if (recoveryTimerRef.current !== null) window.clearTimeout(recoveryTimerRef.current);
   }, []);

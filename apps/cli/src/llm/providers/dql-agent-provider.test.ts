@@ -111,19 +111,23 @@ describe('lazy schema loading', () => {
     ...overrides,
   } as never);
 
-  it('does not touch the warehouse for certified or catalog-grounded questions', () => {
+  it('does not touch the warehouse for certified questions but verifies generated relation columns', () => {
     expect(__test__.shouldLoadSchemaContext(pack({ routeDecision: { route: 'certified' } }), true)).toBe(false);
-    expect(__test__.shouldLoadSchemaContext(pack(), false)).toBe(false);
+    expect(__test__.shouldLoadSchemaContext(pack(), false)).toBe(true);
   });
 
-  it('defers semantic questions but loads schema for unresolved filters or empty context', () => {
-    expect(__test__.shouldLoadSchemaContext(pack({ objects: [{ objectType: 'metric' }] }), true)).toBe(false);
+  it('verifies semantic relation columns and loads schema for unresolved filters or empty context', () => {
+    expect(__test__.shouldLoadSchemaContext(pack({ objects: [{ objectType: 'metric' }] }), true)).toBe(true);
     expect(__test__.shouldLoadSchemaContext(pack({
       questionPlan: { requestedShape: { filters: ['enterprise'] } },
     }), true)).toBe(true);
     expect(__test__.shouldLoadSchemaContext(pack({
       allowedSqlContext: { relations: [], sourceBlockSql: [] },
     }), false)).toBe(true);
+    expect(__test__.shouldLoadSchemaContext(pack({
+      objects: [{ objectType: 'metric' }],
+      allowedSqlContext: { relations: [], sourceBlockSql: [{ name: 'trusted_block', sql: 'select 1' }] },
+    }), true)).toBe(false);
   });
 
   it('uses live source search only when indexed retrieval is thin', () => {

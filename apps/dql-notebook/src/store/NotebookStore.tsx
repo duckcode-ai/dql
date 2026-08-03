@@ -820,6 +820,15 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       };
     }
 
+    case 'CLOSE_APP':
+      return {
+        ...state,
+        activeAppId: null,
+        activeDashboardId: null,
+        activeAppExperience: 'view',
+        activeAppSection: 'dashboards',
+      };
+
     case 'OPEN_DASHBOARD':
       return { ...state, activeDashboardId: action.dashboardId };
 

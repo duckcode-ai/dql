@@ -21,6 +21,7 @@ import {
   buildExploratoryJoinProbeSql,
   repairExploratorySqlBeforeExecution,
   buildAgentSchemaContext,
+  reconcileAgentSchemaContextWithLive,
   buildRuntimeSchemaSearchSql,
   buildNamedRelationProbeSql,
   prepareAnalyticalExecutionSql,
@@ -5448,6 +5449,38 @@ describe('validateConnectionForTest', () => {
 });
 
 describe('buildAgentSchemaContext', () => {
+  it('uses live target columns while preserving matching dbt descriptions', () => {
+    const reconciled = reconcileAgentSchemaContextWithLive(
+      [{
+        relation: 'jaffle_shop.main.dim_customers',
+        schema: 'main',
+        name: 'dim_customers',
+        source: 'local metadata catalog',
+        columns: [
+          { name: 'customer_id', description: 'Customer key' },
+          { name: 'customer_name', description: 'Customer full name' },
+        ],
+      }],
+      [{
+        relation: 'main.dim_customers',
+        schema: 'main',
+        name: 'dim_customers',
+        source: 'runtime information_schema',
+        columns: [
+          { name: 'customer_id', type: 'INTEGER' },
+          { name: 'name', type: 'VARCHAR' },
+        ],
+      }],
+    );
+
+    expect(reconciled[0]?.columns).toEqual([
+      { name: 'customer_id', type: 'INTEGER', description: 'Customer key', sampleValues: undefined },
+      { name: 'name', type: 'VARCHAR', description: undefined, sampleValues: undefined },
+    ]);
+    expect(reconciled[0]?.source).toContain('verified against live runtime schema');
+    expect(reconciled[0]?.columnCompleteness).toBe('complete');
+  });
+
   it('keeps likely entity tables for value-led single-customer questions', () => {
     const rows = [
       { table_schema: 'dev', table_name: 'customers', column_name: 'customer_id', data_type: 'VARCHAR' },

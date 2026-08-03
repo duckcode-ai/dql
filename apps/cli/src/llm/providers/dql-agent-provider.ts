@@ -159,9 +159,10 @@ function createCertifiedFitConfirmation(provider: AgentProvider, signal?: AbortS
 
 /**
  * Decide whether the answer path needs a live warehouse-schema read up front.
- * Catalog-backed relations are already present in the context pack and the
- * generated lane has bounded schema tools for genuine gaps, so eager warehouse
- * scans are reserved for unresolved filters or an empty retrieved SQL context.
+ * Generated SQL must verify retrieved relation columns against the selected
+ * execution target: dbt/catalog metadata can legitimately be ahead of (or
+ * behind) the deployed warehouse. The runtime performs a bounded point lookup,
+ * not a broad warehouse scan, and falls back to the catalog if access is denied.
  */
 function shouldLoadSchemaContext(
   contextPack: LocalContextPack | undefined,
@@ -172,6 +173,11 @@ function shouldLoadSchemaContext(
   if (route === 'certified' || route === 'clarify' || route === 'conflict') return false;
   if (contextPack.questionPlan.requestedShape.filters.length > 0) return true;
 
+  // Relations are useful semantic context, but their physical columns still
+  // need verification on the active DuckDB, Snowflake, or other target before
+  // generated SQL is executed.
+  if (contextPack.allowedSqlContext.relations.length > 0) return true;
+
   const hasSemanticCandidates = hasSemanticLayer && contextPack.objects.some((object) =>
     object.objectType === 'metric'
     || object.objectType === 'dimension'
@@ -179,8 +185,7 @@ function shouldLoadSchemaContext(
     || object.objectType === 'semantic_model');
   if (hasSemanticCandidates) return false;
 
-  return contextPack.allowedSqlContext.relations.length === 0
-    && contextPack.allowedSqlContext.sourceBlockSql.length === 0;
+  return contextPack.allowedSqlContext.sourceBlockSql.length === 0;
 }
 
 function shouldSearchProjectFiles(contextPack: LocalContextPack | undefined): boolean {
@@ -423,11 +428,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             renderExtraContext(req, followUp),
             renderProjectSourceSearch(earlySourceSearch),
           ].filter((value): value is string => Boolean(value)).join('\n\n') || undefined;
-          // Catalog relations already carry the bounded column context needed by
-          // certified and semantic lanes. Touch the live warehouse only when the
-          // retrieved context proves it is necessary (unresolved filters or no
-          // usable relation). This also passes the prepared pack so the runtime
-          // never builds a second metadata context pack for the same question.
+          // Verify retrieved relation columns against the active execution
+          // target before generated SQL runs. The runtime limits this to a few
+          // named relations and reuses this prepared context pack.
           const schemaStartedAt = Date.now();
           if (req.getSchemaContext && shouldLoadSchemaContext(contextPack, Boolean(semanticLayer))) {
             emit({ kind: 'thinking', text: 'Inspecting the runtime schema needed to ground this answer.' });

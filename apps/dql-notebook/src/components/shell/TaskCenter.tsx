@@ -140,6 +140,15 @@ export function TaskCenter() {
                         : 'The saved draft is preserved for review or retry.'}
                   </div>
                 )}
+                {(operation.type === 'agent_run' || operation.type === 'app_ai_build') && (
+                  <div style={{ color: t.textMuted, fontSize: 9.5 }}>
+                    {active
+                      ? 'This continues while you work on another page.'
+                      : operation.status === 'succeeded'
+                        ? 'Completed in the background.'
+                        : 'Open the original surface to review or retry.'}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -152,5 +161,7 @@ export function TaskCenter() {
 function operationLabel(type: string): string {
   if (type === 'block_certification') return 'Block certification';
   if (type === 'project_refresh') return 'Project metadata refresh';
+  if (type === 'agent_run') return 'AI request';
+  if (type === 'app_ai_build') return 'App proposal';
   return type.replace(/_/g, ' ');
 }

@@ -37,6 +37,7 @@ import { Readable } from "node:stream";
 import {
   LocalOperationCoordinator,
   type LocalOperation,
+  type LocalOperationProgress,
 } from './local-operation-coordinator.js';
 import { ProjectRefreshCoordinator } from './project-refresh-coordinator.js';
 import {
@@ -4968,12 +4969,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const probeNamedRelationsForAgent = async (
     relations: string[],
     probeConnection?: ConnectionConfig,
+    verifyExecutionSchema = false,
   ): Promise<GroundingExpansionResult | undefined> => {
     const probeTarget = probeConnection ?? connection;
     if (!probeTarget) return undefined;
-    // Same operator switch that governs live value grounding: a deployment that
-    // wants zero live metadata traffic keeps it.
-    if (resolveAgentRuntimeValueGrounding(projectConfig).mode !== 'safe_automatic') return undefined;
+    // Named relation discovery remains behind the operator's live-grounding
+    // switch. Executable schema verification is different: it is a bounded,
+    // read-only metadata point lookup for relations already selected from dbt,
+    // and never reads row values or mutates the active target.
+    if (!verifyExecutionSchema && resolveAgentRuntimeValueGrounding(projectConfig).mode !== 'safe_automatic') return undefined;
     const sql = buildNamedRelationProbeSql(relations);
     if (!sql) return undefined;
 
@@ -5044,13 +5048,35 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     );
     const valueGrounding = resolveAgentRuntimeValueGrounding(projectConfig);
     if (catalogContext.length > 0) {
-      if (!schemaConnection || valueGrounding.mode !== 'safe_automatic') return catalogContext;
-      // The immutable dbt/DQL snapshot already owns schema discovery. A named
-      // row value must not turn a warm Ask into an information_schema scan over
-      // thousands of enterprise tables; only field-scoped value probes are live.
+      if (!schemaConnection) return catalogContext;
+      // dbt metadata is the semantic authority, but generated SQL must use the
+      // physical columns visible on THIS execution target. Verify only the few
+      // question-ranked relations with a bounded information_schema point lookup;
+      // this is read-only and never mutates DuckDB, Snowflake, or any other target.
+      let executionSchema = catalogContext;
+      try {
+        const live = await probeNamedRelationsForAgent(
+          catalogContext.slice(0, 4).map((table) => table.relation),
+          schemaConnection,
+          true,
+        );
+        if (live?.schemaContext?.length) {
+          executionSchema = reconcileAgentSchemaContextWithLive(
+            catalogContext,
+            live.schemaContext as AgentSchemaTable[],
+          );
+        }
+      } catch {
+        // Live verification is additive. Existing metadata remains available if
+        // the connection cannot expose information_schema to this user.
+      }
+      // The immutable dbt/DQL snapshot owns schema discovery. Live verification
+      // only confirms those named relations; row values remain governed by the
+      // separate allowlisted grounding policy below.
+      if (valueGrounding.mode !== 'safe_automatic') return executionSchema;
       const enriched = await enrichAgentSchemaContextWithValueMatches(
         question,
-        catalogContext,
+        executionSchema,
         executor,
         schemaConnection,
         valueGrounding.searchSafeColumns,
@@ -6448,7 +6474,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const writeAgentRunSse = (
     response: ServerResponse,
     event: string,
-    data: AgentRun | AgentRunEvent | { error: string } | { runId?: string; delta: string },
+    data: AgentRun | AgentRunEvent | { error: string } | { runId?: string; delta: string } | { runId?: string; operationId?: string },
   ) => {
     response.write(`event: ${event}\n`);
     response.write(`data: ${serializeJSON(data)}\n\n`);
@@ -7836,46 +7862,84 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const wantsStream = url.searchParams.get('stream') === '1' || url.searchParams.get('stream') === 'true';
         const runId = parsed.request.runId;
         const runController = new AbortController();
-        parsed.request.signal = AbortSignal.any([
-          runController.signal,
-          AbortSignal.timeout(agentRunDeadlineMs(parsed.request, process.env, getActiveProvider(projectRoot))),
-        ]);
         if (runId) activeAgentRunControllers.set(runId, runController);
+        let streamConnected = true;
+        res.on('close', () => { streamConnected = false; });
+        const writeStream = (
+          event: string,
+          data: AgentRun | AgentRunEvent | { error: string } | { runId?: string; delta: string } | { runId?: string; operationId?: string },
+        ) => {
+          if (!streamConnected || res.destroyed || res.writableEnded) return;
+          try { writeAgentRunSse(res as unknown as ServerResponse, event, data); } catch { streamConnected = false; }
+        };
+        if (wantsStream) {
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+          });
+        }
+        const operation = runId ? operationCoordinator.create({
+          type: 'agent_run',
+          scope: `agent-run:${runId}`,
+          resourceRevision: parsed.request.threadId,
+          message: 'AI request accepted. You can change pages while it runs.',
+          cancellable: true,
+        }) : null;
+        if (wantsStream) writeStream('agent-run-accepted', { runId, operationId: operation?.id });
+        let completedRun: AgentRun | undefined;
+        let runError: unknown;
         try {
+          const executeRun = async (
+            operationSignal?: AbortSignal,
+            report?: (progress: Partial<LocalOperationProgress>) => void,
+          ) => {
+            parsed.request!.signal = AbortSignal.any([
+              runController.signal,
+              ...(operationSignal ? [operationSignal] : []),
+              AbortSignal.timeout(agentRunDeadlineMs(parsed.request!, process.env, getActiveProvider(projectRoot))),
+            ]);
+            report?.({ phase: 'reasoning', progress: 8, message: 'Grounding the request and selecting the governed route.' });
+            try {
+              const run = await agentRunEngine.run(parsed.request!, (event) => {
+                if (wantsStream) writeStream('agent-run-event', event);
+                report?.({ phase: event.type, progress: 45, message: event.message });
+              }, (delta) => {
+                if (wantsStream) writeStream('agent-run-answer-delta', { runId: parsed.request!.runId, delta });
+              });
+              completedRun = run;
+              recordConversationTurn(conversationStore, parsed.request!.threadId, run);
+              return { runId: run.id, threadId: parsed.request!.threadId, status: run.status };
+            } catch (error) {
+              runError = error;
+              throw error;
+            }
+          };
+
+          if (operation) await operationCoordinator.run(operation.id, (signal, report) => executeRun(signal, report));
+          else await executeRun();
+          if (runError) throw runError;
+          if (!completedRun) throw new Error('The AI request ended before producing a stored run.');
           if (wantsStream) {
-            res.writeHead(200, {
-              'Content-Type': 'text/event-stream; charset=utf-8',
-              'Cache-Control': 'no-cache',
-              'Connection': 'keep-alive',
-              'X-Accel-Buffering': 'no',
-            });
-            const run = await agentRunEngine.run(parsed.request, (event) => {
-              writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-event', event);
-            }, (delta) => {
-              writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-answer-delta', { runId: parsed.request!.runId, delta });
-            });
-            recordConversationTurn(conversationStore, parsed.request.threadId, run);
-            // The terminal frame carried the whole stored run — 2.4 MB on a real
-            // question, of which the renderable part was ~3 KB. The rest was the
-            // same artifacts repeated four times over. The client renders from
-            // the projection and fetches the full record from the run-state
-            // route only if something needs it.
-            writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-complete', slimAgentRunForTransport(run));
-            res.end();
+            // The complete stored run stays in the run-state route; the live
+            // stream ships only the renderable transport projection.
+            writeStream('agent-run-complete', slimAgentRunForTransport(completedRun));
+            if (streamConnected && !res.writableEnded) res.end();
             return;
           }
-          const run = await agentRunEngine.run(parsed.request);
-          recordConversationTurn(conversationStore, parsed.request.threadId, run);
           res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ run }));
+          res.end(serializeJSON({ run: completedRun }));
         } finally {
           if (runId) activeAgentRunControllers.delete(runId);
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (res.headersSent) {
-          writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-error', { error: message });
-          res.end();
+          if (!res.destroyed && !res.writableEnded) {
+            writeAgentRunSse(res as unknown as ServerResponse, 'agent-run-error', { error: message });
+            res.end();
+          }
         } else {
           res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ error: message }));
@@ -10044,6 +10108,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           // questions. Throws when no provider is configured — propose degrades
           // gracefully by listing the gap instead.
           generateGovernedAnswer: (question, appContext) => generateAppBuildAnswerWithRepair(question, appContext),
+          queueOperation: <TResult>(
+            input: { type: string; scope: string; resourceRevision?: string; message?: string; cancellable?: boolean },
+            task: (signal: AbortSignal, report: (progress: Partial<LocalOperationProgress>) => void) => Promise<TResult>,
+          ) => {
+            const operation = operationCoordinator.create(input) as LocalOperation<TResult>;
+            void operationCoordinator.run(operation.id, task);
+            return operation;
+          },
+          scheduleProjectRefresh: (reason) => { scheduleProjectRefresh(reason); },
           verifyDashboardRun: ({ runId, appId, dashboardId, tileIds }) => {
             const evidence = dashboardRunEvidence.get(runId);
             if (!evidence || evidence.expiresAt < Date.now()) return { ok: false, error: 'The dashboard run receipt expired. Run the dashboard again.' };
@@ -28231,6 +28304,52 @@ function mergeAgentSchemaContexts(...contexts: AgentSchemaTable[][]): AgentSchem
     });
   }
   return Array.from(byRelation.values()).slice(0, 16);
+}
+
+function agentRelationMatchKey(relation: string): string {
+  return relation
+    .replace(/["`\[\]]/g, '')
+    .split('.')
+    .filter(Boolean)
+    .slice(-2)
+    .join('.')
+    .toLowerCase();
+}
+
+/**
+ * Keep dbt descriptions and semantic meaning, but make a complete live point
+ * lookup authoritative for executable column names on the selected connection.
+ * No fuzzy aliases are invented: a stale `customer_name` declaration disappears
+ * when the live relation exposes only `name`.
+ */
+export function reconcileAgentSchemaContextWithLive(
+  catalog: AgentSchemaTable[],
+  live: AgentSchemaTable[],
+): AgentSchemaTable[] {
+  const liveByRelation = new Map(
+    live
+      .filter((table) => table.columns.length > 0)
+      .map((table) => [agentRelationMatchKey(table.relation), table] as const),
+  );
+  return catalog.map((table) => {
+    const verified = liveByRelation.get(agentRelationMatchKey(table.relation));
+    if (!verified) return table;
+    const metadataColumns = new Map(table.columns.map((column) => [column.name.toLowerCase(), column] as const));
+    return {
+      ...table,
+      source: 'dbt metadata verified against live runtime schema',
+      columnCompleteness: 'complete',
+      columns: verified.columns.map((column) => {
+        const metadata = metadataColumns.get(column.name.toLowerCase());
+        return {
+          ...column,
+          type: column.type ?? metadata?.type,
+          description: metadata?.description,
+          sampleValues: metadata?.sampleValues,
+        };
+      }),
+    };
+  });
 }
 
 function mergeAgentSchemaSampleValues(snapshot: AgentSchemaTable[], enriched: AgentSchemaTable[]): AgentSchemaTable[] {

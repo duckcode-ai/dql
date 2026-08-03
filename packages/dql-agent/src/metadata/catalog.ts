@@ -394,6 +394,8 @@ export interface RuntimeSchemaTable {
   description?: string;
   columns: RuntimeSchemaColumn[];
   source?: string;
+  /** Complete means this request inspected every physical column on the target. */
+  columnCompleteness?: 'complete' | 'partial';
 }
 
 export interface RuntimeSchemaScope {

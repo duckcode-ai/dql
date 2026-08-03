@@ -133,6 +133,47 @@ describe('expandGroundingFromCatalog', () => {
     expect(allNames.some((name) => name.endsWith('supplies'))).toBe(true);
   });
 
+  it('keeps a complete execution-target schema authoritative during re-grounding', () => {
+    const pack = {
+      allowedSqlContext: {
+        relations: [{
+          relation: 'dev.dim_customers',
+          name: 'dim_customers',
+          source: 'dbt metadata',
+          columnCompleteness: 'partial',
+          columns: [{ name: 'customer_id' }, { name: 'customer_name' }],
+        }],
+        sourceBlockSql: [],
+      },
+    } as unknown as LocalContextPack;
+    const merged = applyGroundingExpansion(pack, [{
+      relation: 'dev.dim_customers',
+      name: 'dim_customers',
+      source: 'live execution target',
+      columnCompleteness: 'complete',
+      columns: [{ name: 'customer_id' }, { name: 'name' }],
+    }], {
+      relations: [{
+        relation: 'dev.dim_customers',
+        name: 'dim_customers',
+        source: 'expanded dbt metadata',
+        columnCompleteness: 'partial',
+        columns: [{ name: 'customer_name' }],
+      }],
+      schemaContext: [{
+        relation: 'dev.dim_customers',
+        name: 'dim_customers',
+        source: 'expanded dbt metadata',
+        columnCompleteness: 'partial',
+        columns: [{ name: 'customer_name' }],
+      }],
+      notes: ['stale catalog candidate'],
+    });
+
+    expect(merged.schemaContext[0]?.columnCompleteness).toBe('complete');
+    expect(merged.schemaContext[0]?.columns.map((column) => column.name)).toEqual(['customer_id', 'name']);
+  });
+
   it('still expands from a bare relation when no list is supplied', () => {
     const result = expandGroundingFromCatalog(catalog, {
       question: 'q',

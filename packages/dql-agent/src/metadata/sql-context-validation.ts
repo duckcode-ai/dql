@@ -339,12 +339,16 @@ function buildAllowedRelationLookup(
   dialect?: string,
 ): Map<string, MetadataAllowedSqlRelation> {
   const allowed = new Map<string, MetadataAllowedSqlRelation>();
-  const putAllowed = (entry: MetadataAllowedSqlRelation) => {
+  const putAllowed = (entry: MetadataAllowedSqlRelation, authoritativeColumns = false) => {
     for (const key of relationLookupKeys(entry.relation)) {
-      allowed.set(key, mergeAllowedRelation(allowed.get(key), entry));
+      allowed.set(key, authoritativeColumns
+        ? mergeAuthoritativeAllowedRelation(allowed.get(key), entry)
+        : mergeAllowedRelation(allowed.get(key), entry));
     }
     for (const key of relationLookupKeys(entry.name)) {
-      allowed.set(key, mergeAllowedRelation(allowed.get(key), entry));
+      allowed.set(key, authoritativeColumns
+        ? mergeAuthoritativeAllowedRelation(allowed.get(key), entry)
+        : mergeAllowedRelation(allowed.get(key), entry));
     }
   };
   for (const relation of contextPack?.allowedSqlContext?.relations ?? []) {
@@ -373,9 +377,36 @@ function buildAllowedRelationLookup(
       source: table.source ?? 'runtime schema context',
       columnCompleteness: 'complete',
       columns: table.columns,
-    });
+    }, true);
   }
   return allowed;
+}
+
+/**
+ * A complete runtime lookup owns executable column names for this request.
+ * Preserve semantic descriptions and samples only for names that still exist;
+ * never union stale catalog declarations back into the physical target schema.
+ */
+function mergeAuthoritativeAllowedRelation(
+  existing: MetadataAllowedSqlRelation | undefined,
+  incoming: MetadataAllowedSqlRelation,
+): MetadataAllowedSqlRelation {
+  if (!existing) return incoming;
+  const existingColumns = new Map(existing.columns.map((column) => [column.name.toLowerCase(), column] as const));
+  return {
+    ...incoming,
+    objectKey: incoming.objectKey ?? existing.objectKey,
+    columnCompleteness: 'complete',
+    columns: incoming.columns.map((column) => {
+      const metadata = existingColumns.get(column.name.toLowerCase());
+      return {
+        ...column,
+        type: column.type ?? metadata?.type,
+        description: column.description ?? metadata?.description,
+        sampleValues: Array.from(new Set([...(column.sampleValues ?? []), ...(metadata?.sampleValues ?? [])])).slice(0, 8),
+      };
+    }),
+  };
 }
 
 function sourceSqlReferencedColumns(

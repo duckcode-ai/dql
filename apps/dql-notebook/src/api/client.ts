@@ -1713,6 +1713,8 @@ export interface CreateAppResponse {
 }
 
 export interface GenerateAppRequest {
+  /** Durable client-generated identity used to resume a background proposal. */
+  sessionId?: string;
   prompt: string;
   domain?: string;
   owner?: string;
@@ -1893,7 +1895,7 @@ export interface AppBuildProposal {
 export interface AppAiBuildSession {
   id: string;
   /** 'proposed' = plan + proposal saved, no app files yet (awaiting confirm). */
-  status: 'proposed' | 'ready' | 'error';
+  status: 'building' | 'proposed' | 'ready' | 'error';
   createdAt: string;
   updatedAt: string;
   prompt: string;
@@ -5579,6 +5581,18 @@ export const api = {
     }
   },
 
+  /** Durable proposal request. The accepted operation continues across page navigation. */
+  async proposeAppAiBuildInBackground(input: GenerateAppRequest): Promise<{
+    ok: true;
+    sessionId: string;
+    operation: LocalOperation<{ sessionId: string; status: AppAiBuildSession['status']; appId?: string; dashboardId?: string | null }>;
+  }> {
+    return request('/api/apps/ai-builds/propose-background', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
   /** Two-phase build, step 2: the user confirmed — create the app from the selection. */
   async commitAppAiBuild(sessionId: string, input: {
     selectedTileIds?: string[];
@@ -5607,6 +5621,10 @@ export const api = {
     } catch {
       return null;
     }
+  },
+
+  async deleteApp(id: string): Promise<{ ok: true; id: string; deletedPath: string; trashPath: string }> {
+    return request(`/api/apps/${encodeURIComponent(id)}`, { method: 'DELETE' });
   },
 
   async attachAppNotebook(appId: string, input: {

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { resolveAgentFilterValueBindings, type AgentSchemaTable } from './answer-loop.js';
+import {
+  resolveAgentFilterValueBindings,
+  schemaContextWithAllowedSqlContext,
+  type AgentSchemaTable,
+} from './answer-loop.js';
 
 const schema: AgentSchemaTable[] = [{
   relation: 'dev.customers',
@@ -11,6 +15,35 @@ const schema: AgentSchemaTable[] = [{
 }];
 
 describe('stored data-value resolution', () => {
+  it('does not reintroduce stale context-pack columns after a complete live schema lookup', () => {
+    const merged = schemaContextWithAllowedSqlContext([{
+      relation: 'jaffle_shop.main.dim_customers',
+      name: 'dim_customers',
+      source: 'dbt metadata verified against live runtime schema',
+      columnCompleteness: 'complete',
+      columns: [
+        { name: 'customer_id', type: 'VARCHAR' },
+        { name: 'name', type: 'VARCHAR' },
+      ],
+    }], {
+      allowedSqlContext: {
+        relations: [{
+          relation: 'jaffle_shop.main.dim_customers',
+          name: 'dim_customers',
+          source: 'dbt manifest',
+          columns: [
+            { name: 'customer_id', description: 'Customer key' },
+            { name: 'customer_name', description: 'Stale declared name' },
+          ],
+        }],
+      },
+      retrievalDiagnostics: {},
+    } as never);
+
+    expect(merged[0]?.columns.map((column) => column.name)).toEqual(['customer_id', 'name']);
+    expect(merged[0]?.columns[0]?.description).toBe('Customer key');
+  });
+
   it('AGT-005 resolves a unique bounded typo without turning it into metadata tokens', () => {
     expect(resolveAgentFilterValueBindings('Melissa Lopex', schema)).toEqual([{
       column: 'customer_name',

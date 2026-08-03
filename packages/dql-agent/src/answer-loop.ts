@@ -47,7 +47,7 @@ import { isTrustedConversationTurn } from './conversation/turn-trust.js';
 import { renderStructuredConversationSummary } from './conversation/rolling-summary.js';
 import { detectResultSetOperation, computeResultSetOperation } from './conversation/result-ops.js';
 import { classifyGovernedQueryShape } from './semantic-bridge/query-shape.js';
-import type { LocalContextPack, MetadataAgentIntent, MetadataRouteDecision } from './metadata/catalog.js';
+import type { LocalContextPack, MetadataAgentIntent, MetadataRouteDecision, RuntimeSchemaTable } from './metadata/catalog.js';
 import { domainContextSearchDomains, type DomainContextEnvelope } from './domain-context.js';
 import type { GeneratedDraftBlock, GeneratedDraftSourceDqlArtifact } from './metadata/drafts.js';
 import { deriveGeneratedDraftSlug, renderGeneratedSqlDqlArtifact } from './metadata/drafts.js';
@@ -791,6 +791,8 @@ export interface AgentSchemaTable {
   description?: string;
   columns: AgentSchemaColumn[];
   source?: string;
+  /** A complete live lookup is authoritative for executable column names. */
+  columnCompleteness?: 'partial' | 'complete';
   /** Optional metadata-context rank; lower is better. Used to preserve catalog relation ordering. */
   selectionRank?: number;
   selectionScore?: number;
@@ -3659,6 +3661,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         `Your SQL was rejected before execution: ${contextValidation.error}`,
         formatOffendingValidationToken(contextValidation.offending),
         formatValidationWarningsForPrompt(contextValidation.warnings),
+        renderExecutionSchemaForRepair(contextLedger.schemaContext),
         renderRequestedShapeForRepair(questionPlan),
         'For every required grouping alias, select the best matching inspected business column, project it with that exact alias, and include the same expression in GROUP BY.',
         'When the warehouse uses a different physical name (for example a location field for a requested region), keep the inspected physical column and alias it to the requested business name. Do not silently drop the grouping.',
@@ -4266,6 +4269,16 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       // `semantic_metric` route (spec 17, part C).
       _semanticMetricMatch: governedMetricAnswer ? semanticMetricMatch ?? undefined : undefined,
   };
+}
+
+function renderExecutionSchemaForRepair(schemaContext: RuntimeSchemaTable[]): string {
+  const tables = schemaContext
+    .filter((table) => table.columns.length > 0)
+    .slice(0, 12)
+    .map((table) => `${table.relation}: ${table.columns.slice(0, 60).map((column) => column.name).join(', ')}`);
+  return tables.length > 0
+    ? `Current execution-target columns (authoritative for this repair):\n${tables.join('\n')}`
+    : 'No execution-target columns were available; do not invent a replacement column.';
 }
 
 function trimResultToRequestedTopN(result: AgentResultPayload, plan: AnalysisQuestionPlan): AgentResultPayload {
@@ -6784,7 +6797,7 @@ function tableEntityTokens(table: AgentSchemaTable): Set<string> {
   return tokens;
 }
 
-function schemaContextWithAllowedSqlContext(
+export function schemaContextWithAllowedSqlContext(
   schemaContext: AgentSchemaTable[],
   contextPack: LocalContextPack | undefined,
 ): AgentSchemaTable[] {
@@ -6828,6 +6841,10 @@ function schemaContextWithAllowedSqlContext(
     for (const column of relation.columns) {
       const existingColumn = columns.get(column.name.toLowerCase());
       if (!existingColumn) {
+        // The context pack is the semantic/retrieval snapshot, but it must not
+        // put a stale dbt declaration back into a relation whose physical
+        // columns were completely verified on this request's execution target.
+        if (existing.columnCompleteness === 'complete') continue;
         existing.columns.push({
           name: column.name,
           type: column.type,

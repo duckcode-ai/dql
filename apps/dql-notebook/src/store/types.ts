@@ -1502,6 +1502,7 @@ export type NotebookAction =
       experience?: AppWorkspaceExperience;
       section?: AppWorkspaceSection;
     }
+  | { type: 'CLOSE_APP' }
   | { type: 'OPEN_DASHBOARD'; dashboardId: string }
   | { type: 'SET_APP_WORKSPACE_STATE'; experience?: AppWorkspaceExperience; section?: AppWorkspaceSection }
   | { type: 'SET_ACTIVE_PERSONA'; persona: ActivePersona | null }

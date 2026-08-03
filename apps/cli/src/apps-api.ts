@@ -37,6 +37,7 @@ import {
   type LocalAppInvestigationIntent,
   type LocalAppInvestigationReportSection,
 } from '@duckcodeailabs/dql-project';
+import type { LocalOperation, LocalOperationProgress } from './local-operation-coordinator.js';
 
 interface Ctx {
   req: IncomingMessage;
@@ -59,6 +60,11 @@ interface Ctx {
   verifyDashboardRun?: (input: { runId: string; appId: string; dashboardId: string; tileIds: string[] }) =>
     | { ok: true; snapshotId: string; resultFingerprint: string }
     | { ok: false; error: string };
+  queueOperation?: <TResult>(
+    input: { type: string; scope: string; resourceRevision?: string; message?: string; cancellable?: boolean },
+    task: (signal: AbortSignal, report: (progress: Partial<LocalOperationProgress>) => void) => Promise<TResult>,
+  ) => LocalOperation<TResult>;
+  scheduleProjectRefresh?: (reason: string) => void;
 }
 
 /** Runtime hooks the two-phase app build can use during propose (all optional —
@@ -185,6 +191,41 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
   }
 
   // Two-phase AI build: propose (plan + confirmable content list, no files) …
+  if (req.method === 'POST' && path === '/api/apps/ai-builds/propose-background') {
+    try {
+      const body = await readJson<AppGenerateRequest>(req);
+      if (!ctx.queueOperation) {
+        sendJson(res, 501, { ok: false, error: 'Background App builds are unavailable in this runtime.' });
+        return true;
+      }
+      const sessionId = appAiBuildSessionId(body.sessionId);
+      const operation = ctx.queueOperation(
+        {
+          type: 'app_ai_build',
+          scope: `app-build:${sessionId}`,
+          resourceRevision: createHash('sha256').update(JSON.stringify(body)).digest('hex'),
+          message: body.existingAppId ? 'App page proposal queued.' : 'App proposal queued.',
+          cancellable: true,
+        },
+        async (signal, report) => {
+          report({ phase: 'planning', progress: 8, message: 'Planning the governed App proposal.' });
+          if (signal.aborted) throw Object.assign(new Error('App build cancelled.'), { code: 'OPERATION_CANCELLED' });
+          const session = await proposeAppAiBuild(projectRoot, { ...body, sessionId }, {
+            generateGovernedAnswer: ctx.generateGovernedAnswer,
+          });
+          if (signal.aborted) throw Object.assign(new Error('App build cancelled.'), { code: 'OPERATION_CANCELLED' });
+          if (session.status === 'error') throw Object.assign(new Error(session.error ?? 'App proposal failed.'), { code: 'APP_BUILD_FAILED' });
+          report({ phase: 'review_ready', progress: 96, message: 'Build Brief ready for review.' });
+          return { sessionId: session.id, status: session.status, appId: session.appId, dashboardId: session.dashboardId };
+        },
+      );
+      sendJson(res, 202, { ok: true, operation, sessionId });
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: (err as Error).message });
+    }
+    return true;
+  }
+
   if (req.method === 'POST' && path === '/api/apps/ai-builds/propose') {
     try {
       const body = await readJson<AppGenerateRequest>(req);
@@ -797,6 +838,21 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
 
   // /api/apps/:id  — single App with dashboards summary
   m = path.match(/^\/api\/apps\/([^/]+)$/);
+  if (m && req.method === 'DELETE') {
+    const id = decodeURIComponent(m[1]);
+    try {
+      const result = deleteAppPackage(projectRoot, id);
+      if (!result.ok) {
+        sendJson(res, result.status, { ok: false, error: result.error });
+        return true;
+      }
+      ctx.scheduleProjectRefresh?.('app-deleted');
+      sendJson(res, 200, result);
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: (err as Error).message });
+    }
+    return true;
+  }
   if (m && req.method === 'GET') {
     const id = m[1];
     const result = loadAppById(projectRoot, id);
@@ -1014,6 +1070,8 @@ interface AppCreateRequest {
 }
 
 interface AppGenerateRequest {
+  /** Client-generated durable identity used to resume a background proposal. */
+  sessionId?: string;
   prompt?: string;
   domain?: string;
   owner?: string;
@@ -1033,7 +1091,7 @@ interface AppGenerateRequest {
 interface AppAiBuildSession {
   id: string;
   /** 'proposed' = plan + proposal saved, NO app files written yet (awaiting confirm). */
-  status: 'proposed' | 'ready' | 'error';
+  status: 'building' | 'proposed' | 'ready' | 'error';
   createdAt: string;
   updatedAt: string;
   prompt: string;
@@ -1517,7 +1575,7 @@ export async function createAppAiBuildSession(
   input: AppGenerateRequest,
 ): Promise<AppAiBuildSession> {
   const now = new Date().toISOString();
-  const id = `app_build_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const id = appAiBuildSessionId(input.sessionId);
   const selectedBlockIds = unique((input.selectedBlockIds ?? []).map(cleanString).filter(Boolean));
   const base: AppAiBuildSession = {
     id,
@@ -1840,11 +1898,11 @@ export async function proposeAppAiBuild(
   hooks?: AppBuildHooks,
 ): Promise<AppAiBuildSession> {
   const now = new Date().toISOString();
-  const id = `app_build_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const id = appAiBuildSessionId(input.sessionId);
   const selectedBlockIds = unique((input.selectedBlockIds ?? []).map(cleanString).filter(Boolean));
   const base: AppAiBuildSession = {
     id,
-    status: 'proposed',
+    status: 'building',
     createdAt: now,
     updatedAt: now,
     prompt: cleanString(input.prompt),
@@ -1867,6 +1925,9 @@ export async function proposeAppAiBuild(
     writeAppAiBuildSession(projectRoot, session);
     return session;
   }
+  // Persist the durable identity before planning or provider work begins. The
+  // browser can leave this page immediately and recover the same session later.
+  writeAppAiBuildSession(projectRoot, base);
   const existingApp = base.inputs.existingAppId ? loadAppById(projectRoot, base.inputs.existingAppId) : null;
   if (base.inputs.existingAppId && !existingApp) {
     const session = { ...base, status: 'error' as const, error: `App "${base.inputs.existingAppId}" not found.` };
@@ -1937,6 +1998,7 @@ export async function proposeAppAiBuild(
       .digest('hex');
     const session: AppAiBuildSession = {
       ...base,
+      status: 'proposed',
       appId: plan.appId,
       dashboardId: plan.pages[0]?.id ?? null,
       plan,
@@ -3399,6 +3461,41 @@ function promoteSharedDashboardItem(item: DashboardGridItem): DashboardGridItem 
     ...(display ? { display } : {}),
     trustState,
     reviewStatus,
+  };
+}
+
+export function deleteAppPackage(
+  projectRoot: string,
+  id: string,
+):
+  | { ok: true; id: string; deletedPath: string; trashPath: string }
+  | { ok: false; status: 400 | 404; error: string } {
+  const cleanId = cleanString(id);
+  if (!cleanId || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(cleanId)) {
+    return { ok: false, status: 400, error: 'A valid App id is required.' };
+  }
+  const loaded = loadAppById(projectRoot, cleanId);
+  if (!loaded) return { ok: false, status: 404, error: `App "${cleanId}" not found.` };
+
+  const relativeAppDir = relative(projectRoot, loaded.appDir).replaceAll('\\', '/');
+  const isProjectApp = /^apps\/[^/]+$/.test(relativeAppDir);
+  const isDomainApp = /^domains\/(?:[^/]+\/)*apps\/[^/]+$/.test(relativeAppDir);
+  if ((!isProjectApp && !isDomainApp) || relativeAppDir.startsWith('../')) {
+    return { ok: false, status: 400, error: 'DQL refused to delete an App outside this project.' };
+  }
+
+  const trashRoot = join(projectRoot, '.dql', 'trash', 'apps');
+  mkdirSync(trashRoot, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  let trashDir = join(trashRoot, `${stamp}-${cleanId}`);
+  let suffix = 2;
+  while (existsSync(trashDir)) trashDir = join(trashRoot, `${stamp}-${cleanId}-${suffix++}`);
+  renameSync(loaded.appDir, trashDir);
+  return {
+    ok: true,
+    id: cleanId,
+    deletedPath: relativeAppDir,
+    trashPath: relative(projectRoot, trashDir).replaceAll('\\', '/'),
   };
 }
 
@@ -5689,6 +5786,15 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function cleanString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function appAiBuildSessionId(requested?: string): string {
+  const clean = cleanString(requested);
+  if (clean) {
+    if (!/^app_build_[a-z0-9_:-]+$/i.test(clean)) throw new Error('Invalid App build session id.');
+    return clean;
+  }
+  return `app_build_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function stringArray(value: unknown): string[] | undefined {
