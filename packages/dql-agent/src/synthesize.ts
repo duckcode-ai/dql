@@ -223,7 +223,58 @@ function numericCell(value: unknown): number | undefined {
   return undefined;
 }
 
+const BUSINESS_ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const BUSINESS_ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?$/;
+const BUSINESS_TIME_RE = /^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?Z?$/;
+const BUSINESS_TEMPORAL_COLUMN_RE = /(?:^|_)(?:date|day|month|quarter|year|time|timestamp|daily|weekly|monthly|quarterly|yearly|hourly)(?:_|$)|_(?:at|on)$/i;
+const BUSINESS_MONTH_COLUMN_RE = /(?:^|_)(?:month|monthly)(?:_|$)/i;
+const BUSINESS_YEAR_COLUMN_RE = /(?:^|_)(?:year|yearly)(?:_|$)/i;
+
+function formatBusinessTemporalValue(column: string, value: unknown): string | undefined {
+  let date: Date | undefined;
+  let includesDate = true;
+  if (value instanceof Date) {
+    date = value;
+  } else if (typeof value === 'string') {
+    const text = value.trim();
+    const timeOnly = BUSINESS_TIME_RE.exec(text);
+    if (timeOnly && BUSINESS_TEMPORAL_COLUMN_RE.test(column)) {
+      const hour = Number(timeOnly[1]);
+      const minute = Number(timeOnly[2]);
+      const second = Number(timeOnly[3] ?? 0);
+      if (hour > 23 || minute > 59 || second > 59) return undefined;
+      date = new Date(Date.UTC(2000, 0, 1, hour, minute, second));
+      includesDate = false;
+    } else if (BUSINESS_ISO_DATE_RE.test(text)) {
+      date = new Date(`${text}T00:00:00Z`);
+    } else if (BUSINESS_ISO_TIMESTAMP_RE.test(text)) {
+      const hasTimeZone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(text);
+      date = new Date(hasTimeZone ? text : `${text}Z`);
+    }
+  }
+  if (!date || Number.isNaN(date.getTime())) return undefined;
+  if (!includesDate) {
+    return new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' }).format(date);
+  }
+  if (BUSINESS_MONTH_COLUMN_RE.test(column)) {
+    return new Intl.DateTimeFormat('en-US', { year: 'numeric', month: 'short', timeZone: 'UTC' }).format(date);
+  }
+  if (BUSINESS_YEAR_COLUMN_RE.test(column)) {
+    return new Intl.DateTimeFormat('en-US', { year: 'numeric', timeZone: 'UTC' }).format(date);
+  }
+  const midnightUtc = date.getUTCHours() === 0 && date.getUTCMinutes() === 0 && date.getUTCSeconds() === 0;
+  return new Intl.DateTimeFormat('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    ...(midnightUtc ? {} : { hour: 'numeric', minute: '2-digit' }),
+    timeZone: 'UTC',
+  }).format(date);
+}
+
 function formatBusinessValue(column: string, value: unknown, format?: SemanticDisplayFormat): string {
+  const temporal = formatBusinessTemporalValue(column, value);
+  if (temporal) return temporal;
   const numeric = numericCell(value);
   if (numeric === undefined) return formatCell(value).replace(/_/g, " ");
   if (format) {
@@ -250,8 +301,8 @@ function formatBusinessValue(column: string, value: unknown, format?: SemanticDi
     }
   }
   const isCount = /(?:^|_)(?:count|orders?|customers?|accounts?|users?|products?|items?|units?|quantity|rank|position|days?|months?|years?|distinct)(?:_|$)/i.test(column);
-  const isPercent = /(?:^|_)(?:percent|percentage|pct|ratio|share|conversion|churn|retention|utilization)(?:_|$)|(?:^|_)margin(?:_|$)/i.test(column);
-  const isCurrency = /(?:^|_)(?:revenue|sales|spend|amount|price|cost|profit|income|expense|balance|budget|bookings|arr|mrr|gmv|fee|fees|charge|charges|tax|value)(?:_|$)/i.test(column);
+  const isPercent = /(?:^|_)(?:percent|percentage|pct|ratio|share|conversion|churn|retention|utilization)(?:_|$)/i.test(column);
+  const isCurrency = /(?:^|_)(?:revenue|sales|spend|amount|price|cost|profit|margin|income|expense|balance|budget|bookings|arr|mrr|gmv|fee|fees|charge|charges|tax|value)(?:_|$)/i.test(column);
   if (isCount) return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(numeric);
   if (isPercent) {
     const normalized = Math.abs(numeric) <= 1 ? numeric : numeric / 100;
@@ -318,6 +369,15 @@ function businessRowLabel(
       && row[column] !== null
       && row[column] !== undefined
       && String(row[column]).trim().length > 0),
+    ...(/(?:^|_)(?:date|day|month|quarter|year|time|timestamp|daily|weekly|monthly|quarterly|yearly)(?:_|$)|_(?:at|on)$/i.test(identityColumn)
+      ? preview.columns.filter((column) =>
+          column !== identityColumn
+          && /(?:^|_)(?:type|status|category|segment|channel)(?:_|$)/i.test(column)
+          && !isTechnicalColumn(column)
+          && row[column] !== null
+          && row[column] !== undefined
+          && String(row[column]).trim().length > 0)
+      : []),
   ].slice(0, 2);
   return identityColumns
     .map((column) => formatBusinessValue(column, row[column], formats?.[column]))

@@ -24,7 +24,9 @@ let analyticalInspectorSections: typeof UnifiedAgentRunPanelModule.analyticalIns
 let analyticalRepairActionLabels: typeof UnifiedAgentRunPanelModule.analyticalRepairActionLabels;
 let askInspectorTabsForState: typeof UnifiedAgentRunPanelModule.askInspectorTabsForState;
 let threadItemsFromTurns: typeof UnifiedAgentRunPanelModule.threadItemsFromTurns;
+let replacePresentedAgentRun: typeof UnifiedAgentRunPanelModule.replacePresentedAgentRun;
 let selectAgentExecutionConnection: typeof UnifiedAgentRunPanelModule.selectAgentExecutionConnection;
+let appPinDestinationLabel: typeof UnifiedAgentRunPanelModule.appPinDestinationLabel;
 
 describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
   beforeAll(async () => {
@@ -51,7 +53,14 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     analyticalRepairActionLabels = module.analyticalRepairActionLabels;
     askInspectorTabsForState = module.askInspectorTabsForState;
     threadItemsFromTurns = module.threadItemsFromTurns;
+    replacePresentedAgentRun = module.replacePresentedAgentRun;
     selectAgentExecutionConnection = module.selectAgentExecutionConnection;
+    appPinDestinationLabel = module.appPinDestinationLabel;
+  });
+
+  it('names the exact App page used by the added-result confirmation', () => {
+    expect(appPinDestinationLabel('Customer Health', 'Executive overview')).toBe('Customer Health › Executive overview');
+    expect(appPinDestinationLabel('Customer Health')).toBe('Customer Health');
   });
 
   it('keeps Ask on an explicit valid connection and falls back to the server default', () => {
@@ -60,6 +69,42 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     expect(selectAgentExecutionConnection(names, 'analytics', 'deleted-connection')).toBe('analytics');
     expect(selectAgentExecutionConnection(names, 'missing-default')).toBe('analytics');
     expect(selectAgentExecutionConnection([], 'analytics')).toBeUndefined();
+  });
+
+  it('promotes a repaired run into the presented transcript for inspector and follow-up actions', () => {
+    const failed = { id: 'run_failed', status: 'blocked', artifacts: [] } as never;
+    const repaired = {
+      id: 'run_failed:repair:1',
+      question: 'Top customers',
+      status: 'needs_review',
+      artifacts: [{ id: 'repaired_artifact', kind: 'answer', payload: { result: { columns: ['name'], rows: [{ name: 'Ada' }], rowCount: 1 } } }],
+    } as never;
+    const items = replacePresentedAgentRun([
+      { kind: 'user', id: 'question', text: 'Top customers' },
+      { kind: 'run', id: 'run_failed', run: failed },
+    ], 'run_failed', repaired);
+    expect(items[1]).toMatchObject({ kind: 'run', id: 'run_failed:repair:1', run: repaired });
+    expect(buildConversationContext(items as ConversationThreadItem[])).toMatchObject({
+      activeTurnId: 'run_failed:repair:1',
+      sourceAnswerId: 'run_failed:repair:1',
+      resultColumns: ['name'],
+      resultRowsSample: [{ name: 'Ada' }],
+    });
+  });
+
+  it('collapses the immutable failed turn when a persisted repair derivation exists', () => {
+    const turns = [
+      { id: 'turn_failed', threadId: 'thread', agentRunId: 'run_failed', seq: 1, question: 'Top customers', createdAt: '2026-08-03T00:00:00Z' },
+      { id: 'turn_repaired', threadId: 'thread', agentRunId: 'run_repaired', seq: 2, question: 'Top customers', createdAt: '2026-08-03T00:00:01Z' },
+    ] as never;
+    const runs = [
+      { id: 'run_failed', artifacts: [] },
+      { id: 'run_repaired', artifacts: [], derivation: { kind: 'analytical_repair', sourceRunId: 'run_failed' } },
+    ] as never;
+    const items = threadItemsFromTurns(turns, runs);
+    expect(items).toHaveLength(2);
+    expect(items[0]).toMatchObject({ kind: 'user', text: 'Top customers' });
+    expect(items[1]).toMatchObject({ kind: 'run', id: 'run_repaired' });
   });
 
   it('UI-012 exposes the complete seven-section analytical inspector for success and failure payloads', () => {
@@ -77,6 +122,19 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
         status: 'ambiguous',
       },
     })).toBe(true);
+    const repaired = {
+      diagnosticReceipt: {
+        phase: 'run.completed',
+        repair: { sourceRunId: 'failed-run', targetPreserved: true },
+        execution: { rowCount: 2, resultFingerprint: 'result-2' },
+      },
+      result: { columns: ['name'], rows: [{ name: 'Ada' }, { name: 'Grace' }] },
+    };
+    expect(hasAnalyticalInspectorContract(repaired)).toBe(true);
+    expect(analyticalInspectorContract(repaired)).toMatchObject({
+      diagnostic: { phase: 'run.completed', execution: { rowCount: 2 } },
+      failure: undefined,
+    });
     expect(hasAnalyticalInspectorContract({
       diagnosticReceipt: {
         version: 1,

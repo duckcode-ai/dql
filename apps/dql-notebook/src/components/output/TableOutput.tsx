@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, type CSSProperties } from 'react';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
 import type { QueryResult } from '../../store/types';
 import { inferColumnKind, type ColumnKind } from '../../utils/column-kind';
@@ -7,6 +7,8 @@ import { formatDisplayValue } from '../../utils/value-format';
 interface TableOutputProps {
   result: QueryResult;
   themeMode: ThemeMode;
+  /** Lets full-screen result viewers use the available vertical space. */
+  maxHeight?: CSSProperties['maxHeight'];
 }
 
 const PAGE_SIZES = [25, 50, 100, 500] as const;
@@ -95,7 +97,7 @@ function SortArrow({ dir, color }: { dir: SortDir; color: string }) {
 
 // ─── TableOutput ──────────────────────────────────────────────────────────────
 
-export function TableOutput({ result, themeMode }: TableOutputProps) {
+export function TableOutput({ result, themeMode, maxHeight = 440 }: TableOutputProps) {
   const t = themes[themeMode];
   const [hoveredRow, setHoveredRow] = useState<number | null>(null);
   const [sortCol, setSortCol] = useState<string | null>(null);
@@ -237,7 +239,7 @@ export function TableOutput({ result, themeMode }: TableOutputProps) {
 
       {/* Table */}
       <div
-        style={{ maxHeight: 440, overflow: 'auto', position: 'relative' }}
+        style={{ maxHeight, overflow: 'auto', position: 'relative' }}
         onScroll={(e) => setScrolled((e.target as HTMLDivElement).scrollTop > 0)}
       >
         <table style={{

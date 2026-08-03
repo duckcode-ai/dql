@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { ErrorOutput } from '../output/ErrorOutput';
 import type { Cell } from '../../store/types';
-import { canBackgroundRepairNotebookCell } from '../../utils/notebook-background-repair';
+import { canBackgroundRepairNotebookCell, notebookRepairErrorMessage } from '../../utils/notebook-background-repair';
 
 describe('ErrorOutput', () => {
   it('offers bounded background repair without starting Notebook AI', () => {
@@ -56,5 +56,15 @@ describe('ErrorOutput', () => {
       type: 'dql',
       content: 'block revenue { query = """SELECT * FROM source::analytics.main.orders""" }',
     }))).toBe(true);
+    expect(canBackgroundRepairNotebookCell(cell({
+      type: 'dql',
+      content: 'block revenue { query """SELECT * FROM source::analytics.main.orders""" }',
+    }))).toBe(true);
+  });
+
+  it('shows the bounded repair cause instead of replacing it with a generic failure', () => {
+    expect(notebookRepairErrorMessage(new Error('Column customer_name does not exist on dim_customers.')))
+      .toBe('Column customer_name does not exist on dim_customers.');
+    expect(notebookRepairErrorMessage(new Error(`warehouse error ${'x'.repeat(500)}`))).toHaveLength(420);
   });
 });

@@ -1596,7 +1596,7 @@ export interface DashboardDocumentResponse {
 export interface AppExecutionRepairTrace {
   version: 1;
   status: 'repaired' | 'failed';
-  source: 'query_generator' | 'semantic_query' | 'draft_analysis';
+  source: 'query_generator' | 'semantic_query' | 'draft_analysis' | 'certified_block';
   mode?: 'deterministic' | 'ai';
   attemptedAt: string;
   originalFailure: string;
@@ -1604,6 +1604,18 @@ export interface AppExecutionRepairTrace {
   repairedSqlFingerprint?: string;
   approvalEligible: false;
   message: string;
+}
+
+export interface DashboardTileArtifact {
+  version: 1;
+  sourceKind: 'certified_block' | 'semantic_query' | 'draft_analysis' | 'ai_pin';
+  name: string;
+  sourcePath?: string;
+  dql?: string;
+  sql?: string;
+  trustState: 'certified' | 'review_required';
+  explanation?: string[];
+  executionTarget?: { target: 'local' } | { target: 'connection'; connectionName?: string };
 }
 
 export interface DashboardRunResponse {
@@ -1645,6 +1657,7 @@ export interface DashboardRunResponse {
     };
     citation?: { kind: string; name: string; path?: string };
     repair?: AppExecutionRepairTrace;
+    artifact?: DashboardTileArtifact;
     error?: string;
   }>;
 }
@@ -6077,6 +6090,17 @@ export const api = {
       return await request<DashboardRunResponse>(
         `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/run`,
         { method: 'POST', body: JSON.stringify({ variables: variables ?? {} }) },
+      );
+    } catch {
+      return null;
+    }
+  },
+
+  async retryDashboardTile(appId: string, dashboardId: string, tileId: string, variables?: Record<string, unknown>): Promise<DashboardRunResponse | null> {
+    try {
+      return await request<DashboardRunResponse>(
+        `/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(dashboardId)}/run`,
+        { method: 'POST', body: JSON.stringify({ variables: variables ?? {}, tileId }) },
       );
     } catch {
       return null;

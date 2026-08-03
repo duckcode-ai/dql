@@ -43,4 +43,29 @@ describe('AiSidePanel', () => {
     expect(markup).toContain('aria-label="Return AI panel to standard width"');
     expect(markup).toContain('aria-label="Close Block AI"');
   });
+
+  it('exposes an accessible resize handle when a surface supports wide results', () => {
+    const markup = renderToStaticMarkup(
+      <AiSidePanel
+        t={themes.paper}
+        title="App AI"
+        subtitle="Customer overview"
+        resizable
+        fitViewportHeight
+        heightResizable
+        onClose={vi.fn()}
+      >
+        <div>Wide table</div>
+      </AiSidePanel>,
+    );
+
+    expect(markup).toContain('data-resizable="true"');
+    expect(markup).toContain('role="separator"');
+    expect(markup).toContain('aria-label="Resize App AI"');
+    expect(markup).toContain('aria-orientation="vertical"');
+    expect(markup).toContain('data-height-resizable="true"');
+    expect(markup).toContain('data-height-mode="viewport"');
+    expect(markup).toContain('aria-label="Resize App AI height"');
+    expect(markup).toContain('aria-orientation="horizontal"');
+  });
 });

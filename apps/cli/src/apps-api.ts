@@ -81,7 +81,7 @@ export interface AppBuildHooks {
 export interface AppExecutionRepairTrace {
   version: 1;
   status: 'repaired' | 'failed';
-  source: 'query_generator' | 'semantic_query' | 'draft_analysis';
+  source: 'query_generator' | 'semantic_query' | 'draft_analysis' | 'certified_block';
   mode?: 'deterministic' | 'ai';
   attemptedAt: string;
   originalFailure: string;

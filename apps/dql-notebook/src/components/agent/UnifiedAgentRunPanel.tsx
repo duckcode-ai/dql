@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { normalizeDqlArtifactReference } from '@duckcodeailabs/dql-core/artifacts';
 import {
   ArrowRight,
@@ -19,7 +20,9 @@ import {
   Lightbulb,
   ListTree,
   Loader2,
+  Maximize2,
   MoreHorizontal,
+  Minimize2,
   Pencil,
   Plus,
   RefreshCw,
@@ -71,6 +74,13 @@ import { addAskResultFilter, askArtifactStateKey, askResultFilterCandidates } fr
 export type ThreadItem =
   | { kind: 'user'; id: string; text: string }
   | { kind: 'run'; id: string; run: AgentRun };
+
+/** Replace only the failed presentation; the immutable source remains in the run store. */
+export function replacePresentedAgentRun(items: ThreadItem[], sourceRunId: string, repairedRun: AgentRun): ThreadItem[] {
+  return items.map((item) => item.kind === 'run' && item.run.id === sourceRunId
+    ? { kind: 'run', id: repairedRun.id, run: repairedRun }
+    : item);
+}
 
 /**
  * Build the compact client history used when a persisted server thread is not
@@ -420,6 +430,18 @@ export function UnifiedAgentRunPanel({
     }
   }, [resetStreamingAnswer]);
 
+  const adoptRepairedRun = useCallback((sourceRunId: string, repairedRun: AgentRun) => {
+    setItems((current) => replacePresentedAgentRun(current, sourceRunId, repairedRun));
+    setInspector((current) => {
+      if (!current || current.runId !== sourceRunId) return current;
+      const artifact = repairedRun.artifacts[0];
+      return artifact ? { runId: repairedRun.id, artifactId: artifact.id, tab: current.tab } : null;
+    });
+    setError(null);
+    const ready = artifactReadyPayloadFromRun(repairedRun);
+    if (ready) onArtifactReadyRef.current?.(ready, repairedRun);
+  }, []);
+
   const recoverPendingRun = useCallback((pending: PendingAgentRun) => {
     if (recoveryTimerRef.current !== null) window.clearTimeout(recoveryTimerRef.current);
     const recoveryEpoch = ++recoveryEpochRef.current;
@@ -668,6 +690,7 @@ export function UnifiedAgentRunPanel({
   const appContext = {
     appId: typeof workspaceContext?.appId === 'string' ? workspaceContext.appId : undefined,
     dashboardId: typeof workspaceContext?.dashboardId === 'string' ? workspaceContext.dashboardId : undefined,
+    dashboardTitle: typeof workspaceContext?.dashboardTitle === 'string' ? workspaceContext.dashboardTitle : undefined,
   };
 
   const handleNextAction = (run: AgentRun, action: AgentRun['nextActions'][number]) => {
@@ -831,6 +854,7 @@ export function UnifiedAgentRunPanel({
                     void submit(selection.question, undefined, selection.selectedEvidenceId);
                   }}
                   onNextAction={(action) => handleNextAction(item.run, action)}
+                  onRepairedRun={adoptRepairedRun}
                 />
               ))}
 
@@ -987,6 +1011,7 @@ export function UnifiedAgentRunPanel({
               void submit(selection.question, undefined, selection.selectedEvidenceId);
             }}
             onNextAction={(action) => handleNextAction(item.run, action)}
+            onRepairedRun={adoptRepairedRun}
           />
         ) : (
           <RunCard
@@ -1221,7 +1246,18 @@ export { askFailureOrigin, askFailureDetail, ASK_FAILURE_PRESENTATION };
 
 export function threadItemsFromTurns(turns: AgentConversationTurn[], runs: AgentRun[] = []): ThreadItem[] {
   const runsById = new Map(runs.map((run) => [run.id, run]));
-  return turns.flatMap((turn): ThreadItem[] => {
+  const persistedRunIds = new Set(turns.flatMap((turn) => turn.agentRunId ? [turn.agentRunId] : []));
+  const repairedSourceRunIds = new Set(runs.flatMap((run) => {
+    const derivation = run.derivation;
+    return derivation?.kind === 'analytical_repair'
+      && persistedRunIds.has(run.id)
+      && typeof derivation.sourceRunId === 'string'
+      ? [derivation.sourceRunId]
+      : [];
+  }));
+  // A repair is persisted as an immutable derived turn for audit. Present it as
+  // the replacement answer instead of replaying the failed question twice.
+  return turns.filter((turn) => !turn.agentRunId || !repairedSourceRunIds.has(turn.agentRunId)).flatMap((turn): ThreadItem[] => {
     const run = turn.agentRunId ? runsById.get(turn.agentRunId) : undefined;
     return [
       { kind: 'user', id: `${turn.id}-q`, text: turn.question },
@@ -1563,7 +1599,7 @@ function RunCard({
   run: AgentRun;
   t: Theme;
   themeMode: ThemeMode;
-  appContext?: { appId?: string; dashboardId?: string };
+  appContext?: { appId?: string; dashboardId?: string; dashboardTitle?: string };
   onOpenApp?: (appId: string, dashboardId?: string) => void;
   onInsertSql?: (sql: string, title?: string, meta?: SqlNotebookDraftMeta) => void;
   onInsertDql?: (payload: InsertDqlPayload) => void;
@@ -1925,16 +1961,32 @@ function InlineAskResultCard({
 }) {
   const payload = payloadOf(artifact);
   const result = extractResult(payload);
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    if (!expanded) return undefined;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setExpanded(false);
+    };
+    document.addEventListener('keydown', closeOnEscape);
+    return () => document.removeEventListener('keydown', closeOnEscape);
+  }, [expanded]);
   if (!result) return null;
   const chartConfig = inlineAskChartConfig(payload, result);
   const inspectorTab = preferredAskInspectorTab(run, artifact);
   const dqlArtifact = answerDqlArtifactFromRun(run) ?? resolveArtifactDqlView(payload);
   const certifiedName = artifact.trustState === 'certified' ? certifiedBlockName(artifact, payload) : undefined;
-  return (
+  const card = (
     <section
       data-followup="table"
       aria-label={`${resultCardTitle(run, artifact)} result`}
-      style={{ border: `1px solid ${selected ? 'var(--accent)' : 'var(--border-default)'}`, borderRadius: 12, background: 'var(--bg-2)', overflow: 'hidden', boxShadow: selected ? '0 2px 10px rgba(107,93,211,0.12)' : '0 1px 3px rgba(26,26,26,0.04)' }}
+      style={{
+        border: `1px solid ${selected ? 'var(--accent)' : 'var(--border-default)'}`,
+        borderRadius: 12,
+        background: 'var(--bg-2)',
+        overflow: 'hidden',
+        boxShadow: expanded ? '0 24px 80px rgba(15,23,42,0.28)' : selected ? '0 2px 10px rgba(107,93,211,0.12)' : '0 1px 3px rgba(26,26,26,0.04)',
+        ...(expanded ? { width: 'min(1440px, calc(100vw - 48px))', maxHeight: 'calc(100vh - 48px)' } : {}),
+      }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 13px', borderBottom: '1px solid var(--border-subtle)' }}>
         <span style={{ width: 30, height: 30, borderRadius: 8, background: artifact.trustState === 'certified' ? 'var(--status-success-bg)' : 'var(--accent-dim)', color: artifact.trustState === 'certified' ? 'var(--status-success)' : 'var(--accent)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
@@ -1946,6 +1998,17 @@ function InlineAskResultCard({
         </div>
         <button type="button" className="dql-ask-ghost" onClick={() => onInspect(inspectorTab)} style={askGhostBtnStyle(t)}>
           <ListTree size={12} /> Inspect
+        </button>
+        <button
+          type="button"
+          className="dql-ask-ghost"
+          aria-label={expanded ? 'Return result to Copilot' : 'Expand result'}
+          title={expanded ? 'Return result to Copilot' : 'Expand this result for wide tables'}
+          onClick={() => setExpanded((value) => !value)}
+          style={askGhostBtnStyle(t)}
+        >
+          {expanded ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
+          {expanded ? 'Restore' : 'Expand result'}
         </button>
       </div>
       {dqlArtifact ? (
@@ -1959,6 +2022,7 @@ function InlineAskResultCard({
           t={t}
           themeMode={themeMode}
           embedded
+          expanded={expanded}
         />
       ) : (
         <ResultView
@@ -1968,9 +2032,34 @@ function InlineAskResultCard({
           chartConfig={chartConfig}
           embedded
           tabLabels={{ table: 'Results', chart: 'Visualization' }}
+          contentMaxHeight={expanded ? 'calc(100vh - 172px)' : undefined}
+          tableMaxHeight={expanded ? 'calc(100vh - 250px)' : undefined}
         />
       )}
     </section>
+  );
+
+  if (!expanded || typeof document === 'undefined') return card;
+  return (
+    <>
+      <div style={{ minHeight: 96, border: '1px dashed var(--border-default)', borderRadius: 12, display: 'grid', placeItems: 'center', color: t.textMuted, fontSize: 11.5 }}>
+        Result is open in the expanded viewer.
+      </div>
+      {createPortal(
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${resultCardTitle(run, artifact)} expanded result`}
+          onClick={() => setExpanded(false)}
+          style={{ position: 'fixed', inset: 0, zIndex: 120, display: 'grid', placeItems: 'center', padding: 24, background: 'rgba(15,23,42,0.48)', backdropFilter: 'blur(3px)' }}
+        >
+          <div onClick={(event) => event.stopPropagation()} style={{ minWidth: 0, maxWidth: '100%' }}>
+            {card}
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
   );
 }
 
@@ -1979,7 +2068,7 @@ interface AskRunCardProps {
   t: Theme;
   themeMode: ThemeMode;
   threadId?: string;
-  appContext?: { appId?: string; dashboardId?: string };
+  appContext?: { appId?: string; dashboardId?: string; dashboardTitle?: string };
   selectedArtifactId?: string;
   onOpenArtifact?: (artifactId: string, tab: AskInspectorTab) => void;
   onOpenApp?: (appId: string, dashboardId?: string) => void;
@@ -1992,6 +2081,7 @@ interface AskRunCardProps {
   onOpenResearch?: (id: string, notebookPath?: string) => void;
   onSelectClarification?: (option: AgentRunClarificationOption) => void;
   onNextAction: (action: AgentRun['nextActions'][number]) => void;
+  onRepairedRun: (sourceRunId: string, repairedRun: AgentRun) => void;
 }
 
 function AskRunCard(props: AskRunCardProps) {
@@ -2013,16 +2103,11 @@ function AskRunCard(props: AskRunCardProps) {
   onOpenResearch,
   onSelectClarification,
   onNextAction,
+  onRepairedRun,
   } = props;
   const { dispatch } = useNotebook();
   const [copied, setCopied] = useState(false);
-  const [repairedRun, setRepairedRun] = useState<AgentRun | null>(null);
-  useEffect(() => setRepairedRun(null), [run.id]);
   const openArtifact = onOpenArtifact ?? (() => dispatch({ type: 'OPEN_AGENT_LOG', run }));
-
-  // Replace the failed presentation in place while preserving the immutable
-  // source run in the server trace. The derived card owns fresh local state.
-  if (repairedRun) return <AskRunCard {...props} run={repairedRun} />;
 
   // Conversational replies stay a plain bubble — no trust line, chips, or actions.
   if (run.route === 'conversation') {
@@ -2118,7 +2203,13 @@ function AskRunCard(props: AskRunCardProps) {
           <StructuredAnswerText text={cleanAnswerText(presentationAnswer)} t={t} />
         </div>
       ) : failureMessage ? (
-        <AskFailureCard run={run} detail={failureMessage} threadId={threadId} onRepaired={setRepairedRun} t={t} />
+        <AskFailureCard
+          run={run}
+          detail={failureMessage}
+          threadId={threadId}
+          onRepaired={(repaired) => onRepairedRun(run.id, repaired)}
+          t={t}
+        />
       ) : run.summary ? (
         <div data-followup="answer" style={{ fontSize: 14, lineHeight: 1.6, color: t.textSecondary }}>{cleanPresentationText(run.summary)}</div>
       ) : null}
@@ -2762,7 +2853,7 @@ function AskInspector({
   artifact: AgentRunArtifact;
   tab: AskInspectorTab;
   t: Theme;
-  appContext?: { appId?: string; dashboardId?: string };
+  appContext?: { appId?: string; dashboardId?: string; dashboardTitle?: string };
   onOpenApp?: (appId: string, dashboardId?: string) => void;
   onChangeTab: (tab: AskInspectorTab) => void;
   onClose: () => void;
@@ -3024,6 +3115,10 @@ function defaultAppName(question: string): string {
   return title.slice(0, 60);
 }
 
+export function appPinDestinationLabel(appName: string, dashboardTitle?: string): string {
+  return dashboardTitle?.trim() ? `${appName} › ${dashboardTitle.trim()}` : appName;
+}
+
 /**
  * Hero "Add to app" action. Always available on a pinnable result: opens a small
  * picker to choose an existing app (one click) or create a new one, resolves the
@@ -3037,7 +3132,7 @@ function AddToAppButton({
 }: {
   run: AgentRun;
   t: Theme;
-  appContext?: { appId?: string; dashboardId?: string };
+  appContext?: { appId?: string; dashboardId?: string; dashboardTitle?: string };
   onOpenApp?: (appId: string, dashboardId?: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -3047,7 +3142,13 @@ function AddToAppButton({
   const [newName, setNewName] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [done, setDone] = useState<{ appId: string; dashboardId?: string; name: string } | null>(null);
+  const [done, setDone] = useState<{
+    appId: string;
+    dashboardId?: string;
+    name: string;
+    dashboardTitle?: string;
+    tileTitle: string;
+  } | null>(null);
   // Remember an app created this session so a failed-pin retry reuses it (no orphans).
   const createdRef = useRef<{ appId: string; dashboardId: string } | null>(null);
 
@@ -3080,11 +3181,12 @@ function AddToAppButton({
     setError(null);
   };
 
-  const pinTo = async (appId: string, dashboardId: string, name: string) => {
+  const pinTo = async (appId: string, dashboardId: string, name: string, dashboardTitle?: string) => {
+    const tileTitle = defaultAppName(run.question);
     const dqlArtifact = answerDqlArtifactFromRun(run);
     const result = await api.createAiPin(appId, {
       dashboardId,
-      title: defaultAppName(run.question),
+      title: tileTitle,
       answer: run.answer ?? run.summary,
       question: run.question,
       sql: answerSqlFromRun(run),
@@ -3093,7 +3195,16 @@ function AddToAppButton({
       analysisPlan: dqlArtifact ? { dqlArtifact } : undefined,
     });
     if (!result.ok) throw new Error('Could not add to app.');
-    setDone({ appId, dashboardId, name });
+    setDone({
+      appId,
+      dashboardId,
+      name,
+      dashboardTitle,
+      tileTitle: result.pin.title || tileTitle,
+    });
+    window.dispatchEvent(new CustomEvent('dql-app-dashboard-updated', {
+      detail: { appId, dashboardId, tileId: result.pin.tileId },
+    }));
     setOpen(false);
   };
 
@@ -3103,17 +3214,24 @@ function AddToAppButton({
     setError(null);
     try {
       let dashboardId = appContext?.appId === app.id ? appContext.dashboardId : undefined;
+      let dashboardTitle = appContext?.appId === app.id ? appContext.dashboardTitle : undefined;
+      let doc: Awaited<ReturnType<typeof api.getApp>> | null = null;
       if (!dashboardId) {
-        const doc = await api.getApp(app.id);
+        doc = await api.getApp(app.id);
         const home = doc?.app?.homepage;
         dashboardId = home?.type === 'dashboard' ? home.id : doc?.dashboards?.[0]?.id;
         if (!dashboardId) {
           const created = await api.createAppDashboard(app.id, { title: 'Overview' });
           if (!created.ok) throw new Error(created.error);
           dashboardId = created.dashboard.id;
+          dashboardTitle = created.dashboard.metadata.title;
         }
       }
-      await pinTo(app.id, dashboardId, app.name);
+      if (!dashboardTitle) {
+        doc = doc ?? await api.getApp(app.id);
+        dashboardTitle = doc?.dashboards?.find((dashboard) => dashboard.id === dashboardId)?.title;
+      }
+      await pinTo(app.id, dashboardId, app.name, dashboardTitle);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not add to app.');
     } finally {
@@ -3132,7 +3250,7 @@ function AddToAppButton({
         const created = await api.createApp({ name, domain: 'general', dashboardTitle: 'Overview', tags: [], owners: [], selectedBlockIds: [] });
         createdRef.current = { appId: created.app.id, dashboardId: created.dashboardId };
       }
-      await pinTo(createdRef.current.appId, createdRef.current.dashboardId, name);
+      await pinTo(createdRef.current.appId, createdRef.current.dashboardId, name, 'Overview');
       createdRef.current = null;
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not create the app.');
@@ -3144,17 +3262,47 @@ function AddToAppButton({
   return (
     <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
       {done ? (
-        <button
-          type="button"
-          className="dql-hover"
-          onClick={() => onOpenApp?.(done.appId, done.dashboardId)}
-          style={{ ...heroAddButtonStyle(t), background: `${t.success}1a`, color: t.success, border: `1px solid ${t.success}55`, boxShadow: 'none', cursor: onOpenApp ? 'pointer' : 'default' }}
-          title={onOpenApp ? 'Open the app' : undefined}
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'auto minmax(0, 1fr) auto',
+            alignItems: 'center',
+            gap: 8,
+            minWidth: 260,
+            maxWidth: 440,
+            padding: '8px 9px',
+            borderRadius: 9,
+            background: `${t.success}12`,
+            color: t.success,
+            border: `1px solid ${t.success}55`,
+          }}
         >
-          <CheckCircle2 size={13} />
-          Added to {done.name}
-          {onOpenApp ? <ArrowRight size={13} /> : null}
-        </button>
+          <span style={{ width: 26, height: 26, borderRadius: 999, display: 'grid', placeItems: 'center', background: `${t.success}20` }}>
+            <CheckCircle2 size={15} />
+          </span>
+          <span style={{ display: 'grid', gap: 1, minWidth: 0 }}>
+            <b style={{ fontSize: 11.5 }}>Added to App</b>
+            <span title={appPinDestinationLabel(done.name, done.dashboardTitle)} style={{ fontSize: 10.5, color: t.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {appPinDestinationLabel(done.name, done.dashboardTitle)}
+            </span>
+            <span title={done.tileTitle} style={{ fontSize: 10, color: t.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              Tile: {done.tileTitle}
+            </span>
+          </span>
+          {onOpenApp ? (
+            <button
+              type="button"
+              className="dql-hover"
+              onClick={() => onOpenApp(done.appId, done.dashboardId)}
+              style={{ ...smallButtonStyle(t), color: t.success, whiteSpace: 'nowrap' }}
+              title="Open the App page containing this tile"
+            >
+              Open App <ArrowRight size={12} />
+            </button>
+          ) : null}
+        </div>
       ) : null}
       <button type="button" className="dql-hover dql-lift" onClick={openPicker} style={done ? smallButtonStyle(t) : heroAddButtonStyle(t)}>
         <LayoutDashboard size={13} />
@@ -3375,6 +3523,7 @@ function ExecutableDqlResult({
   t,
   themeMode,
   embedded = false,
+  expanded = false,
 }: {
   artifact: AgentConversationDqlArtifact;
   certifiedBlockName?: string;
@@ -3385,6 +3534,7 @@ function ExecutableDqlResult({
   t: Theme;
   themeMode: ThemeMode;
   embedded?: boolean;
+  expanded?: boolean;
 }) {
   const [activeArtifact, setActiveArtifact] = useState<AgentConversationDqlArtifact>(artifact);
   const [parameters, setParameters] = useState<BlockParameterDefinition[]>(() => artifact.parameters ?? []);
@@ -3571,6 +3721,8 @@ function ExecutableDqlResult({
         chartConfig={chartConfig}
         embedded={embedded}
         tabLabels={embedded ? { table: 'Results', chart: 'Visualization' } : undefined}
+        contentMaxHeight={expanded ? 'calc(100vh - 172px)' : undefined}
+        tableMaxHeight={expanded ? 'calc(100vh - 250px)' : undefined}
       />
     </div>
   );
@@ -4843,7 +4995,7 @@ function askFailureOrigin(run: AgentRun): string {
 }
 
 function askRunAllowsExecutionRepair(run: AgentRun): boolean {
-  if (run.status !== 'blocked' || !answerSqlFromRun(run)) return false;
+  if (run.status !== 'blocked' || (!answerSqlFromRun(run) && !answerDqlArtifactFromRun(run)?.source)) return false;
   for (const artifact of run.artifacts ?? []) {
     const payload = payloadOf(artifact) as { warehouseFailure?: { category?: unknown } } | undefined;
     const category = payload?.warehouseFailure?.category;

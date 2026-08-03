@@ -26,7 +26,11 @@ import {
   buildNamedRelationProbeSql,
   prepareAnalyticalExecutionSql,
   repairableSqlFromAgentRun,
+  repairableDqlArtifactFromAgentRun,
+  repairPresentationContextFromAgentRun,
+  dqlRepairParameterContract,
   notebookCellRepairSql,
+  notebookDqlSourceAllowsBackgroundRepair,
   replaceNotebookDqlQueryForRepair,
   applyNotebookRepairRewrites,
   restoreNotebookDqlParameterInterpolations,
@@ -2758,7 +2762,7 @@ describe('agent run runtime API', () => {
         rootDir: projectRoot,
         projectRoot,
         executor,
-        connection: { driver: 'duckdb', filepath: ':memory:' },
+        connection: { driver: 'file' },
         preferredPort: 0,
         captureServer: (created) => { server = created; },
         agentRunExecutors: {
@@ -2800,6 +2804,11 @@ describe('agent run runtime API', () => {
       });
       expect(repaired.run.artifacts[0].payload.sql).not.toContain('source::');
       expect(repaired.run.artifacts[0].payload.result.rows).toEqual([{ order_id: 42 }]);
+      expect(repaired.run.artifacts[0].payload.diagnosticReceipt).toMatchObject({
+        phase: 'run.completed',
+        repair: { sourceRunId: created.run.id, targetPreserved: true, readOnly: true },
+        execution: { rowCount: 1 },
+      });
 
       const sourceResponse = await fetch(`${base}/api/agent-runs/${encodeURIComponent(created.run.id)}`);
       const sourceState = await sourceResponse.json() as { lifecycleState: string; run: any };
@@ -2812,6 +2821,115 @@ describe('agent run runtime API', () => {
       expect(idempotent.status).toBe(200);
       await expect(idempotent.json()).resolves.toMatchObject({ run: { id: repaired.run.id } });
       expect(executor.executeQuery).toHaveBeenCalledTimes(1);
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
+  it('repairs a DQL-compiler-only Ask failure and returns an inspectable derived result', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-ask-dql-compiler-repair-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    saveProviderSettings(projectRoot, {
+      id: 'openai', enabled: true, apiKey: 'sk-ask-repair',
+      baseUrl: 'https://ask-repair.example.test/v1', model: 'repair-test',
+    });
+    const nativeFetch = globalThis.fetch;
+    const malformedSource = 'block "Orders" { type = "custom" query """SELECT order_id FROM main.orders""" }';
+    const repairedSource = 'block "Orders" { type = "custom" query = """SELECT order_id FROM main.orders""" }';
+    const repairRequests: string[] = [];
+    const providerFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).startsWith('https://ask-repair.example.test/')) {
+        const request = JSON.parse(String(init?.body ?? '{}')) as { messages?: Array<{ content?: string }> };
+        const messages = JSON.stringify(request.messages) ?? '';
+        if (messages.includes('Repair one malformed executable DQL custom block')) {
+          repairRequests.push(messages);
+          expect(messages).toContain('DQL compiler expected equals');
+        }
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: messages.includes('Repair one malformed executable DQL custom block')
+            ? JSON.stringify({ dql: repairedSource })
+            : 'The repaired query returned one order.' } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return nativeFetch(input, init);
+    });
+    vi.stubGlobal('fetch', providerFetch);
+    const failedAnswerExecutor = () => ({
+      summary: 'DQL compiler expected equals before query.',
+      status: 'blocked' as const,
+      trustState: 'blocked' as const,
+      stopReason: 'blocked' as const,
+      artifacts: [{
+        id: 'answer:dql-compiler-failure',
+        kind: 'answer' as const,
+        title: 'Failed DQL compilation',
+        trustState: 'blocked' as const,
+        payload: {
+          kind: 'no_answer',
+          dqlArtifact: { kind: 'sql_block', name: 'Orders', source: malformedSource, trustState: 'review_required' },
+          proposedSql: 'SELECT order_id FROM main.orders',
+          executionError: 'DQL compiler expected equals before query.',
+          warehouseFailure: {
+            version: 1,
+            origin: 'dql_compilation',
+            stage: 'compile',
+            category: 'syntax',
+            retryDisposition: 'model_repair',
+            redactedMessage: 'DQL compiler expected equals before query.',
+            driver: 'duckdb',
+          },
+          resolvedAnalyticalPlan: { fingerprint: 'plan-dql-repair' },
+        },
+      }],
+      evaluations: [],
+      nextActions: [],
+    });
+    const executor = {
+      executeQuery: vi.fn(async (sql: string) => ({
+        columns: ['order_id'], rows: [{ order_id: 42 }], rowCount: 1, sql,
+      })),
+      executePositional: vi.fn(async () => ({ columns: [], rows: [], rowCount: 0 })),
+    } as unknown as QueryExecutor;
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor,
+        connection: { driver: 'file' },
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+        agentRunExecutors: {
+          conversation: failedAnswerExecutor,
+          certified_answer: failedAnswerExecutor,
+          semantic_answer: failedAnswerExecutor,
+          generated_answer: failedAnswerExecutor,
+          research: failedAnswerExecutor,
+          clarify: failedAnswerExecutor,
+          blocked: failedAnswerExecutor,
+        },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const created = await (await nativeFetch(`${base}/api/agent-runs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'Show orders', requestedMode: 'ask' }),
+      })).json() as { run: { id: string } };
+      const response = await nativeFetch(`${base}/api/agent-runs/${encodeURIComponent(created.run.id)}/repair-execution`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const text = await response.text();
+      expect(response.status, text).toBe(201);
+      const repaired = JSON.parse(text) as any;
+      expect(repaired.run).toMatchObject({
+        status: 'needs_review',
+        derivation: { kind: 'analytical_repair', sourceRunId: created.run.id },
+      });
+      expect(repaired.run.artifacts[0].payload.dqlArtifact.source).toBe(repairedSource);
+      expect(repaired.run.artifacts[0].payload.result.rows).toEqual([{ order_id: 42 }]);
+      expect(repaired.run.artifacts[0].payload.resolvedAnalyticalPlan).toEqual({ fingerprint: 'plan-dql-repair' });
+      expect(repaired.run.artifacts[0].payload.analyticalFailure).toBeUndefined();
+      expect(repairRequests).toHaveLength(1);
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
@@ -2933,6 +3051,114 @@ describe('agent run runtime API', () => {
     }
   });
 
+  it('repairs malformed DQL and schema references in one bounded Notebook attempt', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-notebook-dql-compiler-repair-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    saveProviderSettings(projectRoot, {
+      id: 'openai',
+      enabled: true,
+      apiKey: 'sk-repair-test',
+      baseUrl: 'https://repair.example.test/v1',
+      model: 'repair-test',
+    });
+    const nativeFetch = globalThis.fetch;
+    const providerRequests: Array<Record<string, unknown>> = [];
+    const repairedSource = `block "Top customers" {
+  type = "custom"
+  params {
+    top_n: number = 5
+  }
+  query = """
+SELECT customers.name AS customer_name
+FROM main.dim_customers AS customers
+ORDER BY customers.name
+LIMIT \${top_n}
+  """
+}`;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).startsWith('https://repair.example.test/')) {
+        providerRequests.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>);
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ dql: repairedSource }) } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return nativeFetch(input, init);
+    }));
+
+    const executeQuery = vi.fn(async (sql: string, sqlParams: unknown[], variables: Record<string, unknown>) => ({
+      columns: ['customer_name'],
+      rows: [{ customer_name: 'Ada' }],
+      rowCount: 1,
+      sql,
+      sqlParams,
+      variables,
+    }));
+    const executePositional = vi.fn(async () => ({
+      columns: ['table_schema', 'table_name', 'column_name', 'data_type'],
+      rows: [
+        { table_schema: 'main', table_name: 'dim_customers', column_name: 'customer_id', data_type: 'BIGINT' },
+        { table_schema: 'main', table_name: 'dim_customers', column_name: 'name', data_type: 'VARCHAR' },
+      ],
+      rowCount: 2,
+    }));
+    const executor = { executeQuery, executePositional } as unknown as QueryExecutor;
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor,
+        connection: { driver: 'file' },
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const malformedSource = `block "Top customers" {
+  type = "custom"
+  params {
+    top_n: number = 5
+  }
+  query """
+SELECT customers.customer_name AS customer_name
+FROM main.dim_customers AS customers
+LIMIT \${top_n}
+  """
+}`;
+      const response = await nativeFetch(`http://127.0.0.1:${port}/api/notebook/repair-execution`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cell: { id: 'cell_dql_syntax', type: 'dql', source: malformedSource, title: 'Top customers' },
+          error: 'DQL compiler: expected equals before query; customer_name does not exist',
+          parameters: { top_n: 3 },
+        }),
+      });
+      const text = await response.text();
+      expect(response.status, text).toBe(200);
+      const repaired = JSON.parse(text) as any;
+      expect(repaired.source).toBe(repairedSource);
+      expect(repaired.repairMode).toBe('ai');
+      expect(repaired.result.rows).toEqual([{ customer_name: 'Ada' }]);
+      expect(repaired.repairedSql).toContain('customers.name');
+      expect(repaired.repairedSql).not.toContain('customers.customer_name');
+      expect(executeQuery).toHaveBeenCalledTimes(1);
+      expect(executeQuery.mock.calls[0][1]).toEqual([{ name: 'top_n', position: 1 }]);
+      expect(executeQuery.mock.calls[0][2]).toMatchObject({ top_n: 3 });
+      expect(providerRequests).toHaveLength(1);
+      const repairPrompt = providerRequests[0] as { messages: Array<{ content: string }> };
+      const repairPayload = JSON.parse(repairPrompt.messages[1].content) as { schema: unknown[] };
+      expect(repairPayload.schema).toContainEqual({
+        relation: 'main.dim_customers',
+        columns: [
+          { name: 'customer_id', type: 'BIGINT' },
+          { name: 'name', type: 'VARCHAR' },
+        ],
+      });
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
   it('uses the shared bounded repair for App draft-analysis execution without mutating source (AGT-023, API-010)', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-app-tile-repair-'));
     tempDirs.push(projectRoot);
@@ -2975,6 +3201,12 @@ SELECT missing_revenue FROM analytics.orders
       trustState: 'review_required',
       reviewStatus: 'review_required',
     });
+    dashboardBefore.layout.items.push({
+      i: 'story-copy', x: 0, y: 4, w: 12, h: 1,
+      text: { markdown: 'Keep this tile out of the bounded retry response.' },
+      viz: { type: 'text' },
+      title: 'Story copy',
+    });
     writeFileSync(dashboardPath, `${JSON.stringify(dashboardBefore, null, 2)}\n`);
     const dashboardSourceBefore = readFileSync(dashboardPath, 'utf-8');
     let server: Server | undefined;
@@ -3002,7 +3234,7 @@ SELECT missing_revenue FROM analytics.orders
         captureServer: (createdServer) => { server = createdServer; },
       });
       const response = await fetch(`http://127.0.0.1:${port}/api/apps/repair-app/dashboards/overview/run`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tileId: 'draft-repair' }),
       });
       const payload = await response.json() as any;
       expect(response.status, JSON.stringify(payload)).toBe(200);
@@ -3018,11 +3250,231 @@ SELECT missing_revenue FROM analytics.orders
             mode: 'deterministic',
             approvalEligible: false,
           }),
+          artifact: expect.objectContaining({
+            version: 1,
+            sourceKind: 'draft_analysis',
+            sourcePath: 'drafts/regional-revenue-repair.dql',
+            dql: source,
+            sql: expect.stringContaining('missing_revenue'),
+            trustState: 'review_required',
+          }),
         }),
       ]));
+      expect(payload.tiles).toHaveLength(1);
       expect(executor.executeQuery).toHaveBeenCalledTimes(2);
       expect(readFileSync(draftPath, 'utf-8')).toBe(source);
       expect(readFileSync(dashboardPath, 'utf-8')).toBe(dashboardSourceBefore);
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
+  it('repairs one failed certified App block without changing or recertifying its saved source', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-certified-app-tile-repair-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    const blockDir = join(projectRoot, 'blocks', 'revenue');
+    mkdirSync(blockDir, { recursive: true });
+    const source = `block "Certified revenue repair" {
+  domain = "revenue"
+  type = "custom"
+  status = "certified"
+  owner = "owner@local"
+  query = """
+SELECT missing_revenue FROM analytics.orders
+  """
+  visualization { chart = "table" }
+}\n`;
+    const blockPath = join(blockDir, 'certified-revenue-repair.dql');
+    writeFileSync(blockPath, source);
+    const created = createAppPackage(projectRoot, {
+      name: 'Certified Repair App',
+      domain: 'revenue',
+      owners: ['owner@local'],
+      tags: [],
+      selectedBlockIds: ['Certified revenue repair'],
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const dashboardPath = join(projectRoot, 'apps/certified-repair-app/dashboards/overview.dqld');
+    const dashboard = JSON.parse(readFileSync(dashboardPath, 'utf-8')) as any;
+    const tileId = dashboard.layout.items[0]?.i as string;
+    expect(tileId).toBeTruthy();
+    let server: Server | undefined;
+    let attempt = 0;
+    const executor = {
+      executeQuery: vi.fn(async (sql: string) => {
+        attempt += 1;
+        if (attempt === 1) throw new Error('Binder Error: Referenced column missing_revenue not found');
+        return {
+          columns: ['revenue'],
+          rows: [{ revenue: 500 }],
+          rowCount: 1,
+          sql,
+        };
+      }),
+    } as unknown as QueryExecutor;
+
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor,
+        connection: { driver: 'file' },
+        preferredPort: 0,
+        captureServer: (createdServer) => { server = createdServer; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/apps/certified-repair-app/dashboards/overview/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tileId }),
+      });
+      const payload = await response.json() as any;
+      expect(response.status, JSON.stringify(payload)).toBe(200);
+      expect(payload.tiles).toHaveLength(1);
+      expect(payload.tiles[0]).toMatchObject({
+        tileId,
+        status: 'ok',
+        tileType: 'block',
+        certificationStatus: 'certified',
+        trustState: 'review_required',
+        result: { rows: [{ revenue: 500 }] },
+        citation: { kind: 'block_repaired', name: 'Certified revenue repair' },
+        repair: {
+          status: 'repaired',
+          source: 'certified_block',
+          approvalEligible: false,
+        },
+        artifact: {
+          sourceKind: 'certified_block',
+          dql: source,
+          sql: expect.stringContaining('missing_revenue'),
+          trustState: 'review_required',
+        },
+      });
+      expect(executor.executeQuery).toHaveBeenCalledTimes(2);
+      expect(readFileSync(blockPath, 'utf-8')).toBe(source);
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
+  it('repairs malformed App DQL and schema references without overwriting the App draft', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-app-dql-compiler-repair-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    saveProviderSettings(projectRoot, {
+      id: 'openai',
+      enabled: true,
+      apiKey: 'sk-app-repair-test',
+      baseUrl: 'https://app-repair.example.test/v1',
+      model: 'app-repair-test',
+    });
+    const created = createAppPackage(projectRoot, {
+      name: 'DQL Repair App',
+      domain: 'customers',
+      owners: ['owner@local'],
+      tags: [],
+      selectedBlockIds: [],
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const appId = created.app.id;
+    const malformedSource = `block "Top customers" {
+  type = "custom"
+  params {
+    top_n: number = 5
+  }
+  query """
+SELECT customers.customer_name AS customer_name
+FROM main.dim_customers AS customers
+LIMIT \${top_n}
+  """
+}\n`;
+    const repairedSource = `block "Top customers" {
+  type = "custom"
+  params {
+    top_n: number = 5
+  }
+  query = """
+SELECT customers.name AS customer_name
+FROM main.dim_customers AS customers
+LIMIT \${top_n}
+  """
+}\n`;
+    const draftDir = join(projectRoot, 'apps', appId, 'drafts');
+    mkdirSync(draftDir, { recursive: true });
+    const draftPath = join(draftDir, 'top-customers.dql');
+    writeFileSync(draftPath, malformedSource);
+    const dashboardPath = join(projectRoot, 'apps', appId, 'dashboards', `${created.dashboardId}.dqld`);
+    const dashboard = JSON.parse(readFileSync(dashboardPath, 'utf-8')) as any;
+    dashboard.layout.items.push({
+      i: 'top-customers', x: 0, y: 0, w: 6, h: 3,
+      draftAnalysis: {
+        ref: 'drafts/top-customers.dql',
+        artifactFingerprint: `sha256:${createHash('sha256').update(malformedSource).digest('hex')}`,
+      },
+      parameterBindings: [{ param: 'top_n', source: 'constant', value: 3 }],
+      viz: { type: 'table' },
+      title: 'Top customers',
+      trustState: 'review_required',
+    });
+    writeFileSync(dashboardPath, `${JSON.stringify(dashboard, null, 2)}\n`);
+
+    const nativeFetch = globalThis.fetch;
+    const providerRequests: Array<Record<string, unknown>> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).startsWith('https://app-repair.example.test/')) {
+        providerRequests.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>);
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ dql: repairedSource }) } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return nativeFetch(input, init);
+    }));
+    const executeQuery = vi.fn(async () => ({
+      columns: ['customer_name'], rows: [{ customer_name: 'Ada' }], rowCount: 1,
+    }));
+    const executePositional = vi.fn(async () => ({
+      columns: ['table_schema', 'table_name', 'column_name', 'data_type'],
+      rows: [
+        { table_schema: 'main', table_name: 'dim_customers', column_name: 'customer_id', data_type: 'BIGINT' },
+        { table_schema: 'main', table_name: 'dim_customers', column_name: 'name', data_type: 'VARCHAR' },
+      ],
+      rowCount: 2,
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery, executePositional } as unknown as QueryExecutor,
+        connection: { driver: 'file' },
+        preferredPort: 0,
+        captureServer: (createdServer) => { server = createdServer; },
+      });
+      const response = await nativeFetch(`http://127.0.0.1:${port}/api/apps/${encodeURIComponent(appId)}/dashboards/${encodeURIComponent(created.dashboardId)}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tileId: 'top-customers' }),
+      });
+      const text = await response.text();
+      expect(response.status, text).toBe(200);
+      const payload = JSON.parse(text) as any;
+      expect(payload.tiles[0]).toMatchObject({
+        status: 'ok',
+        trustState: 'review_required',
+        repair: { status: 'repaired', source: 'draft_analysis', mode: 'ai', approvalEligible: false },
+        artifact: {
+          sourceKind: 'draft_analysis',
+          dql: repairedSource.trim(),
+          sql: expect.stringContaining('customers.name'),
+          trustState: 'review_required',
+        },
+      });
+      expect(providerRequests).toHaveLength(1);
+      expect(executeQuery).toHaveBeenCalledTimes(1);
+      expect(readFileSync(draftPath, 'utf-8')).toBe(malformedSource);
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
@@ -4926,6 +5378,19 @@ describe('notebook background repair source handling', () => {
     })).toBeUndefined();
   });
 
+  it('offers bounded repair for a malformed custom wrapper before SQL extraction succeeds', () => {
+    const malformed = `block "Orders" {
+  type = "custom"
+  params { top_n: number = 10 }
+  query """SELECT * FROM orders LIMIT \${top_n}"""
+}`;
+    expect(notebookCellRepairSql({ id: 'dql_3', type: 'dql', source: malformed })).toBeUndefined();
+    expect(notebookDqlSourceAllowsBackgroundRepair(malformed)).toBe(true);
+    expect(notebookDqlSourceAllowsBackgroundRepair('@block("Certified Orders")')).toBe(false);
+    expect(notebookDqlSourceAllowsBackgroundRepair('block x { type = "semantic" query = """x""" }')).toBe(false);
+    expect(dqlRepairParameterContract(malformed)).toEqual(['top_n']);
+  });
+
   it('preserves DQL parameters while applying only proven relation rewrites', () => {
     expect(applyNotebookRepairRewrites(
       'SELECT * FROM source::analytics.main.orders WHERE category = ${category}',
@@ -5021,6 +5486,31 @@ describe('bounded analytical repair inputs', () => {
     expect(repairableSqlFromAgentRun({
       artifacts: [{ payload: { proposedSql: 'SELECT * FROM source::analytics.main.orders' } }],
     } as never)).toBe('SELECT * FROM source::analytics.main.orders');
+  });
+
+  it('retains editable DQL values and only the safe presentation context', () => {
+    const dqlArtifact = {
+      kind: 'sql_block',
+      source: 'block "Orders" { type = "custom" query = """SELECT * FROM orders""" }',
+      parameterValues: { top_n: 5 },
+    };
+    const run = {
+      artifacts: [{ payload: {
+        dqlArtifact,
+        resolvedAnalyticalPlan: { fingerprint: 'plan-1' },
+        analyticalExecutionGraph: { graphId: 'graph-1' },
+        analyticalFailure: { code: 'COLUMN_NOT_FOUND' },
+        analyticalFacts: { fingerprint: 'failed-result-facts' },
+        semanticExecutionTrace: { failure: { code: 'compile_failed' } },
+        contextPackId: 'context-1',
+      } }],
+    } as never;
+    expect(repairableDqlArtifactFromAgentRun(run)).toEqual(dqlArtifact);
+    expect(repairPresentationContextFromAgentRun(run)).toEqual({
+      resolvedAnalyticalPlan: { fingerprint: 'plan-1' },
+      analyticalExecutionGraph: { graphId: 'graph-1' },
+      contextPackId: 'context-1',
+    });
   });
 
   it('never retries access, authentication, unsafe, or cancelled failures', () => {

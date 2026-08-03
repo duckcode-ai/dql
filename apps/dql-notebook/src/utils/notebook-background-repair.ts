@@ -28,6 +28,14 @@ export function canBackgroundRepairNotebookCell(cell: Cell): boolean {
   }
 
   if (/^\s*@block\(/i.test(cell.content)) return false;
-  return /\bquery\s*=\s*"""[\s\S]*?"""/i.test(cell.content)
+  return /\bblock\b/i.test(cell.content)
+    && /\bquery\b/i.test(cell.content)
     && !/\btype\s*=\s*"semantic"/i.test(cell.content);
+}
+
+export function notebookRepairErrorMessage(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error ?? '');
+  const compact = raw.replace(/\s+/g, ' ').trim();
+  if (!compact) return 'Automatic repair could not finish safely. Edit this cell and run again.';
+  return compact.length > 420 ? `${compact.slice(0, 419)}…` : compact;
 }

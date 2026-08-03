@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
+import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import { AlertTriangle, BarChart3, Bot, GitBranch, GripVertical, LineChart, Maximize2, PieChart, Plus, ShieldCheck, SlidersHorizontal, Sparkles, Table2, Trash2, Wand2, Wrench, X } from 'lucide-react';
 import { api, type AppBlockRecommendation, type DashboardDocumentResponse, type DashboardRunResponse, type DashboardStoryBrief } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
@@ -14,6 +14,9 @@ import { classifyColumns } from '../../utils/semantic-fields';
 import { NODE_TYPE_COLORS, TYPE_LABELS, TYPE_TITLES } from '../lineage/lineage-constants';
 import { themes, type ThemeMode as NotebookThemeMode } from '../../themes/notebook-theme';
 import { mergeDashboardTileChartConfig, summarizeDashboardKpiResult } from './dashboard-chart-config';
+import { useOpenAnswerInNotebook } from '../../utils/answer-to-notebook';
+import { formatDisplayValue } from '../../utils/value-format';
+import type { InsertDqlPayload } from '../agent/UnifiedAgentRunPanel';
 
 const UnifiedAgentRunPanel = lazy(() => import('../agent/UnifiedAgentRunPanel')
   .then((module) => ({ default: module.UnifiedAgentRunPanel })));
@@ -117,6 +120,9 @@ export function DashboardRenderer({
   const [lineageOpen, setLineageOpen] = useState(false);
   const [lineage, setLineage] = useState<any | null>(null);
   const [saving, setSaving] = useState(false);
+  const [pendingLayoutItems, setPendingLayoutItems] = useState<DashboardLayoutItem[] | null>(null);
+  const [layoutNotice, setLayoutNotice] = useState<string | null>(null);
+  const [retryingTileId, setRetryingTileId] = useState<string | null>(null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [chatExpanded, setChatExpanded] = useState(false);
   const [textDialogKind, setTextDialogKind] = useState<'text' | 'heading' | null>(null);
@@ -126,6 +132,7 @@ export function DashboardRenderer({
   const [narrowGrid, setNarrowGrid] = useState(false);
   const cols = dashboard.layout.cols;
   const rowHeight = dashboard.layout.rowHeight;
+  const openAnswerInNotebook = useOpenAnswerInNotebook();
   const variablesKey = useMemo(() => JSON.stringify(variables ?? {}), [variables]);
   const runVariables = useMemo<Record<string, unknown>>(() => JSON.parse(variablesKey), [variablesKey]);
   const tileResults = useMemo(() => {
@@ -133,9 +140,14 @@ export function DashboardRenderer({
     for (const tile of run?.tiles ?? []) map.set(tile.tileId, tile);
     return map;
   }, [run]);
+  const workingLayoutItems = pendingLayoutItems ?? dashboard.layout.items;
+  const workingDashboard = useMemo(() => ({
+    ...dashboard,
+    layout: { ...dashboard.layout, items: workingLayoutItems },
+  }), [dashboard, workingLayoutItems]);
   const baseVisibleItems = useMemo(
-    () => editable ? dashboard.layout.items : dashboard.layout.items.filter((item) => !isStakeholderHiddenReviewTile(item)),
-    [dashboard.layout.items, editable],
+    () => editable ? workingLayoutItems : dashboard.layout.items.filter((item) => !isStakeholderHiddenReviewTile(item)),
+    [dashboard.layout.items, editable, workingLayoutItems],
   );
   const visibleItems = useMemo(
     () => editable ? baseVisibleItems : prepareStakeholderItems(baseVisibleItems, tileResults, cols),
@@ -163,6 +175,11 @@ export function DashboardRenderer({
     () => (editable || storySections ? null : buildDashboardStory(visibleItems, tileResults, runVariables)),
     [editable, runVariables, storySections, tileResults, visibleItems],
   );
+
+  useEffect(() => {
+    setPendingLayoutItems(null);
+    setLayoutNotice(null);
+  }, [dashboard.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -263,8 +280,12 @@ export function DashboardRenderer({
     }, null, 2);
   }, [appId, dashboard, run, runVariables, tileResults]);
 
-  const saveItems = useCallback(async (items: DashboardDocumentResponse['dashboard']['layout']['items']) => {
+  const saveItems = useCallback(async (
+    items: DashboardDocumentResponse['dashboard']['layout']['items'],
+    successMessage = 'Changes saved',
+  ) => {
     setSaving(true);
+    setError(null);
     const next = {
       ...dashboard,
       layout: {
@@ -272,14 +293,28 @@ export function DashboardRenderer({
         items,
       },
     };
-    const result = await api.patchDashboardLayout(appId, dashboard.id, next.layout);
-    setSaving(false);
-    if (result.ok) {
-      onDashboardChanged?.(result.dashboard);
-    } else {
-      setError(result.error);
+    try {
+      const result = await api.patchDashboardLayout(appId, dashboard.id, next.layout);
+      if (result.ok) {
+        setPendingLayoutItems(null);
+        setLayoutNotice(successMessage);
+        onDashboardChanged?.(result.dashboard);
+      } else {
+        setError(result.error);
+      }
+    } finally {
+      setSaving(false);
     }
   }, [appId, dashboard, onDashboardChanged]);
+
+  const stageOrSaveItems = useCallback(async (items: DashboardLayoutItem[]) => {
+    if (pendingLayoutItems) {
+      setPendingLayoutItems(items);
+      setLayoutNotice('Layout preview ready');
+      return;
+    }
+    await saveItems(items);
+  }, [pendingLayoutItems, saveItems]);
 
   const openCatalog = useCallback(async () => {
     setCatalogOpen(true);
@@ -297,8 +332,8 @@ export function DashboardRenderer({
     });
     const size = autoTileSizeForViz(vizType, cols);
     const tile = {
-      i: nextTileId(dashboard, block.name),
-      ...nextTilePosition(dashboard, size),
+      i: nextTileId(workingDashboard, block.name),
+      ...nextTilePosition(workingDashboard, size),
       block: { blockId: block.name },
       viz: { type: vizType },
       ...(recommendation.ok ? {
@@ -311,9 +346,9 @@ export function DashboardRenderer({
       } : {}),
       title: block.name,
     };
-    await saveItems([...dashboard.layout.items, tile]);
+    await stageOrSaveItems([...workingLayoutItems, tile]);
     setCatalogOpen(false);
-  }, [appId, cols, dashboard, saveItems]);
+  }, [appId, cols, dashboard.id, dashboard.metadata.audience, dashboard.metadata.title, stageOrSaveItems, workingDashboard, workingLayoutItems]);
 
   const addTextTile = useCallback(async () => {
     setTextDialogKind('text');
@@ -329,11 +364,11 @@ export function DashboardRenderer({
     const value = textDialogValue.trim();
     if (!value || !textDialogKind) return;
     if (textDialogKind === 'heading') {
-      await saveItems([
-        ...dashboard.layout.items,
+      await stageOrSaveItems([
+        ...workingLayoutItems,
         {
-          i: nextTileId(dashboard, 'section'),
-          ...nextTilePosition(dashboard, tileSizeForPreset('wide', cols, 'heading')),
+          i: nextTileId(workingDashboard, 'section'),
+          ...nextTilePosition(workingDashboard, tileSizeForPreset('wide', cols, 'heading')),
           text: { markdown: value },
           viz: { type: 'heading' },
           display: textTileDisplay('heading', value),
@@ -342,11 +377,11 @@ export function DashboardRenderer({
       ]);
     } else {
       const title = value.split(/\r?\n/)[0]?.slice(0, 60) || 'Summary';
-      await saveItems([
-        ...dashboard.layout.items,
+      await stageOrSaveItems([
+        ...workingLayoutItems,
         {
-          i: nextTileId(dashboard, 'text'),
-          ...nextTilePosition(dashboard, tileSizeForPreset('standard', cols, 'text')),
+          i: nextTileId(workingDashboard, 'text'),
+          ...nextTilePosition(workingDashboard, tileSizeForPreset('standard', cols, 'text')),
           text: { markdown: value },
           viz: { type: 'text' },
           display: textTileDisplay('text', title),
@@ -356,18 +391,18 @@ export function DashboardRenderer({
     }
     setTextDialogKind(null);
     setTextDialogValue('');
-  }, [cols, dashboard, saveItems, textDialogKind, textDialogValue]);
+  }, [cols, stageOrSaveItems, textDialogKind, textDialogValue, workingDashboard, workingLayoutItems]);
 
   const patchTile = useCallback(async (tileId: string, patch: Partial<DashboardLayoutItem> | null) => {
     const items = patch === null
-      ? dashboard.layout.items.filter((item) => item.i !== tileId)
-      : dashboard.layout.items.map((item) => item.i === tileId ? { ...item, ...patch } : item);
-    await saveItems(packDashboardItems(items, cols));
-  }, [cols, dashboard.layout.items, saveItems]);
+      ? workingLayoutItems.filter((item) => item.i !== tileId)
+      : workingLayoutItems.map((item) => item.i === tileId ? { ...item, ...patch } : item);
+    await stageOrSaveItems(packDashboardItems(items, cols));
+  }, [cols, stageOrSaveItems, workingLayoutItems]);
 
   const moveTileToPoint = useCallback(async (tileId: string, point: { clientX: number; clientY: number }) => {
     const grid = gridRef.current;
-    const item = dashboard.layout.items.find((candidate) => candidate.i === tileId);
+    const item = workingLayoutItems.find((candidate) => candidate.i === tileId);
     if (!grid || !item) return;
     const rect = grid.getBoundingClientRect();
     const gap = 12;
@@ -382,13 +417,13 @@ export function DashboardRenderer({
       y: Math.max(0, rawY),
     };
     setDragPreview(null);
-    const ordered = reorderTileForDrop(dashboard.layout.items, moved, cols);
-    await saveItems(packDashboardItems(ordered, cols));
-  }, [cols, dashboard.layout.items, rowHeight, saveItems]);
+    const ordered = reorderTileForDrop(workingLayoutItems, moved, cols);
+    await stageOrSaveItems(packDashboardItems(ordered, cols));
+  }, [cols, rowHeight, stageOrSaveItems, workingLayoutItems]);
 
   const updateDragPreview = useCallback((tileId: string, point: { clientX: number; clientY: number }) => {
     const grid = gridRef.current;
-    const item = dashboard.layout.items.find((candidate) => candidate.i === tileId);
+    const item = workingLayoutItems.find((candidate) => candidate.i === tileId);
     if (!grid || !item) return;
     const rect = grid.getBoundingClientRect();
     const gap = 12;
@@ -402,25 +437,67 @@ export function DashboardRenderer({
       w: item.w,
       h: item.h,
     });
-  }, [cols, dashboard.layout.items, rowHeight]);
+  }, [cols, rowHeight, workingLayoutItems]);
 
   const clearDragPreview = useCallback(() => setDragPreview(null), []);
 
-  const autoLayout = useCallback(async () => {
-    const items = dashboard.layout.items;
-    if (items.length === 0) return;
-    const ordered = [...items]
-      .map((item, index) => ({ item, index }))
-      .sort((a, b) => {
-        const rank = autoLayoutRank(a.item) - autoLayoutRank(b.item);
-        return rank !== 0 ? rank : a.index - b.index;
-      })
-      .map(({ item }) => {
-        const size = autoTileSizeForItem(item, cols);
-        return { ...item, w: size.w, h: size.h };
-      });
-    await saveItems(packDashboardItems(ordered, cols));
-  }, [cols, dashboard.layout.items, saveItems]);
+  const autoLayout = useCallback(() => {
+    if (workingLayoutItems.length === 0) return;
+    setPendingLayoutItems(autoLayoutDashboardItems(workingLayoutItems, cols));
+    setLayoutNotice('Layout preview ready');
+  }, [cols, workingLayoutItems]);
+
+  const applyPendingLayout = useCallback(async () => {
+    if (!pendingLayoutItems) return;
+    await saveItems(pendingLayoutItems, 'Layout applied');
+  }, [pendingLayoutItems, saveItems]);
+
+  const cancelPendingLayout = useCallback(() => {
+    setPendingLayoutItems(null);
+    setLayoutNotice('Layout preview cancelled');
+  }, []);
+
+  const retryTile = useCallback(async (tileId: string) => {
+    setRetryingTileId(tileId);
+    const retried = await api.retryDashboardTile(appId, dashboard.id, tileId, runVariables);
+    setRetryingTileId(null);
+    const retriedTile = retried?.tiles.find((candidate) => candidate.tileId === tileId);
+    if (!retried || !retriedTile) {
+      setError('This App tile could not be retried.');
+      return;
+    }
+    const merged = run
+      ? { ...run, tiles: run.tiles.map((candidate) => candidate.tileId === tileId ? retriedTile : candidate) }
+      : retried;
+    setRun(merged);
+    setBusinessStory(null);
+    onRunChange?.(merged);
+  }, [appId, dashboard.id, onRunChange, run, runVariables]);
+
+  const openTileInNotebook = useCallback(async (item: DashboardLayoutItem, tile: DashboardRunTile) => {
+    const artifact = tile.artifact;
+    const payload: InsertDqlPayload = {
+      title: item.title ?? artifact?.name ?? tile.title ?? 'App analysis',
+      sql: artifact?.sql,
+      result: tile.result,
+      chartConfig: mergeDashboardTileChartConfig(item, tile.chartConfig as CellChartConfig | undefined),
+      sourceRunId: run?.runId,
+      question: `App tile: ${item.title ?? tile.title ?? item.i}`,
+      executionTarget: artifact?.executionTarget,
+      ...(artifact?.dql ? {
+        dqlArtifact: {
+          kind: artifact.sourceKind === 'certified_block' ? 'certified_block' : 'sql_block',
+          source: artifact.dql,
+          name: artifact.name,
+          sourcePath: artifact.sourcePath,
+          persistence: artifact.sourcePath ? 'saved' : 'transient',
+          trustState: artifact.trustState,
+          compiledSql: artifact.sql,
+        },
+      } : {}),
+    };
+    await openAnswerInNotebook(payload);
+  }, [openAnswerInNotebook, run?.runId]);
 
   const loadLineage = useCallback(async () => {
     setLineageOpen((value) => !value);
@@ -497,17 +574,34 @@ export function DashboardRenderer({
             onAi={openCopilot}
           />
         )}
-        {editable && dashboard.layout.items.length > 1 && (
+        {editable && dashboard.layout.items.length > 1 && !pendingLayoutItems && (
           <button
             type="button"
-            onClick={() => void autoLayout()}
+            onClick={autoLayout}
             disabled={saving}
-            style={toolbarIconButtonStyle(false)}
+            style={toolbarButtonStyle(false)}
             title="Auto-arrange every tile into a clean, gap-free grid"
           >
             <Wand2 size={15} strokeWidth={2} />
+            Auto layout
           </button>
         )}
+        {editable && pendingLayoutItems ? (
+          <>
+            <button
+              type="button"
+              onClick={() => void applyPendingLayout()}
+              disabled={saving}
+              style={toolbarButtonStyle(true)}
+            >
+              {saving ? 'Applying…' : 'Apply layout'}
+            </button>
+            <button type="button" onClick={cancelPendingLayout} disabled={saving} style={toolbarButtonStyle(false)}>
+              Cancel
+            </button>
+          </>
+        ) : null}
+        {editable && layoutNotice ? <span role="status" style={{ fontSize: 11, opacity: 0.68 }}>{layoutNotice}</span> : null}
         {!embeddedHeader && (
           <>
             <button
@@ -642,6 +736,10 @@ export function DashboardRenderer({
                       onDragMove={() => undefined}
                       onDragEnd={() => undefined}
                       onPatch={(patch) => void patchTile(item.i, patch)}
+                      onRetry={() => void retryTile(item.i)}
+                      retrying={retryingTileId === item.i}
+                      retryDisabled={Boolean(retryingTileId && retryingTileId !== item.i)}
+                      onOpenNotebook={(nextTile) => void openTileInNotebook(item, nextTile)}
                     />
                   ))}
                 </div>
@@ -691,6 +789,10 @@ export function DashboardRenderer({
               onDragMove={(point) => updateDragPreview(item.i, point)}
               onDragEnd={clearDragPreview}
               onPatch={(patch) => void patchTile(item.i, patch)}
+              onRetry={() => void retryTile(item.i)}
+              retrying={retryingTileId === item.i}
+              retryDisabled={Boolean(retryingTileId && retryingTileId !== item.i)}
+              onOpenNotebook={(nextTile) => void openTileInNotebook(item, nextTile)}
             />
           ))}
         </div>
@@ -773,6 +875,10 @@ function DashboardTile({
   onDragMove,
   onDragEnd,
   onPatch,
+  onRetry,
+  retrying = false,
+  retryDisabled = false,
+  onOpenNotebook,
 }: {
   item: DashboardDocumentResponse['dashboard']['layout']['items'][number];
   tile?: DashboardRunResponse['tiles'][number];
@@ -789,10 +895,16 @@ function DashboardTile({
   onDragMove?: (point: { clientX: number; clientY: number }) => void;
   onDragEnd?: () => void;
   onPatch: (patch: Partial<DashboardDocumentResponse['dashboard']['layout']['items'][number]> | null) => void;
+  onRetry?: () => void;
+  retrying?: boolean;
+  retryDisabled?: boolean;
+  onOpenNotebook?: (tile: DashboardRunTile) => void;
 }): JSX.Element {
   const tileRef = useRef<HTMLDivElement | null>(null);
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorTab, setInspectorTab] = useState<'how' | 'dql' | 'sql'>('how');
   const blockId = getDashboardItemBlockId(item);
   const canAsk = Boolean(!editable && blockId && onAskBlock);
   const blockRef = blockId
@@ -804,22 +916,43 @@ function DashboardTile({
     : item.aiPin
       ? `aiPin:${item.aiPin.id}`
       : 'text';
-  const vizType = normalizeViz(String(item.viz.type ?? 'table'));
+  const [viewerViz, setViewerViz] = useState<ChartType>(() => normalizeChartType(item.viz.type));
+  useEffect(() => setViewerViz(normalizeChartType(item.viz.type)), [item.i, item.viz.type]);
+  const activeChart = editable ? normalizeChartType(item.viz.type) : viewerViz;
+  const renderedItem = useMemo<DashboardLayoutItem>(() => editable || activeChart === normalizeChartType(item.viz.type)
+    ? item
+    : {
+        ...item,
+        viz: {
+          ...item.viz,
+          type: chartToDashboardViz(activeChart),
+          options: { ...(item.viz.options ?? {}), chart: activeChart },
+        },
+      }, [activeChart, editable, item]);
+  const vizType = normalizeViz(String(renderedItem.viz.type ?? 'table'));
   const genUi = getDqlGenUi(item);
   const generatedComponent = genUi?.component;
   const generatedTitle = genUi?.insightTitle || item.title || blockRef;
   const aiPinTrust = tile?.tileType === 'aiPin'
     ? tile.aiPin?.certification === 'certified' ? 'certified' : 'review_required'
     : undefined;
-  const generatedTrust = genUi?.trustState ?? aiPinTrust ?? (tile?.certificationStatus === 'certified' ? 'certified' : undefined);
   const repair = tile?.repair;
+  const generatedTrust = repair
+    ? 'review_required'
+    : tile?.artifact?.trustState ?? genUi?.trustState ?? aiPinTrust ?? (tile?.certificationStatus === 'certified' ? 'certified' : undefined);
   const isGeneratedUi = Boolean(genUi);
   const isCompactMetric = item.h <= 2 && (vizType === 'single_value' || vizType === 'kpi' || vizType === 'gauge');
   const [hovered, setHovered] = useState(false);
   const showEditChrome = editable && (hovered || selected || settingsOpen);
   const generatedVizOptions = getGeneratedVizOptions(item, genUi);
+  const showVizSwitcher = Boolean(tile?.result && generatedVizOptions.length > 1);
+  const canInspect = Boolean(tile && tile.tileType !== 'text' && (tile.artifact || tile.result || tile.citation || tile.repair));
   const showAskHint = Boolean(canAsk && (hovered || selected));
   const switchGeneratedViz = (chart: ChartType) => {
+    if (!editable) {
+      setViewerViz(chart);
+      return;
+    }
     const dashboardViz = chartToDashboardViz(chart);
     const options = item.viz.options ?? {};
     const currentGenUi = getDqlGenUi(item);
@@ -998,7 +1131,20 @@ function DashboardTile({
         >
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, minWidth: 0 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: isCompactMetric ? 12 : 13, fontWeight: 780, lineHeight: 1.25, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <div
+                title={generatedTitle}
+                style={{
+                  fontSize: isCompactMetric ? 12 : 13,
+                  fontWeight: 780,
+                  lineHeight: 1.25,
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  display: '-webkit-box',
+                  WebkitLineClamp: 2,
+                  WebkitBoxOrient: 'vertical',
+                }}
+              >
                 {generatedTitle}
               </div>
               <div style={generatedMetaRowStyle}>
@@ -1012,9 +1158,9 @@ function DashboardTile({
                 {genUi?.layoutIntent ? <span style={generatedMetaPillStyle}>{formatGenUiLabel(String(genUi.layoutIntent))}</span> : null}
               </div>
             </div>
-            {editable && generatedVizOptions.length > 1 ? (
+            {showVizSwitcher ? (
               <GeneratedVizSwitcher
-                value={normalizeChartType(item.viz.type)}
+                value={activeChart}
                 options={generatedVizOptions}
                 onChange={switchGeneratedViz}
               />
@@ -1031,7 +1177,12 @@ function DashboardTile({
           }}
         >
           <div style={{ fontSize: isCompactMetric ? 12 : 13, fontWeight: 720, lineHeight: 1.25, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {item.title ?? blockRef}
+            <span>{item.title ?? blockRef}</span>
+            {showVizSwitcher ? (
+              <span style={{ float: 'right', marginLeft: 8 }}>
+                <GeneratedVizSwitcher value={activeChart} options={generatedVizOptions} onChange={switchGeneratedViz} />
+              </span>
+            ) : null}
           </div>
           {aiPinTrust || repair ? (
             <div style={{ marginTop: 5, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
@@ -1070,9 +1221,43 @@ function DashboardTile({
           fontStyle: tile?.status === 'ok' ? 'normal' : 'italic',
         }}
       >
-        <TileBody item={item} tile={tile} loading={loading} error={error} themeMode={themeMode} genUi={genUi} />
+        <TileBody
+          item={renderedItem}
+          tile={tile}
+          loading={loading}
+          error={error}
+          themeMode={themeMode}
+          genUi={genUi}
+          onRetry={onRetry}
+          retrying={retrying}
+          retryDisabled={retryDisabled}
+        />
       </div>
       {!editable ? <TileInsightCaption tile={tile} themeMode={themeMode} /> : null}
+      {!editable && canInspect ? (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, paddingTop: 2 }}>
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              setInspectorOpen((value) => !value);
+            }}
+            style={tileEvidenceButtonStyle}
+          >
+            {inspectorOpen ? 'Hide details' : 'How it works'}
+          </button>
+        </div>
+      ) : null}
+      {!editable && inspectorOpen && tile ? (
+        <TileEvidencePanel
+          item={item}
+          tile={tile}
+          tab={inspectorTab}
+          onTab={setInspectorTab}
+          onOpenNotebook={onOpenNotebook}
+          onClose={() => setInspectorOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -1090,7 +1275,7 @@ function TileInsightCaption({ tile, themeMode }: { tile?: DashboardRunResponse['
   );
 }
 
-function computeTileInsight(tile?: DashboardRunResponse['tiles'][number]): string | null {
+export function computeTileInsight(tile?: DashboardRunResponse['tiles'][number]): string | null {
   const rows = tile?.result?.rows;
   const columns = tile?.result?.columns;
   if (!Array.isArray(rows) || rows.length === 0 || !Array.isArray(columns) || columns.length === 0) return null;
@@ -1103,26 +1288,26 @@ function computeTileInsight(tile?: DashboardRunResponse['tiles'][number]): strin
   const valueCol = columns.find((c) => toNum(sample?.[c]) !== undefined);
   const labelCol = columns.find((c) => c !== valueCol && typeof sample?.[c] === 'string');
   if (!valueCol) return null;
+  const valueSamples = rows.map((row) => row[valueCol]);
+  const labelSamples = labelCol ? rows.map((row) => row[labelCol]) : [];
+  const metricLabel = formatGenUiLabel(valueCol);
   if (rows.length === 1) {
     const v = toNum((rows[0] as Record<string, unknown>)[valueCol]);
-    return v !== undefined ? `${valueCol}: ${fmtNum(v)}.` : null;
+    return v !== undefined ? `${metricLabel}: ${formatDashboardValue(valueCol, v, valueSamples, { compact: true })}.` : null;
   }
   const ranked = (rows as Array<Record<string, unknown>>)
-    .map((r) => ({ label: labelCol ? String(r[labelCol] ?? '—') : 'top', value: toNum(r[valueCol]) ?? 0 }))
+    .map((r) => ({
+      label: labelCol ? formatDashboardValue(labelCol, r[labelCol], labelSamples) : 'top',
+      value: toNum(r[valueCol]) ?? 0,
+    }))
     .sort((a, b) => b.value - a.value);
   const total = ranked.reduce((s, e) => s + e.value, 0);
   const top = ranked[0];
   if (!top) return null;
+  const formattedTopValue = formatDashboardValue(valueCol, top.value, valueSamples, { compact: true });
   return total > 0
-    ? `${top.label} leads ${valueCol} at ${fmtNum(top.value)} (${Math.round((top.value / total) * 100)}%).`
-    : `${top.label} leads ${valueCol} at ${fmtNum(top.value)}.`;
-}
-
-function fmtNum(value: number): string {
-  const abs = Math.abs(value);
-  if (abs >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (abs >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
-  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+    ? `${top.label} leads ${metricLabel} at ${formattedTopValue} (${Math.round((top.value / total) * 100)}%).`
+    : `${top.label} leads ${metricLabel} at ${formattedTopValue}.`;
 }
 
 function GeneratedVizSwitcher({
@@ -1345,6 +1530,9 @@ function TileBody({
   error,
   themeMode,
   genUi,
+  onRetry,
+  retrying,
+  retryDisabled,
 }: {
   item: DashboardDocumentResponse['dashboard']['layout']['items'][number];
   tile?: DashboardRunResponse['tiles'][number];
@@ -1352,6 +1540,9 @@ function TileBody({
   error: string | null;
   themeMode: ThemeMode;
   genUi?: DqlGenUiMetadata | null;
+  onRetry?: () => void;
+  retrying?: boolean;
+  retryDisabled?: boolean;
 }): JSX.Element {
   if (loading && !tile) return <span>Loading data...</span>;
   if (tile?.tileType === 'text') {
@@ -1367,33 +1558,167 @@ function TileBody({
     }
     return <MarkdownTile markdown={tile.text?.markdown ?? ''} variant={tile.viz?.type === 'heading' ? 'heading' : 'text'} themeMode={themeMode} />;
   }
-  if (tile?.tileType === 'aiPin' && tile.aiPin) {
-    return <AiPinSummary pin={tile.aiPin} result={tile.result} themeMode={themeMode} />;
-  }
   if (error && !tile) return <span>{error}</span>;
   if (!tile) return <span>No run result.</span>;
   if (tile.status === 'unauthorized') return <span>Not authorized.</span>;
   if (tile.status === 'unresolved') return <span>{tile.error ?? 'Block reference unresolved.'}</span>;
   if (tile.status === 'error') return (
-    <span>
-      {tile.error ?? 'Tile failed.'}
-      {tile.repair?.status === 'failed' ? <small style={{ display: 'block', marginTop: 6 }}>{tile.repair.message}</small> : null}
-    </span>
+    <div style={{ display: 'grid', gap: 8, justifyItems: 'center', textAlign: 'center', padding: 8 }}>
+      <span>{tile.error ?? 'Tile failed.'}</span>
+      {tile.repair?.status === 'failed' ? <small>{tile.repair.message}</small> : null}
+      {onRetry ? (
+        <button
+          type="button"
+          disabled={retrying || retryDisabled}
+          onClick={(event) => {
+            event.stopPropagation();
+            onRetry();
+          }}
+          style={tileRepairButtonStyle}
+        >
+          <Wrench size={12} /> {retrying ? 'Fixing…' : 'Fix and retry'}
+        </button>
+      ) : null}
+    </div>
   );
-  if (!tile.result) return <span>No result.</span>;
+  if (!tile.result) {
+    return tile.tileType === 'aiPin' && tile.aiPin
+      ? <AiPinSummary pin={tile.aiPin} themeMode={themeMode} />
+      : <span>No result.</span>;
+  }
 
   const chartConfig = mergeDashboardTileChartConfig(item, tile.chartConfig as CellChartConfig | undefined);
   const chart = String(chartConfig.chart ?? tile.viz?.type ?? '').toLowerCase();
+  let dataView: JSX.Element;
   if (chart === 'table' || item.viz.type === 'table' || item.viz.type === 'pivot') {
-    if (genUi?.component === 'EvidenceTable' || genUi?.component === 'PivotTable') {
-      return <GeneratedEvidenceTable result={tile.result} genUi={genUi} themeMode={themeMode} />;
+    if (tile.tileType !== 'aiPin' && (genUi?.component === 'EvidenceTable' || genUi?.component === 'PivotTable')) {
+      dataView = <GeneratedEvidenceTable result={tile.result} genUi={genUi} themeMode={themeMode} />;
+    } else {
+      dataView = <div style={{ width: '100%', alignSelf: 'stretch' }}><TableOutput result={tile.result} themeMode={themeMode} /></div>;
     }
-    return <div style={{ width: '100%', alignSelf: 'stretch' }}><TableOutput result={tile.result} themeMode={themeMode} /></div>;
+  } else {
+    const chartResult = chart === 'kpi'
+      ? summarizeDashboardKpiResult(tile.result, chartConfig.y)
+      : tile.result;
+    dataView = <div style={{ width: '100%', alignSelf: 'stretch' }}><ChartOutput result={chartResult} themeMode={themeMode} chartConfig={chartConfig} /></div>;
   }
-  const chartResult = chart === 'kpi'
-    ? summarizeDashboardKpiResult(tile.result, chartConfig.y)
-    : tile.result;
-  return <div style={{ width: '100%', alignSelf: 'stretch' }}><ChartOutput result={chartResult} themeMode={themeMode} chartConfig={chartConfig} /></div>;
+  return tile.tileType === 'aiPin' && tile.aiPin
+    ? <AiPinSummary pin={tile.aiPin} themeMode={themeMode} dataView={dataView} />
+    : dataView;
+}
+
+function TileEvidencePanel({
+  item,
+  tile,
+  tab,
+  onTab,
+  onOpenNotebook,
+  onClose,
+}: {
+  item: DashboardLayoutItem;
+  tile: DashboardRunTile;
+  tab: 'how' | 'dql' | 'sql';
+  onTab: (tab: 'how' | 'dql' | 'sql') => void;
+  onOpenNotebook?: (tile: DashboardRunTile) => void;
+  onClose: () => void;
+}): JSX.Element {
+  const artifact = tile.artifact;
+  const canOpenNotebook = Boolean(tile.result && (artifact?.dql || artifact?.sql));
+  const sourceLabel = artifact?.sourceKind === 'certified_block'
+    ? 'Certified block'
+    : artifact?.sourceKind === 'semantic_query'
+      ? 'Governed semantic query'
+      : artifact?.sourceKind === 'draft_analysis'
+        ? 'App analysis'
+        : artifact?.sourceKind === 'ai_pin'
+          ? 'Saved AI insight'
+          : tile.tileType ?? 'App tile';
+  return (
+    <div style={tileEvidenceBackdropStyle} role="presentation" onClick={onClose}>
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-label={`How ${item.title ?? tile.title ?? item.i} works`}
+        style={tileEvidencePanelStyle}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 16, fontWeight: 800 }}>{item.title ?? tile.title ?? artifact?.name ?? 'App tile'}</div>
+            <div style={{ marginTop: 4, fontSize: 12, color: 'var(--text-secondary)' }}>{sourceLabel} · {artifact?.trustState === 'certified' && !tile.repair ? 'Certified' : 'Review required'}</div>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close details" style={iconTileButtonStyle}><X size={14} /></button>
+        </div>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', borderBottom: '1px solid var(--border-subtle)', paddingBottom: 10 }}>
+          {(['how', 'dql', 'sql'] as const).map((candidate) => (
+            <button
+              key={candidate}
+              type="button"
+              onClick={() => onTab(candidate)}
+              style={tileEvidenceTabStyle(tab === candidate)}
+            >
+              {candidate === 'how' ? 'How it works' : candidate.toUpperCase()}
+            </button>
+          ))}
+        </div>
+        <div style={{ minHeight: 180, maxHeight: '56vh', overflow: 'auto' }}>
+          {tab === 'how' ? (
+            <div style={{ display: 'grid', gap: 12, fontSize: 12.5, lineHeight: 1.5 }}>
+              <EvidenceRow label="Source" value={artifact?.sourcePath ?? tile.citation?.path ?? tile.citation?.name ?? sourceLabel} />
+              <EvidenceRow label="Result" value={tile.result ? `${tile.result.rowCount} rows · ${tile.result.columns.length} columns` : tile.status} />
+              {artifact?.explanation?.length ? (
+                <div>
+                  <b>Execution</b>
+                  <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+                    {artifact.explanation.map((line) => <li key={line}>{line}</li>)}
+                  </ul>
+                </div>
+              ) : null}
+              {tile.filters ? (
+                <EvidenceRow
+                  label="Filters"
+                  value={`${tile.filters.applied.map((filter) => filter.filter).join(', ') || 'None applied'}${tile.filters.skipped.length ? ` · ${tile.filters.skipped.length} skipped` : ''}`}
+                />
+              ) : null}
+              {tile.invocation ? (
+                <EvidenceRow
+                  label="Parameters"
+                  value={tile.invocation.resolvedParameters.map((parameter) => `${parameter.name} (${parameter.source})`).join(', ') || 'None'}
+                />
+              ) : null}
+              {tile.repair ? <EvidenceRow label="Repair" value={tile.repair.message} /> : null}
+              <div style={{ padding: 10, borderRadius: 8, background: 'var(--bg-2)', color: 'var(--text-secondary)' }}>
+                Parameter values are intentionally omitted here. Open the editable Notebook cell to inspect or change the full execution contract.
+              </div>
+            </div>
+          ) : (
+            <pre style={tileEvidenceCodeStyle}>
+              {tab === 'dql'
+                ? artifact?.dql ?? 'This tile does not expose DQL source. Its governed semantic intent is composed into SQL at runtime.'
+                : artifact?.sql ?? 'Executed SQL is not available for this saved result.'}
+            </pre>
+          )}
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, borderTop: '1px solid var(--border-subtle)', paddingTop: 10 }}>
+          <button type="button" onClick={onClose} style={toolbarButtonStyle(false)}>Close</button>
+          {canOpenNotebook ? (
+            <button type="button" onClick={() => onOpenNotebook?.(tile)} style={toolbarButtonStyle(true)}>
+              Open in Notebook
+            </button>
+          ) : null}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function EvidenceRow({ label, value }: { label: string; value: string }): JSX.Element {
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '110px minmax(0, 1fr)', gap: 12 }}>
+      <b>{label}</b>
+      <span style={{ minWidth: 0, overflowWrap: 'anywhere', color: 'var(--text-secondary)' }}>{value}</span>
+    </div>
+  );
 }
 
 function TileEditorControls({
@@ -1840,6 +2165,7 @@ function GeneratedEvidenceTable({
     .filter((column) => column !== labelColumn && column !== statusColumn && !metricColumns.includes(column))
     .slice(0, 2);
   const rowCount = result.rowCount ?? rows.length;
+  const valueSamples = resultValueSamples(columns, rows);
 
   return (
     <div style={generatedEvidenceStyle}>
@@ -1848,8 +2174,8 @@ function GeneratedEvidenceTable({
       </div>
       <div style={generatedEvidenceRowsStyle}>
         {rows.slice(0, 4).map((row, index) => {
-          const label = labelColumn ? formatEvidenceValue(row[labelColumn]) : `Row ${index + 1}`;
-          const status = statusColumn ? formatEvidenceValue(row[statusColumn]) : null;
+          const label = labelColumn ? formatDashboardValue(labelColumn, row[labelColumn], valueSamples.get(labelColumn) ?? []) : `Row ${index + 1}`;
+          const status = statusColumn ? formatDashboardValue(statusColumn, row[statusColumn], valueSamples.get(statusColumn) ?? []) : null;
           return (
             <div key={index} style={generatedEvidenceRowStyle}>
               <div style={{ minWidth: 0 }}>
@@ -1858,7 +2184,7 @@ function GeneratedEvidenceTable({
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 4 }}>
                     {detailColumns.map((column) => (
                       <span key={column} style={generatedEvidenceMiniPillStyle}>
-                        {formatGenUiLabel(column)}: {formatEvidenceValue(row[column])}
+                        {formatGenUiLabel(column)}: {formatDashboardValue(column, row[column], valueSamples.get(column) ?? [])}
                       </span>
                     ))}
                   </div>
@@ -1868,7 +2194,7 @@ function GeneratedEvidenceTable({
                 {metricColumns.map((column) => (
                   <span key={column} style={generatedEvidenceMetricStyle}>
                     <span style={{ opacity: 0.62 }}>{formatGenUiLabel(column)}</span>
-                    <strong>{formatEvidenceValue(row[column])}</strong>
+                    <strong>{formatDashboardValue(column, row[column], valueSamples.get(column) ?? [])}</strong>
                   </span>
                 ))}
                 {status ? <span style={generatedEvidenceStatusStyle}>{status}</span> : null}
@@ -1911,12 +2237,12 @@ function MarkdownTile({ markdown, variant = 'text', themeMode }: { markdown: str
 
 function AiPinSummary({
   pin,
-  result,
   themeMode,
+  dataView,
 }: {
   pin: NonNullable<DashboardRunResponse['tiles'][number]['aiPin']>;
-  result?: QueryResult;
   themeMode: ThemeMode;
+  dataView?: ReactNode;
 }) {
   const [message, setMessage] = useState<string | null>(null);
   const theme = themes[themeMode as NotebookThemeMode] ?? themes.light;
@@ -1934,16 +2260,20 @@ function AiPinSummary({
   };
   return (
     <div style={{ width: '100%', alignSelf: 'stretch', overflow: 'auto', fontStyle: 'normal', lineHeight: 1.5, display: 'grid', gap: 10 }}>
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 10.5, fontWeight: 800, color: pin.certification === 'certified' ? '#15803d' : '#b45309', background: pin.certification === 'certified' ? 'rgba(22,163,74,0.1)' : 'rgba(245,158,11,0.12)', border: `1px solid ${pin.certification === 'certified' ? 'rgba(22,163,74,0.22)' : 'rgba(245,158,11,0.24)'}`, borderRadius: 999, padding: '3px 7px' }}>
-          {pin.certification === 'certified' ? 'Certified' : 'Review required'}
-        </span>
-        <span style={{ fontSize: 10.5, color: 'var(--color-text-muted, rgba(0,0,0,0.58))' }}>Pinned report insight</span>
-      </div>
-      <div style={{ minWidth: 0 }}>
-        {renderMarkdown(pin.answer, theme)}
-      </div>
-      {result?.rows?.length ? <AiPinEvidencePreview result={result} /> : null}
+      {dataView ? dataView : (
+        <>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 10.5, fontWeight: 800, color: pin.certification === 'certified' ? '#15803d' : '#b45309', background: pin.certification === 'certified' ? 'rgba(22,163,74,0.1)' : 'rgba(245,158,11,0.12)', border: `1px solid ${pin.certification === 'certified' ? 'rgba(22,163,74,0.22)' : 'rgba(245,158,11,0.24)'}`, borderRadius: 999, padding: '3px 7px' }}>
+              {pin.certification === 'certified' ? 'Certified' : 'Review required'}
+            </span>
+            <span style={{ fontSize: 10.5, color: 'var(--color-text-muted, rgba(0,0,0,0.58))' }}>Pinned report insight</span>
+          </div>
+          <div style={{ minWidth: 0 }}>
+            {renderMarkdown(pin.answer, theme)}
+          </div>
+          {pin.result?.rows?.length ? <AiPinEvidencePreview result={pin.result} /> : null}
+        </>
+      )}
       <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
         {pin.sql && <button type="button" onClick={() => void refresh()} style={miniButtonStyle}>Refresh</button>}
         {pin.sql && pin.reviewStatus === 'needs_review' && <button type="button" onClick={() => void promote()} style={miniButtonStyle}>Promote</button>}
@@ -1958,6 +2288,7 @@ function AiPinSummary({
 function AiPinEvidencePreview({ result }: { result: QueryResult }) {
   const columns = (result.columns?.length ? result.columns : Object.keys(result.rows?.[0] ?? {})).slice(0, 4);
   const rows = (result.rows ?? []).slice(0, 3);
+  const valueSamples = resultValueSamples(columns, result.rows ?? []);
   if (!columns.length || !rows.length) return null;
   return (
     <div style={{ display: 'grid', gap: 6 }}>
@@ -1978,7 +2309,7 @@ function AiPinEvidencePreview({ result }: { result: QueryResult }) {
               <tr key={index}>
                 {columns.map((column) => (
                   <td key={column} style={{ padding: '5px 7px', borderBottom: index === rows.length - 1 ? 'none' : '1px solid var(--border-color, rgba(0,0,0,0.06))' }}>
-                    {formatEvidenceValue(row[column])}
+                    {formatDashboardValue(column, row[column], valueSamples.get(column) ?? [])}
                   </td>
                 ))}
               </tr>
@@ -2493,8 +2824,10 @@ function buildDashboardStory(
   const metricColumn = pickStoryMetricColumn(columns, rows, genUi?.fieldHints?.value ?? genUi?.fieldHints?.y);
   const first = rows[0];
   const second = rows[1];
-  const firstLabel = labelColumn ? formatEvidenceValue(first[labelColumn]) : 'The leading result';
-  const secondLabel = second && labelColumn ? formatEvidenceValue(second[labelColumn]) : null;
+  const labelValues = labelColumn ? rows.map((row) => row[labelColumn]) : [];
+  const metricValues = metricColumn ? rows.map((row) => row[metricColumn]) : [];
+  const firstLabel = labelColumn ? formatDashboardValue(labelColumn, first[labelColumn], labelValues) : 'The leading result';
+  const secondLabel = second && labelColumn ? formatDashboardValue(labelColumn, second[labelColumn], labelValues) : null;
   const firstMetric = metricColumn ? toStoryNumber(first[metricColumn]) : null;
   const secondMetric = metricColumn && second ? toStoryNumber(second[metricColumn]) : null;
   const metricLabel = metricColumn ? storyMetricLabel(metricColumn) : null;
@@ -2508,11 +2841,11 @@ function buildDashboardStory(
   const title = metricLabel ? `${formatGenUiLabel(metricLabel)} snapshot` : 'Dashboard snapshot';
 
   let summary: string;
-  if (metricLabel && firstMetric !== null) {
-    const leading = `${firstLabel} leads ${metricLabel} with ${formatEvidenceValue(firstMetric)}`;
+  if (metricColumn && metricLabel && firstMetric !== null) {
+    const leading = `${firstLabel} leads ${metricLabel} with ${formatDashboardValue(metricColumn, firstMetric, metricValues, { compact: true })}`;
     if (secondLabel && secondMetric !== null && Number.isFinite(firstMetric - secondMetric)) {
       const gap = Math.abs(firstMetric - secondMetric);
-      summary = `${leading}, ahead of ${secondLabel} by ${formatEvidenceValue(gap)} ${filterPhrase}.`;
+      summary = `${leading}, ahead of ${secondLabel} by ${formatDashboardValue(metricColumn, gap, metricValues, { compact: true })} ${filterPhrase}.`;
     } else {
       summary = `${leading} ${filterPhrase}.`;
     }
@@ -2613,7 +2946,7 @@ function formatStoryFilterValue(key: string, value: unknown): string {
   if (/(season|year)/i.test(key) && Number.isInteger(numeric) && numeric >= 1900 && numeric <= 2200) {
     return String(numeric);
   }
-  return formatEvidenceValue(value);
+  return formatDashboardValue(key, value, [value]);
 }
 
 function toStoryNumber(value: unknown): number | null {
@@ -2643,11 +2976,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function getGeneratedVizOptions(
+export function getGeneratedVizOptions(
   item: DashboardLayoutItem,
   genUi?: DqlGenUiMetadata | null,
 ): Array<{ value: ChartType; label: string }> {
   const allowed = new Set<string>([
+    'table',
     String(item.viz.type ?? 'table'),
     ...(genUi?.allowedVisualizations ?? []),
   ]);
@@ -2655,8 +2989,7 @@ function getGeneratedVizOptions(
     .map((value) => normalizeChartType(value))
     .filter((value, index, arr) => arr.indexOf(value) === index);
   return values
-    .map((value) => APP_CHART_TYPE_OPTIONS.find((option) => option.value === value) ?? { value, label: formatGenUiLabel(value) })
-    .filter((option) => option.value !== 'table' || values.length === 1 || item.block);
+    .map((value) => APP_CHART_TYPE_OPTIONS.find((option) => option.value === value) ?? { value, label: formatGenUiLabel(value) });
 }
 
 function tileSurfaceForGenUi(component?: string): string {
@@ -2748,16 +3081,20 @@ function isNumericColumn(column: string, rows: QueryResult['rows']): boolean {
   return sample.every((value) => typeof value === 'number' || (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))));
 }
 
-function formatEvidenceValue(value: unknown): string {
+function resultValueSamples(columns: string[], rows: QueryResult['rows']): Map<string, unknown[]> {
+  return new Map(columns.map((column) => [column, rows.slice(0, 32).map((row) => row[column])]));
+}
+
+export function formatDashboardValue(
+  column: string,
+  value: unknown,
+  values: unknown[] = [],
+  options: { compact?: boolean; format?: string } = {},
+): string {
   if (value === null || value === undefined || value === '') return 'N/A';
-  if (typeof value === 'number') return Number.isFinite(value) ? new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(value) : String(value);
-  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
-  const text = String(value);
-  const numeric = Number(text);
-  if (text.trim() !== '' && Number.isFinite(numeric) && /^-?\d+(\.\d+)?$/.test(text.trim())) {
-    return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(numeric);
-  }
-  return text.replace(/_/g, ' ');
+  const formatted = formatDisplayValue(column, value, values, options);
+  if (!formatted) return 'N/A';
+  return typeof value === 'string' && formatted === value ? formatted.replace(/_/g, ' ') : formatted;
 }
 
 function escapeRegExp(value: string): string {
@@ -2803,6 +3140,77 @@ const dashboardToolbarStyle: CSSProperties = {
   alignItems: 'center',
   gap: 6,
   marginBottom: 10,
+};
+
+const tileEvidenceButtonStyle: CSSProperties = {
+  border: '1px solid var(--border-subtle)',
+  borderRadius: 7,
+  background: 'var(--bg-1)',
+  color: 'var(--text-secondary)',
+  padding: '4px 8px',
+  cursor: 'pointer',
+  fontSize: 10.5,
+  fontWeight: 720,
+};
+
+const tileRepairButtonStyle: CSSProperties = {
+  ...tileEvidenceButtonStyle,
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 5,
+  color: 'var(--accent)',
+  borderColor: 'var(--accent-dim)',
+};
+
+const tileEvidenceBackdropStyle: CSSProperties = {
+  position: 'fixed',
+  inset: 0,
+  zIndex: 120,
+  display: 'grid',
+  placeItems: 'center',
+  padding: 24,
+  background: 'rgba(0, 0, 0, 0.38)',
+};
+
+const tileEvidencePanelStyle: CSSProperties = {
+  width: 'min(780px, calc(100vw - 32px))',
+  maxHeight: 'min(760px, calc(100vh - 48px))',
+  overflow: 'hidden',
+  display: 'grid',
+  gap: 12,
+  padding: 16,
+  border: '1px solid var(--border-default)',
+  borderRadius: 12,
+  background: 'var(--bg-0)',
+  color: 'var(--text-primary)',
+  boxShadow: '0 24px 80px rgba(0,0,0,0.28)',
+};
+
+function tileEvidenceTabStyle(active: boolean): CSSProperties {
+  return {
+    border: active ? '1px solid var(--accent)' : '1px solid var(--border-subtle)',
+    borderRadius: 7,
+    background: active ? 'var(--accent-dim)' : 'var(--bg-1)',
+    color: active ? 'var(--accent)' : 'var(--text-secondary)',
+    padding: '5px 9px',
+    cursor: 'pointer',
+    fontSize: 11,
+    fontWeight: 750,
+  };
+}
+
+const tileEvidenceCodeStyle: CSSProperties = {
+  margin: 0,
+  minHeight: 180,
+  padding: 14,
+  borderRadius: 8,
+  background: 'var(--bg-2)',
+  color: 'var(--text-primary)',
+  whiteSpace: 'pre-wrap',
+  overflowWrap: 'anywhere',
+  fontFamily: 'var(--font-mono, monospace)',
+  fontSize: 12,
+  lineHeight: 1.55,
 };
 
 const dashboardEditHintStyle: CSSProperties = {
@@ -3419,6 +3827,20 @@ function packDashboardItems(items: DashboardLayoutItem[], cols: number): Dashboa
     mark(px, py, w, h);
     return { ...item, x: px, y: py, w, h };
   });
+}
+
+export function autoLayoutDashboardItems(items: DashboardLayoutItem[], cols: number): DashboardLayoutItem[] {
+  const ordered = [...items]
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => {
+      const rank = autoLayoutRank(a.item) - autoLayoutRank(b.item);
+      return rank !== 0 ? rank : a.index - b.index;
+    })
+    .map(({ item }) => {
+      const size = autoTileSizeForItem(item, cols);
+      return { ...item, w: size.w, h: size.h };
+    });
+  return packDashboardItems(ordered, cols);
 }
 
 function reorderTileForDrop(items: DashboardLayoutItem[], moved: DashboardLayoutItem, cols: number): DashboardLayoutItem[] {

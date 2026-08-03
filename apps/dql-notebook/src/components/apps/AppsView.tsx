@@ -898,6 +898,9 @@ export function AppsView(): JSX.Element {
             setAddPageOpen(true);
           }}
           onOpenDashboard={(dashboardId) => dispatch({ type: 'OPEN_DASHBOARD', dashboardId })}
+          onOpenApp={(appId, dashboardId) => {
+            void refreshApps(appId, dashboardId, 'workspace', { experience: 'view', section: 'dashboards' });
+          }}
           onDashboardChanged={(dashboard) => {
             setDashboardDoc((current) => current ? { ...current, dashboard } : current);
             void refreshApps(state.activeAppId, dashboard.id, 'workspace');
@@ -1730,6 +1733,7 @@ function AppWorkspaceSurface({
   onExplainExpandedChange,
   onAddPage,
   onOpenDashboard,
+  onOpenApp,
   onDashboardChanged,
   onInvestigationsChanged,
   onOpenLineageNode,
@@ -1756,6 +1760,7 @@ function AppWorkspaceSurface({
   onExplainExpandedChange: (value: boolean) => void;
   onAddPage: () => void;
   onOpenDashboard: (dashboardId: string) => void;
+  onOpenApp: (appId: string, dashboardId?: string) => void;
   onDashboardChanged: (dashboard: DashboardDocumentResponse['dashboard']) => void;
   onInvestigationsChanged: (investigations: LocalAppInvestigation[]) => void;
   onOpenLineageNode: (nodeId: string) => void;
@@ -2062,7 +2067,7 @@ function AppWorkspaceSurface({
                 />
                 <div className="dql-app-filter-row-actions">
                   <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={onResetDashboardFilters}>Reset</button>
-                  <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onApplyDashboardFilters}>Apply</button>
+                  <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onApplyDashboardFilters}>Apply filters</button>
                 </div>
               </section>
             ) : null}
@@ -2120,6 +2125,7 @@ function AppWorkspaceSurface({
               expanded={explainExpanded}
               onToggleExpanded={() => onExplainExpandedChange(!explainExpanded)}
               onClose={() => onExplainChange(false)}
+              onOpenApp={onOpenApp}
             />
           ) : null}
         </div>
@@ -2285,6 +2291,7 @@ function UnifiedAppAiPanel({
   expanded,
   onToggleExpanded,
   onClose,
+  onOpenApp,
 }: {
   app: AppSummary | null;
   appDoc: AppDocumentSummary | null;
@@ -2297,6 +2304,7 @@ function UnifiedAppAiPanel({
   expanded: boolean;
   onToggleExpanded: () => void;
   onClose: () => void;
+  onOpenApp: (appId: string, dashboardId?: string) => void;
 }) {
   const t = themes[themeMode];
   const dashboard = dashboardDoc?.dashboard ?? null;
@@ -2349,6 +2357,12 @@ function UnifiedAppAiPanel({
       subtitle={appTitle}
       expanded={expanded}
       onToggleExpanded={onToggleExpanded}
+      resizable
+      minResizeWidth={390}
+      maxResizeWidth={1200}
+      fitViewportHeight
+      heightResizable
+      minResizeHeight={520}
       onClose={onClose}
       onNewChat={agentThread.resetThreadId}
       running={appAiRunning}
@@ -2369,6 +2383,7 @@ function UnifiedAppAiPanel({
           threadId={agentThread.threadId}
           onThreadIdChange={agentThread.onThreadIdChange}
           onRunningChange={setAppAiRunning}
+          onOpenApp={onOpenApp}
           answerFirstCards
           examplePrompts={[
             { label: 'Explain this dashboard', prompt: 'Explain the most important business story in this dashboard and what action it suggests.' },

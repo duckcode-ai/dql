@@ -64,7 +64,7 @@ import { CombineDataPanel, type CombineDataRequest } from '../notebook/CombineDa
 import { buildCombinedDatasetCell } from '../../utils/dataset-references';
 import { BlockParameterControls } from '../parameters/BlockParameterControls';
 import { NotebookDqlParameterEditor } from '../parameters/NotebookDqlParameterEditor';
-import { canBackgroundRepairNotebookCell } from '../../utils/notebook-background-repair';
+import { canBackgroundRepairNotebookCell, notebookRepairErrorMessage } from '../../utils/notebook-background-repair';
 
 interface CellProps {
   cell: Cell;
@@ -1346,10 +1346,7 @@ function CellComponentInner({ cell, index, onStartResearch, researchState }: Cel
         ? 'Retried successfully.'
         : `Fixed and reran. Review the changed ${cell.type === 'dql' ? 'DQL' : 'SQL'} before saving.`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setRepairError(/stale repair|cell changed/i.test(message)
-        ? message
-        : 'Automatic repair could not finish safely. Edit this cell and run again.');
+      setRepairError(notebookRepairErrorMessage(error));
     } finally {
       setRepairing(false);
     }

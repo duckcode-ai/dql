@@ -77,6 +77,34 @@ describe("synthesizeAnswer", () => {
     expect(result.text).not.toContain("| region | revenue |");
   });
 
+  it("formats warehouse dates and companion dimensions without leaking local timezone strings", async () => {
+    const result = await synthesizeAnswer({
+      question: "what are the maximum order types who have high revenue by monthly? what is the trend",
+      resultPreview: preview([
+        { monthly: new Date("2017-01-01T00:00:00.000Z"), type: "food_and_drink", revenue: 26544.38 },
+        { monthly: new Date("2016-12-01T00:00:00.000Z"), type: "drink", revenue: 23898.95 },
+      ], ["monthly", "type", "revenue"]),
+    });
+
+    expect(result.text).toContain("**Jan 2017 — food and drink** has the highest revenue at **$26,544.38**");
+    expect(result.text).toContain("**Dec 2016 — drink:** $23,898.95");
+    expect(result.text).not.toContain("GMT");
+    expect(result.text).not.toContain("Central Standard Time");
+  });
+
+  it("distinguishes monetary margin from explicitly named margin percentages", async () => {
+    const result = await synthesizeAnswer({
+      question: "gross margin and margin percent by product type",
+      resultPreview: preview([
+        { product_type: "beverage", gross_margin: 1269392.42, margin_pct: 86.3 },
+        { product_type: "jaffle", gross_margin: 1085732.81, margin_pct: 83.1 },
+      ], ["product_type", "gross_margin", "margin_pct"]),
+    });
+
+    expect(result.text).toContain("highest gross margin at **$1,269,392.42**");
+    expect(result.text).toContain("**Margin Pct:** 86.3%");
+  });
+
   it("AGT-017 narrates every requested metric in a multi-metric comparison", async () => {
     const result = await synthesizeAnswer({
       question: "Show revenue, refunds, and gross margin by customer",

@@ -174,9 +174,20 @@ export interface ResultViewProps {
   /** Removes the outer shell when Ask AI supplies the titled result card. */
   embedded?: boolean;
   tabLabels?: { chart: string; table: string };
+  contentMaxHeight?: React.CSSProperties['maxHeight'];
+  tableMaxHeight?: React.CSSProperties['maxHeight'];
 }
 
-export function ResultView({ result, themeMode, t, chartConfig, embedded = false, tabLabels }: ResultViewProps) {
+export function ResultView({
+  result,
+  themeMode,
+  t,
+  chartConfig,
+  embedded = false,
+  tabLabels,
+  contentMaxHeight,
+  tableMaxHeight,
+}: ResultViewProps) {
   const isEmpty = result.rows.length === 0;
   // User overrides from the chart-type picker / settings gear (type / X / Y / palette …).
   const [override, setOverride] = useState<CellChartConfig | undefined>();
@@ -275,7 +286,7 @@ export function ResultView({ result, themeMode, t, chartConfig, embedded = false
         ) : null}
         <span style={{ marginLeft: 'auto', fontSize: 10.5, color: t.textMuted, alignSelf: 'center' }}>{result.rowCount ?? result.rows.length} rows</span>
       </div>
-      <div style={{ padding: embedded ? 12 : 8, minHeight: chartable && view === 'chart' ? 200 : undefined, maxHeight: embedded ? 380 : 320, overflow: 'auto' }}>
+      <div style={{ padding: embedded ? 12 : 8, minHeight: chartable && view === 'chart' ? 200 : undefined, maxHeight: contentMaxHeight ?? (embedded ? 380 : 320), overflow: 'auto' }}>
         {isEmpty
           ? <div style={{ padding: '18px 8px', textAlign: 'center', color: t.textMuted, fontSize: 12 }}>
               The query ran successfully and matched 0 rows{result.columns.length > 0 ? ` (columns: ${result.columns.join(', ')})` : ''}.
@@ -295,7 +306,7 @@ export function ResultView({ result, themeMode, t, chartConfig, embedded = false
                     </button>
                   </div>
                 ) : null}
-                <TableOutput result={tableResult} themeMode={themeMode} />
+                <TableOutput result={tableResult} themeMode={themeMode} maxHeight={tableMaxHeight} />
               </>}
       </div>
     </div>

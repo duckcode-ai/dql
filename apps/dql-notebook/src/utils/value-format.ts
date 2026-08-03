@@ -10,16 +10,17 @@ export type DisplayValueKind =
   | 'json'
   | 'text';
 
-const CURRENCY_NAME_RE = /(?:^|_)(?:revenue|sales|spend|amount|price|cost|profit|income|expense|balance|budget|bookings|arr|mrr|gmv|fee|fees|charge|charges|tax|value)(?:_|$)/i;
-const PERCENT_NAME_RE = /(?:^|_)(?:percent|percentage|pct|ratio|share|conversion|churn|retention|utilization)(?:_|$)|(?:^|_)margin(?:_|$)/i;
+const CURRENCY_NAME_RE = /(?:^|_)(?:revenue|sales|spend|amount|price|cost|profit|margin|income|expense|balance|budget|bookings|arr|mrr|gmv|fee|fees|charge|charges|tax|value)(?:_|$)/i;
+const PERCENT_NAME_RE = /(?:^|_)(?:percent|percentage|pct|ratio|share|conversion|churn|retention|utilization)(?:_|$)/i;
 const INTEGER_NAME_RE = /(?:^|_)(?:count|orders?|customers?|accounts?|users?|products?|items?|units?|quantity|rank|position|days?|months?|years?|distinct)(?:_|$)/i;
 const AVERAGE_NAME_RE = /(?:^|_)(?:average|avg|mean)(?:_|$)/i;
 const YEAR_NAME_RE = /(?:^|_)(?:year|yr)$/i;
-const MONTH_NAME_RE = /(?:^|_)(?:month|month_num|month_number|month_of_year)$/i;
-const DATE_NAME_RE = /(?:^|_)(?:date|day|month|quarter|year|time|timestamp)(?:_|$)|_(?:at|on)$/i;
+const MONTH_NAME_RE = /(?:^|_)(?:month|monthly|month_num|month_number|month_of_year)$/i;
+const DATE_NAME_RE = /(?:^|_)(?:date|day|month|quarter|year|time|timestamp|daily|weekly|monthly|quarterly|yearly|hourly)(?:_|$)|_(?:at|on)$/i;
 const YEAR_MONTH_RE = /^(\d{4})-(\d{2})$/;
 const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?$/;
+const TIME_ONLY_RE = /^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?Z?$/;
 
 function numericValue(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -50,6 +51,8 @@ export function inferDisplayValueKind(column: string, values: unknown[] = [], fo
   if (populated.length === 0) return 'text';
   if (populated.every((value) => typeof value === 'boolean')) return 'boolean';
   if (populated.every((value) => numericValue(value) !== undefined)) return 'number';
+  if (populated.every((value) => typeof value === 'string' && YEAR_MONTH_RE.test(value))) return 'month';
+  if (populated.every((value) => typeof value === 'string' && (ISO_DATE_RE.test(value) || ISO_TIMESTAMP_RE.test(value) || TIME_ONLY_RE.test(value)))) return 'date';
   if (populated.every((value) => typeof value === 'object')) return 'json';
   return 'text';
 }
@@ -73,7 +76,7 @@ export function formatDisplayValue(
   const numeric = numericValue(value);
 
   if (kind === 'year') {
-    const year = typeof value === 'string' && ISO_DATE_RE.test(value)
+    const year = typeof value === 'string' && (ISO_DATE_RE.test(value) || ISO_TIMESTAMP_RE.test(value))
       ? Number(value.slice(0, 4))
       : numeric;
     if (year !== undefined && Number.isInteger(year)) {
@@ -121,7 +124,8 @@ function formatMonth(value: unknown): string | undefined {
   }
   if (typeof value !== 'string') return undefined;
   const yearMonth = YEAR_MONTH_RE.exec(value);
-  const isoDate = ISO_DATE_RE.exec(value);
+  const isoDate = ISO_DATE_RE.exec(value)
+    ?? (ISO_TIMESTAMP_RE.test(value) ? ISO_DATE_RE.exec(value.slice(0, 10)) : null);
   const match = yearMonth ?? isoDate;
   if (!match) return undefined;
   const year = Number(match[1]);
@@ -132,6 +136,18 @@ function formatMonth(value: unknown): string | undefined {
 }
 
 function formatDate(value: string): string | undefined {
+  const timeOnly = TIME_ONLY_RE.exec(value);
+  if (timeOnly) {
+    const hour = Number(timeOnly[1]);
+    const minute = Number(timeOnly[2]);
+    const second = Number(timeOnly[3] ?? 0);
+    if (hour > 23 || minute > 59 || second > 59) return undefined;
+    return new Intl.DateTimeFormat('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZone: 'UTC',
+    }).format(new Date(Date.UTC(2000, 0, 1, hour, minute, second)));
+  }
   const dateOnly = ISO_DATE_RE.exec(value);
   if (dateOnly) {
     return new Intl.DateTimeFormat('en-US', {
@@ -142,7 +158,8 @@ function formatDate(value: string): string | undefined {
     }).format(new Date(Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]))));
   }
   if (!ISO_TIMESTAMP_RE.test(value)) return undefined;
-  const date = new Date(value);
+  const hasTimeZone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(value);
+  const date = new Date(hasTimeZone ? value : `${value}Z`);
   if (Number.isNaN(date.getTime())) return undefined;
   const midnightUtc = date.getUTCHours() === 0 && date.getUTCMinutes() === 0 && date.getUTCSeconds() === 0;
   return new Intl.DateTimeFormat('en-US', {

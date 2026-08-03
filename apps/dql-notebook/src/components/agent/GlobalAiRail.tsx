@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { UnifiedAgentRunPanel, usePersistedAgentThreadId } from './UnifiedAgentRunPanel';
-import type { AgentRunSelectedObject } from '../../api/client';
+import { api, type AgentRunSelectedObject } from '../../api/client';
 import { AiSidePanel, AI_SIDE_PANEL_EXPANDED_WIDTH, AI_SIDE_PANEL_WIDTH } from './AiSidePanel';
 
 /**
@@ -19,6 +19,13 @@ export function GlobalAiRail() {
   // refresh resumes the same thread.
   const agentThread = usePersistedAgentThreadId('global-rail');
   const [expanded, setExpanded] = useState(false);
+  const openApp = (appId: string, dashboardId?: string) => {
+    dispatch({ type: 'OPEN_APP', appId, dashboardId, experience: 'view', section: 'dashboards' });
+    dispatch({ type: 'CLOSE_GLOBAL_AI' });
+    // A newly created App is not in the shell catalog yet. Refresh it in the
+    // background so the destination title/navigation resolves immediately.
+    void api.listApps().then((apps) => dispatch({ type: 'SET_APPS', apps })).catch(() => undefined);
+  };
 
   return (
     <AiSidePanel
@@ -27,9 +34,13 @@ export function GlobalAiRail() {
       subtitle={context.scopeHint ?? 'Ask a follow-up about what you are viewing'}
       expanded={expanded}
       onToggleExpanded={() => setExpanded((value) => !value)}
+      resizable
+      minResizeWidth={360}
+      maxResizeWidth={1200}
       onClose={() => dispatch({ type: 'CLOSE_GLOBAL_AI' })}
       ariaLabel="App AI"
       style={{
+        position: 'relative',
         width: expanded
           ? `min(${AI_SIDE_PANEL_EXPANDED_WIDTH}px, calc(100vw - 96px))`
           : `min(${AI_SIDE_PANEL_WIDTH}px, calc(100vw - 64px))`,
@@ -57,6 +68,7 @@ export function GlobalAiRail() {
         threadId={agentThread.threadId}
         onThreadIdChange={agentThread.onThreadIdChange}
         initialMode="auto"
+        onOpenApp={openApp}
       />
     </AiSidePanel>
   );

@@ -1053,6 +1053,42 @@ export function repairableSqlFromAgentRun(run: AgentRun): string | undefined {
   return undefined;
 }
 
+/** Editable DQL retained on an immutable failed run, including its bound values. */
+export function repairableDqlArtifactFromAgentRun(run: AgentRun): DqlArtifactReference | undefined {
+  for (const artifact of run.artifacts) {
+    const payload = agentRunRecord(artifact.payload);
+    if (!payload) continue;
+    const dqlArtifact = normalizeDqlArtifactReference(payload.dqlArtifact);
+    // Only an ownerless/custom SQL block is editable in place. Certified and
+    // semantic artifacts remain immutable; their retained compiled SQL may
+    // still produce a separate review-required repair result below.
+    if (dqlArtifact?.kind === 'sql_block'
+      && dqlArtifact.source?.trim()
+      && notebookDqlSourceAllowsBackgroundRepair(dqlArtifact.source)) {
+      return dqlArtifact;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Keep the parameter surface immutable while repairing malformed DQL. A parser
+ * cannot reliably read a broken wrapper, so collect both declared parameter
+ * names and SQL interpolation names with a deliberately small lexical pass.
+ */
+export function dqlRepairParameterContract(source: string): string[] {
+  const names = new Set<string>();
+  for (const match of source.matchAll(/\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}/g)) {
+    names.add(match[1]);
+  }
+  for (const match of source.matchAll(/\bparams\s*\{([\s\S]*?)\}/gi)) {
+    for (const declaration of match[1].matchAll(/(?:^|\n)\s*([A-Za-z_][A-Za-z0-9_]*)\s*:/g)) {
+      names.add(declaration[1]);
+    }
+  }
+  return [...names].sort((left, right) => left.localeCompare(right));
+}
+
 /** Structured producer failure retained on the source run. */
 export function warehouseFailureFromAgentRun(run: AgentRun): WarehouseSqlFailureV1 | undefined {
   for (const artifact of run.artifacts) {
@@ -1062,6 +1098,40 @@ export function warehouseFailureFromAgentRun(run: AgentRun): WarehouseSqlFailure
     return failure as unknown as WarehouseSqlFailureV1;
   }
   return undefined;
+}
+
+/**
+ * Retain planning and retrieval evidence for a successful derived repair while
+ * deliberately dropping the source failure and any result-bound facts. This
+ * is the presentation contract used by "How it was answered" and by grounded
+ * follow-ups after repair.
+ */
+export function repairPresentationContextFromAgentRun(run: AgentRun): Record<string, unknown> {
+  const retainedKeys = [
+    'resolvedAnalyticalPlan',
+    'analyticalExecutionGraph',
+    'analyticalFreshnessObservation',
+    'governedCompilationReceipt',
+    'governedAnalyticalGraphCompilationReceipt',
+    'contextPack',
+    'contextPackId',
+    'cascade',
+    'citations',
+    'lineage',
+  ] as const;
+  const context: Record<string, unknown> = {};
+  for (const artifact of run.artifacts) {
+    const payload = agentRunRecord(artifact.payload);
+    if (!payload) continue;
+    for (const key of retainedKeys) {
+      if (context[key] === undefined && payload[key] !== undefined) context[key] = payload[key];
+    }
+    const semanticTrace = agentRunRecord(payload.semanticExecutionTrace);
+    if (context.semanticExecutionTrace === undefined && semanticTrace && !semanticTrace.failure) {
+      context.semanticExecutionTrace = semanticTrace;
+    }
+  }
+  return context;
 }
 
 /** Permission, authentication, policy and unsafe-query failures are never AI-repaired. */
@@ -5122,6 +5192,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     rewrites: Array<{ from: string; to: string }>;
   };
 
+  type BoundedDqlRepairResult = BoundedSqlRepairResult & {
+    repairedSource: string;
+    sqlParams: SQLParamSpec[];
+    variables: Record<string, unknown>;
+  };
+
   const boundedRepairError = (
     message: string,
     status: number,
@@ -5269,6 +5345,193 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   };
 
   /**
+   * Repair a DQL wrapper that cannot compile far enough to expose executable
+   * SQL. This is the DQL-side half of the same bounded repair contract used by
+   * Ask and Notebook: one provider call, one block, identical parameters, one
+   * read-only execution, and the exact target selected by the failed run.
+   */
+  const executeBoundedDqlRepair = async (input: {
+    question: string;
+    source: string;
+    failure: string;
+    targetConnection: ConnectionConfig;
+    targetConnectionName?: string;
+    parameters?: Record<string, unknown>;
+    artifactName?: string;
+  }): Promise<BoundedDqlRepairResult> => {
+    const provider = await createBlockStudioAssistProvider(projectRoot);
+    if (!provider) {
+      throw boundedRepairError('Configure an available AI provider in Settings to repair this DQL cell.', 409);
+    }
+
+    let schemaContext: AgentSchemaTable[];
+    try {
+      // Include source identifiers in retrieval so a terse cell title still
+      // resolves the physical dbt relations and live target columns it uses.
+      schemaContext = await getSchemaContextForAgent(
+        `${input.question}\n${input.source.slice(0, 6_000)}`,
+        undefined,
+        input.targetConnection,
+        input.targetConnectionName,
+      );
+    } catch (error) {
+      const failure = normalizeWarehouseSqlFailure(error, input.targetConnection.driver);
+      throw boundedRepairError(failure.redactedMessage, 422, failure);
+    }
+
+    const boundedSchema = schemaContext.slice(0, 16).map((table) => ({
+      relation: table.relation,
+      columns: table.columns.slice(0, 40).map((column) => ({ name: column.name, type: column.type })),
+    }));
+    let raw: string;
+    try {
+      raw = await provider.generate([
+        {
+          role: 'system',
+          content: [
+            'Repair one malformed executable DQL custom block and its embedded read-only SQL.',
+            'Return only one JSON object with exactly one key named dql. Do not use markdown.',
+            'The DQL shape is: block "Name" { type = "custom" params { name: type = default } query = """SELECT ...""" visualization { ... } tests { ... } }.',
+            'Preserve the block name, business fields, visualization, tests, requested grain, filters, output columns, and aggregation semantics.',
+            'Preserve every declared parameter and every ${parameter} interpolation exactly. Do not add or remove parameters.',
+            'Use only relations and columns present in the supplied schema context.',
+            'Never emit internal relation identities such as source::, model::, seed::, or snapshot::.',
+            'Return exactly one custom block. Never certify it, bind a saved block, add writes, DDL, or multiple SQL statements.',
+          ].join(' '),
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            question: input.question,
+            driver: input.targetConnection.driver,
+            failure: input.failure.slice(0, 2_000),
+            dql: input.source.slice(0, 40_000),
+            parameters: input.parameters ?? {},
+            schema: boundedSchema,
+          }),
+        },
+      ], { maxTokens: 2400, temperature: 0 });
+    } catch {
+      throw boundedRepairError('The AI provider could not complete this DQL repair. Check Provider Settings and retry.', 502);
+    }
+
+    let repairedSource: string | undefined;
+    try {
+      const parsed = parseFirstJsonObject(raw);
+      repairedSource = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        && typeof (parsed as Record<string, unknown>).dql === 'string'
+        ? String((parsed as Record<string, unknown>).dql).trim()
+        : undefined;
+    } catch {
+      repairedSource = undefined;
+    }
+    if (!repairedSource) {
+      throw boundedRepairError('The AI repair did not return a complete DQL block.', 422);
+    }
+    if (repairedSource.length > 50_000) {
+      throw boundedRepairError('The repaired DQL exceeded the safe editable-cell size limit.', 422);
+    }
+    if (/^\s*@block\(/i.test(repairedSource) || /\btype\s*=\s*"semantic"/i.test(repairedSource)) {
+      throw boundedRepairError('The repair changed this editable custom block into a governed reference or semantic block.', 422);
+    }
+    if (!/\bstatus\s*=\s*"certified"/i.test(input.source)
+      && /\bstatus\s*=\s*"certified"/i.test(repairedSource)) {
+      throw boundedRepairError('The repair attempted to certify an AI-edited block, so DQL stopped it.', 422);
+    }
+
+    const beforeParameters = dqlRepairParameterContract(input.source);
+    const afterParameters = dqlRepairParameterContract(repairedSource);
+    if (beforeParameters.join('|') !== afterParameters.join('|')) {
+      throw boundedRepairError('The repair changed this block\'s parameter contract, so DQL stopped it before execution.', 422);
+    }
+
+    let invocation: ReturnType<typeof prepareBlockInvocation>;
+    let plan: ReturnType<typeof buildExecutionPlan>;
+    try {
+      const program = new Parser(repairedSource, '<bounded-dql-repair>').parse();
+      const blocks = program.statements.filter((statement) => statement.kind === NodeKind.BlockDecl);
+      if (blocks.length !== 1 || program.statements.length !== 1) {
+        throw new Error('The repaired source must contain exactly one DQL block.');
+      }
+      const block = blocks[0];
+      if (block.kind !== NodeKind.BlockDecl || block.blockType !== 'custom') {
+        throw new Error('The repaired source must remain a custom DQL block.');
+      }
+      invocation = prepareBlockInvocation({
+        source: repairedSource,
+        parameters: input.parameters,
+        question: input.question,
+        surface: 'notebook',
+      });
+      if (invocation.errors.length) throw new Error(invocation.errors.join(' '));
+      if (invocation.unresolvedParameters.length) {
+        throw new Error(`Provide required parameters before retrying: ${invocation.unresolvedParameters.join(', ')}.`);
+      }
+      plan = buildExecutionPlan({
+        id: 'bounded-dql-repair',
+        type: 'dql',
+        source: repairedSource,
+        title: input.artifactName,
+      }, {
+        semanticLayer,
+        driver: input.targetConnection.driver,
+        parameters: invocation.values,
+      });
+      if (!plan?.sql?.trim()) throw new Error('The repaired DQL did not compile to SQL.');
+    } catch (error) {
+      throw boundedRepairError(
+        `The repaired DQL did not compile safely: ${error instanceof Error ? error.message : String(error)}`,
+        422,
+      );
+    }
+
+    const seed: DqlArtifactReference = {
+      kind: 'sql_block',
+      source: repairedSource,
+      name: input.artifactName ?? plan.title,
+      persistence: 'transient',
+      trustState: 'review_required',
+      compiledSql: plan.sql,
+      ...(invocation.parameters.length ? { parameters: invocation.parameters } : {}),
+      ...(Object.keys(invocation.values).length ? { parameterValues: invocation.values } : {}),
+    };
+    let result: AgentResultPayload;
+    try {
+      result = await executeGeneratedSqlDirect(
+        input.question,
+        plan.sql,
+        seed,
+        input.targetConnection,
+        { sqlParams: plan.sqlParams, variables: { ...plan.variables, ...invocation.values } },
+      );
+    } catch (error) {
+      const failure = normalizeWarehouseSqlFailure(error, input.targetConnection.driver);
+      throw boundedRepairError(failure.redactedMessage, 422, failure);
+    }
+
+    result = {
+      ...result,
+      dqlArtifact: {
+        ...(result.dqlArtifact ?? seed),
+        source: repairedSource,
+        compiledSql: result.sql ?? plan.sql,
+        trustState: 'review_required',
+        persistence: 'transient',
+        ...(result.executionReceipt ? { executionReceipt: result.executionReceipt } : {}),
+      },
+    };
+    return {
+      result,
+      repairedSql: plan.sql,
+      repairedSource,
+      repairMode: 'ai',
+      rewrites: [],
+      sqlParams: plan.sqlParams,
+      variables: { ...plan.variables, ...invocation.values },
+    };
+  };
+
+  /**
    * App proposal parity with Ask/Notebook repair. The first governed attempt is
    * retained unchanged. Only an execution failure with retained read-only SQL
    * may spend the shared one-attempt repair budget, on the same connection.
@@ -5370,16 +5633,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   };
 
   const repairFailedAppTileExecution = async (input: {
-    source: 'semantic_query' | 'draft_analysis';
+    source: 'semantic_query' | 'draft_analysis' | 'certified_block';
     question: string;
     sourceSql?: string;
+    sourceDql?: string;
+    artifactName?: string;
     error: unknown;
     targetConnection?: ConnectionConfig;
     targetConnectionName?: string;
     sqlParams?: SQLParamSpec[];
     variables?: Record<string, unknown>;
   }): Promise<
-    | { ok: true; result: AgentResultPayload; repairedSql: string; repair: AppExecutionRepairTrace }
+    | { ok: true; result: AgentResultPayload; repairedSql: string; repairedDql?: string; repair: AppExecutionRepairTrace }
     | { ok: false; repair: AppExecutionRepairTrace }
   > => {
     const attemptedAt = new Date().toISOString();
@@ -5402,11 +5667,46 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         message,
       },
     });
-    if (!input.sourceSql?.trim()) {
-      return failed('DQL retained the failure, but no read-only SQL was available for bounded repair.');
-    }
     if (!input.targetConnection) {
       return failed('Configure the original data target before retrying this App tile.');
+    }
+    if (!input.sourceSql?.trim() && input.sourceDql?.trim()) {
+      try {
+        const repaired = await executeBoundedDqlRepair({
+          question: input.question,
+          source: input.sourceDql,
+          failure: originalFailure,
+          targetConnection: input.targetConnection,
+          targetConnectionName: input.targetConnectionName,
+          parameters: input.variables,
+          artifactName: input.artifactName,
+        });
+        const repair: AppExecutionRepairTrace = {
+          version: 1,
+          status: 'repaired',
+          source: input.source,
+          mode: repaired.repairMode,
+          attemptedAt,
+          originalFailure,
+          repairedSqlFingerprint: `sha256:${createHash('sha256').update(repaired.repairedSql).digest('hex')}`,
+          approvalEligible: false,
+          message: `${repaired.repairMode === 'ai' ? 'AI' : 'Deterministic'} DQL repair executed successfully on the same data target. The App result remains review-required and the source file was not changed.`,
+        };
+        return {
+          ok: true,
+          result: repaired.result,
+          repairedSql: repaired.repairedSql,
+          repairedDql: repaired.repairedSource,
+          repair,
+        };
+      } catch (error) {
+        return failed(error instanceof Error
+          ? `The bounded DQL repair could not complete: ${error.message}`
+          : 'The bounded DQL repair could not complete.');
+      }
+    }
+    if (!input.sourceSql?.trim()) {
+      return failed('DQL retained the failure, but no read-only SQL or editable DQL was available for bounded repair.');
     }
     if (!analyticalFailureAllowsDeterministicRetry(failure)) {
       return failed('This failure needs an access, policy, or connection decision and was not sent to AI repair.');
@@ -7592,13 +7892,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       }
 
       const sourceSql = repairableSqlFromAgentRun(sourceRun);
+      const sourceDqlArtifact = repairableDqlArtifactFromAgentRun(sourceRun);
       const retainedFailure = warehouseFailureFromAgentRun(sourceRun);
-      if (!sourceSql || !analyticalFailureAllowsDeterministicRetry(retainedFailure)) {
+      if ((!sourceSql && !sourceDqlArtifact) || !analyticalFailureAllowsDeterministicRetry(retainedFailure)) {
         res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
-          error: sourceSql
+          error: sourceSql || sourceDqlArtifact
             ? 'This failure requires authorized access or a policy change and cannot be repaired by AI.'
-            : 'This run has no retained SQL statement to repair.',
+            : 'This run has no retained SQL statement or editable DQL artifact to repair.',
           ...(retainedFailure ? { warehouseFailure: retainedFailure } : {}),
         }));
         return;
@@ -7623,14 +7924,29 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ? 'local'
           : projectConfig.defaultConnectionName;
 
-      let repaired: BoundedSqlRepairResult;
+      let repaired: BoundedSqlRepairResult | BoundedDqlRepairResult;
       try {
-        repaired = await executeBoundedSqlRepair({
-          question: sourceRun.question,
-          sourceSql,
-          targetConnection,
-          targetConnectionName,
-        });
+        // Prefer the editable DQL contract even when the failed run also
+        // retained compiled SQL. This keeps parameters, visualization, tests,
+        // and the corrected wrapper attached to the repaired Ask result.
+        repaired = sourceDqlArtifact
+          ? await executeBoundedDqlRepair({
+              question: sourceRun.question,
+              source: sourceDqlArtifact.source,
+              failure: retainedFailure?.redactedMessage
+                ?? sourceRun.diagnosticReceipt?.failure?.message
+                ?? sourceRun.summary,
+              targetConnection,
+              targetConnectionName,
+              parameters: sourceDqlArtifact.parameterValues,
+              artifactName: sourceDqlArtifact.name,
+            })
+          : await executeBoundedSqlRepair({
+              question: sourceRun.question,
+              sourceSql: sourceSql!,
+              targetConnection,
+              targetConnectionName,
+            });
       } catch (error) {
         const repairError = error as Error & { status?: number; warehouseFailure?: WarehouseSqlFailureV1 };
         res.writeHead(repairError.status ?? 500, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -7653,6 +7969,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ...(preview ? { columnFormats: agentColumnDisplayFormats(projectRoot, preview.columns) } : {}),
       });
       const sourceFailure = analyticalFailedRunFromAgentRun(sourceRun)?.failure;
+      const presentationContext = repairPresentationContextFromAgentRun(sourceRun);
+      const executionResultFingerprint = result.executionReceipt?.resultFingerprint;
       const artifact = agentRunArtifact(
         'answer',
         'Repaired analytical answer',
@@ -7663,13 +7981,31 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           trustLabel: 'AI-generated · review required',
           answer: synthesis.text,
           text: synthesis.text,
+          ...presentationContext,
           result,
           proposedSql: repairedSql,
           sql: result.sql ?? repairedSql,
           dqlArtifact: result.dqlArtifact,
+          diagnosticReceipt: {
+            version: 1,
+            phase: 'run.completed',
+            route: 'generated_answer',
+            repair: {
+              attempt: 1,
+              mode: repairMode,
+              sourceRunId: sourceRun.id,
+              targetPreserved: true,
+              readOnly: true,
+            },
+            execution: {
+              rowCount: result.rowCount,
+              ...(executionResultFingerprint ? { resultFingerprint: executionResultFingerprint } : {}),
+            },
+          },
           previousAttempt: {
             sourceRunId: sourceRun.id,
-            sql: sourceSql,
+            ...(sourceSql ? { sql: sourceSql } : {}),
+            ...(sourceDqlArtifact?.source ? { dql: sourceDqlArtifact.source } : {}),
             failure: retainedFailure ?? firstFailure,
           },
           repair: { attempt: 1, mode: repairMode },
@@ -9613,9 +9949,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ? body.variables as Record<string, unknown>
           : {};
         const dashboardVariables = dashboardRuntimeVariables(loaded.dashboard, variables);
+        const requestedTileId = typeof body.tileId === 'string' && body.tileId.trim()
+          ? body.tileId.trim()
+          : undefined;
         const tiles = [];
         let localApps: LocalAppStorage | null = null;
         for (const item of loaded.dashboard.layout.items) {
+          if (requestedTileId && item.i !== requestedTileId) continue;
           if (item.text) {
             tiles.push({
               tileId: item.i,
@@ -9707,54 +10047,80 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 kind: 'ai_pin',
                 name: pin.title,
               },
+              artifact: {
+                version: 1,
+                sourceKind: 'ai_pin',
+                name: pinArtifact?.name ?? pin.title,
+                ...(pinArtifact?.sourcePath ? { sourcePath: pinArtifact.sourcePath } : {}),
+                ...(pinArtifact?.source ? { dql: pinArtifact.source.slice(0, 40_000) } : {}),
+                ...(pinArtifact?.compiledSql || pin.sql ? { sql: (pinArtifact?.compiledSql ?? pin.sql)!.slice(0, 40_000) } : {}),
+                trustState: pinArtifact?.trustState === 'certified' || pin.certification === 'certified'
+                  ? 'certified'
+                  : 'review_required',
+                explanation: [
+                  'This result comes from a saved App insight.',
+                  pinArtifact ? 'The DQL artifact was executed again with the current App parameters.' : 'The saved bounded result is displayed with its original trust state.',
+                ],
+                executionTarget: executionTargetDescriptor(body as Record<string, unknown>),
+              },
             });
             continue;
           }
           if (item.draftAnalysis) {
+            let draftSource: string | undefined;
+            let draftAppRelativePath: string | undefined;
+            let draftParameters: Record<string, unknown> = {};
+            let draftTargetConnection: ConnectionConfig | undefined;
+            let draftRepairPlan: ReturnType<typeof buildExecutionPlan> | undefined;
             try {
               const draftPath = join(loaded.appDir, item.draftAnalysis.ref);
-              const appRelativePath = relative(loaded.appDir, draftPath);
-              if (appRelativePath.startsWith('..') || appRelativePath.startsWith('/')) {
+              draftAppRelativePath = relative(loaded.appDir, draftPath);
+              if (draftAppRelativePath.startsWith('..') || draftAppRelativePath.startsWith('/')) {
                 throw new Error('App-scoped analysis reference escapes the App directory.');
               }
-              const source = readFileSync(draftPath, 'utf-8');
-              const fingerprint = `sha256:${createHash('sha256').update(source).digest('hex')}`;
+              draftSource = readFileSync(draftPath, 'utf-8');
+              const fingerprint = `sha256:${createHash('sha256').update(draftSource).digest('hex')}`;
               if (fingerprint !== item.draftAnalysis.artifactFingerprint) {
                 throw new Error('App-scoped analysis changed after approval. Review the draft again.');
               }
-              const parameters = dashboardTileParameterValues({
+              draftParameters = dashboardTileParameterValues({
                 item,
                 dashboardValues: dashboardVariables,
                 requestValues: variables,
               });
-              const targetConnection = isConnectionConfig(body.connection)
+              draftTargetConnection = isConnectionConfig(body.connection)
                 ? body.connection
                 : connection ?? undefined;
-              const repairPlan = buildExecutionPlan(
-                { id: item.i, type: 'dql', source, title: item.title ?? item.i },
+              draftRepairPlan = buildExecutionPlan(
+                { id: item.i, type: 'dql', source: draftSource, title: item.title ?? item.i },
                 {
                   semanticLayer,
-                  driver: targetConnection?.driver ?? 'duckdb',
-                  parameters,
+                  driver: draftTargetConnection?.driver ?? 'duckdb',
+                  parameters: draftParameters,
                 },
               );
               let result: AgentResultPayload;
               let repair: AppExecutionRepairTrace | undefined;
+              let repairedSql: string | undefined;
+              let repairedDql: string | undefined;
               try {
                 result = await executeDqlArtifactSourceForAgent(
-                  source,
-                  { name: item.title ?? item.i, path: appRelativePath },
-                  { question: item.title, parameters },
+                  draftSource,
+                  { name: item.title ?? item.i, path: draftAppRelativePath },
+                  { question: item.title, parameters: draftParameters },
                 );
               } catch (executionError) {
                 const repaired = await repairFailedAppTileExecution({
                   source: 'draft_analysis',
                   question: item.title ?? item.i,
-                  sourceSql: repairPlan?.sql,
+                  sourceSql: draftRepairPlan?.sql,
+                  sourceDql: draftSource,
+                  artifactName: item.title ?? item.i,
                   error: executionError,
-                  targetConnection,
-                  sqlParams: repairPlan?.sqlParams,
-                  variables: { ...(repairPlan?.variables ?? {}), ...parameters },
+                  targetConnection: draftTargetConnection,
+                  targetConnectionName: projectConfig.defaultConnectionName,
+                  sqlParams: draftRepairPlan?.sqlParams,
+                  variables: { ...(draftRepairPlan?.variables ?? {}), ...draftParameters },
                 });
                 if (!repaired.ok) {
                   tiles.push({
@@ -9765,11 +10131,24 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                     error: executionError instanceof Error ? executionError.message : String(executionError),
                     trustState: 'review_required',
                     repair: repaired.repair,
+                    artifact: {
+                      version: 1,
+                      sourceKind: 'draft_analysis',
+                      name: item.title ?? item.i,
+                      sourcePath: draftAppRelativePath,
+                      dql: draftSource.slice(0, 40_000),
+                      ...(draftRepairPlan?.sql ? { sql: draftRepairPlan.sql.slice(0, 40_000) } : {}),
+                      trustState: 'review_required',
+                      explanation: ['This App-scoped analysis remains review-required.', 'Automatic repair could not produce a safe executable result.'],
+                      executionTarget: executionTargetDescriptor(body as Record<string, unknown>),
+                    },
                   });
                   continue;
                 }
                 result = repaired.result;
                 repair = repaired.repair;
+                repairedSql = repaired.repairedSql;
+                repairedDql = repaired.repairedDql;
               }
               tiles.push({
                 tileId: item.i,
@@ -9780,10 +10159,62 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 chartConfig: mergeDashboardChartConfig(result.chartConfig as object | undefined, item),
                 result,
                 trustState: 'review_required',
-                citation: { kind: repair ? 'app_draft_analysis_repaired' : 'app_draft_analysis', name: item.title ?? item.i, path: appRelativePath },
+                citation: { kind: repair ? 'app_draft_analysis_repaired' : 'app_draft_analysis', name: item.title ?? item.i, path: draftAppRelativePath },
                 ...(repair ? { repair } : {}),
+                artifact: {
+                  version: 1,
+                  sourceKind: 'draft_analysis',
+                  name: item.title ?? item.i,
+                  sourcePath: draftAppRelativePath,
+                  dql: (repairedDql ?? draftSource).slice(0, 40_000),
+                  ...(repairedSql ?? draftRepairPlan?.sql ? { sql: (repairedSql ?? draftRepairPlan!.sql).slice(0, 40_000) } : {}),
+                  trustState: 'review_required',
+                  explanation: [
+                    'This is private App analysis and remains review-required.',
+                    repair ? 'A bounded repair ran on the original data target without changing the saved source file.' : 'The saved App-scoped DQL was executed with the current filters.',
+                  ],
+                  executionTarget: executionTargetDescriptor(body as Record<string, unknown>),
+                },
               });
             } catch (err) {
+              const repaired = await repairFailedAppTileExecution({
+                source: 'draft_analysis',
+                question: item.title ?? item.i,
+                sourceSql: draftRepairPlan?.sql,
+                sourceDql: draftSource,
+                artifactName: item.title ?? item.i,
+                error: err,
+                targetConnection: draftTargetConnection,
+                targetConnectionName: projectConfig.defaultConnectionName,
+                sqlParams: draftRepairPlan?.sqlParams,
+                variables: { ...(draftRepairPlan?.variables ?? {}), ...draftParameters },
+              });
+              if (repaired.ok && draftSource) {
+                tiles.push({
+                  tileId: item.i,
+                  status: 'ok',
+                  tileType: 'draftAnalysis',
+                  title: item.title ?? item.i,
+                  viz: item.viz,
+                  chartConfig: mergeDashboardChartConfig(repaired.result.chartConfig as object | undefined, item),
+                  result: repaired.result,
+                  trustState: 'review_required',
+                  citation: { kind: 'app_draft_analysis_repaired', name: item.title ?? item.i, path: draftAppRelativePath },
+                  repair: repaired.repair,
+                  artifact: {
+                    version: 1,
+                    sourceKind: 'draft_analysis',
+                    name: item.title ?? item.i,
+                    ...(draftAppRelativePath ? { sourcePath: draftAppRelativePath } : {}),
+                    dql: (repaired.repairedDql ?? draftSource).slice(0, 40_000),
+                    sql: repaired.repairedSql.slice(0, 40_000),
+                    trustState: 'review_required',
+                    explanation: ['A bounded DQL repair executed on the original data target. The saved App analysis was not changed.'],
+                    executionTarget: executionTargetDescriptor(body as Record<string, unknown>),
+                  },
+                });
+                continue;
+              }
               tiles.push({
                 tileId: item.i,
                 status: 'error',
@@ -9791,6 +10222,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 title: item.title ?? item.i,
                 error: err instanceof Error ? err.message : String(err),
                 trustState: 'review_required',
+                repair: repaired.repair,
+                ...(draftSource ? {
+                  artifact: {
+                    version: 1,
+                    sourceKind: 'draft_analysis',
+                    name: item.title ?? item.i,
+                    ...(draftAppRelativePath ? { sourcePath: draftAppRelativePath } : {}),
+                    dql: draftSource.slice(0, 40_000),
+                    ...(draftRepairPlan?.sql ? { sql: draftRepairPlan.sql.slice(0, 40_000) } : {}),
+                    trustState: 'review_required',
+                    explanation: ['Automatic repair could not produce a safe executable result. The saved App analysis was not changed.'],
+                    executionTarget: executionTargetDescriptor(body as Record<string, unknown>),
+                  },
+                } : {}),
               });
             }
             continue;
@@ -9833,6 +10278,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               const prepared = prepareLocalExecution(composed.sql, targetConnection, projectRoot, projectConfig);
               let normalizedResult: ReturnType<typeof normalizeQueryResult>;
               let repair: AppExecutionRepairTrace | undefined;
+              let executedSql = composed.sql;
               try {
                 const result = await executor.executeQuery(prepared.sql, [], {}, prepared.connection);
                 normalizedResult = normalizeQueryResult(result);
@@ -9853,11 +10299,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                     error: executionError instanceof Error ? executionError.message : String(executionError),
                     trustState: 'review_required',
                     repair: repaired.repair,
+                    artifact: {
+                      version: 1,
+                      sourceKind: 'semantic_query',
+                      name: item.title ?? item.semantic.id,
+                      sql: composed.sql.slice(0, 40_000),
+                      trustState: 'review_required',
+                      explanation: ['Automatic repair could not execute the governed semantic query safely.'],
+                      executionTarget: executionTargetDescriptor(body as Record<string, unknown>),
+                    },
                   });
                   continue;
                 }
                 normalizedResult = normalizeQueryResult(repaired.result);
                 repair = repaired.repair;
+                executedSql = repaired.repairedSql;
               }
               tiles.push({
                 tileId: item.i,
@@ -9869,6 +10325,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 trustState: 'review_required',
                 citation: { kind: repair ? 'semantic_query_repaired' : 'semantic_query', name: item.semantic.id },
                 ...(repair ? { repair } : {}),
+                artifact: {
+                  version: 1,
+                  sourceKind: 'semantic_query',
+                  name: item.title ?? item.semantic.id,
+                  sql: executedSql.slice(0, 40_000),
+                  trustState: 'review_required',
+                  explanation: [
+                    `Metrics: ${item.semantic.metrics.join(', ') || 'none'}.`,
+                    `Dimensions: ${item.semantic.dimensions?.join(', ') || 'none'}.`,
+                    repair ? 'The composed SQL needed bounded repair and therefore remains review-required.' : 'The governed semantic intent was composed for the active warehouse and remains review-required until approval.',
+                  ],
+                  executionTarget: executionTargetDescriptor(body as Record<string, unknown>),
+                },
               });
             } catch (err) {
               tiles.push({
@@ -9892,6 +10361,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             });
             continue;
           }
+          let blockSource: string | undefined;
+          let blockTargetConnection: ConnectionConfig | undefined;
+          let blockPlan: ReturnType<typeof buildExecutionPlan> | undefined;
+          let blockFilterApplication: ReturnType<typeof applyDashboardFiltersToBlockExecution> | undefined;
+          let blockInvocation: ReturnType<typeof prepareBlockInvocation> | undefined;
           try {
             assertAppAccess({
               app: loaded.app,
@@ -9899,60 +10373,60 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               level: 'execute',
             });
             const absBlockPath = join(projectRoot, block.filePath);
-            const source = readFileSync(absBlockPath, 'utf-8');
-            const targetConnection = isConnectionConfig(body.connection) ? body.connection : connection;
-            const tableMapping = await resolveSemanticTableMapping(executor, targetConnection, semanticLayer, projectRoot);
+            blockSource = readFileSync(absBlockPath, 'utf-8');
+            blockTargetConnection = requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection);
+            const tableMapping = await resolveSemanticTableMapping(executor, blockTargetConnection, semanticLayer, projectRoot);
             const boundParameters = dashboardTileParameterValues({
               item,
               dashboardValues: dashboardVariables,
               requestValues: variables,
             });
-            const invocation = prepareBlockInvocation({
+            blockInvocation = prepareBlockInvocation({
               block: block.name,
-              source,
+              source: blockSource,
               parameters: { ...dashboardVariables, ...boundParameters },
               parameterSources: Object.fromEntries(
                 Object.keys(boundParameters).map((name) => [name, 'surface' as const]),
               ),
               surface: 'app',
             });
-            if (invocation.errors.length || invocation.unresolvedParameters.length) {
+            if (blockInvocation.errors.length || blockInvocation.unresolvedParameters.length) {
               tiles.push({
                 tileId: item.i,
                 status: 'unresolved',
                 tileType: 'block',
                 blockId: block.name,
                 title: item.title ?? block.name,
-                error: invocation.errors[0] ?? `Needs values for: ${invocation.unresolvedParameters.join(', ')}`,
+                error: blockInvocation.errors[0] ?? `Needs values for: ${blockInvocation.unresolvedParameters.join(', ')}`,
                 invocation: {
-                  resolvedParameters: invocation.resolvedParameters,
-                  unresolvedParameters: invocation.unresolvedParameters,
-                  auditId: invocation.auditId,
+                  resolvedParameters: blockInvocation.resolvedParameters,
+                  unresolvedParameters: blockInvocation.unresolvedParameters,
+                  auditId: blockInvocation.auditId,
                 },
               });
               continue;
             }
             const semanticCompose = semanticLayer
-              ? await composeSemanticBlockSqlForRuntime(source, semanticLayer, {
-                  driver: targetConnection.driver,
+              ? await composeSemanticBlockSqlForRuntime(blockSource, semanticLayer, {
+                  driver: blockTargetConnection.driver,
                   tableMapping,
                   projectRoot,
                   projectConfig,
                   detectedProvider: semanticDetectedProvider,
-                  parameters: invocation.values,
+                  parameters: blockInvocation.values,
                 })
               : null;
-            const plan = buildExecutionPlan(
-              { id: item.i, type: 'dql', source, title: item.title ?? block.name },
+            blockPlan = buildExecutionPlan(
+              { id: item.i, type: 'dql', source: blockSource, title: item.title ?? block.name },
               {
                 semanticLayer,
-                driver: targetConnection.driver,
+                driver: blockTargetConnection.driver,
                 tableMapping,
-                parameters: invocation.values,
+                parameters: blockInvocation.values,
                 semanticSql: semanticCompose?.sql ?? undefined,
               },
             );
-            if (!plan && !semanticCompose?.sql) {
+            if (!blockPlan && !semanticCompose?.sql) {
               tiles.push({
                 tileId: item.i,
                 status: 'error',
@@ -9961,23 +10435,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               });
               continue;
             }
-            const filterApplication = applyDashboardFiltersToBlockExecution({
-              sql: semanticCompose?.sql ?? plan!.sql,
-              sqlParams: plan?.sqlParams ?? [],
-              variables: { ...(plan?.variables ?? {}), ...dashboardVariables },
+            blockFilterApplication = applyDashboardFiltersToBlockExecution({
+              sql: semanticCompose?.sql ?? blockPlan!.sql,
+              sqlParams: blockPlan?.sqlParams ?? [],
+              variables: { ...(blockPlan?.variables ?? {}), ...dashboardVariables },
               block,
               dashboard: loaded.dashboard,
             });
             const prepared = prepareLocalExecution(
-              filterApplication.sql,
-              targetConnection,
+              blockFilterApplication.sql,
+              blockTargetConnection,
               projectRoot,
               projectConfig,
             );
             const result = await executor.executeQuery(
               prepared.sql,
-              filterApplication.sqlParams,
-              runtimeVariables({ ...filterApplication.variables, ...invocation.values }),
+              blockFilterApplication.sqlParams,
+              runtimeVariables({ ...blockFilterApplication.variables, ...blockInvocation.values }),
               prepared.connection,
             );
             tiles.push({
@@ -9988,21 +10462,36 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               certificationStatus: block.status ?? null,
               title: item.title ?? block.name,
               viz: item.viz,
-              chartConfig: mergeDashboardChartConfig(plan?.chartConfig, item),
+              chartConfig: mergeDashboardChartConfig(blockPlan?.chartConfig, item),
               result: normalizeQueryResult(result),
               filters: {
-                applied: filterApplication.appliedFilters,
-                skipped: filterApplication.skippedFilters,
+                applied: blockFilterApplication.appliedFilters,
+                skipped: blockFilterApplication.skippedFilters,
               },
               invocation: {
-                resolvedParameters: invocation.resolvedParameters,
-                unresolvedParameters: invocation.unresolvedParameters,
-                auditId: invocation.auditId,
+                resolvedParameters: blockInvocation.resolvedParameters,
+                unresolvedParameters: blockInvocation.unresolvedParameters,
+                auditId: blockInvocation.auditId,
               },
+              trustState: block.status === 'certified' ? 'certified' : 'review_required',
               citation: {
                 kind: 'block',
                 name: block.name,
                 path: block.filePath,
+              },
+              artifact: {
+                version: 1,
+                sourceKind: 'certified_block',
+                name: block.name,
+                sourcePath: block.filePath,
+                dql: blockSource.slice(0, 40_000),
+                sql: blockFilterApplication.sql.slice(0, 40_000),
+                trustState: block.status === 'certified' ? 'certified' : 'review_required',
+                explanation: [
+                  block.status === 'certified' ? 'This tile executed a certified project block.' : 'This project block is not certified and remains review-required.',
+                  'Dashboard filters and typed parameters were bound before read-only execution.',
+                ],
+                executionTarget: executionTargetDescriptor(body as Record<string, unknown>),
               },
             });
           } catch (err) {
@@ -10014,11 +10503,87 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 error: err.message,
               });
             } else {
+              const repaired = await repairFailedAppTileExecution({
+                source: 'certified_block',
+                question: item.title ?? block.name,
+                sourceSql: blockFilterApplication?.sql ?? blockPlan?.sql,
+                sourceDql: blockSource,
+                artifactName: block.name,
+                error: err,
+                targetConnection: blockTargetConnection,
+                targetConnectionName: projectConfig.defaultConnectionName,
+                sqlParams: blockFilterApplication?.sqlParams ?? blockPlan?.sqlParams,
+                variables: {
+                  ...(blockPlan?.variables ?? {}),
+                  ...(blockFilterApplication?.variables ?? {}),
+                  ...(blockInvocation?.values ?? {}),
+                },
+              });
+              if (repaired.ok) {
+                tiles.push({
+                  tileId: item.i,
+                  status: 'ok',
+                  tileType: 'block',
+                  blockId: block.name,
+                  blockPath: block.filePath,
+                  certificationStatus: block.status ?? null,
+                  title: item.title ?? block.name,
+                  viz: item.viz,
+                  chartConfig: mergeDashboardChartConfig(blockPlan?.chartConfig, item),
+                  result: normalizeQueryResult(repaired.result),
+                  ...(blockFilterApplication ? {
+                    filters: {
+                      applied: blockFilterApplication.appliedFilters,
+                      skipped: blockFilterApplication.skippedFilters,
+                    },
+                  } : {}),
+                  ...(blockInvocation ? {
+                    invocation: {
+                      resolvedParameters: blockInvocation.resolvedParameters,
+                      unresolvedParameters: blockInvocation.unresolvedParameters,
+                      auditId: blockInvocation.auditId,
+                    },
+                  } : {}),
+                  trustState: 'review_required',
+                  repair: repaired.repair,
+                  citation: { kind: 'block_repaired', name: block.name, path: block.filePath },
+                  artifact: {
+                    version: 1,
+                    sourceKind: 'certified_block',
+                    name: block.name,
+                    sourcePath: block.filePath,
+                    ...(repaired.repairedDql ?? blockSource ? { dql: (repaired.repairedDql ?? blockSource!).slice(0, 40_000) } : {}),
+                    sql: repaired.repairedSql.slice(0, 40_000),
+                    trustState: 'review_required',
+                    explanation: [
+                      'The saved certified block was not changed.',
+                      'A bounded repair executed on the original data target; this repaired result requires human review.',
+                    ],
+                    executionTarget: executionTargetDescriptor(body as Record<string, unknown>),
+                  },
+                });
+                continue;
+              }
               tiles.push({
                 tileId: item.i,
                 status: 'error',
+                tileType: 'block',
                 blockId: block.name,
                 error: err instanceof Error ? err.message : String(err),
+                repair: repaired.repair,
+                ...(blockSource ? {
+                  artifact: {
+                    version: 1,
+                    sourceKind: 'certified_block',
+                    name: block.name,
+                    sourcePath: block.filePath,
+                    dql: blockSource.slice(0, 40_000),
+                    ...(blockFilterApplication?.sql ?? blockPlan?.sql ? { sql: (blockFilterApplication?.sql ?? blockPlan!.sql).slice(0, 40_000) } : {}),
+                    trustState: 'review_required',
+                    explanation: ['Automatic repair could not produce a safe executable result. The saved block was not changed.'],
+                    executionTarget: executionTargetDescriptor(body as Record<string, unknown>),
+                  },
+                } : {}),
               });
             }
           }
@@ -14684,9 +15249,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         const embeddedSourceSql = notebookCellRepairSql(cell);
-        if (!embeddedSourceSql) {
+        if (!embeddedSourceSql && (cell.type !== 'dql' || !notebookDqlSourceAllowsBackgroundRepair(cell.source))) {
           res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ error: 'Background repair supports SQL cells and DQL cells with an embedded query. Edit this semantic DQL definition directly.' }));
+          res.end(serializeJSON({ error: 'Background repair supports SQL cells and editable custom DQL blocks. Open governed references or semantic definitions in their owning editor.' }));
           return;
         }
         if (cell.type === 'sql' && /\{\{[^}]+\}\}/.test(cell.source)) {
@@ -14721,34 +15286,33 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const parameters = body.parameters && typeof body.parameters === 'object' && !Array.isArray(body.parameters)
           ? body.parameters as Record<string, unknown>
           : {};
-        const invocation = cell.type === 'dql'
-          ? prepareBlockInvocation({ source: cell.source, parameters, surface: 'notebook' })
-          : null;
-        if (invocation?.errors.length) {
-          throw boundedRepairError(invocation.errors.join(' '), 409);
-        }
-        if (invocation?.unresolvedParameters.length) {
-          throw boundedRepairError(
-            `Provide required parameter${invocation.unresolvedParameters.length === 1 ? '' : 's'} before retrying: ${invocation.unresolvedParameters.join(', ')}.`,
-            409,
-          );
-        }
-        const plan = cell.type === 'dql'
-          ? buildExecutionPlan(cell, {
+        let invocation: ReturnType<typeof prepareBlockInvocation> | null = null;
+        let plan: ReturnType<typeof buildExecutionPlan> = null;
+        let dqlCompilationError: string | undefined;
+        if (cell.type === 'dql') {
+          try {
+            invocation = prepareBlockInvocation({ source: cell.source, parameters, surface: 'notebook' });
+            if (invocation.errors.length) throw boundedRepairError(invocation.errors.join(' '), 409);
+            if (invocation.unresolvedParameters.length) {
+              throw boundedRepairError(
+                `Provide required parameter${invocation.unresolvedParameters.length === 1 ? '' : 's'} before retrying: ${invocation.unresolvedParameters.join(', ')}.`,
+                409,
+              );
+            }
+            plan = buildExecutionPlan(cell, {
               semanticLayer,
               driver: targetConnection.driver,
-              parameters: invocation?.values,
-            })
-          : null;
+              parameters: invocation.values,
+            });
+          } catch (error) {
+            const repairError = error as Error & { status?: number };
+            if (repairError.status === 409) throw error;
+            dqlCompilationError = repairError.message || String(error);
+          }
+        }
         const attemptedSql = typeof body.attemptedSql === 'string' && body.attemptedSql.trim()
           ? body.attemptedSql.trim()
           : embeddedSourceSql;
-        const sourceSql = plan?.sql ?? attemptedSql;
-        const sqlParams = plan?.sqlParams ?? [];
-        const variables = {
-          ...(plan?.variables ?? {}),
-          ...(invocation?.values ?? {}),
-        };
 
         const executionTarget = executionTargetDescriptor(body);
         const targetConnectionName = executionTarget.target === 'connection'
@@ -14760,23 +15324,46 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           `Repair notebook cell ${cell.title?.trim() || cell.id}.`,
           submittedError ? `Failure: ${submittedError.slice(0, 1_000)}` : '',
         ].filter(Boolean).join(' ');
-        const repaired = await executeBoundedSqlRepair({
-          question,
-          sourceSql,
-          targetConnection,
-          targetConnectionName,
-          sqlParams,
-          variables,
-        });
+        let repaired: BoundedSqlRepairResult | BoundedDqlRepairResult;
         let repairedSource: string | undefined;
-        if (cell.type === 'dql') {
-          const originalQuery = notebookCellRepairSql(cell)!;
-          const repairedQuery = repaired.repairMode === 'deterministic'
-            ? applyNotebookRepairRewrites(originalQuery, repaired.rewrites)
-            : restoreNotebookDqlParameterInterpolations(repaired.repairedSql, sqlParams);
-          repairedSource = replaceNotebookDqlQueryForRepair(cell.source, repairedQuery);
+        if (cell.type === 'dql' && dqlCompilationError) {
+          const repairedDql = await executeBoundedDqlRepair({
+            question,
+            source: cell.source,
+            failure: [submittedError, dqlCompilationError].filter(Boolean).join('\n'),
+            targetConnection,
+            targetConnectionName,
+            parameters,
+            artifactName: cell.title,
+          });
+          repaired = repairedDql;
+          repairedSource = repairedDql.repairedSource;
         } else {
-          repairedSource = repaired.repairedSql;
+          const sourceSql = plan?.sql ?? attemptedSql;
+          if (!sourceSql?.trim()) {
+            throw boundedRepairError('DQL could not identify an embedded query to repair.', 422);
+          }
+          const sqlParams = plan?.sqlParams ?? [];
+          repaired = await executeBoundedSqlRepair({
+            question,
+            sourceSql,
+            targetConnection,
+            targetConnectionName,
+            sqlParams,
+            variables: {
+              ...(plan?.variables ?? {}),
+              ...(invocation?.values ?? {}),
+            },
+          });
+          if (cell.type === 'dql') {
+            const originalQuery = notebookCellRepairSql(cell)!;
+            const repairedQuery = repaired.repairMode === 'deterministic'
+              ? applyNotebookRepairRewrites(originalQuery, repaired.rewrites)
+              : restoreNotebookDqlParameterInterpolations(repaired.repairedSql, sqlParams);
+            repairedSource = replaceNotebookDqlQueryForRepair(cell.source, repairedQuery);
+          } else {
+            repairedSource = repaired.repairedSql;
+          }
         }
         if (!repairedSource) {
           throw boundedRepairError('DQL could not safely replace the embedded query in this cell.', 422);
@@ -14788,12 +15375,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           const validationPlan = buildExecutionPlan({ ...cell, source: repairedSource }, {
             semanticLayer,
             driver: targetConnection.driver,
-            parameters: invocation?.values,
+            parameters: invocation?.values ?? parameters,
           });
           if (!validationPlan?.sql) {
             throw boundedRepairError('The repaired SQL ran, but the DQL wrapper no longer compiles.', 422);
           }
-          const beforeParameters = sqlParams.map((parameter) => `${parameter.position}:${parameter.name}`);
+          const beforeParameters = (plan?.sqlParams ?? ('sqlParams' in repaired ? repaired.sqlParams : []))
+            .map((parameter) => `${parameter.position}:${parameter.name}`);
           const afterParameters = validationPlan.sqlParams.map((parameter) => `${parameter.position}:${parameter.name}`);
           if (beforeParameters.join('|') !== afterParameters.join('|')) {
             throw boundedRepairError('The repaired DQL changed the cell parameter contract, so the update was stopped.', 422);
@@ -20279,6 +20867,11 @@ export function notebookCellRepairSql(cell: NotebookCell): string | undefined {
   if (cell.type !== 'dql') return undefined;
   const match = /\bquery\s*=\s*"""([\s\S]*?)"""/i.exec(cell.source);
   return match?.[1]?.trim() || undefined;
+}
+
+export function notebookDqlSourceAllowsBackgroundRepair(source: string): boolean {
+  if (/^\s*@block\(/i.test(source) || /\btype\s*=\s*"semantic"/i.test(source)) return false;
+  return /\bblock\b/i.test(source) && /\bquery\b/i.test(source);
 }
 
 export function replaceNotebookDqlQueryForRepair(source: string, sql: string): string | undefined {
