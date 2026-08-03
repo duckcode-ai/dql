@@ -99,6 +99,8 @@ export function GitPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastMsg | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [initialLoadComplete, setInitialLoadComplete] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [branchMenuOpen, setBranchMenuOpen] = useState(false);
   const [newBranchOpen, setNewBranchOpen] = useState(false);
   const [newBranchName, setNewBranchName] = useState('');
@@ -119,6 +121,7 @@ export function GitPage() {
 
   const refreshAll = useCallback(async () => {
     setRefreshing(true);
+    setLoadError(null);
     try {
       const [s, b, r, context] = await Promise.all([
         api.fetchGitStatus(),
@@ -134,7 +137,10 @@ export function GitPage() {
         : { current: b.current, branches: b.branches });
       setRemote((previous) => previous.url === r.url && previous.name === r.name ? previous : { url: r.url, name: r.name });
       setGovernedContext(context);
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : String(error));
     } finally {
+      setInitialLoadComplete(true);
       window.setTimeout(() => setRefreshing(false), 350);
     }
   }, []);
@@ -365,6 +371,17 @@ export function GitPage() {
     [remote.url, branchInfo.current, reviewUrl],
   );
 
+  // Never render the null pre-fetch state as a real detached, clean
+  // repository. That placeholder looked authoritative until the first request
+  // completed and could hide dozens of real workspace changes.
+  if (!initialLoadComplete) {
+    return <GitStatusLoading t={t} />;
+  }
+
+  if (loadError && !status) {
+    return <GitStatusError t={t} message={loadError} onRetry={() => void refreshAll()} />;
+  }
+
   if (status && !status.inRepo) {
     return <NotARepo t={t} />;
   }
@@ -483,6 +500,30 @@ export function GitPage() {
       </div>
 
       {toast && <Toast t={t} kind={toast.kind} text={toast.text} />}
+    </div>
+  );
+}
+
+function GitStatusLoading({ t }: { t: Theme }) {
+  return (
+    <div style={{ height: '100%', display: 'grid', placeItems: 'center', background: t.appBg, color: t.textSecondary }}>
+      <div role="status" style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 12.5 }}>
+        <RefreshCw size={15} strokeWidth={1.8} style={{ animation: 'dql-spin 0.8s linear infinite' }} />
+        Loading current repository state…
+      </div>
+      <style>{`@keyframes dql-spin { to { transform: rotate(360deg); } }`}</style>
+    </div>
+  );
+}
+
+function GitStatusError({ t, message, onRetry }: { t: Theme; message: string; onRetry: () => void }) {
+  return (
+    <div style={{ height: '100%', display: 'grid', placeItems: 'center', background: t.appBg, color: t.textSecondary }}>
+      <div style={{ display: 'grid', justifyItems: 'center', gap: 9, fontSize: 12.5 }}>
+        <span>Source Control could not load the current repository state.</span>
+        <span style={{ color: t.textMuted, fontSize: 11 }}>{message}</span>
+        <button type="button" onClick={onRetry} style={miniBtn(t, 'primary')}>Retry</button>
+      </div>
     </div>
   );
 }

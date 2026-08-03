@@ -1400,9 +1400,15 @@ export function ConnectionPanel({
       ) : null}
       {metadataStatus ? (
         <div style={{ fontSize: 11.5, color: metadataStatus.state === 'ready' ? 'var(--status-success)' : 'var(--status-warning)', fontFamily: t.font }}>
-          {metadataStatus.state === 'ready' ? 'Ready' : metadataStatus.state === 'stale' ? 'Refresh required' : 'Not synchronized'}
-          {' · '}{metadataStatus.relationCount.toLocaleString()} relations
-          {' · '}{metadataStatus.columnCount.toLocaleString()} columns
+          {metadataStatus.state === 'ready'
+            ? 'Warehouse metadata index ready'
+            : metadataStatus.state === 'stale'
+              ? 'Warehouse metadata refresh required'
+              : dbtConfigured
+                ? 'Optional warehouse metadata index not synchronized · dbt project objects remain available'
+                : 'Warehouse metadata index not synchronized'}
+          {' · '}{metadataStatus.relationCount.toLocaleString()} indexed warehouse relations
+          {' · '}{metadataStatus.columnCount.toLocaleString()} indexed warehouse columns
           {metadataStatus.capturedAt ? ` · ${new Date(metadataStatus.capturedAt).toLocaleString()}` : ''}
         </div>
       ) : null}

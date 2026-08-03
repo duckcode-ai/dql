@@ -18,7 +18,7 @@ import { api } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import { themes, type Theme } from '../../themes/notebook-theme';
 import type { Skill, SkillPathSettings, Domain } from '../../store/types';
-import { skillMatchesModelingScope } from './modeling-scope';
+import { skillMatchesModelingScope, skillMatchesSourcePaths } from './modeling-scope';
 import { authoredDomainOptionsWithCurrent } from '../domains/authored-domain-options';
 
 type FormMode = { kind: 'create' } | { kind: 'edit'; skill: Skill };
@@ -59,7 +59,17 @@ function emptyDraft(): Skill {
   };
 }
 
-export function SkillsPage({ embedded = false, domainFilter = null, modelAreaFilter = null }: { embedded?: boolean; domainFilter?: string | null; modelAreaFilter?: string | null } = {}): JSX.Element {
+export function SkillsPage({
+  embedded = false,
+  domainFilter = null,
+  modelAreaFilter = null,
+  sourcePathFilter,
+}: {
+  embedded?: boolean;
+  domainFilter?: string | null;
+  modelAreaFilter?: string | null;
+  sourcePathFilter?: string[];
+} = {}): JSX.Element {
   const { state } = useNotebook();
   const t = themes[state.themeMode];
 
@@ -131,8 +141,11 @@ export function SkillsPage({ embedded = false, domainFilter = null, modelAreaFil
   useEffect(() => load(), [load]);
 
   const sorted = useMemo(() => {
-    return skills.filter((skill) => skillMatchesModelingScope(skill, domainFilter, modelAreaFilter)).sort((a, b) => a.id.localeCompare(b.id));
-  }, [skills, domainFilter, modelAreaFilter]);
+    return skills
+      .filter((skill) => skillMatchesModelingScope(skill, domainFilter, modelAreaFilter))
+      .filter((skill) => skillMatchesSourcePaths(skill, sourcePathFilter))
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }, [skills, domainFilter, modelAreaFilter, sourcePathFilter]);
 
   const handleSaved = useCallback((saved: Skill) => {
     setSkills((prev) => {
@@ -206,7 +219,7 @@ export function SkillsPage({ embedded = false, domainFilter = null, modelAreaFil
                   color: t.textPrimary,
                 }}
               >
-                {modelAreaFilter ? `${modelAreaFilter.split('::').at(-1)?.replace(/_/g, ' ')} skills` : domainFilter ? `${domainFilter} skills` : 'Skills'}
+                {modelAreaFilter ? `${modelAreaFilter.split('::').at(-1)?.replace(/_/g, ' ')} skills` : domainFilter ? `${domainFilter} skills` : sourcePathFilter ? 'Authored domain skills' : 'Skills'}
               </div>
             </div>
             <div
@@ -218,13 +231,13 @@ export function SkillsPage({ embedded = false, domainFilter = null, modelAreaFil
                 lineHeight: 1.5,
               }}
             >
-              Definitions, vocabulary, and instructions the AI follows when answering{modelAreaFilter ? ' in this model area' : domainFilter ? ' in this domain' : ''}. Applied only when their triggers match — drafts never guide answers.
+              Definitions, vocabulary, and instructions the AI follows when answering{modelAreaFilter ? ' in this model area' : domainFilter ? ' in this domain' : sourcePathFilter ? ' from authored domains' : ''}. Applied only when their triggers match — drafts never guide answers.
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 7, color: t.textMuted, fontSize: 10.5, minWidth: 0 }}>
               <FolderOpen size={12} strokeWidth={1.8} />
               <span>Skill folder</span>
               <code style={{ color: t.textSecondary, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{pathSettings?.path ?? 'skills'}</code>
-              {pathSettings ? <span>· {pathSettings.exists ? `${pathSettings.skillCount} loaded` : 'not found'}</span> : null}
+              {pathSettings ? <span>· {pathSettings.exists ? `${pathSettings.skillCount} loaded${sourcePathFilter ? ` · ${sorted.length} shown here` : ''}` : 'not found'}</span> : null}
             </div>
           </div>
           <div

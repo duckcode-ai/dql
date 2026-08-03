@@ -14,6 +14,7 @@ import { makeCell } from '../../store/NotebookStore';
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { useRunSnapshotAutosave } from '../../hooks/useRunSnapshotAutosave';
 import type { NotebookFile } from '../../store/types';
+import { withoutDomainStudioLocationHref } from '../modeling/domain-studio-model';
 
 const HomePage = lazy(() => import('../home/HomePage').then((module) => ({ default: module.HomePage })));
 const AnalyticsHome = lazy(() => import('../home/AnalyticsHome').then((module) => ({ default: module.AnalyticsHome })));
@@ -76,6 +77,17 @@ export function AppShell() {
       });
     return () => { alive = false; };
   }, [dispatch]);
+
+  // Domain/model/section query parameters are valid deep-link state only while
+  // Domain Studio is visible. Keeping them on Ask, Git, Settings, or Notebook
+  // URLs makes reloads unexpectedly reopen Domains and creates misleading
+  // bookmarks after ordinary navigation.
+  useEffect(() => {
+    if (state.mainView === 'domains' || state.mainView === 'modeling' || state.mainView === 'skills') return;
+    const next = withoutDomainStudioLocationHref(window.location.href);
+    const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (next !== current) window.history.replaceState(window.history.state, '', next);
+  }, [state.mainView]);
 
   // Global keyboard shortcuts
   useKeyboardShortcuts();

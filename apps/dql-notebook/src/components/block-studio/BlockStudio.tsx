@@ -5414,7 +5414,9 @@ function CertificationChecklistPanel({
         {result.pending
           ? 'The exact draft is saved and the certification gates are running in the background. You may switch pages or continue other work.'
           : result.ok
-          ? 'Latest edits were saved, the block ran successfully, tests passed, and status was updated to certified.'
+          ? checklist?.tests
+            ? 'Latest edits were saved, the block ran successfully, tests passed, and status was updated to certified.'
+            : 'Latest edits were saved, the block ran successfully, no block tests are defined, and status was updated to certified.'
           : missingSummary
             ? `Latest edits were saved, but certification cannot finish because ${missingSummary}. Fix it, then click Certify again.`
             : 'Latest edits were saved, but certification cannot finish yet. Fix the blockers below, then click Certify again.'}

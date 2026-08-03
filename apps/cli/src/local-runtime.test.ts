@@ -4049,6 +4049,86 @@ describe('semantic compatibility server survival (API-004, API-007, E2E-014)', (
 });
 
 describe('notebook cell execution isolation (API-006, API-007, UI-009, E2E-014)', () => {
+  it('CFG-003/UI-015 resolves the legacy default connection identically for Ask and Notebook AI', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-default-connection-parity-'));
+    tempDirs.push(projectRoot);
+    const databasePath = join(projectRoot, 'legacy-default.duckdb');
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'default-connection-parity',
+      defaultConnection: { driver: 'file', filepath: databasePath },
+    }));
+
+    const executionConnections: Array<{ filepath?: string } | undefined> = [];
+    const executeQuery = vi.fn(async (
+      _sql: string,
+      _params: unknown[],
+      _variables: Record<string, unknown>,
+      executionConnection?: { filepath?: string },
+    ): Promise<QueryResult> => {
+      executionConnections.push(executionConnection);
+      return {
+        columns: [{ name: 'value', type: 'number', driverType: 'INTEGER' }],
+        rows: [{ value: 1 }],
+        rowCount: 1,
+        executionTimeMs: 1,
+      };
+    });
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery } as unknown as QueryExecutor,
+        connection: { driver: 'file', filepath: databasePath },
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+        agentRunExecutors: {
+          generated_answer: () => ({
+            summary: 'Used the configured default connection.',
+            answer: 'One row.',
+            status: 'completed',
+            trustState: 'review_required',
+            stopReason: 'generated_review_required',
+            artifacts: [{
+              id: 'answer:default-connection',
+              kind: 'answer',
+              title: 'Default connection answer',
+              trustState: 'review_required',
+              payload: { text: 'One row.' },
+            }],
+            evaluations: [],
+            nextActions: [],
+          }),
+        },
+      });
+      const base = `http://127.0.0.1:${port}`;
+
+      const askResponse = await fetch(`${base}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'How many rows are there?',
+          requestedMode: 'ask',
+          executionTarget: { target: 'connection', connectionName: 'default' },
+        }),
+      });
+      expect(askResponse.status).toBe(201);
+
+      const notebookResponse = await fetch(`${base}/api/query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sql: 'SELECT 1 AS value',
+          executionTarget: { target: 'connection', connectionName: 'default' },
+        }),
+      });
+      expect(notebookResponse.status).toBe(200);
+      expect(executionConnections.at(-1)?.filepath).toBe(databasePath);
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+    }
+  });
+
   it('binds every response to its cell run and does not leak a failed cell into the next execution', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-notebook-cell-isolation-'));
     tempDirs.push(projectRoot);

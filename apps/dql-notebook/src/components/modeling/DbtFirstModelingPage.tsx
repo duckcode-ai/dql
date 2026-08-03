@@ -233,6 +233,11 @@ export function DbtFirstModelingPage() {
   });
   const unboundNodes = Object.values(data.dbtProvenance.nodes).filter((node) => !Object.values(data.modeling.entities).some((entity) => entity.dbtUniqueId === node.uniqueId));
   const inspectorVisible = inspectorOpen && tab === 'diagram';
+  const domainSkillPaths = [...new Set(
+    selectedDomain
+      ? (data.domainAssets?.[selectedDomain]?.skills ?? [])
+      : Object.values(data.domainAssets ?? {}).flatMap((assets) => assets.skills ?? []),
+  )].sort();
 
   return (
     <div
@@ -396,7 +401,7 @@ export function DbtFirstModelingPage() {
               </div>
             )}
             {tab === 'terms' && <DomainAssetsPanel data={data} domain={selectedDomain} kinds={['terms']} title="Domain terms" detail="Business vocabulary owned by this domain and available to governed retrieval." t={t} />}
-            {tab === 'skills' && <SkillsPage embedded domainFilter={selectedDomain} modelAreaFilter={selectedAreaId} />}
+            {tab === 'skills' && <SkillsPage embedded domainFilter={selectedDomain} modelAreaFilter={selectedAreaId} sourcePathFilter={domainSkillPaths} />}
             {tab === 'knowledge' && <div style={{ height: '100%', overflow: 'auto', padding: '18px 20px' }}><Knowledge360 t={t} domains={Object.values(data.modeling.packages).map((pkg) => ({ id: pkg.id, name: pkg.id }))} initialDomainId={selectedDomain} /></div>}
             {tab === 'blocks' && <DomainBlocksPanel data={data} domain={selectedDomain} t={t} />}
             {tab === 'views' && <DomainAssetsPanel data={data} domain={selectedDomain} kinds={['views']} title="Business views" detail="Domain-owned business views that compose governed models and blocks." t={t} />}
@@ -613,7 +618,7 @@ function DomainPackageNavigation({
         value={selectedDomain ?? ''}
         options={packages.map((pkg) => ({ value: pkg.id, label: authoredLabels.get(pkg.id) ?? pkg.label }))}
         onChange={(value) => onSelect(value || null)}
-        summary={<>{packages.length} domain{packages.length === 1 ? '' : 's'} available</>}
+        summary={<>{packages.length} authored domain{packages.length === 1 ? '' : 's'} available</>}
         t={t}
       />
     </nav>

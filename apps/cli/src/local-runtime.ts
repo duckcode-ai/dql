@@ -1698,13 +1698,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     name: string | undefined,
   ): ConnectionConfig | null => {
     if (!name) return null;
-    const stored = getStoredConnections(
-      projectConfig as unknown as Record<string, unknown>,
-    );
-    const normalized = normalizeStoredConnection(stored[name]);
-    return normalized
-      ? normalizeProjectConnection(normalized, projectRoot)
-      : null;
+    // `GET /api/connections` exposes the active legacy/default connection as
+    // `default` so every execution surface can present one uniform selector.
+    // Resolve that selector through the same project contract used by metadata
+    // APIs instead of looking only in the newer named `connections` map.
+    return projectConnectionById(projectRoot, projectConfig, name);
   };
   const resolveExecutionConnection = async (
     body: Record<string, unknown>,

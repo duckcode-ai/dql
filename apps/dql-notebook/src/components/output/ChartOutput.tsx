@@ -1119,13 +1119,15 @@ function KpiCard({ result, themeMode, chartConfig }: { result: QueryResult; them
   const displayVal = formatKpiValue(yCol, row[yCol], result.rows.map((item) => item[yCol]), chartConfig?.format);
 
   return (
-    <div style={{ containerType: 'inline-size', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', padding: '8px 4px', boxSizing: 'border-box', minWidth: 0 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', minHeight: 54, padding: '8px 4px', boxSizing: 'border-box', minWidth: 0 }}>
       <span
         title={String(row[yCol])}
         style={{
-          // Scale the hero figure to the tile width so it stays readable in
-          // compact app-builder tiles.
-          fontSize: 'clamp(14px, 13cqw, 40px)', fontWeight: 750, fontFamily: t.fontMono, color: palette[0] ?? t.accent,
+          // Viewers embedded in constrained containers did not consistently
+          // resolve container-query units, which could collapse the KPI figure
+          // to an almost invisible size. Viewport-independent bounds stay
+          // readable in compact tiles and in the cloud embed.
+          fontSize: 'clamp(24px, 3.2vw, 40px)', fontWeight: 750, fontFamily: t.fontMono, color: palette[0] ?? t.accent,
           lineHeight: 1.1, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
         }}
       >{displayVal}</span>

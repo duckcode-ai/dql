@@ -174,7 +174,27 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
           dashboardMode: false,
         };
       }
-      return { ...state, mainView: action.view, lineageFullscreen: false, lineageFocusNodeId: null, lineageReturnTarget: null };
+      return {
+        ...state,
+        mainView: action.view,
+        // A block and a notebook share the outer editor shell but not an active
+        // document contract. When a user explicitly opens Notebooks after
+        // Block Studio, show the notebook landing state until they pick a file
+        // instead of rendering block metadata over an empty notebook.
+        ...(action.view === 'notebook' && state.activeFile?.type === 'block'
+          ? {
+              activeFile: null,
+              cells: [],
+              notebookTitle: '',
+              notebookMetadata: {},
+              notebookDirty: false,
+              dashboardMode: false,
+            }
+          : {}),
+        lineageFullscreen: false,
+        lineageFocusNodeId: null,
+        lineageReturnTarget: null,
+      };
     case 'OPEN_AGENT_LOG':
       return { ...state, agentLogRun: action.run, mainView: 'agent_log' };
 
@@ -230,35 +250,46 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       const fullPagePanels = ['connection', 'git', 'apps', 'readiness', 'skills', 'domains', 'settings'] as const;
       const isFullPage = (action.panel as string | null) !== null
         && (fullPagePanels as readonly string[]).includes(action.panel as string);
+      const nextMainView =
+        action.panel === 'connection'
+          ? 'connection'
+          : action.panel === 'git'
+              ? 'git'
+              : action.panel === 'apps'
+                ? 'apps'
+                : action.panel === 'readiness'
+                  ? 'readiness'
+                  : action.panel === 'skills'
+                  ? 'skills'
+                  : action.panel === 'domains'
+                  ? 'domains'
+                  : action.panel === 'settings'
+                  ? 'connection'
+                  : action.panel === 'files'
+                    ? 'notebook'
+                    : action.panel === 'block_library'
+                      ? 'block_studio'
+                      : state.activeFile?.type === 'block'
+                        ? 'block_studio'
+                        : 'notebook';
       return {
         ...state,
         sidebarPanel: action.panel,
         sidebarOpen: action.panel !== null && !isFullPage,
+        ...(nextMainView === 'notebook' && state.activeFile?.type === 'block'
+          ? {
+              activeFile: null,
+              cells: [],
+              notebookTitle: '',
+              notebookMetadata: {},
+              notebookDirty: false,
+              dashboardMode: false,
+            }
+          : {}),
         lineageFullscreen: false,
         lineageFocusNodeId: null,
         lineageReturnTarget: null,
-        mainView:
-          action.panel === 'connection'
-            ? 'connection'
-            : action.panel === 'git'
-                ? 'git'
-                : action.panel === 'apps'
-                  ? 'apps'
-                  : action.panel === 'readiness'
-                    ? 'readiness'
-                    : action.panel === 'skills'
-                    ? 'skills'
-                    : action.panel === 'domains'
-                    ? 'domains'
-                    : action.panel === 'settings'
-                    ? 'connection'
-                    : action.panel === 'files'
-                      ? 'notebook'
-                      : action.panel === 'block_library'
-                        ? 'block_studio'
-                        : state.activeFile?.type === 'block'
-                          ? 'block_studio'
-                          : 'notebook',
+        mainView: nextMainView,
       };
     }
 

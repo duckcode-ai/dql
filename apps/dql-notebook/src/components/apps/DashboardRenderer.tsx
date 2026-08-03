@@ -13,6 +13,7 @@ import { inferColumnKind, columnKindToChartRole, type ChartColumnRole } from '..
 import { classifyColumns } from '../../utils/semantic-fields';
 import { NODE_TYPE_COLORS, TYPE_LABELS, TYPE_TITLES } from '../lineage/lineage-constants';
 import { themes, type ThemeMode as NotebookThemeMode } from '../../themes/notebook-theme';
+import { mergeDashboardTileChartConfig, summarizeDashboardKpiResult } from './dashboard-chart-config';
 
 const UnifiedAgentRunPanel = lazy(() => import('../agent/UnifiedAgentRunPanel')
   .then((module) => ({ default: module.UnifiedAgentRunPanel })));
@@ -1381,7 +1382,7 @@ function TileBody({
   );
   if (!tile.result) return <span>No result.</span>;
 
-  const chartConfig = mergeTileChartConfig(item, tile.chartConfig as CellChartConfig | undefined);
+  const chartConfig = mergeDashboardTileChartConfig(item, tile.chartConfig as CellChartConfig | undefined);
   const chart = String(chartConfig.chart ?? tile.viz?.type ?? '').toLowerCase();
   if (chart === 'table' || item.viz.type === 'table' || item.viz.type === 'pivot') {
     if (genUi?.component === 'EvidenceTable' || genUi?.component === 'PivotTable') {
@@ -1389,7 +1390,10 @@ function TileBody({
     }
     return <div style={{ width: '100%', alignSelf: 'stretch' }}><TableOutput result={tile.result} themeMode={themeMode} /></div>;
   }
-  return <div style={{ width: '100%', alignSelf: 'stretch' }}><ChartOutput result={tile.result} themeMode={themeMode} chartConfig={chartConfig} /></div>;
+  const chartResult = chart === 'kpi'
+    ? summarizeDashboardKpiResult(tile.result, chartConfig.y)
+    : tile.result;
+  return <div style={{ width: '100%', alignSelf: 'stretch' }}><ChartOutput result={chartResult} themeMode={themeMode} chartConfig={chartConfig} /></div>;
 }
 
 function TileEditorControls({
@@ -1487,7 +1491,7 @@ function TileSettingsPanel({
   onPatch: (patch: Partial<DashboardDocumentResponse['dashboard']['layout']['items'][number]> | null) => void;
 }) {
   const result = tile?.result;
-  const chartConfig = mergeTileChartConfig(item, tile?.chartConfig as CellChartConfig | undefined);
+  const chartConfig = mergeDashboardTileChartConfig(item, tile?.chartConfig as CellChartConfig | undefined);
   const chart = normalizeChartType(chartConfig.chart);
   const genUi = getDqlGenUi(item);
   const [recommendBusy, setRecommendBusy] = useState(false);
@@ -2169,20 +2173,6 @@ function LineageStat({ label, value }: { label: string; value: number }) {
 function getDashboardItemBlockId(item: DashboardLayoutItem): string | null {
   if (!item.block) return null;
   return 'blockId' in item.block ? item.block.blockId ?? null : item.block.ref ?? null;
-}
-
-function mergeTileChartConfig(
-  item: DashboardDocumentResponse['dashboard']['layout']['items'][number],
-  base?: CellChartConfig,
-): CellChartConfig {
-  const options = (item.viz.options ?? {}) as Partial<CellChartConfig>;
-  return {
-    ...(base ?? {}),
-    ...options,
-    chart: normalizeChartType(String(options.chart ?? base?.chart ?? item.viz.type)),
-    title: options.title ?? base?.title ?? item.title,
-    colorPalette: options.colorPalette ?? base?.colorPalette ?? 'corporate',
-  };
 }
 
 function normalizeChartType(value: unknown): ChartType {

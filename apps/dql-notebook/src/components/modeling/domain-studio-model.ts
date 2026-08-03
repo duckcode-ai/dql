@@ -72,6 +72,15 @@ export function domainStudioLocationHref(
   return `${url.pathname}${url.search}${url.hash}`;
 }
 
+/** Remove Domain Studio-only deep-link state after leaving the workspace. */
+export function withoutDomainStudioLocationHref(href: string): string {
+  const url = new URL(href);
+  for (const key of ['domain', 'domainSection', 'modelArea', 'domainObject']) {
+    url.searchParams.delete(key);
+  }
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
 /** Stable parent-first ordering for the Domain Studio selector and breadcrumbs. */
 export function domainPackageTree(
   packages: Pick<ManifestDbtFirstModeling, 'packages'>['packages'],

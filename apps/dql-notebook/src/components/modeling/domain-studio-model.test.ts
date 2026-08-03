@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ManifestDbtFirstModeling, ManifestModelEntity } from '@duckcodeailabs/dql-core';
-import { DOMAIN_STUDIO_NAVIGATION, domainPackageTree, domainStudioLocationHref, entityRecords, isDomainStudioSection, resolveEntityRecordKey } from './domain-studio-model';
+import { DOMAIN_STUDIO_NAVIGATION, domainPackageTree, domainStudioLocationHref, entityRecords, isDomainStudioSection, resolveEntityRecordKey, withoutDomainStudioLocationHref } from './domain-studio-model';
 
 function entity(domain: string, localId: string): ManifestModelEntity {
   return {
@@ -59,6 +59,12 @@ describe('Domain Studio navigation', () => {
       modelAreaId: 'customers.lifecycle::model_area::retention',
       selectedId: 'customers.lifecycle::entity::orders',
     })).toBe('/?theme=paper&domain=customers.lifecycle&domainSection=diagram&modelArea=customers.lifecycle%3A%3Amodel_area%3A%3Aretention&domainObject=customers.lifecycle%3A%3Aentity%3A%3Aorders');
+  });
+
+  it('removes Domain Studio state without dropping unrelated URL state', () => {
+    expect(withoutDomainStudioLocationHref(
+      'http://127.0.0.1:3474/?theme=paper&domain=core&domainSection=skills&modelArea=core%3A%3Aarea&domainObject=model%3Aorders#token',
+    )).toBe('/?theme=paper#token');
   });
 });
 
