@@ -6,6 +6,76 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.13.0 - 2026-08-03
+
+### Governed App Builder, asynchronous workflows, and durable AI analysis
+
+This minor release brings every post-`1.12.11` feature on `main` into one
+synchronized distribution. It expands governed Apps into a multi-page story
+builder, keeps long-running local work alive across navigation, and closes the
+remaining Ask/Notebook target-continuity gaps without weakening review or
+certification boundaries.
+
+### Added
+
+- **Governed multi-source App Builder.** Build complete Apps from certified
+  blocks, governed semantic sources, and review-required exploratory sources,
+  with incremental page generation, editable proposals, explicit commit, and
+  source-tier evidence retained in each component.
+- **App-level analysis controls.** App viewers can switch supported results
+  between table and chart views, inspect DQL, SQL, lineage, and answer evidence,
+  open work in Notebook, and run bounded same-target repair from an individual
+  failed App component.
+- **Responsive App Copilot.** Copilot results support wider/expandable layouts,
+  adjustable height, readable wide tables, visible Add-to-App state, and quick
+  navigation to the added component.
+- **Durable background operations.** Ask AI, Notebook AI, and App Builder runs
+  continue across route changes and remounts, with persisted run identity,
+  recovery, cancellation, and a shared task center instead of blocking the UI.
+- **Recoverable App deletion.** Apps can be removed through a confirmed,
+  guarded action alongside View and Edit.
+
+### Improved
+
+- **Asynchronous application shell.** Project refresh, metadata refresh,
+  Notebook execution, saving, certification, and other long-running local work
+  use coordinated background operations so unrelated pages and activities stay
+  responsive.
+- **App presentation quality.** Auto-layout Apply is durable, component result
+  cards expose complete context, and currency, date, time, and decimal values
+  use meaningful display formatting.
+- **Ask clarification continuity.** Structured clarification choices retain the
+  original analytical question and receive the correct analytical deadline even
+  after reload or when conversation storage is unavailable.
+- **Research continuity.** Research deeper carries the successful Ask SQL, DQL,
+  result sample, and exact execution target. If deeper composition cannot
+  produce a safer executable query, DQL revalidates and retains the successful
+  baseline instead of replacing it with a noisy failure.
+
+### Fixed
+
+- **Target-grounded schema repair.** Complete live Snowflake, Databricks, and
+  DuckDB schemas remain authoritative for execution, while partial retrieval
+  cards and certified source SQL are merged without reintroducing stale columns
+  or triggering an unnecessary second AI generation.
+- **Research target drift.** Research schema inspection, certified execution,
+  generated SQL, preview, cancellation, and fallback now remain bound to the
+  same connection selected by the originating Ask run.
+- **Certified Block Studio state.** Save and certification actions retain their
+  intended status while background work proceeds without freezing the page.
+
+### Verification
+
+- The synchronized release dry run passed all 22 workspace builds, every
+  workspace test task, and packed all 19 npm packages.
+- Full DQL Agent suite: 107 files and 1,299 tests passed.
+- Full local-runtime integration suite: 259 tests passed.
+- Full Notebook suite: 48 files and 224 tests passed.
+- All 19 npm packages report `version=1.13.0` and
+  `dist-tags.latest=1.13.0`.
+- Fresh project-local and global CLI installs both report `dql 1.13.0`, and
+  `create-dql-app@1.13.0 --help` resolves successfully.
+
 ## v1.12.11 - 2026-08-01
 
 ### Quiet Notebook repair and governed authoring context
