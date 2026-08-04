@@ -6821,6 +6821,10 @@ export function schemaContextWithAllowedSqlContext(
       byRelation.set(key, {
         relation: relation.relation,
         name: relation.name,
+        // This entry came from retrieval, not a live warehouse inspection.
+        // Preserve explicit completeness, otherwise keep it partial so it
+        // cannot overwrite certified source shape during validation.
+        columnCompleteness: relation.columnCompleteness ?? 'partial',
         columns: relation.columns.map((column) => ({
           name: column.name,
           type: column.type,

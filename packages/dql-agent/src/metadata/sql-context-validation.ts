@@ -221,8 +221,6 @@ export function validateSqlAgainstLocalContext(
     const allowedRelation = findAllowedRelation(allowed, relation);
     if (allowedRelation && allowedRelation.columns.length === 0) {
       warnings.push(`Column validation was advisory for ${relation} because the context pack did not include column metadata.`);
-    } else if (allowedRelation && relationColumnCompleteness(allowedRelation) === 'partial') {
-      warnings.push(`Column validation was advisory for ${relation} because the inspected column list is partial.`);
     }
   }
 
@@ -242,6 +240,15 @@ export function validateSqlAgainstLocalContext(
         column: unknownColumn.column,
       },
     };
+  }
+  // A partial list is sufficient when every referenced column is present. Only
+  // surface the advisory when the query uses a column the partial evidence
+  // cannot prove; this keeps certified source shapes quiet while still avoiding
+  // a false hard rejection for wide/truncated enterprise tables.
+  const advisoryUnknownColumn = findUnknownColumn(analysis.columns, allowed, outputAliases, true);
+  if (advisoryUnknownColumn) {
+    const relation = advisoryUnknownColumn.relation ?? referencedRelations[0];
+    warnings.push(`Column validation was advisory${relation ? ` for ${relation}` : ''} because the inspected column list is partial.`);
   }
 
   // AGT-015 / E2E-014: validate ambiguity inside every SELECT/CTE scope before
@@ -371,13 +378,18 @@ function buildAllowedRelationLookup(
     }
   }
   for (const table of runtimeSchema) {
+    // Runtime callers historically provided complete inspected schemas without
+    // a marker, so absence still means complete. Only relations explicitly
+    // tagged partial (including context-pack cards projected into schemaContext)
+    // remain advisory and merge with certified source SQL instead of erasing it.
+    const authoritativeColumns = table.columnCompleteness !== 'partial';
     putAllowed({
       relation: table.relation,
       name: table.name ?? table.relation.split('.').at(-1) ?? table.relation,
       source: table.source ?? 'runtime schema context',
-      columnCompleteness: 'complete',
+      columnCompleteness: authoritativeColumns ? 'complete' : 'partial',
       columns: table.columns,
-    }, true);
+    }, authoritativeColumns);
   }
   return allowed;
 }
@@ -496,6 +508,7 @@ function findUnknownColumn(
   columns: Array<{ column: string; relation?: string; unqualified: boolean }>,
   allowed: Map<string, MetadataAllowedSqlRelation>,
   outputAliases: Set<string>,
+  includePartial = false,
 ): { column: string; relation?: string } | undefined {
   for (const column of columns) {
     if (column.column === '*') continue;
@@ -503,7 +516,7 @@ function findUnknownColumn(
     if (column.relation) {
       const relation = findAllowedRelation(allowed, column.relation);
       if (!relation || relation.columns.length === 0) continue;
-      if (relationColumnCompleteness(relation) === 'partial') continue;
+      if (!includePartial && relationColumnCompleteness(relation) === 'partial') continue;
       if (!relation.columns.some((allowedColumn) => namesEqual(allowedColumn.name, column.column))) {
         return { column: column.column, relation: relation.relation };
       }
@@ -511,7 +524,7 @@ function findUnknownColumn(
     }
 
     const relationsWithColumns = uniqueAllowedRelations(allowed)
-      .filter((relation) => relation.columns.length > 0 && relationColumnCompleteness(relation) === 'complete');
+      .filter((relation) => relation.columns.length > 0 && (includePartial || relationColumnCompleteness(relation) === 'complete'));
     if (relationsWithColumns.length === 0) continue;
     if (!relationsWithColumns.some((relation) => relation.columns.some((allowedColumn) => namesEqual(allowedColumn.name, column.column)))) {
       return { column: column.column };

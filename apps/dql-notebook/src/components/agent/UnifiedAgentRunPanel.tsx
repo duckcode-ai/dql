@@ -540,6 +540,8 @@ export function UnifiedAgentRunPanel({
     textOverride?: string,
     modeOverride?: AgentRunRequestedMode,
     selectedEvidenceId?: string,
+    clarificationSourceQuestion?: string,
+    researchSourceRun?: AgentRun,
   ) => {
     const text = (textOverride ?? input).trim();
     if (!text || running) return;
@@ -592,10 +594,13 @@ export function UnifiedAgentRunPanel({
       const runInput = {
         question: text,
         ...(selectedEvidenceId ? { selectedEvidenceId } : {}),
+        ...(clarificationSourceQuestion ? { clarificationSourceQuestion } : {}),
         requestedMode: activeMode,
         audience,
         selectedObject: selectedObject ?? (notebookPath ? { kind: 'notebook' as const, path: notebookPath } : undefined),
-        ...(contextualLocalTarget
+        ...(researchSourceRun?.executionTarget
+          ? { executionTarget: researchSourceRun.executionTarget }
+          : contextualLocalTarget
           ? { executionTarget: { target: 'local' as const } }
           : executionConnectionName
             ? { executionTarget: { target: 'connection' as const, connectionName: executionConnectionName } }
@@ -603,6 +608,7 @@ export function UnifiedAgentRunPanel({
         workspaceContext: {
           ...(workspaceContext ?? {}),
           ...(notebookPath ? { notebookPath } : {}),
+          ...(researchSourceRun ? { researchSource: researchSourceFromRun(researchSourceRun) } : {}),
         },
         conversationContext: buildConversationContext(items),
         history,
@@ -710,7 +716,7 @@ export function UnifiedAgentRunPanel({
       return;
     }
     if (action.id === 'research-deeper') {
-      void submit(run.question, 'research');
+      void submit(run.question, 'research', undefined, undefined, run);
       return;
     }
     // A conversational suggestion chip carries the whole question as its label — run it.
@@ -851,7 +857,7 @@ export function UnifiedAgentRunPanel({
                   onOpenResearch={onOpenResearch}
                   onSelectClarification={(option) => {
                     const selection = clarificationSelectionInput(option);
-                    void submit(selection.question, undefined, selection.selectedEvidenceId);
+                    void submit(selection.question, undefined, selection.selectedEvidenceId, item.run.question);
                   }}
                   onNextAction={(action) => handleNextAction(item.run, action)}
                   onRepairedRun={adoptRepairedRun}
@@ -1008,7 +1014,7 @@ export function UnifiedAgentRunPanel({
             onOpenResearch={onOpenResearch}
             onSelectClarification={(option) => {
               const selection = clarificationSelectionInput(option);
-              void submit(selection.question, undefined, selection.selectedEvidenceId);
+              void submit(selection.question, undefined, selection.selectedEvidenceId, item.run.question);
             }}
             onNextAction={(action) => handleNextAction(item.run, action)}
             onRepairedRun={adoptRepairedRun}
@@ -1027,7 +1033,7 @@ export function UnifiedAgentRunPanel({
             onOpenResearch={onOpenResearch}
             onSelectClarification={(option) => {
               const selection = clarificationSelectionInput(option);
-              void submit(selection.question, undefined, selection.selectedEvidenceId);
+              void submit(selection.question, undefined, selection.selectedEvidenceId, item.run.question);
             }}
             onNextAction={(action) => handleNextAction(item.run, action)}
           />
@@ -2826,6 +2832,35 @@ export function clarificationSelectionInput(option: AgentRunClarificationOption)
   return { question: option.question ?? option.label, selectedEvidenceId: option.id };
 }
 
+/**
+ * Compact, immutable baseline handed to an explicit Research-deeper run.
+ * Research may attempt a richer governed query, but it must retain the exact
+ * successful Ask SQL/DQL, result sample, and target as its safe fallback rather
+ * than recomposing the baseline on an unrelated default connection.
+ */
+export function researchSourceFromRun(run: AgentRun): Record<string, unknown> {
+  const result = run.artifacts
+    .map((artifact) => extractResult(payloadOf(artifact)))
+    .find((candidate): candidate is QueryResult => Boolean(candidate));
+  const sourceRef = run.artifacts.find((artifact) => artifact.ref)?.ref;
+  return {
+    runId: run.id,
+    question: run.question,
+    trustState: run.trustState,
+    executionTarget: run.executionTarget,
+    sourceCertifiedBlock: sourceRef,
+    sql: answerSqlFromRun(run),
+    dqlArtifact: answerDqlArtifactFromRun(run),
+    ...(result ? {
+      result: {
+        columns: result.columns,
+        rows: result.rows.slice(0, 24),
+        rowCount: result.rowCount,
+      },
+    } : {}),
+  };
+}
+
 export function isAgentRunPinnable(run: AgentRun): boolean {
   const hasMixedSourcePlan = run.artifacts.some((artifact) =>
     Boolean(extractMixedSourceNotebookPlan(payloadOf(artifact))),
@@ -4532,7 +4567,17 @@ function answerSqlFromRun(run: AgentRun): string | undefined {
   for (const artifact of run.artifacts) {
     const payload = payloadOf(artifact);
     const researchRun = payload.researchRun && typeof payload.researchRun === 'object' ? payload.researchRun as Record<string, unknown> : undefined;
-    const sql = payload.proposedSql ?? payload.sql ?? payload.sqlPreview ?? researchRun?.generatedSql ?? researchRun?.reviewedSql;
+    const result = payload.result && typeof payload.result === 'object' && !Array.isArray(payload.result)
+      ? payload.result as Record<string, unknown>
+      : undefined;
+    const dqlArtifact = normalizeDqlArtifactReference(payload.dqlArtifact);
+    const sql = payload.proposedSql
+      ?? payload.sql
+      ?? payload.sqlPreview
+      ?? result?.sql
+      ?? researchRun?.generatedSql
+      ?? researchRun?.reviewedSql
+      ?? dqlArtifact?.compiledSql;
     if (typeof sql === 'string' && sql.trim()) return sql;
   }
   return undefined;

@@ -1137,6 +1137,20 @@ describe("clarification continuations — Ask surface", () => {
     expect(continuation?.sourceQuestion).toBe("What is total revenue?");
   });
 
+  it("uses the exact source run for a structured choice even without conversation storage", () => {
+    const continuation = resolveClarificationContinuation({
+      question: "Lost Deal Activity Count",
+      selectedEvidenceId: "semantic:metric:sales.lost_deal_activity_count",
+      clarificationSourceQuestion: "Compare monthly competitive losses by competitor and activity count",
+      history: [],
+    });
+
+    expect(continuation).toMatchObject({
+      sourceQuestion: "Compare monthly competitive losses by competitor and activity count",
+      reply: "Lost Deal Activity Count",
+    });
+  });
+
   it("does not fold a complete new question into a pending clarification", () => {
     const continuation = resolveClarificationContinuation({
       question: "Which warehouses shipped late last quarter?",

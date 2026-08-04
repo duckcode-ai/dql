@@ -1162,6 +1162,8 @@ export type AgentThinkingMode = 'auto' | 'low' | 'medium' | 'high';
 export interface CreateAgentRunInput {
   question: string;
   selectedEvidenceId?: string;
+  /** Original analytical question for an identifier-bound clarification choice. */
+  clarificationSourceQuestion?: string;
   requestedMode?: AgentRunRequestedMode;
   mode?: AgentRunRequestedMode;
   audience?: AgentRunAudience;

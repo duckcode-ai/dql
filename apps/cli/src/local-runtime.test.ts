@@ -474,6 +474,14 @@ describe('bounded Ask meaning resolution (AGT-009, PERF-002)', () => {
       requestedMode: 'ask',
       analysisDepth: 'deep',
     })).toBe(120_000);
+    // A clarification chip is intentionally compact, but the continuation
+    // executes the original complex question and needs that question's budget.
+    expect(agentRunDeadlineMs({
+      question: 'Lost Deal Activity Count',
+      selectedEvidenceId: 'semantic:metric:sales.lost_deal_activity_count',
+      clarificationSourceQuestion: 'Compare monthly competitive losses by competitor and total activity count for each lost opportunity',
+      requestedMode: 'ask',
+    })).toBe(120_000);
   });
 
   it('scales the budget for high reasoning effort and resolves thinkingMode', () => {
@@ -2376,6 +2384,7 @@ describe('agent run runtime API', () => {
     const parsed = parseAgentRunRequestBody({
       question: 'who are the top 5 customers for these categories?',
       selectedEvidenceId: 'semantic:metric:customer_lifetime_spend',
+      clarificationSourceQuestion: 'who are the top 5 customers by lifetime spend?',
       requestedMode: 'ask',
       conversationContext: {
         sourceCertifiedBlock: 'food_vs_drink_revenue',
@@ -2397,6 +2406,7 @@ describe('agent run runtime API', () => {
     expect(parsed.request?.analysisDepth).toBe('deep');
     expect(parsed.request?.thinkingMode).toBe('low');
     expect(parsed.request?.selectedEvidenceId).toBe('semantic:metric:customer_lifetime_spend');
+    expect(parsed.request?.clarificationSourceQuestion).toBe('who are the top 5 customers by lifetime spend?');
     expect(parsed.request?.executionTarget).toEqual({
       target: 'connection',
       connectionName: 'reporting',
@@ -3871,6 +3881,93 @@ LIMIT \${top_n}
         }
         server.close(() => resolve());
       });
+    }
+  });
+});
+
+describe('Ask Research baseline continuity', () => {
+  it('revalidates the successful Ask baseline on the exact selected connection when deeper composition is unavailable', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-ask-research-baseline-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'ask-research-baseline',
+      connections: {
+        default: { driver: 'databricks', host: 'default.example.test' },
+        reporting: { driver: 'databricks', host: 'reporting.example.test' },
+      },
+      defaultConnectionName: 'default',
+    }));
+
+    const executionHosts: Array<string | undefined> = [];
+    const executeQuery = vi.fn(async (
+      _sql: string,
+      _params: unknown[],
+      _variables: Record<string, unknown>,
+      executionConnection?: { host?: string },
+    ): Promise<QueryResult> => {
+      executionHosts.push(executionConnection?.host);
+      return {
+        columns: [
+          { name: 'segment', type: 'string', driverType: 'VARCHAR' },
+          { name: 'revenue', type: 'number', driverType: 'DOUBLE' },
+        ],
+        rows: [{ segment: 'Enterprise', revenue: 4200 }],
+        rowCount: 1,
+        executionTimeMs: 1,
+      };
+    });
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery } as unknown as QueryExecutor,
+        connection: { driver: 'databricks', host: 'default.example.test' },
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'Research customer revenue by segment',
+          requestedMode: 'research',
+          executionTarget: { target: 'connection', connectionName: 'reporting' },
+          workspaceContext: {
+            surface: 'ask',
+            researchSource: {
+              runId: 'ask-run-1',
+              question: 'Research customer revenue by segment',
+              trustState: 'review_required',
+              sql: 'SELECT segment, SUM(revenue) AS revenue FROM analytics.orders GROUP BY segment',
+              dqlArtifact: {
+                kind: 'sql_block',
+                name: 'customer_revenue_by_segment',
+                source: 'block "customer_revenue_by_segment" {}',
+                persistence: 'transient',
+                trustState: 'review_required',
+              },
+            },
+          },
+        }),
+      });
+      const payload = await response.json() as { run?: any; error?: string };
+
+      expect({ status: response.status, error: payload.error }).toEqual({ status: 201, error: undefined });
+      expect(payload.run?.route).toBe('research');
+      expect(executionHosts).toContain('reporting.example.test');
+      const researchArtifact = payload.run?.artifacts.find((artifact: any) => artifact.kind === 'research_run');
+      expect(researchArtifact?.payload?.researchRun).toMatchObject({
+        status: 'ready',
+        summary: expect.stringContaining('revalidated it on the same data target'),
+        generatedSql: expect.stringContaining('analytics.orders'),
+        resultPreview: {
+          rows: [{ segment: 'Enterprise', revenue: 4200 }],
+        },
+      });
+      expect(researchArtifact?.payload?.researchRun?.warnings).toContain('Baseline Ask run: ask-run-1');
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
   });
 });

@@ -621,11 +621,25 @@ export interface ClarificationContinuation {
  */
 export function resolveClarificationContinuation(request: AgentRunRequest): ClarificationContinuation | undefined {
   const reply = request.question.trim();
-  if (!reply || !isLikelyClarificationReply(reply)) return undefined;
+  const explicitSourceQuestion = request.clarificationSourceQuestion?.trim();
+  const structuredSelection = Boolean(request.selectedEvidenceId && explicitSourceQuestion);
+  if (!reply || (!structuredSelection && !isLikelyClarificationReply(reply))) return undefined;
 
   const fromServer = latestClarificationFromConversationContext(request.conversationContext);
   const fromHistory = latestClarificationFromHistory(request.history);
-  const pending = fromServer ?? fromHistory;
+  // A UI selection is bound to the exact run that rendered the options. Carry
+  // that run's source question explicitly so the continuation still works when
+  // the optional conversation store is unavailable, after a reload, or when
+  // the user selects an option on an older visible answer. Server history still
+  // supplies the original clarifying prose when it is available.
+  const pending = explicitSourceQuestion
+    ? {
+        sourceQuestion: explicitSourceQuestion,
+        clarifyingQuestion: fromServer?.clarifyingQuestion
+          ?? fromHistory?.clarifyingQuestion
+          ?? 'Which governed meaning should be used?',
+      }
+    : fromServer ?? fromHistory;
   if (!pending || pending.sourceQuestion.trim().toLowerCase() === reply.toLowerCase()) return undefined;
 
   return {

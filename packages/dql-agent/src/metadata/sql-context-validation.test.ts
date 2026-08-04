@@ -484,6 +484,42 @@ describe('validateSqlAgainstLocalContext', () => {
     );
   });
 
+  it('does not let a partial runtime relation erase certified source SQL shape columns', () => {
+    const context = pack();
+    context.allowedSqlContext = {
+      relations: [{
+        relation: 'analytics.player_stats',
+        name: 'player_stats',
+        source: 'certified block dependency',
+        columnCompleteness: 'partial',
+        columns: [],
+      }],
+      sourceBlockSql: [{
+        objectKey: 'dql:block:Top Players',
+        name: 'Top Players',
+        status: 'certified',
+        sql: 'SELECT player_name, season, total_points FROM analytics.player_stats ORDER BY total_points DESC LIMIT 10',
+      }],
+    };
+
+    const result = validateSqlAgainstLocalContext(
+      'SELECT player_name, SUM(total_points) AS total_points FROM analytics.player_stats GROUP BY player_name',
+      context,
+      {
+        runtimeSchema: [{
+          relation: 'analytics.player_stats',
+          name: 'player_stats',
+          source: 'partial retrieved context',
+          columnCompleteness: 'partial',
+          columns: [],
+        }],
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.warnings).toEqual([]);
+  });
+
   it('treats explicitly partial relation columns as advisory', () => {
     const context = pack();
     context.allowedSqlContext.relations[0]!.columnCompleteness = 'partial';

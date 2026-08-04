@@ -850,6 +850,7 @@ export function parseAgentRunRequestBody(body: unknown): { request?: AgentRunReq
     request: {
       question,
       selectedEvidenceId: agentRunString(record.selectedEvidenceId),
+      clarificationSourceQuestion: agentRunString(record.clarificationSourceQuestion),
       requestedMode,
       audience,
       intent: agentRunString(record.intent) as AgentRunRequest['intent'],
@@ -932,7 +933,7 @@ function isAnalyticalBuildQuestion(plan: ReturnType<typeof buildAnalysisQuestion
 }
 
 export function agentRunDeadlineMs(
-  request: Pick<AgentRunRequest, 'question' | 'requestedMode' | 'analysisDepth' | 'reasoningEffort' | 'thinkingMode'>,
+  request: Pick<AgentRunRequest, 'question' | 'selectedEvidenceId' | 'clarificationSourceQuestion' | 'requestedMode' | 'analysisDepth' | 'reasoningEffort' | 'thinkingMode'>,
   env: NodeJS.ProcessEnv = process.env,
   activeProviderId?: string | null,
 ): number {
@@ -961,7 +962,16 @@ export function agentRunDeadlineMs(
   if (request.requestedMode === 'research' || effectiveDepth === 'deep') {
     return scale(researchDeadline);
   }
-  const plan = buildAnalysisQuestionPlan(request.question);
+  // A structured clarification chip displays a compact metric/path label, but
+  // the engine restores and executes the original analytical question. Budget
+  // from that same original question as well. Otherwise a complex ranking or
+  // cross-model request can incorrectly inherit the 45s scalar-lookup budget
+  // merely because the selected label is short, then time out after the user
+  // already supplied the exact governed meaning.
+  const deadlineQuestion = request.selectedEvidenceId
+    ? request.clarificationSourceQuestion?.trim() || request.question
+    : request.question;
+  const plan = buildAnalysisQuestionPlan(deadlineQuestion);
   if (plan.needsResearchWorkspace || isAnalyticalBuildQuestion(plan)) {
     return scale(researchDeadline);
   }
@@ -1996,8 +2006,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
   }
 
-  const executeLocalSqlForStoredResult = async (sql: string) => {
-    const activeConnection = requireActiveConnection();
+  const executeLocalSqlForStoredResult = async (sql: string, executionConnection?: ConnectionConfig) => {
+    const activeConnection = requireActiveConnection(executionConnection);
     const semantic = prepareSemanticSql(sql, semanticLayer);
     if (semantic.unresolvedRefs.length > 0) {
       throw new Error(`Unknown semantic reference${semantic.unresolvedRefs.length > 1 ? 's' : ''}: ${semantic.unresolvedRefs.join(', ')}`);
@@ -3462,6 +3472,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       const needsClarification = Boolean(plan.followUp);
       const notebookPath = agentRunNotebookPath(request, runId);
       const researchIntent = agentRunResearchIntent(request);
+      const researchSource = agentRunRecord(request.workspaceContext?.researchSource);
+      const researchExecutionConnection = !needsClarification && request.executionTarget
+        ? await resolveAgentRunExecutionConnection(request)
+        : undefined;
+      const researchExecutionConnectionName = request.executionTarget?.target === 'connection'
+        ? request.executionTarget.connectionName
+        : undefined;
+      const researchContextEnvelope = {
+        surface: 'unified_agent_run',
+        agentRunId: runId,
+        routeDecision,
+        selectedObject: request.selectedObject,
+        executionTarget: request.executionTarget,
+        workspaceContext: request.workspaceContext,
+        researchSource,
+        plan,
+      };
       let researchRun: ReturnType<typeof withNotebookResearchChecklist> | undefined;
       let researchWorkspaceError: string | undefined;
       if (!needsClarification) {
@@ -3483,14 +3510,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               intent: researchIntent,
               domain: agentRunWorkspaceValue(request, 'domain'),
               owner: agentRunWorkspaceValue(request, 'owner'),
-              context: {
-                surface: 'unified_agent_run',
-                agentRunId: runId,
-                routeDecision,
-                selectedObject: request.selectedObject,
-                workspaceContext: request.workspaceContext,
-                plan,
-              },
+              context: researchContextEnvelope,
             });
             emit({
               type: 'artifact.created',
@@ -3505,14 +3525,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               sourceCellFingerprint,
               question: request.question,
               intent: researchIntent,
-              context: {
-                surface: 'unified_agent_run',
-                agentRunId: runId,
-                routeDecision,
-                selectedObject: request.selectedObject,
-                workspaceContext: request.workspaceContext,
-                plan,
-              },
+              context: researchContextEnvelope,
+              executionConnection: researchExecutionConnection,
+              executionConnectionName: researchExecutionConnectionName,
+              signal: request.signal,
+              baselineSql: agentRunString(researchSource?.sql),
+              baselineDqlArtifact: researchSource?.dqlArtifact as NotebookResearchDqlArtifact | undefined,
+              baselineRunId: agentRunString(researchSource?.runId),
             });
             researchRun = withNotebookResearchChecklist(executed);
           } finally {
@@ -5883,6 +5902,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       generatedSql?: string;
       reviewedSql?: string;
       dqlArtifact?: NotebookResearchDqlArtifact;
+      executionConnection?: ConnectionConfig;
+      executionConnectionName?: string;
+      signal?: AbortSignal;
+      baselineSql?: string;
+      baselineDqlArtifact?: NotebookResearchDqlArtifact;
+      baselineRunId?: string;
     } = {},
   ): Promise<NotebookResearchRun> => {
     const question = notebookResearchString(input.question) || run.question;
@@ -5894,6 +5919,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     let generatedSql = notebookResearchString(input.generatedSql) ?? run.generatedSql;
     let reviewedSql = notebookResearchString(input.reviewedSql) ?? run.reviewedSql;
     let dqlArtifact = normalizeDqlArtifactReference(input.dqlArtifact) ?? run.dqlArtifact;
+    const baselineSql = notebookResearchString(input.baselineSql);
+    const baselineDqlArtifact = normalizeDqlArtifactReference(input.baselineDqlArtifact);
+    let usedBaselineFallback = false;
     const startedAt = new Date().toISOString();
     storage.updateRun(run.id, {
       domain,
@@ -5945,7 +5973,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         if (!resolvedProvider || !runner) {
           generationWarnings.push('No AI provider is configured. Metadata context was saved as a research plan; paste SQL or configure an AI provider to generate candidate SQL.');
         } else {
-          const controller = new AbortController();
+          const researchSignal = input.signal ?? new AbortController().signal;
           try {
             await runner.run(
               {
@@ -5968,9 +5996,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 reasoningEffort: resolveRunReasoningEffort(projectRoot, resolvedProvider, 'research', false),
                 analysisDepth: 'deep',
                 projectRoot,
-                executeCertifiedBlock: executeCertifiedBlockForAgent,
-                executeGeneratedSql: executeGeneratedSqlForAgent,
-                getSchemaContext: getSchemaContextForAgent,
+                executeCertifiedBlock: (node, invocation) => executeCertifiedBlockForAgent(
+                  node,
+                  invocation,
+                  input.executionConnection,
+                  input.executionConnectionName,
+                ),
+                executeGeneratedSql: (sql, artifact) => executeGeneratedArtifactForAgent(
+                  question,
+                  sql,
+                  artifact,
+                  input.executionConnection,
+                  input.executionConnectionName,
+                ),
+                getSchemaContext: (schemaQuestion, preparedContextPack) => getSchemaContextForAgent(
+                  schemaQuestion,
+                  preparedContextPack,
+                  input.executionConnection,
+                  input.executionConnectionName,
+                ),
               },
               (turn) => {
                 if (turn.kind === 'tool_result' && turn.id === 'governed_answer') {
@@ -5978,9 +6022,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 }
                 if (turn.kind === 'error') providerError = turn.message;
               },
-              controller.signal,
+              researchSignal,
             );
           } catch (error) {
+            rethrowIfCancelled(error, input.signal);
             providerError = error instanceof Error ? error.message : String(error);
           }
           if (!governedAnswer) {
@@ -5995,6 +6040,26 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }
       }
 
+      const deeperCompositionFailed = !governedAnswer
+        || governedAnswer.kind === 'no_answer'
+        || agentAnswerHasExecutionFailure(governedAnswer)
+        || Boolean(governedAnswer.analyticalFailure)
+        || (!governedAnswer.result && !generatedSql && !dqlArtifact);
+      if (!reviewedSql && baselineSql && deeperCompositionFailed) {
+        const failure = governedAnswer?.executionError
+          ?? governedAnswer?.analyticalFailure?.message
+          ?? governedAnswer?.answer
+          ?? governedAnswer?.text
+          ?? providerError;
+        generatedSql = baselineSql;
+        dqlArtifact = baselineDqlArtifact ?? dqlArtifact;
+        usedBaselineFallback = true;
+        generationWarnings.push([
+          'The deeper composition did not produce a safer executable query, so DQL kept and revalidated the successful Ask baseline on the same data target.',
+          failure ? `Research detail: ${failure}` : '',
+        ].filter(Boolean).join(' '));
+      }
+
       const sqlForPreview = reviewedSql || generatedSql;
       const warnings = [
         ...(contextPack.warnings ?? []),
@@ -6003,13 +6068,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       ].filter(Boolean);
       let resultPreview: ReturnType<typeof normalizeQueryResult> | undefined;
       let previewError: string | undefined;
-      if (governedAnswer?.result?.rows && !reviewedSql) {
+      if (!usedBaselineFallback && governedAnswer?.result?.rows && !reviewedSql) {
         resultPreview = normalizeNotebookAgentResult(governedAnswer.result);
       } else if (sqlForPreview) {
         try {
           const previewSql = buildAgentPreviewSql(sqlForPreview);
           const previewStart = Date.now();
-          resultPreview = await executeLocalSqlForStoredResult(previewSql);
+          resultPreview = await executeLocalSqlForStoredResult(previewSql, input.executionConnection);
           recordNotebookQueryRun(projectRoot, {
             notebookPath: run.notebookPath,
             cellId: run.sourceCellId,
@@ -6049,8 +6114,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         : undefined;
       const evidence = {
         trustStatus: {
-          label: governedAnswer?.trustLabel
-            ?? (reviewedSql ? 'Reviewed notebook SQL' : generatedSql ? 'AI-generated research SQL' : dqlArtifact ? 'AI-generated DQL artifact' : 'Metadata-grounded research plan'),
+          label: usedBaselineFallback
+            ? 'Successful Ask baseline · revalidated on the same target'
+            : governedAnswer?.trustLabel
+              ?? (reviewedSql ? 'Reviewed notebook SQL' : generatedSql ? 'AI-generated research SQL' : dqlArtifact ? 'AI-generated DQL artifact' : 'Metadata-grounded research plan'),
           reviewRequired: true,
         },
         contextPackId: contextPack.id,
@@ -6083,9 +6150,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ...(governedAnswer?.citations ?? []),
         ].slice(0, 40),
       };
-      const summary = notebookResearchString(governedAnswer?.answer)
-        ?? notebookResearchString(governedAnswer?.text)
-        ?? notebookResearchSummary(question, resultPreview, previewError);
+      const summary = usedBaselineFallback && resultPreview && !previewError
+        ? 'Research retained the successful Ask baseline and revalidated it on the same data target. No unverified replacement query was accepted; use the dossier to add the next breakdown or comparison.'
+        : notebookResearchString(governedAnswer?.answer)
+          ?? notebookResearchString(governedAnswer?.text)
+          ?? notebookResearchSummary(question, resultPreview, previewError);
       const recommendation = previewError
         ? 'Review the SQL, selected metadata, and connection context before rerunning.'
         : dqlArtifact && !reviewedSql
@@ -6123,6 +6192,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         contextPackId: contextPack.id,
         routeDecision,
         warnings: [
+          ...(usedBaselineFallback && input.baselineRunId
+            ? [`Baseline Ask run: ${input.baselineRunId}`]
+            : []),
           ...warnings,
           ...(display && !display.ok ? [display.error] : []),
           ...(display && display.ok ? display.warnings : []),
@@ -6132,6 +6204,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         lastRunAt: startedAt,
       }) ?? run;
     } catch (error) {
+      rethrowIfCancelled(error, input.signal);
       return storage.updateRun(run.id, {
         domain,
         owner,

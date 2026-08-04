@@ -17,6 +17,7 @@ let resolvedParameterValues: typeof UnifiedAgentRunPanelModule.resolvedParameter
 let agentRunHistoryFromItems: typeof UnifiedAgentRunPanelModule.agentRunHistoryFromItems;
 let liveAgentActivityFor: typeof UnifiedAgentRunPanelModule.liveAgentActivityFor;
 let clarificationSelectionInput: typeof UnifiedAgentRunPanelModule.clarificationSelectionInput;
+let researchSourceFromRun: typeof UnifiedAgentRunPanelModule.researchSourceFromRun;
 let isAgentRunPinnable: typeof UnifiedAgentRunPanelModule.isAgentRunPinnable;
 let hasAnalyticalInspectorContract: typeof UnifiedAgentRunPanelModule.hasAnalyticalInspectorContract;
 let analyticalInspectorContract: typeof UnifiedAgentRunPanelModule.analyticalInspectorContract;
@@ -46,6 +47,7 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     agentRunHistoryFromItems = module.agentRunHistoryFromItems;
     liveAgentActivityFor = module.liveAgentActivityFor;
     clarificationSelectionInput = module.clarificationSelectionInput;
+    researchSourceFromRun = module.researchSourceFromRun;
     isAgentRunPinnable = module.isAgentRunPinnable;
     hasAnalyticalInspectorContract = module.hasAnalyticalInspectorContract;
     analyticalInspectorContract = module.analyticalInspectorContract;
@@ -250,6 +252,47 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     })).toEqual({
       question: 'Who are the top customers and what is their BCM this month?',
       selectedEvidenceId: 'semantic-path:report_date:bcm_ccu_pc',
+    });
+  });
+
+  it('keeps the exact successful Ask baseline for an explicit Research-deeper run', () => {
+    expect(researchSourceFromRun({
+      id: 'run-answer-1',
+      question: 'Show revenue by region',
+      trustState: 'review_required',
+      executionTarget: { target: 'connection', connectionName: 'reporting' },
+      artifacts: [{
+        id: 'answer-1',
+        kind: 'answer',
+        title: 'Answer',
+        trustState: 'review_required',
+        ref: 'regional_revenue',
+        payload: {
+          result: {
+            columns: ['region', 'revenue'],
+            rows: [{ region: 'West', revenue: 120 }],
+            rowCount: 1,
+            sql: 'SELECT region, SUM(revenue) AS revenue FROM analytics.orders GROUP BY region',
+          },
+          dqlArtifact: {
+            kind: 'sql_block',
+            name: 'regional_revenue',
+            source: 'block "regional_revenue" {}',
+            persistence: 'transient',
+            trustState: 'review_required',
+          },
+        },
+      }],
+    } as any)).toMatchObject({
+      runId: 'run-answer-1',
+      executionTarget: { target: 'connection', connectionName: 'reporting' },
+      sourceCertifiedBlock: 'regional_revenue',
+      sql: 'SELECT region, SUM(revenue) AS revenue FROM analytics.orders GROUP BY region',
+      result: {
+        columns: ['region', 'revenue'],
+        rows: [{ region: 'West', revenue: 120 }],
+        rowCount: 1,
+      },
     });
   });
 
