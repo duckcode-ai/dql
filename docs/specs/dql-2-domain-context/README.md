@@ -26,8 +26,9 @@ through review before continuing.
 9. [Migration, compatibility, scale, and security](08-migration-compatibility-scale-security.md)
 10. [Fixtures, evaluations, and release gates](09-fixtures-evals-and-release-gates.md)
 11. [Analytical composition and transparent repair](10-analytical-composition-and-repair.md)
-12. [Acceptance matrix](acceptance-matrix.md)
-13. [Execution tracker](execution-tracker.md)
+12. [Context authoring, YAML import, and authoring AI](11-context-authoring-and-ai.md)
+13. [Acceptance matrix](acceptance-matrix.md)
+14. [Execution tracker](execution-tracker.md)
 
 ## Stable requirement IDs
 
@@ -56,5 +57,6 @@ isolation.
 | [W06](workstreams/W06-migration-and-security.md) | migration, runtime security, and repair redaction | W01–W03; W04 repair contract |
 | [W07](workstreams/W07-integration-evals-and-performance.md) | fixtures, analytical/repair E2E, evals, performance | W01–W06 |
 | [W08](workstreams/W08-oss-release-and-docs.md) | compatibility, docs, release evidence | W07 |
+| [W09](workstreams/W09-context-authoring-and-ai.md) | proposal engine, YAML import, Modeling workspace, Modeling AI, and Skills AI | W01–W04 APIs; W05 UI |
 
 Use [the handoff template](agent-handoff-template.md) for every assignment.

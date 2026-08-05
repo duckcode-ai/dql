@@ -78,6 +78,12 @@ export function AppShell() {
     return () => { alive = false; };
   }, [dispatch]);
 
+  useEffect(() => {
+    const openProposal = () => dispatch({ type: 'SET_MAIN_VIEW', view: 'modeling' });
+    window.addEventListener('dql:open-context-proposal', openProposal);
+    return () => window.removeEventListener('dql:open-context-proposal', openProposal);
+  }, [dispatch]);
+
   // Domain/model/section query parameters are valid deep-link state only while
   // Domain Studio is visible. Keeping them on Ask, Git, Settings, or Notebook
   // URLs makes reloads unexpectedly reopen Domains and creates misleading

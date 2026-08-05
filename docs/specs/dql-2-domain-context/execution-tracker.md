@@ -15,6 +15,7 @@ spec and acceptance matrix first.
 | W06 migration and security | `codex/dql2-w06-migration-security` | TBD | — | unassigned | pending | — | — |
 | W07 integration/evals/performance | `codex/dql2-w07-integration` | TBD | — | unassigned | pending | — | — |
 | W08 OSS release/docs | `codex/dql2-w08-release` | TBD | — | unassigned | pending | — | — |
+| W09 context authoring and AI | current worktree | current integration base | uncommitted | implementer | implemented | independent verifier pending | `UI-019`, `API-011`, `MIG-003`, `MIG-004`, `REL-004`, `SKILL-005`, `CTX-008`, `AGT-024`, `API-012`, `SKILL-006`, `UI-020`, `UI-021`, and `E2E-018` implemented; `E2E-019` remains specified pending provider-backed and independent verification |
 
 ## Integration protocol
 

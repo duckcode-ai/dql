@@ -177,6 +177,9 @@ export function BlockStudio() {
   const [runElapsedMs, setRunElapsedMs] = useState(0);
   const [parameterValues, setParameterValues] = useState<Record<string, unknown>>({});
   const [saving, setSaving] = useState(false);
+  const [repairing, setRepairing] = useState(false);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [repairNotice, setRepairNotice] = useState<string | null>(null);
   const [certificationOperationId, setCertificationOperationId] = useState<string | null>(null);
   const mutationInFlightRef = useRef(false);
   // One-shot: how the NEXT block open should present. 'builder' skips the
@@ -249,6 +252,8 @@ export function BlockStudio() {
     error?: string;
   } | null>(null);
   const lastActiveBlockPathRef = useRef<string | null>(state.activeBlockPath);
+  const liveDraftRef = useRef(state.blockStudioDraft);
+  liveDraftRef.current = state.blockStudioDraft;
 
   const catalogQuery = useQuery({
     queryKey: ['block-studio', 'catalog', 'summary'],
@@ -481,6 +486,9 @@ export function BlockStudio() {
 
   const handleDraftChange = (draft: string) => {
     setRunError(null);
+    setSaveError(null);
+    setRecoveryError(null);
+    setRepairNotice(null);
     dispatch({ type: 'SET_BLOCK_STUDIO_DRAFT', draft });
     const parsed = parseBlockFields(draft);
     const current = state.blockStudioMetadata;
@@ -549,6 +557,10 @@ export function BlockStudio() {
 
   const resetToBlockStudioHome = () => {
     dispatch({ type: 'START_NEW_BLOCK_WORKSPACE' });
+    setRunError(null);
+    setSaveError(null);
+    setRecoveryError(null);
+    setRepairNotice(null);
     setDraftSessionId(makeBlockStudioDraftId());
     setImportSession(null);
     setWorkspaceMode('start');
@@ -612,10 +624,52 @@ export function BlockStudio() {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setRunError(message);
+      setRecoveryError(message);
       setResultTab(/required parameter|provide required parameter/i.test(message) ? 'parameters' : 'results');
     } finally {
       setRunning(false);
       setRunStartedAt(null);
+    }
+  };
+
+  const handleFixAndRun = async () => {
+    if (repairing || !recoveryError) return;
+    const originalSource = state.blockStudioDraft;
+    setRepairing(true);
+    setSaveError(null);
+    setRepairNotice(null);
+    try {
+      const repaired = await api.repairAndRunBlockStudio(
+        originalSource,
+        recoveryError,
+        parameterValues,
+        activeBlockName ?? state.blockStudioMetadata?.name ?? undefined,
+      );
+      if (liveDraftRef.current !== originalSource) {
+        throw new Error('The block changed while AI repair was running. The stale repair was not applied.');
+      }
+      const validation = await api.validateBlockStudio(repaired.source, state.activeBlockPath);
+      if (validation.saveable === false) {
+        throw new Error(validation.diagnostics.find((item) => item.severity === 'error')?.message
+          ?? 'The repaired DQL still has an authoring error.');
+      }
+      if (liveDraftRef.current !== originalSource) {
+        throw new Error('The block changed while AI repair was running. The stale repair was not applied.');
+      }
+      handleDraftChange(repaired.source);
+      dispatch({ type: 'SET_BLOCK_STUDIO_VALIDATION', validation });
+      dispatch({ type: 'SET_BLOCK_STUDIO_PREVIEW', preview: repaired.preview });
+      setRunError(null);
+      setRecoveryError(null);
+      setRepairNotice(`${repaired.repairMode === 'ai' ? 'AI fixed' : 'DQL fixed'} the draft and the corrected block ran successfully. Review the changes, then save the draft.`);
+      setEditorMode('source');
+      setResultTab('results');
+      setBottomPaneCollapsed(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSaveError(message);
+    } finally {
+      setRepairing(false);
     }
   };
 
@@ -686,13 +740,24 @@ export function BlockStudio() {
       const sourceToSave = state.blockStudioMetadata.reviewStatus === 'certified' && state.blockStudioDirty
         ? setBlockStringField(state.blockStudioDraft, 'status', 'draft')
         : state.blockStudioDraft;
+      const validation = await api.validateBlockStudio(sourceToSave, state.activeBlockPath);
+      dispatch({ type: 'SET_BLOCK_STUDIO_VALIDATION', validation });
+      if (validation.saveable === false || (validation.saveable === undefined && !validation.valid)) {
+        const message = validation.diagnostics.find((item) => item.severity === 'error')?.message
+          ?? 'Fix the block errors before saving.';
+        setSaveError(`Draft not saved: ${message}`);
+        setRecoveryError(message);
+        setEditorMode('source');
+        return false;
+      }
       await persistBlockStudioDraft(sourceToSave);
+      setRecoveryError(null);
+      setRepairNotice(null);
       setResultTab('save');
       return true;
     } catch (err: any) {
       const msg = err?.message ?? 'Save failed';
       setSaveError(msg.includes('409') || msg.includes('BLOCK_EXISTS') ? 'A block with this name already exists. Rename and try again.' : msg);
-      setTimeout(() => setSaveError(null), 5000);
       return false;
     } finally {
       setSaving(false);
@@ -1303,6 +1368,39 @@ export function BlockStudio() {
             </span>
           )}
         </div>
+        {recoveryError && (
+          <div role="alert" style={{ flexShrink: 0, display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 14px', borderBottom: '1px solid var(--status-error)', background: 'var(--status-error-bg)', color: t.textPrimary, fontFamily: t.font }}>
+            <AlertTriangle size={16} color="var(--status-error)" style={{ marginTop: 1, flexShrink: 0 }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 12, fontWeight: 700 }}>This draft was not saved. Your work is still editable.</div>
+              <div style={{ marginTop: 2, fontSize: 11.5, lineHeight: 1.45, color: t.textSecondary }}>{recoveryError}</div>
+              {(state.blockStudioValidation?.diagnostics.filter((item) => item.severity === 'error').length ?? 0) > 1 && (
+                <div style={{ marginTop: 4, fontSize: 10.5, color: t.textMuted }}>
+                  {state.blockStudioValidation!.diagnostics.filter((item) => item.severity === 'error').slice(1, 3).map((item) => item.message).join(' · ')}
+                </div>
+              )}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+              <button type="button" onClick={() => void handleFixAndRun()} disabled={repairing} style={{ ...primaryImportButtonStyle(t), display: 'inline-flex', alignItems: 'center', gap: 6, opacity: repairing ? .72 : 1 }}>
+                {repairing ? <Loader2 size={13} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} /> : <Sparkles size={13} />}
+                {repairing ? 'Fixing & running…' : 'Fix with AI & run'}
+              </button>
+              <button type="button" onClick={() => setEditorMode('source')} style={secondaryImportButtonStyle(t)}>Edit DQL</button>
+              <button
+                type="button"
+                onClick={() => openAskAi({ kind: 'edit', initialInput: `Help me fix this block error without changing its intended grain, parameters, or trust state: ${recoveryError} ` })}
+                style={secondaryImportButtonStyle(t)}
+              >
+                Open Block AI
+              </button>
+            </div>
+          </div>
+        )}
+        {repairNotice && (
+          <div role="status" style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', borderBottom: '1px solid var(--status-success)', background: 'var(--status-success-bg)', color: t.textSecondary, fontSize: 11.5, fontFamily: t.font }}>
+            <CheckCircle2 size={14} color="var(--status-success)" /> {repairNotice}
+          </div>
+        )}
         {hasActiveDraft && contextInspectorOpen && (
           <BlockContextInspector
             source={state.blockStudioDraft}

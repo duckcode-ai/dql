@@ -14,12 +14,14 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { CommaListInput } from '../common/CommaListInput';
 import type { CSSProperties } from 'react';
 import { GraduationCap, Plus, Pencil, Trash2, X, Sparkles, Loader2, AlertTriangle, RefreshCw, FolderOpen } from 'lucide-react';
-import { api } from '../../api/client';
+import { api, type ContextAuthoringProposalV1 } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
-import { themes, type Theme } from '../../themes/notebook-theme';
+import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
 import type { Skill, SkillPathSettings, Domain } from '../../store/types';
 import { skillMatchesModelingScope, skillMatchesSourcePaths } from './modeling-scope';
 import { authoredDomainOptionsWithCurrent } from '../domains/authored-domain-options';
+import { UnifiedAgentRunPanel, usePersistedAgentThreadId } from '../agent/UnifiedAgentRunPanel';
+import { ContextProposalReviewDrawer } from '../modeling/ContextProposalReviewDrawer';
 
 type FormMode = { kind: 'create' } | { kind: 'edit'; skill: Skill };
 
@@ -79,7 +81,8 @@ export function SkillsPage({
   const [options, setOptions] = useState<{
     metrics: string[];
     blocks: string[];
-  }>({ metrics: [], blocks: [] });
+    modelingRefs: string[];
+  }>({ metrics: [], blocks: [], modelingRefs: [] });
   // Spec 17 (part B) — only authored Domain pages feed the form's picker.
   const domains = state.authoredDomains;
   const [pathSettings, setPathSettings] = useState<SkillPathSettings | null>(null);
@@ -88,6 +91,16 @@ export function SkillsPage({
   const [savingPath, setSavingPath] = useState(false);
   const [pathError, setPathError] = useState<string | null>(null);
   const [form, setForm] = useState<FormMode | null>(null);
+  const [showSkillsAi, setShowSkillsAi] = useState(false);
+  const [proposal, setProposal] = useState<ContextAuthoringProposalV1 | null>(null);
+  const [skillCorrection, setSkillCorrection] = useState<{ skillId: string; question?: string; feedback?: string } | null>(() => {
+    try {
+      const raw = window.sessionStorage.getItem('dql-skill-ai-correction');
+      if (!raw) return null;
+      window.sessionStorage.removeItem('dql-skill-ai-correction');
+      return JSON.parse(raw) as { skillId: string; question?: string; feedback?: string };
+    } catch { return null; }
+  });
   const [pendingDelete, setPendingDelete] = useState<Skill | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -118,10 +131,11 @@ export function SkillsPage({
         setOptions({
           metrics: Array.isArray(res?.metrics) ? res.metrics : [],
           blocks: Array.isArray(res?.blocks) ? res.blocks : [],
+          modelingRefs: Array.isArray(res?.modelingRefs) ? res.modelingRefs : [],
         });
       })
       .catch(() => {
-        if (!cancelled) setOptions({ metrics: [], blocks: [] });
+        if (!cancelled) setOptions({ metrics: [], blocks: [], modelingRefs: [] });
       });
     void api
       .getSkillPathSettings()
@@ -139,6 +153,7 @@ export function SkillsPage({
   }, []);
 
   useEffect(() => load(), [load]);
+  useEffect(() => { if (skillCorrection) setShowSkillsAi(true); }, [skillCorrection]);
 
   const sorted = useMemo(() => {
     return skills
@@ -254,6 +269,9 @@ export function SkillsPage({
             <button type="button" onClick={() => { setPathError(null); setShowPathEditor((value) => !value); }} style={ghostButton(t)}>
               <FolderOpen size={13} strokeWidth={2} /> Skill folder
             </button>
+            <button type="button" onClick={() => setShowSkillsAi((value) => !value)} style={ghostButton(t)}>
+              <Sparkles size={13} strokeWidth={2} /> Skills AI
+            </button>
             <button type="button" onClick={() => setForm({ kind: 'create' })} style={primaryButton(t)}>
               <Plus size={14} strokeWidth={2.2} /> Add skill
             </button>
@@ -284,6 +302,8 @@ export function SkillsPage({
             {pathError ? <InlineNote t={t} tone="error">{pathError}</InlineNote> : null}
           </div>
         ) : null}
+
+        {showSkillsAi ? <SkillsAiPanel themeMode={state.themeMode} domain={domainFilter} modelAreaId={modelAreaFilter} selectedSkill={form?.kind === 'edit' ? form.skill : skills.find((skill) => (skill.qualifiedId ?? skill.id) === skillCorrection?.skillId || skill.id === skillCorrection?.skillId)} correction={skillCorrection} onCorrectionStarted={() => setSkillCorrection(null)} onReviewProposal={setProposal} /> : null}
 
         {/* Body states */}
         {loading ? (
@@ -337,8 +357,40 @@ export function SkillsPage({
           onConfirm={confirmDelete}
         />
       ) : null}
+      {proposal ? <ContextProposalReviewDrawer proposal={proposal} theme={t} onClose={() => setProposal(null)} onCommitted={() => { setProposal(null); load(); }} /> : null}
     </div>
   );
+}
+
+function SkillsAiPanel({ themeMode, domain, modelAreaId, selectedSkill, correction, onCorrectionStarted, onReviewProposal }: { themeMode: ThemeMode; domain: string | null; modelAreaId: string | null; selectedSkill?: Skill; correction?: { skillId: string; question?: string; feedback?: string } | null; onCorrectionStarted: () => void; onReviewProposal: (proposal: ContextAuthoringProposalV1) => void }) {
+  const t = themes[themeMode];
+  const scope = `skills:${domain ?? 'all'}:${modelAreaId ?? 'all'}:${selectedSkill?.qualifiedId ?? selectedSkill?.id ?? 'new'}`;
+  const { threadId, onThreadIdChange } = usePersistedAgentThreadId(scope);
+  return <section style={{ height: 'min(600px, calc(100vh - 260px))', minHeight: 400, marginBottom: 18, border: '1px solid var(--border-default)', borderRadius: 11, overflow: 'hidden', background: t.cellBg }}>
+    <UnifiedAgentRunPanel
+      themeMode={themeMode}
+      title="Skills AI"
+      scopeHint="Skill proposal · metadata only · activation stays separate"
+      composerPlaceholder="Describe skill guidance or a correction…"
+      initialMode="skill"
+      selectedObject={selectedSkill ? { kind: 'skill', id: selectedSkill.qualifiedId ?? selectedSkill.id, title: selectedSkill.id, path: selectedSkill.sourcePath } : modelAreaId ? { kind: 'model_area', id: modelAreaId } : domain ? { kind: 'domain', id: domain } : { kind: 'workspace', title: 'New skill draft' }}
+      workspaceContext={{ domain, modelAreaId, targetSkillId: selectedSkill?.qualifiedId ?? selectedSkill?.id, providerSafety: 'metadata_only' }}
+      threadId={threadId}
+      onThreadIdChange={onThreadIdChange}
+      autoRun={correction && selectedSkill ? { text: `${correction.feedback ?? 'Correct this skill.'}\n\nApplied skill: ${selectedSkill.qualifiedId ?? selectedSkill.id}\nQuestion: ${correction.question ?? 'Not retained'}\nSave any corrected version as draft and preserve its analytical policy.`, mode: 'skill', nonce: 1 } : undefined}
+      onRunningChange={(running) => { if (running && correction) onCorrectionStarted(); }}
+      onReviewAuthoringProposal={(artifact) => {
+        const value = artifact.payload as ContextAuthoringProposalV1 | undefined;
+        if (value?.version === 1 && value.trustState === 'review_required') onReviewProposal(value);
+      }}
+      emptyHint="Describe the skill guidance or correction. Skills AI can draft metadata and canonical references, but cannot activate, grant tools, or make joins permissible."
+      examplePrompts={[
+        { label: 'Create a skill', prompt: 'Create a draft skill for the selected domain and area, with triggers, exclusions, clarification rules, and examples.' },
+        { label: 'Improve this skill', prompt: 'Improve the selected skill while preserving its analytical policy and governed references.' },
+        { label: 'Add vocabulary rules', prompt: 'Propose vocabulary and clarification guidance for this domain without inventing governed references.' },
+      ]}
+    />
+  </section>;
 }
 
 // ── List row ─────────────────────────────────────────────────────────────────
@@ -432,6 +484,7 @@ function SkillRow({ skill, t, onEdit, onDelete }: { skill: Skill; t: Theme; onEd
           <SkillPillGroup t={t} label="Ask first when" values={skill.clarifyWhen} empty="No clarification rule defined" />
           {skill.exclusions?.length ? <SkillPillGroup t={t} label="Avoid when" values={skill.exclusions} empty="" /> : null}
           {skill.modelAreaRefs?.length ? <SkillPillGroup t={t} label="Focus on model areas" values={skill.modelAreaRefs} empty="" mono /> : null}
+          {skill.sourceRefs?.length ? <SkillPillGroup t={t} label="Guided modeling objects" values={skill.sourceRefs} empty="" mono /> : null}
           {skill.body ? (
             <div style={{ gridColumn: '1 / -1' }}>
               <div style={sectionEyebrow(t)}>Guidance</div>
@@ -461,7 +514,7 @@ function SkillRow({ skill, t, onEdit, onDelete }: { skill: Skill; t: Theme; onEd
 
 // ── Form drawer (add / edit) ─────────────────────────────────────────────────
 
-function SkillFormDrawer({ mode, options, domains, defaultDomain = null, defaultModelArea = null, existingIds, t, onClose, onSaved }: { mode: FormMode; options: { metrics: string[]; blocks: string[] }; domains: Domain[]; defaultDomain?: string | null; defaultModelArea?: string | null; existingIds: string[]; t: Theme; onClose: () => void; onSaved: (skill: Skill) => void }): JSX.Element {
+function SkillFormDrawer({ mode, options, domains, defaultDomain = null, defaultModelArea = null, existingIds, t, onClose, onSaved }: { mode: FormMode; options: { metrics: string[]; blocks: string[]; modelingRefs: string[] }; domains: Domain[]; defaultDomain?: string | null; defaultModelArea?: string | null; existingIds: string[]; t: Theme; onClose: () => void; onSaved: (skill: Skill) => void }): JSX.Element {
   const { dispatch } = useNotebook();
   const editing = mode.kind === 'edit';
   // New skills authored from a domain-scoped list belong to that domain by
@@ -502,18 +555,19 @@ function SkillFormDrawer({ mode, options, domains, defaultDomain = null, default
       requiredFilters: (draft.requiredFilters ?? []).map((value) => value.trim()).filter(Boolean),
       clarifyWhen: (draft.clarifyWhen ?? []).map((value) => value.trim()).filter(Boolean),
       examples: (draft.examples ?? []).map((value) => value.trim()).filter(Boolean),
+      sourceRefs: (draft.sourceRefs ?? []).map((value) => value.trim()).filter(Boolean),
     };
     setSaving(true);
     setError(null);
     try {
-      const res = editing ? await api.updateSkill(payload.id, payload) : await api.createSkill(payload);
+      const res = editing ? await api.updateSkill(mode.kind === 'edit' ? (mode.skill.qualifiedId ?? mode.skill.id) : payload.id, payload) : await api.createSkill(payload);
       onSaved(res.skill ?? payload);
     } catch (err) {
       setError(err instanceof Error && err.message ? err.message : 'Could not save this skill. Try again.');
     } finally {
       setSaving(false);
     }
-  }, [draft, editing, onSaved]);
+  }, [draft, editing, mode, onSaved]);
 
   return (
     <div style={drawerScrim} onClick={() => !saving && onClose()}>
@@ -694,6 +748,9 @@ function SkillFormDrawer({ mode, options, domains, defaultDomain = null, default
               <Field label="Preferred dimensions" t={t} hint="Business-safe dimensions the agent should prefer when they are compatible.">
                 <CommaListInput values={draft.preferredDimensions ?? []} onChange={(next) => set('preferredDimensions', next)} placeholder="region, month" style={inputStyle(t)} />
               </Field>
+              <Field label="Qualified models and relationships" t={t} hint="Optional canonical IDs from Modeling. Validated references create guided_by edges; legacy free text cannot authorize joins.">
+                <MultiSelect t={t} options={options.modelingRefs} optionKind="modelingRefs" selected={draft.sourceRefs ?? []} onChange={(next) => set('sourceRefs', next)} placeholder="Search qualified models and relationships…" emptyOptionsHint="No governed Modeling references are available yet." />
+              </Field>
               <Field label="Vocabulary" t={t} hint="Map your terms to a target, e.g. arr → metric:arr or revenue → block:revenue_by_region.">
                 <VocabularyEditor t={t} value={draft.vocabulary} onChange={(next) => set('vocabulary', next)} />
               </Field>
@@ -769,7 +826,7 @@ function ChipInput({ t, values, onChange, placeholder }: { t: Theme; values: str
 
 // ── Multi-select (preferred metrics / blocks) ────────────────────────────────
 
-function MultiSelect({ t, options, optionKind, selected, onChange, placeholder, emptyOptionsHint }: { t: Theme; options: string[]; optionKind: 'metrics' | 'blocks'; selected: string[]; onChange: (next: string[]) => void; placeholder: string; emptyOptionsHint: string }): JSX.Element {
+function MultiSelect({ t, options, optionKind, selected, onChange, placeholder, emptyOptionsHint }: { t: Theme; options: string[]; optionKind: 'metrics' | 'blocks' | 'modelingRefs'; selected: string[]; onChange: (next: string[]) => void; placeholder: string; emptyOptionsHint: string }): JSX.Element {
   const [query, setQuery] = useState('');
   const [remoteOptions, setRemoteOptions] = useState<string[]>(options);
   useEffect(() => {
@@ -778,7 +835,7 @@ function MultiSelect({ t, options, optionKind, selected, onChange, placeholder, 
       void api
         .getSkillOptions(query)
         .then((result) => {
-          if (!cancelled) setRemoteOptions(optionKind === 'metrics' ? result.metrics : result.blocks);
+          if (!cancelled) setRemoteOptions(optionKind === 'metrics' ? result.metrics : optionKind === 'blocks' ? result.blocks : result.modelingRefs);
         })
         .catch(() => {
           if (!cancelled) setRemoteOptions(options);

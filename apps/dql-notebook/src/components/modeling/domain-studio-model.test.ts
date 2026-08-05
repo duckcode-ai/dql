@@ -22,13 +22,15 @@ function modeling(entities: Record<string, ManifestModelEntity>): Pick<ManifestD
 describe('Domain Studio navigation', () => {
   it('keeps the Domain workspace focused on agent context and related products', () => {
     expect(DOMAIN_STUDIO_NAVIGATION.flatMap((group) => group.items.map((item) => item.label))).toEqual([
-      'Models',
+      'Modeling',
+      'Modeling AI',
       'Skills',
       'Blocks',
       'Notebooks',
       'Apps',
     ]);
     expect(isDomainStudioSection('diagram')).toBe(true);
+    expect(isDomainStudioSection('ai')).toBe(true);
     expect(isDomainStudioSection('skills')).toBe(true);
     expect(isDomainStudioSection('blocks')).toBe(true);
     expect(isDomainStudioSection('notebooks')).toBe(true);

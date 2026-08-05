@@ -692,10 +692,12 @@ export function GuidedBySkills({
   t,
   skills,
   onOpenSkills,
+  onSuggestCorrection,
 }: {
   t: Theme;
   skills?: Array<{ id: string; description?: string }>;
   onOpenSkills: () => void;
+  onSuggestCorrection?: (skill: { id: string; description?: string }) => void;
 }): JSX.Element | null {
   if (!skills || skills.length === 0) return null;
   return (
@@ -736,6 +738,7 @@ export function GuidedBySkills({
           </button>
         </React.Fragment>
       ))}
+      {onSuggestCorrection && skills.length === 1 ? <button type="button" onClick={() => onSuggestCorrection(skills[0]!)} style={{ marginLeft: 5, border: '1px solid var(--border-subtle)', borderRadius: 6, background: 'var(--bg-1)', color: t.accent, padding: '3px 7px', cursor: 'pointer', fontSize: 10 }}>Suggest skill correction</button> : null}
     </div>
   );
 }

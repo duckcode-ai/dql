@@ -138,6 +138,8 @@ interface UnifiedAgentRunPanelProps {
   themeMode: ThemeMode;
   title?: string;
   scopeHint?: string;
+  /** Surface-specific composer guidance for authoring modes. */
+  composerPlaceholder?: string;
   onClearScope?: () => void;
   /** Override the empty-state suggestion chips so a surface can offer tailored prompts. */
   examplePrompts?: ExamplePrompt[];
@@ -179,6 +181,8 @@ interface UnifiedAgentRunPanelProps {
    * populate an unsaved editor without changing the agent engine or RunCard.
    */
   onArtifactReady?: (payload: InsertDqlPayload, run: AgentRun) => void;
+  /** Explicit handoff for immutable Modeling/Skills authoring proposals. */
+  onReviewAuthoringProposal?: (artifact: AgentRun['artifacts'][number], run: AgentRun) => void;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
   /** Navigate into an app/dashboard (used by the "Added to app" success link). */
@@ -225,6 +229,8 @@ const ROUTE_LABEL: Record<AgentRunRoute, string> = {
   research: 'Research plan',
   sql_cell: 'SQL cell',
   dql_block_draft: 'DQL block draft',
+  modeling_draft: 'Modeling proposal',
+  skill_draft: 'Skill proposal',
   app_build: 'App plan',
   clarify: 'Clarify',
   blocked: 'Blocked',
@@ -234,6 +240,7 @@ export function UnifiedAgentRunPanel({
   themeMode,
   title = 'AI Copilot',
   scopeHint = 'Auto routes to answer, research, SQL, block, or app',
+  composerPlaceholder = 'Ask anything about your data…',
   onClearScope,
   examplePrompts,
   emptyHint,
@@ -252,6 +259,7 @@ export function UnifiedAgentRunPanel({
   onInsertDql,
   onReplaceDql,
   onArtifactReady,
+  onReviewAuthoringProposal,
   onOpenBlock,
   onOpenResearch,
   onOpenApp,
@@ -591,6 +599,10 @@ export function UnifiedAgentRunPanel({
           // Conversation store unavailable — proceed without a threadId.
         }
       }
+      const priorAuthoringRun = (activeMode === 'modeling' || activeMode === 'skill')
+        ? [...items].reverse().find((item): item is Extract<ThreadItem, { kind: 'run' }> => item.kind === 'run' && item.run.artifacts.some((artifact) => artifact.kind === (activeMode === 'modeling' ? 'modeling_change_proposal' : 'skill_change_proposal')))?.run
+        : undefined;
+      const priorAuthoringArtifact = priorAuthoringRun?.artifacts.find((artifact) => artifact.kind === (activeMode === 'modeling' ? 'modeling_change_proposal' : 'skill_change_proposal'));
       const runInput = {
         question: text,
         ...(selectedEvidenceId ? { selectedEvidenceId } : {}),
@@ -609,6 +621,11 @@ export function UnifiedAgentRunPanel({
           ...(workspaceContext ?? {}),
           ...(notebookPath ? { notebookPath } : {}),
           ...(researchSourceRun ? { researchSource: researchSourceFromRun(researchSourceRun) } : {}),
+          ...(priorAuthoringRun && priorAuthoringArtifact ? {
+            sourceRunId: priorAuthoringRun.id,
+            sourceArtifactId: priorAuthoringArtifact.id,
+            revision: (priorAuthoringRun.derivation?.revision ?? 1) + 1,
+          } : {}),
         },
         conversationContext: buildConversationContext(items),
         history,
@@ -700,6 +717,22 @@ export function UnifiedAgentRunPanel({
   };
 
   const handleNextAction = (run: AgentRun, action: AgentRun['nextActions'][number]) => {
+    if (action.id === 'review-modeling-proposal' || action.id === 'review-skill-proposal') {
+      const expectedKind = action.id === 'review-modeling-proposal'
+        ? 'modeling_change_proposal'
+        : 'skill_change_proposal';
+      const artifact = run.artifacts.find((candidate) => candidate.kind === expectedKind);
+      if (!artifact) {
+        setError('This authoring run does not include a reviewable proposal.');
+        return;
+      }
+      if (onReviewAuthoringProposal) onReviewAuthoringProposal(artifact, run);
+      else if (artifact.ref) {
+        try { window.sessionStorage.setItem('dql-context-proposal-handoff', artifact.ref); } catch { /* best effort */ }
+        window.dispatchEvent(new CustomEvent('dql:open-context-proposal', { detail: { proposalId: artifact.ref, kind: artifact.kind } }));
+      }
+      return;
+    }
     if (action.id === 'save-dql-block') {
       const dqlArtifact = answerDqlArtifactFromRun(run);
       const source = dqlArtifact?.source?.trim() ?? answerSqlFromRun(run)?.trim();
@@ -881,7 +914,7 @@ export function UnifiedAgentRunPanel({
                   value={input}
                   onChange={(event) => { setInput(event.target.value); pendingModeRef.current = undefined; }}
                   rows={2}
-                  placeholder="Ask anything about your data…"
+                  placeholder={composerPlaceholder}
                   onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); handleSubmit(); } }}
                   style={{ border: 'none', background: 'transparent', resize: 'none', outline: 'none', boxShadow: 'none', padding: '13px 15px 4px', fontSize: 13.5, lineHeight: 1.5, color: t.textPrimary, fontFamily: t.font }}
                 />
@@ -1066,7 +1099,7 @@ export function UnifiedAgentRunPanel({
             value={input}
             onChange={(event) => { setInput(event.target.value); pendingModeRef.current = undefined; }}
             rows={2}
-            placeholder="Ask anything about your data…"
+            placeholder={composerPlaceholder}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault();
@@ -1222,7 +1255,7 @@ function readStoredThinkingMode(): AgentThinkingMode {
 
 const AGENT_RUN_ROUTES = new Set<AgentRunRoute>([
   'conversation', 'certified_answer', 'semantic_answer', 'generated_answer', 'research',
-  'sql_cell', 'dql_block_draft', 'app_build', 'clarify', 'blocked',
+  'sql_cell', 'dql_block_draft', 'modeling_draft', 'skill_draft', 'app_build', 'clarify', 'blocked',
 ]);
 const AGENT_RUN_TRUST_STATES = new Set<AgentRunTrustState>([
   'certified', 'governed', 'grounded', 'review_required', 'blocked', 'not_applicable',
@@ -1357,6 +1390,8 @@ function routeMatchLabel(route?: AgentRunRoute): string {
     case 'app_build': return 'Found governed assets for the app';
     case 'sql_cell': return 'Identified the query context';
     case 'dql_block_draft': return 'Identified reusable governed logic';
+    case 'modeling_draft': return 'Resolved current models and relationship evidence';
+    case 'skill_draft': return 'Resolved current domain guidance and governed references';
     case 'clarify': return 'Identified a missing business detail';
     default: return 'Identified the best answer path';
   }
@@ -1373,6 +1408,8 @@ function routeExecutionLabel(route: AgentRunRoute | undefined, events: AgentRunE
     case 'app_build': return 'Assembling the app from governed assets';
     case 'sql_cell': return 'Building and checking the SQL';
     case 'dql_block_draft': return 'Drafting the governed logic';
+    case 'modeling_draft': return 'Building a reviewable modeling proposal';
+    case 'skill_draft': return 'Building a reviewable Skill proposal';
     case 'clarify': return 'Preparing a focused clarification';
     default: return 'Preparing the answer';
   }
@@ -4233,6 +4270,8 @@ function routeToMode(route?: AgentRunRoute): AgentRunRequestedMode | undefined {
   if (route === 'research') return 'research';
   if (route === 'sql_cell') return 'sql';
   if (route === 'dql_block_draft') return 'block';
+  if (route === 'modeling_draft') return 'modeling';
+  if (route === 'skill_draft') return 'skill';
   if (route === 'app_build') return 'app';
   if (route === 'certified_answer' || route === 'semantic_answer' || route === 'generated_answer') return 'ask';
   return undefined;
@@ -4241,6 +4280,8 @@ function routeToMode(route?: AgentRunRoute): AgentRunRequestedMode | undefined {
 function nextPromptFor(run: AgentRun, route?: AgentRunRoute): string {
   if (route === 'sql_cell') return `Create a SQL cell for: ${run.question}`;
   if (route === 'dql_block_draft') return `Create a DQL block draft for: ${run.question}`;
+  if (route === 'modeling_draft') return `Revise the modeling proposal for: ${run.question}`;
+  if (route === 'skill_draft') return `Revise the Skill proposal for: ${run.question}`;
   if (route === 'app_build') return `Build an app for: ${run.question}`;
   if (route === 'research') return `Research deeper: ${run.question}`;
   return run.question;

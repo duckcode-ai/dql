@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import type { Server } from 'node:http';
 import { dirname, resolve } from 'node:path';
 import {
   buildManifest,
@@ -10,12 +11,17 @@ import {
   type DomainProposal,
 } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
+import { startLocalServer } from '../local-runtime.js';
 
 /** `dql model` — inspect/validate v3 and preview evidence-bounded discovery (AGT-002/API-001). */
 export async function runModel(file: string | null, rest: string[], flags: CLIFlags): Promise<void> {
   const subcommand = file ?? 'list';
   if (subcommand === 'discover' || subcommand === 'apply-discovery') {
     runDomainDiscovery(subcommand, rest, flags);
+    return;
+  }
+  if (subcommand === 'import') {
+    await runModelImport(rest, flags);
     return;
   }
   const args = rest.filter((value) => !value.startsWith('-'));
@@ -83,7 +89,7 @@ export async function runModel(file: string | null, rest: string[], flags: CLIFl
   }
 
   if (subcommand !== 'list') {
-    console.error('Usage: dql model list|validate|discover [path] | dql model explain <relationship-id> [path] | dql model apply-discovery [path] --domain <id> --apply');
+    console.error('Usage: dql model list|validate|discover [path] | dql model explain <relationship-id> [path] | dql model apply-discovery [path] --domain <id> --apply | dql model import <file-or-directory> --domain <id> --area <id> --dry-run|--apply');
     process.exitCode = 1;
     return;
   }
@@ -99,6 +105,61 @@ export async function runModel(file: string | null, rest: string[], flags: CLIFl
     console.log('Relationships');
     for (const relationship of output.relationships) console.log(`  ${relationship.id}: ${relationship.from} → ${relationship.to} [${relationship.automaticJoinAllowed ? 'safe' : relationship.fanout}]`);
   }
+}
+
+async function runModelImport(rest: string[], flags: CLIFlags): Promise<void> {
+  const sourcePath = rest.find((value) => !value.startsWith('-'));
+  const projectRoot = resolve('.');
+  if (!sourcePath || !flags.domain || !flags.area || Boolean(flags.dryRun) === Boolean(flags.apply)) {
+    modelImportError(flags, 'INVALID_REQUEST', 'Usage: dql model import <file-or-directory> --domain <id> --area <id> --dry-run|--apply --format json');
+    return;
+  }
+  if (!existsSync(resolve(projectRoot, 'dql.config.json'))) {
+    modelImportError(flags, 'PROJECT_NOT_FOUND', `No DQL project found at ${projectRoot}.`);
+    return;
+  }
+  let server: Server | undefined;
+  try {
+    const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as never, preferredPort: 0, captureServer: (created) => { server = created; } });
+    const base = `http://127.0.0.1:${port}`;
+    const modeling = await modelImportRequest<{ snapshotId: string }>(`${base}/api/modeling/dbt-first`);
+    const discovered = await modelImportRequest<{ session: { id: string; candidates: Array<{ id: string; action: string }> } }>(`${base}/api/modeling/dbt-first/imports`, { method: 'POST', body: JSON.stringify({ source: { mode: 'path', path: resolve(sourcePath) } }) });
+    const selectedCandidateIds = discovered.session.candidates.filter((candidate) => candidate.action === 'import').map((candidate) => candidate.id);
+    const preview = await modelImportRequest<{ proposal: { id: string; proposalHash: string; diagnostics: Array<{ severity: string }>; [key: string]: unknown } }>(`${base}/api/modeling/dbt-first/imports/${encodeURIComponent(discovered.session.id)}/preview`, { method: 'POST', body: JSON.stringify({ selectedCandidateIds, domain: flags.domain, areaId: flags.area, expectedSnapshotId: modeling.snapshotId }) });
+    if (flags.dryRun) {
+      console.log(flags.format === 'json' ? JSON.stringify(preview.proposal, null, 2) : formatModelImportProposal(preview.proposal, false));
+      return;
+    }
+    if (preview.proposal.diagnostics.some((diagnostic) => diagnostic.severity === 'blocking')) {
+      modelImportError(flags, 'PROPOSAL_BLOCKED', 'The import proposal has blocking diagnostics and was not applied.', preview.proposal);
+      return;
+    }
+    const committed = await modelImportRequest<{ proposal: unknown; snapshotId: string }>(`${base}/api/context-proposals/${encodeURIComponent(preview.proposal.id)}/commit`, { method: 'POST', body: JSON.stringify({ expectedProposalHash: preview.proposal.proposalHash, idempotencyKey: `cli-${Date.now().toString(36)}` }) });
+    console.log(flags.format === 'json' ? JSON.stringify(committed, null, 2) : `${formatModelImportProposal(preview.proposal, true)}\nSnapshot: ${committed.snapshotId}`);
+  } catch (error) {
+    const record = error && typeof error === 'object' ? error as { code?: string; message?: string; details?: unknown } : {};
+    modelImportError(flags, record.code ?? 'MODELING_IMPORT_FAILED', record.message ?? String(error), record.details);
+  } finally {
+    await new Promise<void>((done) => server ? server.close(() => done()) : done());
+  }
+}
+
+async function modelImportRequest<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, { ...init, headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) } });
+  const payload = await response.json() as Record<string, unknown>;
+  if (!response.ok) throw Object.assign(new Error(String(payload.message ?? payload.error ?? response.statusText)), { code: payload.code, details: payload.details });
+  return payload as T;
+}
+
+function formatModelImportProposal(proposal: { id: string; proposalHash: string; [key: string]: unknown }, applied: boolean): string {
+  const impact = proposal.impact as { files?: number; modelingChanges?: number } | undefined;
+  return [`DQL modeling YAML import ${applied ? 'applied as draft' : 'dry run'}`, `  proposal ${proposal.id} · ${proposal.proposalHash.slice(0, 12)}`, `  ${impact?.modelingChanges ?? 0} modeling changes across ${impact?.files ?? 0} files`, applied ? '  source compiled and project indexes rebuilt' : '  no source files changed'].join('\n');
+}
+
+function modelImportError(flags: CLIFlags, code: string, message: string, details?: unknown): void {
+  if (flags.format === 'json') console.log(JSON.stringify({ code, message, ...(details === undefined ? {} : { details }) }, null, 2));
+  else console.error(`${code}: ${message}`);
+  process.exitCode = 1;
 }
 
 function runDomainDiscovery(

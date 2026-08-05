@@ -3061,7 +3061,7 @@ describe('agent run runtime API', () => {
     }
   });
 
-  it('repairs malformed DQL and schema references in one bounded Notebook attempt', async () => {
+  it('repairs malformed DQL and schema references in one bounded Block Studio attempt', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-notebook-dql-compiler-repair-'));
     tempDirs.push(projectRoot);
     writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
@@ -3134,7 +3134,7 @@ FROM main.dim_customers AS customers
 LIMIT \${top_n}
   """
 }`;
-      const response = await nativeFetch(`http://127.0.0.1:${port}/api/notebook/repair-execution`, {
+      const response = await nativeFetch(`http://127.0.0.1:${port}/api/block-studio/repair-and-run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -3164,6 +3164,52 @@ LIMIT \${top_n}
           { name: 'name', type: 'VARCHAR' },
         ],
       });
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
+  it('rejects malformed Block Studio source before writing or reopening a frozen block', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-block-save-validation-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        connection: { driver: 'file' },
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const malformedSource = `block "Frozen draft" {
+  type = "custom"
+  owner = "analytics"
+  query """SELECT 1"""
+}`;
+      const response = await fetch(`http://127.0.0.1:${port}/api/block-studio/save`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source: malformedSource,
+          metadata: {
+            name: 'Frozen draft',
+            domain: 'uncategorized',
+            description: '',
+            owner: 'analytics',
+            tags: [],
+          },
+        }),
+      });
+      const text = await response.text();
+      expect(response.status, text).toBe(422);
+      expect(JSON.parse(text)).toMatchObject({
+        code: 'BLOCK_VALIDATION_FAILED',
+        recoverable: true,
+        details: { validation: { valid: false, saveable: false } },
+      });
+      expect(existsSync(join(projectRoot, 'blocks'))).toBe(false);
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
@@ -6878,8 +6924,24 @@ describe('validateBlockStudioSource', () => {
     const validation = validateBlockStudioSource(source, semanticLayer);
 
     expect(validation.valid).toBe(false);
+    expect(validation.saveable).toBe(false);
     expect(validation.executableSql).toBeNull();
     expect(validation.diagnostics.some((item) => item.code === 'semantic_metric_missing')).toBe(true);
+  });
+
+  it('keeps a structurally valid semantic draft saveable when its runtime is not configured', () => {
+    const source = `block "Revenue by Type" {
+  domain = "finance"
+  type = "semantic"
+  metric = "total_revenue"
+  dimensions = ["customer_type"]
+}`;
+
+    const validation = validateBlockStudioSource(source);
+
+    expect(validation.valid).toBe(false);
+    expect(validation.saveable).toBe(true);
+    expect(validation.diagnostics.some((item) => item.code === 'semantic_layer_missing')).toBe(true);
   });
 
   it('returns a semantic validation error for unknown dimensions', () => {
@@ -8215,5 +8277,85 @@ describe('slimAgentRunForTransport', () => {
     const [small, big] = slim.events as unknown as Array<{ payload?: Record<string, unknown> }>;
     expect(small.payload).toEqual({ ok: true });
     expect(big.payload).toMatchObject({ omitted: 'oversized' });
+  });
+});
+
+describe('unified context authoring proposals (API-011, API-012, MIG-003)', () => {
+  it('keeps YAML discovery write-free, commits a reviewed batch, and rejects stale source without partial writes', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-context-proposal-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'target'), { recursive: true });
+    mkdirSync(join(projectRoot, 'domains', 'commerce', 'modeling', 'areas'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'shop', manifestVersion: 3, modeling: { mode: 'dbt-first' }, dbt: { projectDir: '.', manifestPath: 'target/manifest.json' } }));
+    writeFileSync(join(projectRoot, 'domains', 'commerce', 'domain.dql'), 'domain "Commerce" {\n  id = "commerce"\n}\n');
+    const areaPath = join(projectRoot, 'domains', 'commerce', 'modeling', 'areas', 'core.dql.yaml');
+    writeFileSync(areaPath, 'domain: commerce\narea:\n  id: core\n  name: Core\n');
+    const importDirectory = join(projectRoot, 'import-samples');
+    mkdirSync(importDirectory, { recursive: true });
+    writeFileSync(join(importDirectory, 'dql.yml'), 'entities:\n  - id: imported_orders\n    dbt_model: model.shop.orders\n');
+    writeFileSync(join(importDirectory, 'semantic.yml'), 'semantic_models:\n  - name: customers_semantic\n    model: ref("customers")\n');
+    writeFileSync(join(importDirectory, 'generic.yml'), 'widgets:\n  - name: unsupported\n');
+    writeFileSync(join(projectRoot, 'target', 'manifest.json'), JSON.stringify({
+      metadata: { project_name: 'shop' },
+      nodes: Object.fromEntries(['orders', 'customers'].map((name) => [`model.shop.${name}`, { unique_id: `model.shop.${name}`, resource_type: 'model', name, original_file_path: `models/${name}.sql`, columns: { id: { name: 'id' } }, depends_on: { nodes: [] }, tags: [] }])),
+      sources: {}, exposures: {}, semantic_models: {}, groups: {}, metrics: {}, child_map: {}, parent_map: {},
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const base = `http://127.0.0.1:${port}`;
+      const modeling = await (await fetch(`${base}/api/modeling/dbt-first`)).json() as { snapshotId: string };
+      const before = readFileSync(areaPath, 'utf8');
+      const mixedResponse = await fetch(`${base}/api/modeling/dbt-first/imports`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: { mode: 'path', path: importDirectory } }) });
+      expect(mixedResponse.status).toBe(201);
+      const mixed = await mixedResponse.json() as { session: { candidates: Array<{ dialect: string; action: string }> } };
+      expect(new Set(mixed.session.candidates.map((candidate) => candidate.dialect))).toEqual(new Set(['dql_modeling', 'dbt_semantic', 'unsupported']));
+      expect(mixed.session.candidates.find((candidate) => candidate.dialect === 'unsupported')?.action).toBe('unsupported');
+      const malformedResponse = await fetch(`${base}/api/modeling/dbt-first/imports`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: { mode: 'paste', filename: 'broken.yml', content: 'models:\n  - name: orders\n   description: broken' } }) });
+      expect(malformedResponse.status).toBe(201);
+      expect(await malformedResponse.json()).toMatchObject({ session: { candidates: [{ dialect: 'unsupported', action: 'unsupported' }] } });
+      expect(readFileSync(areaPath, 'utf8')).toBe(before);
+      const discoveryResponse = await fetch(`${base}/api/modeling/dbt-first/imports`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: { mode: 'paste', filename: 'schema.yml', content: 'version: 2\nmodels:\n  - name: orders\n    description: Orders\n  - name: customers\n    description: Customers\n' } }) });
+      expect(discoveryResponse.status).toBe(201);
+      const discovery = await discoveryResponse.json() as { session: { id: string; candidates: Array<{ id: string; dialect: string }> } };
+      expect(discovery.session.candidates[0]).toMatchObject({ dialect: 'dbt_resource' });
+      expect(readFileSync(areaPath, 'utf8')).toBe(before);
+
+      const previewResponse = await fetch(`${base}/api/modeling/dbt-first/imports/${discovery.session.id}/preview`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ selectedCandidateIds: discovery.session.candidates.map((candidate) => candidate.id), domain: 'commerce', areaId: 'core', expectedSnapshotId: modeling.snapshotId }) });
+      expect(previewResponse.status).toBe(201);
+      const preview = await previewResponse.json() as { proposal: { id: string; proposalHash: string; operations: unknown[]; patches: Array<{ after: string }> } };
+      expect(preview.proposal.operations).toHaveLength(2);
+      expect(preview.proposal.patches[0]?.after).toContain('model.shop.orders');
+      expect(readFileSync(areaPath, 'utf8')).toBe(before);
+
+      const committed = await fetch(`${base}/api/context-proposals/${preview.proposal.id}/commit`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedProposalHash: preview.proposal.proposalHash, idempotencyKey: 'commit-import-1' }) });
+      expect(committed.status).toBe(200);
+      expect(readFileSync(areaPath, 'utf8')).toContain('model.shop.customers');
+      const idempotent = await fetch(`${base}/api/context-proposals/${preview.proposal.id}/commit`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedProposalHash: preview.proposal.proposalHash, idempotencyKey: 'commit-import-1' }) });
+      expect(idempotent.status).toBe(200);
+      expect(await idempotent.json()).toMatchObject({ idempotent: true });
+      const mismatchedRetry = await fetch(`${base}/api/context-proposals/${preview.proposal.id}/commit`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedProposalHash: 'different-hash', idempotencyKey: 'commit-import-1' }) });
+      expect(mismatchedRetry.status).toBe(409);
+      expect(await mismatchedRetry.json()).toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+      const skillOptions = await (await fetch(`${base}/api/skills/options?q=orders`)).json() as { modelingRefs: string[] };
+      expect(skillOptions.modelingRefs).toContain('commerce::entity::orders');
+
+      const current = await (await fetch(`${base}/api/modeling/dbt-first`)).json() as { snapshotId: string };
+      const proposalResponse = await fetch(`${base}/api/context-proposals`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ origin: 'manual', expectedSnapshotId: current.snapshotId, operations: [{ id: 'update-orders', kind: 'modeling_change', change: { operation: 'upsert_entity', value: { id: 'orders', domain: 'commerce', areaId: 'core', dbtModel: 'model.shop.orders', businessContext: 'Reviewed orders.' } } }] }) });
+      expect(proposalResponse.status).toBe(201);
+      const staleProposal = await proposalResponse.json() as { proposal: { id: string; proposalHash: string } };
+      const concurrent = `${readFileSync(areaPath, 'utf8')}\n# concurrent edit\n`;
+      writeFileSync(areaPath, concurrent);
+      const staleCommit = await fetch(`${base}/api/context-proposals/${staleProposal.proposal.id}/commit`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedProposalHash: staleProposal.proposal.proposalHash, idempotencyKey: 'stale-import-1' }) });
+      expect(staleCommit.status).toBe(409);
+      expect(await staleCommit.json()).toMatchObject({ code: expect.stringMatching(/SOURCE|SNAPSHOT|PROPOSAL/) });
+      expect(readFileSync(areaPath, 'utf8')).toBe(concurrent);
+      const rebased = await fetch(`${base}/api/context-proposals/${staleProposal.proposal.id}/repreview`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ rebase: true }) });
+      expect(rebased.status).toBe(201);
+      expect(await rebased.json()).toMatchObject({ proposal: { revision: 2, trustState: 'review_required' } });
+      expect(readFileSync(areaPath, 'utf8')).toBe(concurrent);
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+    }
   });
 });

@@ -352,6 +352,13 @@ export function buildManifestKnowledgeGraph(input: BuildManifestKnowledgeGraphIn
     for (const ref of skill.preferredMetrics) for (const target of lookup(metricIds, ref, skill.domain)) addEdge('guided_by', target, skill.qualifiedId);
     for (const ref of skill.preferredBlocks) for (const target of lookup(blockIds, ref, skill.domain)) addEdge('guided_by', target, skill.qualifiedId);
     for (const ref of skill.preferredDimensions) for (const target of lookup(dimensionIds, ref, skill.domain)) addEdge('guided_by', target, skill.qualifiedId);
+    // Canonical modeling references are already resolved and guarded before a
+    // skill proposal can commit. Keep legacy free-form references as payload
+    // text only; only exact qualified entity/relationship ids create edges.
+    for (const ref of skill.sourceRefs) {
+      const target = objects[ref];
+      if (target?.kind === 'entity' || target?.kind === 'relationship') addEdge('guided_by', ref, skill.qualifiedId);
+    }
   }
 
   // Preserve dbt transformation flow as observed context, never join proof.
@@ -597,7 +604,7 @@ function relationshipReasonCodes(relationship: NonNullable<DQLManifest['modeling
   if (relationship.status !== 'certified') reasons.push('RELATIONSHIP_NOT_CERTIFIED');
   if (relationship.staleCertification) reasons.push('STALE_PROOF');
   if (!relationship.validation || relationship.validation.status !== 'passed') reasons.push('VALIDATION_NOT_PASSED');
-  if (relationship.fanout === 'unsafe' || relationship.fanout === 'unknown') reasons.push('UNSAFE_FANOUT');
+  if (relationship.fanout !== 'safe') reasons.push('UNSAFE_FANOUT');
   if (relationship.keys.length === 0) reasons.push('MISSING_KEYS');
   return reasons;
 }

@@ -861,7 +861,7 @@ export interface NotebookResearchListResponse {
   offset: number;
 }
 
-export type AgentRunRequestedMode = 'auto' | 'ask' | 'research' | 'sql' | 'block' | 'app';
+export type AgentRunRequestedMode = 'auto' | 'ask' | 'research' | 'sql' | 'block' | 'app' | 'modeling' | 'skill';
 export type AgentRunRoute =
   | 'conversation'
   | 'certified_answer'
@@ -870,6 +870,8 @@ export type AgentRunRoute =
   | 'research'
   | 'sql_cell'
   | 'dql_block_draft'
+  | 'modeling_draft'
+  | 'skill_draft'
   | 'app_build'
   | 'clarify'
   | 'blocked';
@@ -886,7 +888,7 @@ export type AgentRunStopReason =
   | 'needs_clarification'
   | 'human_review_required'
   | 'blocked';
-export type AgentRunArtifactKind = 'answer' | 'research_run' | 'sql_cell' | 'dql_block_draft' | 'app_draft' | 'app_proposal';
+export type AgentRunArtifactKind = 'answer' | 'research_run' | 'sql_cell' | 'dql_block_draft' | 'app_draft' | 'app_proposal' | 'modeling_change_proposal' | 'skill_change_proposal';
 
 export interface MixedSourceNotebookPlan {
   datasetId?: string;
@@ -902,7 +904,7 @@ export interface MixedSourceNotebookPlan {
 export type AgentRunEvaluationSeverity = 'info' | 'warning' | 'blocking';
 
 export interface AgentRunSelectedObject {
-  kind: 'notebook' | 'cell' | 'block' | 'app' | 'dashboard' | 'research' | 'workspace';
+  kind: 'notebook' | 'cell' | 'block' | 'app' | 'dashboard' | 'research' | 'workspace' | 'domain' | 'model_area' | 'model' | 'relationship' | 'skill';
   id?: string;
   title?: string;
   path?: string;
@@ -1082,10 +1084,12 @@ export interface AgentRun {
   diagnosticReceipt?: AgentRunDiagnosticReceiptV1;
   derivation?: {
     version: 1;
-    kind: 'analytical_repair';
+    kind: 'analytical_repair' | 'authoring_revision';
     sourceRunId: string;
     sourceFailureId?: string;
-    attempt: 1;
+    sourceArtifactId?: string;
+    attempt: number;
+    revision?: number;
   };
 }
 
@@ -2828,6 +2832,13 @@ export interface NotebookRepairExecutionResponse {
   executionReceipt?: Record<string, unknown>;
 }
 
+export interface BlockStudioRepairExecutionResponse {
+  source: string;
+  repairedSql: string;
+  repairMode: 'deterministic' | 'ai';
+  preview: BlockStudioPreview;
+}
+
 export interface DatasetColumn {
   name: string;
   type: string;
@@ -2969,6 +2980,52 @@ export interface WarehouseMetadataDiscovery {
   message: string;
 }
 
+export type ContextAuthoringOrigin = 'manual' | 'yaml_import' | 'dbt_discovery' | 'ai' | 'correction';
+export interface ContextAuthoringPatchV1 { path: string; before: string; after: string; changed: boolean; owner: 'dql' | 'dbt'; operationId: string }
+export interface ContextAuthoringDiagnosticV1 { code: string; severity: 'info' | 'warning' | 'blocking'; message: string; operationId?: string }
+export type ContextAuthoringOperation =
+  | { id: string; kind: 'modeling_change'; change: ModelingAuthoringChange; dependsOn?: string[]; evidence?: string[] }
+  | { id: string; kind: 'skill_change'; operation: 'create' | 'update' | 'move'; value: Skill; targetQualifiedId?: string; expectedSourceHash?: string; dependsOn?: string[]; evidence?: string[] }
+  | { id: string; kind: 'dbt_source_change'; change: DbtSourceAuthoringInput; dependsOn?: string[]; evidence?: string[] };
+export interface ContextAuthoringProposalV1 {
+  version: 1;
+  id: string;
+  origin: ContextAuthoringOrigin;
+  status: 'proposed' | 'committed' | 'conflicted';
+  trustState: 'review_required';
+  createdAt: string;
+  baseSnapshotId: string;
+  dependencyFingerprints: Record<string, string>;
+  operations: ContextAuthoringOperation[];
+  patches: ContextAuthoringPatchV1[];
+  diagnostics: ContextAuthoringDiagnosticV1[];
+  impact: { files: number; modelingChanges: number; skillChanges: number; dbtSourceChanges: number };
+  proposalHash: string;
+  sourceRunId?: string;
+  sourceArtifactId?: string;
+  revision?: number;
+  committedAt?: string;
+  committedSnapshotId?: string;
+}
+export interface ModelingImportCandidate {
+  id: string;
+  name: string;
+  path?: string;
+  dialect: 'dql_modeling' | 'dbt_resource' | 'dbt_semantic' | 'unsupported';
+  action: 'import' | 'open_existing' | 'unsupported';
+  summary: string;
+  warnings: string[];
+}
+export interface ModelingImportSession {
+  version: 1;
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  source: { mode: 'current_project' | 'path' | 'upload' | 'paste'; label: string };
+  candidates: ModelingImportCandidate[];
+  proposalId?: string;
+}
+
 export const api = {
   async listOperations(limit = 50): Promise<{ operations: LocalOperation[] }> {
     return request(`/api/operations?limit=${Math.max(1, Math.min(100, Math.floor(limit)))}`);
@@ -3040,6 +3097,41 @@ export const api = {
 
   async getDomainKnowledge(domain: string): Promise<DomainKnowledgeResponse> {
     return request(`/api/domain-workspaces/${encodeURIComponent(domain)}/knowledge`);
+  },
+
+  async createContextProposal(input: {
+    origin: ContextAuthoringOrigin;
+    expectedSnapshotId?: string;
+    operations: ContextAuthoringOperation[];
+    sourceRunId?: string;
+    sourceArtifactId?: string;
+    revision?: number;
+  }): Promise<ContextAuthoringProposalV1> {
+    const result = await request<{ proposal: ContextAuthoringProposalV1 }>('/api/context-proposals', { method: 'POST', body: JSON.stringify(input) });
+    return result.proposal;
+  },
+
+  async getContextProposal(id: string): Promise<ContextAuthoringProposalV1> {
+    const result = await request<{ proposal: ContextAuthoringProposalV1 }>(`/api/context-proposals/${encodeURIComponent(id)}`);
+    return result.proposal;
+  },
+
+  async repreviewContextProposal(id: string, selectedOperationIds: string[], options?: { rebase?: boolean }): Promise<ContextAuthoringProposalV1> {
+    const result = await request<{ proposal: ContextAuthoringProposalV1 }>(`/api/context-proposals/${encodeURIComponent(id)}/repreview`, { method: 'POST', body: JSON.stringify({ selectedOperationIds, rebase: options?.rebase === true }) });
+    return result.proposal;
+  },
+
+  async commitContextProposal(id: string, expectedProposalHash: string, idempotencyKey: string): Promise<{ proposal: ContextAuthoringProposalV1; snapshotId: string }> {
+    return request(`/api/context-proposals/${encodeURIComponent(id)}/commit`, { method: 'POST', body: JSON.stringify({ expectedProposalHash, idempotencyKey }) });
+  },
+
+  async createModelingImport(source: { mode: ModelingImportSession['source']['mode']; path?: string; content?: string; filename?: string }): Promise<ModelingImportSession> {
+    const result = await request<{ session: ModelingImportSession }>('/api/modeling/dbt-first/imports', { method: 'POST', body: JSON.stringify({ source }) });
+    return result.session;
+  },
+
+  async previewModelingImport(id: string, input: { selectedCandidateIds: string[]; domain: string; areaId: string; expectedSnapshotId: string }): Promise<{ session: ModelingImportSession; proposal: ContextAuthoringProposalV1 }> {
+    return request(`/api/modeling/dbt-first/imports/${encodeURIComponent(id)}/preview`, { method: 'POST', body: JSON.stringify(input) });
   },
 
   async previewModelingChange(change: ModelingAuthoringChange, expectedSnapshotId: string): Promise<ModelingChangePreview> {
@@ -3684,6 +3776,38 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ source, path, parameters }),
     });
+  },
+
+  async repairAndRunBlockStudio(
+    source: string,
+    error: string,
+    parameters: Record<string, unknown> = {},
+    title?: string,
+  ): Promise<BlockStudioRepairExecutionResponse> {
+    const raw = await request<any>('/api/block-studio/repair-and-run', {
+      method: 'POST',
+      body: JSON.stringify({
+        cell: {
+          id: 'block-studio-draft',
+          type: 'dql',
+          source,
+          title: title || 'Block Studio draft',
+        },
+        error,
+        attemptedSql: source,
+        parameters,
+      }),
+    });
+    const repairedSql = String(raw.repairedSql ?? '');
+    return {
+      source: String(raw.source ?? source),
+      repairedSql,
+      repairMode: raw.repairMode === 'ai' ? 'ai' : 'deterministic',
+      preview: {
+        sql: repairedSql,
+        result: normalizeQueryResultPayload(raw.result),
+      },
+    };
   },
 
   async getCertifiedBlockParameters(blockName: string): Promise<{
@@ -6193,9 +6317,9 @@ export const api = {
   },
 
   /** Multi-select options for the preferred metrics/blocks fields. → GET /api/skills/options */
-  async getSkillOptions(query = ''): Promise<{ metrics: string[]; blocks: string[] }> {
+  async getSkillOptions(query = ''): Promise<{ metrics: string[]; blocks: string[]; modelingRefs: string[] }> {
     const suffix = query.trim() ? `?q=${encodeURIComponent(query.trim())}` : '';
-    return request<{ metrics: string[]; blocks: string[] }>(`/api/skills/options${suffix}`);
+    return request<{ metrics: string[]; blocks: string[]; modelingRefs: string[] }>(`/api/skills/options${suffix}`);
   },
 
   /** Create a new skill. → POST /api/skills  body { skill } */

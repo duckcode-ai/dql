@@ -95,6 +95,8 @@ const HELP = `
     dql model discover [path]       Preview deterministic dbt domain proposals
     dql model apply-discovery [path] --apply
                                     Write reviewed sparse Domain Package proposals
+    dql model import <file-or-directory> --domain <id> --area <id> --dry-run|--apply
+                                    Import DQL/dbt YAML through the guarded proposal service
     dql model explain <id> [path]   Explain whether a relationship is automatic join proof
     dql lineage [block] [path]      Answer-layer lineage analysis
     dql lineage cross-domain        Show cross-domain lineage flows (--domain filters)
@@ -129,6 +131,7 @@ const HELP = `
     --port <number>                 Preferred local port for "preview" or "serve"
     --chart <type>                  Primary chart type for "new" scaffolds (default: bar)
     --domain <name>                 Domain for new block scaffolds (default: general)
+    --area <id>                     Model Area for modeling import and authoring
     --owner <name>                  Owner for new block scaffolds (default: current user)
     --query-only                    Create a query-only block without visualization
     --pattern <name>                Block scaffold pattern (entity_profile, ranking, trend, bridge, ...)

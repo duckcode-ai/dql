@@ -1,11 +1,13 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import * as yaml from 'js-yaml';
 import { domainFolderSlug, renderDomainDeclaration, type DomainInput } from './domain-writer.js';
 import { loadDomainPackageRegistry } from './domain-package-registry.js';
 import type {
   ManifestFanoutPolicy,
+  ManifestModelLifecycle,
   ManifestRelationshipCardinality,
   ManifestRelationshipValidationEvidence,
 } from './types.js';
@@ -54,7 +56,7 @@ export interface EntityBindingAuthoringInput {
   businessContext?: string;
   conceptRefs?: string[];
   analyticalRole?: 'event' | 'dimension' | 'snapshot' | 'bridge' | 'unknown';
-  status?: 'draft' | 'review' | 'certified' | 'deprecated';
+  status?: ManifestModelLifecycle;
   owner?: string;
   grain?: string;
   keys?: string[];
@@ -70,7 +72,7 @@ export interface RelationshipAuthoringInput {
   keys: Array<{ from: string; to: string }>;
   cardinality: ManifestRelationshipCardinality;
   fanout: ManifestFanoutPolicy;
-  status?: 'draft' | 'review' | 'certified' | 'deprecated';
+  status?: ManifestModelLifecycle;
   crossDomain?: boolean;
   owner?: string;
   certifiedAgainst?: {
@@ -97,7 +99,7 @@ export interface ContractAuthoringInput {
   domain: string;
   entities: string[];
   blocks?: string[];
-  status?: 'draft' | 'review' | 'certified' | 'deprecated';
+  status?: ManifestModelLifecycle;
   owner?: string;
   requiredEvaluation?: boolean;
   version?: number;
@@ -124,7 +126,7 @@ export interface DomainExportAuthoringInput {
   consumerDomains?: string[];
   classification?: string;
   contract?: string;
-  status?: 'draft' | 'review' | 'certified' | 'deprecated';
+  status?: ManifestModelLifecycle;
   owner?: string;
 }
 
@@ -133,7 +135,7 @@ export interface DomainImportAuthoringInput {
   domain: string;
   exportRef: string;
   purpose: string;
-  status?: 'draft' | 'review' | 'certified' | 'deprecated';
+  status?: ManifestModelLifecycle;
   owner?: string;
 }
 
@@ -168,6 +170,13 @@ export interface ModelingSourcePatch {
 
 export interface ModelingChangePreview {
   operation: ModelingAuthoringChange['operation'];
+  patches: ModelingSourcePatch[];
+  fingerprint: string;
+}
+
+export interface ModelingChangesPreview {
+  operation: 'batch';
+  changes: ModelingAuthoringChange[];
   patches: ModelingSourcePatch[];
   fingerprint: string;
 }
@@ -295,6 +304,85 @@ export function previewModelingChange(projectRoot: string, change: ModelingAutho
     patches,
     fingerprint: hash(patches.map((patch) => ({ path: patch.path, before: patch.before, after: patch.after }))),
   };
+}
+
+/**
+ * Compose an ordered batch against a disposable Domain Package shadow. This is
+ * intentionally write-free for the real project and avoids the lost-update bug
+ * caused by independently previewing two changes that target the same YAML file.
+ */
+export function previewModelingChanges(
+  projectRoot: string,
+  changes: ModelingAuthoringChange[],
+): ModelingChangesPreview {
+  const root = resolve(projectRoot);
+  const shadow = mkdtempSync(join(tmpdir(), 'dql-modeling-preview-'));
+  try {
+    for (const configName of ['dql.config.json', 'dql.config.yaml', 'dql.config.yml']) {
+      const source = join(root, configName);
+      if (existsSync(source)) cpSync(source, join(shadow, configName));
+    }
+    const domains = join(root, 'domains');
+    if (existsSync(domains)) cpSync(domains, join(shadow, 'domains'), { recursive: true, dereference: false });
+    const touched = new Set<string>();
+    for (const change of changes) {
+      const preview = previewModelingChange(shadow, change);
+      for (const patch of preview.patches) touched.add(patch.path);
+      applyModelingChange(shadow, change, preview.fingerprint);
+    }
+    const patches = [...touched].sort().map((path): ModelingSourcePatch => {
+      const beforePath = safeProjectPath(root, path);
+      const afterPath = safeProjectPath(shadow, path);
+      const before = existsSync(beforePath) ? readFileSync(beforePath, 'utf8') : '';
+      const after = existsSync(afterPath) ? readFileSync(afterPath, 'utf8') : '';
+      return { path, before, after, changed: before !== after };
+    });
+    return {
+      operation: 'batch',
+      changes,
+      patches,
+      fingerprint: hash(patches.map(({ path, before, after }) => ({ path, before, after }))),
+    };
+  } finally {
+    rmSync(shadow, { recursive: true, force: true });
+  }
+}
+
+/** Apply exactly one reviewed batch, rolling every changed file back on error. */
+export function applyModelingChanges(
+  projectRoot: string,
+  changes: ModelingAuthoringChange[],
+  expectedFingerprint: string,
+): ModelingChangesPreview {
+  const preview = previewModelingChanges(projectRoot, changes);
+  if (!expectedFingerprint || preview.fingerprint !== expectedFingerprint) {
+    throw new Error('Modeling source changed after the batch preview. Refresh the proposal before applying.');
+  }
+  const written: ModelingSourcePatch[] = [];
+  try {
+    for (const patch of preview.patches) {
+      if (!patch.changed) continue;
+      const absolute = safeProjectPath(projectRoot, patch.path);
+      if (!patch.after) rmSync(absolute, { force: true });
+      else {
+        mkdirSync(dirname(absolute), { recursive: true });
+        safeProjectPath(projectRoot, patch.path);
+        writeFileSync(absolute, patch.after, 'utf8');
+      }
+      written.push(patch);
+    }
+  } catch (error) {
+    for (const patch of written.reverse()) {
+      const absolute = safeProjectPath(projectRoot, patch.path);
+      if (!patch.before) rmSync(absolute, { force: true });
+      else {
+        mkdirSync(dirname(absolute), { recursive: true });
+        writeFileSync(absolute, patch.before, 'utf8');
+      }
+    }
+    throw error;
+  }
+  return preview;
 }
 
 export function applyModelingChange(
@@ -426,7 +514,7 @@ function previewEntity(projectRoot: string, value: EntityBindingAuthoringInput):
     ...(value.businessContext?.trim() ? { business_context: value.businessContext.trim() } : {}),
     ...(cleanStrings(value.conceptRefs).length > 0 ? { concept_refs: cleanStrings(value.conceptRefs) } : {}),
     ...(value.analyticalRole ? { analytical_role: value.analyticalRole } : {}),
-    ...(value.status ? { status: value.status } : {}),
+    ...(value.status ? { status: canonicalLifecycle(value.status) } : {}),
     ...(value.owner?.trim() ? { owner: value.owner.trim() } : {}),
     ...(value.grain ? { grain: value.grain } : {}),
     ...(cleanStrings(value.keys).length > 0 ? { keys: cleanStrings(value.keys) } : {}),
@@ -446,8 +534,8 @@ function previewRelationship(projectRoot: string, value: RelationshipAuthoringIn
     to: value.to,
     keys: value.keys.map((key) => ({ from: key.from, to: key.to })),
     cardinality: value.cardinality,
-    fanout: value.fanout,
-    status: value.status ?? 'draft',
+    fanout: canonicalFanout(value.fanout),
+    status: canonicalLifecycle(value.status),
     ...(value.crossDomain ? { crossDomain: true } : {}),
     ...(value.owner ? { owner: value.owner } : {}),
     ...(value.ownerDomain ? { owner_domain: value.ownerDomain } : {}),
@@ -484,7 +572,7 @@ function previewContract(projectRoot: string, value: ContractAuthoringInput): Mo
     id,
     entities: cleanStrings(value.entities),
     blocks: cleanStrings(value.blocks),
-    status: value.status ?? 'draft',
+    status: canonicalLifecycle(value.status),
     ...(value.owner ? { owner: value.owner } : {}),
     requiredEvaluation: value.requiredEvaluation !== false,
     version: value.version ?? 1,
@@ -515,7 +603,7 @@ function previewExport(projectRoot: string, value: DomainExportAuthoringInput): 
     consumer_domains: cleanStrings(value.consumerDomains),
     ...(value.classification ? { classification: value.classification } : {}),
     ...(value.contract ? { contract: value.contract } : {}),
-    status: value.status ?? 'draft',
+    status: canonicalLifecycle(value.status),
     ...(value.owner ? { owner: value.owner } : {}),
   };
   return upsertListPatch(projectRoot, modelingSourceFile(projectRoot, domain, 'interfaces.dql.yaml', 'exports', 'id', id), 'exports', 'id', exported);
@@ -529,7 +617,7 @@ function previewImport(projectRoot: string, value: DomainImportAuthoringInput): 
     id,
     export: exportRef,
     purpose: value.purpose,
-    status: value.status ?? 'draft',
+    status: canonicalLifecycle(value.status),
     ...(value.owner ? { owner: value.owner } : {}),
   };
   return upsertListPatch(projectRoot, modelingSourceFile(projectRoot, domain, 'interfaces.dql.yaml', 'imports', 'id', id), 'imports', 'id', imported);
@@ -743,6 +831,15 @@ function assertContainedPath(projectRoot: string, inputPath: string, label: stri
 
 function dumpYaml(value: unknown): string {
   return yaml.dump(value, { noRefs: true, lineWidth: -1, sortKeys: false, noCompatMode: true }).trimEnd() + '\n';
+}
+
+function canonicalLifecycle(value: ManifestModelLifecycle | undefined): Exclude<ManifestModelLifecycle, 'review'> {
+  if (value === 'review') return 'reviewed';
+  return value ?? 'draft';
+}
+
+function canonicalFanout(value: ManifestFanoutPolicy): Exclude<ManifestFanoutPolicy, 'unsafe'> {
+  return value === 'unsafe' ? 'forbidden' : value;
 }
 
 function readJson(path: string): UnknownRecord {

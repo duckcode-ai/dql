@@ -8,6 +8,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -121,6 +122,7 @@ import {
   type ManifestDomain,
   type DiffReport,
   previewModelingChange,
+  previewModelingChanges,
   applyModelingChange,
   previewDbtSourcePatch,
   applyDbtSourcePatch,
@@ -233,6 +235,10 @@ import {
   buildDomainSkillBootstrapPrompt,
   mergeDomainSkillBootstrapEnrichment,
   writeSkill,
+  previewSkillChange,
+  buildContextAuthoringProposal,
+  contextAuthoringDependencyClosure,
+  FileContextAuthoringProposalStore,
   deleteSkill,
   deriveGeneratedDraftSlug,
   deriveAnalyticalRepair,
@@ -241,6 +247,11 @@ import {
   type AnalyticalRepairRequestV1,
   type Skill,
   type WriteSkillInput,
+  type ContextAuthoringDiagnosticV1,
+  type ContextAuthoringOperation,
+  type ContextAuthoringOrigin,
+  type ContextAuthoringPatchV1,
+  type ContextAuthoringProposalV1,
   type AgentAnswer,
   type WarehouseSqlFailureV1,
   type CertifiedBlockInvocationInput,
@@ -3187,7 +3198,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       : isTerminalFailure
         ? terminalFailureActions
       : isGroundingGap
-        ? [{ id: 'research-gap', label: 'Research missing metadata coverage', route: 'research', artifactKind: 'research_run' }]
+        ? governedAnswer.refusalCode === 'modeling_gap'
+          ? [
+              { id: 'fix-modeling-gap', label: 'Fix with Modeling AI', route: 'modeling_draft', artifactKind: 'modeling_change_proposal' },
+              { id: 'research-gap', label: 'Research missing metadata coverage', route: 'research', artifactKind: 'research_run' },
+            ]
+          : [{ id: 'research-gap', label: 'Research missing metadata coverage', route: 'research', artifactKind: 'research_run' }]
       : [
           { id: 'create-block', label: governedAnswer.dqlArtifact ? 'Review DQL draft' : 'Create DQL draft', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
           { id: 'research-gap', label: 'Research deeper', route: 'research' },
@@ -3432,11 +3448,183 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     };
   };
 
+  const contextProposalStore = new FileContextAuthoringProposalStore(projectRoot);
+
+  const previewContextAuthoring = (input: {
+    origin: ContextAuthoringOrigin;
+    operations: ContextAuthoringOperation[];
+    expectedSnapshotId?: string;
+    sourceRunId?: string;
+    sourceArtifactId?: string;
+    revision?: number;
+    diagnostics?: ContextAuthoringDiagnosticV1[];
+  }): ContextAuthoringProposalV1 => {
+    const snapshot = projectSnapshot();
+    if (input.expectedSnapshotId && input.expectedSnapshotId !== snapshot.snapshotId) {
+      throw Object.assign(new Error('Project sources changed before the authoring proposal was previewed.'), { code: 'PROPOSAL_STALE' });
+    }
+    if (input.operations.length === 0) throw Object.assign(new Error('At least one authoring operation is required.'), { code: 'INVALID_REQUEST' });
+    const diagnostics: ContextAuthoringDiagnosticV1[] = [...(input.diagnostics ?? [])];
+    const operations = input.operations.map((operation): ContextAuthoringOperation => {
+      if (operation.kind === 'skill_change') {
+        const value = { ...operation.value };
+        value.status = 'draft';
+        if (value.sourceRefs?.some((reference) => !contextSourceReferenceExists(snapshot.manifest, reference))) {
+          diagnostics.push({ code: 'UNKNOWN_GOVERNED_REFERENCE', severity: 'blocking', operationId: operation.id, message: 'The Skill proposal references a model or relationship that is not present in the current snapshot.' });
+        }
+        return { ...operation, value };
+      }
+      if (operation.kind !== 'modeling_change') return operation;
+      if ((input.origin === 'ai' || input.origin === 'correction') && operation.change.operation.startsWith('remove_')) {
+        diagnostics.push({ code: 'AI_DELETE_FORBIDDEN', severity: 'blocking', operationId: operation.id, message: 'Modeling AI can create or update context, but it cannot delete governed source.' });
+      }
+      if (operation.change.operation === 'upsert_relationship') {
+        const current = operation.change.value;
+        if (current.crossDomain && (input.origin === 'ai' || input.origin === 'yaml_import')) {
+          diagnostics.push({ code: 'CROSS_DOMAIN_IMPORT_FORBIDDEN', severity: 'blocking', operationId: operation.id, message: 'Cross-domain relationships require the explicit export, contract, and import workflow.' });
+        }
+        if (input.origin === 'ai' || input.origin === 'correction' || input.origin === 'yaml_import') {
+          return {
+            ...operation,
+            change: {
+              ...operation.change,
+              value: {
+                ...current,
+                status: 'draft',
+                fanout: current.fanout === 'unsafe' ? 'forbidden' : current.fanout,
+                certifiedAgainst: undefined,
+                validation: undefined,
+              },
+            },
+          };
+        }
+      }
+      if (operation.change.operation === 'upsert_entity'
+        && (input.origin === 'ai' || input.origin === 'yaml_import' || input.origin === 'dbt_discovery')
+        && !operation.change.value.areaId) {
+        diagnostics.push({ code: 'MODEL_AREA_REQUIRED', severity: 'blocking', operationId: operation.id, message: 'Imported and AI-authored models must target one Model Area.' });
+      }
+      return operation;
+    });
+    const operationIds = new Set(operations.map((operation) => operation.id));
+    for (const operation of operations) {
+      for (const dependency of operation.dependsOn ?? []) {
+        if (!operationIds.has(dependency)) diagnostics.push({ code: 'DEPENDENCY_CONFLICT', severity: 'blocking', operationId: operation.id, message: `Required proposal operation is missing: ${dependency}` });
+      }
+    }
+
+    const patches: ContextAuthoringPatchV1[] = [];
+    const modelingOperations = operations.filter((operation): operation is Extract<ContextAuthoringOperation, { kind: 'modeling_change' }> => operation.kind === 'modeling_change');
+    if (modelingOperations.length > 0) {
+      const batch = previewModelingChanges(projectRoot, modelingOperations.map((operation) => operation.change));
+      for (const patch of batch.patches) {
+        const owner = modelingOperations.find((operation) => {
+          const single = previewModelingChange(projectRoot, operation.change);
+          return single.patches.some((candidate) => candidate.path === patch.path);
+        })?.id ?? modelingOperations[0]!.id;
+        patches.push({ ...patch, owner: 'dql', operationId: owner });
+      }
+    }
+    for (const operation of operations) {
+      if (operation.kind === 'skill_change') {
+        const preview = previewSkillChange(projectRoot, operation.value, operation.targetQualifiedId, operation.expectedSourceHash);
+        for (const patch of preview.patches) {
+          patches.push({
+            path: relative(projectRoot, patch.path).replace(/\\/g, '/'),
+            before: patch.before,
+            after: patch.after,
+            changed: patch.changed,
+            owner: 'dql',
+            operationId: operation.id,
+          });
+        }
+      } else if (operation.kind === 'dbt_source_change') {
+        const { dbtProjectDir, manifestPath } = onboardingDbtPaths({});
+        const preview = previewDbtSourcePatch(dbtProjectDir, manifestPath, operation.change);
+        patches.push({
+          path: relative(projectRoot, resolve(dbtProjectDir, preview.patch.path)).replace(/\\/g, '/'),
+          before: preview.patch.before,
+          after: preview.patch.after,
+          changed: preview.patch.changed,
+          owner: 'dbt',
+          operationId: operation.id,
+        });
+      }
+    }
+    const duplicatePaths = patches.map((patch) => patch.path).filter((path, index, values) => values.indexOf(path) !== index);
+    for (const path of [...new Set(duplicatePaths)]) diagnostics.push({ code: 'OWNERSHIP_CONFLICT', severity: 'blocking', message: `More than one proposal operation owns ${path}. Repreview after resolving the conflict.` });
+    const dependencyFingerprints = Object.fromEntries(patches.map((patch) => [
+      patch.path,
+      createHash('sha256').update(patch.before).digest('hex'),
+    ]));
+    const proposal = buildContextAuthoringProposal({
+      origin: input.origin,
+      baseSnapshotId: snapshot.snapshotId,
+      dependencyFingerprints,
+      operations,
+      patches,
+      diagnostics,
+      sourceRunId: input.sourceRunId,
+      sourceArtifactId: input.sourceArtifactId,
+      revision: input.revision,
+    });
+    contextProposalStore.save(proposal);
+    return proposal;
+  };
+
+  const modelingAuthoringRunExecutor: AgentRouteExecutor = async ({ runId, request }) => {
+    const snapshot = projectSnapshot();
+    const operations = buildMetadataBoundModelingOperations(projectRoot, snapshot.manifest, request);
+    const proposal = previewContextAuthoring({
+      origin: request.workspaceContext?.correction === true ? 'correction' : 'ai',
+      operations,
+      expectedSnapshotId: typeof request.workspaceContext?.snapshotId === 'string' ? request.workspaceContext.snapshotId : snapshot.snapshotId,
+      sourceRunId: runId,
+      revision: Number(request.workspaceContext?.revision ?? 1),
+    });
+    return {
+      summary: `Prepared ${proposal.impact.modelingChanges} metadata-bound modeling change${proposal.impact.modelingChanges === 1 ? '' : 's'} for review.`,
+      answer: proposal.diagnostics.some((item) => item.severity === 'blocking')
+        ? 'I prepared a modeling proposal, but the blocking items must be resolved before it can be saved.'
+        : 'I prepared an evidence-bound modeling proposal. Review the exact source diff before saving it as a draft.',
+      status: 'needs_review',
+      trustState: 'review_required',
+      stopReason: 'human_review_required',
+      artifacts: [{ id: `${runId}:modeling-proposal`, kind: 'modeling_change_proposal', title: 'Modeling change proposal', trustState: 'review_required', ref: proposal.id, payload: proposal }],
+      evaluations: proposal.diagnostics.map((diagnostic) => ({ id: `${proposal.id}:${diagnostic.code}`, label: diagnostic.code, passed: diagnostic.severity !== 'blocking', severity: diagnostic.severity, message: diagnostic.message })),
+      nextActions: [{ id: 'review-modeling-proposal', label: 'Review in Modeling', artifactKind: 'modeling_change_proposal' }],
+    };
+  };
+
+  const skillAuthoringRunExecutor: AgentRouteExecutor = async ({ runId, request }) => {
+    const snapshot = projectSnapshot();
+    const operations = buildMetadataBoundSkillOperations(projectRoot, snapshot.manifest, request);
+    const proposal = previewContextAuthoring({
+      origin: request.workspaceContext?.correction === true ? 'correction' : 'ai',
+      operations,
+      expectedSnapshotId: typeof request.workspaceContext?.snapshotId === 'string' ? request.workspaceContext.snapshotId : snapshot.snapshotId,
+      sourceRunId: runId,
+      revision: Number(request.workspaceContext?.revision ?? 1),
+    });
+    return {
+      summary: `Prepared ${proposal.impact.skillChanges} metadata-bound Skill change${proposal.impact.skillChanges === 1 ? '' : 's'} for review.`,
+      answer: 'I prepared a scope-qualified Skill draft. It will not guide an agent unless you save it and later activate it explicitly.',
+      status: 'needs_review',
+      trustState: 'review_required',
+      stopReason: 'human_review_required',
+      artifacts: [{ id: `${runId}:skill-proposal`, kind: 'skill_change_proposal', title: 'Skill change proposal', trustState: 'review_required', ref: proposal.id, payload: proposal }],
+      evaluations: proposal.diagnostics.map((diagnostic) => ({ id: `${proposal.id}:${diagnostic.code}`, label: diagnostic.code, passed: diagnostic.severity !== 'blocking', severity: diagnostic.severity, message: diagnostic.message })),
+      nextActions: [{ id: 'review-skill-proposal', label: 'Review Skill draft', artifactKind: 'skill_change_proposal' }],
+    };
+  };
+
   const agentRunExecutors: AgentRunExecutors = {
     conversation: conversationRunExecutor,
     certified_answer: answerRunExecutor,
     semantic_answer: answerRunExecutor,
     generated_answer: answerRunExecutor,
+    modeling_draft: modelingAuthoringRunExecutor,
+    skill_draft: skillAuthoringRunExecutor,
     research: async (researchContext) => {
       const { runId, request, routeDecision, emit } = researchContext;
       const metrics = loadSemanticMetrics(projectRoot);
@@ -5380,7 +5568,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   }): Promise<BoundedDqlRepairResult> => {
     const provider = await createBlockStudioAssistProvider(projectRoot);
     if (!provider) {
-      throw boundedRepairError('Configure an available AI provider in Settings to repair this DQL cell.', 409);
+      throw boundedRepairError('Configure an available AI provider in Settings to repair this DQL draft.', 409);
     }
 
     let schemaContext: AgentSchemaTable[];
@@ -5448,7 +5636,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       throw boundedRepairError('The AI repair did not return a complete DQL block.', 422);
     }
     if (repairedSource.length > 50_000) {
-      throw boundedRepairError('The repaired DQL exceeded the safe editable-cell size limit.', 422);
+      throw boundedRepairError('The repaired DQL exceeded the safe editable-draft size limit.', 422);
     }
     if (/^\s*@block\(/i.test(repairedSource) || /\btype\s*=\s*"semantic"/i.test(repairedSource)) {
       throw boundedRepairError('The repair changed this editable custom block into a governed reference or semantic block.', 422);
@@ -6486,6 +6674,26 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         });
         projectWatchers.push(watcher);
       } catch { /* dir not watchable */ }
+    }
+    // A dbt repository commonly keeps its shared Skills folder beside the DQL
+    // project (`../skills`). It is Git-owned context too, so watch the resolved
+    // configured root even when it is not the default projectRoot/skills path.
+    const configuredSkillsRoot = skillsDir(projectRoot);
+    const defaultSkillsRoot = join(projectRoot, 'skills');
+    if (existsSync(configuredSkillsRoot) && resolve(configuredSkillsRoot) !== resolve(defaultSkillsRoot)) {
+      try {
+        const watcher = watch(configuredSkillsRoot, { persistent: false, recursive: true }, (eventType, filename) => {
+          if (runtimeClosing || !filename) return;
+          const path = relative(projectRoot, join(configuredSkillsRoot, String(filename))).replace(/\\/g, '/');
+          invalidateAgentProjectState(projectRoot);
+          scheduleProjectRefresh(`skills:${path}`);
+          const payload = JSON.stringify({ type: eventType === 'rename' ? 'file-added' : 'file-changed', path });
+          for (const client of sseClients) {
+            try { client.write(`event: change\ndata: ${payload}\n\n`); } catch { sseClients.delete(client); }
+          }
+        });
+        projectWatchers.push(watcher);
+      } catch { /* configured Skills folder is not watchable */ }
     }
     const configuredDbtManifest = resolveDbtManifestPath(projectRoot, projectConfig);
     if (configuredDbtManifest && existsSync(dirname(configuredDbtManifest))) {
@@ -7805,6 +8013,209 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
+    if (req.method === 'POST' && path === '/api/modeling/dbt-first/imports') {
+      const requestId = apiRequestId('modeling-import');
+      try {
+        const body = await readJSON(req) as Record<string, unknown>;
+        const source = body.source && typeof body.source === 'object' ? body.source as Record<string, unknown> : body;
+        const session = createModelingImportSession(projectRoot, gitRoot, loopback, source);
+        res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, session: publicModelingImportSession(session) }));
+      } catch (error) {
+        const code = apiErrorCode(error, 'MODELING_IMPORT_INVALID');
+        res.writeHead(code === 'PATH_ACCESS_FORBIDDEN' ? 403 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, code, message: apiErrorMessage(error), nextActions: ['Choose DQL or dbt YAML from the current Git workspace, or paste/upload the YAML.'] })));
+      }
+      return;
+    }
+
+    const modelingImportMatch = path.match(/^\/api\/modeling\/dbt-first\/imports\/([^/]+)$/);
+    if (req.method === 'GET' && modelingImportMatch) {
+      const session = readModelingImportSession(projectRoot, decodeURIComponent(modelingImportMatch[1]!));
+      if (!session) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'Modeling import session not found.', code: 'MODELING_IMPORT_NOT_FOUND' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ session: publicModelingImportSession(session) }));
+      return;
+    }
+
+    const modelingImportPreviewMatch = path.match(/^\/api\/modeling\/dbt-first\/imports\/([^/]+)\/preview$/);
+    if (req.method === 'POST' && modelingImportPreviewMatch) {
+      const requestId = apiRequestId('modeling-import-preview');
+      try {
+        const session = readModelingImportSession(projectRoot, decodeURIComponent(modelingImportPreviewMatch[1]!));
+        if (!session) throw Object.assign(new Error('Modeling import session not found.'), { code: 'MODELING_IMPORT_NOT_FOUND' });
+        const body = await readJSON(req) as Record<string, unknown>;
+        const snapshot = projectSnapshot();
+        const selectedCandidateIds = Array.isArray(body.selectedCandidateIds)
+          ? body.selectedCandidateIds.filter((value): value is string => typeof value === 'string')
+          : session.candidates.filter((candidate) => candidate.dialect !== 'unsupported' && candidate.action !== 'open_existing').map((candidate) => candidate.id);
+        const domain = typeof body.domain === 'string' ? body.domain.trim() : '';
+        const areaId = typeof body.areaId === 'string' ? body.areaId.trim() : '';
+        if (!domain || !areaId) throw Object.assign(new Error('Choose exactly one Domain and Model Area for imported models.'), { code: 'MODEL_SCOPE_REQUIRED' });
+        const planned = modelingImportOperations(session, selectedCandidateIds, domain, areaId, snapshot.manifest);
+        const proposal = previewContextAuthoring({
+          origin: 'yaml_import',
+          operations: planned.operations,
+          expectedSnapshotId: typeof body.expectedSnapshotId === 'string' ? body.expectedSnapshotId : snapshot.snapshotId,
+          diagnostics: planned.diagnostics,
+        });
+        const updated = { ...session, proposalId: proposal.id, updatedAt: new Date().toISOString() };
+        writeModelingImportSession(projectRoot, updated);
+        res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, session: publicModelingImportSession(updated), proposal }));
+      } catch (error) {
+        const code = apiErrorCode(error, 'MODELING_IMPORT_PREVIEW_FAILED');
+        res.writeHead(code === 'MODELING_IMPORT_NOT_FOUND' ? 404 : code === 'PROPOSAL_STALE' ? 409 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, code, message: apiErrorMessage(error), nextActions: ['Resolve unmatched models or choose another Domain and Area, then preview again.'] })));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/context-proposals') {
+      const requestId = apiRequestId('context-proposal');
+      try {
+        const body = await readJSON(req) as Record<string, unknown>;
+        const origin = parseContextAuthoringOrigin(body.origin);
+        const operations = parseContextAuthoringOperations(body.operations);
+        const proposal = previewContextAuthoring({
+          origin,
+          operations,
+          expectedSnapshotId: typeof body.expectedSnapshotId === 'string' ? body.expectedSnapshotId : undefined,
+          sourceRunId: typeof body.sourceRunId === 'string' ? body.sourceRunId : undefined,
+          sourceArtifactId: typeof body.sourceArtifactId === 'string' ? body.sourceArtifactId : undefined,
+          revision: typeof body.revision === 'number' ? body.revision : undefined,
+        });
+        res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, proposal }));
+      } catch (error) {
+        const code = apiErrorCode(error, 'PROPOSAL_INVALID');
+        res.writeHead(code === 'PROPOSAL_STALE' ? 409 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, code, message: apiErrorMessage(error), nextActions: ['Refresh Modeling and preview the proposal again.'] })));
+      }
+      return;
+    }
+
+    const contextProposalMatch = path.match(/^\/api\/context-proposals\/([^/]+)$/);
+    if (req.method === 'GET' && contextProposalMatch) {
+      const id = decodeURIComponent(contextProposalMatch[1]!);
+      const proposal = contextProposalStore.get(id);
+      if (!proposal) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: 'Context proposal not found.', code: 'PROPOSAL_NOT_FOUND' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ proposal }));
+      return;
+    }
+
+    const contextRepreviewMatch = path.match(/^\/api\/context-proposals\/([^/]+)\/repreview$/);
+    if (req.method === 'POST' && contextRepreviewMatch) {
+      const requestId = apiRequestId('context-repreview');
+      try {
+        const current = contextProposalStore.get(decodeURIComponent(contextRepreviewMatch[1]!));
+        if (!current) throw Object.assign(new Error('Context proposal not found.'), { code: 'PROPOSAL_NOT_FOUND' });
+        const body = await readJSON(req) as { selectedOperationIds?: unknown; rebase?: unknown };
+        const selected = Array.isArray(body.selectedOperationIds)
+          ? body.selectedOperationIds.filter((value): value is string => typeof value === 'string')
+          : current.operations.map((operation) => operation.id);
+        const operations = contextAuthoringDependencyClosure(current.operations, selected);
+        const proposal = previewContextAuthoring({
+          origin: current.origin,
+          operations,
+          expectedSnapshotId: body.rebase === true ? projectSnapshot().snapshotId : current.baseSnapshotId,
+          sourceRunId: current.sourceRunId,
+          sourceArtifactId: current.sourceArtifactId,
+          revision: (current.revision ?? 1) + 1,
+        });
+        res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ requestId, proposal }));
+      } catch (error) {
+        const code = apiErrorCode(error, 'PROPOSAL_INVALID');
+        res.writeHead(code === 'PROPOSAL_STALE' ? 409 : code === 'PROPOSAL_NOT_FOUND' ? 404 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, code, message: apiErrorMessage(error), nextActions: ['Refresh the proposal against the latest project snapshot.'] })));
+      }
+      return;
+    }
+
+    const contextCommitMatch = path.match(/^\/api\/context-proposals\/([^/]+)\/commit$/);
+    if (req.method === 'POST' && contextCommitMatch) {
+      const requestId = apiRequestId('context-commit');
+      const proposalId = decodeURIComponent(contextCommitMatch[1]!);
+      try {
+        const proposal = contextProposalStore.get(proposalId);
+        if (!proposal) throw Object.assign(new Error('Context proposal not found.'), { code: 'PROPOSAL_NOT_FOUND' });
+        const body = await readJSON(req) as Record<string, unknown>;
+        const unexpected = Object.keys(body).filter((key) => key !== 'expectedProposalHash' && key !== 'idempotencyKey');
+        if (unexpected.length) throw Object.assign(new Error('Commit accepts only expectedProposalHash and idempotencyKey.'), { code: 'INVALID_REQUEST' });
+        const expectedProposalHash = typeof body.expectedProposalHash === 'string' ? body.expectedProposalHash : '';
+        const idempotencyKey = typeof body.idempotencyKey === 'string' ? body.idempotencyKey.trim() : '';
+        if (!expectedProposalHash || !idempotencyKey) throw Object.assign(new Error('The reviewed proposal hash and idempotency key are required.'), { code: 'INVALID_REQUEST' });
+        const receipt = contextProposalStore.getCommitReceipt(idempotencyKey);
+        if (receipt) {
+          if (receipt.proposalId !== proposal.id || receipt.proposalHash !== expectedProposalHash) throw Object.assign(new Error('The idempotency key belongs to another reviewed proposal request.'), { code: 'IDEMPOTENCY_CONFLICT' });
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ requestId, proposal: contextProposalStore.get(proposal.id), snapshotId: receipt.snapshotId, idempotent: true }));
+          return;
+        }
+        if (proposal.status !== 'proposed') throw Object.assign(new Error('Only a proposed change can be committed.'), { code: 'PROPOSAL_STALE' });
+        if (proposal.proposalHash !== expectedProposalHash) throw Object.assign(new Error('The proposal changed after review.'), { code: 'PROPOSAL_STALE' });
+        if (proposal.diagnostics.some((diagnostic) => diagnostic.severity === 'blocking')) throw Object.assign(new Error('Resolve all blocking proposal diagnostics before saving.'), { code: 'PROPOSAL_BLOCKED' });
+        const beforeSnapshot = projectSnapshot();
+        if (beforeSnapshot.snapshotId !== proposal.baseSnapshotId) throw Object.assign(new Error('Project sources changed after this proposal was reviewed.'), { code: 'PROPOSAL_STALE' });
+        const resolvedPatches = proposal.patches.map((patch) => ({ patch, absolute: resolveContextPatchPath(projectRoot, gitRoot, patch.path) }));
+        for (const { patch, absolute } of resolvedPatches) {
+          const current = existsSync(absolute) ? readFileSync(absolute, 'utf8') : '';
+          if (current !== patch.before) throw Object.assign(new Error(`Source changed after preview: ${patch.path}`), { code: 'SOURCE_CHANGED' });
+        }
+        const written: Array<{ patch: ContextAuthoringPatchV1; absolute: string }> = [];
+        try {
+          for (const item of resolvedPatches) {
+            if (!item.patch.changed) continue;
+            if (!item.patch.after) rmSync(item.absolute, { force: true });
+            else {
+              mkdirSync(dirname(item.absolute), { recursive: true });
+              writeFileSync(item.absolute, item.patch.after, 'utf8');
+            }
+            written.push(item);
+          }
+          projectSnapshots.invalidate();
+          invalidateAgentProjectState(projectRoot);
+          const nextSnapshot = projectSnapshot();
+          if (nextSnapshot.error) throw Object.assign(new Error(nextSnapshot.error), { code: 'COMPILE_FAILED' });
+          await refreshUnifiedProjectIndexes(projectRoot);
+          const committed: ContextAuthoringProposalV1 = { ...proposal, status: 'committed', committedAt: new Date().toISOString(), committedSnapshotId: nextSnapshot.snapshotId };
+          contextProposalStore.save(committed);
+          contextProposalStore.saveCommitReceipt(idempotencyKey, { proposalId: proposal.id, proposalHash: proposal.proposalHash, snapshotId: nextSnapshot.snapshotId });
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ requestId, proposal: committed, snapshotId: nextSnapshot.snapshotId, modeling: nextSnapshot.manifest.modeling }));
+        } catch (error) {
+          for (const { patch, absolute } of written.reverse()) {
+            if (!patch.before) rmSync(absolute, { force: true });
+            else {
+              mkdirSync(dirname(absolute), { recursive: true });
+              writeFileSync(absolute, patch.before, 'utf8');
+            }
+          }
+          projectSnapshots.invalidate();
+          invalidateAgentProjectState(projectRoot);
+          contextProposalStore.save(proposal);
+          contextProposalStore.deleteCommitReceipt(idempotencyKey);
+          throw error;
+        }
+      } catch (error) {
+        const code = apiErrorCode(error, /changed after/i.test(apiErrorMessage(error)) ? 'SOURCE_CHANGED' : 'PROPOSAL_COMMIT_FAILED');
+        const status = code === 'PROPOSAL_NOT_FOUND' ? 404 : ['PROPOSAL_STALE', 'SOURCE_CHANGED', 'IDEMPOTENCY_CONFLICT', 'OWNERSHIP_CONFLICT', 'DEPENDENCY_CONFLICT'].includes(code) ? 409 : code === 'PROPOSAL_BLOCKED' ? 422 : 400;
+        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(apiErrorEnvelope({ requestId, code, message: apiErrorMessage(error), nextActions: ['Rebase or repreview the proposal before saving.'] })));
+      }
+      return;
+    }
+
     if (req.method === 'POST' && path === '/api/modeling/dbt-first/dbt-source/preview') {
       const requestId = apiRequestId('modeling-dbt-source-preview');
       const snapshot = projectSnapshot();
@@ -8844,14 +9255,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const metrics = semanticLayer
           ? semanticLayer.listMetrics(undefined, { includeMeasures: false }).map((m) => m.name).filter(matches).sort().slice(0, limit)
           : [];
-        const manifest = buildManifest({ projectRoot, dqlVersion: 'notebook' });
+        const manifest = buildManifest({
+          projectRoot,
+          dqlVersion: 'notebook',
+          dbtManifestPath: resolveDbtManifestPath(projectRoot) ?? undefined,
+        });
         const blocks = Object.values(manifest.blocks)
           .filter((b) => b.status === 'certified')
           .map((b) => b.name)
           .filter(matches)
           .sort();
+        const modelingRefs = [
+          ...Object.values(manifest.modeling?.entities ?? {}).map((entity) => entity.qualifiedId),
+          ...Object.values(manifest.modeling?.relationships ?? {}).map((relationship) => relationship.qualifiedId),
+        ].filter(matches).sort();
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ metrics, blocks: blocks.slice(0, limit) }));
+        res.end(serializeJSON({ metrics, blocks: blocks.slice(0, limit), modelingRefs: modelingRefs.slice(0, limit) }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
@@ -8869,6 +9288,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           return;
         }
         const skill = writeSkill(projectRoot, input);
+        projectSnapshots.invalidate();
+        invalidateAgentProjectState(projectRoot);
+        await refreshUnifiedProjectIndexes(projectRoot);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ skill: serializeSkill(skill) }));
       } catch (error) {
@@ -8888,7 +9310,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'Provide { skill } with scope and body.' }));
           return;
         }
-        const skill = writeSkill(projectRoot, input);
+        const skill = writeSkill(projectRoot, { ...input, qualifiedId: id });
+        projectSnapshots.invalidate();
+        invalidateAgentProjectState(projectRoot);
+        await refreshUnifiedProjectIndexes(projectRoot);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ skill: serializeSkill(skill) }));
       } catch (error) {
@@ -8902,6 +9327,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       try {
         const id = decodeURIComponent(path.slice('/api/skills/'.length));
         deleteSkill(projectRoot, id);
+        projectSnapshots.invalidate();
+        invalidateAgentProjectState(projectRoot);
+        await refreshUnifiedProjectIndexes(projectRoot);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: true }));
       } catch (error) {
@@ -13455,6 +13883,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'Block name is required.' }));
           return;
         }
+        const validation = validateBlockStudioSource(source, semanticLayer);
+        if (!blockStudioValidationAllowsDraftSave(validation)) {
+          const errors = validation.diagnostics.filter((diagnostic) =>
+            diagnostic.severity === 'error'
+            && !BLOCK_STUDIO_DRAFT_RUNTIME_DIAGNOSTICS.has(diagnostic.code ?? ''),
+          );
+          res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({
+            error: errors[0]?.message ?? 'Fix the block errors before saving.',
+            code: 'BLOCK_VALIDATION_FAILED',
+            recoverable: true,
+            details: { validation: { ...validation, saveable: false } },
+            nextActions: ['Edit the DQL source', 'Fix with AI and run'],
+          }));
+          return;
+        }
         const currentPath = typeof body.path === 'string' ? body.path : undefined;
         const saveOptions = {
           currentPath,
@@ -15299,11 +15743,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
 
     /**
-     * Repair an editable notebook cell without starting Notebook AI research.
-     * The returned source is applied only to the in-memory notebook cell by the
-     * client; this endpoint never writes a block/domain/dbt source file.
+     * Repair an editable notebook cell or Block Studio draft without starting
+     * an AI conversation. The returned source is applied only to the in-memory
+     * editor by the client; this endpoint never writes governed source files.
      */
-    if (req.method === 'POST' && path === '/api/notebook/repair-execution') {
+    if (req.method === 'POST' && (
+      path === '/api/notebook/repair-execution'
+      || path === '/api/block-studio/repair-and-run'
+    )) {
       let body: Record<string, unknown> = {};
       let execContext: NotebookExecutionContextInput | null = null;
       const start = Date.now();
@@ -17451,6 +17898,7 @@ function serializeSkill(skill: Skill): {
   clarifyWhen?: string[];
   examples?: string[];
   sourceRefs?: string[];
+  analyticalPolicy?: Skill['analyticalPolicy'];
   vocabulary: Record<string, string>;
   sourcePath: string;
   isStarter?: boolean;
@@ -17478,6 +17926,7 @@ function serializeSkill(skill: Skill): {
     clarifyWhen: skill.clarifyWhen,
     examples: skill.examples,
     sourceRefs: skill.sourceRefs,
+    analyticalPolicy: skill.analyticalPolicy,
     vocabulary: skill.vocabulary,
     sourcePath: skill.sourcePath,
     isStarter: skill.isStarter,
@@ -17529,7 +17978,25 @@ function parseSkillInput(raw: unknown, fallbackId?: string): WriteSkillInput | n
     examples: asStrings(skill.examples),
     sourceRefs: asStrings(skill.sourceRefs),
     vocabulary: asMap(skill.vocabulary),
+    analyticalPolicy: parseSkillAnalyticalPolicyInput(skill.analyticalPolicy),
     isStarter: skill.isStarter === true ? true : undefined,
+  };
+}
+
+function parseSkillAnalyticalPolicyInput(value: unknown): WriteSkillInput['analyticalPolicy'] {
+  const policy = contextRecord(value);
+  if (!Object.keys(policy).length) return undefined;
+  const strings = (input: unknown): string[] => Array.isArray(input) ? input.filter((item): item is string => typeof item === 'string') : [];
+  const pick = (input: unknown): string | undefined => typeof input === 'string' && input.trim() ? input.trim() : undefined;
+  return {
+    metricIds: strings(policy.metricIds ?? policy.metric_ids),
+    timeRole: pick(policy.timeRole ?? policy.time_role),
+    calendarId: pick(policy.calendarId ?? policy.calendar_id),
+    timezone: pick(policy.timezone),
+    completenessPolicy: ['partial_current', 'latest_complete', 'closed_period'].includes(String(policy.completenessPolicy ?? policy.completeness_policy)) ? String(policy.completenessPolicy ?? policy.completeness_policy) as NonNullable<WriteSkillInput['analyticalPolicy']>['completenessPolicy'] : undefined,
+    comparisonAlignment: ['elapsed_period', 'calendar_period', 'fiscal_period'].includes(String(policy.comparisonAlignment ?? policy.comparison_alignment)) ? String(policy.comparisonAlignment ?? policy.comparison_alignment) as NonNullable<WriteSkillInput['analyticalPolicy']>['comparisonAlignment'] : undefined,
+    defaultRankingPeriod: ['current', 'comparison'].includes(String(policy.defaultRankingPeriod ?? policy.default_ranking_period)) ? String(policy.defaultRankingPeriod ?? policy.default_ranking_period) as NonNullable<WriteSkillInput['analyticalPolicy']>['defaultRankingPeriod'] : undefined,
+    narrativeGuidance: strings(policy.narrativeGuidance ?? policy.narrative_guidance),
   };
 }
 
@@ -17727,6 +18194,579 @@ export function parseDomainInput(raw: unknown, fallbackId?: string): DomainInput
 }
 
 // ── Domain / skill bootstrap sessions (local-only; never tracked) ────────────
+
+type ModelingYamlDialect = 'dql_modeling' | 'dbt_resource' | 'dbt_semantic' | 'unsupported';
+
+interface ModelingImportCandidate {
+  id: string;
+  name: string;
+  path?: string;
+  dialect: ModelingYamlDialect;
+  action: 'import' | 'open_existing' | 'unsupported';
+  summary: string;
+  warnings: string[];
+  document?: Record<string, unknown>;
+}
+
+interface ModelingImportSession {
+  version: 1;
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  source: { mode: 'current_project' | 'path' | 'upload' | 'paste'; label: string };
+  candidates: ModelingImportCandidate[];
+  proposalId?: string;
+}
+
+function modelingImportDirectory(projectRoot: string): string {
+  return join(projectRoot, '.dql', 'local', 'modeling-imports');
+}
+
+function modelingImportSessionPath(projectRoot: string, id: string): string {
+  const safe = id.replace(/[^a-zA-Z0-9_-]/g, '');
+  if (!safe || safe !== id) throw new Error('Invalid modeling import id.');
+  return join(modelingImportDirectory(projectRoot), `${safe}.json`);
+}
+
+function writeModelingImportSession(projectRoot: string, session: ModelingImportSession): void {
+  mkdirSync(modelingImportDirectory(projectRoot), { recursive: true });
+  writeFileSync(modelingImportSessionPath(projectRoot, session.id), `${JSON.stringify(session, null, 2)}\n`, 'utf8');
+}
+
+function readModelingImportSession(projectRoot: string, id: string): ModelingImportSession | null {
+  const path = modelingImportSessionPath(projectRoot, id);
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as ModelingImportSession;
+    return parsed.version === 1 && parsed.id === id ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function publicModelingImportSession(session: ModelingImportSession): ModelingImportSession {
+  return {
+    ...session,
+    candidates: session.candidates.map(({ document: _document, ...candidate }) => candidate),
+  };
+}
+
+function createModelingImportSession(
+  projectRoot: string,
+  gitRoot: string | null,
+  loopback: boolean,
+  source: Record<string, unknown>,
+): ModelingImportSession {
+  const mode = source.mode;
+  if (mode !== 'current_project' && mode !== 'path' && mode !== 'upload' && mode !== 'paste') throw Object.assign(new Error('Choose current_project, path, upload, or paste.'), { code: 'INVALID_REQUEST' });
+  const files: Array<{ name: string; path?: string; content: string; inProject: boolean }> = [];
+  if (mode === 'paste' || mode === 'upload') {
+    const content = typeof source.content === 'string' ? source.content : '';
+    if (!content.trim() || Buffer.byteLength(content) > 1_000_000) throw Object.assign(new Error('YAML content is required and must be 1 MB or smaller.'), { code: 'MODELING_IMPORT_LIMIT' });
+    files.push({ name: typeof source.filename === 'string' ? source.filename : mode === 'paste' ? 'pasted-modeling.yaml' : 'uploaded-modeling.yaml', content, inProject: false });
+  } else {
+    if (mode === 'path' && !loopback) throw Object.assign(new Error('Local path import is available only on the loopback Notebook runtime.'), { code: 'PATH_ACCESS_FORBIDDEN' });
+    const allowedRoot = realpathSync(resolve(gitRoot ?? projectRoot));
+    const requestedInput = mode === 'current_project'
+      ? resolve(projectRoot)
+      : resolve(projectRoot, typeof source.path === 'string' ? source.path : '');
+    if (!existsSync(requestedInput)) throw Object.assign(new Error('The selected YAML path does not exist.'), { code: 'MODELING_IMPORT_NOT_FOUND' });
+    const requested = realpathSync(requestedInput);
+    if (requested !== allowedRoot && !requested.startsWith(`${allowedRoot}${sep}`)) throw Object.assign(new Error('Import path must stay inside the current Git workspace.'), { code: 'PATH_ACCESS_FORBIDDEN' });
+    const paths = collectModelingYamlPaths(requested, 100);
+    for (const path of paths) {
+      const size = statSync(path).size;
+      if (size > 1_000_000) continue;
+      const resolvedPath = realpathSync(path);
+      if (resolvedPath !== allowedRoot && !resolvedPath.startsWith(`${allowedRoot}${sep}`)) continue;
+      const resolvedProject = realpathSync(projectRoot);
+      files.push({ name: relative(requested, resolvedPath).replace(/\\/g, '/') || resolvedPath.split(sep).at(-1)!, path: relative(resolvedProject, resolvedPath).replace(/\\/g, '/'), content: readFileSync(resolvedPath, 'utf8'), inProject: resolvedPath === resolvedProject || resolvedPath.startsWith(`${resolvedProject}${sep}`) });
+    }
+  }
+  if (files.length === 0) throw Object.assign(new Error('No YAML files were found in the selected source.'), { code: 'MODELING_IMPORT_EMPTY' });
+  const candidates = files.map((file, index) => classifyModelingYamlCandidate(file, index));
+  const now = new Date().toISOString();
+  const session: ModelingImportSession = {
+    version: 1,
+    id: apiRequestId('import'),
+    createdAt: now,
+    updatedAt: now,
+    source: { mode, label: mode === 'path' ? String(source.path ?? '') : mode === 'current_project' ? 'Current project' : files[0]!.name },
+    candidates,
+  };
+  writeModelingImportSession(projectRoot, session);
+  return session;
+}
+
+function collectModelingYamlPaths(start: string, limit: number): string[] {
+  if (!existsSync(start)) throw Object.assign(new Error('The selected YAML path does not exist.'), { code: 'MODELING_IMPORT_NOT_FOUND' });
+  if (statSync(start).isFile()) return /\.ya?ml$/i.test(start) ? [start] : [];
+  const output: string[] = [];
+  const visit = (directory: string): void => {
+    if (output.length >= limit) return;
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (output.length >= limit) return;
+      if (entry.name.startsWith('.') || ['node_modules', 'target', 'dist', 'build'].includes(entry.name)) continue;
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.isFile() && /\.ya?ml$/i.test(entry.name)) output.push(path);
+    }
+  };
+  visit(start);
+  return output.sort();
+}
+
+function classifyModelingYamlCandidate(
+  file: { name: string; path?: string; content: string; inProject: boolean },
+  index: number,
+): ModelingImportCandidate {
+  let document: Record<string, unknown> = {};
+  try {
+    const parsed = loadYaml(file.content);
+    document = contextRecord(parsed);
+  } catch (error) {
+    return { id: `file-${index + 1}`, name: file.name, path: file.path, dialect: 'unsupported', action: 'unsupported', summary: 'Malformed YAML', warnings: [error instanceof Error ? error.message : String(error)] };
+  }
+  const keys = new Set(Object.keys(document));
+  const dialect: ModelingYamlDialect = keys.has('entities') || keys.has('relationships') || keys.has('area') || keys.has('domain')
+    ? 'dql_modeling'
+    : keys.has('semantic_models') || keys.has('metrics')
+      ? 'dbt_semantic'
+      : keys.has('models') || keys.has('sources')
+        ? 'dbt_resource'
+        : 'unsupported';
+  const objectCount = ['entities', 'relationships', 'models', 'sources', 'semantic_models', 'metrics']
+    .reduce((total, key) => total + (Array.isArray(document[key]) ? (document[key] as unknown[]).length : 0), 0);
+  const openExisting = file.inProject && dialect === 'dql_modeling' && Boolean(file.path?.startsWith('domains/'));
+  return {
+    id: `file-${index + 1}`,
+    name: file.name,
+    path: file.path,
+    dialect,
+    action: dialect === 'unsupported' ? 'unsupported' : openExisting ? 'open_existing' : 'import',
+    summary: dialect === 'unsupported' ? 'Unsupported generic YAML' : `${objectCount || 1} ${dialect.replace('_', ' ')} candidate${objectCount === 1 ? '' : 's'}`,
+    warnings: dialect === 'unsupported' ? ['v1 supports DQL modeling, dbt resource, and dbt semantic YAML only.'] : openExisting ? ['This is already governed by the current project and should be opened in place.'] : [],
+    document,
+  };
+}
+
+function modelingImportOperations(
+  session: ModelingImportSession,
+  selectedIds: string[],
+  domain: string,
+  areaId: string,
+  manifest: DQLManifest,
+): { operations: ContextAuthoringOperation[]; diagnostics: ContextAuthoringDiagnosticV1[] } {
+  const diagnostics: ContextAuthoringDiagnosticV1[] = [];
+  const operations: ContextAuthoringOperation[] = [];
+  const selected = session.candidates.filter((candidate) => selectedIds.includes(candidate.id));
+  if (!selected.length) throw Object.assign(new Error('Select at least one supported YAML candidate.'), { code: 'MODELING_IMPORT_EMPTY' });
+  const packageExists = Boolean(manifest.modeling?.packages?.[domain]);
+  const area = Object.values(manifest.modeling?.areas ?? {}).find((item) => item.domain === domain && (item.localId === areaId || item.qualifiedId === areaId));
+  if (!packageExists) diagnostics.push({ code: 'DOMAIN_NOT_FOUND', severity: 'blocking', message: `Domain not found: ${domain}` });
+  if (!area) diagnostics.push({ code: 'MODEL_AREA_NOT_FOUND', severity: 'blocking', message: `Model Area not found in ${domain}: ${areaId}` });
+  const nodes = Object.values(manifest.dbtProvenance?.nodes ?? {});
+  const resolveDbt = (reference: string, operationId: string): string | undefined => {
+    const cleaned = reference.replace(/^ref\(['"]|['"]\)$/g, '').replace(/^model\./, '');
+    const matches = nodes.filter((node) => node.uniqueId === reference || node.name === reference || node.name === cleaned || node.uniqueId.endsWith(`.${cleaned}`));
+    if (matches.length !== 1) diagnostics.push({ code: matches.length ? 'AMBIGUOUS_DBT_MODEL' : 'DBT_MODEL_NOT_FOUND', severity: 'blocking', operationId, message: `${reference} ${matches.length ? 'matches multiple dbt models' : 'was not found in the active dbt manifest'}.` });
+    return matches.length === 1 ? matches[0]!.uniqueId : undefined;
+  };
+  const used = new Set(Object.values(manifest.modeling?.entities ?? {}).filter((entity) => entity.domain === domain).map((entity) => entity.localId));
+  const allocate = (value: string): string => {
+    const base = authoringSlug(value).replace(/-/g, '_') || 'model';
+    let id = base;
+    let suffix = 2;
+    while (used.has(id)) id = `${base}_${suffix++}`;
+    used.add(id);
+    return id;
+  };
+  for (const candidate of selected) {
+    if (candidate.action === 'open_existing') {
+      diagnostics.push({ code: 'OPEN_EXISTING_SOURCE', severity: 'info', message: `${candidate.path ?? candidate.name} is already in the current Domain Package and was not copied.` });
+      continue;
+    }
+    if (candidate.dialect === 'unsupported' || !candidate.document) {
+      diagnostics.push({ code: 'UNSUPPORTED_YAML', severity: 'blocking', message: `${candidate.name} is not DQL or dbt modeling YAML.` });
+      continue;
+    }
+    const document = candidate.document;
+    if (candidate.dialect === 'dql_modeling') {
+      const importedEntities = new Map<string, { id: string; operationId: string }>();
+      for (const [index, raw] of contextArray(document.entities).entries()) {
+        const entity = contextRecord(raw);
+        const operationId = `${candidate.id}:entity:${index + 1}`;
+        const dbtModel = resolveDbt(String(entity.dbt_model ?? entity.dbtModel ?? ''), operationId);
+        if (!dbtModel) continue;
+        const sourceId = String(entity.id ?? nodes.find((node) => node.uniqueId === dbtModel)?.name ?? `model_${index + 1}`);
+        const id = allocate(sourceId);
+        importedEntities.set(sourceId, { id, operationId });
+        importedEntities.set(String(entity.qualified_id ?? entity.qualifiedId ?? ''), { id, operationId });
+        importedEntities.set(dbtModel, { id, operationId });
+        operations.push({ id: operationId, kind: 'modeling_change', evidence: [candidate.path ?? candidate.name, dbtModel], change: { operation: 'upsert_entity', value: { id, domain, areaId: area?.localId ?? areaId, dbtModel, businessName: typeof entity.business_name === 'string' ? entity.business_name : undefined, businessContext: typeof entity.business_context === 'string' ? entity.business_context : undefined, conceptRefs: contextStrings(entity.concept_refs), analyticalRole: parseImportedAnalyticalRole(entity.analytical_role), status: 'draft', owner: typeof entity.owner === 'string' ? entity.owner : undefined, grain: typeof entity.grain === 'string' ? entity.grain : undefined, keys: contextStrings(entity.keys) } } });
+      }
+      for (const [index, raw] of contextArray(document.relationships).entries()) {
+        const relationship = contextRecord(raw);
+        const operationId = `${candidate.id}:relationship:${index + 1}`;
+        const keys = contextArray(relationship.keys).flatMap((value) => {
+          const key = contextRecord(value);
+          return typeof key.from === 'string' && typeof key.to === 'string' ? [{ from: key.from, to: key.to }] : [];
+        });
+        if (!relationship.from || !relationship.to || !keys.length) {
+          diagnostics.push({ code: 'RELATIONSHIP_INCOMPLETE', severity: 'blocking', operationId, message: 'Imported relationship requires from, to, and at least one key pair.' });
+          continue;
+        }
+        const resolveEndpoint = (rawRef: unknown): { id?: string; dependency?: string } => {
+          const ref = String(rawRef);
+          const imported = importedEntities.get(ref);
+          if (imported) return { id: imported.id, dependency: imported.operationId };
+          const matches = Object.values(manifest.modeling?.entities ?? {}).filter((entity) => entity.domain === domain && (entity.localId === ref || entity.id === ref || entity.qualifiedId === ref));
+          return matches.length === 1 ? { id: matches[0]!.localId } : {};
+        };
+        const from = resolveEndpoint(relationship.from);
+        const to = resolveEndpoint(relationship.to);
+        if (!from.id || !to.id) {
+          diagnostics.push({ code: 'RELATIONSHIP_REFERENCE_UNRESOLVED', severity: 'blocking', operationId, message: `Relationship endpoints must resolve inside ${domain}; simple import cannot create cross-domain relationships.` });
+          continue;
+        }
+        operations.push({ id: operationId, kind: 'modeling_change', dependsOn: [...new Set([from.dependency, to.dependency].filter((value): value is string => Boolean(value)))], evidence: [candidate.path ?? candidate.name], change: { operation: 'upsert_relationship', value: { id: String(relationship.id ?? `${relationship.from}_to_${relationship.to}`), domain, areaId: area?.localId ?? areaId, from: from.id, to: to.id, keys, cardinality: parseImportedCardinality(relationship.cardinality), fanout: parseImportedFanout(relationship.fanout), status: 'draft', description: typeof relationship.description === 'string' ? relationship.description : undefined, rationale: 'Imported as a draft; certification and warehouse proof were intentionally removed.' } } });
+      }
+    } else {
+      const modelRecords = candidate.dialect === 'dbt_resource'
+        ? contextArray(document.models)
+        : contextArray(document.semantic_models);
+      for (const [index, raw] of modelRecords.entries()) {
+        const model = contextRecord(raw);
+        const operationId = `${candidate.id}:model:${index + 1}`;
+        const reference = String(model.model ?? model.name ?? '');
+        const dbtModel = resolveDbt(reference, operationId);
+        if (!dbtModel) continue;
+        const existing = Object.values(manifest.modeling?.entities ?? {}).find((entity) => entity.dbtUniqueId === dbtModel);
+        if (existing && existing.domain !== domain) {
+          diagnostics.push({ code: 'OWNERSHIP_CONFLICT', severity: 'blocking', operationId, message: `${dbtModel} is already owned by ${existing.domain}; import cannot move it implicitly.` });
+          continue;
+        }
+        const id = existing?.localId ?? allocate(String(model.name ?? nodes.find((node) => node.uniqueId === dbtModel)?.name ?? `model_${index + 1}`));
+        operations.push({ id: operationId, kind: 'modeling_change', evidence: [candidate.path ?? candidate.name, dbtModel], change: { operation: 'upsert_entity', value: { id, domain, areaId: area?.localId ?? areaId, dbtModel, businessName: typeof model.name === 'string' ? titleCaseAuthoring(model.name) : undefined, businessContext: typeof model.description === 'string' ? model.description : undefined, status: 'draft', analyticalRole: 'unknown' } } });
+      }
+    }
+  }
+  if (!operations.length) throw Object.assign(new Error('The selected YAML did not produce any resolvable modeling changes.'), { code: 'MODELING_IMPORT_EMPTY', diagnostics });
+  return { operations, diagnostics };
+}
+
+function contextRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function contextArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function contextStrings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function parseImportedAnalyticalRole(value: unknown): 'event' | 'dimension' | 'snapshot' | 'bridge' | 'unknown' {
+  return value === 'event' || value === 'dimension' || value === 'snapshot' || value === 'bridge' ? value : 'unknown';
+}
+
+function parseImportedCardinality(value: unknown): RelationshipAuthoringInput['cardinality'] {
+  return value === 'one_to_one' || value === 'one_to_many' || value === 'many_to_one' || value === 'many_to_many' ? value : 'unknown';
+}
+
+function parseImportedFanout(value: unknown): RelationshipAuthoringInput['fanout'] {
+  if (value === 'unsafe' || value === 'forbidden') return 'forbidden';
+  return value === 'safe' || value === 'dedupe_required' || value === 'attribution_required' ? value : 'unknown';
+}
+
+function contextSourceReferenceExists(manifest: DQLManifest, reference: string): boolean {
+  if (!reference.includes('::entity::') && !reference.includes('::relationship::')) return true;
+  return Object.values(manifest.modeling?.entities ?? {}).some((entity) => entity.qualifiedId === reference)
+    || Object.values(manifest.modeling?.relationships ?? {}).some((relationship) => relationship.qualifiedId === reference);
+}
+
+function parseContextAuthoringOrigin(value: unknown): ContextAuthoringOrigin {
+  if (value === 'manual' || value === 'yaml_import' || value === 'dbt_discovery' || value === 'ai' || value === 'correction') return value;
+  throw Object.assign(new Error('A valid context proposal origin is required.'), { code: 'INVALID_REQUEST' });
+}
+
+function parseContextAuthoringOperations(value: unknown): ContextAuthoringOperation[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 100) throw Object.assign(new Error('Provide 1-100 authoring operations.'), { code: 'INVALID_REQUEST' });
+  const ids = new Set<string>();
+  return value.map((raw, index): ContextAuthoringOperation => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw Object.assign(new Error(`Operation ${index + 1} is invalid.`), { code: 'INVALID_REQUEST' });
+    const operation = raw as Record<string, unknown>;
+    const id = typeof operation.id === 'string' ? operation.id.trim() : '';
+    if (!id || ids.has(id)) throw Object.assign(new Error(`Operation ${index + 1} requires a unique id.`), { code: 'INVALID_REQUEST' });
+    ids.add(id);
+    const dependsOn = Array.isArray(operation.dependsOn) ? operation.dependsOn.filter((item): item is string => typeof item === 'string') : undefined;
+    const evidence = Array.isArray(operation.evidence) ? operation.evidence.filter((item): item is string => typeof item === 'string').slice(0, 32) : undefined;
+    if (operation.kind === 'modeling_change') {
+      const change = operation.change as ModelingAuthoringChange | undefined;
+      const allowed = new Set(['upsert_domain', 'upsert_area', 'upsert_entity', 'upsert_relationship', 'upsert_contract', 'upsert_export', 'upsert_import', 'remove_entity', 'remove_relationship', 'remove_area']);
+      if (!change || typeof change !== 'object' || !allowed.has(change.operation) || !('value' in change) || !change.value || typeof change.value !== 'object') throw Object.assign(new Error(`Modeling operation ${id} is invalid.`), { code: 'INVALID_REQUEST' });
+      return { id, kind: 'modeling_change', change, dependsOn, evidence };
+    }
+    if (operation.kind === 'skill_change') {
+      const skillOperation = operation.operation;
+      const skill = operation.value as WriteSkillInput | undefined;
+      if ((skillOperation !== 'create' && skillOperation !== 'update' && skillOperation !== 'move') || !skill || typeof skill.id !== 'string' || !skill.id.trim() || typeof skill.body !== 'string') throw Object.assign(new Error(`Skill operation ${id} is invalid.`), { code: 'INVALID_REQUEST' });
+      return {
+        id,
+        kind: 'skill_change',
+        operation: skillOperation,
+        value: { ...skill, scope: 'project', status: 'draft' },
+        targetQualifiedId: typeof operation.targetQualifiedId === 'string' ? operation.targetQualifiedId : undefined,
+        expectedSourceHash: typeof operation.expectedSourceHash === 'string' ? operation.expectedSourceHash : undefined,
+        dependsOn,
+        evidence,
+      };
+    }
+    if (operation.kind === 'dbt_source_change') {
+      const change = operation.change as DbtSourceAuthoringInput | undefined;
+      if (!change || typeof change.uniqueId !== 'string' || !change.uniqueId.trim()) throw Object.assign(new Error(`dbt source operation ${id} is invalid.`), { code: 'INVALID_REQUEST' });
+      return { id, kind: 'dbt_source_change', change, dependsOn, evidence };
+    }
+    throw Object.assign(new Error(`Unsupported context operation kind for ${id}.`), { code: 'INVALID_REQUEST' });
+  });
+}
+
+function resolveContextPatchPath(projectRoot: string, gitRoot: string | null, relativePath: string): string {
+  const allowedRoot = resolve(gitRoot ?? projectRoot);
+  const absolute = resolve(projectRoot, relativePath);
+  if (absolute !== allowedRoot && !absolute.startsWith(`${allowedRoot}${sep}`)) {
+    throw Object.assign(new Error(`Proposal path escapes the Git workspace: ${relativePath}`), { code: 'OWNERSHIP_CONFLICT' });
+  }
+  return absolute;
+}
+
+function buildMetadataBoundModelingOperations(
+  projectRoot: string,
+  manifest: DQLManifest,
+  request: AgentRunRequest,
+): ContextAuthoringOperation[] {
+  const modeling = manifest.modeling;
+  if (!modeling || !manifest.dbtProvenance) throw new Error('Modeling AI requires a compiled dbt-first project snapshot.');
+  const context = request.workspaceContext ?? {};
+  const requestedDomain = typeof context.domain === 'string'
+    ? context.domain
+    : request.selectedObject?.kind === 'domain'
+      ? request.selectedObject.id
+      : undefined;
+  const domain = requestedDomain ?? Object.keys(modeling.packages)[0];
+  if (!domain || !modeling.packages[domain]) throw new Error('Select or create a Domain before building models with AI.');
+  const selectedIdentity = request.selectedObject?.id;
+  const selectedRelationship = request.selectedObject?.kind === 'relationship'
+    ? Object.values(modeling.relationships).find((item) => item.qualifiedId === selectedIdentity || item.id === selectedIdentity || item.localId === selectedIdentity)
+    : undefined;
+  if (selectedRelationship) {
+    const cardinality = /one[-_ ]to[-_ ]one|1\s*:\s*1/i.test(request.question)
+      ? 'one_to_one'
+      : /one[-_ ]to[-_ ]many|1\s*:\s*n/i.test(request.question)
+        ? 'one_to_many'
+        : /many[-_ ]to[-_ ]one|n\s*:\s*1/i.test(request.question)
+          ? 'many_to_one'
+          : /many[-_ ]to[-_ ]many|n\s*:\s*n/i.test(request.question)
+            ? 'many_to_many'
+            : selectedRelationship.cardinality;
+    return [{
+      id: `relationship:${selectedRelationship.qualifiedId}`,
+      kind: 'modeling_change',
+      evidence: [selectedRelationship.sourcePath, ...(selectedRelationship.validation?.queryFingerprint ? [`validation:${selectedRelationship.validation.queryFingerprint}`] : [])],
+      change: {
+        operation: 'upsert_relationship',
+        value: {
+          id: selectedRelationship.localId,
+          domain: selectedRelationship.ownerDomain ?? domain,
+          areaId: selectedRelationship.areaId?.split('::area::').at(-1),
+          from: modeling.entities[selectedRelationship.from]?.localId ?? selectedRelationship.from,
+          to: modeling.entities[selectedRelationship.to]?.localId ?? selectedRelationship.to,
+          keys: selectedRelationship.keys,
+          cardinality,
+          fanout: selectedRelationship.fanout === 'unsafe' ? 'forbidden' : selectedRelationship.fanout,
+          status: 'draft',
+          owner: selectedRelationship.owner,
+          ownerDomain: selectedRelationship.ownerDomain,
+          verb: selectedRelationship.verb,
+          description: selectedRelationship.description,
+          rationale: request.question.trim(),
+          roles: selectedRelationship.roles,
+          optionality: selectedRelationship.optionality,
+          joinTypes: selectedRelationship.joinTypes,
+          aggregation: selectedRelationship.aggregation,
+          temporal: selectedRelationship.temporal,
+          attributionBlock: selectedRelationship.attributionBlock,
+          importRefs: selectedRelationship.importRefs,
+          evidenceExpiresAt: undefined,
+        },
+      },
+    }];
+  }
+
+  const selectedEntity = request.selectedObject?.kind === 'model'
+    ? Object.values(modeling.entities).find((item) => item.qualifiedId === selectedIdentity || item.id === selectedIdentity || item.localId === selectedIdentity)
+    : undefined;
+  if (selectedEntity) {
+    return [{
+      id: `entity:${selectedEntity.qualifiedId}`,
+      kind: 'modeling_change',
+      evidence: [selectedEntity.sourcePath, selectedEntity.dbtUniqueId],
+      change: {
+        operation: 'upsert_entity',
+        value: {
+          id: selectedEntity.localId,
+          domain: selectedEntity.domain,
+          areaId: selectedEntity.areaId?.split('::area::').at(-1),
+          dbtModel: selectedEntity.dbtUniqueId,
+          businessName: selectedEntity.businessName,
+          businessContext: request.question.trim(),
+          conceptRefs: selectedEntity.conceptRefs,
+          analyticalRole: selectedEntity.analyticalRole,
+          status: 'draft',
+          owner: selectedEntity.owner,
+          grain: selectedEntity.grain,
+          keys: selectedEntity.keys,
+        },
+      },
+    }];
+  }
+
+  const requestedArea = typeof context.modelAreaId === 'string' ? context.modelAreaId : typeof context.areaId === 'string' ? context.areaId : undefined;
+  const existingArea = Object.values(modeling.areas).find((area) => area.domain === domain
+    && (!requestedArea || area.qualifiedId === requestedArea || area.localId === requestedArea));
+  const areaId = existingArea?.localId ?? requestedArea?.split('::area::').at(-1) ?? `${authoringSlug(request.question).slice(0, 36) || 'metadata'}_models`;
+  const operations: ContextAuthoringOperation[] = [];
+  if (!existingArea) {
+    operations.push({
+      id: `area:${domain}:${areaId}`,
+      kind: 'modeling_change',
+      evidence: [`domain:${domain}`],
+      change: { operation: 'upsert_area', value: { id: areaId, domain, name: titleCaseAuthoring(areaId), description: `Metadata-backed modeling area requested by the author: ${request.question.trim()}`, intentExamples: [request.question.trim()] } },
+    });
+  }
+  const bound = new Set(Object.values(modeling.entities).map((entity) => entity.dbtUniqueId));
+  const tokens = authoringTokens(request.question);
+  let candidates = Object.values(manifest.dbtProvenance.nodes).filter((node) => !bound.has(node.uniqueId));
+  const matched = candidates.filter((node) => tokens.some((token) => `${node.name} ${node.uniqueId} ${node.sourcePath ?? ''}`.toLowerCase().includes(token)));
+  if (matched.length) candidates = matched;
+  candidates = candidates.slice(0, 12);
+  if (candidates.length === 0) throw new Error('No unbound dbt models match this request. Focus an existing model to update its business context.');
+  const usedIds = new Set(Object.values(modeling.entities).filter((entity) => entity.domain === domain).map((entity) => entity.localId));
+  for (const node of candidates) {
+    const base = authoringSlug(node.name).replace(/-/g, '_') || 'model';
+    let id = base;
+    let suffix = 2;
+    while (usedIds.has(id)) id = `${base}_${suffix++}`;
+    usedIds.add(id);
+    operations.push({
+      id: `entity:${domain}:${id}`,
+      kind: 'modeling_change',
+      dependsOn: existingArea ? [] : [`area:${domain}:${areaId}`],
+      evidence: [node.uniqueId, ...(node.sourcePath ? [node.sourcePath] : [])],
+      change: { operation: 'upsert_entity', value: { id, domain, areaId, dbtModel: node.uniqueId, businessName: titleCaseAuthoring(node.name), status: 'draft', analyticalRole: 'unknown' } },
+    });
+  }
+
+  if (/\b(connect|relationship|join|related)\b/i.test(request.question) && candidates.length >= 2) {
+    const manifestPath = resolveDbtManifestPath(projectRoot);
+    const left = manifestPath ? loadDbtNodeAuthoringDetail(manifestPath, candidates[0]!.uniqueId) : undefined;
+    const right = manifestPath ? loadDbtNodeAuthoringDetail(manifestPath, candidates[1]!.uniqueId) : undefined;
+    const rightColumns = new Set((right?.columns ?? []).map((column) => column.name.toLowerCase()));
+    const sharedKey = (left?.columns ?? []).map((column) => column.name).find((name) => /(^id$|_id$)/i.test(name) && rightColumns.has(name.toLowerCase()));
+    if (sharedKey) {
+      const fromOperation = operations.find((operation) => operation.id.startsWith('entity:') && operation.kind === 'modeling_change' && operation.change.operation === 'upsert_entity' && operation.change.value.dbtModel === candidates[0]!.uniqueId);
+      const toOperation = operations.find((operation) => operation.id.startsWith('entity:') && operation.kind === 'modeling_change' && operation.change.operation === 'upsert_entity' && operation.change.value.dbtModel === candidates[1]!.uniqueId);
+      if (fromOperation?.kind === 'modeling_change' && fromOperation.change.operation === 'upsert_entity' && toOperation?.kind === 'modeling_change' && toOperation.change.operation === 'upsert_entity') {
+        const relationshipId = `${fromOperation.change.value.id}_to_${toOperation.change.value.id}`;
+        operations.push({
+          id: `relationship:${domain}:${relationshipId}`,
+          kind: 'modeling_change',
+          dependsOn: [fromOperation.id, toOperation.id],
+          evidence: [`shared column suggestion:${sharedKey}`, left?.uniqueId ?? '', right?.uniqueId ?? ''].filter(Boolean),
+          change: { operation: 'upsert_relationship', value: { id: relationshipId, domain, areaId, from: fromOperation.change.value.id, to: toOperation.change.value.id, keys: [{ from: sharedKey, to: sharedKey }], cardinality: 'unknown', fanout: 'unknown', status: 'draft', rationale: 'Candidate only: shared dbt column name requires warehouse validation.' } },
+        });
+      }
+    }
+  }
+  return operations;
+}
+
+function buildMetadataBoundSkillOperations(
+  projectRoot: string,
+  manifest: DQLManifest,
+  request: AgentRunRequest,
+): ContextAuthoringOperation[] {
+  const context = request.workspaceContext ?? {};
+  const selectedIdentity = request.selectedObject?.kind === 'skill' ? request.selectedObject.id : undefined;
+  const existing = selectedIdentity
+    ? loadSkills(projectRoot).skills.find((skill) => skill.qualifiedId === selectedIdentity || skill.id === selectedIdentity)
+    : undefined;
+  const domain = typeof context.domain === 'string'
+    ? context.domain
+    : existing?.domain
+      ?? (request.selectedObject?.kind === 'domain' ? request.selectedObject.id : undefined)
+      ?? Object.keys(manifest.modeling?.packages ?? {})[0];
+  if (!domain) throw new Error('Select a Domain before building a Skill with AI.');
+  const area = typeof context.modelAreaId === 'string' ? context.modelAreaId : existing?.modelAreaRefs?.[0];
+  const focusReference = request.selectedObject?.kind === 'model' || request.selectedObject?.kind === 'relationship'
+    ? request.selectedObject.id
+    : undefined;
+  if (focusReference && !contextSourceReferenceExists(manifest, focusReference)) throw new Error('The focused modeling object is not present in the current snapshot.');
+  const id = existing?.localId ?? existing?.id ?? `${authoringSlug(request.question).slice(0, 48) || domain.replace(/[^a-z0-9]+/gi, '-')}-guidance`;
+  const body = existing
+    ? `${existing.body.trim()}\n\n## Proposed correction\n${request.question.trim()}\n`
+    : `## Purpose\nGuide analysis for ${domain} using reviewed repository metadata.\n\n## Guardrails\n${request.question.trim()}\n\n## Clarify\nAsk when the requested metric, model, or relationship is not governed.`;
+  const value: WriteSkillInput = {
+    id,
+    qualifiedId: existing?.qualifiedId,
+    sourcePath: existing?.sourcePath,
+    scope: 'project',
+    domain,
+    domains: [domain],
+    modelAreaRefs: area ? [area] : [],
+    kind: existing?.kind ?? 'domain_reference',
+    status: 'draft',
+    owner: existing?.owner,
+    triggers: existing?.triggers ?? authoringTokens(request.question).slice(0, 8),
+    exclusions: existing?.exclusions ?? [],
+    description: existing?.description ?? `Metadata-backed guidance for ${titleCaseAuthoring(domain)}.`,
+    preferredMetrics: existing?.preferredMetrics ?? Object.values(manifest.metrics ?? {}).filter((metric) => metric.domain === domain).slice(0, 12).map((metric) => metric.name),
+    preferredBlocks: existing?.preferredBlocks ?? Object.values(manifest.blocks ?? {}).filter((block) => block.domain === domain && block.status === 'certified').slice(0, 12).map((block) => block.name),
+    preferredDimensions: existing?.preferredDimensions ?? [],
+    requiredFilters: existing?.requiredFilters ?? [],
+    clarifyWhen: existing?.clarifyWhen ?? ['The request needs a model, metric, or relationship not present in the current governed context.'],
+    examples: existing?.examples ?? [request.question.trim()],
+    sourceRefs: [...new Set([...(existing?.sourceRefs ?? []), ...(focusReference ? [focusReference] : [])])],
+    vocabulary: existing?.vocabulary ?? {},
+    analyticalPolicy: existing?.analyticalPolicy,
+    body,
+    isStarter: existing?.isStarter,
+  };
+  const before = existing?.sourcePath && existsSync(existing.sourcePath) ? readFileSync(existing.sourcePath, 'utf8') : '';
+  return [{
+    id: `skill:${existing?.qualifiedId ?? `${domain}::skill::${id}`}`,
+    kind: 'skill_change',
+    operation: existing ? 'update' : 'create',
+    targetQualifiedId: existing?.qualifiedId,
+    expectedSourceHash: existing ? createHash('sha256').update(before).digest('hex') : undefined,
+    evidence: [existing?.sourcePath ?? `domain:${domain}`, ...(focusReference ? [focusReference] : [])],
+    value,
+  }];
+}
+
+function authoringTokens(value: string): string[] {
+  const stop = new Set(['the', 'and', 'for', 'with', 'from', 'this', 'that', 'build', 'create', 'model', 'models', 'skill', 'please', 'into', 'about']);
+  return [...new Set(value.toLowerCase().split(/[^a-z0-9_]+/).filter((token) => token.length > 2 && !stop.has(token)))];
+}
+
+function authoringSlug(value: string): string {
+  return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function titleCaseAuthoring(value: string): string {
+  return value.replace(/[._-]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
 
 interface ContextBootstrapSession {
   id: string;
@@ -21509,6 +22549,28 @@ export function openBlockStudioDocument(
 
 type BlockStudioDiagnostic = { severity: 'error' | 'warning' | 'info'; message: string; code?: string };
 
+const BLOCK_STUDIO_DRAFT_RUNTIME_DIAGNOSTICS = new Set([
+  'metricflow_unavailable',
+  'semantic_compose_failed',
+  'semantic_layer_missing',
+  'semantic_runtime_required',
+]);
+
+/**
+ * Draft persistence is stricter than loose text storage but does not require a
+ * configured execution runtime. Syntax, unsafe SQL, invalid semantic identity,
+ * and parameter-contract errors must be corrected before a block file is
+ * written; runtime availability remains a Run/Certify concern.
+ */
+export function blockStudioValidationAllowsDraftSave(validation: {
+  diagnostics: BlockStudioDiagnostic[];
+}): boolean {
+  return !validation.diagnostics.some((diagnostic) =>
+    diagnostic.severity === 'error'
+    && !BLOCK_STUDIO_DRAFT_RUNTIME_DIAGNOSTICS.has(diagnostic.code ?? ''),
+  );
+}
+
 interface ParsedSemanticBlockConfig {
   blockType: 'semantic' | 'custom';
   metric?: string;
@@ -22109,6 +23171,7 @@ export function validateBlockStudioSource(
   semanticLayer?: SemanticLayer,
 ): {
   valid: boolean;
+  saveable: boolean;
   diagnostics: BlockStudioDiagnostic[];
   semanticRefs: { metrics: string[]; dimensions: string[]; segments: string[] };
   chartConfig?: { chart?: string; x?: string; y?: string; color?: string; title?: string };
@@ -22229,17 +23292,32 @@ export function validateBlockStudioSource(
     }
   }
 
-  const parameterInvocation = prepareBlockInvocation({ source, surface: 'block_studio' });
-  if (parameterInvocation.errors.length > 0) {
-    diagnostics.push(...parameterInvocation.errors.map((message) => ({ severity: 'error' as const, code: 'parameter_parse', message })));
+  let parameters: ReturnType<typeof prepareBlockInvocation>['parameters'] = [];
+  try {
+    const parameterInvocation = prepareBlockInvocation({ source, surface: 'block_studio' });
+    parameters = parameterInvocation.parameters;
+    if (parameterInvocation.errors.length > 0) {
+      diagnostics.push(...parameterInvocation.errors.map((message) => ({ severity: 'error' as const, code: 'parameter_parse', message })));
+    }
+  } catch (error) {
+    // The main parser diagnostic above owns malformed source. Parameter
+    // extraction must never turn a recoverable validation response into a 500.
+    if (!diagnostics.some((diagnostic) => diagnostic.code === 'syntax')) {
+      diagnostics.push({
+        severity: 'error',
+        code: 'parameter_parse',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
   return {
     valid: diagnostics.every((diagnostic) => diagnostic.severity !== 'error'),
+    saveable: blockStudioValidationAllowsDraftSave({ diagnostics }),
     diagnostics,
     semanticRefs,
     chartConfig: chartConfig ?? undefined,
     executableSql,
-    parameters: parameterInvocation.parameters,
+    parameters,
   };
 }
 

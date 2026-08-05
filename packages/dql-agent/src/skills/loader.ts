@@ -16,6 +16,7 @@
  * key/value, list-of-strings, and one-level objects (good enough for skills).
  */
 
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, basename, dirname, relative, isAbsolute, resolve } from 'node:path';
 import * as yaml from 'js-yaml';
@@ -333,6 +334,10 @@ export function renderSkill(skill: Skill): string {
 
 export interface WriteSkillInput {
   id: string;
+  /** Collision-free target identity for update/move operations. */
+  qualifiedId?: string;
+  /** Exact existing source selected by the server; clients cannot choose arbitrary paths. */
+  sourcePath?: string;
   scope: 'project' | 'personal';
   user?: string;
   domain?: string;
@@ -355,6 +360,21 @@ export interface WriteSkillInput {
   analyticalPolicy?: SkillAnalyticalPolicy;
   body?: string;
   isStarter?: boolean;
+}
+
+export interface SkillSourcePatch {
+  path: string;
+  before: string;
+  after: string;
+  changed: boolean;
+}
+
+export interface SkillChangePreview {
+  operation: 'create' | 'update' | 'move';
+  qualifiedId: string;
+  sourceHash: string;
+  patches: SkillSourcePatch[];
+  fingerprint: string;
 }
 
 /** Normalize a partial input into a full Skill (with a resolved sourcePath). */
@@ -385,7 +405,7 @@ function toSkill(projectRoot: string, input: WriteSkillInput): Skill {
     vocabulary: input.vocabulary ?? {},
     analyticalPolicy: input.analyticalPolicy,
     body: input.body ?? "",
-    sourcePath: skillPath(
+    sourcePath: input.sourcePath ?? skillPath(
       projectRoot,
       input.id,
       input.domains?.length
@@ -400,11 +420,122 @@ function toSkill(projectRoot: string, input: WriteSkillInput): Skill {
 
 /** Write a skill to `skills/<id>.skill.md`, the shared source location. */
 export function writeSkill(projectRoot: string, input: WriteSkillInput): Skill {
-  const skill = toSkill(projectRoot, input);
+  const existing = resolveSkillForWrite(projectRoot, input.qualifiedId ?? input.id);
+  const skill = toSkill(projectRoot, {
+    ...input,
+    sourcePath: input.sourcePath ?? existing?.sourcePath,
+  });
   const dir = dirname(skill.sourcePath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(skill.sourcePath, renderSkill(skill), 'utf-8');
+  const before = existsSync(skill.sourcePath) ? readFileSync(skill.sourcePath, 'utf8') : '';
+  writeFileSync(skill.sourcePath, renderSkillPreservingUnknown(skill, before), 'utf-8');
   return parseSkill(readFileSync(skill.sourcePath, 'utf-8'), skill.sourcePath) ?? skill;
+}
+
+/** Preview one exact Skill create/update/move without writing governed source. */
+export function previewSkillChange(
+  projectRoot: string,
+  input: WriteSkillInput,
+  targetQualifiedId?: string,
+  expectedSourceHash?: string,
+): SkillChangePreview {
+  const existing = targetQualifiedId ? resolveSkillForWrite(projectRoot, targetQualifiedId) : undefined;
+  if (targetQualifiedId && !existing) throw new Error(`Skill not found: ${targetQualifiedId}`);
+  // Updates are partial patches. Preserve every known field the caller did not
+  // mention (especially analytical_policy), while unknown frontmatter is
+  // preserved separately by renderSkillPreservingUnknown.
+  const desired = toSkill(projectRoot, {
+    ...(existing ? {
+      ...existing,
+      sourcePath: existing.sourcePath,
+    } : {}),
+    ...input,
+    qualifiedId: targetQualifiedId,
+  });
+  const sourcePath = existing?.sourcePath;
+  const before = sourcePath && existsSync(sourcePath) ? readFileSync(sourcePath, 'utf8') : '';
+  const sourceHash = hashSkillSource(before);
+  if (expectedSourceHash && sourceHash !== expectedSourceHash) {
+    throw new Error('Skill source changed after it was loaded. Refresh the proposal before saving.');
+  }
+  const destination = desired.sourcePath;
+  const destinationBefore = existsSync(destination) ? readFileSync(destination, 'utf8') : '';
+  if (sourcePath && resolve(sourcePath) !== resolve(destination) && destinationBefore) {
+    throw new Error(`Skill target already exists: ${relative(projectRoot, destination)}`);
+  }
+  const after = renderSkillPreservingUnknown(desired, before);
+  const patches: SkillSourcePatch[] = sourcePath && resolve(sourcePath) !== resolve(destination)
+    ? [
+        { path: sourcePath, before, after: '', changed: before !== '' },
+        { path: destination, before: destinationBefore, after, changed: destinationBefore !== after },
+      ]
+    : [{ path: destination, before: destinationBefore, after, changed: destinationBefore !== after }];
+  const operation: SkillChangePreview['operation'] = !existing ? 'create' : patches.length > 1 ? 'move' : 'update';
+  const qualifiedId = qualifySkill({ ...desired, sourcePath: destination }, desired.domain).qualifiedId!;
+  return {
+    operation,
+    qualifiedId,
+    sourceHash,
+    patches,
+    fingerprint: createHash('sha256').update(JSON.stringify(patches.map(({ path, before: valueBefore, after: valueAfter }) => ({ path: resolve(path), before: valueBefore, after: valueAfter })))).digest('hex'),
+  };
+}
+
+/** Apply only the bytes that were previewed. */
+export function applySkillChange(
+  projectRoot: string,
+  input: WriteSkillInput,
+  expectedFingerprint: string,
+  targetQualifiedId?: string,
+  expectedSourceHash?: string,
+): SkillChangePreview {
+  const preview = previewSkillChange(projectRoot, input, targetQualifiedId, expectedSourceHash);
+  if (!expectedFingerprint || preview.fingerprint !== expectedFingerprint) {
+    throw new Error('Skill source changed after the preview. Refresh the proposal before saving.');
+  }
+  for (const patch of preview.patches) {
+    if (!patch.changed) continue;
+    if (!patch.after) rmSync(patch.path, { force: true });
+    else {
+      mkdirSync(dirname(patch.path), { recursive: true });
+      writeFileSync(patch.path, patch.after, 'utf8');
+    }
+  }
+  return preview;
+}
+
+export function hashSkillSource(source: string): string {
+  return createHash('sha256').update(source).digest('hex');
+}
+
+function resolveSkillForWrite(projectRoot: string, identity: string): Skill | undefined {
+  const matches = loadSkills(projectRoot).skills.filter((skill) => skill.qualifiedId === identity || skill.id === identity);
+  if (matches.length > 1 && !identity.includes('::skill::')) {
+    throw new Error(`Skill id is ambiguous; use a qualified id: ${identity}`);
+  }
+  return matches[0];
+}
+
+function renderSkillPreservingUnknown(skill: Skill, existingRaw: string): string {
+  if (!existingRaw.trim()) return renderSkill(skill);
+  const existingMatch = existingRaw.match(/^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/);
+  const rendered = renderSkill(skill);
+  const nextMatch = rendered.match(/^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/);
+  if (!existingMatch || !nextMatch) return rendered;
+  const existing = yaml.load(existingMatch[1]) as Record<string, unknown> | undefined;
+  const next = yaml.load(nextMatch[1]) as Record<string, unknown> | undefined;
+  if (!existing || !next || Array.isArray(existing) || Array.isArray(next)) return rendered;
+  const knownKeys = [
+    'id', 'domain', 'domains', 'model_areas', 'kind', 'status', 'owner', 'description',
+    'preferred_metrics', 'preferred_blocks', 'preferred_dimensions', 'triggers', 'exclusions',
+    'required_filters', 'clarify_when', 'examples', 'source_refs', 'vocabulary',
+    'analytical_policy', 'starter', 'user',
+  ];
+  const merged = { ...existing };
+  for (const key of knownKeys) delete merged[key];
+  Object.assign(merged, next);
+  const frontmatter = yaml.dump(merged, { noRefs: true, lineWidth: -1, sortKeys: false }).trimEnd();
+  return `---\n${frontmatter}\n---\n${skill.body.trim() ? `${skill.body.trim()}\n` : ''}`;
 }
 
 /** Alias for `writeSkill` — create-or-update by id. */
@@ -697,6 +828,8 @@ export interface SelectRelevantSkillsOptions {
   domains?: string[];
   /** Optional focused Model Areas selected in the Model workspace. */
   modelAreaIds?: string[];
+  /** Exact canonical model/relationship focus. Ranking only; never authority. */
+  focusObjectKeys?: string[];
 }
 
 const DEFAULT_PINNED_SKILL_IDS = ['sql-conventions'];
@@ -745,6 +878,7 @@ export function selectRelevantSkills(
   const queryTokens = new Set(skillTokens(question));
   const domains = new Set((options.domains ?? []).map((domain) => domain.trim().toLowerCase()).filter(Boolean));
   const modelAreaIds = new Set((options.modelAreaIds ?? []).map(modelAreaKey).filter(Boolean));
+  const focusObjectKeys = new Set((options.focusObjectKeys ?? []).map((value) => value.trim().toLowerCase()).filter(Boolean));
 
   const pinned: Skill[] = [];
   const rest: Array<{ skill: Skill; score: number }> = [];
@@ -790,10 +924,11 @@ export function selectRelevantSkills(
     const topicalScore = triggerHits * 12 + vocabularyHits * 10 + governedRefHits * 8 + descriptorHits * 4 + bodyHits;
     const domainMatch = skillDomains.some((domain) => domains.has(domain));
     const areaMatch = skillAreas.some((id) => modelAreaIds.has(id));
+    const focusMatch = (skill.sourceRefs ?? []).some((ref) => focusObjectKeys.has(ref.trim().toLowerCase()));
     // Scope only breaks ties among topically relevant guidance. A domain bonus
     // by itself must not select an arbitrary skill in a large microdomain.
-    if (topicalScore === 0) continue;
-    rest.push({ skill, score: topicalScore + (domainMatch ? 4 : 0) + (areaMatch ? 3 : 0) });
+    if (topicalScore === 0 && !focusMatch) continue;
+    rest.push({ skill, score: topicalScore + (focusMatch ? 40 : 0) + (domainMatch ? 4 : 0) + (areaMatch ? 3 : 0) });
   }
 
   // Keep only skills with at least one topical hit; ordered by score desc, then

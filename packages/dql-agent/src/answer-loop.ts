@@ -1897,6 +1897,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
         : selectRelevantSkills(executionInput.skills ?? [], executionInput.question, {
             userId: executionInput.userId ?? null,
             modelAreaIds: executionInput.domainContext?.modelAreaId ? [executionInput.domainContext.modelAreaId] : [],
+            focusObjectKeys: executionInput.contextPack?.focusObjectKey ? [executionInput.contextPack.focusObjectKey] : [],
             domains: Array.from(new Set([
               ...domainContextSearchDomains(executionInput.domainContext),
               ...(executionInput.domain ? [executionInput.domain] : []),
@@ -1999,6 +2000,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         userId: userId ?? null,
         domains: inferredDomains,
         modelAreaIds: input.domainContext?.modelAreaId ? [input.domainContext.modelAreaId] : [],
+        focusObjectKeys: input.contextPack?.focusObjectKey ? [input.contextPack.focusObjectKey] : [],
       });
   const effectiveBlockHints = Array.from(new Set([
     ...blockHints,

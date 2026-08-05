@@ -26,7 +26,7 @@ import {
   isLikelyClarificationReply,
 } from "./conversation/snapshot.js";
 
-export type AgentRunRequestedMode = "auto" | "ask" | "research" | "sql" | "block" | "app";
+export type AgentRunRequestedMode = "auto" | "ask" | "research" | "sql" | "block" | "app" | "modeling" | "skill";
 
 /**
  * Who the run serves. `analyst` (the Notebook) keeps every route, including
@@ -37,7 +37,7 @@ export type AgentRunRequestedMode = "auto" | "ask" | "research" | "sql" | "block
 export type AgentRunAudience = "stakeholder" | "analyst";
 
 /** Routes a stakeholder may never land on (analyst authoring lives in the Notebook). */
-const ANALYST_ONLY_ROUTES = new Set<AgentRunRoute>(["sql_cell", "dql_block_draft"]);
+const ANALYST_ONLY_ROUTES = new Set<AgentRunRoute>(["sql_cell", "dql_block_draft", "modeling_draft", "skill_draft"]);
 
 export type AgentRunRoute =
   | "conversation"
@@ -47,6 +47,8 @@ export type AgentRunRoute =
   | "research"
   | "sql_cell"
   | "dql_block_draft"
+  | "modeling_draft"
+  | "skill_draft"
   | "app_build"
   | "clarify"
   | "blocked";
@@ -135,6 +137,8 @@ export type AgentRunArtifactKind =
   | "sql_cell"
   | "dql_block_draft"
   | "app_draft"
+  | "modeling_change_proposal"
+  | "skill_change_proposal"
   /** Two-phase app build: the confirmable pre-create content list. */
   | "app_proposal";
 
@@ -224,7 +228,7 @@ export interface AgentRunClarificationOption {
 }
 
 export interface AgentRunSelectedObject {
-  kind: "notebook" | "cell" | "block" | "app" | "dashboard" | "research" | "workspace";
+  kind: "notebook" | "cell" | "block" | "app" | "dashboard" | "research" | "workspace" | "domain" | "model_area" | "model" | "relationship" | "skill";
   id?: string;
   title?: string;
   path?: string;
@@ -340,10 +344,12 @@ export interface AgentRunStep {
 /** Immutable provenance for a user-triggered derived execution. */
 export interface AgentRunDerivationV1 {
   version: 1;
-  kind: "analytical_repair";
+  kind: "analytical_repair" | "authoring_revision";
   sourceRunId: string;
   sourceFailureId?: string;
-  attempt: 1;
+  sourceArtifactId?: string;
+  attempt: number;
+  revision?: number;
 }
 
 export interface AgentRun {
@@ -1577,6 +1583,7 @@ export class AgentRunEngine {
         repairAttempts,
         escalationAttempts,
         budgetUsage: input.budgetUsage,
+        ...authoringDerivationFromRequest(input.request),
       };
     }
 
@@ -1623,6 +1630,7 @@ export class AgentRunEngine {
       repairAttempts: finalResult.repairAttempts ?? repairAttempts,
       escalationAttempts,
       budgetUsage: input.budgetUsage,
+      ...authoringDerivationFromRequest(input.request),
     };
   }
 
@@ -1642,6 +1650,27 @@ export class AgentRunEngine {
   private timestamp(): string {
     return this.now().toISOString();
   }
+}
+
+function authoringDerivationFromRequest(request: AgentRunRequest): { derivation?: AgentRunDerivationV1 } {
+  if (request.requestedMode !== 'modeling' && request.requestedMode !== 'skill') return {};
+  const sourceRunId = typeof request.workspaceContext?.sourceRunId === 'string'
+    ? request.workspaceContext.sourceRunId
+    : undefined;
+  if (!sourceRunId) return {};
+  const revision = Math.max(1, Number(request.workspaceContext?.revision ?? 1) || 1);
+  return {
+    derivation: {
+      version: 1,
+      kind: 'authoring_revision',
+      sourceRunId,
+      sourceArtifactId: typeof request.workspaceContext?.sourceArtifactId === 'string'
+        ? request.workspaceContext.sourceArtifactId
+        : undefined,
+      attempt: revision,
+      revision,
+    },
+  };
 }
 
 function terminalLifecycle(
@@ -1930,6 +1959,10 @@ export function defaultSuccessCriteria(route: AgentRunRoute): string[] {
       return ["Generated SQL executes against the preview without errors."];
     case "dql_block_draft":
       return ["Draft passes the certifier with no blockers (still human-reviewed)."];
+    case "modeling_draft":
+      return ["Every proposed model and relationship resolves to current repository metadata and remains review-required."];
+    case "skill_draft":
+      return ["The Skill proposal is scope-qualified, non-executable, and saved only through explicit review."];
     case "app_build":
       return ["App tiles are backed by certified blocks."];
     case "clarify":
@@ -1980,13 +2013,15 @@ function requestedModeToAction(mode: AgentRunRequestedMode | undefined): IntentD
   if (!mode || mode === "auto") return undefined;
   if (mode === "app") return "compose_app";
   if (mode === "research") return "investigate";
-  if (mode === "ask" || mode === "sql" || mode === "block") return "answer";
+  if (mode === "ask" || mode === "sql" || mode === "block" || mode === "modeling" || mode === "skill") return "answer";
   return undefined;
 }
 
 export function selectRoute(request: AgentRunRequest, decision: IntentDecision): AgentRunRoute {
   if (decision.meaningResolutionErrorCode === 'invalid_evidence_reference') return 'blocked';
   const explicitMode = request.requestedMode;
+  if (explicitMode === 'modeling') return 'modeling_draft';
+  if (explicitMode === 'skill') return 'skill_draft';
   if (explicitMode && explicitMode !== 'auto' && explicitMode !== 'ask') {
     return selectCascadeRunRoute(request, decision);
   }

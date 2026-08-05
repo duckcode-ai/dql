@@ -1043,13 +1043,16 @@ export interface ManifestModelEntity {
   analyticalRole?: 'event' | 'dimension' | 'snapshot' | 'bridge' | 'unknown';
   conceptRefs?: string[];
   owner?: string;
-  status?: 'draft' | 'review' | 'certified' | 'deprecated';
+  status?: ManifestModelLifecycle;
   sourcePath: string;
   identityFingerprint: string;
 }
 
 export type ManifestRelationshipCardinality = 'one_to_one' | 'one_to_many' | 'many_to_one' | 'many_to_many' | 'unknown';
-export type ManifestFanoutPolicy = 'safe' | 'attribution_required' | 'unsafe' | 'unknown';
+/** `review` remains read-compatible; compiled/new authoring emits `reviewed`. */
+export type ManifestModelLifecycle = 'draft' | 'evaluated' | 'reviewed' | 'certified' | 'deprecated' | 'review';
+/** `unsafe` remains read-compatible; compiled/new authoring emits `forbidden`. */
+export type ManifestFanoutPolicy = 'safe' | 'dedupe_required' | 'attribution_required' | 'forbidden' | 'unknown' | 'unsafe';
 export type ManifestRelationshipOptionality = 'required' | 'optional' | 'unknown';
 export type ManifestRelationshipJoinType = 'left' | 'inner';
 
@@ -1077,7 +1080,7 @@ export interface ManifestModelRelationship {
   keys: Array<{ from: string; to: string }>;
   cardinality: ManifestRelationshipCardinality;
   fanout: ManifestFanoutPolicy;
-  status: 'draft' | 'review' | 'certified' | 'deprecated';
+  status: ManifestModelLifecycle;
   crossDomain: boolean;
   ownerDomain?: string;
   owner?: string;
@@ -1126,7 +1129,7 @@ export interface ManifestModelContract {
   domain: string;
   entities: string[];
   blocks: string[];
-  status: 'draft' | 'review' | 'certified' | 'deprecated';
+  status: ManifestModelLifecycle;
   owner?: string;
   sourcePath: string;
   requiredEvaluation: boolean;
@@ -1156,7 +1159,7 @@ export interface ManifestDomainExport {
   consumerDomains: string[];
   classification?: string;
   contract?: string;
-  status: 'draft' | 'review' | 'certified' | 'deprecated';
+  status: ManifestModelLifecycle;
   owner?: string;
   sourcePath: string;
   fingerprint: string;
@@ -1169,7 +1172,7 @@ export interface ManifestDomainImport {
   domain: string;
   exportRef: string;
   purpose: string;
-  status: 'draft' | 'review' | 'certified' | 'deprecated';
+  status: ManifestModelLifecycle;
   owner?: string;
   sourcePath: string;
 }

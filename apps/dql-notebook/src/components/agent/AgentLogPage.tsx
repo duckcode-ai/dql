@@ -254,6 +254,8 @@ function executorLabel(route: AgentRun['route'] | undefined): string {
     case 'app_build': return 'Assembling the app';
     case 'sql_cell': return 'Writing the query';
     case 'dql_block_draft': return 'Drafting the block';
+    case 'modeling_draft': return 'Drafting modeling changes';
+    case 'skill_draft': return 'Drafting Skill guidance';
     case 'conversation': return 'Replying';
     default: return 'Working';
   }

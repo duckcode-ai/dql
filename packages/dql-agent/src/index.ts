@@ -20,7 +20,7 @@ import {
 } from "@duckcodeailabs/dql-core";
 import { KGStore } from "./kg/sqlite-fts.js";
 import { buildKGFromManifest, buildKGFromSemanticLayer, declaredDomainIds } from "./kg/build.js";
-import { loadSkills } from "./skills/loader.js";
+import { loadSkills, skillsDir } from "./skills/loader.js";
 import type { Skill } from "./skills/loader.js";
 import type { KGEdge, KGNode } from "./kg/types.js";
 import { defaultMetadataPath, ensureMetadataCatalogFresh, openMetadataCatalog } from "./metadata/catalog.js";
@@ -48,6 +48,9 @@ export {
   buildSkillMetricHints,
   expandQuestionWithSkillVocabulary,
   writeSkill,
+  previewSkillChange,
+  applySkillChange,
+  hashSkillSource,
   upsertSkill,
   deleteSkill,
   migrateLegacySkills,
@@ -60,6 +63,8 @@ export type {
   Skill,
   SkillLoadResult,
   WriteSkillInput,
+  SkillChangePreview,
+  SkillSourcePatch,
   SelectRelevantSkillsOptions,
 } from "./skills/loader.js";
 export { seedDefaultSkills } from "./skills/defaults.js";
@@ -74,6 +79,20 @@ export type {
   DomainSkillBootstrapAiDraft,
   DomainSkillBootstrapEnrichment,
 } from "./skills/bootstrap.js";
+export {
+  buildContextAuthoringProposal,
+  contextAuthoringDependencyClosure,
+  contextAuthoringProposalHash,
+  FileContextAuthoringProposalStore,
+} from './context-authoring.js';
+export type {
+  ContextAuthoringDiagnosticV1,
+  ContextAuthoringOperation,
+  ContextAuthoringOrigin,
+  ContextAuthoringPatchV1,
+  ContextAuthoringProposalInput,
+  ContextAuthoringProposalV1,
+} from './context-authoring.js';
 export type {
   SeedDefaultSkillsOptions,
   SeedDefaultSkillsResult,
@@ -1199,7 +1218,7 @@ export function agentProjectSourceVersion(projectRoot: string): string {
 
   // New OSS projects keep shared skills visible and Git-owned at `skills/`.
   // Watch the historical path as well until project migrations are complete.
-  addSmallTreeState(join(root, 'skills'), tokens);
+  addSmallTreeState(skillsDir(root), tokens);
   addSmallTreeState(join(root, 'domains'), tokens);
   addSmallTreeState(join(root, '.dql', 'skills'), tokens);
   addSmallTreeState(join(root, '.dql', 'hints'), tokens);

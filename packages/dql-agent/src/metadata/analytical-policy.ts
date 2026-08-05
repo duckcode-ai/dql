@@ -297,7 +297,7 @@ function relationshipTierResolver(manifest: DQLManifest): (relationship: Manifes
 }
 
 function isExploratoryEligibleRelationship(relationship: ManifestModelRelationship): boolean {
-  return (relationship.status === 'draft' || relationship.status === 'review')
+  return (relationship.status === 'draft' || relationship.status === 'evaluated' || relationship.status === 'review' || relationship.status === 'reviewed')
     && !relationship.crossDomain
     && relationship.fanout === 'safe'
     && ['one_to_one', 'one_to_many', 'many_to_one'].includes(relationship.cardinality)
@@ -561,7 +561,7 @@ export function exploratoryCandidatePlan(
   const ordered = [...relationships].sort((a, b) => (a.qualifiedId ?? a.id).localeCompare(b.qualifiedId ?? b.id));
   const edges: AnalyticalExploratoryEdge[] = ordered.map((relationship) => ({
     ...planEdge(manifest, relationship),
-    lifecycle: relationship.status === 'certified' ? 'certified' : relationship.status === 'review' ? 'review' : 'draft',
+    lifecycle: relationship.status === 'certified' ? 'certified' : (relationship.status === 'review' || relationship.status === 'reviewed') ? 'review' : 'draft',
     evidenceSource: 'declared_relationship',
   }));
   const uncertified = edges.filter((edge) => edge.lifecycle !== 'certified');

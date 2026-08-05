@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -9,6 +9,7 @@ import {
   buildSkillsPrompt,
   buildSkillBlockHints,
   writeSkill,
+  previewSkillChange,
   deleteSkill,
   selectRelevantSkills,
   skillPath,
@@ -272,6 +273,22 @@ describe('writeSkill / round-trip (spec 16)', () => {
     expect(renderSkill(skill)).toContain('clarify_when:');
   });
 
+  it('previews a partial update without writing or dropping unknown frontmatter and analytical policy', () => {
+    mkdirSync(join(root, 'skills'), { recursive: true });
+    const path = join(root, 'skills', 'revenue.skill.md');
+    const before = `---\nid: revenue\nstatus: active\ncustom_review_owner: finance-council\nanalytical_policy:\n  metric_ids: [recognized_revenue]\n  timezone: America/Chicago\n---\nUse recognized revenue.\n`;
+    writeFileSync(path, before, 'utf8');
+    const existing = loadSkills(root).skills[0]!;
+    const preview = previewSkillChange(root, {
+      id: 'revenue', scope: 'project', status: 'draft', body: 'Use corrected recognized revenue.',
+    }, existing.qualifiedId);
+    expect(readFileSync(path, 'utf8')).toBe(before);
+    expect(preview.patches[0]?.after).toContain('custom_review_owner: finance-council');
+    expect(preview.patches[0]?.after).toContain('metric_ids:');
+    expect(preview.patches[0]?.after).toContain('timezone: America/Chicago');
+    expect(preview.patches[0]?.after).toContain('status: draft');
+  });
+
   it('omits personal user fields from newly written skills', () => {
     const project = writeSkill(root, { id: 'house-rules', scope: 'project', body: 'Shared.' });
     expect(project.scope).toBe('project');
@@ -384,6 +401,12 @@ describe('selectRelevantSkills (spec 16)', () => {
       preferredMetrics: ['recognized_revenue'], preferredBlocks: [], vocabulary: {}, body: 'Use recognized revenue.', sourcePath: '',
     };
     expect(selectRelevantSkills([draft], 'revenue', { domains: ['Revenue'] })).toEqual([]);
+  });
+
+  it('boosts an active skill with an exact canonical modeling focus while drafts remain ineligible', () => {
+    const focused: Skill = { id: 'orders-guide', scope: 'project', status: 'active', domain: 'commerce', sourceRefs: ['commerce::entity::order'], preferredMetrics: [], preferredBlocks: [], vocabulary: {}, body: 'Order guidance.', sourcePath: '' };
+    const draft: Skill = { ...focused, id: 'draft-order-guide', status: 'draft' };
+    expect(selectRelevantSkills([draft, focused], 'unrelated wording', { domains: ['commerce'], focusObjectKeys: ['commerce::entity::order'] }).map((skill) => skill.id)).toEqual(['orders-guide']);
   });
 
   it('treats exclusions as negative eligibility and never as positive search tokens', () => {

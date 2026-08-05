@@ -1075,11 +1075,13 @@ function relationshipCardinality(value: unknown): ManifestRelationshipCardinalit
 }
 
 function fanoutPolicy(value: unknown): ManifestFanoutPolicy {
-  return value === 'safe' || value === 'attribution_required' || value === 'unsafe' ? value : 'unknown';
+  if (value === 'unsafe' || value === 'forbidden') return 'forbidden';
+  return value === 'safe' || value === 'dedupe_required' || value === 'attribution_required' ? value : 'unknown';
 }
 
-function lifecycle(value: unknown): 'draft' | 'review' | 'certified' | 'deprecated' {
-  return value === 'review' || value === 'certified' || value === 'deprecated' ? value : 'draft';
+function lifecycle(value: unknown): 'draft' | 'evaluated' | 'reviewed' | 'certified' | 'deprecated' {
+  if (value === 'review' || value === 'reviewed') return 'reviewed';
+  return value === 'evaluated' || value === 'certified' || value === 'deprecated' ? value : 'draft';
 }
 
 function ruleKind(value: unknown): 'fanout' | 'export' | 'contract' | 'custom' {

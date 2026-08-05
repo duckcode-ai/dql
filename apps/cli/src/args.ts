@@ -18,6 +18,8 @@ export interface CLIFlags {
   host?: string | null;
   chart: string;
   domain: string;
+  /** Model Area for context/model import authoring. */
+  area?: string;
   /** Governed analytical purpose used to authorize exact cross-domain imports. */
   purpose?: string;
   owner: string;
@@ -161,6 +163,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.chart = argv[++i];
     } else if (arg === '--domain' && i + 1 < argv.length) {
       flags.domain = argv[++i];
+    } else if (arg === '--area' && i + 1 < argv.length) {
+      flags.area = argv[++i];
     } else if (arg === '--purpose' && i + 1 < argv.length) {
       flags.purpose = argv[++i];
     } else if (arg === '--owner' && i + 1 < argv.length) {

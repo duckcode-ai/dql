@@ -371,7 +371,7 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
         targetHandle: viewMode === 'data' && firstKey && toColumns.has(firstKey.to) ? `target:${firstKey.to}` : undefined,
         type: 'default',
         label: showEdgeLabels ? `${label} · ${cardinalitySymbol(relationship.cardinality)}` : undefined,
-        animated: relationship.status === 'review',
+        animated: relationship.status === 'review' || relationship.status === 'reviewed',
         markerEnd: { type: MarkerType.ArrowClosed, color: selectedId === recordKey ? 'var(--accent)' : 'var(--border-strong)' },
         // Prototype edges: quiet bezier curves; the selected edge turns accent.
         style: {

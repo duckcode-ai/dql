@@ -729,6 +729,10 @@ export function AgentAnswerCard({
           t={t}
           skills={answer.appliedSkills}
           onOpenSkills={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'skills' })}
+          onSuggestCorrection={(skill) => {
+            try { window.sessionStorage.setItem('dql-skill-ai-correction', JSON.stringify({ skillId: skill.id, question: sourceQuestion, feedback: 'Correct the guidance that shaped this answer.' })); } catch { /* best effort */ }
+            dispatch({ type: 'SET_MAIN_VIEW', view: 'skills' });
+          }}
         />
       </div>
     </div>

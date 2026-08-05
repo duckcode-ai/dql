@@ -472,6 +472,16 @@ export interface Skill {
   clarifyWhen?: string[];
   examples?: string[];
   sourceRefs?: string[];
+  analyticalPolicy?: {
+    metricIds?: string[];
+    timeRole?: string;
+    calendarId?: string;
+    timezone?: string;
+    completenessPolicy?: 'partial_current' | 'latest_complete' | 'closed_period';
+    comparisonAlignment?: 'elapsed_period' | 'calendar_period' | 'fiscal_period';
+    defaultRankingPeriod?: 'current' | 'comparison';
+    narrativeGuidance?: string[];
+  };
 }
 
 export interface SkillPathSettings {
@@ -1019,6 +1029,8 @@ export interface BlockStudioDiagnostic {
 
 export interface BlockStudioValidation {
   valid: boolean;
+  /** Whether the draft may be persisted even when its execution runtime is unavailable. */
+  saveable?: boolean;
   diagnostics: BlockStudioDiagnostic[];
   semanticRefs: {
     metrics: string[];

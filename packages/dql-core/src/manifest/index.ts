@@ -19,7 +19,9 @@ export {
 } from './dbt-first-modeling.js';
 export {
   previewModelingChange,
+  previewModelingChanges,
   applyModelingChange,
+  applyModelingChanges,
   previewDbtSourcePatch,
   applyDbtSourcePatch,
   loadDbtNodeAuthoringDetail,
@@ -35,6 +37,7 @@ export {
   type ModelingAuthoringChange,
   type ModelingSourcePatch,
   type ModelingChangePreview,
+  type ModelingChangesPreview,
   type DbtNodeAuthoringDetail,
   type DbtSourceAuthoringInput,
   type DbtSourcePatchPreview,
@@ -125,6 +128,7 @@ export type {
   ManifestRelationshipValidationEvidence,
   ManifestRelationshipCardinality,
   ManifestFanoutPolicy,
+  ManifestModelLifecycle,
   ManifestRelationshipOptionality,
   ManifestRelationshipJoinType,
   ManifestRelationshipAggregationPolicy,

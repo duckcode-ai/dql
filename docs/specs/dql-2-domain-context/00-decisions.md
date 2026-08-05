@@ -23,17 +23,21 @@ an acceptance-matrix update.
 | REL-001 | dbt lineage and matching column names are never automatic join proof. |
 | REL-002 | Only certified, fresh, exported, fanout-safe relationships authorize generated joins. |
 | REL-003 | Cross-domain knowledge compiles as explicit `observed`, `authorized`, `blocked`, or `stale` routes; only the full provider export → contract → consumer import → validated relationship chain can authorize use, and dbt transformation lineage remains observation only. |
+| REL-004 | dbt tests, lineage, and matching names are authoring suggestions only; imported or AI-authored relationships remain drafts and cannot create join proof. |
 | CONTRACT-001 | Cross-domain use requires both certified relationship proof and matching provider export/consumer import. |
 | CONTRACT-002 | Every executable metric and certified asset exposes a normalized analytical capability contract covering entity/result grain, aggregation/additivity, dimension roles, time roles/grains, freshness, supported operations, relationship paths, outputs, and execution adapters; missing capability is never inferred from display-name text. |
 | SKILL-001 | Domain skills are governed domain context; global skills are reusable workflow capability. |
 | SKILL-002 | Skill exclusions are negative constraints and never positive retrieval tokens. |
 | SKILL-003 | The compiler emits compact Domain Knowledge Capsules and skill descriptors/hashes without skill bodies or executable scripts; Ask selects a bounded eligible skill set from the immutable snapshot, records a `KnowledgeLens`, and supports optional product/user pinning without making the pin an authorization boundary. |
 | SKILL-004 | Eligible Domain/Skill policy may guide calendar, timezone, completeness, comparison alignment, ranking defaults, and narrative structure, but cannot invent members, authorize relationships, override metric capability, or hide ambiguity; exact selected IDs and hashes remain in the plan and receipt. |
+| SKILL-005 | Skills may reference qualified model and relationship IDs; validated references compile as `guided_by` graph edges while legacy free-form references remain non-governed text. |
+| SKILL-006 | Skills AI produces review-required drafts only; correcting an active skill creates a draft that is retrieval-ineligible until a separate exact-hash activation and reindex. |
 | CTX-001 | One server-resolved `DomainContextEnvelope` scopes every governed answer. |
 | CTX-002 | One immutable `snapshotId` is used from retrieval through final validation. |
 | CTX-004 | Model Area identity is domain-qualified; explicit or inferred Area focus narrows modeling and Skill retrieval inside its owning domain. |
 | CTX-005 | Every Ask surface acquires one qualified immutable project-search snapshot containing DQL v3/modeling, certified assets, semantic metadata, dbt metadata, safe runtime schema, and approved hints; warm retrieval does not reparse source artifacts. |
 | CTX-006 | Manifest v3 owns one deterministic qualified knowledge graph for domains, Areas, terms, skills, certified assets, semantic/dbt provenance, governed interfaces, relationships, and products; legacy lineage, search, Domain 360, and agent context are compatibility projections of this graph. |
+| CTX-008 | Persistent Domain scope includes allowed descendants but never siblings; one-shot exact object focus may boost matching active skills and never authorizes joins, tools, imports, or data access. |
 | AGT-001 | After meaning is fixed, route order is a completely compatible certified block, one compatible semantic adapter (`native`, `metricflow-cli`, or `dbt-cloud`), governed relational composition, bounded review-required exploration, then identifier-bound clarify/refuse. A failure after executable-plan selection never broadens the route. |
 | AGT-002 | AI discovery produces evidence-cited drafts only and never auto-certifies. |
 | AGT-003 | Ask is available before domain setup only in limited-context, review-required mode. |
@@ -54,6 +58,7 @@ an acceptance-matrix update.
 | AGT-021 | An explicit multi-metric question preserves every requested metric in one analytical frame and output contract; execution requires one provably compatible governed tuple, otherwise the run returns a modeling gap instead of silently dropping a metric. |
 | AGT-022 | App Copilot consumes one server-owned App context envelope covering every visible tile and the settled run receipts; it may answer, research, or propose typed App changes, but cannot silently mutate App source or accept client-injected trust evidence. |
 | AGT-023 | App-generated and App-executed SQL failures may use the same single bounded same-target repair boundary as Ask and Notebook; the original failure remains immutable, unsafe/access/policy failures never enter AI repair, and repaired semantic SQL is downgraded to review-required exploration rather than inheriting semantic approval. |
+| AGT-024 | Modeling AI and Skills AI extend durable AgentRun with evidence-bound, write-free proposal artifacts and immutable authoring revisions; generation cannot mutate source, activate skills, certify relationships, create proof, or grant authorization. |
 | EXP-004 | An exploratory App result remains transient until explicit approval materializes an app-scoped review DQL draft; that draft cannot be published, promoted, or certified automatically. |
 | API-001 | Domain, modeling, onboarding, and context APIs return stable codes and snapshot IDs. |
 | API-002 | App proposal is write-free; commit is snapshot/hash guarded and atomic; dashboard run/story APIs bind filters, results, persona, trust, and evidence to stable fingerprints. |
@@ -65,6 +70,8 @@ an acceptance-matrix update.
 | API-008 | Agent runs persist bounded lifecycle checkpoints and one terminal diagnostic receipt; conversation turns bind the canonical run ID so remounts hydrate the complete DQL, SQL, lineage, trust, steps, and failure contract rather than reconstructing lossy client state. |
 | API-009 | Editable App plans, source preflight, existing-App changes, and publication apply only through versioned snapshot/proposal/source/app hashes and atomic commits; stale inputs return conflicts without partial writes. |
 | API-010 | App repair returns a versioned trace with repair status/mode, redacted original failure, original/repaired SQL fingerprints, and explicit semantic-approval ineligibility; it never silently writes the repaired SQL into App or semantic source. |
+| API-011 | DQL/dbt YAML discovery and batch model binding classify bounded inputs and produce shared, hash-guarded proposals; selection changes require server repreview. |
+| API-012 | Every context-authoring path uses immutable proposal/revision IDs, exact source and snapshot fingerprints, dependency closure, compile-before-accept, atomic rollback, and stale `409` conflicts with zero partial writes. |
 | UI-001 | Domain Studio uses vertical contextual navigation; global product navigation stays stable. |
 | UI-002 | dbt-owned metadata is read-only and edited only through previewed source patches. |
 | UI-004 | Generated Apps render page navigation, an apply/reset filter row, a live Business Story row, KPI band, analysis tiles, detail evidence, then reviewer appendix. |
@@ -81,8 +88,13 @@ an acceptance-matrix update.
 | UI-016 | Block AI uses the universal run result and exposes an explicit Add to Block Studio commit that stores an ownerless review draft as DQL and opens the saved draft in the visual builder; generation alone performs no editor mutation or certification. |
 | UI-017 | App Builder presents an editable Build Brief with requirement coverage, source/trust evidence, bounded previews, filters, pages, visualizations, and layout before the explicit Build Draft action. |
 | UI-018 | Build Brief and App dashboard tiles visibly distinguish successful original execution, bounded repaired preview, and blocked repair; an AI-repaired semantic preview cannot enable the governed semantic approval action. |
+| UI-019 | Modeling offers clean empty-state entry, batch model binding, YAML intake, and progressive relationship review while preserving the `models` deep link and Cloud theme contract. |
+| UI-020 | Modeling AI uses the durable thread, evidence-bound proposal review, immutable corrections, validation handoffs, and explicit draft commit without source mutation on completion. |
+| UI-021 | Skills AI uses the durable thread, guarded partial proposal review, immutable corrections, and explicit draft commit without activation or source mutation on completion. |
 | MIG-001 | Manifest v2 and legacy domain-local product paths remain readable through DQL 3.x. |
 | MIG-002 | DataLex/legacy migration is deterministic, idempotent, loss-reporting, and never upgrades lifecycle. |
+| MIG-003 | In-project DQL opens in place; external DQL/dbt YAML imports as reviewed sparse copies with unresolved, lossy, proof, and trust changes visible before commit. |
+| MIG-004 | Readers accept legacy `review`/`unsafe`, preserve untouched spelling, and emit canonical `reviewed`/`forbidden` plus the complete DQL 2 lifecycle/fanout vocabulary on edits. |
 | PERF-001 | Large projects use indexed snapshots, pagination, batch detail, and bounded graph neighborhoods. |
 | PERF-002 | Ask enforces retrieval, evidence-size, provider-call, tool-call, SQL, repair, cancellation, and wall-clock budgets; simple answers never pay an open-ended planning or synthesis loop. |
 | SEC-001 | Non-loopback serving requires authentication; wildcard CORS is not allowed there. |

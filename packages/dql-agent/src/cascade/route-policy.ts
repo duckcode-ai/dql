@@ -1,6 +1,6 @@
 import { looksLikeComposeApp } from '../intent-controller.js';
 
-export type CascadeRequestedMode = 'auto' | 'ask' | 'research' | 'sql' | 'block' | 'app';
+export type CascadeRequestedMode = 'auto' | 'ask' | 'research' | 'sql' | 'block' | 'app' | 'modeling' | 'skill';
 
 export type CascadeRunRoute =
   | 'conversation'
