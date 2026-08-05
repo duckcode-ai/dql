@@ -6,6 +6,48 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.13.1 - 2026-08-04
+
+### Recoverable Block Studio editing and governed context authoring
+
+This patch ships the post-`1.13.0` authoring work on `main`. Block Studio now
+keeps invalid drafts editable and offers bounded AI repair, while Modeling and
+Skills share a write-free proposal lifecycle with explicit review and commit.
+
+### Added
+
+- **Governed context proposals.** Manual Modeling, dbt discovery, YAML import,
+  Modeling AI, and Skills AI can produce immutable, review-required proposals
+  with source snapshots, dependency fingerprints, exact patches, validation,
+  and explicit commit.
+- **Atomic authoring review.** Context proposal commits validate the expected
+  proposal hash, compile the complete candidate, reject source or dependency
+  drift, and restore prior bytes instead of leaving partial writes.
+- **Modeling workspace actions.** The dbt-first workspace exposes clearer
+  connected-dbt, YAML import, manual-start, batch-binding, and relationship
+  review paths without promoting suggestions to certified proof.
+
+### Fixed
+
+- **Editable Block Studio syntax failures.** Invalid DQL is rejected before a
+  block file is written, the source editor remains available, and the error
+  explains that the draft was not saved instead of reopening a frozen block.
+- **Bounded AI repair and run.** `Fix with AI & run` repairs one malformed DQL
+  draft on the same target, validates the repaired source, and returns its run
+  result without automatically saving or certifying the change.
+- **Recoverable validation.** Parameter parsing and structural diagnostics now
+  return actionable validation responses, while missing semantic runtime setup
+  does not incorrectly prevent a structurally valid draft from being saved.
+
+### Verification
+
+- The synchronized release dry run passed all 22 workspace builds, all 41 test
+  tasks, and packed all 19 npm packages.
+- All 19 npm packages report `version=1.13.1` and
+  `dist-tags.latest=1.13.1`.
+- Fresh project-local and global CLI installs both report `dql 1.13.1`, and
+  `create-dql-app@1.13.1 --help` resolves successfully.
+
 ## v1.13.0 - 2026-08-03
 
 ### Governed App Builder, asynchronous workflows, and durable AI analysis
