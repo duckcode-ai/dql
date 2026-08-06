@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ManifestDbtFirstModeling, ManifestModelEntity } from '@duckcodeailabs/dql-core';
-import { DOMAIN_STUDIO_NAVIGATION, domainPackageTree, domainStudioLocationHref, entityRecords, isDescriptiveOnlyChange, isDomainStudioSection, resolveEntityRecordKey, withoutDomainStudioLocationHref } from './domain-studio-model';
+import { DOMAIN_STUDIO_NAVIGATION, domainPackageTree, domainStudioLocationHref, entityRecords, isDescriptiveOnlyChange, isDomainStudioSection, modelingThreadScope, parseDomainStudioLocation, resolveDomainStudioLocation, resolveEntityRecordKey, withoutDomainStudioLocationHref } from './domain-studio-model';
 
 function entity(domain: string, localId: string): ManifestModelEntity {
   return {
@@ -137,5 +137,49 @@ describe('two-tier authoring write path (00-decisions.md#a-001)', () => {
     // move, so A-001's direct-save path was dead and the save button lied.
     expect(existing.areaId).toContain('::model_area::');
     expect(isDescriptiveOnlyChange(upsert({ businessContext: 'One completed purchase.' }) as never, existing)).toBe(true);
+  });
+});
+
+describe('Modeling workspace location and conversation identity', () => {
+  const mirror = JSON.stringify({ domain: 'commerce', section: 'diagram', modelAreaId: 'commerce::model_area::core', selectedId: 'commerce::entity::order' });
+
+  it('restores the last workspace location when the URL carries no Domain Studio state', () => {
+    // The shell strips these params on the way out, so without the mirror a
+    // return trip landed on "all domains, nothing selected" — which also reset
+    // the AI thread key and orphaned the conversation.
+    expect(resolveDomainStudioLocation('https://app.test/notebook', mirror)).toEqual({
+      domain: 'commerce', section: 'diagram', modelAreaId: 'commerce::model_area::core', selectedId: 'commerce::entity::order',
+    });
+  });
+
+  it('lets an explicit deep link win over the mirror', () => {
+    expect(resolveDomainStudioLocation('https://app.test/notebook?domain=growth&domainSection=skills', mirror)).toEqual({
+      domain: 'growth', section: 'skills', modelAreaId: null, selectedId: null,
+    });
+  });
+
+  it('honours a deep link that deliberately clears the domain', () => {
+    // `?domainSection=diagram` with no `domain` means "all domains" on purpose.
+    expect(resolveDomainStudioLocation('https://app.test/notebook?domainSection=diagram', mirror).domain).toBeNull();
+  });
+
+  it('round-trips through domainStudioLocationHref', () => {
+    const href = `https://app.test${domainStudioLocationHref('https://app.test/n', { domain: 'commerce', section: 'diagram', modelAreaId: 'a', selectedId: 'b' })}`;
+    expect(resolveDomainStudioLocation(href, null)).toEqual({ domain: 'commerce', section: 'diagram', modelAreaId: 'a', selectedId: 'b' });
+  });
+
+  it('treats unusable mirrored state as no location instead of throwing', () => {
+    for (const raw of [null, undefined, '', 'not json', '{"section":"nope"}', '[]']) {
+      expect(parseDomainStudioLocation(raw).section).toBe('diagram');
+    }
+    expect(parseDomainStudioLocation('{"domain":"   "}').domain).toBeNull();
+  });
+
+  it('keys the AI conversation on the domain alone', () => {
+    // The key used to embed the active area and the selected node, so clicking
+    // another model swapped the thread mid-conversation.
+    expect(modelingThreadScope('commerce')).toBe(modelingThreadScope('commerce'));
+    expect(modelingThreadScope('commerce')).not.toBe(modelingThreadScope('growth'));
+    expect(modelingThreadScope(null)).toBe('modeling:all');
   });
 });

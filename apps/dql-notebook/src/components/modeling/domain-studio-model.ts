@@ -76,10 +76,76 @@ export function domainStudioLocationHref(
 /** Remove Domain Studio-only deep-link state after leaving the workspace. */
 export function withoutDomainStudioLocationHref(href: string): string {
   const url = new URL(href);
-  for (const key of ['domain', 'domainSection', 'modelArea', 'domainObject']) {
+  for (const key of DOMAIN_STUDIO_LOCATION_PARAMS) {
     url.searchParams.delete(key);
   }
   return `${url.pathname}${url.search}${url.hash}`;
+}
+
+const DOMAIN_STUDIO_LOCATION_PARAMS = ['domain', 'domainSection', 'modelArea', 'domainObject'] as const;
+
+/** Where the workspace mirrors its location so a round trip can restore it. */
+export const DOMAIN_STUDIO_LOCATION_KEY = 'dql.domain-studio.location';
+
+export type DomainStudioLocation = {
+  domain: string | null;
+  section: DomainStudioSection;
+  modelAreaId: string | null;
+  selectedId: string | null;
+};
+
+/**
+ * Where the workspace should open.
+ *
+ * The URL is authoritative; the mirror only fills in when the URL carries no
+ * Domain Studio state at all. `withoutDomainStudioLocationHref` deliberately
+ * strips these params on the way out, so returning to Modeling used to land on
+ * "all domains, nothing selected" — which also reset the AI thread key and made
+ * the conversation unreachable. An explicit deep link always carries at least
+ * `domainSection`, so it still wins over whatever was last visited.
+ */
+export function resolveDomainStudioLocation(href: string, mirrored?: string | null): DomainStudioLocation {
+  const params = new URL(href).searchParams;
+  if (DOMAIN_STUDIO_LOCATION_PARAMS.some((key) => params.has(key))) {
+    const requestedSection = params.get('domainSection');
+    const section = isDomainStudioSection(requestedSection) ? requestedSection : 'diagram';
+    return {
+      domain: params.get('domain'),
+      section,
+      modelAreaId: params.get('modelArea'),
+      // Only honour a selected object on an explicit diagram deep link.
+      selectedId: requestedSection === 'diagram' ? params.get('domainObject') : null,
+    };
+  }
+  return parseDomainStudioLocation(mirrored);
+}
+
+/** Tolerant read of the mirrored location; anything unusable means "no location". */
+export function parseDomainStudioLocation(raw?: string | null): DomainStudioLocation {
+  const empty: DomainStudioLocation = { domain: null, section: 'diagram', modelAreaId: null, selectedId: null };
+  if (!raw) return empty;
+  try {
+    const value = JSON.parse(raw) as Partial<Record<keyof DomainStudioLocation, unknown>>;
+    const section = typeof value.section === 'string' && isDomainStudioSection(value.section) ? value.section : 'diagram';
+    const text = (input: unknown): string | null => (typeof input === 'string' && input.trim() ? input : null);
+    return { domain: text(value.domain), section, modelAreaId: text(value.modelAreaId), selectedId: text(value.selectedId) };
+  } catch {
+    return empty;
+  }
+}
+
+/**
+ * Conversation identity for the Modeling AI dock.
+ *
+ * Scoped to the domain only. It used to embed the active area and the selected
+ * node, so clicking a different model swapped the thread mid-conversation, and
+ * navigating away — which clears those params — produced a key that matched
+ * nothing on the way back. Both already travel per turn via `selectedObject`
+ * and `workspaceContext`, so the turn stays precise while the conversation
+ * stays continuous.
+ */
+export function modelingThreadScope(domain: string | null): string {
+  return `modeling:${domain ?? 'all'}`;
 }
 
 /** Stable parent-first ordering for the Domain Studio selector and breadcrumbs. */

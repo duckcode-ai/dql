@@ -15,7 +15,7 @@ import { DomainModelingCanvas, type ColumnDisplayMode, type DiagramDensity, type
 import { UnifiedAgentRunPanel, usePersistedAgentThreadId } from '../agent/UnifiedAgentRunPanel';
 import { ContextProposalReviewDrawer } from './ContextProposalReviewDrawer';
 import { AddModelsDrawer, ModelingYamlImportDrawer } from './ModelingStartDrawers';
-import { DOMAIN_STUDIO_NAVIGATION, domainEntityRecords, domainPackageTree, domainStudioLocationHref, entityKindColor, isDescriptiveOnlyChange, isDomainStudioSection, type DomainStudioSection } from './domain-studio-model';
+import { DOMAIN_STUDIO_LOCATION_KEY, DOMAIN_STUDIO_NAVIGATION, domainEntityRecords, domainPackageTree, domainStudioLocationHref, entityKindColor, isDescriptiveOnlyChange, modelingThreadScope, resolveDomainStudioLocation, type DomainStudioSection } from './domain-studio-model';
 import { domainStudioUnavailableState, type DomainStudioUnavailableState } from './domain-studio-readiness';
 import { rankModelingOptions, type ModelingSearchOption } from './modeling-search';
 
@@ -75,7 +75,7 @@ export function DbtFirstModelingPage() {
   const [editor, setEditor] = useState<Editor | null>(null);
   const [startDrawer, setStartDrawer] = useState<'models' | 'yaml' | null>(null);
   const [proposal, setProposal] = useState<ContextAuthoringProposalV1 | null>(null);
-  const [aiDockOpen, setAiDockOpen] = useState(false);
+  const [aiDockOpen, setAiDockOpen] = useState(() => readDiagramPreferences().aiDockOpen === true);
   /**
    * A proposal previewed as ghost nodes and dashed edges on the live canvas.
    * Reviewing a model you can see beats reading a YAML diff, so the AI's output
@@ -93,7 +93,7 @@ export function DbtFirstModelingPage() {
   >(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  useEffect(() => { localStorage.setItem('dql-modeling-preferences', JSON.stringify({ modelingView, columnMode, layoutMode, density: diagramDensity, visibleLimit, dimUnrelated, showEdgeLabels })); }, [modelingView, columnMode, layoutMode, diagramDensity, visibleLimit, dimUnrelated, showEdgeLabels]);
+  useEffect(() => { localStorage.setItem('dql-modeling-preferences', JSON.stringify({ modelingView, columnMode, layoutMode, density: diagramDensity, visibleLimit, dimUnrelated, showEdgeLabels, aiDockOpen })); }, [modelingView, columnMode, layoutMode, diagramDensity, visibleLimit, dimUnrelated, showEdgeLabels, aiDockOpen]);
   useEffect(() => {
     const onResize = () => setNarrowLayout(window.innerWidth < 980);
     window.addEventListener('resize', onResize);
@@ -738,15 +738,9 @@ function domainStudioSectionLabel(section: Tab): string {
 
 function readDomainStudioLocation(): { domain: string | null; section: Tab; modelAreaId: string | null; selectedId: string | null } {
   if (typeof window === 'undefined') return { domain: null, section: 'diagram', modelAreaId: null, selectedId: null };
-  const params = new URL(window.location.href).searchParams;
-  const requestedSection = params.get('domainSection');
-  const section = isDomainStudioSection(requestedSection) ? requestedSection : 'diagram';
-  return {
-    domain: params.get('domain'),
-    section,
-    modelAreaId: params.get('modelArea'),
-    selectedId: section === 'diagram' && requestedSection === 'diagram' ? params.get('domainObject') : null,
-  };
+  let mirrored: string | null = null;
+  try { mirrored = window.localStorage.getItem(DOMAIN_STUDIO_LOCATION_KEY); } catch { mirrored = null; }
+  return resolveDomainStudioLocation(window.location.href, mirrored);
 }
 
 function writeDomainStudioLocation(domain: string | null, section: Tab, replace = false, modelAreaId: string | null = null, selectedId: string | null = null) {
@@ -754,6 +748,13 @@ function writeDomainStudioLocation(domain: string | null, section: Tab, replace 
   const next = domainStudioLocationHref(window.location.href, { domain, section, modelAreaId, selectedId });
   if (replace) window.history.replaceState(window.history.state, '', next);
   else window.history.pushState(window.history.state, '', next);
+  // Mirror it: the shell strips these params when the user leaves the
+  // workspace, so the URL alone cannot bring them back where they were.
+  try {
+    window.localStorage.setItem(DOMAIN_STUDIO_LOCATION_KEY, JSON.stringify({ domain, section, modelAreaId, selectedId }));
+  } catch {
+    // Private mode or a full quota: the URL still works for this session.
+  }
 }
 
 /**
@@ -1711,8 +1712,7 @@ function appIdFromPath(path: string): string {
 }
 
 function ModelingAiPanel({ domain, areaId, selectedId, data, themeMode, t, correction, onClose, onCorrectionStarted, onReviewProposal, onPreviewProposal, onOpenSkills, onDraftRelationship }: { domain: string | null; areaId: string | null; selectedId: string | null; data: DbtFirstModelingResponse; themeMode: ThemeMode; t: Theme; correction?: { text: string; nonce: number; evidence: unknown } | null; onClose: () => void; onCorrectionStarted: () => void; onReviewProposal: (proposal: ContextAuthoringProposalV1) => void; onPreviewProposal: (proposal: ContextAuthoringProposalV1 | null) => void; onOpenSkills: () => void; onDraftRelationship: () => void }) {
-  const scope = `modeling:${domain ?? 'new'}:${areaId ?? 'all'}:${selectedId ?? 'new'}`;
-  const { threadId, onThreadIdChange } = usePersistedAgentThreadId(scope);
+  const { threadId, onThreadIdChange } = usePersistedAgentThreadId(modelingThreadScope(domain));
   const selectedRelationship = selectedId ? data.modeling.relationships[selectedId] : undefined;
   const selectedModel = selectedId ? data.modeling.entities[selectedId] : undefined;
   const selectedArea = areaId ? data.modeling.areas[areaId] : undefined;
@@ -1774,7 +1774,11 @@ function ModelingAiPanel({ domain, areaId, selectedId, data, themeMode, t, corre
           composerPlaceholder="Describe the model you want…"
           initialMode="modeling"
           selectedObject={selectedObject}
-          workspaceContext={{ domain, modelAreaId: areaId, snapshotId: data.snapshotId, focusedObjectId: selectedId, providerSafety: 'no_query_rows', ...(correction ? { correction: true, validationReceipt: correction.evidence } : {}) }}
+          // `surface` names the thread's home. Without it these threads were
+          // created as the generic 'agent' surface and appeared in no listing,
+          // so a conversation whose id was lost became unreachable even though
+          // its turns were still on the server.
+          workspaceContext={{ surface: 'modeling', domain, modelAreaId: areaId, snapshotId: data.snapshotId, focusedObjectId: selectedId, providerSafety: 'no_query_rows', ...(correction ? { correction: true, validationReceipt: correction.evidence } : {}) }}
           threadId={threadId}
           onThreadIdChange={onThreadIdChange}
           autoRun={correction ? { text: correction.text, mode: 'modeling', nonce: correction.nonce } : undefined}
@@ -2477,8 +2481,15 @@ function relationshipKeys(value: string): Array<{ from: string; to: string }> {
     return { from, to };
   });
 }
-function readDiagramPreferences(): Partial<{ viewMode: ModelingViewMode; columnMode: ColumnDisplayMode; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean }> {
-  try { return JSON.parse(localStorage.getItem('dql-modeling-preferences') ?? '{}') as Partial<{ viewMode: ModelingViewMode; columnMode: ColumnDisplayMode; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean }>; }
+type DiagramPreferences = Partial<{
+  viewMode: ModelingViewMode; columnMode: ColumnDisplayMode; layoutMode: DiagramLayoutMode;
+  density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean;
+  /** Whether the Modeling AI dock was open. Restored so a round trip through
+   *  another page does not silently close the conversation. */
+  aiDockOpen: boolean;
+}>;
+function readDiagramPreferences(): DiagramPreferences {
+  try { return JSON.parse(localStorage.getItem('dql-modeling-preferences') ?? '{}') as DiagramPreferences; }
   catch { return {}; }
 }
 const twoColumns: React.CSSProperties = {
