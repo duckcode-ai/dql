@@ -8142,13 +8142,20 @@ function resolveFocusedModelArea(
   return id ? { id, object: first.object, source: 'inferred' } : undefined;
 }
 
+/**
+ * The authorization gate: a row survives only if it belongs to the pinned
+ * domain boundary. This is the single place that decides what an agent is
+ * *allowed* to see; a model area may narrow the result further but is applied
+ * separately, and afterwards, so it can only ever shrink an authorized set.
+ *
+ * Uses `domainContextSearchDomains` so descendants are included. The FTS lane
+ * already retrieves sub-domain rows; filtering them out here contradicted
+ * CTX-008 and made a question answerable only from a sub-domain fail whenever
+ * its parent was pinned.
+ */
 function filterMetadataObjectsByDomainContext(rows: MetadataObject[], context?: DomainContextEnvelope): MetadataObject[] {
   if (!context?.activeDomain) return rows;
-  const domains = new Set([
-    context.activeDomain,
-    ...context.ancestors,
-    ...context.allowedImports.map((item) => item.providerDomain),
-  ]);
+  const domains = new Set(domainContextSearchDomains(context));
   return rows.filter((row) => !row.domain || domains.has(row.domain));
 }
 

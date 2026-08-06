@@ -8684,4 +8684,89 @@ describe('unified context authoring proposals (API-011, API-012, MIG-003)', () =
       await new Promise<void>((done) => server ? server.close(() => done()) : done());
     }
   });
+
+  it('harvests a dbt relationships test against an area-owned entity with a local area id', async () => {
+    // Regression: the harvest read the existing entity's `areaId`, which is the
+    // qualified `commerce::model_area::core`, and split it on '::area::' — a
+    // separator that never matches. The full qualified id was carried into the
+    // relationship's `areaId`, reached `requiredId`, whose safe-id regex rejects
+    // ':', and failed the entire proposal. Binding any dbt model that had a
+    // relationships test pointing at an already-area-owned model was impossible.
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-context-area-harvest-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'target'), { recursive: true });
+    mkdirSync(join(projectRoot, 'domains', 'commerce', 'modeling', 'areas'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'shop', manifestVersion: 3, modeling: { mode: 'dbt-first' }, dbt: { projectDir: '.', manifestPath: 'target/manifest.json' } }));
+    writeFileSync(join(projectRoot, 'domains', 'commerce', 'domain.dql'), 'domain "Commerce" {\n  id = "commerce"\n}\n');
+    // `customers` already belongs to an area, so its compiled `areaId` is qualified.
+    writeFileSync(join(projectRoot, 'domains', 'commerce', 'modeling', 'areas', 'core.dql.yaml'), [
+      'domain: commerce',
+      'area:',
+      '  id: core',
+      '  name: Core models',
+      'entities:',
+      '  - id: customers',
+      '    dbt_model: model.shop.customers',
+      '',
+    ].join('\n'));
+    writeFileSync(join(projectRoot, 'target', 'manifest.json'), JSON.stringify({
+      metadata: { project_name: 'shop' },
+      nodes: {
+        'model.shop.customers': { unique_id: 'model.shop.customers', resource_type: 'model', name: 'customers', original_file_path: 'models/customers.sql', columns: { customer_id: { name: 'customer_id' }, first_order_id: { name: 'first_order_id' } }, depends_on: { nodes: [] }, tags: [] },
+        'model.shop.orders': { unique_id: 'model.shop.orders', resource_type: 'model', name: 'orders', original_file_path: 'models/orders.sql', columns: { order_id: { name: 'order_id' }, customer_id: { name: 'customer_id' } }, depends_on: { nodes: [] }, tags: [] },
+        // Attached to the ALREADY area-owned model, so the harvest reads that
+        // entity's qualified `areaId` for the edge's own area.
+        'test.shop.relationships_customers_first_order_id__order_id__ref_orders_.abc123': {
+          unique_id: 'test.shop.relationships_customers_first_order_id__order_id__ref_orders_.abc123',
+          resource_type: 'test',
+          name: 'relationships_customers_first_order_id__order_id__ref_orders_',
+          original_file_path: 'models/schema.yml',
+          test_metadata: { name: 'relationships', kwargs: { to: "ref('orders')", field: 'order_id', column_name: 'first_order_id' } },
+          attached_node: 'model.shop.customers',
+          column_name: 'first_order_id',
+          depends_on: { nodes: ['model.shop.customers', 'model.shop.orders'] },
+          columns: {}, tags: [],
+        },
+      },
+      sources: {}, exposures: {}, semantic_models: {}, groups: {}, metrics: {}, child_map: {}, parent_map: {},
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const base = `http://127.0.0.1:${port}`;
+      const modeling = await (await fetch(`${base}/api/modeling/dbt-first`)).json() as {
+        snapshotId: string;
+        modeling: { entities: Record<string, { areaId?: string }> };
+      };
+      // Precondition: the compiled entity really does carry a qualified area id.
+      expect(Object.values(modeling.modeling.entities).some((entity) => entity.areaId?.includes('::model_area::'))).toBe(true);
+
+      const response = await fetch(`${base}/api/context-proposals`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          origin: 'dbt_discovery',
+          expectedSnapshotId: modeling.snapshotId,
+          operations: [{ id: 'bind:orders', kind: 'modeling_change', change: { operation: 'upsert_entity', value: { id: 'orders', domain: 'commerce', dbtModel: 'model.shop.orders', areaId: 'core', status: 'draft' } } }],
+        }),
+      });
+
+      expect(response.status).toBe(201);
+      const { proposal } = await response.json() as {
+        proposal: {
+          operations: Array<{ id: string; change?: { value: Record<string, unknown> } }>;
+          diagnostics: Array<{ code: string; severity: string; message: string }>;
+        };
+      };
+      expect(proposal.diagnostics.filter((diagnostic) => diagnostic.severity === 'blocking')).toEqual([]);
+
+      const harvested = proposal.operations.find((operation) => operation.id.startsWith('dbt-test:'));
+      expect(harvested, 'the dbt relationships test should be harvested').toBeDefined();
+      // The whole point: a writable local id, never the qualified form.
+      expect(harvested?.change?.value.areaId).toBe('core');
+      expect(String(harvested?.change?.value.areaId)).not.toContain(':');
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+    }
+  });
 });

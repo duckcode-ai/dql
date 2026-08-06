@@ -1,3 +1,4 @@
+import { modelAreaLocalId } from '@duckcodeailabs/dql-core/modeling-ids';
 import type { ManifestDbtFirstModeling, ManifestModelArea, ManifestModelEntity, ModelingAuthoringChange } from '@duckcodeailabs/dql-core';
 
 /**
@@ -174,7 +175,7 @@ export function isDescriptiveOnlyChange(
       && (value.grain ?? undefined) === (existingEntity.grain ?? undefined)
       && JSON.stringify(value.keys ?? []) === JSON.stringify(existingEntity.keys ?? [])
       && (value.status ?? existingEntity.status) === existingEntity.status
-      && (value.areaId ?? undefined) === (existingEntity.areaId?.split('::area::').at(-1) ?? undefined)
+      && (value.areaId ?? undefined) === modelAreaLocalId(existingEntity.areaId)
       && value.domain === existingEntity.domain;
   }
   if (change.operation === 'upsert_area') {

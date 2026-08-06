@@ -15,6 +15,8 @@ export {
   loadDbtFirstModeling,
   siblingDbtArtifact,
   relationshipValidationProofFingerprint,
+  modelAreaLocalId,
+  DEFAULT_MODEL_AREA_ID,
   type DbtFirstModelingLoadResult,
 } from './dbt-first-modeling.js';
 export {

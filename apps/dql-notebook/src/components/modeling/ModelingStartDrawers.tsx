@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { FileSearch, FolderOpen, Loader2, Search, Upload, X } from 'lucide-react';
 import { api, type ContextAuthoringOperation, type ContextAuthoringProposalV1, type DbtFirstModelingResponse, type DbtModelInventoryItem, type ModelingImportSession } from '../../api/client';
+import { DEFAULT_MODEL_AREA_ID } from '@duckcodeailabs/dql-core/modeling-ids';
 import type { Theme } from '../../themes/notebook-theme';
 
 /**
@@ -10,7 +11,7 @@ import type { Theme } from '../../themes/notebook-theme';
  * whichever part of the scope does not exist yet, inside the same reviewable
  * proposal.
  */
-const DEFAULT_AREA_ID = 'core';
+const DEFAULT_AREA_ID = DEFAULT_MODEL_AREA_ID;
 
 function useAuthoringScope(data: DbtFirstModelingResponse, domain: string | null, areaId: string | null) {
   const existingArea = data.modeling.areas[areaId ?? ''];

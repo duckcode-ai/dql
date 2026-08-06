@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Blocks, Boxes, CheckCircle2, Columns3, Download, EyeOff, FileSearch, FolderTree, GitBranch, GraduationCap, Link2, Maximize2, MessageCircle, Network, PanelRightClose, PanelRightOpen, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Sparkles, XCircle } from 'lucide-react';
+import { DEFAULT_MODEL_AREA_ID } from '@duckcodeailabs/dql-core/modeling-ids';
 import type { DomainExportAuthoringInput, DomainImportAuthoringInput, DbtNodeAuthoringDetail, DbtSourceAuthoringInput, DbtSourcePatchPreview, ManifestModelArea, ManifestModelEntity, ManifestModelRelationship, ModelingAuthoringChange, ModelingChangePreview, RelationshipAuthoringInput } from '@duckcodeailabs/dql-core';
 import { api, type AgentRunArtifact, type ContextAuthoringProposalV1, type DbtFirstModelingResponse } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
@@ -754,9 +755,6 @@ function writeDomainStudioLocation(domain: string | null, section: Tab, replace 
   if (replace) window.history.replaceState(window.history.state, '', next);
   else window.history.pushState(window.history.state, '', next);
 }
-
-/** Subject area every model lands in when the author has not chosen one. */
-const DEFAULT_MODEL_AREA_ID = 'core';
 
 /**
  * Overlay a write-free proposal onto the compiled modeling graph so it can be

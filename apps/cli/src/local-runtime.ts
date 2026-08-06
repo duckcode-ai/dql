@@ -142,6 +142,8 @@ import {
   ProjectSnapshotService,
   analyzeSqlReferences,
   semanticDimensionReference,
+  modelAreaLocalId,
+  DEFAULT_MODEL_AREA_ID,
 } from '@duckcodeailabs/dql-core';
 import { load as loadYaml } from 'js-yaml';
 import { listBlockTemplates } from './block-templates.js';
@@ -3513,7 +3515,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // Entities this batch creates, plus entities already bound in the project.
     const bound = new Map<string, { id: string; domain: string; areaId?: string; operationId?: string }>();
     for (const entity of Object.values(manifest.modeling?.entities ?? {})) {
-      bound.set(entity.dbtUniqueId, { id: entity.localId, domain: entity.domain, areaId: entity.areaId?.split('::area::').at(-1) });
+      bound.set(entity.dbtUniqueId, { id: entity.localId, domain: entity.domain, areaId: modelAreaLocalId(entity.areaId) });
     }
     let batchBindings = 0;
     for (const operation of operations) {
@@ -18888,7 +18890,7 @@ async function buildAiModelingOperations(
   const requestedArea = typeof context.modelAreaId === 'string' ? context.modelAreaId : typeof context.areaId === 'string' ? context.areaId : undefined;
   const area = Object.values(modeling.areas).find((candidate) => candidate.domain === domain
     && (!requestedArea || candidate.qualifiedId === requestedArea || candidate.localId === requestedArea));
-  const areaId = area?.localId ?? requestedArea?.split('::area::').at(-1) ?? DEFAULT_MODEL_AREA_ID;
+  const areaId = area?.localId ?? modelAreaLocalId(requestedArea) ?? DEFAULT_MODEL_AREA_ID;
 
   const bound = new Set(Object.values(modeling.entities).map((entity) => entity.dbtUniqueId));
   const manifestPath = resolveDbtManifestPath(projectRoot);
@@ -19145,7 +19147,7 @@ function buildDeterministicModelingOperations(
         value: {
           id: selectedRelationship.localId,
           domain: selectedRelationship.ownerDomain ?? domain,
-          areaId: selectedRelationship.areaId?.split('::area::').at(-1),
+          areaId: modelAreaLocalId(selectedRelationship.areaId),
           from: modeling.entities[selectedRelationship.from]?.localId ?? selectedRelationship.from,
           to: modeling.entities[selectedRelationship.to]?.localId ?? selectedRelationship.to,
           keys: selectedRelationship.keys,
@@ -19183,7 +19185,7 @@ function buildDeterministicModelingOperations(
   const requestedArea = typeof context.modelAreaId === 'string' ? context.modelAreaId : typeof context.areaId === 'string' ? context.areaId : undefined;
   const existingArea = Object.values(modeling.areas).find((area) => area.domain === domain
     && (!requestedArea || area.qualifiedId === requestedArea || area.localId === requestedArea));
-  const areaId = existingArea?.localId ?? requestedArea?.split('::area::').at(-1) ?? `${authoringSlug(request.question).slice(0, 36) || 'metadata'}_models`;
+  const areaId = existingArea?.localId ?? modelAreaLocalId(requestedArea) ?? `${authoringSlug(request.question).slice(0, 36) || 'metadata'}_models`;
   const operations: ContextAuthoringOperation[] = [];
   if (!existingArea) {
     operations.push({
@@ -19379,13 +19381,6 @@ function buildMetadataBoundSkillOperations(
     value,
   }];
 }
-
-/**
- * The subject area every model lands in when the author has not chosen one.
- * A Model Area is source organization and a retrieval-ranking hint, never an
- * authorization boundary, so defaulting it is safe.
- */
-const DEFAULT_MODEL_AREA_ID = 'core';
 
 /**
  * The Domain an author lands in when none is selected: the single existing

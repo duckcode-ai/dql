@@ -93,7 +93,10 @@ describe('qualified entity record identity', () => {
 describe('two-tier authoring write path (00-decisions.md#a-001)', () => {
   const existing: ManifestModelEntity = {
     id: 'order', localId: 'order', qualifiedId: 'commerce::entity::order', domain: 'commerce',
-    areaId: 'commerce::area::core', dbtUniqueId: 'model.shop.fct_orders',
+    // The real compiler emits `<domain>::model_area::<localId>`. This fixture
+    // used to say `::area::`, matching the buggy split rather than reality,
+    // which is why a broken `isDescriptiveOnlyChange` still passed here.
+    areaId: 'commerce::model_area::core', dbtUniqueId: 'model.shop.fct_orders',
     businessName: 'Order', grain: 'order_id', keys: ['order_id'], status: 'draft',
     sourcePath: 'domains/commerce/modeling/model.dql.yaml', identityFingerprint: 'fp',
   } as ManifestModelEntity;
@@ -126,5 +129,13 @@ describe('two-tier authoring write path (00-decisions.md#a-001)', () => {
     expect(isDescriptiveOnlyChange(upsert({ areaId: 'billing' }) as never, existing)).toBe(false);
     // Relationships are never descriptive-only.
     expect(isDescriptiveOnlyChange({ operation: 'upsert_relationship', value: { id: 'r' } } as never, existing)).toBe(false);
+  });
+
+  it('compares the area on its local id, so an area-owned entity can still save prose directly', () => {
+    // The existing entity's `areaId` is qualified; the change carries the local
+    // id. Comparing them raw made every area-owned entity look like an area
+    // move, so A-001's direct-save path was dead and the save button lied.
+    expect(existing.areaId).toContain('::model_area::');
+    expect(isDescriptiveOnlyChange(upsert({ businessContext: 'One completed purchase.' }) as never, existing)).toBe(true);
   });
 });

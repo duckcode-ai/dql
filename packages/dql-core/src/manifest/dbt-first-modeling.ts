@@ -711,6 +711,10 @@ function qualifiedObjectId(domain: string, kind: string, localId: string): strin
   return localId.startsWith(prefix) ? localId : `${prefix}${localId}`;
 }
 
+// Area identity lives in its own dependency-free module so the browser bundle
+// can import it; `qualifiedObjectId` above is the writer of the form it parses.
+export { modelAreaLocalId, DEFAULT_MODEL_AREA_ID } from './model-area-id.js';
+
 export function relationshipValidationProofFingerprint(input: {
   fromRelation?: string;
   toRelation?: string;
