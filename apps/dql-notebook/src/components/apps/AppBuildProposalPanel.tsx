@@ -8,6 +8,31 @@ export function defaultProposalSelection(proposal: AppBuildProposal): Set<string
   return new Set(proposal.tiles.filter((tile) => !tile.error && tile.selectedByDefault).map((tile) => tile.id));
 }
 
+export type UnbuildableTile = { id: string; title: string; reason: string };
+
+/**
+ * Selected tiles the commit will not turn into tiles, and why.
+ *
+ * The brief used to list AI-generated tiles exactly like certified ones and
+ * then drop them at commit without a word, so an app proposed with six tiles
+ * arrived with three and no explanation. Both rules below live in
+ * `commitAppAiBuild`; they are mirrored here so the author reads them *before*
+ * committing rather than inferring them from what is missing afterwards.
+ */
+export function unbuildableSelectedTiles(proposal: AppBuildProposal, selected: Set<string>): UnbuildableTile[] {
+  const personal = proposal.intent.target === 'personal';
+  const out: UnbuildableTile[] = [];
+  for (const tile of proposal.tiles) {
+    if (tile.source !== 'ai_generated' || tile.error || !selected.has(tile.id)) continue;
+    if (!tile.sql) {
+      out.push({ id: tile.id, title: tile.title, reason: 'No query was generated for it, so it has nothing to show. It stays in the review appendix as an open question.' });
+    } else if (!personal) {
+      out.push({ id: tile.id, title: tile.title, reason: 'Exploratory AI SQL can only be accepted into a Personal Draft. Switch this build to Personal Draft to keep it.' });
+    }
+  }
+  return out;
+}
+
 /**
  * The edits an author can make while reviewing a brief, in the exact shape
  * `commitAppAiBuild` already accepts. The API has supported all of this from
@@ -61,6 +86,7 @@ export function AppBuildProposalPanel({
   const selectable = proposal.tiles.filter((tile) => !tile.error);
   const failed = proposal.tiles.filter((tile) => tile.error);
   const selectedCount = selectable.filter((tile) => selected.has(tile.id)).length;
+  const unbuildable = unbuildableSelectedTiles(proposal, selected);
   const generatedSelected = selectable.filter((tile) => selected.has(tile.id) && tile.certification === 'ai_generated').length;
   const semanticSelected = selectable.filter((tile) => selected.has(tile.id) && tile.certification === 'reviewed_semantic').length;
   const certifiedSelected = selectable.filter((tile) => selected.has(tile.id) && tile.certification === 'certified').length;
@@ -126,6 +152,26 @@ export function AppBuildProposalPanel({
             <div key={gap.id} style={{ display: 'flex', gap: 7, alignItems: 'flex-start', fontSize: 11.5, color: t.textMuted }}>
               <FileSearch size={12} style={{ flexShrink: 0, marginTop: 2 }} />
               <span style={{ lineHeight: 1.4 }}>{gap.question}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {unbuildable.length > 0 ? (
+        <div
+          role="status"
+          style={{
+            display: 'grid', gap: 5, padding: '9px 11px', borderRadius: 9,
+            border: `1px solid ${t.headerBorder}`, background: 'var(--status-warning-bg, rgba(180,120,0,0.08))',
+          }}
+        >
+          <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+            {unbuildable.length === 1 ? '1 selected tile will not be built' : `${unbuildable.length} selected tiles will not be built`}
+          </div>
+          {unbuildable.map((tile) => (
+            <div key={tile.id} style={{ display: 'flex', gap: 7, alignItems: 'flex-start', fontSize: 11.5, color: t.textSecondary }}>
+              <ShieldAlert size={12} style={{ flexShrink: 0, marginTop: 2 }} />
+              <span style={{ lineHeight: 1.45 }}><b>{tile.title}</b> — {tile.reason}</span>
             </div>
           ))}
         </div>

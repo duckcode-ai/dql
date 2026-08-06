@@ -1456,7 +1456,7 @@ function displayForCertifiedNode(
     followUpActions,
     rationale,
     genUi: buildGenUiContract({
-      title: node.name,
+      title: humanTileTitle(node.name, node.description),
       role,
       viz,
       text,
@@ -1651,7 +1651,7 @@ function tileFromCertifiedNode(
   const parameterBindings = parameterBindingsForCertifiedNode(node, filterBindings);
   return {
     id: slugify(blockId) || `certified-${index + 1}`,
-    title: node.name,
+    title: humanTileTitle(blockId, node.description),
     kind: "certified_block",
     description: node.description,
     blockId,
@@ -2480,6 +2480,30 @@ function cleanFieldHints(input: AppPlanGenUi["fieldHints"]): Record<string, stri
     if (typeof value === "string" && value.trim()) out[key] = value.trim();
   }
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** Longest tile title we will lift out of a block description. */
+const MAX_DERIVED_TILE_TITLE = 48;
+
+/**
+ * A tile title a stakeholder can read.
+ *
+ * A certified block's KG node name is its id — `monthly_revenue` — so using it
+ * directly labelled every AI-built tile with an identifier, which also made the
+ * titles look like system fields rather than something the author may rename.
+ * Prefer the lead clause of the block's own description, which authors already
+ * write as a summary ("Monthly gross order revenue and order count."), and fall
+ * back to the de-slugged id when that clause is missing or too long to sit in a
+ * tile header.
+ */
+export function humanTileTitle(name: string, description?: string): string {
+  const lead = (description ?? "").split(/[.;]/)[0]?.trim() ?? "";
+  if (lead.length >= 3 && lead.length <= MAX_DERIVED_TILE_TITLE && /\s/.test(lead)) {
+    return lead.charAt(0).toUpperCase() + lead.slice(1);
+  }
+  const words = name.replace(/[_-]+/g, " ").trim();
+  if (!words) return name;
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
 function titleCase(value: string): string {

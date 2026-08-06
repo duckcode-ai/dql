@@ -9,6 +9,7 @@ import {
 import { KGStore } from "./kg/sqlite-fts.js";
 import {
   generateAppFromPlan,
+  humanTileTitle,
   planAppFromPrompt,
   validateAppPlan,
   type AppPlan,
@@ -846,4 +847,36 @@ describe("generateAppFromPlan", () => {
       expect(plainDoc.sections).toBeUndefined();
       expect(plainDoc.layout.items.every((item) => item.sectionId === undefined)).toBe(true);
     }));
+});
+
+describe('humanTileTitle', () => {
+  // A certified block's KG node name is its id, so AI-built tiles were all
+  // labelled `monthly_revenue` / `beverage_revenue_by_product` — identifiers
+  // that read as untouchable system fields rather than editable names.
+  it('lifts the lead clause out of the block description', () => {
+    expect(humanTileTitle('monthly_revenue', 'Monthly gross order revenue and order count. One row per calendar month.'))
+      .toBe('Monthly gross order revenue and order count');
+    expect(humanTileTitle('customer_profile', 'Customer lifetime profile. One row per customer.'))
+      .toBe('Customer lifetime profile');
+  });
+
+  it('falls back to the de-slugged id when the lead clause will not fit a tile header', () => {
+    expect(humanTileTitle('top_beverage_customers', 'Top customers ranked by beverage revenue, with beverage order count and product variety. One row per customer.'))
+      .toBe('Top beverage customers');
+  });
+
+  it('falls back to the de-slugged id when there is no description', () => {
+    expect(humanTileTitle('monthly_revenue')).toBe('Monthly revenue');
+    expect(humanTileTitle('beverage_revenue_by_product', '')).toBe('Beverage revenue by product');
+  });
+
+  it('never returns a raw identifier when a readable form exists', () => {
+    for (const [id, description] of [
+      ['monthly_revenue', 'Monthly gross order revenue and order count.'],
+      ['monthly_revenue', undefined],
+      ['x', undefined],
+    ] as Array<[string, string | undefined]>) {
+      expect(humanTileTitle(id, description)).not.toContain('_');
+    }
+  });
 });

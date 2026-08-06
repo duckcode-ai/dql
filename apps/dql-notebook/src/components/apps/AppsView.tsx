@@ -2051,7 +2051,21 @@ function AppWorkspaceSurface({
           <div className="dql-app-title-copy">
             <div className="dql-app-title-meta">
               <span><LayoutDashboard size={14} /> {app?.domain ?? dashboardDoc?.dashboard.metadata.domain ?? 'DQL App'}</span>
-              {onDashboards ? <span className="dql-app-title-context">{tidyTitle(app?.name) || 'App'}</span> : null}
+              {onDashboards ? (
+                // While on a page the heading below edits the PAGE title, so
+                // this is the only place the App's own name can be renamed.
+                experience === 'build' && app ? (
+                  <span className="dql-app-title-context">
+                    <AppTitleInput
+                      key={`${app.id}:name`}
+                      variant="compact"
+                      value={tidyTitle(app.name) || 'App'}
+                      label="App name"
+                      onCommit={(next) => void onRenameApp(next)}
+                    />
+                  </span>
+                ) : <span className="dql-app-title-context">{tidyTitle(app?.name) || 'App'}</span>
+              ) : null}
               {experience === 'build' ? <StatusSeal tone="draft">Customizing</StatusSeal> : null}
             </div>
             {/* Editable in place while customizing: `dql.app.json` and the page
@@ -2259,15 +2273,25 @@ function BlockIndex({
  * Renaming commits on blur or Enter, never per keystroke, and Escape restores
  * the saved value so a half-typed name cannot be written by accident.
  */
-function AppTitleInput({ value, label, onCommit }: { value: string; label: string; onCommit: (next: string) => void }) {
+/**
+ * Rename control for the App and the page.
+ *
+ * `variant` matters for reachability, not just looks. While viewing a page the
+ * heading-scale field edits the *page* title, so the App's own name had no
+ * writer anywhere on the screen the user actually lands on. The compact variant
+ * puts it in the meta row beside the domain, where it was already displayed as
+ * dead text.
+ */
+function AppTitleInput({ value, label, onCommit, variant = 'title' }: { value: string; label: string; onCommit: (next: string) => void; variant?: 'title' | 'compact' }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => { setDraft(value); }, [value]);
   return (
     <input
-      className="dql-app-title-input"
+      className={variant === 'compact' ? 'dql-app-title-input dql-app-title-input-compact' : 'dql-app-title-input'}
       aria-label={label}
       title={`${label} — press Enter to save`}
       value={draft}
+      size={variant === 'compact' ? Math.max(8, Math.min(36, draft.length + 1)) : undefined}
       maxLength={120}
       onChange={(event) => setDraft(event.target.value)}
       onBlur={() => { const next = draft.trim(); if (next && next !== value) onCommit(next); else setDraft(value); }}

@@ -974,6 +974,27 @@ function DashboardTile({
   const isCompactMetric = item.h <= 2 && (vizType === 'single_value' || vizType === 'kpi' || vizType === 'gauge');
   const [hovered, setHovered] = useState(false);
   const showEditChrome = editable && (hovered || selected || settingsOpen);
+
+  /**
+   * Rename the tile from its own header.
+   *
+   * The only rename used to live inside the "Chart and field settings" panel,
+   * behind a hover-revealed slider icon — three hidden steps, under a label
+   * about charts. Renaming is the most common edit, so it belongs on the title
+   * itself. `insightTitle` is a shadow copy frozen at build time; leaving it
+   * stale lets a renamed tile still render its original name elsewhere.
+   */
+  const renameTile = (next: string) => {
+    const title = next.trim();
+    if (!title || title === item.title) return;
+    const currentGenUi = getDqlGenUi(item);
+    onPatch({
+      title,
+      ...(currentGenUi
+        ? { viz: { ...item.viz, options: { ...(item.viz.options ?? {}), dqlGenUi: { ...currentGenUi, insightTitle: title } } } }
+        : {}),
+    });
+  };
   const generatedVizOptions = getGeneratedVizOptions(item, genUi);
   const showVizSwitcher = Boolean(tile?.result && generatedVizOptions.length > 1);
   const canInspect = Boolean(tile && tile.tileType !== 'text' && (tile.artifact || tile.result || tile.citation || tile.repair));
@@ -1161,22 +1182,28 @@ function DashboardTile({
         >
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, minWidth: 0 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div
-                title={generatedTitle}
-                style={{
-                  fontSize: isCompactMetric ? 12 : 13,
-                  fontWeight: 780,
-                  lineHeight: 1.25,
-                  minWidth: 0,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  display: '-webkit-box',
-                  WebkitLineClamp: 2,
-                  WebkitBoxOrient: 'vertical',
-                }}
-              >
-                {generatedTitle}
-              </div>
+              {editable ? (
+                <div style={{ fontSize: isCompactMetric ? 12 : 13, fontWeight: 780, lineHeight: 1.25, minWidth: 0 }}>
+                  <TileTitleInput value={generatedTitle ?? ''} compact={isCompactMetric} onCommit={(next) => renameTile(next)} />
+                </div>
+              ) : (
+                <div
+                  title={generatedTitle}
+                  style={{
+                    fontSize: isCompactMetric ? 12 : 13,
+                    fontWeight: 780,
+                    lineHeight: 1.25,
+                    minWidth: 0,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    display: '-webkit-box',
+                    WebkitLineClamp: 2,
+                    WebkitBoxOrient: 'vertical',
+                  }}
+                >
+                  {generatedTitle}
+                </div>
+              )}
               <div style={generatedMetaRowStyle}>
                 {generatedTrust ? <TrustPill trust={generatedTrust} /> : null}
                 {repair ? (
@@ -1207,7 +1234,13 @@ function DashboardTile({
           }}
         >
           <div style={{ fontSize: isCompactMetric ? 12 : 13, fontWeight: 720, lineHeight: 1.25, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            <span>{item.title ?? blockRef}</span>
+            {editable ? (
+              <TileTitleInput
+                value={item.title ?? blockRef ?? ''}
+                compact={isCompactMetric}
+                onCommit={(next) => renameTile(next)}
+              />
+            ) : <span>{item.title ?? blockRef}</span>}
             {showVizSwitcher ? (
               <span style={{ float: 'right', marginLeft: 8 }}>
                 <GeneratedVizSwitcher value={activeChart} options={generatedVizOptions} onChange={switchGeneratedViz} />
@@ -1258,6 +1291,8 @@ function DashboardTile({
           error={error}
           themeMode={themeMode}
           genUi={genUi}
+          editable={editable}
+          onEditText={(markdown) => onPatch({ text: { ...(item.text ?? {}), markdown } })}
           onRetry={onRetry}
           retrying={retrying}
           retryDisabled={retryDisabled}
@@ -1338,6 +1373,105 @@ export function computeTileInsight(tile?: DashboardRunResponse['tiles'][number])
   return total > 0
     ? `${top.label} leads ${metricLabel} at ${formattedTopValue} (${Math.round((top.value / total) * 100)}%).`
     : `${top.label} leads ${metricLabel} at ${formattedTopValue}.`;
+}
+
+/**
+ * A narrative tile's words, edited in place.
+ *
+ * Click to edit, blur or Escape to go back to rendered markdown, so the tile
+ * still reads as prose rather than as a form. Escape reverts; blur saves.
+ */
+function TileTextEditor({ markdown, variant, themeMode, onCommit }: { markdown: string; variant: 'text' | 'heading'; themeMode: ThemeMode; onCommit: (next: string) => void }): JSX.Element {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(markdown);
+  useEffect(() => { setDraft(markdown); }, [markdown]);
+  if (!editing) {
+    return (
+      <div
+        role="button"
+        tabIndex={0}
+        title="Click to edit this text"
+        onClick={() => setEditing(true)}
+        onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setEditing(true); } }}
+        style={{ cursor: 'text', minHeight: 24, borderRadius: 6, outline: 'none' }}
+      >
+        {markdown.trim()
+          ? <MarkdownTile markdown={markdown} variant={variant} themeMode={themeMode} />
+          : <span style={{ opacity: 0.55, fontSize: 12 }}>Click to write this section…</span>}
+      </div>
+    );
+  }
+  return (
+    <textarea
+      autoFocus
+      aria-label={variant === 'heading' ? 'Heading text' : 'Tile text'}
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onPointerDown={(event) => event.stopPropagation()}
+      onBlur={() => { setEditing(false); if (draft !== markdown) onCommit(draft); }}
+      onKeyDown={(event) => {
+        event.stopPropagation();
+        if (event.key === 'Escape') { setDraft(markdown); setEditing(false); }
+      }}
+      style={{
+        width: '100%', minHeight: 72, resize: 'vertical', boxSizing: 'border-box',
+        font: variant === 'heading' ? '700 17px/1.3 inherit' : 'inherit',
+        color: 'inherit', background: 'var(--bg-1, #fff)',
+        border: '1px solid var(--accent, #4f46e5)', borderRadius: 7, padding: '7px 9px', outline: 'none',
+      }}
+    />
+  );
+}
+
+/**
+ * The tile's name, edited where it is read.
+ *
+ * Styled to sit flush with the heading it replaces so the header does not jump
+ * between view and edit, but it carries a real label and shows an affordance on
+ * hover — the previous field had neither, and sat under a "Chart and field
+ * settings" heading that gave no reason to look there for a name.
+ */
+function TileTitleInput({ value, compact, onCommit }: { value: string; compact: boolean; onCommit: (next: string) => void }): JSX.Element {
+  const [draft, setDraft] = useState(value);
+  const [focused, setFocused] = useState(false);
+  useEffect(() => { setDraft(value); }, [value]);
+  return (
+    <input
+      aria-label="Tile name"
+      title="Tile name — press Enter to save"
+      value={draft}
+      maxLength={140}
+      onChange={(event) => setDraft(event.target.value)}
+      onFocus={() => setFocused(true)}
+      onBlur={() => {
+        setFocused(false);
+        const next = draft.trim();
+        if (next && next !== value) onCommit(next);
+        else setDraft(value);
+      }}
+      onKeyDown={(event) => {
+        event.stopPropagation(); // never let typing reach the tile's drag handlers
+        if (event.key === 'Enter') event.currentTarget.blur();
+        if (event.key === 'Escape') { setDraft(value); event.currentTarget.blur(); }
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+      style={{
+        font: 'inherit',
+        color: 'inherit',
+        background: focused ? 'var(--bg-1, #fff)' : 'transparent',
+        border: `1px solid ${focused ? 'var(--accent, #4f46e5)' : 'transparent'}`,
+        borderRadius: 6,
+        padding: compact ? '0 4px' : '1px 5px',
+        margin: compact ? '0 0 0 -4px' : '0 0 0 -5px',
+        maxWidth: '100%',
+        width: `${Math.max(6, Math.min(48, draft.length + 1))}ch`,
+        outline: 'none',
+        cursor: focused ? 'text' : 'pointer',
+      }}
+      onMouseEnter={(event) => { if (!focused) event.currentTarget.style.borderColor = 'var(--border-subtle, #d8d8d8)'; }}
+      onMouseLeave={(event) => { if (!focused) event.currentTarget.style.borderColor = 'transparent'; }}
+    />
+  );
 }
 
 function GeneratedVizSwitcher({
@@ -1601,6 +1735,8 @@ function TileBody({
   error,
   themeMode,
   genUi,
+  editable = false,
+  onEditText,
   onRetry,
   retrying,
   retryDisabled,
@@ -1611,6 +1747,8 @@ function TileBody({
   error: string | null;
   themeMode: ThemeMode;
   genUi?: DqlGenUiMetadata | null;
+  editable?: boolean;
+  onEditText?: (markdown: string) => void;
   onRetry?: () => void;
   retrying?: boolean;
   retryDisabled?: boolean;
@@ -1627,7 +1765,20 @@ function TileBody({
         />
       );
     }
-    return <MarkdownTile markdown={tile.text?.markdown ?? ''} variant={tile.viz?.type === 'heading' ? 'heading' : 'text'} themeMode={themeMode} />;
+    const markdown = tile.text?.markdown ?? '';
+    // Narrative tiles are written for readers, so their words are exactly what
+    // an author needs to revise. Editing them required hand-editing the .dqld.
+    if (editable && onEditText) {
+      return (
+        <TileTextEditor
+          markdown={markdown}
+          variant={tile.viz?.type === 'heading' ? 'heading' : 'text'}
+          themeMode={themeMode}
+          onCommit={onEditText}
+        />
+      );
+    }
+    return <MarkdownTile markdown={markdown} variant={tile.viz?.type === 'heading' ? 'heading' : 'text'} themeMode={themeMode} />;
   }
   if (error && !tile) return <span>{error}</span>;
   if (!tile) return <span>No run result.</span>;
@@ -1911,7 +2062,10 @@ function TileSettingsPanel({
 
   // The title is the one field typed character by character; everything else in
   // this panel is a discrete choice that can save immediately.
-  const savedTitle = chartConfig.title ?? item.title ?? '';
+  // Seed from what the tile actually displays. `chartConfig.title` can carry a
+  // block-level default, so preferring it showed a different name in the editor
+  // than in the header — and saving then silently renamed the tile.
+  const savedTitle = item.title ?? chartConfig.title ?? '';
   const [titleDraft, setTitleDraft] = useState(savedTitle);
   useEffect(() => { setTitleDraft(savedTitle); }, [savedTitle]);
   const commitTitleDraft = () => {
@@ -2037,12 +2191,14 @@ function TileSettingsPanel({
               issued a full layout PATCH and re-packed the grid on every
               character, so tiles visibly jumped around as you renamed one. */}
           <input
+            aria-label="Tile name"
+            title="Tile name — also editable directly on the tile header"
             value={titleDraft}
             onChange={(event) => setTitleDraft(event.target.value)}
             onBlur={() => commitTitleDraft()}
             onKeyDown={(event) => {
               if (event.key === 'Enter') { event.currentTarget.blur(); }
-              if (event.key === 'Escape') { setTitleDraft(chartConfig.title ?? item.title ?? ''); event.currentTarget.blur(); }
+              if (event.key === 'Escape') { setTitleDraft(savedTitle); event.currentTarget.blur(); }
             }}
             style={tileSettingsInputStyle}
           />

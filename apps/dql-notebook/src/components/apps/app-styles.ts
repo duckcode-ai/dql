@@ -1926,6 +1926,15 @@ export const APP_STYLES = `
   color: var(--dql-app-faint);
   font: 700 11.5px var(--font-mono);
 }
+
+/* The App-name rename sitting in the meta row: inherits that row's small
+   type so it reads as the breadcrumb it replaces, not a second heading. */
+.dql-app-title-input-compact {
+  font: inherit;
+  width: auto;
+  padding: 1px 5px;
+  margin-left: -5px;
+}
 .dql-app-title-context::before { content: "·"; margin-right: 8px; color: var(--dql-app-line-2); }
 
 .dql-app-nav-row {
