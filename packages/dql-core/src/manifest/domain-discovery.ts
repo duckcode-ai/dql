@@ -419,45 +419,77 @@ function buildDomainProposals(
   });
 }
 
-function collectRelationshipDrafts(
+/** One `relationships` test in a dbt manifest, resolved to an exact key pair. */
+export interface DbtRelationshipTestEdge {
+  /** The dbt test node this edge was read from. */
+  testUniqueId: string;
+  fromDbtUniqueId: string;
+  toDbtUniqueId: string;
+  /** `'unknown'` when dbt did not record the column on either side. */
+  fromColumn: string;
+  toColumn: string;
+  sourcePath?: string;
+}
+
+/**
+ * Read every `relationships` test out of a dbt manifest. dbt already declares
+ * the exact from/to key pair and enforces it with `dbt test`, so these are the
+ * highest-quality relationship candidates a project has.
+ *
+ * REL-001 still applies: a dbt test is evidence, never join authorization.
+ * Callers must keep the resulting relationship a reviewable draft.
+ *
+ * `include` restricts both endpoints to a known set of dbt unique ids; pass
+ * `undefined` to accept any endpoint the manifest resolves.
+ */
+export function collectDbtRelationshipTests(
   manifest: UnknownRecord,
-  assigned: Map<string, DomainMembershipProposal & { proposedDomain: string }>,
-): RelationshipDraftCandidate[] {
-  const output: RelationshipDraftCandidate[] = [];
+  include?: ReadonlySet<string>,
+): DbtRelationshipTestEdge[] {
+  const known = (id: string): boolean => !include || include.has(id);
+  const output: DbtRelationshipTestEdge[] = [];
   for (const [testUniqueId, value] of Object.entries(asRecord(manifest.nodes)).sort(([a], [b]) => a.localeCompare(b))) {
     const raw = asRecord(value);
     if (raw.resource_type !== 'test') continue;
     const metadata = asRecord(raw.test_metadata);
     const testName = stringValue(metadata.name) ?? stringValue(raw.name);
     if (!testName || !testName.toLowerCase().includes('relationship')) continue;
-    const dependencies = stringArray(asRecord(raw.depends_on).nodes).filter((id) => assigned.has(id));
+    const dependencies = stringArray(asRecord(raw.depends_on).nodes).filter(known);
     const attached = stringValue(raw.attached_node);
-    const from = attached && assigned.has(attached) ? attached : dependencies[0];
+    const from = attached && known(attached) ? attached : dependencies[0];
     const to = dependencies.find((id) => id !== from);
     if (!from || !to) continue;
     const kwargs = asRecord(metadata.kwargs);
-    const fromColumn = stringValue(raw.column_name) ?? stringValue(kwargs.column_name) ?? 'unknown';
-    const toColumn = stringValue(kwargs.field) ?? stringValue(kwargs.to_field) ?? 'unknown';
-    const fromMembership = assigned.get(from)!;
-    const toMembership = assigned.get(to)!;
     output.push({
-      id: `${safeId(from)}_to_${safeId(to)}_${safeId(fromColumn)}`,
+      testUniqueId,
+      fromDbtUniqueId: from,
+      toDbtUniqueId: to,
+      fromColumn: stringValue(raw.column_name) ?? stringValue(kwargs.column_name) ?? 'unknown',
+      toColumn: stringValue(kwargs.field) ?? stringValue(kwargs.to_field) ?? 'unknown',
+      sourcePath: stringValue(raw.original_file_path) ?? stringValue(raw.path),
+    });
+  }
+  return output;
+}
+
+function collectRelationshipDrafts(
+  manifest: UnknownRecord,
+  assigned: Map<string, DomainMembershipProposal & { proposedDomain: string }>,
+): RelationshipDraftCandidate[] {
+  return collectDbtRelationshipTests(manifest, new Set(assigned.keys()))
+    .map((edge): RelationshipDraftCandidate => ({
+      id: `${safeId(edge.fromDbtUniqueId)}_to_${safeId(edge.toDbtUniqueId)}_${safeId(edge.fromColumn)}`,
       lifecycle: 'draft',
       requiresReview: true,
       automaticJoinAllowed: false,
-      fromDbtUniqueId: from,
-      toDbtUniqueId: to,
-      fromDomain: fromMembership.proposedDomain,
-      toDomain: toMembership.proposedDomain,
-      keys: [{ from: fromColumn, to: toColumn }],
-      evidence: [{
-        dbtUniqueId: testUniqueId,
-        sourcePath: stringValue(raw.original_file_path) ?? stringValue(raw.path),
-        kind: 'dbt_relationship_test',
-      }],
-    });
-  }
-  return output.sort((a, b) => a.id.localeCompare(b.id));
+      fromDbtUniqueId: edge.fromDbtUniqueId,
+      toDbtUniqueId: edge.toDbtUniqueId,
+      fromDomain: assigned.get(edge.fromDbtUniqueId)!.proposedDomain,
+      toDomain: assigned.get(edge.toDbtUniqueId)!.proposedDomain,
+      keys: [{ from: edge.fromColumn, to: edge.toColumn }],
+      evidence: [{ dbtUniqueId: edge.testUniqueId, sourcePath: edge.sourcePath, kind: 'dbt_relationship_test' }],
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
 }
 
 function matchingSelectors(

@@ -624,12 +624,77 @@ describe('local metadata catalog', () => {
       synonyms: ['MQL', 'marketing qualified lead'],
     }]);
 
-    // No domain pinned means no briefing to render.
+    // CTX-001 permits inference when the evidence is unambiguous. Requiring an
+    // explicit pin meant the glossary, intent examples, required filters, and
+    // caveats were silently absent from every ordinary un-pinned Ask — which is
+    // the common case. One unambiguous domain now renders its briefing.
     const unpinned = await buildLocalContextPack(projectRoot, {
       question: 'how many qualified leads',
       preparedMetadataFingerprint: snapshot.fingerprint,
     });
-    expect(unpinned.domainBriefing).toBeUndefined();
+    expect(unpinned.domainBriefing).toMatchObject({ domainId: 'growth', requiredFilters: ['is_test = false'] });
+  });
+
+  it('CTX-007 renders no briefing when the retrieved domain is ambiguous', async () => {
+    // Inference is briefing-only and must stay conservative: two plausible
+    // domains means no briefing rather than a confidently wrong one. It also
+    // grants no imports or joins — `allowedImports` stays empty by construction.
+    const manifest = {
+      manifestVersion: 3,
+      dqlVersion: 'test', generatedAt: '1970-01-01T00:00:00.000Z', project: 'test', projectRoot,
+      domains: {
+        growth: { id: 'growth', name: 'Growth', filePath: 'domains/growth/domain.dql' },
+        commerce: { id: 'commerce', name: 'Commerce', filePath: 'domains/commerce/domain.dql' },
+      },
+      blocks: {}, businessViews: {}, notebooks: {}, dashboards: {}, apps: {}, metrics: {}, dimensions: {}, sources: {},
+      terms: {
+        qualified_lead: {
+          name: 'qualified_lead', filePath: 'domains/growth/terms/qualified_lead.dql', domain: 'growth',
+          description: 'A lead that passed scoring.', synonyms: ['MQL'],
+        },
+        qualified_order: {
+          name: 'qualified_order', filePath: 'domains/commerce/terms/qualified_order.dql', domain: 'commerce',
+          description: 'An order that passed scoring.', synonyms: ['MQO'],
+        },
+      },
+      lineage: { nodes: [], edges: [] }, diagnostics: [],
+      dbtProvenance: { manifestPath: join(projectRoot, 'target/manifest.json'), manifestFingerprint: 'ambiguous-snapshot', nodes: {}, metricFlow: {} },
+      modeling: {
+        mode: 'dbt-first',
+        packages: {
+          growth: { id: 'growth', filePath: 'domains/growth/domain.dql', exports: [] },
+          commerce: { id: 'commerce', filePath: 'domains/commerce/domain.dql', exports: [] },
+        },
+        areas: {}, entities: {}, relationships: {}, contracts: {}, conformance: {}, rules: {},
+        interfaces: { exports: {}, imports: {} }, domainLineage: [],
+      },
+      knowledgeGraph: {
+        objects: {}, objectRefs: [], edges: [], crossDomainRoutes: [], diagnostics: [],
+        sourceFingerprint: 'kg-2',
+        domainCapsules: {
+          'growth::capsule': {
+            id: 'growth::capsule', domainId: 'growth', name: 'Growth', description: 'Acquisition.',
+            intentExamples: [], exclusions: [], termRefs: ['growth::term::qualified_lead'], skillRefs: [],
+            entityRefs: [], metricRefs: [], blockRefs: [], routeRefs: [], caveats: [], requiredFilters: [],
+            fingerprint: 'capsule-g',
+          },
+          'commerce::capsule': {
+            id: 'commerce::capsule', domainId: 'commerce', name: 'Commerce', description: 'Orders.',
+            intentExamples: [], exclusions: [], termRefs: ['commerce::term::qualified_order'], skillRefs: [],
+            entityRefs: [], metricRefs: [], blockRefs: [], routeRefs: [], caveats: [], requiredFilters: [],
+            fingerprint: 'capsule-c',
+          },
+        },
+      },
+    } as unknown as DQLManifest;
+    const snapshot = buildMetadataSnapshot(projectRoot, manifest);
+    upsertMetadataSnapshot(projectRoot, snapshot);
+
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'how many qualified',
+      preparedMetadataFingerprint: snapshot.fingerprint,
+    });
+    expect(pack.domainBriefing).toBeUndefined();
   });
 
 it('upgrades the vector index to a real embedder after the sync write, and is idempotent', async () => {

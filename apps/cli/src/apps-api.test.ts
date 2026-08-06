@@ -17,6 +17,7 @@ import {
   generateAppPackage,
   getAppAiBuildSession,
   promoteAppForStakeholders,
+  renameApp,
   previewNotebookForApp,
   proposeAppAiBuild,
   recommendBlocks,
@@ -746,6 +747,101 @@ describe('Apps command center API helpers', () => {
     expect(existsSync(join(root, 'apps'))).toBe(false);
   });
 
+  it('survives the whole authoring round trip: build, rename, add a tile, reload (UI-017, E2E-016)', async () => {
+    // The flow the user actually performs had no coverage at all, which is how
+    // "cannot rename", "no save", and "add does not stick" all shipped together.
+    const root = createProject();
+    writeBlock(root, 'revenue/total_revenue.dql', {
+      name: 'Total Revenue', domain: 'revenue', status: 'certified', tags: ['revenue'], description: 'Revenue KPI', chart: 'single_value',
+    });
+
+    // 1. Build, editing the brief on the way through.
+    const session = await proposeAppAiBuild(root, { prompt: 'Build a revenue app for leadership.', domain: 'revenue', owner: 'owner@local' });
+    expect(session.status).toBe('proposed');
+    const tiles = session.proposal!.tiles.filter((tile) => !tile.error);
+    expect(tiles.length).toBeGreaterThan(0);
+    const committed = await commitAppAiBuild(root, session.id, {
+      selectedTileIds: tiles.map((tile) => tile.id),
+      expectedProposalHash: session.proposalHash,
+      appName: 'Leadership Revenue',
+      tileOverrides: { [tiles[0].id]: { title: 'Revenue right now' } },
+    });
+    expect(committed.ok).toBe(true);
+    if (!committed.ok) return;
+    const appId = committed.app!.id;
+    const appPath = join(root, `apps/${appId}/dql.app.json`);
+    const dashboardPath = join(root, committed.session.generatedPaths.find((path) => path.endsWith('.dqld'))!);
+
+    // The brief's edits reached disk.
+    expect(JSON.parse(readFileSync(appPath, 'utf-8')).name).toBe('Leadership Revenue');
+    const builtTitles = JSON.parse(readFileSync(dashboardPath, 'utf-8')).layout.items.map((item: { title?: string }) => item.title);
+    expect(builtTitles).toContain('Revenue right now');
+
+    // 2. Rename the App and the page after the build.
+    const dashboardId = JSON.parse(readFileSync(dashboardPath, 'utf-8')).id;
+    expect(renameApp(root, appId, { name: 'Exec Revenue' }).ok).toBe(true);
+    expect(renameApp(root, appId, { pageTitle: 'Revenue Overview', dashboardId }).ok).toBe(true);
+
+    // 3. Add an Ask result as a tile.
+    const pinned = __test__.createAiPinTile(root, appId, {
+      dashboardId,
+      title: 'Revenue by region',
+      answer: 'EMEA leads.',
+      question: 'How does revenue split by region?',
+      certification: 'ai_generated',
+      reviewStatus: 'needs_review',
+      result: { columns: ['region', 'revenue'], rows: [{ region: 'EMEA', revenue: 900 }], rowCount: 1 },
+    });
+    expect(pinned.ok).toBe(true);
+
+    // 4. Reload from disk: every change survived, and nothing clobbered anything else.
+    const app = JSON.parse(readFileSync(appPath, 'utf-8'));
+    const dashboard = JSON.parse(readFileSync(dashboardPath, 'utf-8'));
+    expect(app.name).toBe('Exec Revenue');
+    expect(app.id).toBe(appId);
+    expect(dashboard.metadata.title).toBe('Revenue Overview');
+    const titles = dashboard.layout.items.map((item: { title?: string }) => item.title);
+    expect(titles).toContain('Revenue right now');
+    expect(titles).toContain('Revenue by region');
+    // The pin is a real tile on the page, not only a SQLite row.
+    expect(dashboard.layout.items.some((item: { aiPin?: unknown }) => Boolean(item.aiPin))).toBe(true);
+  });
+
+  it('renames an App and a page on disk without moving the App id (UI-017)', async () => {
+    const root = createProject();
+    writeBlock(root, 'revenue/total_revenue.dql', {
+      name: 'Total Revenue', domain: 'revenue', status: 'certified', tags: ['revenue'], description: 'Revenue KPI', chart: 'single_value',
+    });
+    const created = createAppPackage(root, {
+      name: 'Revenue App', domain: 'revenue', dashboardTitle: 'Overview', selectedBlockIds: ['Total Revenue'], owners: ['owner@local'],
+    });
+    expect(created.ok).toBe(true);
+    const appPath = join(root, 'apps/revenue-app/dql.app.json');
+    const dashboardPath = join(root, 'apps/revenue-app/dashboards/overview.dqld');
+
+    const renamed = renameApp(root, 'revenue-app', { name: 'Executive Revenue' });
+    expect(renamed.ok).toBe(true);
+    expect(JSON.parse(readFileSync(appPath, 'utf-8')).name).toBe('Executive Revenue');
+    // The id is also the folder name and is referenced by deep links, so a
+    // rename must never move the package.
+    expect(JSON.parse(readFileSync(appPath, 'utf-8')).id).toBe('revenue-app');
+    expect(existsSync(join(root, 'apps/revenue-app'))).toBe(true);
+
+    const pageRenamed = renameApp(root, 'revenue-app', { pageTitle: 'Revenue Overview', dashboardId: 'overview' });
+    expect(pageRenamed.ok).toBe(true);
+    expect(JSON.parse(readFileSync(dashboardPath, 'utf-8')).metadata.title).toBe('Revenue Overview');
+
+    // A stale fingerprint must not clobber a concurrent edit.
+    const stale = renameApp(root, 'revenue-app', { name: 'Nope', expectedFingerprint: 'sha256:stale' });
+    expect(stale.ok).toBe(false);
+    if (!stale.ok) expect(stale.code).toBe('APP_CHANGED');
+    expect(JSON.parse(readFileSync(appPath, 'utf-8')).name).toBe('Executive Revenue');
+
+    expect(renameApp(root, 'missing-app', { name: 'X' }).ok).toBe(false);
+    // Nothing to change is a request error, not a silent success.
+    expect(renameApp(root, 'revenue-app', {}).ok).toBe(false);
+  });
+
   it('adds one approved AI page without rewriting existing App content and rejects stale App drift (API-009, UI-017, E2E-016)', async () => {
     const root = createProject();
     writeBlock(root, 'revenue/total_revenue.dql', {
@@ -787,11 +883,27 @@ describe('Apps command center API helpers', () => {
     const added = loadDashboardDocument(join(root, committed.session.generatedPaths[0]));
     expect(added.document?.metadata.title).toBe('Leadership Revenue Drivers');
 
+    // Drift detection covers what a page add can actually conflict with: the
+    // App manifest and its dashboard documents. Generated prose and notebook
+    // output do not participate — hashing them made an unrelated edit fail the
+    // commit with an unexplained conflict.
+    const tolerantSession = await proposeAppAiBuild(root, {
+      prompt: 'Add a revenue driver page for leadership', existingAppId: 'revenue-app',
+    });
+    expect(tolerantSession.status).toBe('proposed');
+    writeFileSync(join(root, 'apps/revenue-app/README.md'), '# Concurrent edit\n', 'utf-8');
+    const tolerantCommit = await commitAppAiBuild(root, tolerantSession.id, {
+      selectedTileIds: tolerantSession.proposal!.tiles.filter((tile) => !tile.error).map((tile) => tile.id),
+      expectedProposalHash: tolerantSession.proposalHash,
+    });
+    expect(tolerantCommit.ok).toBe(true);
+
     const staleSession = await proposeAppAiBuild(root, {
       prompt: 'Add a quarterly revenue outlook page', existingAppId: 'revenue-app',
     });
     expect(staleSession.status).toBe('proposed');
-    writeFileSync(join(root, 'apps/revenue-app/README.md'), '# Concurrent edit\n', 'utf-8');
+    // A real conflict: the page this proposal was built against changed.
+    writeFileSync(originalDashboardPath, `${readFileSync(originalDashboardPath, 'utf-8')}\n`, 'utf-8');
     const staleCommit = await commitAppAiBuild(root, staleSession.id, {
       selectedTileIds: staleSession.proposal!.tiles.filter((tile) => !tile.error).map((tile) => tile.id),
       expectedProposalHash: staleSession.proposalHash,

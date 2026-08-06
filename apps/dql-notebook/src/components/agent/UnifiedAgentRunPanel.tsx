@@ -59,7 +59,8 @@ import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme'
 import { controlStyle } from '../../themes/control-tokens';
 import { ThinkingModeControl } from './ThinkingModeControl';
 import { StructuredAnswerText } from './AgentAnswerCard';
-import { AppBuildProposalPanel, defaultProposalSelection } from '../apps/AppBuildProposalPanel';
+import { AppBuildProposalPanel, defaultProposalSelection, type AppBuildBriefEdits } from '../apps/AppBuildProposalPanel';
+import { nextTileId, nextTilePosition, normalizeVizTypeForDashboard } from '../apps/dashboard-tile-placement';
 import { ResultView } from '../output/ResultView';
 import { DraftReviewCard } from '../blocks/DraftReviewCard';
 import { SaveAsBlockModal } from '../modals/SaveAsBlockModal';
@@ -2905,7 +2906,12 @@ export function isAgentRunPinnable(run: AgentRun): boolean {
   return !hasMixedSourcePlan
     && run.status !== 'blocked'
     && run.status !== 'needs_clarification'
-    && run.artifacts.some((artifact) => artifact.kind === 'answer' || artifact.kind === 'research_run');
+    // A run that produced only a DQL artifact — "the DQL from Ask AI" — is
+    // exactly what people want on a page, but it used to render no Add-to-App
+    // button at all because it carries no `answer` artifact. This mirrors the
+    // `canSaveBlock` gate, which already accepted that case.
+    && (run.artifacts.some((artifact) => artifact.kind === 'answer' || artifact.kind === 'research_run')
+      || Boolean(answerDqlArtifactFromRun(run) ?? answerSqlFromRun(run)));
 }
 
 function AskInspector({
@@ -3214,12 +3220,16 @@ function AddToAppButton({
   const [newName, setNewName] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The tile name, editable before adding rather than silently derived. */
+  const [tileName, setTileName] = useState('');
   const [done, setDone] = useState<{
     appId: string;
     dashboardId?: string;
     name: string;
     dashboardTitle?: string;
     tileTitle: string;
+    /** What actually landed, so the confirmation can be truthful. */
+    kind: 'block' | 'pin' | 'existing';
   } | null>(null);
   // Remember an app created this session so a failed-pin retry reuses it (no orphans).
   const createdRef = useRef<{ appId: string; dashboardId: string } | null>(null);
@@ -3244,6 +3254,7 @@ function AddToAppButton({
     setView('list');
     createdRef.current = null;
     setNewName(defaultAppName(run.question));
+    setTileName(defaultAppName(run.question));
     void loadApps();
   };
 
@@ -3254,9 +3265,40 @@ function AddToAppButton({
   };
 
   const pinTo = async (appId: string, dashboardId: string, name: string, dashboardTitle?: string) => {
-    const tileTitle = defaultAppName(run.question);
+    const tileTitle = tileName.trim() || defaultAppName(run.question);
     const dqlArtifact = answerDqlArtifactFromRun(run);
-    const result = await api.createAiPin(appId, {
+    const certifiedBlock = certifiedBlockNameFromRun(run);
+
+    // A certified block belongs on the page as a real block tile: it keeps its
+    // block identity, re-runs with the dashboard's filters, and survives
+    // publication. Only exploratory output becomes a review-required pin.
+    if (certifiedBlock) {
+      const doc = await api.getDashboard(appId, dashboardId);
+      if (!doc) throw new Error('Dashboard could not be loaded.');
+      const layout = {
+        ...doc.dashboard.layout,
+        items: [
+          ...doc.dashboard.layout.items,
+          {
+            i: nextTileId(doc.dashboard, certifiedBlock),
+            ...nextTilePosition(doc.dashboard),
+            block: { blockId: certifiedBlock },
+            viz: { type: normalizeVizTypeForDashboard(runChartConfig(run)?.chart) },
+            title: tileTitle,
+          },
+        ],
+      };
+      const saved = await api.patchDashboardLayout(appId, dashboardId, layout);
+      if (!saved.ok) throw new Error(saved.error || 'Could not add to app.');
+      setDone({ appId, dashboardId, name, dashboardTitle, tileTitle, kind: 'block' });
+      window.dispatchEvent(new CustomEvent('dql-app-dashboard-updated', { detail: { appId, dashboardId } }));
+      setOpen(false);
+      return;
+    }
+
+    const chartConfig = runChartConfig(run);
+    const result = runResult(run);
+    const created = await api.createAiPin(appId, {
       dashboardId,
       title: tileTitle,
       answer: run.answer ?? run.summary,
@@ -3265,17 +3307,24 @@ function AddToAppButton({
       certification: run.trustState === 'certified' ? 'certified' : 'ai_generated',
       reviewStatus: run.trustState === 'certified' ? 'certified' : 'needs_review',
       analysisPlan: dqlArtifact ? { dqlArtifact } : undefined,
+      // Without these the server forces `viz: table` and the tile renders empty.
+      ...(chartConfig ? { chartConfig: { ...chartConfig } as Record<string, unknown> } : {}),
+      ...(result ? { result } : {}),
     });
-    if (!result.ok) throw new Error('Could not add to app.');
+    // Surface the real server error rather than a generic one.
+    if (!created.ok) throw new Error(created.error || 'Could not add to app.');
     setDone({
       appId,
       dashboardId,
       name,
       dashboardTitle,
-      tileTitle: result.pin.title || tileTitle,
+      tileTitle: created.pin.title || tileTitle,
+      // The server dedupes on the question, so a second add is a no-op it still
+      // reports as success. Say "already there" instead of implying a new tile.
+      kind: created.deduped ? 'existing' : 'pin',
     });
     window.dispatchEvent(new CustomEvent('dql-app-dashboard-updated', {
-      detail: { appId, dashboardId, tileId: result.pin.tileId },
+      detail: { appId, dashboardId, tileId: created.pin.tileId },
     }));
     setOpen(false);
   };
@@ -3355,13 +3404,24 @@ function AddToAppButton({
             <CheckCircle2 size={15} />
           </span>
           <span style={{ display: 'grid', gap: 1, minWidth: 0 }}>
-            <b style={{ fontSize: 11.5 }}>Added to App</b>
+            <b style={{ fontSize: 11.5 }}>
+              {done.kind === 'existing'
+                ? 'Already on this page'
+                : done.kind === 'block'
+                  ? 'Added as a certified tile'
+                  : 'Added — needs review'}
+            </b>
             <span title={appPinDestinationLabel(done.name, done.dashboardTitle)} style={{ fontSize: 10.5, color: t.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {appPinDestinationLabel(done.name, done.dashboardTitle)}
             </span>
             <span title={done.tileTitle} style={{ fontSize: 10, color: t.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               Tile: {done.tileTitle}
             </span>
+            {done.kind === 'pin' ? (
+              <span style={{ fontSize: 10, color: t.textMuted, lineHeight: 1.35 }}>
+                Visible in Edit; hidden from the stakeholder view until reviewed.
+              </span>
+            ) : null}
           </span>
           {onOpenApp ? (
             <button
@@ -3421,6 +3481,18 @@ function AddToAppButton({
               </div>
             ) : (
               <div style={{ display: 'grid', gap: 3, maxHeight: 244, overflow: 'auto' }}>
+                {/* Name the tile before it lands. It used to be derived from the
+                    question with no way to change it afterwards. */}
+                <label style={{ display: 'grid', gap: 3, marginBottom: 5 }}>
+                  <span style={{ fontSize: 10.5, color: t.textMuted }}>Tile name</span>
+                  <input
+                    value={tileName}
+                    onChange={(e) => setTileName(e.target.value)}
+                    placeholder={defaultAppName(run.question)}
+                    maxLength={120}
+                    style={pickerInputStyle(t)}
+                  />
+                </label>
                 <button type="button" className="dql-hover" onClick={() => setView('new')} style={newAppRowStyle(t)}>
                   <Plus size={13} /> New app…
                 </button>
@@ -3527,10 +3599,19 @@ function AppProposalArtifact({
     );
   }
 
-  const commit = async () => {
+  const commit = async (edits: AppBuildBriefEdits) => {
     setBusy(true);
     setError(null);
-    const result = await api.commitAppAiBuild(sessionId, { selectedTileIds: Array.from(selected), expectedProposalHash: proposalHash });
+    // The chat path used to send only the selection, so a name or tile title
+    // typed in this brief was silently discarded even though the API accepts it.
+    const result = await api.commitAppAiBuild(sessionId, {
+      selectedTileIds: Array.from(selected),
+      expectedProposalHash: proposalHash,
+      ...(edits.appName ? { appName: edits.appName } : {}),
+      ...(edits.pageTitle ? { pageTitle: edits.pageTitle } : {}),
+      ...(edits.audience ? { audience: edits.audience } : {}),
+      ...(Object.keys(edits.tileOverrides).length > 0 ? { tileOverrides: edits.tileOverrides } : {}),
+    });
     setBusy(false);
     if (!result.ok) {
       setError(result.error);
@@ -3575,7 +3656,8 @@ function AppProposalArtifact({
               return next;
             });
           }}
-          onCreate={() => void commit()}
+          onCreate={(edits) => void commit(edits)}
+          defaultName={artifact.title}
           busy={busy}
           error={error}
           compact
@@ -4620,6 +4702,44 @@ function answerSqlFromRun(run: AgentRun): string | undefined {
       ?? researchRun?.reviewedSql
       ?? dqlArtifact?.compiledSql;
     if (typeof sql === 'string' && sql.trim()) return sql;
+  }
+  return undefined;
+}
+
+/**
+ * The certified block backing this run, if any.
+ *
+ * A certified block added to an App should become a real block tile rather than
+ * a review-required pin: it keeps its block identity, re-runs with the
+ * dashboard's filters, and survives publication (which strips pins).
+ */
+function certifiedBlockNameFromRun(run: AgentRun): string | undefined {
+  if (run.trustState !== 'certified') return undefined;
+  for (const artifact of run.artifacts) {
+    const payload = payloadOf(artifact);
+    const name = payload.blockName ?? payload.blockId ?? normalizeDqlArtifactReference(payload.dqlArtifact)?.name;
+    if (typeof name === 'string' && name.trim()) return name.trim();
+  }
+  return undefined;
+}
+
+/** The chart configuration the run produced, so a pinned tile is not forced to `table`. */
+function runChartConfig(run: AgentRun): CellChartConfig | undefined {
+  for (const artifact of run.artifacts) {
+    const payload = payloadOf(artifact);
+    const result = extractResult(payload);
+    if (!result) continue;
+    const config = extractChartConfig(payload, result);
+    if (config) return config;
+  }
+  return undefined;
+}
+
+/** The executed rows, so a pinned tile renders data instead of an empty summary. */
+function runResult(run: AgentRun): QueryResult | undefined {
+  for (const artifact of run.artifacts) {
+    const result = extractResult(payloadOf(artifact));
+    if (result) return result;
   }
   return undefined;
 }

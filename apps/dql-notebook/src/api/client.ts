@@ -5766,6 +5766,20 @@ export const api = {
     return request(`/api/apps/${encodeURIComponent(id)}`, { method: 'DELETE' });
   },
 
+  /**
+   * Rename an App and/or one of its pages. The App id (and therefore its folder
+   * and every deep link to it) is deliberately unchanged.
+   */
+  async renameApp(id: string, input: { name?: string; pageTitle?: string; dashboardId?: string; expectedFingerprint?: string }): Promise<
+    { ok: true; app: AppDocumentSummary['app']; paths: string[] } | { ok: false; error: string; code?: string }
+  > {
+    try {
+      return await request(`/api/apps/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(input) });
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
   async attachAppNotebook(appId: string, input: {
     path: string;
     title?: string;
@@ -6151,7 +6165,17 @@ export const api = {
     analysisPlan?: unknown;
     evidence?: unknown;
     followUps?: string[];
-  }): Promise<{ ok: true; pin: LocalAiPin; dashboard?: DashboardDocumentResponse['dashboard']; tile?: DashboardDocumentResponse['dashboard']['layout']['items'][number] } | { ok: false; error: string }> {
+  }): Promise<{
+    ok: true;
+    pin: LocalAiPin;
+    dashboard?: DashboardDocumentResponse['dashboard'];
+    tile?: DashboardDocumentResponse['dashboard']['layout']['items'][number];
+    /**
+     * The server dedupes on the question and returns the existing pin without
+     * writing. Callers must not report that as a new tile.
+     */
+    deduped?: boolean;
+  } | { ok: false; error: string }> {
     try {
       return await request(
         `/api/apps/${encodeURIComponent(appId)}/ai-pins`,

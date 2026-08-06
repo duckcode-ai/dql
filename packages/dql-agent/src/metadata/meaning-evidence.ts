@@ -186,6 +186,61 @@ export function buildMeaningEvidencePackage(
  * diagnostics, while the router receives the single provider-agnostic contract
  * shared by CLI, notebook, MCP, and native agent hosts.
  */
+/**
+ * Attach the governed relationships that touch each candidate's relations.
+ *
+ * `AgentEvidenceCandidate.relationshipEvidence` was declared, rendered into the
+ * meaning-resolution prompt, and read by `compileGovernedRelationalPlan` via
+ * `plan.relationshipPathIds` — but nothing ever populated it. The compiler
+ * gates joins on that list, so every multi-relation governed compile returned
+ * `RELATIONSHIP_PROOF_REQUIRED` and the path was unreachable in production.
+ *
+ * This only *offers* the identities. `compileGovernedRelationalPlan` still
+ * enforces certified, fresh, automatic-join-safe (`REL-002`) before it emits a
+ * join, so surfacing a draft relationship here cannot authorize one.
+ */
+function attachRelationshipEvidence(
+  candidates: AgentEvidenceCandidate[],
+  contextObjects: MetadataObject[],
+): void {
+  const relationships = contextObjects.filter((object) => object.objectType === 'relationship');
+  if (relationships.length === 0) return;
+
+  const identitiesByEntity = new Map<string, Set<string>>();
+  for (const object of relationships) {
+    const payload = (object.payload ?? {}) as { from?: string; to?: string; qualifiedId?: string; id?: string; localId?: string };
+    const identities = [payload.qualifiedId, payload.id, payload.localId, object.objectKey, object.fullName, object.name]
+      .filter((value): value is string => Boolean(value));
+    if (identities.length === 0) continue;
+    for (const endpoint of [payload.from, payload.to]) {
+      if (!endpoint) continue;
+      for (const alias of entityAliasesForRelationshipMatch(endpoint)) {
+        const existing = identitiesByEntity.get(alias) ?? new Set<string>();
+        for (const identity of identities) existing.add(identity);
+        identitiesByEntity.set(alias, existing);
+      }
+    }
+  }
+  if (identitiesByEntity.size === 0) return;
+
+  for (const candidate of candidates) {
+    const touched = new Set<string>();
+    for (const reference of [candidate.primaryEntity, ...(candidate.sourceObjects ?? [])]) {
+      if (!reference) continue;
+      for (const alias of entityAliasesForRelationshipMatch(reference)) {
+        for (const identity of identitiesByEntity.get(alias) ?? []) touched.add(identity);
+      }
+    }
+    if (touched.size > 0) candidate.relationshipEvidence = [...touched].sort();
+  }
+}
+
+/** Match `commerce::entity::order`, `order`, and `entity:order` as one entity. */
+function entityAliasesForRelationshipMatch(reference: string): string[] {
+  const normalized = reference.toLowerCase().replace(/^entity:/, '');
+  return [...new Set([normalized, normalized.split('::').at(-1) ?? normalized])];
+}
+
 export function toAgentRetrievalEvidence(
   evidence: MetadataMeaningEvidencePackage,
   questionPlan: AnalysisQuestionPlan,
@@ -227,6 +282,7 @@ export function toAgentRetrievalEvidence(
       exactMatch: candidate.relevanceReasons.includes("exact name or alias"),
     }),
   );
+  attachRelationshipEvidence(candidates, options.contextObjects ?? []);
   const groundedFilters = groundedMemberFilters(
     questionPlan,
     candidates,

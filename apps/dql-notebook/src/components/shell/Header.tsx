@@ -142,8 +142,9 @@ export function Header() {
     git: 'Source control',
     settings: 'Settings',
     imports: 'Import SQL',
-    domains: 'Domains',
-    modeling: 'Domains',
+    // Both views render the Modeling workspace; the header names what you see.
+    domains: 'Modeling',
+    modeling: 'Modeling',
   };
   const headerTitle = isEditorView
     ? state.activeFile

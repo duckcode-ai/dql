@@ -137,6 +137,7 @@ import {
   relationshipValidationProofFingerprint,
   renderSemanticBlockSource,
   discoverDbtDomains,
+  collectDbtRelationshipTests,
   renderDomainDeclaration,
   ProjectSnapshotService,
   analyzeSqlReferences,
@@ -2182,63 +2183,6 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     return { domainContext, contextPack };
   };
 
-  const buildAgentPromptArtifact = async (
-    request: AgentRunRequest,
-    target: 'cell' | 'block',
-    repair?: { attempt: number; repairHint?: string },
-  ): Promise<BuildFromPromptResult> => {
-    try {
-      await reindexProject(projectRoot, { kgPath: defaultKgPath(projectRoot) });
-    } catch {
-      // Best-effort: buildFromPrompt can still use any existing KG/cache state.
-    }
-    const skills = loadSkills(projectRoot).skills;
-    // On a repair re-run, target the prior failure and (for blocks) revise in place.
-    const isRepair = (repair?.attempt ?? 0) > 0 && Boolean(repair?.repairHint);
-    const mode = target === 'block' && (isRepair || agentRunWorkspaceValue(request, 'mode') === 'edit')
-      ? 'edit'
-      : 'create';
-    const prompt = isRepair
-      ? `${request.question}\n\nFix the previous attempt: ${repair?.repairHint}`
-      : request.question;
-    const domain = target === 'block' ? agentRunWorkspaceValue(request, 'domain') : undefined;
-    const modelAreaId = agentRunWorkspaceValue(request, 'modelAreaId');
-    const purpose = agentRunWorkspaceValue(request, 'purpose');
-    const { domainContext, contextPack } = await buildDirectBuildContext({
-      question: prompt,
-      domain,
-      purpose,
-      modelAreaId,
-      surface: target === 'cell' ? 'notebook' : 'block',
-      selectedContext: { target, mode },
-    });
-    return buildFromPrompt({
-      projectRoot,
-      prompt,
-      context: {
-        cellSql: agentRunWorkspaceValue(request, 'cellSql'),
-        selection: agentRunWorkspaceValue(request, 'selection'),
-      },
-      target,
-      mode,
-      blockPath: target === 'block'
-        ? agentRunWorkspaceValue(request, 'blockPath')
-          ?? (request.selectedObject?.kind === 'block' && request.selectedObject.path?.endsWith('.dql')
-            ? request.selectedObject.path
-            : undefined)
-        : undefined,
-      owner: agentRunWorkspaceValue(request, 'owner'),
-      domain,
-      modelAreaId,
-      contextPack,
-      domainContext,
-      userId: agentRunWorkspaceValue(request, 'userId'),
-      skills,
-      dbtManifestPath: resolveDbtManifestPath(projectRoot, projectConfig),
-      executionProbe: target === 'block' ? runBlockReflectionProbe : undefined,
-    });
-  };
-
   const agentRunEvaluation = (
     id: string,
     label: string,
@@ -3450,6 +3394,169 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
   const contextProposalStore = new FileContextAuthoringProposalStore(projectRoot);
 
+  /**
+   * UI-019: authoring must never dead-end on a Domain/Area that does not exist
+   * yet. Every modeling operation still belongs to exactly one Domain and Area
+   * (`11-context-authoring-and-ai.md`); the difference is that DQL now creates
+   * the missing scope as part of the same reviewable proposal instead of
+   * blocking the author until they create it by hand. The synthesized
+   * operations are ordinary reviewable patches, so nothing is written until the
+   * proposal is explicitly committed.
+   */
+  const ensureAuthoringScopeOperations = (
+    operations: ContextAuthoringOperation[],
+    manifest: DQLManifest,
+  ): ContextAuthoringOperation[] => {
+    const modeling = manifest.modeling;
+    if (!modeling) return operations;
+    const existingDomains = new Set(Object.keys(modeling.packages ?? {}));
+    const existingAreas = new Set(
+      Object.values(modeling.areas ?? {}).flatMap((area) => [`${area.domain}::${area.localId}`, `${area.domain}::${area.qualifiedId}`]),
+    );
+    // A scope created earlier in this same batch counts as existing.
+    for (const operation of operations) {
+      if (operation.kind !== 'modeling_change') continue;
+      if (operation.change.operation === 'upsert_domain') existingDomains.add(operation.change.value.id);
+      if (operation.change.operation === 'upsert_area') existingAreas.add(`${operation.change.value.domain}::${operation.change.value.id}`);
+    }
+
+    const created: ContextAuthoringOperation[] = [];
+    const domainOperationId = new Map<string, string>();
+    const areaOperationId = new Map<string, string>();
+    const defaultAreaName = manifest.dbtProvenance?.projectName
+      ? titleCaseAuthoring(manifest.dbtProvenance.projectName)
+      : 'Core models';
+
+    const withScope = operations.map((operation): ContextAuthoringOperation => {
+      if (operation.kind !== 'modeling_change') return operation;
+      const change = operation.change;
+      if (change.operation !== 'upsert_entity' && change.operation !== 'upsert_relationship') return operation;
+      const domain = change.value.domain;
+      if (!domain) return operation;
+      const dependsOn = [...(operation.dependsOn ?? [])];
+
+      if (!existingDomains.has(domain)) {
+        let id = domainOperationId.get(domain);
+        if (!id) {
+          id = `scope:domain:${domain}`;
+          domainOperationId.set(domain, id);
+          created.push({
+            id,
+            kind: 'modeling_change',
+            evidence: ['created automatically so the requested modeling scope exists'],
+            change: { operation: 'upsert_domain', value: { id: domain, name: titleCaseAuthoring(domain) } },
+          });
+        }
+        if (!dependsOn.includes(id)) dependsOn.push(id);
+      }
+
+      const areaId = change.value.areaId;
+      if (areaId && !existingAreas.has(`${domain}::${areaId}`)) {
+        const key = `${domain}::${areaId}`;
+        let id = areaOperationId.get(key);
+        if (!id) {
+          id = `scope:area:${domain}:${areaId}`;
+          areaOperationId.set(key, id);
+          created.push({
+            id,
+            kind: 'modeling_change',
+            dependsOn: domainOperationId.has(domain) ? [domainOperationId.get(domain)!] : [],
+            evidence: ['created automatically so the requested modeling scope exists'],
+            change: {
+              operation: 'upsert_area',
+              value: {
+                id: areaId,
+                domain,
+                name: areaId === DEFAULT_MODEL_AREA_ID ? defaultAreaName : titleCaseAuthoring(areaId),
+                description: 'Subject area created automatically when modeling started. Rename or split it at any time.',
+              },
+            },
+          });
+        }
+        if (!dependsOn.includes(id)) dependsOn.push(id);
+      }
+
+      return dependsOn.length ? { ...operation, dependsOn } : operation;
+    });
+
+    return created.length ? [...created, ...withScope] : withScope;
+  };
+
+  /**
+   * REL-004: when a batch binds dbt models, bring across the relationships dbt
+   * already declares in its `relationships` tests. dbt states the exact key
+   * pair and `dbt test` enforces it, so redrawing those edges by hand is pure
+   * duplicated work.
+   *
+   * REL-001 is unchanged: a dbt test is evidence, not join authorization. Every
+   * edge produced here is `status: 'draft'` with `fanout: 'unknown'` and no
+   * validation receipt, so it can never prove an automatic join.
+   */
+  const appendDbtDeclaredRelationships = (
+    operations: ContextAuthoringOperation[],
+    manifest: DQLManifest,
+  ): ContextAuthoringOperation[] => {
+    const manifestPath = manifest.dbtProvenance?.manifestPath;
+    if (!manifestPath || !existsSync(manifestPath)) return operations;
+
+    // Entities this batch creates, plus entities already bound in the project.
+    const bound = new Map<string, { id: string; domain: string; areaId?: string; operationId?: string }>();
+    for (const entity of Object.values(manifest.modeling?.entities ?? {})) {
+      bound.set(entity.dbtUniqueId, { id: entity.localId, domain: entity.domain, areaId: entity.areaId?.split('::area::').at(-1) });
+    }
+    let batchBindings = 0;
+    for (const operation of operations) {
+      if (operation.kind !== 'modeling_change' || operation.change.operation !== 'upsert_entity') continue;
+      const value = operation.change.value;
+      bound.set(value.dbtModel, { id: value.id, domain: value.domain, areaId: value.areaId, operationId: operation.id });
+      batchBindings += 1;
+    }
+    if (batchBindings === 0 || bound.size < 2) return operations;
+
+    let rawManifest: Record<string, unknown>;
+    try { rawManifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>; } catch { return operations; }
+
+    const existingRelationshipIds = new Set([
+      ...Object.values(manifest.modeling?.relationships ?? {}).map((relationship) => `${relationship.ownerDomain ?? ''}::${relationship.localId}`),
+      ...operations.flatMap((operation) => operation.kind === 'modeling_change' && operation.change.operation === 'upsert_relationship'
+        ? [`${operation.change.value.domain}::${operation.change.value.id}`]
+        : []),
+    ]);
+
+    const harvested: ContextAuthoringOperation[] = [];
+    for (const edge of collectDbtRelationshipTests(rawManifest, new Set(bound.keys()))) {
+      if (edge.fromColumn === 'unknown' || edge.toColumn === 'unknown') continue;
+      const from = bound.get(edge.fromDbtUniqueId);
+      const to = bound.get(edge.toDbtUniqueId);
+      if (!from || !to || from.id === to.id) continue;
+      // Only offer edges this batch actually introduces, and keep cross-domain
+      // links on the explicit export/import path.
+      if (!from.operationId && !to.operationId) continue;
+      if (from.domain !== to.domain) continue;
+      const id = `${from.id}_to_${to.id}`;
+      const key = `${from.domain}::${id}`;
+      if (existingRelationshipIds.has(key)) continue;
+      existingRelationshipIds.add(key);
+      harvested.push({
+        id: `dbt-test:${edge.testUniqueId}`,
+        kind: 'modeling_change',
+        dependsOn: [from.operationId, to.operationId].filter((value): value is string => Boolean(value)),
+        evidence: [edge.testUniqueId, ...(edge.sourcePath ? [edge.sourcePath] : [])],
+        change: {
+          operation: 'upsert_relationship',
+          value: {
+            id, domain: from.domain, areaId: from.areaId ?? to.areaId,
+            from: from.id, to: to.id,
+            keys: [{ from: edge.fromColumn, to: edge.toColumn }],
+            cardinality: 'many_to_one', fanout: 'unknown', status: 'draft',
+            rationale: `Declared by the dbt relationships test ${edge.testUniqueId}. Validate against the warehouse before certifying.`,
+          },
+        },
+      });
+    }
+    return harvested.length ? [...operations, ...harvested] : operations;
+  };
+
   const previewContextAuthoring = (input: {
     origin: ContextAuthoringOrigin;
     operations: ContextAuthoringOperation[];
@@ -3502,30 +3609,45 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       if (operation.change.operation === 'upsert_entity'
         && (input.origin === 'ai' || input.origin === 'yaml_import' || input.origin === 'dbt_discovery')
         && !operation.change.value.areaId) {
-        diagnostics.push({ code: 'MODEL_AREA_REQUIRED', severity: 'blocking', operationId: operation.id, message: 'Imported and AI-authored models must target one Model Area.' });
+        // Every model still belongs to exactly one Domain and subject area. An
+        // omitted area is filled with the default rather than blocking the
+        // author; `ensureAuthoringScopeOperations` creates it if it is new.
+        diagnostics.push({ code: 'MODEL_AREA_DEFAULTED', severity: 'info', operationId: operation.id, message: `No subject area was selected, so these models were placed in "${DEFAULT_MODEL_AREA_ID}". You can rename or move them later.` });
+        return { ...operation, change: { ...operation.change, value: { ...operation.change.value, areaId: DEFAULT_MODEL_AREA_ID } } };
       }
       return operation;
     });
-    const operationIds = new Set(operations.map((operation) => operation.id));
-    for (const operation of operations) {
+    // dbt discovery and Modeling AI bind models; give them the edges dbt already
+    // declares. Manual authoring and YAML import bring their own relationships.
+    const withDeclaredEdges = input.origin === 'dbt_discovery' || input.origin === 'ai'
+      ? appendDbtDeclaredRelationships(operations, snapshot.manifest)
+      : operations;
+    const scopedOperations = ensureAuthoringScopeOperations(withDeclaredEdges, snapshot.manifest);
+    const operationIds = new Set(scopedOperations.map((operation) => operation.id));
+    for (const operation of scopedOperations) {
       for (const dependency of operation.dependsOn ?? []) {
         if (!operationIds.has(dependency)) diagnostics.push({ code: 'DEPENDENCY_CONFLICT', severity: 'blocking', operationId: operation.id, message: `Required proposal operation is missing: ${dependency}` });
       }
     }
 
     const patches: ContextAuthoringPatchV1[] = [];
-    const modelingOperations = operations.filter((operation): operation is Extract<ContextAuthoringOperation, { kind: 'modeling_change' }> => operation.kind === 'modeling_change');
+    const modelingOperations = scopedOperations.filter((operation): operation is Extract<ContextAuthoringOperation, { kind: 'modeling_change' }> => operation.kind === 'modeling_change');
     if (modelingOperations.length > 0) {
       const batch = previewModelingChanges(projectRoot, modelingOperations.map((operation) => operation.change));
+      // The batch attributes each path while composing its shadow, so a change
+      // that depends on an earlier one (an entity in a Domain this same batch
+      // creates) is attributed correctly and without re-previewing per patch.
+      const ownerByPath = new Map<string, string>();
+      batch.patchPathsByChange.forEach((paths, index) => {
+        const operationId = modelingOperations[index]?.id;
+        if (!operationId) return;
+        for (const path of paths) if (!ownerByPath.has(path)) ownerByPath.set(path, operationId);
+      });
       for (const patch of batch.patches) {
-        const owner = modelingOperations.find((operation) => {
-          const single = previewModelingChange(projectRoot, operation.change);
-          return single.patches.some((candidate) => candidate.path === patch.path);
-        })?.id ?? modelingOperations[0]!.id;
-        patches.push({ ...patch, owner: 'dql', operationId: owner });
+        patches.push({ ...patch, owner: 'dql', operationId: ownerByPath.get(patch.path) ?? modelingOperations[0]!.id });
       }
     }
-    for (const operation of operations) {
+    for (const operation of scopedOperations) {
       if (operation.kind === 'skill_change') {
         const preview = previewSkillChange(projectRoot, operation.value, operation.targetQualifiedId, operation.expectedSourceHash);
         for (const patch of preview.patches) {
@@ -3561,7 +3683,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       origin: input.origin,
       baseSnapshotId: snapshot.snapshotId,
       dependencyFingerprints,
-      operations,
+      operations: scopedOperations,
       patches,
       diagnostics,
       sourceRunId: input.sourceRunId,
@@ -3574,7 +3696,27 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
   const modelingAuthoringRunExecutor: AgentRouteExecutor = async ({ runId, request }) => {
     const snapshot = projectSnapshot();
-    const operations = buildMetadataBoundModelingOperations(projectRoot, snapshot.manifest, request);
+    // AGT-024: a configured provider designs the model; the deterministic
+    // matcher is the documented provider-unavailable fallback, and the answer
+    // says which one ran so an evidence-only suggestion is never mistaken for
+    // an AI proposal.
+    const provider = await createBlockStudioAssistProvider(projectRoot);
+    let usedProvider = Boolean(provider);
+    let operations: ContextAuthoringOperation[];
+    if (provider) {
+      try {
+        operations = await buildAiModelingOperations(projectRoot, snapshot.manifest, request, provider);
+      } catch (error) {
+        // Fall back only when the provider itself is unusable. A rejected
+        // proposal (invented identifiers, nothing to propose) is a real result
+        // and must surface, not be papered over by the template matcher.
+        if (!/could not complete this modeling request/.test(error instanceof Error ? error.message : String(error))) throw error;
+        usedProvider = false;
+        operations = buildDeterministicModelingOperations(projectRoot, snapshot.manifest, request);
+      }
+    } else {
+      operations = buildDeterministicModelingOperations(projectRoot, snapshot.manifest, request);
+    }
     const proposal = previewContextAuthoring({
       origin: request.workspaceContext?.correction === true ? 'correction' : 'ai',
       operations,
@@ -3582,15 +3724,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       sourceRunId: runId,
       revision: Number(request.workspaceContext?.revision ?? 1),
     });
+    const blocked = proposal.diagnostics.some((item) => item.severity === 'blocking');
     return {
-      summary: `Prepared ${proposal.impact.modelingChanges} metadata-bound modeling change${proposal.impact.modelingChanges === 1 ? '' : 's'} for review.`,
-      answer: proposal.diagnostics.some((item) => item.severity === 'blocking')
+      summary: `Prepared ${proposal.impact.modelingChanges} modeling change${proposal.impact.modelingChanges === 1 ? '' : 's'} for review.`,
+      answer: blocked
         ? 'I prepared a modeling proposal, but the blocking items must be resolved before it can be saved.'
-        : 'I prepared an evidence-bound modeling proposal. Review the exact source diff before saving it as a draft.',
+        : usedProvider
+          ? 'I designed a modeling proposal from your dbt metadata. Every model and column was checked against the current snapshot. Review the exact source diff before saving it as a draft.'
+          : 'No AI provider is configured, so these are evidence-only suggestions matched from dbt metadata rather than an AI proposal. Review the exact source diff before saving it as a draft.',
       status: 'needs_review',
       trustState: 'review_required',
       stopReason: 'human_review_required',
-      artifacts: [{ id: `${runId}:modeling-proposal`, kind: 'modeling_change_proposal', title: 'Modeling change proposal', trustState: 'review_required', ref: proposal.id, payload: proposal }],
+      artifacts: [{ id: `${runId}:modeling-proposal`, kind: 'modeling_change_proposal', title: usedProvider ? 'Modeling change proposal' : 'Evidence-only modeling suggestions', trustState: 'review_required', ref: proposal.id, payload: proposal }],
       evaluations: proposal.diagnostics.map((diagnostic) => ({ id: `${proposal.id}:${diagnostic.code}`, label: diagnostic.code, passed: diagnostic.severity !== 'blocking', severity: diagnostic.severity, message: diagnostic.message })),
       nextActions: [{ id: 'review-modeling-proposal', label: 'Review in Modeling', artifactKind: 'modeling_change_proposal' }],
     };
@@ -3598,7 +3743,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
   const skillAuthoringRunExecutor: AgentRouteExecutor = async ({ runId, request }) => {
     const snapshot = projectSnapshot();
-    const operations = buildMetadataBoundSkillOperations(projectRoot, snapshot.manifest, request);
+    // SKILL-006: same contract as Modeling AI — a provider drafts the skill
+    // body and vocabulary; the template is the labelled fallback.
+    const provider = await createBlockStudioAssistProvider(projectRoot);
+    const operations = provider
+      ? await buildAiSkillOperations(projectRoot, snapshot.manifest, request, provider)
+        .catch(() => buildMetadataBoundSkillOperations(projectRoot, snapshot.manifest, request))
+      : buildMetadataBoundSkillOperations(projectRoot, snapshot.manifest, request);
     const proposal = previewContextAuthoring({
       origin: request.workspaceContext?.correction === true ? 'correction' : 'ai',
       operations,
@@ -5405,6 +5556,41 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     variables: Record<string, unknown>;
   };
 
+  /**
+   * CTX-008: the project's authored relationships, as plain join facts for the
+   * relations a bounded repair can actually see.
+   *
+   * A repair prompt previously carried only the failure, the failed SQL, and a
+   * bare relation list, so a repair could silently replace a correct governed
+   * join with a shared-column guess. This is grounding only — it never widens
+   * the relation scope and never authorizes a join (`REL-002` still governs
+   * execution); trust is labelled so a draft edge reads as a draft.
+   */
+  const governedJoinFactsForRelations = (relations: string[]): string[] => {
+    const modeling = (() => {
+      try { return projectSnapshot().manifest.modeling; } catch { return undefined; }
+    })();
+    if (!modeling) return [];
+    const manifest = projectSnapshot().manifest;
+    const normalize = (value: string) => value.toLowerCase().replace(/"/g, '').split('.').at(-1) ?? value.toLowerCase();
+    const visible = new Set(relations.map(normalize));
+    const relationFor = (entityKey: string): string | undefined => {
+      const entity = modeling.entities[entityKey];
+      if (!entity) return undefined;
+      const node = manifest.dbtProvenance?.nodes[entity.dbtUniqueId];
+      return node?.relation ?? node?.name;
+    };
+    return Object.values(modeling.relationships).flatMap((relationship) => {
+      const from = relationFor(relationship.from);
+      const to = relationFor(relationship.to);
+      if (!from || !to || !visible.has(normalize(from)) || !visible.has(normalize(to))) return [];
+      const keys = relationship.keys.map((key) => `${from}.${key.from} = ${to}.${key.to}`).join(' AND ');
+      const trust = relationship.automaticJoinAllowed ? 'certified' : `${relationship.status} (review required)`;
+      const meaning = [relationship.verb, relationship.description].filter(Boolean).join(' — ');
+      return [`${keys} (${relationship.cardinality}, fanout ${relationship.fanout}, ${trust}${meaning ? `; ${meaning}` : ''})`];
+    }).slice(0, 12);
+  };
+
   const boundedRepairError = (
     message: string,
     status: number,
@@ -5471,6 +5657,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         relation: table.relation,
         columns: table.columns.slice(0, 40).map((column) => ({ name: column.name, type: column.type })),
       }));
+      // CTX-008: a repair that re-derives joins from column names can undo a
+      // join the original query got right. Give it the authored key pairs.
+      const governedJoins = governedJoinFactsForRelations(schemaContext.slice(0, 16).map((table) => table.relation));
       let raw: string;
       try {
         raw = await provider.generate([
@@ -5484,6 +5673,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 ? 'Preserve every positional parameter placeholder exactly; do not add, remove, or renumber placeholders.'
                 : '',
               'Use only relations and columns present in the supplied schema context.',
+              'When governedJoins is present, join on those exact key pairs rather than inferring a join from column names.',
               'Never emit internal DQL relation identities such as source::, model::, seed::, or snapshot::.',
               'Do not add writes, DDL, multiple statements, or commentary outside the JSON fence.',
             ].join(' '),
@@ -5500,6 +5690,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 placeholder: `$${parameter.position}`,
               })),
               schema: boundedSchema,
+              ...(governedJoins.length ? { governedJoins } : {}),
             }),
           },
         ], { maxTokens: 1200, temperature: 0 });
@@ -5590,6 +5781,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       relation: table.relation,
       columns: table.columns.slice(0, 40).map((column) => ({ name: column.name, type: column.type })),
     }));
+    // CTX-008: same as the SQL repair — keep authored joins out of the guesser.
+    const governedJoins = governedJoinFactsForRelations(schemaContext.slice(0, 16).map((table) => table.relation));
     let raw: string;
     try {
       raw = await provider.generate([
@@ -5602,6 +5795,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             'Preserve the block name, business fields, visualization, tests, requested grain, filters, output columns, and aggregation semantics.',
             'Preserve every declared parameter and every ${parameter} interpolation exactly. Do not add or remove parameters.',
             'Use only relations and columns present in the supplied schema context.',
+            'When governedJoins is present, join on those exact key pairs rather than inferring a join from column names.',
             'Never emit internal relation identities such as source::, model::, seed::, or snapshot::.',
             'Return exactly one custom block. Never certify it, bind a saved block, add writes, DDL, or multiple SQL statements.',
           ].join(' '),
@@ -5615,6 +5809,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             dql: input.source.slice(0, 40_000),
             parameters: input.parameters ?? {},
             schema: boundedSchema,
+            ...(governedJoins.length ? { governedJoins } : {}),
           }),
         },
       ], { maxTokens: 2400, temperature: 0 });
@@ -8053,9 +8248,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const selectedCandidateIds = Array.isArray(body.selectedCandidateIds)
           ? body.selectedCandidateIds.filter((value): value is string => typeof value === 'string')
           : session.candidates.filter((candidate) => candidate.dialect !== 'unsupported' && candidate.action !== 'open_existing').map((candidate) => candidate.id);
-        const domain = typeof body.domain === 'string' ? body.domain.trim() : '';
-        const areaId = typeof body.areaId === 'string' ? body.areaId.trim() : '';
-        if (!domain || !areaId) throw Object.assign(new Error('Choose exactly one Domain and Model Area for imported models.'), { code: 'MODEL_SCOPE_REQUIRED' });
+        // An unspecified scope is defaulted, not rejected: the proposal carries
+        // the `upsert_domain`/`upsert_area` patches so the author reviews the
+        // scope alongside the models it will hold.
+        const domain = typeof body.domain === 'string' && body.domain.trim()
+          ? body.domain.trim()
+          : defaultAuthoringDomainId(snapshot.manifest);
+        const areaId = typeof body.areaId === 'string' && body.areaId.trim() ? body.areaId.trim() : DEFAULT_MODEL_AREA_ID;
         const planned = modelingImportOperations(session, selectedCandidateIds, domain, areaId, snapshot.manifest);
         const proposal = previewContextAuthoring({
           origin: 'yaml_import',
@@ -18215,8 +18414,13 @@ interface ModelingImportSession {
   updatedAt: string;
   source: { mode: 'current_project' | 'path' | 'upload' | 'paste'; label: string };
   candidates: ModelingImportCandidate[];
+  /** Files the scan skipped, so a truncated import never looks like a miss. */
+  warnings?: string[];
   proposalId?: string;
 }
+
+/** Bounded discovery: an import scan reads at most this many YAML files. */
+const MODELING_IMPORT_FILE_LIMIT = 100;
 
 function modelingImportDirectory(projectRoot: string): string {
   return join(projectRoot, '.dql', 'local', 'modeling-imports');
@@ -18260,6 +18464,7 @@ function createModelingImportSession(
   const mode = source.mode;
   if (mode !== 'current_project' && mode !== 'path' && mode !== 'upload' && mode !== 'paste') throw Object.assign(new Error('Choose current_project, path, upload, or paste.'), { code: 'INVALID_REQUEST' });
   const files: Array<{ name: string; path?: string; content: string; inProject: boolean }> = [];
+  const truncationWarnings: string[] = [];
   if (mode === 'paste' || mode === 'upload') {
     const content = typeof source.content === 'string' ? source.content : '';
     if (!content.trim() || Buffer.byteLength(content) > 1_000_000) throw Object.assign(new Error('YAML content is required and must be 1 MB or smaller.'), { code: 'MODELING_IMPORT_LIMIT' });
@@ -18273,10 +18478,17 @@ function createModelingImportSession(
     if (!existsSync(requestedInput)) throw Object.assign(new Error('The selected YAML path does not exist.'), { code: 'MODELING_IMPORT_NOT_FOUND' });
     const requested = realpathSync(requestedInput);
     if (requested !== allowedRoot && !requested.startsWith(`${allowedRoot}${sep}`)) throw Object.assign(new Error('Import path must stay inside the current Git workspace.'), { code: 'PATH_ACCESS_FORBIDDEN' });
-    const paths = collectModelingYamlPaths(requested, 100);
+    const paths = collectModelingYamlPaths(requested, MODELING_IMPORT_FILE_LIMIT);
+    // Truncation used to be silent, which reads as "DQL did not find my file".
+    if (paths.length >= MODELING_IMPORT_FILE_LIMIT) {
+      truncationWarnings.push(`Only the first ${MODELING_IMPORT_FILE_LIMIT} YAML files in this location were scanned. Point the import at a narrower folder to see the rest.`);
+    }
     for (const path of paths) {
       const size = statSync(path).size;
-      if (size > 1_000_000) continue;
+      if (size > 1_000_000) {
+        truncationWarnings.push(`Skipped ${relative(requested, path).replace(/\\/g, '/')}: larger than the 1 MB import limit.`);
+        continue;
+      }
       const resolvedPath = realpathSync(path);
       if (resolvedPath !== allowedRoot && !resolvedPath.startsWith(`${allowedRoot}${sep}`)) continue;
       const resolvedProject = realpathSync(projectRoot);
@@ -18293,6 +18505,7 @@ function createModelingImportSession(
     updatedAt: now,
     source: { mode, label: mode === 'path' ? String(source.path ?? '') : mode === 'current_project' ? 'Current project' : files[0]!.name },
     candidates,
+    ...(truncationWarnings.length ? { warnings: truncationWarnings } : {}),
   };
   writeModelingImportSession(projectRoot, session);
   return session;
@@ -18363,8 +18576,10 @@ function modelingImportOperations(
   if (!selected.length) throw Object.assign(new Error('Select at least one supported YAML candidate.'), { code: 'MODELING_IMPORT_EMPTY' });
   const packageExists = Boolean(manifest.modeling?.packages?.[domain]);
   const area = Object.values(manifest.modeling?.areas ?? {}).find((item) => item.domain === domain && (item.localId === areaId || item.qualifiedId === areaId));
-  if (!packageExists) diagnostics.push({ code: 'DOMAIN_NOT_FOUND', severity: 'blocking', message: `Domain not found: ${domain}` });
-  if (!area) diagnostics.push({ code: 'MODEL_AREA_NOT_FOUND', severity: 'blocking', message: `Model Area not found in ${domain}: ${areaId}` });
+  // A missing Domain/subject area is created by `ensureAuthoringScopeOperations`
+  // as part of this same proposal, so it is reported, not blocked.
+  if (!packageExists) diagnostics.push({ code: 'DOMAIN_CREATED', severity: 'info', message: `Domain "${domain}" does not exist yet and will be created with these models.` });
+  if (!area) diagnostics.push({ code: 'MODEL_AREA_CREATED', severity: 'info', message: `Subject area "${areaId}" does not exist yet in ${domain} and will be created with these models.` });
   const nodes = Object.values(manifest.dbtProvenance?.nodes ?? {});
   const resolveDbt = (reference: string, operationId: string): string | undefined => {
     const cleaned = reference.replace(/^ref\(['"]|['"]\)$/g, '').replace(/^model\./, '');
@@ -18373,6 +18588,15 @@ function modelingImportOperations(
     return matches.length === 1 ? matches[0]!.uniqueId : undefined;
   };
   const used = new Set(Object.values(manifest.modeling?.entities ?? {}).filter((entity) => entity.domain === domain).map((entity) => entity.localId));
+  /**
+   * REL-004: dbt already declares its relationships. Every model this import
+   * binds is recorded here so the dbt `relationships` tests and MetricFlow
+   * `entities:` blocks covering those models become draft edges instead of
+   * leaving the author to redraw connections they already wrote down.
+   */
+  const boundEntityByDbtId = new Map<string, { id: string; operationId: string }>();
+  const semanticPrimaryByName = new Map<string, { dbtModel: string; column: string }>();
+  const semanticForeignRefs: Array<{ name: string; column: string; dbtModel: string; operationId: string }> = [];
   const allocate = (value: string): string => {
     const base = authoringSlug(value).replace(/-/g, '_') || 'model';
     let id = base;
@@ -18400,6 +18624,7 @@ function modelingImportOperations(
         if (!dbtModel) continue;
         const sourceId = String(entity.id ?? nodes.find((node) => node.uniqueId === dbtModel)?.name ?? `model_${index + 1}`);
         const id = allocate(sourceId);
+        boundEntityByDbtId.set(dbtModel, { id, operationId });
         importedEntities.set(sourceId, { id, operationId });
         importedEntities.set(String(entity.qualified_id ?? entity.qualifiedId ?? ''), { id, operationId });
         importedEntities.set(dbtModel, { id, operationId });
@@ -18447,10 +18672,85 @@ function modelingImportOperations(
           continue;
         }
         const id = existing?.localId ?? allocate(String(model.name ?? nodes.find((node) => node.uniqueId === dbtModel)?.name ?? `model_${index + 1}`));
-        operations.push({ id: operationId, kind: 'modeling_change', evidence: [candidate.path ?? candidate.name, dbtModel], change: { operation: 'upsert_entity', value: { id, domain, areaId: area?.localId ?? areaId, dbtModel, businessName: typeof model.name === 'string' ? titleCaseAuthoring(model.name) : undefined, businessContext: typeof model.description === 'string' ? model.description : undefined, status: 'draft', analyticalRole: 'unknown' } } });
+        boundEntityByDbtId.set(dbtModel, { id, operationId });
+        // MetricFlow states its own join graph in `entities:`; keep the primary
+        // key so the semantic branch can pair it with foreign references below.
+        const semanticEntities = contextArray(model.entities).map(contextRecord);
+        const primary = semanticEntities.find((entry) => entry.type === 'primary');
+        if (primary?.name) semanticPrimaryByName.set(String(primary.name), { dbtModel, column: String(primary.expr ?? primary.name) });
+        for (const entry of semanticEntities) {
+          if (entry.type !== 'foreign' || !entry.name) continue;
+          semanticForeignRefs.push({ name: String(entry.name), column: String(entry.expr ?? entry.name), dbtModel, operationId });
+        }
+        const aggTimeDimension = contextRecord(model.defaults).agg_time_dimension;
+        operations.push({ id: operationId, kind: 'modeling_change', evidence: [candidate.path ?? candidate.name, dbtModel], change: { operation: 'upsert_entity', value: { id, domain, areaId: area?.localId ?? areaId, dbtModel, businessName: typeof model.name === 'string' ? titleCaseAuthoring(model.name) : undefined, businessContext: typeof model.description === 'string' ? model.description : undefined, status: 'draft', analyticalRole: 'unknown', ...(typeof aggTimeDimension === 'string' ? { grain: aggTimeDimension } : {}), ...(primary?.name ? { keys: [String(primary.expr ?? primary.name)] } : {}) } } });
       }
     }
   }
+
+  // REL-004: pair MetricFlow foreign references against the primary entity of
+  // the same name. This is dbt's own declared join graph, so it needs no
+  // guessing — but it is still only a draft candidate (REL-001).
+  for (const reference of semanticForeignRefs) {
+    const primary = semanticPrimaryByName.get(reference.name);
+    if (!primary || primary.dbtModel === reference.dbtModel) continue;
+    const from = boundEntityByDbtId.get(reference.dbtModel);
+    const to = boundEntityByDbtId.get(primary.dbtModel);
+    if (!from || !to) continue;
+    operations.push({
+      id: `semantic-entity:${from.id}:${to.id}:${reference.name}`,
+      kind: 'modeling_change',
+      dependsOn: [...new Set([from.operationId, to.operationId])],
+      evidence: [`MetricFlow entity "${reference.name}" declared foreign in ${reference.dbtModel} and primary in ${primary.dbtModel}`],
+      change: {
+        operation: 'upsert_relationship',
+        value: {
+          id: `${from.id}_to_${to.id}`, domain, areaId: area?.localId ?? areaId,
+          from: from.id, to: to.id,
+          keys: [{ from: reference.column, to: primary.column }],
+          cardinality: 'many_to_one', fanout: 'unknown', status: 'draft',
+          verb: reference.name,
+          rationale: 'Declared by the MetricFlow semantic entity graph. Validate against the warehouse before certifying.',
+        },
+      },
+    });
+  }
+
+  // REL-004: dbt `relationships` tests state an exact key pair and are already
+  // enforced by `dbt test`, which makes them the strongest available candidate.
+  // They remain drafts: a dbt test is evidence, never join authorization.
+  const manifestPath = manifest.dbtProvenance?.manifestPath;
+  if (manifestPath && boundEntityByDbtId.size > 1) {
+    let rawManifest: Record<string, unknown> | undefined;
+    try { rawManifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>; } catch { rawManifest = undefined; }
+    if (rawManifest) {
+      for (const edge of collectDbtRelationshipTests(rawManifest, new Set(boundEntityByDbtId.keys()))) {
+        if (edge.fromColumn === 'unknown' || edge.toColumn === 'unknown') continue;
+        const from = boundEntityByDbtId.get(edge.fromDbtUniqueId);
+        const to = boundEntityByDbtId.get(edge.toDbtUniqueId);
+        if (!from || !to || from.id === to.id) continue;
+        const id = `${from.id}_to_${to.id}`;
+        if (operations.some((operation) => operation.kind === 'modeling_change' && operation.change.operation === 'upsert_relationship' && operation.change.value.id === id)) continue;
+        operations.push({
+          id: `dbt-test:${edge.testUniqueId}`,
+          kind: 'modeling_change',
+          dependsOn: [...new Set([from.operationId, to.operationId])],
+          evidence: [edge.testUniqueId, ...(edge.sourcePath ? [edge.sourcePath] : [])],
+          change: {
+            operation: 'upsert_relationship',
+            value: {
+              id, domain, areaId: area?.localId ?? areaId,
+              from: from.id, to: to.id,
+              keys: [{ from: edge.fromColumn, to: edge.toColumn }],
+              cardinality: 'many_to_one', fanout: 'unknown', status: 'draft',
+              rationale: `Declared by the dbt relationships test ${edge.testUniqueId}. Validate against the warehouse before certifying.`,
+            },
+          },
+        });
+      }
+    }
+  }
+
   if (!operations.length) throw Object.assign(new Error('The selected YAML did not produce any resolvable modeling changes.'), { code: 'MODELING_IMPORT_EMPTY', diagnostics });
   return { operations, diagnostics };
 }
@@ -18504,7 +18804,7 @@ function parseContextAuthoringOperations(value: unknown): ContextAuthoringOperat
     const evidence = Array.isArray(operation.evidence) ? operation.evidence.filter((item): item is string => typeof item === 'string').slice(0, 32) : undefined;
     if (operation.kind === 'modeling_change') {
       const change = operation.change as ModelingAuthoringChange | undefined;
-      const allowed = new Set(['upsert_domain', 'upsert_area', 'upsert_entity', 'upsert_relationship', 'upsert_contract', 'upsert_export', 'upsert_import', 'remove_entity', 'remove_relationship', 'remove_area']);
+      const allowed = new Set(['upsert_domain', 'upsert_area', 'upsert_entity', 'upsert_relationship', 'upsert_contract', 'upsert_export', 'upsert_import', 'remove_entity', 'remove_relationship', 'remove_area', 'remove_contract', 'remove_export', 'remove_import']);
       if (!change || typeof change !== 'object' || !allowed.has(change.operation) || !('value' in change) || !change.value || typeof change.value !== 'object') throw Object.assign(new Error(`Modeling operation ${id} is invalid.`), { code: 'INVALID_REQUEST' });
       return { id, kind: 'modeling_change', change, dependsOn, evidence };
     }
@@ -18541,7 +18841,253 @@ function resolveContextPatchPath(projectRoot: string, gitRoot: string | null, re
   return absolute;
 }
 
-function buildMetadataBoundModelingOperations(
+/**
+ * Modeling AI: propose modeling changes from repository metadata.
+ *
+ * `AGT-024` — the model receives manifest identifiers, columns, lineage, tests,
+ * current modeling, and source locations, and never query rows. It proposes;
+ * this function then validates every identifier against the live snapshot and
+ * drops anything invented, so a hallucinated model or column cannot enter a
+ * proposal. `previewContextAuthoring` independently forces `status: 'draft'`,
+ * strips certification and validation, and blocks deletes and cross-domain
+ * relationships, so nothing here can certify or authorize a join.
+ */
+async function buildAiModelingOperations(
+  projectRoot: string,
+  manifest: DQLManifest,
+  request: AgentRunRequest,
+  provider: AgentProvider,
+): Promise<ContextAuthoringOperation[]> {
+  const modeling = manifest.modeling;
+  if (!modeling || !manifest.dbtProvenance) throw new Error('Modeling AI requires a compiled dbt-first project snapshot.');
+  const context = request.workspaceContext ?? {};
+  const requestedDomain = typeof context.domain === 'string'
+    ? context.domain
+    : request.selectedObject?.kind === 'domain' ? request.selectedObject.id : undefined;
+  const domain = requestedDomain ?? Object.keys(modeling.packages)[0] ?? defaultAuthoringDomainId(manifest);
+  const requestedArea = typeof context.modelAreaId === 'string' ? context.modelAreaId : typeof context.areaId === 'string' ? context.areaId : undefined;
+  const area = Object.values(modeling.areas).find((candidate) => candidate.domain === domain
+    && (!requestedArea || candidate.qualifiedId === requestedArea || candidate.localId === requestedArea));
+  const areaId = area?.localId ?? requestedArea?.split('::area::').at(-1) ?? DEFAULT_MODEL_AREA_ID;
+
+  const bound = new Set(Object.values(modeling.entities).map((entity) => entity.dbtUniqueId));
+  const manifestPath = resolveDbtManifestPath(projectRoot);
+  const describe = (uniqueId: string) => {
+    const detail = manifestPath ? loadDbtNodeAuthoringDetail(manifestPath, uniqueId) : undefined;
+    return {
+      dbtUniqueId: uniqueId,
+      name: manifest.dbtProvenance!.nodes[uniqueId]?.name,
+      relation: manifest.dbtProvenance!.nodes[uniqueId]?.relation,
+      description: detail?.description,
+      columns: (detail?.columns ?? []).slice(0, 60).map((column) => ({ name: column.name, type: column.type, description: column.description })),
+      tests: (detail?.tests ?? []).slice(0, 40),
+    };
+  };
+  // Bound as candidates so a large project still fits a prompt.
+  const unbound = Object.values(manifest.dbtProvenance.nodes).filter((node) => !bound.has(node.uniqueId));
+  const tokens = authoringTokens(request.question);
+  const ranked = [
+    ...unbound.filter((node) => tokens.some((token) => `${node.name} ${node.uniqueId} ${node.sourcePath ?? ''}`.toLowerCase().includes(token))),
+    ...unbound,
+  ].filter((node, index, values) => values.findIndex((other) => other.uniqueId === node.uniqueId) === index).slice(0, 24);
+
+  const payload = {
+    request: request.question.trim(),
+    targetDomain: domain,
+    targetAreaId: areaId,
+    currentModels: Object.values(modeling.entities).filter((entity) => entity.domain === domain).map((entity) => ({
+      id: entity.localId, dbtUniqueId: entity.dbtUniqueId, businessName: entity.businessName,
+      businessContext: entity.businessContext, grain: entity.grain, keys: entity.keys, analyticalRole: entity.analyticalRole,
+    })),
+    currentRelationships: Object.values(modeling.relationships).filter((relationship) => relationship.ownerDomain === domain).map((relationship) => ({
+      id: relationship.localId, from: modeling.entities[relationship.from]?.localId, to: modeling.entities[relationship.to]?.localId,
+      keys: relationship.keys, cardinality: relationship.cardinality, fanout: relationship.fanout, status: relationship.status,
+    })),
+    availableDbtModels: ranked.map((node) => describe(node.uniqueId)),
+    focusedModel: request.selectedObject?.kind === 'model'
+      ? Object.values(modeling.entities).find((entity) => entity.qualifiedId === request.selectedObject!.id)
+      : undefined,
+  };
+
+  let raw: string;
+  try {
+    raw = await provider.generate([
+      {
+        role: 'system',
+        content: [
+          'You design analytical data models. Propose modeling changes for review; you are never applying them.',
+          'Return exactly one JSON object in a ```json fence: {"operations":[...]}. No prose outside the fence.',
+          'Each operation is {"kind":"upsert_entity","id":"<snake_case>","dbtModel":"<exact dbt unique id>","businessName":"...","businessContext":"...","grain":"...","keys":["..."],"analyticalRole":"event|dimension|snapshot|bridge|unknown"}',
+          'or {"kind":"upsert_relationship","id":"<snake_case>","from":"<entity id>","to":"<entity id>","keys":[{"from":"<column>","to":"<column>"}],"cardinality":"one_to_one|one_to_many|many_to_one|many_to_many|unknown","fanout":"safe|dedupe_required|attribution_required|forbidden|unknown","verb":"...","description":"...","rationale":"..."}.',
+          'Use ONLY dbt unique ids and column names present in the supplied metadata. Never invent an identifier.',
+          'businessContext states what one row means in business terms. Never restate the request back as business context.',
+          'Set cardinality and fanout from the evidence; use "unknown" when the metadata does not establish them. Never claim a relationship is certified or validated.',
+          'Do not propose deletions, cross-domain relationships, or changes to dbt-owned SQL, columns, tests, or descriptions.',
+        ].join(' '),
+      },
+      { role: 'user', content: JSON.stringify(payload) },
+    ], { maxTokens: 3000, temperature: 0 });
+  } catch (error) {
+    throw new Error(`The AI provider could not complete this modeling request: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const parsed = parseAiModelingOperations(raw);
+  if (parsed.length === 0) throw new Error('Modeling AI did not return any usable modeling changes. Try naming the models or the relationship you want.');
+
+  // Validate every identifier against the live snapshot. An operation that
+  // references something the project does not have is dropped, not repaired.
+  const knownDbtIds = new Set(Object.keys(manifest.dbtProvenance.nodes));
+  const columnsFor = new Map<string, Set<string>>();
+  const proposedEntityIds = new Set(Object.values(modeling.entities).filter((entity) => entity.domain === domain).map((entity) => entity.localId));
+  const operations: ContextAuthoringOperation[] = [];
+
+  for (const candidate of parsed) {
+    if (candidate.kind === 'upsert_entity') {
+      if (!candidate.dbtModel || !knownDbtIds.has(candidate.dbtModel)) continue;
+      const id = authoringSlug(candidate.id || candidate.dbtModel.split('.').at(-1) || 'model').replace(/-/g, '_');
+      if (!id) continue;
+      proposedEntityIds.add(id);
+      const detail = manifestPath ? loadDbtNodeAuthoringDetail(manifestPath, candidate.dbtModel) : undefined;
+      const columns = new Set((detail?.columns ?? []).map((column) => column.name.toLowerCase()));
+      columnsFor.set(id, columns);
+      operations.push({
+        id: `entity:${domain}:${id}`,
+        kind: 'modeling_change',
+        evidence: [candidate.dbtModel, ...(detail?.sourcePath ? [detail.sourcePath] : [])],
+        change: {
+          operation: 'upsert_entity',
+          value: {
+            id, domain, areaId, dbtModel: candidate.dbtModel,
+            businessName: candidate.businessName?.trim() || titleCaseAuthoring(id),
+            businessContext: candidate.businessContext?.trim() || undefined,
+            grain: candidate.grain && columns.has(candidate.grain.toLowerCase()) ? candidate.grain : undefined,
+            keys: (candidate.keys ?? []).filter((key) => columns.has(key.toLowerCase())),
+            analyticalRole: parseImportedAnalyticalRole(candidate.analyticalRole) ?? 'unknown',
+            status: 'draft',
+          },
+        },
+      });
+      continue;
+    }
+
+    const from = authoringSlug(candidate.from ?? '').replace(/-/g, '_');
+    const to = authoringSlug(candidate.to ?? '').replace(/-/g, '_');
+    if (!proposedEntityIds.has(from) || !proposedEntityIds.has(to) || from === to) continue;
+    const knownColumns = (entityId: string): Set<string> => {
+      const cached = columnsFor.get(entityId);
+      if (cached) return cached;
+      const entity = Object.values(modeling.entities).find((item) => item.domain === domain && item.localId === entityId);
+      const detail = entity && manifestPath ? loadDbtNodeAuthoringDetail(manifestPath, entity.dbtUniqueId) : undefined;
+      const columns = new Set((detail?.columns ?? []).map((column) => column.name.toLowerCase()));
+      columnsFor.set(entityId, columns);
+      return columns;
+    };
+    const fromColumns = knownColumns(from);
+    const toColumns = knownColumns(to);
+    const keys = (candidate.keys ?? []).filter((key) =>
+      key?.from && key?.to && fromColumns.has(key.from.toLowerCase()) && toColumns.has(key.to.toLowerCase()));
+    if (keys.length === 0) continue;
+    const id = authoringSlug(candidate.id || `${from}_to_${to}`).replace(/-/g, '_');
+    operations.push({
+      id: `relationship:${domain}:${id}`,
+      kind: 'modeling_change',
+      dependsOn: [`entity:${domain}:${from}`, `entity:${domain}:${to}`].filter((dependency) =>
+        operations.some((operation) => operation.id === dependency)),
+      evidence: ['Modeling AI proposal from dbt metadata; requires warehouse validation before certification'],
+      change: {
+        operation: 'upsert_relationship',
+        value: {
+          id, domain, areaId, from, to, keys,
+          cardinality: parseImportedCardinality(candidate.cardinality),
+          fanout: parseImportedFanout(candidate.fanout),
+          status: 'draft',
+          verb: candidate.verb?.trim() || undefined,
+          description: candidate.description?.trim() || undefined,
+          rationale: candidate.rationale?.trim() || undefined,
+        },
+      },
+    });
+  }
+
+  if (operations.length === 0) throw new Error('Modeling AI referenced models or columns that are not in the current dbt snapshot, so nothing was proposed.');
+  return operations;
+}
+
+type AiModelingCandidate =
+  | {
+      kind: 'upsert_entity';
+      id?: string;
+      dbtModel?: string;
+      businessName?: string;
+      businessContext?: string;
+      grain?: string;
+      /** Analytical key column names asserted on the bound dbt model. */
+      keys: string[];
+      analyticalRole?: unknown;
+    }
+  | {
+      kind: 'upsert_relationship';
+      id?: string;
+      from?: string;
+      to?: string;
+      keys: Array<{ from: string; to: string }>;
+      verb?: string;
+      description?: string;
+      rationale?: string;
+      cardinality?: unknown;
+      fanout?: unknown;
+    };
+
+/** Tolerant JSON extraction; a malformed provider reply yields no operations. */
+export function parseAiModelingOperations(raw: string): AiModelingCandidate[] {
+  const fenced = raw.match(/```json\s*([\s\S]*?)```/i)?.[1] ?? raw.match(/```\s*([\s\S]*?)```/)?.[1] ?? raw;
+  let parsed: unknown;
+  try { parsed = JSON.parse(fenced.trim()); } catch { return []; }
+  const text = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined);
+  return contextArray(contextRecord(parsed).operations).flatMap((value): AiModelingCandidate[] => {
+    const record = contextRecord(value);
+    if (record.kind === 'upsert_entity') {
+      return [{
+        kind: 'upsert_entity',
+        id: text(record.id),
+        dbtModel: text(record.dbtModel),
+        businessName: text(record.businessName),
+        businessContext: text(record.businessContext),
+        grain: text(record.grain),
+        analyticalRole: record.analyticalRole,
+        keys: contextStrings(record.keys),
+      }];
+    }
+    if (record.kind === 'upsert_relationship') {
+      return [{
+        kind: 'upsert_relationship',
+        id: text(record.id),
+        from: text(record.from),
+        to: text(record.to),
+        verb: text(record.verb),
+        description: text(record.description),
+        rationale: text(record.rationale),
+        cardinality: record.cardinality,
+        fanout: record.fanout,
+        keys: contextArray(record.keys).flatMap((entry) => {
+          const key = contextRecord(entry);
+          return typeof key.from === 'string' && typeof key.to === 'string' ? [{ from: key.from, to: key.to }] : [];
+        }),
+      }];
+    }
+    return [];
+  });
+}
+
+/**
+ * Evidence-only modeling suggestions: deterministic, no provider required.
+ *
+ * This is the `AGT-024` provider-unavailable fallback, not "Modeling AI". It
+ * matches dbt model names against the request and pairs shared `*_id` columns.
+ * Callers must label its output honestly so a user is never told a template
+ * expansion was an AI proposal.
+ */
+function buildDeterministicModelingOperations(
   projectRoot: string,
   manifest: DQLManifest,
   request: AgentRunRequest,
@@ -18608,28 +19154,10 @@ function buildMetadataBoundModelingOperations(
     ? Object.values(modeling.entities).find((item) => item.qualifiedId === selectedIdentity || item.id === selectedIdentity || item.localId === selectedIdentity)
     : undefined;
   if (selectedEntity) {
-    return [{
-      id: `entity:${selectedEntity.qualifiedId}`,
-      kind: 'modeling_change',
-      evidence: [selectedEntity.sourcePath, selectedEntity.dbtUniqueId],
-      change: {
-        operation: 'upsert_entity',
-        value: {
-          id: selectedEntity.localId,
-          domain: selectedEntity.domain,
-          areaId: selectedEntity.areaId?.split('::area::').at(-1),
-          dbtModel: selectedEntity.dbtUniqueId,
-          businessName: selectedEntity.businessName,
-          businessContext: request.question.trim(),
-          conceptRefs: selectedEntity.conceptRefs,
-          analyticalRole: selectedEntity.analyticalRole,
-          status: 'draft',
-          owner: selectedEntity.owner,
-          grain: selectedEntity.grain,
-          keys: selectedEntity.keys,
-        },
-      },
-    }];
+    // Without a provider there is nothing evidence-backed to propose here.
+    // Copying the raw request into `businessContext` would present the user's
+    // own prompt back to them as authored business meaning.
+    throw new Error('Writing business context needs an AI provider. Configure one in Settings, or edit this model directly in Modeling.');
   }
 
   const requestedArea = typeof context.modelAreaId === 'string' ? context.modelAreaId : typeof context.areaId === 'string' ? context.areaId : undefined;
@@ -18690,6 +19218,83 @@ function buildMetadataBoundModelingOperations(
     }
   }
   return operations;
+}
+
+/**
+ * Skills AI: draft a domain skill's purpose, guardrails, and vocabulary.
+ *
+ * `SKILL-006` — the model sees qualified modeling/metric references, the
+ * current skill, and the Domain/Area scope. It writes prose and vocabulary
+ * only; every governed reference is taken from the deterministic base built
+ * below, so it cannot invent a metric, block, or model. `previewContextAuthoring`
+ * independently forces `status: 'draft'`, so a drafted skill never guides an
+ * agent until a human activates it.
+ */
+async function buildAiSkillOperations(
+  projectRoot: string,
+  manifest: DQLManifest,
+  request: AgentRunRequest,
+  provider: AgentProvider,
+): Promise<ContextAuthoringOperation[]> {
+  const base = buildMetadataBoundSkillOperations(projectRoot, manifest, request);
+  const operation = base[0];
+  if (!operation || operation.kind !== 'skill_change') return base;
+
+  const raw = await provider.generate([
+    {
+      role: 'system',
+      content: [
+        'You write governed analytics guidance for one business domain.',
+        'Return exactly one JSON object in a ```json fence: {"description":"...","body":"...","triggers":["..."],"clarifyWhen":["..."],"vocabulary":{"term":"meaning"}}. No prose outside the fence.',
+        'body is markdown with a "## Purpose" section, a "## Guardrails" section, and a "## Clarify" section.',
+        'Write guidance an analyst would follow. Never restate the request back as the guidance.',
+        'Never name a metric, block, model, or relationship that is not in the supplied governed references.',
+        'Do not grant tools, authorize joins or data access, activate the skill, or write executable code.',
+      ].join(' '),
+    },
+    {
+      role: 'user',
+      content: JSON.stringify({
+        request: request.question.trim(),
+        domain: operation.value.domain,
+        modelAreaRefs: operation.value.modelAreaRefs,
+        currentSkill: { id: operation.value.id, description: operation.value.description, body: operation.value.body },
+        governedReferences: {
+          metrics: operation.value.preferredMetrics,
+          blocks: operation.value.preferredBlocks,
+          modelingRefs: operation.value.sourceRefs,
+        },
+      }),
+    },
+  ], { maxTokens: 2000, temperature: 0.2 });
+
+  const fenced = raw.match(/```json\s*([\s\S]*?)```/i)?.[1] ?? raw.match(/```\s*([\s\S]*?)```/)?.[1] ?? raw;
+  let parsed: Record<string, unknown>;
+  try { parsed = contextRecord(JSON.parse(fenced.trim())); } catch { return base; }
+  const body = typeof parsed.body === 'string' ? parsed.body.trim() : '';
+  if (!body) return base;
+
+  const vocabulary = contextRecord(parsed.vocabulary);
+  return [{
+    ...operation,
+    evidence: [...(operation.evidence ?? []), 'drafted by Skills AI from governed references only'],
+    value: {
+      ...operation.value,
+      description: typeof parsed.description === 'string' && parsed.description.trim() ? parsed.description.trim() : operation.value.description,
+      body,
+      triggers: contextStrings(parsed.triggers).slice(0, 12).length ? contextStrings(parsed.triggers).slice(0, 12) : operation.value.triggers,
+      clarifyWhen: contextStrings(parsed.clarifyWhen).slice(0, 8).length ? contextStrings(parsed.clarifyWhen).slice(0, 8) : operation.value.clarifyWhen,
+      vocabulary: Object.fromEntries(Object.entries(vocabulary)
+        .filter(([, value]) => typeof value === 'string')
+        .slice(0, 24)) as Record<string, string>,
+      // Governed references always come from the deterministic base; the model
+      // never gets to add one.
+      preferredMetrics: operation.value.preferredMetrics,
+      preferredBlocks: operation.value.preferredBlocks,
+      sourceRefs: operation.value.sourceRefs,
+      status: 'draft',
+    },
+  }];
 }
 
 function buildMetadataBoundSkillOperations(
@@ -18753,6 +19358,25 @@ function buildMetadataBoundSkillOperations(
     evidence: [existing?.sourcePath ?? `domain:${domain}`, ...(focusReference ? [focusReference] : [])],
     value,
   }];
+}
+
+/**
+ * The subject area every model lands in when the author has not chosen one.
+ * A Model Area is source organization and a retrieval-ranking hint, never an
+ * authorization boundary, so defaulting it is safe.
+ */
+const DEFAULT_MODEL_AREA_ID = 'core';
+
+/**
+ * The Domain an author lands in when none is selected: the single existing
+ * Domain if there is exactly one, otherwise a new one named after the dbt
+ * project. Callers keep full control — this is only the prefilled default.
+ */
+function defaultAuthoringDomainId(manifest: DQLManifest): string {
+  const packages = Object.keys(manifest.modeling?.packages ?? {});
+  if (packages.length === 1) return packages[0]!;
+  const projectName = manifest.dbtProvenance?.projectName;
+  return projectName ? authoringSlug(projectName).replace(/-/g, '_') || 'analytics' : 'analytics';
 }
 
 function authoringTokens(value: string): string[] {

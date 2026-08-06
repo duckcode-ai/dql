@@ -47,6 +47,14 @@ export interface AnalyticalJoinPlanEdge {
   cardinality: string;
   fanout: string;
   importRefs: string[];
+  /**
+   * CTX-008: the authored business meaning of the join. Keys tell a model *how*
+   * to join; these tell it *what the join means*, which is what stops a
+   * technically valid join from answering the wrong question.
+   */
+  verb?: string;
+  description?: string;
+  rationale?: string;
 }
 
 export interface AnalyticalExploratoryEdge extends AnalyticalJoinPlanEdge {
@@ -540,6 +548,9 @@ function planEdge(manifest: DQLManifest | undefined, relationship: ManifestModel
     cardinality: relationship.cardinality,
     fanout: relationship.fanout,
     importRefs: relationship.importRefs ?? [],
+    verb: relationship.verb,
+    description: relationship.description,
+    rationale: relationship.rationale,
   };
 }
 

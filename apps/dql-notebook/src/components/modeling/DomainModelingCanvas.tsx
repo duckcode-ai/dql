@@ -33,7 +33,7 @@ type EntityNodeData = {
   onResize: (id: string, width: number) => void;
 };
 
-export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedAreaId, selectedId, viewMode, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, resetLayoutToken, focusRequest, onVisibleDbtIdsChange, onSelectEntity, onSelectRelationship, onEditRelationship, onDraftRelationship, onAddRelatedModel, onDropDbtModel, onCreateDomain, onEditEntity, onOpenAi, theme }: { modeling: ManifestDbtFirstModeling; relationByDbtId: Record<string, string | undefined>; detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>; selectedDomain: string | null; selectedAreaId: string | null; selectedId: string | null; viewMode: ModelingViewMode; columnMode: ColumnDisplayMode; search: string; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean; resetLayoutToken: number; focusRequest?: { id: string; token: number }; onVisibleDbtIdsChange: (uniqueIds: string[]) => void; onSelectEntity: (id: string) => void; onSelectRelationship: (id: string) => void; onEditRelationship?: (recordKey: string) => void; onDraftRelationship: (draft: RelationshipDraft) => void; onAddRelatedModel: (origin: { from: string; fromColumn?: string }) => void; onDropDbtModel: (uniqueId: string) => void; onCreateDomain: () => void; onEditEntity: (id: string) => void; onOpenAi: (id: string) => void; theme: Theme }) {
+export function DomainModelingCanvas({ modeling, ghostEntityIds, ghostRelationshipIds, relationByDbtId, detailsByDbtId, selectedDomain, selectedAreaId, selectedId, viewMode, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, resetLayoutToken, focusRequest, onVisibleDbtIdsChange, onSelectEntity, onSelectRelationship, onEditRelationship, onDraftRelationship, onAddRelatedModel, onAddModel, onCreateDomain, onEditEntity, onOpenAi, theme }: { modeling: ManifestDbtFirstModeling; ghostEntityIds?: ReadonlySet<string>; ghostRelationshipIds?: ReadonlySet<string>; relationByDbtId: Record<string, string | undefined>; detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>; selectedDomain: string | null; selectedAreaId: string | null; selectedId: string | null; viewMode: ModelingViewMode; columnMode: ColumnDisplayMode; search: string; layoutMode: DiagramLayoutMode; density: DiagramDensity; visibleLimit: number; dimUnrelated: boolean; showEdgeLabels: boolean; resetLayoutToken: number; focusRequest?: { id: string; token: number }; onVisibleDbtIdsChange: (uniqueIds: string[]) => void; onSelectEntity: (id: string) => void; onSelectRelationship: (id: string) => void; onEditRelationship?: (recordKey: string) => void; onDraftRelationship: (draft: RelationshipDraft) => void; onAddRelatedModel: (origin: { from: string; fromColumn?: string }) => void; onAddModel: () => void; onCreateDomain: () => void; onEditEntity: (id: string) => void; onOpenAi: (id: string) => void; theme: Theme }) {
   const layoutKey = `dql-model-layout:${selectedAreaId ?? selectedDomain ?? 'all'}`;
   const sizeKey = `${layoutKey}:sizes`;
   const [savedPositions, setSavedPositions] = useState<Record<string, { x: number; y: number }>>(() => readPositions(layoutKey));
@@ -52,7 +52,7 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
   // a 316px context card at the pointer with join, cardinality, and proof.
   const [relPopover, setRelPopover] = useState<{ x: number; y: number; recordKey: string } | null>(null);
   const handleResize = (id: string, width: number) => { const next = { ...savedSizes, [id]: Math.round(width) }; setSavedSizes(next); localStorage.setItem(sizeKey, JSON.stringify(next)); };
-  const { nodes: graphNodes, edges } = useMemo(() => buildGraph(modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedAreaId, selectedId, viewMode, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, savedPositions, savedSizes, onAddRelatedModel, handleResize, theme), [modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedAreaId, selectedId, viewMode, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, savedPositions, savedSizes, onAddRelatedModel, theme]);
+  const { nodes: graphNodes, edges } = useMemo(() => buildGraph(modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedAreaId, selectedId, viewMode, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, savedPositions, savedSizes, onAddRelatedModel, handleResize, theme, ghostEntityIds, ghostRelationshipIds), [modeling, relationByDbtId, detailsByDbtId, selectedDomain, selectedAreaId, selectedId, viewMode, columnMode, search, layoutMode, density, visibleLimit, dimUnrelated, showEdgeLabels, savedPositions, savedSizes, onAddRelatedModel, theme, ghostEntityIds, ghostRelationshipIds]);
   const [nodes, setNodes, onNodesChange] = useNodesState(graphNodes);
   useEffect(() => setNodes(graphNodes), [graphNodes, setNodes]);
   const visibleDbtIds = graphNodes.map((node) => (node.data as EntityNodeData).entity.dbtUniqueId);
@@ -73,7 +73,7 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
         }}
       >
         <strong style={{ color: theme.textPrimary }}>{search.trim() ? `No models or columns match “${search.trim()}”.` : 'Start your Domain Model'}</strong>
-        {!search.trim() && <><span>Bind a dbt model, then connect its columns to define governed analytical relationships.</span><div style={{ display: 'flex', gap: 8 }}><button onClick={onCreateDomain} style={emptyAction(theme)}><Plus size={13} /> Create domain</button><button onClick={() => onDropDbtModel('')} style={emptyAction(theme, true)}><Link2 size={13} /> Bind first model</button></div></>}
+        {!search.trim() && <><span>Bind a dbt model, then connect its columns to define governed analytical relationships.</span><div style={{ display: 'flex', gap: 8 }}><button onClick={onCreateDomain} style={emptyAction(theme)}><Plus size={13} /> Create domain</button><button onClick={onAddModel} style={emptyAction(theme, true)}><Link2 size={13} /> Bind first model</button></div></>}
       </div>
     );
   const handleConnect = (connection: Connection) => {
@@ -89,7 +89,7 @@ export function DomainModelingCanvas({ modeling, relationByDbtId, detailsByDbtId
   return (
     <div style={{ height: '100%', position: 'relative' }} onClick={() => { setContextMenu(null); setRelPopover(null); }}>
     <style>{MODELING_CANVAS_STYLES}</style>
-    <ReactFlow key={`${layoutMode}:${density}:${visibleLimit}:${resetLayoutToken}:${search}`} nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={{ entity: EntityNode }} fitView fitViewOptions={{ padding: 0.16 }} minZoom={0.2} maxZoom={1.8} nodesDraggable nodesConnectable onConnect={handleConnect} onNodeDragStop={(_, node) => { const next = { ...savedPositions, [node.id]: node.position }; setSavedPositions(next); localStorage.setItem(layoutKey, JSON.stringify(next)); }} onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-dql-dbt-model')) event.preventDefault(); }} onDrop={(event) => { const uniqueId = event.dataTransfer.getData('application/x-dql-dbt-model'); if (uniqueId) { event.preventDefault(); onDropDbtModel(uniqueId); } }} onNodeClick={(_, node) => onSelectEntity(node.id)} onNodeDoubleClick={(_, node) => onEditEntity(node.id)} onNodeContextMenu={(event, node) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, nodeId: node.id }); }} onEdgeClick={(event, edge) => { event.stopPropagation(); onSelectRelationship(edge.id); setRelPopover({ x: Math.min(event.clientX, window.innerWidth - 340), y: Math.min(event.clientY, window.innerHeight - 320), recordKey: edge.id }); }} colorMode={theme.appBg.toLowerCase().includes('0') ? 'dark' : 'light'} proOptions={{ hideAttribution: true }}>
+    <ReactFlow key={`${layoutMode}:${density}:${visibleLimit}:${resetLayoutToken}:${search}`} nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={{ entity: EntityNode }} fitView fitViewOptions={{ padding: 0.16 }} minZoom={0.2} maxZoom={1.8} nodesDraggable nodesConnectable onConnect={handleConnect} onNodeDragStop={(_, node) => { const next = { ...savedPositions, [node.id]: node.position }; setSavedPositions(next); localStorage.setItem(layoutKey, JSON.stringify(next)); }} onNodeClick={(_, node) => onSelectEntity(node.id)} onNodeDoubleClick={(_, node) => onEditEntity(node.id)} onNodeContextMenu={(event, node) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY, nodeId: node.id }); }} onEdgeClick={(event, edge) => { event.stopPropagation(); onSelectRelationship(edge.id); setRelPopover({ x: Math.min(event.clientX, window.innerWidth - 340), y: Math.min(event.clientY, window.innerHeight - 320), recordKey: edge.id }); }} colorMode={theme.appBg.toLowerCase().includes('0') ? 'dark' : 'light'} proOptions={{ hideAttribution: true }}>
       {/* Pans/zooms to a model picked from the toolbar search. */}
       <FocusController focusRequest={focusRequest} />
       {/* Prototype dot grid: 22px spacing on the Paper canvas. */}
@@ -281,7 +281,7 @@ function EntityNode({ data }: NodeProps<Node<EntityNodeData>>) {
   );
 }
 
-function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<string, string | undefined>, detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>, selectedDomain: string | null, selectedAreaId: string | null, selectedId: string | null, viewMode: ModelingViewMode, columnMode: ColumnDisplayMode, search: string, layoutMode: DiagramLayoutMode, density: DiagramDensity, visibleLimit: number, dimUnrelated: boolean, showEdgeLabels: boolean, savedPositions: Record<string, { x: number; y: number }>, savedSizes: Record<string, number>, onAddRelatedModel: (origin: { from: string; fromColumn?: string }) => void, onResize: (id: string, width: number) => void, theme: Theme): { nodes: Node<EntityNodeData>[]; edges: Edge[] } {
+function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<string, string | undefined>, detailsByDbtId: Record<string, DbtNodeAuthoringDetail | undefined>, selectedDomain: string | null, selectedAreaId: string | null, selectedId: string | null, viewMode: ModelingViewMode, columnMode: ColumnDisplayMode, search: string, layoutMode: DiagramLayoutMode, density: DiagramDensity, visibleLimit: number, dimUnrelated: boolean, showEdgeLabels: boolean, savedPositions: Record<string, { x: number; y: number }>, savedSizes: Record<string, number>, onAddRelatedModel: (origin: { from: string; fromColumn?: string }) => void, onResize: (id: string, width: number) => void, theme: Theme, ghostEntityIds?: ReadonlySet<string>, ghostRelationshipIds?: ReadonlySet<string>): { nodes: Node<EntityNodeData>[]; edges: Edge[] } {
   const selectedArea = selectedAreaId ? modeling.areas[selectedAreaId] : undefined;
   const areaEntityIds = new Set(selectedArea ? [...selectedArea.entityIds, ...selectedArea.referencedEntityIds] : []);
   const visibleRelationships = Object.entries(modeling.relationships).flatMap(([recordKey, relationship]) => {
@@ -342,7 +342,15 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
             onAddRelatedModel,
             onResize,
           },
-          style: { width, height: 116 + columnCount * 29 },
+          style: {
+            width,
+            height: 116 + columnCount * 29,
+            // A proposed model is outlined, not filled: visibly part of the
+            // diagram, visibly not yet saved.
+            ...(ghostEntityIds?.has(recordKey)
+              ? { outline: '2px dashed var(--accent)', outlineOffset: 2, opacity: 0.9, borderRadius: 12 }
+              : {}),
+          },
         });
       }),
   );
@@ -362,6 +370,7 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
       // the join keys and fanout live in the relationship popover, not the label.
       const verbLabel = relationship.verb?.trim();
       const label = verbLabel || keyLabel;
+      const isGhost = ghostRelationshipIds?.has(recordKey) ?? false;
       return {
         id: recordKey,
         source: from,
@@ -370,14 +379,17 @@ function buildGraph(modeling: ManifestDbtFirstModeling, relationByDbtId: Record<
         sourceHandle: viewMode === 'data' && firstKey && fromColumns.has(firstKey.from) ? `source:${firstKey.from}` : undefined,
         targetHandle: viewMode === 'data' && firstKey && toColumns.has(firstKey.to) ? `target:${firstKey.to}` : undefined,
         type: 'default',
-        label: showEdgeLabels ? `${label} · ${cardinalitySymbol(relationship.cardinality)}` : undefined,
-        animated: relationship.status === 'review' || relationship.status === 'reviewed',
-        markerEnd: { type: MarkerType.ArrowClosed, color: selectedId === recordKey ? 'var(--accent)' : 'var(--border-strong)' },
+        label: showEdgeLabels ? `${label} · ${cardinalitySymbol(relationship.cardinality)}${isGhost ? ' · proposed' : ''}` : undefined,
+        animated: isGhost || relationship.status === 'review' || relationship.status === 'reviewed',
+        markerEnd: { type: MarkerType.ArrowClosed, color: isGhost ? 'var(--accent)' : selectedId === recordKey ? 'var(--accent)' : 'var(--border-strong)' },
         // Prototype edges: quiet bezier curves; the selected edge turns accent.
+        // A proposed edge is dashed and translucent so it reads as pending
+        // review rather than as part of the committed model.
         style: {
-          stroke: selectedId === recordKey ? 'var(--accent)' : 'var(--border-strong)',
+          stroke: isGhost || selectedId === recordKey ? 'var(--accent)' : 'var(--border-strong)',
           strokeWidth: selectedId === recordKey ? 2 : 1.5,
           cursor: 'pointer',
+          ...(isGhost ? { strokeDasharray: '6 4', opacity: 0.85 } : {}),
         },
         labelStyle: {
           fill: selectedId === recordKey ? 'var(--accent)' : theme.textSecondary,

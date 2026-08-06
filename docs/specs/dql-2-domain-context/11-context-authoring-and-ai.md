@@ -21,8 +21,16 @@ automatic-join authority.
 
 ## One write-free authoring contract
 
-Manual work, dbt discovery, DQL/dbt YAML import, Modeling AI, Skills AI, and
-corrections produce an immutable `ContextAuthoringProposalV1` with:
+Amended by `00-decisions.md#a-001`: edits to DQL-owned descriptive fields on an
+existing object (business name, business context, concepts, analytical role, and
+a subject area's name/description/intent examples) save directly, because they
+carry no join, lifecycle, or authorization semantics. Deletion, previously the
+only write that bypassed review, now goes through the proposal path.
+
+Everything below still applies to dbt discovery, DQL/dbt YAML import, Modeling
+AI, Skills AI, corrections, object creation, dbt rebinding, grain/key
+assertions, relationship changes, lifecycle moves, and cross-domain changes.
+These produce an immutable `ContextAuthoringProposalV1` with:
 
 - origin, proposal/run ID, base snapshot, dependency fingerprints, proposal
   hash, and `review_required` trust;
@@ -69,13 +77,31 @@ Every created/imported model belongs to exactly one Domain and Area. Batch add
 selects dbt manifest models, assigns one Domain/Area, resolves deterministic DQL
 ID collisions, and reviews bindings before proposal creation.
 
+Amended by `00-decisions.md#a-002`: a missing Domain/Area is created inside the
+same proposal rather than blocking the author. The synthesized `upsert_domain`/
+`upsert_area` operations are ordered ahead of the models that depend on them and
+are reviewed like any other patch. The Area is presented as "subject area"; the
+`model_area` identifier and persisted qualified IDs are unchanged.
+
+Relationships already declared in dbt come across with the models that carry
+them: `relationships` tests supply an exact key pair, and MetricFlow
+`semantic_models[].entities` pair `primary` against `foreign`. Both arrive as
+`draft` with `fanout: unknown` and no validation receipt — `REL-001` is
+unchanged, so a dbt test is evidence, never join authorization.
+
 ## Modeling workspace
 
 The contextual label is Modeling while the `models` deep link and legacy routes
 remain valid. Empty projects offer Use connected dbt, Import modeling YAML, and
-Start manually. Configured projects open the canvas. The primary toolbar is
-Domain/Area, Business/Data view, search, Add models, Connect, and View; New Area
-lives in the Area selector and layout/density controls live in View.
+Start manually — all three are always available; the Domain and subject area are
+prefilled and created with the models (`00-decisions.md#a-002`). Configured
+projects open the canvas. The primary toolbar is Domain/Area, Business/Data
+view, search, Add models, Connect, Build with AI, and View; New Area lives in the
+Area selector and layout/density controls live in View.
+
+Modeling AI is an action on the canvas, not a navigation destination: it docks
+beside the diagram it edits, and a returned proposal previews as ghost nodes and
+dashed edges on the live canvas before the exact source patches are offered.
 
 Relationships use a progressive review: source/target, keys/cardinality with
 reasoned suggestions, business meaning/evidence and warehouse validation, then
@@ -97,6 +123,14 @@ relationships, updates, and explicit moves. It cannot invent identifiers,
 delete, certify, create proof, authorize cross-domain use, or overwrite
 dbt-owned facts. Corrections to certified relationships downgrade to draft and
 remove stale proof.
+
+Modeling AI and Skills AI are provider-backed. Every identifier a provider
+returns is validated against the live snapshot and dropped if absent, so an
+invented model or column cannot enter a proposal. When no provider is
+configured, the deterministic evidence-only matcher runs instead and the answer
+says so explicitly — an evidence-only suggestion is never presented as an AI
+proposal. Without a provider, DQL declines to author business context rather
+than echoing the author's own request back as authored meaning.
 
 Skills AI receives qualified modeling/metric/vocabulary references, current
 skill configuration/hash, Ask evidence, and Domain/Area scope. It may propose

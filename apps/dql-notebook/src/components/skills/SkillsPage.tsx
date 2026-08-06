@@ -659,7 +659,7 @@ function SkillFormDrawer({ mode, options, domains, defaultDomain = null, default
                 </select>
               </label>
             </div>
-            <button type="button" onClick={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'domains' })} style={{ border: 'none', background: 'none', padding: 0, fontSize: 10.5, color: t.accent, cursor: 'pointer', fontFamily: t.font, alignSelf: 'flex-start' }} title="Create a new domain on the Domains page">
+            <button type="button" onClick={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'domains' })} style={{ border: 'none', background: 'none', padding: 0, fontSize: 10.5, color: t.accent, cursor: 'pointer', fontFamily: t.font, alignSelf: 'flex-start' }} title="Create a new domain in the Modeling workspace">
               + New domain
             </button>
             <div>
@@ -740,9 +740,9 @@ function SkillFormDrawer({ mode, options, domains, defaultDomain = null, default
 
           {/* Advanced fields the prototype folds away — all wiring preserved. */}
           <details style={{ gridColumn: '1 / -1' }}>
-            <summary style={{ fontSize: 11.5, fontWeight: 650, color: t.accent, cursor: 'pointer' }}>Advanced — model areas, dimensions, and vocabulary</summary>
+            <summary style={{ fontSize: 11.5, fontWeight: 650, color: t.accent, cursor: 'pointer' }}>Advanced — subject areas, dimensions, and vocabulary</summary>
             <div style={{ display: 'grid', gap: 14, marginTop: 12 }}>
-              <Field label="Focused model areas (optional)" t={t} hint="Comma-separated area ids from the Model workspace. This boosts the skill only inside its selected domain; it never expands access.">
+              <Field label="Focused subject areas (optional)" t={t} hint="Comma-separated subject-area ids from the Modeling workspace. This boosts the skill only inside its selected domain; it never expands access.">
                 <CommaListInput values={draft.modelAreaRefs ?? []} onChange={(next) => set('modelAreaRefs', next)} placeholder="customer_lifecycle, revenue_reporting" style={inputStyle(t)} />
               </Field>
               <Field label="Preferred dimensions" t={t} hint="Business-safe dimensions the agent should prefer when they are compatible.">

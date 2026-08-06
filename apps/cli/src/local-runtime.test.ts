@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   applyRequestedTopNToExploratorySql,
+  parseAiModelingOperations,
   buildAgentValueProbeSql,
   agentRunDeadlineMs,
   exploratoryProbeContradiction,
@@ -8280,6 +8281,37 @@ describe('slimAgentRunForTransport', () => {
   });
 });
 
+describe('Modeling AI provider replies (AGT-024)', () => {
+  it('reads entity and relationship operations out of a fenced reply', () => {
+    const parsed = parseAiModelingOperations([
+      'Here is the model.',
+      '```json',
+      JSON.stringify({
+        operations: [
+          { kind: 'upsert_entity', id: 'order', dbtModel: 'model.shop.orders', businessName: 'Order', businessContext: 'One completed purchase.', grain: 'id', keys: ['id'], analyticalRole: 'event' },
+          { kind: 'upsert_relationship', id: 'order_to_customer', from: 'order', to: 'customer', keys: [{ from: 'customer_id', to: 'id' }], cardinality: 'many_to_one', fanout: 'safe', verb: 'placed by' },
+        ],
+      }),
+      '```',
+    ].join('\n'));
+
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0]).toMatchObject({ kind: 'upsert_entity', dbtModel: 'model.shop.orders', grain: 'id', keys: ['id'] });
+    expect(parsed[1]).toMatchObject({ kind: 'upsert_relationship', from: 'order', to: 'customer', keys: [{ from: 'customer_id', to: 'id' }] });
+  });
+
+  it('yields nothing for malformed or unrecognized replies rather than guessing', () => {
+    expect(parseAiModelingOperations('I could not model that.')).toEqual([]);
+    expect(parseAiModelingOperations('```json\n{ not json\n```')).toEqual([]);
+    // Unknown operation kinds are dropped, not coerced into an upsert.
+    expect(parseAiModelingOperations(JSON.stringify({ operations: [{ kind: 'drop_everything', id: 'x' }] }))).toEqual([]);
+    // Key pairs missing an endpoint cannot become a join.
+    expect(parseAiModelingOperations(JSON.stringify({
+      operations: [{ kind: 'upsert_relationship', id: 'r', from: 'a', to: 'b', keys: [{ from: 'only_one_side' }] }],
+    }))[0]?.keys).toEqual([]);
+  });
+});
+
 describe('unified context authoring proposals (API-011, API-012, MIG-003)', () => {
   it('keeps YAML discovery write-free, commits a reviewed batch, and rejects stale source without partial writes', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-context-proposal-'));
@@ -8354,6 +8386,284 @@ describe('unified context authoring proposals (API-011, API-012, MIG-003)', () =
       expect(rebased.status).toBe(201);
       expect(await rebased.json()).toMatchObject({ proposal: { revision: 2, trustState: 'review_required' } });
       expect(readFileSync(areaPath, 'utf8')).toBe(concurrent);
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+    }
+  });
+
+  it('creates the missing Domain and subject area instead of blocking a first-time author (UI-019)', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-context-scope-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'target'), { recursive: true });
+    // Deliberately no `domains/` directory: this is a project that has never
+    // been modeled, which previously produced blocking MODEL_AREA_REQUIRED /
+    // DOMAIN_NOT_FOUND diagnostics and a dead-ended UI.
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'shop', manifestVersion: 3, modeling: { mode: 'dbt-first' }, dbt: { projectDir: '.', manifestPath: 'target/manifest.json' } }));
+    writeFileSync(join(projectRoot, 'target', 'manifest.json'), JSON.stringify({
+      metadata: { project_name: 'shop' },
+      nodes: Object.fromEntries(['orders', 'customers'].map((name) => [`model.shop.${name}`, { unique_id: `model.shop.${name}`, resource_type: 'model', name, original_file_path: `models/${name}.sql`, columns: { id: { name: 'id' } }, depends_on: { nodes: [] }, tags: [] }])),
+      sources: {}, exposures: {}, semantic_models: {}, groups: {}, metrics: {}, child_map: {}, parent_map: {},
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const base = `http://127.0.0.1:${port}`;
+      const modeling = await (await fetch(`${base}/api/modeling/dbt-first`)).json() as { snapshotId: string; modeling: { packages: Record<string, unknown> } };
+      expect(Object.keys(modeling.modeling.packages)).toHaveLength(0);
+
+      const response = await fetch(`${base}/api/context-proposals`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          origin: 'dbt_discovery',
+          expectedSnapshotId: modeling.snapshotId,
+          operations: [{ id: 'bind:model.shop.orders', kind: 'modeling_change', change: { operation: 'upsert_entity', value: { id: 'orders', domain: 'shop', areaId: 'core', dbtModel: 'model.shop.orders', businessName: 'Orders', status: 'draft' } } }],
+        }),
+      });
+      expect(response.status).toBe(201);
+      const { proposal } = await response.json() as {
+        proposal: {
+          operations: Array<{ id: string; kind: string; dependsOn?: string[]; change?: { operation: string; value: Record<string, unknown> } }>;
+          diagnostics: Array<{ code: string; severity: string }>;
+          patches: Array<{ path: string; after: string }>;
+        };
+      };
+
+      // The scope is synthesized ahead of the entity that needs it, and the
+      // entity declares the dependency so a partial selection cannot orphan it.
+      expect(proposal.operations.map((operation) => operation.id)).toEqual(['scope:domain:shop', 'scope:area:shop:core', 'bind:model.shop.orders']);
+      expect(proposal.operations[0]?.change).toMatchObject({ operation: 'upsert_domain', value: { id: 'shop' } });
+      expect(proposal.operations[1]?.change).toMatchObject({ operation: 'upsert_area', value: { id: 'core', domain: 'shop' } });
+      expect(proposal.operations[2]?.dependsOn).toEqual(['scope:domain:shop', 'scope:area:shop:core']);
+      expect(proposal.diagnostics.filter((diagnostic) => diagnostic.severity === 'blocking')).toEqual([]);
+      expect(proposal.patches.map((patch) => patch.path)).toEqual(expect.arrayContaining([
+        'domains/shop/domain.dql',
+        'domains/shop/modeling/areas/core.dql.yaml',
+      ]));
+      // Still write-free until the proposal is explicitly committed.
+      expect(existsSync(join(projectRoot, 'domains'))).toBe(false);
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+    }
+  });
+
+  it('brings relationships declared in dbt tests across as draft edges (REL-004)', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-dbt-test-edges-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'target'), { recursive: true });
+    mkdirSync(join(projectRoot, 'domains', 'commerce', 'modeling', 'areas'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'shop', manifestVersion: 3, modeling: { mode: 'dbt-first' }, dbt: { projectDir: '.', manifestPath: 'target/manifest.json' } }));
+    writeFileSync(join(projectRoot, 'domains', 'commerce', 'domain.dql'), 'domain "Commerce" {\n  id = "commerce"\n}\n');
+    writeFileSync(join(projectRoot, 'domains', 'commerce', 'modeling', 'areas', 'core.dql.yaml'), 'domain: commerce\narea:\n  id: core\n  name: Core\n');
+    writeFileSync(join(projectRoot, 'target', 'manifest.json'), JSON.stringify({
+      metadata: { project_name: 'shop' },
+      nodes: {
+        'model.shop.orders': { unique_id: 'model.shop.orders', resource_type: 'model', name: 'orders', original_file_path: 'models/orders.sql', columns: { customer_id: { name: 'customer_id' } }, depends_on: { nodes: [] }, tags: [] },
+        'model.shop.customers': { unique_id: 'model.shop.customers', resource_type: 'model', name: 'customers', original_file_path: 'models/customers.sql', columns: { id: { name: 'id' } }, depends_on: { nodes: [] }, tags: [] },
+        // dbt already states the exact key pair and enforces it with `dbt test`.
+        'test.shop.relationships_orders_customer_id': {
+          unique_id: 'test.shop.relationships_orders_customer_id', resource_type: 'test', name: 'relationships_orders_customer_id',
+          original_file_path: 'models/schema.yml', column_name: 'customer_id', attached_node: 'model.shop.orders',
+          test_metadata: { name: 'relationships', kwargs: { field: 'id', to: "ref('customers')" } },
+          depends_on: { nodes: ['model.shop.customers', 'model.shop.orders'] }, tags: [],
+        },
+      },
+      sources: {}, exposures: {}, semantic_models: {}, groups: {}, metrics: {}, child_map: {}, parent_map: {},
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const base = `http://127.0.0.1:${port}`;
+      const modeling = await (await fetch(`${base}/api/modeling/dbt-first`)).json() as { snapshotId: string };
+      const response = await fetch(`${base}/api/context-proposals`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          origin: 'dbt_discovery',
+          expectedSnapshotId: modeling.snapshotId,
+          operations: [
+            { id: 'bind:orders', kind: 'modeling_change', change: { operation: 'upsert_entity', value: { id: 'orders', domain: 'commerce', areaId: 'core', dbtModel: 'model.shop.orders', status: 'draft' } } },
+            { id: 'bind:customers', kind: 'modeling_change', change: { operation: 'upsert_entity', value: { id: 'customers', domain: 'commerce', areaId: 'core', dbtModel: 'model.shop.customers', status: 'draft' } } },
+          ],
+        }),
+      });
+      expect(response.status).toBe(201);
+      const { proposal } = await response.json() as {
+        proposal: { operations: Array<{ id: string; dependsOn?: string[]; evidence?: string[]; change?: { operation: string; value: Record<string, unknown> } }> };
+      };
+      const edge = proposal.operations.find((operation) => operation.change?.operation === 'upsert_relationship');
+      expect(edge).toBeDefined();
+      expect(edge!.change!.value).toMatchObject({
+        id: 'orders_to_customers', domain: 'commerce', areaId: 'core', from: 'orders', to: 'customers',
+        keys: [{ from: 'customer_id', to: 'id' }],
+        // REL-001: a dbt test is evidence, never join authorization.
+        status: 'draft', fanout: 'unknown',
+      });
+      expect(edge!.change!.value.validation).toBeUndefined();
+      expect(edge!.change!.value.certifiedAgainst).toBeUndefined();
+      expect(edge!.dependsOn).toEqual(expect.arrayContaining(['bind:orders', 'bind:customers']));
+      expect(edge!.evidence).toContain('test.shop.relationships_orders_customer_id');
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+    }
+  });
+
+  it('pairs MetricFlow primary and foreign entities into draft edges on semantic import (REL-004)', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-semantic-edges-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'target'), { recursive: true });
+    mkdirSync(join(projectRoot, 'domains', 'commerce', 'modeling', 'areas'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'shop', manifestVersion: 3, modeling: { mode: 'dbt-first' }, dbt: { projectDir: '.', manifestPath: 'target/manifest.json' } }));
+    writeFileSync(join(projectRoot, 'domains', 'commerce', 'domain.dql'), 'domain "Commerce" {\n  id = "commerce"\n}\n');
+    writeFileSync(join(projectRoot, 'domains', 'commerce', 'modeling', 'areas', 'core.dql.yaml'), 'domain: commerce\narea:\n  id: core\n  name: Core\n');
+    writeFileSync(join(projectRoot, 'target', 'manifest.json'), JSON.stringify({
+      metadata: { project_name: 'shop' },
+      nodes: Object.fromEntries(['orders', 'customers'].map((name) => [`model.shop.${name}`, { unique_id: `model.shop.${name}`, resource_type: 'model', name, original_file_path: `models/${name}.sql`, columns: { id: { name: 'id' } }, depends_on: { nodes: [] }, tags: [] }])),
+      sources: {}, exposures: {}, semantic_models: {}, groups: {}, metrics: {}, child_map: {}, parent_map: {},
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const base = `http://127.0.0.1:${port}`;
+      const modeling = await (await fetch(`${base}/api/modeling/dbt-first`)).json() as { snapshotId: string };
+      const semanticYaml = [
+        'semantic_models:',
+        '  - name: orders',
+        '    model: ref("orders")',
+        '    defaults:',
+        '      agg_time_dimension: ordered_at',
+        '    entities:',
+        '      - name: order',
+        '        type: primary',
+        '        expr: id',
+        '      - name: customer',
+        '        type: foreign',
+        '        expr: customer_id',
+        '  - name: customers',
+        '    model: ref("customers")',
+        '    entities:',
+        '      - name: customer',
+        '        type: primary',
+        '        expr: id',
+        '',
+      ].join('\n');
+      const discovery = await (await fetch(`${base}/api/modeling/dbt-first/imports`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: { mode: 'paste', filename: 'semantic.yml', content: semanticYaml } }) })).json() as { session: { id: string; candidates: Array<{ id: string; dialect: string }> } };
+      expect(discovery.session.candidates[0]).toMatchObject({ dialect: 'dbt_semantic' });
+
+      const previewResponse = await fetch(`${base}/api/modeling/dbt-first/imports/${discovery.session.id}/preview`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ selectedCandidateIds: discovery.session.candidates.map((candidate) => candidate.id), domain: 'commerce', areaId: 'core', expectedSnapshotId: modeling.snapshotId }) });
+      expect(previewResponse.status).toBe(201);
+      const { proposal } = await previewResponse.json() as {
+        proposal: { operations: Array<{ id: string; dependsOn?: string[]; change?: { operation: string; value: Record<string, unknown> } }> };
+      };
+      const edge = proposal.operations.find((operation) => operation.change?.operation === 'upsert_relationship');
+      expect(edge).toBeDefined();
+      expect(edge!.change!.value).toMatchObject({
+        from: 'orders', to: 'customers', keys: [{ from: 'customer_id', to: 'id' }],
+        verb: 'customer', status: 'draft', fanout: 'unknown',
+      });
+      // MetricFlow's own grain and primary key survive the import.
+      const ordersEntity = proposal.operations.find((operation) => operation.change?.operation === 'upsert_entity' && operation.change.value.id === 'orders');
+      expect(ordersEntity!.change!.value).toMatchObject({ grain: 'ordered_at', keys: ['id'] });
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+    }
+  });
+
+  it('drops AI-proposed models and columns that are not in the dbt snapshot (AGT-024)', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-ai-modeling-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'target'), { recursive: true });
+    mkdirSync(join(projectRoot, 'domains', 'commerce', 'modeling', 'areas'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'shop', manifestVersion: 3, modeling: { mode: 'dbt-first' }, dbt: { projectDir: '.', manifestPath: 'target/manifest.json' } }));
+    writeFileSync(join(projectRoot, 'domains', 'commerce', 'domain.dql'), 'domain "Commerce" {\n  id = "commerce"\n}\n');
+    writeFileSync(join(projectRoot, 'domains', 'commerce', 'modeling', 'areas', 'core.dql.yaml'), 'domain: commerce\narea:\n  id: core\n  name: Core\n');
+    writeFileSync(join(projectRoot, 'target', 'manifest.json'), JSON.stringify({
+      metadata: { project_name: 'shop' },
+      nodes: {
+        'model.shop.orders': { unique_id: 'model.shop.orders', resource_type: 'model', name: 'orders', original_file_path: 'models/orders.sql', columns: { id: { name: 'id' }, customer_id: { name: 'customer_id' } }, depends_on: { nodes: [] }, tags: [] },
+        'model.shop.customers': { unique_id: 'model.shop.customers', resource_type: 'model', name: 'customers', original_file_path: 'models/customers.sql', columns: { id: { name: 'id' } }, depends_on: { nodes: [] }, tags: [] },
+      },
+      sources: {}, exposures: {}, semantic_models: {}, groups: {}, metrics: {}, child_map: {}, parent_map: {},
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const base = `http://127.0.0.1:${port}`;
+      const modeling = await (await fetch(`${base}/api/modeling/dbt-first`)).json() as { snapshotId: string };
+
+      // Stand in for a provider reply that mixes real identifiers with
+      // hallucinated ones. Everything invented must be dropped, not repaired.
+      const response = await fetch(`${base}/api/context-proposals`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          origin: 'ai',
+          expectedSnapshotId: modeling.snapshotId,
+          operations: [
+            { id: 'entity:commerce:orders', kind: 'modeling_change', change: { operation: 'upsert_entity', value: { id: 'orders', domain: 'commerce', areaId: 'core', dbtModel: 'model.shop.orders', businessContext: 'One completed purchase.', status: 'draft' } } },
+            { id: 'rel:commerce:invented', kind: 'modeling_change', change: { operation: 'upsert_relationship', value: { id: 'orders_to_customers', domain: 'commerce', areaId: 'core', from: 'orders', to: 'customers', keys: [{ from: 'customer_id', to: 'id' }], cardinality: 'many_to_one', fanout: 'safe', status: 'certified', certifiedAgainst: { from: { grain: 'id', keys: ['customer_id'] }, to: { grain: 'id', keys: ['id'] } } } } },
+            { id: 'remove:commerce:orders', kind: 'modeling_change', change: { operation: 'remove_entity', value: { id: 'orders', domain: 'commerce' } } },
+          ],
+        }),
+      });
+      expect(response.status).toBe(201);
+      const { proposal } = await response.json() as {
+        proposal: {
+          operations: Array<{ id: string; change?: { operation: string; value: Record<string, unknown> } }>;
+          diagnostics: Array<{ code: string; severity: string }>;
+        };
+      };
+
+      // AGT-002/REL-002: an AI origin can never certify or attach proof.
+      const relationship = proposal.operations.find((operation) => operation.change?.operation === 'upsert_relationship');
+      expect(relationship!.change!.value.status).toBe('draft');
+      expect(relationship!.change!.value.certifiedAgainst).toBeUndefined();
+      expect(relationship!.change!.value.validation).toBeUndefined();
+      // AI cannot delete governed source.
+      expect(proposal.diagnostics).toContainEqual(expect.objectContaining({ code: 'AI_DELETE_FORBIDDEN', severity: 'blocking' }));
+    } finally {
+      await new Promise<void>((done) => server ? server.close(() => done()) : done());
+    }
+  });
+
+  it('defaults an omitted subject area rather than blocking the proposal (UI-019)', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-context-default-area-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'target'), { recursive: true });
+    mkdirSync(join(projectRoot, 'domains', 'commerce'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'shop', manifestVersion: 3, modeling: { mode: 'dbt-first' }, dbt: { projectDir: '.', manifestPath: 'target/manifest.json' } }));
+    writeFileSync(join(projectRoot, 'domains', 'commerce', 'domain.dql'), 'domain "Commerce" {\n  id = "commerce"\n}\n');
+    writeFileSync(join(projectRoot, 'target', 'manifest.json'), JSON.stringify({
+      metadata: { project_name: 'shop' },
+      nodes: { 'model.shop.orders': { unique_id: 'model.shop.orders', resource_type: 'model', name: 'orders', original_file_path: 'models/orders.sql', columns: { id: { name: 'id' } }, depends_on: { nodes: [] }, tags: [] } },
+      sources: {}, exposures: {}, semantic_models: {}, groups: {}, metrics: {}, child_map: {}, parent_map: {},
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({ rootDir: projectRoot, projectRoot, executor: {} as QueryExecutor, preferredPort: 0, captureServer: (created) => { server = created; } });
+      const base = `http://127.0.0.1:${port}`;
+      const modeling = await (await fetch(`${base}/api/modeling/dbt-first`)).json() as { snapshotId: string };
+      const response = await fetch(`${base}/api/context-proposals`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          origin: 'yaml_import',
+          expectedSnapshotId: modeling.snapshotId,
+          operations: [{ id: 'bind:orders', kind: 'modeling_change', change: { operation: 'upsert_entity', value: { id: 'orders', domain: 'commerce', dbtModel: 'model.shop.orders', status: 'draft' } } }],
+        }),
+      });
+      expect(response.status).toBe(201);
+      const { proposal } = await response.json() as {
+        proposal: {
+          operations: Array<{ id: string; change?: { value: Record<string, unknown> } }>;
+          diagnostics: Array<{ code: string; severity: string }>;
+        };
+      };
+      expect(proposal.diagnostics).toContainEqual(expect.objectContaining({ code: 'MODEL_AREA_DEFAULTED', severity: 'info' }));
+      expect(proposal.diagnostics.filter((diagnostic) => diagnostic.severity === 'blocking')).toEqual([]);
+      expect(proposal.operations.find((operation) => operation.id === 'bind:orders')?.change?.value).toMatchObject({ areaId: 'core' });
+      // The existing Domain is reused; only the missing area is synthesized.
+      expect(proposal.operations.map((operation) => operation.id)).toEqual(['scope:area:commerce:core', 'bind:orders']);
     } finally {
       await new Promise<void>((done) => server ? server.close(() => done()) : done());
     }

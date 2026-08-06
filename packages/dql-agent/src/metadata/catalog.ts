@@ -673,7 +673,8 @@ export interface LocalContextPack {
       rightColumn: string;
       reason: string;
       confidence: number;
-      source?: 'dbt_lineage' | 'metadata_guess' | 'kg_path' | 'datalex';
+      /** `dql_relationship` is an authored, reviewed DQL join — the strongest source. */
+      source?: 'dql_relationship' | 'dbt_lineage' | 'metadata_guess' | 'kg_path' | 'datalex';
     }>;
     schemaShapeCandidates?: Array<{
       objectKey: string;
@@ -1540,7 +1541,7 @@ export async function buildLocalContextPack(
         rank: index + 1,
       };
     });
-    const selectedJoinPaths = buildSelectedJoinPaths(allowedSqlContext, contextEdges);
+    const selectedJoinPaths = buildSelectedJoinPaths(allowedSqlContext, contextEdges, objects);
     const evidenceRoles = buildEvidenceRoles(objects, queryRuns);
     const reranked = rankMetadataObjects({
       rows: retrievalObjects(mergeObjects([...searchRows, ...schemaShapeObjects, ...objects])),
@@ -1591,7 +1592,14 @@ export async function buildLocalContextPack(
     }).catch(() => ({ applied: [], conflicts: [], excluded: [] }));
 
     const knowledgeLens = buildKnowledgeLens(catalog, effectiveDomainContext, selectedSkills);
-    const domainBriefing = buildDomainBriefing(catalog, effectiveDomainContext);
+    // CTX-001 allows an inferred domain when the evidence is unambiguous. The
+    // briefing previously required an explicitly pinned one, so the glossary,
+    // intent examples, required filters, and caveats were silently absent from
+    // every ordinary un-pinned Ask. Infer only from an unambiguous single
+    // domain across the retrieved objects; ambiguity still yields no briefing,
+    // and this grants no imports or joins.
+    const domainBriefing = buildDomainBriefing(catalog, effectiveDomainContext)
+      ?? buildDomainBriefing(catalog, inferredDomainContextForBriefing(effectiveDomainContext, objects));
 
     const payload: LocalContextPack = {
       id: '',
@@ -1695,6 +1703,32 @@ export interface DomainBriefing {
  * Bounded at every list: a large domain must degrade gracefully rather than
  * crowd relation cards out of the prompt.
  */
+/**
+ * Derive a low-confidence, briefing-only domain context when the caller pinned
+ * none. Returns `undefined` unless the retrieved objects agree on exactly one
+ * domain, so an ambiguous question keeps its whole-project view.
+ *
+ * The envelope is deliberately marked `inferred`/`low` and carries no
+ * `allowedImports`: it may supply reading context, never authorization.
+ */
+function inferredDomainContextForBriefing(
+  context: DomainContextEnvelope | undefined,
+  objects: MetadataObject[],
+): DomainContextEnvelope | undefined {
+  if (context?.activeDomain) return undefined;
+  const domains = new Set(objects.map((object) => object.domain).filter((domain): domain is string => Boolean(domain) && domain !== 'uncategorized'));
+  if (domains.size !== 1) return undefined;
+  return {
+    activeDomain: [...domains][0]!,
+    ancestors: [],
+    descendants: [],
+    allowedImports: [],
+    source: 'inferred',
+    confidence: 'low',
+    snapshotId: context?.snapshotId ?? '',
+  };
+}
+
 function buildDomainBriefing(
   catalog: MetadataCatalog,
   context: DomainContextEnvelope | undefined,
@@ -3873,11 +3907,27 @@ function objectFromKGNode(node: KGNode): MetadataObject {
     domain: node.domain,
     owner: node.owner,
     status: node.status ?? node.certification,
-    description: node.description ?? node.llmContext,
+    // CTX-008: a relationship's `llmContext` carries the facts that make it
+    // usable — keys, cardinality, fanout — so falling back to it meant writing
+    // a human description silently deleted all of them from the prompt. Keep
+    // both for relationships: prose leads, facts follow. Every other node type
+    // keeps the original fallback, where `llmContext` is only a longer restatement.
+    description: node.kind === 'relationship'
+      ? joinNodeDescription(node.description, node.llmContext)
+      : node.description ?? node.llmContext,
     sourcePath: node.sourcePath,
     sourceSystem: node.provenance ?? node.sourceTier,
     payload: compactObject(payload),
   };
+}
+
+/** Prose first, then the machine facts, without repeating either. */
+function joinNodeDescription(description?: string, llmContext?: string): string | undefined {
+  const prose = description?.trim();
+  const facts = llmContext?.trim();
+  if (!prose) return facts || undefined;
+  if (!facts || prose.includes(facts)) return prose;
+  return `${prose} — ${facts}`;
 }
 
 function kgContextField(context: string | undefined, field: string): string | undefined {
@@ -6571,6 +6621,7 @@ function firstExampleQuestion(examples: unknown): string | undefined {
 function buildSelectedJoinPaths(
   allowedSqlContext: MetadataAllowedSqlContext,
   edges: MetadataEdge[],
+  objects: MetadataObject[] = [],
 ): NonNullable<LocalContextPack['retrievalDiagnostics']['selectedJoinPaths']> {
   const relations = allowedSqlContext.relations
     .filter((relation) => relation.columns.some((column) => isJoinKeyColumnForCatalog(column.name)))
@@ -6584,6 +6635,40 @@ function buildSelectedJoinPaths(
     seen.add(key);
     joins.push(join);
   };
+
+  // CTX-008: authored DQL relationships come first. `pushJoin` keeps the first
+  // writer of a relation pair, so running this pass ahead of dbt lineage and
+  // the shared-column heuristic means a relationship the user certified always
+  // outranks a column-name guess. This is a ranking change only — REL-002 still
+  // decides whether the join may actually execute.
+  const modeledLookup = buildSelectedRelationLookup(allowedSqlContext.relations);
+  for (const object of objects) {
+    if (object.objectType !== 'relationship') continue;
+    const payload = (object.payload ?? {}) as {
+      from?: string; to?: string; keys?: Array<{ from: string; to: string }>;
+      cardinality?: string; fanout?: string; automaticJoinAllowed?: boolean; verb?: string;
+    };
+    const keys = payload.keys ?? [];
+    if (!payload.from || !payload.to || keys.length === 0) continue;
+    const left = lookupRelationForCatalogEdge(`entity:${payload.from}`, modeledLookup)
+      ?? lookupRelationForCatalogEdge(payload.from, modeledLookup);
+    const right = lookupRelationForCatalogEdge(`entity:${payload.to}`, modeledLookup)
+      ?? lookupRelationForCatalogEdge(payload.to, modeledLookup);
+    if (!left || !right || normalizeRelationKey(left.relation) === normalizeRelationKey(right.relation)) continue;
+    for (const key of keys) {
+      if (!relationHasColumn(left, key.from) || !relationHasColumn(right, key.to)) continue;
+      const trust = payload.automaticJoinAllowed ? 'certified' : `${object.status ?? 'draft'} (review required)`;
+      pushJoin({
+        leftRelation: left.relation,
+        leftColumn: key.from,
+        rightRelation: right.relation,
+        rightColumn: key.to,
+        reason: `DQL relationship ${object.name}${payload.verb ? ` (${payload.verb})` : ''}: ${payload.cardinality ?? 'unknown'} cardinality, ${payload.fanout ?? 'unknown'} fanout, ${trust}`,
+        confidence: payload.automaticJoinAllowed ? 1 : 0.95,
+        source: 'dql_relationship',
+      });
+    }
+  }
 
   for (const edge of edges) {
     if (edge.edgeType !== 'depends_on') continue;
@@ -6724,11 +6809,14 @@ function relationHasColumn(relation: MetadataAllowedSqlRelation, column: string 
 
 function joinSourceRank(source: NonNullable<LocalContextPack['retrievalDiagnostics']['selectedJoinPaths']>[number]['source']): number {
   switch (source) {
-    case 'dbt_lineage': return 0;
-    case 'datalex': return 1;
-    case 'kg_path': return 2;
-    case 'metadata_guess': return 3;
-    default: return 4;
+    // An authored DQL relationship states the key pair; everything below it
+    // infers one. Meaning-bearing evidence outranks inference.
+    case 'dql_relationship': return 0;
+    case 'dbt_lineage': return 1;
+    case 'datalex': return 2;
+    case 'kg_path': return 3;
+    case 'metadata_guess': return 4;
+    default: return 5;
   }
 }
 

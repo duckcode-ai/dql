@@ -171,7 +171,10 @@ export function ActivityBar() {
     {
       label: 'Govern',
       items: [
-        { key: 'domains', title: 'Domains', icon: <Boxes size={16} strokeWidth={1.75} />, active: state.mainView === 'domains' || state.mainView === 'modeling' || state.mainView === 'skills' },
+        // The workspace behind this item is the Modeling canvas, so it says so.
+        // "Domains" sent people looking for a domain list and left Modeling
+        // undiscoverable — the word only appeared after you already arrived.
+        { key: 'domains', title: 'Modeling', icon: <Boxes size={16} strokeWidth={1.75} />, active: state.mainView === 'domains' || state.mainView === 'modeling' || state.mainView === 'skills' },
         { key: 'git', title: 'Source control', icon: <GitBranch size={16} strokeWidth={1.75} />, active: state.mainView === 'git' },
         { key: 'settings', title: 'Settings', icon: <Settings size={16} strokeWidth={1.75} />, active: state.mainView === 'settings' || state.mainView === 'connection' },
       ],

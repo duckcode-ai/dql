@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ManifestDbtFirstModeling, ManifestModelEntity } from '@duckcodeailabs/dql-core';
-import { DOMAIN_STUDIO_NAVIGATION, domainPackageTree, domainStudioLocationHref, entityRecords, isDomainStudioSection, resolveEntityRecordKey, withoutDomainStudioLocationHref } from './domain-studio-model';
+import { DOMAIN_STUDIO_NAVIGATION, domainPackageTree, domainStudioLocationHref, entityRecords, isDescriptiveOnlyChange, isDomainStudioSection, resolveEntityRecordKey, withoutDomainStudioLocationHref } from './domain-studio-model';
 
 function entity(domain: string, localId: string): ManifestModelEntity {
   return {
@@ -21,20 +21,24 @@ function modeling(entities: Record<string, ManifestModelEntity>): Pick<ManifestD
 
 describe('Domain Studio navigation', () => {
   it('keeps the Domain workspace focused on agent context and related products', () => {
+    // The five task destinations from `05-domain-studio-ui.md`. Modeling AI is
+    // deliberately absent: it is an action on the canvas that docks beside the
+    // diagram it edits, not a place you navigate to.
     expect(DOMAIN_STUDIO_NAVIGATION.flatMap((group) => group.items.map((item) => item.label))).toEqual([
       'Modeling',
-      'Modeling AI',
       'Skills',
       'Blocks',
       'Notebooks',
       'Apps',
     ]);
     expect(isDomainStudioSection('diagram')).toBe(true);
-    expect(isDomainStudioSection('ai')).toBe(true);
     expect(isDomainStudioSection('skills')).toBe(true);
     expect(isDomainStudioSection('blocks')).toBe(true);
     expect(isDomainStudioSection('notebooks')).toBe(true);
     expect(isDomainStudioSection('apps')).toBe(true);
+    // Removed sections normalize to the canvas rather than resolving.
+    expect(isDomainStudioSection('ai')).toBe(false);
+    expect(isDomainStudioSection('overview')).toBe(false);
     expect(isDomainStudioSection('knowledge')).toBe(false);
     expect(isDomainStudioSection('join-proofs')).toBe(false);
     expect(isDomainStudioSection('contracts')).toBe(false);
@@ -83,5 +87,44 @@ describe('qualified entity record identity', () => {
   it('does not guess an ambiguous local id', () => {
     expect(resolveEntityRecordKey(entities, 'customer')).toBeUndefined();
     expect(resolveEntityRecordKey(entities, 'growth::entity::customer')).toBe('growth::entity::customer');
+  });
+});
+
+describe('two-tier authoring write path (00-decisions.md#a-001)', () => {
+  const existing: ManifestModelEntity = {
+    id: 'order', localId: 'order', qualifiedId: 'commerce::entity::order', domain: 'commerce',
+    areaId: 'commerce::area::core', dbtUniqueId: 'model.shop.fct_orders',
+    businessName: 'Order', grain: 'order_id', keys: ['order_id'], status: 'draft',
+    sourcePath: 'domains/commerce/modeling/model.dql.yaml', identityFingerprint: 'fp',
+  } as ManifestModelEntity;
+
+  const upsert = (value: Partial<ManifestModelEntity> & Record<string, unknown>) => ({
+    operation: 'upsert_entity' as const,
+    value: {
+      id: 'order', domain: 'commerce', areaId: 'core', dbtModel: 'model.shop.fct_orders',
+      grain: 'order_id', keys: ['order_id'], status: 'draft', ...value,
+    },
+  });
+
+  it('saves prose edits directly: they carry no join or lifecycle meaning', () => {
+    expect(isDescriptiveOnlyChange(upsert({ businessContext: 'One completed purchase.' }) as never, existing)).toBe(true);
+    expect(isDescriptiveOnlyChange(upsert({ businessName: 'Customer order' }) as never, existing)).toBe(true);
+    expect(isDescriptiveOnlyChange(upsert({ analyticalRole: 'event' }) as never, existing)).toBe(true);
+  });
+
+  it('keeps the full proposal review for anything structural', () => {
+    // Creating an object.
+    expect(isDescriptiveOnlyChange(upsert({}) as never, undefined)).toBe(false);
+    // Rebinding the dbt model.
+    expect(isDescriptiveOnlyChange(upsert({ dbtModel: 'model.shop.stg_orders' }) as never, existing)).toBe(false);
+    // Asserting a different grain or keys.
+    expect(isDescriptiveOnlyChange(upsert({ grain: 'line_item_id' }) as never, existing)).toBe(false);
+    expect(isDescriptiveOnlyChange(upsert({ keys: ['order_id', 'customer_id'] }) as never, existing)).toBe(false);
+    // Moving lifecycle or ownership.
+    expect(isDescriptiveOnlyChange(upsert({ status: 'certified' }) as never, existing)).toBe(false);
+    expect(isDescriptiveOnlyChange(upsert({ domain: 'growth' }) as never, existing)).toBe(false);
+    expect(isDescriptiveOnlyChange(upsert({ areaId: 'billing' }) as never, existing)).toBe(false);
+    // Relationships are never descriptive-only.
+    expect(isDescriptiveOnlyChange({ operation: 'upsert_relationship', value: { id: 'r' } } as never, existing)).toBe(false);
   });
 });

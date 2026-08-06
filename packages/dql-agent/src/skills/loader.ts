@@ -740,7 +740,7 @@ export function buildSkillsPrompt(skills: Skill[], userId: string | null): strin
     const vocab = Object.keys(s.vocabulary).length > 0
       ? `\nVocabulary: ${Object.entries(s.vocabulary).map(([k, v]) => `"${k}" → ${v}`).join(', ')}`
       : '';
-    return `### Skill: ${header}${metrics}${blocks}${dimensions}${filters}${clarify}${vocab}\n\n${s.body}`;
+    return `### Skill: ${header}${metrics}${blocks}${dimensions}${filters}${clarify}${vocab}${renderAnalyticalPolicy(s.analyticalPolicy)}\n\n${s.body}`;
   });
   return [
     '## Active Skills',
@@ -750,6 +750,31 @@ export function buildSkillsPrompt(skills: Skill[], userId: string | null): strin
     sections.join('\n\n'),
     '',
   ].join('\n');
+}
+
+/**
+ * CTX-008: the reporting conventions a domain has already decided — which
+ * calendar, how a period is closed, how a comparison is aligned. This was
+ * parsed, indexed, and threaded into the plan, but never shown to a model, so
+ * every answer re-derived conventions the project had already written down.
+ * Only `policyId`/`sourceHash` survived downstream; the substance is here.
+ */
+function renderAnalyticalPolicy(policy: SkillAnalyticalPolicy | undefined): string {
+  if (!policy) return '';
+  const lines = [
+    policy.timeRole ? `time role: ${policy.timeRole}` : '',
+    policy.calendarId ? `calendar: ${policy.calendarId}` : '',
+    policy.timezone ? `timezone: ${policy.timezone}` : '',
+    policy.completenessPolicy ? `period completeness: ${policy.completenessPolicy}` : '',
+    policy.comparisonAlignment ? `comparison alignment: ${policy.comparisonAlignment}` : '',
+    policy.defaultRankingPeriod ? `default ranking period: ${policy.defaultRankingPeriod}` : '',
+  ].filter(Boolean);
+  const guidance = (policy.narrativeGuidance ?? []).filter(Boolean);
+  if (lines.length === 0 && guidance.length === 0) return '';
+  return [
+    '\nReporting policy: ' + (lines.join('; ') || 'see narrative guidance'),
+    guidance.length ? `\nWhen narrating: ${guidance.join('; ')}` : '',
+  ].join('');
 }
 
 export function activeSkills(skills: Skill[], userId: string | null): Skill[] {

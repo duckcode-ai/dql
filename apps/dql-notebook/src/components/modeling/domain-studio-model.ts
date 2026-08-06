@@ -1,21 +1,19 @@
-import type { ManifestDbtFirstModeling, ManifestModelEntity } from '@duckcodeailabs/dql-core';
+import type { ManifestDbtFirstModeling, ManifestModelArea, ManifestModelEntity, ModelingAuthoringChange } from '@duckcodeailabs/dql-core';
 
+/**
+ * The five task destinations from `05-domain-studio-ui.md`.
+ *
+ * Terms, business views, join proofs, contracts, interfaces, evaluations, dbt
+ * scope, and Knowledge 360 are deliberately not destinations: their compiled
+ * evidence stays available to retrieval, validation, and the Modeling
+ * inspectors. Historical deep links to them normalize to `diagram`.
+ */
 export type DomainStudioSection =
-  | 'overview'
   | 'diagram'
-  | 'knowledge'
-  | 'terms'
   | 'skills'
   | 'blocks'
-  | 'views'
-  | 'join-proofs'
-  | 'contracts'
-  | 'interfaces'
-  | 'evaluations'
   | 'notebooks'
-  | 'apps'
-  | 'dbt'
-  | 'ai';
+  | 'apps';
 
 export type DomainStudioNavigationItem = {
   id: DomainStudioSection;
@@ -30,8 +28,9 @@ export type DomainStudioNavigationGroup = {
 export const DOMAIN_STUDIO_NAVIGATION: DomainStudioNavigationGroup[] = [
   {
     items: [
+      // Modeling AI is not a destination. It is an action on the canvas, so it
+      // lives in the Modeling toolbar and docks beside the diagram it edits.
       { id: 'diagram', label: 'Modeling' },
-      { id: 'ai', label: 'Modeling AI' },
       { id: 'skills', label: 'Skills' },
       { id: 'blocks', label: 'Blocks' },
       { id: 'notebooks', label: 'Notebooks' },
@@ -151,4 +150,37 @@ export function domainEntityRecords(
   domain: string | null,
 ): EntityRecord[] {
   return entityRecords(modeling).filter(({ entity }) => !domain || entity.domain === domain);
+}
+
+/**
+ * True when a change only edits DQL-owned prose on an object that already
+ * exists — business name, business context, concepts, analytical role, or an
+ * area's name/description/examples.
+ *
+ * These carry no join, lifecycle, or authorization semantics, so they may save
+ * directly. Anything that creates an object, rebinds a dbt model, asserts grain
+ * or keys, touches a relationship, or moves lifecycle returns false and keeps
+ * the full proposal review.
+ */
+export function isDescriptiveOnlyChange(
+  change: ModelingAuthoringChange,
+  existingEntity?: ManifestModelEntity,
+  existingArea?: ManifestModelArea,
+): boolean {
+  if (change.operation === 'upsert_entity') {
+    if (!existingEntity) return false;
+    const value = change.value;
+    return value.dbtModel === existingEntity.dbtUniqueId
+      && (value.grain ?? undefined) === (existingEntity.grain ?? undefined)
+      && JSON.stringify(value.keys ?? []) === JSON.stringify(existingEntity.keys ?? [])
+      && (value.status ?? existingEntity.status) === existingEntity.status
+      && (value.areaId ?? undefined) === (existingEntity.areaId?.split('::area::').at(-1) ?? undefined)
+      && value.domain === existingEntity.domain;
+  }
+  if (change.operation === 'upsert_area') {
+    return Boolean(existingArea)
+      && change.value.domain === existingArea!.domain
+      && change.value.id === existingArea!.localId;
+  }
+  return false;
 }

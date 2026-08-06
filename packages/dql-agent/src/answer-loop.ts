@@ -78,6 +78,7 @@ import {
   analyticalPolicyUserFacingReason,
   type AnalyticalExploratoryPath,
   type AnalyticalPathPlan,
+  type AnalyticalJoinPlanEdge,
   type AnalyticalPolicyCode,
 } from './metadata/analytical-policy.js';
 import { planCertifiedAdaptation, type CertifiedAdaptation } from './metadata/block-adapt.js';
@@ -2721,7 +2722,11 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         domainContext: input.domainContext,
       })
     : undefined;
-  const analyticalPlanPrompt = renderAnalyticalPlanPrompt(analyticalPlan);
+  // A multi-entity question gets the certified join plan; a single-entity one
+  // gets that entity's authored grain and business meaning. Before this, only
+  // the former existed, so most everyday questions saw no modeling at all.
+  const analyticalPlanPrompt = renderAnalyticalPlanPrompt(analyticalPlan)
+    ?? renderSingleEntityModelingPrompt(analyticalPlan, input.manifest);
   if (analyticalPlanPrompt) messages.push({ role: 'system', content: analyticalPlanPrompt });
   if (questionDomainScope.length > 0) {
     messages.push({
@@ -5314,7 +5319,36 @@ function entityIdentifierTokensForMatching(entity: { localId?: string; id: strin
     .filter((token) => token.length > 2 && token !== 'entity');
 }
 
-function renderAnalyticalPlanPrompt(plan: AnalyticalPathPlan | undefined): string | undefined {
+/**
+ * CTX-008: the authored business identity of a single modeled entity. Most
+ * real questions name exactly one entity, and those used to receive no modeling
+ * context at all because the join planner needs two. Grain and business context
+ * matter just as much to a one-table answer as keys do to a join.
+ */
+export function renderSingleEntityModelingPrompt(
+  plan: AnalyticalPathPlan | undefined,
+  manifest: DQLManifest | undefined,
+): string | undefined {
+  if (!plan || plan.entities.length !== 1 || !manifest?.modeling) return undefined;
+  const entity = manifest.modeling.entities[plan.entities[0]!];
+  if (!entity) return undefined;
+  const relation = manifest.dbtProvenance?.nodes[entity.dbtUniqueId]?.relation;
+  const lines = [
+    `- ${entity.businessName || entity.localId}${relation ? ` (${relation})` : ''}`,
+    entity.businessContext ? `  meaning: ${entity.businessContext}` : '',
+    entity.grain ? `  grain: one row per ${entity.grain}` : '',
+    entity.keys.length ? `  keys: ${entity.keys.join(', ')}` : '',
+    entity.analyticalRole && entity.analyticalRole !== 'unknown' ? `  role: ${entity.analyticalRole}` : '',
+  ].filter(Boolean);
+  if (lines.length === 1 && !entity.businessName) return undefined;
+  return [
+    'DQL MODELED ENTITY (authored business context):',
+    ...lines,
+    'Respect the stated grain: do not aggregate across it in a way that double counts, and use the business meaning to interpret the question.',
+  ].join('\n');
+}
+
+export function renderAnalyticalPlanPrompt(plan: AnalyticalPathPlan | undefined): string | undefined {
   if (!plan || plan.entities.length < 2) return undefined;
   if (!plan.safe) {
     if (analyticalPlanAllowsDbtExploration(plan)) {
@@ -5350,10 +5384,19 @@ function renderAnalyticalPlanPrompt(plan: AnalyticalPathPlan | undefined): strin
     ...plan.edges.map((edge, index) => [
       `${index + 1}. ${edge.fromEntity} (${edge.fromRelation ?? 'bound dbt model'}) -> ${edge.toEntity} (${edge.toRelation ?? 'bound dbt model'})`,
       `   relationship=${edge.relationshipId}; keys=${edge.keys.map((key) => `${key.from}=${key.to}`).join(', ')}; cardinality=${edge.cardinality}; fanout=${edge.fanout}`,
+      // CTX-008: the authored meaning travels with the keys, so the model can
+      // tell a technically valid join from the one the question actually wants.
+      analyticalEdgeMeaning(edge),
       edge.importRefs.length ? `   imports=${edge.importRefs.join(', ')}` : '',
     ].filter(Boolean).join('\n')),
     'Use only these relationships and exact key pairs. dbt DAG lineage and same-named columns are not join authorization. Any different join must be refused.',
   ].join('\n');
+}
+
+/** One `means:` line describing what a join represents, when it was authored. */
+function analyticalEdgeMeaning(edge: AnalyticalJoinPlanEdge): string {
+  const meaning = [edge.verb, edge.description, edge.rationale].filter(Boolean).join(' — ');
+  return meaning ? `   means: ${meaning}` : '';
 }
 
 /**
@@ -5700,9 +5743,23 @@ function renderCandidateJoinsForPrompt(contextPack: LocalContextPack, budget: Pr
   ].join('\n');
 }
 
+/**
+ * CTX-008: `proves_join` edges are the governed relationship graph the user
+ * authored, and the quick budget sets `edgeLimit: 0` — which blacked them out
+ * entirely on exactly the lookup questions that most need them. Governed join
+ * proof always earns a small allowance; every other edge class still respects
+ * the budget.
+ */
+const GOVERNED_JOIN_EDGE_FLOOR = 12;
+
 function renderContextEdgesForPrompt(contextPack: LocalContextPack, budget: PromptContextBudget): string {
-  if (budget.edgeLimit <= 0) return '';
-  const edges = contextPack.edges.slice(0, budget.edgeLimit);
+  const governed = contextPack.edges
+    .filter((edge) => edge.edgeType === 'proves_join')
+    .slice(0, Math.max(budget.edgeLimit, GOVERNED_JOIN_EDGE_FLOOR));
+  const others = budget.edgeLimit > 0
+    ? contextPack.edges.filter((edge) => edge.edgeType !== 'proves_join').slice(0, budget.edgeLimit)
+    : [];
+  const edges = [...governed, ...others];
   if (edges.length === 0) return '';
   return [
     'Context graph edges:',

@@ -9,6 +9,19 @@ export function defaultProposalSelection(proposal: AppBuildProposal): Set<string
 }
 
 /**
+ * The edits an author can make while reviewing a brief, in the exact shape
+ * `commitAppAiBuild` already accepts. The API has supported all of this from
+ * the start; only the Apps hero builder ever sent it, and only from behind a
+ * collapsed disclosure.
+ */
+export type AppBuildBriefEdits = {
+  appName?: string;
+  pageTitle?: string;
+  audience?: string;
+  tileOverrides: Record<string, { title?: string; viz?: string }>;
+};
+
+/**
  * The confirmable pre-create content list for the two-phase app build: every
  * proposed tile with a trust badge and an include/exclude toggle, uncovered
  * questions listed as gaps, and a single "Build draft" confirm. Shared by the
@@ -23,16 +36,28 @@ export function AppBuildProposalPanel({
   busy,
   error,
   compact,
+  nameLabel = 'App name',
+  defaultName,
 }: {
   proposal: AppBuildProposal;
   t: Theme;
   selected: Set<string>;
   onToggle: (tileId: string) => void;
-  onCreate: () => void;
+  /** Receives the author's edits; the caller forwards them to `commitAppAiBuild`. */
+  onCreate: (edits: AppBuildBriefEdits) => void;
   busy?: boolean;
   error?: string | null;
   compact?: boolean;
+  nameLabel?: string;
+  defaultName?: string;
 }) {
+  // Edits live here so every surface that renders this brief can make them.
+  // The chat card previously had no way to rename anything at all.
+  const [name, setName] = useState(defaultName ?? '');
+  const [tileEdits, setTileEdits] = useState<Record<string, { title?: string; viz?: string }>>({});
+  const editTile = (tileId: string, patch: { title?: string; viz?: string }) => {
+    setTileEdits((current) => ({ ...current, [tileId]: { ...current[tileId], ...patch } }));
+  };
   const selectable = proposal.tiles.filter((tile) => !tile.error);
   const failed = proposal.tiles.filter((tile) => tile.error);
   const selectedCount = selectable.filter((tile) => selected.has(tile.id)).length;
@@ -57,6 +82,17 @@ export function AppBuildProposalPanel({
         </span>
       </div>
 
+      <label style={{ display: 'grid', gap: 3 }}>
+        <span style={{ fontSize: 10.5, color: t.textMuted, fontWeight: 700 }}>{nameLabel}</span>
+        <input
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          placeholder={defaultName}
+          maxLength={120}
+          style={briefInputStyle(t)}
+        />
+      </label>
+
       <div style={{ display: 'grid', gap: 6 }}>
         {selectable.map((tile) => (
           <ProposalTileRow
@@ -66,6 +102,8 @@ export function AppBuildProposalPanel({
             checked={selected.has(tile.id)}
             onToggle={() => onToggle(tile.id)}
             compact={compact}
+            edit={tileEdits[tile.id]}
+            onEdit={(patch) => editTile(tile.id, patch)}
           />
         ))}
         {failed.map((tile) => (
@@ -99,7 +137,10 @@ export function AppBuildProposalPanel({
         <button
           type="button"
           className="dql-hover"
-          onClick={onCreate}
+          onClick={() => onCreate({
+            ...(name.trim() ? { appName: name.trim(), pageTitle: name.trim() } : {}),
+            tileOverrides: tileEdits,
+          })}
           disabled={busy || !canCreate}
           style={createButtonStyle(t, canCreate && !busy)}
         >
@@ -128,12 +169,16 @@ function ProposalTileRow({
   checked,
   onToggle,
   compact,
+  edit,
+  onEdit,
 }: {
   tile: AppBuildProposalTile;
   t: Theme;
   checked: boolean;
   onToggle: () => void;
   compact?: boolean;
+  edit?: { title?: string; viz?: string };
+  onEdit: (patch: { title?: string; viz?: string }) => void;
 }) {
   const [open, setOpen] = useState(false);
   const certified = tile.certification === 'certified';
@@ -150,7 +195,13 @@ function ProposalTileRow({
       />
       <div style={{ minWidth: 0, flex: 1 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 12.5, fontWeight: 750, color: t.textPrimary }}>{tile.title}</span>
+          <input
+            value={edit?.title ?? tile.title}
+            onChange={(event) => onEdit({ title: event.target.value })}
+            aria-label={`Title for ${tile.title}`}
+            maxLength={120}
+            style={tileTitleInputStyle(t)}
+          />
           {certified ? (
             <span style={badgeStyle(t.success)}>
               <ShieldCheck size={10} /> certified
@@ -165,7 +216,16 @@ function ProposalTileRow({
               {tile.repair?.status === 'repaired' ? 'auto-repaired · needs review' : 'AI-generated · needs review'}
             </span>
           )}
-          <span style={{ fontSize: 10, color: t.textMuted }}>{tile.viz}</span>
+          <select
+            value={edit?.viz ?? tile.viz}
+            onChange={(event) => onEdit({ viz: event.target.value })}
+            aria-label={`Visualization for ${tile.title}`}
+            style={tileVizSelectStyle(t)}
+          >
+            {[...new Set([...(tile.allowedVisualizations ?? []), tile.viz, 'table'])].map((viz) => (
+              <option key={viz} value={viz}>{viz.replace(/_/g, ' ')}</option>
+            ))}
+          </select>
         </div>
         {tile.description && !compact ? (
           <div style={{ fontSize: 11.5, color: t.textSecondary, marginTop: 2, lineHeight: 1.4 }}>{tile.description}</div>
@@ -303,5 +363,46 @@ function createButtonStyle(t: Theme, enabled: boolean): React.CSSProperties {
     cursor: enabled ? 'pointer' : 'default',
     background: enabled ? t.accent : `${t.accent}55`,
     color: '#fff',
+  };
+}
+
+function briefInputStyle(t: Theme): React.CSSProperties {
+  return {
+    border: `1px solid ${t.cellBorder}`,
+    background: t.inputBg,
+    color: t.textPrimary,
+    borderRadius: 7,
+    padding: '6px 9px',
+    fontSize: 12,
+    fontFamily: t.font,
+    outline: 'none',
+  };
+}
+
+function tileTitleInputStyle(t: Theme): React.CSSProperties {
+  return {
+    border: '1px solid transparent',
+    background: 'transparent',
+    color: t.textPrimary,
+    borderRadius: 5,
+    padding: '1px 4px',
+    fontSize: 12.5,
+    fontWeight: 750,
+    fontFamily: t.font,
+    minWidth: 0,
+    flex: '1 1 180px',
+  };
+}
+
+function tileVizSelectStyle(t: Theme): React.CSSProperties {
+  return {
+    border: `1px solid ${t.cellBorder}`,
+    background: t.cellBg,
+    color: t.textMuted,
+    borderRadius: 999,
+    padding: '1px 6px',
+    fontSize: 9.5,
+    fontFamily: t.font,
+    cursor: 'pointer',
   };
 }

@@ -68,6 +68,8 @@ export {
 } from './domain-package-registry.js';
 export {
   discoverDbtDomains,
+  collectDbtRelationshipTests,
+  type DbtRelationshipTestEdge,
   type DiscoverDbtDomainsOptions,
   type DomainDiscoveryEvidenceKind,
   type DomainDiscoveryEvidence,

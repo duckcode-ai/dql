@@ -1,19 +1,33 @@
 entities:
   - id: order
     dbt_model: model.dbt_first_commerce.fct_orders
+    business_name: Order
+    business_context: One completed customer purchase. Cancellations are excluded upstream, so every row is revenue-bearing.
+    analytical_role: event
+    grain: order_id
+    keys: [order_id]
   - id: customer
     dbt_model: model.dbt_first_commerce.dim_customers
+    business_name: Customer
+    business_context: One purchasing account. A person with two accounts is two customers here.
+    analytical_role: dimension
+    grain: customer_id
+    keys: [customer_id]
 relationships:
   - id: order_to_customer
     from: order
     to: customer
+    verb: placed by
+    description: Each order is placed by exactly one customer.
     keys: [{ from: customer_id, to: customer_id }]
     cardinality: many_to_one
     fanout: safe
     status: certified
     owner: commerce@company.test
+    # Records the entity grain/keys this certification was proved against, so
+    # DQL can detect drift if either model's declared identity changes.
     certifiedAgainst:
-      from: { grain: order_id, keys: [customer_id] }
+      from: { grain: order_id, keys: [order_id] }
       to: { grain: customer_id, keys: [customer_id] }
     validation:
       status: passed

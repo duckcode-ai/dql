@@ -1267,6 +1267,11 @@ export async function buildFromPrompt(options: BuildFromPromptOptions): Promise<
   const skillsPrompt = [
     contextPackPrompt(options.contextPack),
     buildFocusedModelAreaPrompt(focusedArea),
+    // CTX-008: this path used to infer joins purely from dbt lineage and
+    // shared `*_id` column names, so a project's certified relationships never
+    // reached "Build with AI" at all. Give it the same authored key pairs and
+    // meaning the governed answer loop gets.
+    buildGovernedJoinPrompt(options.contextPack),
     buildSkillsPrompt(selectedSkills, options.userId ?? null),
   ].filter(Boolean).join('\n');
 
@@ -1317,6 +1322,28 @@ function loadFocusedModelArea(options: BuildFromPromptOptions): FocusedModelArea
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The governed relationships the context pack already resolved, rendered with
+ * their exact key pairs, cardinality, fanout, and authored meaning.
+ *
+ * `inferJoinKeys` (dbt lineage + `*_id` name matching) stays as the fallback
+ * for un-modeled relations, but a relationship the project actually authored
+ * should never lose to a column-name guess.
+ */
+function buildGovernedJoinPrompt(contextPack: LocalContextPack | undefined): string {
+  const joins = (contextPack?.retrievalDiagnostics?.selectedJoinPaths ?? [])
+    .filter((join) => join.source === 'dql_relationship')
+    .slice(0, 12);
+  if (joins.length === 0) return '';
+  return [
+    '## Governed relationships',
+    '',
+    'These join key pairs are declared in the project\'s DQL modeling. Prefer them over inferring a join from lineage or matching column names.',
+    ...joins.map((join) => `- ${join.leftRelation}.${join.leftColumn} = ${join.rightRelation}.${join.rightColumn} — ${join.reason}`),
+    '',
+  ].join('\n');
 }
 
 function buildFocusedModelAreaPrompt(context: FocusedModelAreaContext | undefined): string {

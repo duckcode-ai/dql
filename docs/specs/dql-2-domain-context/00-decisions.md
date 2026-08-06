@@ -119,6 +119,49 @@ an acceptance-matrix update.
 | E2E-016 | Release proves certified-only, semantic-only, mixed, and exploratory Personal Draft App flows; modification and stale-change rejection; publication gates; and whole-App/section Copilot plus previewed Add-to-App in the built CLI. |
 | E2E-017 | Release proves App query-generation, semantic-execution, and draft-analysis repair parity with Ask/Notebook, including one-attempt bounds, same-target execution, immutable evidence, access/policy refusal, semantic trust downgrade, and unchanged successful paths in the built CLI. |
 
+## Amendments
+
+Recorded amendments to earlier locked decisions. Each states what changed, why,
+and what did not change.
+
+### A-001 — Two-tier authoring write path (amends `11-context-authoring-and-ai.md`)
+
+`11-context-authoring-and-ai.md` required every authoring path — including
+manual work — to produce an immutable `ContextAuthoringProposalV1`. In practice
+that put a hash-bound YAML diff review between an author and their own typing:
+writing one sentence of business context cost a server round-trip, a source
+diff, and an explicit save.
+
+Amended so that **edits to DQL-owned descriptive fields on an object that
+already exists save directly**: business name, business context, concepts,
+analytical role, and a subject area's name/description/intent examples. These
+carry no join, lifecycle, or authorization semantics.
+
+Everything else keeps the full proposal: creating an object, rebinding a dbt
+model, asserting grain or keys, any relationship change, any lifecycle move,
+cross-domain changes, dbt-source patches, YAML import, and all AI output.
+
+**Deletion moves *into* the proposal path**, which is a net tightening — it was
+previously the one write that bypassed review entirely.
+
+### A-002 — Modeling scope is created, not demanded (amends `11-context-authoring-and-ai.md`)
+
+`11-context-authoring-and-ai.md` states that every created or imported model
+belongs to exactly one Domain and Area. That invariant is unchanged.
+
+What changed is the failure mode. A project with no domains previously produced
+blocking `MODEL_AREA_REQUIRED`/`DOMAIN_NOT_FOUND` diagnostics, and the Modeling
+empty state disabled two of its three entry points — so a first-time author had
+to create governance objects before they could look at their own dbt models.
+
+DQL now synthesizes the missing `upsert_domain`/`upsert_area` operations into
+the same reviewable proposal, ordered ahead of the models that depend on them.
+The author reviews and edits the scope alongside the models it will hold.
+Nothing is written until the proposal is committed.
+
+"Model Area" is presented as "subject area" in the UI; the `model_area`
+identifier and every persisted qualified ID are unchanged (`DOM-003`).
+
 ## OSS and Cloud boundary
 
 DQL OSS includes the complete accuracy loop for one primary dbt project:

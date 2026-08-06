@@ -981,7 +981,7 @@ function DomainPicker({
         type="button"
         onClick={() => dispatch({ type: 'SET_MAIN_VIEW', view: 'domains' })}
         style={ghostButtonStyle(t)}
-        title="Create a new domain on the Domains page"
+        title="Create a new domain in the Modeling workspace"
       >
         <SquarePlus size={12} strokeWidth={2} /> New
       </button>

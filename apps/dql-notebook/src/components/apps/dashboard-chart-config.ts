@@ -1,15 +1,18 @@
 import type { CellChartConfig, QueryResult } from '../../store/types';
+import { CHART_TYPE_OPTIONS } from '../output/ChartOutput';
 
 type DashboardTileChartInput = {
   title?: string;
   viz: { type?: string; options?: Record<string, unknown> };
 };
 
-const CHART_TYPES = new Set([
-  'bar', 'line', 'area', 'pie', 'donut', 'scatter', 'heatmap', 'funnel',
-  'waterfall', 'histogram', 'gauge', 'stacked-bar', 'grouped-bar', 'sankey',
-  'kpi', 'table',
-]);
+/**
+ * The chart types the client can actually render, derived from the chart engine
+ * rather than restated. A dashboard `viz.type` outside this set (the server also
+ * accepts `pivot`, `map`, `text` and `heading`) falls back to `table`, because
+ * there is no renderer for it here.
+ */
+const CHART_TYPES = new Set<string>(['table', ...CHART_TYPE_OPTIONS.map((option) => option.value)]);
 
 export function normalizeDashboardChartType(value: unknown): string {
   const normalized = String(value ?? 'table').toLowerCase().replace(/_/g, '-');

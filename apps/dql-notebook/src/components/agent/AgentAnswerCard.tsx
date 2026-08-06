@@ -14,7 +14,6 @@ import { formatDisplayValue } from '../../utils/value-format';
 import { GuidedBySkills, RouteBadge } from './AiBuildResult';
 
 type AnswerTab = 'answer' | 'dql' | 'visual' | 'data' | 'lineage' | 'context' | 'sql' | 'review';
-type AddToAppMode = 'auto' | 'chart' | 'data' | 'both';
 
 export interface AgentAnswerInvestigationRequest {
   question: string;
@@ -338,7 +337,6 @@ export function AgentAnswerCard({
   themeMode,
   showSql = true,
   compact = false,
-  addToAppTarget,
   sourceQuestion,
   onInvestigate,
   onInsertSql,
@@ -348,7 +346,6 @@ export function AgentAnswerCard({
   themeMode: ThemeMode;
   showSql?: boolean;
   compact?: boolean;
-  addToAppTarget?: { appId: string; dashboardId: string };
   sourceQuestion?: string;
   onInvestigate?: (request: AgentAnswerInvestigationRequest) => void;
   onInsertSql?: (
@@ -374,7 +371,6 @@ export function AgentAnswerCard({
   const hasSqlPanel = Boolean(sql || executionError || (showSql && blockPath));
   const hasEvidence = Boolean(answer.evidence);
   const [tab, setTab] = useState<AnswerTab>('answer');
-  const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const trustState = resolveAnswerTrustState(answer);
   const trustAccent = trustStateColor(trustState, t);
@@ -383,10 +379,7 @@ export function AgentAnswerCard({
   const blockName = answer.result?.blockName ?? answer.block?.name ?? answer.citations?.find((c) => c.kind === 'block')?.name;
   const investigationBlockName = resolveInvestigationBlockName(answer, blockName);
   const provenance = buildAnswerProvenance(answer, result, blockName, blockPath);
-  const [adding, setAdding] = useState(false);
-  const [addMessage, setAddMessage] = useState<string | null>(null);
   const [insertMessage, setInsertMessage] = useState<string | null>(null);
-  const canAddToApp = Boolean(addToAppTarget && (result || sql || summary || blockName));
   const canInsertSql = Boolean(onInsertSql && sql);
   const canCreateBlock = Boolean(onCreateBlock && sql);
   const investigationQuestion = cleanQuestion(analysisPlan?.question)
@@ -415,92 +408,6 @@ export function AgentAnswerCard({
       description: summary || analysisPlan?.routeReason || 'AI generated DQL draft.',
       tags: ['ai-generated', 'review-required'],
     });
-  };
-  const addToApp = async (mode: AddToAppMode = 'auto') => {
-    if (!addToAppTarget) return;
-    const selectedModes: Array<'chart' | 'data'> = mode === 'both'
-      ? ['chart', 'data']
-      : mode === 'data'
-        ? ['data']
-        : mode === 'chart'
-          ? ['chart']
-          : result
-            ? [hasChart ? 'chart' : 'data']
-            : [];
-    setAdding(true);
-    setAddMenuOpen(false);
-    setAddMessage(null);
-    try {
-      if (answer.certification === 'certified' && blockName) {
-        const doc = await api.getDashboard(addToAppTarget.appId, addToAppTarget.dashboardId);
-        if (!doc) throw new Error('Dashboard could not be loaded.');
-        const nextItems = [...doc.dashboard.layout.items];
-        const modesToAdd = selectedModes.length > 0 ? selectedModes : ['chart'];
-        for (const tileMode of modesToAdd) {
-          const tileBase = modesToAdd.length > 1 ? `${blockName}_${tileMode}` : blockName;
-          const dashboardForPosition = {
-            ...doc.dashboard,
-            layout: { ...doc.dashboard.layout, items: nextItems },
-          };
-          const tileId = nextTileId(dashboardForPosition, tileBase);
-          nextItems.push({
-            i: tileId,
-            ...nextTilePosition(dashboardForPosition),
-            block: { blockId: blockName },
-            viz: { type: tileMode === 'data' ? 'table' : normalizeVizTypeForDashboard(chartConfig?.chart) },
-            title: modesToAdd.length > 1 ? `${blockName} ${tileMode === 'data' ? 'data' : 'chart'}` : blockName,
-          });
-        }
-        const next = {
-          ...doc.dashboard.layout,
-          items: nextItems,
-        };
-        const saved = await api.patchDashboardLayout(addToAppTarget.appId, addToAppTarget.dashboardId, next);
-        if (!saved.ok) throw new Error(saved.error);
-        setAddMessage(modesToAdd.length > 1 ? 'Added certified chart and data tiles.' : 'Added certified block tile.');
-      } else {
-        const keepDaily = Boolean(sql && window.confirm('Keep this AI result refreshed daily?'));
-        const baseTitle = blockName ?? (summary.slice(0, 60) || 'AI result');
-        const modesToAdd = selectedModes.length > 0 ? selectedModes : ['data'];
-        let resultForPin = result ?? undefined;
-        if (!resultForPin && sql) {
-          const preview = await api.previewGeneratedSql(sql);
-          if (!preview.ok) {
-            throw new Error(`SQL preview failed: ${preview.error}`);
-          }
-          resultForPin = preview.result;
-        }
-        for (const tileMode of modesToAdd) {
-          const tileChartConfig = tileMode === 'data'
-            ? ({ ...(chartConfig ?? {}), chart: 'table', title: `${baseTitle} data` } as Record<string, unknown>)
-            : (chartConfig as Record<string, unknown> | undefined);
-          const created = await api.createAiPin(addToAppTarget.appId, {
-            dashboardId: addToAppTarget.dashboardId,
-            title: modesToAdd.length > 1 ? `${baseTitle} ${tileMode === 'data' ? 'data' : 'chart'}` : baseTitle,
-            answer: summary || answer.answer || answer.text || 'AI generated answer',
-            question: analysisPlan?.question,
-            sql,
-            sourceTier: answer.sourceTier,
-            certification: answer.certification === 'certified' ? 'certified' : 'ai_generated',
-            reviewStatus: 'needs_review',
-            refreshCadence: keepDaily ? 'daily' : 'none',
-            chartConfig: tileChartConfig,
-            result: resultForPin,
-            citations: answer.citations,
-            analysisPlan,
-            evidence: answer.evidence,
-            followUps: analysisPlan?.followUps,
-          });
-          if (!created.ok) throw new Error(created.error);
-        }
-        setAddMessage(modesToAdd.length > 1 ? 'Pinned chart and data tiles for review.' : 'Pinned AI result for review.');
-      }
-      window.dispatchEvent(new CustomEvent('dql-app-dashboard-updated', { detail: addToAppTarget }));
-    } catch (err) {
-      setAddMessage(err instanceof Error ? err.message : String(err));
-    } finally {
-      setAdding(false);
-    }
   };
   const investigate = () => {
     if (!onInvestigate || !investigationQuestion) return;
@@ -602,18 +509,6 @@ export function AgentAnswerCard({
             {result.executionTime !== undefined && <> - {Math.round(result.executionTime)}ms</>}
           </span>
         )}
-        {canAddToApp && (
-          <AddToAppControl
-            t={t}
-            adding={adding}
-            hasResult={Boolean(result)}
-            hasChart={hasChart}
-            fallbackLabel={answer.certification === 'certified' && blockName ? (compact ? 'Add' : 'Add block') : 'Pin answer'}
-            open={addMenuOpen}
-            onToggle={() => setAddMenuOpen((value) => !value)}
-            onAdd={(mode) => void addToApp(mode)}
-          />
-        )}
         {canInvestigate && (
           <button
             type="button"
@@ -672,7 +567,6 @@ export function AgentAnswerCard({
           </button>
         )}
       </div>
-      {addMessage && <div style={{ fontSize: 11, color: addMessage.toLowerCase().includes('added') || addMessage.toLowerCase().includes('pinned') ? '#3fb950' : '#ff7b72' }}>{addMessage}</div>}
       {insertMessage && <div style={{ fontSize: 11, color: '#3fb950' }}>{insertMessage}</div>}
       <OutcomeBanner outcome={outcome} t={t} compact={compact} />
 
@@ -2042,112 +1936,6 @@ function chartControlSelectStyle(t: Theme): React.CSSProperties {
     fontFamily: t.font,
     fontSize: 12,
     padding: '0 8px',
-  };
-}
-
-function AddToAppControl({
-  t,
-  adding,
-  hasResult,
-  hasChart,
-  fallbackLabel,
-  open,
-  onToggle,
-  onAdd,
-}: {
-  t: Theme;
-  adding: boolean;
-  hasResult: boolean;
-  hasChart: boolean;
-  fallbackLabel: string;
-  open: boolean;
-  onToggle: () => void;
-  onAdd: (mode: AddToAppMode) => void;
-}) {
-  if (!hasResult) {
-    return (
-      <button
-        type="button"
-        onClick={() => onAdd('auto')}
-        disabled={adding}
-        style={{ ...addButtonStyle(t, adding), marginLeft: 'auto' }}
-      >
-        {adding ? 'Adding...' : fallbackLabel}
-      </button>
-    );
-  }
-
-  const options: Array<{ mode: AddToAppMode; label: string; description: string }> = hasChart
-    ? [
-        { mode: 'both', label: 'Chart + data', description: 'Add chart and table tiles' },
-        { mode: 'chart', label: 'Chart only', description: 'Add the visualization tile' },
-        { mode: 'data', label: 'Data table', description: 'Add the rows as a table tile' },
-      ]
-    : [
-        { mode: 'data', label: 'Data table', description: 'Add the rows as a table tile' },
-      ];
-
-  return (
-    <div style={{ marginLeft: 'auto', position: 'relative' }}>
-      <button
-        type="button"
-        onClick={onToggle}
-        disabled={adding}
-        style={addButtonStyle(t, adding)}
-      >
-        {adding ? 'Adding...' : 'Add to App'}
-        {!adding && <span style={{ marginLeft: 6, fontSize: 10 }}>v</span>}
-      </button>
-      {open && !adding && (
-        <div
-          style={{
-            position: 'absolute',
-            right: 0,
-            top: 'calc(100% + 6px)',
-            zIndex: 30,
-            width: 190,
-            border: `1px solid ${t.cellBorder}`,
-            borderRadius: 8,
-            background: t.cellBg,
-            boxShadow: '0 14px 34px rgba(0, 0, 0, 0.18)',
-            padding: 6,
-          }}
-        >
-          {options.map((option) => (
-            <button
-              key={option.mode}
-              type="button"
-              onClick={() => onAdd(option.mode)}
-              style={{
-                width: '100%',
-                border: 0,
-                borderRadius: 6,
-                background: 'transparent',
-                color: t.textPrimary,
-                textAlign: 'left',
-                padding: '8px 9px',
-                cursor: 'pointer',
-              }}
-            >
-              <div style={{ fontSize: 12, fontWeight: 700 }}>{option.label}</div>
-              <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2 }}>{option.description}</div>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function addButtonStyle(t: Theme, adding: boolean): React.CSSProperties {
-  return {
-    border: `1px solid ${t.btnBorder}`,
-    borderRadius: 5,
-    background: adding ? t.editorBg : `${t.accent}18`,
-    color: adding ? t.textMuted : t.accent,
-    padding: '4px 8px',
-    fontSize: 11,
-    cursor: adding ? 'default' : 'pointer',
   };
 }
 

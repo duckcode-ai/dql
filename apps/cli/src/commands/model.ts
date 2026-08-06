@@ -228,7 +228,8 @@ function runDomainDiscovery(
   } else {
     console.log('DQL domain discovery apply');
     for (const result of results) console.log(`  ${result.status === 'created' ? '+' : result.status === 'existing' ? '=' : '!'} ${result.id}: ${result.message}`);
-    console.log('Relationship and skill candidates remain review-only drafts and were not written or certified.');
+    printRelationshipCandidates(report);
+    console.log('Skill candidates remain review-only drafts and were not written or certified.');
   }
   if (results.some((result) => result.status === 'blocked')) process.exitCode = 1;
 }
@@ -292,8 +293,27 @@ function printDiscoveryReport(report: DomainDiscoveryReport, flags: CLIFlags, ap
       console.log(`  ${model.dbtUniqueId}: ${model.reason}${candidates}`);
     }
   }
-  console.log(`Review-only drafts: ${report.relationshipDraftCandidates.length} relationships, ${report.skillDraftCandidates.length} skills; none are certified.`);
+  printRelationshipCandidates(report);
+  console.log(`Review-only skill drafts: ${report.skillDraftCandidates.length}; none are certified.`);
   if (applyPreview) console.log('No files written. Re-run with --apply after reviewing the selected proposals.');
+}
+
+/**
+ * REL-004: show the relationships dbt already declares, with their exact key
+ * pairs, instead of reporting a bare count the author cannot act on. These are
+ * draft candidates — `dql model import` binds them, certification stays manual.
+ */
+function printRelationshipCandidates(report: DomainDiscoveryReport): void {
+  if (report.relationshipDraftCandidates.length === 0) {
+    console.log('Relationships declared in dbt tests: none found.');
+    return;
+  }
+  console.log(`Relationships declared in dbt tests: ${report.relationshipDraftCandidates.length} (draft candidates, not certified)`);
+  for (const candidate of report.relationshipDraftCandidates) {
+    const keys = candidate.keys.map((key) => `${key.from} = ${key.to}`).join(', ');
+    console.log(`  ${candidate.fromDbtUniqueId} -> ${candidate.toDbtUniqueId} on ${keys}`);
+  }
+  console.log('  Bind these with: dql model import <schema.yml> --domain <id> --apply');
 }
 
 function discoveryError(flags: CLIFlags, code: string, message: string): void {

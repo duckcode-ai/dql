@@ -149,9 +149,14 @@ export type ModelingAuthoringChange =
   | { operation: 'upsert_import'; value: DomainImportAuthoringInput }
   // Removals. Modeling was upsert-only, so an entity, relationship or model
   // area authored by mistake could only be removed by hand-editing YAML.
+  // Contract/export/import removal completes the set: every object the UI can
+  // create, it can also retract through the same reviewed path.
   | { operation: 'remove_entity'; value: ModelingObjectRef }
   | { operation: 'remove_relationship'; value: ModelingObjectRef }
-  | { operation: 'remove_area'; value: ModelingObjectRef };
+  | { operation: 'remove_area'; value: ModelingObjectRef }
+  | { operation: 'remove_contract'; value: ModelingObjectRef }
+  | { operation: 'remove_export'; value: ModelingObjectRef }
+  | { operation: 'remove_import'; value: ModelingObjectRef };
 
 /** Identifies an authored modeling object for removal. */
 export interface ModelingObjectRef {
@@ -179,6 +184,13 @@ export interface ModelingChangesPreview {
   changes: ModelingAuthoringChange[];
   patches: ModelingSourcePatch[];
   fingerprint: string;
+  /**
+   * Source paths each change touched, by its index in `changes`. Attribution is
+   * captured inside the composed shadow because a change that depends on an
+   * earlier one in the batch (an entity in a Domain the batch is still
+   * creating) cannot be previewed standalone against the real project.
+   */
+  patchPathsByChange: string[][];
 }
 
 export interface DbtNodeAuthoringDetail {
@@ -280,25 +292,30 @@ export function applyDbtSourcePatch(
 
 export function previewModelingChange(projectRoot: string, change: ModelingAuthoringChange): ModelingChangePreview {
   const root = resolve(projectRoot);
-  const patches = change.operation === 'upsert_domain'
-    ? previewDomain(root, change.value)
-    : change.operation === 'upsert_area'
-      ? [previewArea(root, change.value)]
-      : change.operation === 'upsert_entity'
-        ? [previewEntity(root, change.value)]
-        : change.operation === 'upsert_relationship'
-          ? [previewRelationship(root, change.value)]
-          : change.operation === 'upsert_contract'
-            ? [previewContract(root, change.value)]
-            : change.operation === 'upsert_export'
-              ? [previewExport(root, change.value)]
-              : change.operation === 'remove_entity'
-                ? [previewRemoveListEntry(root, change.value, 'entities.dql.yaml', 'entities')]
-                : change.operation === 'remove_relationship'
-                  ? [previewRemoveListEntry(root, change.value, 'relationships.dql.yaml', 'relationships')]
-                  : change.operation === 'remove_area'
-                    ? previewRemoveArea(root, change.value)
-                    : [previewImport(root, change.value)];
+  // An explicit switch with a real default: the previous nested ternary fell
+  // through to `previewImport`, so a mistyped operation was silently treated
+  // as a domain import rather than rejected.
+  const patches = ((): ModelingSourcePatch[] => {
+    switch (change.operation) {
+      case 'upsert_domain': return previewDomain(root, change.value);
+      case 'upsert_area': return [previewArea(root, change.value)];
+      case 'upsert_entity': return [previewEntity(root, change.value)];
+      case 'upsert_relationship': return [previewRelationship(root, change.value)];
+      case 'upsert_contract': return [previewContract(root, change.value)];
+      case 'upsert_export': return [previewExport(root, change.value)];
+      case 'upsert_import': return [previewImport(root, change.value)];
+      case 'remove_entity': return [previewRemoveListEntry(root, change.value, 'entities.dql.yaml', 'entities')];
+      case 'remove_relationship': return [previewRemoveListEntry(root, change.value, 'relationships.dql.yaml', 'relationships')];
+      case 'remove_area': return previewRemoveArea(root, change.value);
+      case 'remove_contract': return [previewRemoveListEntry(root, change.value, 'contracts.dql.yaml', 'contracts')];
+      case 'remove_export': return [previewRemoveListEntry(root, change.value, 'interfaces.dql.yaml', 'exports')];
+      case 'remove_import': return [previewRemoveListEntry(root, change.value, 'interfaces.dql.yaml', 'imports')];
+      default: {
+        const unsupported: never = change;
+        throw new Error(`Unsupported modeling operation: ${(unsupported as { operation?: string }).operation ?? 'unknown'}`);
+      }
+    }
+  })();
   return {
     operation: change.operation,
     patches,
@@ -325,9 +342,11 @@ export function previewModelingChanges(
     const domains = join(root, 'domains');
     if (existsSync(domains)) cpSync(domains, join(shadow, 'domains'), { recursive: true, dereference: false });
     const touched = new Set<string>();
+    const patchPathsByChange: string[][] = [];
     for (const change of changes) {
       const preview = previewModelingChange(shadow, change);
       for (const patch of preview.patches) touched.add(patch.path);
+      patchPathsByChange.push(preview.patches.map((patch) => patch.path));
       applyModelingChange(shadow, change, preview.fingerprint);
     }
     const patches = [...touched].sort().map((path): ModelingSourcePatch => {
@@ -342,6 +361,7 @@ export function previewModelingChanges(
       changes,
       patches,
       fingerprint: hash(patches.map(({ path, before, after }) => ({ path, before, after }))),
+      patchPathsByChange,
     };
   } finally {
     rmSync(shadow, { recursive: true, force: true });
@@ -657,10 +677,13 @@ function upsertListPatch(
   // entity or relationship authored in a small Model Area from losing its
   // advanced DQL policy when a user updates its business context or keys.
   if (index >= 0) list[index] = { ...asRecord(list[index]), ...value };
+  // Append rather than re-sorting the whole list. Sorting by id on every upsert
+  // turned a one-field edit into a whole-file diff and discarded the grouping
+  // the author chose, which matters for a Git-backed file people hand-edit.
   else list.push(value);
-  list.sort((left, right) => String(asRecord(left)[identityKey] ?? '').localeCompare(String(asRecord(right)[identityKey] ?? '')));
   document[listKey] = list;
-  return { path, before, after: dumpYaml(document), changed: before !== dumpYaml(document) };
+  const after = dumpYaml(document);
+  return { path, before, after, changed: before !== after };
 }
 
 /**
@@ -829,6 +852,17 @@ function assertContainedPath(projectRoot: string, inputPath: string, label: stri
   return absolute;
 }
 
+/**
+ * Serialize authored modeling source.
+ *
+ * Key order and list order are preserved (`sortKeys: false`, and callers append
+ * rather than re-sort). Comments are NOT preserved: `js-yaml` re-serializes the
+ * parsed tree, so a comment in `model.dql.yaml` is dropped the first time the
+ * UI writes that file. `02-object-model-and-project-layout.md` asks writers to
+ * preserve comments "where feasible"; doing so needs a CST-based emitter (the
+ * `yaml` package's Document API), which is a new runtime dependency for this
+ * published package and is deliberately left as a separate decision.
+ */
 function dumpYaml(value: unknown): string {
   return yaml.dump(value, { noRefs: true, lineWidth: -1, sortKeys: false, noCompatMode: true }).trimEnd() + '\n';
 }

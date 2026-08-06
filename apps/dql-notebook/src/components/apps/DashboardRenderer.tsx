@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
-import { AlertTriangle, BarChart3, Bot, GitBranch, GripVertical, LineChart, Maximize2, PieChart, Plus, ShieldCheck, SlidersHorizontal, Sparkles, Table2, Trash2, Wand2, Wrench, X } from 'lucide-react';
+import { Activity, AlertTriangle, BarChart3, Bot, ChartArea, ChartColumnBig, ChartColumnIncreasing, ChartColumnStacked, ChartScatter, CheckCircle2, Donut, Filter, Gauge, GitBranch, Grid3x3, GripVertical, Hash, LineChart, Loader2, Maximize2, PieChart, Plus, ShieldCheck, SlidersHorizontal, Sparkles, Table2, Trash2, Wand2, Workflow, Wrench, X } from 'lucide-react';
 import { api, type AppBlockRecommendation, type DashboardDocumentResponse, type DashboardRunResponse, type DashboardStoryBrief } from '../../api/client';
 import { useNotebook } from '../../store/NotebookStore';
 import type { CellChartConfig, QueryResult, ThemeMode } from '../../store/types';
@@ -13,7 +13,29 @@ import { inferColumnKind, columnKindToChartRole, type ChartColumnRole } from '..
 import { classifyColumns } from '../../utils/semantic-fields';
 import { NODE_TYPE_COLORS, TYPE_LABELS, TYPE_TITLES } from '../lineage/lineage-constants';
 import { themes, type ThemeMode as NotebookThemeMode } from '../../themes/notebook-theme';
-import { mergeDashboardTileChartConfig, summarizeDashboardKpiResult } from './dashboard-chart-config';
+import { mergeDashboardTileChartConfig, normalizeDashboardChartType, summarizeDashboardKpiResult } from './dashboard-chart-config';
+import {
+  chartToDashboardViz, coerceLayoutIntent, coerceReviewStatus, coerceTrustState, compactChartConfig,
+  componentForDashboardViz, displayWithVisualization, getDashboardItemBlockId, getDqlGenUi, isRecord,
+  normalizeViz, roleForDisplayComponent, textTileDisplay, uniqueStrings, type DqlGenUiMetadata,
+} from './dashboard-tile-model';
+import { autoLayoutDashboardItems, autoLayoutRank, layoutScore, packDashboardItems, reorderTileForDrop } from './dashboard-layout';
+import {
+  autoTileSizeForItem, autoTileSizeForViz, clamp, narrowTileMinHeight, normalizeSizePreset,
+  presetMatches, tileSizeForPreset, tileSizePatch, TILE_SIZE_PRESETS, type TileSizePresetId,
+} from './dashboard-tile-sizing';
+import {
+  buildDashboardStory, isStakeholderHiddenReviewTile, prepareStakeholderItems, storyFilterChips,
+} from './dashboard-presentation';
+import {
+  escapeRegExp, evidenceMetricRank, formatDashboardValue, formatGenUiLabel, isNumericColumn,
+  pickEvidenceLabelColumn, resultValueSamples, type DashboardStory,
+} from './dashboard-format';
+
+/** Single client chart vocabulary; see `normalizeDashboardChartType`. */
+function normalizeChartType(value: unknown): ChartType {
+  return normalizeDashboardChartType(value) as ChartType;
+}
 import { useOpenAnswerInNotebook } from '../../utils/answer-to-notebook';
 import { formatDisplayValue } from '../../utils/value-format';
 import type { InsertDqlPayload } from '../agent/UnifiedAgentRunPanel';
@@ -23,15 +45,6 @@ const UnifiedAgentRunPanel = lazy(() => import('../agent/UnifiedAgentRunPanel')
 
 type DashboardLayoutItem = DashboardDocumentResponse['dashboard']['layout']['items'][number];
 type DashboardRunTile = DashboardRunResponse['tiles'][number];
-type DashboardStory = {
-  title: string;
-  summary: string;
-  sourceTitle: string;
-  trust: string | null;
-  filters: Array<{ label: string; value: string }>;
-  chips: string[];
-};
-
 const SIDE_PANEL_HEIGHT = 'clamp(320px, calc(100vh - 220px), 760px)';
 const APP_CHART_TYPE_OPTIONS: Array<{ value: ChartType; label: string }> = [
   { value: 'table', label: 'Table' },
@@ -44,32 +57,7 @@ function sampleRows(rows?: Array<Record<string, unknown>>, columns?: string[]): 
   return rows.slice(0, 5).map((row) => Object.fromEntries(selectedColumns.map((column) => [column, row[column]])));
 }
 
-type TileSizePresetId = 'auto' | 'compact' | 'standard' | 'wide' | 'tall' | 'full';
 
-const TILE_SIZE_PRESETS: Array<{ id: TileSizePresetId; label: string; description: string }> = [
-  { id: 'auto', label: 'Auto fit', description: 'Choose a practical size from the tile content' },
-  { id: 'compact', label: 'Compact', description: 'Small KPI or short summary' },
-  { id: 'standard', label: 'Standard', description: 'Default chart or table card' },
-  { id: 'wide', label: 'Wide', description: 'Full-row trend or comparison' },
-  { id: 'tall', label: 'Tall', description: 'More vertical room for tables and dense charts' },
-  { id: 'full', label: 'Full page', description: 'Large focused view across the page' },
-];
-
-interface DqlGenUiMetadata {
-  version?: number;
-  component?: 'BusinessBrief' | 'KpiMetric' | 'TrendPanel' | 'RankingPanel' | 'EvidenceTable' | 'PivotTable' | 'TrustCallout' | 'ResearchActions' | 'NarrativePanel' | string;
-  role?: string;
-  layoutIntent?: TileSizePresetId | string;
-  defaultVisualization?: string;
-  allowedVisualizations?: string[];
-  fieldHints?: Record<string, string>;
-  insightTitle?: string;
-  trustState?: 'certified' | 'review_required' | 'draft_ready' | string;
-  reviewStatus?: string;
-  sourceNodeId?: string;
-  followUpActions?: string[];
-  rationale?: string;
-}
 
 /**
  * Grid renderer for `.dqld` dashboards backed by the live dashboard run API.
@@ -109,6 +97,8 @@ export function DashboardRenderer({
   const [businessStory, setBusinessStory] = useState<DashboardStoryBrief | null>(null);
   const latestRunIdRef = useRef<string | null>(null);
   const [loading, setLoading] = useState(false);
+  /** Monotonic id so only the newest dashboard run may write state. */
+  const runRequestRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
   // Server-persisted conversation thread, keyed per app dashboard so a page
@@ -182,11 +172,23 @@ export function DashboardRenderer({
   }, [dashboard.id]);
 
   useEffect(() => {
-    let cancelled = false;
+    // Sequence the run rather than using a boolean `cancelled` flag.
+    //
+    // The old cleanup skipped `setLoading(false)` for a superseded run, so
+    // leaving the App (or any dependency change) while a run was in flight left
+    // `loading` stuck at true — and `TileBody` renders "Loading data..." for
+    // every tile that has no cached result whenever `loading` is true. Coming
+    // back to the App then showed tiles loading forever.
+    //
+    // Now only the newest request may write state, and it always clears the
+    // loading flag; a superseded response is ignored without freezing the UI.
+    const requestId = runRequestRef.current + 1;
+    runRequestRef.current = requestId;
+    const isCurrent = () => runRequestRef.current === requestId;
     setLoading(true);
     setError(null);
     void api.runDashboard(appId, dashboard.id, runVariables).then((result) => {
-      if (cancelled) return;
+      if (!isCurrent()) return;
       setRun(result);
       setBusinessStory(result?.story ?? null);
       latestRunIdRef.current = result?.runId ?? null;
@@ -194,22 +196,18 @@ export function DashboardRenderer({
       if (!result) setError('Dashboard run failed.');
       if (result?.runId) {
         void api.getDashboardStory(appId, dashboard.id, result.runId).then((storyResult) => {
-          if (cancelled || !storyResult || latestRunIdRef.current !== storyResult.runId) return;
+          if (!isCurrent() || !storyResult || latestRunIdRef.current !== storyResult.runId) return;
           if (storyResult.snapshotId !== result.snapshotId || storyResult.filterFingerprint !== result.filterFingerprint || storyResult.resultFingerprint !== result.resultFingerprint || storyResult.personaFingerprint !== result.personaFingerprint) return;
           setBusinessStory(storyResult.story);
         });
       }
     }).catch((err) => {
-      if (!cancelled) {
-        setError(err instanceof Error ? err.message : String(err));
-        onRunChange?.(null);
-      }
+      if (!isCurrent()) return;
+      setError(err instanceof Error ? err.message : String(err));
+      onRunChange?.(null);
     }).finally(() => {
-      if (!cancelled) setLoading(false);
+      if (isCurrent()) setLoading(false);
     });
-    return () => {
-      cancelled = true;
-    };
   }, [appId, dashboard.id, dashboard.layout.items.length, onRunChange, runVariables, state.activePersona?.userId]);
 
   useEffect(() => {
@@ -307,12 +305,23 @@ export function DashboardRenderer({
     }
   }, [appId, dashboard, onDashboardChanged]);
 
-  const stageOrSaveItems = useCallback(async (items: DashboardLayoutItem[]) => {
-    if (pendingLayoutItems) {
+  /**
+   * Geometry is staged while a layout preview is pending; content is not.
+   *
+   * This used to stage *everything* once "Auto layout" set a pending preview —
+   * a tile rename, a viz change, even a delete would sit in React state and
+   * never reach the server until Apply was clicked, with no indication the work
+   * was unsaved. Only positions are provisional during a preview; a content
+   * edit must save immediately and be carried into the pending preview so
+   * applying the layout does not revert it.
+   */
+  const stageOrSaveItems = useCallback(async (items: DashboardLayoutItem[], kind: 'geometry' | 'content' = 'geometry') => {
+    if (pendingLayoutItems && kind === 'geometry') {
       setPendingLayoutItems(items);
       setLayoutNotice('Layout preview ready');
       return;
     }
+    if (pendingLayoutItems) setPendingLayoutItems(items);
     await saveItems(items);
   }, [pendingLayoutItems, saveItems]);
 
@@ -346,7 +355,7 @@ export function DashboardRenderer({
       } : {}),
       title: block.name,
     };
-    await stageOrSaveItems([...workingLayoutItems, tile]);
+    await stageOrSaveItems([...workingLayoutItems, tile], 'content');
     setCatalogOpen(false);
   }, [appId, cols, dashboard.id, dashboard.metadata.audience, dashboard.metadata.title, stageOrSaveItems, workingDashboard, workingLayoutItems]);
 
@@ -374,7 +383,7 @@ export function DashboardRenderer({
           display: textTileDisplay('heading', value),
           title: value,
         },
-      ]);
+      ], 'content');
     } else {
       const title = value.split(/\r?\n/)[0]?.slice(0, 60) || 'Summary';
       await stageOrSaveItems([
@@ -397,7 +406,11 @@ export function DashboardRenderer({
     const items = patch === null
       ? workingLayoutItems.filter((item) => item.i !== tileId)
       : workingLayoutItems.map((item) => item.i === tileId ? { ...item, ...patch } : item);
-    await stageOrSaveItems(packDashboardItems(items, cols));
+    // A removal, or any patch touching something other than position/size, is
+    // content and must save even while a layout preview is pending.
+    const geometryOnly = patch !== null
+      && Object.keys(patch).every((key) => key === 'x' || key === 'y' || key === 'w' || key === 'h');
+    await stageOrSaveItems(packDashboardItems(items, cols), geometryOnly ? 'geometry' : 'content');
   }, [cols, stageOrSaveItems, workingLayoutItems]);
 
   const moveTileToPoint = useCallback(async (tileId: string, point: { clientX: number; clientY: number }) => {
@@ -540,6 +553,24 @@ export function DashboardRenderer({
   return (
     <div style={{ display: 'block', minHeight: 0 }}>
       <div style={{ flex: 1, minWidth: 0 }}>
+      {/* Saving is automatic, so it has to be legible. This sits outside the
+          editing toolbar: a write can land while the App is being viewed (an
+          Ask result added from elsewhere), and a failed save used to be
+          invisible because the error only rendered inside empty tiles. */}
+      <SaveStatus saving={saving} error={error} pending={Boolean(pendingLayoutItems)} notice={layoutNotice} onDismissError={() => setError(null)} />
+      {/* The stakeholder view deliberately hides review-required and duplicate
+          tiles, which is right for published viewing — but it used to be
+          announced only when EVERY tile was hidden. Adding an AI result to a
+          page that already had tiles therefore looked like nothing had been
+          saved. Say so whenever anything is hidden. */}
+      {!editable && visibleItems.length > 0 && (hiddenReviewTileCount + hiddenPresentationTileCount) > 0 ? (
+        <div role="status" style={saveStatusStyle('var(--text-tertiary)')}>
+          <ShieldCheck size={13} />
+          {hiddenReviewTileCount + hiddenPresentationTileCount} tile
+          {hiddenReviewTileCount + hiddenPresentationTileCount === 1 ? ' is' : 's are'} hidden from this
+          stakeholder view because {hiddenReviewTileCount > 0 ? 'they still need review' : 'a certified tile already answers the same question'}. Switch to Edit to see everything on this page.
+        </div>
+      ) : null}
       {(!embeddedHeader || editable) && (
       <div style={dashboardToolbarStyle}>
         <div style={{ flex: 1, minWidth: 0 }}>
@@ -601,7 +632,6 @@ export function DashboardRenderer({
             </button>
           </>
         ) : null}
-        {editable && layoutNotice ? <span role="status" style={{ fontSize: 11, opacity: 0.68 }}>{layoutNotice}</span> : null}
         {!embeddedHeader && (
           <>
             <button
@@ -932,7 +962,7 @@ function DashboardTile({
   const vizType = normalizeViz(String(renderedItem.viz.type ?? 'table'));
   const genUi = getDqlGenUi(item);
   const generatedComponent = genUi?.component;
-  const generatedTitle = genUi?.insightTitle || item.title || blockRef;
+  const generatedTitle = item.title || genUi?.insightTitle || blockRef;
   const aiPinTrust = tile?.tileType === 'aiPin'
     ? tile.aiPin?.certification === 'certified' ? 'certified' : 'review_required'
     : undefined;
@@ -1319,13 +1349,27 @@ function GeneratedVizSwitcher({
   options: Array<{ value: ChartType; label: string }>;
   onChange: (value: ChartType) => void;
 }) {
+  // A server-side allow-list can reach nine visualizations, and rendering one
+  // button each turned every tile header into a wall of near-identical glyphs.
+  // Show a few — always including the current one — and put the rest behind a
+  // labelled select.
+  const INLINE_LIMIT = 4;
+  const inline = options.slice(0, INLINE_LIMIT);
+  if (!inline.some((option) => option.value === value)) {
+    const current = options.find((option) => option.value === value);
+    if (current) inline.splice(INLINE_LIMIT - 1, 1, current);
+  }
+  const overflow = options.filter((option) => !inline.some((item) => item.value === option.value));
+
   return (
     <div style={generatedVizSwitcherStyle} aria-label="Visualization">
-      {options.map((option) => (
+      {inline.map((option) => (
         <button
           key={option.value}
           type="button"
           title={option.label}
+          aria-label={option.label}
+          aria-pressed={value === option.value}
           onClick={(event) => {
             event.stopPropagation();
             onChange(option.value);
@@ -1335,9 +1379,36 @@ function GeneratedVizSwitcher({
           {iconForChartType(option.value)}
         </button>
       ))}
+      {overflow.length > 0 ? (
+        <select
+          aria-label="More visualizations"
+          title="More visualizations"
+          value=""
+          onClick={(event) => event.stopPropagation()}
+          onChange={(event) => {
+            if (event.target.value) onChange(event.target.value as ChartType);
+          }}
+          style={generatedVizOverflowStyle}
+        >
+          <option value="">More…</option>
+          {overflow.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+      ) : null}
     </div>
   );
 }
+
+const generatedVizOverflowStyle: React.CSSProperties = {
+  border: 'none',
+  background: 'transparent',
+  color: 'inherit',
+  font: 'inherit',
+  fontSize: 10.5,
+  cursor: 'pointer',
+  maxWidth: 74,
+};
 
 function TrustPill({ trust }: { trust: string }) {
   const certified = trust === 'certified';
@@ -1838,13 +1909,28 @@ function TileSettingsPanel({
   const measures = result?.columns.filter((column) => columnKinds.get(column) === 'measure') ?? [];
   const dimensions = result?.columns.filter((column) => columnKinds.get(column) !== 'measure') ?? [];
 
+  // The title is the one field typed character by character; everything else in
+  // this panel is a discrete choice that can save immediately.
+  const savedTitle = chartConfig.title ?? item.title ?? '';
+  const [titleDraft, setTitleDraft] = useState(savedTitle);
+  useEffect(() => { setTitleDraft(savedTitle); }, [savedTitle]);
+  const commitTitleDraft = () => {
+    const next = titleDraft.trim();
+    if (next === savedTitle) return;
+    patchConfig({ title: next || undefined });
+  };
+
   const patchConfig = (patch: Partial<CellChartConfig>) => {
     const next = compactChartConfig({ ...chartConfig, ...patch });
     const dashboardViz = chartToDashboardViz(next.chart);
     const currentGenUi = getDqlGenUi(item);
     const options: Record<string, unknown> = { ...next };
     if (currentGenUi) {
-      options.dqlGenUi = { ...currentGenUi, defaultVisualization: dashboardViz };
+      options.dqlGenUi = {
+        ...currentGenUi,
+        defaultVisualization: dashboardViz,
+        ...(next.title ? { insightTitle: next.title } : {}),
+      };
     }
     onPatch({
       title: next.title || item.title,
@@ -1947,9 +2033,17 @@ function TileSettingsPanel({
       <div style={tileSettingsGridStyle}>
         <label style={tileSettingsLabelStyle}>
           Title
+          {/* Local while typing, saved on blur or Enter. Patching per keystroke
+              issued a full layout PATCH and re-packed the grid on every
+              character, so tiles visibly jumped around as you renamed one. */}
           <input
-            value={chartConfig.title ?? item.title ?? ''}
-            onChange={(event) => patchConfig({ title: event.target.value || undefined })}
+            value={titleDraft}
+            onChange={(event) => setTitleDraft(event.target.value)}
+            onBlur={() => commitTitleDraft()}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') { event.currentTarget.blur(); }
+              if (event.key === 'Escape') { setTitleDraft(chartConfig.title ?? item.title ?? ''); event.currentTarget.blur(); }
+            }}
             style={tileSettingsInputStyle}
           />
         </label>
@@ -2119,7 +2213,7 @@ function GeneratedTextTile({
           {isTrust ? <AlertTriangle size={15} /> : isResearch ? <Sparkles size={15} /> : <ShieldCheck size={15} />}
         </span>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 780, lineHeight: 1.25 }}>{genUi.insightTitle ?? title}</div>
+          <div style={{ fontSize: 13, fontWeight: 780, lineHeight: 1.25 }}>{title ?? genUi.insightTitle}</div>
           <div style={{ marginTop: 6, fontSize: 13, lineHeight: 1.45, color: theme.textSecondary }}>
             {summary}
           </div>
@@ -2501,481 +2595,6 @@ function LineageStat({ label, value }: { label: string; value: number }) {
   );
 }
 
-function getDashboardItemBlockId(item: DashboardLayoutItem): string | null {
-  if (!item.block) return null;
-  return 'blockId' in item.block ? item.block.blockId ?? null : item.block.ref ?? null;
-}
-
-function normalizeChartType(value: unknown): ChartType {
-  const normalized = String(value ?? 'table').toLowerCase().replace(/_/g, '-');
-  if (normalized === 'single-value') return 'kpi';
-  if (APP_CHART_TYPE_OPTIONS.some((option) => option.value === normalized)) return normalized as ChartType;
-  return 'table';
-}
-
-function chartToDashboardViz(value: unknown): string {
-  const chart = normalizeChartType(value);
-  if (chart === 'table') return 'table';
-  return chart.replace(/-/g, '_');
-}
-
-function compactChartConfig(config: CellChartConfig): CellChartConfig {
-  const out: CellChartConfig = {};
-  for (const [key, value] of Object.entries(config) as Array<[keyof CellChartConfig, unknown]>) {
-    if (value === undefined || value === '') continue;
-    (out as Record<string, unknown>)[key] = value;
-  }
-  if (!out.chart) out.chart = 'table';
-  return out;
-}
-
-function getDqlGenUi(item: DashboardLayoutItem): DqlGenUiMetadata | null {
-  if (isRecord(item.display)) {
-    const display = item.display;
-    const component = typeof display.component === 'string' ? display.component : undefined;
-    return {
-      version: 1,
-      component,
-      role: roleForDisplayComponent(component),
-      layoutIntent: typeof display.layoutIntent === 'string' ? display.layoutIntent : undefined,
-      defaultVisualization: typeof display.defaultVisualization === 'string' ? display.defaultVisualization : undefined,
-      allowedVisualizations: Array.isArray(display.allowedVisualizations) ? display.allowedVisualizations.filter((value): value is string => typeof value === 'string') : undefined,
-      fieldHints: isRecord(display.fieldHints)
-        ? Object.fromEntries(Object.entries(display.fieldHints).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
-        : undefined,
-      insightTitle: item.title,
-      trustState: typeof display.trustState === 'string' ? display.trustState : undefined,
-      reviewStatus: typeof display.reviewStatus === 'string' ? display.reviewStatus : undefined,
-      rationale: typeof display.rationale === 'string' ? display.rationale : undefined,
-    };
-  }
-  const raw = (item.viz.options as Record<string, unknown> | undefined)?.dqlGenUi;
-  if (!isRecord(raw)) return null;
-  return {
-    version: typeof raw.version === 'number' ? raw.version : undefined,
-    component: typeof raw.component === 'string' ? raw.component : undefined,
-    role: typeof raw.role === 'string' ? raw.role : undefined,
-    layoutIntent: typeof raw.layoutIntent === 'string' ? raw.layoutIntent : undefined,
-    defaultVisualization: typeof raw.defaultVisualization === 'string' ? raw.defaultVisualization : undefined,
-    allowedVisualizations: Array.isArray(raw.allowedVisualizations) ? raw.allowedVisualizations.filter((value): value is string => typeof value === 'string') : undefined,
-    fieldHints: isRecord(raw.fieldHints)
-      ? Object.fromEntries(Object.entries(raw.fieldHints).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
-      : undefined,
-    insightTitle: typeof raw.insightTitle === 'string' ? raw.insightTitle : undefined,
-    trustState: typeof raw.trustState === 'string' ? raw.trustState : undefined,
-    reviewStatus: typeof raw.reviewStatus === 'string' ? raw.reviewStatus : undefined,
-    sourceNodeId: typeof raw.sourceNodeId === 'string' ? raw.sourceNodeId : undefined,
-    followUpActions: Array.isArray(raw.followUpActions) ? raw.followUpActions.filter((value): value is string => typeof value === 'string') : undefined,
-    rationale: typeof raw.rationale === 'string' ? raw.rationale : undefined,
-  };
-}
-
-function textTileDisplay(
-  viz: 'text' | 'heading',
-  title: string,
-): NonNullable<DashboardLayoutItem['display']> {
-  return {
-    mode: 'manual',
-    component: viz === 'heading' ? 'NarrativePanel' : 'BusinessBrief',
-    defaultVisualization: viz,
-    allowedVisualizations: [viz],
-    layoutIntent: viz === 'heading' ? 'wide' : 'standard',
-    rationale: title ? `Manual narrative tile for "${title}" on this app surface.` : 'Manual narrative tile for this app surface.',
-    trustState: 'review_required',
-    reviewStatus: 'review_required',
-  };
-}
-
-function displayWithVisualization(
-  item: DashboardLayoutItem,
-  dashboardViz: string,
-  genUi?: DqlGenUiMetadata | null,
-): DashboardLayoutItem['display'] | undefined {
-  const allowed = uniqueStrings([
-    dashboardViz,
-    ...(item.display?.allowedVisualizations ?? []),
-    ...(genUi?.allowedVisualizations ?? []),
-  ]);
-  const component = item.display?.component ?? componentForDashboardViz(dashboardViz);
-  return {
-    mode: item.display?.mode ?? (genUi ? 'ai_generated' : item.block ? 'block_hint' : 'manual'),
-    component,
-    defaultVisualization: dashboardViz,
-    allowedVisualizations: allowed.length ? allowed : [dashboardViz],
-    ...(item.display?.fieldHints || genUi?.fieldHints ? { fieldHints: item.display?.fieldHints ?? genUi?.fieldHints } : {}),
-    layoutIntent: coerceLayoutIntent(item.display?.layoutIntent ?? genUi?.layoutIntent),
-    rationale: item.display?.rationale ?? genUi?.rationale ?? 'Visualization selected for this consumer surface.',
-    trustState: coerceTrustState(item.display?.trustState ?? genUi?.trustState),
-    reviewStatus: coerceReviewStatus(item.display?.reviewStatus ?? genUi?.reviewStatus),
-  };
-}
-
-function uniqueStrings(values: string[]): string[] {
-  return Array.from(new Set(values.filter((value) => typeof value === 'string' && value.trim()).map((value) => value.trim())));
-}
-
-function componentForDashboardViz(viz: string): NonNullable<DashboardLayoutItem['display']>['component'] {
-  if (viz === 'single_value' || viz === 'kpi' || viz === 'gauge') return 'KpiMetric';
-  if (viz === 'line' || viz === 'area') return 'TrendPanel';
-  if (viz === 'bar' || viz === 'grouped_bar' || viz === 'stacked_bar' || viz === 'donut' || viz === 'pie') return 'RankingPanel';
-  if (viz === 'pivot') return 'PivotTable';
-  if (viz === 'text' || viz === 'heading') return 'NarrativePanel';
-  return 'EvidenceTable';
-}
-
-function roleForDisplayComponent(component?: string): string | undefined {
-  if (component === 'BusinessBrief') return 'business_summary';
-  if (component === 'KpiMetric') return 'kpi';
-  if (component === 'TrendPanel') return 'trend';
-  if (component === 'RankingPanel') return 'breakdown';
-  if (component === 'TrustCallout') return 'trust';
-  if (component === 'ResearchActions') return 'research';
-  if (component === 'NarrativePanel') return 'narrative';
-  return component ? 'evidence' : undefined;
-}
-
-function isStakeholderHiddenReviewTile(item: DashboardLayoutItem): boolean {
-  if (getDashboardItemBlockId(item) || item.aiPin) return false;
-  const genUi = getDqlGenUi(item);
-  const component = genUi?.component ?? item.display?.component;
-  const role = genUi?.role ?? roleForDisplayComponent(component);
-  const trustState = coerceTrustState(String(genUi?.trustState ?? item.display?.trustState ?? 'review_required'));
-  if (component === 'TrustCallout' || component === 'ResearchActions' || role === 'trust' || role === 'research') return true;
-  if (component !== 'NarrativePanel' && component !== 'BusinessBrief') return false;
-  if (trustState === 'certified') return false;
-  const text = [
-    item.title,
-    item.text?.markdown,
-    item.display?.rationale,
-    genUi?.rationale,
-    genUi?.insightTitle,
-  ].filter(Boolean).join(' ').toLowerCase();
-  return /\b(draft ready|review-required|review required|missing evidence|missing proof|trust gap|research drilldown|promote to a certified block|generated review placeholder|generated section)\b/.test(text);
-}
-
-function prepareStakeholderItems(
-  items: DashboardLayoutItem[],
-  tileResults: Map<string, DashboardRunTile>,
-  cols: number,
-): DashboardLayoutItem[] {
-  const deduped = items.filter((item) => {
-    return !isReviewRequiredAiPinStakeholderTile(item, tileResults.get(item.i))
-      && !isRedundantStaticStakeholderTile(item, items, tileResults)
-      && !isDuplicateAiPinStakeholderTile(item, items, tileResults);
-  });
-  const ranked = [...deduped].sort((a, b) => {
-    const priority = stakeholderTilePriority(b, tileResults.get(b.i), cols) - stakeholderTilePriority(a, tileResults.get(a.i), cols);
-    return priority !== 0 ? priority : layoutScore(a, cols) - layoutScore(b, cols);
-  });
-  return packDashboardItems(ranked, cols);
-}
-
-function isReviewRequiredAiPinStakeholderTile(item: DashboardLayoutItem, tile?: DashboardRunTile): boolean {
-  if (!item.aiPin) return false;
-  const certification = tile?.aiPin?.certification;
-  const reviewStatus = tile?.aiPin?.reviewStatus;
-  return certification !== 'certified' && reviewStatus !== 'certified';
-}
-
-function isDuplicateAiPinStakeholderTile(
-  item: DashboardLayoutItem,
-  items: DashboardLayoutItem[],
-  tileResults: Map<string, DashboardRunTile>,
-): boolean {
-  if (!item.aiPin) return false;
-  const fingerprint = aiPinStakeholderFingerprint(item, tileResults.get(item.i));
-  if (!fingerprint) return false;
-  const index = items.findIndex((candidate) => candidate.i === item.i);
-  return items.some((candidate, candidateIndex) => {
-    if (candidate.i === item.i || candidateIndex >= index || !candidate.aiPin) return false;
-    return aiPinStakeholderFingerprint(candidate, tileResults.get(candidate.i)) === fingerprint;
-  });
-}
-
-function aiPinStakeholderFingerprint(item: DashboardLayoutItem, tile?: DashboardRunTile): string {
-  const pin = tile?.aiPin;
-  const plan = pin?.analysisPlan && typeof pin.analysisPlan === 'object'
-    ? pin.analysisPlan as Record<string, unknown>
-    : null;
-  const question = normalizeAiPinText(pin?.question) || normalizeAiPinText(item.title);
-  const sourceBlock = normalizeAiPinText(plan?.sourceBlockId);
-  const sourceTile = normalizeAiPinText(plan?.sourceTileId);
-  const result = pin?.result ? aiPinResultFingerprint(pin.result) : '';
-  if (!question && !sourceBlock && !sourceTile) return '';
-  return [question, sourceBlock, sourceTile, result].filter(Boolean).join('|');
-}
-
-function normalizeAiPinText(value: unknown): string {
-  return String(value ?? '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function aiPinResultFingerprint(result: unknown): string {
-  if (!result || typeof result !== 'object') return '';
-  const record = result as { columns?: unknown; rows?: unknown };
-  const columns = Array.isArray(record.columns) ? record.columns.map((column) => String(column).toLowerCase()).join(',') : '';
-  const rows = Array.isArray(record.rows) ? record.rows.slice(0, 8).map((row) => stableFingerprintValue(row)).join(';') : '';
-  return columns || rows ? `${columns}:${rows}` : '';
-}
-
-function stableFingerprintValue(value: unknown): string {
-  if (value === null || value === undefined) return '';
-  if (typeof value !== 'object') return String(value);
-  if (Array.isArray(value)) return `[${value.map(stableFingerprintValue).join(',')}]`;
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record).sort().map((key) => `${key}:${stableFingerprintValue(record[key])}`).join(',')}}`;
-}
-
-function stakeholderTilePriority(item: DashboardLayoutItem, tile: DashboardRunTile | undefined, cols: number): number {
-  let score = 0;
-  if (item.parameterBindings?.length) score += 5000;
-  if (tile?.filters?.applied?.length) score += 4000;
-  if (tile?.certificationStatus === 'certified') score += 1800;
-  if (getDashboardItemBlockId(item)) score += 900;
-  if (tile?.status === 'ok' && tile.result?.rows?.length) score += 500;
-  score -= autoLayoutRank(item) * 80;
-  score -= layoutScore(item, cols) / 1000;
-  return score;
-}
-
-function isRedundantStaticStakeholderTile(
-  item: DashboardLayoutItem,
-  items: DashboardLayoutItem[],
-  tileResults: Map<string, DashboardRunTile>,
-): boolean {
-  if (item.parameterBindings?.length || item.aiPin || !getDashboardItemBlockId(item)) return false;
-  const tile = tileResults.get(item.i);
-  const fingerprint = tile?.result ? stakeholderResultFingerprint(tile.result) : null;
-  if (!fingerprint) return false;
-  return items.some((candidate) => {
-    if (candidate.i === item.i || !isFilterAwareStakeholderItem(candidate, tileResults.get(candidate.i))) return false;
-    const candidateTile = tileResults.get(candidate.i);
-    const candidateFingerprint = candidateTile?.result ? stakeholderResultFingerprint(candidateTile.result) : null;
-    return Boolean(candidateFingerprint && sameStakeholderFingerprint(fingerprint, candidateFingerprint));
-  });
-}
-
-function isFilterAwareStakeholderItem(item: DashboardLayoutItem, tile?: DashboardRunTile): boolean {
-  return Boolean(item.parameterBindings?.length || tile?.filters?.applied?.length);
-}
-
-function stakeholderResultFingerprint(result: QueryResult): { columns: string; label: string; metric: string; metricValue: string } | null {
-  const rows = result.rows ?? [];
-  if (!rows.length) return null;
-  const columns = result.columns?.length ? result.columns : Object.keys(rows[0] ?? {});
-  if (!columns.length) return null;
-  const labelColumn = pickStoryLabelColumn(columns, rows);
-  const metricColumn = pickStoryMetricColumn(columns, rows);
-  const first = rows[0];
-  return {
-    columns: columns.map((column) => column.toLowerCase()).sort().join('|'),
-    label: labelColumn ? canonicalStakeholderValue(first[labelColumn]) : '',
-    metric: metricColumn?.toLowerCase() ?? '',
-    metricValue: metricColumn ? canonicalStakeholderValue(first[metricColumn]) : '',
-  };
-}
-
-function sameStakeholderFingerprint(
-  left: NonNullable<ReturnType<typeof stakeholderResultFingerprint>>,
-  right: NonNullable<ReturnType<typeof stakeholderResultFingerprint>>,
-): boolean {
-  return left.columns === right.columns
-    && left.label === right.label
-    && left.metric === right.metric
-    && left.metricValue === right.metricValue;
-}
-
-function canonicalStakeholderValue(value: unknown): string {
-  if (value === null || value === undefined) return '';
-  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : '';
-  return String(value).trim().toLowerCase().replace(/\s+/g, ' ');
-}
-
-function buildDashboardStory(
-  items: DashboardLayoutItem[],
-  tileResults: Map<string, DashboardRunTile>,
-  variables: Record<string, unknown>,
-): DashboardStory | null {
-  const candidate = items
-    .map((item, index) => ({ item, tile: tileResults.get(item.i), index }))
-    .filter((entry): entry is { item: DashboardLayoutItem; tile: DashboardRunTile; index: number } => {
-      return entry.tile?.status === 'ok'
-        && Boolean(entry.tile.result)
-        && Array.isArray(entry.tile.result?.rows)
-        && entry.tile.result.rows.length > 0;
-    })
-    .sort((a, b) => {
-      const scoreA = storyTileScore(a.item, a.tile, a.index);
-      const scoreB = storyTileScore(b.item, b.tile, b.index);
-      return scoreB - scoreA;
-    })[0];
-  if (!candidate?.tile.result) return null;
-
-  const result = candidate.tile.result;
-  const rows = result.rows;
-  const columns = result.columns ?? Object.keys(rows[0] ?? {});
-  if (!columns.length) return null;
-
-  const genUi = getDqlGenUi(candidate.item);
-  const labelColumn = pickStoryLabelColumn(columns, rows, genUi?.fieldHints?.label);
-  const metricColumn = pickStoryMetricColumn(columns, rows, genUi?.fieldHints?.value ?? genUi?.fieldHints?.y);
-  const first = rows[0];
-  const second = rows[1];
-  const labelValues = labelColumn ? rows.map((row) => row[labelColumn]) : [];
-  const metricValues = metricColumn ? rows.map((row) => row[metricColumn]) : [];
-  const firstLabel = labelColumn ? formatDashboardValue(labelColumn, first[labelColumn], labelValues) : 'The leading result';
-  const secondLabel = second && labelColumn ? formatDashboardValue(labelColumn, second[labelColumn], labelValues) : null;
-  const firstMetric = metricColumn ? toStoryNumber(first[metricColumn]) : null;
-  const secondMetric = metricColumn && second ? toStoryNumber(second[metricColumn]) : null;
-  const metricLabel = metricColumn ? storyMetricLabel(metricColumn) : null;
-  const filters = storyFilterChips(variables);
-  const filterPhrase = filters.length ? 'under the selected app filters' : 'in the current dashboard view';
-  const sourceTitle = candidate.item.title ?? candidate.tile.title ?? getDashboardItemBlockId(candidate.item) ?? 'Dashboard result';
-  const rowCount = result.rowCount ?? rows.length;
-  const trust = candidate.tile.certificationStatus === 'certified'
-    ? 'certified'
-    : coerceTrustState(String(candidate.item.display?.trustState ?? genUi?.trustState ?? 'review_required'));
-  const title = metricLabel ? `${formatGenUiLabel(metricLabel)} snapshot` : 'Dashboard snapshot';
-
-  let summary: string;
-  if (metricColumn && metricLabel && firstMetric !== null) {
-    const leading = `${firstLabel} leads ${metricLabel} with ${formatDashboardValue(metricColumn, firstMetric, metricValues, { compact: true })}`;
-    if (secondLabel && secondMetric !== null && Number.isFinite(firstMetric - secondMetric)) {
-      const gap = Math.abs(firstMetric - secondMetric);
-      summary = `${leading}, ahead of ${secondLabel} by ${formatDashboardValue(metricColumn, gap, metricValues, { compact: true })} ${filterPhrase}.`;
-    } else {
-      summary = `${leading} ${filterPhrase}.`;
-    }
-  } else {
-    summary = `${sourceTitle} returned ${rowCount} ${rowCount === 1 ? 'row' : 'rows'} ${filterPhrase}.`;
-  }
-
-  return {
-    title,
-    summary,
-    sourceTitle,
-    trust,
-    filters,
-    chips: [
-      `${rowCount} ${rowCount === 1 ? 'row' : 'rows'}`,
-      columns.length ? `${columns.length} fields` : '',
-    ].filter(Boolean),
-  };
-}
-
-function storyTileScore(item: DashboardLayoutItem, tile: DashboardRunTile, index: number): number {
-  const genUi = getDqlGenUi(item);
-  const component = genUi?.component ?? item.display?.component;
-  const result = tile.result;
-  let score = 1000 - index;
-  if (tile.certificationStatus === 'certified') score += 500;
-  if (getDashboardItemBlockId(item)) score += 180;
-  if (tile.filters?.applied?.length) score += 260;
-  if (item.parameterBindings?.length) score += 220;
-  if (component === 'RankingPanel' || component === 'EvidenceTable' || component === 'KpiMetric') score += 120;
-  if (item.viz.type === 'table' || item.viz.type === 'bar' || item.viz.type === 'kpi') score += 70;
-  if (result && pickStoryMetricColumn(result.columns, result.rows)) score += 80;
-  if (result && pickStoryLabelColumn(result.columns, result.rows)) score += 50;
-  return score;
-}
-
-function pickStoryLabelColumn(columns: string[], rows: QueryResult['rows'], hint?: string): string | undefined {
-  const hinted = pickHintedColumn(columns, hint);
-  if (hinted) return hinted;
-  return columns.find((column) => /\b(player|customer|account|team|segment|category|name|label|title|entity)\b/i.test(column))
-    ?? columns.find((column) => !isNumericColumn(column, rows) && !/\b(date|time|year|month|id)\b/i.test(column))
-    ?? columns.find((column) => !isNumericColumn(column, rows));
-}
-
-function pickStoryMetricColumn(columns: string[], rows: QueryResult['rows'], hint?: string): string | undefined {
-  const hinted = pickHintedColumn(columns, hint);
-  if (hinted && isNumericColumn(hinted, rows)) return hinted;
-  return columns
-    .filter((column) => isNumericColumn(column, rows))
-    .sort((a, b) => storyMetricRank(a) - storyMetricRank(b))[0];
-}
-
-function pickHintedColumn(columns: string[], hint?: string): string | undefined {
-  const normalizedHint = hint?.toLowerCase().trim();
-  if (!normalizedHint) return undefined;
-  return columns.find((column) => {
-    const lower = column.toLowerCase();
-    return lower === normalizedHint || lower.includes(normalizedHint) || normalizedHint.includes(lower);
-  });
-}
-
-function storyMetricRank(column: string): number {
-  const lower = column.toLowerCase();
-  if (/(total|revenue|amount|points|score|value|sales|arr|mrr)/.test(lower)) return 1;
-  if (/(count|orders|games|customers|rows|volume)/.test(lower)) return 2;
-  if (/(rate|pct|percent|ratio|margin|average|avg)/.test(lower)) return 3;
-  if (/(rank|position|index)/.test(lower)) return 20;
-  if (/(date|year|month|day|week|id)/.test(lower)) return 90;
-  return 30;
-}
-
-function storyMetricLabel(column: string): string {
-  return formatGenUiLabel(column).toLowerCase();
-}
-
-function storyFilterChips(variables: Record<string, unknown>): Array<{ label: string; value: string }> {
-  return Object.entries(variables)
-    .filter(([key, value]) => {
-      if (/^(smartView|persona|dashboardId|appId)$/i.test(key)) return false;
-      if (key.startsWith('__')) return false;
-      if (value === null || value === undefined || value === '') return false;
-      if (Array.isArray(value) && value.length === 0) return false;
-      return typeof value !== 'object' || Array.isArray(value);
-    })
-    .slice(0, 6)
-    .map(([key, value]) => ({
-      label: formatGenUiLabel(key),
-      value: Array.isArray(value) ? value.map((entry) => formatStoryFilterValue(key, entry)).join(', ') : formatStoryFilterValue(key, value),
-    }));
-}
-
-function formatStoryFilterValue(key: string, value: unknown): string {
-  const numeric = typeof value === 'number'
-    ? value
-    : typeof value === 'string' && value.trim() !== ''
-      ? Number(value)
-      : NaN;
-  if (/(season|year)/i.test(key) && Number.isInteger(numeric) && numeric >= 1900 && numeric <= 2200) {
-    return String(numeric);
-  }
-  return formatDashboardValue(key, value, [value]);
-}
-
-function toStoryNumber(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value === 'string' && value.trim() !== '') {
-    const numeric = Number(value);
-    return Number.isFinite(numeric) ? numeric : null;
-  }
-  return null;
-}
-
-function coerceLayoutIntent(value?: string): NonNullable<DashboardLayoutItem['display']>['layoutIntent'] {
-  return value === 'compact' || value === 'standard' || value === 'wide' || value === 'tall' || value === 'full' || value === 'auto'
-    ? value
-    : 'auto';
-}
-
-function coerceTrustState(value?: string): NonNullable<DashboardLayoutItem['display']>['trustState'] {
-  return value === 'certified' || value === 'draft_ready' || value === 'review_required' ? value : 'review_required';
-}
-
-function coerceReviewStatus(value?: string): NonNullable<DashboardLayoutItem['display']>['reviewStatus'] {
-  return value === 'certified' || value === 'draft_ready' || value === 'review_required' ? value : 'review_required';
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 export function getGeneratedVizOptions(
   item: DashboardLayoutItem,
   genUi?: DqlGenUiMetadata | null,
@@ -2999,17 +2618,99 @@ function tileSurfaceForGenUi(component?: string): string {
   return 'var(--dql-app-surface, var(--surface, rgba(255,255,255,0.84)))';
 }
 
-function iconForChartType(type: ChartType): JSX.Element {
-  if (type === 'line' || type === 'area') return <LineChart size={13} strokeWidth={2.2} />;
-  if (type === 'pie' || type === 'donut') return <PieChart size={13} strokeWidth={2.2} />;
-  if (type === 'table') return <Table2 size={13} strokeWidth={2.2} />;
-  return <BarChart3 size={13} strokeWidth={2.2} />;
+/**
+ * Persistent save state for a dashboard that autosaves.
+ *
+ * There is no Save button by design — layout and tile edits write immediately.
+ * That is only a defensible design if the state is always visible, which it was
+ * not: the old notice was an 11px 0.68-opacity string rendered only in edit
+ * mode, and a failed save had no surface at all.
+ */
+function SaveStatus({
+  saving,
+  error,
+  pending,
+  notice,
+  onDismissError,
+}: {
+  saving: boolean;
+  error: string | null;
+  pending: boolean;
+  notice: string | null;
+  onDismissError: () => void;
+}): JSX.Element | null {
+  if (error) {
+    return (
+      <div role="alert" style={saveStatusStyle('var(--status-error, #c45555)')}>
+        <AlertTriangle size={13} />
+        <span style={{ flex: 1, minWidth: 0 }}>Save failed — {error}</span>
+        <button type="button" onClick={onDismissError} style={saveStatusDismissStyle}>Dismiss</button>
+      </div>
+    );
+  }
+  if (saving) {
+    return <div role="status" style={saveStatusStyle('var(--text-secondary)')}><Loader2 size={13} /> Saving…</div>;
+  }
+  if (pending) {
+    return (
+      <div role="status" style={saveStatusStyle('var(--status-warning, #b8860b)')}>
+        <AlertTriangle size={13} /> Layout preview not saved — Apply or Cancel to continue.
+      </div>
+    );
+  }
+  if (!notice) return null;
+  return <div role="status" style={saveStatusStyle('var(--text-tertiary)')}><CheckCircle2 size={13} /> {notice}</div>;
 }
 
-function formatGenUiLabel(value: string): string {
-  return value
-    .replace(/[_-]+/g, ' ')
-    .replace(/\b\w/g, (char) => char.toUpperCase());
+const saveStatusStyle = (color: string): React.CSSProperties => ({
+  display: 'flex',
+  alignItems: 'center',
+  gap: 7,
+  padding: '5px 12px',
+  fontSize: 11.5,
+  color,
+  borderBottom: '1px solid var(--border-subtle)',
+});
+
+const saveStatusDismissStyle: React.CSSProperties = {
+  border: 'none',
+  background: 'transparent',
+  color: 'inherit',
+  cursor: 'pointer',
+  fontSize: 11,
+  fontWeight: 700,
+  textDecoration: 'underline',
+  padding: 0,
+};
+
+/**
+ * A distinct glyph per chart type.
+ *
+ * This had four branches for sixteen types, so ten of them — including KPI,
+ * gauge, scatter and every stacked/grouped variant — drew the same bar icon.
+ * `GeneratedVizSwitcher` renders one button per allowed visualization, so a
+ * single tile could show seven identical bar glyphs in a row.
+ */
+export function iconForChartType(type: ChartType): JSX.Element {
+  const props = { size: 13, strokeWidth: 2.2 } as const;
+  switch (type) {
+    case 'line': return <LineChart {...props} />;
+    case 'area': return <ChartArea {...props} />;
+    case 'pie': return <PieChart {...props} />;
+    case 'donut': return <Donut {...props} />;
+    case 'table': return <Table2 {...props} />;
+    case 'kpi': return <Hash {...props} />;
+    case 'gauge': return <Gauge {...props} />;
+    case 'scatter': return <ChartScatter {...props} />;
+    case 'heatmap': return <Grid3x3 {...props} />;
+    case 'histogram': return <ChartColumnIncreasing {...props} />;
+    case 'stacked-bar': return <ChartColumnStacked {...props} />;
+    case 'grouped-bar': return <ChartColumnBig {...props} />;
+    case 'funnel': return <Filter {...props} />;
+    case 'waterfall': return <Activity {...props} />;
+    case 'sankey': return <Workflow {...props} />;
+    default: return <BarChart3 {...props} />;
+  }
 }
 
 function componentLabelForGenUi(genUi: DqlGenUiMetadata): string {
@@ -3048,57 +2749,6 @@ function extractGeneratedSummary(markdown: string, title: string): string {
     .trim();
   const paragraph = cleaned.split(/\n{2,}/).map((part) => part.trim()).find(Boolean);
   return paragraph || 'Generated app section pending analyst review.';
-}
-
-function pickEvidenceLabelColumn(columns: string[], rows: QueryResult['rows'], hint?: string): string | undefined {
-  if (columns.length === 0) return undefined;
-  const normalizedHint = hint?.toLowerCase();
-  if (normalizedHint) {
-    const hinted = columns.find((column) => {
-      const lower = column.toLowerCase();
-      return lower === normalizedHint || lower.includes(normalizedHint) || normalizedHint.includes(lower);
-    });
-    if (hinted) return hinted;
-  }
-  return columns.find((column) => /\b(name|label|title|dataset|table|block|player|customer|account)\b/i.test(column))
-    ?? columns.find((column) => !isNumericColumn(column, rows))
-    ?? columns[0];
-}
-
-function evidenceMetricRank(column: string): number {
-  const lower = column.toLowerCase();
-  if (/(total|count|records|rows|volume)/.test(lower)) return 1;
-  if (/(rate|percent|pct|score|quality|freshness)/.test(lower)) return 2;
-  if (/(amount|revenue|arr|value)/.test(lower)) return 3;
-  if (/(date|time|season)/.test(lower)) return 6;
-  if (/(^|_)id($|_)/.test(lower)) return 20;
-  return 100;
-}
-
-function isNumericColumn(column: string, rows: QueryResult['rows']): boolean {
-  const sample = rows.slice(0, 8).map((row) => row[column]).filter((value) => value !== null && value !== undefined && value !== '');
-  if (sample.length === 0) return false;
-  return sample.every((value) => typeof value === 'number' || (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))));
-}
-
-function resultValueSamples(columns: string[], rows: QueryResult['rows']): Map<string, unknown[]> {
-  return new Map(columns.map((column) => [column, rows.slice(0, 32).map((row) => row[column])]));
-}
-
-export function formatDashboardValue(
-  column: string,
-  value: unknown,
-  values: unknown[] = [],
-  options: { compact?: boolean; format?: string } = {},
-): string {
-  if (value === null || value === undefined || value === '') return 'N/A';
-  const formatted = formatDisplayValue(column, value, values, options);
-  if (!formatted) return 'N/A';
-  return typeof value === 'string' && formatted === value ? formatted.replace(/_/g, ' ') : formatted;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function toolbarButtonStyle(active: boolean): CSSProperties {
@@ -3704,70 +3354,6 @@ const miniButtonStyle: CSSProperties = {
   fontSize: 11,
 };
 
-function autoTileSizeForViz(vizType: string, cols: number): { w: number; h: number } {
-  const normalized = normalizeViz(vizType);
-  if (normalized === 'heading') return tileSizeForPreset('wide', cols, 'heading');
-  if (normalized === 'text') return tileSizeForPreset('standard', cols, 'text');
-  if (normalized === 'single_value' || normalized === 'kpi' || normalized === 'gauge') {
-    return tileSizeForPreset('compact', cols, normalized);
-  }
-  if (normalized === 'table' || normalized === 'pivot') return tileSizeForPreset('tall', cols, normalized);
-  if (normalized === 'line' || normalized === 'area') return tileSizeForPreset('wide', cols, normalized);
-  return tileSizeForPreset('standard', cols, normalized);
-}
-
-function autoTileSizeForItem(item: DashboardLayoutItem, cols: number): { w: number; h: number } {
-  const genUi = getDqlGenUi(item);
-  const preset = normalizeSizePreset(genUi?.layoutIntent);
-  if (preset && preset !== 'auto') return tileSizeForPreset(preset, cols, String(item.viz.type ?? 'table'));
-  return autoTileSizeForViz(normalizeViz(String(item.viz.type ?? 'table')), cols);
-}
-
-function narrowTileMinHeight(item: DashboardLayoutItem, genUi?: DqlGenUiMetadata | null): number {
-  if (item.viz.type === 'heading') return 90;
-  if (genUi?.component === 'BusinessBrief' || genUi?.component === 'NarrativePanel' || item.viz.type === 'text') return 180;
-  if (genUi?.component === 'TrustCallout' || genUi?.component === 'ResearchActions') return 210;
-  if (genUi?.component === 'EvidenceTable' || genUi?.component === 'PivotTable') return 330;
-  if (genUi?.component === 'KpiMetric') return 150;
-  return Math.max(280, Math.min(420, item.h * 76));
-}
-
-function tileSizeForPreset(preset: TileSizePresetId, cols: number, vizType = 'table'): { w: number; h: number } {
-  const safeCols = Math.max(1, cols);
-  const half = Math.max(1, Math.ceil(safeCols / 2));
-  const third = Math.max(1, Math.ceil(safeCols / 3));
-  if (preset === 'auto') return autoTileSizeForViz(vizType, safeCols);
-  if (preset === 'compact') return { w: third, h: 2 };
-  if (preset === 'wide') return { w: safeCols, h: vizType === 'heading' ? 1 : 4 };
-  if (preset === 'tall') return { w: half, h: 6 };
-  if (preset === 'full') return { w: safeCols, h: 7 };
-  return { w: half, h: vizType === 'text' ? 2 : 4 };
-}
-
-function tileSizePatch(item: DashboardLayoutItem, cols: number, preset: TileSizePresetId): Partial<DashboardLayoutItem> {
-  const vizType = String(item.viz.type ?? 'table');
-  const size = preset === 'auto'
-    ? autoTileSizeForItem(item, cols)
-    : tileSizeForPreset(preset, cols, vizType);
-  return {
-    w: size.w,
-    h: size.h,
-    x: clamp(item.x, 0, Math.max(0, cols - size.w)),
-  };
-}
-
-function presetMatches(item: DashboardLayoutItem, cols: number, preset: TileSizePresetId): boolean {
-  const size = preset === 'auto'
-    ? autoTileSizeForItem(item, cols)
-    : tileSizeForPreset(preset, cols, String(item.viz.type ?? 'table'));
-  return item.w === size.w && item.h === size.h;
-}
-
-function normalizeSizePreset(value?: string): TileSizePresetId | null {
-  if (value === 'auto' || value === 'compact' || value === 'standard' || value === 'wide' || value === 'tall' || value === 'full') return value;
-  return null;
-}
-
 function nextTilePosition(
   dashboard: DashboardDocumentResponse['dashboard'],
   size: { w: number; h: number } = { w: 6, h: 3 },
@@ -3790,107 +3376,3 @@ function nextTileId(dashboard: DashboardDocumentResponse['dashboard'], raw: stri
 // Gap-free 2D first-fit packer: places each tile (in order) at the topmost,
 // then leftmost, free slot so later tiles backfill whitespace left by wider
 // tiles above them. Keeps a clean, dense enterprise grid.
-function packDashboardItems(items: DashboardLayoutItem[], cols: number): DashboardLayoutItem[] {
-  const safeCols = Math.max(1, cols);
-  const occupied: boolean[][] = [];
-  const fits = (x: number, y: number, w: number, h: number): boolean => {
-    for (let dy = 0; dy < h; dy++) {
-      const row = occupied[y + dy];
-      if (!row) continue;
-      for (let dx = 0; dx < w; dx++) {
-        if (row[x + dx]) return false;
-      }
-    }
-    return true;
-  };
-  const mark = (x: number, y: number, w: number, h: number): void => {
-    for (let dy = 0; dy < h; dy++) {
-      const yy = y + dy;
-      if (!occupied[yy]) occupied[yy] = new Array(safeCols).fill(false);
-      for (let dx = 0; dx < w; dx++) occupied[yy][x + dx] = true;
-    }
-  };
-  return items.map((item) => {
-    const w = clamp(Math.round(item.w || 1), 1, safeCols);
-    const h = Math.max(1, Math.round(item.h || 1));
-    let px = 0;
-    let py = 0;
-    outer: for (let y = 0; ; y++) {
-      for (let x = 0; x + w <= safeCols; x++) {
-        if (fits(x, y, w, h)) {
-          px = x;
-          py = y;
-          break outer;
-        }
-      }
-    }
-    mark(px, py, w, h);
-    return { ...item, x: px, y: py, w, h };
-  });
-}
-
-export function autoLayoutDashboardItems(items: DashboardLayoutItem[], cols: number): DashboardLayoutItem[] {
-  const ordered = [...items]
-    .map((item, index) => ({ item, index }))
-    .sort((a, b) => {
-      const rank = autoLayoutRank(a.item) - autoLayoutRank(b.item);
-      return rank !== 0 ? rank : a.index - b.index;
-    })
-    .map(({ item }) => {
-      const size = autoTileSizeForItem(item, cols);
-      return { ...item, w: size.w, h: size.h };
-    });
-  return packDashboardItems(ordered, cols);
-}
-
-function reorderTileForDrop(items: DashboardLayoutItem[], moved: DashboardLayoutItem, cols: number): DashboardLayoutItem[] {
-  const others = items
-    .filter((item) => item.i !== moved.i)
-    .sort((a, b) => layoutScore(a, cols) - layoutScore(b, cols));
-  const targetScore = layoutScore(moved, cols);
-  const insertAt = others.findIndex((item) => layoutScore(item, cols) > targetScore);
-  if (insertAt === -1) return [...others, moved];
-  return [
-    ...others.slice(0, insertAt),
-    moved,
-    ...others.slice(insertAt),
-  ];
-}
-
-function layoutScore(item: DashboardLayoutItem, cols: number): number {
-  return item.y * cols + item.x;
-}
-
-// Clean enterprise reading order for Auto layout:
-// headings → KPIs → charts → tables/pivots → text.
-function autoLayoutRank(item: DashboardLayoutItem): number {
-  const genUi = getDqlGenUi(item);
-  if (genUi?.role === 'business_summary') return 0;
-  if (genUi?.role === 'kpi') return 1;
-  if (genUi?.component === 'RankingPanel' || genUi?.component === 'TrendPanel') return 2;
-  if (genUi?.component === 'EvidenceTable' || genUi?.component === 'PivotTable') return 3;
-  if (genUi?.component === 'TrustCallout' || genUi?.component === 'ResearchActions') return 4;
-  if (genUi?.role === 'narrative') return 5;
-  const viz = normalizeViz(String(item.viz.type ?? 'table'));
-  if (viz === 'heading') return 0;
-  if (viz === 'single_value' || viz === 'kpi' || viz === 'gauge') return 1;
-  if (viz === 'line' || viz === 'area' || viz === 'bar' || viz === 'pie' || viz === 'funnel' || viz === 'map') return 2;
-  if (viz === 'table' || viz === 'pivot') return 3;
-  if (viz === 'text') return 4;
-  return 2;
-}
-
-function normalizeViz(chartType?: string): string {
-  const value = (chartType ?? 'table').toLowerCase().replace(/-/g, '_');
-  if (value === 'single_value' || value === 'kpi' || value === 'gauge' || value === 'line' || value === 'bar' || value === 'area'
-    || value === 'pie' || value === 'donut' || value === 'grouped_bar' || value === 'stacked_bar' || value === 'scatter'
-    || value === 'heatmap' || value === 'histogram' || value === 'waterfall' || value === 'pivot' || value === 'map'
-    || value === 'funnel' || value === 'sankey' || value === 'heading' || value === 'text') {
-    return value;
-  }
-  return 'table';
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
-}

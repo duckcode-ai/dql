@@ -853,6 +853,22 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
     }
     return true;
   }
+  if (m && req.method === 'PATCH') {
+    const id = decodeURIComponent(m[1]);
+    try {
+      const body = await readJson<{ name?: string; pageTitle?: string; dashboardId?: string; expectedFingerprint?: string }>(req);
+      const result = renameApp(projectRoot, id, body);
+      if (!result.ok) {
+        sendJson(res, result.code === 'APP_NOT_FOUND' ? 404 : result.code === 'APP_CHANGED' ? 409 : 400, result);
+        return true;
+      }
+      ctx.scheduleProjectRefresh?.('app-renamed');
+      sendJson(res, 200, result);
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: (err as Error).message });
+    }
+    return true;
+  }
   if (m && req.method === 'GET') {
     const id = m[1];
     const result = loadAppById(projectRoot, id);
@@ -2199,6 +2215,10 @@ export async function commitAppAiBuild(
   // tiles (narrative, draft placeholders) stay — they document the story + gaps.
   const committedPlan: AppPlan = {
     ...plan,
+    // `+ Add page` must not rewrite the App it is adding to (`UI-017`), but the
+    // fields were dropped with no error, so a name typed in that brief silently
+    // vanished. Adding a page keeps the App's own name; use `PATCH /api/apps/:id`
+    // to rename, and see `appliedNameWarnings` below for the reported diagnostic.
     ...(!isExistingPageBuild && cleanString(input.appName) ? { name: cleanString(input.appName).slice(0, 120) } : {}),
     ...(!isExistingPageBuild && cleanString(input.audience) ? { audience: cleanString(input.audience).slice(0, 120) } : {}),
     pages: plan.pages.map((page, pageIndex) => ({
@@ -2248,7 +2268,15 @@ export async function commitAppAiBuild(
   } = await import('@duckcodeailabs/dql-agent');
   const index = await reindexProject(projectRoot, { kgPath: defaultKgPath(projectRoot) });
   if (!session.snapshotId || index.kgFingerprint !== session.snapshotId) {
-    return { ok: false, error: 'Project sources changed after this proposal was created. Refresh and review the App proposal again.', status: 409 };
+    // This compares a whole-project index, so an unrelated block or model edit
+    // invalidates a pending proposal. Kept deliberately strict — the proposal's
+    // preflight receipts are bound to that snapshot — but the message now says
+    // what to do instead of only reporting a conflict.
+    return {
+      ok: false,
+      error: 'Project sources changed after this proposal was created, so its preflight evidence no longer applies. Re-run the build request to get a fresh proposal.',
+      status: 409,
+    };
   }
   const kg = new KGStore(defaultKgPath(projectRoot));
   try {
@@ -2274,7 +2302,10 @@ export async function commitAppAiBuild(
     const stagedAppDir = isExistingPageBuild
       ? join(stagingRoot, 'candidate', 'apps', committedPlan.appId)
       : generatedAppDir;
-    const targetAppDir = join(projectRoot, 'apps', committedPlan.appId);
+    // Apps also resolve under `domains/**/apps/<id>`. Hardcoding the canonical
+    // root meant a domain-hosted App always failed the existence check below
+    // and could never have a page added.
+    const targetAppDir = existingApp?.appDir ?? join(projectRoot, 'apps', committedPlan.appId);
     const backupAppDir = join(projectRoot, '.dql', 'local', 'app-build-staging', `${session.id}-backup`);
     rmSync(stagingRoot, { recursive: true, force: true });
     try {
@@ -2358,6 +2389,15 @@ export async function commitAppAiBuild(
       rmSync(stagingRoot, { recursive: true, force: true });
     }
     const attachWarnings: string[] = [];
+    // Adding a page deliberately cannot rename or re-audience the App it joins.
+    // Say so instead of discarding the input silently — this array existed and
+    // was never written to, so the drop had no surface at all.
+    if (isExistingPageBuild && cleanString(input.appName)) {
+      attachWarnings.push('The App name was not changed: adding a page cannot rename the App. Rename it from the App header.');
+    }
+    if (isExistingPageBuild && cleanString(input.audience)) {
+      attachWarnings.push('The audience was not changed: adding a page keeps the App\'s existing audience.');
+    }
     await ensureMetadataCatalogFresh(projectRoot, { force: true });
     const app = collectAppsList(projectRoot).find((entry) => entry.id === committedPlan.appId) ?? null;
     const next: AppAiBuildSession = {
@@ -2966,6 +3006,81 @@ export function recommendDashboardTile(
     reviewStatus: recommendation.display.reviewStatus,
     evidence: recommendation.evidence,
     warnings: recommendation.warnings,
+  };
+}
+
+/**
+ * Rename an App, and optionally a page inside it.
+ *
+ * `dql.app.json` previously had exactly two writers — create and publish — so
+ * an App could never be renamed after it was built. Only the display `name`
+ * changes here: the App **id** is also its folder name and is referenced by
+ * notebooks, product context, and deep links, so renaming must not move it.
+ *
+ * The write is staged and swapped like the publish path, and guarded by the
+ * caller-supplied fingerprint so a concurrent edit cannot be clobbered.
+ */
+export function renameApp(
+  projectRoot: string,
+  appId: string,
+  input: { name?: string; pageTitle?: string; dashboardId?: string; expectedFingerprint?: string },
+): { ok: true; app: AppDocument; paths: string[] } | { ok: false; error: string; code?: string } {
+  const loaded = loadAppById(projectRoot, appId);
+  if (!loaded) return { ok: false, error: `App "${appId}" not found`, code: 'APP_NOT_FOUND' };
+  if (input.expectedFingerprint && fingerprintAppDirectory(loaded.appDir) !== input.expectedFingerprint) {
+    return { ok: false, error: 'This App changed since it was loaded. Refresh and rename again.', code: 'APP_CHANGED' };
+  }
+
+  const name = cleanString(input.name);
+  const pageTitle = cleanString(input.pageTitle);
+  if (!name && !pageTitle) return { ok: false, error: 'Provide a name or a pageTitle.', code: 'INVALID_REQUEST' };
+
+  const appPath = join(loaded.appDir, 'dql.app.json');
+  const parsedApp = parseAppDocument(JSON.stringify({ ...loaded.app, ...(name ? { name } : {}) }), appPath);
+  if (!parsedApp.document) return { ok: false, error: parsedApp.errors.map((err) => err.message).join('; ') };
+
+  const renamedDashboards: Array<{ sourcePath: string; document: DashboardDocument }> = [];
+  if (pageTitle) {
+    const homepage = loaded.app.homepage;
+    const dashboardId = cleanString(input.dashboardId)
+      || (homepage?.type === 'dashboard' ? homepage.id : undefined);
+    const source = findDashboardsForApp(loaded.appDir)
+      .map((path) => ({ path, document: loadDashboardDocument(path).document }))
+      .find((item) => item.document && (!dashboardId || item.document.id === dashboardId));
+    if (!source?.document) return { ok: false, error: `Dashboard "${dashboardId ?? ''}" not found in app "${appId}"`, code: 'DASHBOARD_NOT_FOUND' };
+    const next = { ...source.document, metadata: { ...source.document.metadata, title: pageTitle } };
+    const parsed = parseDashboardDocument(JSON.stringify(next), source.path);
+    if (!parsed.document) return { ok: false, error: parsed.errors.map((err) => err.message).join('; ') };
+    renamedDashboards.push({ sourcePath: source.path, document: parsed.document });
+  }
+
+  const stagingBase = join(projectRoot, '.dql', 'local', 'app-rename-staging');
+  const stagedAppDir = join(stagingBase, `${appId}-next`);
+  const backupAppDir = join(stagingBase, `${appId}-backup`);
+  rmSync(stagedAppDir, { recursive: true, force: true });
+  rmSync(backupAppDir, { recursive: true, force: true });
+  mkdirSync(stagingBase, { recursive: true });
+  cpSync(loaded.appDir, stagedAppDir, { recursive: true });
+  writeFileSync(join(stagedAppDir, 'dql.app.json'), JSON.stringify(parsedApp.document, null, 2) + '\n', 'utf-8');
+  for (const dashboard of renamedDashboards) {
+    writeFileSync(
+      join(stagedAppDir, relative(loaded.appDir, dashboard.sourcePath)),
+      JSON.stringify(dashboard.document, null, 2) + '\n',
+      'utf-8',
+    );
+  }
+  try {
+    renameSync(loaded.appDir, backupAppDir);
+    renameSync(stagedAppDir, loaded.appDir);
+    rmSync(backupAppDir, { recursive: true, force: true });
+  } catch (error) {
+    if (existsSync(backupAppDir) && !existsSync(loaded.appDir)) renameSync(backupAppDir, loaded.appDir);
+    throw error;
+  }
+  return {
+    ok: true,
+    app: parsedApp.document,
+    paths: [relative(projectRoot, appPath), ...renamedDashboards.map((item) => relative(projectRoot, item.sourcePath))],
   };
 }
 
@@ -3822,7 +3937,12 @@ function visualizationFitsResult(
   const dimensions = columns.filter((column) => !isMeasureColumn(column, rows));
   const hasTime = columns.some((column) => /\b(date|time|week|month|quarter|year|season|period)\b/i.test(column.name));
   if (viz === 'table' || viz === 'pivot' || viz === 'text' || viz === 'heading') return true;
-  if (rows.length === 0) return false;
+  // An empty row sample means "cannot judge", not "does not fit". Returning
+  // false here silently rewrote every requested visualization to `table`
+  // whenever no rows were supplied — which is the normal case when a tile is
+  // configured before its first run, so authored and AI-chosen charts were
+  // routinely discarded. Keep the request; the renderer copes with the shape.
+  if (rows.length === 0) return true;
   if (viz === 'single_value' || viz === 'kpi' || viz === 'gauge') return rows.length === 1 && measures.length >= 1;
   if (viz === 'line' || viz === 'area') return hasTime && measures.length >= 1;
   if (viz === 'scatter') return measures.length >= 2;
@@ -5835,13 +5955,26 @@ function uniqueAppPageId(base: string, existingIds: Set<string>): string {
  * deliberately stricter than the metadata snapshot: page, notebook, draft, and
  * App-document edits all invalidate approval before the atomic directory swap.
  */
+/**
+ * Fingerprint the parts of an App package a write can actually conflict with:
+ * the manifest and the dashboard documents.
+ *
+ * Hashing every byte under the App directory made the guard far too sensitive —
+ * a notebook run output, a README edit, or an attached notebook would
+ * invalidate a page proposal that could not possibly conflict with them, and
+ * the commit failed with an unexplained 409.
+ */
 function fingerprintAppDirectory(appDir: string): string {
   const files: Array<{ path: string; symbolicLink: boolean }> = [];
   const visit = (directory: string): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const absolutePath = join(directory, entry.name);
-      if (entry.isDirectory()) visit(absolutePath);
-      else if (entry.isFile() || entry.isSymbolicLink()) {
+      if (entry.isDirectory()) {
+        // Only `dashboards/` participates; notebooks, drafts and generated prose do not.
+        if (directory === appDir && entry.name !== 'dashboards') continue;
+        visit(absolutePath);
+      } else if (entry.isFile() || entry.isSymbolicLink()) {
+        if (directory === appDir && entry.name !== 'dql.app.json') continue;
         files.push({ path: absolutePath, symbolicLink: entry.isSymbolicLink() });
       }
     }

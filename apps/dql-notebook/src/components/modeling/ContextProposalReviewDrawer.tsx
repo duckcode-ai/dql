@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, FileDiff, Loader2, RefreshCw, ShieldCheck, X } from 'lucide-react';
 import { api, type ContextAuthoringProposalV1 } from '../../api/client';
 import type { Theme } from '../../themes/notebook-theme';
@@ -22,22 +22,38 @@ export function ContextProposalReviewDrawer({
   const blocking = current.diagnostics.filter((diagnostic) => diagnostic.severity === 'blocking');
   const patchesByOperation = useMemo(() => new Map(current.operations.map((operation) => [operation.id, current.patches.filter((patch) => patch.operationId === operation.id)])), [current]);
 
-  const updateSelection = async (operationId: string, checked: boolean) => {
-    const next = checked ? [...selected, operationId] : selected.filter((id) => id !== operationId);
+  /**
+   * Reviewing a large import means toggling many checkboxes in a row. Each
+   * toggle re-previews on the server and mints a new proposal hash, so they are
+   * coalesced into one request per burst instead of one per click.
+   */
+  const pendingSelection = useRef<string[] | null>(null);
+  const repreviewTimer = useRef<number | null>(null);
+  useEffect(() => () => { if (repreviewTimer.current) window.clearTimeout(repreviewTimer.current); }, []);
+
+  const updateSelection = (operationId: string, checked: boolean) => {
+    const previous = pendingSelection.current ?? selected;
+    const next = checked ? [...previous, operationId] : previous.filter((id) => id !== operationId);
+    pendingSelection.current = next;
     setSelected(next);
-    setBusy('preview');
     setError(null);
     setRebaseAvailable(false);
-    try {
-      const refreshed = await api.repreviewContextProposal(current.id, next);
-      setCurrent(refreshed);
-      setSelected(refreshed.operations.map((operation) => operation.id));
-    } catch (cause) {
-      setSelected(selected);
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(null);
-    }
+    if (repreviewTimer.current) window.clearTimeout(repreviewTimer.current);
+    repreviewTimer.current = window.setTimeout(() => {
+      const requested = pendingSelection.current ?? next;
+      pendingSelection.current = null;
+      setBusy('preview');
+      void api.repreviewContextProposal(current.id, requested)
+        .then((refreshed) => {
+          setCurrent(refreshed);
+          setSelected(refreshed.operations.map((operation) => operation.id));
+        })
+        .catch((cause) => {
+          setSelected(current.operations.map((operation) => operation.id));
+          setError(cause instanceof Error ? cause.message : String(cause));
+        })
+        .finally(() => setBusy(null));
+    }, 350);
   };
 
   const commit = async () => {
@@ -107,9 +123,9 @@ export function ContextProposalReviewDrawer({
               return (
                 <section key={operation.id} style={{ border: '1px solid var(--border-subtle)', borderRadius: 9, overflow: 'hidden', background: theme.cellBg }}>
                   <label style={{ display: 'flex', gap: 9, alignItems: 'flex-start', padding: '11px 12px', cursor: busy ? 'wait' : 'pointer' }}>
-                    <input type="checkbox" checked={selected.includes(operation.id)} disabled={Boolean(busy)} onChange={(event) => void updateSelection(operation.id, event.target.checked)} />
+                    <input type="checkbox" checked={selected.includes(operation.id)} disabled={Boolean(busy)} onChange={(event) => updateSelection(operation.id, event.target.checked)} />
                     <span style={{ flex: 1, minWidth: 0 }}>
-                      <b style={{ display: 'block', fontSize: 11.5 }}>{operation.kind.replace(/_/g, ' ')}</b>
+                      <b style={{ display: 'block', fontSize: 11.5 }}>{describeOperation(operation)}</b>
                       <code style={{ display: 'block', marginTop: 3, color: theme.textMuted, fontSize: 9.5, overflowWrap: 'anywhere' }}>{operation.id}</code>
                     </span>
                     <span style={{ fontSize: 10, color: theme.textMuted }}>{patches.length} patch{patches.length === 1 ? '' : 'es'}</span>
@@ -141,6 +157,36 @@ export function ContextProposalReviewDrawer({
       </aside>
     </div>
   );
+}
+
+/**
+ * A one-line, plain-language summary of what an operation does.
+ *
+ * The exact source patch is still one click away, but leading with
+ * "Bind fct_orders as Order in commerce / core" is what makes a 40-model import
+ * reviewable; a list of operation ids is not.
+ */
+function describeOperation(operation: ContextAuthoringProposalV1['operations'][number]): string {
+  if (operation.kind === 'skill_change') {
+    return `${operation.operation === 'create' ? 'Create' : operation.operation === 'move' ? 'Move' : 'Update'} skill ${operation.value.id}`;
+  }
+  if (operation.kind === 'dbt_source_change') return 'Patch dbt source';
+  const change = operation.change;
+  const scope = (domain?: string, areaId?: string) => [domain, areaId].filter(Boolean).join(' / ');
+  switch (change.operation) {
+    case 'upsert_domain': return `Create domain ${change.value.id}`;
+    case 'upsert_area': return `Create subject area ${change.value.name || change.value.id} in ${change.value.domain}`;
+    case 'upsert_entity':
+      return `Bind ${change.value.dbtModel.split('.').at(-1)} as ${change.value.businessName || change.value.id} in ${scope(change.value.domain, change.value.areaId)}`;
+    case 'upsert_relationship': {
+      const keys = change.value.keys.map((key) => `${key.from} = ${key.to}`).join(', ');
+      return `Connect ${change.value.from} to ${change.value.to} on ${keys} (${change.value.cardinality}, draft)`;
+    }
+    case 'remove_entity': return `Remove model ${change.value.id}`;
+    case 'remove_relationship': return `Remove relationship ${change.value.id}`;
+    case 'remove_area': return `Remove subject area ${change.value.id}`;
+    default: return change.operation.replace(/_/g, ' ');
+  }
 }
 
 function Summary({ label, value, theme }: { label: string; value: number; theme: Theme }) {

@@ -3,6 +3,45 @@ import { FileSearch, FolderOpen, Loader2, Search, Upload, X } from 'lucide-react
 import { api, type ContextAuthoringOperation, type ContextAuthoringProposalV1, type DbtFirstModelingResponse, type DbtModelInventoryItem, type ModelingImportSession } from '../../api/client';
 import type { Theme } from '../../themes/notebook-theme';
 
+/**
+ * UI-019: the scope a new model lands in. Every model still belongs to exactly
+ * one Domain and subject area, but an author who has not chosen one gets a
+ * sensible prefilled default instead of a disabled button. The server creates
+ * whichever part of the scope does not exist yet, inside the same reviewable
+ * proposal.
+ */
+const DEFAULT_AREA_ID = 'core';
+
+function useAuthoringScope(data: DbtFirstModelingResponse, domain: string | null, areaId: string | null) {
+  const existingArea = data.modeling.areas[areaId ?? ''];
+  const domains = Object.keys(data.modeling.packages ?? {});
+  const defaultDomain = domain
+    ?? (domains.length === 1 ? domains[0]! : slug(data.dbtProvenance?.projectName ?? '').replace(/-/g, '_') || 'analytics');
+  const [scopeDomain, setScopeDomain] = useState(defaultDomain);
+  const [scopeArea, setScopeArea] = useState(existingArea?.localId ?? existingArea?.id ?? DEFAULT_AREA_ID);
+  const domainIsNew = !domains.includes(scopeDomain);
+  const areaIsNew = !Object.values(data.modeling.areas ?? {}).some(
+    (candidate) => candidate.domain === scopeDomain && (candidate.localId === scopeArea || candidate.id === scopeArea),
+  );
+  return { scopeDomain, setScopeDomain, scopeArea, setScopeArea, domains, domainIsNew, areaIsNew };
+}
+
+function ScopeFields({ scope, theme }: { scope: ReturnType<typeof useAuthoringScope>; theme: Theme }): JSX.Element {
+  return <>
+    <label style={label(theme)}>Domain
+      <input aria-label="Domain" list="dql-scope-domains" value={scope.scopeDomain} onChange={(event) => scope.setScopeDomain(event.target.value)} style={input(theme)} />
+      <datalist id="dql-scope-domains">{scope.domains.map((value) => <option key={value} value={value} />)}</datalist>
+      <small style={{ color: scope.domainIsNew ? 'var(--status-warning)' : theme.textMuted }}>{scope.domainIsNew ? 'Will be created with these models.' : 'Existing Domain.'}</small>
+    </label>
+    <label style={label(theme)}>Subject area
+      <input aria-label="Subject area" value={scope.scopeArea} onChange={(event) => scope.setScopeArea(event.target.value)} style={input(theme)} />
+      <small style={{ color: scope.areaIsNew ? 'var(--status-warning)' : theme.textMuted }}>
+        {scope.areaIsNew ? 'Will be created with these models.' : 'Existing subject area.'} A subject area is one focused diagram inside the Domain — it organizes source and sharpens retrieval, and never changes what an agent is allowed to use.
+      </small>
+    </label>
+  </>;
+}
+
 export function AddModelsDrawer({ data, domain, areaId, theme, onClose, onProposal }: DrawerContextProps): JSX.Element {
   const [query, setQuery] = useState('');
   const [items, setItems] = useState<DbtModelInventoryItem[]>([]);
@@ -11,7 +50,7 @@ export function AddModelsDrawer({ data, domain, areaId, theme, onClose, onPropos
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const area = data.modeling.areas[areaId ?? ''];
+  const scope = useAuthoringScope(data, domain, areaId);
 
   useEffect(() => {
     let active = true;
@@ -29,7 +68,10 @@ export function AddModelsDrawer({ data, domain, areaId, theme, onClose, onPropos
   }, [query]);
 
   const selectedItems = selected.flatMap((id) => itemById[id] ? [itemById[id]!] : []);
-  const operations = useMemo(() => buildEntityOperations(data, domain, area, selectedItems), [area, data, domain, selectedItems]);
+  const operations = useMemo(
+    () => buildEntityOperations(data, scope.scopeDomain, scope.scopeArea, selectedItems),
+    [data, scope.scopeArea, scope.scopeDomain, selectedItems],
+  );
   const preview = async () => {
     setBusy(true); setError(null);
     try {
@@ -47,15 +89,14 @@ export function AddModelsDrawer({ data, domain, areaId, theme, onClose, onPropos
         {!items.length ? <Note theme={theme}>No unbound dbt models match this search.</Note> : null}
       </div>
     </> : step === 2 ? <>
-      <Field label="Domain" value={domain ?? 'Select a Domain in Modeling first'} theme={theme} />
-      <Field label="Area" value={area?.name ?? 'Select one Area in Modeling first'} theme={theme} />
-      <Note theme={theme}>Every model receives exactly one Domain and Area. DQL stores the dbt unique ID and business overlay; dbt-owned columns, SQL, tests, descriptions, and lineage remain in dbt.</Note>
+      <ScopeFields scope={scope} theme={theme} />
+      <Note theme={theme}>Every model receives exactly one Domain and subject area. DQL stores the dbt unique ID and business overlay; dbt-owned columns, SQL, tests, descriptions, and lineage remain in dbt.</Note>
     </> : <>
       <Note theme={theme}>{operations.length} sparse entity-binding patch{operations.length === 1 ? '' : 'es'} will be prepared. No source changes occur until the exact proposal is reviewed and explicitly saved.</Note>
-      {selectedItems.map((item) => <div key={item.uniqueId} style={choice(theme)}><span style={{ flex: 1 }}><b style={{ display: 'block', fontSize: 11 }}>{item.name}</b><code style={{ fontSize: 9.5, color: theme.textMuted }}>{item.uniqueId}</code></span><span style={{ fontSize: 10, color: theme.textMuted }}>{domain} / {area?.name}</span></div>)}
+      {selectedItems.map((item) => <div key={item.uniqueId} style={choice(theme)}><span style={{ flex: 1 }}><b style={{ display: 'block', fontSize: 11 }}>{item.name}</b><code style={{ fontSize: 9.5, color: theme.textMuted }}>{item.uniqueId}</code></span><span style={{ fontSize: 10, color: theme.textMuted }}>{scope.scopeDomain} / {scope.scopeArea}</span></div>)}
     </>}
     {error ? <div role="alert" style={{ color: 'var(--status-error)', fontSize: 11, marginTop: 10 }}>{error}</div> : null}
-    <DrawerActions theme={theme} busy={busy} back={step > 1 ? () => setStep((step - 1) as 1 | 2) : undefined} next={step < 3 ? () => setStep((step + 1) as 2 | 3) : () => void preview()} nextLabel={step < 3 ? 'Continue' : 'Create review proposal'} disabled={selected.length === 0 || !domain || !area} />
+    <DrawerActions theme={theme} busy={busy} back={step > 1 ? () => setStep((step - 1) as 1 | 2) : undefined} next={step < 3 ? () => setStep((step + 1) as 2 | 3) : () => void preview()} nextLabel={step < 3 ? 'Continue' : 'Create review proposal'} disabled={selected.length === 0 || !scope.scopeDomain.trim() || !scope.scopeArea.trim()} />
   </DrawerShell>;
 }
 
@@ -68,7 +109,7 @@ export function ModelingYamlImportDrawer({ data, domain, areaId, theme, onClose,
   const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const area = data.modeling.areas[areaId ?? ''];
+  const scope = useAuthoringScope(data, domain, areaId);
 
   const discover = async () => {
     setBusy(true); setError(null);
@@ -80,10 +121,10 @@ export function ModelingYamlImportDrawer({ data, domain, areaId, theme, onClose,
     finally { setBusy(false); }
   };
   const preview = async () => {
-    if (!session || !domain || !area) return;
+    if (!session) return;
     setBusy(true); setError(null);
     try {
-      const result = await api.previewModelingImport(session.id, { selectedCandidateIds: selected, domain, areaId: area.localId || area.id, expectedSnapshotId: data.snapshot?.id ?? '' });
+      const result = await api.previewModelingImport(session.id, { selectedCandidateIds: selected, domain: scope.scopeDomain, areaId: scope.scopeArea, expectedSnapshotId: data.snapshot?.id ?? '' });
       onProposal(result.proposal);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setBusy(false); }
@@ -112,8 +153,8 @@ export function ModelingYamlImportDrawer({ data, domain, areaId, theme, onClose,
       <div style={{ display: 'grid', gap: 7 }}>
         {session.candidates.map((candidate) => <label key={candidate.id} style={{ ...choice(theme), opacity: candidate.action === 'import' ? 1 : .72 }}><input type="checkbox" disabled={candidate.action !== 'import'} checked={selected.includes(candidate.id)} onChange={(event) => setSelected((current) => event.target.checked ? [...current, candidate.id] : current.filter((id) => id !== candidate.id))} /><span style={{ flex: 1 }}><b style={{ display: 'block', fontSize: 11 }}>{candidate.name}</b><span style={{ display: 'block', marginTop: 2, color: theme.textMuted, fontSize: 9.5 }}>{candidate.dialect.replace(/_/g, ' ')} · {candidate.summary}</span>{candidate.warnings.map((warning) => <small key={warning} style={{ display: 'block', color: 'var(--status-warning)', marginTop: 3 }}>{warning}</small>)}</span><span style={{ fontSize: 9.5, color: theme.textMuted }}>{candidate.action.replace(/_/g, ' ')}</span></label>)}
       </div>
-      {!domain || !area ? <div role="alert" style={{ color: 'var(--status-warning)', fontSize: 11, marginTop: 10 }}>Select exactly one Domain and Area in Modeling before previewing the import.</div> : null}
-      <DrawerActions theme={theme} busy={busy} back={() => { setSession(null); setSelected([]); }} next={() => void preview()} nextLabel="Review exact patches" disabled={!selected.length || !domain || !area} />
+      <ScopeFields scope={scope} theme={theme} />
+      <DrawerActions theme={theme} busy={busy} back={() => { setSession(null); setSelected([]); }} next={() => void preview()} nextLabel="Review exact patches" disabled={!selected.length || !scope.scopeDomain.trim() || !scope.scopeArea.trim()} />
     </>}
     {error ? <div role="alert" style={{ color: 'var(--status-error)', fontSize: 11, marginTop: 10 }}>{error}</div> : null}
   </DrawerShell>;
@@ -121,8 +162,8 @@ export function ModelingYamlImportDrawer({ data, domain, areaId, theme, onClose,
 
 interface DrawerContextProps { data: DbtFirstModelingResponse; domain: string | null; areaId: string | null; theme: Theme; onClose: () => void; onProposal: (proposal: ContextAuthoringProposalV1) => void }
 
-function buildEntityOperations(data: DbtFirstModelingResponse, domain: string | null, area: DbtFirstModelingResponse['modeling']['areas'][string] | undefined, items: DbtModelInventoryItem[]): ContextAuthoringOperation[] {
-  if (!domain || !area) return [];
+function buildEntityOperations(data: DbtFirstModelingResponse, domain: string, areaId: string, items: DbtModelInventoryItem[]): ContextAuthoringOperation[] {
+  if (!domain.trim() || !areaId.trim()) return [];
   const used = new Set(Object.values(data.modeling.entities).filter((entity) => entity.domain === domain).map((entity) => entity.localId || entity.id));
   return [...items].sort((a, b) => a.uniqueId.localeCompare(b.uniqueId)).map((item) => {
     const base = slug(item.name) || 'model';
@@ -131,7 +172,7 @@ function buildEntityOperations(data: DbtFirstModelingResponse, domain: string | 
     let index = 2;
     while (used.has(id)) id = `${base}-${index++}`;
     used.add(id);
-    return { id: `bind:${item.uniqueId}`, kind: 'modeling_change', change: { operation: 'upsert_entity', value: { id, domain, areaId: area.localId || area.id, dbtModel: item.uniqueId, businessName: title(item.name), status: 'draft' } }, evidence: [`dbt unique id ${item.uniqueId}`, `manifest fingerprint ${item.identityFingerprint}`] };
+    return { id: `bind:${item.uniqueId}`, kind: 'modeling_change', change: { operation: 'upsert_entity', value: { id, domain, areaId, dbtModel: item.uniqueId, businessName: title(item.name), status: 'draft' } }, evidence: [`dbt unique id ${item.uniqueId}`, `manifest fingerprint ${item.identityFingerprint}`] };
   });
 }
 
