@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { __test__, resolveEffectiveQuestion } from './dql-agent-provider.js';
+import { __test__, renderAppContextForPrompt, renderExtraContext, resolveEffectiveQuestion } from './dql-agent-provider.js';
 import type { AgentRunRequest } from '../types.js';
 import {
   buildAnalysisQuestionPlan,
@@ -1042,5 +1042,54 @@ describe('certified fit confirmation bridge', () => {
       allow: false,
       confidence: 'low',
     });
+  });
+});
+
+describe('App copilot context: the app\'s own drafts', () => {
+  const appContext = {
+    app: { id: 'growth', name: 'Growth Review', domain: 'growth', audience: 'CFO' },
+    dashboards: [{ id: 'overview', title: 'Growth Overview', tiles: [{}, {}] }],
+    drafts: [{
+      name: 'customer-tax-view',
+      path: 'apps/growth/drafts/customer-tax-view.dql',
+      status: 'review',
+      description: 'Tax paid per customer; join is declared but not certified.',
+      question: 'Can you complete customers tax view',
+      sql: 'SELECT c.customer_name, SUM(o.tax_paid)\nFROM customers c JOIN orders o USING (customer_id)',
+    }],
+  };
+  const envelope = (workspaceContext: Record<string, unknown>) => JSON.stringify({ mode: 'agent_run', workspaceContext }, null, 2);
+
+  it('renders the drafts the manifest never indexes, with their SQL and review standing', () => {
+    const out = renderAppContextForPrompt(appContext) ?? '';
+    expect(out).toContain('Growth Review');
+    expect(out).toContain('customer-tax-view');
+    expect(out).toContain('SUM(o.tax_paid)');
+    expect(out).toMatch(/REVIEW-REQUIRED/);
+    expect(out).toMatch(/never present one as a certified result/i);
+  });
+
+  it('carries the app context once, not twice', () => {
+    // It also travels inside the serialized run envelope; rendering it as prose
+    // must strip it from the JSON rather than shipping both copies.
+    const req = { upstream: { sql: envelope({ surface: 'app_builder', appContext }) } } as unknown as AgentRunRequest;
+    const out = renderExtraContext(req) ?? '';
+    expect(out.match(/customer-tax-view/g)?.length).toBe(1);
+    expect(out).toContain('"surface": "app_builder"');
+  });
+
+  it('leaves a non-app run envelope untouched', () => {
+    const req = { upstream: { sql: envelope({ surface: 'modeling', domain: 'commerce' }) } } as unknown as AgentRunRequest;
+    const out = renderExtraContext(req) ?? '';
+    expect(out).toContain('"surface": "modeling"');
+    expect(out).not.toMatch(/REVIEW-REQUIRED/);
+  });
+
+  it('ignores an envelope with no app and never throws on malformed input', () => {
+    expect(renderAppContextForPrompt(undefined)).toBeUndefined();
+    expect(renderAppContextForPrompt({})).toBeUndefined();
+    expect(renderAppContextForPrompt({ app: {} })).toBeUndefined();
+    const req = { upstream: { sql: '{ not json' } } as unknown as AgentRunRequest;
+    expect(() => renderExtraContext(req)).not.toThrow();
   });
 });

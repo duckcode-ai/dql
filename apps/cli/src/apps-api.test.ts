@@ -23,6 +23,7 @@ import {
   recommendBlocks,
   recommendDashboardTile,
   recommendVisualization,
+  matchAppDraftForQuestion,
 } from './apps-api.js';
 
 const tempDirs: string[] = [];
@@ -2416,3 +2417,40 @@ function formatTestParamValue(value: string | number | boolean | Array<string | 
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   return `"${value.replace(/"/g, '\\"')}"`;
 }
+
+describe('App copilot: the app\'s own drafts', () => {
+  const drafts = [
+    { name: 'can-you-complete-customers-tax-view', path: 'apps/a/drafts/tax.dql', status: 'review',
+      question: 'Can you complete customers tax view', description: 'Tax paid per customer.' },
+    { name: 'beverage-margin-by-region', path: 'apps/a/drafts/margin.dql', status: 'review',
+      question: 'What is beverage margin by region', description: 'Margin per beverage per region.' },
+  ];
+
+  it('offers the draft that covers the question', () => {
+    // The governed loop cannot find these — they are never indexed into the
+    // manifest — so without this the app silently sits on an answer it has.
+    expect(matchAppDraftForQuestion(drafts, 'Can you complete the customers tax view?')?.name)
+      .toBe('can-you-complete-customers-tax-view');
+    expect(matchAppDraftForQuestion(drafts, 'show beverage margin by region')?.name)
+      .toBe('beverage-margin-by-region');
+  });
+
+  it('offers nothing when the question is unrelated', () => {
+    expect(matchAppDraftForQuestion(drafts, 'What is the weather in Paris?')).toBeUndefined();
+    expect(matchAppDraftForQuestion(drafts, 'hello')).toBeUndefined();
+  });
+
+  it('does not match on filler words alone', () => {
+    // 'can you complete the view' is almost all stopwords; matching on those
+    // would offer a random draft for practically any question.
+    expect(matchAppDraftForQuestion(
+      [{ name: 'unrelated-thing', path: 'p', status: 'review', question: 'Can you complete the view for me' }],
+      'can you complete the view',
+    )).toBeUndefined();
+  });
+
+  it('handles an app with no drafts', () => {
+    expect(matchAppDraftForQuestion([], 'anything at all')).toBeUndefined();
+    expect(matchAppDraftForQuestion(undefined as never, 'anything at all')).toBeUndefined();
+  });
+});

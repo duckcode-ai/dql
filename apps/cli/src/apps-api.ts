@@ -115,6 +115,25 @@ export interface AppContextEnvelopeV1 {
     story?: DashboardDocument['story'];
     tiles: Array<Record<string, unknown>>;
   }>;
+  /**
+   * The app's own review-required draft analyses (`apps/<id>/drafts/*.dql`).
+   *
+   * These never enter `manifest.blocks` — the manifest's block scan set is
+   * blocks/domains/dashboards/workbooks — so they have no KG node and no
+   * catalog row, and retrieval could not see them at any tier. They are carried
+   * on this envelope instead of being indexed globally on purpose: they are
+   * AI-generated exploratory SQL scoped to one app, and indexing them
+   * project-wide would leak one app's drafts into every other app's context and
+   * into every Ask question.
+   */
+  drafts: Array<{
+    name: string;
+    path: string;
+    status: string;
+    description?: string;
+    question?: string;
+    sql?: string;
+  }>;
   focus?: { dashboardId?: string; tileId?: string; blockId?: string };
 }
 
@@ -2497,7 +2516,7 @@ async function routeAppAskQuestion(
     (input.blockId && item.block && 'blockId' in item.block && item.block.blockId === input.blockId),
   );
   const blockId = cleanString(input.blockId) || (tile?.block && 'blockId' in tile.block ? tile.block.blockId : undefined);
-  const appContext = buildAppContextEnvelope(loaded.app, loaded.appDir, {
+  const appContext = buildAppContextEnvelope(ctx.projectRoot, loaded.app, loaded.appDir, {
     dashboardId,
     tileId: cleanString(input.tileId) || undefined,
     blockId,
@@ -2764,20 +2783,88 @@ function questionIsAboutFocusedTile(question: string): boolean {
 }
 
 /** Map a governed AgentAnswer into the App Copilot's response shape. */
+/** Overlap needed before a draft is offered as covering the question. */
+const APP_DRAFT_MATCH_MIN_OVERLAP = 2;
+
+const APP_DRAFT_STOPWORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'for', 'with', 'what', 'which', 'who', 'how', 'why', 'is', 'are',
+  'do', 'does', 'can', 'you', 'me', 'my', 'our', 'this', 'that', 'show', 'give', 'get', 'by', 'of',
+  'in', 'on', 'to', 'from', 'all', 'complete', 'view',
+]);
+
+function appDraftTokens(value: string): Set<string> {
+  return new Set(
+    value.toLowerCase().split(/[^a-z0-9]+/)
+      .filter((word) => word.length > 2 && !APP_DRAFT_STOPWORDS.has(word)),
+  );
+}
+
+/**
+ * The app's own draft that best covers a question the governed loop could not answer.
+ *
+ * Drafts are review-required exploratory analyses saved in the app. They are not
+ * indexed into the manifest, so retrieval cannot find them — but when the loop
+ * has just refused for want of a certified path, the app frequently already
+ * contains a draft that does exactly the thing. Offering it is strictly better
+ * than explaining the gap and stopping, and it never launders trust: the answer
+ * stays review-required and says the source is an unreviewed draft.
+ */
+export function matchAppDraftForQuestion(
+  drafts: AppContextEnvelopeV1['drafts'],
+  question: string,
+): AppContextEnvelopeV1['drafts'][number] | undefined {
+  const asked = appDraftTokens(question);
+  if (asked.size === 0) return undefined;
+  let best: { draft: AppContextEnvelopeV1['drafts'][number]; score: number } | undefined;
+  for (const draft of drafts ?? []) {
+    const candidate = appDraftTokens([draft.name, draft.question ?? '', draft.description ?? ''].join(' '));
+    let score = 0;
+    for (const token of asked) if (candidate.has(token)) score += 1;
+    if (score >= APP_DRAFT_MATCH_MIN_OVERLAP && (!best || score > best.score)) best = { draft, score };
+  }
+  return best?.draft;
+}
+
 function mapGovernedToAppAsk(
   governed: AgentAnswer,
-  input: { question: string; blockId?: string; appName: string; citations: Array<{ kind: string; name: string; path?: string }> },
+  input: { question: string; blockId?: string; appName: string; citations: Array<{ kind: string; name: string; path?: string }>; appContext?: AppContextEnvelopeV1 },
 ): AppAskSuccess {
   const isCertified = governed.certification === 'certified' || governed.kind === 'certified';
   const noAnswer = governed.kind === 'no_answer';
-  const answer = cleanString(governed.answer) || cleanString(governed.text) || 'No governed answer was available for this question.';
+  const governedText = cleanString(governed.answer) || cleanString(governed.text) || 'No governed answer was available for this question.';
+  // The loop just declined for want of certified evidence. Before returning only
+  // the gap, check whether this app already saved a draft that covers it.
+  const draft = noAnswer ? matchAppDraftForQuestion(input.appContext?.drafts ?? [], input.question) : undefined;
+  // App drafts are often generated FROM a refusal like this one, so their
+  // description can be the same paragraph the loop just returned. Only add it
+  // when it actually says something new.
+  const normalize = (value: string): string => value.toLowerCase().replace(/\s+/g, ' ').trim();
+  const draftAdds = draft?.description && !normalize(governedText).includes(normalize(draft.description).slice(0, 80))
+    ? draft.description
+    : '';
+  const answer = draft
+    ? [
+        governedText,
+        '',
+        `This app already has a saved draft for it: "${draft.name}" (${draft.status}).`,
+        draftAdds,
+        'It is an unreviewed draft, not a certified answer — open it under Drafts, check the join, grain, and filters, then certify it to make it governed.',
+      ].filter(Boolean).join('\n')
+    : governedText;
   const route: AppAskSuccess['route'] = noAnswer ? 'metadata_answer' : isCertified ? 'certified_answer' : 'generated_answer';
-  const trustState: AppAskSuccess['trustState'] = noAnswer ? 'draft_ready' : isCertified ? 'certified' : 'review_required';
+  // Offering a draft is actionable but unreviewed, so it is review_required
+  // rather than the bare draft_ready used when there is nothing to offer.
+  const trustState: AppAskSuccess['trustState'] = draft ? 'review_required' : noAnswer ? 'draft_ready' : isCertified ? 'certified' : 'review_required';
   const govCitations = Array.isArray(governed.citations)
     ? governed.citations.map((c) => ({ kind: String((c as { kind?: unknown }).kind ?? 'source'), name: String((c as { name?: unknown }).name ?? '') })).filter((c) => c.name)
     : [];
   const seen = new Set<string>();
-  const citations = [...input.citations, ...govCitations].filter((c) => {
+  const citations = [
+    ...input.citations,
+    ...govCitations,
+    // Cite the draft so the user can open the exact file being offered.
+    ...(draft ? [{ kind: 'draft', name: draft.name, path: draft.path }] : []),
+  ].filter((c) => {
     const key = `${c.kind}:${c.name}`;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -2790,9 +2877,11 @@ function mapGovernedToAppAsk(
     trustState,
     reviewStatus: trustState,
     citations,
-    followUps: noAnswer
-      ? ['Name the metric and grain', 'Pick a certified tile', 'Start driver analysis']
-      : ['Investigate drivers', 'Break this down further', 'Create a draft DQL block'],
+    followUps: draft
+      ? [`Open the "${draft.name}" draft`, 'Review its join and grain', 'Certify it to make it governed']
+      : noAnswer
+        ? ['Name the metric and grain', 'Pick a certified tile', 'Start driver analysis']
+        : ['Investigate drivers', 'Break this down further', 'Create a draft DQL block'],
     decision: buildAppAskDecision(route, { question: input.question, blockId: input.blockId, appName: input.appName }),
   };
 }
@@ -3364,6 +3453,7 @@ function appAskTileContext(tile: DashboardGridItem): Record<string, unknown> {
 }
 
 function buildAppContextEnvelope(
+  projectRoot: string,
   app: AppDocument,
   appDir: string,
   focus: { dashboardId?: string; tileId?: string; blockId?: string },
@@ -3392,6 +3482,7 @@ function buildAppContextEnvelope(
       caveats: app.caveats ?? [],
     },
     dashboards,
+    drafts: loadAppDraftContext(projectRoot, appDir),
     focus,
   };
 }
@@ -6652,6 +6743,34 @@ function readNotebookRunSnapshot(absNotebookPath: string): { cells?: unknown[]; 
 
 function normalizeNotebookRole(value: unknown): 'source' | 'analysis' | 'supporting' {
   return value === 'source' || value === 'analysis' ? value : 'supporting';
+}
+
+/** Longest draft SQL carried into a prompt; drafts are context, not the answer. */
+const APP_DRAFT_SQL_PROMPT_LIMIT = 1200;
+
+/**
+ * The app's drafts, with enough of each to be usable as context.
+ *
+ * `listAppDrafts` reads the same files for the Drafts panel but keeps only a
+ * name and review status, which is why the drafts were visible in the UI and
+ * invisible to the copilot even once the envelope carried them.
+ */
+function loadAppDraftContext(projectRoot: string, appDir: string): AppContextEnvelopeV1['drafts'] {
+  return scanFiles(join(appDir, 'drafts'), '.dql').map((file) => {
+    const source = readFileSync(file, 'utf-8');
+    const path = relative(projectRoot, file).replaceAll('\\', '/');
+    const query = matchString(source, /query\s*=\s*"""([\s\S]*?)"""/)?.trim();
+    return {
+      name: matchString(source, /block\s+"([^"]+)"/) ?? titleFromPath(path),
+      path,
+      status: matchString(source, /status\s*=\s*"([^"]+)"/) ?? 'review',
+      description: matchString(source, /description\s*=\s*"([^"]*)"/) ?? undefined,
+      question: matchString(source, /question\s*=\s*"([^"]*)"/) ?? undefined,
+      sql: query
+        ? query.length > APP_DRAFT_SQL_PROMPT_LIMIT ? `${query.slice(0, APP_DRAFT_SQL_PROMPT_LIMIT)}\n-- …truncated` : query
+        : undefined,
+    };
+  }).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function listAppDrafts(projectRoot: string, appDir: string): AppListEntry['drafts'] {

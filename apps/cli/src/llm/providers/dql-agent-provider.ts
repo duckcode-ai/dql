@@ -658,9 +658,81 @@ function compactInline(value: string, max: number): string {
   return compact.length > max ? `${compact.slice(0, max - 3).trimEnd()}...` : compact;
 }
 
-function renderExtraContext(req: AgentRunRequest, followUp?: AgentFollowUpContext): string | undefined {
+/** Drafts shown to the model per app; enough to be useful, bounded for prompt size. */
+const APP_DRAFT_PROMPT_LIMIT = 6;
+
+/**
+ * The App copilot's own app: its pages, tiles, and review-required drafts.
+ *
+ * `AppContextEnvelopeV1` already travelled to the prompt inside the serialized
+ * run envelope, but only as an anonymous JSON dump — and it never carried the
+ * app's drafts at all, because those live in `apps/<id>/drafts/` which the
+ * manifest's block scan never reads. Rendering it here gives the drafts the
+ * explicit trust instruction they need; the caller drops `appContext` from the
+ * JSON dump so nothing is carried twice.
+ *
+ * This sits in the extra-context section, which already tells the model the
+ * material must not override certified artifacts — the correct standing for a
+ * review-required draft.
+ */
+export function renderAppContextForPrompt(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const envelope = value as {
+    app?: { name?: string; domain?: string; audience?: string; businessOutcome?: string };
+    dashboards?: Array<{ title?: string; tiles?: unknown[] }>;
+    drafts?: Array<{ name?: string; status?: string; description?: string; question?: string; sql?: string }>;
+    focus?: { tileId?: string; blockId?: string };
+  };
+  const app = envelope.app;
+  if (!app?.name) return undefined;
+  const lines = [`This question was asked inside the App "${app.name}"${app.domain ? ` (domain: ${app.domain})` : ''}.`];
+  if (app.audience) lines.push(`Audience: ${app.audience}`);
+  if (app.businessOutcome) lines.push(`Business outcome: ${app.businessOutcome}`);
+
+  const pages = (envelope.dashboards ?? []).filter((page) => page?.title);
+  if (pages.length > 0) {
+    lines.push(`Pages: ${pages.map((page) => `${page.title} (${page.tiles?.length ?? 0} tiles)`).join('; ')}`);
+  }
+  if (envelope.focus?.blockId) lines.push(`Focused block: ${envelope.focus.blockId}`);
+
+  const drafts = (envelope.drafts ?? []).filter((draft) => draft?.name).slice(0, APP_DRAFT_PROMPT_LIMIT);
+  if (drafts.length > 0) {
+    lines.push(
+      '',
+      'Draft analyses saved in this app. They are REVIEW-REQUIRED and not certified:',
+      'reuse or adapt their SQL when it answers the question, say plainly that the source is an unreviewed app draft,',
+      'and never present one as a certified result.',
+      ...drafts.map((draft) => [
+        `- ${draft.name} (status: ${draft.status ?? 'review'})`,
+        draft.question ? `  question: ${draft.question}` : '',
+        draft.description ? `  description: ${draft.description}` : '',
+        draft.sql ? `  sql:\n${draft.sql.split('\n').map((line) => `    ${line}`).join('\n')}` : '',
+      ].filter(Boolean).join('\n')),
+    );
+  }
+  return lines.join('\n');
+}
+
+export function renderExtraContext(req: AgentRunRequest, followUp?: AgentFollowUpContext): string | undefined {
   const parts: string[] = [];
-  const upstream = req.upstream?.sql?.trim();
+  let upstream = req.upstream?.sql?.trim();
+  if (upstream?.startsWith('{')) {
+    // The run envelope carries `workspaceContext.appContext` for App copilot
+    // questions. Render it as prose with its trust instruction, and strip it
+    // from the JSON below rather than shipping the same content twice.
+    try {
+      const envelope = JSON.parse(upstream) as { workspaceContext?: Record<string, unknown> };
+      const appContext = envelope.workspaceContext?.appContext;
+      const rendered = renderAppContextForPrompt(appContext);
+      if (rendered) {
+        parts.push(rendered);
+        const { appContext: _dropped, ...restWorkspace } = envelope.workspaceContext ?? {};
+        upstream = JSON.stringify({ ...envelope, workspaceContext: restWorkspace }, null, 2);
+      }
+    } catch {
+      // Not the structured envelope — fall through and carry it verbatim.
+    }
+  }
   if (upstream) {
     const label = upstream.startsWith('{') || upstream.startsWith('[')
       ? 'Current app/drill context'
