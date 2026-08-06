@@ -2420,6 +2420,22 @@ describe('agent run runtime API', () => {
     });
   });
 
+  it('preserves every authoring mode so Modeling and Skills AI reach their own routes', () => {
+    // Regression: the runtime whitelist was a strict subset of
+    // `AgentRunRequestedMode` — it omitted 'modeling' and 'skill'. A
+    // `Set<AgentRunRequestedMode>` accepts a subset, so this never failed to
+    // compile. The parser dropped the mode to `undefined`, `selectRoute` saw no
+    // explicit mode, and Modeling's "Build with AI" silently ran the governed
+    // answer loop, returning an Ask-AI analytical answer instead of a proposal.
+    for (const mode of ['auto', 'ask', 'research', 'sql', 'block', 'app', 'modeling', 'skill'] as const) {
+      const parsed = parseAgentRunRequestBody({ question: 'model the customer profile', requestedMode: mode });
+      expect(parsed.error).toBeUndefined();
+      expect(parsed.request?.requestedMode).toBe(mode);
+    }
+
+    expect(parseAgentRunRequestBody({ question: 'q', requestedMode: 'nonsense' }).request?.requestedMode).toBeUndefined();
+  });
+
   it('ignores invalid governed agent run depth and reasoning values', () => {
     const parsed = parseAgentRunRequestBody({
       question: 'orders',

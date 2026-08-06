@@ -3538,6 +3538,11 @@ export function trustExplainer(run: AgentRun): string | null {
     }
     return 'Exploratory · DBT-grounded. DQL prepared a review-required query, but it has not executed yet.';
   }
+  // Authoring routes produce a source proposal, not an answer. Telling the user
+  // to "save it as a block" there is both wrong and the reason Modeling AI still
+  // read as Ask AI: a modeling/skill draft is saved to its YAML after review.
+  if (run.route === 'modeling_draft') return 'AI-drafted modeling proposal. Review the exact source diff, then save it as a draft — nothing is written or joinable yet.';
+  if (run.route === 'skill_draft') return 'AI-drafted Skill proposal. Review it, then save it as a draft — it will not guide any agent until you activate it.';
   if (run.trustState === 'review_required') return 'AI-generated answer. Save it as a block when you want to keep it.';
   if (run.trustState === 'blocked') return null;
   return null;

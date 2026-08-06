@@ -636,7 +636,18 @@ export interface LocalServerOptions {
   agentRunExecutors?: AgentRunExecutors;
 }
 
-const AGENT_RUN_REQUESTED_MODES = new Set<AgentRunRequestedMode>(['auto', 'ask', 'research', 'sql', 'block', 'app']);
+// Every member of `AgentRunRequestedMode`. The `Record` (rather than a bare
+// Set literal) is deliberate: a `Set<AgentRunRequestedMode>` happily accepts a
+// subset, which is how 'modeling' and 'skill' went missing here — the parser
+// dropped them to `undefined`, `selectRoute` never saw an explicit mode, and
+// Modeling AI silently ran the governed answer loop instead of proposing a
+// model. A Record makes an omission a compile error.
+const AGENT_RUN_REQUESTED_MODE_MEMBERS: Record<AgentRunRequestedMode, true> = {
+  auto: true, ask: true, research: true, sql: true, block: true, app: true, modeling: true, skill: true,
+};
+const AGENT_RUN_REQUESTED_MODES = new Set<AgentRunRequestedMode>(
+  Object.keys(AGENT_RUN_REQUESTED_MODE_MEMBERS) as AgentRunRequestedMode[],
+);
 
 export interface AppCopilotResearchAgentInput {
   appId: string;
@@ -3720,7 +3731,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const proposal = previewContextAuthoring({
       origin: request.workspaceContext?.correction === true ? 'correction' : 'ai',
       operations,
-      expectedSnapshotId: typeof request.workspaceContext?.snapshotId === 'string' ? request.workspaceContext.snapshotId : snapshot.snapshotId,
+      // Base the draft on the snapshot it was just built from, not on the id the
+      // client captured at page load. Gating construction on the client's id
+      // rejected a proposal assembled from `snapshot.manifest` moments earlier,
+      // so any unrelated project write (a block edit, a dbt reapply) made every
+      // Modeling AI request fail with PROPOSAL_STALE until a manual refresh.
+      // Drift is still caught where it matters: applying the proposal re-checks
+      // its `baseSnapshotId` and `dependencyFingerprints` and fails SOURCE_CHANGED.
+      expectedSnapshotId: snapshot.snapshotId,
       sourceRunId: runId,
       revision: Number(request.workspaceContext?.revision ?? 1),
     });
@@ -3753,7 +3771,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const proposal = previewContextAuthoring({
       origin: request.workspaceContext?.correction === true ? 'correction' : 'ai',
       operations,
-      expectedSnapshotId: typeof request.workspaceContext?.snapshotId === 'string' ? request.workspaceContext.snapshotId : snapshot.snapshotId,
+      // Same reasoning as the modeling executor above: base the draft on the
+      // snapshot it was built from; apply-time re-validation catches real drift.
+      expectedSnapshotId: snapshot.snapshotId,
       sourceRunId: runId,
       revision: Number(request.workspaceContext?.revision ?? 1),
     });
