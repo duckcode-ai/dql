@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { CalendarDays, Hash, List, ToggleLeft, Type } from 'lucide-react';
 import { api, type DashboardDocumentResponse } from '../../api/client';
-import { defaultParameterFilterValue } from './dashboard-filters';
+import { defaultParameterFilterValue, type DashboardFilterCandidate, type DashboardFilterCoverage } from './dashboard-filters';
 import { formatBusinessLabel } from './app-text';
 
 /**
@@ -36,6 +36,95 @@ export function DashboardFilterControls({
         />
       ))}
     </>
+  );
+}
+
+/**
+ * Add, inspect, and remove a page's global filters.
+ *
+ * Filters were authored only by the AI at build time and had no editor at all,
+ * so a page that got none could never gain one. Candidates come from what the
+ * tiles actually returned, and each filter states the tiles it truly reaches —
+ * a filter that silently narrows half a page is worse than none, because the
+ * page still reads as one scope.
+ */
+export function DashboardFilterEditor({
+  filters,
+  candidates,
+  coverageFor,
+  onAdd,
+  onRemove,
+  busy,
+}: {
+  filters: DashboardFilter[];
+  candidates: DashboardFilterCandidate[];
+  coverageFor: (filterId: string) => DashboardFilterCoverage;
+  onAdd: (column: string) => void;
+  onRemove: (filterId: string) => void;
+  busy?: boolean;
+}) {
+  const [adding, setAdding] = useState('');
+  return (
+    <div className="dql-app-filter-editor">
+      {filters.map((filter) => {
+        const coverage = coverageFor(filter.id);
+        const partial = coverage.unaffected.length > 0 && coverage.applied.length > 0;
+        const none = coverage.applied.length === 0;
+        return (
+          <div key={filter.id} className="dql-app-filter-editor-row">
+            <span className="dql-app-filter-editor-name">{formatBusinessLabel(filter.id)}</span>
+            <span
+              className={`dql-app-filter-coverage${partial ? ' is-partial' : ''}${none ? ' is-none' : ''}`}
+              title={coverage.unaffected.length
+                ? `Not applied to: ${coverage.unaffected.map((tile) => `${tile.title ?? tile.tileId}${tile.reason ? ` — ${tile.reason}` : ''}`).join('; ')}`
+                : 'Applies to every tile on this page.'}
+            >
+              {none
+                ? 'Reaches no tile'
+                : `Applies to ${coverage.applied.length} of ${coverage.filterable} tile${coverage.filterable === 1 ? '' : 's'}`}
+            </span>
+            <button
+              type="button"
+              className="dql-apps-btn dql-apps-btn-line"
+              disabled={busy}
+              aria-label={`Remove the ${formatBusinessLabel(filter.id)} filter`}
+              onClick={() => onRemove(filter.id)}
+            >
+              Remove
+            </button>
+          </div>
+        );
+      })}
+      {candidates.length > 0 ? (
+        <div className="dql-app-filter-editor-row">
+          <select
+            aria-label="Add a filter column"
+            value={adding}
+            disabled={busy}
+            onChange={(event) => setAdding(event.target.value)}
+          >
+            <option value="">Add a filter…</option>
+            {candidates.map((candidate) => (
+              <option key={candidate.column} value={candidate.column}>
+                {formatBusinessLabel(candidate.column)} — in {candidate.tiles} tile{candidate.tiles === 1 ? '' : 's'}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="dql-apps-btn dql-apps-btn-primary"
+            disabled={!adding || busy}
+            onClick={() => { onAdd(adding); setAdding(''); }}
+          >
+            Add filter
+          </button>
+        </div>
+      ) : filters.length === 0 ? (
+        <span className="dql-app-filter-empty">
+          No column is shared by enough tiles on this page to act as a global filter.
+        </span>
+      ) : null}
+    </div>
   );
 }
 

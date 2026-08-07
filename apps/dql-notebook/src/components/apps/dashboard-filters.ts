@@ -35,6 +35,104 @@ export function deriveDashboardFilters(dashboard: DashboardDocumentResponse['das
   return Array.from(filters.values());
 }
 
+export type DashboardFilterCoverage = {
+  filterId: string;
+  /** Tiles the filter actually narrows. */
+  applied: string[];
+  /** Tiles it leaves showing everything, with the reason when one is recorded. */
+  unaffected: Array<{ tileId: string; title?: string; reason?: string }>;
+  /** Tiles that could be filtered at all — text and heading tiles are excluded. */
+  filterable: number;
+};
+
+/**
+ * Which tiles a global filter actually reaches.
+ *
+ * A filter that narrows two of five tiles looks identical on screen to one that
+ * narrows all five: `unsupportedReason` was only ever used to drop a binding
+ * from the derived list, never shown. That silence is the dangerous part — you
+ * filter to one customer, half the tiles keep showing everyone, and the
+ * dashboard reads as if it were all one scope.
+ */
+export function dashboardFilterCoverage(
+  dashboard: DashboardDocumentResponse['dashboard'] | null,
+  filterId: string,
+): DashboardFilterCoverage {
+  const items = (dashboard?.layout.items ?? []).filter((item) => !isNarrativeTile(item));
+  const applied: string[] = [];
+  const unaffected: DashboardFilterCoverage['unaffected'] = [];
+  for (const item of items) {
+    const binding = (item.filterBindings ?? []).find((candidate) => candidate.filter === filterId)
+      ?? (item.parameterBindings ?? []).find((candidate) => (candidate.filter || candidate.field || candidate.param) === filterId);
+    const bound = Boolean(binding)
+      && !(binding as { unsupportedReason?: string }).unsupportedReason
+      && Boolean((binding as { binding?: string; param?: string }).binding ?? (binding as { param?: string }).param);
+    if (bound) applied.push(item.i);
+    else {
+      unaffected.push({
+        tileId: item.i,
+        title: item.title,
+        reason: (binding as { unsupportedReason?: string } | undefined)?.unsupportedReason
+          ?? (binding ? 'The tile declares this filter but nothing to bind it to.' : 'This tile has no column matching the filter.'),
+      });
+    }
+  }
+  return { filterId, applied, unaffected, filterable: items.length };
+}
+
+export type DashboardFilterCandidate = {
+  column: string;
+  /** How many tiles return this column — its reach if made a global filter. */
+  tiles: number;
+  sampleValues: string[];
+};
+
+/** A column shared by fewer tiles than this is a tile setting, not a global filter. */
+const MIN_CANDIDATE_TILE_REACH = 2;
+
+/**
+ * Columns worth offering as a global filter, ranked by how many tiles carry them.
+ *
+ * Derived from what the tiles actually returned rather than from the manifest,
+ * so the offer is grounded in this page's real result shape. Columns that look
+ * like measures are excluded — filtering by `revenue` is not a business scope —
+ * and a column present in only one tile is left out, since a "global" filter
+ * that reaches one tile misleads more than it helps.
+ */
+export function dashboardFilterCandidates(
+  dashboard: DashboardDocumentResponse['dashboard'] | null,
+  run: { tiles?: Array<{ tileId?: string; result?: { columns?: string[]; rows?: Array<Record<string, unknown>> } }> } | null,
+): DashboardFilterCandidate[] {
+  const existing = new Set((dashboard?.filters ?? []).map((filter) => filter.id));
+  const byColumn = new Map<string, { tiles: number; values: Set<string> }>();
+  for (const tile of run?.tiles ?? []) {
+    for (const column of tile.result?.columns ?? []) {
+      if (existing.has(column) || looksLikeMeasureColumn(column)) continue;
+      const entry = byColumn.get(column) ?? { tiles: 0, values: new Set<string>() };
+      entry.tiles += 1;
+      for (const row of (tile.result?.rows ?? []).slice(0, 12)) {
+        const value = row?.[column];
+        if (typeof value === 'string' && value.trim() && entry.values.size < 12) entry.values.add(value);
+      }
+      byColumn.set(column, entry);
+    }
+  }
+  return Array.from(byColumn.entries())
+    .filter(([, entry]) => entry.tiles >= MIN_CANDIDATE_TILE_REACH)
+    .map(([column, entry]) => ({ column, tiles: entry.tiles, sampleValues: Array.from(entry.values).sort() }))
+    .sort((a, b) => b.tiles - a.tiles || a.column.localeCompare(b.column));
+}
+
+function looksLikeMeasureColumn(column: string): boolean {
+  return /(^|_)(revenue|amount|total|sum|count|avg|average|min|max|price|cost|margin|qty|quantity|spend|value|rate|pct|percent|ratio)(_|$)/i.test(column);
+}
+
+/** Text and heading tiles carry no data, so they are not "missing" a filter. */
+function isNarrativeTile(item: DashboardLayoutItem): boolean {
+  const viz = String(item.viz?.type ?? '');
+  return Boolean(item.text) || viz === 'text' || viz === 'heading';
+}
+
 function isUsefulDashboardFilter(filter: DashboardFilter): boolean {
   if (filter.type === 'select' && !filter.options?.length && filter.default === undefined) return false;
   return true;

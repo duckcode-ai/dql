@@ -770,6 +770,7 @@ export function DashboardRenderer({
                       retrying={retryingTileId === item.i}
                       retryDisabled={Boolean(retryingTileId && retryingTileId !== item.i)}
                       onOpenNotebook={(nextTile) => void openTileInNotebook(item, nextTile)}
+              activeVariables={runVariables}
                     />
                   ))}
                 </div>
@@ -823,6 +824,7 @@ export function DashboardRenderer({
               retrying={retryingTileId === item.i}
               retryDisabled={Boolean(retryingTileId && retryingTileId !== item.i)}
               onOpenNotebook={(nextTile) => void openTileInNotebook(item, nextTile)}
+              activeVariables={runVariables}
             />
           ))}
         </div>
@@ -909,6 +911,7 @@ function DashboardTile({
   retrying = false,
   retryDisabled = false,
   onOpenNotebook,
+  activeVariables,
 }: {
   item: DashboardDocumentResponse['dashboard']['layout']['items'][number];
   tile?: DashboardRunResponse['tiles'][number];
@@ -929,6 +932,8 @@ function DashboardTile({
   retrying?: boolean;
   retryDisabled?: boolean;
   onOpenNotebook?: (tile: DashboardRunTile) => void;
+  /** Page filter values in force, so a tile can say when it ignores one. */
+  activeVariables?: Record<string, unknown>;
 }): JSX.Element {
   const tileRef = useRef<HTMLDivElement | null>(null);
   const [dragOffset, setDragOffset] = useState<{ x: number; y: number } | null>(null);
@@ -974,6 +979,31 @@ function DashboardTile({
   const isCompactMetric = item.h <= 2 && (vizType === 'single_value' || vizType === 'kpi' || vizType === 'gauge');
   const [hovered, setHovered] = useState(false);
   const showEditChrome = editable && (hovered || selected || settingsOpen);
+
+  /**
+   * Say so when a page filter is set but this tile ignores it.
+   *
+   * Without this the tile shows every row while the filter bar claims a
+   * narrower scope, and the two are indistinguishable on screen — the reader
+   * compares a filtered tile against an unfiltered one and never knows.
+   */
+  const unfilteredNotice = useMemo(() => {
+    const active = Object.entries(activeVariables ?? {})
+      .filter(([, value]) => value !== undefined && value !== null && value !== '')
+      .map(([key]) => key);
+    if (active.length === 0) return null;
+    const ignored = active.filter((filterId) => {
+      const binding: { unsupportedReason?: string; binding?: string; param?: string } | undefined =
+        (item.filterBindings ?? []).find((candidate) => candidate.filter === filterId)
+        ?? (item.parameterBindings ?? []).find((candidate) => (candidate.filter || candidate.field || candidate.param) === filterId);
+      return !binding || Boolean(binding.unsupportedReason) || !(binding.binding ?? binding.param);
+    });
+    if (ignored.length === 0) return null;
+    return {
+      label: ignored.length === 1 ? `Not filtered by ${ignored[0]}` : `Not filtered by ${ignored.length} page filters`,
+      detail: `This tile has no column bound to ${ignored.join(', ')}, so it shows the full scope while the rest of the page is narrowed.`,
+    };
+  }, [activeVariables, item.filterBindings, item.parameterBindings]);
 
   /**
    * Rename the tile from its own header.
@@ -1247,6 +1277,13 @@ function DashboardTile({
               </span>
             ) : null}
           </div>
+          {unfilteredNotice ? (
+            <div style={{ marginTop: 5 }}>
+              <span style={generatedMetaPillStyle} title={unfilteredNotice.detail}>
+                <Filter size={9} /> {unfilteredNotice.label}
+              </span>
+            </div>
+          ) : null}
           {aiPinTrust || repair ? (
             <div style={{ marginTop: 5, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
               {aiPinTrust ? <TrustPill trust={aiPinTrust} /> : null}

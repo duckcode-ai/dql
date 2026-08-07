@@ -1797,6 +1797,54 @@ export const APP_STYLES = `
   font: 750 11px var(--font-ui);
 }
 
+.dql-app-filter-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding-top: 8px;
+  border-top: 1px solid var(--dql-app-line-2);
+}
+
+.dql-app-filter-editor-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dql-app-filter-editor-name {
+  font: 750 11.5px var(--font-ui);
+  min-width: 120px;
+}
+
+/* Coverage is the honest part: a filter reaching some tiles must not look like
+   one reaching all of them. */
+.dql-app-filter-coverage {
+  font: 700 10.5px var(--font-ui);
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: var(--status-success);
+  background: var(--status-success-bg);
+  cursor: help;
+}
+
+.dql-app-filter-coverage.is-partial {
+  color: var(--status-warning);
+  background: var(--status-warning-bg);
+}
+
+.dql-app-filter-coverage.is-none {
+  color: var(--status-error);
+  background: var(--status-error-bg);
+}
+
+.dql-app-filter-error {
+  width: 100%;
+  color: var(--status-error);
+  font: 700 11px var(--font-ui);
+}
+
 .dql-app-filter-note {
   margin-left: auto;
   color: var(--dql-app-faint);

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AppBuildProposal, AppBuildProposalTile, DashboardDocumentResponse } from '../../api/client';
 import { unbuildableSelectedTiles } from './AppBuildProposalPanel';
-import { deriveDashboardFilters } from './dashboard-filters';
+import { dashboardFilterCandidates, dashboardFilterCoverage, deriveDashboardFilters } from './dashboard-filters';
 import { semanticApprovalState } from './app-semantic-approval';
 
 type RuntimeFilter = NonNullable<DashboardDocumentResponse['dashboard']['filters']>[number] & {
@@ -118,5 +118,62 @@ describe('Build Brief: tiles the commit will not build', () => {
 
     const dropped = proposal('shared_project', [{ title: 'Revenue by region', sql: 'select 1' }]);
     expect(unbuildableSelectedTiles(dropped, new Set())).toEqual([]);
+  });
+});
+
+describe('Global filters: coverage and candidates', () => {
+  const dash = (items: Array<Record<string, unknown>>, filters: Array<Record<string, unknown>> = []) => ({
+    id: 'overview', metadata: { title: 'Overview' },
+    filters, layout: { items },
+  } as unknown as DashboardDocumentResponse['dashboard']);
+
+  it('reports the tiles a filter actually reaches, not the tiles that mention it', () => {
+    // A tile can declare a binding and still be unable to apply it. Counting
+    // those as covered is how a filter that narrows half a page looked total.
+    const dashboard = dash([
+      { i: 'a', title: 'Bound', viz: { type: 'bar' }, filterBindings: [{ filter: 'customer_name', binding: 'customer_name', mode: 'predicate' }] },
+      { i: 'b', title: 'Declared but unusable', viz: { type: 'line' }, filterBindings: [{ filter: 'customer_name', unsupportedReason: 'No matching column' }] },
+      { i: 'c', title: 'Unaware', viz: { type: 'table' } },
+    ], [{ id: 'customer_name', type: 'select', bindsTo: 'customer_name' }]);
+
+    const coverage = dashboardFilterCoverage(dashboard, 'customer_name');
+    expect(coverage.applied).toEqual(['a']);
+    expect(coverage.filterable).toBe(3);
+    expect(coverage.unaffected.map((tile) => tile.tileId)).toEqual(['b', 'c']);
+    expect(coverage.unaffected[0]?.reason).toBe('No matching column');
+  });
+
+  it('does not count narrative tiles as missing a filter', () => {
+    const dashboard = dash([
+      { i: 'a', title: 'Chart', viz: { type: 'bar' }, filterBindings: [{ filter: 'region', binding: 'region', mode: 'predicate' }] },
+      { i: 'note', title: 'Intro', viz: { type: 'text' }, text: { markdown: 'Hello' } },
+      { i: 'head', title: 'Heading', viz: { type: 'heading' } },
+    ], [{ id: 'region', type: 'select' }]);
+    const coverage = dashboardFilterCoverage(dashboard, 'region');
+    expect(coverage.filterable).toBe(1);
+    expect(coverage.unaffected).toEqual([]);
+  });
+
+  it('offers only columns shared by several tiles, ranked by reach', () => {
+    const run = { tiles: [
+      { tileId: 'a', result: { columns: ['customer_name', 'region', 'revenue'], rows: [{ customer_name: 'Acme', region: 'EMEA', revenue: 10 }] } },
+      { tileId: 'b', result: { columns: ['customer_name', 'region'], rows: [{ customer_name: 'Zeta', region: 'AMER' }] } },
+      { tileId: 'c', result: { columns: ['customer_name', 'order_id'], rows: [] } },
+    ] };
+    const candidates = dashboardFilterCandidates(dash([]), run);
+    expect(candidates.map((candidate) => candidate.column)).toEqual(['customer_name', 'region']);
+    expect(candidates[0]?.tiles).toBe(3);
+    // A measure is not a business scope, and a single-tile column is not global.
+    expect(candidates.some((candidate) => candidate.column === 'revenue')).toBe(false);
+    expect(candidates.some((candidate) => candidate.column === 'order_id')).toBe(false);
+    expect(candidates[0]?.sampleValues).toContain('Acme');
+  });
+
+  it('never re-offers a column that is already a filter', () => {
+    const run = { tiles: [
+      { tileId: 'a', result: { columns: ['region'], rows: [] } },
+      { tileId: 'b', result: { columns: ['region'], rows: [] } },
+    ] };
+    expect(dashboardFilterCandidates(dash([], [{ id: 'region', type: 'select' }]), run)).toEqual([]);
   });
 });

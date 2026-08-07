@@ -68,13 +68,14 @@ import type { AppAnalysisHandoff, AppResearchSeed, CreateInvestigationResult } f
 import {
   coerceDashboardFilterValue,
   DashboardFilterControls,
+  DashboardFilterEditor,
   defaultDashboardFilterValue,
   filterIconForDashboardFilter,
   shallowEqualRecords,
 } from './app-dashboard-filters';
 import { DashboardRenderer } from './DashboardRenderer';
 import { PersonaSwitcher } from './PersonaSwitcher';
-import { defaultParameterFilterValue, deriveDashboardFilters } from './dashboard-filters';
+import { dashboardFilterCandidates, dashboardFilterCoverage, defaultParameterFilterValue, deriveDashboardFilters } from './dashboard-filters';
 import { semanticApprovalState } from './app-semantic-approval';
 import { authoredDomainOptions, resolveAuthoredDomainId, type AuthoredDomainOption } from '../domains/authored-domain-options';
 import { useOperations } from '../../operations/OperationsProvider';
@@ -1832,6 +1833,51 @@ function AppWorkspaceSurface({
   const handleDashboardRunChange = useCallback((run: DashboardRunResponse | null) => {
     setDashboardRun(run);
   }, []);
+
+  const [filterBusy, setFilterBusy] = useState(false);
+  const [filterError, setFilterError] = useState<string | null>(null);
+  const filterCandidates = useMemo(
+    () => dashboardFilterCandidates(dashboardDoc?.dashboard ?? null, dashboardRun),
+    [dashboardDoc, dashboardRun],
+  );
+  const coverageFor = useCallback(
+    (filterId: string) => dashboardFilterCoverage(dashboardDoc?.dashboard ?? null, filterId),
+    [dashboardDoc],
+  );
+  /**
+   * Write the page's filter list. Filters live on the dashboard document, not
+   * its layout, so the layout-only PATCH cannot carry them — this uses the
+   * full-document PUT that already existed and had no caller.
+   */
+  const saveDashboardFilters = useCallback(async (
+    next: NonNullable<DashboardDocumentResponse['dashboard']['filters']>,
+  ) => {
+    if (!app?.id || !dashboardDoc) return;
+    setFilterBusy(true);
+    setFilterError(null);
+    const result = await api.saveDashboard(app.id, dashboardDoc.dashboard.id, {
+      ...dashboardDoc.dashboard,
+      filters: next,
+    });
+    setFilterBusy(false);
+    if (!result.ok) {
+      setFilterError(result.error);
+      return;
+    }
+    const reloaded = await api.getDashboard(app.id, dashboardDoc.dashboard.id);
+    if (reloaded?.dashboard) onDashboardChanged?.(reloaded.dashboard);
+  }, [app?.id, dashboardDoc, onDashboardChanged]);
+
+  const addDashboardFilter = useCallback((column: string) => {
+    const current = dashboardDoc?.dashboard.filters ?? [];
+    if (current.some((filter) => filter.id === column)) return;
+    void saveDashboardFilters([...current, { id: column, type: 'select', bindsTo: column }]);
+  }, [dashboardDoc, saveDashboardFilters]);
+
+  const removeDashboardFilter = useCallback((filterId: string) => {
+    const current = dashboardDoc?.dashboard.filters ?? [];
+    void saveDashboardFilters(current.filter((filter) => filter.id !== filterId));
+  }, [dashboardDoc, saveDashboardFilters]);
   const handleStartResearch = useCallback((seed: Omit<AppResearchSeed, 'nonce'>) => {
     setResearchSeed({ ...seed, nonce: Date.now() });
     onSectionChange('research');
@@ -2125,21 +2171,38 @@ function AppWorkspaceSurface({
 
         <div className={`dql-app-view-layout ${copilotVisible ? '' : 'no-explain'}`}>
           <div className="dql-app-main-column">
-            {section === 'dashboards' && dashboardDoc && dashboardFilters.length > 0 ? (
+            {/* Rendered while customizing even with no filters yet: a page the AI
+                gave none to previously had no way to ever gain one. */}
+            {section === 'dashboards' && dashboardDoc && (dashboardFilters.length > 0 || experience === 'build') ? (
               <section className="dql-app-filter-row" aria-label="Dashboard filters">
                 <div className="dql-app-filter-row-copy">
                   <b>Filters</b>
                   <span>Set the business scope, then apply once to refresh the full story.</span>
                 </div>
-                <DashboardFilterControls
-                  filters={dashboardFilters}
-                  values={dashboardFilterValues}
-                  onChange={onDashboardFilterChange}
-                />
-                <div className="dql-app-filter-row-actions">
-                  <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={onResetDashboardFilters}>Reset</button>
-                  <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onApplyDashboardFilters}>Apply filters</button>
-                </div>
+                {dashboardFilters.length > 0 ? (
+                  <>
+                    <DashboardFilterControls
+                      filters={dashboardFilters}
+                      values={dashboardFilterValues}
+                      onChange={onDashboardFilterChange}
+                    />
+                    <div className="dql-app-filter-row-actions">
+                      <button type="button" className="dql-apps-btn dql-apps-btn-line" onClick={onResetDashboardFilters}>Reset</button>
+                      <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onApplyDashboardFilters}>Apply filters</button>
+                    </div>
+                  </>
+                ) : null}
+                {experience === 'build' ? (
+                  <DashboardFilterEditor
+                    filters={dashboardDoc.dashboard.filters ?? []}
+                    candidates={filterCandidates}
+                    coverageFor={coverageFor}
+                    onAdd={addDashboardFilter}
+                    onRemove={removeDashboardFilter}
+                    busy={filterBusy}
+                  />
+                ) : null}
+                {filterError ? <div className="dql-app-filter-error" role="alert">{filterError}</div> : null}
               </section>
             ) : null}
             {loading ? (
