@@ -154,26 +154,62 @@ describe('Global filters: coverage and candidates', () => {
     expect(coverage.unaffected).toEqual([]);
   });
 
-  it('offers only columns shared by several tiles, ranked by reach', () => {
+  it('offers only the columns the server proved filterable, ranked by reach', () => {
+    // The candidate list must come from the server's SQL parse. Guessing from
+    // result column names would offer an aggregate output, and filtering that
+    // in WHERE changes the measure instead of narrowing it.
     const run = { tiles: [
-      { tileId: 'a', result: { columns: ['customer_name', 'region', 'revenue'], rows: [{ customer_name: 'Acme', region: 'EMEA', revenue: 10 }] } },
-      { tileId: 'b', result: { columns: ['customer_name', 'region'], rows: [{ customer_name: 'Zeta', region: 'AMER' }] } },
-      { tileId: 'c', result: { columns: ['customer_name', 'order_id'], rows: [] } },
+      { filterableColumns: [{ column: 'customer_name', predicateTarget: 'c.customer_name' }, { column: 'region', predicateTarget: 'c.region' }],
+        result: { columns: ['customer_name', 'region', 'revenue'], rows: [{ customer_name: 'Acme', region: 'EMEA', revenue: 10 }] } },
+      { filterableColumns: [{ column: 'region', predicateTarget: 'o.region' }],
+        result: { columns: ['region', 'revenue'], rows: [{ region: 'AMER' }] } },
+      // No filterableColumns: an aggregate-only tile the server refused to offer.
+      { result: { columns: ['total_revenue'], rows: [{ total_revenue: 99 }] } },
     ] };
     const candidates = dashboardFilterCandidates(dash([]), run);
-    expect(candidates.map((candidate) => candidate.column)).toEqual(['customer_name', 'region']);
-    expect(candidates[0]?.tiles).toBe(3);
-    // A measure is not a business scope, and a single-tile column is not global.
+    expect(candidates.map((candidate) => candidate.column)).toEqual(['region', 'customer_name']);
+    expect(candidates[0]?.tiles).toBe(2);
     expect(candidates.some((candidate) => candidate.column === 'revenue')).toBe(false);
-    expect(candidates.some((candidate) => candidate.column === 'order_id')).toBe(false);
-    expect(candidates[0]?.sampleValues).toContain('Acme');
+    expect(candidates.some((candidate) => candidate.column === 'total_revenue')).toBe(false);
+    expect(candidates[1]?.sampleValues).toContain('Acme');
   });
 
-  it('never re-offers a column that is already a filter', () => {
+  it('never re-offers a column that is already a page filter', () => {
     const run = { tiles: [
-      { tileId: 'a', result: { columns: ['region'], rows: [] } },
-      { tileId: 'b', result: { columns: ['region'], rows: [] } },
+      { filterableColumns: [{ column: 'region', predicateTarget: 'region' }], result: { columns: ['region'], rows: [] } },
     ] };
     expect(dashboardFilterCandidates(dash([], [{ id: 'region', type: 'select' }]), run)).toEqual([]);
+  });
+});
+
+describe('Coverage for a filter the author never declared', () => {
+  const dash = (items: Array<Record<string, unknown>>, filters: Array<Record<string, unknown>> = []) => ({
+    id: 'overview', metadata: { title: 'Overview' }, filters, layout: { items },
+  } as unknown as DashboardDocumentResponse['dashboard']);
+
+  it('derives reach from the tiles that offered the column', () => {
+    // A viewer-chosen column has no filterBindings anywhere, so reading only the
+    // document reported "reaches no tile" right before the page filtered fine.
+    const dashboard = dash([
+      { i: 'a', title: 'Profiles', viz: { type: 'table' } },
+      { i: 'b', title: 'Revenue', viz: { type: 'line' } },
+    ]);
+    const run = { tiles: [
+      { tileId: 'a', filterableColumns: [{ column: 'customer_type', predicateTarget: 'c.customer_type' }] },
+      { tileId: 'b', filterableColumns: [] },
+    ] };
+    const coverage = dashboardFilterCoverage(dashboard, 'customer_type', run);
+    expect(coverage.applied).toEqual(['a']);
+    expect(coverage.unaffected.map((tile) => tile.tileId)).toEqual(['b']);
+  });
+
+  it('still uses the declared bindings when the filter is on the document', () => {
+    const dashboard = dash(
+      [{ i: 'a', title: 'Profiles', viz: { type: 'table' }, filterBindings: [{ filter: 'region', binding: 'region', mode: 'predicate' }] }],
+      [{ id: 'region', type: 'select' }],
+    );
+    // The run disagrees; the author's declaration wins for a declared filter.
+    const coverage = dashboardFilterCoverage(dashboard, 'region', { tiles: [{ tileId: 'a', filterableColumns: [] }] });
+    expect(coverage.applied).toEqual(['a']);
   });
 });

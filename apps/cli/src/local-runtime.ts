@@ -11311,6 +11311,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
         }
         localApps?.close();
+        // Which of each tile's result columns a viewer may safely filter on.
+        // Decided here, from a real dialect parse of the SQL that actually ran,
+        // for the same reason Ask does it server-side: an aggregate output needs
+        // HAVING, and picking such a column off the table would quietly change
+        // the measure. The browser must never re-derive this.
+        const runDialect = (() => {
+          try { return requireActiveConnection().driver || 'duckdb'; } catch { return 'duckdb'; }
+        })();
+        const tilesWithFilters = tiles.map((tile) => {
+          const executedSql = (tile as { artifact?: { sql?: unknown } }).artifact?.sql;
+          const columns = (tile as { result?: { columns?: string[] } }).result?.columns ?? [];
+          if (typeof executedSql !== 'string' || columns.length === 0) return tile;
+          try {
+            const filterable = filterableResultColumns(executedSql, columns, runDialect);
+            return filterable.length > 0 ? { ...tile, filterableColumns: filterable } : tile;
+          } catch {
+            return tile; // Unparseable SQL simply offers no filter candidates.
+          }
+        });
         const snapshot = projectSnapshot();
         const filterFingerprint = createHash('sha256').update(JSON.stringify(dashboardVariables)).digest('hex');
         const resultFingerprint = createHash('sha256').update(JSON.stringify(tiles.map((tile) => ({ tileId: tile.tileId, status: tile.status, result: tile.result })))).digest('hex');
@@ -11361,7 +11380,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           filterFingerprint,
           resultFingerprint,
           personaFingerprint,
-          tiles,
+          tiles: tilesWithFilters,
           facts: storyResult.facts,
           story: storyResult.story,
         }));

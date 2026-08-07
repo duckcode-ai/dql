@@ -48,6 +48,82 @@ export function DashboardFilterControls({
  * a filter that silently narrows half a page is worse than none, because the
  * page still reads as one scope.
  */
+/**
+ * "Filter by…": pick a business column and a value, then apply.
+ *
+ * This is the viewer's control, not the author's — the same move as adding an
+ * input to an Ask or Notebook result, at page scale. Columns come from the
+ * server's parse of each tile's executed SQL, and values from the rows those
+ * tiles actually returned, so nothing here is guessed in the browser.
+ *
+ * Choosing one is session-only. A viewer exploring a number must never rewrite
+ * the page's saved scope for everyone; an author promotes a choice explicitly
+ * from Edit.
+ */
+export function DashboardFilterPicker({
+  candidates,
+  coverageFor,
+  onApply,
+}: {
+  candidates: DashboardFilterCandidate[];
+  coverageFor: (column: string) => DashboardFilterCoverage;
+  onApply: (column: string, value: string) => void;
+}) {
+  const [column, setColumn] = useState('');
+  const [value, setValue] = useState('');
+  const active = candidates.find((candidate) => candidate.column === column);
+  if (candidates.length === 0) return null;
+  const coverage = active ? coverageFor(active.column) : null;
+  return (
+    <div className="dql-app-filter-picker">
+      <select
+        aria-label="Filter this page by"
+        value={column}
+        onChange={(event) => { setColumn(event.target.value); setValue(''); }}
+      >
+        <option value="">Filter by…</option>
+        {candidates.map((candidate) => (
+          <option key={candidate.column} value={candidate.column}>
+            {formatBusinessLabel(candidate.column)}
+          </option>
+        ))}
+      </select>
+      {active ? (
+        <>
+          {active.sampleValues.length > 0 ? (
+            <select aria-label={`${formatBusinessLabel(active.column)} value`} value={value} onChange={(event) => setValue(event.target.value)}>
+              <option value="">Choose a value…</option>
+              {active.sampleValues.map((sample) => <option key={sample} value={sample}>{sample}</option>)}
+            </select>
+          ) : (
+            <input
+              aria-label={`${formatBusinessLabel(active.column)} value`}
+              value={value}
+              placeholder="Value…"
+              onChange={(event) => setValue(event.target.value)}
+            />
+          )}
+          {coverage ? (
+            <span className="dql-app-filter-coverage-hint">
+              {coverage.applied.length === 0
+                ? 'No tile on this page can apply it'
+                : `Will narrow ${coverage.applied.length} of ${coverage.filterable} tiles`}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            className="dql-apps-btn dql-apps-btn-primary"
+            disabled={!value.trim()}
+            onClick={() => { onApply(active.column, value.trim()); setColumn(''); setValue(''); }}
+          >
+            Apply
+          </button>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 export function DashboardFilterEditor({
   filters,
   candidates,

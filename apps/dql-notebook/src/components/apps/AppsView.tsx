@@ -69,6 +69,7 @@ import {
   coerceDashboardFilterValue,
   DashboardFilterControls,
   DashboardFilterEditor,
+  DashboardFilterPicker,
   defaultDashboardFilterValue,
   filterIconForDashboardFilter,
   shallowEqualRecords,
@@ -1841,8 +1842,8 @@ function AppWorkspaceSurface({
     [dashboardDoc, dashboardRun],
   );
   const coverageFor = useCallback(
-    (filterId: string) => dashboardFilterCoverage(dashboardDoc?.dashboard ?? null, filterId),
-    [dashboardDoc],
+    (filterId: string) => dashboardFilterCoverage(dashboardDoc?.dashboard ?? null, filterId, dashboardRun),
+    [dashboardDoc, dashboardRun],
   );
   /**
    * Write the page's filter list. Filters live on the dashboard document, not
@@ -1853,9 +1854,18 @@ function AppWorkspaceSurface({
     next: NonNullable<DashboardDocumentResponse['dashboard']['filters']>,
   ) => {
     if (!app?.id || !dashboardDoc) return;
+    // Address the write by the app the loaded document says it belongs to, not
+    // by whichever app the view currently has selected. Dashboard ids are only
+    // unique within an app — several apps here have an `overview` page — so a
+    // stale selection would write one app's document over another's file.
+    const owningAppId = dashboardDoc.app?.id ?? app.id;
+    if (owningAppId !== app.id) {
+      setFilterError('This page belongs to a different app than the one open. Reload the app and try again.');
+      return;
+    }
     setFilterBusy(true);
     setFilterError(null);
-    const result = await api.saveDashboard(app.id, dashboardDoc.dashboard.id, {
+    const result = await api.saveDashboard(owningAppId, dashboardDoc.dashboard.id, {
       ...dashboardDoc.dashboard,
       filters: next,
     });
@@ -1873,6 +1883,25 @@ function AppWorkspaceSurface({
     if (current.some((filter) => filter.id === column)) return;
     void saveDashboardFilters([...current, { id: column, type: 'select', bindsTo: column }]);
   }, [dashboardDoc, saveDashboardFilters]);
+
+  /**
+   * A viewer's own filter: applied to this session's run only.
+   *
+   * Nothing is written. A stakeholder narrowing a number to understand it must
+   * not change the page's saved scope for everyone else; an author promotes one
+   * deliberately with "Save to page" while customizing.
+   */
+  const [sessionFilters, setSessionFilters] = useState<Array<{ id: string; column: string }>>([]);
+  useEffect(() => { setSessionFilters([]); }, [dashboardDoc?.dashboard.id]);
+  const applySessionFilter = useCallback((column: string, value: string) => {
+    setSessionFilters((current) => (current.some((entry) => entry.column === column) ? current : [...current, { id: column, column }]));
+    onDashboardFilterChange({ id: column, type: 'select', bindsTo: column } as never, value);
+    onApplyDashboardFilters();
+  }, [onApplyDashboardFilters, onDashboardFilterChange]);
+  const saveSessionFilterToPage = useCallback((column: string) => {
+    addDashboardFilter(column);
+    setSessionFilters((current) => current.filter((entry) => entry.column !== column));
+  }, [addDashboardFilter]);
 
   const removeDashboardFilter = useCallback((filterId: string) => {
     const current = dashboardDoc?.dashboard.filters ?? [];
@@ -2171,9 +2200,13 @@ function AppWorkspaceSurface({
 
         <div className={`dql-app-view-layout ${copilotVisible ? '' : 'no-explain'}`}>
           <div className="dql-app-main-column">
-            {/* Rendered while customizing even with no filters yet: a page the AI
-                gave none to previously had no way to ever gain one. */}
-            {section === 'dashboards' && dashboardDoc && (dashboardFilters.length > 0 || experience === 'build') ? (
+            {/* Rendered whenever this page can be filtered at all — not only when
+                it already carries a usable declared filter. Gating on that left
+                a viewer with no way to filter a page the planner gave none to,
+                and `deriveDashboardFilters` also drops a declared filter it
+                considers unusable, which hid the row on pages that had one. */}
+            {section === 'dashboards' && dashboardDoc
+              && (dashboardFilters.length > 0 || filterCandidates.length > 0 || experience === 'build') ? (
               <section className="dql-app-filter-row" aria-label="Dashboard filters">
                 <div className="dql-app-filter-row-copy">
                   <b>Filters</b>
@@ -2191,6 +2224,31 @@ function AppWorkspaceSurface({
                       <button type="button" className="dql-apps-btn dql-apps-btn-primary" onClick={onApplyDashboardFilters}>Apply filters</button>
                     </div>
                   </>
+                ) : null}
+                {/* The viewer's own control. Filtering a dashboard is a reading
+                    act, so it belongs here rather than behind Edit. */}
+                <DashboardFilterPicker
+                  candidates={filterCandidates}
+                  coverageFor={coverageFor}
+                  onApply={applySessionFilter}
+                />
+                {sessionFilters.length > 0 ? (
+                  <div className="dql-app-filter-session">
+                    <span>Your filters, this session only.</span>
+                    {experience === 'build'
+                      ? sessionFilters.map((entry) => (
+                          <button
+                            key={entry.id}
+                            type="button"
+                            className="dql-apps-btn dql-apps-btn-line"
+                            disabled={filterBusy}
+                            onClick={() => saveSessionFilterToPage(entry.column)}
+                          >
+                            Save “{formatBusinessLabel(entry.column)}” to page
+                          </button>
+                        ))
+                      : null}
+                  </div>
                 ) : null}
                 {experience === 'build' ? (
                   <DashboardFilterEditor

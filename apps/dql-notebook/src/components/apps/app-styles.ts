@@ -1797,6 +1797,28 @@ export const APP_STYLES = `
   font: 750 11px var(--font-ui);
 }
 
+.dql-app-filter-picker {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.dql-app-filter-coverage-hint {
+  font: 700 10.5px var(--font-ui);
+  color: var(--dql-app-faint);
+}
+
+.dql-app-filter-session {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+  font: 700 10.5px var(--font-ui);
+  color: var(--dql-app-faint);
+}
+
 .dql-app-filter-editor {
   display: flex;
   flex-direction: column;

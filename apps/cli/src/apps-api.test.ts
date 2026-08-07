@@ -24,6 +24,7 @@ import {
   recommendDashboardTile,
   recommendVisualization,
   matchAppDraftForQuestion,
+  writeDashboardForTest,
 } from './apps-api.js';
 
 const tempDirs: string[] = [];
@@ -2452,5 +2453,43 @@ describe('App copilot: the app\'s own drafts', () => {
   it('handles an app with no drafts', () => {
     expect(matchAppDraftForQuestion([], 'anything at all')).toBeUndefined();
     expect(matchAppDraftForQuestion(undefined as never, 'anything at all')).toBeUndefined();
+  });
+});
+
+describe('writeDashboard cross-app guard', () => {
+  it('refuses a page that shares no tiles with the one already on disk', async () => {
+    // Dashboard ids are unique only within an App. Several apps here have an
+    // `overview` page, so a caller holding one App's document and another App's
+    // id would silently overwrite the wrong file — which happened in testing.
+    const root = mkdtempSync(join(tmpdir(), 'dql-dash-guard-'));
+    tempDirs.push(root);
+    const page = (appId: string, tileId: string) => ({
+      version: 1, id: 'overview',
+      metadata: { title: 'Overview', domain: 'd' },
+      layout: { kind: 'grid', cols: 12, items: [{ i: tileId, x: 0, y: 0, w: 4, h: 4, viz: { type: 'table' }, block: { blockId: tileId } }] },
+    });
+    for (const appId of ['alpha', 'beta']) {
+      mkdirSync(join(root, 'apps', appId, 'dashboards'), { recursive: true });
+      writeFileSync(join(root, 'apps', appId, 'dql.app.json'), JSON.stringify({
+        version: 1, id: appId, name: appId, description: appId, visibility: 'shared',
+        domain: 'd', groups: [], lifecycle: 'draft', owners: ['t@example.com'], tags: [],
+        homepage: { type: 'dashboard', id: 'overview' },
+      }));
+      writeFileSync(join(root, 'apps', appId, 'dashboards', 'overview.dqld'), JSON.stringify(page(appId, `${appId}_tile`)));
+    }
+
+    const wrongApp = writeDashboardForTest(root, 'beta', 'overview', page('alpha', 'alpha_tile'));
+    expect(wrongApp.ok).toBe(false);
+    expect('error' in wrongApp && wrongApp.error).toMatch(/shares no tiles/);
+    // beta's file is untouched.
+    expect(readFileSync(join(root, 'apps', 'beta', 'dashboards', 'overview.dqld'), 'utf-8')).toContain('beta_tile');
+
+    // A genuine edit to the same page still saves.
+    const sameApp = writeDashboardForTest(root, 'beta', 'overview', {
+      ...page('beta', 'beta_tile'),
+      filters: [{ id: 'region', type: 'select', bindsTo: 'region' }],
+    });
+    expect(sameApp.ok).toBe(true);
+    expect(readFileSync(join(root, 'apps', 'beta', 'dashboards', 'overview.dqld'), 'utf-8')).toContain('region');
   });
 });

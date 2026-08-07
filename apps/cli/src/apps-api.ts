@@ -6884,6 +6884,8 @@ function loadDashboardForApp(
   return null;
 }
 
+export { writeDashboard as writeDashboardForTest };
+
 function writeDashboard(
   projectRoot: string,
   appId: string,
@@ -6904,6 +6906,22 @@ function writeDashboard(
   if (!loaded) return { ok: false, error: `App "${appId}" not found` };
   const appDir = loaded.appDir;
   const dashboardPath = join(appDir, 'dashboards', `${dashboardId}.dqld`);
+  // Dashboard ids are unique only within an App — `overview` is a common name —
+  // so a caller holding one App's document and another App's id would silently
+  // overwrite the wrong file. Only accept a title change to an existing page,
+  // never a wholesale replacement of a different App's page of the same name.
+  if (existsSync(dashboardPath)) {
+    const existing = loadDashboardDocument(dashboardPath).document;
+    const incomingBlocks = new Set(document.layout.items.map((item) => item.i));
+    const existingBlocks = new Set((existing?.layout.items ?? []).map((item) => item.i));
+    const overlap = [...incomingBlocks].filter((tileId) => existingBlocks.has(tileId)).length;
+    if (existingBlocks.size > 0 && incomingBlocks.size > 0 && overlap === 0) {
+      return {
+        ok: false,
+        error: `Refusing to overwrite "${appId}/${dashboardId}": the incoming page shares no tiles with the one on disk, so it is very likely a different App's page of the same name.`,
+      };
+    }
+  }
   mkdirSync(dirname(dashboardPath), { recursive: true });
   writeFileSync(dashboardPath, JSON.stringify(document, null, 2) + '\n', 'utf-8');
   return { ok: true, path: dashboardPath };

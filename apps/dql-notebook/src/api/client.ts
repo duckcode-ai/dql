@@ -1648,6 +1648,13 @@ export interface DashboardRunResponse {
     result?: QueryResult;
     text?: { markdown: string };
     aiPin?: LocalAiPin;
+    /**
+     * Result columns a viewer may safely filter on, decided server-side from a
+     * real dialect parse of the SQL that ran. Aggregate outputs are excluded:
+     * they would need HAVING, and filtering one in WHERE changes the measure.
+     * Never re-derive this in the browser.
+     */
+    filterableColumns?: Array<{ column: string; predicateTarget: string }>;
     filters?: {
       applied: Array<{ filter: string; binding?: string; mode: 'parameter' | 'predicate'; paramNames: string[] }>;
       skipped: Array<{ filter: string; reason: string }>;
