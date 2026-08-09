@@ -6,6 +6,7 @@ import {
   type LocalOperation,
 } from '../api/client';
 import { useNotebookStore } from '../store/NotebookStore';
+import { streamServerEvents } from '../api/server-auth';
 
 const OPERATIONS_QUERY_KEY = ['local-operations'] as const;
 
@@ -36,26 +37,37 @@ export function OperationsProvider({ children }: { children: React.ReactNode }) 
     queryFn: async () => (await api.listOperations(50)).operations,
     staleTime: 15_000,
     refetchOnWindowFocus: false,
+    // Polling is a recovery path if the authenticated event stream is dropped.
+    refetchInterval: 1_500,
   });
   const operations = query.data ?? [];
 
   useEffect(() => {
-    if (typeof EventSource === 'undefined') return;
-    const events = new EventSource('/api/operations/events');
-    const onOperation = (event: MessageEvent<string>) => {
-      try {
-        const operation = JSON.parse(event.data) as LocalOperation;
-        queryClient.setQueryData<LocalOperation[]>(OPERATIONS_QUERY_KEY, (current = []) => (
-          mergeOperation(current, operation)
-        ));
-      } catch {
-        // A malformed progress frame must not interrupt later updates.
-      }
+    let alive = true;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let controller: AbortController | undefined;
+    const connect = () => {
+      controller = new AbortController();
+      void streamServerEvents('/api/operations/events', (frame) => {
+        if (frame.event !== 'operation') return;
+        try {
+          const operation = JSON.parse(frame.data) as LocalOperation;
+          queryClient.setQueryData<LocalOperation[]>(OPERATIONS_QUERY_KEY, (current = []) => (
+            mergeOperation(current, operation)
+          ));
+        } catch {
+          // A malformed progress frame must not interrupt later updates.
+        }
+      }, controller.signal).catch(() => {
+        if (!alive || controller?.signal.aborted) return;
+        reconnectTimer = setTimeout(connect, 5_000);
+      });
     };
-    events.addEventListener('operation', onOperation as EventListener);
+    connect();
     return () => {
-      events.removeEventListener('operation', onOperation as EventListener);
-      events.close();
+      alive = false;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      controller?.abort();
     };
   }, [queryClient]);
 

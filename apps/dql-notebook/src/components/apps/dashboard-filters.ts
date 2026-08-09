@@ -8,7 +8,10 @@ export function deriveDashboardFilters(dashboard: DashboardDocumentResponse['das
   if (!dashboard) return [];
   const filters = new Map<string, DashboardFilter>();
   for (const filter of dashboard.filters ?? []) {
-    if (isUsefulDashboardFilter(filter)) filters.set(filter.id, { ...filter });
+    // Predicate bindings below can supply a source block and server-owned
+    // distinct options. Keep the declaration until those bindings have been
+    // inspected; filtering it here hides valid option-less select controls.
+    filters.set(filter.id, { ...filter });
   }
   const blockIdOf = (item: DashboardLayoutItem): string | undefined =>
     item.block?.blockId ?? item.block?.ref;
@@ -32,7 +35,7 @@ export function deriveDashboardFilters(dashboard: DashboardDocumentResponse['das
       filters.set(id, filterFromParameterBinding(binding));
     }
   }
-  return Array.from(filters.values());
+  return Array.from(filters.values()).filter(isUsefulDashboardFilter);
 }
 
 export type DashboardFilterCoverage = {
@@ -113,6 +116,78 @@ export type DashboardFilterCandidate = {
   sampleValues: string[];
 };
 
+type DashboardRunFilterEvidence = {
+  tiles?: Array<{
+    tileId?: string;
+    filterableColumns?: Array<{ column: string; predicateTarget: string }>;
+  }>;
+};
+
+/**
+ * Promote a server-proven result column into a saved page filter and bind every
+ * compatible tile in the same document write. Saving only the filter header
+ * creates an attractive but inert control that immediately reports no reach.
+ */
+export function addDashboardFilterToDocument(
+  dashboard: DashboardDocumentResponse['dashboard'],
+  column: string,
+  run: DashboardRunFilterEvidence | null,
+): DashboardDocumentResponse['dashboard'] {
+  if ((dashboard.filters ?? []).some((filter) => filter.id === column)) return dashboard;
+  const targetByTile = new Map<string, string>();
+  for (const tile of run?.tiles ?? []) {
+    const candidate = tile.filterableColumns?.find((entry) => entry.column === column);
+    if (tile.tileId && candidate?.predicateTarget) targetByTile.set(tile.tileId, candidate.predicateTarget);
+  }
+  const bindItems = (items: DashboardLayoutItem[]): DashboardLayoutItem[] => items.map((item) => {
+    const target = targetByTile.get(item.i);
+    if (!target) return item;
+    const bindings = (item.filterBindings ?? []).filter((binding) => binding.filter !== column);
+    return {
+      ...item,
+      filterBindings: [...bindings, { filter: column, binding: target, mode: 'predicate' as const }],
+    };
+  });
+  return {
+    ...dashboard,
+    filters: [...(dashboard.filters ?? []), {
+      id: column,
+      type: dashboardFilterTypeForColumn(column),
+      bindsTo: column,
+    }],
+    layout: {
+      ...dashboard.layout,
+      items: bindItems(dashboard.layout.items),
+    },
+  };
+}
+
+export function removeDashboardFilterFromDocument(
+  dashboard: DashboardDocumentResponse['dashboard'],
+  filterId: string,
+): DashboardDocumentResponse['dashboard'] {
+  const unbindItems = (items: DashboardLayoutItem[]): DashboardLayoutItem[] => items.map((item) => ({
+    ...item,
+    filterBindings: (item.filterBindings ?? []).filter((binding) => binding.filter !== filterId),
+    parameterBindings: (item.parameterBindings ?? []).filter((binding) => binding.filter !== filterId),
+  }));
+  return {
+    ...dashboard,
+    filters: (dashboard.filters ?? []).filter((filter) => filter.id !== filterId),
+    layout: {
+      ...dashboard.layout,
+      items: unbindItems(dashboard.layout.items),
+    },
+  };
+}
+
+function dashboardFilterTypeForColumn(column: string): DashboardFilter['type'] {
+  if (/(_at$|_date$|_time$|_ts$|date|time|day|week|month|quarter|period)/i.test(column)) return 'daterange';
+  if (/(top[_-]?n|limit|count|amount|number|year|score|rank)/i.test(column)) return 'number';
+  if (/(_name$|_id$|^name$|search|email)/i.test(column)) return 'search';
+  return 'select';
+}
+
 /**
  * Business columns a viewer may filter this page by.
  *
@@ -164,7 +239,12 @@ function isNarrativeTile(item: DashboardLayoutItem): boolean {
 }
 
 function isUsefulDashboardFilter(filter: DashboardFilter): boolean {
-  if (filter.type === 'select' && !filter.options?.length && filter.default === undefined) return false;
+  if (
+    filter.type === 'select'
+    && !filter.options?.length
+    && filter.default === undefined
+    && !(filter as { sourceBlockId?: string }).sourceBlockId
+  ) return false;
   return true;
 }
 

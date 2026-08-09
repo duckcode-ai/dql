@@ -9,6 +9,10 @@ interface ChartOutputProps {
   result: QueryResult;
   themeMode: ThemeMode;
   chartConfig?: CellChartConfig;  // Explicit config from DQL visualization block
+  /** Measured App-tile body height. Notebook charts may omit it. */
+  availableHeight?: number;
+  /** Measured App-tile body width. Keeps SVG text legible in narrow containers. */
+  availableWidth?: number;
 }
 
 export type ChartType =
@@ -148,7 +152,7 @@ function abbreviate(n: number, column = 'value', format?: CellChartConfig['forma
   return formatChartValue(column, n, format);
 }
 
-function formatDateLabel(val: string, maxLen = 8): string {
+function formatDateLabel(val: string, maxLen = 8, monthBucket = false): string {
   // DATE values arrive as midnight-UTC ISO timestamps. Format in UTC so
   // "2026-01-01T00:00:00.000Z" doesn't render as "Dec 31" in western
   // timezones (and "2026-01-01" doesn't render as the previous day).
@@ -156,12 +160,19 @@ function formatDateLabel(val: string, maxLen = 8): string {
     const monthOnly = /^\d{4}-\d{2}$/.test(val);
     const d = new Date(monthOnly ? `${val}-01T00:00:00Z` : val);
     if (!isNaN(d.getTime())) {
-      return d.toLocaleDateString('en-US', monthOnly
+      return d.toLocaleDateString('en-US', monthOnly || monthBucket
         ? { year: 'numeric', month: 'short', timeZone: 'UTC' }
-        : { month: 'short', day: 'numeric', timeZone: 'UTC' });
+        : { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' });
     }
   }
   return String(val).length > maxLen ? String(val).slice(0, maxLen) : String(val);
+}
+
+function formatCategoryLabel(value: string, column: string, maxLen = 16): string {
+  if (DATE_NAME_RE.test(column) || /^\d{4}-\d{2}(-\d{2})?(T|$)/.test(value)) {
+    return formatDateLabel(value, maxLen, /month/i.test(column));
+  }
+  return value.length > maxLen ? `${value.slice(0, Math.max(1, maxLen - 1))}…` : value;
 }
 
 function pickColumns(result: QueryResult, chartConfig?: CellChartConfig) {
@@ -180,7 +191,7 @@ type ThemeRef = ReturnType<typeof themes['dark'] extends infer T ? () => T : nev
 
 const DEFAULT_MAX_ITEMS = 20;
 
-function BarChart({ result, themeMode, chartConfig }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig }) {
+function BarChart({ result, themeMode, chartConfig, availableHeight, availableWidth }: { result: QueryResult; themeMode: ThemeMode; chartConfig?: CellChartConfig; availableHeight?: number; availableWidth?: number }) {
   const t = themes[themeMode];
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
   const { labelCol, valueCol } = pickColumns(result, chartConfig);
@@ -195,22 +206,32 @@ function BarChart({ result, themeMode, chartConfig }: { result: QueryResult; the
   const truncated = result.rows.length > maxItems;
   const maxVal = Math.max(...data.map((d) => d.value), 1);
 
-  const BAR_H = 28, LABEL_W = 120, GAP = 6, PADDING = 12;
-  const svgH = data.length * (BAR_H + GAP) + PADDING * 2;
+  const WIDTH = availableWidth && availableWidth > 0 ? Math.max(240, Math.min(720, availableWidth)) : 600;
+  const LABEL_W = Math.min(132, Math.max(82, WIDTH * 0.32));
+  const PADDING = 10;
+  const preferredSlot = 34;
+  const fittedHeight = availableHeight && availableHeight > 0
+    ? Math.max(96, availableHeight - 4)
+    : data.length * preferredSlot + PADDING * 2;
+  const slot = Math.max(15, Math.min(preferredSlot, (fittedHeight - PADDING * 2) / Math.max(1, data.length)));
+  const BAR_H = Math.max(10, slot - 4);
+  const svgH = Math.max(80, PADDING * 2 + data.length * slot);
 
   return (
     <div style={{ padding: '8px 0' }}>
-      <svg width="100%" height={svgH} viewBox={`0 0 600 ${svgH}`} preserveAspectRatio="xMidYMid meet" style={{ display: 'block', overflow: 'visible' }}>
+      <svg width="100%" height={svgH} viewBox={`0 0 ${WIDTH} ${svgH}`} preserveAspectRatio="xMidYMid meet" style={{ display: 'block', overflow: 'visible' }}>
         {data.map((item, i) => {
-          const y = PADDING + i * (BAR_H + GAP);
-          const barMaxW = 600 - LABEL_W - 84;
+          const y = PADDING + i * slot;
+          const barMaxW = WIDTH - LABEL_W - Math.min(84, WIDTH * 0.22);
           const barW = Math.max((item.value / maxVal) * barMaxW, 2);
           const isHovered = hoveredIdx === i;
-          const color = palette[i % palette.length];
+          // A two-field bar result is one series. Cycling colors per row implied
+          // unrelated categories and made governed business charts look noisy.
+          const color = palette[0] ?? t.accent;
           return (
             <g key={i} onMouseEnter={() => setHoveredIdx(i)} onMouseLeave={() => setHoveredIdx(null)} style={{ cursor: 'default' }}>
               <text x={LABEL_W - 8} y={y + BAR_H / 2 + 4} textAnchor="end" fontSize={11} fontFamily={t.font} fill={t.textSecondary}>
-                {item.label.length > 16 ? item.label.slice(0, 15) + '…' : item.label}
+                {formatCategoryLabel(item.label, labelCol)}
               </text>
               <rect x={LABEL_W} y={y} width={barW} height={BAR_H} rx={3} fill={color} opacity={isHovered ? 1 : 0.88} style={{ transition: 'opacity 0.15s' }} />
               <text x={LABEL_W + barW + 6} y={y + BAR_H / 2 + 4} textAnchor="start" fontSize={11} fontFamily={t.fontMono} fill={t.textMuted}>
@@ -366,7 +387,7 @@ function StackedBarChart({ result, themeMode, chartConfig }: { result: QueryResu
 
 // ─── Line Chart ───────────────────────────────────────────────────────────────
 
-function LineChart({ result, themeMode, showArea, chartConfig }: { result: QueryResult; themeMode: ThemeMode; showArea?: boolean; chartConfig?: CellChartConfig }) {
+function LineChart({ result, themeMode, showArea, chartConfig, availableHeight, availableWidth }: { result: QueryResult; themeMode: ThemeMode; showArea?: boolean; chartConfig?: CellChartConfig; availableHeight?: number; availableWidth?: number }) {
   const t = themes[themeMode];
   const [tooltip, setTooltip] = useState<{ x: number; y: number; label: string; value: number } | null>(null);
   const palette = getPalette(chartConfig?.colorPalette);
@@ -376,8 +397,12 @@ function LineChart({ result, themeMode, showArea, chartConfig }: { result: Query
   const data = result.rows.map((row) => ({ label: String(row[xCol] ?? ''), value: Number(row[yCol] ?? 0) }));
   if (data.length < 2) return null;
 
-  const WIDTH = 560, HEIGHT = 212;
-  const PAD_L = 56, PAD_R = 16, PAD_T = 16, PAD_B = 48;
+  const WIDTH = availableWidth && availableWidth > 0 ? Math.max(240, Math.min(720, availableWidth)) : 560;
+  const HEIGHT = availableHeight && availableHeight > 0
+    ? Math.max(150, Math.min(320, availableHeight - 4))
+    : 212;
+  const compact = WIDTH < 360;
+  const PAD_L = compact ? 44 : 56, PAD_R = compact ? 8 : 16, PAD_T = 16, PAD_B = 48;
   const chartW = WIDTH - PAD_L - PAD_R, chartH = HEIGHT - PAD_T - PAD_B;
 
   const minVal = Math.min(...data.map((d) => d.value));
@@ -398,14 +423,18 @@ function LineChart({ result, themeMode, showArea, chartConfig }: { result: Query
 
   const areaD = `${pathD} L ${points[points.length - 1].x},${PAD_T + chartH} L ${PAD_L},${PAD_T + chartH} Z`;
 
-  const TICKS = 5;
+  const TICKS = compact ? 4 : 5;
   const yTicks = Array.from({ length: TICKS + 1 }, (_, i) => {
     const val = minVal + (valRange * i) / TICKS;
     return { val, y: toY(val) };
   });
 
   const labelStep = Math.ceil(data.length / 8);
-  const xLabels = data.filter((_, i) => i % labelStep === 0 || i === data.length - 1);
+  const xLabelIndexes = compact
+    ? [...new Set(WIDTH < 300
+      ? [0, data.length - 1]
+      : [0, Math.floor((data.length - 1) / 2), data.length - 1])]
+    : data.map((_, index) => index).filter((index) => index % labelStep === 0 || index === data.length - 1);
 
   return (
     <div style={{ position: 'relative', padding: '8px 0' }}>
@@ -422,10 +451,10 @@ function LineChart({ result, themeMode, showArea, chartConfig }: { result: Query
           <circle key={i} cx={pt.x} cy={pt.y} r={3} fill={lineColor} style={{ cursor: 'crosshair' }}
             onMouseEnter={() => setTooltip({ x: pt.x, y: pt.y, label: data[i].label, value: data[i].value })} />
         ))}
-        {xLabels.map((item, i) => {
-          const idx = data.indexOf(item);
+        {xLabelIndexes.map((idx) => {
+          const item = data[idx];
           return (
-            <text key={i} x={toX(idx)} y={PAD_T + chartH + 16} textAnchor="middle" fontSize={10} fontFamily={t.font} fill={t.textMuted}>
+            <text key={idx} x={toX(idx)} y={PAD_T + chartH + 16} textAnchor={idx === 0 ? 'start' : idx === data.length - 1 ? 'end' : 'middle'} fontSize={10} fontFamily={t.font} fill={t.textMuted}>
               {formatDateLabel(item.label)}
             </text>
           );
@@ -436,9 +465,9 @@ function LineChart({ result, themeMode, showArea, chartConfig }: { result: Query
         <text x={PAD_L + chartW / 2} y={HEIGHT - 4} textAnchor="middle" fontSize={10} fontWeight={600} fontFamily={t.font} fill={t.textMuted} letterSpacing="0.04em">
           {xCol}
         </text>
-        <text x={12} y={PAD_T + chartH / 2} textAnchor="middle" fontSize={10} fontWeight={600} fontFamily={t.font} fill={t.textMuted} letterSpacing="0.04em" transform={`rotate(-90, 12, ${PAD_T + chartH / 2})`}>
+        {!compact ? <text x={12} y={PAD_T + chartH / 2} textAnchor="middle" fontSize={10} fontWeight={600} fontFamily={t.font} fill={t.textMuted} letterSpacing="0.04em" transform={`rotate(-90, 12, ${PAD_T + chartH / 2})`}>
           {yCol}
-        </text>
+        </text> : null}
         {tooltip && (
           <g>
             <rect x={tooltip.x + 8} y={tooltip.y - 20} width={90} height={32} rx={4} fill={t.cellBg} stroke={t.cellBorder} strokeWidth={1} />
@@ -1223,7 +1252,7 @@ function ChartConfigPopover({
   );
 }
 
-export function ChartOutput({ result, themeMode, chartConfig, onConfigChange }: ChartOutputProps & { onConfigChange?: (updates: Partial<CellChartConfig>) => void }) {
+export function ChartOutput({ result, themeMode, chartConfig, availableHeight, availableWidth, onConfigChange }: ChartOutputProps & { onConfigChange?: (updates: Partial<CellChartConfig>) => void }) {
   const t = themes[themeMode];
   const resolvedType = resolveChartType(result, chartConfig);
   const [showConfig, setShowConfig] = useState(false);
@@ -1271,12 +1300,12 @@ export function ChartOutput({ result, themeMode, chartConfig, onConfigChange }: 
           t={t}
         />
       )}
-      {renderChart(resolvedType, result, themeMode, chartConfig)}
+      {renderChart(resolvedType, result, themeMode, chartConfig, availableHeight, availableWidth)}
     </div>
   );
 }
 
-export function renderChart(chartType: ChartType, result: QueryResult, themeMode: ThemeMode, chartConfig?: CellChartConfig): React.ReactElement | null {
+export function renderChart(chartType: ChartType, result: QueryResult, themeMode: ThemeMode, chartConfig?: CellChartConfig, availableHeight?: number, availableWidth?: number): React.ReactElement | null {
   // Reorder columns based on explicit config
   const xCol = chartConfig?.x && result.columns.includes(chartConfig.x) ? chartConfig.x : undefined;
   const yCol = chartConfig?.y && result.columns.includes(chartConfig.y) ? chartConfig.y : undefined;
@@ -1284,11 +1313,11 @@ export function renderChart(chartType: ChartType, result: QueryResult, themeMode
 
   switch (chartType) {
     case 'line':
-      return <LineChart result={configuredResult} themeMode={themeMode} chartConfig={chartConfig} />;
+      return <LineChart result={configuredResult} themeMode={themeMode} chartConfig={chartConfig} availableHeight={availableHeight} availableWidth={availableWidth} />;
     case 'area':
-      return <LineChart result={configuredResult} themeMode={themeMode} chartConfig={chartConfig} showArea />;
+      return <LineChart result={configuredResult} themeMode={themeMode} chartConfig={chartConfig} availableHeight={availableHeight} availableWidth={availableWidth} showArea />;
     case 'bar':
-      return <BarChart result={configuredResult} themeMode={themeMode} chartConfig={chartConfig} />;
+      return <BarChart result={configuredResult} themeMode={themeMode} chartConfig={chartConfig} availableHeight={availableHeight} availableWidth={availableWidth} />;
     case 'grouped-bar':
       return <GroupedBarChart result={configuredResult} themeMode={themeMode} chartConfig={chartConfig} />;
     case 'stacked-bar':

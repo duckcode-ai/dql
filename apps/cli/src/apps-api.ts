@@ -18,12 +18,16 @@ import {
   parseDashboardDocument,
   normalizeDqlArtifactReference,
   suggestAppId,
+  createAppBuildDraft,
+  applyAppBuildDraftOperations,
   type AppDocument,
   type BlockParameterDefinition,
   type DashboardDisplayMetadata,
   type DashboardDocument,
   type DashboardFilter,
   type DashboardGridItem,
+  type AppBuildDraft,
+  type AppBuildDraftOperation,
 } from '@duckcodeailabs/dql-core';
 import {
   defaultPersonaRegistry,
@@ -58,6 +62,9 @@ interface Ctx {
    *  fallback). Commit uses it to write the app's narrated story sections. */
   narrate?: (input: NarrateInput) => Promise<NarrateResult>;
   verifyDashboardRun?: (input: { runId: string; appId: string; dashboardId: string; tileIds: string[] }) =>
+    | { ok: true; snapshotId: string; resultFingerprint: string }
+    | { ok: false; error: string };
+  verifyAppBuildPreview?: (input: { runId: string; draftId: string; dashboardId: string; tileIds: string[] }) =>
     | { ok: true; snapshotId: string; resultFingerprint: string }
     | { ok: false; error: string };
   queueOperation?: <TResult>(
@@ -162,6 +169,180 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
   }
 
   // ── Apps ────────────────────────────────────────────────────────────────
+
+  if (req.method === 'POST' && path === '/api/app-builds') {
+    try {
+      const body = await readJson<{
+        appId?: string; baseAppId?: string; name?: string; goal?: string; audience?: string; domain?: string;
+        authoringMode?: 'ai' | 'manual'; sourcePolicy?: 'governed_only' | 'include_review_required';
+        template?: 'executive_brief' | 'operational_dashboard' | 'investigation' | 'blank';
+      }>(req);
+      const draft = createStoredAppBuildDraft(projectRoot, body);
+      sendJson(res, 201, { ok: true, draft });
+    } catch (err) {
+      sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+    return true;
+  }
+
+  if (req.method === 'GET' && path === '/api/app-builds') {
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+    try {
+      sendJson(res, 200, { ok: true, drafts: storage.listAppBuildDrafts() });
+    } finally {
+      storage.close();
+    }
+    return true;
+  }
+
+  let buildMatch = path.match(/^\/api\/app-builds\/([^/]+)$/);
+  if (buildMatch && req.method === 'GET') {
+    const draft = loadStoredAppBuildDraft(projectRoot, decodeURIComponent(buildMatch[1]));
+    sendJson(res, draft ? 200 : 404, draft ? { ok: true, draft } : { ok: false, error: 'App Build Draft not found.' });
+    return true;
+  }
+  if (buildMatch && req.method === 'PATCH') {
+    try {
+      const id = decodeURIComponent(buildMatch[1]);
+      const current = loadStoredAppBuildDraft(projectRoot, id);
+      if (!current) {
+        sendJson(res, 404, { ok: false, error: 'App Build Draft not found.' });
+        return true;
+      }
+      const body = await readJson<{ expectedRevision?: number; expectedProposalHash?: string; operations?: AppBuildDraftOperation[] }>(req);
+      if (body.expectedProposalHash && body.expectedProposalHash !== current.proposalHash) {
+        sendJson(res, 409, { ok: false, error: 'APP_BUILD_PROPOSAL_CONFLICT: refresh the local draft before applying changes.' });
+        return true;
+      }
+      const next = applyAppBuildDraftOperations(current, body.expectedRevision ?? -1, body.operations ?? []);
+      writeStoredAppBuildDraft(projectRoot, next, {
+        expectedRevision: current.revision,
+        operations: body.operations ?? [],
+      });
+      sendJson(res, 200, { ok: true, draft: next });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      sendJson(res, message.includes('APP_BUILD_REVISION_CONFLICT') ? 409 : 400, { ok: false, error: message });
+    }
+    return true;
+  }
+  if (buildMatch && req.method === 'DELETE') {
+    try {
+      const id = decodeURIComponent(buildMatch[1]);
+      const current = loadStoredAppBuildDraft(projectRoot, id);
+      if (!current) {
+        sendJson(res, 404, { ok: false, error: 'App Build Draft not found.' });
+        return true;
+      }
+      const body = await readJson<{ expectedRevision?: number; proposalHash?: string }>(req);
+      if (body.expectedRevision !== current.revision || body.proposalHash !== current.proposalHash) {
+        sendJson(res, 409, { ok: false, error: 'APP_BUILD_REVISION_CONFLICT: refresh before deleting this local draft.' });
+        return true;
+      }
+      sendJson(res, 200, deleteStoredAppBuildDraft(projectRoot, current));
+    } catch (err) {
+      sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+    return true;
+  }
+
+  const draftAiProposalMatch = path.match(/^\/api\/app-builds\/([^/]+)\/ai-proposals$/);
+  if (draftAiProposalMatch && req.method === 'POST') {
+    try {
+      const id = decodeURIComponent(draftAiProposalMatch[1]);
+      const current = loadStoredAppBuildDraft(projectRoot, id);
+      if (!current) {
+        sendJson(res, 404, { ok: false, error: 'App Build Draft not found.' });
+        return true;
+      }
+      const body = await readJson<{
+        prompt?: string;
+        expectedRevision?: number;
+        proposalHash?: string;
+        selectedBlockIds?: string[];
+      }>(req);
+      if (body.expectedRevision !== current.revision || body.proposalHash !== current.proposalHash) {
+        sendJson(res, 409, { ok: false, error: 'APP_BUILD_REVISION_CONFLICT: refresh before asking AI to change this draft.' });
+        return true;
+      }
+      const proposal = await proposeAppBuildDraftOperations(projectRoot, current, {
+        prompt: cleanString(body.prompt) || current.frame.goal,
+        selectedBlockIds: body.selectedBlockIds,
+      }, { generateGovernedAnswer: ctx.generateGovernedAnswer });
+      sendJson(res, 201, { ok: true, proposal });
+    } catch (err) {
+      sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+    return true;
+  }
+
+  buildMatch = path.match(/^\/api\/app-builds\/([^/]+)\/preflight$/);
+  if (buildMatch && req.method === 'POST') {
+    const current = loadStoredAppBuildDraft(projectRoot, decodeURIComponent(buildMatch[1]));
+    if (!current) {
+      sendJson(res, 404, { ok: false, error: 'App Build Draft not found.' });
+      return true;
+    }
+    const body = await readJson<{ expectedRevision?: number; proposalHash?: string }>(req);
+    if ((body.expectedRevision !== undefined && body.expectedRevision !== current.revision)
+      || (body.proposalHash && body.proposalHash !== current.proposalHash)) {
+      sendJson(res, 409, { ok: false, error: 'APP_BUILD_REVISION_CONFLICT: refresh before preflight.' });
+      return true;
+    }
+    const errors = preflightStoredAppBuildDraft(projectRoot, current);
+    const analysisPages = current.pages
+      .map((page) => ({ pageId: page.id, tileIds: page.layout.items.filter((tile) => !tile.text && !tile.aiPin).map((tile) => tile.i) }))
+      .filter((page) => page.tileIds.length > 0);
+    const receipts = current.previewReceipts ?? (current.previewReceipt ? [current.previewReceipt] : []);
+    if (analysisPages.length > 0 && !ctx.verifyAppBuildPreview) {
+      errors.push('The runtime cannot verify the settled App preview receipts.');
+    }
+    for (const page of analysisPages) {
+      const receipt = receipts.find((candidate) => candidate.pageId === page.pageId);
+      if (!receipt || !ctx.verifyAppBuildPreview) continue;
+      const verified = ctx.verifyAppBuildPreview({
+        runId: receipt.id,
+        draftId: current.id,
+        dashboardId: page.pageId,
+        tileIds: page.tileIds,
+      });
+      if (!verified.ok
+        || verified.snapshotId !== receipt.snapshotId
+        || verified.resultFingerprint !== receipt.resultFingerprint) {
+        errors.push(verified.ok ? `The saved preview receipt for ${page.pageId} no longer matches the settled run.` : verified.error);
+      }
+    }
+    if (errors.length) {
+      sendJson(res, 400, { ok: false, draft: current, errors });
+      return true;
+    }
+    const next = markStoredAppBuildDraftPreflighted(projectRoot, current);
+    sendJson(res, 200, { ok: true, draft: next, errors: [] });
+    return true;
+  }
+
+  buildMatch = path.match(/^\/api\/app-builds\/([^/]+)\/(publish-to-project|commit)$/);
+  if (buildMatch && req.method === 'POST') {
+    try {
+      const current = loadStoredAppBuildDraft(projectRoot, decodeURIComponent(buildMatch[1]));
+      if (!current) {
+        sendJson(res, 404, { ok: false, error: 'App Build Draft not found.' });
+        return true;
+      }
+      const body = await readJson<{ expectedRevision?: number; proposalHash?: string }>(req);
+      if (body.expectedRevision !== current.revision || body.proposalHash !== current.proposalHash) {
+        sendJson(res, 409, { ok: false, error: 'APP_BUILD_REVISION_CONFLICT: refresh the Build Frame before committing.' });
+        return true;
+      }
+      const result = publishStoredAppBuildDraft(projectRoot, current);
+      await refreshGeneratedMetadata(projectRoot);
+      sendJson(res, 201, { ...result, compatibilityRoute: buildMatch[2] === 'commit' });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      sendJson(res, message.includes('already exists') ? 409 : 400, { ok: false, error: message });
+    }
+    return true;
+  }
 
   if (req.method === 'GET' && path === '/api/apps') {
     const apps = collectAppsList(projectRoot);
@@ -295,7 +476,9 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
   if (req.method === 'POST' && path === '/api/apps') {
     try {
       const body = await readJson<AppCreateRequest>(req);
-      const result = createAppPackage(projectRoot, body);
+      // Compatibility adapter: the legacy manual endpoint now traverses the
+      // same versioned draft, preflight, and private commit service as Studio.
+      const result = createAppPackageViaBuildDraft(projectRoot, body);
       if (!result.ok) {
         sendJson(res, 400, { error: result.error });
         return true;
@@ -339,6 +522,24 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
       sendJson(res, 200, result);
     } catch (err) {
       sendJson(res, 500, { ok: false, error: (err as Error).message });
+    }
+    return true;
+  }
+
+  m = path.match(/^\/api\/apps\/([^/]+)\/publish-to-project$/);
+  if (m && req.method === 'POST') {
+    const appId = decodeURIComponent(m[1]);
+    try {
+      const body = await readJson<AppPromoteRequest>(req);
+      const result = promoteAppForStakeholders(projectRoot, appId, body);
+      if (!result.ok) {
+        sendJson(res, 409, result);
+        return true;
+      }
+      await refreshGeneratedMetadata(projectRoot);
+      sendJson(res, 200, result);
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) });
     }
     return true;
   }
@@ -860,12 +1061,29 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
   if (m && req.method === 'DELETE') {
     const id = decodeURIComponent(m[1]);
     try {
-      const result = deleteAppPackage(projectRoot, id);
+      const body = await readJson<{ expectedFingerprint?: string }>(req);
+      const result = deleteAppPackage(projectRoot, id, body);
       if (!result.ok) {
         sendJson(res, result.status, { ok: false, error: result.error });
         return true;
       }
       ctx.scheduleProjectRefresh?.('app-deleted');
+      sendJson(res, 200, result);
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: (err as Error).message });
+    }
+    return true;
+  }
+
+  m = path.match(/^\/api\/app-recoveries\/([^/]+)\/restore$/);
+  if (m && req.method === 'POST') {
+    try {
+      const result = restoreAppRecovery(projectRoot, decodeURIComponent(m[1]));
+      if (!result.ok) {
+        sendJson(res, result.status, result);
+        return true;
+      }
+      ctx.scheduleProjectRefresh?.('app-restored');
       sendJson(res, 200, result);
     } catch (err) {
       sendJson(res, 500, { ok: false, error: (err as Error).message });
@@ -984,6 +1202,7 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
 type AppListEntry = {
   id: string;
   name: string;
+  fingerprint: string;
   filePath: string;
   domain: string;
   ownerDomain?: string;
@@ -1029,6 +1248,7 @@ function collectAppsList(projectRoot: string): AppListEntry[] {
     out.push({
       id: document.id,
       name: document.name,
+      fingerprint: fingerprintAppDirectory(appDir),
       filePath: relative(projectRoot, appDir),
       domain: document.domain,
       ownerDomain: document.ownerDomain,
@@ -1147,6 +1367,7 @@ interface AppAiBuildSession {
     appName?: string;
     pageTitle?: string;
     audience: string;
+    filterIds: string[];
     tileOverrides: Record<string, { title?: string; viz?: string }>;
   };
   warnings: string[];
@@ -1209,10 +1430,31 @@ export interface AppBuildProposalGap {
   reason: string;
 }
 
+export interface AppBuildFrame {
+  goal: string;
+  audience: string;
+  metrics: string[];
+  dimensions: string[];
+  grain?: string;
+  timeRange?: string;
+  comparison?: string;
+  filters: string[];
+  desiredOutput: string;
+}
+
+export interface AppBuildClarification {
+  id: string;
+  question: string;
+  choices: string[];
+  required: boolean;
+}
+
 export interface AppBuildProposal {
   intent: { target: 'personal' | 'shared_project'; initialVisibility: 'private' };
+  buildFrame: AppBuildFrame;
   tiles: AppBuildProposalTile[];
   gaps: AppBuildProposalGap[];
+  clarifications: AppBuildClarification[];
   followUps: string[];
   coverage: { certifiedTiles: number; semanticTiles: number; generatedTiles: number; gaps: number };
 }
@@ -1370,10 +1612,13 @@ interface BlockCandidate {
   owner: string | null;
   tags: string[];
   path: string;
+  fingerprint: string;
   lastModified: string;
   description: string;
   llmContext: string | null;
   chartType?: string;
+  /** Stable App-filter ids declared by block filter/parameter bindings. */
+  filterIds: string[];
   score: number;
   reasons: string[];
 }
@@ -1757,13 +2002,51 @@ function buildAppProposal(plan: AppPlan): AppBuildProposal {
     seenGap.add(question.toLowerCase());
     gaps.push({ id: `gap_${gaps.length + 1}`, question, reason: 'No certified block covers this question.' });
   }
+  const metrics = Array.from(new Set(plan.requirements.flatMap((requirement) => requirement.measures)));
+  const dimensions = Array.from(new Set(plan.requirements.flatMap((requirement) => requirement.dimensions)));
+  const filters = Array.from(new Set(plan.requirements.flatMap((requirement) => requirement.filters)));
+  const clarifications: AppBuildClarification[] = [];
+  if (metrics.length === 0) {
+    clarifications.push({
+      id: 'metric',
+      question: 'Which governed business metric should lead this App?',
+      choices: ['Choose a certified block', 'Choose a semantic metric', 'Describe the calculation as review-required analysis'],
+      required: true,
+    });
+  }
+  if (tiles.length === 0 || gaps.length > 0) {
+    clarifications.push({
+      id: 'coverage',
+      question: 'How should DQL handle requirements without governed coverage?',
+      choices: ['Refine metrics or dimensions', 'Use governed semantic coverage', 'Include review-required analysis', 'Keep visible gaps'],
+      required: tiles.length === 0,
+    });
+  }
+  if (!plan.prompt.match(/\b(day|week|month|quarter|year|today|yesterday|current|previous|over time)\b/i)) {
+    clarifications.push({
+      id: 'time',
+      question: 'What time window and comparison should the App use?',
+      choices: ['Current period vs previous period', 'Trailing 30 days', 'Year to date', 'No time comparison'],
+      required: false,
+    });
+  }
   return {
     intent: {
       target: plan.publicationIntent,
       initialVisibility: 'private',
     },
+    buildFrame: {
+      goal: plan.businessGoal,
+      audience: plan.audience,
+      metrics,
+      dimensions,
+      grain: plan.requirements.find((requirement) => requirement.grain)?.grain,
+      filters,
+      desiredOutput: plan.planning.displayStrategy,
+    },
     tiles,
     gaps,
+    clarifications,
     followUps: gaps.map((gap) => gap.question).slice(0, 4),
     coverage: {
       certifiedTiles: tiles.filter((tile) => tile.certification === 'certified').length,
@@ -2060,6 +2343,184 @@ export async function proposeAppAiBuild(
   }
 }
 
+export interface AppBuildDraftAiProposal {
+  id: string;
+  draftId: string;
+  baseRevision: number;
+  baseProposalHash: string;
+  operations: AppBuildDraftOperation[];
+  clarifications: Array<{
+    id: string;
+    question: string;
+    choices: Array<{ id: string; label: string }>;
+    required: boolean;
+  }>;
+  summary: {
+    requirements: number;
+    covered: number;
+    gaps: number;
+    certifiedSources: number;
+    semanticSources: number;
+  };
+}
+
+/**
+ * AI is a coauthor of the same local AppBuildDraft used by manual authoring.
+ * This adapter reuses the governed planner, compiles its result outside the
+ * project, and returns typed operations. It does not mutate the draft or write
+ * any canonical App source.
+ */
+export async function proposeAppBuildDraftOperations(
+  projectRoot: string,
+  draft: AppBuildDraft,
+  input: { prompt: string; selectedBlockIds?: string[] },
+  hooks?: AppBuildHooks,
+): Promise<AppBuildDraftAiProposal> {
+  const session = await proposeAppAiBuild(projectRoot, {
+    sessionId: `app_build_${draft.id}_${draft.revision}`,
+    prompt: input.prompt,
+    domain: draft.pages[0]?.metadata.domain,
+    audience: draft.frame.audience,
+    mode: draft.sourcePolicy === 'include_review_required' ? 'personal' : 'stakeholder',
+    exploreGaps: draft.sourcePolicy === 'include_review_required',
+    selectedBlockIds: input.selectedBlockIds,
+    ...(draft.baseApp ? { existingAppId: draft.baseApp.appId } : {}),
+  }, hooks);
+  if (session.status !== 'proposed' || !session.plan || !session.proposal) {
+    throw new Error(session.error ?? 'The App planner did not produce a proposal.');
+  }
+  const plan = session.plan as AppPlan;
+
+  const { KGStore, defaultKgPath, materializeAppPlanDocuments } = await import('@duckcodeailabs/dql-agent');
+  const kg = new KGStore(defaultKgPath(projectRoot));
+  let dashboards: DashboardDocument[];
+  try {
+    dashboards = materializeAppPlanDocuments(plan, kg).dashboards;
+  } finally {
+    kg.close();
+  }
+
+  const proposalTileById = new Map(session.proposal.tiles.map((tile) => [tile.id, tile] as const));
+  const plannedTiles = plan.pages.flatMap((page) => page.tiles);
+  const sourceOperations: AppBuildDraftOperation[] = plannedTiles.flatMap((tile): AppBuildDraftOperation[] => {
+    const proposalTile = proposalTileById.get(tile.id);
+    if (tile.kind === 'certified_block' && tile.blockId) {
+      return [{
+        type: 'upsert_source' as const,
+        source: {
+          id: `block:${tile.blockId}`,
+          kind: 'certified_block' as const,
+          sourceRef: tile.blockId,
+          sourceFingerprint: proposalTile?.preflight.sourceFingerprint,
+          receiptId: proposalTile?.preflight.receiptId,
+          trustState: 'certified' as const,
+          reviewStatus: 'not_required' as const,
+        },
+      }];
+    }
+    if (tile.kind === 'semantic_query' && tile.semantic) {
+      return [{
+        type: 'upsert_source' as const,
+        source: {
+          id: `semantic:${tile.semantic.id}`,
+          kind: 'governed_semantic' as const,
+          sourceRef: tile.semantic.id,
+          qualifiedIdentity: tile.semantic.qualifiedMetricIds?.join(',') || tile.semantic.id,
+          snapshotId: tile.semantic.snapshotId,
+          sourceFingerprint: tile.semantic.definitionFingerprint,
+          receiptId: proposalTile?.preflight.receiptId,
+          trustState: 'review_required' as const,
+          reviewStatus: 'required' as const,
+        },
+      }];
+    }
+    return [];
+  });
+  const sourceIdForCoverage = (source: string, sourceId?: string): string[] => {
+    if (!sourceId) return [];
+    if (source === 'certified_block') return [sourceId.startsWith('block:') ? sourceId : `block:${sourceId}`];
+    if (source === 'semantic_query') return [sourceId.startsWith('semantic:') ? sourceId : `semantic:${sourceId}`];
+    return [];
+  };
+  const clarifications = session.proposal.clarifications.map((clarification) => ({
+    id: clarification.id,
+    question: clarification.question,
+    choices: clarification.choices.map((label, index) => ({ id: slugify(label) || `choice-${index + 1}`, label })),
+    required: clarification.required,
+  }));
+  const replaceInitialBlank = !draft.baseApp
+    && draft.pages.length === 1
+    && draft.pages[0].layout.items.length === 0
+    && !dashboards.some((page) => page.id === draft.pages[0].id);
+  const operations: AppBuildDraftOperation[] = [
+    { type: 'set_name', name: plan.name },
+    {
+      type: 'set_frame',
+      frame: {
+        goal: session.proposal.buildFrame.goal,
+        decision: plan.businessGoal,
+        audience: session.proposal.buildFrame.audience,
+        metrics: session.proposal.buildFrame.metrics,
+        dimensions: session.proposal.buildFrame.dimensions,
+        grain: session.proposal.buildFrame.grain,
+        timeRange: session.proposal.buildFrame.timeRange,
+        comparison: session.proposal.buildFrame.comparison,
+        filters: session.proposal.buildFrame.filters,
+        desiredOutput: session.proposal.buildFrame.desiredOutput,
+        clarificationQuestions: clarifications,
+      },
+    },
+    {
+      type: 'set_requirements',
+      requirements: plan.requirements.map((requirement) => ({
+        id: requirement.id,
+        question: requirement.question,
+        role: requirement.role,
+        required: true,
+        measures: requirement.measures,
+        dimensions: requirement.dimensions,
+        filters: requirement.filters,
+        grain: requirement.grain,
+      })),
+      coverage: plan.requirementCoverage.map((coverage) => ({
+        requirementId: coverage.requirementId,
+        status: coverage.status === 'covered' ? 'covered' as const : 'gap' as const,
+        sourceIds: sourceIdForCoverage(coverage.source, coverage.sourceId),
+        componentIds: coverage.tileId ? [coverage.tileId] : [],
+        reasons: coverage.reasons,
+      })),
+    },
+    ...(replaceInitialBlank ? [{ type: 'remove_page' as const, pageId: draft.pages[0].id }] : []),
+    ...dashboards.map((page): AppBuildDraftOperation => ({ type: 'upsert_page', page })),
+    ...sourceOperations,
+    ...plan.reviewTasks.map((message, index): AppBuildDraftOperation => ({
+      type: 'set_review_task',
+      task: {
+        id: `ai-review-${index + 1}`,
+        message: /run dql app build after accepting the generated files/i.test(message)
+          ? 'Publish to Project only after every selected source, filter binding, and settled preview passes preflight.'
+          : message,
+        status: 'open',
+      },
+    })),
+  ];
+  return {
+    id: session.id,
+    draftId: draft.id,
+    baseRevision: draft.revision,
+    baseProposalHash: draft.proposalHash,
+    operations,
+    clarifications,
+    summary: {
+      requirements: plan.requirements.length,
+      covered: plan.requirementCoverage.filter((item) => item.status === 'covered').length,
+      gaps: plan.requirementCoverage.filter((item) => item.status === 'gap').length,
+      certifiedSources: session.proposal.coverage.certifiedTiles,
+      semanticSources: session.proposal.coverage.semanticTiles,
+    },
+  };
+}
+
 /**
  * Materialize explicitly selected exploratory candidates as Git-owned, app-scoped
  * review DQL. They are never promoted into the shared block library and the
@@ -2172,6 +2633,8 @@ export interface CommitAppAiBuildInput {
   /** Existing-App page builds may rename only the proposed page, never the App. */
   pageTitle?: string;
   audience?: string;
+  /** User-approved page filter ids; omitted keeps every planned filter. */
+  filterIds?: string[];
   tileOverrides?: Record<string, { title?: string; viz?: string }>;
 }
 
@@ -2229,11 +2692,19 @@ export async function commitAppAiBuild(
   if (selected.size === 0) {
     return { ok: false, error: 'Select at least one tile to create the app.', status: 400 };
   }
+  const plannedFilterIds = new Set([
+    ...(plan.globalFilters ?? []).map((filter) => filter.id),
+    ...plan.pages.flatMap((page) => (page.filters ?? []).map((filter) => filter.id)),
+  ]);
+  const selectedFilterIds = new Set(
+    (input.filterIds ?? Array.from(plannedFilterIds)).filter((filterId) => plannedFilterIds.has(filterId)),
+  );
 
   // Filter the plan's certified tiles down to the confirmed selection; structural
   // tiles (narrative, draft placeholders) stay — they document the story + gaps.
   const committedPlan: AppPlan = {
     ...plan,
+    globalFilters: (plan.globalFilters ?? []).filter((filter) => selectedFilterIds.has(filter.id)),
     // `+ Add page` must not rewrite the App it is adding to (`UI-017`), but the
     // fields were dropped with no error, so a name typed in that brief silently
     // vanished. Adding a page keeps the App's own name; use `PATCH /api/apps/:id`
@@ -2245,14 +2716,19 @@ export async function commitAppAiBuild(
       ...(isExistingPageBuild && pageIndex === 0 && cleanString(input.pageTitle)
         ? { title: cleanString(input.pageTitle).slice(0, 120) }
         : {}),
+      filters: (page.filters ?? []).filter((filter) => selectedFilterIds.has(filter.id)),
       tiles: page.tiles
         .filter((tile) => !['certified_block', 'semantic_query'].includes(tile.kind) || selected.has(tile.id))
         .map((tile) => {
           const override = tileOverrides[tile.id];
-          if (!override) return tile;
+          const filteredTile = {
+            ...tile,
+            filterBindings: (tile.filterBindings ?? []).filter((binding) => selectedFilterIds.has(binding.filter)),
+          };
+          if (!override) return filteredTile;
           const viz = override.viz as AppPlan['pages'][number]['tiles'][number]['viz'] | undefined;
           return {
-            ...tile,
+            ...filteredTile,
             ...(override.title ? { title: override.title } : {}),
             ...(viz ? { viz } : {}),
             ...(viz && tile.display ? {
@@ -2434,6 +2910,7 @@ export async function commitAppAiBuild(
           ? { pageTitle: committedPlan.pages[0]?.title }
           : { appName: committedPlan.name }),
         audience: committedPlan.audience,
+        filterIds: Array.from(selectedFilterIds),
         tileOverrides,
       },
       warnings: [...session.warnings, ...attachWarnings],
@@ -3183,7 +3660,7 @@ export function promoteAppForStakeholders(
   const dashboardSources = findDashboardsForApp(loaded.appDir)
     .map((path) => ({ path, document: loadDashboardDocument(path).document }))
     .filter((item): item is { path: string; document: DashboardDocument } => Boolean(item.document));
-  const readiness = appPublicationReadiness(dashboardSources.map((item) => item.document));
+  const readiness = appPublicationReadiness(projectRoot, dashboardSources.map((item) => item.document));
   if (!readiness.ready) {
     return {
       ok: false,
@@ -3260,7 +3737,7 @@ export function promoteAppForStakeholders(
 export interface AppPublicationReadiness {
   ready: boolean;
   governedTiles: number;
-  blockers: Array<{ dashboardId: string; tileId: string; code: 'exploratory_source' | 'semantic_review' | 'semantic_preflight'; message: string }>;
+  blockers: Array<{ dashboardId: string; tileId: string; code: 'exploratory_source' | 'semantic_review' | 'semantic_preflight' | 'block_not_certified' | 'block_source_changed' | 'filter_not_preflighted'; message: string }>;
 }
 
 export function approveAppSemanticTiles(
@@ -3314,12 +3791,40 @@ export function approveAppSemanticTiles(
   return { ok: true, dashboard: parsed.document, path: relative(projectRoot, loaded.path) };
 }
 
-function appPublicationReadiness(dashboards: DashboardDocument[]): AppPublicationReadiness {
+function appPublicationReadiness(
+  projectRoot: string,
+  dashboards: DashboardDocument[],
+  options: { settledPageIds?: Set<string> } = {},
+): AppPublicationReadiness {
   const blockers: AppPublicationReadiness['blockers'] = [];
   let governedTiles = 0;
+  const blocks = collectBlockCandidates(projectRoot);
   for (const dashboard of dashboards) {
     for (const item of dashboard.layout.items) {
-      if (item.block) governedTiles += 1;
+      if (item.block) {
+        governedTiles += 1;
+        const blockRef = item.block;
+        const block = blocks.find((candidate) => (
+          'blockId' in blockRef
+            ? candidate.id === blockRef.blockId || candidate.name === blockRef.blockId
+            : candidate.path === blockRef.ref
+        ));
+        if (!block || block.status !== 'certified') {
+          blockers.push({
+            dashboardId: dashboard.id,
+            tileId: item.i,
+            code: 'block_not_certified',
+            message: `${dashboard.id}/${item.i} no longer resolves to a certified block.`,
+          });
+        } else if (item.review?.sourceFingerprint?.startsWith('sha256:') && item.review.sourceFingerprint !== block.fingerprint) {
+          blockers.push({
+            dashboardId: dashboard.id,
+            tileId: item.i,
+            code: 'block_source_changed',
+            message: `${dashboard.id}/${item.i} changed after it was selected; review the current certified block before publication.`,
+          });
+        }
+      }
       if (item.draftAnalysis) {
         blockers.push({
           dashboardId: dashboard.id,
@@ -3347,6 +3852,21 @@ function appPublicationReadiness(dashboards: DashboardDocument[]): AppPublicatio
           });
         }
       }
+      if (dashboard.version === 2 && (item.block || item.semantic || item.draftAnalysis)) {
+        for (const filter of dashboard.filters ?? []) {
+          if (filter.scope?.tileIds && !filter.scope.tileIds.includes(item.i)) continue;
+          const binding = item.filterBindings?.find((candidate) => candidate.filter === filter.id);
+          const settled = options.settledPageIds?.has(dashboard.id) ?? false;
+          if (!binding || (!binding.binding && binding.mode !== 'parameter') || (binding.capability === 'preflight_required' && !settled)) {
+            blockers.push({
+              dashboardId: dashboard.id,
+              tileId: item.i,
+              code: 'filter_not_preflighted',
+              message: `${dashboard.id}/${item.i} does not have a preflighted binding for filter ${filter.label ?? filter.id}.`,
+            });
+          }
+        }
+      }
     }
   }
   return { ready: blockers.length === 0, governedTiles, blockers };
@@ -3354,6 +3874,465 @@ function appPublicationReadiness(dashboards: DashboardDocument[]): AppPublicatio
 
 function appAiBuildSessionDir(projectRoot: string): string {
   return join(projectRoot, '.dql', 'local', 'app-ai-builds');
+}
+
+function appBuildDraftDir(projectRoot: string): string {
+  // Read-only migration location for AppBuildDraft v1 JSON files. New drafts
+  // are persisted transactionally in .dql/local/apps.sqlite.
+  return join(projectRoot, '.dql', 'local', 'app-builds');
+}
+
+export function createStoredAppBuildDraft(
+  projectRoot: string,
+  input: {
+    appId?: string; baseAppId?: string; name?: string; goal?: string; audience?: string; domain?: string;
+    authoringMode?: 'ai' | 'manual'; sourcePolicy?: 'governed_only' | 'include_review_required';
+    template?: 'executive_brief' | 'operational_dashboard' | 'investigation' | 'blank';
+  },
+): AppBuildDraft {
+  const baseAppId = cleanString(input.baseAppId);
+  const base = baseAppId ? loadAppById(projectRoot, baseAppId) : null;
+  if (baseAppId && !base) throw new Error(`App "${baseAppId}" not found.`);
+  const name = cleanString(input.name) || base?.app.name || cleanString(input.goal) || 'Untitled App';
+  const appId = base?.app.id || cleanString(input.appId) || suggestAppId(name);
+  const id = `build_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const pageId = 'overview';
+  const emptyItems: DashboardGridItem[] = [];
+  const blankPage: DashboardDocument = {
+    version: 2,
+    id: pageId,
+    metadata: {
+      title: 'Overview',
+      description: cleanString(input.goal) || `Local draft canvas for ${name}`,
+      domain: cleanString(input.domain) || base?.app.domain || 'general',
+      audience: cleanString(input.audience) || base?.app.audience || 'stakeholders',
+      visibility: 'private',
+      lifecycle: 'draft',
+    },
+    layout: {
+      kind: 'grid', cols: 12, rowHeight: 80, items: emptyItems,
+      responsive: {
+        wide: { kind: 'grid', cols: 12, rowHeight: 80, items: emptyItems },
+        medium: { kind: 'grid', cols: 6, rowHeight: 80, items: emptyItems },
+        narrow: { kind: 'grid', cols: 1, rowHeight: 80, items: emptyItems },
+      },
+    },
+  };
+  const basePages = base
+    ? findDashboardsForApp(base.appDir)
+      .map((path) => loadDashboardDocument(path).document)
+      .filter((page): page is DashboardDocument => Boolean(page))
+    : [];
+  const template = input.template ?? 'blank';
+  const pages = basePages.length ? basePages : [applyAppStudioTemplate(blankPage, template, name)];
+  const draft = createAppBuildDraft({
+    id,
+    appId,
+    name,
+    ...(base ? { baseApp: { appId: base.app.id, fingerprint: fingerprintAppDirectory(base.appDir) } } : {}),
+    authoringMode: input.authoringMode === 'manual' ? 'manual' : 'ai',
+    template,
+    sourcePolicy: input.sourcePolicy,
+    frame: {
+      goal: cleanString(input.goal) || `Create ${name}`,
+      audience: cleanString(input.audience) || base?.app.audience || 'stakeholders',
+      metrics: [], dimensions: [], filters: [], desiredOutput: 'One responsive analytical page',
+      clarificationQuestions: input.authoringMode === 'manual' || base ? [] : [{
+        id: 'metric',
+        question: 'Which governed business metric should lead this App?',
+        choices: [
+          { id: 'certified', label: 'Choose a certified block' },
+          { id: 'semantic', label: 'Choose a semantic metric' },
+          { id: 'gap', label: 'Keep a visible gap' },
+        ],
+        required: true,
+      }],
+    },
+    pages,
+  });
+  writeStoredAppBuildDraft(projectRoot, draft);
+  return draft;
+}
+
+function applyAppStudioTemplate(
+  page: DashboardDocument,
+  template: 'executive_brief' | 'operational_dashboard' | 'investigation' | 'blank',
+  appName: string,
+): DashboardDocument {
+  if (template === 'blank') return page;
+  const intro = template === 'executive_brief'
+    ? `# ${appName}\n\nState the decision this brief supports, then add governed evidence below.`
+    : template === 'operational_dashboard'
+      ? `# ${appName}\n\nMonitor current performance, changes, and the details that require action.`
+      : `# ${appName}\n\nDocument the question, findings, caveats, and evidence for this investigation.`;
+  const items: DashboardGridItem[] = [{
+    i: 'template-introduction', x: 0, y: 0, w: 12, h: 2,
+    title: template === 'investigation' ? 'Investigation question' : 'Executive context',
+    sectionId: 'exec_summary',
+    text: { markdown: intro },
+    viz: { type: 'text' },
+    sourceClass: 'narrative',
+    trustState: 'draft_ready',
+    reviewStatus: 'draft_ready',
+  }];
+  const sections = template === 'investigation'
+    ? [
+      { id: 'exec_summary', title: 'Question', kind: 'exec_summary' as const, order: 0 },
+      { id: 'insight', title: 'Findings and comparisons', kind: 'insight' as const, order: 1 },
+      { id: 'appendix', title: 'Caveats and evidence', kind: 'appendix' as const, order: 2 },
+    ]
+    : [
+      { id: 'exec_summary', title: 'Executive summary', kind: 'exec_summary' as const, order: 0 },
+      { id: 'kpi_band', title: 'Key metrics', kind: 'kpi_band' as const, order: 1 },
+      { id: 'insight', title: template === 'executive_brief' ? 'Decision evidence' : 'Trends and drivers', kind: 'insight' as const, order: 2 },
+      { id: 'appendix', title: 'Detail and evidence', kind: 'appendix' as const, order: 3 },
+    ];
+  return {
+    ...page,
+    sections,
+    layout: {
+      ...page.layout,
+      items,
+      responsive: responsiveLayoutsForDashboardItems(items),
+    },
+  };
+}
+
+function loadStoredAppBuildDraft(projectRoot: string, id: string): AppBuildDraft | null {
+  const clean = cleanString(id);
+  if (!clean || !/^[a-z0-9_:-]+$/i.test(clean)) return null;
+  const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+  try {
+    const stored = storage.getAppBuildDraft(clean);
+    if (stored) return stored;
+    const legacyPath = join(appBuildDraftDir(projectRoot), `${clean}.json`);
+    if (!existsSync(legacyPath)) return null;
+    const migrated = migrateLegacyAppBuildDraft(JSON.parse(readFileSync(legacyPath, 'utf-8')));
+    if (!migrated) return null;
+    storage.saveAppBuildDraft(migrated);
+    return migrated;
+  } catch {
+    return null;
+  } finally {
+    storage.close();
+  }
+}
+
+export function writeStoredAppBuildDraft(
+  projectRoot: string,
+  draft: AppBuildDraft,
+  input: { expectedRevision?: number; operations?: AppBuildDraftOperation[] } = {},
+): void {
+  const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+  try {
+    storage.saveAppBuildDraft(draft, input);
+  } finally {
+    storage.close();
+  }
+}
+
+function migrateLegacyAppBuildDraft(value: unknown): AppBuildDraft | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const legacy = value as Record<string, unknown>;
+  if (legacy.version === 2) return legacy as unknown as AppBuildDraft;
+  if (legacy.version !== 1 || typeof legacy.id !== 'string' || typeof legacy.appId !== 'string') return null;
+  const frame = (legacy.frame && typeof legacy.frame === 'object' ? legacy.frame : {}) as Record<string, unknown>;
+  const clarificationQuestions = Array.isArray(frame.clarificationQuestions)
+    ? frame.clarificationQuestions.flatMap((raw) => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+      const question = raw as Record<string, unknown>;
+      if (typeof question.id !== 'string' || typeof question.question !== 'string') return [];
+      const choices = Array.isArray(question.choices)
+        ? question.choices.map((choice, index) => typeof choice === 'string'
+          ? { id: slugify(choice) || `choice-${index + 1}`, label: choice }
+          : choice).filter((choice): choice is { id: string; label: string } => Boolean(choice && typeof choice === 'object' && 'id' in choice && 'label' in choice))
+        : [];
+      return [{ id: question.id, question: question.question, choices, required: question.required !== false }];
+    })
+    : [];
+  const migrated = createAppBuildDraft({
+    id: legacy.id,
+    appId: legacy.appId,
+    name: typeof legacy.name === 'string' ? legacy.name : (typeof frame.goal === 'string' ? frame.goal : legacy.appId),
+    authoringMode: legacy.authoringMode === 'manual' ? 'manual' : 'ai',
+    sourcePolicy: legacy.sourcePolicy === 'include_review_required' ? 'include_review_required' : 'governed_only',
+    frame: {
+      goal: typeof frame.goal === 'string' ? frame.goal : `Create ${legacy.appId}`,
+      decision: typeof frame.decision === 'string' ? frame.decision : undefined,
+      audience: typeof frame.audience === 'string' ? frame.audience : undefined,
+      metrics: Array.isArray(frame.metrics) ? frame.metrics.filter((item): item is string => typeof item === 'string') : [],
+      dimensions: Array.isArray(frame.dimensions) ? frame.dimensions.filter((item): item is string => typeof item === 'string') : [],
+      filters: Array.isArray(frame.filters) ? frame.filters.filter((item): item is string => typeof item === 'string') : [],
+      desiredOutput: typeof frame.desiredOutput === 'string' ? frame.desiredOutput : undefined,
+      clarificationQuestions,
+    },
+    sources: Array.isArray(legacy.sources) ? legacy.sources as AppBuildDraft['sources'] : [],
+    pages: Array.isArray(legacy.pages) ? legacy.pages as DashboardDocument[] : [],
+    reviewTasks: Array.isArray(legacy.reviewTasks) ? legacy.reviewTasks as AppBuildDraft['reviewTasks'] : [],
+    now: typeof legacy.createdAt === 'string' ? legacy.createdAt : undefined,
+  });
+  return {
+    ...migrated,
+    revision: typeof legacy.revision === 'number' ? legacy.revision : migrated.revision,
+    updatedAt: typeof legacy.updatedAt === 'string' ? legacy.updatedAt : migrated.updatedAt,
+  };
+}
+
+export function deleteStoredAppBuildDraft(
+  projectRoot: string,
+  draft: AppBuildDraft,
+): { ok: true; id: string; recoveryId: string; recoverableUntilRestart: false } {
+  const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+  let deleted: ReturnType<LocalAppStorage['deleteAppBuildDraft']>;
+  try {
+    deleted = storage.deleteAppBuildDraft(draft.id);
+  } finally {
+    storage.close();
+  }
+  if (!deleted) throw new Error(`App Build Draft not found: ${draft.id}`);
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const recoveryId = `draft-${stamp}-${draft.id}`;
+  const recoveryDir = join(projectRoot, '.dql', 'local', 'trash', 'app-drafts', recoveryId);
+  try {
+    mkdirSync(recoveryDir, { recursive: true });
+    writeFileSync(join(recoveryDir, 'recovery.json'), JSON.stringify({
+      version: 1,
+      kind: 'app_build_draft',
+      recoveryId,
+      deletedAt: new Date().toISOString(),
+      draft: deleted.draft,
+      operations: deleted.operations,
+    }, null, 2) + '\n', 'utf-8');
+  } catch (error) {
+    const restore = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+    try { restore.restoreAppBuildDraft(deleted.draft, deleted.operations); } finally { restore.close(); }
+    rmSync(recoveryDir, { recursive: true, force: true });
+    throw error;
+  }
+  return { ok: true, id: draft.id, recoveryId, recoverableUntilRestart: false };
+}
+
+function restoreStoredAppBuildDraft(
+  projectRoot: string,
+  recoveryId: string,
+): { ok: true; id: string; restoredPath: string; draft: AppBuildDraft } | { ok: false; status: 400 | 404 | 409; error: string } {
+  const recoveryDir = join(projectRoot, '.dql', 'local', 'trash', 'app-drafts', recoveryId);
+  const recoveryPath = join(recoveryDir, 'recovery.json');
+  if (!existsSync(recoveryPath)) return { ok: false, status: 404, error: 'App recovery bundle not found.' };
+  let payload: { kind?: string; draft?: AppBuildDraft; operations?: Array<{ id: number; draftId: string; revision: number; operations: AppBuildDraftOperation[]; createdAt: string }> };
+  try { payload = JSON.parse(readFileSync(recoveryPath, 'utf-8')); } catch { return { ok: false, status: 400, error: 'App draft recovery bundle is invalid.' }; }
+  if (payload.kind !== 'app_build_draft' || !payload.draft) return { ok: false, status: 400, error: 'App draft recovery bundle is invalid.' };
+  const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+  try {
+    if (storage.getAppBuildDraft(payload.draft.id)) return { ok: false, status: 409, error: `App Build Draft already exists: ${payload.draft.id}` };
+    storage.restoreAppBuildDraft(payload.draft, payload.operations ?? []);
+  } finally {
+    storage.close();
+  }
+  rmSync(recoveryDir, { recursive: true, force: true });
+  return { ok: true, id: payload.draft.id, restoredPath: '.dql/local/apps.sqlite', draft: payload.draft };
+}
+
+export function preflightStoredAppBuildDraft(projectRoot: string, draft: AppBuildDraft): string[] {
+  const errors: string[] = [];
+  const blocks = collectBlockCandidates(projectRoot);
+  if (draft.state === 'clarification_required') errors.push('Resolve required Build Frame clarifications before publication.');
+  if (draft.pages.length === 0) errors.push('App Build Draft needs at least one page.');
+  for (const requirement of draft.requirements.filter((item) => item.required)) {
+    const coverage = draft.coverage.find((item) => item.requirementId === requirement.id);
+    if (!coverage || coverage.status !== 'covered') errors.push(`Required App question is unresolved: ${requirement.question}`);
+  }
+  for (const task of draft.reviewTasks.filter((item) => item.status === 'open')) {
+    errors.push(`Review task is still open: ${task.message}`);
+  }
+  if (draft.baseApp) {
+    const base = loadAppById(projectRoot, draft.baseApp.appId);
+    if (!base || fingerprintAppDirectory(base.appDir) !== draft.baseApp.fingerprint) {
+      errors.push('The published App changed after this local draft was created. Refresh the draft before publishing.');
+    }
+  }
+  for (const page of draft.pages) {
+    const parsed = parseDashboardDocument(JSON.stringify(page), `<app-build:${draft.id}/${page.id}>`);
+    if (!parsed.document) errors.push(...parsed.errors.map((error) => error.message));
+  }
+  const analysisPages = draft.pages.filter((page) => page.layout.items.some((tile) => !tile.text && !tile.aiPin));
+  const receipts = draft.previewReceipts ?? (draft.previewReceipt ? [draft.previewReceipt] : []);
+  for (const page of analysisPages) {
+    const receipt = receipts.find((candidate) => candidate.pageId === page.id);
+    if (!receipt || receipt.revision !== draft.revision) errors.push(`Run a current settled preview for page ${page.metadata.title || page.id} before Project publication.`);
+  }
+  for (const source of draft.sources) {
+    if (source.kind === 'certified_block') {
+      const block = blocks.find((candidate) => candidate.id === source.sourceRef || candidate.name === source.sourceRef || candidate.path === source.sourceRef);
+      if (!block || block.status !== 'certified') errors.push(`Source ${source.id} does not resolve to a current certified block.`);
+      if (block && source.sourceFingerprint && source.sourceFingerprint !== block.fingerprint) errors.push(`Source ${source.id} changed after selection.`);
+    }
+    if (source.kind === 'governed_semantic' || source.kind === 'semantic_query') {
+      if (source.reviewStatus !== 'approved' || !source.snapshotId || !source.receiptId) {
+        errors.push(`Source ${source.id} requires snapshot-bound semantic approval before Project publication.`);
+      }
+    }
+    if (source.kind === 'review_block' || source.kind === 'review_dql' || source.kind === 'exploratory_sql') {
+      errors.push(`Source ${source.id} is review-required and cannot be published to the Project.`);
+    }
+    if ((source.kind === 'review_block' || source.kind === 'review_dql' || source.kind === 'exploratory_sql') && draft.sourcePolicy !== 'include_review_required') {
+      errors.push(`Source ${source.id} requires include_review_required policy.`);
+    }
+  }
+  const settledPageIds = new Set(receipts.filter((receipt) => receipt.revision === draft.revision).map((receipt) => receipt.pageId));
+  const readiness = appPublicationReadiness(projectRoot, draft.pages, { settledPageIds });
+  errors.push(...readiness.blockers.map((blocker) => blocker.message));
+  return Array.from(new Set(errors));
+}
+
+export function markStoredAppBuildDraftPreflighted(projectRoot: string, draft: AppBuildDraft): AppBuildDraft {
+  const errors = preflightStoredAppBuildDraft(projectRoot, draft);
+  if (errors.length) throw new Error(`App Build preflight failed: ${errors.join(' ')}`);
+  const now = new Date().toISOString();
+  const next: AppBuildDraft = {
+    ...draft,
+    state: 'preflight_ready',
+    preflightReceipt: {
+      id: `app_preflight_${createHash('sha256').update(`${draft.id}:${draft.revision}:${draft.proposalHash}`).digest('hex').slice(0, 16)}`,
+      revision: draft.revision,
+      proposalHash: draft.proposalHash,
+      sourceFingerprint: appBuildSourceFingerprint(draft),
+      createdAt: now,
+    },
+    updatedAt: now,
+  };
+  writeStoredAppBuildDraft(projectRoot, next, { expectedRevision: draft.revision });
+  return next;
+}
+
+function appBuildSourceFingerprint(draft: AppBuildDraft): string {
+  const sources = [...draft.sources]
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map((source) => ({
+      id: source.id,
+      kind: source.kind,
+      sourceRef: source.sourceRef,
+      snapshotId: source.snapshotId,
+      sourceFingerprint: source.sourceFingerprint,
+      receiptId: source.receiptId,
+      reviewStatus: source.reviewStatus,
+    }));
+  return `sha256:${createHash('sha256').update(JSON.stringify(sources)).digest('hex')}`;
+}
+
+export function publishStoredAppBuildDraft(
+  projectRoot: string,
+  draft: AppBuildDraft,
+): { ok: true; app: ReturnType<typeof collectAppsList>[number]; draft: AppBuildDraft; paths: string[] } {
+  const errors = preflightStoredAppBuildDraft(projectRoot, draft);
+  if (errors.length) throw new Error(`App Build preflight failed: ${errors.join(' ')}`);
+  if (!draft.preflightReceipt
+    || draft.preflightReceipt.revision !== draft.revision
+    || draft.preflightReceipt.proposalHash !== draft.proposalHash
+    || draft.preflightReceipt.sourceFingerprint !== appBuildSourceFingerprint(draft)) {
+    throw new Error('App Build Draft needs a current preflight receipt before publication.');
+  }
+  const destination = resolveAppPackageDir(projectRoot, draft.appId);
+  if (!draft.baseApp && existsSync(destination)) throw new Error(`App already exists: ${draft.appId}`);
+  if (draft.baseApp && (!existsSync(destination) || draft.baseApp.appId !== draft.appId)) {
+    throw new Error('Published App base no longer exists at the expected path.');
+  }
+
+  const stage = join(projectRoot, '.dql', 'local', 'app-build-staging', `${draft.id}-${Date.now()}`);
+  const dashboardDir = join(stage, 'dashboards');
+  const owner = `${process.env.USER ?? 'owner'}@local`;
+  const domain = draft.pages[0]?.metadata.domain || 'general';
+  const name = draft.name.trim() || draft.appId;
+  const containsSemantic = draft.sources.some((source) => source.kind === 'governed_semantic' || source.kind === 'semantic_query');
+  const hasCertifiedAnalysis = draft.sources.some((source) => source.kind === 'certified_block');
+  const lifecycle = hasCertifiedAnalysis && !containsSemantic ? 'certified' as const : 'review' as const;
+  const app: AppDocument = {
+    version: 1,
+    id: draft.appId,
+    name,
+    description: draft.frame.decision || `Governed analytical App for ${name}`,
+    visibility: 'shared',
+    publicationIntent: 'shared_project',
+    ownerDomain: domain,
+    usesDomains: [domain],
+    requiredExports: [],
+    domain,
+    audience: draft.frame.audience,
+    lifecycle,
+    owners: [owner],
+    members: [{ userId: owner, displayName: owner, roles: ['owner', 'analyst'] }],
+    roles: [
+      { id: 'owner', displayName: 'Owner' },
+      { id: 'analyst', displayName: 'Analyst' },
+      { id: 'viewer', displayName: 'Viewer' },
+    ],
+    policies: [
+      { id: 'viewers-read', domain, minClassification: 'internal', allowedRoles: ['viewer', 'analyst', 'owner'], accessLevel: 'read', enabled: true },
+      { id: 'analyst-execute', domain, minClassification: 'internal', allowedRoles: ['analyst', 'owner'], accessLevel: 'execute', enabled: true },
+      { id: 'owner-admin', domain, minClassification: 'restricted', allowedRoles: ['owner'], accessLevel: 'admin', enabled: true },
+    ],
+    rlsBindings: [],
+    schedules: [],
+    homepage: { type: 'dashboard', id: draft.pages[0].id },
+  };
+  const committedPages = draft.pages.map((page) => ({
+    ...page,
+    version: 2 as const,
+    metadata: { ...page.metadata, visibility: 'shared' as const, lifecycle },
+  }));
+  mkdirSync(dashboardDir, { recursive: true });
+  mkdirSync(join(stage, 'notebooks'), { recursive: true });
+  mkdirSync(join(stage, 'drafts'), { recursive: true });
+  try {
+    writeFileSync(join(stage, 'dql.app.json'), JSON.stringify(app, null, 2) + '\n', 'utf-8');
+    for (const page of committedPages) {
+      writeFileSync(join(dashboardDir, `${page.id}.dqld`), JSON.stringify(page, null, 2) + '\n', 'utf-8');
+    }
+    writeFileSync(join(stage, 'README.md'), appReadme(app, draft.frame.audience ?? '', [], committedPages[0].id), 'utf-8');
+    mkdirSync(dirname(destination), { recursive: true });
+    if (draft.baseApp) {
+      const backup = join(projectRoot, '.dql', 'local', 'app-build-staging', `${draft.id}-backup-${Date.now()}`);
+      renameSync(destination, backup);
+      try {
+        renameSync(stage, destination);
+        rmSync(backup, { recursive: true, force: true });
+      } catch (error) {
+        if (!existsSync(destination) && existsSync(backup)) renameSync(backup, destination);
+        throw error;
+      }
+    } else {
+      renameSync(stage, destination);
+    }
+  } catch (error) {
+    rmSync(stage, { recursive: true, force: true });
+    throw error;
+  }
+
+  const next: AppBuildDraft = {
+    ...draft,
+    revision: draft.revision + 1,
+    state: 'project_published',
+    publishedFingerprint: fingerprintAppDirectory(destination),
+    updatedAt: new Date().toISOString(),
+    proposalHash: draft.proposalHash,
+  };
+  writeStoredAppBuildDraft(projectRoot, next, { expectedRevision: draft.revision });
+  const created = collectAppsList(projectRoot).find((entry) => entry.id === draft.appId);
+  if (!created) throw new Error(`App was committed but could not be reloaded: ${draft.appId}`);
+  return {
+    ok: true,
+    app: created,
+    draft: next,
+    paths: ['dql.app.json', 'README.md', ...committedPages.map((page) => `dashboards/${page.id}.dqld`)].map((path) => `apps/${draft.appId}/${path}`),
+  };
+}
+
+/** @deprecated Compatibility adapter for callers that still use the old name. */
+export function commitStoredAppBuildDraft(
+  projectRoot: string,
+  draft: AppBuildDraft,
+): ReturnType<typeof publishStoredAppBuildDraft> {
+  return publishStoredAppBuildDraft(projectRoot, draft);
 }
 
 function writeAppAiBuildSession(projectRoot: string, session: AppAiBuildSession): void {
@@ -3495,6 +4474,9 @@ function filterBindingsForBlockSource(projectRoot: string, block: BlockCandidate
   const parameterSection = sectionBody(source, 'parameterPolicy');
   const bindings = Array.from(filterSection.matchAll(/^\s*([A-Za-z_][\w-]*)\s*=\s*"([^"]+)"/gm))
     .map((match) => ({ filter: match[1], binding: match[2], mode: 'predicate' as const }));
+  const allowedFilterBindings = matchArray(source, /allowedFilters\s*=\s*\[([^\]]*)\]/)
+    .filter((filter) => !bindings.some((binding) => binding.filter === filter))
+    .map((filter) => ({ filter, binding: filter, mode: 'predicate' as const }));
   const parameterNames = Array.from(parameterSection.matchAll(/^\s*([A-Za-z_][\w-]*)\s*=\s*"dynamic"/gm))
     .map((match) => match[1]);
   const parameterBindings = parameterNames.map((param) => ({
@@ -3503,7 +4485,7 @@ function filterBindingsForBlockSource(projectRoot: string, block: BlockCandidate
     mode: 'parameter' as const,
     paramNames: [param],
   }));
-  return uniqueFilterBindings([...bindings, ...parameterBindings]);
+  return uniqueFilterBindings([...bindings, ...allowedFilterBindings, ...parameterBindings]);
 }
 
 function sectionBody(source: string, sectionName: string): string {
@@ -3673,15 +4655,23 @@ function promoteSharedDashboardItem(item: DashboardGridItem): DashboardGridItem 
 export function deleteAppPackage(
   projectRoot: string,
   id: string,
+  input: { expectedFingerprint?: string } = {},
 ):
-  | { ok: true; id: string; deletedPath: string; trashPath: string }
-  | { ok: false; status: 400 | 404; error: string } {
+  | { ok: true; id: string; deletedPath: string; trashPath: string; recoveryId: string; localRowsArchived: number; sourceControlImpact: 'delete' }
+  | { ok: false; status: 400 | 404 | 409; error: string } {
   const cleanId = cleanString(id);
   if (!cleanId || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(cleanId)) {
     return { ok: false, status: 400, error: 'A valid App id is required.' };
   }
   const loaded = loadAppById(projectRoot, cleanId);
   if (!loaded) return { ok: false, status: 404, error: `App "${cleanId}" not found.` };
+  const currentFingerprint = fingerprintAppDirectory(loaded.appDir);
+  if (!input.expectedFingerprint) {
+    return { ok: false, status: 409, error: 'App deletion requires the fingerprint shown during confirmation.' };
+  }
+  if (input.expectedFingerprint !== currentFingerprint) {
+    return { ok: false, status: 409, error: 'This App changed since deletion was requested. Refresh and review it again.' };
+  }
 
   const relativeAppDir = relative(projectRoot, loaded.appDir).replaceAll('\\', '/');
   const isProjectApp = /^apps\/[^/]+$/.test(relativeAppDir);
@@ -3690,19 +4680,112 @@ export function deleteAppPackage(
     return { ok: false, status: 400, error: 'DQL refused to delete an App outside this project.' };
   }
 
-  const trashRoot = join(projectRoot, '.dql', 'trash', 'apps');
+  const trashRoot = join(projectRoot, '.dql', 'local', 'trash', 'apps');
   mkdirSync(trashRoot, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  let trashDir = join(trashRoot, `${stamp}-${cleanId}`);
+  let recoveryId = `${stamp}-${cleanId}`;
+  let trashDir = join(trashRoot, recoveryId);
   let suffix = 2;
-  while (existsSync(trashDir)) trashDir = join(trashRoot, `${stamp}-${cleanId}-${suffix++}`);
-  renameSync(loaded.appDir, trashDir);
+  while (existsSync(trashDir)) {
+    recoveryId = `${stamp}-${cleanId}-${suffix++}`;
+    trashDir = join(trashRoot, recoveryId);
+  }
+  mkdirSync(trashDir, { recursive: true });
+  const packageDir = join(trashDir, 'package');
+  renameSync(loaded.appDir, packageDir);
+  let localArchive: ReturnType<LocalAppStorage['archiveAndDeleteAppState']> | undefined;
+  try {
+    const dbPath = defaultLocalAppsDbPath(projectRoot);
+    if (existsSync(dbPath)) {
+      const storage = new LocalAppStorage(dbPath);
+      try {
+        localArchive = storage.archiveAndDeleteAppState(cleanId);
+      } finally {
+        storage.close();
+      }
+      writeFileSync(join(trashDir, 'local-state.json'), JSON.stringify(localArchive, null, 2) + '\n', 'utf-8');
+    }
+    writeFileSync(join(trashDir, 'recovery.json'), JSON.stringify({
+      version: 1,
+      recoveryId,
+      appId: cleanId,
+      originalPath: relativeAppDir,
+      appFingerprint: currentFingerprint,
+      deletedAt: new Date().toISOString(),
+    }, null, 2) + '\n', 'utf-8');
+  } catch (error) {
+    if (localArchive) {
+      const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+      try { storage.restoreAppState(localArchive); } finally { storage.close(); }
+    }
+    if (!existsSync(loaded.appDir) && existsSync(packageDir)) renameSync(packageDir, loaded.appDir);
+    rmSync(trashDir, { recursive: true, force: true });
+    throw error;
+  }
+  const localRowsArchived = localArchive
+    ? Object.values(localArchive.rows).reduce((count, rows) => count + rows.length, 0)
+    : 0;
   return {
     ok: true,
     id: cleanId,
     deletedPath: relativeAppDir,
     trashPath: relative(projectRoot, trashDir).replaceAll('\\', '/'),
+    recoveryId,
+    localRowsArchived,
+    sourceControlImpact: 'delete',
   };
+}
+
+export function restoreAppPackage(
+  projectRoot: string,
+  recoveryId: string,
+): { ok: true; id: string; restoredPath: string } | { ok: false; status: 400 | 404 | 409; error: string } {
+  const cleanRecoveryId = cleanString(recoveryId);
+  if (!cleanRecoveryId || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(cleanRecoveryId)) {
+    return { ok: false, status: 400, error: 'A valid recovery id is required.' };
+  }
+  const recoveryDir = join(projectRoot, '.dql', 'local', 'trash', 'apps', cleanRecoveryId);
+  const manifestPath = join(recoveryDir, 'recovery.json');
+  const packageDir = join(recoveryDir, 'package');
+  if (!existsSync(manifestPath) || !existsSync(packageDir)) return { ok: false, status: 404, error: 'App recovery bundle not found.' };
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as { appId?: string; originalPath?: string };
+  if (!manifest.appId || !manifest.originalPath || manifest.originalPath.startsWith('../')) {
+    return { ok: false, status: 400, error: 'App recovery bundle is invalid.' };
+  }
+  const destination = join(projectRoot, manifest.originalPath);
+  if (existsSync(destination)) return { ok: false, status: 409, error: `Cannot restore because ${manifest.originalPath} already exists.` };
+  mkdirSync(dirname(destination), { recursive: true });
+  renameSync(packageDir, destination);
+  try {
+    const localStatePath = join(recoveryDir, 'local-state.json');
+    if (existsSync(localStatePath)) {
+      const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+      try {
+        storage.restoreAppState(JSON.parse(readFileSync(localStatePath, 'utf-8')));
+      } finally {
+        storage.close();
+      }
+    }
+  } catch (error) {
+    renameSync(destination, packageDir);
+    throw error;
+  }
+  rmSync(recoveryDir, { recursive: true, force: true });
+  return { ok: true, id: manifest.appId, restoredPath: manifest.originalPath };
+}
+
+export function restoreAppRecovery(
+  projectRoot: string,
+  recoveryId: string,
+): ReturnType<typeof restoreAppPackage> | ReturnType<typeof restoreStoredAppBuildDraft> {
+  const cleanRecoveryId = cleanString(recoveryId);
+  if (!cleanRecoveryId || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(cleanRecoveryId)) {
+    return { ok: false, status: 400, error: 'A valid recovery id is required.' };
+  }
+  const draftRecovery = join(projectRoot, '.dql', 'local', 'trash', 'app-drafts', cleanRecoveryId, 'recovery.json');
+  return existsSync(draftRecovery)
+    ? restoreStoredAppBuildDraft(projectRoot, cleanRecoveryId)
+    : restoreAppPackage(projectRoot, cleanRecoveryId);
 }
 
 export function createAppPackage(
@@ -3724,16 +4807,22 @@ export function createAppPackage(
   const audience = cleanString(input.audience);
   const subdomain = cleanString(input.subdomain);
   const groups = normalizeTags(input.groups ?? []);
-  const visibility = input.visibility === 'private' || input.visibility === 'template' ? input.visibility : 'shared';
-  const lifecycle = input.lifecycle === 'certified' || input.lifecycle === 'review' || input.lifecycle === 'deprecated'
-    ? input.lifecycle
-    : 'draft';
+  // API-013: authoring always starts as a private draft. Project visibility is
+  // available only through the publication endpoint and its live trust checks.
+  const visibility = 'private' as const;
+  const lifecycle = 'draft' as const;
   const tags = normalizeTags([...(input.tags ?? []), audience ? `audience:${slugify(audience)}` : '']);
   const selectedIds = Array.from(new Set((input.selectedBlockIds ?? []).map(cleanString).filter(Boolean)));
   const blocks = collectBlockCandidates(projectRoot);
   const selectedBlocks = selectedIds
     .map((blockId) => blocks.find((block) => block.id === blockId || block.name === blockId))
     .filter((block): block is BlockCandidate => Boolean(block));
+  const missingBlocks = selectedIds.filter((blockId) => !selectedBlocks.some((block) => block.id === blockId || block.name === blockId));
+  if (missingBlocks.length) return { ok: false, error: `Unknown block selection: ${missingBlocks.join(', ')}` };
+  const uncertifiedBlocks = selectedBlocks.filter((block) => block.status !== 'certified');
+  if (uncertifiedBlocks.length) {
+    return { ok: false, error: `Manual App creation accepts certified blocks only: ${uncertifiedBlocks.map((block) => block.name).join(', ')}` };
+  }
 
   const app: AppDocument = {
     version: 1,
@@ -3793,7 +4882,7 @@ export function createAppPackage(
   };
 
   const dashboard: DashboardDocument = {
-    version: 1,
+    version: 2,
     id: dashboardId,
     metadata: {
       title: dashboardTitle,
@@ -3806,11 +4895,13 @@ export function createAppPackage(
       lifecycle,
       tags,
     },
+    filters: dashboardFiltersForBlocks(selectedBlocks),
     layout: {
       kind: 'grid',
       cols: 12,
       rowHeight: 80,
-      items: buildDashboardItems(selectedBlocks),
+      items: buildDashboardItems(projectRoot, selectedBlocks),
+      responsive: responsiveLayoutsForDashboardItems(buildDashboardItems(projectRoot, selectedBlocks)),
     },
   };
 
@@ -3838,7 +4929,81 @@ export function createAppPackage(
   };
 }
 
-function buildDashboardItems(blocks: BlockCandidate[]): DashboardDocument['layout']['items'] {
+function createAppPackageViaBuildDraft(
+  projectRoot: string,
+  input: AppCreateRequest,
+): ReturnType<typeof createAppPackage> {
+  const name = cleanString(input.name);
+  const domain = cleanString(input.ownerDomain) || cleanString(input.domain);
+  if (!name) return { ok: false, error: 'name is required' };
+  if (!domain) return { ok: false, error: 'domain is required' };
+  const appId = suggestAppId(name);
+  if (existsSync(resolveAppPackageDir(projectRoot, appId))) return { ok: false, error: `App already exists: ${appId}` };
+
+  const selectedIds = unique((input.selectedBlockIds ?? []).map(cleanString).filter(Boolean));
+  const blocks = collectBlockCandidates(projectRoot);
+  const selectedBlocks = selectedIds
+    .map((id) => blocks.find((block) => block.id === id || block.name === id))
+    .filter((block): block is BlockCandidate => Boolean(block));
+  const missing = selectedIds.filter((id) => !selectedBlocks.some((block) => block.id === id || block.name === id));
+  if (missing.length) return { ok: false, error: `Unknown block selection: ${missing.join(', ')}` };
+  const uncertified = selectedBlocks.filter((block) => block.status !== 'certified');
+  if (uncertified.length) return { ok: false, error: `Manual App creation accepts certified blocks only: ${uncertified.map((block) => block.name).join(', ')}` };
+
+  const draft = createStoredAppBuildDraft(projectRoot, {
+    appId,
+    name,
+    goal: name,
+    audience: cleanString(input.audience),
+    domain,
+    authoringMode: 'manual',
+    sourcePolicy: 'governed_only',
+  });
+  const items = buildDashboardItems(projectRoot, selectedBlocks);
+  const page = {
+    ...draft.pages[0],
+    id: slugify(cleanString(input.dashboardTitle) || 'Overview') || 'overview',
+    metadata: {
+      ...draft.pages[0].metadata,
+      title: cleanString(input.dashboardTitle) || 'Overview',
+      description: cleanString(input.purpose) || `Starter dashboard for ${name}`,
+      domain,
+      audience: cleanString(input.audience) || undefined,
+    },
+    filters: dashboardFiltersForBlocks(selectedBlocks),
+    layout: {
+      ...draft.pages[0].layout,
+      items,
+      responsive: responsiveLayoutsForDashboardItems(items),
+    },
+  } satisfies DashboardDocument;
+  const operations: AppBuildDraftOperation[] = [
+    ...(page.id === draft.pages[0].id ? [] : [{ type: 'remove_page' as const, pageId: draft.pages[0].id }]),
+    { type: 'upsert_page', page },
+    ...selectedBlocks.map((block): AppBuildDraftOperation => ({
+      type: 'upsert_source',
+      source: {
+        id: `block:${block.id}`,
+        kind: 'certified_block',
+        sourceRef: block.id,
+        sourceFingerprint: block.fingerprint,
+        trustState: 'certified',
+        reviewStatus: 'not_required',
+      },
+    })),
+  ];
+  const revised = applyAppBuildDraftOperations(draft, draft.revision, operations);
+  writeStoredAppBuildDraft(projectRoot, revised, { expectedRevision: draft.revision, operations });
+  try {
+    const preflighted = markStoredAppBuildDraftPreflighted(projectRoot, revised);
+    const committed = publishStoredAppBuildDraft(projectRoot, preflighted);
+    return { ok: true, app: committed.app, paths: committed.paths, dashboardId: page.id };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function buildDashboardItems(projectRoot: string, blocks: BlockCandidate[]): DashboardDocument['layout']['items'] {
   let x = 0;
   let y = 0;
   let rowH = 0;
@@ -3852,11 +5017,59 @@ function buildDashboardItems(blocks: BlockCandidate[]): DashboardDocument['layou
         y += rowH || size.h;
         rowH = 0;
       }
-      const item = dashboardItemForBlock(block, chartType, x, y, size, index);
+      const item = dashboardItemForBlock(
+        block,
+        chartType,
+        x,
+        y,
+        size,
+        index,
+        filterBindingsForBlockSource(projectRoot, block),
+      );
       x += size.w;
       rowH = Math.max(rowH, size.h);
       return item;
     });
+}
+
+function dashboardFiltersForBlocks(blocks: BlockCandidate[]): DashboardFilter[] {
+  return unique(blocks.flatMap((block) => block.filterIds)).map((id) => ({
+    id,
+    label: id.replace(/[_-]+/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase()),
+    type: /(?:^|_)(?:top_n|limit|count|amount|number|minimum|maximum)(?:_|$)/i.test(id)
+      ? 'number'
+      : /(?:date|time|period|month|quarter|year)/i.test(id)
+        ? 'date'
+        : /(?:^|_)(?:name|id|search|email)(?:_|$)/i.test(id)
+          ? 'search'
+        : 'select',
+    bindsTo: id,
+  }));
+}
+
+function responsiveLayoutsForDashboardItems(items: DashboardGridItem[]): NonNullable<DashboardDocument['layout']['responsive']> {
+  const project = (cols: number): DashboardGridItem[] => {
+    let x = 0;
+    let y = 0;
+    let rowHeight = 0;
+    return [...items].sort((left, right) => left.y - right.y || left.x - right.x).map((item) => {
+      const width = cols === 1 ? 1 : Math.min(cols, Math.max(2, Math.ceil(item.w / 2)));
+      if (x + width > cols) {
+        x = 0;
+        y += rowHeight || item.h;
+        rowHeight = 0;
+      }
+      const next = { ...item, x, y, w: width };
+      x += width;
+      rowHeight = Math.max(rowHeight, item.h);
+      return next;
+    });
+  };
+  return {
+    wide: { kind: 'grid', cols: 12, rowHeight: 80, items },
+    medium: { kind: 'grid', cols: 6, rowHeight: 80, items: project(6) },
+    narrow: { kind: 'grid', cols: 1, rowHeight: 80, items: project(1) },
+  };
 }
 
 function dashboardItemForBlock(
@@ -3866,6 +5079,7 @@ function dashboardItemForBlock(
   y: number,
   size: { w: number; h: number },
   index: number,
+  filterBindings: NonNullable<DashboardGridItem['filterBindings']> = [],
 ): DashboardDocument['layout']['items'][number] {
   return {
     i: slugify(block.name) || `tile-${index + 1}`,
@@ -3876,7 +5090,12 @@ function dashboardItemForBlock(
     block: { blockId: block.name },
     viz: { type: chartType },
     display: displayForBlockHint(block, chartType),
+    sourceClass: 'certified_block',
+    review: { status: 'not_required', sourceFingerprint: block.fingerprint },
+    trustState: 'certified',
+    reviewStatus: 'certified',
     title: block.name,
+    ...(filterBindings.length ? { filterBindings } : {}),
   };
 }
 
@@ -4247,10 +5466,12 @@ function collectBlockCandidates(projectRoot: string): BlockCandidate[] {
             owner: matchString(source, /owner\s*=\s*"([^"]+)"/),
             tags,
             path: relative(projectRoot, filePath).replaceAll('\\', '/'),
+            fingerprint: `sha256:${createHash('sha256').update(source).digest('hex')}`,
             lastModified: stat?.mtime.toISOString() ?? new Date(0).toISOString(),
             description: matchString(source, /description\s*=\s*"((?:[^"\\]|\\.)*)"/) ?? '',
             llmContext: matchString(source, /llmContext\s*=\s*"((?:[^"\\]|\\.)*)"/),
             chartType: matchString(source, /chart\s*=\s*"([^"]+)"/) ?? matchString(source, /chart\.(\w+)\s*\(/) ?? undefined,
+            filterIds: declaredAppFilterIds(source),
             score: 0,
             reasons: [],
           });
@@ -4262,7 +5483,28 @@ function collectBlockCandidates(projectRoot: string): BlockCandidate[] {
   };
   scanDir(join(projectRoot, 'blocks'));
   scanDir(join(projectRoot, 'domains'));
-  return blocks;
+  const byId = new Map<string, BlockCandidate>();
+  for (const block of blocks) {
+    const current = byId.get(block.id);
+    if (!current) {
+      byId.set(block.id, block);
+      continue;
+    }
+    const blockRank = (block.status === 'certified' ? 4 : 0) + (block.path.startsWith('domains/') ? 2 : 0);
+    const currentRank = (current.status === 'certified' ? 4 : 0) + (current.path.startsWith('domains/') ? 2 : 0);
+    if (blockRank > currentRank || (blockRank === currentRank && block.lastModified > current.lastModified)) byId.set(block.id, block);
+  }
+  return Array.from(byId.values());
+}
+
+function declaredAppFilterIds(source: string): string[] {
+  const filterSection = sectionBody(source, 'filterBindings');
+  const parameterSection = sectionBody(source, 'parameterPolicy');
+  return unique([
+    ...matchArray(source, /allowedFilters\s*=\s*\[([^\]]*)\]/),
+    ...Array.from(filterSection.matchAll(/^\s*([A-Za-z_][\w-]*)\s*=\s*"[^"]+"/gm)).map((match) => match[1]),
+    ...Array.from(parameterSection.matchAll(/^\s*([A-Za-z_][\w-]*)\s*=\s*"(?:dynamic|optional|business)"/gm)).map((match) => match[1]),
+  ]);
 }
 
 function readdirSyncSafe(dir: string): Dirent[] {
@@ -5013,10 +6255,12 @@ function resolveSelectedBlock(
         owner: matchString(source, /owner\s*=\s*"([^"]+)"/),
         tags: matchArray(source, /tags\s*=\s*\[([^\]]*)\]/),
         path: normalizedPath,
+        fingerprint: `sha256:${createHash('sha256').update(source).digest('hex')}`,
         lastModified: statSyncSafe(join(projectRoot, normalizedPath))?.mtime.toISOString() ?? new Date(0).toISOString(),
         description: matchString(source, /description\s*=\s*"((?:[^"\\]|\\.)*)"/) ?? '',
         llmContext: matchString(source, /llmContext\s*=\s*"((?:[^"\\]|\\.)*)"/),
         chartType: matchString(source, /chart\s*=\s*"([^"]+)"/) ?? undefined,
+        filterIds: declaredAppFilterIds(source),
         score: 0,
         reasons: [],
       };

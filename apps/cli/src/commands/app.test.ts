@@ -37,7 +37,7 @@ afterEach(() => {
 });
 
 describe('runApp', () => {
-  it('creates new apps globally with exact domain backlinks', async () => {
+  it('creates a private local draft without writing project App source', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-app-new-domain-'));
     tempDirs.push(projectRoot);
     writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'demo' }), 'utf-8');
@@ -59,16 +59,19 @@ describe('runApp', () => {
     expect(payload).toMatchObject({
       created: true,
       id: 'customer-360',
-      path: 'apps/customer-360',
+      projectSourceWritten: false,
+      draft: {
+        appId: 'customer-360',
+        authoringMode: 'manual',
+        sourcePolicy: 'governed_only',
+        state: 'local_draft',
+        pages: [{ metadata: { domain: 'customer', visibility: 'private', lifecycle: 'draft' } }],
+      },
     });
     expect(existsSync(join(projectRoot, 'domains', 'customer', 'apps', 'customer-360', 'dql.app.json'))).toBe(false);
-    expect(existsSync(join(projectRoot, 'apps', 'customer-360', 'dql.app.json'))).toBe(true);
-    expect(__test__.collectApps(projectRoot)[0]).toMatchObject({
-      id: 'customer-360',
-      filePath: 'apps/customer-360',
-    });
-    const authored = JSON.parse(readFileSync(join(projectRoot, 'apps', 'customer-360', 'dql.app.json'), 'utf-8'));
-    expect(authored).toMatchObject({ ownerDomain: 'customer', usesDomains: ['customer'], requiredExports: [] });
+    expect(existsSync(join(projectRoot, 'apps', 'customer-360', 'dql.app.json'))).toBe(false);
+    expect(__test__.collectApps(projectRoot)).toEqual([]);
+    expect(existsSync(join(projectRoot, '.dql', 'local', 'apps.sqlite'))).toBe(true);
   });
 
   it('lists apps from an explicit project path', async () => {

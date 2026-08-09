@@ -118,10 +118,13 @@ export function DashboardRenderer({
   const [textDialogKind, setTextDialogKind] = useState<'text' | 'heading' | null>(null);
   const [textDialogValue, setTextDialogValue] = useState('');
   const [dragPreview, setDragPreview] = useState<{ tileId: string; x: number; y: number; w: number; h: number } | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const gridRef = useRef<HTMLDivElement | null>(null);
-  const [narrowGrid, setNarrowGrid] = useState(false);
-  const cols = dashboard.layout.cols;
-  const rowHeight = dashboard.layout.rowHeight;
+  const [containerWidth, setContainerWidth] = useState(1120);
+  const breakpoint = containerWidth < 720 ? 'narrow' : containerWidth < 1120 ? 'medium' : 'wide';
+  const responsiveLayouts = (dashboard.layout as typeof dashboard.layout & {
+    responsive?: Partial<Record<'wide' | 'medium' | 'narrow', { kind: 'grid'; cols: number; rowHeight: number; items: DashboardLayoutItem[] }>>;
+  }).responsive;
   const openAnswerInNotebook = useOpenAnswerInNotebook();
   const variablesKey = useMemo(() => JSON.stringify(variables ?? {}), [variables]);
   const runVariables = useMemo<Record<string, unknown>>(() => JSON.parse(variablesKey), [variablesKey]);
@@ -131,13 +134,33 @@ export function DashboardRenderer({
     return map;
   }, [run]);
   const workingLayoutItems = pendingLayoutItems ?? dashboard.layout.items;
+  const activeLayout = useMemo(() => {
+    const explicit = responsiveLayouts?.[breakpoint];
+    const geometry = breakpoint === 'wide'
+      ? { kind: 'grid' as const, cols: dashboard.layout.cols, rowHeight: dashboard.layout.rowHeight, items: workingLayoutItems }
+      : explicit ?? {
+          kind: 'grid' as const,
+          cols: breakpoint === 'medium' ? 6 : 1,
+          rowHeight: dashboard.layout.rowHeight,
+          items: projectDashboardItems(workingLayoutItems, breakpoint === 'medium' ? 6 : 1),
+        };
+    const content = new Map(workingLayoutItems.map((item) => [item.i, item]));
+    return {
+      ...geometry,
+      items: geometry.items.map((item) => ({ ...content.get(item.i), ...item } as DashboardLayoutItem)),
+    };
+  }, [breakpoint, dashboard.layout.cols, dashboard.layout.rowHeight, responsiveLayouts, workingLayoutItems]);
+  const narrowGrid = breakpoint === 'narrow';
+  const cols = activeLayout.cols;
+  const rowHeight = activeLayout.rowHeight;
+  const editableCanvas = editable && breakpoint === 'wide';
   const workingDashboard = useMemo(() => ({
     ...dashboard,
     layout: { ...dashboard.layout, items: workingLayoutItems },
   }), [dashboard, workingLayoutItems]);
   const baseVisibleItems = useMemo(
-    () => editable ? workingLayoutItems : dashboard.layout.items.filter((item) => !isStakeholderHiddenReviewTile(item)),
-    [dashboard.layout.items, editable, workingLayoutItems],
+    () => editable ? activeLayout.items : activeLayout.items.filter((item) => !isStakeholderHiddenReviewTile(item)),
+    [activeLayout.items, editable],
   );
   const visibleItems = useMemo(
     () => editable ? baseVisibleItems : prepareStakeholderItems(baseVisibleItems, tileResults, cols),
@@ -158,8 +181,8 @@ export function DashboardRenderer({
   // surface AI-generated analysis, clearly badged — so it bypasses the stakeholder
   // review-tile hiding that governs classic grids.
   const storyItems = useMemo(
-    () => (storySections ? dashboard.layout.items : null),
-    [dashboard.layout.items, storySections],
+    () => (storySections ? activeLayout.items : null),
+    [activeLayout.items, storySections],
   );
   const dashboardStory = useMemo(
     () => (editable || storySections ? null : buildDashboardStory(visibleItems, tileResults, runVariables)),
@@ -231,10 +254,13 @@ export function DashboardRenderer({
   }, [appId, dashboard.id, onDashboardChanged, onRunChange, runVariables]);
 
   useEffect(() => {
-    const update = () => setNarrowGrid(window.innerWidth < 760);
+    const element = containerRef.current;
+    if (!element) return;
+    const update = () => setContainerWidth(element.getBoundingClientRect().width);
     update();
-    window.addEventListener('resize', update);
-    return () => window.removeEventListener('resize', update);
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
   }, []);
 
   const chatContext = useMemo(() => {
@@ -551,7 +577,7 @@ export function DashboardRenderer({
   }, [copilotOpen, onCopilotChange]);
 
   return (
-    <div style={{ display: 'block', minHeight: 0 }}>
+    <div ref={containerRef} data-dashboard-breakpoint={breakpoint} style={{ display: 'block', minHeight: 0, containerType: 'inline-size' }}>
       <div style={{ flex: 1, minWidth: 0 }}>
       {/* Saving is automatic, so it has to be legible. This sits outside the
           editing toolbar: a write can land while the App is being viewed (an
@@ -650,7 +676,7 @@ export function DashboardRenderer({
         )}
       </div>
       )}
-      {editable && <div style={dashboardEditHintStyle}>Drag tiles, select a block for Copilot context, or use the tile controls for sizing and chart settings.</div>}
+      {editable && <div style={dashboardEditHintStyle}>{editableCanvas ? 'Drag tiles, select a block for Copilot context, or use the tile controls for sizing and chart settings.' : `${breakpoint === 'medium' ? 'Tablet' : 'Mobile'} preview uses the saved responsive projection. Return to a wide canvas to rearrange tiles.`}</div>}
 
       {!editable && businessStory ? (
         <BusinessStoryPanel story={businessStory} onResearch={openCopilot} onEvidence={openLineage} />
@@ -810,7 +836,7 @@ export function DashboardRenderer({
               loading={loading}
               error={error}
               themeMode={state.themeMode}
-              editable={editable}
+              editable={editableCanvas}
               narrow={narrowGrid}
               cols={cols}
               selected={Boolean(getDashboardItemBlockId(item) && getDashboardItemBlockId(item) === selectedBlockId)}
@@ -980,6 +1006,24 @@ function DashboardTile({
   const [hovered, setHovered] = useState(false);
   const showEditChrome = editable && (hovered || selected || settingsOpen);
 
+  useEffect(() => {
+    if (!editable) return;
+    const closeAnotherInspector = (event: Event) => {
+      const openedTileId = (event as CustomEvent<string>).detail;
+      if (openedTileId !== item.i) setSettingsOpen(false);
+    };
+    window.addEventListener('dql-app-tile-settings-open', closeAnotherInspector);
+    return () => window.removeEventListener('dql-app-tile-settings-open', closeAnotherInspector);
+  }, [editable, item.i]);
+
+  const toggleTileSettings = () => {
+    setSettingsOpen((value) => {
+      const next = !value;
+      if (next) window.dispatchEvent(new CustomEvent('dql-app-tile-settings-open', { detail: item.i }));
+      return next;
+    });
+  };
+
   /**
    * Say so when a page filter is set but this tile ignores it.
    *
@@ -1026,7 +1070,10 @@ function DashboardTile({
     });
   };
   const generatedVizOptions = getGeneratedVizOptions(item, genUi);
-  const showVizSwitcher = Boolean(tile?.result && generatedVizOptions.length > 1);
+  // Editing already has one durable visualization control in the tile
+  // inspector. A second row of chart icons in the tile header made the manual
+  // path look like two competing editors.
+  const showVizSwitcher = Boolean(!editable && tile?.result && generatedVizOptions.length > 1);
   const canInspect = Boolean(tile && tile.tileType !== 'text' && (tile.artifact || tile.result || tile.citation || tile.repair));
   const showAskHint = Boolean(canAsk && (hovered || selected));
   const switchGeneratedViz = (chart: ChartType) => {
@@ -1194,7 +1241,7 @@ function DashboardTile({
               item={item}
               cols={cols}
               settingsOpen={settingsOpen}
-              onToggleSettings={() => setSettingsOpen((value) => !value)}
+              onToggleSettings={toggleTileSettings}
               onPatch={onPatch}
             />
           </div>
@@ -1305,6 +1352,7 @@ function DashboardTile({
           tile={tile}
           cols={cols}
           onPatch={onPatch}
+          onClose={() => setSettingsOpen(false)}
         />
       ) : null}
       <div
@@ -1313,8 +1361,8 @@ function DashboardTile({
           minHeight: 0,
           overflow: 'hidden',
           display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
+          alignItems: 'stretch',
+          justifyContent: 'stretch',
           marginTop: isCompactMetric ? 0 : 2,
           fontSize: 12,
           opacity: tile?.status === 'ok' ? 1 : 0.7,
@@ -1853,17 +1901,75 @@ function TileBody({
     if (tile.tileType !== 'aiPin' && (genUi?.component === 'EvidenceTable' || genUi?.component === 'PivotTable')) {
       dataView = <GeneratedEvidenceTable result={tile.result} genUi={genUi} themeMode={themeMode} />;
     } else {
-      dataView = <div style={{ width: '100%', alignSelf: 'stretch' }}><TableOutput result={tile.result} themeMode={themeMode} /></div>;
+      dataView = <div style={{ width: '100%', alignSelf: 'stretch' }}><TableOutput result={tile.result} themeMode={themeMode} initialPageSize={10} /></div>;
     }
   } else {
     const chartResult = chart === 'kpi'
       ? summarizeDashboardKpiResult(tile.result, chartConfig.y)
       : tile.result;
-    dataView = <div style={{ width: '100%', alignSelf: 'stretch' }}><ChartOutput result={chartResult} themeMode={themeMode} chartConfig={chartConfig} /></div>;
+    // The tile header is the App title. Passing the same title into the shared
+    // chart renderer duplicated it inside the plot and consumed scarce height.
+    dataView = (
+      <DashboardChartFrame>
+        {(availableHeight) => (
+          <ChartOutput
+            result={chartResult}
+            themeMode={themeMode}
+            chartConfig={{ ...chartConfig, title: undefined }}
+            availableHeight={availableHeight}
+          />
+        )}
+      </DashboardChartFrame>
+    );
   }
   return tile.tileType === 'aiPin' && tile.aiPin
     ? <AiPinSummary pin={tile.aiPin} themeMode={themeMode} dataView={dataView} />
     : dataView;
+}
+
+/**
+ * Gives App charts the height of the tile body, not the browser viewport.
+ * Fixed-height SVGs were centered inside shorter grid cells, clipping both the
+ * first and last rows while leaving the surrounding tile apparently empty.
+ */
+function DashboardChartFrame({
+  children,
+}: {
+  children: (availableHeight?: number) => ReactNode;
+}): JSX.Element {
+  const frameRef = useRef<HTMLDivElement | null>(null);
+  const [availableHeight, setAvailableHeight] = useState<number | undefined>();
+
+  useEffect(() => {
+    const element = frameRef.current;
+    if (!element) return;
+    const update = () => {
+      const next = Math.floor(element.getBoundingClientRect().height);
+      setAvailableHeight(next > 0 ? next : undefined);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <div
+      ref={frameRef}
+      data-testid="dashboard-chart-frame"
+      style={{
+        width: '100%',
+        height: '100%',
+        minWidth: 0,
+        minHeight: 0,
+        alignSelf: 'stretch',
+        overflow: 'auto',
+        scrollbarWidth: 'thin',
+      }}
+    >
+      {children(availableHeight)}
+    </div>
+  );
 }
 
 function TileEvidencePanel({
@@ -2018,7 +2124,8 @@ function TileEditorControls({
       </div>
       <button
         type="button"
-        title="Chart and field settings"
+        title="Tile settings"
+        aria-label="Tile settings"
         onClick={onToggleSettings}
         style={iconTileButtonStyle}
       >
@@ -2068,11 +2175,13 @@ function TileSettingsPanel({
   tile,
   cols,
   onPatch,
+  onClose,
 }: {
   item: DashboardDocumentResponse['dashboard']['layout']['items'][number];
   tile?: DashboardRunResponse['tiles'][number];
   cols: number;
   onPatch: (patch: Partial<DashboardDocumentResponse['dashboard']['layout']['items'][number]> | null) => void;
+  onClose: () => void;
 }) {
   const result = tile?.result;
   const chartConfig = mergeDashboardTileChartConfig(item, tile?.chartConfig as CellChartConfig | undefined);
@@ -2177,9 +2286,28 @@ function TileSettingsPanel({
   };
 
   return (
-    <div style={tileSettingsPanelStyle}>
-      <div style={{ display: 'grid', gap: 6 }}>
-        <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', opacity: 0.58 }}>Tile size</div>
+    <aside
+      role="dialog"
+      aria-label={`Tile settings for ${item.title ?? item.i}`}
+      style={tileSettingsPanelStyle}
+      onClick={(event) => event.stopPropagation()}
+    >
+      <header style={tileSettingsHeaderStyle}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13, fontWeight: 820 }}>
+            <SlidersHorizontal size={14} /> Tile settings
+          </div>
+          <div style={{ marginTop: 2, color: 'var(--text-tertiary)', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {item.title ?? item.i}
+          </div>
+        </div>
+        <button type="button" aria-label="Close tile settings" title="Close" onClick={onClose} style={tileSettingsCloseStyle}>
+          <X size={15} />
+        </button>
+      </header>
+
+      <section style={tileSettingsSectionStyle}>
+        <div style={tileSettingsSectionHeadingStyle}>Layout</div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {TILE_SIZE_PRESETS.map((preset) => (
             <button
@@ -2193,79 +2321,88 @@ function TileSettingsPanel({
             </button>
           ))}
         </div>
-      </div>
-      <div style={tileDisplayContractStyle}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', opacity: 0.58 }}>Display contract</div>
-            <div style={{ marginTop: 3, fontSize: 11, lineHeight: 1.35, opacity: 0.76 }}>
-              {genUi?.rationale ?? item.display?.rationale ?? 'Choose a governed visualization for this app tile.'}
-            </div>
-          </div>
+      </section>
+
+      <section style={tileSettingsSectionStyle}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          <div style={tileSettingsSectionHeadingStyle}>Visualization</div>
           <button
             type="button"
             onClick={() => void applyRecommendation()}
             disabled={recommendBusy}
             style={recommendButtonStyle(recommendBusy)}
-            title="Recommend visualization from block hints and result fields"
+            title="Recommend a visualization from governed result fields"
           >
             <Wand2 size={12} strokeWidth={2.2} />
-            {recommendBusy ? 'Thinking' : 'AI recommend'}
+            {recommendBusy ? 'Thinking…' : 'Recommend'}
           </button>
         </div>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-          {genUi?.component ? <span style={generatedMetaPillStyle}>{componentLabelForGenUi(genUi)}</span> : null}
-          {genUi?.defaultVisualization ? <span style={generatedMetaPillStyle}>{formatGenUiLabel(String(genUi.defaultVisualization))}</span> : null}
-          {genUi?.reviewStatus ? <span style={generatedMetaPillStyle}>{formatGenUiLabel(String(genUi.reviewStatus))}</span> : null}
+        <div style={tileSettingsGridStyle}>
+          <label style={{ ...tileSettingsLabelStyle, gridColumn: '1 / -1' }}>
+            Title
+            <input
+              aria-label="Tile name"
+              value={titleDraft}
+              onChange={(event) => setTitleDraft(event.target.value)}
+              onBlur={() => commitTitleDraft()}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') event.currentTarget.blur();
+                if (event.key === 'Escape') { setTitleDraft(savedTitle); event.currentTarget.blur(); }
+              }}
+              style={tileSettingsInputStyle}
+            />
+          </label>
+          <label style={{ ...tileSettingsLabelStyle, gridColumn: '1 / -1' }}>
+            Chart type
+            <select
+              value={chart}
+              onChange={(event) => patchConfig({ chart: event.target.value as ChartType })}
+              style={tileSettingsInputStyle}
+            >
+              {APP_CHART_TYPE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
         </div>
         {recommendNote ? <div style={recommendNoteStyle}>{recommendNote}</div> : null}
         {recommendError ? <div style={recommendErrorStyle}>{recommendError}</div> : null}
-      </div>
-      <div style={tileSettingsGridStyle}>
-        <label style={tileSettingsLabelStyle}>
-          Title
-          {/* Local while typing, saved on blur or Enter. Patching per keystroke
-              issued a full layout PATCH and re-packed the grid on every
-              character, so tiles visibly jumped around as you renamed one. */}
-          <input
-            aria-label="Tile name"
-            title="Tile name — also editable directly on the tile header"
-            value={titleDraft}
-            onChange={(event) => setTitleDraft(event.target.value)}
-            onBlur={() => commitTitleDraft()}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') { event.currentTarget.blur(); }
-              if (event.key === 'Escape') { setTitleDraft(savedTitle); event.currentTarget.blur(); }
-            }}
-            style={tileSettingsInputStyle}
-          />
-        </label>
-        <label style={tileSettingsLabelStyle}>
-          Chart
-          <select
-            value={chart}
-            onChange={(event) => patchConfig({ chart: event.target.value as ChartType })}
-            style={tileSettingsInputStyle}
-          >
-            {APP_CHART_TYPE_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </select>
-        </label>
-        <FieldSelect label="X" value={chartConfig.x} columns={result?.columns ?? []} onChange={(value) => patchConfig({ x: value })} />
-        <FieldSelect label="Y" value={chartConfig.y} columns={result?.columns ?? []} onChange={(value) => patchConfig({ y: value })} />
-        <FieldSelect label="Color" value={chartConfig.color} columns={result?.columns ?? []} onChange={(value) => patchConfig({ color: value })} />
-        <FieldSelect label="Facet" value={chartConfig.facet} columns={result?.columns ?? []} onChange={(value) => patchConfig({ facet: value })} />
-      </div>
-      {result ? (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-          <ColumnPickList title="Measures" columns={measures} onPick={(column) => patchConfig({ y: column })} />
-          <ColumnPickList title="Dimensions" columns={dimensions} onPick={(column) => patchConfig({ x: column })} />
+      </section>
+
+      <details style={tileSettingsDetailsStyle}>
+        <summary style={tileSettingsSummaryStyle}>Data fields and advanced options</summary>
+        <div style={{ display: 'grid', gap: 10, marginTop: 10 }}>
+          <div style={tileSettingsGridStyle}>
+            <FieldSelect label="Category / X" value={chartConfig.x} columns={result?.columns ?? []} onChange={(value) => patchConfig({ x: value })} />
+            <FieldSelect label="Value / Y" value={chartConfig.y} columns={result?.columns ?? []} onChange={(value) => patchConfig({ y: value })} />
+            <FieldSelect label="Color" value={chartConfig.color} columns={result?.columns ?? []} onChange={(value) => patchConfig({ color: value })} />
+            <FieldSelect label="Facet" value={chartConfig.facet} columns={result?.columns ?? []} onChange={(value) => patchConfig({ facet: value })} />
+          </div>
+          {result ? (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <ColumnPickList title="Measures" columns={measures} onPick={(column) => patchConfig({ y: column })} />
+              <ColumnPickList title="Dimensions" columns={dimensions} onPick={(column) => patchConfig({ x: column })} />
+            </div>
+          ) : (
+            <div style={{ fontSize: 11, opacity: 0.64 }}>Run the tile once to map result fields.</div>
+          )}
         </div>
-      ) : (
-        <div style={{ fontSize: 11, opacity: 0.64 }}>Run results are needed before field slots can be inferred.</div>
-      )}
-    </div>
+      </details>
+
+      <details style={tileSettingsDetailsStyle}>
+        <summary style={tileSettingsSummaryStyle}>Why this visualization</summary>
+        <div style={tileDisplayContractStyle}>
+          <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--text-secondary)' }}>
+            {genUi?.rationale ?? item.display?.rationale ?? 'This visualization is constrained by the governed result fields and the saved App display contract.'}
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+            {genUi?.component ? <span style={generatedMetaPillStyle}>{componentLabelForGenUi(genUi)}</span> : null}
+            {genUi?.defaultVisualization ? <span style={generatedMetaPillStyle}>{formatGenUiLabel(String(genUi.defaultVisualization))}</span> : null}
+            {genUi?.reviewStatus ? <span style={generatedMetaPillStyle}>{formatGenUiLabel(String(genUi.reviewStatus))}</span> : null}
+          </div>
+        </div>
+      </details>
+    </aside>
   );
 }
 
@@ -2981,8 +3118,10 @@ const addTileIconButtonStyle: CSSProperties = {
 const dashboardToolbarStyle: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
+  flexWrap: 'wrap',
   gap: 6,
   marginBottom: 10,
+  minWidth: 0,
 };
 
 const tileEvidenceButtonStyle: CSSProperties = {
@@ -3205,19 +3344,77 @@ const addMenuItemStyle: CSSProperties = {
 };
 
 const tileSettingsPanelStyle: CSSProperties = {
-  border: '1px solid var(--border-color, rgba(0,0,0,0.10))',
-  borderRadius: 6,
-  padding: 8,
-  background: 'var(--color-bg, rgba(255,255,255,0.72))',
+  position: 'fixed',
+  top: 72,
+  right: 16,
+  bottom: 16,
+  zIndex: 120,
+  width: 'min(360px, calc(100vw - 32px))',
+  boxSizing: 'border-box',
+  border: '1px solid var(--border-default)',
+  borderRadius: 12,
+  padding: 14,
+  background: 'var(--bg-0)',
+  color: 'var(--text-primary)',
+  boxShadow: '0 22px 70px rgba(15,23,42,0.22)',
   display: 'grid',
-  gap: 8,
+  alignContent: 'start',
+  gap: 12,
   fontStyle: 'normal',
+  overflowY: 'auto',
+  overscrollBehavior: 'contain',
+};
+
+const tileSettingsHeaderStyle: CSSProperties = {
+  position: 'sticky',
+  top: -14,
+  zIndex: 2,
+  margin: '-14px -14px 0',
+  padding: '13px 14px 11px',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: 12,
+  borderBottom: '1px solid var(--border-subtle)',
+  background: 'var(--bg-0)',
+};
+
+const tileSettingsCloseStyle: CSSProperties = {
+  width: 30,
+  height: 30,
+  padding: 0,
+  border: '1px solid var(--border-subtle)',
+  borderRadius: 7,
+  background: 'var(--bg-1)',
+  color: 'var(--text-secondary)',
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  cursor: 'pointer',
+  flex: 'none',
+};
+
+const tileSettingsSectionStyle: CSSProperties = {
+  display: 'grid',
+  gap: 9,
+  padding: 12,
+  border: '1px solid var(--border-subtle)',
+  borderRadius: 9,
+  background: 'var(--bg-1)',
+};
+
+const tileSettingsSectionHeadingStyle: CSSProperties = {
+  fontSize: 10.5,
+  fontWeight: 820,
+  textTransform: 'uppercase',
+  letterSpacing: '0.055em',
+  color: 'var(--text-tertiary)',
 };
 
 const tileSettingsGridStyle: CSSProperties = {
   display: 'grid',
-  gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
-  gap: 6,
+  gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+  gap: 8,
 };
 
 const tileSettingsLabelStyle: CSSProperties = {
@@ -3243,10 +3440,22 @@ const tileSettingsInputStyle: CSSProperties = {
 const tileDisplayContractStyle: CSSProperties = {
   display: 'grid',
   gap: 6,
-  border: '1px solid var(--border-color, rgba(0,0,0,0.08))',
-  borderRadius: 6,
-  background: 'var(--surface, rgba(248,250,252,0.62))',
-  padding: 8,
+  paddingTop: 9,
+};
+
+const tileSettingsDetailsStyle: CSSProperties = {
+  border: '1px solid var(--border-subtle)',
+  borderRadius: 9,
+  background: 'var(--bg-1)',
+  padding: '0 12px 11px',
+};
+
+const tileSettingsSummaryStyle: CSSProperties = {
+  cursor: 'pointer',
+  padding: '11px 0 0',
+  color: 'var(--text-secondary)',
+  fontSize: 11.5,
+  fontWeight: 760,
 };
 
 function recommendButtonStyle(busy: boolean): CSSProperties {
@@ -3564,6 +3773,28 @@ function nextTileId(dashboard: DashboardDocumentResponse['dashboard'], raw: stri
     if (!used.has(candidate)) return candidate;
   }
   return `${base}-${Date.now()}`;
+}
+
+/** Deterministic compatibility projection for v1 dashboards and v2 documents
+ * that have not yet saved an explicit medium/narrow override. */
+export function projectDashboardItems(items: DashboardLayoutItem[], cols: number): DashboardLayoutItem[] {
+  let x = 0;
+  let y = 0;
+  let rowHeight = 0;
+  return [...items]
+    .sort((left, right) => left.y - right.y || left.x - right.x)
+    .map((item) => {
+      const width = cols === 1 ? 1 : Math.min(cols, Math.max(2, Math.ceil(item.w / 2)));
+      if (x + width > cols) {
+        x = 0;
+        y += rowHeight || item.h;
+        rowHeight = 0;
+      }
+      const projected = { ...item, x, y, w: width };
+      x += width;
+      rowHeight = Math.max(rowHeight, item.h);
+      return projected;
+    });
 }
 
 // Gap-free 2D first-fit packer: places each tile (in order) at the topmost,

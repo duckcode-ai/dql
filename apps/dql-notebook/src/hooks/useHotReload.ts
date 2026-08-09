@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useDispatch } from '../store/NotebookStore';
 import { api } from '../api/client';
+import { streamServerEvents } from '../api/server-auth';
 
 interface WatchEvent {
   type: 'file-changed' | 'file-added' | 'file-deleted' | 'semantic-reload';
@@ -18,12 +19,9 @@ interface WatchEvent {
 export function useHotReload() {
   const dispatch = useDispatch();
   const queryClient = useQueryClient();
-  const esRef = useRef<EventSource | null>(null);
+  const streamRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    // Only connect if the browser supports SSE and the server is reachable
-    if (typeof EventSource === 'undefined') return;
-
     let alive = true;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let filesTimer: ReturnType<typeof setTimeout> | null = null;
@@ -69,12 +67,12 @@ export function useHotReload() {
 
     const connect = () => {
       if (!alive) return;
-      const es = new EventSource(`${window.location.origin}/api/watch`);
-      esRef.current = es;
-
-      es.addEventListener('change', (e: MessageEvent) => {
+      const controller = new AbortController();
+      streamRef.current = controller;
+      void streamServerEvents('/api/watch', (frame) => {
+        if (frame.event !== 'change') return;
         try {
-          const event: WatchEvent = JSON.parse(e.data as string);
+          const event: WatchEvent = JSON.parse(frame.data) as WatchEvent;
 
           if (event.type === 'file-added' || event.type === 'file-deleted' || event.type === 'file-changed') {
             const changedPath = event.path ?? '';
@@ -91,10 +89,8 @@ export function useHotReload() {
         } catch {
           // ignore parse errors
         }
-      });
-
-      es.addEventListener('error', () => {
-        es.close();
+      }, controller.signal).catch(() => {
+        if (!alive || controller.signal.aborted) return;
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(connect, 5000);
       });
@@ -108,8 +104,8 @@ export function useHotReload() {
       if (filesTimer) clearTimeout(filesTimer);
       if (domainsTimer) clearTimeout(domainsTimer);
       if (semanticTimer) clearTimeout(semanticTimer);
-      esRef.current?.close();
-      esRef.current = null;
+      streamRef.current?.abort();
+      streamRef.current = null;
     };
   }, [dispatch, queryClient]); // only mount/unmount once
 }

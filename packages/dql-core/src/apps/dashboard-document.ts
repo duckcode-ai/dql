@@ -27,12 +27,41 @@ export type DashboardParam = {
 
 export type DashboardFilter = {
   id: string;
-  type: 'string' | 'number' | 'boolean' | 'date' | 'daterange' | 'select';
+  type:
+    | 'string'
+    | 'number'
+    | 'boolean'
+    | 'date'
+    | 'daterange'
+    | 'relative_date'
+    | 'select'
+    | 'multiselect'
+    | 'search'
+    | 'number_range';
+  label?: string;
   default?: unknown;
   /** For 'select': allowed values. */
   options?: string[];
   /** Optional dimension reference the filter binds to. */
   bindsTo?: string;
+  /** Qualified identity; display names alone are never sufficient binding proof. */
+  field?: {
+    name: string;
+    relation?: string;
+    semanticModel?: string;
+    provider?: string;
+  };
+  required?: boolean;
+  multiple?: boolean;
+  scope?: { page?: string; tileIds?: string[] };
+  optionSource?: {
+    mode: 'static' | 'distinct_query';
+    sourceRef?: string;
+    field?: string;
+    snapshotId?: string;
+    limit?: number;
+  };
+  dependsOn?: string[];
 };
 
 export type DashboardBlockRef =
@@ -101,13 +130,15 @@ export type DashboardTileFilterBinding = {
   /** Physical column/expression or semantic field this filter can bind to. */
   binding?: string;
   /** Whether this becomes a block parameter or an outer predicate at execution time. */
-  mode?: 'parameter' | 'predicate';
+  mode?: 'parameter' | 'predicate' | 'semantic';
   /** Block parameter names controlled by this app filter. */
   paramNames?: string[];
   /** If true, the tile should warn when the filter is missing. */
   required?: boolean;
   /** Populated when a global filter intentionally does not apply to this tile. */
   unsupportedReason?: string;
+  /** Explicit capability prevents a global filter from appearing silently partial. */
+  capability?: 'supported' | 'unsupported' | 'preflight_required';
 };
 
 export type DashboardTileParameterBinding = {
@@ -281,8 +312,22 @@ export type DashboardSection = {
   order: number;
 };
 
+export type DashboardGridLayout = {
+  kind: 'grid';
+  cols: number;
+  rowHeight: number;
+  items: DashboardGridItem[];
+};
+
+export type DashboardResponsiveLayouts = {
+  /** Canonical authoring geometry. Existing v1 layout is treated as `wide`. */
+  wide?: DashboardGridLayout;
+  medium?: DashboardGridLayout;
+  narrow?: DashboardGridLayout;
+};
+
 export interface DashboardDocument {
-  version: 1;
+  version: 1 | 2;
   id: string;
   metadata: {
     title: string;
@@ -307,12 +352,7 @@ export interface DashboardDocument {
   sections?: DashboardSection[];
   /** Runtime story evidence contract. Result-specific prose is never persisted. */
   story?: DashboardStoryEvidencePlan;
-  layout: {
-    kind: 'grid';
-    cols: number;
-    rowHeight: number;
-    items: DashboardGridItem[];
-  };
+  layout: DashboardGridLayout & { responsive?: DashboardResponsiveLayouts };
 }
 
 export interface DashboardParseError {
@@ -413,7 +453,7 @@ function validateDashboardDocument(raw: unknown, path: string): DashboardLoadRes
   }
   const obj = raw as Record<string, unknown>;
   const version = obj.version ?? 1;
-  if (version !== 1) err(`unsupported version ${String(version)} (expected 1)`);
+  if (version !== 1 && version !== 2) err(`unsupported version ${String(version)} (expected 1 or 2)`);
 
   if (typeof obj.id !== 'string' || obj.id.length === 0) {
     err('id must be a non-empty string');
@@ -434,7 +474,7 @@ function validateDashboardDocument(raw: unknown, path: string): DashboardLoadRes
 
   return {
     document: {
-      version: 1,
+      version: version as 1 | 2,
       id,
       metadata,
       params: params.length > 0 ? params : undefined,
@@ -574,7 +614,7 @@ function readFilters(raw: unknown, err: (m: string) => void): DashboardFilter[] 
     err('filters must be an array');
     return [];
   }
-  const allowed = ['string', 'number', 'boolean', 'date', 'daterange', 'select'] as const;
+  const allowed = ['string', 'number', 'boolean', 'date', 'daterange', 'relative_date', 'select', 'multiselect', 'search', 'number_range'] as const;
   const out: DashboardFilter[] = [];
   for (let i = 0; i < raw.length; i++) {
     const f = raw[i] as Record<string, unknown>;
@@ -594,9 +634,16 @@ function readFilters(raw: unknown, err: (m: string) => void): DashboardFilter[] 
     out.push({
       id: f.id,
       type: f.type as DashboardFilter['type'],
+      label: typeof f.label === 'string' ? f.label : undefined,
       default: f.default,
       options: opts,
       bindsTo: typeof f.bindsTo === 'string' ? f.bindsTo : undefined,
+      field: readDashboardFilterField(f.field, i, err),
+      required: typeof f.required === 'boolean' ? f.required : undefined,
+      multiple: typeof f.multiple === 'boolean' ? f.multiple : undefined,
+      scope: readDashboardFilterScope(f.scope, i, err),
+      optionSource: readDashboardFilterOptionSource(f.optionSource, i, err),
+      dependsOn: stringArrayOrUndefined(f.dependsOn, `filters[${i}].dependsOn`, err),
     });
   }
   return out;
@@ -705,7 +752,78 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
     });
   }
 
-  return { kind: 'grid', cols, rowHeight, items };
+  const responsive = readResponsiveLayouts(o.responsive, err);
+  return { kind: 'grid', cols, rowHeight, items, ...(responsive ? { responsive } : {}) };
+}
+
+function readDashboardFilterField(raw: unknown, index: number, err: (m: string) => void): DashboardFilter['field'] {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    err(`filters[${index}].field must be an object`);
+    return undefined;
+  }
+  const field = raw as Record<string, unknown>;
+  if (typeof field.name !== 'string' || !field.name.trim()) {
+    err(`filters[${index}].field.name must be a non-empty string`);
+    return undefined;
+  }
+  return {
+    name: field.name,
+    relation: typeof field.relation === 'string' ? field.relation : undefined,
+    semanticModel: typeof field.semanticModel === 'string' ? field.semanticModel : undefined,
+    provider: typeof field.provider === 'string' ? field.provider : undefined,
+  };
+}
+
+function readDashboardFilterScope(raw: unknown, index: number, err: (m: string) => void): DashboardFilter['scope'] {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    err(`filters[${index}].scope must be an object`);
+    return undefined;
+  }
+  const scope = raw as Record<string, unknown>;
+  return {
+    page: typeof scope.page === 'string' ? scope.page : undefined,
+    tileIds: stringArrayOrUndefined(scope.tileIds, `filters[${index}].scope.tileIds`, err),
+  };
+}
+
+function readDashboardFilterOptionSource(raw: unknown, index: number, err: (m: string) => void): DashboardFilter['optionSource'] {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    err(`filters[${index}].optionSource must be an object`);
+    return undefined;
+  }
+  const source = raw as Record<string, unknown>;
+  if (source.mode !== 'static' && source.mode !== 'distinct_query') {
+    err(`filters[${index}].optionSource.mode must be static or distinct_query`);
+    return undefined;
+  }
+  return {
+    mode: source.mode,
+    sourceRef: typeof source.sourceRef === 'string' ? source.sourceRef : undefined,
+    field: typeof source.field === 'string' ? source.field : undefined,
+    snapshotId: typeof source.snapshotId === 'string' ? source.snapshotId : undefined,
+    limit: typeof source.limit === 'number' && source.limit > 0 ? source.limit : undefined,
+  };
+}
+
+function readResponsiveLayouts(raw: unknown, err: (m: string) => void): DashboardResponsiveLayouts | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    err('layout.responsive must be an object');
+    return undefined;
+  }
+  const source = raw as Record<string, unknown>;
+  const responsive: DashboardResponsiveLayouts = {};
+  for (const breakpoint of ['wide', 'medium', 'narrow'] as const) {
+    if (source[breakpoint] === undefined) continue;
+    const projection = readLayout(source[breakpoint], err);
+    // Responsive projections cannot recursively contain more projections.
+    const { responsive: _nested, ...flat } = projection;
+    responsive[breakpoint] = flat;
+  }
+  return Object.keys(responsive).length ? responsive : undefined;
 }
 
 function readDraftAnalysisRef(

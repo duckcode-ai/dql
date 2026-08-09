@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
+import { tmpdir } from "node:os";
 import {
   parseAppDocument,
   parseDashboardDocument,
@@ -136,7 +137,7 @@ export interface AppPlanGenUi {
 export interface AppPlanFilter {
   id: string;
   label: string;
-  type: "date" | "daterange" | "select" | "string" | "number";
+  type: "date" | "daterange" | "select" | "search" | "string" | "number";
   default?: unknown;
   options?: string[];
   bindsTo?: string;
@@ -348,13 +349,25 @@ export const APP_BUILDER_SKILLS: AppBuilderSkill[] = [
   },
 ];
 
-function appRequirementsForPrompt(prompt: string): AppRequirement[] {
+function appRequirementsForPrompt(prompt: string, certifiedNodes: KGNode[] = []): AppRequirement[] {
   const analysis = buildAnalysisQuestionPlan(prompt);
   const measures = analysis.requestedShape.measures.length
     ? analysis.requestedShape.measures
     : analysis.metricTerms;
-  const dimensions = analysis.requestedShape.dimensions;
-  const filters = analysis.requestedShape.filters;
+  const explicitMembers = explicitMemberFilters(prompt);
+  const requestedDimensions = Array.from(new Set([
+    ...analysis.requestedShape.dimensions,
+    ...explicitMembers.map((member) => member.dimension),
+  ]));
+  const availableDimensions = Array.from(new Set(certifiedNodes.flatMap((node) => [
+    ...(node.dimensions ?? []),
+    ...(node.allowedFilters ?? []),
+  ]))).filter((dimension) => !/^(top_?n|limit)$/i.test(dimension));
+  const dimensions = requestedDimensions.length > 0 ? requestedDimensions : availableDimensions.slice(0, 3);
+  const filters = Array.from(new Set([
+    ...analysis.requestedShape.filters,
+    ...explicitMembers.map((member) => member.value),
+  ]));
   const ranking = analysis.requestedShape.topN
     ? { direction: analysis.requestedShape.rankingDirection ?? "top" as const, limit: analysis.requestedShape.topN.n }
     : undefined;
@@ -368,18 +381,30 @@ function appRequirementsForPrompt(prompt: string): AppRequirement[] {
     grain: analysis.requestedShape.grain,
     ...(ranking ? { ranking } : {}),
   }];
-  const wantsTrend = analysis.mode === "trend" || /\btrend|over time|weekly|monthly|quarterly\b/i.test(prompt);
+  if (measures.length > 0 && requirements[0]?.role !== "kpi") {
+    requirements.unshift({
+      id: "headline",
+      question: `Headline ${measures.join(" and ")}`,
+      role: "kpi",
+      measures,
+      dimensions: [],
+      filters,
+    });
+  }
+  const sourceTimeDimension = availableDimensions.find((dimension) => /(_at$|_date$|_time$|^date$|^month$|^week$|^day$|quarter|year)/i.test(dimension));
+  const wantsTrend = Boolean(sourceTimeDimension) || analysis.mode === "trend" || /\btrend|over time|weekly|monthly|quarterly\b/i.test(prompt);
   if (wantsTrend && !requirements.some((requirement) => requirement.role === "trend")) {
     requirements.push({
       id: "trend",
       question: `${measures.join(" and ") || "primary metric"} over time`,
       role: "trend",
       measures,
-      dimensions: analysis.timeTerms.length ? analysis.timeTerms : ["time"],
+      dimensions: analysis.timeTerms.length ? analysis.timeTerms : [sourceTimeDimension ?? "time"],
       filters,
     });
   }
   for (const dimension of dimensions.slice(0, 2)) {
+    if (/(_at$|_date$|_time$|^date$|^month$|^week$|^day$|quarter|year)/i.test(dimension)) continue;
     if (requirements[0]?.dimensions.includes(dimension) && dimensions.length === 1) continue;
     requirements.push({
       id: `by-${slugify(dimension)}`,
@@ -390,7 +415,25 @@ function appRequirementsForPrompt(prompt: string): AppRequirement[] {
       filters,
     });
   }
+  const detailDimensions = dimensions.filter((dimension) => !/(_at$|_date$|_time$|^date$|^month$|^week$|^day$|quarter|year)/i.test(dimension));
+  if ((ranking || detailDimensions.length > 0) && !requirements.some((requirement) => requirement.role === "detail")) {
+    requirements.push({
+      id: "detail",
+      question: `Detailed evidence for ${measures.join(" and ") || prompt}`,
+      role: "detail",
+      measures,
+      dimensions: detailDimensions.slice(0, 3),
+      filters,
+      grain: analysis.requestedShape.grain,
+      ...(ranking ? { ranking } : {}),
+    });
+  }
   return requirements;
+}
+
+function explicitMemberFilters(prompt: string): Array<{ value: string; dimension: string }> {
+  const matches = prompt.matchAll(/\bfor\s+([a-z0-9][a-z0-9_-]*)\s+((?:product\s+)?category|segment|status|region|channel|country|type)\b/gi);
+  return Array.from(matches, (match) => ({ value: match[1], dimension: match[2] }));
 }
 
 function certifiedCoverageForRequirement(
@@ -479,6 +522,11 @@ function semanticTileForRequirement(
   const metric = metricNodes.find((node) => requested.has(slugify(node.name).replace(/-/g, "_"))) ?? metricNodes[0];
   if (!metric) return null;
   const semanticModelRefs = Array.from(new Set(modelNodes.map((node) => node.name))).slice(0, 4);
+  const semanticFilters = semanticFiltersForRequirement(requirement);
+  // A semantic fallback may close a filtered requirement only when every
+  // requested member is bound to a named dimension. Recording the filter in a
+  // fingerprint without applying it would make coverage untruthful.
+  if (requirement.filters.length > 0 && semanticFilters.length !== requirement.filters.length) return null;
   const id = `semantic-${requirement.id}`;
   const fingerprintPayload = JSON.stringify({
     metric: metric.nodeId,
@@ -492,6 +540,7 @@ function semanticTileForRequirement(
     provider: metric.provenance?.toLowerCase().includes("metricflow") ? "metricflow" : "native",
     metrics: [metric.name],
     ...(requirement.dimensions.length ? { dimensions: requirement.dimensions } : {}),
+    ...(semanticFilters.length ? { filters: semanticFilters } : {}),
     ...(requirement.ranking ? {
       orderBy: [{ field: metric.name, direction: requirement.ranking.direction === "bottom" ? "asc" : "desc" }],
       limit: requirement.ranking.limit,
@@ -517,12 +566,55 @@ function semanticTileForRequirement(
     reviewStatus: "review_required",
     trustState: "review_required",
     rationale: "Governed semantic coverage for a requirement not fully covered by a compatible certified block.",
+    ...(semanticFilters.length ? {
+      filterBindings: semanticFilters.map((filter) => ({
+        filter: slugify(filter.field),
+        binding: filter.field,
+        mode: "semantic" as const,
+        capability: "supported" as const,
+        required: true,
+      })),
+    } : {}),
     sourceEvidence: [
       { source: metric.nodeId, nodeId: metric.nodeId, kind: metric.kind, reason: "Governed semantic metric; result review is still required", trustState: "review_required" },
       ...modelNodes.slice(0, 4).map((node) => ({ source: node.nodeId, nodeId: node.nodeId, kind: node.kind, reason: "Semantic model used by the canonical query", trustState: "review_required" as const })),
     ],
     reviewTasks: ["Review semantic definition freshness and result shape before stakeholder publication."],
   };
+}
+
+function semanticFiltersForRequirement(
+  requirement: AppRequirement,
+): NonNullable<DashboardSemanticQueryRef["filters"]> {
+  const question = requirement.question.toLowerCase();
+  return requirement.filters.flatMap((value) => {
+    const valueIndex = question.indexOf(value.toLowerCase());
+    if (valueIndex < 0) return [];
+    const candidates = requirement.dimensions
+      .map((dimension) => ({
+        dimension,
+        index: question.indexOf(dimension.toLowerCase(), valueIndex + value.length),
+      }))
+      .filter((candidate) => candidate.index >= 0 && candidate.index - valueIndex <= 64)
+      .sort((left, right) => left.index - right.index);
+    const dimension = inferFilterFieldFromQuestion(requirement.question, value) ?? candidates[0]?.dimension;
+    if (!dimension) return [];
+    return [{
+      field: slugify(dimension).replace(/-/g, "_"),
+      operator: "=",
+      value,
+    }];
+  });
+}
+
+function inferFilterFieldFromQuestion(question: string, value: string): string | undefined {
+  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const dimensionWord = /(category|type|segment|status|region|country|channel|customer|product|team|season|date|period)$/i;
+  const after = new RegExp(`${escaped}\\s+([a-z0-9_ -]{2,40})$`, "i").exec(question.trim())?.[1]?.trim();
+  if (after && dimensionWord.test(after)) return after;
+  const before = new RegExp(`([a-z0-9_ -]{2,40})\\s+${escaped}(?:\\s|$)`, "i").exec(question)?.[1]?.trim();
+  const beforeTail = before?.split(/\s+/).slice(-2).join(" ");
+  return beforeTail && dimensionWord.test(beforeTail) ? beforeTail : undefined;
 }
 
 export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
@@ -556,12 +648,12 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
   // only when no tile declares any filter. Keeps the dashboard's filters dynamic.
   const promptFilters = inferFilters(prompt);
   const blockFilters = filtersFromCertifiedNodes(certifiedNodes);
-  const filters = blockFilters.length > 0 ? mergeAppFilters(blockFilters, promptFilters) : promptFilters;
+  let filters = blockFilters.length > 0 ? mergeAppFilters(blockFilters, promptFilters) : promptFilters;
 
   const candidateCertifiedTiles = certifiedNodes.map((node, index) =>
     tileFromCertifiedNode(node, index, analysisIntent, filters),
   );
-  const requirements = appRequirementsForPrompt(prompt);
+  const requirements = appRequirementsForPrompt(prompt, certifiedNodes);
   const coverage: RequirementCoverage[] = [];
   const selectedCertifiedIds = new Set<string>();
   const semanticTiles: AppPlanTile[] = [];
@@ -605,6 +697,15 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
       });
     }
   }
+  const semanticFilters = semanticTiles.flatMap((tile) => (tile.semantic?.filters ?? []).map((filter) => ({
+    id: slugify(filter.field),
+    label: titleCase(filter.field.replace(/[_.]+/g, " ")),
+    type: "select" as const,
+    default: filter.value,
+    options: [String(filter.value)],
+    bindsTo: filter.field,
+  })));
+  filters = uniquePlanFilters([...filters, ...semanticFilters]);
   // Keep compatible certified context only. For legacy unshaped prompts, retain
   // the best certified candidates so existing simple App generation stays useful.
   // Requirement coverage is strict, while explicitly discovered certified
@@ -975,8 +1076,12 @@ export function generateAppFromPlan(
   };
 
   const dashboards = plan.pages.map(
-    (page, pageIndex): DashboardDocument => ({
-      version: 1,
+    (page, pageIndex): DashboardDocument => {
+      const items = options.narration && pageIndex === 0
+        ? buildStoryLayoutItems(page.tiles, options.narration)
+        : buildLayoutItems(page.tiles);
+      return {
+      version: 2,
       id: page.id,
       ...(options.narration && pageIndex === 0
         ? { sections: buildStorySections(page.tiles, options.narration) }
@@ -998,20 +1103,25 @@ export function generateAppFromPlan(
       },
       filters: page.filters.map((filter) => ({
         id: filter.id,
+        label: filter.label,
         type: filter.type,
         default: filter.default,
         ...(filter.options?.length ? { options: filter.options } : {}),
         bindsTo: filter.bindsTo,
+        ...(filter.bindsTo ? { field: { name: filter.bindsTo } } : {}),
+        ...(filter.options?.length
+          ? { optionSource: { mode: "static" as const } }
+          : {}),
       })),
       layout: {
         kind: "grid",
         cols: 12,
         rowHeight: 80,
-        items: options.narration && pageIndex === 0
-          ? buildStoryLayoutItems(page.tiles, options.narration)
-          : buildLayoutItems(page.tiles),
+        items,
+        responsive: responsiveLayoutsForItems(items),
       },
-    }),
+      };
+    },
   );
 
   const appValidation = parseAppDocument(
@@ -1067,6 +1177,25 @@ export function generateAppFromPlan(
       join(appDir, "README.md"),
     ].map((path) => relative(projectRoot, path)),
   };
+}
+
+/**
+ * Compile a validated AppPlan into typed App/dashboard documents without
+ * touching the user's project. App Studio uses this for AI proposal diffs;
+ * only the later Publish to Project service writes canonical App source.
+ */
+export function materializeAppPlanDocuments(
+  plan: AppPlan,
+  kg: KGStore,
+  options: GenerateAppFromPlanOptions = {},
+): Pick<GeneratedAppPackage, "app" | "dashboards"> {
+  const scratchRoot = mkdtempSync(join(tmpdir(), "dql-app-plan-"));
+  try {
+    const generated = generateAppFromPlan(scratchRoot, plan, kg, { ...options, overwrite: true });
+    return { app: generated.app, dashboards: generated.dashboards };
+  } finally {
+    rmSync(scratchRoot, { recursive: true, force: true });
+  }
 }
 
 function findCertifiedBlockNodes(
@@ -1951,6 +2080,34 @@ function buildLayoutItems(tiles: AppPlanTile[]): DashboardGridItem[] {
   });
 }
 
+function responsiveLayoutsForItems(items: DashboardGridItem[]): NonNullable<DashboardDocument["layout"]["responsive"]> {
+  return {
+    wide: { kind: "grid", cols: 12, rowHeight: 80, items },
+    medium: { kind: "grid", cols: 6, rowHeight: 80, items: projectItemsToColumns(items, 6) },
+    narrow: { kind: "grid", cols: 1, rowHeight: 80, items: projectItemsToColumns(items, 1) },
+  };
+}
+
+function projectItemsToColumns(items: DashboardGridItem[], cols: number): DashboardGridItem[] {
+  let x = 0;
+  let y = 0;
+  let rowHeight = 0;
+  return [...items]
+    .sort((left, right) => left.y - right.y || left.x - right.x)
+    .map((item) => {
+      const width = cols === 1 ? 1 : Math.min(cols, Math.max(2, Math.ceil(item.w / 2)));
+      if (x + width > cols) {
+        x = 0;
+        y += rowHeight || item.h;
+        rowHeight = 0;
+      }
+      const projected = { ...item, x, y, w: width };
+      x += width;
+      rowHeight = Math.max(rowHeight, item.h);
+      return projected;
+    });
+}
+
 function markdownForGeneratedPlanTile(tile: AppPlanTile): string {
   const reviewTasks = tile.reviewTasks?.length
     ? tile.reviewTasks.map((task) => `- ${task}`).join("\n")
@@ -2321,11 +2478,13 @@ function uniquePlanFilters(filters: AppPlanFilter[]): AppPlanFilter[] {
 
 const APP_FILTER_TIME_RE = /(_at$|_date$|_time$|_ts$|^date$|^month$|^week$|^day$|ordered_at|created)/i;
 const APP_FILTER_NUMBER_RE = /(top[_-]?n|limit|count|amount|year|score|rank)/i;
+const APP_FILTER_SEARCH_RE = /(_name$|_id$|^name$|search|email)/i;
 
 /** Map a block filter column to the dashboard control the runtime filter engine renders. */
 function controlTypeForColumn(column: string): AppPlanFilter["type"] {
   if (APP_FILTER_TIME_RE.test(column)) return "daterange";
   if (APP_FILTER_NUMBER_RE.test(column)) return "number";
+  if (APP_FILTER_SEARCH_RE.test(column)) return "search";
   return "select"; // categorical → dropdown (options filled by /api/dashboard/filter-options)
 }
 

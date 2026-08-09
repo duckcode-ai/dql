@@ -9,9 +9,11 @@ interface TableOutputProps {
   themeMode: ThemeMode;
   /** Lets full-screen result viewers use the available vertical space. */
   maxHeight?: CSSProperties['maxHeight'];
+  /** App surfaces use a compact first page while retaining every row for paging and export. */
+  initialPageSize?: number;
 }
 
-const PAGE_SIZES = [25, 50, 100, 500] as const;
+const PAGE_SIZES = [10, 25, 50, 100, 500] as const;
 
 type SortDir = 'asc' | 'desc' | null;
 
@@ -97,13 +99,13 @@ function SortArrow({ dir, color }: { dir: SortDir; color: string }) {
 
 // ─── TableOutput ──────────────────────────────────────────────────────────────
 
-export function TableOutput({ result, themeMode, maxHeight = 440 }: TableOutputProps) {
+export function TableOutput({ result, themeMode, maxHeight = 440, initialPageSize = 50 }: TableOutputProps) {
   const t = themes[themeMode];
   const [hoveredRow, setHoveredRow] = useState<number | null>(null);
   const [sortCol, setSortCol] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>(null);
   const [filterText, setFilterText] = useState('');
-  const [pageSize, setPageSize] = useState<number>(50);
+  const [pageSize, setPageSize] = useState<number>(PAGE_SIZES.includes(initialPageSize as (typeof PAGE_SIZES)[number]) ? initialPageSize : 50);
   const [page, setPage] = useState(0);
 
   const handleSort = useCallback((col: string) => {
@@ -159,6 +161,8 @@ export function TableOutput({ result, themeMode, maxHeight = 440 }: TableOutputP
   const totalPages = Math.max(1, Math.ceil(sortedRows.length / pageSize));
   const safePage = Math.min(page, totalPages - 1);
   const displayRows = sortedRows.slice(safePage * pageSize, (safePage + 1) * pageSize);
+  const rangeStart = sortedRows.length === 0 ? 0 : safePage * pageSize + 1;
+  const rangeEnd = Math.min((safePage + 1) * pageSize, sortedRows.length);
 
   if (result.columns.length === 0) {
     return (
@@ -200,7 +204,9 @@ export function TableOutput({ result, themeMode, maxHeight = 440 }: TableOutputP
 
         {/* Row count */}
         <span style={{ fontSize: 10, color: t.textMuted, fontFamily: t.font }}>
-          {filterText ? `${sortedRows.length} of ${result.rows.length}` : `${result.rows.length}`} {result.rows.length === 1 ? 'row' : 'rows'}
+          {filterText
+            ? `Showing ${rangeStart}–${rangeEnd} of ${sortedRows.length} matching (${result.rows.length} total)`
+            : `Showing ${rangeStart}–${rangeEnd} of ${result.rows.length} ${result.rows.length === 1 ? 'row' : 'rows'}`}
         </span>
 
         <div style={{ flex: 1 }} />

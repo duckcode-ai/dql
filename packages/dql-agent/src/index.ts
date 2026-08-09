@@ -573,6 +573,7 @@ export {
   planAppFromPrompt,
   validateAppPlan,
   generateAppFromPlan,
+  materializeAppPlanDocuments,
 } from "./app-builder.js";
 export type {
   AppBuilderSkill,

@@ -31,12 +31,18 @@ import {
   loadDashboardDocument,
   findDashboardsForApp,
   suggestAppId,
+  applyAppBuildDraftOperations,
   type AppDocument,
   type DashboardDocument,
   type ManifestApp,
 } from "@duckcodeailabs/dql-core";
 import type { CLIFlags } from "../args.js";
 import { findProjectRoot } from "../local-runtime.js";
+import {
+  createStoredAppBuildDraft,
+  proposeAppBuildDraftOperations,
+  writeStoredAppBuildDraft,
+} from "../apps-api.js";
 
 const APPS_ROOT = "apps";
 
@@ -94,116 +100,32 @@ async function runAppNew(rest: string[], flags: CLIFlags): Promise<void> {
     );
   }
 
-  const owner =
-    (flags as { owner?: string }).owner?.trim() ||
-    `${process.env.USER ?? "owner"}@local`;
+  const owner = (flags as { owner?: string }).owner?.trim() || `${process.env.USER ?? "owner"}@local`;
   const displayName = humanise(id);
-
-  const appJson: AppDocument = {
-    version: 1,
-    id,
+  const draft = createStoredAppBuildDraft(projectRoot, {
+    appId: id,
     name: displayName,
-    description: `${displayName} — consumption surface for ${domain}`,
-    visibility: "shared",
-    ownerDomain: domain,
-    usesDomains: [domain],
-    requiredExports: [],
+    goal: `Create ${displayName} for ${domain}`,
+    audience: owner,
     domain,
-    groups: [],
-    lifecycle: "draft",
-    owners: [owner],
-    tags: [],
-    members: [{ userId: owner, displayName: owner, roles: ["owner"] }],
-    roles: [
-      {
-        id: "owner",
-        displayName: "Owner",
-        description: "Full access to all dashboards and configuration.",
-      },
-      {
-        id: "analyst",
-        displayName: "Analyst",
-        description: "Can view and run dashboards, propose new blocks.",
-      },
-      {
-        id: "viewer",
-        displayName: "Viewer",
-        description: "Read-only access to certified dashboards.",
-      },
-    ],
-    policies: [
-      {
-        id: "viewers-read",
-        domain,
-        minClassification: "internal",
-        allowedRoles: ["viewer", "analyst", "owner"],
-        accessLevel: "read",
-        enabled: true,
-      },
-      {
-        id: "analyst-execute",
-        domain,
-        minClassification: "confidential",
-        allowedRoles: ["analyst", "owner"],
-        accessLevel: "execute",
-        enabled: true,
-      },
-    ],
-    rlsBindings: [],
-    schedules: [],
-    homepage: { type: "dashboard", id: "overview" },
-  };
-
-  const overview: DashboardDocument = {
-    version: 1,
-    id: "overview",
-    metadata: {
-      title: `${displayName} — Overview`,
-      description:
-        "Default dashboard scaffolded by `dql app new`. Replace with your own blocks.",
-      domain,
-      visibility: "shared",
-      lifecycle: "draft",
-    },
-    layout: {
-      kind: "grid",
-      cols: 12,
-      rowHeight: 80,
-      items: [],
-    },
-  };
-
-  mkdirSync(join(appDir, "dashboards"), { recursive: true });
-  mkdirSync(join(appDir, "notebooks"), { recursive: true });
-  mkdirSync(join(appDir, "drafts"), { recursive: true });
-  writeFileSync(
-    join(appDir, "dql.app.json"),
-    JSON.stringify(appJson, null, 2) + "\n",
-    "utf-8",
-  );
-  writeFileSync(
-    join(appDir, "dashboards", "overview.dqld"),
-    JSON.stringify(overview, null, 2) + "\n",
-    "utf-8",
-  );
-
-  const rel = relFromRoot(projectRoot, appDir);
+    authoringMode: "manual",
+    sourcePolicy: "governed_only",
+    template: "blank",
+  });
 
   if ((flags as { format?: string }).format === "json") {
-    console.log(JSON.stringify({ created: true, id, path: rel }, null, 2));
+    console.log(JSON.stringify({ created: true, id, draft, projectSourceWritten: false }, null, 2));
     return;
   }
-  console.log(`\n  ✓ Created app: ${id}`);
-  console.log(`    Path: ${rel}`);
+  console.log(`\n  ✓ Created local App draft: ${displayName}`);
+  console.log(`    Draft id: ${draft.id}`);
   console.log(`    Domain: ${domain}   Owner: ${owner}`);
+  console.log("    Project source: unchanged");
   console.log("");
   console.log("  Next steps:");
-  console.log(`    1. Add blocks to your project under blocks/`);
-  console.log(`    2. Edit ${rel}/dashboards/overview.dqld to reference them`);
-  console.log(
-    `    3. dql app build      # writes apps[] and dashboards[] into dql-manifest.json`,
-  );
-  console.log(`    4. dql notebook       # open the App in the desktop UI`);
+  console.log("    1. Run dql notebook and open Apps");
+  console.log("    2. Resume the local draft and add governed sources, components, and filters");
+  console.log("    3. Run preflight and explicitly Publish to Project when ready");
   console.log("");
 }
 
@@ -216,73 +138,58 @@ async function runAppGenerate(rest: string[], flags: CLIFlags): Promise<void> {
       'Usage: dql app generate "<prompt>" [--domain <domain>] [--owner <user>] [--ai-layout]',
     );
   }
-  const {
-    KGStore,
-    defaultKgPath,
-    ensureMetadataCatalogFresh,
-    generateAppFromPlan,
-    planAppFromPrompt,
-    reindexProject,
-    validateAppPlan,
-  } = await import("@duckcodeailabs/dql-agent");
   const projectRoot = findProjectRoot(process.cwd());
-  const kgPath = defaultKgPath(projectRoot);
-  await reindexProject(projectRoot, { kgPath });
-  const kg = new KGStore(kgPath);
-  try {
-    const plan = planAppFromPrompt({
-      prompt,
-      kg,
-      domain: cleanOptional((flags as { domain?: string }).domain),
-      owner: cleanOptional((flags as { owner?: string }).owner),
-      plannerMode: (flags as { aiLayout?: boolean }).aiLayout
-        ? "ai_assisted"
-        : "deterministic",
-    });
-    const validation = validateAppPlan(plan, kg);
-    const generated = generateAppFromPlan(projectRoot, plan, kg, {
-      overwrite: Boolean(flags.force),
-    });
-    await ensureMetadataCatalogFresh(projectRoot, { force: true });
+  const domain = cleanOptional((flags as { domain?: string }).domain);
+  const owner = cleanOptional((flags as { owner?: string }).owner);
+  const draft = createStoredAppBuildDraft(projectRoot, {
+    goal: prompt,
+    audience: owner,
+    domain,
+    authoringMode: "ai",
+    sourcePolicy: "governed_only",
+    template: "operational_dashboard",
+  });
+  const proposal = await proposeAppBuildDraftOperations(projectRoot, draft, { prompt });
+  const revised = applyAppBuildDraftOperations(draft, proposal.baseRevision, proposal.operations);
+  writeStoredAppBuildDraft(projectRoot, revised, {
+    expectedRevision: draft.revision,
+    operations: proposal.operations,
+  });
 
-    if ((flags as { format?: string }).format === "json") {
-      console.log(
-        JSON.stringify({ ok: true, plan, validation, generated }, null, 2),
-      );
-      return;
-    }
-
-    console.log(`\n  ✓ Generated local app package: ${plan.name}`);
-    console.log(`    App id: ${plan.appId}`);
-    console.log(
-      `    Agent skills: ${plan.skills.map((skill) => skill.title).join(", ")}`,
-    );
-    console.log(`    Domain: ${plan.domain}   Audience: ${plan.audience}`);
-    console.log(
-      `    Certified tiles: ${validation.certifiedTiles}   Draft/review tiles: ${validation.draftTiles}`,
-    );
-    console.log("");
-    console.log("  Files:");
-    for (const path of generated.paths) console.log(`    - ${path}`);
-    if (validation.issues.length > 0) {
-      console.log("");
-      console.log("  Review notes:");
-      for (const issue of validation.issues) {
-        console.log(`    [${issue.level}] ${issue.path}: ${issue.message}`);
-      }
-    }
-    console.log("");
-    console.log("  Next steps:");
-    console.log(
-      "    1. Review the certified dashboard tiles in the generated app",
-    );
-    console.log("    2. Use app chat or Research for missing drilldowns and SQL previews");
-    console.log("    3. Promote reviewed results into draft/certified blocks before adding them to the app");
-    console.log("    4. Run dql app build");
-    console.log("");
-  } finally {
-    kg.close();
+  if ((flags as { format?: string }).format === "json") {
+    console.log(JSON.stringify({
+      ok: true,
+      draft: revised,
+      proposal: {
+        id: proposal.id,
+        summary: proposal.summary,
+        clarifications: proposal.clarifications,
+      },
+      projectSourceWritten: false,
+    }, null, 2));
+    return;
   }
+
+  console.log(`\n  ✓ Created AI-assisted local App draft: ${revised.name}`);
+  console.log(`    Draft id: ${revised.id}`);
+  console.log(`    Domain: ${domain ?? "automatic"}   Audience: ${owner ?? "stakeholders"}`);
+  console.log(`    Covered questions: ${proposal.summary.covered}/${proposal.summary.requirements}`);
+  console.log(`    Certified sources: ${proposal.summary.certifiedSources}   Semantic sources: ${proposal.summary.semanticSources}`);
+  console.log("    Project source: unchanged");
+  if (proposal.clarifications.length > 0) {
+    console.log("");
+    console.log("  Clarification required:");
+    for (const item of proposal.clarifications) {
+      console.log(`    - ${item.question}`);
+      console.log(`      ${item.choices.map((choice) => choice.label).join(" | ")}`);
+    }
+  }
+  console.log("");
+  console.log("  Next steps:");
+  console.log("    1. Run dql notebook and resume this draft in Apps");
+  console.log("    2. Review the typed AI changes, resolve clarifications, and run previews");
+  console.log("    3. Explicitly Publish to Project after preflight succeeds");
+  console.log("");
 }
 
 // ---- ls ----

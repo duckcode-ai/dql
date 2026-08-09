@@ -213,23 +213,23 @@ function DashboardFilterInput({
   value: unknown;
   onChange: (value: unknown) => void;
 }) {
-  const label = formatBusinessLabel(filter.id);
+  const label = filter.label?.trim() || formatBusinessLabel(filter.id);
   const valueText = filterInputValue(filter, value);
   // Categorical filters bound to a tile: fetch the column's distinct values and
   // upgrade the free-text box to a real dropdown (low-cardinality only).
   const sourceBlockId = (filter as { sourceBlockId?: string }).sourceBlockId;
   const column = filter.bindsTo || filter.id;
-  const wantsOptions = (filter.type === 'string' || filter.type === 'select') && Boolean(sourceBlockId) && !filter.options?.length;
+  const wantsOptions = (filter.type === 'string' || filter.type === 'select' || filter.type === 'multiselect' || filter.type === 'search') && Boolean(sourceBlockId) && !filter.options?.length;
   const [fetchedOptions, setFetchedOptions] = useState<string[] | null>(null);
   useEffect(() => {
     if (!wantsOptions || !sourceBlockId) return;
     let cancelled = false;
     void api.dashboardFilterOptions(sourceBlockId, column).then((res) => {
-      if (!cancelled && res && res.options.length > 0 && !res.truncated) setFetchedOptions(res.options);
+      if (!cancelled) setFetchedOptions(res && res.options.length > 0 && !res.truncated ? res.options : []);
     });
     return () => { cancelled = true; };
   }, [sourceBlockId, column, wantsOptions]);
-  if (fetchedOptions && fetchedOptions.length > 0) {
+  if (filter.type !== 'multiselect' && fetchedOptions && fetchedOptions.length > 0) {
     return (
       <FilterSelect
         icon={filterIconForDashboardFilter(filter)}
@@ -240,7 +240,7 @@ function DashboardFilterInput({
       />
     );
   }
-  if (filter.type === 'select') {
+  if (filter.type === 'select' && filterOptions(filter).length > 0) {
     return (
       <FilterSelect
         icon={filterIconForDashboardFilter(filter)}
@@ -248,6 +248,35 @@ function DashboardFilterInput({
         value={valueText}
         onChange={onChange}
         options={filterOptions(filter)}
+      />
+    );
+  }
+  if (filter.type === 'multiselect') {
+    const selected = Array.isArray(value) ? value.map(String) : [];
+    const options = filter.options ?? fetchedOptions ?? [];
+    return (
+      <label className="dql-app-filter-select" title={label} aria-label={label}>
+        <span className="dql-app-filter-icon">{filterIconForDashboardFilter(filter)}</span>
+        <select
+          multiple
+          value={selected}
+          aria-label={`${label} multiple selection`}
+          onChange={(event) => onChange(Array.from(event.currentTarget.selectedOptions, (option) => option.value))}
+        >
+          {options.map((option) => <option key={String(option)} value={String(option)}>{formatBusinessLabel(String(option))}</option>)}
+        </select>
+      </label>
+    );
+  }
+  if (filter.type === 'relative_date') {
+    const options = filter.options?.length ? filter.options : ['last_7_days', 'last_30_days', 'last_90_days', 'month_to_date', 'quarter_to_date', 'year_to_date'];
+    return (
+      <FilterSelect
+        icon={filterIconForDashboardFilter(filter)}
+        label={label}
+        value={valueText}
+        onChange={onChange}
+        options={options.map((option) => [String(option), formatBusinessLabel(String(option))])}
       />
     );
   }
@@ -284,6 +313,25 @@ function DashboardFilterInput({
       </label>
     );
   }
+  if (filter.type === 'number_range') {
+    const range = value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as { min?: unknown; max?: unknown })
+      : {};
+    const min = typeof range.min === 'number' || typeof range.min === 'string' ? String(range.min) : '';
+    const max = typeof range.max === 'number' || typeof range.max === 'string' ? String(range.max) : '';
+    const emit = (nextMin: string, nextMax: string) => onChange({
+      min: nextMin === '' ? undefined : Number(nextMin),
+      max: nextMax === '' ? undefined : Number(nextMax),
+    });
+    return (
+      <label className="dql-app-filter-select dql-app-filter-range" title={label} aria-label={label}>
+        <span className="dql-app-filter-icon">{filterIconForDashboardFilter(filter)}</span>
+        <input type="number" value={min} aria-label={`${label} minimum`} placeholder="Min" onChange={(event) => emit(event.target.value, max)} />
+        <span className="dql-app-filter-range-sep">–</span>
+        <input type="number" value={max} aria-label={`${label} maximum`} placeholder="Max" onChange={(event) => emit(min, event.target.value)} />
+      </label>
+    );
+  }
   return (
     <label className="dql-app-filter-select" title={filter.bindsTo ? `${label} -> ${filter.bindsTo}` : label} aria-label={label}>
       <span className="dql-app-filter-icon">{filterIconForDashboardFilter(filter)}</span>
@@ -314,12 +362,15 @@ export function defaultDashboardFilterValue(filter: DashboardFilter): unknown {
   if (filter.type === 'number') return defaultParameterFilterValue(filter.id);
   if (filter.type === 'boolean') return false;
   if (filter.type === 'select') return filter.options?.[0] ?? '';
+  if (filter.type === 'multiselect') return [];
+  if (filter.type === 'number_range') return { min: undefined, max: undefined };
+  if (filter.type === 'relative_date') return filter.options?.[0] ?? 'last_30_days';
   return '';
 }
 
 function filterInputValue(filter: DashboardFilter, value: unknown): string {
   if (value === undefined || value === null) return String(defaultDashboardFilterValue(filter) ?? '');
-  if (filter.type === 'daterange' && typeof value === 'object') return JSON.stringify(value);
+  if ((filter.type === 'daterange' || filter.type === 'number_range' || filter.type === 'multiselect') && typeof value === 'object') return JSON.stringify(value);
   return String(value);
 }
 
@@ -330,6 +381,7 @@ export function coerceDashboardFilterValue(filter: DashboardFilter, value: unkno
     return Number.isFinite(numeric) ? numeric : value;
   }
   if (filter.type === 'boolean') return value === true || value === 'true';
+  if (filter.type === 'multiselect') return Array.isArray(value) ? value.map(String) : [];
   if (filter.type === 'select' && typeof filter.default === 'number') {
     const numeric = Number(value);
     return Number.isFinite(numeric) ? numeric : value;

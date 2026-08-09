@@ -72,6 +72,23 @@ describe('App dashboard interaction contract', () => {
     expect(options.map((option) => option.value)).toEqual(['table', 'line', 'area']);
   });
 
+  it('projects v1 geometry deterministically for medium and narrow containers', async () => {
+    const { projectDashboardItems } = await dashboardHelpers();
+    const wide = [
+      { i: 'kpi', x: 0, y: 0, w: 3, h: 2, viz: { type: 'kpi' } },
+      { i: 'trend', x: 3, y: 0, w: 9, h: 4, viz: { type: 'line' } },
+    ] as any;
+
+    expect(projectDashboardItems(wide, 6)).toMatchObject([
+      { i: 'kpi', x: 0, y: 0, w: 2 },
+      { i: 'trend', x: 0, y: 2, w: 5 },
+    ]);
+    expect(projectDashboardItems(wide, 1)).toMatchObject([
+      { i: 'kpi', x: 0, y: 0, w: 1 },
+      { i: 'trend', x: 0, y: 2, w: 1 },
+    ]);
+  });
+
   it('formats AI-pinned evidence and summaries with business meaning', async () => {
     const { computeTileInsight } = await dashboardHelpers();
     const rows = [

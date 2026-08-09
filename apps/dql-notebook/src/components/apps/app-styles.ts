@@ -54,7 +54,7 @@ export const APP_STYLES = `
 }
 
 .dql-apps-wrap {
-  width: min(880px, calc(100% - 48px));
+  width: min(1220px, calc(100% - 48px));
   margin: 0 auto;
   padding: 28px 0 40px;
   display: flex;
@@ -169,6 +169,21 @@ export const APP_STYLES = `
   font-size: 11px; font-weight: 550; cursor: pointer; font-family: inherit;
 }
 .dql-apps-try button:hover { border-color: var(--dql-app-accent); color: var(--dql-app-accent); background: var(--dql-app-accent-soft); }
+.dql-apps-local-drafts { border:1px solid var(--border-subtle); border-radius:12px; background:var(--bg-0); overflow:hidden; }
+.dql-apps-local-drafts > header { min-height:48px; padding:0 14px; border-bottom:1px solid var(--border-subtle); display:flex; align-items:center; justify-content:space-between; }
+.dql-apps-local-drafts > header div { display:grid; gap:2px; }
+.dql-apps-local-drafts > header span { font-size:11px; font-weight:800; }
+.dql-apps-local-drafts > header small { color:var(--text-tertiary); font-size:9px; }
+.dql-apps-local-drafts > header b { min-width:22px; height:22px; border-radius:999px; background:var(--bg-2); display:flex; align-items:center; justify-content:center; color:var(--text-secondary); font-size:9px; }
+.dql-apps-local-drafts > div { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+.dql-apps-local-drafts > div > button { min-width:0; border:0; border-bottom:1px solid var(--border-subtle); background:transparent; padding:12px 14px; display:grid; grid-template-columns:34px minmax(0,1fr) auto 16px; gap:9px; align-items:center; text-align:left; color:var(--text-primary); }
+.dql-apps-local-drafts > div > button:nth-child(odd) { border-right:1px solid var(--border-subtle); }
+.dql-apps-local-drafts > div > button:hover { background:var(--bg-1); }
+.dql-apps-local-drafts .draft-mark { width:32px; height:32px; border-radius:9px; background:var(--accent-dim); color:var(--accent); display:flex; align-items:center; justify-content:center; }
+.dql-apps-local-drafts button > div { min-width:0; display:grid; gap:3px; }
+.dql-apps-local-drafts button strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; }
+.dql-apps-local-drafts button small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-tertiary); font-size:9px; }
+@media (max-width:760px) { .dql-apps-local-drafts > div { grid-template-columns:1fr; } .dql-apps-local-drafts > div > button:nth-child(odd) { border-right:0; } }
 
 .dql-apps-btn {
   height: 32px;
@@ -329,6 +344,19 @@ export const APP_STYLES = `
 .dql-apps-sectionhead i { flex: 1; border-top: 1px solid var(--dql-app-line); }
 .dql-apps-sectionhead b { font-family: var(--font-mono); font-size: 10px; color: var(--dql-app-faint); }
 
+.dql-apps-library-head {
+  margin-top: 28px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+}
+.dql-apps-library-head h2 { margin: 5px 0 0; font-size: 25px; line-height: 1.15; letter-spacing: -.025em; }
+.dql-apps-library-head p { max-width: 650px; margin: 7px 0 0; color: var(--text-tertiary); font-size: 11.5px; line-height: 1.55; }
+.dql-apps-library-summary { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
+.dql-apps-library-summary span { display: inline-flex; align-items: baseline; gap: 5px; border: 1px solid var(--border-subtle); border-radius: 999px; background: var(--bg-0); color: var(--text-tertiary); padding: 6px 10px; font-size: 9.5px; white-space: nowrap; }
+.dql-apps-library-summary strong { color: var(--text-primary); font-size: 11px; }
+
 .dql-apps-libbar {
   display: flex;
   align-items: center;
@@ -392,7 +420,7 @@ export const APP_STYLES = `
 .dql-app-card {
   min-width: 0;
   border: 1px solid var(--dql-app-line);
-  border-radius: 8px;
+  border-radius: 12px;
   background: var(--dql-app-surface);
   overflow: hidden;
   box-shadow: var(--dql-app-shadow);
@@ -410,6 +438,15 @@ export const APP_STYLES = `
   gap: 10px;
   margin-bottom: 9px;
 }
+
+.dql-app-card-labels { min-width: 0; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.dql-app-visibility { display: inline-flex; align-items: center; gap: 4px; min-height: 22px; padding: 0 7px; border: 1px solid var(--border-subtle); border-radius: 999px; font-size: 8.5px; font-weight: 750; white-space: nowrap; }
+.dql-app-visibility.private { color: var(--text-secondary); background: var(--bg-2); }
+.dql-app-visibility.shared { color: var(--accent); border-color: color-mix(in srgb,var(--accent) 25%,var(--border-subtle)); background: var(--accent-dim); }
+.dql-app-draft-card { border-color: color-mix(in srgb,var(--accent) 26%,var(--border-subtle)); }
+.dql-app-draft-card .dql-app-card-body { background: linear-gradient(145deg,color-mix(in srgb,var(--accent-dim) 48%,var(--bg-0)),var(--bg-0) 42%); }
+.dql-app-draft-mark { flex:0 0 auto; width:29px; height:29px; display:grid; place-items:center; border-radius:8px; color:var(--accent); background:var(--accent-dim); }
+.dql-app-card-act.primary { border-color:var(--accent) !important; color:var(--accent) !important; }
 
 .dql-app-star {
   width: 28px;
@@ -560,7 +597,13 @@ export const APP_STYLES = `
 }
 
 .dql-app-create-shell { grid-template-rows: auto 1fr; overflow: hidden; }
-.dql-app-workspace { grid-template-rows: auto auto 1fr; }
+.dql-app-workspace {
+  grid-template-rows: auto auto 1fr;
+  container-type: inline-size;
+  container-name: app-workspace;
+  min-width: 0;
+  overflow-x: clip;
+}
 
 .dql-app-buildbar,
 .dql-app-view-topbar {
@@ -696,6 +739,9 @@ export const APP_STYLES = `
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
 }
 
 .dql-app-view-actions { position: relative; }
@@ -1861,6 +1907,13 @@ export const APP_STYLES = `
   background: var(--status-error-bg);
 }
 
+.dql-app-filter-runtime-coverage {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 .dql-app-filter-error {
   width: 100%;
   color: var(--status-error);
@@ -1916,6 +1969,8 @@ export const APP_STYLES = `
   width: min(1560px, calc(100% - 40px));
   margin: 0 auto;
   padding: 12px 0 60px;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .dql-app-title-row {
@@ -4199,7 +4254,48 @@ export const APP_STYLES = `
   }
 }
 
+/* The App can be narrow while the browser is still wide (sidebar, Copilot, or
+   an embedded host). Respond to the actual Studio canvas instead of waiting
+   for a viewport media query. */
+@container app-workspace (max-width: 1100px) {
+  .dql-app-view-topbar {
+    align-content: flex-start;
+    align-items: flex-start;
+    row-gap: 8px;
+  }
+  .dql-app-topbar-divider { display: none; }
+  .dql-app-view-actions {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+    margin-left: 0;
+  }
+  .dql-app-crumb {
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+@container app-workspace (max-width: 760px) {
+  .dql-app-view-topbar {
+    padding-inline: 10px;
+  }
+  .dql-app-view-wrap {
+    width: calc(100% - 16px);
+    max-width: calc(100% - 16px);
+  }
+  .dql-app-nav-row {
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    overflow-x: visible;
+  }
+}
+
 @media (max-width: 900px) {
+  .dql-apps-library-head { align-items:flex-start; flex-direction:column; gap:12px; }
+  .dql-apps-library-summary { justify-content:flex-start; }
   .dql-app-view-layout { grid-template-columns: 1fr; }
   .dql-app-view-topbar {
     align-content: flex-start;
@@ -4590,7 +4686,11 @@ export const APP_STYLES = `
   background: var(--dql-app-surface);
   border-radius: 999px; padding: 2.5px 9px;
   color: var(--dql-app-muted);
+  display: inline-flex; align-items: center; gap: 4px;
+  cursor: pointer; font: inherit;
 }
+.dql-app-detected-pill.selected { border-color: var(--dql-app-accent); background: var(--dql-app-accent-soft); color: var(--dql-app-accent); }
+.dql-app-detected-pill.off { opacity: 0.64; text-decoration: line-through; }
 .dql-app-flow-gaps { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--dql-app-orange); }
 .dql-app-flow-gaps span { display: inline-flex; align-items: center; gap: 6px; }
 .dql-app-flow-actions { display: flex; align-items: center; gap: 8px; }
@@ -4628,4 +4728,106 @@ export const APP_STYLES = `
   background: transparent; color: var(--dql-app-faint);
 }
 .dql-app-modeseg button.on { background: var(--dql-app-accent-soft); color: var(--dql-app-accent); }
+
+/* App Studio 2.0: supporting artifacts are contextual, not competing tabs. */
+.dql-app-context-menu { position: relative; margin-left: 4px; }
+.dql-app-context-menu > summary {
+  list-style: none; display: inline-flex; align-items: center; gap: 6px;
+  min-height: 30px; padding: 0 10px; border-radius: 7px; cursor: pointer;
+  color: var(--text-secondary); font-size: 11.5px; font-weight: 650;
+}
+.dql-app-context-menu > summary::-webkit-details-marker { display: none; }
+.dql-app-context-menu[open] > summary { background: var(--bg-2); color: var(--text-primary); }
+.dql-app-context-menu > div {
+  position: absolute; z-index: 80; top: calc(100% + 7px); left: 0; width: 230px;
+  padding: 6px; border: 1px solid var(--border-default); border-radius: 10px;
+  background: var(--bg-1); box-shadow: 0 16px 42px rgba(15,23,42,.18);
+}
+.dql-app-context-menu > div button {
+  width: 100%; display: grid; grid-template-columns: 18px 1fr auto; align-items: center;
+  gap: 7px; min-height: 34px; padding: 0 9px; border: 0; border-radius: 7px;
+  background: transparent; color: var(--text-secondary); text-align: left; cursor: pointer;
+}
+.dql-app-context-menu > div button:hover,
+.dql-app-context-menu > div button.on { background: var(--bg-2); color: var(--text-primary); }
+.dql-app-context-menu > div button b { font-size: 10px; color: var(--text-tertiary); }
+
+.dql-apps-source-policy {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 12px; border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-secondary); font-size: 11.5px;
+}
+.dql-apps-source-policy > span { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; }
+.dql-app-build-frame,
+.dql-app-clarifications { border: 1px solid var(--border-subtle); border-radius: 10px; background: var(--bg-1); padding: 12px; }
+.dql-app-build-frame header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.dql-app-build-frame header strong { font-size: 12px; color: var(--text-primary); }
+.dql-app-build-frame header span { font-size: 10.5px; color: var(--text-tertiary); }
+.dql-app-build-frame dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 11px 0 0; }
+.dql-app-build-frame dl > div { min-width: 0; padding: 8px; border-radius: 7px; background: var(--bg-2); }
+.dql-app-build-frame dt { margin-bottom: 3px; color: var(--text-tertiary); font-size: 9.5px; font-weight: 750; text-transform: uppercase; letter-spacing: .06em; }
+.dql-app-build-frame dd { margin: 0; color: var(--text-secondary); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.dql-app-clarifications { display: grid; gap: 10px; }
+.dql-app-clarifications > strong { color: var(--text-primary); font-size: 12px; }
+.dql-app-clarifications > div { display: grid; gap: 6px; }
+.dql-app-clarifications > div > span { color: var(--text-secondary); font-size: 11.5px; }
+.dql-app-clarifications > div > div { display: flex; flex-wrap: wrap; gap: 5px; }
+.dql-app-clarifications button { border: 1px solid var(--border-default); border-radius: 999px; background: var(--bg-2); color: var(--text-secondary); padding: 4px 8px; cursor: pointer; font-size: 10.5px; }
+.dql-app-clarifications button:hover { border-color: var(--accent); color: var(--accent); }
+.dql-app-clarifications small { color: var(--text-tertiary); font-size: 10px; }
+
+.dql-app-card-menu { position: relative; }
+.dql-app-card-menu > div {
+  position: absolute; z-index: 50; right: 0; bottom: calc(100% + 5px); min-width: 150px;
+  padding: 5px; border: 1px solid var(--border-default); border-radius: 9px;
+  background: var(--bg-1); box-shadow: 0 12px 34px rgba(15,23,42,.2);
+}
+.dql-app-card-menu > div button {
+  width: 100%; min-height: 32px; display: flex; align-items: center; gap: 7px;
+  padding: 0 9px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--text-secondary); cursor: pointer; font: 600 11.5px var(--font-ui);
+}
+.dql-app-card-menu > div button.danger { color: var(--status-error); }
+.dql-app-card-menu > div button:hover { background: var(--bg-2); }
+
+.dql-app-delete-backdrop {
+  position: fixed; inset: 0; z-index: 1800; display: grid; place-items: center;
+  padding: 24px; background: rgba(15,23,42,.48); backdrop-filter: blur(3px);
+}
+.dql-app-delete-dialog {
+  width: min(480px, 100%); display: grid; gap: 16px; padding: 22px;
+  border: 1px solid var(--border-default); border-radius: 14px;
+  background: var(--bg-1); color: var(--text-primary);
+  box-shadow: 0 24px 70px rgba(15,23,42,.3);
+}
+.dql-app-delete-heading { display: flex; align-items: flex-start; gap: 12px; }
+.dql-app-delete-heading h2 { margin: 1px 0 0; font-size: 16px; }
+.dql-app-delete-heading p { margin: 5px 0 0; color: var(--text-tertiary); font-size: 11.5px; line-height: 1.5; }
+.dql-app-delete-icon {
+  flex: 0 0 auto; width: 36px; height: 36px; display: grid; place-items: center;
+  border: 1px solid var(--status-error-border); border-radius: 9px;
+  background: var(--status-error-bg); color: var(--status-error);
+}
+.dql-app-delete-confirm { display: grid; gap: 7px; color: var(--text-secondary); font-size: 11.5px; }
+.dql-app-delete-confirm strong { color: var(--text-primary); }
+.dql-app-delete-confirm input {
+  height: 38px; padding: 0 11px; border: 1px solid var(--border-default); border-radius: 8px;
+  outline: none; background: var(--bg-2); color: var(--text-primary); font: 12px var(--font-ui);
+}
+.dql-app-delete-confirm input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.dql-app-delete-error { color: var(--status-error); font-size: 11.5px; }
+.dql-app-delete-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.dql-app-delete-actions button {
+  min-height: 35px; padding: 0 14px; border-radius: 8px; cursor: pointer; font: 650 11.5px var(--font-ui);
+}
+.dql-app-delete-actions button.secondary { border: 1px solid var(--border-default); background: var(--bg-2); color: var(--text-secondary); }
+.dql-app-delete-actions button.danger { border: 1px solid var(--status-error-border); background: var(--status-error); color: white; }
+.dql-app-delete-actions button:disabled { opacity: .45; cursor: default; }
+.dql-app-delete-undo {
+  position: fixed; z-index: 1850; right: 22px; bottom: 22px; display: flex; align-items: center; gap: 10px;
+  max-width: min(520px, calc(100vw - 44px)); padding: 11px 12px 11px 14px;
+  border: 1px solid var(--border-default); border-radius: 10px; background: var(--bg-1);
+  color: var(--text-secondary); box-shadow: 0 16px 46px rgba(15,23,42,.24); font-size: 11.5px;
+}
+.dql-app-delete-undo button { border: 0; background: transparent; color: var(--accent); font-weight: 750; cursor: pointer; }
 `;

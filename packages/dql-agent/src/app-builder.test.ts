@@ -151,6 +151,16 @@ describe("planAppFromPrompt — convergence (filters bound to real blocks)", () 
       expect(region?.bindsTo).toBe("region");
     }));
 
+  it("uses a search control for high-cardinality name filters", () =>
+    withKg([{ ...jaffleNode, allowedFilters: ["customer_name"] }], (kg) => {
+      const plan = planAppFromPrompt({ prompt: "customer revenue app", kg, domain: "marts" });
+      expect(plan.globalFilters).toContainEqual(expect.objectContaining({
+        id: "customer_name",
+        type: "search",
+        bindsTo: "customer_name",
+      }));
+    }));
+
   it("drops a prompt-inferred filter no certified tile supports (no orphans)", () =>
     withKg([jaffleNode], (kg) => {
       // "season"/years would inject season filters under the old prompt-only logic.
@@ -200,7 +210,9 @@ describe("planAppFromPrompt", () => {
         allowSemanticQueries: false,
       });
 
-      expect(plan.requirementCoverage.every((coverage) => coverage.status === "gap")).toBe(true);
+      const analyticalCoverage = plan.requirementCoverage.filter((coverage) => coverage.requirementId !== "headline");
+      expect(analyticalCoverage.length).toBeGreaterThan(0);
+      expect(analyticalCoverage.every((coverage) => coverage.status === "gap")).toBe(true);
       expect(plan.pages[0].tiles.every((tile) => tile.kind === "certified_block")).toBe(true);
       expect(plan.requirementCoverage.flatMap((coverage) => coverage.reasons).join(" ")).toMatch(/does not prove (dimensions|filters)/);
     }));
@@ -253,11 +265,15 @@ describe("planAppFromPrompt", () => {
       expect(semantic?.semantic).toMatchObject({
         metrics: ["revenue"],
         semanticModelRefs: ["orders"],
+        filters: [{ field: "product_category", operator: "=", value: "beverage" }],
         qualifiedMetricIds: ["metric:revenue"],
         qualifiedModelIds: ["semantic_model:orders"],
         resolvedPlanFingerprint: expect.stringMatching(/^sha256:/),
         snapshotId: "snapshot-1",
       });
+      expect(semantic?.filterBindings).toEqual([
+        expect.objectContaining({ filter: "product-category", binding: "product_category", mode: "semantic", capability: "supported" }),
+      ]);
       expect(plan.storyEvidencePlan.eligibleTileIds).toContain(semantic?.id);
     }));
 

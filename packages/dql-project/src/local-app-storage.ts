@@ -2,6 +2,7 @@ import { createRequire } from 'node:module';
 import { dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import type Database from 'better-sqlite3';
+import type { AppBuildDraft, AppBuildDraftOperation } from '@duckcodeailabs/dql-core';
 
 const require = createRequire(import.meta.url);
 let databaseCtor: typeof Database | null = null;
@@ -15,6 +16,31 @@ export type LocalAppVisibility = 'mine' | 'shared' | 'template';
 export type LocalAiPinRefreshCadence = 'none' | 'daily';
 export type LocalAiPinReviewStatus = 'needs_review' | 'draft_created' | 'certified' | 'rejected';
 export type LocalAppConversationRole = 'user' | 'assistant';
+
+export interface LocalAppStateArchive {
+  version: 1;
+  appId: string;
+  createdAt: string;
+  rows: {
+    personalApps: Record<string, unknown>[];
+    personalDashboards: Record<string, unknown>[];
+    layoutOverrides: Record<string, unknown>[];
+    aiPins: Record<string, unknown>[];
+    investigations: Record<string, unknown>[];
+    conversations: Record<string, unknown>[];
+    conversationMessages: Record<string, unknown>[];
+    buildDrafts: Record<string, unknown>[];
+    buildOperations: Record<string, unknown>[];
+  };
+}
+
+export interface LocalAppBuildOperationRecord {
+  id: number;
+  draftId: string;
+  revision: number;
+  operations: AppBuildDraftOperation[];
+  createdAt: string;
+}
 export type LocalAppInvestigationIntent =
   | 'diagnose_change'
   | 'driver_breakdown'
@@ -239,6 +265,131 @@ export class LocalAppStorage {
 
   close(): void {
     this.db.close();
+  }
+
+  /**
+   * Persist the local-only App Studio aggregate and its typed operation batch in
+   * one SQLite transaction. Git-owned App source is deliberately not involved.
+   */
+  saveAppBuildDraft(
+    draft: AppBuildDraft,
+    input: { expectedRevision?: number; operations?: AppBuildDraftOperation[] } = {},
+  ): AppBuildDraft {
+    const run = this.db.transaction(() => {
+      const current = this.db.prepare('SELECT revision FROM app_build_drafts WHERE id = ?').get(draft.id) as { revision?: number } | undefined;
+      if (input.expectedRevision !== undefined && current?.revision !== input.expectedRevision) {
+        throw new Error(`APP_BUILD_REVISION_CONFLICT: expected ${input.expectedRevision}, current ${current?.revision ?? 'missing'}`);
+      }
+      this.db.prepare(`
+        INSERT INTO app_build_drafts (
+          id, app_id, name, base_app_id, base_fingerprint, revision,
+          proposal_hash, state, authoring_mode, source_policy, template, payload,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          app_id = excluded.app_id,
+          name = excluded.name,
+          base_app_id = excluded.base_app_id,
+          base_fingerprint = excluded.base_fingerprint,
+          revision = excluded.revision,
+          proposal_hash = excluded.proposal_hash,
+          state = excluded.state,
+          authoring_mode = excluded.authoring_mode,
+          source_policy = excluded.source_policy,
+          template = excluded.template,
+          payload = excluded.payload,
+          updated_at = excluded.updated_at
+      `).run(
+        draft.id,
+        draft.appId,
+        draft.name,
+        draft.baseApp?.appId ?? null,
+        draft.baseApp?.fingerprint ?? null,
+        draft.revision,
+        draft.proposalHash,
+        draft.state,
+        draft.authoringMode,
+        draft.sourcePolicy,
+        draft.template,
+        JSON.stringify(draft),
+        draft.createdAt,
+        draft.updatedAt,
+      );
+      const operations = input.operations ?? [];
+      if (operations.length) {
+        this.db.prepare(`
+          INSERT INTO app_build_operations (draft_id, revision, operations, created_at)
+          VALUES (?, ?, ?, ?)
+        `).run(draft.id, draft.revision, JSON.stringify(operations), draft.updatedAt);
+      }
+      return draft;
+    });
+    return run();
+  }
+
+  getAppBuildDraft(id: string): AppBuildDraft | null {
+    const row = this.db.prepare('SELECT payload FROM app_build_drafts WHERE id = ?').get(id) as { payload?: unknown } | undefined;
+    if (!row || typeof row.payload !== 'string') return null;
+    try { return JSON.parse(row.payload) as AppBuildDraft; } catch { return null; }
+  }
+
+  listAppBuildDrafts(appId?: string): AppBuildDraft[] {
+    const rows = (appId
+      ? this.db.prepare('SELECT payload FROM app_build_drafts WHERE app_id = ? ORDER BY updated_at DESC').all(appId)
+      : this.db.prepare('SELECT payload FROM app_build_drafts ORDER BY updated_at DESC').all()) as Array<{ payload?: unknown }>;
+    return rows.flatMap((row) => {
+      if (typeof row.payload !== 'string') return [];
+      try { return [JSON.parse(row.payload) as AppBuildDraft]; } catch { return []; }
+    });
+  }
+
+  listAppBuildOperations(draftId: string): LocalAppBuildOperationRecord[] {
+    const rows = this.db.prepare(`
+      SELECT id, draft_id, revision, operations, created_at
+      FROM app_build_operations
+      WHERE draft_id = ?
+      ORDER BY id ASC
+    `).all(draftId) as Record<string, unknown>[];
+    return rows.map((row) => ({
+      id: Number(row.id),
+      draftId: String(row.draft_id),
+      revision: Number(row.revision),
+      operations: (parseJson(row.operations) as AppBuildDraftOperation[] | undefined) ?? [],
+      createdAt: String(row.created_at),
+    }));
+  }
+
+  deleteAppBuildDraft(id: string): { draft: AppBuildDraft; operations: LocalAppBuildOperationRecord[] } | null {
+    const draft = this.getAppBuildDraft(id);
+    if (!draft) return null;
+    const operations = this.listAppBuildOperations(id);
+    const run = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM app_build_operations WHERE draft_id = ?').run(id);
+      this.db.prepare('DELETE FROM app_build_drafts WHERE id = ?').run(id);
+    });
+    run();
+    return { draft, operations };
+  }
+
+  restoreAppBuildDraft(draft: AppBuildDraft, history: LocalAppBuildOperationRecord[] = []): AppBuildDraft {
+    if (this.getAppBuildDraft(draft.id)) throw new Error(`App Build Draft already exists: ${draft.id}`);
+    this.saveAppBuildDraft(draft);
+    try {
+      const insert = this.db.prepare(`
+        INSERT INTO app_build_operations (draft_id, revision, operations, created_at)
+        VALUES (?, ?, ?, ?)
+      `);
+      const run = this.db.transaction(() => {
+        for (const item of history) {
+          insert.run(draft.id, item.revision, JSON.stringify(item.operations), item.createdAt);
+        }
+      });
+      run();
+      return draft;
+    } catch (error) {
+      this.deleteAppBuildDraft(draft.id);
+      throw error;
+    }
   }
 
   createAiPin(input: CreateLocalAiPinInput): LocalAiPin {
@@ -542,6 +693,71 @@ export class LocalAppStorage {
     return result.changes > 0;
   }
 
+  /**
+   * API-013: remove every active local row owned by one App and return a
+   * serializable recovery bundle. The caller persists this bundle beside the
+   * deleted source package before reporting success.
+   */
+  archiveAndDeleteAppState(appId: string, now = new Date().toISOString()): LocalAppStateArchive {
+    const run = this.db.transaction((): LocalAppStateArchive => {
+      const conversations = this.db.prepare('SELECT * FROM app_conversations WHERE app_id = ?').all(appId) as Record<string, unknown>[];
+      const conversationIds = conversations.map((row) => String(row.id));
+      const conversationMessages = conversationIds.length
+        ? this.db.prepare(`SELECT * FROM app_conversation_messages WHERE conversation_id IN (${conversationIds.map(() => '?').join(',')})`).all(...conversationIds) as Record<string, unknown>[]
+        : [];
+      const archive: LocalAppStateArchive = {
+        version: 1,
+        appId,
+        createdAt: now,
+        rows: {
+          personalApps: this.db.prepare('SELECT * FROM personal_apps WHERE id = ?').all(appId) as Record<string, unknown>[],
+          personalDashboards: this.db.prepare('SELECT * FROM personal_dashboards WHERE app_id = ?').all(appId) as Record<string, unknown>[],
+          layoutOverrides: this.db.prepare('SELECT * FROM layout_overrides WHERE app_id = ?').all(appId) as Record<string, unknown>[],
+          aiPins: this.db.prepare('SELECT * FROM ai_pins WHERE app_id = ?').all(appId) as Record<string, unknown>[],
+          investigations: this.db.prepare('SELECT * FROM app_investigations WHERE app_id = ?').all(appId) as Record<string, unknown>[],
+          conversations,
+          conversationMessages,
+          buildDrafts: this.db.prepare('SELECT * FROM app_build_drafts WHERE app_id = ? OR base_app_id = ?').all(appId, appId) as Record<string, unknown>[],
+          buildOperations: this.db.prepare(`
+            SELECT * FROM app_build_operations
+            WHERE draft_id IN (SELECT id FROM app_build_drafts WHERE app_id = ? OR base_app_id = ?)
+          `).all(appId, appId) as Record<string, unknown>[],
+        },
+      };
+      if (conversationIds.length) {
+        this.db.prepare(`DELETE FROM app_conversation_messages WHERE conversation_id IN (${conversationIds.map(() => '?').join(',')})`).run(...conversationIds);
+      }
+      this.db.prepare('DELETE FROM app_conversations WHERE app_id = ?').run(appId);
+      this.db.prepare(`
+        DELETE FROM app_build_operations
+        WHERE draft_id IN (SELECT id FROM app_build_drafts WHERE app_id = ? OR base_app_id = ?)
+      `).run(appId, appId);
+      this.db.prepare('DELETE FROM app_build_drafts WHERE app_id = ? OR base_app_id = ?').run(appId, appId);
+      this.db.prepare('DELETE FROM app_investigations WHERE app_id = ?').run(appId);
+      this.db.prepare('DELETE FROM ai_pins WHERE app_id = ?').run(appId);
+      this.db.prepare('DELETE FROM layout_overrides WHERE app_id = ?').run(appId);
+      this.db.prepare('DELETE FROM personal_dashboards WHERE app_id = ?').run(appId);
+      this.db.prepare('DELETE FROM personal_apps WHERE id = ?').run(appId);
+      return archive;
+    });
+    return run();
+  }
+
+  restoreAppState(archive: LocalAppStateArchive): void {
+    const run = this.db.transaction(() => {
+      this.insertArchivedRows('personal_apps', archive.rows.personalApps);
+      this.insertArchivedRows('personal_dashboards', archive.rows.personalDashboards);
+      this.insertArchivedRows('layout_overrides', archive.rows.layoutOverrides);
+      this.insertArchivedRows('ai_pins', archive.rows.aiPins);
+      this.insertArchivedRows('app_investigations', archive.rows.investigations);
+      this.insertArchivedRows('app_conversations', archive.rows.conversations);
+      this.insertArchivedRows('app_conversation_messages', archive.rows.conversationMessages);
+      this.insertArchivedRows('app_build_drafts', archive.rows.buildDrafts ?? []);
+      this.insertArchivedRows('app_build_operations', archive.rows.buildOperations ?? []);
+    });
+    run();
+  }
+
   private initSchema(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS personal_apps (
@@ -656,6 +872,34 @@ export class LocalAppStorage {
 
       CREATE INDEX IF NOT EXISTS idx_app_conversations_app ON app_conversations(app_id, updated_at);
       CREATE INDEX IF NOT EXISTS idx_app_conversation_messages ON app_conversation_messages(conversation_id, position);
+
+      CREATE TABLE IF NOT EXISTS app_build_drafts (
+        id TEXT PRIMARY KEY,
+        app_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        base_app_id TEXT,
+        base_fingerprint TEXT,
+        revision INTEGER NOT NULL,
+        proposal_hash TEXT NOT NULL,
+        state TEXT NOT NULL,
+        authoring_mode TEXT NOT NULL,
+        source_policy TEXT NOT NULL,
+        template TEXT NOT NULL DEFAULT 'blank',
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS app_build_operations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        draft_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        operations TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_app_build_drafts_app ON app_build_drafts(app_id, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_app_build_operations_draft ON app_build_operations(draft_id, id);
     `);
     this.ensureColumn('ai_pins', 'question', 'TEXT');
     this.ensureColumn('ai_pins', 'analysis_plan', 'TEXT');
@@ -670,6 +914,16 @@ export class LocalAppStorage {
     this.ensureColumn('app_investigations', 'pinned_ai_pin_id', 'TEXT');
     this.ensureColumn('app_investigations', 'report_sections', 'TEXT');
     this.ensureColumn('app_conversations', 'context', 'TEXT');
+    this.ensureColumn('app_build_drafts', 'template', "TEXT NOT NULL DEFAULT 'blank'");
+  }
+
+  private insertArchivedRows(table: string, rows: Record<string, unknown>[]): void {
+    for (const row of rows) {
+      const columns = Object.keys(row);
+      if (!columns.length) continue;
+      const sql = `INSERT OR REPLACE INTO ${table} (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`;
+      this.db.prepare(sql).run(...columns.map((column) => row[column]));
+    }
   }
 
   private ensureColumn(table: string, column: string, type: string): void {

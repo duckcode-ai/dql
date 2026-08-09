@@ -10647,20 +10647,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       return;
     }
 
-    const appDashRun = path.match(/^\/api\/apps\/([^/]+)\/dashboards\/([^/]+)\/run$/);
+    const appDashRun = path.match(/^\/api\/(apps|app-builds)\/([^/]+)\/dashboards\/([^/]+)\/run$/);
     if (req.method === 'POST' && appDashRun) {
       try {
-        const appId = decodeURIComponent(appDashRun[1]);
-        const dashboardId = decodeURIComponent(appDashRun[2]);
+        const runSurface = appDashRun[1] as 'apps' | 'app-builds';
+        const appId = decodeURIComponent(appDashRun[2]);
+        const dashboardId = decodeURIComponent(appDashRun[3]);
         const body = await readJSON(req).catch(() => ({}));
-        const loaded = loadAppDashboard(projectRoot, appId, dashboardId);
+        const loaded = runSurface === 'app-builds'
+          ? loadAppBuildDraftDashboard(projectRoot, appId, dashboardId)
+          : loadAppDashboard(projectRoot, appId, dashboardId);
         if (!loaded) {
           res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ error: `Dashboard "${dashboardId}" not found in app "${appId}"` }));
+          res.end(serializeJSON({ error: `Dashboard "${dashboardId}" not found in ${runSurface === 'app-builds' ? 'local App draft' : 'App'} "${appId}"` }));
           return;
         }
         const activeApp = activePersonaAppId();
-        if (activeApp && activeApp !== appId) {
+        if (runSurface === 'apps' && activeApp && activeApp !== appId) {
           res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ error: `The active persona belongs to App "${activeApp}", not "${appId}".` }));
           return;
@@ -11163,6 +11166,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               variables: { ...(blockPlan?.variables ?? {}), ...dashboardVariables },
               block,
               dashboard: loaded.dashboard,
+              tileFilterBindings: item.filterBindings,
             });
             const prepared = prepareLocalExecution(
               blockFilterApplication.sql,
@@ -11392,7 +11396,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     }
 
     // Apps, dashboards, persona — see apps-api.ts. Returns true if handled.
-    if (path.startsWith('/api/apps') || path.startsWith('/api/visualizations') || path === '/api/persona') {
+    if (path.startsWith('/api/apps')
+      || path.startsWith('/api/app-builds')
+      || path.startsWith('/api/app-recoveries')
+      || path.startsWith('/api/visualizations')
+      || path === '/api/persona') {
       try {
           const handled = await handleAppsApi({
             req,
@@ -11435,6 +11443,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             if (repaired.length > 0) {
               return { ok: false, error: `These semantic previews required SQL repair and cannot be approved as governed semantic results: ${repaired.join(', ')}. Review them as exploratory App analysis instead.` };
             }
+            return { ok: true, snapshotId: evidence.snapshotId, resultFingerprint: evidence.resultFingerprint };
+          },
+          verifyAppBuildPreview: ({ runId, draftId, dashboardId, tileIds }) => {
+            const evidence = dashboardRunEvidence.get(runId);
+            if (!evidence || evidence.expiresAt < Date.now()) return { ok: false, error: 'The App preview receipt expired. Run the local draft again.' };
+            if (evidence.appId !== draftId || evidence.dashboardId !== dashboardId) return { ok: false, error: 'The App preview receipt does not match this local draft page.' };
+            const successful = new Set(evidence.successfulTileIds);
+            const failed = tileIds.filter((tileId) => !successful.has(tileId));
+            if (failed.length > 0) return { ok: false, error: `These App components did not complete successfully: ${failed.join(', ')}` };
             return { ok: true, snapshotId: evidence.snapshotId, resultFingerprint: evidence.resultFingerprint };
           },
           // Story narration for commit — LLM-backed with deterministic fallback.
@@ -18027,6 +18044,62 @@ function loadAppDashboard(
   return null;
 }
 
+/**
+ * Resolves an App Studio draft directly from local SQLite for read-only preview.
+ * The draft is never copied into the Git-owned `apps/` tree. This gives manual
+ * and AI authoring the same execution path and the same filter/story receipts
+ * as a published App while keeping publication explicit.
+ */
+function loadAppBuildDraftDashboard(
+  projectRoot: string,
+  draftId: string,
+  dashboardId: string,
+): { app: AppDocument; dashboard: DashboardDocument; appDir: string } | null {
+  const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+  try {
+    const draft = storage.getAppBuildDraft(draftId);
+    if (!draft) return null;
+    const dashboard = draft.pages.find((page) => page.id === dashboardId);
+    if (!dashboard) return null;
+    const base = draft.baseApp ? findAppById(projectRoot, draft.baseApp.appId) : null;
+    const app: AppDocument = base?.app ?? {
+      version: 1,
+      id: draft.appId,
+      name: draft.name,
+      description: draft.frame.goal,
+      visibility: 'private',
+      publicationIntent: 'personal',
+      domain: dashboard.metadata.domain ?? 'general',
+      usesDomains: [],
+      requiredExports: [],
+      audience: draft.frame.audience || 'stakeholders',
+      lifecycle: 'draft',
+      owners: ['local-author'],
+      tags: ['app-studio', 'local-draft'],
+      members: [],
+      roles: [],
+      policies: [],
+      homepage: { type: 'dashboard', id: dashboard.id },
+    };
+    return {
+      app: { ...app, id: draft.appId, name: draft.name, visibility: 'private', lifecycle: 'draft' },
+      dashboard,
+      appDir: base?.appDir ?? join(projectRoot, '.dql', 'local', 'app-builds', draft.id),
+    };
+  } finally {
+    storage.close();
+  }
+}
+
+function findAppById(projectRoot: string, appId: string): { app: AppDocument; appDir: string } | null {
+  for (const path of findAppDocuments(projectRoot)) {
+    const { document: app } = loadAppDocument(path);
+    if (app?.id !== appId) continue;
+    return { app, appDir: path.slice(0, -'/dql.app.json'.length) };
+  }
+  return null;
+}
+
 function resolveDashboardItemBlock(
   item: DashboardGridItem,
   manifest: DQLManifest,
@@ -21327,6 +21400,7 @@ export function applyDashboardFiltersToBlockExecution(input: {
   variables: Record<string, unknown>;
   block: Pick<ManifestBlock, 'name' | 'allowedFilters' | 'filterBindings' | 'parameterPolicy'>;
   dashboard: Pick<DashboardDocument, 'filters'>;
+  tileFilterBindings?: DashboardGridItem['filterBindings'];
 }): DashboardFilterApplicationResult {
   const variables = { ...input.variables };
   const sqlParams = [...input.sqlParams];
@@ -21352,7 +21426,7 @@ export function applyDashboardFiltersToBlockExecution(input: {
       continue;
     }
 
-    const binding = resolveDashboardFilterBinding(filter, input.block);
+    const binding = resolveDashboardFilterBinding(filter, input.block, input.tileFilterBindings);
     if (!binding) {
       skippedFilters.push({ filter: filter.id, reason: `block "${input.block.name}" does not declare a compatible filter binding` });
       continue;
@@ -21487,8 +21561,18 @@ function bindDashboardFilterToExistingParams(
 function resolveDashboardFilterBinding(
   filter: NonNullable<DashboardDocument['filters']>[number],
   block: Pick<ManifestBlock, 'allowedFilters' | 'filterBindings'>,
+  tileFilterBindings: DashboardGridItem['filterBindings'] = [],
 ): string | null {
   const candidates = uniqueDashboardStrings([filter.id, filter.bindsTo ?? '']).map(normalizeDashboardFilterName);
+  for (const entry of tileFilterBindings ?? []) {
+    const mode = entry.mode ?? (entry.binding ? 'predicate' : undefined);
+    if (
+      mode === 'predicate'
+      && entry.binding
+      && !entry.unsupportedReason
+      && candidates.includes(normalizeDashboardFilterName(entry.filter))
+    ) return entry.binding;
+  }
   for (const entry of block.filterBindings ?? []) {
     if (candidates.includes(normalizeDashboardFilterName(entry.filter))) return entry.binding;
   }

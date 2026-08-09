@@ -39,6 +39,28 @@ export {
   isBlockIdRef,
   extractDashboardBlockRefs,
 } from './dashboard-document.js';
+
+export {
+  createAppBuildDraft,
+  applyAppBuildDraftOperations,
+  appBuildDraftHash,
+} from './app-build-draft.js';
+export type {
+  AppBuildDraft,
+  AppBuildFrame,
+  AppBuildClarification,
+  AppBuildRequirement,
+  AppBuildRequirementCoverage,
+  AppBuildRunReceipt,
+  AppBuildPreflightReceipt,
+  AppBuildAuthoringMode,
+  AppBuildSourcePolicy,
+  AppBuildTemplateId,
+  AppBuildDraftSourceKind,
+  AppBuildDraftSource,
+  AppBuildReviewTask,
+  AppBuildDraftOperation,
+} from './app-build-draft.js';
 export type {
   DashboardDocument,
   DashboardParam,
@@ -60,6 +82,8 @@ export type {
   DashboardTileParameterBinding,
   DashboardTileSourceEvidence,
   DashboardGridItem,
+  DashboardGridLayout,
+  DashboardResponsiveLayouts,
   DashboardLoadResult,
   DashboardParseError,
   DashboardSection,

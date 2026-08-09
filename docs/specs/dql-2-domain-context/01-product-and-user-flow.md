@@ -90,13 +90,16 @@ filters, parameters, ranking, freshness, and purpose fully cover the
 requirement. Governed semantic queries cover only remaining requirements;
 uncovered needs remain visible typed gaps (`PRD-004`, `AGT-007`).
 
-Before planning, the user selects either **Personal Draft** or **Shared Project
-target**. Both paths create a private draft first. Certified blocks remain the
-fastest reusable route, but are not an onboarding prerequisite. Governed
-semantic queries may back uncovered requirements after exact compatibility and
-runtime preflight. Bounded exploratory SQL is available only through an
-explicit gap-research action and remains a review-required app-scoped DQL draft
-until separately promoted or replaced (`PRD-005`, `EXP-004`).
+App creation begins as one **local private draft**. The author selects an
+authoring mode (**Describe with AI** or **Start blank**) and an independent
+source policy (**Governed sources only** or **Include review-required
+analysis**). The Project publication destination is chosen only after the App
+has been reviewed. Certified blocks remain the fastest reusable route, but are
+not an onboarding prerequisite. Governed semantic queries may back uncovered
+requirements after exact compatibility and runtime preflight. Bounded
+exploratory SQL is available only through the explicit review-required source
+policy and remains an app-scoped DQL draft until separately promoted or
+replaced (`PRD-005`, `PRD-006`, `EXP-004`).
 
 The write-free Build Brief exposes each requirement, selected source,
 alternatives, compatibility and lineage evidence, trust/review state, bounded
@@ -105,16 +108,19 @@ source invalidates the affected preflight receipt and proposal hash. The final
 action is **Build draft**, never an implicit certification or publication
 action (`API-009`, `UI-017`).
 
-App creation is deliberately incremental: one AI request proposes one page.
+App creation is deliberately incremental: one AI request proposes one page,
+while manual authoring opens the same versioned draft with a blank page.
 From an existing App, **+ Add page** starts the same write-free Build Brief for
 exactly one additional page, inheriting the server-owned App domain, audience,
-owner, and publication intent. Approval may edit the proposed page title, tile
+owner, and source policy. Approval may edit the proposed page title, tile
 selection, tile titles, and visualizations; it cannot rename the App or rewrite
-an existing page. Personal Apps may explicitly include bounded AI-SQL gap
-exploration; shared-project Apps remain certified/semantic-only. The commit
+an existing page. A local private draft may explicitly include bounded AI-SQL
+gap exploration; Project publication remains certified/approved-semantic only.
+The commit
 binds both the metadata snapshot and an exact
 fingerprint of the existing App package, stages a full candidate copy, and
-atomically swaps it only if neither source has changed (`API-009`, `UI-017`).
+atomically swaps it only if neither source has changed (`API-009`, `API-013`,
+`UI-017`, `UI-022`).
 
 If generated App SQL or an App dashboard semantic/draft query fails at
 execution, DQL may spend one bounded repair attempt through the same repair

@@ -40,6 +40,8 @@ export type {
   LocalAppInvestigationReviewStatus,
   LocalAiPinRefreshCadence,
   LocalAiPinReviewStatus,
+  LocalAppStateArchive,
+  LocalAppBuildOperationRecord,
   LocalAppVisibility,
 } from './local-app-storage.js';
 export {

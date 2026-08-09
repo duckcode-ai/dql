@@ -11,11 +11,15 @@ import {
   commitAppAiBuild,
   createAppAiBuildSession,
   createAppPackage,
+  createStoredAppBuildDraft,
   createDashboardForApp,
   createNotebookForApp,
   deleteAppPackage,
+  restoreAppPackage,
   generateAppPackage,
   getAppAiBuildSession,
+  markStoredAppBuildDraftPreflighted,
+  publishStoredAppBuildDraft,
   promoteAppForStakeholders,
   renameApp,
   previewNotebookForApp,
@@ -37,6 +41,7 @@ interface TestBlockSpec {
   description: string;
   chart: string;
   query?: string;
+  allowedFilters?: string[];
   filterBindings?: Array<{ filter: string; binding: string }>;
   params?: Record<string, string | number | boolean | Array<string | number | boolean>>;
 }
@@ -122,6 +127,29 @@ describe('Apps command center API helpers', () => {
     expect(nba[0].reasons).toContain('context match');
   });
 
+  it('deduplicates migrated block copies and exposes declared App filters', () => {
+    const root = createProject();
+    const spec = {
+      name: 'Revenue Total',
+      domain: 'growth',
+      status: 'certified',
+      tags: ['revenue'],
+      description: 'Executive revenue KPI',
+      chart: 'single_value',
+      allowedFilters: ['customer_type'],
+      filterBindings: [{ filter: 'region', binding: 'customer_region' }],
+    };
+    writeBlock(root, 'growth/revenue.dql', spec);
+    writeDomainBlock(root, 'growth', 'revenue.dql', spec);
+
+    const blocks = recommendBlocks(root, { certifiedOnly: true });
+    expect(blocks.filter((block) => block.id === 'Revenue Total')).toHaveLength(1);
+    expect(blocks.find((block) => block.id === 'Revenue Total')).toMatchObject({
+      path: 'domains/growth/blocks/revenue.dql',
+      filterIds: ['customer_type', 'region'],
+    });
+  });
+
   it('creates canonical App folders and dashboard references without duplicating blocks', () => {
     const root = createProject();
     writeBlock(root, 'growth/revenue.dql', {
@@ -131,6 +159,7 @@ describe('Apps command center API helpers', () => {
       tags: ['cxo', 'revenue'],
       description: 'Executive revenue KPI',
       chart: 'single_value',
+      filterBindings: [{ filter: 'region', binding: 'customer_region' }],
     });
 
     const result = createAppPackage(root, {
@@ -153,12 +182,13 @@ describe('Apps command center API helpers', () => {
     expect(existsSync(join(root, 'apps/growth-cxo/blocks'))).toBe(false);
 
     const app = JSON.parse(readFileSync(join(root, 'apps/growth-cxo/dql.app.json'), 'utf-8'));
-    expect(app.visibility).toBe('shared');
+    expect(app.visibility).toBe('private');
     expect(app.lifecycle).toBe('draft');
     expect(app.audience).toBe('executive');
 
     const dashboard = JSON.parse(readFileSync(join(root, 'apps/growth-cxo/dashboards/overview.dqld'), 'utf-8'));
-    expect(dashboard.metadata.visibility).toBe('shared');
+    expect(dashboard.version).toBe(2);
+    expect(dashboard.metadata.visibility).toBe('private');
     expect(dashboard.metadata.lifecycle).toBe('draft');
     expect(dashboard.layout.items[0].block).toEqual({ blockId: 'Revenue Total' });
     expect(dashboard.layout.items[0].display).toMatchObject({
@@ -166,7 +196,62 @@ describe('Apps command center API helpers', () => {
       component: 'KpiMetric',
       trustState: 'certified',
     });
+    expect(dashboard.layout.items[0].filterBindings).toEqual([
+      { filter: 'region', binding: 'customer_region', mode: 'predicate' },
+    ]);
+    expect(dashboard.filters).toEqual([{ id: 'region', label: 'Region', type: 'select', bindsTo: 'region' }]);
     expect(result.app.dashboards).toEqual([{ id: 'overview', title: 'Overview' }]);
+  });
+
+  it('keeps manual creation private and rejects non-certified block selections', () => {
+    const root = createProject();
+    writeDomainBlock(root, 'growth', 'draft-revenue.dql', {
+      name: 'Draft Revenue',
+      domain: 'growth',
+      status: 'draft',
+      tags: ['revenue'],
+      description: 'Unreviewed revenue logic',
+      chart: 'single_value',
+    });
+
+    const result = createAppPackage(root, {
+      name: 'Unsafe Growth',
+      domain: 'growth',
+      selectedBlockIds: ['Draft Revenue'],
+    });
+
+    expect(result).toMatchObject({ ok: false });
+    if (!result.ok) expect(result.error).toMatch(/certified blocks only/i);
+    expect(existsSync(join(root, 'apps/unsafe-growth'))).toBe(false);
+  });
+
+  it('keeps the unified manual draft local until atomic Publish to Project', () => {
+    const root = createProject();
+    const draft = createStoredAppBuildDraft(root, {
+      appId: 'revenue-studio',
+      name: 'Revenue Studio',
+      goal: 'Revenue Studio',
+      audience: 'finance leaders',
+      domain: 'finance',
+      authoringMode: 'manual',
+      sourcePolicy: 'governed_only',
+    });
+
+    expect(existsSync(join(root, 'apps/revenue-studio'))).toBe(false);
+    expect(draft.state).toBe('local_draft');
+    const preflighted = markStoredAppBuildDraftPreflighted(root, draft);
+    expect(existsSync(join(root, 'apps/revenue-studio'))).toBe(false);
+    const result = publishStoredAppBuildDraft(root, preflighted);
+
+    expect(result.app).toMatchObject({ id: 'revenue-studio', visibility: 'shared', lifecycle: 'review' });
+    expect(result.draft).toMatchObject({ state: 'project_published', revision: 2 });
+    const page = JSON.parse(readFileSync(join(root, 'apps/revenue-studio/dashboards/overview.dqld'), 'utf-8'));
+    expect(page).toMatchObject({
+      version: 2,
+      metadata: { visibility: 'shared', lifecycle: 'review' },
+      layout: { responsive: { wide: { cols: 12 }, medium: { cols: 6 }, narrow: { cols: 1 } } },
+    });
+    expect(existsSync(join(root, '.dql/local/app-build-staging', draft.id))).toBe(false);
   });
 
   it('deletes only the selected App package and moves it to recoverable local trash', () => {
@@ -186,15 +271,21 @@ describe('Apps command center API helpers', () => {
     expect(first.ok).toBe(true);
     expect(second.ok).toBe(true);
 
-    const deleted = deleteAppPackage(root, 'growth-cxo');
+    if (!first.ok) return;
+    const deleted = deleteAppPackage(root, 'growth-cxo', { expectedFingerprint: first.app.fingerprint });
 
     expect(deleted.ok).toBe(true);
     if (!deleted.ok) return;
     expect(deleted.deletedPath).toBe('apps/growth-cxo');
     expect(existsSync(join(root, 'apps/growth-cxo'))).toBe(false);
-    expect(existsSync(join(root, deleted.trashPath, 'dql.app.json'))).toBe(true);
+    expect(existsSync(join(root, deleted.trashPath, 'package', 'dql.app.json'))).toBe(true);
+    expect(deleted.trashPath).toContain('.dql/local/trash/apps/');
     expect(existsSync(join(root, 'apps/finance-cxo/dql.app.json'))).toBe(true);
-    expect(deleteAppPackage(root, '../finance-cxo')).toMatchObject({ ok: false, status: 400 });
+    expect(deleteAppPackage(root, '../finance-cxo', { expectedFingerprint: 'sha256:nope' })).toMatchObject({ ok: false, status: 400 });
+
+    const restored = restoreAppPackage(root, deleted.recoveryId);
+    expect(restored).toMatchObject({ ok: true, id: 'growth-cxo', restoredPath: 'apps/growth-cxo' });
+    expect(existsSync(join(root, 'apps/growth-cxo/dql.app.json'))).toBe(true);
   });
 
   it('creates App packages globally with exact domain backlinks when a domain folder exists', () => {
@@ -402,6 +493,8 @@ describe('Apps command center API helpers', () => {
       tags: ['revenue', 'kpi'],
       description: 'Executive revenue KPI',
       chart: 'single_value',
+      allowedFilters: ['region'],
+      filterBindings: [{ filter: 'region', binding: 'customer_region' }],
     });
 
     const session = await proposeAppAiBuild(root, {
@@ -417,13 +510,18 @@ describe('Apps command center API helpers', () => {
       expectedProposalHash: session.proposalHash,
       appName: 'Leadership Revenue Brief',
       audience: 'Finance leadership',
+      filterIds: [],
       tileOverrides: { [selected[0]]: { title: 'Revenue pulse', viz: 'bar' } },
     });
     expect(committed.ok).toBe(true);
     if (!committed.ok) return;
     expect(committed.session.status).toBe('ready');
     expect(committed.session.committedTileIds).toEqual(selected);
-    expect(committed.session.committedBrief).toMatchObject({ appName: 'Leadership Revenue Brief', audience: 'Finance leadership' });
+    expect(committed.session.committedBrief).toMatchObject({
+      appName: 'Leadership Revenue Brief',
+      audience: 'Finance leadership',
+      filterIds: [],
+    });
     expect(committed.session.generatedPaths.some((path) => path.endsWith('dql.app.json'))).toBe(true);
     for (const path of committed.session.generatedPaths) {
       expect(existsSync(join(root, path))).toBe(true);
@@ -431,9 +529,12 @@ describe('Apps command center API helpers', () => {
     const manifestPath = committed.session.generatedPaths.find((path) => path.endsWith('dql.app.json'))!;
     expect(JSON.parse(readFileSync(join(root, manifestPath), 'utf-8'))).toMatchObject({ name: 'Leadership Revenue Brief', audience: 'Finance leadership' });
     const dashboardPath = committed.session.generatedPaths.find((path) => path.endsWith('.dqld'))!;
-    expect(JSON.parse(readFileSync(join(root, dashboardPath), 'utf-8')).layout.items).toEqual(expect.arrayContaining([
+    const dashboard = JSON.parse(readFileSync(join(root, dashboardPath), 'utf-8'));
+    expect(dashboard.filters).toEqual([]);
+    expect(dashboard.layout.items).toEqual(expect.arrayContaining([
       expect.objectContaining({ i: selected[0], title: 'Revenue pulse', viz: expect.objectContaining({ type: 'bar' }) }),
     ]));
+    expect(dashboard.layout.items.find((item: { i: string }) => item.i === selected[0]).filterBindings ?? []).toEqual([]);
 
     // Double-commit is refused — the app already exists.
     const again = await commitAppAiBuild(root, session.id, { selectedTileIds: selected, expectedProposalHash: session.proposalHash });
@@ -2375,6 +2476,7 @@ function writeBlockFile(
   description = "${block.description}"
   owner = "analytics@local"
   tags = [${block.tags.map((tag) => `"${tag}"`).join(', ')}]
+${block.allowedFilters?.length ? `  allowedFilters = [${block.allowedFilters.map((filter) => `"${filter}"`).join(', ')}]` : ''}
 ${formatTestFilterBindings(block)}
 ${formatTestParams(block)}
 

@@ -580,10 +580,11 @@ export interface ModelingApplyResponse {
 export type DashboardTileFilterBinding = {
   filter: string;
   binding?: string;
-  mode?: 'parameter' | 'predicate';
+  mode?: 'parameter' | 'predicate' | 'semantic';
   paramNames?: string[];
   required?: boolean;
   unsupportedReason?: string;
+  capability?: 'supported' | 'unsupported' | 'preflight_required';
 };
 
 export type DashboardTileParameterBinding = {
@@ -1083,7 +1084,7 @@ export interface AgentRun {
   lifecycle?: AgentRunLifecycleV1;
   diagnosticReceipt?: AgentRunDiagnosticReceiptV1;
   derivation?: {
-    version: 1;
+    version: 1 | 2;
     kind: 'analytical_repair' | 'authoring_revision';
     sourceRunId: string;
     sourceFailureId?: string;
@@ -1507,7 +1508,7 @@ export interface NotebookExecutionContext {
 export interface DashboardDocumentResponse {
   app: AppDocumentSummary['app'];
   dashboard: {
-    version: 1;
+    version: 1 | 2;
     id: string;
     metadata: {
       title: string;
@@ -1527,7 +1528,20 @@ export interface DashboardDocumentResponse {
       caveats?: string[];
     };
     params?: Array<{ id: string; type: string; default?: unknown; description?: string }>;
-    filters?: Array<{ id: string; type: string; default?: unknown; options?: string[]; bindsTo?: string }>;
+    filters?: Array<{
+      id: string;
+      type: string;
+      label?: string;
+      default?: unknown;
+      options?: string[];
+      bindsTo?: string;
+      field?: { name: string; relation?: string; semanticModel?: string; provider?: string };
+      required?: boolean;
+      multiple?: boolean;
+      scope?: { page?: string; tileIds?: string[] };
+      optionSource?: { mode: 'static' | 'distinct_query'; sourceRef?: string; field?: string; snapshotId?: string; limit?: number };
+      dependsOn?: string[];
+    }>;
     /** Story layout sections (optional) — narrated flow for AI-built apps. */
     sections?: Array<{
       id: string;
@@ -1595,6 +1609,20 @@ export interface DashboardDocumentResponse {
         /** Story layout: section membership (optional). */
         sectionId?: string;
       }>;
+      responsive?: {
+        wide?: {
+          kind: 'grid'; cols: number; rowHeight: number;
+          items: DashboardDocumentResponse['dashboard']['layout']['items'];
+        };
+        medium?: {
+          kind: 'grid'; cols: number; rowHeight: number;
+          items: DashboardDocumentResponse['dashboard']['layout']['items'];
+        };
+        narrow?: {
+          kind: 'grid'; cols: number; rowHeight: number;
+          items: DashboardDocumentResponse['dashboard']['layout']['items'];
+        };
+      };
     };
   };
 }
@@ -1704,10 +1732,12 @@ export interface AppBlockRecommendation {
   owner: string | null;
   tags: string[];
   path: string;
+  fingerprint: string;
   lastModified: string;
   description: string;
   llmContext?: string | null;
   chartType?: string;
+  filterIds?: string[];
   score: number;
   reasons: string[];
 }
@@ -1910,12 +1940,130 @@ export interface AppBuildProposalGap {
   reason: string;
 }
 
+export interface AppBuildFrame {
+  goal: string;
+  audience: string;
+  metrics: string[];
+  dimensions: string[];
+  grain?: string;
+  timeRange?: string;
+  comparison?: string;
+  filters: string[];
+  desiredOutput: string;
+}
+
+export interface AppBuildClarification {
+  id: string;
+  question: string;
+  choices: string[];
+  required: boolean;
+}
+
 export interface AppBuildProposal {
   intent: { target: 'personal' | 'shared_project'; initialVisibility: 'private' };
+  buildFrame: AppBuildFrame;
   tiles: AppBuildProposalTile[];
   gaps: AppBuildProposalGap[];
+  clarifications: AppBuildClarification[];
   followUps: string[];
   coverage: { certifiedTiles: number; semanticTiles: number; generatedTiles: number; gaps: number };
+}
+
+export interface AppStudioBuildDraft {
+  version: 2;
+  id: string;
+  appId: string;
+  name: string;
+  baseApp?: { appId: string; fingerprint: string };
+  revision: number;
+  proposalHash: string;
+  authoringMode: 'ai' | 'manual';
+  template: 'executive_brief' | 'operational_dashboard' | 'investigation' | 'blank';
+  sourcePolicy: 'governed_only' | 'include_review_required';
+  state: 'local_draft' | 'clarification_required' | 'preflight_ready' | 'project_published';
+  frame: Omit<AppBuildFrame, 'clarificationQuestions'> & {
+    decision?: string;
+    clarificationQuestions?: Array<{
+      id: string;
+      question: string;
+      choices: Array<{ id: string; label: string; description?: string }>;
+      required: boolean;
+      answerId?: string;
+    }>;
+  };
+  requirements: Array<{
+    id: string;
+    question: string;
+    role: 'kpi' | 'trend' | 'breakdown' | 'detail' | 'narrative' | 'evidence';
+    required: boolean;
+    measures: string[];
+    dimensions: string[];
+    filters: string[];
+    grain?: string;
+  }>;
+  coverage: Array<{
+    requirementId: string;
+    status: 'covered' | 'partial' | 'gap';
+    sourceIds: string[];
+    componentIds: string[];
+    reasons: string[];
+  }>;
+  sources: Array<{
+    id: string;
+    kind: 'certified_block' | 'governed_semantic' | 'review_block' | 'review_dql' | 'text' | 'semantic_query' | 'exploratory_sql';
+    sourceRef: string;
+    qualifiedIdentity?: string;
+    snapshotId?: string;
+    sourceFingerprint?: string;
+    receiptId?: string;
+    trustState: 'certified' | 'review_required' | 'draft_ready';
+    reviewStatus: 'not_required' | 'required' | 'approved';
+  }>;
+  pages: DashboardDocumentResponse['dashboard'][];
+  reviewTasks: Array<{ id: string; message: string; status: 'open' | 'resolved'; sourceId?: string; pageId?: string; tileId?: string }>;
+  previewReceipts?: Array<{ id: string; pageId: string; revision: number; snapshotId: string; filterFingerprint: string; resultFingerprint: string; createdAt: string }>;
+  previewReceipt?: { id: string; pageId: string; revision: number; snapshotId: string; filterFingerprint: string; resultFingerprint: string; createdAt: string };
+  preflightReceipt?: { id: string; revision: number; proposalHash: string; sourceFingerprint: string; createdAt: string };
+  publishedFingerprint?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type AppStudioDraftOperation =
+  | { type: 'set_name'; name: string }
+  | { type: 'set_template'; template: AppStudioBuildDraft['template'] }
+  | { type: 'set_frame'; frame: AppStudioBuildDraft['frame'] }
+  | { type: 'set_source_policy'; sourcePolicy: AppStudioBuildDraft['sourcePolicy'] }
+  | { type: 'set_requirements'; requirements: AppStudioBuildDraft['requirements']; coverage?: AppStudioBuildDraft['coverage'] }
+  | { type: 'set_coverage'; coverage: AppStudioBuildDraft['coverage'] }
+  | { type: 'upsert_source'; source: AppStudioBuildDraft['sources'][number] }
+  | { type: 'remove_source'; sourceId: string }
+  | { type: 'upsert_page'; page: AppStudioBuildDraft['pages'][number] }
+  | { type: 'remove_page'; pageId: string }
+  | { type: 'add_tile'; pageId: string; tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number] }
+  | { type: 'update_tile'; pageId: string; tileId: string; patch: Partial<AppStudioBuildDraft['pages'][number]['layout']['items'][number]> }
+  | { type: 'remove_tile'; pageId: string; tileId: string }
+  | { type: 'set_filter'; pageId: string; filter: NonNullable<AppStudioBuildDraft['pages'][number]['filters']>[number] }
+  | { type: 'remove_filter'; pageId: string; filterId: string }
+  | { type: 'set_layout'; pageId: string; layout: AppStudioBuildDraft['pages'][number]['layout'] }
+  | { type: 'set_review_task'; task: AppStudioBuildDraft['reviewTasks'][number] }
+  | { type: 'remove_review_task'; taskId: string }
+  | { type: 'set_preview_receipt'; receipt: NonNullable<AppStudioBuildDraft['previewReceipt']> };
+
+export interface AppStudioAiProposal {
+  id: string;
+  draftId: string;
+  baseRevision: number;
+  baseProposalHash: string;
+  operations: AppStudioDraftOperation[];
+  clarifications: NonNullable<AppStudioBuildDraft['frame']['clarificationQuestions']>;
+  summary: {
+    requirements: number;
+    covered: number;
+    gaps: number;
+    certifiedSources: number;
+    semanticSources: number;
+  };
 }
 
 export interface AppAiBuildSession {
@@ -1939,6 +2087,7 @@ export interface AppAiBuildSession {
     appName?: string;
     pageTitle?: string;
     audience: string;
+    filterIds: string[];
     tileOverrides: Record<string, { title?: string; viz?: string }>;
   };
   warnings: string[];
@@ -2299,11 +2448,16 @@ function formatRequestError(res: Response, text: string): DqlApiError {
   if (!text.trim()) return new DqlApiError({ message: fallback, status: res.status });
   try {
     const payload = JSON.parse(text);
+    const validationErrors = Array.isArray(payload?.errors)
+      ? payload.errors.filter((item: unknown): item is string => typeof item === 'string' && item.trim().length > 0)
+      : [];
     const message = typeof payload?.message === 'string' && payload.message.trim()
       ? payload.message
       : typeof payload?.error === 'string' && payload.error.trim()
         ? payload.error
-        : fallback;
+        : validationErrors.length > 0
+          ? `${validationErrors.slice(0, 3).join(' ')}${validationErrors.length > 3 ? ` ${validationErrors.length - 3} more blockers.` : ''}`
+          : fallback;
     return new DqlApiError({
       message,
       status: res.status,
@@ -5662,17 +5816,12 @@ export const api = {
     audience?: string;
     certifiedOnly?: boolean;
   }, signal?: AbortSignal): Promise<AppBlockRecommendation[]> {
-    try {
-      const { blocks } = await request<{ blocks: AppBlockRecommendation[] }>('/api/apps/recommend-blocks', {
-        method: 'POST',
-        body: JSON.stringify(input),
-        signal,
-      });
-      return blocks;
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      return [];
-    }
+    const { blocks } = await request<{ blocks: AppBlockRecommendation[] }>('/api/apps/recommend-blocks', {
+      method: 'POST',
+      body: JSON.stringify(input),
+      signal,
+    });
+    return blocks;
   },
 
   async createApp(input: CreateAppRequest): Promise<CreateAppResponse> {
@@ -5680,6 +5829,67 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(input),
     });
+  },
+
+  async createAppBuild(input: {
+    appId?: string;
+    baseAppId?: string;
+    name?: string;
+    goal?: string;
+    audience?: string;
+    domain?: string;
+    authoringMode: 'ai' | 'manual';
+    sourcePolicy?: 'governed_only' | 'include_review_required';
+    template?: AppStudioBuildDraft['template'];
+  }): Promise<{ ok: true; draft: AppStudioBuildDraft }> {
+    return request('/api/app-builds', { method: 'POST', body: JSON.stringify(input) });
+  },
+
+  async listAppBuilds(): Promise<{ ok: true; drafts: AppStudioBuildDraft[] }> {
+    return request('/api/app-builds');
+  },
+
+  async proposeAppBuildChanges(
+    id: string,
+    input: { prompt: string; expectedRevision: number; proposalHash: string; selectedBlockIds?: string[] },
+  ): Promise<{ ok: true; proposal: AppStudioAiProposal }> {
+    return request(`/api/app-builds/${encodeURIComponent(id)}/ai-proposals`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  async patchAppBuild(id: string, expectedRevision: number, operations: AppStudioDraftOperation[], expectedProposalHash?: string): Promise<{ ok: true; draft: AppStudioBuildDraft }> {
+    return request(`/api/app-builds/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ expectedRevision, expectedProposalHash, operations }),
+    });
+  },
+
+  async preflightAppBuild(id: string, expectedRevision: number, proposalHash: string): Promise<{ ok: boolean; draft: AppStudioBuildDraft; errors: string[] }> {
+    return request(`/api/app-builds/${encodeURIComponent(id)}/preflight`, {
+      method: 'POST',
+      body: JSON.stringify({ expectedRevision, proposalHash }),
+    });
+  },
+
+  async publishAppBuild(id: string, expectedRevision: number, proposalHash: string): Promise<{ ok: true; draft: AppStudioBuildDraft; app: AppSummary; paths: string[] }> {
+    return request(`/api/app-builds/${encodeURIComponent(id)}/publish-to-project`, {
+      method: 'POST',
+      body: JSON.stringify({ expectedRevision, proposalHash }),
+    });
+  },
+
+  async deleteAppBuild(id: string, expectedRevision: number, proposalHash: string): Promise<{ ok: true; id: string; recoveryId: string }> {
+    return request(`/api/app-builds/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ expectedRevision, proposalHash }),
+    });
+  },
+
+  /** @deprecated Use publishAppBuild. */
+  async commitAppBuild(id: string, expectedRevision: number, proposalHash: string): Promise<{ ok: true; draft: AppStudioBuildDraft; app: AppSummary; paths: string[] }> {
+    return this.publishAppBuild(id, expectedRevision, proposalHash);
   },
 
   async generateApp(input: GenerateAppRequest): Promise<GenerateAppResponse | { ok: false; error: string }> {
@@ -5747,6 +5957,7 @@ export const api = {
     appName?: string;
     pageTitle?: string;
     audience?: string;
+    filterIds?: string[];
     tileOverrides?: Record<string, { title?: string; viz?: string }>;
   } = {}): Promise<
     { ok: true; session: AppAiBuildSession; app: AppSummary | null; dashboardId: string | null } | { ok: false; error: string }
@@ -5769,8 +5980,12 @@ export const api = {
     }
   },
 
-  async deleteApp(id: string): Promise<{ ok: true; id: string; deletedPath: string; trashPath: string }> {
-    return request(`/api/apps/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  async deleteApp(id: string, expectedFingerprint: string): Promise<{ ok: true; id: string; deletedPath: string; trashPath: string; recoveryId: string; localRowsArchived: number; sourceControlImpact: 'delete' }> {
+    return request(`/api/apps/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ expectedFingerprint }) });
+  },
+
+  async restoreApp(recoveryId: string): Promise<{ ok: true; id: string; restoredPath: string }> {
+    return request(`/api/app-recoveries/${encodeURIComponent(recoveryId)}/restore`, { method: 'POST', body: '{}' });
   },
 
   /**
@@ -6076,18 +6291,23 @@ export const api = {
     }
   },
 
-  async promoteApp(appId: string, input?: { lifecycle?: 'draft' | 'review' | 'certified' | 'deprecated' }): Promise<
+  async publishAppToProject(appId: string, input?: { lifecycle?: 'draft' | 'review' | 'certified' | 'deprecated' }): Promise<
     | { ok: true; app: AppDocumentSummary['app']; paths: string[]; removedLocalTiles: number; readiness: { ready: true; governedTiles: number; blockers: [] } }
     | { ok: false; error: string; readiness?: { ready: false; governedTiles: number; blockers: Array<{ dashboardId: string; tileId: string; code: string; message: string }> } }
   > {
     try {
       return await request(
-        `/api/apps/${encodeURIComponent(appId)}/promote`,
+        `/api/apps/${encodeURIComponent(appId)}/publish-to-project`,
         { method: 'POST', body: JSON.stringify(input ?? {}) },
       );
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
+  },
+
+  /** @deprecated Compatibility alias. New UI should say Publish to Project. */
+  async promoteApp(appId: string, input?: { lifecycle?: 'draft' | 'review' | 'certified' | 'deprecated' }) {
+    return api.publishAppToProject(appId, input);
   },
 
   async approveAppSemanticTiles(
@@ -6251,6 +6471,13 @@ export const api = {
     } catch {
       return null;
     }
+  },
+
+  async runAppBuildPreview(draftId: string, dashboardId: string, variables?: Record<string, unknown>): Promise<DashboardRunResponse> {
+    return request<DashboardRunResponse>(
+      `/api/app-builds/${encodeURIComponent(draftId)}/dashboards/${encodeURIComponent(dashboardId)}/run`,
+      { method: 'POST', body: JSON.stringify({ variables: variables ?? {} }) },
+    );
   },
 
   async retryDashboardTile(appId: string, dashboardId: string, tileId: string, variables?: Record<string, unknown>): Promise<DashboardRunResponse | null> {

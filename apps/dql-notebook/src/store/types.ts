@@ -209,6 +209,7 @@ export type LineageReturnTarget =
 export interface AppSummary {
   id: string;
   name: string;
+  fingerprint: string;
   filePath?: string;
   domain: string;
   ownerDomain?: string;

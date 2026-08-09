@@ -3553,6 +3553,38 @@ LIMIT \${top_n}
     }
   });
 
+  it('routes App Studio drafts through the local-only lifecycle API (PRD-006, API-013)', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-app-studio-runtime-'));
+    tempDirs.push(projectRoot);
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery: vi.fn(), executePositional: vi.fn() } as unknown as QueryExecutor,
+        connection: { driver: 'file' },
+        preferredPort: 0,
+        captureServer: (createdServer) => { server = createdServer; },
+      });
+      const created = await fetch(`http://127.0.0.1:${port}/api/app-builds`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Operations Health', goal: 'Monitor operations', authoringMode: 'manual', template: 'operational_dashboard' }),
+      });
+      const createdText = await created.text();
+      expect(created.status, createdText).toBe(201);
+      const payload = JSON.parse(createdText) as any;
+      expect(payload.draft).toMatchObject({ version: 2, authoringMode: 'manual', state: 'local_draft', template: 'operational_dashboard' });
+      expect(existsSync(join(projectRoot, 'apps'))).toBe(false);
+
+      const listed = await fetch(`http://127.0.0.1:${port}/api/app-builds`);
+      expect(listed.status).toBe(200);
+      expect((await listed.json() as any).drafts.map((draft: any) => draft.id)).toContain(payload.draft.id);
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
   it('threads conversation context through the HTTP agent-run endpoint into the route executor', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-context-'));
     tempDirs.push(projectRoot);
@@ -5350,6 +5382,33 @@ describe('prepareLocalExecution', () => {
       binding: 'region',
       mode: 'predicate',
     });
+  });
+
+  it('applies a server-proven App tile binding added by the manual filter editor', () => {
+    const applied = applyDashboardFiltersToBlockExecution({
+      sql: 'SELECT customer_name, customer_type FROM marts.customers',
+      sqlParams: [],
+      variables: { customer_type: 'new' },
+      block: {
+        name: 'Customer Profile',
+        allowedFilters: ['customer_name'],
+      },
+      dashboard: {
+        filters: [{ id: 'customer_type', type: 'select', bindsTo: 'customer_type' }],
+      },
+      tileFilterBindings: [{
+        filter: 'customer_type',
+        binding: 'customer_type',
+        mode: 'predicate',
+      }],
+    });
+
+    expect(applied.sql).toBe('SELECT * FROM (SELECT customer_name, customer_type FROM marts.customers) _dql_filter WHERE _dql_filter.customer_type = $1');
+    expect(applied.appliedFilters).toEqual([expect.objectContaining({
+      filter: 'customer_type',
+      binding: 'customer_type',
+      mode: 'predicate',
+    })]);
   });
 
   it('rewrites SQL paths for file-backed notebook queries', () => {

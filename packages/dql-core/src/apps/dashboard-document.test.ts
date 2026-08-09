@@ -116,6 +116,49 @@ describe('parseDashboardDocument', () => {
     expect(document?.layout.items[0].viz.options?.chart).toBe('scatter');
   });
 
+  it('round-trips v2 responsive layouts and qualified filter controls', () => {
+    const doc: DashboardDocument = {
+      ...minimal,
+      version: 2,
+      filters: [{
+        id: 'order-period',
+        label: 'Order period',
+        type: 'relative_date',
+        bindsTo: 'ordered_at',
+        field: { name: 'ordered_at', relation: 'analytics.orders', provider: 'duckdb' },
+        required: true,
+        scope: { page: 'weekly-overview', tileIds: ['kpi', 'trend'] },
+        optionSource: { mode: 'distinct_query', sourceRef: 'analytics.orders', field: 'ordered_at', snapshotId: 'snapshot-1', limit: 100 },
+        dependsOn: ['region'],
+      }],
+      layout: {
+        ...minimal.layout,
+        responsive: {
+          medium: { kind: 'grid', cols: 6, rowHeight: 80, items: minimal.layout.items },
+          narrow: {
+            kind: 'grid', cols: 1, rowHeight: 80,
+            items: minimal.layout.items.map((item, y) => ({ ...item, x: 0, y, w: 1 })),
+          },
+        },
+      },
+    };
+
+    const { document, errors } = parseDashboardDocument(JSON.stringify(doc));
+
+    expect(errors).toEqual([]);
+    expect(document?.version).toBe(2);
+    expect(document?.filters?.[0]).toMatchObject({
+      label: 'Order period',
+      type: 'relative_date',
+      field: { name: 'ordered_at', relation: 'analytics.orders' },
+      required: true,
+      scope: { page: 'weekly-overview', tileIds: ['kpi', 'trend'] },
+      optionSource: { mode: 'distinct_query', snapshotId: 'snapshot-1' },
+    });
+    expect(document?.layout.responsive?.medium?.cols).toBe(6);
+    expect(document?.layout.responsive?.narrow?.items[1]).toMatchObject({ x: 0, y: 1, w: 1 });
+  });
+
   it('preserves Sankey source, target, and value bindings', () => {
     const doc = {
       ...minimal,

@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { AppBuildProposal, AppBuildProposalTile, DashboardDocumentResponse } from '../../api/client';
 import { unbuildableSelectedTiles } from './AppBuildProposalPanel';
-import { dashboardFilterCandidates, dashboardFilterCoverage, deriveDashboardFilters } from './dashboard-filters';
+import {
+  addDashboardFilterToDocument,
+  dashboardFilterCandidates,
+  dashboardFilterCoverage,
+  deriveDashboardFilters,
+  removeDashboardFilterFromDocument,
+} from './dashboard-filters';
 import { semanticApprovalState } from './app-semantic-approval';
 
 type RuntimeFilter = NonNullable<DashboardDocumentResponse['dashboard']['filters']>[number] & {
@@ -47,6 +53,47 @@ describe('App dashboard filter wiring (UI-001, E2E-001)', () => {
 
     expect((filter as RuntimeFilter).sourceBlockId).toBe('Revenue by Category');
     expect(filter.bindsTo).toBe('category_name');
+  });
+
+  it('keeps an option-less select when a governed predicate binding can resolve its options', () => {
+    const dashboard = dashboardWithItem({
+      i: 'customer-tile', x: 0, y: 0, w: 6, h: 4,
+      block: { blockId: 'Customer profile' },
+      viz: { type: 'table' },
+      filterBindings: [{ filter: 'customer_name', binding: 'customer_name', mode: 'predicate' }],
+    });
+    dashboard.filters = [{ id: 'customer_name', label: 'Customer Name', type: 'select', bindsTo: 'customer_name' }];
+
+    const [filter] = deriveDashboardFilters(dashboard);
+
+    expect(filter).toMatchObject({ id: 'customer_name', sourceBlockId: 'Customer profile' });
+  });
+
+  it('adds and removes a manual page filter together with its proven tile binding', () => {
+    const dashboard = dashboardWithItem({
+      i: 'customer-tile', x: 0, y: 0, w: 6, h: 4,
+      block: { blockId: 'Customer profile' },
+      viz: { type: 'table' },
+    });
+    dashboard.filters = [];
+    const added = addDashboardFilterToDocument(dashboard, 'customer_type', {
+      tiles: [{
+        tileId: 'customer-tile',
+        filterableColumns: [{ column: 'customer_type', predicateTarget: 'customer_type' }],
+      }],
+    });
+
+    expect(added.filters).toContainEqual({ id: 'customer_type', type: 'select', bindsTo: 'customer_type' });
+    expect(added.layout.items[0].filterBindings).toContainEqual({
+      filter: 'customer_type',
+      binding: 'customer_type',
+      mode: 'predicate',
+    });
+    expect(dashboardFilterCoverage(added, 'customer_type').applied).toEqual(['customer-tile']);
+
+    const removed = removeDashboardFilterFromDocument(added, 'customer_type');
+    expect(removed.filters).toEqual([]);
+    expect(removed.layout.items[0].filterBindings).toEqual([]);
   });
 });
 

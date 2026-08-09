@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { applyAppBuildDraftOperations, createAppBuildDraft } from '@duckcodeailabs/dql-core';
 import { LocalAppStorage } from './local-app-storage.js';
 
 let dir: string;
@@ -19,6 +20,29 @@ afterEach(() => {
 });
 
 describe('LocalAppStorage', () => {
+  it('stores local-only App Studio drafts and append-only typed operation history', () => {
+    const draft = createAppBuildDraft({
+      id: 'build-revenue', appId: 'revenue-studio', name: 'Revenue Studio', authoringMode: 'manual',
+      frame: { goal: 'Monitor revenue', metrics: ['revenue'], dimensions: [], filters: [] },
+      now: '2026-08-08T00:00:00.000Z',
+    });
+    store.saveAppBuildDraft(draft);
+    const operations = [{ type: 'set_name' as const, name: 'Revenue Health' }];
+    const next = applyAppBuildDraftOperations(draft, draft.revision, operations, '2026-08-08T00:01:00.000Z');
+    store.saveAppBuildDraft(next, { expectedRevision: draft.revision, operations });
+
+    expect(store.getAppBuildDraft(draft.id)).toMatchObject({
+      version: 2,
+      name: 'Revenue Health',
+      revision: 2,
+      state: 'local_draft',
+    });
+    expect(store.listAppBuildOperations(draft.id)).toEqual([
+      expect.objectContaining({ revision: 2, operations }),
+    ]);
+    expect(() => store.saveAppBuildDraft(next, { expectedRevision: 1 })).toThrow(/APP_BUILD_REVISION_CONFLICT/);
+  });
+
   it('stores AI pins and refresh metadata locally', () => {
     const pin = store.createAiPin({
       appId: 'executive-cockpit',
@@ -231,5 +255,48 @@ describe('LocalAppStorage', () => {
       'Why did revenue drop in February?',
       'Why did revenue drop in March?',
     ]));
+  });
+
+  it('archives every app-scoped local artifact and restores the exact bundle', () => {
+    const appId = 'executive-cockpit';
+    store.createAiPin({
+      appId,
+      dashboardId: 'overview',
+      title: 'Review pin',
+      answer: 'A review-required answer.',
+    });
+    store.createAppInvestigation({
+      appId,
+      dashboardId: 'overview',
+      question: 'Why did revenue change?',
+      intent: 'diagnose_change',
+    });
+    store.createAppConversation({
+      appId,
+      dashboardId: 'overview',
+      title: 'App discussion',
+      messages: [{ role: 'user', content: 'What changed?' }],
+    });
+    store.saveAppBuildDraft(createAppBuildDraft({
+      id: 'build-executive', appId, name: 'Executive Cockpit', authoringMode: 'manual',
+      frame: { goal: 'Monitor executive metrics', metrics: [], dimensions: [], filters: [] },
+    }));
+
+    const archive = store.archiveAndDeleteAppState(appId, '2026-08-08T00:00:00.000Z');
+    expect(archive.rows.aiPins).toHaveLength(1);
+    expect(archive.rows.investigations).toHaveLength(1);
+    expect(archive.rows.conversations).toHaveLength(1);
+    expect(archive.rows.conversationMessages).toHaveLength(1);
+    expect(archive.rows.buildDrafts).toHaveLength(1);
+    expect(store.listAiPins(appId)).toEqual([]);
+    expect(store.listAppInvestigations(appId)).toEqual([]);
+    expect(store.listAppConversations(appId)).toEqual([]);
+    expect(store.listAppBuildDrafts(appId)).toEqual([]);
+
+    store.restoreAppState(archive);
+    expect(store.listAiPins(appId)).toHaveLength(1);
+    expect(store.listAppInvestigations(appId)).toHaveLength(1);
+    expect(store.listAppConversations(appId)).toHaveLength(1);
+    expect(store.listAppBuildDrafts(appId)).toHaveLength(1);
   });
 });
