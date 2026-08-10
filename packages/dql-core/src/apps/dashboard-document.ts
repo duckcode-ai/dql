@@ -1032,8 +1032,9 @@ function readTileFilterBindings(
       err(`layout.items[${index}].filterBindings[${i}].filter must be a non-empty string`);
       continue;
     }
-    const mode = enumOrUndefined(record.mode, `layout.items[${index}].filterBindings[${i}].mode`, ['parameter', 'predicate'] as const, err);
+    const mode = enumOrUndefined(record.mode, `layout.items[${index}].filterBindings[${i}].mode`, ['parameter', 'predicate', 'semantic'] as const, err);
     const paramNames = stringArrayOrUndefined(record.paramNames, `layout.items[${index}].filterBindings[${i}].paramNames`, err);
+    const capability = enumOrUndefined(record.capability, `layout.items[${index}].filterBindings[${i}].capability`, ['supported', 'unsupported', 'preflight_required'] as const, err);
     out.push({
       filter: record.filter,
       binding: typeof record.binding === 'string' ? record.binding : undefined,
@@ -1041,6 +1042,7 @@ function readTileFilterBindings(
       ...(paramNames ? { paramNames } : {}),
       required: typeof record.required === 'boolean' ? record.required : undefined,
       unsupportedReason: typeof record.unsupportedReason === 'string' ? record.unsupportedReason : undefined,
+      ...(capability ? { capability } : {}),
     });
   }
   return out;

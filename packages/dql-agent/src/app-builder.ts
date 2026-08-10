@@ -632,14 +632,17 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
     input.kg,
     input.preferredBlockIds ?? [],
   );
-  const matchedNodes = findCertifiedBlockNodes(
+  const hasExplicitSelection = (input.preferredBlockIds?.length ?? 0) > 0;
+  const matchedNodes = hasExplicitSelection ? [] : findCertifiedBlockNodes(
     input.kg,
     prompt,
     domain,
     Math.max(targetCertifiedTiles * 3, preferredNodes.length),
   );
+  // App Studio source review is an exact allow-list. Once the author chooses
+  // blocks, do not silently reintroduce an AI-ranked source they removed.
   const certifiedNodes = dedupeCertifiedBlockNodes(
-    mergeCertifiedBlockNodes(preferredNodes, matchedNodes),
+    hasExplicitSelection ? preferredNodes : mergeCertifiedBlockNodes(preferredNodes, matchedNodes),
     new Set(preferredNodes.map((node) => node.nodeId)),
   ).slice(0, targetCertifiedTiles);
   const contextNodes = findCertifiedContextNodes(input.kg, prompt, domain, 6);
@@ -654,6 +657,8 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
     tileFromCertifiedNode(node, index, analysisIntent, filters),
   );
   const requirements = appRequirementsForPrompt(prompt, certifiedNodes);
+  const allowSemanticFallback = input.allowSemanticQueries !== false
+    && !promptExplicitlyUsesNamedCertifiedBlocks(prompt, certifiedNodes);
   const coverage: RequirementCoverage[] = [];
   const selectedCertifiedIds = new Set<string>();
   const semanticTiles: AppPlanTile[] = [];
@@ -673,7 +678,7 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
       });
       continue;
     }
-    const semanticTile = input.allowSemanticQueries === false
+    const semanticTile = !allowSemanticFallback
       ? null
       : semanticTileForRequirement(input.kg, requirement, domain, input.snapshotId);
     if (semanticTile) {
@@ -858,6 +863,21 @@ export function planAppFromPrompt(input: PlanAppFromPromptInput): AppPlan {
           : 0,
     },
   };
+}
+
+/**
+ * A user who explicitly names one or more certified blocks has selected the
+ * analytical contracts they want to use. Keep uncovered requirements visible
+ * instead of silently broadening that request with semantic fallbacks. Generic
+ * "governed sources" requests still retain certified-first semantic fallback.
+ */
+function promptExplicitlyUsesNamedCertifiedBlocks(prompt: string, nodes: KGNode[]): boolean {
+  if (!/\bcertified\b/i.test(prompt) || !/\bblocks?\b/i.test(prompt)) return false;
+  const normalizedPrompt = canonicalRequirementText(prompt);
+  return nodes.some((node) => {
+    const normalizedName = canonicalRequirementText(node.name).trim();
+    return normalizedName.split(/\s+/).length >= 2 && normalizedPrompt.includes(` ${normalizedName} `);
+  });
 }
 
 export function validateAppPlan(
@@ -1206,7 +1226,12 @@ function findCertifiedBlockNodes(
 ): KGNode[] {
   const hits = kg.search({
     query: prompt,
-    domain,
+    // `general` is the Studio's initial, unscoped page domain. Treating it as
+    // a literal KG domain hid every real project block from AI-created drafts
+    // until the author manually chose a domain. An unscoped draft must search
+    // the whole governed catalog; a concrete domain remains a hard preference
+    // with the existing cross-domain fallback below.
+    domain: domain === "general" ? undefined : domain,
     kinds: ["block"],
     limit: limit * 3,
   });
@@ -1289,6 +1314,14 @@ function dedupeCertifiedBlockNodes(
     }
 
     const current = selected[duplicateIndex];
+    // An explicit App Studio selection is author intent, not a search result.
+    // Keep both chosen blocks even when their business/topic fingerprints are
+    // similar; automatic discovery may still dedupe everything else.
+    if (preferredNodeIds.has(current.nodeId) && preferredNodeIds.has(node.nodeId)) {
+      signatureIndex.set(node.nodeId, selected.length);
+      selected.push(node);
+      continue;
+    }
     if (certifiedBlockSelectionScore(node, preferredNodeIds) > certifiedBlockSelectionScore(current, preferredNodeIds)) {
       selected[duplicateIndex] = node;
       signatureIndex.set(node.nodeId, duplicateIndex);

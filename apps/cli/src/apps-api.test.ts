@@ -23,7 +23,9 @@ import {
   promoteAppForStakeholders,
   renameApp,
   previewNotebookForApp,
+  preflightStoredAppBuildDraft,
   proposeAppAiBuild,
+  proposeAppBuildDraftOperations,
   recommendBlocks,
   recommendDashboardTile,
   recommendVisualization,
@@ -125,6 +127,24 @@ describe('Apps command center API helpers', () => {
     });
     expect(nba[0].name).toBe('Top NBA Scorers');
     expect(nba[0].reasons).toContain('context match');
+  });
+
+  it('never exposes semantic terms as addable App block sources', () => {
+    const root = createProject();
+    writeBlock(root, 'commerce/monthly-revenue.dql', {
+      name: 'Monthly Revenue',
+      domain: 'commerce',
+      status: 'certified',
+      tags: ['revenue'],
+      description: 'Executable monthly revenue trend',
+      chart: 'line',
+    });
+    const termsDir = join(root, 'domains', 'commerce', 'terms');
+    mkdirSync(termsDir, { recursive: true });
+    writeFileSync(join(termsDir, 'revenue.dql'), 'term "Revenue" {\n  domain = "commerce"\n  status = "certified"\n  description = "Business meaning of gross revenue"\n}\n', 'utf-8');
+
+    const blocks = recommendBlocks(root, { domain: 'commerce', purpose: 'revenue', certifiedOnly: true });
+    expect(blocks.map((block) => block.name)).toEqual(['Monthly Revenue']);
   });
 
   it('deduplicates migrated block copies and exposes declared App filters', () => {
@@ -252,6 +272,35 @@ describe('Apps command center API helpers', () => {
       layout: { responsive: { wide: { cols: 12 }, medium: { cols: 6 }, narrow: { cols: 1 } } },
     });
     expect(existsSync(join(root, '.dql/local/app-build-staging', draft.id))).toBe(false);
+  });
+
+  it('does not turn legacy unscoped AI reminders into hidden publication gates', () => {
+    const root = createProject();
+    const draft = createStoredAppBuildDraft(root, {
+      appId: 'readiness-studio',
+      name: 'Readiness Studio',
+      goal: 'Monitor readiness',
+      authoringMode: 'manual',
+      sourcePolicy: 'governed_only',
+    });
+    const legacyReminder = {
+      ...draft,
+      reviewTasks: [{ id: 'ai-review-1', message: 'Review every scoped analysis memo before stakeholder use.', status: 'open' as const }],
+    };
+    expect(preflightStoredAppBuildDraft(root, legacyReminder)).toEqual([]);
+
+    const placeholderRequirement = {
+      ...draft,
+      requirements: [{ id: 'primary', question: draft.name, role: 'breakdown' as const, required: true, measures: [], dimensions: ['month'], filters: [] }],
+      coverage: [{ requirementId: 'primary', status: 'gap' as const, sourceIds: [], componentIds: [], reasons: [] }],
+    };
+    expect(preflightStoredAppBuildDraft(root, placeholderRequirement)).toEqual([]);
+
+    const scopedTask = {
+      ...draft,
+      reviewTasks: [{ id: 'review-overview', message: 'Confirm the Overview evidence.', status: 'open' as const, pageId: draft.pages[0].id }],
+    };
+    expect(preflightStoredAppBuildDraft(root, scopedTask)).toContain('Review task is still open: Confirm the Overview evidence.');
   });
 
   it('deletes only the selected App package and moves it to recoverable local trash', () => {
@@ -672,6 +721,51 @@ describe('Apps command center API helpers', () => {
       }),
     ]));
     expect(dashboard.layout.items.some((item) => item.text?.markdown?.includes('SELECT '))).toBe(false);
+  });
+
+  it('offers previewed exploratory SQL as opt-in review DQL in the unified App Build proposal', async () => {
+    const root = createProject();
+    writeBlock(root, 'revenue/total_revenue.dql', {
+      name: 'Total Revenue',
+      domain: 'revenue',
+      status: 'certified',
+      tags: ['revenue', 'kpi'],
+      description: 'Executive revenue KPI',
+      chart: 'single_value',
+    });
+    const draft = createStoredAppBuildDraft(root, {
+      name: 'Revenue Drivers',
+      goal: 'Explain why revenue is changing',
+      domain: 'revenue',
+      authoringMode: 'ai',
+      sourcePolicy: 'include_review_required',
+      template: 'operational_dashboard',
+    });
+
+    const proposal = await proposeAppBuildDraftOperations(root, draft, {
+      prompt: 'Build a revenue app and explain why revenue is changing.',
+    }, {
+      generateGovernedAnswer: async (question) => ({
+        text: `Exploration for ${question}`,
+        sql: 'SELECT region, SUM(revenue) AS revenue FROM analytics.orders GROUP BY region',
+        suggestedViz: 'bar',
+        result: { columns: ['region', 'revenue'], rows: [{ region: 'NA', revenue: 100 }], rowCount: 1 },
+      } as never),
+    });
+
+    const reviewSource = proposal.operations.find((operation) => operation.type === 'upsert_source' && operation.source.kind === 'review_dql');
+    expect(reviewSource).toBeTruthy();
+    if (!reviewSource || reviewSource.type !== 'upsert_source') return;
+    expect(proposal.defaultSelectedSourceIds).not.toContain(reviewSource.source.id);
+    expect(readFileSync(join(root, '.dql', 'local', 'app-builds', draft.id, reviewSource.source.sourceRef), 'utf-8')).toContain('status = "review"');
+    const page = proposal.operations.find((operation) => operation.type === 'upsert_page');
+    expect(page?.type === 'upsert_page' ? page.page.layout.items : []).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        draftAnalysis: expect.objectContaining({ ref: reviewSource.source.sourceRef }),
+        trustState: 'review_required',
+      }),
+    ]));
+    expect(JSON.stringify(page)).not.toContain('SELECT region');
   });
 
   it('retains bounded App repair evidence and only makes a successful repaired preview selectable', async () => {

@@ -182,6 +182,25 @@ describe("planAppFromPrompt — convergence (filters bound to real blocks)", () 
 });
 
 describe("planAppFromPrompt", () => {
+  it("searches the governed catalog when App Studio starts from the general domain", () =>
+    withKg(revenueNodes, (kg) => {
+      const plan = planAppFromPrompt({
+        prompt: "Build a weekly revenue health app for the COO",
+        kg,
+        domain: "general",
+        allowSemanticQueries: false,
+      });
+
+      expect(plan.pages[0].tiles).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          kind: "certified_block",
+          blockId: "revenue_total",
+          certification: "certified",
+        }),
+      ]));
+      expect(plan.coverage.certifiedTiles).toBeGreaterThan(0);
+    }));
+
   it("does not let broad inferred blocks close filtered customer, product, or trend requirements", () =>
     withKg([
       {
@@ -275,6 +294,50 @@ describe("planAppFromPrompt", () => {
         expect.objectContaining({ filter: "product-category", binding: "product_category", mode: "semantic", capability: "supported" }),
       ]);
       expect(plan.storyEvidencePlan.eligibleTileIds).toContain(semantic?.id);
+    }));
+
+  it("does not silently add semantic fallbacks when the prompt names certified blocks", () =>
+    withKg([
+      {
+        nodeId: "block:revenue_total",
+        kind: "block",
+        name: "revenue_total",
+        domain: "commerce",
+        status: "certified",
+        description: "Overall revenue KPI",
+        sourceTier: "certified_artifact",
+        declaredOutputs: ["revenue"],
+      },
+      {
+        nodeId: "metric:revenue",
+        kind: "metric",
+        name: "revenue",
+        domain: "commerce",
+        status: "review",
+        description: "Governed order revenue",
+        sourceTier: "semantic_layer",
+      },
+      {
+        nodeId: "semantic_model:orders",
+        kind: "semantic_model",
+        name: "orders",
+        domain: "commerce",
+        status: "review",
+        description: "Orders semantic model with customer detail",
+        sourceTier: "semantic_layer",
+      },
+    ], (kg) => {
+      const plan = planAppFromPrompt({
+        prompt: "Build an app using the certified revenue_total block with customer detail",
+        kg,
+        domain: "commerce",
+      });
+
+      expect(plan.pages[0].tiles.some((tile) => tile.kind === "semantic_query")).toBe(false);
+      expect(plan.pages[0].tiles).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: "certified_block", blockId: "revenue_total" }),
+      ]));
+      expect(plan.requirementCoverage.some((coverage) => coverage.status === "gap")).toBe(true);
     }));
 
   it("builds a reviewable local app plan from certified DQL context", () =>
@@ -374,7 +437,7 @@ describe("planAppFromPrompt", () => {
       expect(validation.draftTiles).toBe(0);
     }));
 
-  it("prioritizes explicitly selected certified blocks in generated plans", () =>
+  it("uses explicitly selected certified blocks as the exact App Studio allow-list", () =>
     withKg(revenueNodes, (kg) => {
       const plan = planAppFromPrompt({
         prompt: "Build a weekly operating app for the COO",
@@ -386,10 +449,8 @@ describe("planAppFromPrompt", () => {
       const certifiedTiles = plan.pages[0].tiles.filter(
         (tile) => tile.kind === "certified_block",
       );
-      expect(certifiedTiles[0]).toMatchObject({
-        blockId: "revenue_by_segment",
-        certification: "certified",
-      });
+      expect(certifiedTiles.map((tile) => tile.blockId)).toEqual(["revenue_by_segment"]);
+      expect(certifiedTiles[0]).toMatchObject({ certification: "certified" });
     }));
 
   it("uses an explicit stakeholder audience when supplied", () =>
@@ -578,6 +639,29 @@ describe("planAppFromPrompt", () => {
       expect(certifiedBlockIds).toContain("player_stats_data_availability");
       expect(certifiedBlockIds).not.toContain("codex_e2e_top_scorers");
       expect(certifiedBlockIds.filter((id) => /scorer/i.test(id))).toHaveLength(1);
+    }));
+
+  it("retains every explicitly selected block in App Studio even when fingerprints overlap", () =>
+    withKg([
+      ...nbaNodes,
+      {
+        ...nbaNodes[0],
+        nodeId: "block:executive_top_scorers",
+        name: "executive_top_scorers",
+        description: "Executive presentation of the same governed scorer results",
+      },
+    ], (kg) => {
+      const plan = planAppFromPrompt({
+        prompt: "Build an NBA scorer App from the sources I selected",
+        kg,
+        domain: "nba",
+        preferredBlockIds: ["top_10_goal_scorers", "executive_top_scorers"],
+      });
+
+      const certifiedBlockIds = plan.pages[0].tiles
+        .filter((tile) => tile.kind === "certified_block")
+        .map((tile) => tile.blockId);
+      expect(certifiedBlockIds).toEqual(expect.arrayContaining(["top_10_goal_scorers", "executive_top_scorers"]));
     }));
 });
 

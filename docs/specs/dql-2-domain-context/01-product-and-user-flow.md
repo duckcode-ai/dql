@@ -154,7 +154,8 @@ all-certified App may use certified lifecycle state.
 Generated App pages use this reading order (`UI-004`):
 
 1. page title and navigation;
-2. full-width filters with draft values and explicit Apply/Reset;
+2. full-width searchable filters with explicit tile scope, debounced automatic
+   apply, and Reset;
 3. full-width live Business Story;
 4. KPI band;
 5. trends and driver breakdowns;

@@ -313,7 +313,14 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
       }
     }
     if (errors.length) {
-      sendJson(res, 400, { ok: false, draft: current, errors });
+      sendJson(res, 400, {
+        ok: false,
+        code: 'APP_BUILD_NOT_READY',
+        message: 'This App is not ready to publish yet.',
+        draft: current,
+        errors,
+        details: { draft: current, errors },
+      });
       return true;
     }
     const next = markStoredAppBuildDraftPreflighted(projectRoot, current);
@@ -2147,6 +2154,7 @@ async function fillProposalGaps(
         certification: 'ai_generated',
         sourceClass: 'exploratory_analysis',
         reviewStatus: 'required',
+        requirementIds: gap.id.startsWith('gap_') ? [gap.id.slice('gap_'.length)] : undefined,
         preflight: {
           status: preview ? 'passed' : unresolvedExecutionError ? 'blocked' : 'review_required',
           sourceFingerprint: `sha256:${createHash('sha256').update(sql).digest('hex')}`,
@@ -2186,6 +2194,7 @@ async function fillProposalGaps(
         certification: 'ai_generated',
         sourceClass: 'exploratory_analysis',
         reviewStatus: 'required',
+        requirementIds: gap.id.startsWith('gap_') ? [gap.id.slice('gap_'.length)] : undefined,
         preflight: {
           status: 'blocked',
           message: 'Exploratory analysis generation failed.',
@@ -2349,6 +2358,8 @@ export interface AppBuildDraftAiProposal {
   baseRevision: number;
   baseProposalHash: string;
   operations: AppBuildDraftOperation[];
+  /** Governed sources start selected; generated review DQL is always opt-in. */
+  defaultSelectedSourceIds?: string[];
   clarifications: Array<{
     id: string;
     question: string;
@@ -2361,6 +2372,162 @@ export interface AppBuildDraftAiProposal {
     gaps: number;
     certifiedSources: number;
     semanticSources: number;
+  };
+}
+
+function materializeAppBuildProposalReviewAnalyses(
+  projectRoot: string,
+  draft: AppBuildDraft,
+  plan: AppPlan,
+  proposalId: string,
+  candidates: AppBuildProposalTile[],
+  inputDashboards: DashboardDocument[],
+): {
+  dashboards: DashboardDocument[];
+  sourceOperations: AppBuildDraftOperation[];
+  reviewTasks: AppBuildDraftOperation[];
+  coverageByRequirement: Map<string, { sourceIds: string[]; componentIds: string[] }>;
+} {
+  const eligible = candidates.filter((candidate) => (
+    candidate.source === 'ai_generated'
+    && Boolean(candidate.sql)
+    && !candidate.error
+    && candidate.preflight.status === 'passed'
+  ));
+  if (eligible.length === 0 || inputDashboards.length === 0) {
+    return { dashboards: inputDashboards, sourceOperations: [], reviewTasks: [], coverageByRequirement: new Map() };
+  }
+  const proposalKey = slugify(proposalId) || `proposal-${Date.now()}`;
+  const relativeDraftDir = `proposals/${proposalKey}/drafts`;
+  const absoluteDraftDir = join(projectRoot, '.dql', 'local', 'app-builds', draft.id, relativeDraftDir);
+  mkdirSync(absoluteDraftDir, { recursive: true });
+  const sourceOperations: AppBuildDraftOperation[] = [];
+  const reviewTasks: AppBuildDraftOperation[] = [];
+  const coverageByRequirement = new Map<string, { sourceIds: string[]; componentIds: string[] }>();
+  const generatedItems: DashboardGridItem[] = [];
+  const normalizeQuestion = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  for (const [index, candidate] of eligible.entries()) {
+    const sql = candidate.sql!;
+    if (sql.includes('"""')) throw new Error(`Exploratory SQL for "${candidate.title}" contains an unsupported triple-quote delimiter.`);
+    const candidateKey = slugify(candidate.id) || `analysis-${index + 1}`;
+    const blockName = `app_${slugify(draft.appId)}_${candidateKey}`;
+    const sourceRef = `${relativeDraftDir}/${candidateKey}.dql`;
+    const source = [
+      `block "${escapeDqlString(blockName)}" {`,
+      `  domain = "${escapeDqlString(plan.domain)}"`,
+      '  type = "custom"',
+      '  status = "review"',
+      `  owner = "${escapeDqlString(plan.owner)}"`,
+      `  description = "${escapeDqlString((candidate.answer ?? candidate.question ?? candidate.title).slice(0, 240))}"`,
+      candidate.question ? `  llmContext = "${escapeDqlString(`App-scoped exploratory analysis. Question: ${candidate.question}`)}"` : '',
+      '  caveats = ["AI-generated App analysis. Validate joins, filters, grain, and business interpretation before promotion."]',
+      '  tags = ["app-scoped", "ai-generated", "needs-review"]',
+      '',
+      '  query = """',
+      sql,
+      '  """',
+      '',
+      '  visualization {',
+      `    chart = "${escapeDqlString(normalizeGeneratedViz(candidate.viz))}"`,
+      '  }',
+      '}',
+      '',
+    ].filter(Boolean).join('\n');
+    const fingerprint = `sha256:${createHash('sha256').update(source).digest('hex')}`;
+    writeFileSync(join(absoluteDraftDir, `${candidateKey}.dql`), source, 'utf-8');
+    const sourceId = `review-dql:${candidate.id}`;
+    const componentId = `review_${candidateKey}`;
+    sourceOperations.push({
+      type: 'upsert_source',
+      source: {
+        id: sourceId,
+        kind: 'review_dql',
+        sourceRef,
+        qualifiedIdentity: candidate.title,
+        snapshotId: candidate.preflight.snapshotId ?? plan.snapshotId,
+        sourceFingerprint: fingerprint,
+        receiptId: candidate.preflight.receiptId,
+        trustState: 'review_required',
+        reviewStatus: 'required',
+      },
+    });
+    reviewTasks.push({
+      type: 'set_review_task',
+      task: {
+        id: `review-generated-${candidateKey}`,
+        message: `Validate the joins, grain, filters, and business interpretation for ${candidate.title}.`,
+        status: 'open',
+        sourceId,
+        pageId: inputDashboards[0].id,
+        tileId: componentId,
+      },
+    });
+    const requirementIds = candidate.requirementIds?.length
+      ? candidate.requirementIds
+      : plan.requirements.filter((requirement) => normalizeQuestion(requirement.question) === normalizeQuestion(candidate.question ?? '')).map((requirement) => requirement.id);
+    for (const requirementId of requirementIds) {
+      const current = coverageByRequirement.get(requirementId) ?? { sourceIds: [], componentIds: [] };
+      current.sourceIds.push(sourceId);
+      current.componentIds.push(componentId);
+      coverageByRequirement.set(requirementId, current);
+    }
+    generatedItems.push({
+      i: componentId,
+      x: (index % 2) * 6,
+      y: Math.floor(index / 2) * 4,
+      w: 6,
+      h: 4,
+      draftAnalysis: {
+        ref: sourceRef,
+        artifactFingerprint: fingerprint,
+        ...(candidate.preflight.snapshotId ?? plan.snapshotId ? { snapshotId: candidate.preflight.snapshotId ?? plan.snapshotId } : {}),
+        ...(candidate.preflight.receiptId ? { executionReceiptId: candidate.preflight.receiptId } : {}),
+      },
+      viz: { type: normalizeGeneratedViz(candidate.viz) as DashboardGridItem['viz']['type'] },
+      title: candidate.title,
+      sourceClass: 'exploratory_analysis',
+      sourceEvidence: [
+        ...(candidate.sourceEvidence ?? []),
+        {
+          source: sourceRef,
+          reason: candidate.question
+            ? `AI generated this private analysis for: ${candidate.question}`
+            : 'AI generated this private analysis for a requirement without governed coverage.',
+          kind: 'review_dql',
+          trustState: 'review_required',
+        },
+      ],
+      review: { status: 'required', sourceFingerprint: fingerprint, ...(candidate.preflight.receiptId ? { preflightReceiptId: candidate.preflight.receiptId } : {}) },
+      trustState: 'review_required',
+      reviewStatus: 'review_required',
+    });
+  }
+  const first = inputDashboards[0];
+  const baseY = first.layout.items.reduce((max, item) => Math.max(max, item.y + item.h), 0);
+  const items = [...first.layout.items, ...generatedItems.map((item) => ({ ...item, y: item.y + baseY }))];
+  const sections = first.sections
+    ? first.sections.some((section) => section.kind === 'appendix')
+      ? first.sections
+      : [...first.sections, { id: 'review-appendix', title: 'Review-required analysis', kind: 'appendix' as const, order: first.sections.length }]
+    : undefined;
+  const appendixId = sections?.find((section) => section.kind === 'appendix')?.id;
+  const finalItems = appendixId
+    ? items.map((item) => generatedItems.some((generated) => generated.i === item.i) ? { ...item, sectionId: appendixId } : item)
+    : items;
+  const page: DashboardDocument = {
+    ...first,
+    ...(sections ? { sections } : {}),
+    layout: {
+      ...first.layout,
+      items: finalItems,
+      responsive: responsiveLayoutsForDashboardItems(finalItems),
+    },
+  };
+  return {
+    dashboards: [page, ...inputDashboards.slice(1)],
+    sourceOperations,
+    reviewTasks,
+    coverageByRequirement,
   };
 }
 
@@ -2436,6 +2603,16 @@ export async function proposeAppBuildDraftOperations(
     }
     return [];
   });
+  const reviewAnalyses = materializeAppBuildProposalReviewAnalyses(
+    projectRoot,
+    draft,
+    plan,
+    session.id,
+    session.proposal.tiles,
+    dashboards,
+  );
+  dashboards = reviewAnalyses.dashboards;
+  sourceOperations.push(...reviewAnalyses.sourceOperations);
   const sourceIdForCoverage = (source: string, sourceId?: string): string[] => {
     if (!sourceId) return [];
     if (source === 'certified_block') return [sourceId.startsWith('block:') ? sourceId : `block:${sourceId}`];
@@ -2452,6 +2629,25 @@ export async function proposeAppBuildDraftOperations(
     && draft.pages.length === 1
     && draft.pages[0].layout.items.length === 0
     && !dashboards.some((page) => page.id === draft.pages[0].id);
+  const coverage = plan.requirementCoverage.map((item) => {
+    const reviewCoverage = reviewAnalyses.coverageByRequirement.get(item.requirementId);
+    if (reviewCoverage) {
+      return {
+        requirementId: item.requirementId,
+        status: 'covered' as const,
+        sourceIds: reviewCoverage.sourceIds,
+        componentIds: reviewCoverage.componentIds,
+        reasons: ['Covered by explicitly selectable review-required App analysis.'],
+      };
+    }
+    return {
+      requirementId: item.requirementId,
+      status: item.status === 'covered' ? 'covered' as const : 'gap' as const,
+      sourceIds: sourceIdForCoverage(item.source, item.sourceId),
+      componentIds: item.tileId ? [item.tileId] : [],
+      reasons: item.reasons,
+    };
+  });
   const operations: AppBuildDraftOperation[] = [
     { type: 'set_name', name: plan.name },
     {
@@ -2482,27 +2678,12 @@ export async function proposeAppBuildDraftOperations(
         filters: requirement.filters,
         grain: requirement.grain,
       })),
-      coverage: plan.requirementCoverage.map((coverage) => ({
-        requirementId: coverage.requirementId,
-        status: coverage.status === 'covered' ? 'covered' as const : 'gap' as const,
-        sourceIds: sourceIdForCoverage(coverage.source, coverage.sourceId),
-        componentIds: coverage.tileId ? [coverage.tileId] : [],
-        reasons: coverage.reasons,
-      })),
+      coverage,
     },
     ...(replaceInitialBlank ? [{ type: 'remove_page' as const, pageId: draft.pages[0].id }] : []),
     ...dashboards.map((page): AppBuildDraftOperation => ({ type: 'upsert_page', page })),
     ...sourceOperations,
-    ...plan.reviewTasks.map((message, index): AppBuildDraftOperation => ({
-      type: 'set_review_task',
-      task: {
-        id: `ai-review-${index + 1}`,
-        message: /run dql app build after accepting the generated files/i.test(message)
-          ? 'Publish to Project only after every selected source, filter binding, and settled preview passes preflight.'
-          : message,
-        status: 'open',
-      },
-    })),
+    ...reviewAnalyses.reviewTasks,
   ];
   return {
     id: session.id,
@@ -2510,6 +2691,9 @@ export async function proposeAppBuildDraftOperations(
     baseRevision: draft.revision,
     baseProposalHash: draft.proposalHash,
     operations,
+    defaultSelectedSourceIds: sourceOperations.flatMap((operation) => (
+      operation.type === 'upsert_source' && operation.source.kind !== 'review_dql' ? [operation.source.id] : []
+    )),
     clarifications,
     summary: {
       requirements: plan.requirements.length,
@@ -4093,8 +4277,15 @@ export function deleteStoredAppBuildDraft(
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const recoveryId = `draft-${stamp}-${draft.id}`;
   const recoveryDir = join(projectRoot, '.dql', 'local', 'trash', 'app-drafts', recoveryId);
+  const localArtifactsDir = join(projectRoot, '.dql', 'local', 'app-builds', draft.id);
+  const recoveryArtifactsDir = join(recoveryDir, 'artifacts');
+  let artifactsMoved = false;
   try {
     mkdirSync(recoveryDir, { recursive: true });
+    if (existsSync(localArtifactsDir)) {
+      renameSync(localArtifactsDir, recoveryArtifactsDir);
+      artifactsMoved = true;
+    }
     writeFileSync(join(recoveryDir, 'recovery.json'), JSON.stringify({
       version: 1,
       kind: 'app_build_draft',
@@ -4104,6 +4295,10 @@ export function deleteStoredAppBuildDraft(
       operations: deleted.operations,
     }, null, 2) + '\n', 'utf-8');
   } catch (error) {
+    if (artifactsMoved && existsSync(recoveryArtifactsDir)) {
+      mkdirSync(dirname(localArtifactsDir), { recursive: true });
+      renameSync(recoveryArtifactsDir, localArtifactsDir);
+    }
     const restore = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
     try { restore.restoreAppBuildDraft(deleted.draft, deleted.operations); } finally { restore.close(); }
     rmSync(recoveryDir, { recursive: true, force: true });
@@ -4122,10 +4317,22 @@ function restoreStoredAppBuildDraft(
   let payload: { kind?: string; draft?: AppBuildDraft; operations?: Array<{ id: number; draftId: string; revision: number; operations: AppBuildDraftOperation[]; createdAt: string }> };
   try { payload = JSON.parse(readFileSync(recoveryPath, 'utf-8')); } catch { return { ok: false, status: 400, error: 'App draft recovery bundle is invalid.' }; }
   if (payload.kind !== 'app_build_draft' || !payload.draft) return { ok: false, status: 400, error: 'App draft recovery bundle is invalid.' };
+  const recoveredArtifactsDir = join(recoveryDir, 'artifacts');
+  const localArtifactsDir = join(projectRoot, '.dql', 'local', 'app-builds', payload.draft.id);
   const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+  let artifactsRestored = false;
   try {
     if (storage.getAppBuildDraft(payload.draft.id)) return { ok: false, status: 409, error: `App Build Draft already exists: ${payload.draft.id}` };
+    if (existsSync(localArtifactsDir)) return { ok: false, status: 409, error: `App Build Draft artifacts already exist: ${payload.draft.id}` };
+    if (existsSync(recoveredArtifactsDir)) {
+      mkdirSync(dirname(localArtifactsDir), { recursive: true });
+      renameSync(recoveredArtifactsDir, localArtifactsDir);
+      artifactsRestored = true;
+    }
     storage.restoreAppBuildDraft(payload.draft, payload.operations ?? []);
+  } catch (error) {
+    if (artifactsRestored && existsSync(localArtifactsDir)) renameSync(localArtifactsDir, recoveredArtifactsDir);
+    throw error;
   } finally {
     storage.close();
   }
@@ -4138,11 +4345,11 @@ export function preflightStoredAppBuildDraft(projectRoot: string, draft: AppBuil
   const blocks = collectBlockCandidates(projectRoot);
   if (draft.state === 'clarification_required') errors.push('Resolve required Build Frame clarifications before publication.');
   if (draft.pages.length === 0) errors.push('App Build Draft needs at least one page.');
-  for (const requirement of draft.requirements.filter((item) => item.required)) {
+  for (const requirement of draft.requirements.filter((item) => appBuildRequirementBlocksPublication(draft, item))) {
     const coverage = draft.coverage.find((item) => item.requirementId === requirement.id);
     if (!coverage || coverage.status !== 'covered') errors.push(`Required App question is unresolved: ${requirement.question}`);
   }
-  for (const task of draft.reviewTasks.filter((item) => item.status === 'open')) {
+  for (const task of draft.reviewTasks.filter((item) => appBuildReviewTaskBlocksPublication(draft, item))) {
     errors.push(`Review task is still open: ${task.message}`);
   }
   if (draft.baseApp) {
@@ -4183,6 +4390,23 @@ export function preflightStoredAppBuildDraft(projectRoot: string, draft: AppBuil
   const readiness = appPublicationReadiness(projectRoot, draft.pages, { settledPageIds });
   errors.push(...readiness.blockers.map((blocker) => blocker.message));
   return Array.from(new Set(errors));
+}
+
+function appBuildRequirementBlocksPublication(draft: AppBuildDraft, requirement: AppBuildDraft['requirements'][number]): boolean {
+  if (!requirement.required) return false;
+  if (draft.authoringMode === 'manual' && draft.frame.metrics.length === 0 && requirement.measures.length === 0) return false;
+  return true;
+}
+
+function appBuildReviewTaskBlocksPublication(draft: AppBuildDraft, task: AppBuildDraft['reviewTasks'][number]): boolean {
+  if (task.status !== 'open') return false;
+  if (task.sourceId && draft.sources.some((source) => source.id === task.sourceId)) return true;
+  if (task.tileId && draft.pages.some((page) => page.layout.items.some((tile) => tile.i === task.tileId))) return true;
+  if (task.pageId && draft.pages.some((page) => page.id === task.pageId)) return true;
+  // v2 AI plans previously persisted general guidance as open tasks without an
+  // attached source, page, or tile. Keep those reminders readable, but do not
+  // turn them into an unexplained hard publication gate.
+  return false;
 }
 
 export function markStoredAppBuildDraftPreflighted(projectRoot: string, draft: AppBuildDraft): AppBuildDraft {
@@ -5456,7 +5680,11 @@ function collectBlockCandidates(projectRoot: string): BlockCandidate[] {
           seen.add(filePath);
           const source = readFileSync(filePath, 'utf-8');
           const stat = statSyncSafe(filePath);
-          const name = matchString(source, /block\s+"([^"]+)"/) ?? entry.name.replace(/\.dql$/, '');
+          const name = matchString(source, /block\s+"([^"]+)"/);
+          // The App source picker is an executable-block catalog. Domain terms,
+          // skills, and other .dql context remain available to planning, but they
+          // must not appear as addable dashboard data sources.
+          if (!name) continue;
           const tags = matchArray(source, /tags\s*=\s*\[([^\]]*)\]/);
           blocks.push({
             id: name,

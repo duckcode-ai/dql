@@ -11,6 +11,8 @@ import {
   analyticalFailedRunFromAgentRun,
   boundedAgentMeaningSignal,
   applyDashboardFiltersToBlockExecution,
+  dashboardSemanticFiltersForTile,
+  collectDashboardFilterOptions,
   buildAgentPreviewSql,
   buildAppCopilotResearchAgentRequest,
   buildRowBoundedSql,
@@ -5305,6 +5307,54 @@ describe('discoverDbtProfileConnections', () => {
 });
 
 describe('prepareLocalExecution', () => {
+  it('returns bounded searchable choices only from server-approved page filter columns', () => {
+    const options = collectDashboardFilterOptions({
+      filters: [{ id: 'customer_name', label: 'Customer name', type: 'search', bindsTo: 'customer_name', optionSource: { mode: 'distinct_query', limit: 2 } }],
+      layout: {
+        kind: 'grid',
+        cols: 12,
+        rowHeight: 72,
+        items: [{
+          i: 'customers', x: 0, y: 0, w: 6, h: 4,
+          block: { blockId: 'customer_profile' },
+          viz: { type: 'table' },
+          filterBindings: [{ filter: 'customer_name', binding: 'customer_name', mode: 'predicate', capability: 'preflight_required' }],
+        }, {
+          i: 'unsupported', x: 6, y: 0, w: 6, h: 4,
+          block: { blockId: 'revenue' },
+          viz: { type: 'table' },
+          filterBindings: [{ filter: 'customer_name', capability: 'unsupported', unsupportedReason: 'Not available.' }],
+        }],
+      },
+    }, [{
+      tileId: 'customers',
+      status: 'ok',
+      result: {
+        columns: ['customer_name', 'lifetime_spend'],
+        rows: [
+          { customer_name: 'Zoe', lifetime_spend: 10 },
+          { customer_name: 'Amy', lifetime_spend: 20 },
+          { customer_name: 'Zoe', lifetime_spend: 30 },
+          { customer_name: 'Ben', lifetime_spend: 40 },
+        ],
+        rowCount: 4,
+      },
+      filterableColumns: [{ column: 'customer_name', predicateTarget: 'customer_name' }],
+    }, {
+      tileId: 'unsupported',
+      status: 'ok',
+      result: { columns: ['customer_name'], rows: [{ customer_name: 'Must not leak' }], rowCount: 1 },
+      filterableColumns: [{ column: 'customer_name', predicateTarget: 'customer_name' }],
+    }], 100);
+
+    expect(options).toEqual([{
+      filterId: 'customer_name',
+      values: ['Amy', 'Ben'],
+      truncated: true,
+      sourceTileIds: ['customers'],
+    }]);
+  });
+
   it('fills block parameters from dashboard filters before execution', () => {
     const variables = dashboardRuntimeVariables(
       {
@@ -5409,6 +5459,59 @@ describe('prepareLocalExecution', () => {
       binding: 'customer_type',
       mode: 'predicate',
     })]);
+  });
+
+  it('does not apply a dashboard filter to a component outside its explicit scope', () => {
+    const applied = applyDashboardFiltersToBlockExecution({
+      sql: 'SELECT customer_name, customer_type FROM marts.customers',
+      sqlParams: [],
+      variables: { customer_type: 'new' },
+      block: { name: 'Customer Profile', allowedFilters: ['customer_type'] },
+      dashboard: {
+        filters: [{ id: 'customer_type', type: 'select', bindsTo: 'customer_type', scope: { tileIds: ['customer-table'] } }],
+      },
+      tileId: 'revenue-chart',
+      tileFilterBindings: [{ filter: 'customer_type', binding: 'customer_type', mode: 'predicate' }],
+    });
+
+    expect(applied.sql).toBe('SELECT customer_name, customer_type FROM marts.customers');
+    expect(applied.appliedFilters).toEqual([]);
+    expect(applied.skippedFilters).toEqual([{ filter: 'customer_type', reason: 'component is outside this filter scope' }]);
+  });
+
+  it('maps App-wide filter values into only explicitly linked semantic components', () => {
+    const dashboard = {
+      filters: [{ id: 'segment', type: 'multiselect' as const, field: { name: 'customer_segment' }, scope: { tileIds: ['segment-chart'] } }],
+    };
+    const semantic = {
+      id: 'segment-revenue', provider: 'metricflow' as const, metrics: ['revenue'], dimensions: ['customer_segment'],
+      semanticModelRefs: ['orders'], definitionFingerprint: 'sha256:semantic',
+    };
+
+    expect(dashboardSemanticFiltersForTile(dashboard, {
+      i: 'segment-chart', semantic,
+      filterBindings: [{ filter: 'segment', binding: 'customer_segment', mode: 'semantic', capability: 'preflight_required' }],
+    }, { segment: ['Enterprise', 'SMB'] })).toEqual([{
+      dimension: 'customer_segment', operator: 'in', values: ['Enterprise', 'SMB'],
+    }]);
+    expect(dashboardSemanticFiltersForTile(dashboard, {
+      i: 'unlinked-chart', semantic,
+      filterBindings: [{ filter: 'segment', binding: 'customer_segment', mode: 'semantic', capability: 'preflight_required' }],
+    }, { segment: ['Enterprise'] })).toEqual([]);
+  });
+
+  it('treats a search control as a case-insensitive contains predicate', () => {
+    const applied = applyDashboardFiltersToBlockExecution({
+      sql: 'SELECT customer_name, customer_type FROM marts.customers',
+      sqlParams: [],
+      variables: { customer_name: 'aaron' },
+      block: { name: 'Customer Profile', allowedFilters: ['customer_name'] },
+      dashboard: { filters: [{ id: 'customer_name', type: 'search', bindsTo: 'customer_name' }] },
+      tileFilterBindings: [{ filter: 'customer_name', binding: 'customer_name', mode: 'predicate' }],
+    });
+
+    expect(applied.sql).toBe('SELECT * FROM (SELECT customer_name, customer_type FROM marts.customers) _dql_filter WHERE LOWER(_dql_filter.customer_name) LIKE LOWER($1)');
+    expect(applied.variables.__dashboard_filter_customer_name_contains).toBe('%aaron%');
   });
 
   it('rewrites SQL paths for file-backed notebook queries', () => {

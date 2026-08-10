@@ -1663,6 +1663,16 @@ export interface DashboardRunResponse {
   personaFingerprint: string;
   facts: DashboardStoryFact[];
   story: DashboardStoryBrief;
+  /**
+   * Bounded, ephemeral choices derived server-side from safe result columns in
+   * this settled run. They are never persisted into the App document.
+   */
+  filterOptions?: Array<{
+    filterId: string;
+    values: string[];
+    truncated: boolean;
+    sourceTileIds: string[];
+  }>;
   tiles: Array<{
     tileId: string;
     status: 'ok' | 'unauthorized' | 'error' | 'unresolved';
@@ -2056,6 +2066,7 @@ export interface AppStudioAiProposal {
   baseRevision: number;
   baseProposalHash: string;
   operations: AppStudioDraftOperation[];
+  defaultSelectedSourceIds?: string[];
   clarifications: NonNullable<AppStudioBuildDraft['frame']['clarificationQuestions']>;
   summary: {
     requirements: number;
@@ -2463,7 +2474,7 @@ function formatRequestError(res: Response, text: string): DqlApiError {
       status: res.status,
       code: typeof payload?.code === 'string' ? payload.code : undefined,
       recoverable: typeof payload?.recoverable === 'boolean' ? payload.recoverable : undefined,
-      details: payload?.details,
+      details: payload?.details ?? (validationErrors.length > 0 ? { errors: validationErrors, draft: payload?.draft } : undefined),
       nextActions: Array.isArray(payload?.nextActions)
         ? payload.nextActions.filter((item: unknown): item is string => typeof item === 'string')
         : undefined,

@@ -10976,9 +10976,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               if (missingModels.length) throw new Error(`Semantic definition changed; missing model(s): ${missingModels.join(', ')}`);
               const targetConnection = requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection);
               const tableMapping = await resolveSemanticTableMapping(executor, targetConnection, semanticLayer, projectRoot);
-              const activeFilters = Object.entries(dashboardVariables)
-                .filter(([field, value]) => item.semantic!.dimensions?.includes(field) && value !== undefined && value !== null && value !== '')
-                .map(([dimension, value]) => ({ dimension, operator: 'equals', values: Array.isArray(value) ? value.map(String) : [String(value)] }));
+              const activeFilters = dashboardSemanticFiltersForTile(loaded.dashboard, item, dashboardVariables);
               const staticFilters = (item.semantic.filters ?? []).map((filter) => ({
                 dimension: filter.field,
                 operator: filter.operator,
@@ -11166,6 +11164,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               variables: { ...(blockPlan?.variables ?? {}), ...dashboardVariables },
               block,
               dashboard: loaded.dashboard,
+              tileId: item.i,
               tileFilterBindings: item.filterBindings,
             });
             const prepared = prepareLocalExecution(
@@ -11334,6 +11333,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             return tile; // Unparseable SQL simply offers no filter candidates.
           }
         });
+        const filterOptions = collectDashboardFilterOptions(loaded.dashboard, tilesWithFilters);
         const snapshot = projectSnapshot();
         const filterFingerprint = createHash('sha256').update(JSON.stringify(dashboardVariables)).digest('hex');
         const resultFingerprint = createHash('sha256').update(JSON.stringify(tiles.map((tile) => ({ tileId: tile.tileId, status: tile.status, result: tile.result })))).digest('hex');
@@ -11384,6 +11384,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           filterFingerprint,
           resultFingerprint,
           personaFingerprint,
+          filterOptions,
           tiles: tilesWithFilters,
           facts: storyResult.facts,
           story: storyResult.story,
@@ -21357,6 +21358,125 @@ export function dashboardRuntimeVariables(
   return { ...variables, ...overrides };
 }
 
+export interface DashboardFilterOptionSet {
+  filterId: string;
+  values: string[];
+  truncated: boolean;
+  sourceTileIds: string[];
+}
+
+/** Resolve semantic filters only through the component's explicit mapping. */
+export function dashboardSemanticFiltersForTile(
+  dashboard: Pick<DashboardDocument, 'filters'>,
+  item: Pick<DashboardGridItem, 'i' | 'semantic' | 'filterBindings'>,
+  dashboardValues: Record<string, unknown>,
+): Array<{ dimension: string; operator: string; values: string[] }> {
+  if (!item.semantic) return [];
+  return (dashboard.filters ?? []).flatMap((filter) => {
+    if (filter.scope?.tileIds && !filter.scope.tileIds.includes(item.i)) return [];
+    const binding = item.filterBindings?.find((candidate) =>
+      candidate.filter === filter.id
+      && candidate.capability !== 'unsupported'
+      && !candidate.unsupportedReason,
+    );
+    const dimension = binding?.binding;
+    const value = dashboardValues[filter.id];
+    if (!dimension || !item.semantic?.dimensions?.includes(dimension) || isEmptyDashboardFilterValue(value)) return [];
+    const values = Array.isArray(value) ? value.map(String) : [String(value)];
+    return [{ dimension, operator: values.length > 1 ? 'in' : 'equals', values }];
+  });
+}
+
+type DashboardFilterOptionTile = {
+  tileId: string;
+  status?: string;
+  result?: unknown;
+  filterableColumns?: Array<{ column: string; predicateTarget: string }>;
+};
+
+/**
+ * Return bounded, run-scoped filter choices only from columns the server has
+ * already proven safe for predicate filtering. These sampled labels are sent
+ * to the browser for a searchable control and are never written to `.dqld`.
+ */
+export function collectDashboardFilterOptions(
+  dashboard: Pick<DashboardDocument, 'filters' | 'layout'>,
+  tiles: DashboardFilterOptionTile[],
+  defaultLimit = 100,
+): DashboardFilterOptionSet[] {
+  const items = new Map(dashboard.layout.items.map((item) => [item.i, item]));
+  const optionSets: DashboardFilterOptionSet[] = [];
+
+  for (const filter of dashboard.filters ?? []) {
+    if (filter.type === 'boolean' || filter.type === 'daterange' || filter.type === 'date' || filter.type === 'relative_date' || filter.type === 'number_range') continue;
+    const limit = Math.max(1, Math.min(100, filter.optionSource?.limit ?? defaultLimit));
+    const values = new Set<string>();
+    const sourceTileIds: string[] = [];
+    let truncated = false;
+
+    for (const tile of tiles) {
+      const result = dashboardFilterOptionResult(tile.result);
+      if (tile.status !== 'ok' || !result?.rows.length) continue;
+      const item = items.get(tile.tileId);
+      const binding = item?.filterBindings?.find((candidate) => candidate.filter === filter.id && candidate.capability !== 'unsupported');
+      if (!binding) continue;
+      const requestedColumn = dashboardOutputColumn(binding?.binding ?? filter.field?.name ?? filter.bindsTo ?? filter.id);
+      if (!requestedColumn) continue;
+      const safeColumn = tile.filterableColumns?.find((candidate) => normalizeDashboardOptionColumn(candidate.column) === normalizeDashboardOptionColumn(requestedColumn));
+      if (!safeColumn) continue;
+      const resultColumn = result.columns.find((column) => normalizeDashboardOptionColumn(column) === normalizeDashboardOptionColumn(safeColumn.column));
+      if (!resultColumn) continue;
+      sourceTileIds.push(tile.tileId);
+      for (const row of result.rows) {
+        const value = dashboardFilterOptionValue(row[resultColumn]);
+        if (value !== null) values.add(value);
+      }
+      if (result.truncated || (result.rowCount ?? result.rows.length) > result.rows.length) truncated = true;
+    }
+
+    if (values.size === 0) continue;
+    const sorted = Array.from(values).sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }));
+    optionSets.push({
+      filterId: filter.id,
+      values: sorted.slice(0, limit),
+      truncated: truncated || sorted.length > limit,
+      sourceTileIds: Array.from(new Set(sourceTileIds)),
+    });
+  }
+
+  return optionSets;
+}
+
+function dashboardFilterOptionResult(value: unknown): {
+  columns: string[];
+  rows: Record<string, unknown>[];
+  rowCount?: number;
+  truncated?: boolean;
+} | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (!Array.isArray(record.columns) || !record.columns.every((column) => typeof column === 'string')) return null;
+  if (!Array.isArray(record.rows) || !record.rows.every((row) => Boolean(row) && typeof row === 'object' && !Array.isArray(row))) return null;
+  return {
+    columns: record.columns as string[],
+    rows: record.rows as Record<string, unknown>[],
+    ...(typeof record.rowCount === 'number' ? { rowCount: record.rowCount } : {}),
+    ...(typeof record.truncated === 'boolean' ? { truncated: record.truncated } : {}),
+  };
+}
+
+function normalizeDashboardOptionColumn(value: string): string {
+  return value.replace(/[`"[\]]/g, '').trim().split('.').filter(Boolean).at(-1)?.toLowerCase() ?? '';
+}
+
+function dashboardFilterOptionValue(value: unknown): string | null {
+  if (typeof value === 'string') return value.trim() ? value : null;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'boolean') return String(value);
+  if (value instanceof Date && Number.isFinite(value.getTime())) return value.toISOString();
+  return null;
+}
+
 /**
  * Resolve only declared tile parameter bindings.  Dashboard filters remain
  * values; they never become SQL identifiers or an implicit name-based binding.
@@ -21400,6 +21520,7 @@ export function applyDashboardFiltersToBlockExecution(input: {
   variables: Record<string, unknown>;
   block: Pick<ManifestBlock, 'name' | 'allowedFilters' | 'filterBindings' | 'parameterPolicy'>;
   dashboard: Pick<DashboardDocument, 'filters'>;
+  tileId?: string;
   tileFilterBindings?: DashboardGridItem['filterBindings'];
 }): DashboardFilterApplicationResult {
   const variables = { ...input.variables };
@@ -21410,6 +21531,10 @@ export function applyDashboardFiltersToBlockExecution(input: {
   let nextPosition = sqlParams.reduce((max, param) => Math.max(max, param.position), 0);
 
   for (const filter of input.dashboard.filters ?? []) {
+    if (filter.scope?.tileIds && input.tileId && !filter.scope.tileIds.includes(input.tileId)) {
+      skippedFilters.push({ filter: filter.id, reason: 'component is outside this filter scope' });
+      continue;
+    }
     const value = dashboardFilterValue(filter, variables);
     if (isEmptyDashboardFilterValue(value)) {
       skippedFilters.push({ filter: filter.id, reason: 'no value supplied' });
@@ -21623,6 +21748,12 @@ function buildDashboardFilterPredicate(input: {
   if (input.filterType === 'daterange') return null;
   const values = Array.isArray(input.value) ? input.value.filter((item) => !isEmptyDashboardFilterValue(item)) : [input.value];
   if (values.length === 0) return null;
+  if (input.filterType === 'search' && values.length === 1) {
+    const search = String(values[0] ?? '').trim();
+    if (!search) return null;
+    const param = addDashboardFilterParam(input, 'contains', `%${search}%`);
+    return `LOWER(${input.expression}) LIKE LOWER($${param.position})`;
+  }
   if (values.length === 1) {
     const param = addDashboardFilterParam(input, 'value', values[0]);
     return `${input.expression} = $${param.position}`;
