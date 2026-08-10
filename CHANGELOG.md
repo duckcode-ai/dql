@@ -6,6 +6,53 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.13.2 - 2026-08-10
+
+### Governed App Studio authoring, filters, and publication
+
+This patch completes the unified local App Studio workflow for manual and AI
+authoring. Ask AI, source selection, dashboard filters, automatic previews, and
+Project publication now share the same guarded `AppBuildDraft` lifecycle.
+
+### Added
+
+- **Governed dashboard filters.** Authors can select declared block filters,
+  semantic dimensions, and safe settled-result columns, choose App or page
+  scope, and explicitly include every compatible tile. Date controls show
+  ephemeral data availability before save, and all linked tiles refresh from
+  one filter change.
+- **Ask AI to App Studio.** Certified Ask results retain their source identity
+  and fingerprints, while exploratory SQL is stored as referenced local review
+  DQL. Both open the exact editable App draft and page without writing governed
+  Project source.
+- **Direct publication fixes.** The publish review groups blockers and places a
+  corrective action beside each one. The final Project write consumes the
+  reviewed receipt and remains atomically revalidated server-side.
+
+### Fixed
+
+- **App navigation and draft continuity.** Back returns directly to the unified
+  Apps library, clears stale App selection, and no longer opens the retired
+  empty workspace. Ask, global Copilot, and App Copilot additions refresh the
+  same Studio draft.
+- **Filter compatibility and date feedback.** Certified computed result
+  dimensions are available when safe, measures remain excluded, unsupported
+  tiles explain why they are unaffected, and empty date fields cannot create a
+  misleading filter.
+- **Preview and review flow.** Adding a governed view runs the page preview
+  automatically, stale responses are ignored, review-required local analysis
+  has a direct remove/replace path, and repeated readiness-check loops are
+  eliminated.
+
+### Verification
+
+- The synchronized release dry run passed all 22 workspace builds, the full
+  workspace test graph, and packed all 19 npm packages.
+- All 19 npm packages report `version=1.13.2` and
+  `dist-tags.latest=1.13.2`.
+- Fresh project-local and global CLI installs both report `dql 1.13.2`, and
+  `create-dql-app@1.13.2 --help` resolves successfully.
+
 ## v1.13.1 - 2026-08-04
 
 ### Recoverable Block Studio editing and governed context authoring
