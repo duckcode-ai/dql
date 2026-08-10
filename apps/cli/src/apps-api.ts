@@ -176,6 +176,7 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
         appId?: string; baseAppId?: string; name?: string; goal?: string; audience?: string; domain?: string;
         authoringMode?: 'ai' | 'manual'; sourcePolicy?: 'governed_only' | 'include_review_required';
         template?: 'executive_brief' | 'operational_dashboard' | 'investigation' | 'blank';
+        entrypoint?: 'studio' | 'ask';
       }>(req);
       const draft = createStoredAppBuildDraft(projectRoot, body);
       sendJson(res, 201, { ok: true, draft });
@@ -246,6 +247,20 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
     return true;
   }
 
+  const askResultMatch = path.match(/^\/api\/app-builds\/([^/]+)\/ask-results$/);
+  if (askResultMatch && req.method === 'POST') {
+    try {
+      const id = decodeURIComponent(askResultMatch[1]);
+      const body = await readJson<AppBuildAskResultInput>(req);
+      const result = addAskResultToAppBuildDraft(projectRoot, id, body);
+      sendJson(res, result.deduped ? 200 : 201, result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      sendJson(res, message.includes('APP_BUILD_') ? 409 : 400, { ok: false, error: message });
+    }
+    return true;
+  }
+
   const draftAiProposalMatch = path.match(/^\/api\/app-builds\/([^/]+)\/ai-proposals$/);
   if (draftAiProposalMatch && req.method === 'POST') {
     try {
@@ -289,29 +304,7 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
       sendJson(res, 409, { ok: false, error: 'APP_BUILD_REVISION_CONFLICT: refresh before preflight.' });
       return true;
     }
-    const errors = preflightStoredAppBuildDraft(projectRoot, current);
-    const analysisPages = current.pages
-      .map((page) => ({ pageId: page.id, tileIds: page.layout.items.filter((tile) => !tile.text && !tile.aiPin).map((tile) => tile.i) }))
-      .filter((page) => page.tileIds.length > 0);
-    const receipts = current.previewReceipts ?? (current.previewReceipt ? [current.previewReceipt] : []);
-    if (analysisPages.length > 0 && !ctx.verifyAppBuildPreview) {
-      errors.push('The runtime cannot verify the settled App preview receipts.');
-    }
-    for (const page of analysisPages) {
-      const receipt = receipts.find((candidate) => candidate.pageId === page.pageId);
-      if (!receipt || !ctx.verifyAppBuildPreview) continue;
-      const verified = ctx.verifyAppBuildPreview({
-        runId: receipt.id,
-        draftId: current.id,
-        dashboardId: page.pageId,
-        tileIds: page.tileIds,
-      });
-      if (!verified.ok
-        || verified.snapshotId !== receipt.snapshotId
-        || verified.resultFingerprint !== receipt.resultFingerprint) {
-        errors.push(verified.ok ? `The saved preview receipt for ${page.pageId} no longer matches the settled run.` : verified.error);
-      }
-    }
+    const errors = preflightAppBuildRequestErrors(projectRoot, current, ctx.verifyAppBuildPreview);
     if (errors.length) {
       sendJson(res, 400, {
         ok: false,
@@ -341,7 +334,25 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
         sendJson(res, 409, { ok: false, error: 'APP_BUILD_REVISION_CONFLICT: refresh the Build Frame before committing.' });
         return true;
       }
-      const result = publishStoredAppBuildDraft(projectRoot, current);
+      const errors = preflightAppBuildRequestErrors(projectRoot, current, ctx.verifyAppBuildPreview);
+      if (errors.length) {
+        sendJson(res, 400, {
+          ok: false,
+          code: 'APP_BUILD_NOT_READY',
+          message: 'This App is not ready to publish yet.',
+          draft: current,
+          errors,
+          details: { draft: current, errors },
+        });
+        return true;
+      }
+      // The final confirmation consumes the exact receipt the user reviewed.
+      // Compatibility callers that arrive without one are preflighted once in
+      // this same request so they cannot enter a client-side recheck loop.
+      const prepared = hasCurrentAppBuildPreflightReceipt(current)
+        ? current
+        : markStoredAppBuildDraftPreflighted(projectRoot, current);
+      const result = publishStoredAppBuildDraft(projectRoot, prepared);
       await refreshGeneratedMetadata(projectRoot);
       sendJson(res, 201, { ...result, compatibilityRoute: buildMatch[2] === 'commit' });
     } catch (err) {
@@ -1626,6 +1637,8 @@ interface BlockCandidate {
   chartType?: string;
   /** Stable App-filter ids declared by block filter/parameter bindings. */
   filterIds: string[];
+  /** Declared governed result dimensions that may be linked as App filters. */
+  dimensionIds: string[];
   score: number;
   reasons: string[];
 }
@@ -4040,6 +4053,10 @@ function appPublicationReadiness(
         for (const filter of dashboard.filters ?? []) {
           if (filter.scope?.tileIds && !filter.scope.tileIds.includes(item.i)) continue;
           const binding = item.filterBindings?.find((candidate) => candidate.filter === filter.id);
+          // An explicit unsupported binding is a governed exclusion, not a
+          // missing binding. Studio shows the reason on the affected tile and
+          // the filter deliberately leaves that tile unchanged.
+          if (binding?.capability === 'unsupported' && binding.unsupportedReason?.trim()) continue;
           const settled = options.settledPageIds?.has(dashboard.id) ?? false;
           if (!binding || (!binding.binding && binding.mode !== 'parameter') || (binding.capability === 'preflight_required' && !settled)) {
             blockers.push({
@@ -4072,6 +4089,7 @@ export function createStoredAppBuildDraft(
     appId?: string; baseAppId?: string; name?: string; goal?: string; audience?: string; domain?: string;
     authoringMode?: 'ai' | 'manual'; sourcePolicy?: 'governed_only' | 'include_review_required';
     template?: 'executive_brief' | 'operational_dashboard' | 'investigation' | 'blank';
+    entrypoint?: 'studio' | 'ask';
   },
 ): AppBuildDraft {
   const baseAppId = cleanString(input.baseAppId);
@@ -4121,7 +4139,7 @@ export function createStoredAppBuildDraft(
       goal: cleanString(input.goal) || `Create ${name}`,
       audience: cleanString(input.audience) || base?.app.audience || 'stakeholders',
       metrics: [], dimensions: [], filters: [], desiredOutput: 'One responsive analytical page',
-      clarificationQuestions: input.authoringMode === 'manual' || base ? [] : [{
+      clarificationQuestions: input.authoringMode === 'manual' || base || input.entrypoint === 'ask' ? [] : [{
         id: 'metric',
         question: 'Which governed business metric should lead this App?',
         choices: [
@@ -4136,6 +4154,191 @@ export function createStoredAppBuildDraft(
   });
   writeStoredAppBuildDraft(projectRoot, draft);
   return draft;
+}
+
+export interface AppBuildAskResultInput {
+  expectedRevision: number;
+  expectedProposalHash: string;
+  pageId?: string;
+  title?: string;
+  question?: string;
+  answer?: string;
+  certifiedBlockId?: string;
+  dqlSource?: string;
+  sql?: string;
+  visualization?: string;
+}
+
+/**
+ * Adds an Ask result to the same local AppBuildDraft used by manual and AI
+ * authoring. Certified answers retain their block identity. Exploratory DQL is
+ * materialized as an app-scoped local artifact and remains review-required;
+ * SQL is never embedded in the dashboard JSON or written to Project source.
+ */
+export function addAskResultToAppBuildDraft(
+  projectRoot: string,
+  draftId: string,
+  input: AppBuildAskResultInput,
+): { ok: true; draft: AppBuildDraft; pageId: string; tileId: string; deduped: boolean } {
+  const draft = loadStoredAppBuildDraft(projectRoot, draftId);
+  if (!draft) throw new Error('App Build Draft not found.');
+  if (input.expectedRevision !== draft.revision || input.expectedProposalHash !== draft.proposalHash) {
+    throw new Error('APP_BUILD_REVISION_CONFLICT: refresh the local draft before adding this Ask result.');
+  }
+  const page = draft.pages.find((candidate) => candidate.id === cleanString(input.pageId)) ?? draft.pages[0];
+  if (!page) throw new Error('The local App draft needs a page before adding an Ask result.');
+
+  const question = cleanString(input.question).slice(0, 500);
+  const answer = cleanString(input.answer).slice(0, 40_000);
+  const title = (cleanString(input.title) || titleForGapQuestion(question || 'Ask result')).slice(0, 120);
+  const requestedBlockId = cleanString(input.certifiedBlockId);
+  const dqlSource = cleanString(input.dqlSource);
+  const sql = cleanString(input.sql);
+  if (dqlSource.length > 400_000 || sql.length > 200_000) throw new Error('Ask result source exceeds the local App artifact limit.');
+  const sourceIdentity = requestedBlockId || dqlSource || sql || `${question}\n${answer}`;
+  if (!sourceIdentity) throw new Error('The Ask result did not include reusable evidence.');
+  const identity = createHash('sha256').update(sourceIdentity).digest('hex').slice(0, 16);
+  const tileId = `ask-${identity}`;
+  if (draft.pages.some((candidate) => candidate.layout.items.some((tile) => tile.i === tileId))) {
+    return { ok: true, draft, pageId: page.id, tileId, deduped: true };
+  }
+
+  const nextY = page.layout.items.reduce((max, tile) => Math.max(max, tile.y + tile.h), 0);
+  const viz = normalizeGeneratedViz(input.visualization) as DashboardGridItem['viz']['type'];
+  const operations: AppBuildDraftOperation[] = [];
+  let artifactPath: string | undefined;
+  let artifactWasCreated = false;
+  let tile: DashboardGridItem;
+
+  if (requestedBlockId) {
+    const block = collectBlockCandidates(projectRoot).find((candidate) => candidate.status === 'certified'
+      && (candidate.id === requestedBlockId || candidate.name === requestedBlockId || candidate.path === requestedBlockId));
+    if (!block) throw new Error(`Certified block "${requestedBlockId}" is no longer available.`);
+    const sourceId = `block:${block.id}`;
+    operations.push({
+      type: 'upsert_source',
+      source: {
+        id: sourceId,
+        kind: 'certified_block',
+        sourceRef: block.id,
+        sourceFingerprint: block.fingerprint,
+        trustState: 'certified',
+        reviewStatus: 'not_required',
+      },
+    });
+    tile = {
+      i: tileId, x: 0, y: nextY, w: 6, h: 4,
+      block: { blockId: block.id },
+      viz: { type: viz === 'table' ? normalizeVizType(block.chartType) : viz },
+      title,
+      sourceClass: 'certified_block',
+      filterBindings: block.filterIds.map((filter) => ({ filter, binding: filter, mode: 'predicate', capability: 'preflight_required' })),
+      sourceEvidence: [{ source: block.id, reason: question ? `Ask answer for: ${question}` : 'Added from a certified Ask answer.', kind: 'certified_block', trustState: 'certified' }],
+      review: { status: 'not_required', sourceFingerprint: block.fingerprint },
+      trustState: 'certified',
+      reviewStatus: 'certified',
+    };
+  } else if (dqlSource || sql) {
+    const sourceId = `review-dql:ask-${identity}`;
+    const sourceRef = `analysis/ask-${identity}.dql`;
+    const source = dqlSource || [
+      `block "ask_${identity}" {`,
+      `  domain = "${escapeDqlString(page.metadata.domain ?? 'general')}"`,
+      '  type = "custom"',
+      '  status = "review"',
+      '  owner = "local-ask"',
+      `  description = "${escapeDqlString(answer || question || title)}"`,
+      question ? `  llmContext = "${escapeDqlString(`Ask result: ${question}`)}"` : '',
+      '  caveats = ["Ask-generated local analysis. Validate joins, grain, filters, and interpretation before promotion."]',
+      '  tags = ["app-scoped", "ask-generated", "needs-review"]',
+      '',
+      '  query = """',
+      sql,
+      '  """',
+      '',
+      '  visualization {',
+      `    chart = "${escapeDqlString(normalizeGeneratedViz(input.visualization))}"`,
+      '  }',
+      '}',
+      '',
+    ].filter(Boolean).join('\n');
+    const fingerprint = `sha256:${createHash('sha256').update(source).digest('hex')}`;
+    artifactPath = join(projectRoot, '.dql', 'local', 'app-builds', draft.id, sourceRef);
+    operations.push(
+      ...(draft.sourcePolicy === 'include_review_required'
+        ? []
+        : [{ type: 'set_source_policy' as const, sourcePolicy: 'include_review_required' as const }]),
+      {
+        type: 'upsert_source',
+        source: {
+          id: sourceId,
+          kind: 'review_dql',
+          sourceRef,
+          qualifiedIdentity: title,
+          sourceFingerprint: fingerprint,
+          trustState: 'review_required',
+          reviewStatus: 'required',
+        },
+      },
+      {
+        type: 'set_review_task',
+        task: {
+          id: `review-ask-${identity}`,
+          message: `Validate the joins, grain, filters, and business interpretation for ${title}.`,
+          status: 'open',
+          sourceId,
+          pageId: page.id,
+          tileId,
+        },
+      },
+    );
+    tile = {
+      i: tileId, x: 0, y: nextY, w: 6, h: 4,
+      draftAnalysis: { ref: sourceRef, artifactFingerprint: fingerprint },
+      viz: { type: viz },
+      title,
+      sourceClass: 'exploratory_analysis',
+      sourceEvidence: [{ source: sourceRef, reason: question ? `Ask generated this private analysis for: ${question}` : 'Ask generated this private analysis.', kind: 'review_dql', trustState: 'review_required' }],
+      review: { status: 'required', sourceFingerprint: fingerprint },
+      trustState: 'review_required',
+      reviewStatus: 'review_required',
+    };
+    if (!existsSync(artifactPath)) {
+      mkdirSync(dirname(artifactPath), { recursive: true });
+      writeFileSync(artifactPath, source, 'utf-8');
+      artifactWasCreated = true;
+    }
+  } else {
+    const sourceId = `text:ask-${identity}`;
+    operations.push(
+      ...(draft.sourcePolicy === 'include_review_required'
+        ? []
+        : [{ type: 'set_source_policy' as const, sourcePolicy: 'include_review_required' as const }]),
+      { type: 'upsert_source', source: { id: sourceId, kind: 'text', sourceRef: `ask:${identity}`, trustState: 'review_required', reviewStatus: 'required' } },
+      { type: 'set_review_task', task: { id: `review-ask-${identity}`, message: `Review the Ask narrative ${title} before publication.`, status: 'open', sourceId, pageId: page.id, tileId } },
+    );
+    tile = {
+      i: tileId, x: 0, y: nextY, w: 12, h: 2,
+      text: { markdown: answer || question },
+      viz: { type: 'text' },
+      title,
+      sourceClass: 'narrative',
+      sourceEvidence: [{ source: `ask:${identity}`, reason: 'Saved from Ask as an editable review-required narrative.', kind: 'text', trustState: 'review_required' }],
+      review: { status: 'required' },
+      trustState: 'review_required',
+      reviewStatus: 'review_required',
+    };
+  }
+
+  operations.push({ type: 'add_tile', pageId: page.id, tile });
+  try {
+    const next = applyAppBuildDraftOperations(draft, draft.revision, operations);
+    writeStoredAppBuildDraft(projectRoot, next, { expectedRevision: draft.revision, operations });
+    return { ok: true, draft: next, pageId: page.id, tileId, deduped: false };
+  } catch (error) {
+    if (artifactWasCreated && artifactPath) rmSync(artifactPath, { force: true });
+    throw error;
+  }
 }
 
 function applyAppStudioTemplate(
@@ -4392,6 +4595,42 @@ export function preflightStoredAppBuildDraft(projectRoot: string, draft: AppBuil
   return Array.from(new Set(errors));
 }
 
+function preflightAppBuildRequestErrors(
+  projectRoot: string,
+  draft: AppBuildDraft,
+  verifyPreview: Ctx['verifyAppBuildPreview'],
+): string[] {
+  const errors = preflightStoredAppBuildDraft(projectRoot, draft);
+  const analysisPages = draft.pages
+    .map((page) => ({
+      pageId: page.id,
+      tileIds: page.layout.items.filter((tile) => !tile.text && !tile.aiPin).map((tile) => tile.i),
+    }))
+    .filter((page) => page.tileIds.length > 0);
+  const receipts = draft.previewReceipts ?? (draft.previewReceipt ? [draft.previewReceipt] : []);
+  if (analysisPages.length > 0 && !verifyPreview) {
+    errors.push('The runtime cannot verify the settled App preview receipts.');
+  }
+  for (const page of analysisPages) {
+    const receipt = receipts.find((candidate) => candidate.pageId === page.pageId);
+    if (!receipt || !verifyPreview) continue;
+    const verified = verifyPreview({
+      runId: receipt.id,
+      draftId: draft.id,
+      dashboardId: page.pageId,
+      tileIds: page.tileIds,
+    });
+    if (!verified.ok
+      || verified.snapshotId !== receipt.snapshotId
+      || verified.resultFingerprint !== receipt.resultFingerprint) {
+      errors.push(verified.ok
+        ? `The saved preview receipt for ${page.pageId} no longer matches the settled run.`
+        : verified.error);
+    }
+  }
+  return Array.from(new Set(errors));
+}
+
 function appBuildRequirementBlocksPublication(draft: AppBuildDraft, requirement: AppBuildDraft['requirements'][number]): boolean {
   if (!requirement.required) return false;
   if (draft.authoringMode === 'manual' && draft.frame.metrics.length === 0 && requirement.measures.length === 0) return false;
@@ -4407,6 +4646,13 @@ function appBuildReviewTaskBlocksPublication(draft: AppBuildDraft, task: AppBuil
   // attached source, page, or tile. Keep those reminders readable, but do not
   // turn them into an unexplained hard publication gate.
   return false;
+}
+
+function hasCurrentAppBuildPreflightReceipt(draft: AppBuildDraft): boolean {
+  return Boolean(draft.preflightReceipt
+    && draft.preflightReceipt.revision === draft.revision
+    && draft.preflightReceipt.proposalHash === draft.proposalHash
+    && draft.preflightReceipt.sourceFingerprint === appBuildSourceFingerprint(draft));
 }
 
 export function markStoredAppBuildDraftPreflighted(projectRoot: string, draft: AppBuildDraft): AppBuildDraft {
@@ -4450,10 +4696,7 @@ export function publishStoredAppBuildDraft(
 ): { ok: true; app: ReturnType<typeof collectAppsList>[number]; draft: AppBuildDraft; paths: string[] } {
   const errors = preflightStoredAppBuildDraft(projectRoot, draft);
   if (errors.length) throw new Error(`App Build preflight failed: ${errors.join(' ')}`);
-  if (!draft.preflightReceipt
-    || draft.preflightReceipt.revision !== draft.revision
-    || draft.preflightReceipt.proposalHash !== draft.proposalHash
-    || draft.preflightReceipt.sourceFingerprint !== appBuildSourceFingerprint(draft)) {
+  if (!hasCurrentAppBuildPreflightReceipt(draft)) {
     throw new Error('App Build Draft needs a current preflight receipt before publication.');
   }
   const destination = resolveAppPackageDir(projectRoot, draft.appId);
@@ -5700,6 +5943,7 @@ function collectBlockCandidates(projectRoot: string): BlockCandidate[] {
             llmContext: matchString(source, /llmContext\s*=\s*"((?:[^"\\]|\\.)*)"/),
             chartType: matchString(source, /chart\s*=\s*"([^"]+)"/) ?? matchString(source, /chart\.(\w+)\s*\(/) ?? undefined,
             filterIds: declaredAppFilterIds(source),
+            dimensionIds: declaredAppDimensionIds(source),
             score: 0,
             reasons: [],
           });
@@ -5733,6 +5977,10 @@ function declaredAppFilterIds(source: string): string[] {
     ...Array.from(filterSection.matchAll(/^\s*([A-Za-z_][\w-]*)\s*=\s*"[^"]+"/gm)).map((match) => match[1]),
     ...Array.from(parameterSection.matchAll(/^\s*([A-Za-z_][\w-]*)\s*=\s*"(?:dynamic|optional|business)"/gm)).map((match) => match[1]),
   ]);
+}
+
+function declaredAppDimensionIds(source: string): string[] {
+  return unique(matchArray(source, /dimensions\s*=\s*\[([^\]]*)\]/));
 }
 
 function readdirSyncSafe(dir: string): Dirent[] {
@@ -6489,6 +6737,7 @@ function resolveSelectedBlock(
         llmContext: matchString(source, /llmContext\s*=\s*"((?:[^"\\]|\\.)*)"/),
         chartType: matchString(source, /chart\s*=\s*"([^"]+)"/) ?? undefined,
         filterIds: declaredAppFilterIds(source),
+        dimensionIds: declaredAppDimensionIds(source),
         score: 0,
         reasons: [],
       };

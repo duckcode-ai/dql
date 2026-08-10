@@ -178,6 +178,37 @@ export function filterableResultColumns(sql: string, resultColumns: string[], di
   return out;
 }
 
+/**
+ * Filter fields for an App tile whose query is executed behind an outer result
+ * wrapper. Certified blocks may explicitly declare dimensions that are safe to
+ * filter after aggregation (for example `month` from `date_trunc(...) AS
+ * month`). The generic SQL analyser cannot prove computed aliases, so merge
+ * only declared dimensions that actually exist in the returned result. Measure
+ * aliases remain excluded.
+ */
+export function dashboardFilterableResultColumns(
+  sql: string,
+  resultColumns: string[],
+  declaredDimensions: string[] = [],
+  dialect = 'duckdb',
+): SqlFilterableColumn[] {
+  const proven = filterableResultColumns(sql, resultColumns, dialect)
+    .map((candidate) => ({ ...candidate, predicateTarget: candidate.column }));
+  const byNormalizedResult = new Map(resultColumns.map((column) => [normalizeResultColumn(column), column]));
+  const merged = new Map(proven.map((candidate) => [normalizeResultColumn(candidate.column), candidate]));
+  for (const dimension of declaredDimensions) {
+    const column = byNormalizedResult.get(normalizeResultColumn(dimension));
+    if (!column) continue;
+    merged.set(normalizeResultColumn(column), { column, predicateTarget: column });
+  }
+  return [...merged.values()];
+}
+
+function normalizeResultColumn(value: string): string {
+  const parts = value.trim().toLowerCase().replace(/["`\[\]]/g, '').split('.');
+  return (parts[parts.length - 1] ?? '').replace(/[^a-z0-9]/g, '');
+}
+
 /** Render a DQL parameter default for a value of unknown type. */
 function dqlParameterDefault(value: unknown): string {
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);

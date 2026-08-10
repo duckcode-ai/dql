@@ -1672,6 +1672,8 @@ export interface DashboardRunResponse {
     values: string[];
     truncated: boolean;
     sourceTileIds: string[];
+    valueCount?: number;
+    dateRange?: { min: string; max: string };
   }>;
   tiles: Array<{
     tileId: string;
@@ -1748,6 +1750,8 @@ export interface AppBlockRecommendation {
   llmContext?: string | null;
   chartType?: string;
   filterIds?: string[];
+  /** Governed result dimensions that may be linked to App dashboard filters. */
+  dimensionIds?: string[];
   score: number;
   reasons: string[];
 }
@@ -5852,6 +5856,7 @@ export const api = {
     authoringMode: 'ai' | 'manual';
     sourcePolicy?: 'governed_only' | 'include_review_required';
     template?: AppStudioBuildDraft['template'];
+    entrypoint?: 'studio' | 'ask';
   }): Promise<{ ok: true; draft: AppStudioBuildDraft }> {
     return request('/api/app-builds', { method: 'POST', body: JSON.stringify(input) });
   },
@@ -5874,6 +5879,24 @@ export const api = {
     return request(`/api/app-builds/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       body: JSON.stringify({ expectedRevision, expectedProposalHash, operations }),
+    });
+  },
+
+  async addAskResultToAppBuild(id: string, input: {
+    expectedRevision: number;
+    expectedProposalHash: string;
+    pageId?: string;
+    title?: string;
+    question?: string;
+    answer?: string;
+    certifiedBlockId?: string;
+    dqlSource?: string;
+    sql?: string;
+    visualization?: string;
+  }): Promise<{ ok: true; draft: AppStudioBuildDraft; pageId: string; tileId: string; deduped: boolean }> {
+    return request(`/api/app-builds/${encodeURIComponent(id)}/ask-results`, {
+      method: 'POST',
+      body: JSON.stringify(input),
     });
   },
 

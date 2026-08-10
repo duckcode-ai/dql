@@ -4,6 +4,7 @@ import {
   blockingPublicationReviewTasks,
   localPublicationSteps,
   pagesNeedingSettledPreview,
+  publicationIssueSummaries,
   unresolvedPublicationRequirements,
 } from './app-studio-publish-readiness';
 
@@ -63,5 +64,11 @@ describe('App Studio publication readiness (API-013, UI-022)', () => {
     draft.frame.metrics = [];
     draft.requirements[0].measures = [];
     expect(unresolvedPublicationRequirements(draft)).toEqual([]);
+  });
+
+  it('does not duplicate a review-required DQL source as a changed-source action (API-013)', () => {
+    expect(publicationIssueSummaries([
+      'overview/ask-result references app-scoped exploratory DQL; promote it to governed semantic logic or a certified block first.',
+    ])).toEqual([]);
   });
 });

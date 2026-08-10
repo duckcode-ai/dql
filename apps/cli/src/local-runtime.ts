@@ -334,7 +334,7 @@ import {
   withAnalyticalErrorOriginSync,
   type AnalyticalErrorStage,
 } from '@duckcodeailabs/dql-agent';
-import { addSqlResultFilter, filterableResultColumns, replaceBlockStudioSql } from './sql-result-filter.js';
+import { addSqlResultFilter, dashboardFilterableResultColumns, filterableResultColumns, replaceBlockStudioSql } from './sql-result-filter.js';
 import { gatherProposeEnrichment } from './propose-enrich.js';
 import {
   handleAppsApi,
@@ -10798,8 +10798,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             let draftTargetConnection: ConnectionConfig | undefined;
             let draftRepairPlan: ReturnType<typeof buildExecutionPlan> | undefined;
             try {
-              const draftPath = join(loaded.appDir, item.draftAnalysis.ref);
-              draftAppRelativePath = relative(loaded.appDir, draftPath);
+              const localDraftPath = loaded.draftArtifactsDir
+                ? join(loaded.draftArtifactsDir, item.draftAnalysis.ref)
+                : undefined;
+              const draftRoot = localDraftPath && existsSync(localDraftPath)
+                ? loaded.draftArtifactsDir!
+                : loaded.appDir;
+              const draftPath = join(draftRoot, item.draftAnalysis.ref);
+              draftAppRelativePath = relative(draftRoot, draftPath);
               if (draftAppRelativePath.startsWith('..') || draftAppRelativePath.startsWith('/')) {
                 throw new Error('App-scoped analysis reference escapes the App directory.');
               }
@@ -11327,7 +11333,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           const columns = (tile as { result?: { columns?: string[] } }).result?.columns ?? [];
           if (typeof executedSql !== 'string' || columns.length === 0) return tile;
           try {
-            const filterable = filterableResultColumns(executedSql, columns, runDialect);
+            const dashboardItem = loaded.dashboard.layout.items.find((item) => item.i === tile.tileId);
+            const block = dashboardItem ? resolveDashboardItemBlock(dashboardItem, manifest) : null;
+            const declaredDimensions = block?.status === 'certified' ? block.dimensions ?? [] : [];
+            const filterable = dashboardFilterableResultColumns(executedSql, columns, declaredDimensions, runDialect);
             return filterable.length > 0 ? { ...tile, filterableColumns: filterable } : tile;
           } catch {
             return tile; // Unparseable SQL simply offers no filter candidates.
@@ -18032,7 +18041,7 @@ function loadAppDashboard(
   projectRoot: string,
   appId: string,
   dashboardId: string,
-): { app: AppDocument; dashboard: DashboardDocument; appDir: string } | null {
+): { app: AppDocument; dashboard: DashboardDocument; appDir: string; draftArtifactsDir?: string } | null {
   for (const p of findAppDocuments(projectRoot)) {
     const { document: app } = loadAppDocument(p);
     if (!app || app.id !== appId) continue;
@@ -18055,7 +18064,7 @@ function loadAppBuildDraftDashboard(
   projectRoot: string,
   draftId: string,
   dashboardId: string,
-): { app: AppDocument; dashboard: DashboardDocument; appDir: string } | null {
+): { app: AppDocument; dashboard: DashboardDocument; appDir: string; draftArtifactsDir?: string } | null {
   const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
   try {
     const draft = storage.getAppBuildDraft(draftId);
@@ -18086,6 +18095,7 @@ function loadAppBuildDraftDashboard(
       app: { ...app, id: draft.appId, name: draft.name, visibility: 'private', lifecycle: 'draft' },
       dashboard,
       appDir: base?.appDir ?? join(projectRoot, '.dql', 'local', 'app-builds', draft.id),
+      draftArtifactsDir: join(projectRoot, '.dql', 'local', 'app-builds', draft.id),
     };
   } finally {
     storage.close();
@@ -21363,6 +21373,12 @@ export interface DashboardFilterOptionSet {
   values: string[];
   truncated: boolean;
   sourceTileIds: string[];
+  /**
+   * Run-scoped availability metadata for date controls. The bounds are
+   * derived from safe result columns and are never persisted to the App.
+   */
+  valueCount?: number;
+  dateRange?: { min: string; max: string };
 }
 
 /** Resolve semantic filters only through the component's explicit mapping. */
@@ -21408,7 +21424,8 @@ export function collectDashboardFilterOptions(
   const optionSets: DashboardFilterOptionSet[] = [];
 
   for (const filter of dashboard.filters ?? []) {
-    if (filter.type === 'boolean' || filter.type === 'daterange' || filter.type === 'date' || filter.type === 'relative_date' || filter.type === 'number_range') continue;
+    if (filter.type === 'boolean' || filter.type === 'relative_date' || filter.type === 'number_range') continue;
+    const dateControl = filter.type === 'daterange' || filter.type === 'date';
     const limit = Math.max(1, Math.min(100, filter.optionSource?.limit ?? defaultLimit));
     const values = new Set<string>();
     const sourceTileIds: string[] = [];
@@ -21434,13 +21451,39 @@ export function collectDashboardFilterOptions(
       if (result.truncated || (result.rowCount ?? result.rows.length) > result.rows.length) truncated = true;
     }
 
-    if (values.size === 0) continue;
+    if (values.size === 0) {
+      if (dateControl) {
+        optionSets.push({
+          filterId: filter.id,
+          values: [],
+          truncated,
+          sourceTileIds: Array.from(new Set(sourceTileIds)),
+          valueCount: 0,
+        });
+      }
+      continue;
+    }
     const sorted = Array.from(values).sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }));
+    const dateValues = dateControl
+      ? sorted
+        .map((value) => ({ value, timestamp: Date.parse(value) }))
+        .filter((item) => Number.isFinite(item.timestamp))
+        .sort((left, right) => left.timestamp - right.timestamp)
+      : [];
     optionSets.push({
       filterId: filter.id,
-      values: sorted.slice(0, limit),
-      truncated: truncated || sorted.length > limit,
+      values: dateControl ? [] : sorted.slice(0, limit),
+      truncated: dateControl ? truncated : truncated || sorted.length > limit,
       sourceTileIds: Array.from(new Set(sourceTileIds)),
+      ...(dateControl ? {
+        valueCount: dateValues.length,
+        ...(dateValues.length ? {
+          dateRange: {
+            min: new Date(dateValues[0]!.timestamp).toISOString().slice(0, 10),
+            max: new Date(dateValues[dateValues.length - 1]!.timestamp).toISOString().slice(0, 10),
+          },
+        } : {}),
+      } : {}),
     });
   }
 

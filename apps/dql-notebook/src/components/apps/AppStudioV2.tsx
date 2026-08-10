@@ -26,9 +26,11 @@ import { APP_STUDIO_V2_STYLES } from './app-studio-v2-styles';
 import { availableAppStudioProposalSources, operationsForSelectedAppStudioSources, summarizeAppStudioAiPlan, type AppStudioAiPlanSummary } from './app-studio-ai-plan';
 import {
   discoverAppFilterCandidates,
+  defaultStudioFilterType,
   filterTileMappingsForField,
   studioFilterMappingKey,
   type StudioFilterCandidate,
+  type StudioRuntimeFilterFields,
   type StudioFilterTileMapping,
 } from './app-studio-filter-candidates';
 import {
@@ -36,6 +38,7 @@ import {
   localPublicationSteps,
   pagesNeedingSettledPreview,
   publicationBlockingSources,
+  publicationIssueSummaries,
   unresolvedPublicationRequirements,
 } from './app-studio-publish-readiness';
 
@@ -58,6 +61,20 @@ type StudioFilterConfiguration = {
   scope: StudioFilterScope;
   required: boolean;
   selectedMappingKeys: string[];
+};
+
+type StudioFilterAvailability = {
+  values: string[];
+  truncated: boolean;
+  valueCount?: number;
+  dateRange?: { min: string; max: string };
+};
+
+type StudioFieldAvailability = {
+  checkedComponents: number;
+  compatibleComponents: number;
+  valueCount: number;
+  dateRange?: { min: string; max: string };
 };
 
 export interface AppStudioLaunchConfig {
@@ -185,7 +202,7 @@ export function AppStudioV2({
   const [previewRunsByPage, setPreviewRunsByPage] = useState<Record<string, DashboardRunResponse>>({});
   const [previewing, setPreviewing] = useState(false);
   const [previewVariablesByPage, setPreviewVariablesByPage] = useState<Record<string, Record<string, unknown>>>({});
-  const [filterOptionsByPage, setFilterOptionsByPage] = useState<Record<string, Record<string, { values: string[]; truncated: boolean }>>>({});
+  const [filterOptionsByPage, setFilterOptionsByPage] = useState<Record<string, Record<string, StudioFilterAvailability>>>({});
   const [draggingTileId, setDraggingTileId] = useState<string | null>(null);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -277,6 +294,29 @@ export function AppStudioV2({
     return () => { active = false; };
   }, [draft?.id, draft?.sourcePolicy, draft?.frame.goal]);
 
+  useEffect(() => {
+    const handleAskResult = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        draft?: AppStudioBuildDraft;
+        pageId?: string;
+        tileId?: string;
+      }>).detail;
+      if (!detail?.draft || detail.draft.id !== draft?.id) return;
+      previewSequenceRef.current += 1;
+      setPreviewing(false);
+      setPreviewRunsByPage({});
+      setFilterOptionsByPage({});
+      setDraft(detail.draft);
+      setName(detail.draft.name);
+      setActivePageId(detail.pageId ?? detail.draft.pages[0]?.id ?? 'overview');
+      setSelectedTileId(detail.tileId ?? null);
+      setProposal(null);
+      setSavedMessage('Ask result added · loading preview…');
+    };
+    window.addEventListener('dql-app-build-updated', handleAskResult);
+    return () => window.removeEventListener('dql-app-build-updated', handleAskResult);
+  }, [draft?.id]);
+
   const activePage = useMemo(
     () => draft?.pages.find((page) => page.id === activePageId) ?? draft?.pages[0] ?? null,
     [activePageId, draft],
@@ -298,9 +338,14 @@ export function AppStudioV2({
     const needle = catalogQuery.trim().toLowerCase();
     return catalog.filter((item) => !needle || [item.name, item.domain, item.description, ...item.tags].join(' ').toLowerCase().includes(needle));
   }, [catalog, catalogQuery]);
+  const runtimeFilterFields = useMemo<StudioRuntimeFilterFields>(() => Object.fromEntries(
+    Object.entries(previewRunsByPage).map(([pageId, run]) => [pageId, Object.fromEntries(
+      run.tiles.map((tile) => [tile.tileId, tile.filterableColumns ?? []]),
+    )]),
+  ), [previewRunsByPage]);
   const filterCandidates = useMemo(
-    () => discoverAppFilterCandidates(draft?.pages ?? [], catalog),
-    [catalog, draft?.pages],
+    () => discoverAppFilterCandidates(draft?.pages ?? [], catalog, runtimeFilterFields),
+    [catalog, draft?.pages, runtimeFilterFields],
   );
   const proposalSummary = useMemo(() => proposal ? summarizeAppStudioAiPlan(proposal) : null, [proposal]);
   const readinessSteps = useMemo(() => draft ? localPublicationSteps(draft) : [], [draft]);
@@ -622,7 +667,7 @@ export function AppStudioV2({
   const saveFilter = async (configuration: StudioFilterConfiguration) => {
     if (!draft || !activePage) return;
     const selected = new Set(configuration.selectedMappingKeys);
-    const mappings = filterTileMappingsForField(draft.pages, catalog, configuration.fieldId);
+    const mappings = filterTileMappingsForField(draft.pages, catalog, configuration.fieldId, runtimeFilterFields);
     const selectedMappings = mappings.filter((mapping) => mapping.supported && selected.has(mapping.key));
     if (selectedMappings.length === 0) {
       setError('Link this filter to at least one compatible component.');
@@ -776,12 +821,65 @@ export function AppStudioV2({
     if (next) setSavedMessage('Semantic results approved · run preview once more');
   };
 
-  const publish = async (publishWhenReady = true) => {
+  const removeLocalAnalysisForPublication = async () => {
     if (!draft) return;
+    const sources = publicationBlockingSources(draft)
+      .filter((source) => source.kind !== 'governed_semantic' && source.kind !== 'semantic_query');
+    if (sources.length === 0) return;
+    const sourceIds = new Set(sources.map((source) => source.id));
+    const sourceRefs = new Set(sources.flatMap((source) => [source.id, source.sourceRef, source.id.replace(/^[^:]+:/, '')]));
+    const removedTiles = draft.pages.flatMap((page) => page.layout.items
+      .filter((tile) => {
+        const blockRef = tile.block ? ('blockId' in tile.block ? tile.block.blockId : tile.block.ref) : null;
+        const refs = [tile.draftAnalysis?.ref, blockRef].filter((value): value is string => Boolean(value));
+        return refs.some((ref) => sourceRefs.has(ref) || sourceRefs.has(ref.replace(/^[^:]+:/, '')));
+      })
+      .map((tile) => ({ pageId: page.id, tileId: tile.i })));
+    const removedTileIds = new Set(removedTiles.map((tile) => tile.tileId));
+    const operations: AppStudioDraftOperation[] = [
+      ...removedTiles.map((tile): AppStudioDraftOperation => ({ type: 'remove_tile', pageId: tile.pageId, tileId: tile.tileId })),
+      ...sources.map((source): AppStudioDraftOperation => ({ type: 'remove_source', sourceId: source.id })),
+      ...draft.reviewTasks.filter((task) => (task.sourceId && sourceIds.has(task.sourceId)) || (task.tileId && removedTileIds.has(task.tileId)))
+        .map((task): AppStudioDraftOperation => ({ type: 'remove_review_task', taskId: task.id })),
+      {
+        type: 'set_coverage',
+        coverage: draft.coverage.map((coverage) => {
+          const nextSourceIds = coverage.sourceIds.filter((id) => !sourceIds.has(id));
+          const nextComponentIds = coverage.componentIds.filter((id) => !removedTileIds.has(id));
+          return {
+            ...coverage,
+            sourceIds: nextSourceIds,
+            componentIds: nextComponentIds,
+            ...(coverage.status === 'covered' && (nextSourceIds.length === 0 || nextComponentIds.length === 0)
+              ? { status: 'gap' as const, reasons: [...coverage.reasons, 'Review-required local analysis was removed from the publication draft.'] }
+              : {}),
+          };
+        }),
+      },
+    ];
+    const next = await mutate(operations);
+    if (next) {
+      setPublishIssues([]);
+      setSavedMessage('Local analysis removed · Undo is available');
+    }
+  };
+
+  const publish = async (publishWhenReady = true, targetDraft = draft) => {
+    if (!targetDraft) return;
     setBusy(true);
     setError(null);
     try {
-      const preflight = await api.preflightAppBuild(draft.id, draft.revision, draft.proposalHash);
+      // The confirmation button commits the exact preflight receipt already
+      // shown as ready. Starting another preflight here caused readiness to
+      // oscillate when source or preview state changed between two requests.
+      if (publishWhenReady && targetDraft.state === 'preflight_ready' && localPublicationSteps(targetDraft).length === 0 && publishIssues.length === 0) {
+        const result = await api.publishAppBuild(targetDraft.id, targetDraft.revision, targetDraft.proposalHash);
+        setDraft(result.draft);
+        setPublishReviewOpen(false);
+        onPublished(result.app, result.draft.pages[0]?.id);
+        return;
+      }
+      const preflight = await api.preflightAppBuild(targetDraft.id, targetDraft.revision, targetDraft.proposalHash);
       setDraft(preflight.draft);
       if (!publishWhenReady) {
         setPublishIssues([]);
@@ -847,9 +945,20 @@ export function AppStudioV2({
       item.status === 'certified'
       && (item.id === reference || item.name === reference || item.path === reference)
     ));
-    for (const source of draft.sources.filter((item) => item.kind === 'certified_block')) {
+    const certifiedSources = draft.sources.filter((item) => item.kind === 'certified_block');
+    const unavailableSources = certifiedSources.filter((source) => !matchBlock(source.sourceRef));
+    if (unavailableSources.length) {
+      setPublishReviewOpen(false);
+      setPanel('sources');
+      setPanelOpen(true);
+      setError(`${unavailableSources.map((source) => humanize(source.sourceRef)).join(', ')} ${unavailableSources.length === 1 ? 'is' : 'are'} no longer certified. Replace or remove ${unavailableSources.length === 1 ? 'this source' : 'these sources'} before publication.`);
+      return;
+    }
+    for (const source of certifiedSources) {
       const block = matchBlock(source.sourceRef);
-      if (block) operations.push({ type: 'upsert_source', source: { ...source, sourceFingerprint: block.fingerprint, trustState: 'certified', reviewStatus: 'not_required' } });
+      if (block && (source.sourceFingerprint !== block.fingerprint || source.trustState !== 'certified' || source.reviewStatus !== 'not_required')) {
+        operations.push({ type: 'upsert_source', source: { ...source, sourceFingerprint: block.fingerprint, trustState: 'certified', reviewStatus: 'not_required' } });
+      }
     }
     for (const page of draft.pages) {
       for (const tile of page.layout.items) {
@@ -858,19 +967,20 @@ export function AppStudioV2({
         if (!reference) continue;
         const block = matchBlock(reference);
         if (!block) continue;
-        operations.push({
-          type: 'update_tile',
-          pageId: page.id,
-          tileId: tile.i,
-          patch: { review: { ...tile.review, status: 'not_required', sourceFingerprint: block.fingerprint } },
-        });
+        if (tile.review?.sourceFingerprint !== block.fingerprint || tile.review?.status !== 'not_required') {
+          operations.push({
+            type: 'update_tile',
+            pageId: page.id,
+            tileId: tile.i,
+            patch: { review: { ...tile.review, status: 'not_required', sourceFingerprint: block.fingerprint } },
+          });
+        }
       }
     }
     if (!operations.length) {
-      setPublishReviewOpen(false);
-      setPanel('sources');
-      setPanelOpen(true);
-      setError('A selected block is no longer available as certified. Replace it from Sources before publication.');
+      setPublishIssues([]);
+      setSavedMessage('Certified sources are already current');
+      await publish(false);
       return;
     }
     const next = await mutate(operations);
@@ -895,9 +1005,9 @@ export function AppStudioV2({
     }
   };
 
-  async function runPreviewForDraft(targetDraft: AppStudioBuildDraft, pageId: string, variablesOverride?: Record<string, unknown>) {
+  async function runPreviewForDraft(targetDraft: AppStudioBuildDraft, pageId: string, variablesOverride?: Record<string, unknown>): Promise<AppStudioBuildDraft | null> {
     const page = targetDraft.pages.find((candidate) => candidate.id === pageId);
-    if (!page) return;
+    if (!page) return null;
     const sequence = previewSequenceRef.current + 1;
     previewSequenceRef.current = sequence;
     setActivePageId(page.id);
@@ -906,7 +1016,7 @@ export function AppStudioV2({
     try {
       const variables = variablesOverride ?? previewVariablesByPage[page.id] ?? {};
       const result = await api.runAppBuildPreview(targetDraft.id, page.id, variables);
-      if (sequence !== previewSequenceRef.current) return;
+      if (sequence !== previewSequenceRef.current) return null;
       const recorded = await api.patchAppBuild(targetDraft.id, targetDraft.revision, [{
         type: 'set_preview_receipt',
         receipt: {
@@ -919,7 +1029,7 @@ export function AppStudioV2({
           createdAt: new Date().toISOString(),
         },
       }], targetDraft.proposalHash);
-      if (sequence !== previewSequenceRef.current) return;
+      if (sequence !== previewSequenceRef.current) return null;
       setDraft(recorded.draft);
       setPreviewRunsByPage((current) => ({ ...current, [page.id]: result }));
       if (result.filterOptions?.length) {
@@ -933,14 +1043,18 @@ export function AppStudioV2({
               ...optionSet.values,
               ])).sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' })),
               truncated: Boolean(cached?.truncated || optionSet.truncated),
+              valueCount: optionSet.valueCount ?? cached?.valueCount,
+              dateRange: mergeStudioDateRanges(cached?.dateRange, optionSet.dateRange),
             };
           }
           return { ...current, [page.id]: pageOptions };
         });
       }
       setSavedMessage(`Preview settled · ${result.tiles.filter((tile) => tile.status === 'ok').length}/${result.tiles.length} ready`);
+      return recorded.draft;
     } catch (cause) {
       if (sequence === previewSequenceRef.current) setError(messageOf(cause));
+      return null;
     } finally {
       if (sequence === previewSequenceRef.current) setPreviewing(false);
     }
@@ -949,6 +1063,27 @@ export function AppStudioV2({
   const runPreview = async (pageId = activePage?.id) => {
     if (!draft || !pageId) return;
     await runPreviewForDraft(draft, pageId);
+  };
+
+  const runPreviewAndReview = async (pageId: string) => {
+    if (!draft || !pageId) return;
+    const recorded = await runPreviewForDraft(draft, pageId);
+    if (!recorded) return;
+    setPublishIssues([]);
+    await publish(false, recorded);
+  };
+
+  const runAllPreviewsAndReview = async () => {
+    if (!draft) return;
+    let current = draft;
+    const pages = current.pages.filter((page) => pageHasDataTiles(page));
+    for (const page of pages) {
+      const recorded = await runPreviewForDraft(current, page.id, previewVariablesByPage[page.id] ?? {});
+      if (!recorded) return;
+      current = recorded;
+    }
+    setPublishIssues([]);
+    await publish(false, current);
   };
 
   const applyFilterValue = (filter: NonNullable<AppStudioBuildDraft['pages'][number]['filters']>[number], value: unknown) => {
@@ -989,7 +1124,7 @@ export function AppStudioV2({
       void runPreviewForDraft(draft, activePage.id, previewVariablesByPage[activePage.id] ?? {});
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [activePage?.id]);
+  }, [activePage?.id, draft?.revision, proposal]);
 
   useEffect(() => () => {
     if (filterPreviewTimerRef.current !== null) window.clearTimeout(filterPreviewTimerRef.current);
@@ -1021,10 +1156,10 @@ export function AppStudioV2({
             <button type="button" className={previewMode === 'medium' ? 'on' : ''} onClick={() => setPreviewMode('medium')} title="Tablet preview"><PanelRight size={15} /></button>
             <button type="button" className={previewMode === 'narrow' ? 'on' : ''} onClick={() => setPreviewMode('narrow')} title="Phone preview"><Smartphone size={15} /></button>
           </div>
-          <button type="button" className={`review-state ${publishReady ? '' : 'needs-review'}`} onClick={() => void publish(false)} disabled={busy} title="Open publication readiness"><ShieldCheck size={14} /> {publishReady ? 'Ready to publish' : publishStepCount ? `${publishStepCount} ${publishStepCount === 1 ? 'step' : 'steps'} before publish` : 'Check publish readiness'}</button>
+          <button type="button" className={`review-state ${publishReady ? '' : 'needs-review'}`} onClick={() => void publish(false)} disabled={busy} title="Open the guided publication review"><ShieldCheck size={14} /> {publishReady ? 'Governed checks passed' : publishStepCount ? `${publishStepCount} ${publishStepCount === 1 ? 'fix' : 'fixes'} before publish` : 'Review before publish'}</button>
           <button type="button" className={`copilot ${copilotOpen ? 'on' : ''}`} onClick={() => setCopilotOpen((open) => !open)} aria-pressed={copilotOpen} aria-label="Open App Copilot"><Bot size={14} /><span>App Copilot</span></button>
           <button type="button" className="preview" onClick={() => void runPreview()} disabled={previewing || busy} aria-label={previewing ? 'Running preview' : 'Run preview'}><Play size={13} /><span>{previewing ? 'Running…' : 'Run preview'}</span></button>
-          <button type="button" className="publish" onClick={() => void publish(true)} disabled={busy} aria-label="Publish to Project"><Upload size={13} /><span>Publish to Project</span></button>
+          <button type="button" className="publish" onClick={() => void publish(false)} disabled={busy} aria-label="Review and publish to Project"><Upload size={13} /><span>Publish to Project</span></button>
           <button type="button" className="icon overflow-button" aria-label="More draft actions" aria-expanded={actionsOpen} onClick={() => setActionsOpen((open) => !open)}><MoreHorizontal size={17} /></button>
           {actionsOpen ? <div className="studio-overflow-menu" role="menu"><button type="button" role="menuitem" onClick={() => { setActionsOpen(false); setDeleteConfirmOpen(true); }}><Trash2 size={14} /> Delete local draft</button></div> : null}
         </div>}
@@ -1041,7 +1176,7 @@ export function AppStudioV2({
           <button type="button" className="mobile-drawer-close" onClick={() => setPanelOpen(false)} aria-label="Close Studio drawer"><X size={16} /></button>
           {panel === 'pages' ? <PagesPanel draft={draft} activePageId={activePage?.id} onOpen={setActivePageId} onAdd={() => void addPage()} /> : null}
           {panel === 'sources' ? <SourcesPanel usedSources={draft.sources} items={filteredCatalog} selected={selectedSource} query={catalogQuery} loading={catalogLoading} error={catalogError} disabled={busy || previewing} onQuery={setCatalogQuery} onSelect={selectSource} onAdd={(item, kind) => void addComponent(kind, item)} onAddContent={(kind) => void addComponent(kind, null)} policy={draft.sourcePolicy} /> : null}
-          {panel === 'filters' ? <FiltersPanel draft={draft} activePageId={activePage?.id} catalog={catalog} candidates={filterCandidates} disabled={busy || previewing} onSave={(configuration) => void saveFilter(configuration)} onRemove={(id) => void removeFilter(id)} /> : null}
+          {panel === 'filters' ? <FiltersPanel draft={draft} activePageId={activePage?.id} catalog={catalog} candidates={filterCandidates} runtimeFilterFields={runtimeFilterFields} previewRunsByPage={previewRunsByPage} previewing={previewing} disabled={busy || previewing} onRunPreview={() => void runPreview()} onSave={(configuration) => void saveFilter(configuration)} onRemove={(id) => void removeFilter(id)} /> : null}
           {panel === 'templates' ? <TemplatesPanel current={draft.template} onApply={(nextTemplate) => void applyTemplate(nextTemplate)} /> : null}
         </section>
       </aside> : null}
@@ -1072,7 +1207,7 @@ export function AppStudioV2({
           <section className="studio-canvas" aria-label="App canvas">
             <header className="studio-page-heading"><div><small>APP PAGE</small><span>{activePage?.metadata.title ?? 'Overview'}</span></div><small>{draft.frame.audience || 'Stakeholders'} · {draft.pages[0]?.metadata.domain || 'General'}</small></header>
             {selectedSource ? <div className="studio-source-ready"><div><span className="certified"><ShieldCheck size={14} /></span><p><small>Selected data</small><strong>{humanize(selectedSource.name)}</strong></p></div><span className="studio-source-actions"><button type="button" onClick={() => void addComponent(recommendedComponentKind(selectedSource), selectedSource)}><Plus size={14} /> Add {componentKindLabel(recommendedComponentKind(selectedSource))}</button><button type="button" className="source-clear" onClick={() => setSelectedSource(null)} aria-label="Clear selected data"><X size={14} /></button></span></div> : null}
-            {(activePage?.filters ?? []).length ? <div className="studio-page-filterbar">{activePage!.filters!.map((filter) => <StudioFilterControl key={filter.id} filter={filter} options={activeFilterOptions[filter.id]?.values ?? []} optionsTruncated={activeFilterOptions[filter.id]?.truncated ?? false} value={previewVariables[filter.id] ?? filter.default} applying={previewing} onChange={(value) => applyFilterValue(filter, value)} />)}</div> : null}
+            {(activePage?.filters ?? []).length ? <div className="studio-page-filterbar">{activePage!.filters!.map((filter) => <StudioFilterControl key={filter.id} filter={filter} availability={activeFilterOptions[filter.id]} value={previewVariables[filter.id] ?? filter.default} applying={previewing} onChange={(value) => applyFilterValue(filter, value)} />)}</div> : null}
             <div className="studio-page-grid">
               {visibleItems.map((tile) => (
                 <article key={tile.i} role="button" tabIndex={0} draggable className={`studio-component-card ${selectedTileId === tile.i ? 'selected' : ''} ${draggingTileId === tile.i ? 'dragging' : ''}`} style={{ '--studio-tile-width': Math.min(tile.w, breakpoint === 'medium' ? 6 : breakpoint === 'narrow' ? 1 : 12), minHeight: breakpoint === 'narrow' ? Math.max(180, tile.h * 58) : Math.max(150, tile.h * 68) } as CSSProperties} onDragStart={() => { draggingTileIdRef.current = tile.i; setDraggingTileId(tile.i); }} onDragEnd={() => { draggingTileIdRef.current = null; setDraggingTileId(null); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void moveTileBefore(tile.i); }} onClick={() => setSelectedTileId(tile.i)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') setSelectedTileId(tile.i); }}>
@@ -1145,7 +1280,8 @@ export function AppStudioV2({
         previewRun={previewRun}
         onClose={() => setPublishReviewOpen(false)}
         onRetry={() => void publish(true)}
-        onRunPreview={(pageId) => void runPreview(pageId)}
+        onRunPreview={(pageId) => void runPreviewAndReview(pageId)}
+        onRunAllPreviews={() => void runAllPreviewsAndReview()}
         onRemoveRequirement={(requirementId) => void removeRequirementFromPublishScope(requirementId)}
         onReviseRequirement={reviseRequirementWithAi}
         onAnswerQuestion={(questionId, answerId) => void answerBuildFrameQuestion(questionId, answerId)}
@@ -1154,6 +1290,7 @@ export function AppStudioV2({
         onOpenFilters={() => { setPublishReviewOpen(false); setPanel('filters'); setPanelOpen(true); }}
         onRefreshSources={() => void refreshCertifiedSourceTrust()}
         onApproveSemantic={() => void approveSemanticPreview()}
+        onRemoveLocalAnalysis={() => void removeLocalAnalysisForPublication()}
       /> : null}
       {deleteConfirmOpen ? <div className="proposal-scrim" role="dialog" aria-modal="true" aria-label="Delete local App draft"><section className="studio-delete-card"><span className="delete-mark"><Trash2 size={18} /></span><h2>Delete this local draft?</h2><p><strong>{draft.name}</strong> will leave the App list. Its pages, components, and local history move to a recovery bundle so you can Undo.</p><footer><button type="button" onClick={() => setDeleteConfirmOpen(false)} disabled={busy}>Cancel</button><button type="button" className="danger" onClick={() => void deleteLocalDraft()} disabled={busy}>{busy ? 'Deleting…' : 'Delete draft'}</button></footer></section></div> : null}
     </div>
@@ -1168,6 +1305,7 @@ function PublishReadinessDialog({
   onClose,
   onRetry,
   onRunPreview,
+  onRunAllPreviews,
   onRemoveRequirement,
   onReviseRequirement,
   onAnswerQuestion,
@@ -1176,6 +1314,7 @@ function PublishReadinessDialog({
   onOpenFilters,
   onRefreshSources,
   onApproveSemantic,
+  onRemoveLocalAnalysis,
 }: {
   draft: AppStudioBuildDraft;
   serverIssues: string[];
@@ -1184,6 +1323,7 @@ function PublishReadinessDialog({
   onClose: () => void;
   onRetry: () => void;
   onRunPreview: (pageId: string) => void;
+  onRunAllPreviews: () => void;
   onRemoveRequirement: (requirementId: string) => void;
   onReviseRequirement: (question: string) => void;
   onAnswerQuestion: (questionId: string, answerId: string) => void;
@@ -1192,6 +1332,7 @@ function PublishReadinessDialog({
   onOpenFilters: () => void;
   onRefreshSources: () => void;
   onApproveSemantic: () => void;
+  onRemoveLocalAnalysis: () => void;
 }): JSX.Element {
   const requirements = unresolvedPublicationRequirements(draft);
   const clarifications = (draft.frame.clarificationQuestions ?? []).filter((question) => question.required && !question.answerId);
@@ -1207,12 +1348,18 @@ function PublishReadinessDialog({
     && previewPages.length === 0
     && sources.length === 0
     && remainingIssues.length === 0;
+  const blockerCount = requirements.length
+    + clarifications.length
+    + tasks.length
+    + previewPages.length
+    + sources.length
+    + remainingIssues.length;
 
   return <div className="proposal-scrim" role="dialog" aria-modal="true" aria-labelledby="publish-readiness-title">
     <section className="studio-readiness-card">
       <header>
         <span className={ready ? 'ready' : ''}>{ready ? <Check size={19} /> : <ShieldCheck size={19} />}</span>
-        <div><h2 id="publish-readiness-title">{ready ? 'Ready to publish' : 'Finish the publish checklist'}</h2><p>{ready ? 'Every governed publication check passed.' : 'Your App stays local while you complete these steps. Nothing is lost or published early.'}</p></div>
+        <div><h2 id="publish-readiness-title">{ready ? 'Ready to publish' : `${blockerCount} ${blockerCount === 1 ? 'fix' : 'fixes'} before publishing`}</h2><p>{ready ? 'Every governed publication check passed.' : 'Complete the actions below. Each action updates this review automatically; there is no separate recheck loop.'}</p></div>
         <button type="button" className="icon" onClick={onClose} aria-label="Close publish checklist"><X size={16} /></button>
       </header>
       <div className="readiness-body">
@@ -1238,28 +1385,17 @@ function PublishReadinessDialog({
         </section> : null}
         {localOnlySources.length ? <section className="readiness-item warning">
           <span className="step-mark"><FileText size={15} /></span>
-          <div><strong>Replace or remove local analysis</strong><p>{localOnlySources.map((source) => humanize(source.sourceRef)).join(', ')}</p><small>Review-required analysis may stay in the private draft, but it cannot enter the governed Project App.</small><div className="readiness-actions"><button type="button" className="primary" onClick={onOpenSources}><Blocks size={13} /> Open Sources</button></div></div>
+          <div><strong>Local analysis cannot publish</strong><p>{localOnlySources.map((source) => humanize(source.sourceRef)).join(', ')}</p><small>Replace it with governed data, or remove it from this draft. Removal is saved locally and can be undone from the Studio toolbar.</small><div className="readiness-actions"><button type="button" className="primary" onClick={onOpenSources}><Blocks size={13} /> Replace with governed data</button><button type="button" onClick={onRemoveLocalAnalysis} disabled={busy}><Trash2 size={13} /> Remove local analysis</button></div></div>
         </section> : null}
         {remainingIssues.map((issue) => <section className="readiness-item" key={issue.id}>
           <span className="step-mark"><Settings2 size={15} /></span>
-          <div><strong>{issue.title}</strong><p>{issue.detail}</p><div className="readiness-actions">{issue.action === 'filters' ? <button type="button" className="primary" onClick={onOpenFilters}><Filter size={13} /> Open Filters</button> : issue.id === 'sources' ? <button type="button" className="primary" onClick={onRefreshSources} disabled={busy}><ShieldCheck size={13} /> Refresh certified sources</button> : issue.id === 'preview' ? <button type="button" className="primary" onClick={() => onRunPreview(draft.pages.find((page) => page.layout.items.some((tile) => !tile.text && !tile.aiPin))?.id ?? draft.pages[0]?.id ?? '')} disabled={busy}><Play size={13} /> Run current preview</button> : <button type="button" className="primary" onClick={onOpenSources}><Blocks size={13} /> Open Sources</button>}</div></div>
+          <div><strong>{issue.title}</strong><p>{issue.detail}</p><div className="readiness-actions">{issue.action === 'filters' ? <button type="button" className="primary" onClick={onOpenFilters}><Filter size={13} /> Open Filters</button> : issue.id === 'sources' || issue.id.startsWith('sources:') ? <button type="button" className="primary" onClick={onRefreshSources} disabled={busy}><ShieldCheck size={13} /> Accept current certified sources</button> : issue.id === 'preview' ? <button type="button" className="primary" onClick={onRunAllPreviews} disabled={busy}><Play size={13} /> {busy ? 'Refreshing previews…' : 'Refresh all page previews'}</button> : <button type="button" className="primary" onClick={onOpenSources}><Blocks size={13} /> Open Sources</button>}</div></div>
         </section>)}
         {ready ? <div className="readiness-ready"><Check size={18} /><div><strong>Governed checks passed</strong><span>The published package will be Git-reviewable and no files are auto-staged or committed.</span></div></div> : null}
       </div>
-      <footer><button type="button" onClick={onClose} disabled={busy}>Keep editing</button><button type="button" className="primary" onClick={onRetry} disabled={busy}>{busy ? 'Checking…' : ready ? 'Publish to Project' : 'Check again'}</button></footer>
+      <footer><button type="button" onClick={onClose} disabled={busy}>Back to editing</button>{ready ? <button type="button" className="primary" onClick={onRetry} disabled={busy}>{busy ? 'Publishing…' : 'Publish to Project'}</button> : <span className="readiness-footer-hint">Choose a fix above. This review updates as you work.</span>}</footer>
     </section>
   </div>;
-}
-
-function publicationIssueSummaries(issues: string[]): Array<{ id: string; title: string; detail: string; action: 'sources' | 'filters' }> {
-  const known = /Required App question is unresolved|Review task is still open|Run a current settled preview|requires snapshot-bound semantic approval|is review-required and cannot be published|Resolve required Build Frame clarifications/i;
-  const summaries = issues.filter((issue) => !known.test(issue)).map((issue) => {
-    if (/filter|binding/i.test(issue)) return { id: 'filters', title: 'Finish filter wiring', detail: 'At least one App filter is not safely bound to every affected component.', action: 'filters' as const };
-    if (/changed after selection|certified block|source/i.test(issue)) return { id: 'sources', title: 'Refresh source trust', detail: 'A selected source changed or no longer passes the current governed-source check.', action: 'sources' as const };
-    if (/preview|settled run|receipt|runtime/i.test(issue)) return { id: 'preview', title: 'Refresh the settled preview', detail: 'The saved preview no longer matches the current App data contract.', action: 'sources' as const };
-    return { id: 'validation', title: 'Complete governed validation', detail: 'A current App contract still needs attention before Project publication.', action: 'sources' as const };
-  });
-  return Array.from(new Map(summaries.map((summary) => [summary.id, summary])).values());
 }
 
 function AiPlanReview({
@@ -1463,7 +1599,7 @@ function SourcesPanel({
     </label>
     <details className="used-sources-disclosure">
       <summary>
-        <div><strong>In this App</strong><small>{usedDataSources.length ? `${usedDataSources.length} governed ${usedDataSources.length === 1 ? 'source' : 'sources'}` : 'No source added yet'}</small></div>
+        <div><strong>In this App</strong><small>{usedDataSources.length ? `${usedDataSources.length} data ${usedDataSources.length === 1 ? 'source' : 'sources'}` : 'No source added yet'}</small></div>
         <span>{usedDataSources.length}</span><ChevronDown size={14} />
       </summary>
       {usedDataSources.length ? <div className="used-source-list">{usedDataSources.map((source) => <div key={source.id}>
@@ -1512,7 +1648,11 @@ function FiltersPanel({
   activePageId,
   catalog,
   candidates,
+  runtimeFilterFields,
+  previewRunsByPage,
+  previewing,
   disabled,
+  onRunPreview,
   onSave,
   onRemove,
 }: {
@@ -1520,7 +1660,11 @@ function FiltersPanel({
   activePageId?: string;
   catalog: AppBlockRecommendation[];
   candidates: StudioFilterCandidate[];
+  runtimeFilterFields: StudioRuntimeFilterFields;
+  previewRunsByPage: Record<string, DashboardRunResponse>;
+  previewing: boolean;
   disabled: boolean;
+  onRunPreview: () => void;
   onSave: (configuration: StudioFilterConfiguration) => void;
   onRemove: (id: string) => void;
 }): JSX.Element {
@@ -1544,8 +1688,8 @@ function FiltersPanel({
     return !needle || [candidate.id, ...candidate.sourceNames].join(' ').toLowerCase().includes(needle);
   });
   const mappings = useMemo(
-    () => configuration?.fieldId ? filterTileMappingsForField(draft.pages, catalog, configuration.fieldId) : [],
-    [catalog, configuration?.fieldId, draft.pages],
+    () => configuration?.fieldId ? filterTileMappingsForField(draft.pages, catalog, configuration.fieldId, runtimeFilterFields) : [],
+    [catalog, configuration?.fieldId, draft.pages, runtimeFilterFields],
   );
   const visibleMappings = configuration?.scope === 'page'
     ? mappings.filter((mapping) => mapping.pageId === activePage?.id)
@@ -1553,14 +1697,26 @@ function FiltersPanel({
   const selectedMappings = new Set(configuration?.selectedMappingKeys ?? []);
   const selectedVisibleCount = visibleMappings.filter((mapping) => mapping.supported && selectedMappings.has(mapping.key)).length;
   const supportedVisibleCount = visibleMappings.filter((mapping) => mapping.supported).length;
+  const fieldAvailability = useMemo(
+    () => configuration?.fieldId
+      ? studioFieldAvailability(configuration.fieldId, visibleMappings.filter((mapping) => mapping.supported), previewRunsByPage)
+      : null,
+    [configuration?.fieldId, previewRunsByPage, visibleMappings],
+  );
+  const dateControl = configuration?.type === 'daterange' || configuration?.type === 'date';
+  const dateAvailabilityChecked = Boolean(dateControl
+    && fieldAvailability
+    && fieldAvailability.compatibleComponents > 0
+    && fieldAvailability.checkedComponents === fieldAvailability.compatibleComponents);
+  const dateFieldHasNoValues = Boolean(dateAvailabilityChecked && fieldAvailability?.valueCount === 0);
 
   const chooseField = (candidate: StudioFilterCandidate) => {
-    const candidateMappings = filterTileMappingsForField(draft.pages, catalog, candidate.id);
+    const candidateMappings = filterTileMappingsForField(draft.pages, catalog, candidate.id, runtimeFilterFields);
     setConfiguration({
       id: candidate.id,
       fieldId: candidate.id,
       label: humanize(candidate.id),
-      type: filterType(candidate.id),
+      type: defaultStudioFilterType(candidate.id),
       scope: 'app',
       required: false,
       selectedMappingKeys: candidateMappings.filter((mapping) => mapping.supported).map((mapping) => mapping.key),
@@ -1568,7 +1724,7 @@ function FiltersPanel({
   };
   const editFilter = (item: { filter: StudioDashboardFilter; pageIds: string[] }) => {
     const fieldId = item.filter.field?.name ?? item.filter.bindsTo ?? item.filter.id;
-    const filterMappings = filterTileMappingsForField(draft.pages, catalog, fieldId);
+    const filterMappings = filterTileMappingsForField(draft.pages, catalog, fieldId, runtimeFilterFields);
     const linked = filterMappings.filter((mapping) => {
       const page = draft.pages.find((candidate) => candidate.id === mapping.pageId);
       const pageFilter = page?.filters?.find((filter) => filter.id === item.filter.id);
@@ -1617,6 +1773,11 @@ function FiltersPanel({
         <section className="filter-builder-field"><span><ShieldCheck size={15} /></span><div><small>GOVERNED FIELD</small><strong>{humanize(configuration.fieldId)}</strong></div>{!editingExisting ? <button type="button" onClick={() => setConfiguration({ ...configuration, fieldId: '', selectedMappingKeys: [] })}>Change</button> : null}</section>
         <label><span>Display label</span><input value={configuration.label} onChange={(event) => setConfiguration({ ...configuration, label: event.target.value })} /></label>
         <label><span>Control</span><select value={configuration.type} onChange={(event) => setConfiguration({ ...configuration, type: event.target.value as StudioFilterControlType })}>{filterControlOptions(configuration.fieldId).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+        {dateControl ? <section className={`filter-availability ${dateFieldHasNoValues ? 'empty' : fieldAvailability?.dateRange ? 'ready' : ''}`}>
+          <span>{dateFieldHasNoValues ? <X size={14} /> : fieldAvailability?.dateRange ? <Check size={14} /> : <Play size={14} />}</span>
+          <div><strong>{previewing ? 'Checking available dates…' : dateFieldHasNoValues ? 'No date values found' : fieldAvailability?.dateRange ? `${fieldAvailability.dateRange.min} – ${fieldAvailability.dateRange.max}` : 'Check available dates'}</strong><small>{previewing ? 'The settled preview is checking the selected field.' : dateFieldHasNoValues ? 'This field has no usable dates in the current governed result. Choose another field or refresh the data.' : fieldAvailability?.dateRange ? `${fieldAvailability.valueCount} dated rows found across ${fieldAvailability.checkedComponents} linked ${fieldAvailability.checkedComponents === 1 ? 'component' : 'components'}.` : 'Run the current page once before creating this date control.'}</small></div>
+          {!previewing && !fieldAvailability?.dateRange ? <button type="button" onClick={onRunPreview} disabled={disabled}><Play size={12} /> Run preview</button> : null}
+        </section> : null}
         <fieldset><legend>Apply to</legend><div className="filter-scope-switch"><button type="button" className={configuration.scope === 'page' ? 'on' : ''} onClick={() => setConfiguration({ ...configuration, scope: 'page' })}>This page</button><button type="button" className={configuration.scope === 'app' ? 'on' : ''} onClick={() => setConfiguration({ ...configuration, scope: 'app' })}>All compatible pages</button></div><small>{configuration.scope === 'app' ? 'One dashboard control is added to every page with a compatible tile.' : `Only ${activePage?.metadata.title ?? 'this page'} receives this control.`}</small></fieldset>
         <fieldset className="filter-mapping"><legend>Linked components</legend><header><span>{selectedVisibleCount}/{supportedVisibleCount} compatible linked</span><button type="button" onClick={() => setAllVisibleMappings(selectedVisibleCount !== supportedVisibleCount)}>{selectedVisibleCount === supportedVisibleCount ? 'Clear compatible' : 'Link all compatible'}</button></header>
           <div>{draft.pages.filter((page) => configuration.scope === 'app' || page.id === activePage?.id).map((page) => {
@@ -1628,7 +1789,7 @@ function FiltersPanel({
           })}</div>
         </fieldset>
         <label className="filter-required"><input type="checkbox" checked={configuration.required} onChange={(event) => setConfiguration({ ...configuration, required: event.target.checked })} /><span><strong>Require a value</strong><small>Publication and runs require this filter to be set.</small></span></label>
-        <div className="filter-builder-actions"><button type="button" onClick={() => setConfiguration(null)}>Cancel</button><button type="button" className="primary" disabled={disabled || !configuration.label.trim() || selectedVisibleCount === 0} onClick={() => { onSave(configuration); setConfiguration(null); }}>{editingExisting ? 'Save filter' : 'Create filter'}</button></div>
+        <div className="filter-builder-actions"><button type="button" onClick={() => setConfiguration(null)}>Cancel</button><button type="button" className="primary" disabled={disabled || !configuration.label.trim() || selectedVisibleCount === 0 || dateFieldHasNoValues} onClick={() => { onSave(configuration); setConfiguration(null); }}>{editingExisting ? 'Save filter' : 'Create filter'}</button></div>
       </div>}
     </>;
   }
@@ -1684,35 +1845,40 @@ function StaticComponentPreview({ loading }: { loading: boolean }): JSX.Element 
 
 function StudioFilterControl({
   filter,
-  options,
-  optionsTruncated,
+  availability,
   value,
   applying,
   onChange,
 }: {
   filter: NonNullable<AppStudioBuildDraft['pages'][number]['filters']>[number];
-  options: string[];
-  optionsTruncated: boolean;
+  availability?: StudioFilterAvailability;
   value: unknown;
   applying: boolean;
   onChange: (value: unknown) => void;
 }): JSX.Element {
   const label = filter.label ?? humanize(filter.id);
-  const optionValues = Array.from(new Set([...(filter.options ?? []), ...options]));
+  const optionValues = Array.from(new Set([...(filter.options ?? []), ...(availability?.values ?? [])]));
   const [query, setQuery] = useState(String(value ?? ''));
   useEffect(() => setQuery(String(value ?? '')), [value]);
   if (filter.type === 'daterange') {
     const range = value && typeof value === 'object' && !Array.isArray(value) ? value as { start?: string; end?: string } : {};
-    return <label className="studio-filter range" aria-busy={applying}><span>{label}</span><input type="date" aria-label={`${label} start`} value={range.start ?? ''} onChange={(event) => onChange({ ...range, start: event.target.value })} /><i>–</i><input type="date" aria-label={`${label} end`} value={range.end ?? ''} onChange={(event) => onChange({ ...range, end: event.target.value })} /></label>;
+    const availabilityLabel = applying
+      ? 'Checking dates…'
+      : availability?.dateRange
+        ? `Available ${availability.dateRange.min} – ${availability.dateRange.max}`
+        : availability?.valueCount === 0
+          ? 'No date values exist for this field'
+          : 'Run preview to check available dates';
+    return <label className={`studio-filter range ${availability?.valueCount === 0 ? 'empty' : ''}`} aria-busy={applying}><span>{label}</span><input type="date" min={availability?.dateRange?.min} max={availability?.dateRange?.max} aria-label={`${label} start`} value={range.start ?? ''} onChange={(event) => onChange({ ...range, start: event.target.value })} /><i>–</i><input type="date" min={availability?.dateRange?.min} max={availability?.dateRange?.max} aria-label={`${label} end`} value={range.end ?? ''} onChange={(event) => onChange({ ...range, end: event.target.value })} /><small>{availabilityLabel}</small></label>;
   }
   if (filter.type === 'boolean') {
     return <label className="studio-filter boolean" aria-busy={applying}><input type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(event.target.checked)} /><span>{label}</span></label>;
   }
   if (filter.type === 'date') {
-    return <label className="studio-filter" aria-busy={applying}><span>{label}</span><input type="date" value={String(value ?? '')} onChange={(event) => onChange(event.target.value)} /><small>{applying ? 'Applying…' : 'Updates all linked components'}</small></label>;
+    return <label className={`studio-filter ${availability?.valueCount === 0 ? 'empty' : ''}`} aria-busy={applying}><span>{label}</span><input type="date" min={availability?.dateRange?.min} max={availability?.dateRange?.max} value={String(value ?? '')} onChange={(event) => onChange(event.target.value)} /><small>{applying ? 'Checking dates…' : availability?.dateRange ? `Available ${availability.dateRange.min} – ${availability.dateRange.max}` : availability?.valueCount === 0 ? 'No date values exist for this field' : 'Run preview to check available dates'}</small></label>;
   }
   if (optionValues.length > 0 && (filter.type === 'select' || filter.type === 'multiselect')) {
-    return <StudioFilterDropdown label={label} values={optionValues} value={value} multiple={filter.type === 'multiselect'} applying={applying} truncated={optionsTruncated} onChange={onChange} />;
+    return <StudioFilterDropdown label={label} values={optionValues} value={value} multiple={filter.type === 'multiselect'} applying={applying} truncated={availability?.truncated ?? false} onChange={onChange} />;
   }
   if (optionValues.length > 0 && filter.type === 'search') {
     const listId = `studio-filter-${filter.id.replace(/[^a-z0-9_-]/gi, '-')}-options`;
@@ -1724,7 +1890,7 @@ function StudioFilterControl({
         onChange(nextQuery);
       }} /><ChevronDown size={12} aria-hidden="true" /></span>
       <datalist id={listId}>{optionValues.map((option) => <option key={option} value={option} />)}</datalist>
-      <small>{applying ? 'Applying…' : `${optionValues.length}${optionsTruncated ? '+' : ''} ${optionValues.length === 1 && !optionsTruncated ? 'value' : 'values'} · type or choose`}</small>
+      <small>{applying ? 'Applying…' : `${optionValues.length}${availability?.truncated ? '+' : ''} ${optionValues.length === 1 && !availability?.truncated ? 'value' : 'values'} · type or choose`}</small>
     </div>;
   }
   return <label className="studio-filter" aria-busy={applying}><span>{label}</span><input type={filter.type === 'number' ? 'number' : 'search'} value={String(value ?? '')} placeholder="All values" onChange={(event) => onChange(filter.type === 'number' && event.target.value !== '' ? Number(event.target.value) : event.target.value)} /><small>{applying ? 'Applying…' : 'Updates automatically'}</small></label>;
@@ -1977,18 +2143,12 @@ function normalizeViz(type?: string): 'bar' | 'line' | 'area' | 'table' | 'singl
   return 'bar';
 }
 
-function filterType(id: string): 'daterange' | 'number' | 'select' {
-  if (/date|time|month|week|quarter|year/i.test(id)) return 'daterange';
-  if (/count|amount|limit|top_?n|score/i.test(id)) return 'number';
-  return 'select';
-}
-
 function filterControlOptions(fieldId: string): Array<{ value: StudioFilterControlType; label: string }> {
   const common: Array<{ value: StudioFilterControlType; label: string }> = [
     { value: 'select', label: 'Searchable dropdown' },
     { value: 'multiselect', label: 'Searchable multi-select' },
   ];
-  if (/date|time|month|week|quarter|year/i.test(fieldId)) {
+  if (defaultStudioFilterType(fieldId) === 'daterange') {
     return [
       { value: 'daterange', label: 'Date range' },
       { value: 'date', label: 'Single date' },
@@ -2002,6 +2162,59 @@ function filterControlOptions(fieldId: string): Array<{ value: StudioFilterContr
     return [{ value: 'boolean', label: 'Yes / no' }, ...common];
   }
   return common;
+}
+
+function studioFieldAvailability(
+  fieldId: string,
+  mappings: StudioFilterTileMapping[],
+  previewRunsByPage: Record<string, DashboardRunResponse>,
+): StudioFieldAvailability {
+  let checkedComponents = 0;
+  let valueCount = 0;
+  let minTimestamp = Number.POSITIVE_INFINITY;
+  let maxTimestamp = Number.NEGATIVE_INFINITY;
+  for (const mapping of mappings) {
+    const tile = previewRunsByPage[mapping.pageId]?.tiles.find((candidate) => candidate.tileId === mapping.tileId);
+    if (tile?.status !== 'ok' || !tile.result) continue;
+    const requested = normalizeStudioField(mapping.binding ?? fieldId);
+    const column = tile.result.columns.find((candidate) => normalizeStudioField(candidate) === requested);
+    if (!column) continue;
+    checkedComponents += 1;
+    for (const row of tile.result.rows) {
+      const timestamp = Date.parse(String(row[column] ?? ''));
+      if (!Number.isFinite(timestamp)) continue;
+      valueCount += 1;
+      minTimestamp = Math.min(minTimestamp, timestamp);
+      maxTimestamp = Math.max(maxTimestamp, timestamp);
+    }
+  }
+  return {
+    checkedComponents,
+    compatibleComponents: mappings.length,
+    valueCount,
+    ...(valueCount > 0 ? {
+      dateRange: {
+        min: new Date(minTimestamp).toISOString().slice(0, 10),
+        max: new Date(maxTimestamp).toISOString().slice(0, 10),
+      },
+    } : {}),
+  };
+}
+
+function normalizeStudioField(value: string): string {
+  return value.trim().toLowerCase().replace(/["`\[\]]/g, '').split('.').at(-1)?.replace(/[^a-z0-9]/g, '') ?? '';
+}
+
+function mergeStudioDateRanges(
+  current?: { min: string; max: string },
+  incoming?: { min: string; max: string },
+): { min: string; max: string } | undefined {
+  if (!current) return incoming;
+  if (!incoming) return current;
+  return {
+    min: current.min < incoming.min ? current.min : incoming.min,
+    max: current.max > incoming.max ? current.max : incoming.max,
+  };
 }
 
 function linkedComponentCount(draft: AppStudioBuildDraft, filterId: string): number {

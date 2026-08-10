@@ -28,6 +28,8 @@ let threadItemsFromTurns: typeof UnifiedAgentRunPanelModule.threadItemsFromTurns
 let replacePresentedAgentRun: typeof UnifiedAgentRunPanelModule.replacePresentedAgentRun;
 let selectAgentExecutionConnection: typeof UnifiedAgentRunPanelModule.selectAgentExecutionConnection;
 let appPinDestinationLabel: typeof UnifiedAgentRunPanelModule.appPinDestinationLabel;
+let askAppDestinations: typeof UnifiedAgentRunPanelModule.askAppDestinations;
+let askAppWriteErrorMessage: typeof UnifiedAgentRunPanelModule.askAppWriteErrorMessage;
 
 describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
   beforeAll(async () => {
@@ -58,11 +60,42 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     replacePresentedAgentRun = module.replacePresentedAgentRun;
     selectAgentExecutionConnection = module.selectAgentExecutionConnection;
     appPinDestinationLabel = module.appPinDestinationLabel;
+    askAppDestinations = module.askAppDestinations;
+    askAppWriteErrorMessage = module.askAppWriteErrorMessage;
   });
 
   it('names the exact App page used by the added-result confirmation', () => {
     expect(appPinDestinationLabel('Customer Health', 'Executive overview')).toBe('Customer Health › Executive overview');
     expect(appPinDestinationLabel('Customer Health')).toBe('Customer Health');
+  });
+
+  it('turns an Ask-to-App 405 into a safe runtime compatibility recovery', () => {
+    expect(askAppWriteErrorMessage(Object.assign(new Error('Method not allowed'), { status: 405 }), 'Could not create the app.')).toContain('Restart dql notebook');
+    expect(askAppWriteErrorMessage(new Error('Draft conflict'), 'Could not create the app.')).toBe('Draft conflict');
+    expect(askAppWriteErrorMessage(null, 'Could not create the app.')).toBe('Could not create the app.');
+  });
+
+  it('lists editable drafts once and turns an unedited Project App into a safe draft destination', () => {
+    const editDraft = {
+      id: 'draft-edit', appId: 'project-app', name: 'Project App edits', state: 'local_draft',
+      baseApp: { appId: 'project-app' }, pages: [{ id: 'overview', metadata: { title: 'Overview' } }],
+    } as never;
+    const localDraft = {
+      id: 'draft-local', appId: 'local-app', name: 'Local App', state: 'local_draft',
+      pages: [{ id: 'page-1', metadata: { title: 'Analysis' } }],
+    } as never;
+    const destinations = askAppDestinations([
+      { id: 'project-app', name: 'Project App', dashboards: [{ id: 'overview', title: 'Overview' }] },
+      { id: 'other-project', name: 'Other Project', dashboards: [{ id: 'main', title: 'Main' }] },
+    ] as never, [editDraft, localDraft]);
+
+    expect(destinations.map((destination) => destination.id)).toEqual([
+      'draft:draft-edit',
+      'draft:draft-local',
+      'project:other-project',
+    ]);
+    expect(destinations[0]).toMatchObject({ kind: 'draft', pageId: 'overview' });
+    expect(destinations[2]).toMatchObject({ kind: 'project', pageId: 'main', pageTitle: 'Main' });
   });
 
   it('keeps Ask on an explicit valid connection and falls back to the server default', () => {

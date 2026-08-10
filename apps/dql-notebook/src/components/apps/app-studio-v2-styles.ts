@@ -185,6 +185,16 @@ export const APP_STUDIO_V2_STYLES = `
 .filter-builder > label > span, .filter-builder legend { color:var(--text-secondary); font-size:8.5px; font-weight:800; text-transform:uppercase; letter-spacing:.06em; }
 .filter-builder > label > input, .filter-builder > label > select { width:100%; height:35px; border:1px solid var(--border-default); border-radius:8px; padding:0 9px; outline:0; color:var(--text-primary); background:var(--bg-1); font-size:10px; }
 .filter-builder > label > input:focus, .filter-builder > label > select:focus { border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-dim); }
+.filter-availability { border:1px solid var(--border-subtle); border-radius:9px; padding:8px; display:grid; grid-template-columns:27px minmax(0,1fr) auto; align-items:center; gap:8px; background:var(--bg-1); }
+.filter-availability > span { width:27px; height:27px; border-radius:7px; display:grid; place-items:center; color:var(--text-tertiary); background:var(--bg-2); }
+.filter-availability > div { min-width:0; display:grid; gap:2px; }
+.filter-availability strong { font-size:9.5px; }
+.filter-availability small { color:var(--text-tertiary); font-size:8px; line-height:1.35; }
+.filter-availability button { min-height:29px; border:1px solid var(--border-default); border-radius:7px; padding:0 8px; display:flex; align-items:center; gap:4px; background:var(--bg-0); color:var(--text-secondary); font-size:8px; font-weight:750; }
+.filter-availability.ready { border-color:color-mix(in srgb,#16a34a 24%,var(--border-default)); background:color-mix(in srgb,#16a34a 5%,var(--bg-0)); }
+.filter-availability.ready > span { color:#15803d; background:color-mix(in srgb,#16a34a 10%,var(--bg-0)); }
+.filter-availability.empty { border-color:color-mix(in srgb,#d97706 32%,var(--border-default)); background:color-mix(in srgb,#d97706 5%,var(--bg-0)); }
+.filter-availability.empty > span { color:#a16207; background:color-mix(in srgb,#d97706 10%,var(--bg-0)); }
 .filter-builder-field { border:1px solid color-mix(in srgb,var(--accent) 28%,var(--border-default)); border-radius:9px; padding:8px; background:var(--accent-dim); display:flex; align-items:center; gap:8px; }
 .filter-builder-field > span { width:29px; height:29px; flex:none; border-radius:8px; display:grid; place-items:center; color:var(--accent); background:var(--bg-0); }
 .filter-builder-field > div { min-width:0; display:grid; flex:1; gap:1px; }
@@ -335,6 +345,9 @@ export const APP_STUDIO_V2_STYLES = `
 .studio-filter.range > span { grid-column:1/-1; }
 .studio-filter.range input { min-width:112px; }
 .studio-filter.range i { align-self:center; color:var(--text-muted); font-style:normal; }
+.studio-filter.range > small { grid-column:1/-1; }
+.studio-filter.empty { border-color:color-mix(in srgb,#d97706 42%,var(--border-default)); background:color-mix(in srgb,#d97706 5%,var(--bg-0)); }
+.studio-filter.empty > small { color:#a16207; }
 .studio-filter.boolean { display:flex; align-items:center; gap:6px; }
 .studio-filter.boolean input { min-width:0; }
 .studio-filter.boolean span { font-size:10px; color:var(--text-secondary); }
@@ -541,10 +554,11 @@ export const APP_STUDIO_V2_STYLES = `
 .readiness-ready > div { display:grid; gap:3px; }
 .readiness-ready strong { color:var(--text-primary); font-size:11px; }
 .readiness-ready span { color:var(--text-secondary); font-size:9.5px; line-height:1.45; }
-.studio-readiness-card > footer { padding:14px 20px; border-top:1px solid var(--border-subtle); display:flex; justify-content:flex-end; gap:8px; }
+.studio-readiness-card > footer { padding:14px 20px; border-top:1px solid var(--border-subtle); display:flex; align-items:center; justify-content:flex-end; gap:8px; }
 .studio-readiness-card > footer button { border:1px solid var(--border-default); background:var(--bg-1); border-radius:8px; padding:9px 12px; font-size:10px; font-weight:750; }
 .studio-readiness-card > footer button.primary { border-color:var(--accent); background:var(--accent); color:var(--accent-fg); }
 .studio-readiness-card > footer button:disabled { opacity:.5; cursor:default; }
+.readiness-footer-hint { flex:1; color:var(--text-tertiary); font-size:9.5px; text-align:right; }
 .studio-delete-card { width:min(420px,100%); border:1px solid var(--border-default); background:var(--bg-0); border-radius:16px; padding:24px; box-shadow:0 24px 80px color-mix(in srgb,var(--text-primary) 18%,transparent); }
 .studio-delete-card .delete-mark { width:40px; height:40px; border-radius:11px; display:flex; align-items:center; justify-content:center; color:#b91c1c; background:color-mix(in srgb,#dc2626 9%,var(--bg-0)); }
 .studio-delete-card h2 { margin:15px 0 7px; font-size:18px; }

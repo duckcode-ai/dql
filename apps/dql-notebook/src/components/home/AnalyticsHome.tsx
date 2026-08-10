@@ -447,7 +447,11 @@ export function AnalyticsHome() {
     [activeId, conversations, isRunning],
   );
 
-  const openApp = (appId: string, dashboardId?: string) => {
+  const openApp = (appId: string, dashboardId?: string, draftId?: string) => {
+    if (draftId) {
+      dispatch({ type: 'OPEN_APP_DRAFT', draftId, appId, dashboardId });
+      return;
+    }
     dispatch({ type: 'OPEN_APP', appId, dashboardId });
   };
 

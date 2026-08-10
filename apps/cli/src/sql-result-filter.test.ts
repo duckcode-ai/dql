@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { addSqlResultFilter, filterableResultColumns, replaceBlockStudioSql } from './sql-result-filter.js';
+import { addSqlResultFilter, dashboardFilterableResultColumns, filterableResultColumns, replaceBlockStudioSql } from './sql-result-filter.js';
 import { parameterizeSqlForDqlImport, candidateToDqlSource } from './block-studio-import.js';
 import { prepareBlockInvocation } from './block-invocation.js';
 
@@ -41,6 +41,20 @@ describe('filterableResultColumns', () => {
     expect(filterableResultColumns('WITH t AS (SELECT region FROM x) SELECT region FROM t', ['region'])).toEqual([]);
     expect(filterableResultColumns('', ['region'])).toEqual([]);
     expect(filterableResultColumns(GROUPED, [])).toEqual([]);
+  });
+});
+
+describe('dashboardFilterableResultColumns (UI-022)', () => {
+  it('adds a certified computed dimension that exists in the settled result', () => {
+    const sql = "SELECT date_trunc('month', ordered_at) AS month, SUM(order_total) AS gross_revenue FROM dev.orders GROUP BY 1";
+    expect(dashboardFilterableResultColumns(sql, ['month', 'gross_revenue'], ['month']))
+      .toEqual([{ column: 'month', predicateTarget: 'month' }]);
+  });
+
+  it('does not expose undeclared measures or declared fields absent from the result', () => {
+    const sql = "SELECT date_trunc('month', ordered_at) AS month, SUM(order_total) AS gross_revenue FROM dev.orders GROUP BY 1";
+    expect(dashboardFilterableResultColumns(sql, ['month', 'gross_revenue'], ['customer_segment']))
+      .toEqual([]);
   });
 });
 

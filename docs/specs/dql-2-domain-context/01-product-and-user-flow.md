@@ -144,12 +144,44 @@ and evidence. App-specific answers, investigations, and typed Add-to-App
 proposals remain explicit and cannot silently mutate App source (`AGT-007`,
 `AGT-022`).
 
+Ask AI's explicit **Add to App** action uses the same `AppBuildDraft` boundary.
+It adds certified answers as fingerprinted certified-block tiles, stores
+exploratory DQL only in the ignored app-scoped local bundle, and treats an
+existing Project App as the base of a safe local edit draft. Opening the result
+lands in the editable Studio; leaving Studio clears the draft/App selection and
+returns to the unified Apps library rather than the retired App workspace
+(`API-013`, `UI-005`, `UI-022`, `E2E-020`).
+
 Shared publication permits current certified blocks and explicitly approved,
 successfully preflighted semantic queries. It rejects required gaps, local AI
 pins, exploratory App drafts, stale semantic definitions, failed source/filter
 preflight, or stories not bound to one settled dashboard run. Apps containing
 approved semantic sources remain reviewed rather than certified; only an
 all-certified App may use certified lifecycle state.
+
+**Publish to Project** opens one guided publication review. It groups every
+blocking question, scoped review, stale preview, source-trust failure, and
+filter-binding failure with the corrective action beside it. Corrective actions
+update the review from the current draft; the author is never sent through a
+separate, repeated "check readiness" loop. The final publish action is shown
+only after the blocking list is empty; it consumes the exact reviewed preflight
+receipt instead of starting another client-side check. The publish endpoint
+still revalidates in the same server request before the atomic write. A stale
+runtime receipt offers one bounded **Refresh all page previews** action, then
+re-evaluates automatically. Source refresh is a no-op when fingerprints are
+already current and therefore cannot invalidate a settled preview (`API-013`,
+`UI-022`).
+
+Dashboard filter authoring is governed-field-first: search a declared block
+filter, semantic dimension, or settled result column that the server SQL parser
+has proved safe and non-aggregate; choose the control; choose App/page scope;
+and explicitly include every compatible component. Select controls use
+bounded, run-scoped server choices. Date controls expose ephemeral min/max
+availability from safe settled result columns; a checked field with no usable
+date values is shown as empty before the filter can be saved. These values and
+bounds are not persisted in the App artifact. A tile with an explicit
+`unsupported` capability and explanation is a governed exclusion, not a
+missing filter binding or publication blocker (`UI-022`, `E2E-020`).
 
 Generated App pages use this reading order (`UI-004`):
 

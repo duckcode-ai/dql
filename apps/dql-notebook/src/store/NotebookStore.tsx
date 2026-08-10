@@ -119,6 +119,7 @@ const initialState: NotebookState = {
   apps: [],
   appsLoading: false,
   activeAppId: null,
+  activeAppDraftId: null,
   activeDashboardId: null,
   activeAppExperience: 'view',
   activeAppSection: 'dashboards',
@@ -813,6 +814,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         ...state,
         mainView: 'apps',
         activeAppId: action.appId,
+        activeAppDraftId: null,
         activeDashboardId: dashboardId,
         activeAppExperience: action.experience ?? (sameApp ? state.activeAppExperience : 'view'),
         activeAppSection: action.section ?? (sameApp ? state.activeAppSection : 'dashboards'),
@@ -820,10 +822,23 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       };
     }
 
+    case 'OPEN_APP_DRAFT':
+      return {
+        ...state,
+        mainView: 'apps',
+        activeAppId: action.appId ?? null,
+        activeAppDraftId: action.draftId,
+        activeDashboardId: action.dashboardId ?? null,
+        activeAppExperience: 'build',
+        activeAppSection: 'dashboards',
+        lineageReturnTarget: null,
+      };
+
     case 'CLOSE_APP':
       return {
         ...state,
         activeAppId: null,
+        activeAppDraftId: null,
         activeDashboardId: null,
         activeAppExperience: 'view',
         activeAppSection: 'dashboards',

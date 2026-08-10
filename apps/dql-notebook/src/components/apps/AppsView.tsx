@@ -218,6 +218,7 @@ export function AppsView(): JSX.Element {
   const state = useNotebookStore(useShallow((store) => ({
     activeAppExperience: store.activeAppExperience,
     activeAppId: store.activeAppId,
+    activeAppDraftId: store.activeAppDraftId,
     activeAppSection: store.activeAppSection,
     activeDashboardId: store.activeDashboardId,
     apps: store.apps,
@@ -229,7 +230,7 @@ export function AppsView(): JSX.Element {
   const queryClient = useQueryClient();
   const { operations, track: trackOperation } = useOperations();
   const appTheme = useMemo(() => normalizeAppTheme(state.themeMode), [state.themeMode]);
-  const [surface, setSurface] = useState<AppSurface>(() => state.activeAppId ? 'workspace' : 'library');
+  const [surface, setSurface] = useState<AppSurface>(() => state.activeAppDraftId ? 'create' : state.activeAppId ? 'workspace' : 'library');
   const experience = state.activeAppExperience;
   const section = state.activeAppSection;
   const setExperience = (nextExperience: AppExperience) => {
@@ -257,7 +258,7 @@ export function AppsView(): JSX.Element {
   const [builderAudience, setBuilderAudience] = useState('stakeholders');
   const builderAudienceTouchedRef = useRef(false);
   const [builderExistingAppId, setBuilderExistingAppId] = useState<string | null>(null);
-  const [builderDraftId, setBuilderDraftId] = useState<string | null>(null);
+  const [builderDraftId, setBuilderDraftId] = useState<string | null>(() => state.activeAppDraftId);
   const [catalog, setCatalog] = useState<AppBlockRecommendation[]>([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
@@ -314,6 +315,17 @@ export function AppsView(): JSX.Element {
   useEffect(() => {
     if (personaQuery.data) dispatch({ type: 'SET_ACTIVE_PERSONA', persona: personaQuery.data });
   }, [dispatch, personaQuery.data]);
+
+  // Ask AI can open an AppBuildDraft while AppsView is already mounted (for
+  // example from the global App Copilot rail). React state initializers only
+  // run on mount, so mirror the explicit store transition into the Studio
+  // surface instead of leaving the user in the retired workspace.
+  useEffect(() => {
+    if (!state.activeAppDraftId) return;
+    setBuilderDraftId(state.activeAppDraftId);
+    setBuilderExistingAppId(null);
+    setSurface('create');
+  }, [state.activeAppDraftId]);
 
   const applyRecoveredBuildSession = useCallback((session: AppAiBuildSession) => {
     setBuildSession(session);
@@ -877,6 +889,15 @@ export function AppsView(): JSX.Element {
     }
   };
 
+  const returnToAppLibrary = useCallback(() => {
+    dispatch({ type: 'CLOSE_APP' });
+    setAppDoc(null);
+    setDashboardDoc(null);
+    setBuilderExistingAppId(null);
+    setBuilderDraftId(null);
+    setSurface('library');
+  }, [dispatch]);
+
   return (
     <div className={`dql-apps-waterline dql-apps-theme-${appTheme}`}>
       <style>{APP_STYLES}</style>
@@ -931,7 +952,7 @@ export function AppsView(): JSX.Element {
           domain={builderDomain}
           audience={builderAudience}
           themeMode={state.themeMode}
-          onBack={() => setSurface(builderExistingAppId ? 'workspace' : 'library')}
+          onBack={returnToAppLibrary}
           onPublished={(app, dashboardId) => {
             void queryClient.invalidateQueries({ queryKey: ['app-builds'] });
             void refreshApps(app.id, dashboardId, 'workspace', { experience: 'view', section: 'dashboards' });
@@ -956,7 +977,7 @@ export function AppsView(): JSX.Element {
           dashboardFilterValues={dashboardFilterValues}
           themeMode={state.themeMode}
           variables={dashboardVariables}
-          onBack={() => setSurface('library')}
+          onBack={returnToAppLibrary}
           onExperienceChange={(nextExperience) => {
             if (nextExperience === 'build' && activeApp) openApp(activeApp, 'build');
             else setExperience(nextExperience);
@@ -972,7 +993,14 @@ export function AppsView(): JSX.Element {
             setAddPageOpen(true);
           }}
           onOpenDashboard={(dashboardId) => dispatch({ type: 'OPEN_DASHBOARD', dashboardId })}
-          onOpenApp={(appId, dashboardId) => {
+          onOpenApp={(appId, dashboardId, draftId) => {
+            if (draftId) {
+              setBuilderDraftId(draftId);
+              setBuilderExistingAppId(null);
+              dispatch({ type: 'OPEN_APP_DRAFT', draftId, appId, dashboardId });
+              setSurface('create');
+              return;
+            }
             // Opening from "added to App" must show what was just added; a
             // review-required pin is filtered out of the read-only view.
             void refreshApps(appId, dashboardId, 'workspace', { experience: 'build', section: 'dashboards' });
@@ -1889,7 +1917,7 @@ function AppWorkspaceSurface({
   onExplainExpandedChange: (value: boolean) => void;
   onAddPage: () => void;
   onOpenDashboard: (dashboardId: string) => void;
-  onOpenApp: (appId: string, dashboardId?: string) => void;
+  onOpenApp: (appId: string, dashboardId?: string, draftId?: string) => void;
   onDashboardChanged: (dashboard: DashboardDocumentResponse['dashboard']) => void;
   onInvestigationsChanged: (investigations: LocalAppInvestigation[]) => void;
   onOpenLineageNode: (nodeId: string) => void;
@@ -2628,7 +2656,7 @@ function UnifiedAppAiPanel({
   expanded: boolean;
   onToggleExpanded: () => void;
   onClose: () => void;
-  onOpenApp: (appId: string, dashboardId?: string) => void;
+  onOpenApp: (appId: string, dashboardId?: string, draftId?: string) => void;
 }) {
   const t = themes[themeMode];
   const dashboard = dashboardDoc?.dashboard ?? null;

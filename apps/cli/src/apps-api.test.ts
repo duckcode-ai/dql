@@ -3,10 +3,13 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
+import { Readable } from 'node:stream';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { loadDashboardDocument } from '@duckcodeailabs/dql-core';
 import { defaultLocalAppsDbPath, defaultPersonaRegistry, LocalAppStorage } from '@duckcodeailabs/dql-project';
 import {
   __test__,
+  addAskResultToAppBuildDraft,
   approveAppSemanticTiles,
   commitAppAiBuild,
   createAppAiBuildSession,
@@ -18,6 +21,7 @@ import {
   restoreAppPackage,
   generateAppPackage,
   getAppAiBuildSession,
+  handleAppsApi,
   markStoredAppBuildDraftPreflighted,
   publishStoredAppBuildDraft,
   promoteAppForStakeholders,
@@ -45,6 +49,7 @@ interface TestBlockSpec {
   query?: string;
   allowedFilters?: string[];
   filterBindings?: Array<{ filter: string; binding: string }>;
+  dimensions?: string[];
   params?: Record<string, string | number | boolean | Array<string | number | boolean>>;
 }
 
@@ -147,7 +152,7 @@ describe('Apps command center API helpers', () => {
     expect(blocks.map((block) => block.name)).toEqual(['Monthly Revenue']);
   });
 
-  it('deduplicates migrated block copies and exposes declared App filters', () => {
+  it('deduplicates migrated block copies and exposes declared App filters and dimensions (UI-022)', () => {
     const root = createProject();
     const spec = {
       name: 'Revenue Total',
@@ -158,6 +163,7 @@ describe('Apps command center API helpers', () => {
       chart: 'single_value',
       allowedFilters: ['customer_type'],
       filterBindings: [{ filter: 'region', binding: 'customer_region' }],
+      dimensions: ['month'],
     };
     writeBlock(root, 'growth/revenue.dql', spec);
     writeDomainBlock(root, 'growth', 'revenue.dql', spec);
@@ -167,6 +173,7 @@ describe('Apps command center API helpers', () => {
     expect(blocks.find((block) => block.id === 'Revenue Total')).toMatchObject({
       path: 'domains/growth/blocks/revenue.dql',
       filterIds: ['customer_type', 'region'],
+      dimensionIds: ['month'],
     });
   });
 
@@ -274,6 +281,135 @@ describe('Apps command center API helpers', () => {
     expect(existsSync(join(root, '.dql/local/app-build-staging', draft.id))).toBe(false);
   });
 
+  it('adds a certified Ask answer to the editable draft without writing Project App source', () => {
+    const root = createProject();
+    writeBlock(root, 'revenue/monthly-revenue.dql', {
+      name: 'Monthly Revenue',
+      domain: 'revenue',
+      status: 'certified',
+      tags: ['revenue', 'monthly'],
+      description: 'Monthly governed revenue',
+      chart: 'line',
+      allowedFilters: ['month'],
+    });
+    const draft = createStoredAppBuildDraft(root, {
+      name: 'Ask Revenue',
+      goal: 'Track monthly revenue',
+      domain: 'revenue',
+      authoringMode: 'ai',
+      sourcePolicy: 'governed_only',
+    });
+
+    const result = addAskResultToAppBuildDraft(root, draft.id, {
+      expectedRevision: draft.revision,
+      expectedProposalHash: draft.proposalHash,
+      pageId: draft.pages[0].id,
+      title: 'Monthly revenue from Ask',
+      question: 'How is monthly revenue trending?',
+      certifiedBlockId: 'Monthly Revenue',
+      visualization: 'line',
+    });
+
+    expect(result.draft.revision).toBe(draft.revision + 1);
+    expect(result.draft.sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'certified_block', trustState: 'certified' }),
+    ]));
+    expect(result.draft.pages[0].layout.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        i: result.tileId,
+        block: expect.objectContaining({ blockId: expect.any(String) }),
+        sourceClass: 'certified_block',
+        trustState: 'certified',
+      }),
+    ]));
+    expect(existsSync(join(root, 'apps', draft.appId))).toBe(false);
+
+    const duplicate = addAskResultToAppBuildDraft(root, draft.id, {
+      expectedRevision: result.draft.revision,
+      expectedProposalHash: result.draft.proposalHash,
+      pageId: draft.pages[0].id,
+      title: 'Monthly revenue from Ask',
+      question: 'How is monthly revenue trending?',
+      certifiedBlockId: 'Monthly Revenue',
+      visualization: 'line',
+    });
+    expect(duplicate.deduped).toBe(true);
+    expect(duplicate.draft.revision).toBe(result.draft.revision);
+  });
+
+  it('routes Ask new-App creation and result addition through POST App Build endpoints (API-013, UI-005)', async () => {
+    const root = createProject();
+    writeBlock(root, 'revenue/monthly-revenue.dql', {
+      name: 'Monthly Revenue',
+      domain: 'revenue',
+      status: 'certified',
+      tags: ['revenue', 'monthly'],
+      description: 'Monthly governed revenue',
+      chart: 'line',
+    });
+
+    const created = await invokeAppsApi(root, '/api/app-builds', 'POST', {
+      name: 'Ask Revenue',
+      goal: 'How is monthly revenue trending?',
+      authoringMode: 'ai',
+      sourcePolicy: 'governed_only',
+      template: 'blank',
+      entrypoint: 'ask',
+    });
+    expect(created).toMatchObject({ handled: true, status: 201, payload: { ok: true } });
+    const draft = (created.payload as { draft: ReturnType<typeof createStoredAppBuildDraft> }).draft;
+
+    const added = await invokeAppsApi(root, `/api/app-builds/${draft.id}/ask-results`, 'POST', {
+      expectedRevision: draft.revision,
+      expectedProposalHash: draft.proposalHash,
+      pageId: draft.pages[0].id,
+      title: 'Monthly revenue from Ask',
+      question: 'How is monthly revenue trending?',
+      certifiedBlockId: 'Monthly Revenue',
+      visualization: 'line',
+    });
+
+    expect(added).toMatchObject({
+      handled: true,
+      status: 201,
+      payload: { ok: true, deduped: false, pageId: draft.pages[0].id },
+    });
+    expect(existsSync(join(root, 'apps', draft.appId))).toBe(false);
+  });
+
+  it('materializes exploratory Ask SQL as local review DQL rather than inline dashboard SQL', () => {
+    const root = createProject();
+    const draft = createStoredAppBuildDraft(root, {
+      name: 'Ask Exploration',
+      goal: 'Explore customer risk',
+      authoringMode: 'ai',
+      sourcePolicy: 'governed_only',
+    });
+
+    const result = addAskResultToAppBuildDraft(root, draft.id, {
+      expectedRevision: draft.revision,
+      expectedProposalHash: draft.proposalHash,
+      title: 'Customers at risk',
+      question: 'Which customers are at risk?',
+      answer: 'Review the customers with unusually low activity.',
+      sql: 'SELECT customer_id, activity_score FROM customers WHERE activity_score < 10',
+      visualization: 'table',
+    });
+
+    const source = result.draft.sources.find((candidate) => candidate.kind === 'review_dql');
+    expect(source).toMatchObject({ trustState: 'review_required', reviewStatus: 'required' });
+    expect(result.draft.sourcePolicy).toBe('include_review_required');
+    expect(result.draft.reviewTasks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceId: source?.id, tileId: result.tileId, status: 'open' }),
+    ]));
+    expect(JSON.stringify(result.draft.pages)).not.toContain('SELECT customer_id');
+    expect(source?.sourceRef).toBeTruthy();
+    const artifact = readFileSync(join(root, '.dql', 'local', 'app-builds', draft.id, source!.sourceRef), 'utf-8');
+    expect(artifact).toContain('status = "review"');
+    expect(artifact).toContain('SELECT customer_id');
+    expect(existsSync(join(root, 'apps', draft.appId))).toBe(false);
+  });
+
   it('does not turn legacy unscoped AI reminders into hidden publication gates', () => {
     const root = createProject();
     const draft = createStoredAppBuildDraft(root, {
@@ -301,6 +437,61 @@ describe('Apps command center API helpers', () => {
       reviewTasks: [{ id: 'review-overview', message: 'Confirm the Overview evidence.', status: 'open' as const, pageId: draft.pages[0].id }],
     };
     expect(preflightStoredAppBuildDraft(root, scopedTask)).toContain('Review task is still open: Confirm the Overview evidence.');
+  });
+
+  it('accepts an explicitly unsupported tile as a governed filter exclusion', () => {
+    const root = createProject();
+    writeBlock(root, 'commerce/customer-profile.dql', {
+      name: 'Customer Profile',
+      domain: 'commerce',
+      status: 'certified',
+      tags: ['customer'],
+      description: 'Governed customer profile',
+      chart: 'table',
+      allowedFilters: ['customer_name'],
+    });
+    const block = recommendBlocks(root, { certifiedOnly: true })[0];
+    const draft = createStoredAppBuildDraft(root, {
+      name: 'Customer Filter App',
+      goal: 'Review customers',
+      domain: 'commerce',
+      authoringMode: 'manual',
+      sourcePolicy: 'governed_only',
+    });
+    const page = {
+      ...draft.pages[0],
+      filters: [{ id: 'customer_name', label: 'Customer Name', type: 'select' as const, bindsTo: 'customer_name' }],
+      layout: {
+        ...draft.pages[0].layout,
+        items: [
+          {
+            i: 'customer-profile', x: 0, y: 0, w: 6, h: 4,
+            block: { blockId: block.id }, viz: { type: 'table' as const },
+            filterBindings: [{ filter: 'customer_name', binding: 'customer_name', mode: 'predicate' as const, capability: 'preflight_required' as const }],
+            review: { status: 'not_required' as const, sourceFingerprint: block.fingerprint },
+          },
+          {
+            i: 'revenue-trend', x: 6, y: 0, w: 6, h: 4,
+            block: { blockId: block.id }, viz: { type: 'line' as const },
+            filterBindings: [{ filter: 'customer_name', capability: 'unsupported' as const, unsupportedReason: 'Customer Name is not exposed by Revenue Trend.' }],
+            review: { status: 'not_required' as const, sourceFingerprint: block.fingerprint },
+          },
+        ],
+      },
+    };
+    const readyDraft = {
+      ...draft,
+      sources: [{ id: `block:${block.id}`, kind: 'certified_block' as const, sourceRef: block.id, sourceFingerprint: block.fingerprint, trustState: 'certified' as const, reviewStatus: 'not_required' as const }],
+      pages: [page],
+      previewReceipts: [{ id: 'run-customer-filter', pageId: page.id, revision: draft.revision, snapshotId: 'snapshot', filterFingerprint: 'filters', resultFingerprint: 'results', createdAt: draft.updatedAt }],
+    };
+
+    expect(preflightStoredAppBuildDraft(root, readyDraft)).toEqual([]);
+    const missingExclusion = {
+      ...readyDraft,
+      pages: [{ ...page, layout: { ...page.layout, items: page.layout.items.map((tile) => tile.i === 'revenue-trend' ? { ...tile, filterBindings: [] } : tile) } }],
+    };
+    expect(preflightStoredAppBuildDraft(root, missingExclusion)).toContain('overview/revenue-trend does not have a preflighted binding for filter Customer Name.');
   });
 
   it('deletes only the selected App package and moves it to recoverable local trash', () => {
@@ -2541,6 +2732,36 @@ function createProject(): string {
   return root;
 }
 
+async function invokeAppsApi(
+  projectRoot: string,
+  path: string,
+  method: string,
+  body: unknown,
+): Promise<{ handled: boolean; status: number; payload: unknown }> {
+  const req = Readable.from([Buffer.from(JSON.stringify(body), 'utf-8')]) as IncomingMessage;
+  req.method = method;
+  let status = 0;
+  let responseBody = '';
+  const res = {
+    writeHead(nextStatus: number) {
+      status = nextStatus;
+      return this;
+    },
+    end(chunk?: string | Buffer) {
+      if (chunk !== undefined) responseBody += Buffer.isBuffer(chunk) ? chunk.toString('utf-8') : String(chunk);
+      return this;
+    },
+  } as unknown as ServerResponse;
+  const handled = await handleAppsApi({
+    req,
+    res,
+    url: new URL(`http://local.test${path}`),
+    path,
+    projectRoot,
+  });
+  return { handled, status, payload: responseBody ? JSON.parse(responseBody) : undefined };
+}
+
 function writeBlock(
   root: string,
   relPath: string,
@@ -2570,6 +2791,7 @@ function writeBlockFile(
   description = "${block.description}"
   owner = "analytics@local"
   tags = [${block.tags.map((tag) => `"${tag}"`).join(', ')}]
+${block.dimensions?.length ? `  dimensions = [${block.dimensions.map((dimension) => `"${dimension}"`).join(', ')}]` : ''}
 ${block.allowedFilters?.length ? `  allowedFilters = [${block.allowedFilters.map((filter) => `"${filter}"`).join(', ')}]` : ''}
 ${formatTestFilterBindings(block)}
 ${formatTestParams(block)}

@@ -9,6 +9,38 @@ export interface AppPublicationStep {
   count: number;
 }
 
+export function publicationIssueSummaries(issues: string[]): Array<{ id: string; title: string; detail: string; action: 'sources' | 'filters' }> {
+  const known = /Required App question is unresolved|Review task is still open|Run a current settled preview|requires snapshot-bound semantic approval|is review-required and cannot be published|references app-scoped exploratory DQL|Resolve required Build Frame clarifications/i;
+  const summaries = issues.filter((issue) => !known.test(issue)).map((issue) => {
+    const filterMatch = issue.match(/^[^/]+\/[^ ]+ does not have a preflighted binding for filter (.+)\.$/i);
+    if (filterMatch) {
+      const label = filterMatch[1];
+      const affected = issues.filter((candidate) => candidate.endsWith(`binding for filter ${label}.`)).length;
+      return {
+        id: `filters:${label.toLowerCase()}`,
+        title: `Limit ${label} to compatible components`,
+        detail: `${label} is applied to ${affected} ${affected === 1 ? 'component that cannot' : 'components that cannot'} use it. Open Filters, edit ${label}, and keep only the compatible components selected.`,
+        action: 'filters' as const,
+      };
+    }
+    if (/filter|binding/i.test(issue)) return { id: 'filters', title: 'Finish filter wiring', detail: issue, action: 'filters' as const };
+    const sourceMatch = issue.match(/^Source (.+?) changed after selection\.$/i);
+    if (sourceMatch) {
+      const source = publicationHumanize(sourceMatch[1]);
+      return { id: `sources:${sourceMatch[1]}`, title: `Review ${source}`, detail: `${source} changed since it was selected. Accept the current certified version; DQL will then request a fresh preview.`, action: 'sources' as const };
+    }
+    if (/does not resolve to a current certified block/i.test(issue)) return { id: `unavailable:${issue}`, title: 'Replace an unavailable source', detail: issue, action: 'sources' as const };
+    if (/changed after selection|certified block|source/i.test(issue)) return { id: 'sources', title: 'Review changed sources', detail: issue, action: 'sources' as const };
+    if (/preview|settled run|receipt|runtime/i.test(issue)) return { id: 'preview', title: 'Refresh the settled preview', detail: 'The saved preview no longer matches the current App data contract.', action: 'sources' as const };
+    return { id: `validation:${issue}`, title: 'Complete governed validation', detail: issue, action: 'sources' as const };
+  });
+  return Array.from(new Map(summaries.map((summary) => [summary.id, summary])).values());
+}
+
+function publicationHumanize(value: string): string {
+  return value.replace(/[_-]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
 export function unresolvedPublicationRequirements(draft: AppStudioBuildDraft): AppStudioBuildDraft['requirements'] {
   return draft.requirements.filter((requirement) => {
     if (!requirement.required) return false;

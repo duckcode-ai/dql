@@ -37,6 +37,7 @@ import {
 } from 'lucide-react';
 import {
   api,
+  DqlApiError,
   type AgentConversationTurn,
   type AgentRun,
   type AgentRunArtifact,
@@ -53,6 +54,7 @@ import {
   type AgentRunTrustState,
   type AgentThinkingMode,
   type AppBuildProposal,
+  type AppStudioBuildDraft,
   type MixedSourceNotebookPlan,
 } from '../../api/client';
 import { themes, type Theme, type ThemeMode } from '../../themes/notebook-theme';
@@ -60,7 +62,6 @@ import { controlStyle } from '../../themes/control-tokens';
 import { ThinkingModeControl } from './ThinkingModeControl';
 import { StructuredAnswerText } from './AgentAnswerCard';
 import { AppBuildProposalPanel, defaultProposalSelection, type AppBuildBriefEdits } from '../apps/AppBuildProposalPanel';
-import { nextTileId, nextTilePosition, normalizeVizTypeForDashboard } from '../apps/dashboard-tile-placement';
 import { ResultView } from '../output/ResultView';
 import { DraftReviewCard } from '../blocks/DraftReviewCard';
 import { SaveAsBlockModal } from '../modals/SaveAsBlockModal';
@@ -187,7 +188,7 @@ interface UnifiedAgentRunPanelProps {
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
   /** Navigate into an app/dashboard (used by the "Added to app" success link). */
-  onOpenApp?: (appId: string, dashboardId?: string) => void;
+  onOpenApp?: (appId: string, dashboardId?: string, draftId?: string) => void;
   /** Reports whether a run is in flight, so a host can avoid unmounting mid-run. */
   onRunningChange?: (running: boolean) => void;
   /** Use Ask's answer-first narrative/result card inside a compact authoring panel. */
@@ -1644,7 +1645,7 @@ function RunCard({
   t: Theme;
   themeMode: ThemeMode;
   appContext?: { appId?: string; dashboardId?: string; dashboardTitle?: string };
-  onOpenApp?: (appId: string, dashboardId?: string) => void;
+  onOpenApp?: (appId: string, dashboardId?: string, draftId?: string) => void;
   onInsertSql?: (sql: string, title?: string, meta?: SqlNotebookDraftMeta) => void;
   onInsertDql?: (payload: InsertDqlPayload) => void;
   onOpenBlock?: (path: string, name?: string) => void;
@@ -2115,7 +2116,7 @@ interface AskRunCardProps {
   appContext?: { appId?: string; dashboardId?: string; dashboardTitle?: string };
   selectedArtifactId?: string;
   onOpenArtifact?: (artifactId: string, tab: AskInspectorTab) => void;
-  onOpenApp?: (appId: string, dashboardId?: string) => void;
+  onOpenApp?: (appId: string, dashboardId?: string, draftId?: string) => void;
   onInsertSql?: (sql: string, title?: string, meta?: SqlNotebookDraftMeta) => void;
   onInsertDql?: (payload: InsertDqlPayload) => void;
   onReplaceDql?: (payload: InsertDqlPayload) => void;
@@ -2932,7 +2933,7 @@ function AskInspector({
   tab: AskInspectorTab;
   t: Theme;
   appContext?: { appId?: string; dashboardId?: string; dashboardTitle?: string };
-  onOpenApp?: (appId: string, dashboardId?: string) => void;
+  onOpenApp?: (appId: string, dashboardId?: string, draftId?: string) => void;
   onChangeTab: (tab: AskInspectorTab) => void;
   onClose: () => void;
   onSaveBlock: () => void;
@@ -3193,14 +3194,67 @@ function defaultAppName(question: string): string {
   return title.slice(0, 60);
 }
 
+/**
+ * Keep Ask-to-App failures actionable. A raw 405 here means the browser bundle
+ * is talking to a Notebook runtime that predates the unified App Build API (or
+ * was not restarted after rebuilding). Falling back to the legacy `/api/apps`
+ * write would bypass the private-draft contract, so fail closed and explain the
+ * one safe recovery instead.
+ */
+export function askAppWriteErrorMessage(error: unknown, fallback: string): string {
+  const message = error instanceof Error ? error.message.trim() : '';
+  if ((error instanceof DqlApiError && error.status === 405) || /method not allowed/i.test(message)) {
+    return 'This Notebook server is older than the App Studio shown in your browser. Restart dql notebook, reload this page, and try again. No Project files were published.';
+  }
+  return message || fallback;
+}
+
 export function appPinDestinationLabel(appName: string, dashboardTitle?: string): string {
   return dashboardTitle?.trim() ? `${appName} › ${dashboardTitle.trim()}` : appName;
 }
 
+export interface AskAppDestination {
+  id: string;
+  kind: 'draft' | 'project';
+  appId: string;
+  name: string;
+  draft?: AppStudioBuildDraft;
+  pageId?: string;
+  pageTitle?: string;
+}
+
+/** Coalesce Project Apps that already have a local edit draft into one choice. */
+export function askAppDestinations(apps: AppSummary[], drafts: AppStudioBuildDraft[]): AskAppDestination[] {
+  const localDrafts = drafts.filter((draft) => draft.state !== 'project_published');
+  const draftedProjectIds = new Set(localDrafts.flatMap((draft) => draft.baseApp?.appId ? [draft.baseApp.appId] : []));
+  return [
+    ...localDrafts.map((draft): AskAppDestination => ({
+      id: `draft:${draft.id}`,
+      kind: 'draft',
+      appId: draft.appId,
+      name: draft.name,
+      draft,
+      pageId: draft.pages[0]?.id,
+      pageTitle: draft.pages[0]?.metadata.title,
+    })),
+    ...apps.filter((app) => !draftedProjectIds.has(app.id)).map((app): AskAppDestination => {
+      const pageId = app.homepage?.type === 'dashboard' ? app.homepage.id : app.dashboards[0]?.id;
+      return {
+        id: `project:${app.id}`,
+        kind: 'project',
+        appId: app.id,
+        name: app.name,
+        pageId,
+        pageTitle: app.dashboards.find((dashboard) => dashboard.id === pageId)?.title,
+      };
+    }),
+  ];
+}
+
 /**
- * Hero "Add to app" action. Always available on a pinnable result: opens a small
- * picker to choose an existing app (one click) or create a new one, resolves the
- * target dashboard, then writes the AI pin. Composed entirely from existing APIs.
+ * Save an Ask result into the unified local AppBuildDraft. The result remains
+ * editable in Studio; certified answers keep their block identity and all
+ * other answers are materialized as review-required local evidence.
  */
 function AddToAppButton({
   run,
@@ -3211,10 +3265,10 @@ function AddToAppButton({
   run: AgentRun;
   t: Theme;
   appContext?: { appId?: string; dashboardId?: string; dashboardTitle?: string };
-  onOpenApp?: (appId: string, dashboardId?: string) => void;
+  onOpenApp?: (appId: string, dashboardId?: string, draftId?: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [apps, setApps] = useState<AppSummary[] | null>(null); // null = loading
+  const [destinations, setDestinations] = useState<AskAppDestination[] | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [view, setView] = useState<'list' | 'new'>('list');
   const [newName, setNewName] = useState('');
@@ -3224,28 +3278,30 @@ function AddToAppButton({
   const [tileName, setTileName] = useState('');
   const [done, setDone] = useState<{
     appId: string;
-    dashboardId?: string;
+    draftId: string;
+    pageId?: string;
     name: string;
-    dashboardTitle?: string;
+    pageTitle?: string;
     tileTitle: string;
-    /** What actually landed, so the confirmation can be truthful. */
-    kind: 'block' | 'pin' | 'existing';
+    kind: 'certified' | 'review' | 'narrative' | 'existing';
   } | null>(null);
-  // Remember an app created this session so a failed-pin retry reuses it (no orphans).
-  const createdRef = useRef<{ appId: string; dashboardId: string } | null>(null);
+  const createdRef = useRef<AppStudioBuildDraft | null>(null);
 
   const loadApps = async () => {
-    setApps(null);
+    setDestinations(null);
     setLoadError(false);
-    try {
-      const list = await api.listAppsStrict();
-      setApps(list);
-      if (list.length === 0) setView('new');
-    } catch {
-      // A failed load must NOT look like "you have no apps" (would cause duplicates).
-      setApps([]);
+    const [projectApps, appBuilds] = await Promise.allSettled([api.listAppsStrict(), api.listAppBuilds()]);
+    if (projectApps.status === 'rejected' && appBuilds.status === 'rejected') {
+      setDestinations([]);
       setLoadError(true);
+      return;
     }
+    const choices = askAppDestinations(
+      projectApps.status === 'fulfilled' ? projectApps.value : [],
+      appBuilds.status === 'fulfilled' ? appBuilds.value.drafts : [],
+    );
+    setDestinations(choices);
+    if (choices.length === 0) setView('new');
   };
 
   const openPicker = () => {
@@ -3264,97 +3320,62 @@ function AddToAppButton({
     setError(null);
   };
 
-  const pinTo = async (appId: string, dashboardId: string, name: string, dashboardTitle?: string) => {
+  const addToDraft = async (draft: AppStudioBuildDraft, name: string, requestedPageId?: string, pageTitle?: string) => {
     const tileTitle = tileName.trim() || defaultAppName(run.question);
     const dqlArtifact = answerDqlArtifactFromRun(run);
     const certifiedBlock = certifiedBlockNameFromRun(run);
-
-    // A certified block belongs on the page as a real block tile: it keeps its
-    // block identity, re-runs with the dashboard's filters, and survives
-    // publication. Only exploratory output becomes a review-required pin.
-    if (certifiedBlock) {
-      const doc = await api.getDashboard(appId, dashboardId);
-      if (!doc) throw new Error('Dashboard could not be loaded.');
-      const layout = {
-        ...doc.dashboard.layout,
-        items: [
-          ...doc.dashboard.layout.items,
-          {
-            i: nextTileId(doc.dashboard, certifiedBlock),
-            ...nextTilePosition(doc.dashboard),
-            block: { blockId: certifiedBlock },
-            viz: { type: normalizeVizTypeForDashboard(runChartConfig(run)?.chart) },
-            title: tileTitle,
-          },
-        ],
-      };
-      const saved = await api.patchDashboardLayout(appId, dashboardId, layout);
-      if (!saved.ok) throw new Error(saved.error || 'Could not add to app.');
-      setDone({ appId, dashboardId, name, dashboardTitle, tileTitle, kind: 'block' });
-      window.dispatchEvent(new CustomEvent('dql-app-dashboard-updated', { detail: { appId, dashboardId } }));
-      setOpen(false);
-      return;
-    }
-
-    const chartConfig = runChartConfig(run);
-    const result = runResult(run);
-    const created = await api.createAiPin(appId, {
-      dashboardId,
+    const result = await api.addAskResultToAppBuild(draft.id, {
+      expectedRevision: draft.revision,
+      expectedProposalHash: draft.proposalHash,
+      pageId: requestedPageId,
       title: tileTitle,
-      answer: run.answer ?? run.summary,
       question: run.question,
+      answer: run.answer ?? run.summary,
+      certifiedBlockId: certifiedBlock,
+      dqlSource: dqlArtifact?.source,
       sql: answerSqlFromRun(run),
-      certification: run.trustState === 'certified' ? 'certified' : 'ai_generated',
-      reviewStatus: run.trustState === 'certified' ? 'certified' : 'needs_review',
-      analysisPlan: dqlArtifact ? { dqlArtifact } : undefined,
-      // Without these the server forces `viz: table` and the tile renders empty.
-      ...(chartConfig ? { chartConfig: { ...chartConfig } as Record<string, unknown> } : {}),
-      ...(result ? { result } : {}),
+      visualization: runChartConfig(run)?.chart,
     });
-    // Surface the real server error rather than a generic one.
-    if (!created.ok) throw new Error(created.error || 'Could not add to app.');
     setDone({
-      appId,
-      dashboardId,
+      appId: result.draft.appId,
+      draftId: result.draft.id,
+      pageId: result.pageId,
       name,
-      dashboardTitle,
-      tileTitle: created.pin.title || tileTitle,
-      // The server dedupes on the question, so a second add is a no-op it still
-      // reports as success. Say "already there" instead of implying a new tile.
-      kind: created.deduped ? 'existing' : 'pin',
+      pageTitle: result.draft.pages.find((page) => page.id === result.pageId)?.metadata.title ?? pageTitle,
+      tileTitle,
+      kind: result.deduped ? 'existing' : certifiedBlock ? 'certified' : (dqlArtifact?.source || answerSqlFromRun(run)) ? 'review' : 'narrative',
     });
-    window.dispatchEvent(new CustomEvent('dql-app-dashboard-updated', {
-      detail: { appId, dashboardId, tileId: created.pin.tileId },
+    window.dispatchEvent(new CustomEvent('dql-app-build-updated', {
+      detail: { draft: result.draft, pageId: result.pageId, tileId: result.tileId },
     }));
     setOpen(false);
   };
 
-  const addToExisting = async (app: AppSummary) => {
+  const ensureDraft = async (destination: AskAppDestination): Promise<AppStudioBuildDraft> => {
+    if (destination.draft) return destination.draft;
+    const latest = await api.listAppBuilds();
+    const existing = latest.drafts.find((draft) => draft.state !== 'project_published' && draft.baseApp?.appId === destination.appId);
+    if (existing) return existing;
+    return (await api.createAppBuild({
+      baseAppId: destination.appId,
+      goal: `Edit ${destination.name} with an Ask result`,
+      authoringMode: 'ai',
+      sourcePolicy: certifiedBlockNameFromRun(run) ? 'governed_only' : 'include_review_required',
+      template: 'blank',
+      entrypoint: 'ask',
+    })).draft;
+  };
+
+  const addToExisting = async (destination: AskAppDestination) => {
     if (busy) return;
     setBusy(true);
     setError(null);
     try {
-      let dashboardId = appContext?.appId === app.id ? appContext.dashboardId : undefined;
-      let dashboardTitle = appContext?.appId === app.id ? appContext.dashboardTitle : undefined;
-      let doc: Awaited<ReturnType<typeof api.getApp>> | null = null;
-      if (!dashboardId) {
-        doc = await api.getApp(app.id);
-        const home = doc?.app?.homepage;
-        dashboardId = home?.type === 'dashboard' ? home.id : doc?.dashboards?.[0]?.id;
-        if (!dashboardId) {
-          const created = await api.createAppDashboard(app.id, { title: 'Overview' });
-          if (!created.ok) throw new Error(created.error);
-          dashboardId = created.dashboard.id;
-          dashboardTitle = created.dashboard.metadata.title;
-        }
-      }
-      if (!dashboardTitle) {
-        doc = doc ?? await api.getApp(app.id);
-        dashboardTitle = doc?.dashboards?.find((dashboard) => dashboard.id === dashboardId)?.title;
-      }
-      await pinTo(app.id, dashboardId, app.name, dashboardTitle);
+      const draft = await ensureDraft(destination);
+      const pageId = appContext?.appId === destination.appId ? appContext.dashboardId : destination.pageId;
+      await addToDraft(draft, destination.name, pageId, destination.pageTitle);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not add to app.');
+      setError(askAppWriteErrorMessage(e, 'Could not add to app.'));
     } finally {
       setBusy(false);
     }
@@ -3368,13 +3389,19 @@ function AddToAppButton({
     try {
       // Reuse an app already created this session if the prior pin failed.
       if (!createdRef.current) {
-        const created = await api.createApp({ name, domain: 'general', dashboardTitle: 'Overview', tags: [], owners: [], selectedBlockIds: [] });
-        createdRef.current = { appId: created.app.id, dashboardId: created.dashboardId };
+        createdRef.current = (await api.createAppBuild({
+          name,
+          goal: run.question,
+          authoringMode: 'ai',
+          sourcePolicy: certifiedBlockNameFromRun(run) ? 'governed_only' : 'include_review_required',
+          template: 'blank',
+          entrypoint: 'ask',
+        })).draft;
       }
-      await pinTo(createdRef.current.appId, createdRef.current.dashboardId, name, 'Overview');
+      await addToDraft(createdRef.current, name, createdRef.current.pages[0]?.id, createdRef.current.pages[0]?.metadata.title);
       createdRef.current = null;
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not create the app.');
+      setError(askAppWriteErrorMessage(e, 'Could not create the app.'));
     } finally {
       setBusy(false);
     }
@@ -3407,19 +3434,21 @@ function AddToAppButton({
             <b style={{ fontSize: 11.5 }}>
               {done.kind === 'existing'
                 ? 'Already on this page'
-                : done.kind === 'block'
-                  ? 'Added as a certified tile'
-                  : 'Added — needs review'}
+                : done.kind === 'certified'
+                  ? 'Saved as a certified tile'
+                  : done.kind === 'review'
+                    ? 'Saved — review required'
+                    : 'Saved as editable narrative'}
             </b>
-            <span title={appPinDestinationLabel(done.name, done.dashboardTitle)} style={{ fontSize: 10.5, color: t.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {appPinDestinationLabel(done.name, done.dashboardTitle)}
+            <span title={appPinDestinationLabel(done.name, done.pageTitle)} style={{ fontSize: 10.5, color: t.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {appPinDestinationLabel(done.name, done.pageTitle)} · editable draft
             </span>
             <span title={done.tileTitle} style={{ fontSize: 10, color: t.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               Tile: {done.tileTitle}
             </span>
-            {done.kind === 'pin' ? (
+            {done.kind === 'review' || done.kind === 'narrative' ? (
               <span style={{ fontSize: 10, color: t.textMuted, lineHeight: 1.35 }}>
-                Visible in Edit; hidden from the stakeholder view until reviewed.
+                Stays local and cannot publish until reviewed, promoted, or removed.
               </span>
             ) : null}
           </span>
@@ -3427,7 +3456,7 @@ function AddToAppButton({
             <button
               type="button"
               className="dql-hover"
-              onClick={() => onOpenApp(done.appId, done.dashboardId)}
+              onClick={() => onOpenApp(done.appId, done.pageId, done.draftId)}
               style={{ ...smallButtonStyle(t), color: t.success, whiteSpace: 'nowrap' }}
               title="Open the App page containing this tile"
             >
@@ -3445,7 +3474,7 @@ function AddToAppButton({
           <div onClick={closePicker} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
           <div style={addPopoverStyle(t)}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-              <span style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary }}>{view === 'new' ? 'Name the new app' : 'Add to an app'}</span>
+              <span style={{ fontSize: 12, fontWeight: 700, color: t.textPrimary }}>{view === 'new' ? 'Name the new App draft' : 'Save to an editable App'}</span>
               <button type="button" onClick={closePicker} style={{ border: 'none', background: 'transparent', color: t.textMuted, cursor: 'pointer', fontSize: 15, lineHeight: 1 }}>×</button>
             </div>
             {error ? <div style={{ fontSize: 11, color: t.error, marginBottom: 7, lineHeight: 1.4 }}>{error}</div> : null}
@@ -3460,14 +3489,14 @@ function AddToAppButton({
                   style={pickerInputStyle(t)}
                 />
                 <div style={{ display: 'flex', gap: 6 }}>
-                  {apps && apps.length > 0 ? <button type="button" className="dql-hover" onClick={() => setView('list')} style={smallButtonStyle(t)}>Back</button> : null}
+                  {destinations && destinations.length > 0 ? <button type="button" className="dql-hover" onClick={() => setView('list')} style={smallButtonStyle(t)}>Back</button> : null}
                   <button type="button" className="dql-hover" disabled={busy || !newName.trim()} onClick={() => void createAndAdd()} style={{ ...heroAddButtonStyle(t), flex: 1, justifyContent: 'center' }}>
                     {busy ? <Loader2 size={13} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} /> : <Plus size={13} />}
-                    Create &amp; add
+                    Create draft &amp; add
                   </button>
                 </div>
               </div>
-            ) : apps === null ? (
+            ) : destinations === null ? (
               <div style={{ fontSize: 11.5, color: t.textMuted, padding: '8px 2px' }}>Loading apps…</div>
             ) : loadError ? (
               <div style={{ display: 'grid', gap: 8 }}>
@@ -3496,10 +3525,13 @@ function AddToAppButton({
                 <button type="button" className="dql-hover" onClick={() => setView('new')} style={newAppRowStyle(t)}>
                   <Plus size={13} /> New app…
                 </button>
-                {apps.map((app) => (
-                  <button key={app.id} type="button" className="dql-hover" disabled={busy} onClick={() => void addToExisting(app)} style={appRowStyle(t)}>
+                {destinations.map((destination) => (
+                  <button key={destination.id} type="button" className="dql-hover" disabled={busy} onClick={() => void addToExisting(destination)} style={appRowStyle(t)}>
                     <LayoutDashboard size={13} style={{ flex: '0 0 auto', opacity: 0.7 }} />
-                    <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left' }}>{app.name}</span>
+                    <span style={{ flex: 1, minWidth: 0, display: 'grid', gap: 1, overflow: 'hidden', textAlign: 'left' }}>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{destination.name}</span>
+                      <small style={{ color: t.textMuted }}>{destination.kind === 'draft' ? 'Local editable draft' : 'Project App · creates a safe edit draft'}</small>
+                    </span>
                   </button>
                 ))}
               </div>
@@ -3580,7 +3612,7 @@ function AppProposalArtifact({
   artifact: AgentRunArtifact;
   payload: Record<string, unknown>;
   t: Theme;
-  onOpenApp?: (appId: string, dashboardId?: string) => void;
+  onOpenApp?: (appId: string, dashboardId?: string, draftId?: string) => void;
 }) {
   const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : undefined;
   const proposal = payload.proposal && typeof payload.proposal === 'object'
@@ -3940,7 +3972,7 @@ function ArtifactView({
   sourceQuestion?: string;
   onOpenBlock?: (path: string, name?: string) => void;
   onOpenResearch?: (id: string, notebookPath?: string) => void;
-  onOpenApp?: (appId: string, dashboardId?: string) => void;
+  onOpenApp?: (appId: string, dashboardId?: string, draftId?: string) => void;
   onNextAction?: (action: AgentRun['nextActions'][number]) => void;
 }) {
   const payload = artifact.payload && typeof artifact.payload === 'object' ? artifact.payload as Record<string, unknown> : {};

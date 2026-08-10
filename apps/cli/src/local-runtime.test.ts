@@ -122,7 +122,7 @@ import { createWarehouseTargetIdentity, loadSemanticLayerFromDir, SemanticLayer 
 import { createAnalyticalFailure, recordRuntimeSchemaSnapshot, latestRuntimeSchemaSnapshotForProject } from '@duckcodeailabs/dql-agent';
 import type { DatabaseConnector, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
 import { saveTestedSemanticRuntimeSettings } from './semantic-runtime-settings.js';
-import { createAppPackage } from './apps-api.js';
+import { addAskResultToAppBuildDraft, createAppPackage, createStoredAppBuildDraft } from './apps-api.js';
 
 const tempDirs: string[] = [];
 
@@ -3344,6 +3344,78 @@ SELECT missing_revenue FROM analytics.orders
     }
   });
 
+  it('runs Ask review DQL from the local edit-draft bundle before the Project App directory (API-013, UI-005)', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-app-ask-local-artifact-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    const created = createAppPackage(projectRoot, {
+      name: 'Ask Base App',
+      domain: 'revenue',
+      owners: ['owner@local'],
+      tags: [],
+      selectedBlockIds: [],
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const draft = createStoredAppBuildDraft(projectRoot, {
+      baseAppId: created.app.id,
+      goal: 'Safely edit the Project App with Ask',
+      authoringMode: 'ai',
+      sourcePolicy: 'include_review_required',
+      entrypoint: 'ask',
+    });
+    const added = addAskResultToAppBuildDraft(projectRoot, draft.id, {
+      expectedRevision: draft.revision,
+      expectedProposalHash: draft.proposalHash,
+      pageId: created.dashboardId,
+      title: 'Regional risk from Ask',
+      question: 'Which regions need review?',
+      sql: 'SELECT region, risk_score FROM regional_risk',
+      visualization: 'table',
+    });
+    const localSource = added.draft.sources.find((source) => source.kind === 'review_dql');
+    expect(localSource?.sourceRef).toBeTruthy();
+    expect(existsSync(join(projectRoot, '.dql', 'local', 'app-builds', draft.id, localSource!.sourceRef))).toBe(true);
+    expect(existsSync(join(projectRoot, 'apps', created.app.id, localSource!.sourceRef))).toBe(false);
+
+    const executeQuery = vi.fn(async (sql: string) => ({
+      columns: ['region', 'risk_score'], rows: [{ region: 'West', risk_score: 9 }], rowCount: 1, sql,
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery } as unknown as QueryExecutor,
+        connection: { driver: 'file' },
+        preferredPort: 0,
+        captureServer: (createdServer) => { server = createdServer; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/app-builds/${draft.id}/dashboards/${created.dashboardId}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tileId: added.tileId }),
+      });
+      const text = await response.text();
+      expect(response.status, text).toBe(200);
+      const payload = JSON.parse(text) as any;
+      expect(payload.tiles).toEqual([expect.objectContaining({
+        tileId: added.tileId,
+        status: 'ok',
+        trustState: 'review_required',
+        result: expect.objectContaining({ rows: [{ region: 'West', risk_score: 9 }] }),
+        artifact: expect.objectContaining({
+          sourceKind: 'draft_analysis',
+          sourcePath: localSource!.sourceRef,
+          trustState: 'review_required',
+        }),
+      })]);
+      expect(executeQuery).toHaveBeenCalledTimes(1);
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
   it('repairs one failed certified App block without changing or recertifying its saved source', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-certified-app-tile-repair-'));
     tempDirs.push(projectRoot);
@@ -5352,6 +5424,55 @@ describe('prepareLocalExecution', () => {
       values: ['Amy', 'Ben'],
       truncated: true,
       sourceTileIds: ['customers'],
+    }]);
+  });
+
+  it('returns ephemeral date availability bounds and an explicit empty state for date controls', () => {
+    const dashboard = {
+      filters: [{ id: 'order_date', label: 'Order date', type: 'daterange' as const, bindsTo: 'order_date' }],
+      layout: {
+        kind: 'grid' as const,
+        cols: 12,
+        rowHeight: 72,
+        items: [{
+          i: 'orders', x: 0, y: 0, w: 12, h: 4,
+          block: { blockId: 'orders' },
+          viz: { type: 'table' as const },
+          filterBindings: [{ filter: 'order_date', binding: 'order_date', mode: 'predicate' as const, capability: 'preflight_required' as const }],
+        }],
+      },
+    };
+    const populated = collectDashboardFilterOptions(dashboard, [{
+      tileId: 'orders',
+      status: 'ok',
+      result: {
+        columns: ['order_date'],
+        rows: [{ order_date: '2025-03-15T00:00:00Z' }, { order_date: '2024-01-02' }, { order_date: null }],
+        rowCount: 3,
+      },
+      filterableColumns: [{ column: 'order_date', predicateTarget: 'order_date' }],
+    }]);
+    expect(populated).toEqual([{
+      filterId: 'order_date',
+      values: [],
+      truncated: false,
+      sourceTileIds: ['orders'],
+      valueCount: 2,
+      dateRange: { min: '2024-01-02', max: '2025-03-15' },
+    }]);
+
+    const empty = collectDashboardFilterOptions(dashboard, [{
+      tileId: 'orders',
+      status: 'ok',
+      result: { columns: ['order_date'], rows: [{ order_date: null }], rowCount: 1 },
+      filterableColumns: [{ column: 'order_date', predicateTarget: 'order_date' }],
+    }]);
+    expect(empty).toEqual([{
+      filterId: 'order_date',
+      values: [],
+      truncated: false,
+      sourceTileIds: ['orders'],
+      valueCount: 0,
     }]);
   });
 

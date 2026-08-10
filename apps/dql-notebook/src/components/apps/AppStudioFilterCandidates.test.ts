@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { AppBlockRecommendation, AppStudioBuildDraft } from '../../api/client';
-import { discoverAppFilterCandidates, discoverPageFilterCandidates, filterTileMappingsForField } from './app-studio-filter-candidates';
+import { defaultStudioFilterType, discoverAppFilterCandidates, discoverPageFilterCandidates, filterTileMappingsForField } from './app-studio-filter-candidates';
 
 describe('App Studio filter discovery (UI-022)', () => {
+  it('infers warehouse timestamp columns as date range controls', () => {
+    expect(defaultStudioFilterType('first_ordered_at')).toBe('daterange');
+    expect(defaultStudioFilterType('created_on')).toBe('daterange');
+    expect(defaultStudioFilterType('customer_name')).toBe('select');
+  });
+
   it('derives candidates from every governed source already used on the page', () => {
     const page = {
       version: 2,
@@ -80,5 +86,58 @@ describe('App Studio filter discovery (UI-022)', () => {
       expect.objectContaining({ key: 'overview:segments', supported: true, mode: 'semantic' }),
       expect.objectContaining({ key: 'detail:orders', supported: false, reason: expect.stringContaining('not exposed') }),
     ]);
+  });
+
+  it('offers only server-approved settled result columns as filter bindings', () => {
+    const pages = [{
+      version: 2,
+      id: 'overview',
+      metadata: { title: 'Overview' },
+      layout: {
+        kind: 'grid', cols: 12, rowHeight: 80,
+        items: [{ i: 'trend', title: 'Revenue trend', x: 0, y: 0, w: 12, h: 4, block: { blockId: 'monthly_revenue' }, viz: { type: 'line' } }],
+      },
+    }] as AppStudioBuildDraft['pages'];
+    const catalog = [{ id: 'monthly_revenue', name: 'Monthly revenue', filterIds: [] }] as unknown as AppBlockRecommendation[];
+    const runtimeFields = {
+      overview: {
+        trend: [{ column: 'month', predicateTarget: 'orders.order_date' }],
+      },
+    };
+
+    expect(discoverAppFilterCandidates(pages, catalog, runtimeFields)).toEqual([{
+      id: 'month',
+      sourceNames: ['Monthly revenue'],
+      affectedTileCount: 1,
+      pageCount: 1,
+    }]);
+    expect(filterTileMappingsForField(pages, catalog, 'month', runtimeFields)).toEqual([
+      expect.objectContaining({ supported: true, binding: 'month', mode: 'predicate' }),
+    ]);
+  });
+
+  it('offers certified block dimensions even when the block has no parameter filters', () => {
+    const pages = [{
+      version: 2,
+      id: 'overview',
+      metadata: { title: 'Overview' },
+      layout: {
+        kind: 'grid', cols: 12, rowHeight: 80,
+        items: [
+          { i: 'trend', title: 'Revenue trend', x: 0, y: 0, w: 6, h: 4, block: { blockId: 'monthly_revenue' }, viz: { type: 'line' } },
+          { i: 'table', title: 'Revenue table', x: 6, y: 0, w: 6, h: 4, block: { blockId: 'monthly_revenue' }, viz: { type: 'table' } },
+        ],
+      },
+    }] as AppStudioBuildDraft['pages'];
+    const catalog = [{
+      id: 'monthly_revenue', name: 'Monthly revenue', filterIds: [], dimensionIds: ['month'],
+    }] as unknown as AppBlockRecommendation[];
+
+    expect(discoverAppFilterCandidates(pages, catalog)).toEqual([{
+      id: 'month',
+      sourceNames: ['Monthly revenue'],
+      affectedTileCount: 2,
+      pageCount: 1,
+    }]);
   });
 });

@@ -19,8 +19,9 @@ export function GlobalAiRail() {
   // refresh resumes the same thread.
   const agentThread = usePersistedAgentThreadId('global-rail');
   const [expanded, setExpanded] = useState(false);
-  const openApp = (appId: string, dashboardId?: string) => {
-    dispatch({ type: 'OPEN_APP', appId, dashboardId, experience: 'view', section: 'dashboards' });
+  const openApp = (appId: string, dashboardId?: string, draftId?: string) => {
+    if (draftId) dispatch({ type: 'OPEN_APP_DRAFT', draftId, appId, dashboardId });
+    else dispatch({ type: 'OPEN_APP', appId, dashboardId, experience: 'view', section: 'dashboards' });
     dispatch({ type: 'CLOSE_GLOBAL_AI' });
     // A newly created App is not in the shell catalog yet. Refresh it in the
     // background so the destination title/navigation resolves immediately.

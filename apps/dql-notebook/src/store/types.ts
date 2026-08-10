@@ -1417,6 +1417,8 @@ export interface NotebookState {
   apps: AppSummary[];
   appsLoading: boolean;
   activeAppId: string | null;
+  /** Local AppBuildDraft to open directly in the unified Studio. */
+  activeAppDraftId: string | null;
   activeDashboardId: string | null;
   activeAppExperience: AppWorkspaceExperience;
   activeAppSection: AppWorkspaceSection;
@@ -1515,6 +1517,7 @@ export type NotebookAction =
       experience?: AppWorkspaceExperience;
       section?: AppWorkspaceSection;
     }
+  | { type: 'OPEN_APP_DRAFT'; draftId: string; appId?: string; dashboardId?: string | null }
   | { type: 'CLOSE_APP' }
   | { type: 'OPEN_DASHBOARD'; dashboardId: string }
   | { type: 'SET_APP_WORKSPACE_STATE'; experience?: AppWorkspaceExperience; section?: AppWorkspaceSection }

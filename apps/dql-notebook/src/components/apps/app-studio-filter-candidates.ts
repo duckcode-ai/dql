@@ -23,6 +23,17 @@ export type StudioFilterCandidate = {
   pageCount: number;
 };
 
+export type StudioRuntimeFilterFields = Record<string, Record<string, Array<{
+  column: string;
+  predicateTarget: string;
+}>>>;
+
+export function defaultStudioFilterType(fieldId: string): 'daterange' | 'number' | 'select' {
+  if (/date|time|month|week|quarter|year|created|updated|ordered|(_at|_on)$/i.test(fieldId)) return 'daterange';
+  if (/count|amount|limit|top_?n|score/i.test(fieldId)) return 'number';
+  return 'select';
+}
+
 /**
  * Filters are authored only from fields already exposed by a governed source.
  * This gives App Studio a Power BI/Tableau-style field picker without turning
@@ -31,6 +42,7 @@ export type StudioFilterCandidate = {
 export function discoverAppFilterCandidates(
   pages: StudioPage[],
   catalog: AppBlockRecommendation[],
+  runtimeFields: StudioRuntimeFilterFields = {},
 ): StudioFilterCandidate[] {
   const fieldIds = new Set<string>();
   for (const page of pages) {
@@ -40,6 +52,7 @@ export function discoverAppFilterCandidates(
     }
     for (const tile of dataTiles(page)) {
       for (const fieldId of governedFieldsForTile(tile, catalog)) fieldIds.add(fieldId);
+      for (const field of runtimeFields[page.id]?.[tile.i] ?? []) fieldIds.add(field.column);
       for (const binding of tile.filterBindings ?? []) {
         if (binding.binding && binding.capability !== 'unsupported') fieldIds.add(binding.binding);
       }
@@ -47,7 +60,7 @@ export function discoverAppFilterCandidates(
   }
   return [...fieldIds]
     .map((id) => {
-      const mappings = filterTileMappingsForField(pages, catalog, id).filter((mapping) => mapping.supported);
+      const mappings = filterTileMappingsForField(pages, catalog, id, runtimeFields).filter((mapping) => mapping.supported);
       return {
         id,
         sourceNames: [...new Set(mappings.map((mapping) => mapping.sourceName))].sort(),
@@ -62,8 +75,9 @@ export function discoverAppFilterCandidates(
 export function discoverPageFilterCandidates(
   page: StudioPage | null,
   catalog: AppBlockRecommendation[],
+  runtimeFields: StudioRuntimeFilterFields = {},
 ): StudioFilterCandidate[] {
-  return page ? discoverAppFilterCandidates([page], catalog) : [];
+  return page ? discoverAppFilterCandidates([page], catalog, runtimeFields) : [];
 }
 
 /** Returns every data component, including explicit incompatibility reasons. */
@@ -71,13 +85,16 @@ export function filterTileMappingsForField(
   pages: StudioPage[],
   catalog: AppBlockRecommendation[],
   fieldId: string,
+  runtimeFields: StudioRuntimeFilterFields = {},
 ): StudioFilterTileMapping[] {
   return pages.flatMap((page) => dataTiles(page).map((tile) => {
     const fields = governedFieldsForTile(tile, catalog);
+    const runtimeField = (runtimeFields[page.id]?.[tile.i] ?? []).find((field) => sameStudioFilterField(field.column, fieldId));
     const existing = (tile.filterBindings ?? []).find((binding) =>
       binding.filter === fieldId || binding.binding === fieldId,
     );
     const supported = fields.includes(fieldId)
+      || Boolean(runtimeField)
       || Boolean(existing?.binding === fieldId && existing.capability !== 'unsupported');
     const sourceName = sourceNameForTile(tile, catalog);
     return {
@@ -89,13 +106,24 @@ export function filterTileMappingsForField(
       sourceName,
       supported,
       ...(supported ? {
-        binding: fieldId,
+        // App execution filters the settled tile's outer result. Use the
+        // approved output column here; predicateTarget is retained only as the
+        // server-side proof that this output is a safe, non-aggregate field.
+        binding: runtimeField?.column ?? fieldId,
         mode: tile.semantic ? 'semantic' as const : existing?.mode ?? 'predicate' as const,
       } : {
         reason: `${fieldId.replace(/_/g, ' ')} is not exposed by ${sourceName}.`,
       }),
     };
   }));
+}
+
+function sameStudioFilterField(left: string, right: string): boolean {
+  const normalize = (value: string) => {
+    const parts = value.trim().toLowerCase().replace(/["`\[\]]/g, '').split('.');
+    return (parts[parts.length - 1] ?? '').replace(/[^a-z0-9]/g, '');
+  };
+  return normalize(left) === normalize(right);
 }
 
 export function studioFilterMappingKey(pageId: string, tileId: string): string {
@@ -109,7 +137,7 @@ function dataTiles(page: StudioPage): StudioTile[] {
 function governedFieldsForTile(tile: StudioTile, catalog: AppBlockRecommendation[]): string[] {
   const blockId = tile.block ? ('blockId' in tile.block ? tile.block.blockId : tile.block.ref) : null;
   const source = blockId ? catalog.find((item) => item.id === blockId || item.name === blockId) : null;
-  if (source) return source.filterIds ?? [];
+  if (source) return [...new Set([...(source.filterIds ?? []), ...(source.dimensionIds ?? [])])];
   if (tile.semantic) return tile.semantic.dimensions ?? [];
   if (tile.draftAnalysis) return [];
   return (tile.filterBindings ?? [])
