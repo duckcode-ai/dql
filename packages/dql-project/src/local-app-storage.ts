@@ -31,6 +31,7 @@ export interface LocalAppStateArchive {
     conversationMessages: Record<string, unknown>[];
     buildDrafts: Record<string, unknown>[];
     buildOperations: Record<string, unknown>[];
+    previewEvidence?: Record<string, unknown>[];
   };
 }
 
@@ -39,6 +40,19 @@ export interface LocalAppBuildOperationRecord {
   draftId: string;
   revision: number;
   operations: AppBuildDraftOperation[];
+  createdAt: string;
+}
+
+export interface LocalAppPreviewEvidence {
+  runId: string;
+  draftId: string;
+  dashboardId: string;
+  snapshotId: string;
+  filterFingerprint: string;
+  resultFingerprint: string;
+  personaFingerprint: string;
+  successfulTileIds: string[];
+  semanticApprovalEligibleTileIds: string[];
   createdAt: string;
 }
 export type LocalAppInvestigationIntent =
@@ -359,11 +373,51 @@ export class LocalAppStorage {
     }));
   }
 
+  /** Persist trust/evidence metadata for restart-safe App preview preflight. */
+  saveAppPreviewEvidence(evidence: LocalAppPreviewEvidence): void {
+    this.db.prepare(`
+      INSERT OR REPLACE INTO app_preview_evidence (
+        run_id, draft_id, dashboard_id, snapshot_id, filter_fingerprint,
+        result_fingerprint, persona_fingerprint, successful_tile_ids,
+        semantic_approval_tile_ids, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      evidence.runId,
+      evidence.draftId,
+      evidence.dashboardId,
+      evidence.snapshotId,
+      evidence.filterFingerprint,
+      evidence.resultFingerprint,
+      evidence.personaFingerprint,
+      JSON.stringify(evidence.successfulTileIds),
+      JSON.stringify(evidence.semanticApprovalEligibleTileIds),
+      evidence.createdAt,
+    );
+  }
+
+  getAppPreviewEvidence(runId: string): LocalAppPreviewEvidence | null {
+    const row = this.db.prepare('SELECT * FROM app_preview_evidence WHERE run_id = ?').get(runId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      runId: String(row.run_id),
+      draftId: String(row.draft_id),
+      dashboardId: String(row.dashboard_id),
+      snapshotId: String(row.snapshot_id),
+      filterFingerprint: String(row.filter_fingerprint),
+      resultFingerprint: String(row.result_fingerprint),
+      personaFingerprint: String(row.persona_fingerprint),
+      successfulTileIds: (parseJson(row.successful_tile_ids) as string[] | undefined) ?? [],
+      semanticApprovalEligibleTileIds: (parseJson(row.semantic_approval_tile_ids) as string[] | undefined) ?? [],
+      createdAt: String(row.created_at),
+    };
+  }
+
   deleteAppBuildDraft(id: string): { draft: AppBuildDraft; operations: LocalAppBuildOperationRecord[] } | null {
     const draft = this.getAppBuildDraft(id);
     if (!draft) return null;
     const operations = this.listAppBuildOperations(id);
     const run = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM app_preview_evidence WHERE draft_id = ?').run(id);
       this.db.prepare('DELETE FROM app_build_operations WHERE draft_id = ?').run(id);
       this.db.prepare('DELETE FROM app_build_drafts WHERE id = ?').run(id);
     });
@@ -722,6 +776,10 @@ export class LocalAppStorage {
             SELECT * FROM app_build_operations
             WHERE draft_id IN (SELECT id FROM app_build_drafts WHERE app_id = ? OR base_app_id = ?)
           `).all(appId, appId) as Record<string, unknown>[],
+          previewEvidence: this.db.prepare(`
+            SELECT * FROM app_preview_evidence
+            WHERE draft_id IN (SELECT id FROM app_build_drafts WHERE app_id = ? OR base_app_id = ?)
+          `).all(appId, appId) as Record<string, unknown>[],
         },
       };
       if (conversationIds.length) {
@@ -730,6 +788,10 @@ export class LocalAppStorage {
       this.db.prepare('DELETE FROM app_conversations WHERE app_id = ?').run(appId);
       this.db.prepare(`
         DELETE FROM app_build_operations
+        WHERE draft_id IN (SELECT id FROM app_build_drafts WHERE app_id = ? OR base_app_id = ?)
+      `).run(appId, appId);
+      this.db.prepare(`
+        DELETE FROM app_preview_evidence
         WHERE draft_id IN (SELECT id FROM app_build_drafts WHERE app_id = ? OR base_app_id = ?)
       `).run(appId, appId);
       this.db.prepare('DELETE FROM app_build_drafts WHERE app_id = ? OR base_app_id = ?').run(appId, appId);
@@ -754,6 +816,7 @@ export class LocalAppStorage {
       this.insertArchivedRows('app_conversation_messages', archive.rows.conversationMessages);
       this.insertArchivedRows('app_build_drafts', archive.rows.buildDrafts ?? []);
       this.insertArchivedRows('app_build_operations', archive.rows.buildOperations ?? []);
+      this.insertArchivedRows('app_preview_evidence', archive.rows.previewEvidence ?? []);
     });
     run();
   }
@@ -898,8 +961,22 @@ export class LocalAppStorage {
         created_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS app_preview_evidence (
+        run_id TEXT PRIMARY KEY,
+        draft_id TEXT NOT NULL,
+        dashboard_id TEXT NOT NULL,
+        snapshot_id TEXT NOT NULL,
+        filter_fingerprint TEXT NOT NULL,
+        result_fingerprint TEXT NOT NULL,
+        persona_fingerprint TEXT NOT NULL,
+        successful_tile_ids TEXT NOT NULL,
+        semantic_approval_tile_ids TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_app_build_drafts_app ON app_build_drafts(app_id, updated_at);
       CREATE INDEX IF NOT EXISTS idx_app_build_operations_draft ON app_build_operations(draft_id, id);
+      CREATE INDEX IF NOT EXISTS idx_app_preview_evidence_draft ON app_preview_evidence(draft_id, dashboard_id, created_at);
     `);
     this.ensureColumn('ai_pins', 'question', 'TEXT');
     this.ensureColumn('ai_pins', 'analysis_plan', 'TEXT');

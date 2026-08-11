@@ -1605,6 +1605,32 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     story: ReturnType<typeof buildDeterministicDashboardStory>['story'];
     expiresAt: number;
   }>();
+  const loadAppBuildPreviewEvidence = (runId: string) => {
+    const memoryEvidence = dashboardRunEvidence.get(runId);
+    if (memoryEvidence && memoryEvidence.expiresAt >= Date.now()) return memoryEvidence;
+    if (memoryEvidence) dashboardRunEvidence.delete(runId);
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+    try {
+      const persisted = storage.getAppPreviewEvidence(runId);
+      if (!persisted) return null;
+      return {
+        appId: persisted.draftId,
+        dashboardId: persisted.dashboardId,
+        snapshotId: persisted.snapshotId,
+        filterFingerprint: persisted.filterFingerprint,
+        resultFingerprint: persisted.resultFingerprint,
+        personaFingerprint: persisted.personaFingerprint,
+        successfulTileIds: persisted.successfulTileIds,
+        semanticApprovalEligibleTileIds: persisted.semanticApprovalEligibleTileIds,
+        // Persisted receipts are bound again by draft revision, source
+        // fingerprints, filters and snapshot during preflight. They therefore
+        // survive a process restart without making result rows durable.
+        expiresAt: Number.POSITIVE_INFINITY,
+      };
+    } finally {
+      storage.close();
+    }
+  };
   const dbtNodeDetailCache = new Map<string, DbtNodeAuthoringDetail | undefined>();
   const onboardingJobs = new Map<string, DbtPreparationJob>();
   const metricFlowInstaller = new ManagedMetricFlowInstaller(projectRoot);
@@ -6057,7 +6083,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   };
 
   const repairFailedAppTileExecution = async (input: {
-    source: 'semantic_query' | 'draft_analysis' | 'certified_block';
+    source: 'semantic_query' | 'draft_analysis' | 'certified_block' | 'review_block';
     question: string;
     sourceSql?: string;
     sourceDql?: string;
@@ -6983,6 +7009,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     chartConfig: { chart?: string; x?: string; y?: string; color?: string; title?: string } | null;
     invocation: ReturnType<typeof prepareBlockInvocation>;
     tests: NonNullable<ReturnType<typeof buildExecutionPlan>>['tests'];
+    validation: BlockStudioValidationResult;
   }> => {
     const activeConnection = requireActiveConnection(targetConnection);
     let tableMapping: Record<string, string> | undefined;
@@ -7009,7 +7036,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           parameters: invocation.values,
         })
       : null;
-    const validation = validateBlockStudioSource(source, semanticLayer);
+    const staticValidation = validateBlockStudioSource(source, semanticLayer);
+    const validation = semanticCompose
+      ? reconcileBlockStudioRuntimeValidation(staticValidation, semanticCompose)
+      : staticValidation;
     const executableSql = semanticCompose?.sql ?? validation.executableSql;
     if (!executableSql) {
       const message = semanticCompose?.diagnostics.find((item) => item.severity === 'error')?.message
@@ -7044,6 +7074,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       chartConfig: plan?.chartConfig ?? validation.chartConfig ?? null,
       invocation,
       tests: plan?.tests ?? [],
+      validation,
     };
   };
 
@@ -7175,13 +7206,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     blockPath?: string | null,
     options: { enterprise?: boolean } = {},
   ) => {
-    const validation = validateBlockStudioSource(source, semanticLayer);
+    let validation = validateBlockStudioSource(source, semanticLayer);
     let preview: Awaited<ReturnType<typeof runBlockStudioPreviewSource>> | null = null;
     let testResults: TestResultSummary | null = null;
     const blockers: string[] = [];
 
     try {
       preview = await runBlockStudioPreviewSource(source);
+      validation = preview.validation;
     } catch (error) {
       blockers.push(error instanceof Error ? error.message : String(error));
     }
@@ -10677,10 +10709,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const requestedTileId = typeof body.tileId === 'string' && body.tileId.trim()
           ? body.tileId.trim()
           : undefined;
-        const tiles = [];
-        let localApps: LocalAppStorage | null = null;
-        for (const item of loaded.dashboard.layout.items) {
-          if (requestedTileId && item.i !== requestedTileId) continue;
+        const tiles: Array<{ tileId: string; status: string; [key: string]: any }> = [];
+        const localApps = { current: null as LocalAppStorage | null };
+        const itemsToRun = loaded.dashboard.layout.items.filter((item) => !requestedTileId || item.i === requestedTileId);
+        const tileOrder = new Map(itemsToRun.map((item, index) => [item.i, index]));
+        let nextTileIndex = 0;
+        // App preview is a multi-source execution, so isolate each tile's
+        // failure and run a small fixed pool. Four avoids serial 4k-catalog
+        // behavior without flooding the configured warehouse.
+        const runTileWorker = async () => {
+          while (nextTileIndex < itemsToRun.length) {
+            const item = itemsToRun[nextTileIndex++];
+            if (!item) continue;
           if (item.text) {
             tiles.push({
               tileId: item.i,
@@ -10694,7 +10734,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
           if (item.aiPin) {
             try {
-              localApps ??= new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+              localApps.current ??= new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
             } catch (err) {
               tiles.push({
                 tileId: item.i,
@@ -10704,7 +10744,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               });
               continue;
             }
-            let pin = localApps.getAiPin(item.aiPin.id);
+            let pin = localApps.current.getAiPin(item.aiPin.id);
             if (!pin) {
               tiles.push({
                 tileId: item.i,
@@ -10750,9 +10790,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             } else if (pin.refreshCadence === 'daily' && pin.sql && isAiPinRefreshDue(pin.lastRefreshedAt)) {
               try {
                 const refreshed = await executeLocalSqlForStoredResult(pin.sql);
-                pin = localApps.updateAiPinResult(pin.id, refreshed) ?? pin;
+                pin = localApps.current.updateAiPinResult(pin.id, refreshed) ?? pin;
               } catch (err) {
-                pin = localApps.updateAiPinResult(
+                pin = localApps.current.updateAiPinResult(
                   pin.id,
                   pin.result,
                   err instanceof Error ? err.message : String(err),
@@ -11103,6 +11143,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             });
             const absBlockPath = join(projectRoot, block.filePath);
             blockSource = readFileSync(absBlockPath, 'utf-8');
+            const currentSourceRevision = `sha256:${createHash('sha256').update(blockSource).digest('hex')}`;
+            if (item.sourceRevision && item.sourceRevision !== currentSourceRevision) {
+              tiles.push({
+                tileId: item.i,
+                status: 'error',
+                tileType: 'block',
+                blockId: block.name,
+                blockPath: block.filePath,
+                certificationStatus: block.status ?? null,
+                title: item.title ?? block.name,
+                trustState: 'review_required',
+                error: 'This App source changed after it was selected. Refresh the source binding and rerun preview.',
+              });
+              continue;
+            }
             blockTargetConnection = requireActiveConnection(isConnectionConfig(body.connection) ? body.connection : connection);
             const tableMapping = await resolveSemanticTableMapping(executor, blockTargetConnection, semanticLayer, projectRoot);
             const boundParameters = dashboardTileParameterValues({
@@ -11212,7 +11267,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               },
               artifact: {
                 version: 1,
-                sourceKind: 'certified_block',
+                sourceKind: block.status === 'certified' ? 'certified_block' : 'review_block',
                 name: block.name,
                 sourcePath: block.filePath,
                 dql: blockSource.slice(0, 40_000),
@@ -11235,7 +11290,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               });
             } else {
               const repaired = await repairFailedAppTileExecution({
-                source: 'certified_block',
+                source: block.status === 'certified' ? 'certified_block' : 'review_block',
                 question: item.title ?? block.name,
                 sourceSql: blockFilterApplication?.sql ?? blockPlan?.sql,
                 sourceDql: blockSource,
@@ -11280,7 +11335,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                   citation: { kind: 'block_repaired', name: block.name, path: block.filePath },
                   artifact: {
                     version: 1,
-                    sourceKind: 'certified_block',
+                    sourceKind: block.status === 'certified' ? 'certified_block' : 'review_block',
                     name: block.name,
                     sourcePath: block.filePath,
                     ...(repaired.repairedDql ?? blockSource ? { dql: (repaired.repairedDql ?? blockSource!).slice(0, 40_000) } : {}),
@@ -11305,7 +11360,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 ...(blockSource ? {
                   artifact: {
                     version: 1,
-                    sourceKind: 'certified_block',
+                    sourceKind: block.status === 'certified' ? 'certified_block' : 'review_block',
                     name: block.name,
                     sourcePath: block.filePath,
                     dql: blockSource.slice(0, 40_000),
@@ -11318,8 +11373,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               });
             }
           }
-        }
-        localApps?.close();
+          }
+        };
+        await Promise.all(Array.from(
+          { length: Math.min(4, itemsToRun.length) },
+          () => runTileWorker(),
+        ));
+        tiles.sort((left, right) => (tileOrder.get(left.tileId) ?? 0) - (tileOrder.get(right.tileId) ?? 0));
+        localApps.current?.close();
         // Which of each tile's result columns a viewer may safely filter on.
         // Decided here, from a real dialect parse of the SQL that actually ran,
         // for the same reason Ask does it server-side: an aggregate output needs
@@ -11335,7 +11396,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           try {
             const dashboardItem = loaded.dashboard.layout.items.find((item) => item.i === tile.tileId);
             const block = dashboardItem ? resolveDashboardItemBlock(dashboardItem, manifest) : null;
-            const declaredDimensions = block?.status === 'certified' ? block.dimensions ?? [] : [];
+            const declaredDimensions = block?.dimensions ?? [];
             const filterable = dashboardFilterableResultColumns(executedSql, columns, declaredDimensions, runDialect);
             return filterable.length > 0 ? { ...tile, filterableColumns: filterable } : tile;
           } catch {
@@ -11365,7 +11426,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           eligibleTileIds: loaded.dashboard.story?.eligibleTileIds,
           driverTileIds: loaded.dashboard.story?.driverTileIds,
         });
-        dashboardRunEvidence.set(runId, {
+        const runEvidence = {
           appId,
           dashboardId,
           snapshotId: snapshot.snapshotId,
@@ -11381,7 +11442,27 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           facts: storyResult.facts,
           story: storyResult.story,
           expiresAt: Date.now() + 15 * 60_000,
-        });
+        };
+        dashboardRunEvidence.set(runId, runEvidence);
+        if (runSurface === 'app-builds') {
+          const receiptStorage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
+          try {
+            receiptStorage.saveAppPreviewEvidence({
+              runId,
+              draftId: appId,
+              dashboardId,
+              snapshotId: snapshot.snapshotId,
+              filterFingerprint,
+              resultFingerprint,
+              personaFingerprint,
+              successfulTileIds: runEvidence.successfulTileIds,
+              semanticApprovalEligibleTileIds: runEvidence.semanticApprovalEligibleTileIds,
+              createdAt: new Date().toISOString(),
+            });
+          } finally {
+            receiptStorage.close();
+          }
+        }
         for (const [id, evidence] of dashboardRunEvidence) if (evidence.expiresAt < Date.now()) dashboardRunEvidence.delete(id);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
@@ -11432,6 +11513,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           // questions. Throws when no provider is configured — propose degrades
           // gracefully by listing the gap instead.
           generateGovernedAnswer: (question, appContext) => generateAppBuildAnswerWithRepair(question, appContext),
+          // App Builder owns its orchestration and structured state. It shares
+          // only the configured provider adapter with Ask/Notebook.
+          planAppBuild: async ({ system, user }) => {
+            const provider = await createBlockStudioAssistProvider(projectRoot);
+            if (!provider) return undefined;
+            return provider.generate([
+              { role: 'system', content: system },
+              { role: 'user', content: user },
+            ], { maxTokens: 2_400, temperature: 0.1 });
+          },
           queueOperation: <TResult>(
             input: { type: string; scope: string; resourceRevision?: string; message?: string; cancellable?: boolean },
             task: (signal: AbortSignal, report: (progress: Partial<LocalOperationProgress>) => void) => Promise<TResult>,
@@ -11456,8 +11547,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             return { ok: true, snapshotId: evidence.snapshotId, resultFingerprint: evidence.resultFingerprint };
           },
           verifyAppBuildPreview: ({ runId, draftId, dashboardId, tileIds }) => {
-            const evidence = dashboardRunEvidence.get(runId);
-            if (!evidence || evidence.expiresAt < Date.now()) return { ok: false, error: 'The App preview receipt expired. Run the local draft again.' };
+            const evidence = loadAppBuildPreviewEvidence(runId);
+            if (!evidence) return { ok: false, error: 'The App preview receipt is unavailable. Run the local draft again.' };
             if (evidence.appId !== draftId || evidence.dashboardId !== dashboardId) return { ok: false, error: 'The App preview receipt does not match this local draft page.' };
             const successful = new Set(evidence.successfulTileIds);
             const failed = tileIds.filter((tileId) => !successful.has(tileId));
@@ -13089,13 +13180,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ error: 'Block name is required.' }));
           return;
         }
-        const canonicalPath = currentPath && !isDraftBlockPath(currentPath) ? currentPath : undefined;
+        const existingCanonicalDraft = Boolean(currentPath && !isDraftBlockPath(currentPath));
         const stableSuffix = createHash('sha256')
           .update(currentPath ?? `${name}:${draftSource}`)
           .digest('hex')
           .slice(0, 16);
-        const draftPath = saveBlockStudioDraftArtifacts(projectRoot, {
-          currentPath: currentPath && isDraftBlockPath(currentPath) ? currentPath : undefined,
+        const draftSaveOptions = {
           source: draftSource,
           name,
           domain: typeof suppliedMetadata.domain === 'string' ? suppliedMetadata.domain : parsed.domain,
@@ -13103,8 +13193,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           owner: typeof suppliedMetadata.owner === 'string' ? suppliedMetadata.owner : parsed.owner,
           tags: Array.isArray(suppliedMetadata.tags) ? suppliedMetadata.tags.map(String) : parsed.tags,
           lineage: Array.isArray(suppliedMetadata.lineage) ? suppliedMetadata.lineage.map(String) : undefined,
-          stableSuffix,
-        });
+        };
+        // A saved draft already has a durable identity, even when it lives in
+        // the canonical domain blocks directory. Reuse that identity for the
+        // certification attempt. Creating a second `_drafts` artifact here
+        // made a failed gate duplicate the block in the library.
+        const draftPath = existingCanonicalDraft
+          ? saveBlockStudioArtifacts(projectRoot, {
+              currentPath: currentPath!,
+              ...draftSaveOptions,
+            })
+          : saveBlockStudioDraftArtifacts(projectRoot, {
+              currentPath: currentPath && isDraftBlockPath(currentPath) ? currentPath : undefined,
+              ...draftSaveOptions,
+              stableSuffix,
+            });
+        const canonicalPath = existingCanonicalDraft ? draftPath : undefined;
         const operation = operationCoordinator.create({
           type: 'block_certification',
           scope: `block:${draftPath}`,
@@ -13129,13 +13233,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           const blockers = Array.from(new Set(result.checklist.blockers));
           if (signal.aborted) throw Object.assign(new Error('Certification cancelled.'), { code: 'OPERATION_CANCELLED' });
           if (!result.certification.certified || blockers.length > 0) {
+            if (result.preview) writeBlockStudioRunSummary(projectRoot, draftPath, draftSource, result.preview.result);
+            const openedDraft = openBlockStudioDocument(projectRoot, draftPath, semanticLayer);
             return {
               outcome: 'draft_saved_with_blockers',
               oldPath: currentPath ?? draftPath,
               draftPath,
               blockers,
               checklist: result.checklist,
-              block: openBlockStudioDocument(projectRoot, draftPath, semanticLayer),
+              runSummary: result.preview ? {
+                rowCount: result.preview.result.rowCount ?? result.preview.result.rows.length,
+                executionTime: result.preview.result.executionTime,
+                columns: result.preview.result.columns,
+                ranAt: new Date().toISOString(),
+              } : undefined,
+              block: { ...openedDraft, validation: result.validation },
             };
           }
 
@@ -13179,13 +13291,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             /* best-effort: learning capture must never block certification */
           }
           const refreshOperation = scheduleProjectRefresh('block-studio-certification');
+          if (result.preview) writeBlockStudioRunSummary(projectRoot, savedPath, certifiedSource, result.preview.result);
+          const openedCertified = openBlockStudioDocument(projectRoot, savedPath, semanticLayer);
           return {
             outcome: 'certified',
             oldPath: currentPath ?? draftPath,
             draftPath,
             newPath: savedPath,
-            block: openBlockStudioDocument(projectRoot, savedPath, semanticLayer),
+            block: { ...openedCertified, validation: result.validation },
             checklist: result.checklist,
+            runSummary: result.preview ? {
+              rowCount: result.preview.result.rowCount ?? result.preview.result.rows.length,
+              executionTime: result.preview.result.executionTime,
+              columns: result.preview.result.columns,
+              ranAt: new Date().toISOString(),
+            } : undefined,
             indexRefresh: { status: 'queued', operationId: refreshOperation.id },
           };
         });
@@ -13200,6 +13320,32 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const status = code === 'SOURCE_CHANGED' || apiErrorMessage(error) === 'BLOCK_EXISTS' ? 409 : 500;
         res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ error: apiErrorMessage(error), code }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && path === '/api/block-studio/certification-check') {
+      try {
+        const body = await readJSON(req);
+        const source = typeof body.source === 'string' ? body.source : '';
+        if (!source.trim()) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(serializeJSON({ error: 'source is required' }));
+          return;
+        }
+        // Read-only certification assessment for repair/review workflows. It
+        // deliberately does not write source, receipts, learning, or indexes.
+        const result = await certifyBlockStudioSource(source, null, { enterprise: body.enterprise === true });
+        const blockers = Array.from(new Set(result.checklist.blockers));
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          ok: result.certification.certified && blockers.length === 0,
+          ...result,
+          blockers,
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ error: error instanceof Error ? error.message : String(error) }));
       }
       return;
     }
@@ -13221,6 +13367,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const result = await certifyBlockStudioSource(source, blockPath, { enterprise: body.enterprise === true });
         const blockers = Array.from(new Set(result.checklist.blockers));
         if (!result.certification.certified || blockers.length > 0) {
+          if (blockPath && result.preview) writeBlockStudioRunSummary(projectRoot, blockPath, source, result.preview.result);
           res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(serializeJSON({ ok: false, ...result, blockers }));
           return;
@@ -13240,9 +13387,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               owner: parsed.owner,
               tags: parsed.tags,
             });
+            if (result.preview) writeBlockStudioRunSummary(projectRoot, savedPath, certifiedSource, result.preview.result);
             certifiedPayload = openBlockStudioDocument(projectRoot, savedPath, semanticLayer);
           } else {
             setBlockStudioStatus(projectRoot, normalizedBlockPath, 'certified');
+            if (result.preview) writeBlockStudioRunSummary(projectRoot, normalizedBlockPath, certifiedSource, result.preview.result);
             certifiedPayload = openBlockStudioDocument(projectRoot, normalizedBlockPath, semanticLayer);
           }
         }
@@ -13281,7 +13430,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           source: certifiedPayload?.source ?? certifiedSource,
           metadata: certifiedPayload?.metadata,
           companionPath: certifiedPayload?.companionPath ?? null,
-          validation: certifiedPayload?.validation ?? result.validation,
+          validation: result.validation,
           lineageRefresh: { status: 'queued', operationId: refreshOperation.id },
         }));
       } catch (error) {
@@ -14079,14 +14228,24 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ? body.parameters as Record<string, unknown>
           : {};
         const preview = await runBlockStudioPreviewSource(source, targetConnection, parameters);
+        const blockPath = typeof body.path === 'string' ? body.path : null;
+        if (blockPath) writeBlockStudioRunSummary(projectRoot, blockPath, source, preview.result);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON(preview));
       } catch (error) {
         const raw = error instanceof Error ? error.message : String(error);
+        const friendlyMessage = compactBlockStudioRuntimeFailure(raw);
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-        // `error` stays the full compiler output (the UI shows it in a
-        // collapsible); `friendlyMessage` is the one actionable sentence.
-        res.end(serializeJSON({ error: raw, friendlyMessage: compactSemanticRuntimeFailure(raw) }));
+        // Keep the result surface concise. Raw compiler output remains available
+        // for support and AI repair, but is never the primary end-user message.
+        res.end(serializeJSON({
+          error: raw,
+          friendlyMessage,
+          code: 'BLOCK_PREVIEW_FAILED',
+          recoverable: true,
+          details: { technicalDetails: raw },
+          nextActions: ['Review the named field or metric.', 'Fix the draft and run it again.'],
+        }));
       }
       return;
     }
@@ -18120,7 +18279,8 @@ function resolveDashboardItemBlock(
     return manifest.blocks[item.block.blockId] ?? null;
   }
   const normalizedRef = normalize(item.block.ref).replaceAll('\\', '/');
-  return Object.values(manifest.blocks).find((b) => normalize(b.filePath).replaceAll('\\', '/') === normalizedRef) ?? null;
+  return (manifest.blockDeclarations ?? Object.values(manifest.blocks))
+    .find((b) => normalize(b.filePath).replaceAll('\\', '/') === normalizedRef) ?? null;
 }
 
 function mergeDashboardChartConfig(
@@ -23429,6 +23589,7 @@ export function openBlockStudioDocument(
   };
   companionPath: string | null;
   validation: ReturnType<typeof validateBlockStudioSource>;
+  lastRun?: BlockStudioRunSummary;
 } {
   const normalizedPath = normalize(relativePath).replace(/^\/+/, '');
   if (!isBlockStudioBlockPath(normalizedPath)) {
@@ -23460,10 +23621,117 @@ export function openBlockStudioDocument(
     metadata,
     companionPath: companionPath && existsSync(join(projectRoot, companionPath)) ? companionPath : null,
     validation: validateBlockStudioSource(source, semanticLayer),
+    lastRun: readBlockStudioRunSummary(projectRoot, normalizedPath, source) ?? undefined,
   };
 }
 
-type BlockStudioDiagnostic = { severity: 'error' | 'warning' | 'info'; message: string; code?: string };
+interface BlockStudioRunSummary {
+  rowCount: number;
+  executionTime?: number;
+  columns: string[];
+  ranAt: string;
+}
+
+interface StoredBlockStudioRunSummary extends BlockStudioRunSummary {
+  version: 1;
+  blockPath: string;
+  sourceFingerprint: string;
+}
+
+interface BlockStudioPreviewResult {
+  columns: string[];
+  rows: Array<Record<string, unknown>>;
+  rowCount: number;
+  executionTime: number;
+}
+
+function blockStudioExecutionFingerprint(source: string): string {
+  return createHash('sha256')
+    .update(setBlockStudioStatusInSource(source, 'draft').trim())
+    .digest('hex');
+}
+
+function blockStudioRunSummaryPath(projectRoot: string, blockPath: string): string {
+  const normalizedPath = normalize(blockPath).replace(/^\/+/, '').replaceAll('\\', '/');
+  const pathKey = createHash('sha256').update(normalizedPath).digest('hex').slice(0, 32);
+  return join(projectRoot, '.dql', 'runs', 'block-studio', `${pathKey}.json`);
+}
+
+function writeBlockStudioRunSummary(
+  projectRoot: string,
+  blockPath: string,
+  source: string,
+  result: BlockStudioPreviewResult,
+): void {
+  const normalizedPath = normalize(blockPath).replace(/^\/+/, '').replaceAll('\\', '/');
+  if (!isBlockStudioBlockPath(normalizedPath)) return;
+  const receiptPath = blockStudioRunSummaryPath(projectRoot, normalizedPath);
+  mkdirSync(dirname(receiptPath), { recursive: true });
+  const receipt: StoredBlockStudioRunSummary = {
+    version: 1,
+    blockPath: normalizedPath,
+    sourceFingerprint: blockStudioExecutionFingerprint(source),
+    rowCount: result.rowCount ?? result.rows.length,
+    executionTime: result.executionTime,
+    columns: result.columns,
+    ranAt: new Date().toISOString(),
+  };
+  const tempPath = `${receiptPath}.${process.pid}.tmp`;
+  writeFileSync(tempPath, JSON.stringify(receipt, null, 2) + '\n', 'utf-8');
+  renameSync(tempPath, receiptPath);
+}
+
+function readBlockStudioRunSummary(
+  projectRoot: string,
+  blockPath: string,
+  source: string,
+): BlockStudioRunSummary | null {
+  try {
+    const normalizedPath = normalize(blockPath).replace(/^\/+/, '').replaceAll('\\', '/');
+    const receiptPath = blockStudioRunSummaryPath(projectRoot, normalizedPath);
+    if (!existsSync(receiptPath)) return null;
+    const receipt = JSON.parse(readFileSync(receiptPath, 'utf-8')) as Partial<StoredBlockStudioRunSummary>;
+    if (
+      receipt.version !== 1
+      || receipt.blockPath !== normalizedPath
+      || receipt.sourceFingerprint !== blockStudioExecutionFingerprint(source)
+      || !Number.isFinite(receipt.rowCount)
+      || !Array.isArray(receipt.columns)
+      || typeof receipt.ranAt !== 'string'
+    ) return null;
+    return {
+      rowCount: Number(receipt.rowCount),
+      executionTime: typeof receipt.executionTime === 'number' ? receipt.executionTime : undefined,
+      columns: receipt.columns.filter((column): column is string => typeof column === 'string'),
+      ranAt: receipt.ranAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+type BlockStudioDiagnostic = {
+  severity: 'error' | 'warning' | 'info';
+  message: string;
+  code?: string;
+  title?: string;
+  field?: string;
+  references?: string[];
+  correction?: string;
+  technicalDetails?: string;
+  action?: 'edit_source' | 'review_metrics' | 'configure_runtime' | 'edit_parameters' | 'run_again';
+  location?: { line?: number; column?: number };
+};
+
+interface BlockStudioValidationResult {
+  valid: boolean;
+  saveable: boolean;
+  diagnostics: BlockStudioDiagnostic[];
+  semanticRefs: { metrics: string[]; dimensions: string[]; segments: string[] };
+  chartConfig?: { chart?: string; x?: string; y?: string; color?: string; title?: string };
+  executableSql?: string | null;
+  parameters?: ReturnType<typeof prepareBlockInvocation>['parameters'];
+}
 
 const BLOCK_STUDIO_DRAFT_RUNTIME_DIAGNOSTICS = new Set([
   'metricflow_unavailable',
@@ -23471,6 +23739,176 @@ const BLOCK_STUDIO_DRAFT_RUNTIME_DIAGNOSTICS = new Set([
   'semantic_layer_missing',
   'semantic_runtime_required',
 ]);
+
+const BLOCK_STUDIO_RUNTIME_COMPILE_DIAGNOSTICS = new Set([
+  'metricflow_unavailable',
+  'semantic_compose_failed',
+  'semantic_layer_missing',
+  'semantic_runtime_check_required',
+  'semantic_runtime_required',
+]);
+
+function staticSemanticAuthoringDiagnostic(diagnostic: BlockStudioDiagnostic): BlockStudioDiagnostic {
+  if (!BLOCK_STUDIO_RUNTIME_COMPILE_DIAGNOSTICS.has(diagnostic.code ?? '')) return diagnostic;
+  return {
+    severity: 'warning',
+    code: 'semantic_runtime_check_required',
+    title: 'Run required for semantic validation',
+    field: 'Runtime',
+    message: 'The block structure and references are valid, but only the configured semantic runtime can prove this metric combination.',
+    correction: 'Run the block to validate compilation and data access before certification.',
+    technicalDetails: diagnostic.message,
+    action: 'run_again',
+  };
+}
+
+function presentBlockStudioDiagnostic(
+  diagnostic: BlockStudioDiagnostic,
+  semanticRefs: BlockStudioValidationResult['semanticRefs'],
+): BlockStudioDiagnostic {
+  if (diagnostic.title || diagnostic.correction) return diagnostic;
+  const raw = diagnostic.message.trim();
+  const locationMatch = /(?:line\s+)?(\d+)[: ,]+(?:column\s+)?(\d+)/i.exec(raw);
+  const technicalDetails = raw.length > 300 || raw.includes('\n') ? raw : undefined;
+  const base = {
+    ...diagnostic,
+    ...(technicalDetails ? { technicalDetails } : {}),
+    ...(locationMatch ? { location: { line: Number(locationMatch[1]), column: Number(locationMatch[2]) } } : {}),
+  };
+  switch (diagnostic.code) {
+    case 'semantic_compose_failed':
+      return {
+        ...base,
+        title: 'Selected metrics cannot be compiled',
+        field: 'Metrics',
+        references: semanticRefs.metrics,
+        message: semanticRefs.metrics.length > 0
+          ? `${semanticRefs.metrics.length} selected metric${semanticRefs.metrics.length === 1 ? '' : 's'} could not be compiled by the configured semantic runtime.`
+          : 'The selected metrics and dimensions do not share a governed query path.',
+        correction: 'Review the listed metrics in Modeling. Add the missing governed measure or relationship metadata, or replace the incompatible metric, then run the block again.',
+        technicalDetails: raw,
+        action: 'review_metrics',
+      };
+    case 'metricflow_unavailable':
+    case 'semantic_runtime_required':
+    case 'semantic_layer_missing':
+      return {
+        ...base,
+        title: 'Semantic runtime is not ready',
+        field: 'Runtime',
+        references: semanticRefs.metrics,
+        message: 'This semantic block needs a configured dbt Cloud, local MetricFlow, or DQL semantic runtime before it can run or be certified.',
+        correction: 'Open semantic runtime settings, connect the project runtime, then run the block again.',
+        technicalDetails: raw,
+        action: 'configure_runtime',
+      };
+    case 'semantic_metric_missing':
+      return {
+        ...base,
+        title: 'Choose at least one metric',
+        field: 'Metrics',
+        message: 'This semantic block does not select a metric yet.',
+        correction: 'Add one or more governed metrics in the visual builder or DQL source.',
+        action: 'review_metrics',
+      };
+    case 'semantic_ref': {
+      const reference = raw.split(':').slice(1).join(':').trim();
+      return {
+        ...base,
+        title: 'Semantic reference was not found',
+        field: 'Metrics and dimensions',
+        references: reference ? [reference] : [...semanticRefs.metrics, ...semanticRefs.dimensions],
+        message: reference ? `“${reference}” is not available in the current semantic snapshot.` : compactSemanticRuntimeFailure(raw),
+        correction: 'Choose a current metric or dimension from the semantic catalog, then run validation again.',
+        action: 'review_metrics',
+      };
+    }
+    case 'semantic_granularity_missing':
+      return {
+        ...base,
+        title: 'Choose a time grain',
+        field: 'Time',
+        message: 'A time dimension is selected without a granularity.',
+        correction: 'Choose day, week, month, quarter, or year for the selected time dimension.',
+        action: 'review_metrics',
+      };
+    case 'parameter_parse':
+      return {
+        ...base,
+        title: 'Run input is invalid',
+        field: 'Parameters',
+        message: compactSemanticRuntimeFailure(raw),
+        correction: 'Correct the named parameter, default value, or binding, then run validation again.',
+        action: 'edit_parameters',
+      };
+    case 'syntax':
+    case 'semantic_shape':
+    case 'semantic_block_has_query':
+    case 'sql_missing':
+    case 'sql_read_only':
+      return {
+        ...base,
+        title: diagnostic.code === 'sql_read_only' ? 'Only read-only SQL is allowed' : 'DQL source needs attention',
+        field: 'DQL source',
+        message: compactSemanticRuntimeFailure(raw),
+        correction: diagnostic.code === 'sql_read_only'
+          ? 'Replace write or DDL statements with one read-only query.'
+          : 'Open DQL source, correct the highlighted declaration, then validate again.',
+        action: 'edit_source',
+      };
+    default:
+      return base;
+  }
+}
+
+export function compactBlockStudioRuntimeFailure(failure: string): string {
+  const semanticPrefix = 'Could not compose SQL for semantic block metrics.';
+  const semanticIndex = failure.indexOf(semanticPrefix);
+  if (semanticIndex >= 0) {
+    const remainder = failure.slice(semanticIndex + semanticPrefix.length);
+    const references = Array.from(remainder.matchAll(/(?:^|\s)([A-Za-z_][\w.:/-]*)\s*:/g), (match) => match[1]);
+    const uniqueReferences = Array.from(new Set(references));
+    if (uniqueReferences.length > 0) {
+      return `${uniqueReferences.length} selected metric${uniqueReferences.length === 1 ? '' : 's'} cannot be compiled by the current semantic runtime: ${uniqueReferences.join(', ')}. Review the measure and relationship metadata, then run again.`;
+    }
+    return 'The selected metrics and dimensions do not share a governed query path. Review the semantic relationships, then run again.';
+  }
+  return compactSemanticRuntimeFailure(failure);
+}
+
+function presentBlockStudioDiagnostics(
+  diagnostics: BlockStudioDiagnostic[],
+  semanticRefs: BlockStudioValidationResult['semanticRefs'],
+): BlockStudioDiagnostic[] {
+  return diagnostics.map((diagnostic) => presentBlockStudioDiagnostic(diagnostic, semanticRefs));
+}
+
+/**
+ * Certification and preview must use the same compiler verdict. A successful
+ * dbt/MetricFlow compile supersedes the native compiler's capability warning;
+ * syntax, unsafe SQL, unknown references, and parameter errors remain intact.
+ */
+export function reconcileBlockStudioRuntimeValidation(
+  validation: BlockStudioValidationResult,
+  runtime: { sql: string | null; diagnostics: BlockStudioDiagnostic[] },
+): BlockStudioValidationResult {
+  const diagnostics = [
+    ...validation.diagnostics.filter((diagnostic) => !BLOCK_STUDIO_RUNTIME_COMPILE_DIAGNOSTICS.has(diagnostic.code ?? '')),
+    ...runtime.diagnostics,
+  ].filter((diagnostic, index, all) => all.findIndex((candidate) => (
+    candidate.severity === diagnostic.severity
+    && candidate.code === diagnostic.code
+    && candidate.message === diagnostic.message
+  )) === index);
+  const presented = presentBlockStudioDiagnostics(diagnostics, validation.semanticRefs);
+  return {
+    ...validation,
+    valid: presented.every((diagnostic) => diagnostic.severity !== 'error'),
+    saveable: blockStudioValidationAllowsDraftSave({ diagnostics: presented }),
+    diagnostics: presented,
+    executableSql: runtime.sql ?? validation.executableSql,
+  };
+}
 
 /**
  * Draft persistence is stricter than loose text storage but does not require a
@@ -24085,15 +24523,7 @@ function resolveCustomBlockSql(
 export function validateBlockStudioSource(
   source: string,
   semanticLayer?: SemanticLayer,
-): {
-  valid: boolean;
-  saveable: boolean;
-  diagnostics: BlockStudioDiagnostic[];
-  semanticRefs: { metrics: string[]; dimensions: string[]; segments: string[] };
-  chartConfig?: { chart?: string; x?: string; y?: string; color?: string; title?: string };
-  executableSql?: string | null;
-  parameters?: ReturnType<typeof prepareBlockInvocation>['parameters'];
-} {
+): BlockStudioValidationResult {
   const diagnostics: BlockStudioDiagnostic[] = [];
   const semanticConfig = parseSemanticBlockConfig(source);
   if (semanticConfig.blockType !== 'semantic') {
@@ -24138,7 +24568,10 @@ export function validateBlockStudioSource(
     if (semanticLayer) {
       const semanticCompose = composeSemanticBlockSql(source, semanticLayer);
       semanticRefs = semanticCompose.semanticRefs;
-      diagnostics.push(...semanticCompose.diagnostics);
+      // Synchronous validation owns authored shape, references, safety, and
+      // parameter contracts. A native compile miss is not an authoring error:
+      // dbt Cloud or MetricFlow may compile the exact same source successfully.
+      diagnostics.push(...semanticCompose.diagnostics.map(staticSemanticAuthoringDiagnostic));
       executableSql = semanticCompose.sql;
     } else {
       diagnostics.push({
@@ -24226,10 +24659,11 @@ export function validateBlockStudioSource(
       });
     }
   }
+  const presentedDiagnostics = presentBlockStudioDiagnostics(diagnostics, semanticRefs);
   return {
-    valid: diagnostics.every((diagnostic) => diagnostic.severity !== 'error'),
-    saveable: blockStudioValidationAllowsDraftSave({ diagnostics }),
-    diagnostics,
+    valid: presentedDiagnostics.every((diagnostic) => diagnostic.severity !== 'error'),
+    saveable: blockStudioValidationAllowsDraftSave({ diagnostics: presentedDiagnostics }),
+    diagnostics: presentedDiagnostics,
     semanticRefs,
     chartConfig: chartConfig ?? undefined,
     executableSql,
@@ -25351,17 +25785,88 @@ function buildBlockStudioCertificationChecklist(input: {
 }) {
   const parsed = parseBlockSourceMetadata(input.source);
   const sql = extractBlockStudioSql(input.source) ?? '';
-  const blockers = new Set<string>();
-  for (const diagnostic of input.validation.diagnostics) {
-    if (diagnostic.severity === 'error') blockers.add(diagnostic.message);
+  const issues: BlockStudioDiagnostic[] = input.validation.diagnostics
+    .filter((diagnostic) => diagnostic.severity === 'error');
+  for (const error of input.certificationErrors) {
+    const combined = `${error.rule}: ${error.message}`;
+    const lower = combined.toLowerCase();
+    if (lower.includes('missing owner')) {
+      issues.push({
+        severity: 'error',
+        code: 'owner_missing',
+        title: 'Add an owner',
+        field: 'Metadata',
+        message: 'Owner is required before certification.',
+        correction: 'Enter the accountable team or person in Metadata, save the draft, and certify again.',
+        action: 'edit_source',
+        technicalDetails: combined,
+      });
+    } else if (lower.includes('tests pass')) {
+      issues.push({
+        severity: 'error',
+        code: 'tests_failed',
+        title: 'A block test failed',
+        field: 'Tests',
+        message: 'One or more declared tests did not pass against the latest preview result.',
+        correction: 'Review the failed assertion and result, correct the query or expectation, then run certification again.',
+        action: 'edit_source',
+        technicalDetails: combined,
+      });
+    } else {
+      issues.push({
+        severity: 'error',
+        code: `certification_${error.rule.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`,
+        title: 'Certification requirement is not ready',
+        field: 'Metadata',
+        message: compactSemanticRuntimeFailure(combined),
+        correction: 'Update the named block field, save the draft, and certify again.',
+        action: 'edit_source',
+        technicalDetails: combined,
+      });
+    }
   }
-  for (const error of input.certificationErrors) blockers.add(`${error.rule}: ${error.message}`);
-  for (const blocker of input.extraBlockers ?? []) blockers.add(blocker);
-  if (!input.previewSucceeded) blockers.add('Block has not run successfully');
+  for (const blocker of input.extraBlockers ?? []) {
+    issues.push({
+      severity: 'error',
+      code: 'preview_failed',
+      title: 'Preview did not finish',
+      field: 'Run',
+        message: compactBlockStudioRuntimeFailure(blocker),
+      correction: 'Correct the reported query or runtime problem, then run the block again before certification.',
+      technicalDetails: blocker,
+      action: 'run_again',
+    });
+  }
+  if (!input.previewSucceeded && (input.extraBlockers?.length ?? 0) === 0) {
+    issues.push({
+      severity: 'error',
+      code: 'preview_required',
+      title: 'Run the block',
+      field: 'Run',
+      message: 'The block needs a successful preview result before certification.',
+      correction: 'Run the block, resolve any preview error, then certify again.',
+      action: 'run_again',
+    });
+  }
   // Only a REAL test failure blocks. "No tests" and "no chart" are advisory review
   // items the AI fills at draft time — never hard gates (owner is the gate). This is
   // what keeps "build a DQL" from demanding ~13 fields per block at 300-query scale.
-  if (input.testResults && input.testResults.failed > 0) blockers.add('Tests must pass before certification');
+  if (input.testResults && input.testResults.failed > 0 && !issues.some((issue) => issue.code === 'tests_failed')) {
+    issues.push({
+      severity: 'error',
+      code: 'tests_failed',
+      title: 'A block test failed',
+      field: 'Tests',
+      message: 'One or more declared tests did not pass against the latest preview result.',
+      correction: 'Review the failed assertion and result, correct the query or expectation, then run certification again.',
+      action: 'edit_source',
+    });
+  }
+  const uniqueIssues = issues.filter((issue, index, all) => all.findIndex((candidate) => (
+    candidate.code === issue.code
+    && candidate.message === issue.message
+    && (candidate.references ?? []).join('|') === (issue.references ?? []).join('|')
+  )) === index);
 
   return {
     // The metadata tab is green once the one required field (owner) is present.
@@ -25373,7 +25878,8 @@ function buildBlockStudioCertificationChecklist(input: {
     chart: Boolean(input.validation.chartConfig?.chart),
     lineage: extractSqlTablesLight(sql).length > 0 || input.validation.semanticRefs.metrics.length > 0,
     aiReviewed: true,
-    blockers: Array.from(blockers),
+    blockers: uniqueIssues.map((issue) => issue.message),
+    issues: uniqueIssues,
     checkedAt: new Date().toISOString(),
   };
 }

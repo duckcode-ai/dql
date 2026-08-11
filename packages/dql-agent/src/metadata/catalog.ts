@@ -33,6 +33,7 @@ import {
   type ManifestKnowledgeObject,
   type ManifestKnowledgeEdge,
   type ManifestKnowledgeObjectKind,
+  type ManifestBlock,
   type SemanticLayer,
   type ColumnLineageEntry,
   type ColumnSource,
@@ -1899,6 +1900,7 @@ export function buildMetadataSnapshot(
   }
 
   addManifestBlockDetails(manifest, objects);
+  addManifestBlockSourceObjects(projectRoot, manifest, objects);
   addManifestKnowledgeGraph(materializeIndexedKnowledgeGraph(projectRoot, manifest), objects, edges);
   addSkillObjects(skills, objects, edges);
   addDbtDagObjects(manifest, objects, edges, diagnostics);
@@ -3052,6 +3054,65 @@ export class MetadataCatalog {
       ),
       snippet: row.snip ?? undefined,
     }));
+  }
+
+  /**
+   * Bounded, index-only catalog query for inventory surfaces such as App
+   * Studio. Unlike `searchObjects`, this contract owns pagination and a total
+   * count so browsers never have to download an arbitrary top-N subset and
+   * pretend it is the complete catalog.
+   */
+  queryObjectsPage(options: {
+    query?: string;
+    objectTypes?: string[];
+    domains?: string[];
+    statuses?: string[];
+    offset?: number;
+    limit?: number;
+  }): { items: MetadataObject[]; total: number } {
+    const offset = Math.max(0, Math.floor(options.offset ?? 0));
+    const limit = Math.min(100, Math.max(1, Math.floor(options.limit ?? 50)));
+    const filters: string[] = [];
+    const params: unknown[] = [];
+    if (options.objectTypes?.length) {
+      filters.push(`o.object_type IN (${options.objectTypes.map(() => '?').join(', ')})`);
+      params.push(...options.objectTypes);
+    }
+    if (options.domains?.length) {
+      filters.push(`COALESCE(o.domain, '') IN (${options.domains.map(() => '?').join(', ')})`);
+      params.push(...options.domains);
+    }
+    if (options.statuses?.length) {
+      filters.push(`COALESCE(o.status, 'unknown') IN (${options.statuses.map(() => '?').join(', ')})`);
+      params.push(...options.statuses);
+    }
+    const match = buildFtsMatch(options.query ?? '', { prefix: true });
+    const useFts = Boolean(match.or);
+    const from = useFts
+      ? 'FROM metadata_fts JOIN metadata_objects AS o ON o.object_key = metadata_fts.object_key'
+      : 'FROM metadata_objects AS o';
+    const where = [
+      ...(useFts ? ['metadata_fts MATCH ?'] : []),
+      ...filters,
+    ];
+    const queryParams = [...(useFts ? [match.or] : []), ...params];
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const total = Number((this.db.prepare(`SELECT COUNT(*) AS count ${from} ${whereSql}`).get(...queryParams) as { count: number }).count);
+    const rankSql = useFts ? ', bm25(metadata_fts) AS rank' : '';
+    const orderSql = useFts ? 'ORDER BY rank, o.object_key' : 'ORDER BY o.object_key';
+    const rows = this.db.prepare(`
+      SELECT o.*${rankSql}
+      ${from}
+      ${whereSql}
+      ${orderSql}
+      LIMIT ? OFFSET ?
+    `).all(...queryParams, limit, offset) as MetadataObjectRow[];
+    const items = rows.map((row) => {
+      const item = rowToObject(row);
+      if (!useFts || row.rank === undefined || row.rank === null) return item;
+      return { ...item, score: Number((1 / (1 + Math.abs(row.rank))).toFixed(6)) };
+    });
+    return { items, total };
   }
 
   /** Replace the snapshot vector lane with an explicitly configured provider. */
@@ -4610,6 +4671,108 @@ function addManifestBlockDetails(manifest: DQLManifest, objects: Map<string, Met
       }),
     }));
   }
+}
+
+/**
+ * App Studio needs an inventory, not the legacy name-keyed execution
+ * projection in `manifest.blocks`. Keep every executable declaration and give
+ * it a path-qualified immutable identity. This object class is additive so Ask
+ * AI's certified block routing continues to use `dql_block` unchanged.
+ */
+function addManifestBlockSourceObjects(
+  projectRoot: string,
+  manifest: DQLManifest,
+  objects: Map<string, MetadataObject>,
+): void {
+  const declarations = manifest.blockDeclarations ?? Object.values(manifest.blocks ?? {});
+  for (const block of declarations) {
+    if (!block.sql?.trim() || !block.filePath) continue;
+    const sourceRevision = manifestBlockSourceRevision(projectRoot, block);
+    const domain = block.domain?.trim() || undefined;
+    const pathIdentity = sha256(`${block.filePath}\u0000${block.name}`).slice(0, 20);
+    const sourceId = `app:block:${domain ?? 'global'}:${pathIdentity}`;
+    const lifecycle = normalizeBlockSourceLifecycle(block.status);
+    const outputs = block.declaredOutputs
+      ?? block.outputContract?.map((output) => output.name).filter(Boolean)
+      ?? block.outputs?.map((output) => output.name).filter(Boolean)
+      ?? [];
+    const measures = Array.from(new Set([
+      ...(block.metricRefs ?? []),
+      ...(block.metricsRef ?? []),
+      ...(block.metricRef ? [block.metricRef] : []),
+      ...((block.outputContract ?? []).filter((output) => output.role === 'metric').map((output) => output.name)),
+    ])).sort();
+    const dimensions = Array.from(new Set([
+      ...(block.dimensions ?? []),
+      ...(block.dimensionRefs ?? []),
+      ...(block.dimensionsRef ?? []),
+      ...((block.outputContract ?? []).filter((output) => output.role === 'dimension').map((output) => output.name)),
+    ])).sort();
+    const allowedVisualizations = Array.from(new Set([
+      ...(block.displayHints?.allowedVisualizations ?? []),
+      ...(block.displayHints?.defaultVisualization ? [block.displayHints.defaultVisualization] : []),
+      ...(block.chartType ? [block.chartType] : []),
+    ])).sort();
+    objects.set(sourceId, {
+      objectKey: sourceId,
+      objectType: 'dql_block_source',
+      name: block.name,
+      fullName: `${domain ?? 'global'}::block::${block.name}`,
+      domain,
+      owner: block.owner,
+      status: lifecycle,
+      description: block.description,
+      sourcePath: block.filePath,
+      sourceSystem: 'dql',
+      payload: compactObject({
+        sourceId,
+        qualifiedId: `${domain ?? 'global'}::block::${block.name}::${pathIdentity}`,
+        kind: 'block',
+        lifecycle,
+        trust: lifecycle === 'certified' ? 'certified' : 'review_required',
+        executionRef: block.filePath,
+        sourceRevision,
+        fingerprint: sourceRevision,
+        tags: block.tags,
+        blockType: block.blockType,
+        chartType: block.chartType,
+        allowedVisualizations,
+        measures,
+        dimensions,
+        declaredOutputs: outputs,
+        allowedFilters: block.allowedFilters,
+        filterBindings: block.filterBindings,
+        grain: block.grain,
+        parameters: (block.parameters ?? []).map((parameter) => ({
+          name: parameter.name,
+          type: parameter.type,
+          required: parameter.required,
+          hasDefault: parameter.default !== undefined,
+        })),
+        dataState: block.dataState,
+        dataStateDetail: block.dataStateDetail,
+      }),
+    });
+  }
+}
+
+function normalizeBlockSourceLifecycle(status: string | undefined): string {
+  const normalized = status?.trim().toLowerCase();
+  if (normalized === 'certified') return 'certified';
+  if (normalized === 'review' || normalized === 'review_required') return 'review';
+  if (normalized === 'pending_recertification') return 'pending_recertification';
+  if (normalized === 'deprecated') return 'deprecated';
+  return 'draft';
+}
+
+function manifestBlockSourceRevision(projectRoot: string, block: ManifestBlock): string {
+  const path = join(projectRoot, block.filePath);
+  try {
+    if (existsSync(path)) return `sha256:${sha256(readFileSync(path, 'utf8'))}`;
+  } catch {
+    // The manifest object remains enough for a deterministic snapshot identity.
+  }
+  return `sha256:${sha256(stableStringify(block))}`;
 }
 
 function addDataLexManifestObjects(

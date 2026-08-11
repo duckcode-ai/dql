@@ -3,7 +3,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { useQuery } from '@tanstack/react-query';
 import { renderSemanticBlockSource } from '@duckcodeailabs/dql-core/blocks';
 import { AlertTriangle, Blocks, Bot, CheckCircle2, CheckSquare, ChevronLeft, ChevronRight, Code2, Database, FileInput, Loader2, MoreHorizontal, PanelRightOpen, Pencil, Play, Plus, Search, ShieldCheck, Sparkles, Square, Trash2, X, type LucideIcon } from 'lucide-react';
-import { api, type BlockCertificationOperationResult } from '../../api/client';
+import { api, DqlApiError, type BlockCertificationOperationResult } from '../../api/client';
 import { useDispatch, useNotebookStore } from '../../store/NotebookStore';
 import { useOperations } from '../../operations/OperationsProvider';
 import { controlStyle } from '../../themes/control-tokens';
@@ -87,6 +87,7 @@ import {
   parseBlockFields,
   parseVisualBlockParameters,
   getDqlSectionBody,
+  hasCompleteBlockEnvelope,
   reconcileSemanticCompatibility,
   removeVisualBlockParameter,
   parseSemanticVisualFields,
@@ -107,6 +108,7 @@ import {
 } from '../../utils/block-studio';
 import { getTypeColor } from '../../utils/type-colors';
 import { BlockParameterControls } from '../parameters/BlockParameterControls';
+import type { BlockEntry } from '../blocks/block-types';
 
 type ExplorerTab = 'blocks' | 'semantic' | 'database';
 type ResultTab = 'results' | 'parameters' | 'lineage' | 'save' | 'history';
@@ -133,6 +135,7 @@ export function BlockStudio() {
     blockStudioDirty: store.blockStudioDirty,
     blockStudioDraft: store.blockStudioDraft,
     blockStudioImportOpen: store.blockStudioImportOpen,
+    blockStudioLastRun: store.blockStudioLastRun,
     blockStudioMetadata: store.blockStudioMetadata,
     blockStudioPreview: store.blockStudioPreview,
     blockStudioValidation: store.blockStudioValidation,
@@ -173,13 +176,17 @@ export function BlockStudio() {
   );
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
+  const [runErrorDetails, setRunErrorDetails] = useState<string | null>(null);
+  const [queryDetailsOpen, setQueryDetailsOpen] = useState(false);
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [runElapsedMs, setRunElapsedMs] = useState(0);
   const [parameterValues, setParameterValues] = useState<Record<string, unknown>>({});
   const [saving, setSaving] = useState(false);
   const [repairing, setRepairing] = useState(false);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [recoveryScope, setRecoveryScope] = useState<'save' | 'run' | null>(null);
   const [repairNotice, setRepairNotice] = useState<string | null>(null);
+  const [repairWarning, setRepairWarning] = useState<string | null>(null);
   const [certificationOperationId, setCertificationOperationId] = useState<string | null>(null);
   const mutationInFlightRef = useRef(false);
   // One-shot: how the NEXT block open should present. 'builder' skips the
@@ -193,6 +200,7 @@ export function BlockStudio() {
   const [blockLibraryRefreshKey, setBlockLibraryRefreshKey] = useState(0);
   const [saveIdentityOpen, setSaveIdentityOpen] = useState(false);
   const [dirtyGuardOpen, setDirtyGuardOpen] = useState(false);
+  const pendingBlockOpenRef = useRef<BlockEntry | null>(null);
   const pendingIdentityActionRef = useRef<'save' | 'certify' | null>(null);
   const newAfterSaveRef = useRef(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
@@ -241,6 +249,7 @@ export function BlockStudio() {
       lineage: boolean;
       aiReviewed: boolean;
       blockers: string[];
+      issues?: BlockStudioDiagnostic[];
       checkedAt?: string;
     };
     certification?: {
@@ -250,10 +259,38 @@ export function BlockStudio() {
     };
     blockers?: string[];
     error?: string;
+    phase?: string;
+    progress?: number;
+    message?: string;
   } | null>(null);
   const lastActiveBlockPathRef = useRef<string | null>(state.activeBlockPath);
+  const certificationPathsRef = useRef(new Set<string>());
+  const blockScopeEpochRef = useRef(0);
   const liveDraftRef = useRef(state.blockStudioDraft);
   liveDraftRef.current = state.blockStudioDraft;
+
+  const resetBlockScopedActivity = useCallback(() => {
+    blockScopeEpochRef.current += 1;
+    setRunning(false);
+    setRunError(null);
+    setRunErrorDetails(null);
+    setQueryDetailsOpen(false);
+    setRunStartedAt(null);
+    setRunElapsedMs(0);
+    setParameterValues({});
+    setSaving(false);
+    setRepairing(false);
+    setRecoveryError(null);
+    setRecoveryScope(null);
+    setRepairNotice(null);
+    setRepairWarning(null);
+    setSaveError(null);
+    setCertificationResult(null);
+    setCertificationOperationId(null);
+    setHistoryEntries([]);
+    setHistoryLoaded(false);
+    setResultTab('results');
+  }, []);
 
   const catalogQuery = useQuery({
     queryKey: ['block-studio', 'catalog', 'summary'],
@@ -280,7 +317,16 @@ export function BlockStudio() {
   useEffect(() => {
     if (!certificationOperationId) return;
     const operation = operations.find((candidate) => candidate.id === certificationOperationId);
-    if (!operation || operation.status === 'queued' || operation.status === 'running') return;
+    if (!operation) return;
+    if (operation.status === 'queued' || operation.status === 'running') {
+      setCertificationResult({
+        pending: true,
+        phase: operation.phase,
+        progress: operation.progress,
+        message: operation.message,
+      });
+      return;
+    }
     if (operation.status === 'succeeded') {
       const result = operation.result as BlockCertificationOperationResult | undefined;
       setCertificationResult({
@@ -292,9 +338,7 @@ export function BlockStudio() {
           ? 'The draft was saved. Resolve the certification blockers and try again.'
           : undefined,
       });
-      if (result?.outcome === 'draft_saved_with_blockers') {
-        setSaveError('Draft saved. Certification needs attention; review the checklist below.');
-      }
+      setSaveError(null);
     } else {
       setSaveError(operation.error?.message ?? 'Certification did not complete. The draft remains saved.');
       setCertificationResult({ pending: false, error: operation.error?.message ?? operation.message });
@@ -343,11 +387,42 @@ export function BlockStudio() {
   useEffect(() => {
     const previous = lastActiveBlockPathRef.current;
     const current = state.activeBlockPath;
+    if (current !== previous) {
+      const operation = certificationOperationId
+        ? operations.find((candidate) => candidate.id === certificationOperationId)
+        : undefined;
+      const result = operation?.result as BlockCertificationOperationResult | undefined;
+      const certificationPaths = new Set([
+        ...certificationPathsRef.current,
+        result?.oldPath,
+        result?.draftPath,
+        result?.newPath,
+      ].filter((value): value is string => Boolean(value)));
+      const isCertificationTransition = Boolean(
+        current
+        && certificationPaths.has(current)
+        && (!previous || certificationPaths.has(previous)),
+      );
+      if (!isCertificationTransition) {
+        certificationPathsRef.current.clear();
+        resetBlockScopedActivity();
+      }
+    }
     if (current && current !== previous) {
       dispatch({ type: 'CLOSE_BLOCK_IMPORT' });
     }
     lastActiveBlockPathRef.current = current;
-  }, [state.activeBlockPath, dispatch]);
+  }, [state.activeBlockPath, certificationOperationId, dispatch, operations, resetBlockScopedActivity]);
+
+  useEffect(() => {
+    if (!state.blockStudioDirty) return;
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeLeaving);
+    return () => window.removeEventListener('beforeunload', warnBeforeLeaving);
+  }, [state.blockStudioDirty]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -455,6 +530,7 @@ export function BlockStudio() {
   }, [state.activeBlockPath]);
 
   const loadBlockLineage = useCallback(async (blockName: string) => {
+    const scopeEpoch = blockScopeEpochRef.current;
     const nodeId = `block:${blockName}`;
     dispatch({ type: 'SET_LINEAGE_FOCUS', nodeId });
     setLineageLoading(true);
@@ -467,15 +543,17 @@ export function BlockStudio() {
         api.queryLineage({ focus: nodeId, upstreamDepth: 3, downstreamDepth: 2 }),
         api.fetchLineagePaths(nodeId, { maxDepth: 6, maxPaths: 6 }),
       ]);
+      if (scopeEpoch !== blockScopeEpochRef.current) return;
       setLineageDetail(detail);
       setLineageGraph(focused.graph ?? null);
       setLineagePaths(paths);
     } catch {
+      if (scopeEpoch !== blockScopeEpochRef.current) return;
       setLineageDetail(null);
       setLineageGraph(null);
       setLineagePaths(null);
     } finally {
-      setLineageLoading(false);
+      if (scopeEpoch === blockScopeEpochRef.current) setLineageLoading(false);
     }
   }, [dispatch]);
 
@@ -484,15 +562,33 @@ export function BlockStudio() {
     void loadBlockLineage(activeBlockName);
   }, [activeBlockName, loadBlockLineage]);
 
+  const loadBlockHistory = useCallback(() => {
+    const blockPath = state.activeBlockPath;
+    if (!blockPath || historyLoaded) return;
+    const scopeEpoch = blockScopeEpochRef.current;
+    void api.getBlockHistory(blockPath).then((result) => {
+      if (scopeEpoch !== blockScopeEpochRef.current || blockPath !== lastActiveBlockPathRef.current) return;
+      setHistoryEntries(result.entries);
+      setHistoryLoaded(true);
+    }).catch(() => {
+      if (scopeEpoch !== blockScopeEpochRef.current) return;
+      setHistoryEntries([]);
+      setHistoryLoaded(true);
+    });
+  }, [historyLoaded, state.activeBlockPath]);
+
   const handleDraftChange = (draft: string) => {
     setRunError(null);
+    setRunErrorDetails(null);
     setSaveError(null);
     setRecoveryError(null);
+    setRecoveryScope(null);
     setRepairNotice(null);
+    setRepairWarning(null);
     dispatch({ type: 'SET_BLOCK_STUDIO_DRAFT', draft });
     const parsed = parseBlockFields(draft);
     const current = state.blockStudioMetadata;
-    if (!parsed || !current) return;
+    if (!parsed || !current || !hasCompleteBlockEnvelope(draft)) return;
     const next = {
       ...current,
       name: parsed.name || current.name,
@@ -556,21 +652,49 @@ export function BlockStudio() {
   };
 
   const resetToBlockStudioHome = () => {
+    resetBlockScopedActivity();
     dispatch({ type: 'START_NEW_BLOCK_WORKSPACE' });
-    setRunError(null);
-    setSaveError(null);
-    setRecoveryError(null);
-    setRepairNotice(null);
     setDraftSessionId(makeBlockStudioDraftId());
     setImportSession(null);
     setWorkspaceMode('start');
     setEditorMode('visual');
   };
 
+  const openSavedBlock = async (block: BlockEntry) => {
+    try {
+      const file = {
+        name: block.path.split('/').pop() ?? block.name,
+        path: block.path,
+        type: 'block' as const,
+        folder: 'blocks',
+      };
+      const payload = await api.openBlockStudio(block.path);
+      resetBlockScopedActivity();
+      if (!state.files.some((candidate) => candidate.path === block.path)) {
+        dispatch({ type: 'FILE_ADDED', file });
+      }
+      dispatch({ type: 'OPEN_BLOCK_STUDIO', file, payload });
+      setCatalogError(null);
+    } catch (error) {
+      setCatalogError(error instanceof Error ? error.message : 'Could not open this block.');
+    }
+  };
+
+  const completePendingWorkspaceNavigation = () => {
+    const pendingBlock = pendingBlockOpenRef.current;
+    pendingBlockOpenRef.current = null;
+    if (pendingBlock) {
+      void openSavedBlock(pendingBlock);
+      return;
+    }
+    resetToBlockStudioHome();
+  };
+
   // Return to the Block Studio home — the page that offers the three ways in
   // (Ask AI / Import SQL / Build manually). After saving a block there was no
   // route back to where that choice is made.
   const goToBlockStudioHome = () => {
+    pendingBlockOpenRef.current = null;
     if (state.blockStudioDirty) {
       setDirtyGuardOpen(true);
       return;
@@ -583,6 +707,16 @@ export function BlockStudio() {
   // where the AI / import / manual choice is made.
   const beginNewWorkspace = () => {
     goToBlockStudioHome();
+  };
+
+  const requestOpenBlock = (block: BlockEntry) => {
+    if (block.path === state.activeBlockPath) return;
+    if (state.blockStudioDirty) {
+      pendingBlockOpenRef.current = block;
+      setDirtyGuardOpen(true);
+      return;
+    }
+    void openSavedBlock(block);
   };
 
   const beginManualDraft = (type: 'custom' | 'semantic') => {
@@ -612,47 +746,75 @@ export function BlockStudio() {
   };
 
   const handleRun = async () => {
+    const scopeEpoch = blockScopeEpochRef.current;
     setRunning(true);
     setRunError(null);
+    setRunErrorDetails(null);
+    setQueryDetailsOpen(false);
     setRunStartedAt(Date.now());
     setRunElapsedMs(0);
     dispatch({ type: 'SET_BLOCK_STUDIO_PREVIEW', preview: null });
     try {
       const preview = await api.runBlockStudio(state.blockStudioDraft, state.activeBlockPath, parameterValues);
+      if (scopeEpoch !== blockScopeEpochRef.current) return;
       dispatch({ type: 'SET_BLOCK_STUDIO_PREVIEW', preview });
+      if (preview.validation) dispatch({ type: 'SET_BLOCK_STUDIO_VALIDATION', validation: preview.validation });
+      setRecoveryError(null);
+      setRecoveryScope(null);
       setResultTab('results');
     } catch (error) {
+      if (scopeEpoch !== blockScopeEpochRef.current) return;
       const message = error instanceof Error ? error.message : String(error);
+      const technicalDetails = blockStudioErrorTechnicalDetails(error);
       setRunError(message);
-      setRecoveryError(message);
+      setRunErrorDetails(technicalDetails);
+      setRecoveryError(technicalDetails ?? message);
+      setRecoveryScope('run');
       setResultTab(/required parameter|provide required parameter/i.test(message) ? 'parameters' : 'results');
     } finally {
-      setRunning(false);
-      setRunStartedAt(null);
+      if (scopeEpoch === blockScopeEpochRef.current) {
+        setRunning(false);
+        setRunStartedAt(null);
+      }
     }
   };
 
-  const handleFixAndRun = async () => {
-    if (repairing || !recoveryError) return;
+  const handleFixAndRun = async (
+    errorOverride?: string,
+    options: { requireCertificationReady?: boolean } = {},
+  ) => {
+    const repairError = errorOverride ?? recoveryError;
+    if (repairing || !repairError) return;
     const originalSource = state.blockStudioDraft;
+    const scopeEpoch = blockScopeEpochRef.current;
     setRepairing(true);
     setSaveError(null);
     setRepairNotice(null);
+    setRepairWarning(null);
     try {
       const repaired = await api.repairAndRunBlockStudio(
         originalSource,
-        recoveryError,
+        repairError,
         parameterValues,
         activeBlockName ?? state.blockStudioMetadata?.name ?? undefined,
       );
+      if (scopeEpoch !== blockScopeEpochRef.current) return;
       if (liveDraftRef.current !== originalSource) {
         throw new Error('The block changed while AI repair was running. The stale repair was not applied.');
       }
       const validation = await api.validateBlockStudio(repaired.source, state.activeBlockPath);
+      if (scopeEpoch !== blockScopeEpochRef.current) return;
       if (validation.saveable === false) {
         throw new Error(validation.diagnostics.find((item) => item.severity === 'error')?.message
           ?? 'The repaired DQL still has an authoring error.');
       }
+      if (liveDraftRef.current !== originalSource) {
+        throw new Error('The block changed while AI repair was running. The stale repair was not applied.');
+      }
+      const certificationAssessment = options.requireCertificationReady
+        ? await api.assessBlockStudioCertification(repaired.source)
+        : null;
+      if (scopeEpoch !== blockScopeEpochRef.current) return;
       if (liveDraftRef.current !== originalSource) {
         throw new Error('The block changed while AI repair was running. The stale repair was not applied.');
       }
@@ -661,15 +823,48 @@ export function BlockStudio() {
       dispatch({ type: 'SET_BLOCK_STUDIO_PREVIEW', preview: repaired.preview });
       setRunError(null);
       setRecoveryError(null);
-      setRepairNotice(`${repaired.repairMode === 'ai' ? 'AI fixed' : 'DQL fixed'} the draft and the corrected block ran successfully. Review the changes, then save the draft.`);
+      setRecoveryScope(null);
+      setRunErrorDetails(null);
+      if (certificationAssessment && !certificationAssessment.ok) {
+        const blockerCount = Math.max(1, certificationAssessment.blockers.length);
+        const firstIssue = certificationAssessment.checklist.issues?.find((item) => item.severity === 'error');
+        setCertificationResult({
+          pending: false,
+          ok: false,
+          checklist: certificationAssessment.checklist,
+          certification: certificationAssessment.certification,
+          blockers: certificationAssessment.blockers,
+          error: 'The repair attempt ran, but certification requirements are still not ready.',
+        });
+        setRepairWarning(
+          `The repair attempt ran, but ${blockerCount} certification fix${blockerCount === 1 ? '' : 'es'} remain${blockerCount === 1 ? 's' : ''}.${firstIssue?.title ? ` ${firstIssue.title}.` : ''}`,
+        );
+        setEditorMode('source');
+        setResultTab('save');
+        setBottomPaneCollapsed(false);
+        return;
+      }
+      if (certificationAssessment?.ok) {
+        setCertificationResult(null);
+        setRepairNotice(`${repaired.repairMode === 'ai' ? 'AI repaired' : 'DQL repaired'} the draft, and every certification check now passes. Review the changes, then click Certify.`);
+      } else {
+        setRepairNotice(`${repaired.repairMode === 'ai' ? 'AI fixed' : 'DQL fixed'} the draft and the corrected block ran successfully. Review the changes, then save the draft.`);
+      }
       setEditorMode('source');
       setResultTab('results');
       setBottomPaneCollapsed(false);
     } catch (error) {
+      if (scopeEpoch !== blockScopeEpochRef.current) return;
       const message = error instanceof Error ? error.message : String(error);
-      setSaveError(message);
+      const technicalDetails = blockStudioErrorTechnicalDetails(error);
+      setRunError(message);
+      setRunErrorDetails(technicalDetails);
+      setRecoveryError(technicalDetails ?? message);
+      setRecoveryScope('run');
+      setResultTab('results');
+      setBottomPaneCollapsed(false);
     } finally {
-      setRepairing(false);
+      if (scopeEpoch === blockScopeEpochRef.current) setRepairing(false);
     }
   };
 
@@ -747,12 +942,15 @@ export function BlockStudio() {
           ?? 'Fix the block errors before saving.';
         setSaveError(`Draft not saved: ${message}`);
         setRecoveryError(message);
+        setRecoveryScope('save');
         setEditorMode('source');
         return false;
       }
       await persistBlockStudioDraft(sourceToSave);
       setRecoveryError(null);
+      setRecoveryScope(null);
       setRepairNotice(null);
+      setRepairWarning(null);
       setResultTab('save');
       return true;
     } catch (err: any) {
@@ -827,6 +1025,10 @@ export function BlockStudio() {
       });
       trackOperation(accepted.operation);
       setCertificationOperationId(accepted.operation.id);
+      certificationPathsRef.current = new Set([
+        state.activeBlockPath,
+        accepted.draft.path,
+      ].filter((value): value is string => Boolean(value)));
       dispatch({ type: 'BLOCK_CERTIFICATION_ACCEPTED', source: sourceToSave });
       setCertificationResult({
         pending: true,
@@ -834,6 +1036,7 @@ export function BlockStudio() {
       setResultTab('save');
       return true;
     } catch (err: any) {
+      certificationPathsRef.current.clear();
       const msg = err?.message ?? 'Save failed';
       setSaveError(msg.includes('409') || msg.includes('BLOCK_EXISTS') ? 'A block with this name already exists. Rename and try again.' : msg);
       setTimeout(() => setSaveError(null), 5000);
@@ -852,7 +1055,7 @@ export function BlockStudio() {
     void operation.then((saved) => {
       if (saved && newAfterSaveRef.current) {
         newAfterSaveRef.current = false;
-        resetToBlockStudioHome();
+        completePendingWorkspaceNavigation();
       }
     });
   }, [state.blockStudioMetadata?.name, state.blockStudioMetadata?.owner, state.blockStudioDraft]);
@@ -1244,6 +1447,7 @@ export function BlockStudio() {
             }}
             onSemanticCompose={applySemanticComposition}
             onNewBlock={beginNewWorkspace}
+            onOpenBlock={requestOpenBlock}
             onDeleteBlock={(block) => requestDeleteBlock(block.path, block.name)}
             blockLibraryRefreshKey={blockLibraryRefreshKey}
             onCollapse={() => setLeftPaneCollapsed(true)}
@@ -1368,7 +1572,7 @@ export function BlockStudio() {
             </span>
           )}
         </div>
-        {recoveryError && (
+        {recoveryError && recoveryScope === 'save' && (
           <div role="alert" style={{ flexShrink: 0, display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 14px', borderBottom: '1px solid var(--status-error)', background: 'var(--status-error-bg)', color: t.textPrimary, fontFamily: t.font }}>
             <AlertTriangle size={16} color="var(--status-error)" style={{ marginTop: 1, flexShrink: 0 }} />
             <div style={{ flex: 1, minWidth: 0 }}>
@@ -1399,6 +1603,11 @@ export function BlockStudio() {
         {repairNotice && (
           <div role="status" style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', borderBottom: '1px solid var(--status-success)', background: 'var(--status-success-bg)', color: t.textSecondary, fontSize: 11.5, fontFamily: t.font }}>
             <CheckCircle2 size={14} color="var(--status-success)" /> {repairNotice}
+          </div>
+        )}
+        {repairWarning && (
+          <div role="status" style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', borderBottom: '1px solid var(--status-warning-border)', background: 'var(--status-warning-bg)', color: t.textSecondary, fontSize: 11.5, fontFamily: t.font }}>
+            <AlertTriangle size={14} color="var(--status-warning)" /> {repairWarning}
           </div>
         )}
         {hasActiveDraft && contextInspectorOpen && (
@@ -1447,6 +1656,7 @@ export function BlockStudio() {
               source={state.blockStudioDraft}
               parameters={state.blockStudioValidation?.parameters ?? []}
               preview={state.blockStudioPreview}
+              lastRun={state.blockStudioLastRun ?? undefined}
               lineageDetail={lineageDetail}
               isSemanticBlock={isSemanticBlock}
               running={running}
@@ -1457,9 +1667,7 @@ export function BlockStudio() {
               onOpenHistory={() => {
                 setResultTab('history');
                 setBottomPaneCollapsed(false);
-                if (!historyLoaded && state.activeBlockPath) {
-                  api.getBlockHistory(state.activeBlockPath).then((r) => { setHistoryEntries(r.entries); setHistoryLoaded(true); });
-                }
+                loadBlockHistory();
               }}
               t={t}
             />
@@ -1522,9 +1730,15 @@ export function BlockStudio() {
                 <span style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {state.activeBlockPath ?? blockStudioPathPreview(state.blockStudioMetadata)}
                 </span>
-                <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--status-warning)', flexShrink: 0 }} title="Unsaved changes" />
+                {state.blockStudioDirty && (
+                  <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--status-warning)', flexShrink: 0 }} title="Unsaved changes" />
+                )}
                 <div style={{ flex: 1 }} />
-                {(state.blockStudioValidation?.diagnostics.filter((item) => item.severity === 'error').length ?? 0) === 0 ? (
+                {!state.blockStudioValidation ? (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: t.textMuted, fontWeight: 600, whiteSpace: 'nowrap', fontFamily: t.font }}>
+                    <Loader2 size={12} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} /> Checking
+                  </span>
+                ) : state.blockStudioValidation.diagnostics.filter((item) => item.severity === 'error').length === 0 ? (
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, color: 'var(--status-success)', fontWeight: 600, whiteSpace: 'nowrap', fontFamily: t.font }}>
                     <CheckCircle2 size={12} /> Valid
                   </span>
@@ -1585,9 +1799,7 @@ export function BlockStudio() {
           <OutputTab active={resultTab === 'lineage'} onClick={() => setResultTab('lineage')} label="Lineage" t={t} />
           <OutputTab active={resultTab === 'history'} onClick={() => {
             setResultTab('history');
-            if (!historyLoaded && state.activeBlockPath) {
-              api.getBlockHistory(state.activeBlockPath).then((r) => { setHistoryEntries(r.entries); setHistoryLoaded(true); });
-            }
+            loadBlockHistory();
           }} label="History" t={t} />
           <OutputTab active={resultTab === 'save'} onClick={() => setResultTab('save')} label="Metadata" t={t} />
           <div style={{ flex: 1 }} />
@@ -1615,7 +1827,6 @@ export function BlockStudio() {
                 {state.blockStudioPreview.invocation?.resolvedParameters?.length ? (
                   <BlockInvocationSnapshot values={state.blockStudioPreview.invocation.resolvedParameters} t={t} />
                 ) : null}
-                <div style={{ fontSize: 11, color: t.textMuted, fontFamily: t.fontMono }}>{state.blockStudioPreview.sql}</div>
                 {activeResultChartType === 'table' ? (
                   <TableOutput result={state.blockStudioPreview.result} themeMode={state.themeMode} />
                 ) : (
@@ -1625,9 +1836,27 @@ export function BlockStudio() {
                     themeMode={state.themeMode}
                   />
                 )}
+                <details
+                  open={queryDetailsOpen}
+                  onToggle={(event) => setQueryDetailsOpen(event.currentTarget.open)}
+                  style={{ border: `1px solid ${t.headerBorder}`, borderRadius: 8, background: t.pillBg }}
+                >
+                  <summary style={{ cursor: 'pointer', padding: '9px 11px', fontSize: 11, fontWeight: 700, color: t.textSecondary, fontFamily: t.font }}>
+                    Query details
+                  </summary>
+                  <pre style={{ margin: 0, padding: '0 11px 11px', maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 10.5, lineHeight: 1.45, color: t.textMuted, fontFamily: t.fontMono }}>
+                    {state.blockStudioPreview.sql}
+                  </pre>
+                </details>
               </div>
             ) : runError ? (
-              <BlockStudioRunErrorCard message={runError} />
+              <BlockStudioRunErrorCard
+                message={runError}
+                technicalDetails={runErrorDetails}
+                repairing={repairing}
+                onFix={() => void handleFixAndRun(runErrorDetails ?? runError)}
+                onEdit={() => setEditorMode('source')}
+              />
             ) : (
               <EmptyPanel message="Run the block to preview results." />
             )
@@ -1689,7 +1918,23 @@ export function BlockStudio() {
                 </div>
               )}
               {certificationResult && (
-                <CertificationChecklistPanel result={certificationResult} t={t} />
+                <CertificationChecklistPanel
+                  result={certificationResult}
+                  t={t}
+                  repairing={repairing}
+                  onEditSource={() => setEditorMode('source')}
+                  onEditParameters={() => setResultTab('parameters')}
+                  onReviewMetrics={() => {
+                    setLeftPaneCollapsed(false);
+                    setExplorerTab('semantic');
+                    setEditorMode('visual');
+                  }}
+                  onRun={() => void handleRun()}
+                  onFix={(issue) => void handleFixAndRun(
+                    issue.technicalDetails ?? issue.message,
+                    { requireCertificationReady: true },
+                  )}
+                />
               )}
               <SavePanel
                 metadata={state.blockStudioMetadata}
@@ -1809,7 +2054,7 @@ export function BlockStudio() {
           onCancel={() => setDirtyGuardOpen(false)}
           onDiscard={() => {
             setDirtyGuardOpen(false);
-            resetToBlockStudioHome();
+            completePendingWorkspaceNavigation();
           }}
           onSave={async () => {
             newAfterSaveRef.current = true;
@@ -1817,7 +2062,7 @@ export function BlockStudio() {
             const saved = await handleSave();
             if (saved) {
               newAfterSaveRef.current = false;
-              resetToBlockStudioHome();
+              completePendingWorkspaceNavigation();
             }
           }}
           t={t}
@@ -2067,8 +2312,8 @@ function DirtyWorkDialog({
     <div role="dialog" aria-modal="true" aria-label="Unsaved block" style={{ position: 'fixed', inset: 0, zIndex: 90, display: 'grid', placeItems: 'center', padding: 20, background: 'rgba(0, 0, 0, 0.42)' }}>
       <div style={{ width: 'min(430px, 100%)', border: `1px solid ${t.cellBorder}`, borderRadius: 12, background: t.cellBg, padding: 18, display: 'grid', gap: 14, boxShadow: '0 20px 60px rgba(0, 0, 0, 0.24)' }}>
         <div>
-          <div style={{ fontSize: 15, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>Save this block before starting another?</div>
-          <div style={{ marginTop: 5, fontSize: 12, lineHeight: 1.5, color: t.textMuted, fontFamily: t.font }}>Your current workspace has unsaved changes.</div>
+          <div style={{ fontSize: 15, fontWeight: 800, color: t.textPrimary, fontFamily: t.font }}>Save this block before leaving?</div>
+          <div style={{ marginTop: 5, fontSize: 12, lineHeight: 1.5, color: t.textMuted, fontFamily: t.font }}>Your current Block Studio workspace has unsaved changes.</div>
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
           <button type="button" onClick={onCancel} disabled={saving} style={secondaryImportButtonStyle(t)}>Cancel</button>
@@ -2620,6 +2865,7 @@ function BlockDetailView({
   source,
   parameters,
   preview,
+  lastRun,
   lineageDetail,
   isSemanticBlock,
   running,
@@ -2634,6 +2880,7 @@ function BlockDetailView({
   source: string;
   parameters: BlockParameterDefinition[];
   preview: { sql: string; result: { rows: Array<Record<string, unknown>>; rowCount?: number; executionTime?: number } } | null;
+  lastRun?: BlockCertificationOperationResult['runSummary'];
   lineageDetail: { incoming: Array<unknown>; outgoing: Array<unknown> } | null;
   isSemanticBlock: boolean;
   running: boolean;
@@ -2662,9 +2909,10 @@ function BlockDetailView({
     <span key={label} style={{ padding: '3px 9px', borderRadius: 999, border: `1px solid ${accent ? `${t.accent}59` : t.headerBorder}`, background: accent ? 'var(--accent-dim)' : 'var(--bg-1)', color: accent ? t.accent : t.textSecondary, fontFamily: t.fontMono, fontWeight: accent ? 600 : 400, fontSize: 11.5 }}>{label}</span>
   );
   const lineageArrow = <span style={{ color: t.textMuted, fontSize: 11 }}>→</span>;
+  const lastRunDuration = preview?.result.executionTime ?? lastRun?.executionTime;
   const stats: Array<[string, string]> = [
-    ['Last run', preview?.result.executionTime ? `${(preview.result.executionTime / 1000).toFixed(1)}s` : 'Not run yet'],
-    ['Rows', preview ? String(preview.result.rowCount ?? preview.result.rows.length) : '—'],
+    ['Last run', preview || lastRun ? (typeof lastRunDuration === 'number' ? `${(lastRunDuration / 1000).toFixed(1)}s` : 'Completed') : 'Not run yet'],
+    ['Rows', preview ? String(preview.result.rowCount ?? preview.result.rows.length) : lastRun ? String(lastRun.rowCount) : '—'],
     ['Used in', downCount > 0 ? `${downCount} downstream` : '—'],
     ['Tests', tests.length > 0 ? `${tests.length} declared` : 'None yet'],
   ];
@@ -5068,9 +5316,22 @@ function DiagnosticsPanel({ diagnostics, t }: { diagnostics: BlockStudioDiagnost
           }}
         >
           <div style={{ fontSize: 10, fontWeight: 700, color: diagnostic.severity === 'error' ? t.error : diagnostic.severity === 'warning' ? t.warning : t.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-            {diagnostic.severity}
+            {diagnostic.field ? `${diagnostic.severity} · ${diagnostic.field}` : diagnostic.severity}
           </div>
+          {diagnostic.title && <div style={{ fontSize: 12, fontWeight: 800, color: t.textPrimary, marginTop: 4 }}>{diagnostic.title}</div>}
+          {(diagnostic.references?.length ?? 0) > 0 && (
+            <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginTop: 5 }}>
+              {diagnostic.references!.map((reference) => <code key={reference} style={{ fontSize: 10, color: t.accent, background: t.pillBg, borderRadius: 4, padding: '2px 5px' }}>{reference}</code>)}
+            </div>
+          )}
           <div style={{ fontSize: 12, color: t.textPrimary, marginTop: 4 }}>{diagnostic.message}</div>
+          {diagnostic.correction && <div style={{ fontSize: 11.5, color: t.textSecondary, marginTop: 5 }}><strong>How to fix:</strong> {diagnostic.correction}</div>}
+          {diagnostic.technicalDetails && diagnostic.technicalDetails !== diagnostic.message && (
+            <details style={{ marginTop: 6 }}>
+              <summary style={{ cursor: 'pointer', color: t.textMuted, fontSize: 10.5, fontWeight: 700 }}>Technical details</summary>
+              <pre style={{ margin: '6px 0 0', maxHeight: 160, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: t.textMuted, fontSize: 10, lineHeight: 1.4, fontFamily: t.fontMono }}>{diagnostic.technicalDetails}</pre>
+            </details>
+          )}
         </div>
       ))}
     </div>
@@ -5355,7 +5616,27 @@ function BlockStudioRunStatusCard({ elapsedMs }: { elapsedMs: number }) {
   );
 }
 
-function BlockStudioRunErrorCard({ message }: { message: string }) {
+function blockStudioErrorTechnicalDetails(error: unknown): string | null {
+  if (!(error instanceof DqlApiError) || !error.details || typeof error.details !== 'object' || Array.isArray(error.details)) {
+    return null;
+  }
+  const value = (error.details as { technicalDetails?: unknown }).technicalDetails;
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function BlockStudioRunErrorCard({
+  message,
+  technicalDetails,
+  repairing,
+  onFix,
+  onEdit,
+}: {
+  message: string;
+  technicalDetails?: string | null;
+  repairing: boolean;
+  onFix: () => void;
+  onEdit: () => void;
+}) {
   const t = themes[useNotebookStore((state) => state.themeMode)];
   return (
     <div style={{ padding: 12 }}>
@@ -5376,6 +5657,22 @@ function BlockStudioRunErrorCard({ message }: { message: string }) {
         <div style={{ color: t.textPrimary, fontSize: 12, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
           {message}
         </div>
+        <div style={{ color: t.textMuted, fontSize: 11.5, lineHeight: 1.45 }}>
+          Correct the named field or runtime problem, then run the same draft again. Nothing was saved or certified.
+        </div>
+        <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
+          <button type="button" onClick={onFix} disabled={repairing} style={{ ...primaryImportButtonStyle(t), display: 'inline-flex', alignItems: 'center', gap: 6, opacity: repairing ? .72 : 1 }}>
+            {repairing ? <Loader2 size={13} style={{ animation: 'dql-agent-run-spin 0.8s linear infinite' }} /> : <Sparkles size={13} />}
+            {repairing ? 'Fixing & running…' : 'Fix with AI & run'}
+          </button>
+          <button type="button" onClick={onEdit} style={secondaryImportButtonStyle(t)}>Edit DQL</button>
+        </div>
+        {technicalDetails && technicalDetails !== message && (
+          <details style={{ borderTop: `1px solid ${t.headerBorder}`, paddingTop: 7 }}>
+            <summary style={{ cursor: 'pointer', color: t.textMuted, fontSize: 10.5, fontWeight: 700 }}>Technical details</summary>
+            <pre style={{ margin: '7px 0 0', maxHeight: 180, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: t.textMuted, fontSize: 10, lineHeight: 1.4, fontFamily: t.fontMono }}>{technicalDetails}</pre>
+          </details>
+        )}
       </div>
     </div>
   );
@@ -5463,6 +5760,12 @@ function StatusWorkflow({
 function CertificationChecklistPanel({
   result,
   t,
+  repairing,
+  onEditSource,
+  onEditParameters,
+  onReviewMetrics,
+  onRun,
+  onFix,
 }: {
   result: {
     ok?: boolean;
@@ -5476,6 +5779,7 @@ function CertificationChecklistPanel({
       lineage: boolean;
       aiReviewed: boolean;
       blockers: string[];
+      issues?: BlockStudioDiagnostic[];
       checkedAt?: string;
     };
     certification?: {
@@ -5485,20 +5789,42 @@ function CertificationChecklistPanel({
     };
     blockers?: string[];
     error?: string;
+    phase?: string;
+    progress?: number;
+    message?: string;
   };
   t: Theme;
+  repairing: boolean;
+  onEditSource: () => void;
+  onEditParameters: () => void;
+  onReviewMetrics: () => void;
+  onRun: () => void;
+  onFix: (issue: BlockStudioDiagnostic) => void;
 }) {
   const checklist = result.checklist;
+  const testsAreBlocking = Boolean(
+    checklist?.issues?.some((issue) => issue.code === 'tests_failed')
+    || checklist?.blockers.some((blocker) => /tests? must pass|test failed/i.test(blocker)),
+  );
   const items = checklist ? [
-    ['Metadata', checklist.metadata],
-    ['Validation', checklist.validation],
-    ['Run', checklist.run],
-    ['Tests', checklist.tests],
-    ['Chart', checklist.chart],
-    ['Lineage', checklist.lineage],
+    ['Metadata', checklist.metadata, true],
+    ['Validation', checklist.validation, true],
+    ['Run', checklist.run, true],
+    ['Tests', checklist.tests, testsAreBlocking],
+    ['Chart', checklist.chart, false],
+    ['Lineage', checklist.lineage, false],
   ] as const : [];
   const blockers = Array.from(new Set((result.blockers?.length ? result.blockers : checklist?.blockers ?? []).map(formatCertificationBlocker)));
-  const missingSummary = summarizeCertificationBlockers(blockers);
+  const issues = checklist?.issues?.length
+    ? checklist.issues
+    : blockers.map((message): BlockStudioDiagnostic => ({
+        severity: 'error',
+        code: 'certification_blocker',
+        title: 'Certification requirement is not ready',
+        message,
+        correction: 'Update the block, run it again, and retry certification.',
+        action: message === 'The query must run successfully.' ? 'run_again' : 'edit_source',
+      }));
   const accent = result.pending ? t.accent : result.ok ? '#3fb950' : '#d29922';
   return (
     <div style={{ margin: '12px 12px 0', border: `1px solid ${accent}55`, borderRadius: 8, background: `${accent}0d`, padding: 12, display: 'grid', gap: 10 }}>
@@ -5510,29 +5836,91 @@ function CertificationChecklistPanel({
       </div>
       <div style={{ fontSize: 12, color: t.textMuted, lineHeight: 1.45 }}>
         {result.pending
-          ? 'The exact draft is saved and the certification gates are running in the background. You may switch pages or continue other work.'
+          ? result.message ?? 'The exact draft is saved and the certification gates are running in the background.'
           : result.ok
           ? checklist?.tests
             ? 'Latest edits were saved, the block ran successfully, tests passed, and status was updated to certified.'
             : 'Latest edits were saved, the block ran successfully, no block tests are defined, and status was updated to certified.'
-          : missingSummary
-            ? `Latest edits were saved, but certification cannot finish because ${missingSummary}. Fix it, then click Certify again.`
-            : 'Latest edits were saved, but certification cannot finish yet. Fix the blockers below, then click Certify again.'}
+          : `The draft is saved. Certification stopped with ${issues.length || 1} required fix${issues.length === 1 ? '' : 'es'}; nothing was partially certified.`}
       </div>
+      {result.pending && (
+        <div style={{ display: 'grid', gap: 5 }}>
+          <div style={{ height: 5, borderRadius: 999, background: t.headerBorder, overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: `${Math.max(4, Math.min(100, result.progress ?? 4))}%`, borderRadius: 999, background: t.accent, transition: 'width 180ms ease' }} />
+          </div>
+          <div style={{ fontSize: 10.5, color: t.textMuted, display: 'flex', justifyContent: 'space-between' }}>
+            <span>{result.phase ? result.phase.replace(/_/g, ' ') : 'queued'}</span>
+            <span>{Math.round(result.progress ?? 0)}%</span>
+          </div>
+        </div>
+      )}
       {items.length > 0 && (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          {items.map(([label, ok]) => (
-            <span key={label} style={{ fontSize: 11, fontWeight: 700, color: ok ? '#3fb950' : '#d29922', background: ok ? '#3fb95018' : '#d2992218', borderRadius: 999, padding: '4px 8px' }}>
-              {ok ? '✓' : '!'} {label}
+          {items.map(([label, ok, required]) => (
+            <span key={label} title={!ok && !required ? `${label} is optional for local certification.` : undefined} style={{ fontSize: 11, fontWeight: 700, color: ok ? '#3fb950' : required ? '#d29922' : t.textMuted, background: ok ? '#3fb95018' : required ? '#d2992218' : t.pillBg, borderRadius: 999, padding: '4px 8px' }}>
+              {ok ? '✓' : required ? '!' : '○'} {label}{!ok && !required ? ' · optional' : ''}
             </span>
           ))}
         </div>
       )}
-      {result.error && <div style={{ fontSize: 12, color: '#f85149' }}>{result.error}</div>}
-      {blockers.length > 0 && (
-        <div style={{ display: 'grid', gap: 5 }}>
-          <div style={{ fontSize: 10, color: '#d29922', textTransform: 'uppercase', fontWeight: 800 }}>Missing before certification</div>
-          {blockers.map((blocker, index) => <div key={index} style={{ fontSize: 12, color: '#d29922', lineHeight: 1.4 }}>{blocker}</div>)}
+      {result.error && issues.length === 0 && <div style={{ fontSize: 12, color: '#f85149' }}>{result.error}</div>}
+      {!result.pending && !result.ok && issues.length > 0 && (
+        <div style={{ display: 'grid', gap: 8 }}>
+          <div style={{ fontSize: 10, color: '#d29922', textTransform: 'uppercase', fontWeight: 800 }}>
+            Fixes before certification · {issues.length}
+          </div>
+          {issues.map((issue, index) => {
+            const actionLabel = issue.action === 'review_metrics'
+              ? 'Review metrics'
+              : issue.action === 'run_again'
+                ? 'Run block'
+                : issue.action === 'edit_parameters'
+                  ? 'Edit run inputs'
+                  : issue.action === 'configure_runtime'
+                    ? 'Review runtime'
+                    : 'Edit source';
+            const handleAction = issue.action === 'review_metrics' || issue.action === 'configure_runtime'
+              ? onReviewMetrics
+              : issue.action === 'run_again'
+                ? onRun
+                : issue.action === 'edit_parameters'
+                  ? onEditParameters
+                : onEditSource;
+            return (
+              <div key={`${issue.code ?? issue.message}-${index}`} style={{ display: 'grid', gap: 7, border: `1px solid ${accent}44`, borderRadius: 8, background: t.cellBg, padding: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+                  <AlertTriangle size={14} color={accent} style={{ marginTop: 1, flexShrink: 0 }} />
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ display: 'flex', gap: 7, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: 12, fontWeight: 800, color: t.textPrimary }}>{issue.title ?? 'Certification requirement is not ready'}</span>
+                      {issue.field && <span style={{ fontSize: 10, color: t.textMuted }}>{issue.field}</span>}
+                    </div>
+                    {(issue.references?.length ?? 0) > 0 && (
+                      <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginTop: 5 }}>
+                        {issue.references!.map((reference) => <code key={reference} style={{ fontSize: 10, color: t.accent, background: t.pillBg, borderRadius: 4, padding: '2px 5px' }}>{reference}</code>)}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div style={{ fontSize: 11.5, lineHeight: 1.45, color: t.textSecondary }}>{issue.message}</div>
+                {issue.correction && <div style={{ fontSize: 11.5, lineHeight: 1.45, color: t.textPrimary }}><strong>How to fix:</strong> {issue.correction}</div>}
+                <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
+                  <button type="button" onClick={handleAction} style={secondaryImportButtonStyle(t)}>{actionLabel}</button>
+                  {issue.technicalDetails && (
+                    <button type="button" onClick={() => onFix(issue)} disabled={repairing} style={secondaryImportButtonStyle(t)}>
+                      {repairing ? 'Fixing…' : 'Fix with AI & run'}
+                    </button>
+                  )}
+                </div>
+                {issue.technicalDetails && issue.technicalDetails !== issue.message && (
+                  <details>
+                    <summary style={{ cursor: 'pointer', color: t.textMuted, fontSize: 10.5, fontWeight: 700 }}>Technical details</summary>
+                    <pre style={{ margin: '6px 0 0', maxHeight: 160, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: t.textMuted, fontSize: 10, lineHeight: 1.4, fontFamily: t.fontMono }}>{issue.technicalDetails}</pre>
+                  </details>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
       {(result.certification?.warnings?.length ?? 0) > 0 && (
@@ -5556,21 +5944,6 @@ function formatCertificationBlocker(blocker: string): string {
   if (lower === 'at least one test assertion is required before certification' || lower.startsWith('block has tests:')) return 'Add at least one test assertion.';
   if (lower === 'visualization config is missing') return 'Choose a visualization.';
   return clean;
-}
-
-function summarizeCertificationBlockers(blockers: string[]): string {
-  const required = blockers
-    .filter((blocker) => blocker.endsWith(' is required.'))
-    .map((blocker) => blocker.replace(' is required.', '').toLowerCase());
-  if (required.length === 0) return blockers[0] ? blockers[0].replace(/\.$/, '').toLowerCase() : '';
-  if (required.length === 1) return `${required[0]} is missing`;
-  if (required.length === 2) return `${required[0]} and ${required[1]} are missing`;
-  if (required.length > 2) return `${required.slice(0, -1).join(', ')}, and ${required[required.length - 1]} are missing`;
-  if (blockers.includes('Add at least one test assertion.')) return 'a test assertion is missing';
-  if (blockers.includes('Choose a visualization.')) return 'a visualization is missing';
-  if (blockers.includes('Tests must pass.')) return 'tests must pass';
-  if (blockers.includes('The query must run successfully.')) return 'the query has not run successfully';
-  return blockers[0] ? blockers[0].replace(/\.$/, '').toLowerCase() : '';
 }
 
 function TestsPanel({
@@ -6032,7 +6405,7 @@ function blockStudioPathPreview(metadata: Pick<BlockStudioOpenPayload['metadata'
   const domain = metadata?.domain?.trim() || 'uncategorized';
   const folder = metadata?.folderPath?.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
   const slug = (metadata?.name || 'new_block').toLowerCase().replace(/[^a-z0-9_]+/g, '-').replace(/^[-_]+|[-_]+$/g, '') || 'new-block';
-  return `blocks/${domain}/${folder ? `${folder}/` : ''}${slug}.dql`;
+  return `domains/${domain}/blocks/${folder ? `${folder}/` : ''}${slug}.dql`;
 }
 
 function extractSelectAliases(sql: string): string[] {

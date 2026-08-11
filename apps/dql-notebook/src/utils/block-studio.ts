@@ -53,6 +53,46 @@ export interface SemanticVisualFields {
   granularity: string;
 }
 
+/**
+ * Lightweight editor guard for metadata synchronization. This is not the DQL
+ * validator; it only prevents an incomplete typing buffer (for example a
+ * temporarily missing closing brace) from erasing the last valid identity
+ * fields before the server validator can respond.
+ */
+export function hasCompleteBlockEnvelope(content: string): boolean {
+  if (!/^\s*block\s+"[^"]+"\s*\{/i.test(content)) return false;
+  let depth = 0;
+  let sawOpeningBrace = false;
+  let inString = false;
+  let inTripleString = false;
+  let escaped = false;
+
+  for (let index = 0; index < content.length; index += 1) {
+    if (content.slice(index, index + 3) === '"""' && !escaped) {
+      inTripleString = !inTripleString;
+      index += 2;
+      inString = false;
+      continue;
+    }
+    if (inTripleString) continue;
+    const character = content[index];
+    if (character === '"' && !escaped) inString = !inString;
+    if (!inString) {
+      if (character === '{') {
+        depth += 1;
+        sawOpeningBrace = true;
+      } else if (character === '}') {
+        depth -= 1;
+        if (depth < 0) return false;
+      }
+    }
+    escaped = character === '\\' && !escaped;
+    if (character !== '\\') escaped = false;
+  }
+
+  return sawOpeningBrace && depth === 0 && !inString && !inTripleString;
+}
+
 export function parseSemanticVisualFields(content: string): SemanticVisualFields {
   const scalar = (key: string) => content.match(new RegExp(`\\b${key}\\s*=\\s*"([^"]*)"`, 'i'))?.[1] ?? '';
   const array = (key: string) => {

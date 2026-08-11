@@ -27,6 +27,16 @@ export interface DQLManifest {
   domains?: Record<string, ManifestDomain>;
   /** All blocks discovered in the project */
   blocks: Record<string, ManifestBlock>;
+  /**
+   * Every parsed block declaration, including draft/review variants and
+   * same-named declarations in different domains or source files.
+   *
+   * `blocks` remains the legacy execution projection that selects one block
+   * per local name. App Studio and other inventory surfaces must use this
+   * qualified, path-preserving collection so discovery never silently drops a
+   * declaration merely because another source shares its display name.
+   */
+  blockDeclarations?: ManifestBlock[];
   /** Business composition views discovered in the project */
   businessViews: Record<string, ManifestBusinessView>;
   /** Business glossary terms discovered in the project */

@@ -82,13 +82,20 @@ misleading project-wide green check.
 
 ## Governed App Builder
 
-App Builder is a composition workflow, not another Ask surface. It decomposes
-the requested stakeholder outcome into typed analytical requirements and covers
-each requirement from one immutable server-resolved snapshot. A compatible
-certified block is selected only when its metric, grain, dimensions, outputs,
-filters, parameters, ranking, freshness, and purpose fully cover the
-requirement. Governed semantic queries cover only remaining requirements;
-uncovered needs remain visible typed gaps (`PRD-004`, `AGT-007`).
+App Builder is a composition workflow, not another Ask surface. Its dedicated
+orchestrator owns requirements, source alternatives, pages, components,
+filters, preview coordination, and publication readiness. It shares Ask's
+configured provider adapter, immutable snapshot, meaning infrastructure,
+execution/repair boundary, trust vocabulary, and evidence primitives—not Ask's
+answer state machine (`AGT-007`, `AGT-026`).
+
+Every AI and manual source choice comes from one snapshot-backed executable
+block catalog. Certified, review, and draft blocks are visible and labeled;
+deprecated blocks are hidden by default. Source policy controls eligibility,
+not discovery. Search and pagination operate on the server over qualified,
+path-preserving identities, so duplicate names and sources beyond the first UI
+page remain resolvable. Raw dbt models provide context only unless an executable
+semantic adapter backs them (`PRD-004`, `PRD-007`, `API-014`).
 
 App creation begins as one **local private draft**. The author selects an
 authoring mode (**Describe with AI** or **Start blank**) and an independent
@@ -101,12 +108,27 @@ exploratory SQL is available only through the explicit review-required source
 policy and remains an app-scoped DQL draft until separately promoted or
 replaced (`PRD-005`, `PRD-006`, `EXP-004`).
 
+For AI authoring, retrieval narrows the catalog to 8-12 capability-bearing
+candidate cards. At most one App-planning provider call returns a typed Build
+Frame, requirements, and identifier-bound components. The server rejects
+invented IDs and independently validates lifecycle, capability, policy,
+snapshot, and source revision. Provider failure uses bounded deterministic
+matching; it does not produce an empty App or upgrade source trust.
+
 The write-free Build Brief exposes each requirement, selected source,
 alternatives, compatibility and lineage evidence, trust/review state, bounded
 preview, filters, page, visualization, and layout. Editing any requirement or
 source invalidates the affected preflight receipt and proposal hash. The final
 action is **Build draft**, never an implicit certification or publication
-action (`API-009`, `UI-017`).
+action. Clarification answers and added source selections create server-owned
+proposal revisions. Uncovered SQL requires a separate explicit review-lane gap
+action (`API-009`, `UI-017`, `UI-023`).
+
+Manual and AI confirmation call the same server composition endpoint with the
+complete selected-source allow-list. The server re-resolves every source,
+creates canonical source records and exact tile `sourceId` bindings, recomputes
+coverage and parameter needs, and atomically stores `AppBuildDraft` v3. The
+browser never constructs trust-bearing source records or tiles (`API-014`).
 
 App creation is deliberately incremental: one AI request proposes one page,
 while manual authoring opens the same versioned draft with a blank page.
@@ -136,6 +158,13 @@ Proposal is write-free. Selected sources are preflighted before commit, and a
 snapshot or proposal-hash change fails with a conflict. Commit writes the App,
 dashboard, and derived `ProductDomainContext` atomically. Personal Apps begin as
 private drafts; stakeholder Apps must satisfy governed publication gates.
+
+Local preview executes independent components through a concurrency pool of
+four. One failure does not hide successful tiles. Declared source capabilities
+and settled safe result columns produce exact per-tile filter bindings. The
+bounded evidence receipt survives a local runtime restart without persisting
+sample rows, and remains guarded by the draft revision, source fingerprints,
+filters, snapshot, and execution evidence (`PERF-003`, `E2E-021`).
 
 App Copilot is not the App planning orchestrator. It adapts the server-owned
 whole-App or focused-section context into the shared governed AgentRun used by

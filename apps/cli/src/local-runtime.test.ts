@@ -91,6 +91,8 @@ import {
   resolveProjectRelativeSqlPaths,
   runtimeSchemaSnapshotForAgentConnection,
   runtimeSnapshotStale,
+  compactBlockStudioRuntimeFailure,
+  reconcileBlockStudioRuntimeValidation,
   saveBlockStudioArtifacts,
   saveBlockStudioDraftArtifacts,
   sanitizeAgentBlockDraftSource,
@@ -3648,7 +3650,7 @@ LIMIT \${top_n}
       const createdText = await created.text();
       expect(created.status, createdText).toBe(201);
       const payload = JSON.parse(createdText) as any;
-      expect(payload.draft).toMatchObject({ version: 2, authoringMode: 'manual', state: 'local_draft', template: 'operational_dashboard' });
+      expect(payload.draft).toMatchObject({ version: 3, authoringMode: 'manual', state: 'local_draft', template: 'operational_dashboard' });
       expect(existsSync(join(projectRoot, 'apps'))).toBe(false);
 
       const listed = await fetch(`http://127.0.0.1:${port}/api/app-builds`);
@@ -7173,6 +7175,14 @@ describe('validateBlockStudioSource', () => {
     hierarchies: [],
   });
 
+  it('condenses multi-metric compiler output into one targeted correction', () => {
+    const friendly = compactBlockStudioRuntimeFailure(
+      'Could not compose SQL for semantic block metrics. percent_dod_bic_acm_qty: the metric does not have enough composable measure and relation metadata. percent_dod_bic_bcm: the metric does not have enough composable measure and relation metadata.',
+    );
+
+    expect(friendly).toBe('2 selected metrics cannot be compiled by the current semantic runtime: percent_dod_bic_acm_qty, percent_dod_bic_bcm. Review the measure and relationship metadata, then run again.');
+  });
+
   it('composes executable SQL for semantic blocks with metric and dimensions', () => {
     const source = `block "Revenue by Type" {
   domain = "finance"
@@ -7227,6 +7237,46 @@ describe('validateBlockStudioSource', () => {
     expect(validation.saveable).toBe(false);
     expect(validation.executableSql).toBeNull();
     expect(validation.diagnostics.some((item) => item.code === 'semantic_metric_missing')).toBe(true);
+    expect(validation.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'semantic_metric_missing',
+        title: 'Choose at least one metric',
+        field: 'Metrics',
+        action: 'review_metrics',
+      }),
+    ]));
+  });
+
+  it('uses a successful full-runtime compile as the validation verdict for preview and certification', () => {
+    const source = `block "Revenue by Type" {
+  domain = "finance"
+  type = "semantic"
+  metric = "total_revenue"
+  dimensions = ["customer_type"]
+}`;
+    const base = validateBlockStudioSource(source, semanticLayer);
+    const nativeOnlyFailure = {
+      ...base,
+      valid: false,
+      executableSql: null,
+      diagnostics: [
+        ...base.diagnostics,
+        {
+          severity: 'error' as const,
+          code: 'semantic_compose_failed',
+          message: 'Could not compose SQL with the native compiler.',
+        },
+      ],
+    };
+
+    const reconciled = reconcileBlockStudioRuntimeValidation(nativeOnlyFailure, {
+      sql: 'SELECT customer_type, SUM(revenue) AS total_revenue FROM orders GROUP BY customer_type',
+      diagnostics: [],
+    });
+
+    expect(reconciled.valid).toBe(true);
+    expect(reconciled.executableSql).toContain('SUM(revenue)');
+    expect(reconciled.diagnostics.some((item) => item.code === 'semantic_compose_failed')).toBe(false);
   });
 
   it('keeps a structurally valid semantic draft saveable when its runtime is not configured', () => {

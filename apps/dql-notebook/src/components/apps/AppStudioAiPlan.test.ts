@@ -126,4 +126,28 @@ describe('App Studio AI plan review (AGT-025, UI-022)', () => {
     expect(availableAppStudioProposalSources(summary, catalog, 'customer').map((source) => source.id)).toEqual(['customer_profile']);
     expect(availableAppStudioProposalSources(summary, catalog, 'revenue')).toEqual([]);
   });
+
+  it('keeps a selected review block bound to its canonical source id', () => {
+    const proposal = {
+      id: 'proposal-review', draftId: 'draft-1', baseRevision: 0, baseProposalHash: 'sha256:base', clarifications: [],
+      summary: { requirements: 1, covered: 1, gaps: 0, certifiedSources: 0, semanticSources: 0 },
+      operations: [
+        { type: 'upsert_source', source: {
+          id: 'review-block:orders-by-region', kind: 'review_block', sourceRef: 'orders-by-region',
+          trustState: 'review_required', reviewStatus: 'required',
+        } },
+        { type: 'upsert_page', page: {
+          version: 2, id: 'overview', metadata: { title: 'Orders', visibility: 'private', lifecycle: 'draft' },
+          layout: { kind: 'grid', cols: 12, rowHeight: 80, items: [
+            { i: 'orders', x: 0, y: 0, w: 6, h: 4, viz: { type: 'bar' }, block: { blockId: 'orders-by-region' } },
+          ] },
+        } },
+      ],
+    } as AppStudioAiProposal;
+
+    expect(summarizeAppStudioAiPlan(proposal).components[0]?.sourceId).toBe('review-block:orders-by-region');
+    const operations = operationsForSelectedAppStudioSources(proposal, new Set(['review-block:orders-by-region']));
+    const page = operations.find((operation) => operation.type === 'upsert_page');
+    expect(page?.type === 'upsert_page' ? page.page.layout.items.map((item) => item.i) : []).toEqual(['orders']);
+  });
 });

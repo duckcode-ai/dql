@@ -8,7 +8,7 @@ describe('AppBuildDraft', () => {
       frame: { goal: 'Monitor revenue', metrics: ['revenue'], dimensions: [], filters: [] },
     });
     const next = applyAppBuildDraftOperations(draft, 1, [{ type: 'set_source_policy', sourcePolicy: 'include_review_required' }], '2026-08-08T00:01:00.000Z');
-    expect(next.version).toBe(2);
+    expect(next.version).toBe(3);
     expect(next.state).toBe('local_draft');
     expect(next.revision).toBe(2);
     expect(next.sourcePolicy).toBe('include_review_required');
@@ -162,6 +162,53 @@ describe('AppBuildDraft', () => {
       },
     }]);
     expect(next.state).toBe('local_draft');
+  });
+
+  it('reconciles coverage when a source-bound tile is removed', () => {
+    const source = {
+      id: 'app:block:sales:revenue',
+      kind: 'block' as const,
+      sourceRef: 'blocks/sales/revenue.dql',
+      sourceRevision: 'sha256:revenue',
+      sourceFingerprint: 'sha256:revenue',
+      lifecycle: 'certified' as const,
+      trustState: 'certified' as const,
+      reviewStatus: 'not_required' as const,
+    };
+    const page = {
+      version: 2 as const,
+      id: 'overview',
+      metadata: { title: 'Overview' },
+      layout: {
+        kind: 'grid' as const,
+        cols: 12,
+        rowHeight: 80,
+        items: [{
+          i: 'revenue-trend', x: 0, y: 0, w: 6, h: 4,
+          sourceId: source.id, sourceRevision: source.sourceRevision,
+          block: { ref: source.sourceRef }, viz: { type: 'line' as const },
+        }],
+      },
+    };
+    const draft = createAppBuildDraft({
+      id: 'build-coverage', appId: 'sales-app', authoringMode: 'ai', sources: [source], pages: [page],
+      frame: { goal: 'Monitor revenue', metrics: ['revenue'], dimensions: [], filters: [] },
+      requirements: [{ id: 'revenue', question: 'Revenue trend', role: 'trend', required: true, measures: ['revenue'], dimensions: [], filters: [] }],
+      coverage: [{ requirementId: 'revenue', status: 'covered', sourceIds: [source.id], componentIds: ['revenue-trend'], reasons: ['Covered.'] }],
+    });
+
+    const withoutTile = applyAppBuildDraftOperations(draft, draft.revision, [
+      { type: 'remove_tile', pageId: 'overview', tileId: 'revenue-trend' },
+    ]);
+    expect(withoutTile.coverage).toEqual([
+      expect.objectContaining({ requirementId: 'revenue', status: 'gap', sourceIds: [source.id], componentIds: [] }),
+    ]);
+    const withoutSource = applyAppBuildDraftOperations(withoutTile, withoutTile.revision, [
+      { type: 'remove_source', sourceId: source.id },
+    ]);
+    expect(withoutSource.coverage).toEqual([
+      expect.objectContaining({ requirementId: 'revenue', status: 'gap', sourceIds: [], componentIds: [] }),
+    ]);
   });
 
   it('packs invalid and overlapping App Studio geometry into a stable reading order', () => {

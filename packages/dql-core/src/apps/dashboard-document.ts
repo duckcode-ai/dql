@@ -267,6 +267,13 @@ export type DashboardGridItem = {
   y: number;
   w: number;
   h: number;
+  /**
+   * Canonical AppBuildDraft source binding. App Studio v3 writes this for
+   * every data tile; legacy published dashboards remain readable without it.
+   */
+  sourceId?: string;
+  /** Snapshot-bound source revision selected by App Studio. */
+  sourceRevision?: string;
   /** Certified/shared block source. Existing dashboards use this shape. */
   block?: DashboardBlockRef;
   /** Local narrative/section text tile. */
@@ -733,6 +740,8 @@ function readLayout(raw: unknown, err: (m: string) => void): DashboardDocument['
     items.push({
       i: it.i,
       x, y, w, h,
+      ...(typeof it.sourceId === 'string' && it.sourceId ? { sourceId: it.sourceId } : {}),
+      ...(typeof it.sourceRevision === 'string' && it.sourceRevision ? { sourceRevision: it.sourceRevision } : {}),
       ...(block ? { block } : {}),
       ...(text ? { text } : {}),
       ...(aiPin ? { aiPin } : {}),

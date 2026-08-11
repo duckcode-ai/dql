@@ -41,7 +41,9 @@ import type {
   BlockStudioCatalog,
   BlockStudioOpenPayload,
   BlockStudioPreview,
+  BlockStudioRunSummary,
   BlockStudioValidation,
+  BlockStudioDiagnostic,
   BlockStudioImportSession,
   BlockStudioImportSessionSummary,
   BlockStudioImportCandidate,
@@ -1565,6 +1567,8 @@ export interface DashboardDocumentResponse {
       items: Array<{
         i: string;
         x: number; y: number; w: number; h: number;
+        sourceId?: string;
+        sourceRevision?: string;
         block?: { blockId?: string; ref?: string; version?: string };
         text?: { markdown: string };
         aiPin?: { id: string };
@@ -1630,7 +1634,7 @@ export interface DashboardDocumentResponse {
 export interface AppExecutionRepairTrace {
   version: 1;
   status: 'repaired' | 'failed';
-  source: 'query_generator' | 'semantic_query' | 'draft_analysis' | 'certified_block';
+  source: 'query_generator' | 'semantic_query' | 'draft_analysis' | 'certified_block' | 'review_block';
   mode?: 'deterministic' | 'ai';
   attemptedAt: string;
   originalFailure: string;
@@ -1642,7 +1646,7 @@ export interface AppExecutionRepairTrace {
 
 export interface DashboardTileArtifact {
   version: 1;
-  sourceKind: 'certified_block' | 'semantic_query' | 'draft_analysis' | 'ai_pin';
+  sourceKind: 'certified_block' | 'review_block' | 'semantic_query' | 'draft_analysis' | 'ai_pin';
   name: string;
   sourcePath?: string;
   dql?: string;
@@ -1753,6 +1757,66 @@ export interface AppBlockRecommendation {
   /** Governed result dimensions that may be linked to App dashboard filters. */
   dimensionIds?: string[];
   score: number;
+  reasons: string[];
+  /** Canonical AppSourceCatalog identity. Legacy recommend-blocks rows omit it. */
+  sourceId?: string;
+  qualifiedIdentity?: string;
+  sourceRevision?: string;
+  snapshotId?: string;
+  lifecycle?: 'certified' | 'review' | 'draft' | 'pending_recertification' | 'deprecated' | 'unknown';
+  trust?: 'certified' | 'review_required';
+  capabilities?: {
+    measures: string[];
+    dimensions: string[];
+    outputs: string[];
+    filters: string[];
+    grain?: string;
+    chartType?: string;
+    allowedVisualizations?: string[];
+    parameters: Array<{ name: string; type?: string; required: boolean; hasDefault: boolean }>;
+  };
+  eligibility?: {
+    discoverable: boolean;
+    localPreview: boolean;
+    projectPublish: boolean;
+    reasonCodes: string[];
+  };
+}
+
+export interface AppSourceCandidatePage {
+  version: 1;
+  snapshotId: string;
+  items: AppBlockRecommendation[];
+  nextCursor?: string;
+  total: number;
+  pageSize: number;
+  facets: {
+    lifecycles: Record<string, number>;
+    domains: Record<string, number>;
+    kinds: Record<string, number>;
+  };
+}
+
+interface AppSourceCandidateWire {
+  sourceId: string;
+  qualifiedIdentity: string;
+  sourceRevision: string;
+  snapshotId: string;
+  kind: 'block';
+  lifecycle: NonNullable<AppBlockRecommendation['lifecycle']>;
+  trust: NonNullable<AppBlockRecommendation['trust']>;
+  executable: boolean;
+  name: string;
+  title: string;
+  description?: string;
+  domain?: string;
+  owner?: string;
+  sourcePath: string;
+  executionRef: string;
+  tags: string[];
+  capabilities: NonNullable<AppBlockRecommendation['capabilities']>;
+  eligibility: NonNullable<AppBlockRecommendation['eligibility']>;
+  score?: number;
   reasons: string[];
 }
 
@@ -1984,7 +2048,7 @@ export interface AppBuildProposal {
 }
 
 export interface AppStudioBuildDraft {
-  version: 2;
+  version: 3;
   id: string;
   appId: string;
   name: string;
@@ -2024,12 +2088,17 @@ export interface AppStudioBuildDraft {
   }>;
   sources: Array<{
     id: string;
-    kind: 'certified_block' | 'governed_semantic' | 'review_block' | 'review_dql' | 'text' | 'semantic_query' | 'exploratory_sql';
+    kind: 'block' | 'certified_block' | 'governed_semantic' | 'review_block' | 'review_dql' | 'text' | 'semantic_query' | 'exploratory_sql';
     sourceRef: string;
     qualifiedIdentity?: string;
+    sourcePath?: string;
+    executionRef?: string;
     snapshotId?: string;
+    sourceRevision?: string;
     sourceFingerprint?: string;
     receiptId?: string;
+    lifecycle?: 'certified' | 'review' | 'draft' | 'pending_recertification' | 'deprecated' | 'unknown';
+    capabilities?: NonNullable<AppBlockRecommendation['capabilities']>;
     trustState: 'certified' | 'review_required' | 'draft_ready';
     reviewStatus: 'not_required' | 'required' | 'approved';
   }>;
@@ -2071,6 +2140,8 @@ export interface AppStudioAiProposal {
   baseProposalHash: string;
   operations: AppStudioDraftOperation[];
   defaultSelectedSourceIds?: string[];
+  candidateSourceIds?: string[];
+  warnings?: string[];
   clarifications: NonNullable<AppStudioBuildDraft['frame']['clarificationQuestions']>;
   summary: {
     requirements: number;
@@ -2421,10 +2492,35 @@ export interface BlockCertificationOperationResult {
     lineage: boolean;
     aiReviewed: boolean;
     blockers: string[];
+    issues?: BlockStudioDiagnostic[];
     checkedAt?: string;
   };
   block: BlockStudioOpenPayload;
+  runSummary?: BlockStudioRunSummary;
   indexRefresh?: { status: 'queued'; operationId: string };
+}
+
+export interface BlockStudioCertificationAssessment {
+  ok: boolean;
+  validation?: BlockStudioValidation;
+  certification: {
+    certified: boolean;
+    errors: Array<{ rule: string; message: string }>;
+    warnings: Array<{ rule: string; message: string }>;
+  };
+  checklist: {
+    metadata: boolean;
+    validation: boolean;
+    run: boolean;
+    tests: boolean;
+    chart: boolean;
+    lineage: boolean;
+    aiReviewed: boolean;
+    blockers: string[];
+    issues?: BlockStudioDiagnostic[];
+    checkedAt?: string;
+  };
+  blockers: string[];
 }
 
 export class DqlApiError extends Error {
@@ -2466,9 +2562,11 @@ function formatRequestError(res: Response, text: string): DqlApiError {
     const validationErrors = Array.isArray(payload?.errors)
       ? payload.errors.filter((item: unknown): item is string => typeof item === 'string' && item.trim().length > 0)
       : [];
-    const message = typeof payload?.message === 'string' && payload.message.trim()
-      ? payload.message
-      : typeof payload?.error === 'string' && payload.error.trim()
+    const message = typeof payload?.friendlyMessage === 'string' && payload.friendlyMessage.trim()
+      ? payload.friendlyMessage
+      : typeof payload?.message === 'string' && payload.message.trim()
+        ? payload.message
+        : typeof payload?.error === 'string' && payload.error.trim()
         ? payload.error
         : validationErrors.length > 0
           ? `${validationErrors.slice(0, 3).join(' ')}${validationErrors.length > 3 ? ` ${validationErrors.length - 3} more blockers.` : ''}`
@@ -2478,7 +2576,12 @@ function formatRequestError(res: Response, text: string): DqlApiError {
       status: res.status,
       code: typeof payload?.code === 'string' ? payload.code : undefined,
       recoverable: typeof payload?.recoverable === 'boolean' ? payload.recoverable : undefined,
-      details: payload?.details ?? (validationErrors.length > 0 ? { errors: validationErrors, draft: payload?.draft } : undefined),
+      details: payload?.details
+        ?? (typeof payload?.error === 'string' && payload.error.trim() && payload.error !== message
+          ? { technicalDetails: payload.error }
+          : validationErrors.length > 0
+            ? { errors: validationErrors, draft: payload?.draft }
+            : undefined),
       nextActions: Array.isArray(payload?.nextActions)
         ? payload.nextActions.filter((item: unknown): item is string => typeof item === 'string')
         : undefined,
@@ -3200,6 +3303,34 @@ export interface ModelingImportSession {
   source: { mode: 'current_project' | 'path' | 'upload' | 'paste'; label: string };
   candidates: ModelingImportCandidate[];
   proposalId?: string;
+}
+
+function appSourceCandidateToRecommendation(source: AppSourceCandidateWire): AppBlockRecommendation {
+  return {
+    id: source.sourceId,
+    sourceId: source.sourceId,
+    qualifiedIdentity: source.qualifiedIdentity,
+    sourceRevision: source.sourceRevision,
+    snapshotId: source.snapshotId,
+    lifecycle: source.lifecycle,
+    trust: source.trust,
+    name: source.name,
+    domain: source.domain ?? 'Unassigned',
+    status: source.lifecycle,
+    owner: source.owner ?? null,
+    tags: source.tags,
+    path: source.executionRef,
+    fingerprint: source.sourceRevision,
+    lastModified: '',
+    description: source.description ?? '',
+    chartType: source.capabilities.chartType,
+    filterIds: source.capabilities.filters,
+    dimensionIds: source.capabilities.dimensions,
+    capabilities: source.capabilities,
+    eligibility: source.eligibility,
+    score: source.score ?? 0,
+    reasons: source.reasons,
+  };
 }
 
 export const api = {
@@ -4306,9 +4437,16 @@ export const api = {
       return request<SemanticLayerDiagnostics>('/api/semantic-layer/diagnostics');
     },
 
-    async reloadSemanticLayer(): Promise<{ ok: boolean; available: boolean; provider: string | null; errors: string[]; lastSyncTime?: string | null; dbt: BlockStudioDbtStatus }> {
-      return request('/api/semantic-layer/reload', { method: 'POST' });
-    },
+  async reloadSemanticLayer(): Promise<{ ok: boolean; available: boolean; provider: string | null; errors: string[]; lastSyncTime?: string | null; dbt: BlockStudioDbtStatus }> {
+    return request('/api/semantic-layer/reload', { method: 'POST' });
+  },
+
+  async assessBlockStudioCertification(source: string): Promise<BlockStudioCertificationAssessment> {
+    return request<BlockStudioCertificationAssessment>('/api/block-studio/certification-check', {
+      method: 'POST',
+      body: JSON.stringify({ source }),
+    });
+  },
 
   async certifyBlockStudio(payload: { source: string; path?: string | null }): Promise<{
     ok: boolean;
@@ -4332,6 +4470,7 @@ export const api = {
       lineage: boolean;
       aiReviewed: boolean;
       blockers: string[];
+      issues?: BlockStudioDiagnostic[];
       checkedAt?: string;
     };
     blockers?: string[];
@@ -5839,6 +5978,41 @@ export const api = {
     return blocks;
   },
 
+  async listAppSourceCandidates(id: string, input: {
+    query?: string;
+    cursor?: string;
+    limit?: number;
+    lifecycles?: string[];
+    domains?: string[];
+    includeDeprecated?: boolean;
+  } = {}, signal?: AbortSignal): Promise<AppSourceCandidatePage> {
+    const params = new URLSearchParams();
+    if (input.query?.trim()) params.set('q', input.query.trim());
+    if (input.cursor) params.set('cursor', input.cursor);
+    params.set('limit', String(input.limit ?? 50));
+    for (const lifecycle of input.lifecycles ?? []) params.append('lifecycle', lifecycle);
+    for (const domain of input.domains ?? []) params.append('domain', domain);
+    if (input.includeDeprecated) params.set('includeDeprecated', 'true');
+    const response = await request<Omit<AppSourceCandidatePage, 'items'> & { ok: true; items: AppSourceCandidateWire[] }>(
+      `/api/app-builds/${encodeURIComponent(id)}/source-candidates?${params.toString()}`,
+      { signal },
+    );
+    return { ...response, items: response.items.map(appSourceCandidateToRecommendation) };
+  },
+
+  async resolveAppSourceCandidates(id: string, sourceIds: string[]): Promise<{
+    ok: true;
+    snapshotId: string;
+    items: AppBlockRecommendation[];
+    missingSourceIds: string[];
+  }> {
+    const response = await request<{ ok: true; snapshotId: string; items: AppSourceCandidateWire[]; missingSourceIds: string[] }>(
+      `/api/app-builds/${encodeURIComponent(id)}/source-candidates`,
+      { method: 'POST', body: JSON.stringify({ sourceIds }) },
+    );
+    return { ...response, items: response.items.map(appSourceCandidateToRecommendation) };
+  },
+
   async createApp(input: CreateAppRequest): Promise<CreateAppResponse> {
     return request<CreateAppResponse>('/api/apps', {
       method: 'POST',
@@ -5875,10 +6049,47 @@ export const api = {
     });
   },
 
+  async reviseAppBuildProposal(id: string, proposalId: string, input: {
+    expectedRevision: number;
+    expectedProposalHash: string;
+    answers?: Record<string, string>;
+    selectedSourceIds?: string[];
+    additionalSourceIds?: string[];
+  }): Promise<{ ok: true; proposal: AppStudioAiProposal }> {
+    return request(`/api/app-builds/${encodeURIComponent(id)}/ai-proposals/${encodeURIComponent(proposalId)}/revisions`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
+  async generateAppBuildGap(id: string, proposalId: string, input: {
+    expectedRevision: number;
+    expectedProposalHash: string;
+    requirementId: string;
+  }): Promise<{ ok: true; proposal: AppStudioAiProposal }> {
+    return request(`/api/app-builds/${encodeURIComponent(id)}/ai-proposals/${encodeURIComponent(proposalId)}/gaps`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+
   async patchAppBuild(id: string, expectedRevision: number, operations: AppStudioDraftOperation[], expectedProposalHash?: string): Promise<{ ok: true; draft: AppStudioBuildDraft }> {
     return request(`/api/app-builds/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       body: JSON.stringify({ expectedRevision, expectedProposalHash, operations }),
+    });
+  },
+
+  async composeAppBuild(id: string, input: {
+    expectedRevision: number;
+    expectedProposalHash: string;
+  } & (
+    | { mode: 'ai'; proposalId: string; selectedSourceIds: string[] }
+    | { mode: 'manual'; selections: Array<{ sourceId: string; pageId?: string; view: 'kpi' | 'chart' | 'table' }> }
+  )): Promise<{ ok: true; draft: AppStudioBuildDraft; pageIds: string[]; tileIds: string[] }> {
+    return request(`/api/app-builds/${encodeURIComponent(id)}/compose`, {
+      method: 'POST',
+      body: JSON.stringify(input),
     });
   },
 

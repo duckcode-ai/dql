@@ -9,7 +9,9 @@ export interface AppPublicationStep {
   count: number;
 }
 
-export function publicationIssueSummaries(issues: string[]): Array<{ id: string; title: string; detail: string; action: 'sources' | 'filters' }> {
+export type AppPublicationIssueAction = 'sources' | 'refresh_sources' | 'filters' | 'preview';
+
+export function publicationIssueSummaries(issues: string[]): Array<{ id: string; title: string; detail: string; action: AppPublicationIssueAction }> {
   const known = /Required App question is unresolved|Review task is still open|Run a current settled preview|requires snapshot-bound semantic approval|is review-required and cannot be published|references app-scoped exploratory DQL|Resolve required Build Frame clarifications/i;
   const summaries = issues.filter((issue) => !known.test(issue)).map((issue) => {
     const filterMatch = issue.match(/^[^/]+\/[^ ]+ does not have a preflighted binding for filter (.+)\.$/i);
@@ -27,11 +29,11 @@ export function publicationIssueSummaries(issues: string[]): Array<{ id: string;
     const sourceMatch = issue.match(/^Source (.+?) changed after selection\.$/i);
     if (sourceMatch) {
       const source = publicationHumanize(sourceMatch[1]);
-      return { id: `sources:${sourceMatch[1]}`, title: `Review ${source}`, detail: `${source} changed since it was selected. Accept the current certified version; DQL will then request a fresh preview.`, action: 'sources' as const };
+      return { id: `sources:${sourceMatch[1]}`, title: `Review ${source}`, detail: `${source} changed since it was selected. Accept the current certified version; DQL will then request a fresh preview.`, action: 'refresh_sources' as const };
     }
-    if (/does not resolve to a current certified block/i.test(issue)) return { id: `unavailable:${issue}`, title: 'Replace an unavailable source', detail: issue, action: 'sources' as const };
+    if (/does not resolve to (?:a current |a )?certified block|no longer resolves to a certified block/i.test(issue)) return { id: `unavailable:${issue}`, title: 'Replace or remove this source', detail: issue, action: 'sources' as const };
     if (/changed after selection|certified block|source/i.test(issue)) return { id: 'sources', title: 'Review changed sources', detail: issue, action: 'sources' as const };
-    if (/preview|settled run|receipt|runtime/i.test(issue)) return { id: 'preview', title: 'Refresh the settled preview', detail: 'The saved preview no longer matches the current App data contract.', action: 'sources' as const };
+    if (/preview|settled run|receipt|runtime/i.test(issue)) return { id: 'preview', title: 'Refresh the settled preview', detail: 'The saved preview no longer matches the current App data contract.', action: 'preview' as const };
     return { id: `validation:${issue}`, title: 'Complete governed validation', detail: issue, action: 'sources' as const };
   });
   return Array.from(new Map(summaries.map((summary) => [summary.id, summary])).values());
@@ -94,6 +96,12 @@ export function publicationBlockingSources(draft: AppStudioBuildDraft): AppStudi
   return draft.sources.filter((source) => {
     if (source.kind === 'governed_semantic' || source.kind === 'semantic_query') {
       return source.reviewStatus !== 'approved' || !source.snapshotId || !source.receiptId;
+    }
+    if (source.kind === 'block') {
+      return source.lifecycle !== 'certified' || source.trustState !== 'certified' || source.reviewStatus === 'required';
+    }
+    if (source.kind === 'certified_block') {
+      return (source.lifecycle !== undefined && source.lifecycle !== 'certified') || source.trustState !== 'certified' || source.reviewStatus === 'required';
     }
     return source.kind === 'review_block' || source.kind === 'review_dql' || source.kind === 'exploratory_sql';
   });

@@ -8,7 +8,17 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync,
 import { createHash } from 'node:crypto';
 import { join, dirname, relative, basename } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { AgentAnswer, AgentResultPayload, AppPlan, NarrateInput, NarrateItem, NarrateResult, ResearchPlan as AppResearchPlan } from '@duckcodeailabs/dql-agent';
+import type {
+  AgentAnswer,
+  AgentResultPayload,
+  AppBuilderPlannerCompletion,
+  AppPlan,
+  AppSourceCatalogRecord,
+  NarrateInput,
+  NarrateItem,
+  NarrateResult,
+  ResearchPlan as AppResearchPlan,
+} from '@duckcodeailabs/dql-agent';
 import {
   loadAppDocument,
   findAppDocuments,
@@ -19,6 +29,7 @@ import {
   normalizeDqlArtifactReference,
   suggestAppId,
   createAppBuildDraft,
+  appBuildDraftHash,
   applyAppBuildDraftOperations,
   type AppDocument,
   type BlockParameterDefinition,
@@ -28,6 +39,8 @@ import {
   type DashboardGridItem,
   type AppBuildDraft,
   type AppBuildDraftOperation,
+  type AppBuildDraftSource,
+  type AppBuildSourceLifecycle,
 } from '@duckcodeailabs/dql-core';
 import {
   defaultPersonaRegistry,
@@ -58,6 +71,9 @@ interface Ctx {
   /** Governed answer generator — supplied by the runtime. Lets the two-phase app
    *  build fill coverage gaps with bounded, review-required generated SQL. */
   generateGovernedAnswer?: (question: string, context?: AppContextEnvelopeV1) => Promise<AppBuildGeneratedAnswer>;
+  /** App-specific planning call. The runtime supplies the same configured
+   * provider adapter as Ask, but App Builder owns the structured state machine. */
+  planAppBuild?: AppBuilderPlannerCompletion;
   /** Story narrator — supplied by the runtime (LLM-backed with a deterministic
    *  fallback). Commit uses it to write the app's narrated story sections. */
   narrate?: (input: NarrateInput) => Promise<NarrateResult>;
@@ -78,6 +94,7 @@ interface Ctx {
  *  without them, gaps stay listed as uncovered research questions). */
 export interface AppBuildHooks {
   generateGovernedAnswer?: (question: string, context?: AppContextEnvelopeV1) => Promise<AppBuildGeneratedAnswer>;
+  planAppBuild?: AppBuilderPlannerCompletion;
 }
 
 /**
@@ -88,7 +105,7 @@ export interface AppBuildHooks {
 export interface AppExecutionRepairTrace {
   version: 1;
   status: 'repaired' | 'failed';
-  source: 'query_generator' | 'semantic_query' | 'draft_analysis' | 'certified_block';
+  source: 'query_generator' | 'semantic_query' | 'draft_analysis' | 'certified_block' | 'review_block';
   mode?: 'deterministic' | 'ai';
   attemptedAt: string;
   originalFailure: string;
@@ -189,9 +206,65 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
   if (req.method === 'GET' && path === '/api/app-builds') {
     const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
     try {
-      sendJson(res, 200, { ok: true, drafts: storage.listAppBuildDrafts() });
+      const drafts = storage.listAppBuildDrafts().flatMap((stored) => {
+        const migrated = migrateLegacyAppBuildDraft(projectRoot, stored);
+        if (!migrated) return [];
+        if (stored.version !== migrated.version) storage.saveAppBuildDraft(migrated);
+        return [migrated];
+      });
+      sendJson(res, 200, { ok: true, drafts });
     } finally {
       storage.close();
+    }
+    return true;
+  }
+
+  const sourceCandidatesMatch = path.match(/^\/api\/app-builds\/([^/]+)\/source-candidates$/);
+  if (sourceCandidatesMatch && req.method === 'GET') {
+    try {
+      const id = decodeURIComponent(sourceCandidatesMatch[1]);
+      const current = loadStoredAppBuildDraft(projectRoot, id);
+      if (!current) {
+        sendJson(res, 404, { ok: false, error: 'App Build Draft not found.' });
+        return true;
+      }
+      const { ensureAgentProjectReady, queryAppSourceCatalog } = await import('@duckcodeailabs/dql-agent');
+      await ensureAgentProjectReady(projectRoot);
+      const lifecycles = splitQueryValues(ctx.url.searchParams.getAll('lifecycle')) as AppBuildSourceLifecycle[];
+      const domains = splitQueryValues(ctx.url.searchParams.getAll('domain'));
+      const page = queryAppSourceCatalog(projectRoot, {
+        query: ctx.url.searchParams.get('q') ?? undefined,
+        cursor: ctx.url.searchParams.get('cursor') ?? undefined,
+        limit: Number(ctx.url.searchParams.get('limit')) || 50,
+        lifecycles: lifecycles.length ? lifecycles : undefined,
+        domains: domains.length ? domains : undefined,
+        sourcePolicy: current.sourcePolicy,
+        includeDeprecated: ctx.url.searchParams.get('includeDeprecated') === 'true',
+      });
+      sendJson(res, 200, { ok: true, ...page });
+    } catch (err) {
+      const error = err as Error & { code?: string };
+      sendJson(res, error.code?.includes('CURSOR') ? 409 : 400, { ok: false, code: error.code, error: error.message });
+    }
+    return true;
+  }
+
+  if (sourceCandidatesMatch && req.method === 'POST') {
+    try {
+      const id = decodeURIComponent(sourceCandidatesMatch[1]);
+      const current = loadStoredAppBuildDraft(projectRoot, id);
+      if (!current) {
+        sendJson(res, 404, { ok: false, error: 'App Build Draft not found.' });
+        return true;
+      }
+      const body = await readJson<{ sourceIds?: string[] }>(req);
+      const { ensureAgentProjectReady, resolveAppSourceCatalogRecords } = await import('@duckcodeailabs/dql-agent');
+      await ensureAgentProjectReady(projectRoot);
+      const result = resolveAppSourceCatalogRecords(projectRoot, body.sourceIds ?? [], current.sourcePolicy);
+      sendJson(res, 200, { ok: true, ...result });
+    } catch (err) {
+      const error = err as Error & { code?: string };
+      sendJson(res, 400, { ok: false, code: error.code, error: error.message });
     }
     return true;
   }
@@ -283,7 +356,110 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
       const proposal = await proposeAppBuildDraftOperations(projectRoot, current, {
         prompt: cleanString(body.prompt) || current.frame.goal,
         selectedBlockIds: body.selectedBlockIds,
-      }, { generateGovernedAnswer: ctx.generateGovernedAnswer });
+      }, { generateGovernedAnswer: ctx.generateGovernedAnswer, planAppBuild: ctx.planAppBuild });
+      writeAppBuildDraftAiProposal(projectRoot, proposal);
+      sendJson(res, 201, { ok: true, proposal });
+    } catch (err) {
+      sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+    return true;
+  }
+
+  const composeBuildMatch = path.match(/^\/api\/app-builds\/([^/]+)\/compose$/);
+  if (composeBuildMatch && req.method === 'POST') {
+    try {
+      const id = decodeURIComponent(composeBuildMatch[1]);
+      const current = loadStoredAppBuildDraft(projectRoot, id);
+      if (!current) {
+        sendJson(res, 404, { ok: false, error: 'App Build Draft not found.' });
+        return true;
+      }
+      const body = await readJson<AppBuildComposeRequest>(req);
+      if (body.expectedRevision !== current.revision || body.expectedProposalHash !== current.proposalHash) {
+        sendJson(res, 409, { ok: false, error: 'APP_BUILD_REVISION_CONFLICT: refresh before composing this App.' });
+        return true;
+      }
+      const result = await composeStoredAppBuildDraft(projectRoot, current, body);
+      sendJson(res, 200, { ok: true, ...result });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      sendJson(res, message.includes('APP_BUILD_') ? 409 : 400, { ok: false, error: message });
+    }
+    return true;
+  }
+
+  const reviseProposalMatch = path.match(/^\/api\/app-builds\/([^/]+)\/ai-proposals\/([^/]+)\/revisions$/);
+  if (reviseProposalMatch && req.method === 'POST') {
+    try {
+      const id = decodeURIComponent(reviseProposalMatch[1]);
+      const proposalId = decodeURIComponent(reviseProposalMatch[2]);
+      const current = loadStoredAppBuildDraft(projectRoot, id);
+      const previous = current ? loadAppBuildDraftAiProposal(projectRoot, id, proposalId) : null;
+      if (!current || !previous) {
+        sendJson(res, 404, { ok: false, error: 'App Build proposal not found.' });
+        return true;
+      }
+      const body = await readJson<{
+        expectedRevision?: number;
+        expectedProposalHash?: string;
+        answers?: Record<string, string>;
+        selectedSourceIds?: string[];
+        additionalSourceIds?: string[];
+      }>(req);
+      if (body.expectedRevision !== current.revision || body.expectedProposalHash !== current.proposalHash
+        || previous.baseRevision !== current.revision || previous.baseProposalHash !== current.proposalHash) {
+        sendJson(res, 409, { ok: false, error: 'APP_BUILD_PROPOSAL_CONFLICT: refresh before revising this proposal.' });
+        return true;
+      }
+      const answers = body.answers ?? {};
+      const answerText = previous.clarifications.flatMap((question) => {
+        const answerId = answers[question.id];
+        const choice = question.choices.find((candidate) => candidate.id === answerId);
+        return choice ? [`${question.question}: ${choice.label}`] : [];
+      });
+      const selectedSourceIds = unique([
+        ...(body.selectedSourceIds ?? previous.defaultSelectedSourceIds ?? []),
+        ...(body.additionalSourceIds ?? []),
+      ].map(cleanString).filter(Boolean));
+      const proposal = await proposeAppBuildDraftOperations(projectRoot, current, {
+        prompt: [current.frame.goal, answerText.length ? `Clarification decisions: ${answerText.join('; ')}` : ''].filter(Boolean).join('\n'),
+        selectedBlockIds: selectedSourceIds,
+      }, { generateGovernedAnswer: ctx.generateGovernedAnswer, planAppBuild: ctx.planAppBuild });
+      proposal.defaultSelectedSourceIds = selectedSourceIds.filter((sourceId) => proposal.operations.some((operation) => (
+        operation.type === 'upsert_source' && operation.source.id === sourceId
+      )));
+      writeAppBuildDraftAiProposal(projectRoot, proposal);
+      sendJson(res, 201, { ok: true, proposal });
+    } catch (err) {
+      sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+    return true;
+  }
+
+  const generateGapMatch = path.match(/^\/api\/app-builds\/([^/]+)\/ai-proposals\/([^/]+)\/gaps$/);
+  if (generateGapMatch && req.method === 'POST') {
+    try {
+      const id = decodeURIComponent(generateGapMatch[1]);
+      const proposalId = decodeURIComponent(generateGapMatch[2]);
+      const current = loadStoredAppBuildDraft(projectRoot, id);
+      const previous = current ? loadAppBuildDraftAiProposal(projectRoot, id, proposalId) : null;
+      if (!current || !previous) {
+        sendJson(res, 404, { ok: false, error: 'App Build proposal not found.' });
+        return true;
+      }
+      const body = await readJson<{ expectedRevision?: number; expectedProposalHash?: string; requirementId?: string }>(req);
+      if (body.expectedRevision !== current.revision || body.expectedProposalHash !== current.proposalHash
+        || previous.baseRevision !== current.revision || previous.baseProposalHash !== current.proposalHash) {
+        sendJson(res, 409, { ok: false, error: 'APP_BUILD_PROPOSAL_CONFLICT: refresh before generating a gap.' });
+        return true;
+      }
+      if (current.sourcePolicy !== 'include_review_required') {
+        sendJson(res, 409, { ok: false, error: 'APP_BUILD_REVIEW_POLICY_REQUIRED: enable review-required sources before generating a gap.' });
+        return true;
+      }
+      if (!ctx.generateGovernedAnswer) throw new Error('The configured provider cannot generate an App gap in this runtime.');
+      const proposal = await generateExplicitAppBuildGap(projectRoot, current, previous, cleanString(body.requirementId), ctx.generateGovernedAnswer);
+      writeAppBuildDraftAiProposal(projectRoot, proposal);
       sendJson(res, 201, { ok: true, proposal });
     } catch (err) {
       sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
@@ -371,7 +547,16 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
   if (req.method === 'POST' && path === '/api/apps/recommend-blocks') {
     try {
       const body = await readJson<AppRecommendationRequest>(req);
-      sendJson(res, 200, { blocks: recommendBlocks(projectRoot, body) });
+      const { ensureAgentProjectReady, queryAppSourceCatalog } = await import('@duckcodeailabs/dql-agent');
+      await ensureAgentProjectReady(projectRoot);
+      const page = queryAppSourceCatalog(projectRoot, {
+        query: [body.purpose, body.audience, ...(body.tags ?? [])].filter(Boolean).join(' '),
+        domains: body.domain && body.domain !== 'general' ? [body.domain] : undefined,
+        lifecycles: body.certifiedOnly ? ['certified'] : undefined,
+        sourcePolicy: body.certifiedOnly ? 'governed_only' : 'include_review_required',
+        limit: 50,
+      });
+      sendJson(res, 200, { blocks: page.items.map(appSourceCatalogRecordToLegacyRecommendation) });
     } catch (err) {
       sendJson(res, 500, { error: (err as Error).message });
     }
@@ -1093,21 +1278,6 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
     return true;
   }
 
-  m = path.match(/^\/api\/app-recoveries\/([^/]+)\/restore$/);
-  if (m && req.method === 'POST') {
-    try {
-      const result = restoreAppRecovery(projectRoot, decodeURIComponent(m[1]));
-      if (!result.ok) {
-        sendJson(res, result.status, result);
-        return true;
-      }
-      ctx.scheduleProjectRefresh?.('app-restored');
-      sendJson(res, 200, result);
-    } catch (err) {
-      sendJson(res, 500, { ok: false, error: (err as Error).message });
-    }
-    return true;
-  }
   if (m && req.method === 'PATCH') {
     const id = decodeURIComponent(m[1]);
     try {
@@ -1124,14 +1294,31 @@ export async function handleAppsApi(ctx: Ctx): Promise<boolean> {
     }
     return true;
   }
+
   if (m && req.method === 'GET') {
-    const id = m[1];
+    const id = decodeURIComponent(m[1]);
     const result = loadAppById(projectRoot, id);
     if (!result) {
       sendJson(res, 404, { error: `App "${id}" not found` });
       return true;
     }
     sendJson(res, 200, result);
+    return true;
+  }
+
+  m = path.match(/^\/api\/app-recoveries\/([^/]+)\/restore$/);
+  if (m && req.method === 'POST') {
+    try {
+      const result = restoreAppRecovery(projectRoot, decodeURIComponent(m[1]));
+      if (!result.ok) {
+        sendJson(res, result.status, result);
+        return true;
+      }
+      ctx.scheduleProjectRefresh?.('app-restored');
+      sendJson(res, 200, result);
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: (err as Error).message });
+    }
     return true;
   }
 
@@ -2373,6 +2560,9 @@ export interface AppBuildDraftAiProposal {
   operations: AppBuildDraftOperation[];
   /** Governed sources start selected; generated review DQL is always opt-in. */
   defaultSelectedSourceIds?: string[];
+  /** Complete bounded candidate set used by the App-specific planning call. */
+  candidateSourceIds?: string[];
+  warnings?: string[];
   clarifications: Array<{
     id: string;
     question: string;
@@ -2386,6 +2576,131 @@ export interface AppBuildDraftAiProposal {
     certifiedSources: number;
     semanticSources: number;
   };
+}
+
+export type AppBuildComposeRequest = {
+  expectedRevision: number;
+  expectedProposalHash: string;
+} & (
+  | { mode: 'ai'; proposalId: string; selectedSourceIds: string[] }
+  | {
+    mode: 'manual';
+    selections: Array<{
+      sourceId: string;
+      pageId?: string;
+      view: 'kpi' | 'chart' | 'table';
+    }>;
+  }
+);
+
+function appDraftSourceFromCatalog(source: AppSourceCatalogRecord): AppBuildDraftSource {
+  const certified = source.lifecycle === 'certified';
+  return {
+    id: source.sourceId,
+    kind: 'block',
+    sourceRef: source.executionRef,
+    qualifiedIdentity: source.qualifiedIdentity,
+    sourcePath: source.sourcePath,
+    executionRef: source.executionRef,
+    snapshotId: source.snapshotId,
+    sourceRevision: source.sourceRevision,
+    sourceFingerprint: source.sourceRevision,
+    lifecycle: source.lifecycle,
+    capabilities: source.capabilities,
+    trustState: certified ? 'certified' : 'review_required',
+    reviewStatus: certified ? 'not_required' : 'required',
+  };
+}
+
+function appSourceCatalogRecordToLegacyRecommendation(source: AppSourceCatalogRecord): BlockCandidate {
+  return {
+    id: source.sourceId,
+    name: source.name,
+    domain: source.domain ?? 'uncategorized',
+    status: source.lifecycle,
+    owner: source.owner ?? null,
+    tags: source.tags,
+    path: source.executionRef,
+    fingerprint: source.sourceRevision,
+    lastModified: new Date(0).toISOString(),
+    description: source.description ?? '',
+    llmContext: null,
+    chartType: source.capabilities.chartType,
+    filterIds: source.capabilities.filters,
+    dimensionIds: source.capabilities.dimensions,
+    score: source.score ?? 0,
+    reasons: source.reasons,
+  };
+}
+
+function uniqueAppSourceRecords(sources: AppSourceCatalogRecord[]): AppSourceCatalogRecord[] {
+  const seen = new Set<string>();
+  return sources.filter((source) => {
+    if (seen.has(source.sourceId)) return false;
+    seen.add(source.sourceId);
+    return true;
+  });
+}
+
+function uniqueTileId(existing: DashboardGridItem[], preferred: string): string {
+  const base = slugify(preferred) || 'component';
+  const ids = new Set(existing.map((item) => item.i));
+  if (!ids.has(base)) return base;
+  for (let index = 2; index < 10_000; index += 1) {
+    const candidate = `${base}-${index}`;
+    if (!ids.has(candidate)) return candidate;
+  }
+  return `${base}-${Date.now()}`;
+}
+
+const APP_REQUIREMENT_STOP_WORDS = new Set([
+  'a', 'an', 'and', 'app', 'application', 'build', 'by', 'create', 'dashboard',
+  'for', 'from', 'in', 'last', 'me', 'of', 'on', 'report', 'show', 'showing',
+  'the', 'to', 'using', 'view', 'with',
+]);
+
+function appRequirementTokens(value: string): Set<string> {
+  return new Set(value.toLowerCase().split(/[^a-z0-9]+/)
+    .map((token) => token.length > 3 && token.endsWith('s') ? token.slice(0, -1) : token)
+    .filter((token) => token.length > 1 && !APP_REQUIREMENT_STOP_WORDS.has(token)));
+}
+
+function catalogSourceSatisfiesRequirement(
+  source: AppSourceCatalogRecord,
+  requirement: AppBuildDraft['requirements'][number],
+): boolean {
+  const normalized = (values: string[]) => new Set(values.flatMap((value) => Array.from(appRequirementTokens(value))));
+  const sourceMeasures = normalized(source.capabilities.measures);
+  const sourceDimensions = normalized(source.capabilities.dimensions);
+  const sourceFilters = normalized(source.capabilities.filters);
+  const requires = [
+    [normalized(requirement.measures), sourceMeasures],
+    [normalized(requirement.dimensions), sourceDimensions],
+    [normalized(requirement.filters), sourceFilters],
+  ] as const;
+  const declaredCompatible = requires.every(([required, available]) => (
+    required.size === 0 || (available.size > 0 && Array.from(required).every((field) => available.has(field)))
+  ));
+  const hasDeclaredRequirement = requires.some(([required]) => required.size > 0);
+  if (declaredCompatible && hasDeclaredRequirement) return true;
+
+  const requirementTerms = appRequirementTokens(requirement.question);
+  if (requirementTerms.size === 0) return false;
+  const sourceTerms = appRequirementTokens([
+    source.title,
+    source.name,
+    source.description ?? '',
+    source.qualifiedIdentity,
+    ...source.tags,
+    ...source.capabilities.measures,
+    ...source.capabilities.dimensions,
+  ].join(' '));
+  const overlap = Array.from(requirementTerms).filter((term) => sourceTerms.has(term)).length;
+  return overlap >= Math.min(2, requirementTerms.size);
+}
+
+function splitQueryValues(values: string[]): string[] {
+  return unique(values.flatMap((value) => value.split(',')).map((value) => value.trim()).filter(Boolean));
 }
 
 function materializeAppBuildProposalReviewAnalyses(
@@ -2556,164 +2871,156 @@ export async function proposeAppBuildDraftOperations(
   input: { prompt: string; selectedBlockIds?: string[] },
   hooks?: AppBuildHooks,
 ): Promise<AppBuildDraftAiProposal> {
-  const session = await proposeAppAiBuild(projectRoot, {
-    sessionId: `app_build_${draft.id}_${draft.revision}`,
-    prompt: input.prompt,
+  const prompt = cleanString(input.prompt) || draft.frame.goal;
+  const {
+    ensureAgentProjectReady,
+    planAppBuildBrief,
+    resolveAppSourceCatalogRecords,
+    shortlistAppSources,
+  } = await import('@duckcodeailabs/dql-agent');
+  await ensureAgentProjectReady(projectRoot);
+  let candidates = shortlistAppSources(projectRoot, prompt, {
+    sourcePolicy: draft.sourcePolicy,
+    domains: draft.pages[0]?.metadata.domain && draft.pages[0].metadata.domain !== 'general'
+      ? [draft.pages[0].metadata.domain]
+      : undefined,
+  }).items;
+  const requestedIds = unique((input.selectedBlockIds ?? []).map(cleanString).filter(Boolean));
+  if (requestedIds.length) {
+    const exactIds = requestedIds.filter((id) => id.startsWith('app:block:'));
+    const exact = exactIds.length
+      ? resolveAppSourceCatalogRecords(projectRoot, exactIds, draft.sourcePolicy).items
+      : [];
+    const requested = new Set(requestedIds);
+    candidates = uniqueAppSourceRecords([
+      ...exact,
+      ...candidates.filter((candidate) => requested.has(candidate.sourceId)
+        || requested.has(candidate.name)
+        || requested.has(candidate.sourcePath)
+        || requested.has(candidate.qualifiedIdentity)),
+      ...candidates,
+    ]).slice(0, 12);
+  }
+  const brief = await planAppBuildBrief({
+    prompt,
+    candidates,
+    sourcePolicy: draft.sourcePolicy,
     domain: draft.pages[0]?.metadata.domain,
     audience: draft.frame.audience,
-    mode: draft.sourcePolicy === 'include_review_required' ? 'personal' : 'stakeholder',
-    exploreGaps: draft.sourcePolicy === 'include_review_required',
-    selectedBlockIds: input.selectedBlockIds,
-    ...(draft.baseApp ? { existingAppId: draft.baseApp.appId } : {}),
-  }, hooks);
-  if (session.status !== 'proposed' || !session.plan || !session.proposal) {
-    throw new Error(session.error ?? 'The App planner did not produce a proposal.');
-  }
-  const plan = session.plan as AppPlan;
-
-  const { KGStore, defaultKgPath, materializeAppPlanDocuments } = await import('@duckcodeailabs/dql-agent');
-  const kg = new KGStore(defaultKgPath(projectRoot));
-  let dashboards: DashboardDocument[];
-  try {
-    dashboards = materializeAppPlanDocuments(plan, kg).dashboards;
-  } finally {
-    kg.close();
-  }
-
-  const proposalTileById = new Map(session.proposal.tiles.map((tile) => [tile.id, tile] as const));
-  const plannedTiles = plan.pages.flatMap((page) => page.tiles);
-  const sourceOperations: AppBuildDraftOperation[] = plannedTiles.flatMap((tile): AppBuildDraftOperation[] => {
-    const proposalTile = proposalTileById.get(tile.id);
-    if (tile.kind === 'certified_block' && tile.blockId) {
-      return [{
-        type: 'upsert_source' as const,
-        source: {
-          id: `block:${tile.blockId}`,
-          kind: 'certified_block' as const,
-          sourceRef: tile.blockId,
-          sourceFingerprint: proposalTile?.preflight.sourceFingerprint,
-          receiptId: proposalTile?.preflight.receiptId,
-          trustState: 'certified' as const,
-          reviewStatus: 'not_required' as const,
-        },
-      }];
-    }
-    if (tile.kind === 'semantic_query' && tile.semantic) {
-      return [{
-        type: 'upsert_source' as const,
-        source: {
-          id: `semantic:${tile.semantic.id}`,
-          kind: 'governed_semantic' as const,
-          sourceRef: tile.semantic.id,
-          qualifiedIdentity: tile.semantic.qualifiedMetricIds?.join(',') || tile.semantic.id,
-          snapshotId: tile.semantic.snapshotId,
-          sourceFingerprint: tile.semantic.definitionFingerprint,
-          receiptId: proposalTile?.preflight.receiptId,
-          trustState: 'review_required' as const,
-          reviewStatus: 'required' as const,
-        },
-      }];
-    }
-    return [];
+    complete: hooks?.planAppBuild,
   });
-  const reviewAnalyses = materializeAppBuildProposalReviewAnalyses(
-    projectRoot,
-    draft,
-    plan,
-    session.id,
-    session.proposal.tiles,
-    dashboards,
-  );
-  dashboards = reviewAnalyses.dashboards;
-  sourceOperations.push(...reviewAnalyses.sourceOperations);
-  const sourceIdForCoverage = (source: string, sourceId?: string): string[] => {
-    if (!sourceId) return [];
-    if (source === 'certified_block') return [sourceId.startsWith('block:') ? sourceId : `block:${sourceId}`];
-    if (source === 'semantic_query') return [sourceId.startsWith('semantic:') ? sourceId : `semantic:${sourceId}`];
-    return [];
-  };
-  const clarifications = session.proposal.clarifications.map((clarification) => ({
-    id: clarification.id,
-    question: clarification.question,
-    choices: clarification.choices.map((label, index) => ({ id: slugify(label) || `choice-${index + 1}`, label })),
-    required: clarification.required,
+  const byId = new Map(candidates.map((candidate) => [candidate.sourceId, candidate]));
+  const plannedSources = brief.selectedSourceIds.flatMap((sourceId) => {
+    const source = byId.get(sourceId);
+    return source ? [source] : [];
+  });
+  const sourceOperations: AppBuildDraftOperation[] = plannedSources.map((source) => ({
+    type: 'upsert_source',
+    source: appDraftSourceFromCatalog(source),
   }));
-  const replaceInitialBlank = !draft.baseApp
-    && draft.pages.length === 1
-    && draft.pages[0].layout.items.length === 0
-    && !dashboards.some((page) => page.id === draft.pages[0].id);
-  const coverage = plan.requirementCoverage.map((item) => {
-    const reviewCoverage = reviewAnalyses.coverageByRequirement.get(item.requirementId);
-    if (reviewCoverage) {
-      return {
-        requirementId: item.requirementId,
-        status: 'covered' as const,
-        sourceIds: reviewCoverage.sourceIds,
-        componentIds: reviewCoverage.componentIds,
-        reasons: ['Covered by explicitly selectable review-required App analysis.'],
-      };
-    }
+  const page = draft.pages[0];
+  if (!page) throw new Error('The App draft needs a page before AI can compose it.');
+  const structuralItems = page.layout.items.filter((item) => Boolean(item.text));
+  const baseY = structuralItems.reduce((max, item) => Math.max(max, item.y + item.h), 0);
+  const reservedItems = [...structuralItems];
+  const componentTileIdById = new Map<string, string>();
+  const plannedItems = brief.components.flatMap((component, index): DashboardGridItem[] => {
+    const source = byId.get(component.sourceId);
+    if (!source) return [];
+    const certified = source.lifecycle === 'certified';
+    const tileId = uniqueTileId(reservedItems, component.id || `component-${index + 1}`);
+    componentTileIdById.set(component.id, tileId);
+    const tile: DashboardGridItem = {
+      i: tileId,
+      x: (index % 2) * 6,
+      y: baseY + Math.floor(index / 2) * 4,
+      w: component.view === 'kpi' ? 3 : 6,
+      h: component.view === 'kpi' ? 2 : 4,
+      sourceId: source.sourceId,
+      sourceRevision: source.sourceRevision,
+      block: { ref: source.executionRef },
+      viz: { type: component.view },
+      title: component.title,
+      sourceClass: certified ? 'certified_block' : 'exploratory_analysis',
+      filterBindings: source.capabilities.filters.map((filter) => ({
+        filter,
+        binding: filter,
+        mode: 'predicate',
+        capability: 'preflight_required',
+      })),
+      review: { status: certified ? 'not_required' : 'required', sourceFingerprint: source.sourceRevision },
+      trustState: certified ? 'certified' : 'review_required',
+      reviewStatus: certified ? 'certified' : 'review_required',
+    };
+    reservedItems.push(tile);
+    return [tile];
+  });
+  const nextPage: DashboardDocument = {
+    ...page,
+    metadata: { ...page.metadata, description: brief.frame.decision || brief.frame.goal },
+    layout: {
+      ...page.layout,
+      items: [...structuralItems, ...plannedItems],
+      responsive: responsiveLayoutsForDashboardItems([...structuralItems, ...plannedItems]),
+    },
+  };
+  const coverage = brief.requirements.map((requirement) => {
+    const components = brief.components.filter((component) => component.requirementIds.includes(requirement.id));
     return {
-      requirementId: item.requirementId,
-      status: item.status === 'covered' ? 'covered' as const : 'gap' as const,
-      sourceIds: sourceIdForCoverage(item.source, item.sourceId),
-      componentIds: item.tileId ? [item.tileId] : [],
-      reasons: item.reasons,
+      requirementId: requirement.id,
+      status: components.length ? 'covered' as const : 'gap' as const,
+      sourceIds: Array.from(new Set(components.map((component) => component.sourceId))),
+      componentIds: components.map((component) => componentTileIdById.get(component.id) ?? component.id),
+      reasons: components.length
+        ? ['Covered by a source-bound App component from the validated Build Brief.']
+        : ['No supplied source candidate covered this requirement.'],
     };
   });
+  const clarifications = brief.frame.clarificationQuestions ?? [];
+  const reviewTasks: AppBuildDraftOperation[] = plannedSources
+    .filter((source) => source.lifecycle !== 'certified')
+    .map((source) => ({
+      type: 'set_review_task',
+      task: {
+        id: `review-source-${createHash('sha256').update(source.sourceId).digest('hex').slice(0, 12)}`,
+        message: `${source.title} is ${source.lifecycle} and must be certified, replaced, or removed before Project publication.`,
+        status: 'open',
+        sourceId: source.sourceId,
+        pageId: page.id,
+      },
+    }));
   const operations: AppBuildDraftOperation[] = [
-    { type: 'set_name', name: plan.name },
     {
       type: 'set_frame',
-      frame: {
-        goal: session.proposal.buildFrame.goal,
-        decision: plan.businessGoal,
-        audience: session.proposal.buildFrame.audience,
-        metrics: session.proposal.buildFrame.metrics,
-        dimensions: session.proposal.buildFrame.dimensions,
-        grain: session.proposal.buildFrame.grain,
-        timeRange: session.proposal.buildFrame.timeRange,
-        comparison: session.proposal.buildFrame.comparison,
-        filters: session.proposal.buildFrame.filters,
-        desiredOutput: session.proposal.buildFrame.desiredOutput,
-        clarificationQuestions: clarifications,
-      },
+      frame: brief.frame,
     },
     {
       type: 'set_requirements',
-      requirements: plan.requirements.map((requirement) => ({
-        id: requirement.id,
-        question: requirement.question,
-        role: requirement.role,
-        required: true,
-        measures: requirement.measures,
-        dimensions: requirement.dimensions,
-        filters: requirement.filters,
-        grain: requirement.grain,
-      })),
+      requirements: brief.requirements,
       coverage,
     },
-    ...(replaceInitialBlank ? [{ type: 'remove_page' as const, pageId: draft.pages[0].id }] : []),
-    ...dashboards.map((page): AppBuildDraftOperation => ({ type: 'upsert_page', page })),
+    { type: 'upsert_page', page: nextPage },
     ...sourceOperations,
-    ...reviewAnalyses.reviewTasks,
+    ...reviewTasks,
   ];
   return {
-    id: session.id,
+    id: `proposal_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     draftId: draft.id,
     baseRevision: draft.revision,
     baseProposalHash: draft.proposalHash,
     operations,
-    defaultSelectedSourceIds: sourceOperations.flatMap((operation) => (
-      operation.type === 'upsert_source' && operation.source.kind !== 'review_dql' ? [operation.source.id] : []
-    )),
+    defaultSelectedSourceIds: plannedSources
+      .filter((source) => source.eligibility.localPreview)
+      .map((source) => source.sourceId),
     clarifications,
+    candidateSourceIds: brief.candidateSourceIds,
+    warnings: brief.warnings,
     summary: {
-      requirements: plan.requirements.length,
-      covered: plan.requirementCoverage.filter((item) => item.status === 'covered').length,
-      gaps: plan.requirementCoverage.filter((item) => item.status === 'gap').length,
-      certifiedSources: session.proposal.coverage.certifiedTiles,
-      semanticSources: session.proposal.coverage.semanticTiles,
+      requirements: brief.requirements.length,
+      covered: coverage.filter((item) => item.status === 'covered').length,
+      gaps: coverage.filter((item) => item.status === 'gap').length,
+      certifiedSources: plannedSources.filter((source) => source.lifecycle === 'certified').length,
+      semanticSources: 0,
     },
   };
 }
@@ -3995,7 +4302,7 @@ function appPublicationReadiness(
 ): AppPublicationReadiness {
   const blockers: AppPublicationReadiness['blockers'] = [];
   let governedTiles = 0;
-  const blocks = collectBlockCandidates(projectRoot);
+  const blocks = collectBlockCandidates(projectRoot, { preserveDuplicates: true });
   for (const dashboard of dashboards) {
     for (const item of dashboard.layout.items) {
       if (item.block) {
@@ -4083,6 +4390,480 @@ function appBuildDraftDir(projectRoot: string): string {
   return join(projectRoot, '.dql', 'local', 'app-builds');
 }
 
+function appBuildProposalDir(projectRoot: string, draftId: string): string {
+  return join(appBuildDraftDir(projectRoot), draftId, 'proposals');
+}
+
+function writeAppBuildDraftAiProposal(projectRoot: string, proposal: AppBuildDraftAiProposal): void {
+  if (!/^[a-z0-9_:-]+$/i.test(proposal.draftId) || !/^[a-z0-9_:-]+$/i.test(proposal.id)) {
+    throw new Error('APP_BUILD_PROPOSAL_INVALID: proposal identity is invalid.');
+  }
+  const dir = appBuildProposalDir(projectRoot, proposal.draftId);
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${proposal.id}.json`);
+  const candidate = `${path}.candidate`;
+  writeFileSync(candidate, `${JSON.stringify(proposal, null, 2)}\n`, 'utf8');
+  renameSync(candidate, path);
+}
+
+function loadAppBuildDraftAiProposal(
+  projectRoot: string,
+  draftId: string,
+  proposalId: string,
+): AppBuildDraftAiProposal | null {
+  if (!/^[a-z0-9_:-]+$/i.test(draftId) || !/^[a-z0-9_:-]+$/i.test(proposalId)) return null;
+  const path = join(appBuildProposalDir(projectRoot, draftId), `${proposalId}.json`);
+  if (!existsSync(path)) return null;
+  try {
+    const proposal = JSON.parse(readFileSync(path, 'utf8')) as AppBuildDraftAiProposal;
+    return proposal.draftId === draftId && proposal.id === proposalId ? proposal : null;
+  } catch {
+    return null;
+  }
+}
+
+async function generateExplicitAppBuildGap(
+  projectRoot: string,
+  draft: AppBuildDraft,
+  previous: AppBuildDraftAiProposal,
+  requirementId: string,
+  generate: NonNullable<Ctx['generateGovernedAnswer']>,
+): Promise<AppBuildDraftAiProposal> {
+  const requirementOperation = previous.operations.find((operation) => operation.type === 'set_requirements');
+  const requirement = requirementOperation?.type === 'set_requirements'
+    ? requirementOperation.requirements.find((candidate) => candidate.id === requirementId)
+    : undefined;
+  const coverage = requirementOperation?.type === 'set_requirements'
+    ? requirementOperation.coverage?.find((candidate) => candidate.requirementId === requirementId)
+    : undefined;
+  if (!requirement || coverage?.status === 'covered') {
+    throw new Error('APP_BUILD_GAP_NOT_FOUND: choose an uncovered App requirement.');
+  }
+  const answer = await generate(requirement.question);
+  const sql = cleanString(answer.sql);
+  if (!sql) throw new Error('APP_BUILD_GAP_NO_QUERY: the provider did not return executable review DQL.');
+  if (sql.includes('"""')) throw new Error('APP_BUILD_GAP_INVALID_QUERY: generated SQL contains an unsupported triple-quote delimiter.');
+  const proposalId = `proposal_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const key = slugify(requirement.id) || createHash('sha256').update(requirement.question).digest('hex').slice(0, 12);
+  const sourceRef = `proposals/${proposalId}/drafts/${key}.dql`;
+  const source = [
+    `block "app_${slugify(draft.appId)}_${key}" {`,
+    `  domain = "${escapeDqlString(draft.pages[0]?.metadata.domain ?? 'general')}"`,
+    '  type = "custom"',
+    '  status = "review"',
+    '  owner = "local-app-builder"',
+    `  description = "${escapeDqlString(answer.text?.slice(0, 240) || requirement.question)}"`,
+    `  llmContext = "${escapeDqlString(`Explicitly generated App gap: ${requirement.question}`)}"`,
+    '  caveats = ["AI-generated App gap. Validate joins, grain, filters, and interpretation before promotion."]',
+    '  tags = ["app-scoped", "ai-generated", "needs-review"]',
+    '',
+    '  query = """',
+    sql,
+    '  """',
+    '',
+    '  visualization {',
+    `    chart = "${escapeDqlString(normalizeGeneratedViz(answer.suggestedViz))}"`,
+    '  }',
+    '}',
+    '',
+  ].join('\n');
+  const fingerprint = `sha256:${createHash('sha256').update(source).digest('hex')}`;
+  const absolute = join(projectRoot, '.dql', 'local', 'app-builds', draft.id, sourceRef);
+  mkdirSync(dirname(absolute), { recursive: true });
+  writeFileSync(absolute, source, 'utf8');
+  const sourceId = `review-dql:gap:${createHash('sha256').update(`${proposalId}:${requirement.id}`).digest('hex').slice(0, 16)}`;
+  const pageOperation = previous.operations.find((operation) => operation.type === 'upsert_page');
+  if (!pageOperation || pageOperation.type !== 'upsert_page') throw new Error('APP_BUILD_PAGE_REQUIRED: the proposal has no App page.');
+  const tileId = uniqueTileId(pageOperation.page.layout.items, `gap-${requirement.id}`);
+  const y = pageOperation.page.layout.items.reduce((max, tile) => Math.max(max, tile.y + tile.h), 0);
+  const tile: DashboardGridItem = {
+    i: tileId,
+    x: 0,
+    y,
+    w: 6,
+    h: 4,
+    sourceId,
+    sourceRevision: fingerprint,
+    draftAnalysis: { ref: sourceRef, artifactFingerprint: fingerprint },
+    viz: { type: normalizeGeneratedViz(answer.suggestedViz) as DashboardGridItem['viz']['type'] },
+    title: titleForGapQuestion(requirement.question),
+    sourceClass: 'exploratory_analysis',
+    review: { status: 'required', sourceFingerprint: fingerprint },
+    trustState: 'review_required',
+    reviewStatus: 'review_required',
+  };
+  const operations = previous.operations.map((operation): AppBuildDraftOperation => {
+    if (operation === pageOperation && operation.type === 'upsert_page') {
+      const items = [...operation.page.layout.items, tile];
+      return { type: 'upsert_page', page: { ...operation.page, layout: { ...operation.page.layout, items, responsive: responsiveLayoutsForDashboardItems(items) } } };
+    }
+    if (operation.type === 'set_requirements') {
+      return {
+        ...operation,
+        coverage: (operation.coverage ?? []).map((item) => item.requirementId === requirement.id
+          ? { ...item, status: 'covered', sourceIds: [sourceId], componentIds: [tileId], reasons: ['Covered by explicitly generated review-required App DQL.'] }
+          : item),
+      };
+    }
+    return operation;
+  });
+  operations.push({
+    type: 'upsert_source',
+    source: {
+      id: sourceId,
+      kind: 'review_dql',
+      sourceRef,
+      qualifiedIdentity: tile.title,
+      sourceRevision: fingerprint,
+      sourceFingerprint: fingerprint,
+      lifecycle: 'review',
+      capabilities: { measures: requirement.measures, dimensions: requirement.dimensions, outputs: [], filters: requirement.filters, allowedVisualizations: [tile.viz.type], parameters: [] },
+      trustState: 'review_required',
+      reviewStatus: 'required',
+    },
+  });
+  operations.push({
+    type: 'set_review_task',
+    task: {
+      id: `review-gap-${key}`,
+      message: `Validate the joins, grain, filters, and business interpretation for ${tile.title}.`,
+      status: 'open',
+      sourceId,
+      pageId: pageOperation.page.id,
+      tileId,
+    },
+  });
+  return {
+    ...previous,
+    id: proposalId,
+    operations,
+    warnings: Array.from(new Set([...(previous.warnings ?? []), 'Generated gap remains review-required and local-only.'])),
+    summary: {
+      ...previous.summary,
+      covered: previous.summary.covered + 1,
+      gaps: Math.max(0, previous.summary.gaps - 1),
+    },
+  };
+}
+
+async function composeStoredAppBuildDraft(
+  projectRoot: string,
+  current: AppBuildDraft,
+  request: AppBuildComposeRequest,
+): Promise<{ draft: AppBuildDraft; pageIds: string[]; tileIds: string[] }> {
+  if (request.mode === 'ai') {
+    const proposal = loadAppBuildDraftAiProposal(projectRoot, current.id, cleanString(request.proposalId));
+    if (!proposal) throw new Error('APP_BUILD_PROPOSAL_NOT_FOUND: ask AI to rebuild the proposal.');
+    if (proposal.baseRevision !== current.revision || proposal.baseProposalHash !== current.proposalHash) {
+      throw new Error('APP_BUILD_PROPOSAL_CONFLICT: the proposal is based on an older draft revision.');
+    }
+    const selected = new Set(unique((request.selectedSourceIds ?? []).map(cleanString).filter(Boolean)));
+    const available = new Map(proposal.operations.flatMap((operation) => (
+      operation.type === 'upsert_source' ? [[operation.source.id, operation.source] as const] : []
+    )));
+    const missing = Array.from(selected).filter((sourceId) => !available.has(sourceId));
+    if (missing.length) throw new Error(`APP_BUILD_SOURCE_NOT_IN_PROPOSAL: ${missing.join(', ')}`);
+    for (const sourceId of selected) {
+      const source = available.get(sourceId)!;
+      if (current.sourcePolicy === 'governed_only' && source.trustState !== 'certified') {
+        throw new Error(`APP_BUILD_REVIEW_POLICY_REQUIRED: enable review-required sources before adding ${source.qualifiedIdentity ?? source.sourceRef}.`);
+      }
+    }
+    const operations = operationsForSelectedAppBuildSources(proposal.operations, selected);
+    const next = applyAppBuildDraftOperations(current, current.revision, operations);
+    writeStoredAppBuildDraft(projectRoot, next, { expectedRevision: current.revision, operations });
+    const pages = operations.flatMap((operation) => operation.type === 'upsert_page' ? [operation.page] : []);
+    return {
+      draft: next,
+      pageIds: pages.map((page) => page.id),
+      tileIds: pages.flatMap((page) => page.layout.items.filter((item) => item.sourceId && selected.has(item.sourceId)).map((item) => item.i)),
+    };
+  }
+
+  const selections = request.selections ?? [];
+  if (selections.length === 0) throw new Error('APP_BUILD_SOURCE_REQUIRED: choose at least one source.');
+  if (selections.length > 100) throw new Error('APP_BUILD_SOURCE_LIMIT: at most 100 components can be composed at once.');
+  const { ensureAgentProjectReady, resolveAppSourceCatalogRecords } = await import('@duckcodeailabs/dql-agent');
+  await ensureAgentProjectReady(projectRoot);
+  const resolved = resolveAppSourceCatalogRecords(
+    projectRoot,
+    selections.map((selection) => selection.sourceId),
+    current.sourcePolicy,
+  );
+  if (resolved.missingSourceIds.length) {
+    throw new Error(`APP_BUILD_SOURCE_DRIFT: these sources no longer resolve: ${resolved.missingSourceIds.join(', ')}`);
+  }
+  const byId = new Map(resolved.items.map((source) => [source.sourceId, source]));
+  const workingItems = new Map(current.pages.map((page) => [page.id, [...page.layout.items]]));
+  const operations: AppBuildDraftOperation[] = [];
+  const pageIds = new Set<string>();
+  const tileIds: string[] = [];
+  const coverageAdditions = new Map<string, { sourceIds: string[]; componentIds: string[] }>();
+  for (const [index, selection] of selections.entries()) {
+    const source = byId.get(selection.sourceId);
+    if (!source) throw new Error(`APP_BUILD_SOURCE_DRIFT: ${selection.sourceId} no longer resolves.`);
+    if (!source.eligibility.localPreview) {
+      throw new Error(`APP_BUILD_REVIEW_POLICY_REQUIRED: ${source.title} is ${source.lifecycle}; enable review-required sources to add it locally.`);
+    }
+    const page = current.pages.find((candidate) => candidate.id === cleanString(selection.pageId)) ?? current.pages[0];
+    if (!page) throw new Error('APP_BUILD_PAGE_REQUIRED: add a page before adding a source.');
+    const pageItems = workingItems.get(page.id) ?? [...page.layout.items];
+    const tileId = uniqueTileId(pageItems, `${source.name}-${selection.view}`);
+    const y = pageItems.reduce((max, item) => Math.max(max, item.y + item.h), 0);
+    const certified = source.lifecycle === 'certified';
+    const view = selection.view === 'chart'
+      ? normalizeVizType(source.capabilities.chartType ?? source.capabilities.allowedVisualizations?.[0] ?? 'bar')
+      : selection.view === 'kpi' ? 'kpi' : 'table';
+    const tile: DashboardGridItem = {
+      i: tileId,
+      x: (index % 2) * 6,
+      y,
+      w: selection.view === 'kpi' ? 3 : 6,
+      h: selection.view === 'kpi' ? 2 : 4,
+      sourceId: source.sourceId,
+      sourceRevision: source.sourceRevision,
+      block: { ref: source.executionRef },
+      viz: { type: view },
+      title: source.title,
+      sourceClass: certified ? 'certified_block' : 'exploratory_analysis',
+      filterBindings: source.capabilities.filters.map((filter) => ({ filter, binding: filter, mode: 'predicate', capability: 'preflight_required' })),
+      review: { status: certified ? 'not_required' : 'required', sourceFingerprint: source.sourceRevision },
+      trustState: certified ? 'certified' : 'review_required',
+      reviewStatus: certified ? 'certified' : 'review_required',
+    };
+    pageItems.push(tile);
+    workingItems.set(page.id, pageItems);
+    operations.push({ type: 'upsert_source', source: appDraftSourceFromCatalog(source) });
+    operations.push({ type: 'add_tile', pageId: page.id, tile });
+    if (!certified) {
+      operations.push({
+        type: 'set_review_task',
+        task: {
+          id: `review-source-${createHash('sha256').update(source.sourceId).digest('hex').slice(0, 12)}`,
+          message: `${source.title} is ${source.lifecycle} and must be certified, replaced, or removed before Project publication.`,
+          status: 'open',
+          sourceId: source.sourceId,
+          pageId: page.id,
+          tileId,
+        },
+      });
+    }
+    pageIds.add(page.id);
+    tileIds.push(tileId);
+    for (const requirement of current.requirements) {
+      if (!catalogSourceSatisfiesRequirement(source, requirement)) continue;
+      const addition = coverageAdditions.get(requirement.id) ?? { sourceIds: [], componentIds: [] };
+      addition.sourceIds.push(source.sourceId);
+      addition.componentIds.push(tileId);
+      coverageAdditions.set(requirement.id, addition);
+    }
+  }
+  if (current.requirements.length > 0) {
+    const existingByRequirement = new Map(current.coverage.map((item) => [item.requirementId, item]));
+    operations.push({
+      type: 'set_coverage',
+      coverage: current.requirements.map((requirement) => {
+        const existing = existingByRequirement.get(requirement.id);
+        const addition = coverageAdditions.get(requirement.id);
+        const sourceIds = unique([...(existing?.sourceIds ?? []), ...(addition?.sourceIds ?? [])]);
+        const componentIds = unique([...(existing?.componentIds ?? []), ...(addition?.componentIds ?? [])]);
+        const newlyCovered = Boolean(addition?.sourceIds.length && addition.componentIds.length);
+        return {
+          requirementId: requirement.id,
+          status: newlyCovered ? 'covered' : existing?.status ?? 'gap',
+          sourceIds,
+          componentIds,
+          reasons: newlyCovered
+            ? unique([...(existing?.reasons ?? []), 'Covered by a server-resolved source added during manual composition.'])
+            : existing?.reasons ?? ['No selected App source covers this requirement.'],
+        };
+      }),
+    });
+  }
+  const next = applyAppBuildDraftOperations(current, current.revision, operations);
+  writeStoredAppBuildDraft(projectRoot, next, { expectedRevision: current.revision, operations });
+  return { draft: next, pageIds: Array.from(pageIds), tileIds };
+}
+
+function operationsForSelectedAppBuildSources(
+  operations: AppBuildDraftOperation[],
+  selected: Set<string>,
+): AppBuildDraftOperation[] {
+  const keptComponentIds = new Set(operations.flatMap((operation) => {
+    if (operation.type === 'upsert_page') {
+      return operation.page.layout.items.filter((item) => !item.sourceId || selected.has(item.sourceId)).map((item) => item.i);
+    }
+    if (operation.type === 'add_tile' && (!operation.tile.sourceId || selected.has(operation.tile.sourceId))) return [operation.tile.i];
+    return [];
+  }));
+  return operations.flatMap((operation): AppBuildDraftOperation[] => {
+    if (operation.type === 'upsert_source') return selected.has(operation.source.id) ? [operation] : [];
+    if (operation.type === 'set_review_task') {
+      return !operation.task.sourceId || selected.has(operation.task.sourceId) ? [operation] : [];
+    }
+    if (operation.type === 'upsert_page') {
+      const items = operation.page.layout.items.filter((item) => !item.sourceId || selected.has(item.sourceId));
+      return [{
+        ...operation,
+        page: {
+          ...operation.page,
+          layout: {
+            ...operation.page.layout,
+            items,
+            responsive: responsiveLayoutsForDashboardItems(items),
+          },
+        },
+      }];
+    }
+    if (operation.type === 'set_requirements') {
+      const coverage = (operation.coverage ?? []).map((item) => {
+        const sourceIds = item.sourceIds.filter((sourceId) => selected.has(sourceId));
+        const componentIds = item.componentIds.filter((componentId) => keptComponentIds.has(componentId));
+        return {
+          ...item,
+          sourceIds,
+          componentIds,
+          status: sourceIds.length && componentIds.length ? item.status : 'gap' as const,
+        };
+      });
+      return [{ ...operation, coverage }];
+    }
+    if (operation.type === 'set_coverage') {
+      return [{
+        ...operation,
+        coverage: operation.coverage.map((item) => {
+          const sourceIds = item.sourceIds.filter((sourceId) => selected.has(sourceId));
+          const componentIds = item.componentIds.filter((componentId) => keptComponentIds.has(componentId));
+          return { ...item, sourceIds, componentIds, status: sourceIds.length && componentIds.length ? item.status : 'gap' as const };
+        }),
+      }];
+    }
+    return [operation];
+  });
+}
+
+/**
+ * Rehydrate the canonical v3 source registry when a Git-owned App is opened in
+ * Studio. Published dashboard documents intentionally keep the immutable
+ * source binding on each tile; the mutable local draft must restore that
+ * registry before core aggregate validation runs. This is metadata-only and
+ * performs no request-time block scan. Current lifecycle/fingerprint checks
+ * remain the responsibility of preview and publication preflight.
+ */
+function rehydratePublishedAppSources(pages: DashboardDocument[]): {
+  pages: DashboardDocument[];
+  sources: AppBuildDraftSource[];
+  reviewTasks: AppBuildDraft['reviewTasks'];
+  requiresReviewPolicy: boolean;
+} {
+  const sources = new Map<string, AppBuildDraftSource>();
+  const reviewTasks = new Map<string, AppBuildDraft['reviewTasks'][number]>();
+  let requiresReviewPolicy = false;
+  const normalizedPages = pages.map((page) => ({
+    ...page,
+    layout: {
+      ...page.layout,
+      items: page.layout.items.map((tile) => {
+        const hasDataSource = Boolean(tile.block || tile.semantic || tile.draftAnalysis || tile.aiPin);
+        if (!hasDataSource) return tile;
+        const blockRef = tile.block ? ('ref' in tile.block ? tile.block.ref : tile.block.blockId) : undefined;
+        const sourceRef = blockRef
+          ?? tile.draftAnalysis?.ref
+          ?? tile.semantic?.id
+          ?? tile.aiPin?.id
+          ?? `${page.id}/${tile.i}`;
+        const sourceRevision = tile.sourceRevision
+          ?? tile.review?.sourceFingerprint
+          ?? tile.draftAnalysis?.artifactFingerprint
+          ?? tile.semantic?.definitionFingerprint;
+        const sourceId = tile.sourceId
+          ?? `published:${createHash('sha256').update(`${page.id}\0${tile.i}\0${sourceRef}`).digest('hex').slice(0, 20)}`;
+        const certified = Boolean(
+          tile.block
+          && sourceRevision
+          && tile.trustState === 'certified'
+          && tile.review?.status !== 'required',
+        );
+        const kind: AppBuildDraftSource['kind'] = tile.semantic
+          ? 'governed_semantic'
+          : tile.draftAnalysis
+            ? 'review_dql'
+            : tile.block
+              ? 'block'
+              : 'text';
+        const nextSource: AppBuildDraftSource = {
+          id: sourceId,
+          kind,
+          sourceRef,
+          qualifiedIdentity: tile.title || sourceRef,
+          ...(tile.block ? { sourcePath: sourceRef, executionRef: sourceRef } : {}),
+          ...(sourceRevision ? { sourceRevision, sourceFingerprint: sourceRevision } : {}),
+          lifecycle: certified ? 'certified' : tile.draftAnalysis ? 'review' : 'unknown',
+          capabilities: {
+            measures: [],
+            dimensions: [],
+            outputs: [],
+            filters: Array.from(new Set((tile.filterBindings ?? [])
+              .filter((binding) => binding.capability !== 'unsupported')
+              .map((binding) => binding.filter))),
+            allowedVisualizations: Array.from(new Set([
+              tile.viz.type,
+              ...(tile.display?.allowedVisualizations ?? []),
+            ])),
+            parameters: [],
+          },
+          trustState: certified ? 'certified' : 'review_required',
+          reviewStatus: certified ? 'not_required' : 'required',
+        };
+        const previous = sources.get(sourceId);
+        if (!previous) {
+          sources.set(sourceId, nextSource);
+        } else if (
+          previous.sourceRef !== nextSource.sourceRef
+          || previous.sourceRevision !== nextSource.sourceRevision
+          || previous.trustState !== nextSource.trustState
+        ) {
+          requiresReviewPolicy = true;
+          sources.set(sourceId, {
+            ...previous,
+            lifecycle: 'unknown',
+            trustState: 'review_required',
+            reviewStatus: 'required',
+          });
+          reviewTasks.set(`published-source-${sourceId}`, {
+            id: `published-source-${createHash('sha256').update(sourceId).digest('hex').slice(0, 12)}`,
+            message: `${tile.title || sourceRef} has conflicting published source bindings. Refresh or replace it before publication.`,
+            status: 'open',
+            sourceId,
+            pageId: page.id,
+            tileId: tile.i,
+          });
+        }
+        if (!certified) {
+          requiresReviewPolicy = true;
+          reviewTasks.set(`published-source-${sourceId}`, {
+            id: `published-source-${createHash('sha256').update(sourceId).digest('hex').slice(0, 12)}`,
+            message: sourceRevision
+              ? `${tile.title || sourceRef} must be refreshed against the current project source before publication.`
+              : `${tile.title || sourceRef} has no published source revision. Replace or refresh it before publication.`,
+            status: 'open',
+            sourceId,
+            pageId: page.id,
+            tileId: tile.i,
+          });
+        }
+        return tile.sourceId === sourceId ? tile : { ...tile, sourceId, ...(sourceRevision ? { sourceRevision } : {}) };
+      }),
+    },
+  }));
+  return {
+    pages: normalizedPages,
+    sources: Array.from(sources.values()),
+    reviewTasks: Array.from(reviewTasks.values()),
+    requiresReviewPolicy,
+  };
+}
+
 export function createStoredAppBuildDraft(
   projectRoot: string,
   input: {
@@ -4126,7 +4907,8 @@ export function createStoredAppBuildDraft(
       .filter((page): page is DashboardDocument => Boolean(page))
     : [];
   const template = input.template ?? 'blank';
-  const pages = basePages.length ? basePages : [applyAppStudioTemplate(blankPage, template, name)];
+  const published = rehydratePublishedAppSources(basePages);
+  const pages = published.pages.length ? published.pages : [applyAppStudioTemplate(blankPage, template, name)];
   const draft = createAppBuildDraft({
     id,
     appId,
@@ -4134,23 +4916,19 @@ export function createStoredAppBuildDraft(
     ...(base ? { baseApp: { appId: base.app.id, fingerprint: fingerprintAppDirectory(base.appDir) } } : {}),
     authoringMode: input.authoringMode === 'manual' ? 'manual' : 'ai',
     template,
-    sourcePolicy: input.sourcePolicy,
+    sourcePolicy: published.requiresReviewPolicy ? 'include_review_required' : input.sourcePolicy,
     frame: {
       goal: cleanString(input.goal) || `Create ${name}`,
       audience: cleanString(input.audience) || base?.app.audience || 'stakeholders',
       metrics: [], dimensions: [], filters: [], desiredOutput: 'One responsive analytical page',
-      clarificationQuestions: input.authoringMode === 'manual' || base || input.entrypoint === 'ask' ? [] : [{
-        id: 'metric',
-        question: 'Which governed business metric should lead this App?',
-        choices: [
-          { id: 'certified', label: 'Choose a certified block' },
-          { id: 'semantic', label: 'Choose a semantic metric' },
-          { id: 'gap', label: 'Keep a visible gap' },
-        ],
-        required: true,
-      }],
+      // Clarifications are returned only when the App-specific planner finds a
+      // material ambiguity. A synthetic unanswered question here used to make
+      // every new AI draft enter a UI dead-end before planning even ran.
+      clarificationQuestions: [],
     },
+    sources: published.sources,
     pages,
+    reviewTasks: published.reviewTasks,
   });
   writeStoredAppBuildDraft(projectRoot, draft);
   return draft;
@@ -4391,10 +5169,14 @@ function loadStoredAppBuildDraft(projectRoot: string, id: string): AppBuildDraft
   const storage = new LocalAppStorage(defaultLocalAppsDbPath(projectRoot));
   try {
     const stored = storage.getAppBuildDraft(clean);
-    if (stored) return stored;
+    if (stored) {
+      const migrated = migrateLegacyAppBuildDraft(projectRoot, stored);
+      if (migrated && stored.version !== migrated.version) storage.saveAppBuildDraft(migrated);
+      return migrated;
+    }
     const legacyPath = join(appBuildDraftDir(projectRoot), `${clean}.json`);
     if (!existsSync(legacyPath)) return null;
-    const migrated = migrateLegacyAppBuildDraft(JSON.parse(readFileSync(legacyPath, 'utf-8')));
+    const migrated = migrateLegacyAppBuildDraft(projectRoot, JSON.parse(readFileSync(legacyPath, 'utf-8')));
     if (!migrated) return null;
     storage.saveAppBuildDraft(migrated);
     return migrated;
@@ -4418,10 +5200,11 @@ export function writeStoredAppBuildDraft(
   }
 }
 
-function migrateLegacyAppBuildDraft(value: unknown): AppBuildDraft | null {
+function migrateLegacyAppBuildDraft(projectRoot: string, value: unknown): AppBuildDraft | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const legacy = value as Record<string, unknown>;
-  if (legacy.version === 2) return legacy as unknown as AppBuildDraft;
+  if (legacy.version === 3) return legacy as unknown as AppBuildDraft;
+  if (legacy.version === 2) return migrateV2AppBuildDraft(projectRoot, legacy);
   if (legacy.version !== 1 || typeof legacy.id !== 'string' || typeof legacy.appId !== 'string') return null;
   const frame = (legacy.frame && typeof legacy.frame === 'object' ? legacy.frame : {}) as Record<string, unknown>;
   const clarificationQuestions = Array.isArray(frame.clarificationQuestions)
@@ -4462,6 +5245,127 @@ function migrateLegacyAppBuildDraft(value: unknown): AppBuildDraft | null {
     ...migrated,
     revision: typeof legacy.revision === 'number' ? legacy.revision : migrated.revision,
     updatedAt: typeof legacy.updatedAt === 'string' ? legacy.updatedAt : migrated.updatedAt,
+  };
+}
+
+function migrateV2AppBuildDraft(projectRoot: string, legacy: Record<string, unknown>): AppBuildDraft | null {
+  if (typeof legacy.id !== 'string' || typeof legacy.appId !== 'string') return null;
+  const declarations = collectBlockCandidates(projectRoot, { preserveDuplicates: true });
+  const oldSources = Array.isArray(legacy.sources) ? legacy.sources as Array<Record<string, unknown>> : [];
+  const idMap = new Map<string, string>();
+  const revisionById = new Map<string, string>();
+  const pathById = new Map<string, string>();
+  const migrationTasks: AppBuildDraft['reviewTasks'] = [];
+  const sources: AppBuildDraftSource[] = oldSources.flatMap((raw, index) => {
+    const oldId = cleanString(raw.id) || `legacy-source-${index + 1}`;
+    const kind = cleanString(raw.kind);
+    if (!['block', 'certified_block', 'review_block'].includes(kind)) {
+      idMap.set(oldId, oldId);
+      return [{ ...raw, id: oldId } as unknown as AppBuildDraftSource];
+    }
+    const sourceRef = cleanString(raw.sourceRef);
+    const fingerprint = cleanString(raw.sourceFingerprint);
+    const matches = declarations.filter((candidate) => (
+      candidate.path === sourceRef
+      || candidate.id === sourceRef
+      || candidate.name === sourceRef
+      || candidate.path.endsWith(`/${sourceRef}`)
+    ) && (!fingerprint || candidate.fingerprint === fingerprint));
+    if (matches.length === 1) {
+      const candidate = matches[0];
+      const id = canonicalAppBlockSourceId(candidate);
+      idMap.set(oldId, id);
+      revisionById.set(id, candidate.fingerprint);
+      pathById.set(id, candidate.path);
+      const certified = candidate.status === 'certified';
+      return [{
+        id,
+        kind: 'block',
+        sourceRef: candidate.path,
+        qualifiedIdentity: `${candidate.domain || 'global'}::block::${candidate.name}`,
+        sourcePath: candidate.path,
+        executionRef: candidate.path,
+        sourceRevision: candidate.fingerprint,
+        sourceFingerprint: candidate.fingerprint,
+        lifecycle: certified ? 'certified' : candidate.status === 'review' ? 'review' : 'draft',
+        capabilities: {
+          measures: [],
+          dimensions: candidate.dimensionIds,
+          outputs: [],
+          filters: candidate.filterIds,
+          chartType: candidate.chartType,
+          allowedVisualizations: candidate.chartType ? [candidate.chartType] : [],
+          parameters: [],
+        },
+        trustState: certified ? 'certified' : 'review_required',
+        reviewStatus: certified ? 'not_required' : 'required',
+      }];
+    }
+    idMap.set(oldId, oldId);
+    migrationTasks.push({
+      id: `legacy-source-${createHash('sha256').update(oldId).digest('hex').slice(0, 12)}`,
+      message: matches.length > 1
+        ? `Legacy source ${sourceRef || oldId} is ambiguous. Select the exact path and revision before previewing or publishing.`
+        : `Legacy source ${sourceRef || oldId} no longer resolves. Replace or remove it before previewing or publishing.`,
+      status: 'open',
+      sourceId: oldId,
+    });
+    return [{
+      id: oldId,
+      kind: 'block',
+      sourceRef: sourceRef || oldId,
+      qualifiedIdentity: cleanString(raw.qualifiedIdentity) || sourceRef || oldId,
+      sourceRevision: fingerprint || undefined,
+      sourceFingerprint: fingerprint || undefined,
+      lifecycle: 'unknown',
+      capabilities: { measures: [], dimensions: [], outputs: [], filters: [], allowedVisualizations: [], parameters: [] },
+      trustState: 'review_required',
+      reviewStatus: 'required',
+    }];
+  });
+  const pages = (Array.isArray(legacy.pages) ? legacy.pages as DashboardDocument[] : []).map((page) => ({
+    ...page,
+    layout: {
+      ...page.layout,
+      items: page.layout.items.map((item) => {
+        if (item.sourceId) return item;
+        const blockRef = item.block
+          ? ('ref' in item.block ? item.block.ref : item.block.blockId)
+          : undefined;
+        if (!blockRef) return item;
+        const oldSource = oldSources.find((source) => {
+          const ref = cleanString(source.sourceRef);
+          return ref === blockRef || cleanString(source.id) === `block:${blockRef}` || cleanString(source.id) === `review-block:${blockRef}`;
+        });
+        const sourceId = oldSource ? idMap.get(cleanString(oldSource.id)) : undefined;
+        if (!sourceId) return item;
+        return {
+          ...item,
+          sourceId,
+          sourceRevision: revisionById.get(sourceId) ?? (cleanString(oldSource?.sourceFingerprint) || undefined),
+          ...(pathById.get(sourceId) ? { block: { ref: pathById.get(sourceId)! } } : {}),
+        };
+      }),
+    },
+  }));
+  const coverage = (Array.isArray(legacy.coverage) ? legacy.coverage as AppBuildDraft['coverage'] : []).map((item) => ({
+    ...item,
+    sourceIds: item.sourceIds.map((id) => idMap.get(id) ?? id),
+  }));
+  const migratedWithoutHash = {
+    ...(legacy as unknown as AppBuildDraft),
+    version: 3 as const,
+    sources,
+    pages,
+    coverage,
+    reviewTasks: [
+      ...(Array.isArray(legacy.reviewTasks) ? legacy.reviewTasks as AppBuildDraft['reviewTasks'] : []),
+      ...migrationTasks,
+    ],
+  };
+  return {
+    ...migratedWithoutHash,
+    proposalHash: appBuildDraftHash({ ...migratedWithoutHash, proposalHash: undefined }),
   };
 }
 
@@ -4572,20 +5476,27 @@ export function preflightStoredAppBuildDraft(projectRoot: string, draft: AppBuil
     if (!receipt || receipt.revision !== draft.revision) errors.push(`Run a current settled preview for page ${page.metadata.title || page.id} before Project publication.`);
   }
   for (const source of draft.sources) {
-    if (source.kind === 'certified_block') {
+    if (source.kind === 'block' || source.kind === 'certified_block') {
       const block = blocks.find((candidate) => candidate.id === source.sourceRef || candidate.name === source.sourceRef || candidate.path === source.sourceRef);
-      if (!block || block.status !== 'certified') errors.push(`Source ${source.id} does not resolve to a current certified block.`);
-      if (block && source.sourceFingerprint && source.sourceFingerprint !== block.fingerprint) errors.push(`Source ${source.id} changed after selection.`);
+      const lifecycle = source.lifecycle ?? (source.kind === 'certified_block' ? 'certified' : block?.status);
+      if (!block) errors.push(`Source ${source.id} no longer resolves at ${source.sourceRef}.`);
+      if (block && canonicalAppBlockSourceId(block) !== source.id && source.kind === 'block') errors.push(`Source ${source.id} no longer matches its qualified path identity.`);
+      if (!block || block.status !== 'certified' || lifecycle !== 'certified' || source.trustState !== 'certified') {
+        errors.push(`Source ${source.qualifiedIdentity ?? source.id} is ${lifecycle ?? 'unknown'} and cannot be published to the Project.`);
+      }
+      if (block && (source.sourceRevision ?? source.sourceFingerprint) && (source.sourceRevision ?? source.sourceFingerprint) !== block.fingerprint) {
+        errors.push(`Source ${source.qualifiedIdentity ?? source.id} changed after selection.`);
+      }
     }
     if (source.kind === 'governed_semantic' || source.kind === 'semantic_query') {
       if (source.reviewStatus !== 'approved' || !source.snapshotId || !source.receiptId) {
         errors.push(`Source ${source.id} requires snapshot-bound semantic approval before Project publication.`);
       }
     }
-    if (source.kind === 'review_block' || source.kind === 'review_dql' || source.kind === 'exploratory_sql') {
+    if ((source.kind === 'block' && source.trustState !== 'certified') || source.kind === 'review_block' || source.kind === 'review_dql' || source.kind === 'exploratory_sql') {
       errors.push(`Source ${source.id} is review-required and cannot be published to the Project.`);
     }
-    if ((source.kind === 'review_block' || source.kind === 'review_dql' || source.kind === 'exploratory_sql') && draft.sourcePolicy !== 'include_review_required') {
+    if (((source.kind === 'block' && source.trustState !== 'certified') || source.kind === 'review_block' || source.kind === 'review_dql' || source.kind === 'exploratory_sql') && draft.sourcePolicy !== 'include_review_required') {
       errors.push(`Source ${source.id} requires include_review_required policy.`);
     }
   }
@@ -4711,7 +5622,7 @@ export function publishStoredAppBuildDraft(
   const domain = draft.pages[0]?.metadata.domain || 'general';
   const name = draft.name.trim() || draft.appId;
   const containsSemantic = draft.sources.some((source) => source.kind === 'governed_semantic' || source.kind === 'semantic_query');
-  const hasCertifiedAnalysis = draft.sources.some((source) => source.kind === 'certified_block');
+  const hasCertifiedAnalysis = draft.sources.some((source) => (source.kind === 'block' || source.kind === 'certified_block') && source.trustState === 'certified');
   const lifecycle = hasCertifiedAnalysis && !containsSemantic ? 'certified' as const : 'review' as const;
   const app: AppDocument = {
     version: 1,
@@ -5909,7 +6820,7 @@ function appReadme(app: AppDocument, audience: string, blocks: BlockCandidate[],
   ].join('\n');
 }
 
-function collectBlockCandidates(projectRoot: string): BlockCandidate[] {
+function collectBlockCandidates(projectRoot: string, options: { preserveDuplicates?: boolean } = {}): BlockCandidate[] {
   const blocks: BlockCandidate[] = [];
   const seen = new Set<string>();
   const scanDir = (dir: string) => {
@@ -5955,6 +6866,7 @@ function collectBlockCandidates(projectRoot: string): BlockCandidate[] {
   };
   scanDir(join(projectRoot, 'blocks'));
   scanDir(join(projectRoot, 'domains'));
+  if (options.preserveDuplicates) return blocks.sort((left, right) => left.path.localeCompare(right.path));
   const byId = new Map<string, BlockCandidate>();
   for (const block of blocks) {
     const current = byId.get(block.id);
@@ -5967,6 +6879,11 @@ function collectBlockCandidates(projectRoot: string): BlockCandidate[] {
     if (blockRank > currentRank || (blockRank === currentRank && block.lastModified > current.lastModified)) byId.set(block.id, block);
   }
   return Array.from(byId.values());
+}
+
+function canonicalAppBlockSourceId(block: Pick<BlockCandidate, 'domain' | 'path' | 'name'>): string {
+  const pathIdentity = createHash('sha256').update(`${block.path}\u0000${block.name}`).digest('hex').slice(0, 20);
+  return `app:block:${block.domain || 'global'}:${pathIdentity}`;
 }
 
 function declaredAppFilterIds(source: string): string[] {

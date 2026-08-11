@@ -47,6 +47,7 @@ export interface AppBuildRequirementCoverage {
 }
 
 export type AppBuildDraftSourceKind =
+  | 'block'
   | 'certified_block'
   | 'governed_semantic'
   | 'review_block'
@@ -57,14 +58,45 @@ export type AppBuildDraftSourceKind =
   /** v1 read compatibility; generated exploration is materialized as review_dql. */
   | 'exploratory_sql';
 
+export type AppBuildSourceLifecycle =
+  | 'certified'
+  | 'review'
+  | 'draft'
+  | 'pending_recertification'
+  | 'deprecated'
+  | 'unknown';
+
+export interface AppBuildSourceCapabilities {
+  measures: string[];
+  dimensions: string[];
+  outputs: string[];
+  filters: string[];
+  grain?: string;
+  chartType?: string;
+  allowedVisualizations?: string[];
+  parameters: Array<{
+    name: string;
+    type?: string;
+    required: boolean;
+    hasDefault: boolean;
+  }>;
+}
+
 export type AppBuildDraftSource = {
+  /** Canonical, path-disambiguated source id used by tiles and coverage. */
   id: string;
   kind: AppBuildDraftSourceKind;
+  /** Legacy display/execution reference retained for v1/v2 readers. */
   sourceRef: string;
   qualifiedIdentity?: string;
+  sourcePath?: string;
+  executionRef?: string;
   snapshotId?: string;
+  sourceRevision?: string;
   sourceFingerprint?: string;
   receiptId?: string;
+  lifecycle?: AppBuildSourceLifecycle;
+  capabilities?: AppBuildSourceCapabilities;
   trustState: 'certified' | 'review_required' | 'draft_ready';
   reviewStatus: 'not_required' | 'required' | 'approved';
 };
@@ -102,7 +134,7 @@ export interface AppBuildPreflightReceipt {
  * Publish to Project and is never used as the mutable editor backing store.
  */
 export interface AppBuildDraft {
-  version: 2;
+  version: 3;
   id: string;
   appId: string;
   name: string;
@@ -170,7 +202,7 @@ export function createAppBuildDraft(input: {
   const clarifications = input.frame.clarificationQuestions ?? [];
   const needsClarification = clarifications.some((question) => question.required && !question.answerId);
   const draftWithoutHash = {
-    version: 2 as const,
+    version: 3 as const,
     id: input.id,
     appId: input.appId,
     name: input.name?.trim() || input.frame.goal.trim() || input.appId,
@@ -205,6 +237,7 @@ export function applyAppBuildDraftOperations(
   if (operations.length === 0) return draft;
   let next: AppBuildDraft = structuredClone(draft);
   for (const operation of operations) next = applyOperation(next, operation);
+  next = reconcileCoverageReferences(next);
   const contentChanged = operations.some((operation) => operation.type !== 'set_preview_receipt');
   const settledDataChanged = operations.some((operation) => !operationPreservesSettledData(draft, operation));
   next.updatedAt = now;
@@ -226,6 +259,29 @@ export function applyAppBuildDraftOperations(
   }
   assertAppBuildDraftPolicy(next);
   return next;
+}
+
+/**
+ * Coverage is part of the aggregate, not an independent planner memo. Keep its
+ * references aligned after source/page/tile mutations so a removed component
+ * can never remain reported as covered or block publication as a ghost gap.
+ */
+function reconcileCoverageReferences(draft: AppBuildDraft): AppBuildDraft {
+  const sourceIds = new Set(draft.sources.map((source) => source.id));
+  const componentIds = new Set(draft.pages.flatMap((page) => page.layout.items.map((item) => item.i)));
+  return {
+    ...draft,
+    coverage: draft.coverage.map((item) => {
+      const validSourceIds = item.sourceIds.filter((sourceId) => sourceIds.has(sourceId));
+      const validComponentIds = item.componentIds.filter((componentId) => componentIds.has(componentId));
+      return {
+        ...item,
+        sourceIds: validSourceIds,
+        componentIds: validComponentIds,
+        status: validSourceIds.length > 0 && validComponentIds.length > 0 ? item.status : 'gap',
+      };
+    }),
+  };
 }
 
 function operationPreservesSettledData(draft: AppBuildDraft, operation: AppBuildDraftOperation): boolean {
@@ -401,9 +457,30 @@ function assertAppBuildDraftPolicy(draft: Omit<AppBuildDraft, 'proposalHash'> | 
   if (!draft.id.trim() || !draft.appId.trim()) throw new Error('App Build Draft requires id and appId');
   if (!draft.name.trim()) throw new Error('App Build Draft requires a name');
   if (!draft.frame.goal.trim()) throw new Error('App Build Frame requires a goal');
+  const sourceIds = new Set<string>();
+  for (const source of draft.sources) {
+    if (sourceIds.has(source.id)) throw new Error(`Duplicate App source id: ${source.id}`);
+    sourceIds.add(source.id);
+    if (source.sourceRevision && source.sourceFingerprint && source.sourceRevision !== source.sourceFingerprint) {
+      throw new Error(`Source ${source.id} has conflicting revision fingerprints`);
+    }
+  }
+  for (const coverage of draft.coverage) {
+    for (const sourceId of coverage.sourceIds) {
+      if (!sourceIds.has(sourceId)) throw new Error(`Coverage ${coverage.requirementId} references missing source ${sourceId}`);
+    }
+  }
+  for (const page of draft.pages) {
+    for (const tile of page.layout.items) {
+      if (tile.sourceId && !sourceIds.has(tile.sourceId)) {
+        throw new Error(`Tile ${page.id}/${tile.i} references missing source ${tile.sourceId}`);
+      }
+    }
+  }
   if (draft.sourcePolicy === 'governed_only') {
     const reviewSource = draft.sources.find((source) =>
-      source.kind === 'review_block'
+      (source.kind === 'block' && source.trustState !== 'certified')
+      || source.kind === 'review_block'
       || source.kind === 'review_dql'
       || source.kind === 'exploratory_sql');
     if (reviewSource) throw new Error(`Source ${reviewSource.id} requires include_review_required policy`);

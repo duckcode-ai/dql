@@ -281,6 +281,70 @@ describe('Apps command center API helpers', () => {
     expect(existsSync(join(root, '.dql/local/app-build-staging', draft.id))).toBe(false);
   });
 
+  it('rehydrates published source bindings for safe editing and returns every page from the App route', async () => {
+    const root = createProject();
+    const created = createAppPackage(root, {
+      name: 'Published Sales Review',
+      domain: 'sales',
+      dashboardTitle: 'Overview',
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const appId = created.app.id;
+    const overviewPath = join(root, 'apps', appId, 'dashboards', 'overview.dqld');
+    const overview = JSON.parse(readFileSync(overviewPath, 'utf-8'));
+    const sourceId = 'app:block:sales:stable-source';
+    const sourceRevision = 'sha256:published-source-revision';
+    overview.layout.items = [{
+      i: 'sales-trend', x: 0, y: 0, w: 6, h: 4,
+      sourceId, sourceRevision,
+      block: { ref: 'blocks/sales/sales-trend.dql' },
+      viz: { type: 'line' },
+      title: 'Sales trend',
+      sourceClass: 'certified_block',
+      trustState: 'certified',
+      reviewStatus: 'certified',
+      review: { status: 'not_required', sourceFingerprint: sourceRevision },
+    }];
+    overview.layout.responsive = undefined;
+    writeFileSync(overviewPath, JSON.stringify(overview, null, 2) + '\n', 'utf-8');
+    const pageTwo = {
+      ...overview,
+      id: 'page-2',
+      metadata: { ...overview.metadata, title: 'Regional detail' },
+      layout: { ...overview.layout, items: [{ ...overview.layout.items[0], i: 'regional-sales', title: 'Regional sales' }] },
+    };
+    writeFileSync(join(root, 'apps', appId, 'dashboards', 'page-2.dqld'), JSON.stringify(pageTwo, null, 2) + '\n', 'utf-8');
+
+    const appResponse = await invokeAppsApi(root, `/api/apps/${appId}`, 'GET', {});
+    expect(appResponse).toMatchObject({ handled: true, status: 200 });
+    expect((appResponse.payload as any).dashboards).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'overview', itemCount: 1 }),
+      expect.objectContaining({ id: 'page-2', itemCount: 1 }),
+    ]));
+
+    const editDraft = createStoredAppBuildDraft(root, {
+      baseAppId: appId,
+      name: 'Published Sales Review',
+      goal: 'Safely edit the published App',
+      authoringMode: 'manual',
+      sourcePolicy: 'governed_only',
+    });
+    expect(editDraft.pages).toHaveLength(2);
+    expect(editDraft.sources).toEqual([
+      expect.objectContaining({
+        id: sourceId,
+        sourceRef: 'blocks/sales/sales-trend.dql',
+        sourceRevision,
+        lifecycle: 'certified',
+        trustState: 'certified',
+      }),
+    ]);
+    expect(editDraft.pages.flatMap((page) => page.layout.items)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceId, sourceRevision }),
+    ]));
+  });
+
   it('adds a certified Ask answer to the editable draft without writing Project App source', () => {
     const root = createProject();
     writeBlock(root, 'revenue/monthly-revenue.dql', {
@@ -914,7 +978,7 @@ describe('Apps command center API helpers', () => {
     expect(dashboard.layout.items.some((item) => item.text?.markdown?.includes('SELECT '))).toBe(false);
   });
 
-  it('offers previewed exploratory SQL as opt-in review DQL in the unified App Build proposal', async () => {
+  it('does not generate uncovered SQL unless the user explicitly requests the gap action', async () => {
     const root = createProject();
     writeBlock(root, 'revenue/total_revenue.dql', {
       name: 'Total Revenue',
@@ -933,30 +997,196 @@ describe('Apps command center API helpers', () => {
       template: 'operational_dashboard',
     });
 
+    let generated = false;
     const proposal = await proposeAppBuildDraftOperations(root, draft, {
       prompt: 'Build a revenue app and explain why revenue is changing.',
     }, {
-      generateGovernedAnswer: async (question) => ({
-        text: `Exploration for ${question}`,
-        sql: 'SELECT region, SUM(revenue) AS revenue FROM analytics.orders GROUP BY region',
-        suggestedViz: 'bar',
-        result: { columns: ['region', 'revenue'], rows: [{ region: 'NA', revenue: 100 }], rowCount: 1 },
-      } as never),
+      generateGovernedAnswer: async (question) => {
+        generated = true;
+        return {
+          text: `Exploration for ${question}`,
+          sql: 'SELECT region, SUM(revenue) AS revenue FROM analytics.orders GROUP BY region',
+          suggestedViz: 'bar',
+          result: { columns: ['region', 'revenue'], rows: [{ region: 'NA', revenue: 100 }], rowCount: 1 },
+        } as never;
+      },
     });
 
     const reviewSource = proposal.operations.find((operation) => operation.type === 'upsert_source' && operation.source.kind === 'review_dql');
-    expect(reviewSource).toBeTruthy();
-    if (!reviewSource || reviewSource.type !== 'upsert_source') return;
-    expect(proposal.defaultSelectedSourceIds).not.toContain(reviewSource.source.id);
-    expect(readFileSync(join(root, '.dql', 'local', 'app-builds', draft.id, reviewSource.source.sourceRef), 'utf-8')).toContain('status = "review"');
+    expect(generated).toBe(false);
+    expect(reviewSource).toBeUndefined();
     const page = proposal.operations.find((operation) => operation.type === 'upsert_page');
     expect(page?.type === 'upsert_page' ? page.page.layout.items : []).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        draftAnalysis: expect.objectContaining({ ref: reviewSource.source.sourceRef }),
-        trustState: 'review_required',
-      }),
+      expect.objectContaining({ sourceId: expect.stringMatching(/^app:block:/) }),
     ]));
     expect(JSON.stringify(page)).not.toContain('SELECT region');
+  });
+
+  it('uses one catalog for all-draft AI and manual composition, with explicit gap generation (PRD-007, API-014)', async () => {
+    const root = createProject();
+    writeBlock(root, 'sales/orders-by-region.dql', {
+      name: 'Orders by Region',
+      domain: 'sales',
+      status: 'draft',
+      tags: ['orders', 'region'],
+      description: 'Draft regional order totals',
+      chart: 'bar',
+      dimensions: ['region'],
+      allowedFilters: ['order_date', 'region'],
+    });
+
+    const manualCreated = await invokeAppsApi(root, '/api/app-builds', 'POST', {
+      name: 'Manual Draft Sources', goal: 'Show orders by region', authoringMode: 'manual',
+      sourcePolicy: 'include_review_required', domain: 'sales',
+    });
+    const manualDraft = (manualCreated.payload as any).draft;
+    const catalog = await invokeAppsApi(
+      root,
+      `/api/app-builds/${manualDraft.id}/source-candidates?q=orders&limit=50`,
+      'GET',
+      {},
+    );
+    expect(catalog).toMatchObject({ handled: true, status: 200, payload: { ok: true } });
+    const draftSource = (catalog.payload as any).items[0];
+    expect(draftSource).toMatchObject({
+      lifecycle: 'draft',
+      trust: 'review_required',
+      eligibility: { discoverable: true, localPreview: true, projectPublish: false },
+    });
+
+    const framed = await invokeAppsApi(root, `/api/app-builds/${manualDraft.id}`, 'PATCH', {
+      expectedRevision: manualDraft.revision,
+      expectedProposalHash: manualDraft.proposalHash,
+      operations: [{
+        type: 'set_requirements',
+        requirements: [{
+          id: 'regional-orders', question: 'Orders by region', role: 'breakdown', required: true,
+          measures: [], dimensions: ['region'], filters: ['order_date'],
+        }],
+        coverage: [{
+          requirementId: 'regional-orders', status: 'gap', sourceIds: [], componentIds: [],
+          reasons: ['No selected source covers this requirement.'],
+        }],
+      }],
+    });
+    const framedManualDraft = (framed.payload as any).draft;
+
+    const manualCompose = await invokeAppsApi(root, `/api/app-builds/${manualDraft.id}/compose`, 'POST', {
+      mode: 'manual', expectedRevision: framedManualDraft.revision,
+      expectedProposalHash: framedManualDraft.proposalHash,
+      selections: [{ sourceId: draftSource.sourceId, pageId: 'overview', view: 'chart' }],
+    });
+    const composedManual = (manualCompose.payload as any).draft;
+    expect(composedManual).toMatchObject({ version: 3, sourcePolicy: 'include_review_required' });
+    expect(composedManual.sources[0]).toMatchObject({
+      id: draftSource.sourceId, kind: 'block', lifecycle: 'draft', trustState: 'review_required',
+    });
+    expect(composedManual.pages[0].layout.items[0]).toMatchObject({
+      sourceId: draftSource.sourceId, sourceRevision: draftSource.sourceRevision,
+    });
+    expect(composedManual.coverage).toEqual([
+      expect.objectContaining({
+        requirementId: 'regional-orders', status: 'covered',
+        sourceIds: [draftSource.sourceId], componentIds: [composedManual.pages[0].layout.items[0].i],
+      }),
+    ]);
+
+    const aiCreated = await invokeAppsApi(root, '/api/app-builds', 'POST', {
+      name: 'AI Draft Sources', goal: 'Build regional orders and explain order growth', authoringMode: 'ai',
+      sourcePolicy: 'include_review_required', domain: 'sales',
+    });
+    const aiDraft = (aiCreated.payload as any).draft;
+    let planningCalls = 0;
+    const proposalResponse = await invokeAppsApi(root, `/api/app-builds/${aiDraft.id}/ai-proposals`, 'POST', {
+      prompt: 'Build regional orders and explain order growth',
+      expectedRevision: aiDraft.revision,
+      proposalHash: aiDraft.proposalHash,
+    }, {
+      planAppBuild: async () => {
+        planningCalls += 1;
+        return JSON.stringify({
+          frame: { goal: 'Regional order health', metrics: ['orders'], dimensions: ['region'], filters: ['order_date'] },
+          requirements: [
+            { id: 'r-orders', question: 'Orders by region', role: 'breakdown', required: true, measures: ['orders'], dimensions: ['region'], filters: ['order_date'] },
+            { id: 'r-growth', question: 'Explain order growth', role: 'trend', required: true, measures: ['orders'], dimensions: ['week'], filters: ['order_date'] },
+          ],
+          components: [
+            { id: 'orders-chart', title: 'Orders by region', sourceId: draftSource.sourceId, requirementIds: ['r-orders'], role: 'breakdown', view: 'bar', rationale: 'Exact regional draft block' },
+          ],
+        });
+      },
+    });
+    const proposal = (proposalResponse.payload as any).proposal;
+    expect(planningCalls).toBe(1);
+    expect(proposal.summary).toMatchObject({ requirements: 2, covered: 1, gaps: 1, certifiedSources: 0 });
+    expect(proposal.defaultSelectedSourceIds).toEqual([draftSource.sourceId]);
+
+    const gapResponse = await invokeAppsApi(
+      root,
+      `/api/app-builds/${aiDraft.id}/ai-proposals/${proposal.id}/gaps`,
+      'POST',
+      { expectedRevision: aiDraft.revision, expectedProposalHash: aiDraft.proposalHash, requirementId: 'r-growth' },
+      {
+        generateGovernedAnswer: async () => ({
+          text: 'Review weekly order growth.',
+          sql: 'SELECT order_week, COUNT(*) AS orders FROM analytics.orders GROUP BY order_week',
+          suggestedViz: 'line',
+        } as never),
+      },
+    );
+    const revised = (gapResponse.payload as any).proposal;
+    const reviewSource = revised.operations.find((operation: any) => operation.type === 'upsert_source' && operation.source.kind === 'review_dql');
+    expect(reviewSource?.source).toMatchObject({ lifecycle: 'review', trustState: 'review_required' });
+    expect(revised.summary).toMatchObject({ covered: 2, gaps: 0 });
+    expect(existsSync(join(root, '.dql', 'local', 'app-builds', aiDraft.id, reviewSource.source.sourceRef))).toBe(true);
+  });
+
+  it('lazily migrates v2 only when source identity is unique and exposes ambiguity as a blocker', async () => {
+    const root = createProject();
+    const duplicate = {
+      name: 'Performance', status: 'draft', tags: ['performance'],
+      description: 'Performance dashboard source', chart: 'bar',
+    };
+    writeBlock(root, 'sales/performance.dql', { ...duplicate, domain: 'sales' });
+    writeBlock(root, 'customer/performance.dql', { ...duplicate, domain: 'customer' });
+    const draft = createStoredAppBuildDraft(root, {
+      name: 'Legacy Performance', goal: 'Monitor performance', authoringMode: 'manual',
+      sourcePolicy: 'include_review_required',
+    });
+    const legacy = {
+      ...draft,
+      version: 2,
+      sources: [{
+        id: 'review-block:Performance', kind: 'review_block', sourceRef: 'Performance',
+        trustState: 'review_required', reviewStatus: 'required',
+      }],
+      pages: draft.pages.map((page) => ({
+        ...page,
+        layout: {
+          ...page.layout,
+          items: [{
+            i: 'performance', x: 0, y: 0, w: 6, h: 4, title: 'Performance',
+            block: { blockId: 'Performance' }, viz: { type: 'bar' },
+          }],
+        },
+      })),
+    };
+    const storage = new LocalAppStorage(defaultLocalAppsDbPath(root));
+    try {
+      storage.saveAppBuildDraft(legacy as never);
+    } finally {
+      storage.close();
+    }
+
+    const response = await invokeAppsApi(root, `/api/app-builds/${draft.id}`, 'GET', {});
+    const migrated = (response.payload as any).draft;
+    expect(migrated.version).toBe(3);
+    expect(migrated.sources[0]).toMatchObject({
+      id: 'review-block:Performance', lifecycle: 'unknown', trustState: 'review_required',
+    });
+    expect(migrated.reviewTasks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'open', sourceId: 'review-block:Performance', message: expect.stringContaining('ambiguous') }),
+    ]));
   });
 
   it('retains bounded App repair evidence and only makes a successful repaired preview selectable', async () => {
@@ -2737,6 +2967,7 @@ async function invokeAppsApi(
   path: string,
   method: string,
   body: unknown,
+  hooks: Partial<Pick<Parameters<typeof handleAppsApi>[0], 'planAppBuild' | 'generateGovernedAnswer'>> = {},
 ): Promise<{ handled: boolean; status: number; payload: unknown }> {
   const req = Readable.from([Buffer.from(JSON.stringify(body), 'utf-8')]) as IncomingMessage;
   req.method = method;
@@ -2752,12 +2983,14 @@ async function invokeAppsApi(
       return this;
     },
   } as unknown as ServerResponse;
+  const url = new URL(`http://local.test${path}`);
   const handled = await handleAppsApi({
     req,
     res,
-    url: new URL(`http://local.test${path}`),
-    path,
+    url,
+    path: url.pathname,
     projectRoot,
+    ...hooks,
   });
   return { handled, status, payload: responseBody ? JSON.parse(responseBody) : undefined };
 }

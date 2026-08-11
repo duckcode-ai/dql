@@ -1026,6 +1026,19 @@ export interface BlockStudioDiagnostic {
   severity: 'error' | 'warning' | 'info';
   message: string;
   code?: string;
+  /** Short, user-facing label. The full compiler output belongs in technicalDetails. */
+  title?: string;
+  /** Form area that owns the problem, such as Metrics, Parameters, or DQL source. */
+  field?: string;
+  /** Exact semantic references or fields affected by this diagnostic. */
+  references?: string[];
+  /** Concrete next step that can resolve the problem. */
+  correction?: string;
+  /** Raw parser/compiler text, rendered only in a collapsed technical-details control. */
+  technicalDetails?: string;
+  /** Stable UI intent; the browser still decides how to perform the action. */
+  action?: 'edit_source' | 'review_metrics' | 'configure_runtime' | 'edit_parameters' | 'run_again';
+  location?: { line?: number; column?: number };
 }
 
 export interface BlockStudioValidation {
@@ -1056,11 +1069,20 @@ export interface BlockStudioPreview {
   sql: string;
   result: QueryResult;
   chartConfig?: CellChartConfig;
+  /** Runtime-aware validation produced by the same compile used for this result. */
+  validation?: BlockStudioValidation;
   invocation?: {
     resolvedParameters: Array<{ name: string; value: unknown; source: 'policy' | 'explicit' | 'question' | 'prior_result' | 'surface' | 'default' }>;
     unresolvedParameters: string[];
     auditId: string;
   };
+}
+
+export interface BlockStudioRunSummary {
+  rowCount: number;
+  executionTime?: number;
+  columns: string[];
+  ranAt: string;
 }
 
 export interface BlockStudioMetadata {
@@ -1353,6 +1375,8 @@ export interface BlockStudioOpenPayload {
   metadata: BlockStudioMetadata;
   companionPath: string | null;
   validation: BlockStudioValidation;
+  /** Compact, source-fingerprint-bound local receipt. Result rows are never persisted here. */
+  lastRun?: BlockStudioRunSummary;
   /** Redacted save-time compiler outcome; the block may still be safely saved when this fails. */
   lineageRefresh?: {
     status: 'queued' | 'ready' | 'failed';
@@ -1403,6 +1427,7 @@ export interface NotebookState {
   blockStudioDraft: string;
   blockStudioDirty: boolean;
   blockStudioPreview: BlockStudioPreview | null;
+  blockStudioLastRun: BlockStudioRunSummary | null;
   blockStudioValidation: BlockStudioValidation | null;
   blockStudioMetadata: BlockStudioMetadata | null;
   blockStudioCatalog: BlockStudioCatalog | null;

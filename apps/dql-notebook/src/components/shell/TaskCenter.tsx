@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useOperations } from '../../operations/OperationsProvider';
 import { useNotebookStore } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
+import { taskOutcomePresentation } from './task-center-presentation';
 
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'interrupted']);
 
@@ -14,6 +15,7 @@ export function TaskCenter() {
   const visibleOperations = operations
     .filter((operation) => !TERMINAL.has(operation.status) || operation.type !== 'project_refresh')
     .slice(0, 8);
+  const attentionCount = visibleOperations.filter((operation) => taskOutcomePresentation(operation).tone === 'attention').length;
 
   useEffect(() => {
     if (!open) return;
@@ -44,7 +46,7 @@ export function TaskCenter() {
           height: 28,
           padding: '0 9px',
           borderRadius: 6,
-          border: `1px solid ${activeCount > 0 ? t.accent : t.btnBorder}`,
+          border: `1px solid ${activeCount > 0 ? t.accent : attentionCount > 0 ? t.warning : t.btnBorder}`,
           background: open ? t.btnHover : t.btnBg,
           color: t.textSecondary,
           cursor: 'pointer',
@@ -62,11 +64,11 @@ export function TaskCenter() {
             width: 7,
             height: 7,
             borderRadius: 999,
-            background: activeCount > 0 ? t.accent : t.success,
+            background: activeCount > 0 ? t.accent : attentionCount > 0 ? t.warning : t.success,
             boxShadow: activeCount > 0 ? `0 0 0 3px ${t.accent}20` : 'none',
           }}
         />
-        {activeCount > 0 ? `${activeCount} running` : 'Tasks'}
+        {activeCount > 0 ? `${activeCount} running` : attentionCount > 0 ? `${attentionCount} needs attention` : 'Tasks'}
       </button>
       {open && (
         <div
@@ -91,8 +93,15 @@ export function TaskCenter() {
             Background tasks
           </div>
           {visibleOperations.map((operation) => {
-            const active = operation.status === 'queued' || operation.status === 'running';
-            const failed = operation.status === 'failed' || operation.status === 'interrupted';
+            const presentation = taskOutcomePresentation(operation);
+            const active = presentation.active;
+            const statusColor = presentation.tone === 'failure'
+              ? t.error
+              : presentation.tone === 'attention'
+                ? t.warning
+                : presentation.tone === 'success'
+                  ? t.success
+                  : t.textMuted;
             return (
               <div
                 key={operation.id}
@@ -108,12 +117,12 @@ export function TaskCenter() {
                   <span style={{ flex: 1, color: t.textPrimary, fontSize: 11.5, fontWeight: 650 }}>
                     {operationLabel(operation.type)}
                   </span>
-                  <span style={{ color: failed ? t.error : operation.status === 'succeeded' ? t.success : t.textMuted, fontSize: 10 }}>
-                    {operation.status}
+                  <span style={{ color: statusColor, fontSize: 10 }}>
+                    {presentation.statusLabel}
                   </span>
                 </div>
-                <div style={{ color: failed ? t.error : t.textSecondary, fontSize: 10.5, lineHeight: 1.4 }}>
-                  {operation.error?.message ?? operation.message}
+                <div style={{ color: presentation.tone === 'failure' ? t.error : presentation.tone === 'attention' ? t.warning : t.textSecondary, fontSize: 10.5, lineHeight: 1.4 }}>
+                  {presentation.message}
                 </div>
                 {active && (
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -133,11 +142,10 @@ export function TaskCenter() {
                 )}
                 {operation.type === 'block_certification' && (
                   <div style={{ color: t.textMuted, fontSize: 9.5 }}>
-                    {active
-                      ? 'You can change pages while certification continues.'
-                      : operation.status === 'succeeded'
-                        ? 'Completed without blocking the rest of your work.'
-                        : 'The saved draft is preserved for review or retry.'}
+                    {presentation.guidance
+                      ?? (presentation.tone === 'success'
+                        ? 'Certification is complete.'
+                        : 'The saved draft is preserved for review or retry.')}
                   </div>
                 )}
                 {(operation.type === 'agent_run' || operation.type === 'app_ai_build') && (

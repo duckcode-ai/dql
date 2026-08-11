@@ -4,13 +4,14 @@ import {
   blockingPublicationReviewTasks,
   localPublicationSteps,
   pagesNeedingSettledPreview,
+  publicationBlockingSources,
   publicationIssueSummaries,
   unresolvedPublicationRequirements,
 } from './app-studio-publish-readiness';
 
 function draftFixture(): AppStudioBuildDraft {
   return {
-    version: 2,
+    version: 3,
     id: 'build-1',
     appId: 'revenue-app',
     name: 'Revenue App',
@@ -70,5 +71,27 @@ describe('App Studio publication readiness (API-013, UI-022)', () => {
     expect(publicationIssueSummaries([
       'overview/ask-result references app-scoped exploratory DQL; promote it to governed semantic logic or a certified block first.',
     ])).toEqual([]);
+  });
+
+  it('routes certified fingerprint drift to refresh but draft resolution failures to replacement (UI-023)', () => {
+    expect(publicationIssueSummaries(['Source sales.revenue changed after selection.'])[0]?.action).toBe('refresh_sources');
+    expect(publicationIssueSummaries(['overview/orders no longer resolves to a certified block.'])[0]).toMatchObject({
+      action: 'sources',
+      title: 'Replace or remove this source',
+    });
+  });
+
+  it('keeps canonical draft block sources local-only (PRD-007)', () => {
+    const draft = draftFixture();
+    draft.sources = [{
+      id: 'source:draft-orders',
+      kind: 'block',
+      sourceRef: 'orders_by_region',
+      lifecycle: 'draft',
+      trustState: 'review_required',
+      reviewStatus: 'required',
+    }];
+    expect(publicationBlockingSources(draft).map((source) => source.id)).toEqual(['source:draft-orders']);
+    expect(localPublicationSteps(draft).map((step) => step.id)).toContain('sources');
   });
 });

@@ -21,6 +21,7 @@ an acceptance-matrix update.
 | PRD-004 | App Builder composes governed dashboards requirement-first: compatible certified blocks first, governed semantic queries only for uncovered requirements, and visible gaps otherwise. |
 | PRD-005 | App creation begins as one local private draft; authoring mode and source policy are chosen independently, while Project publication is a later explicit governed action. Certified blocks remain the fastest route, not a prerequisite. |
 | PRD-006 | Manual and AI App authoring produce the same versioned App Build Draft and use the same preflight, review, commit, and publication gates; neither path may silently write governed project source. |
+| PRD-007 | App sources are always discovered from one immutable snapshot-backed catalog across certified, review, and draft executable blocks; lifecycle affects eligibility, never visibility, and raw dbt models are not executable tiles without an adapter. |
 | REL-001 | dbt lineage and matching column names are never automatic join proof. |
 | REL-002 | Only certified, fresh, exported, fanout-safe relationships authorize generated joins. |
 | REL-003 | Cross-domain knowledge compiles as explicit `observed`, `authorized`, `blocked`, or `stale` routes; only the full provider export → contract → consumer import → validated relationship chain can authorize use, and dbt transformation lineage remains observation only. |
@@ -61,6 +62,7 @@ an acceptance-matrix update.
 | AGT-023 | App-generated and App-executed SQL failures may use the same single bounded same-target repair boundary as Ask and Notebook; the original failure remains immutable, unsafe/access/policy failures never enter AI repair, and repaired semantic SQL is downgraded to review-required exploration rather than inheriting semantic approval. |
 | AGT-024 | Modeling AI and Skills AI extend durable AgentRun with evidence-bound, write-free proposal artifacts and immutable authoring revisions; generation cannot mutate source, activate skills, certify relationships, create proof, or grant authorization. |
 | AGT-025 | An underspecified App request produces a typed Build Frame with compact identifier-bound clarification choices; it never converts missing coverage into invented tiles, metrics, filters, or SQL. |
+| AGT-026 | App Builder owns a separate stateful orchestration loop, reuses the shared provider/snapshot/meaning/execution foundations, plans from 8-12 identifier-bound catalog candidates with at most one AI call, and requires an explicit action for generated gaps. |
 | EXP-004 | An exploratory App result remains transient until explicit approval materializes an app-scoped review DQL draft; that draft cannot be published, promoted, or certified automatically. |
 | API-001 | Domain, modeling, onboarding, and context APIs return stable codes and snapshot IDs. |
 | API-002 | App proposal is write-free; commit is snapshot/hash guarded and atomic; dashboard run/story APIs bind filters, results, persona, trust, and evidence to stable fingerprints. |
@@ -75,6 +77,7 @@ an acceptance-matrix update.
 | API-011 | DQL/dbt YAML discovery and batch model binding classify bounded inputs and produce shared, hash-guarded proposals; selection changes require server repreview. |
 | API-012 | Every context-authoring path uses immutable proposal/revision IDs, exact source and snapshot fingerprints, dependency closure, compile-before-accept, atomic rollback, and stale `409` conflicts with zero partial writes. |
 | API-013 | App create, edit, publish, delete, and restore operations bind an expected App revision or package fingerprint, update Git-owned source atomically, and keep recoverable local lifecycle state outside governed source. |
+| API-014 | App source search is cursor-paginated and exact-resolvable; AI proposal revisions and manual/AI composition are server-owned, revision/snapshot guarded, and atomically create canonical source-to-tile bindings. |
 | UI-001 | Domain Studio uses vertical contextual navigation; global product navigation stays stable. |
 | UI-002 | dbt-owned metadata is read-only and edited only through previewed source patches. |
 | UI-004 | Generated Apps render page navigation, an apply/reset filter row, a live Business Story row, KPI band, analysis tiles, detail evidence, then reviewer appendix. |
@@ -95,12 +98,14 @@ an acceptance-matrix update.
 | UI-020 | Modeling AI uses the durable thread, evidence-bound proposal review, immutable corrections, validation handoffs, and explicit draft commit without source mutation on completion. |
 | UI-021 | Skills AI uses the durable thread, guarded partial proposal review, immutable corrections, and explicit draft commit without activation or source mutation on completion. |
 | UI-022 | App Studio gives manual and AI authors one canvas, contextual sources/components/filters/evidence controls, container-responsive layouts, and an explicit review-before-project-publication flow. |
+| UI-023 | App Studio always labels certified/review/draft candidates, explains policy-disabled actions, sends complete source allow-lists to server composition, supports clarification revisions and explicit gap generation, and never fabricates trust-bearing tiles in React. |
 | MIG-001 | Manifest v2 and legacy domain-local product paths remain readable through DQL 3.x. |
 | MIG-002 | DataLex/legacy migration is deterministic, idempotent, loss-reporting, and never upgrades lifecycle. |
 | MIG-003 | In-project DQL opens in place; external DQL/dbt YAML imports as reviewed sparse copies with unresolved, lossy, proof, and trust changes visible before commit. |
 | MIG-004 | Readers accept legacy `review`/`unsafe`, preserve untouched spelling, and emit canonical `reviewed`/`forbidden` plus the complete DQL 2 lifecycle/fanout vocabulary on edits. |
 | PERF-001 | Large projects use indexed snapshots, pagination, batch detail, and bounded graph neighborhoods. |
 | PERF-002 | Ask enforces retrieval, evidence-size, provider-call, tool-call, SQL, repair, cancellation, and wall-clock budgets; simple answers never pay an open-ended planning or synthesis loop. |
+| PERF-003 | Warm App exact search is p95 under 100 ms, natural-language source retrieval is p95 under 500 ms, performs zero warm artifact reads, keeps responses below 500 KB, and previews at most four tiles concurrently. |
 | SEC-001 | Non-loopback serving requires authentication; wildcard CORS is not allowed there. |
 | SEC-002 | App proposal, run, story, and commit trust server-owned snapshots and run evidence; clients cannot inject trusted source, result, lineage, or claim evidence. |
 | SEC-003 | Search repair, runtime-value grounding, evidence packaging, and optional embeddings are allowlisted, policy-bounded, redacted, and cannot expose or persist secrets, unauthorized metadata, or plaintext sampled values. |
@@ -122,6 +127,7 @@ an acceptance-matrix update.
 | E2E-015 | Release proves multi-metric Ask, durable navigation/remount, complete failed-run diagnostics, canonical history hydration, explicit Notebook add/replace, and explicit ownerless Block draft commit in the built CLI. |
 | E2E-016 | Release proves certified-only, semantic-only, mixed, and exploratory Personal Draft App flows; modification and stale-change rejection; publication gates; and whole-App/section Copilot plus previewed Add-to-App in the built CLI. |
 | E2E-017 | Release proves App query-generation, semantic-execution, and draft-analysis repair parity with Ask/Notebook, including one-attempt bounds, same-target execution, immutable evidence, access/policy refusal, semantic trust downgrade, and unchanged successful paths in the built CLI. |
+| E2E-021 | Release proves all-draft AI and manual late-position search, duplicate-name identity, filters, restart-safe receipts, source drift, provider fallback, explicit gap review, and publication blocking through the built `dql notebook` CLI. |
 
 ## Amendments
 

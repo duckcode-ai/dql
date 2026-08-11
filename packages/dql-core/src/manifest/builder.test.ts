@@ -539,6 +539,10 @@ describe('buildManifest block extraction', () => {
       filePath: 'blocks/nba/top_players.dql',
       allowedFilters: ['season_start', 'season_end', 'top_n'],
     });
+    expect(manifest.blockDeclarations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: 'certified', filePath: 'blocks/nba/top_players.dql' }),
+      expect.objectContaining({ status: 'draft', filePath: 'blocks/_drafts/nba/top_players.dql' }),
+    ]));
     expect(manifest.diagnostics.some((diagnostic) =>
       diagnostic.message.includes('duplicate block "Top Players"'),
     )).toBe(true);

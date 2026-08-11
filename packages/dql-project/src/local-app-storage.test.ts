@@ -32,7 +32,7 @@ describe('LocalAppStorage', () => {
     store.saveAppBuildDraft(next, { expectedRevision: draft.revision, operations });
 
     expect(store.getAppBuildDraft(draft.id)).toMatchObject({
-      version: 2,
+      version: 3,
       name: 'Revenue Health',
       revision: 2,
       state: 'local_draft',
@@ -72,6 +72,36 @@ describe('LocalAppStorage', () => {
     const promoted = store.markAiPinPromoted(pin.id, 'apps/executive-cockpit/drafts/ai_summary.dql');
     expect(promoted?.reviewStatus).toBe('draft_created');
     expect(promoted?.promotedBlockPath).toBe('apps/executive-cockpit/drafts/ai_summary.dql');
+  });
+
+  it('restores App preview trust evidence after the local runtime restarts', () => {
+    store.saveAppPreviewEvidence({
+      runId: 'app_run_restart',
+      draftId: 'build-revenue',
+      dashboardId: 'overview',
+      snapshotId: 'snapshot-1',
+      filterFingerprint: 'filters-1',
+      resultFingerprint: 'result-1',
+      personaFingerprint: 'persona-1',
+      successfulTileIds: ['revenue', 'orders'],
+      semanticApprovalEligibleTileIds: ['revenue'],
+      createdAt: '2026-08-10T00:00:00.000Z',
+    });
+    store.close();
+    store = new LocalAppStorage(join(dir, '.dql', 'local', 'apps.sqlite'));
+
+    expect(store.getAppPreviewEvidence('app_run_restart')).toEqual({
+      runId: 'app_run_restart',
+      draftId: 'build-revenue',
+      dashboardId: 'overview',
+      snapshotId: 'snapshot-1',
+      filterFingerprint: 'filters-1',
+      resultFingerprint: 'result-1',
+      personaFingerprint: 'persona-1',
+      successfulTileIds: ['revenue', 'orders'],
+      semanticApprovalEligibleTileIds: ['revenue'],
+      createdAt: '2026-08-10T00:00:00.000Z',
+    });
   });
 
   it('stores private App conversations locally', () => {
@@ -281,6 +311,12 @@ describe('LocalAppStorage', () => {
       id: 'build-executive', appId, name: 'Executive Cockpit', authoringMode: 'manual',
       frame: { goal: 'Monitor executive metrics', metrics: [], dimensions: [], filters: [] },
     }));
+    store.saveAppPreviewEvidence({
+      runId: 'app_run_archive', draftId: 'build-executive', dashboardId: 'overview',
+      snapshotId: 'snapshot-1', filterFingerprint: 'filters-1', resultFingerprint: 'result-1',
+      personaFingerprint: 'persona-1', successfulTileIds: ['revenue'],
+      semanticApprovalEligibleTileIds: ['revenue'], createdAt: '2026-08-08T00:00:00.000Z',
+    });
 
     const archive = store.archiveAndDeleteAppState(appId, '2026-08-08T00:00:00.000Z');
     expect(archive.rows.aiPins).toHaveLength(1);
@@ -288,15 +324,18 @@ describe('LocalAppStorage', () => {
     expect(archive.rows.conversations).toHaveLength(1);
     expect(archive.rows.conversationMessages).toHaveLength(1);
     expect(archive.rows.buildDrafts).toHaveLength(1);
+    expect(archive.rows.previewEvidence).toHaveLength(1);
     expect(store.listAiPins(appId)).toEqual([]);
     expect(store.listAppInvestigations(appId)).toEqual([]);
     expect(store.listAppConversations(appId)).toEqual([]);
     expect(store.listAppBuildDrafts(appId)).toEqual([]);
+    expect(store.getAppPreviewEvidence('app_run_archive')).toBeNull();
 
     store.restoreAppState(archive);
     expect(store.listAiPins(appId)).toHaveLength(1);
     expect(store.listAppInvestigations(appId)).toHaveLength(1);
     expect(store.listAppConversations(appId)).toHaveLength(1);
     expect(store.listAppBuildDrafts(appId)).toHaveLength(1);
+    expect(store.getAppPreviewEvidence('app_run_archive')?.snapshotId).toBe('snapshot-1');
   });
 });

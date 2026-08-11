@@ -23,7 +23,7 @@ import { usePersistedAgentThreadId } from '../agent/usePersistedAgentThreadId';
 import { ChartOutput } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
 import { APP_STUDIO_V2_STYLES } from './app-studio-v2-styles';
-import { availableAppStudioProposalSources, operationsForSelectedAppStudioSources, summarizeAppStudioAiPlan, type AppStudioAiPlanSummary } from './app-studio-ai-plan';
+import { availableAppStudioProposalSources, summarizeAppStudioAiPlan, type AppStudioAiPlanSummary } from './app-studio-ai-plan';
 import {
   discoverAppFilterCandidates,
   defaultStudioFilterType,
@@ -190,6 +190,8 @@ export function AppStudioV2({
   const [selectedSource, setSelectedSource] = useState<AppBlockRecommendation | null>(null);
   const [catalog, setCatalog] = useState<AppBlockRecommendation[]>([]);
   const [catalogQuery, setCatalogQuery] = useState('');
+  const [catalogNextCursor, setCatalogNextCursor] = useState<string | undefined>();
+  const [catalogTotal, setCatalogTotal] = useState(0);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [proposal, setProposal] = useState<AppStudioAiProposal | null>(null);
@@ -278,21 +280,31 @@ export function AppStudioV2({
   useEffect(() => {
     if (!draft) return;
     let active = true;
+    const controller = new AbortController();
     setCatalogLoading(true);
     setCatalogError(null);
-    void api.recommendAppBlocks({
-      domain: draft.pages[0]?.metadata.domain,
-      purpose: draft.frame.goal,
-      audience: draft.frame.audience,
-      certifiedOnly: draft.sourcePolicy === 'governed_only',
-    }).then((items) => { if (active) setCatalog(items); }).catch((cause) => {
-      if (active) {
-        setCatalog([]);
-        setCatalogError(messageOf(cause));
-      }
-    }).finally(() => { if (active) setCatalogLoading(false); });
-    return () => { active = false; };
-  }, [draft?.id, draft?.sourcePolicy, draft?.frame.goal]);
+    const timer = window.setTimeout(() => {
+      void api.listAppSourceCandidates(draft.id, {
+        query: catalogQuery,
+        limit: 50,
+      }, controller.signal).then((page) => {
+        if (!active) return;
+        setCatalog(page.items);
+        setCatalogNextCursor(page.nextCursor);
+        setCatalogTotal(page.total);
+      }).catch((cause) => {
+        if (active && !controller.signal.aborted) {
+          setCatalog([]);
+          setCatalogError(messageOf(cause));
+        }
+      }).finally(() => { if (active) setCatalogLoading(false); });
+    }, catalogQuery ? 180 : 0);
+    return () => {
+      active = false;
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [draft?.id, draft?.sourcePolicy, catalogQuery]);
 
   useEffect(() => {
     const handleAskResult = (event: Event) => {
@@ -334,18 +346,15 @@ export function AppStudioV2({
     return packStudioItems(collapseTemplateIntroductions(projection?.items ?? activePage.layout.items, draft?.template), columns);
   }, [activePage, breakpoint, draft?.template]);
   const selectedTile = activePage?.layout.items.find((item) => item.i === selectedTileId) ?? null;
-  const filteredCatalog = useMemo(() => {
-    const needle = catalogQuery.trim().toLowerCase();
-    return catalog.filter((item) => !needle || [item.name, item.domain, item.description, ...item.tags].join(' ').toLowerCase().includes(needle));
-  }, [catalog, catalogQuery]);
+  const filteredCatalog = catalog;
   const runtimeFilterFields = useMemo<StudioRuntimeFilterFields>(() => Object.fromEntries(
     Object.entries(previewRunsByPage).map(([pageId, run]) => [pageId, Object.fromEntries(
       run.tiles.map((tile) => [tile.tileId, tile.filterableColumns ?? []]),
     )]),
   ), [previewRunsByPage]);
   const filterCandidates = useMemo(
-    () => discoverAppFilterCandidates(draft?.pages ?? [], catalog, runtimeFilterFields),
-    [catalog, draft?.pages, runtimeFilterFields],
+    () => discoverAppFilterCandidates(draft?.pages ?? [], catalog, runtimeFilterFields, draft?.sources ?? []),
+    [catalog, draft?.pages, draft?.sources, runtimeFilterFields],
   );
   const proposalSummary = useMemo(() => proposal ? summarizeAppStudioAiPlan(proposal) : null, [proposal]);
   const readinessSteps = useMemo(() => draft ? localPublicationSteps(draft) : [], [draft]);
@@ -415,64 +424,59 @@ export function AppStudioV2({
     }
   };
 
-  const addSourceToAiProposal = (source: AppBlockRecommendation) => {
+  const reviseAiProposal = async (answers?: Record<string, string>, additionalSourceIds?: string[]) => {
+    if (!draft || !proposal) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.reviseAppBuildProposal(draft.id, proposal.id, {
+        expectedRevision: draft.revision,
+        expectedProposalHash: draft.proposalHash,
+        answers,
+        selectedSourceIds: Array.from(selectedProposalSourceIds),
+        additionalSourceIds,
+      });
+      setProposal(result.proposal);
+      setSavedMessage('AI proposal revised on the server');
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const generateAiGap = async (requirementId: string) => {
+    if (!draft || !proposal) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.generateAppBuildGap(draft.id, proposal.id, {
+        expectedRevision: draft.revision,
+        expectedProposalHash: draft.proposalHash,
+        requirementId,
+      });
+      setProposal(result.proposal);
+      setSavedMessage('Review-required gap added to the proposal');
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addSourceToAiProposal = async (source: AppBlockRecommendation) => {
     if (!draft || !proposal || !proposalSummary) return;
-    const review = source.status !== 'certified';
-    if (review && draft.sourcePolicy === 'governed_only') {
-      setError('This source requires the “Include review-required analysis” policy.');
+    if (source.eligibility && !source.eligibility.localPreview) {
+      setError('Enable review-required sources before adding this draft block to the proposal.');
       return;
     }
-    const sourceId = `${review ? 'review-block' : 'block'}:${source.id}`;
-    if (proposalSummary.sources.some((item) => item.id === sourceId || item.sourceRef === source.id)) {
+    const sourceId = source.sourceId ?? source.id;
+    if (proposalSummary.sources.some((item) => item.id === sourceId || item.sourceRef === source.path)) {
       setSelectedProposalSourceIds((current) => new Set([...current, sourceId]));
       return;
     }
-    const pageOperation = proposal.operations.find((operation) => operation.type === 'upsert_page');
-    const pageId = pageOperation?.type === 'upsert_page' ? pageOperation.page.id : activePage?.id;
-    if (!pageId) return;
-    const proposedItems = proposal.operations.flatMap((operation) => operation.type === 'upsert_page'
-      ? operation.page.layout.items
-      : operation.type === 'add_tile' && operation.pageId === pageId ? [operation.tile] : []);
-    const usedIds = new Set(proposedItems.map((item) => item.i));
-    const tileStem = `proposal-${source.id.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase() || 'source'}`;
-    let tileId = tileStem;
-    for (let suffix = 2; usedIds.has(tileId); suffix += 1) tileId = `${tileStem}-${suffix}`;
-    const kind = recommendedComponentKind(source);
-    const nextY = proposedItems.reduce((max, item) => Math.max(max, item.y + item.h), 0);
-    const tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number] = {
-      i: tileId,
-      x: 0,
-      y: nextY,
-      w: kind === 'kpi' ? 3 : 6,
-      h: kind === 'kpi' ? 2 : 4,
-      title: humanize(source.name),
-      block: { blockId: source.id },
-      sourceClass: review ? 'exploratory_analysis' : 'certified_block',
-      viz: { type: kind === 'kpi' ? 'single_value' : kind === 'table' ? 'table' : normalizeViz(source.chartType) },
-      trustState: review ? 'review_required' : 'certified',
-      reviewStatus: review ? 'review_required' : 'certified',
-      review: { status: review ? 'required' : 'not_required', sourceFingerprint: source.fingerprint },
-      filterBindings: (source.filterIds ?? []).map((filter) => ({ filter, binding: filter, mode: 'predicate', capability: 'preflight_required' })),
-    };
-    const sourceOperation: AppStudioDraftOperation = {
-      type: 'upsert_source',
-      source: {
-        id: sourceId,
-        kind: review ? 'review_block' : 'certified_block',
-        sourceRef: source.id,
-        sourceFingerprint: source.fingerprint,
-        trustState: review ? 'review_required' : 'certified',
-        reviewStatus: review ? 'required' : 'not_required',
-      },
-    };
-    setProposal((current) => current ? {
-      ...current,
-      operations: [...current.operations, sourceOperation, { type: 'add_tile', pageId, tile }],
-      defaultSelectedSourceIds: Array.from(new Set([...selectedProposalSourceIds, sourceId])),
-      summary: { ...current.summary, certifiedSources: current.summary.certifiedSources + (review ? 0 : 1) },
-    } : current);
+    await reviseAiProposal(undefined, [sourceId]);
     setSelectedSource(source);
-    setSavedMessage(`${humanize(source.name)} added to the AI proposal`);
   };
 
   useEffect(() => {
@@ -514,9 +518,24 @@ export function AppStudioV2({
 
   const applyProposal = async () => {
     if (!proposal || !draft) return;
-    const operations = operationsForSelectedAppStudioSources(proposal, selectedProposalSourceIds);
-    const next = await mutate(operations);
-    if (next) {
+    setBusy(true);
+    setError(null);
+    setSavedMessage('Composing App…');
+    try {
+      const previous = draft;
+      const result = await api.composeAppBuild(draft.id, {
+        mode: 'ai',
+        expectedRevision: draft.revision,
+        expectedProposalHash: draft.proposalHash,
+        proposalId: proposal.id,
+        selectedSourceIds: Array.from(selectedProposalSourceIds),
+      });
+      const next = result.draft;
+      setDraft(next);
+      setUndoStack((items) => [...items.slice(-29), previous]);
+      setRedoStack([]);
+      setPreviewRunsByPage({});
+      setFilterOptionsByPage({});
       setProposal(null);
       setName(next.name);
       const generatedPage = next.pages[0];
@@ -525,6 +544,11 @@ export function AppStudioV2({
         setSavedMessage('App generated · loading governed data…');
         await runPreviewForDraft(next, generatedPage.id);
       }
+    } catch (cause) {
+      setSavedMessage('Compose failed');
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -581,24 +605,27 @@ export function AppStudioV2({
     setError(null);
   };
 
-  const sourceOperation = (source: AppBlockRecommendation): AppStudioDraftOperation | null => {
-    if (!draft) return null;
-    const review = source.status !== 'certified';
-    if (review && draft.sourcePolicy === 'governed_only') {
-      setError('This source requires the “Include review-required analysis” policy.');
-      return null;
+  const loadMoreSources = async () => {
+    if (!draft || !catalogNextCursor || catalogLoading) return;
+    setCatalogLoading(true);
+    setCatalogError(null);
+    try {
+      const page = await api.listAppSourceCandidates(draft.id, {
+        query: catalogQuery,
+        cursor: catalogNextCursor,
+        limit: 50,
+      });
+      setCatalog((current) => {
+        const seen = new Set(current.map((source) => source.id));
+        return [...current, ...page.items.filter((source) => !seen.has(source.id))];
+      });
+      setCatalogNextCursor(page.nextCursor);
+      setCatalogTotal(page.total);
+    } catch (cause) {
+      setCatalogError(messageOf(cause));
+    } finally {
+      setCatalogLoading(false);
     }
-    return {
-      type: 'upsert_source',
-      source: {
-        id: `${review ? 'review-block' : 'block'}:${source.id}`,
-        kind: review ? 'review_block' : 'certified_block',
-        sourceRef: source.id,
-        sourceFingerprint: source.fingerprint,
-        trustState: review ? 'review_required' : 'certified',
-        reviewStatus: review ? 'required' : 'not_required',
-      },
-    };
   };
 
   const addComponent = async (kind: 'heading' | 'text' | 'kpi' | 'chart' | 'table', sourceOverride?: AppBlockRecommendation | null) => {
@@ -612,12 +639,44 @@ export function AppStudioV2({
       setError('Choose a governed source, then use Add to page.');
       return;
     }
-    const sourceOp = source ? sourceOperation(source) : null;
-    if (source && !sourceOp) return;
-    if (source) setSelectedSource(source);
+    if (source) {
+      if (source.eligibility && !source.eligibility.localPreview) {
+        setError('Enable review-required sources to add this draft block to the local App.');
+        return;
+      }
+      setSelectedSource(source);
+      setBusy(true);
+      setSavedMessage('Composing source…');
+      setError(null);
+      try {
+        const previous = draft;
+        const result = await api.composeAppBuild(draft.id, {
+          mode: 'manual',
+          expectedRevision: draft.revision,
+          expectedProposalHash: draft.proposalHash,
+          selections: [{ sourceId: source.sourceId ?? source.id, pageId: activePage.id, view: kind as 'kpi' | 'chart' | 'table' }],
+        });
+        setDraft(result.draft);
+        setUndoStack((items) => [...items.slice(-29), previous]);
+        setRedoStack([]);
+        setSelectedTileId(result.tileIds[0] ?? null);
+        setSavedMessage(`${kind === 'chart' ? 'Chart' : humanize(kind)} added · loading data…`);
+        previewSequenceRef.current += 1;
+        setPreviewRunsByPage({});
+        setFilterOptionsByPage({});
+        await runPreviewForDraft(result.draft, activePage.id);
+      } catch (cause) {
+        setSavedMessage('Compose failed');
+        setError(messageOf(cause));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    if (kind !== 'heading' && kind !== 'text') return;
     const tileId = `${kind}-${Date.now().toString(36)}`;
-    const width = kind === 'kpi' ? 3 : kind === 'heading' || kind === 'text' ? 12 : 6;
-    const height = kind === 'heading' ? 1 : kind === 'kpi' ? 2 : kind === 'text' ? 2 : 4;
+    const width = 12;
+    const height = kind === 'heading' ? 1 : 2;
     const nextY = activePage.layout.items.reduce((max, item) => Math.max(max, item.y + item.h), 0);
     const tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number] = {
       i: tileId,
@@ -625,35 +684,18 @@ export function AppStudioV2({
       y: nextY,
       w: width,
       h: height,
-      title: kind === 'heading' ? 'Section heading' : kind === 'text' ? 'Narrative' : source!.name,
-      ...(kind === 'heading' || kind === 'text'
-        ? { text: { markdown: kind === 'heading' ? '## New section' : 'Add context, interpretation, or guidance.' }, sourceClass: 'narrative' as const }
-        : {
-          block: { blockId: source!.id },
-          sourceClass: source!.status === 'certified' ? 'certified_block' as const : 'exploratory_analysis' as const,
-          filterBindings: (source!.filterIds ?? []).map((filter) => ({ filter, binding: filter, mode: 'predicate' as const, capability: 'preflight_required' as const })),
-        }),
-      viz: { type: kind === 'heading' ? 'heading' : kind === 'text' ? 'text' : kind === 'kpi' ? 'single_value' : kind === 'table' ? 'table' : normalizeViz(source?.chartType) },
-      trustState: source?.status === 'certified' ? 'certified' : kind === 'heading' || kind === 'text' ? 'draft_ready' : 'review_required',
-      reviewStatus: source?.status === 'certified' ? 'certified' : kind === 'heading' || kind === 'text' ? 'draft_ready' : 'review_required',
+      title: kind === 'heading' ? 'Section heading' : 'Narrative',
+      text: { markdown: kind === 'heading' ? '## New section' : 'Add context, interpretation, or guidance.' },
+      sourceClass: 'narrative',
+      viz: { type: kind === 'heading' ? 'heading' : 'text' },
+      trustState: 'draft_ready',
+      reviewStatus: 'draft_ready',
     };
-    const operations: AppStudioDraftOperation[] = [
-      ...(sourceOp ? [sourceOp] : []),
-      { type: 'add_tile', pageId: activePage.id, tile },
-    ];
+    const operations: AppStudioDraftOperation[] = [{ type: 'add_tile', pageId: activePage.id, tile }];
     const next = await mutate(operations);
     if (next) {
       setSelectedTileId(tileId);
-      const filterCount = source?.filterIds?.length ?? 0;
-      const addedLabel = kind === 'chart' ? 'Chart' : humanize(kind);
-      if (source) {
-        setSavedMessage(`${addedLabel} added · loading governed data…`);
-        await runPreviewForDraft(next, activePage.id);
-      } else {
-        setSavedMessage(filterCount > 0
-          ? `${addedLabel} added · ${filterCount} ${filterCount === 1 ? 'filter' : 'filters'} available`
-          : `${addedLabel} added`);
-      }
+      setSavedMessage(`${humanize(kind)} added`);
     }
   };
 
@@ -667,7 +709,7 @@ export function AppStudioV2({
   const saveFilter = async (configuration: StudioFilterConfiguration) => {
     if (!draft || !activePage) return;
     const selected = new Set(configuration.selectedMappingKeys);
-    const mappings = filterTileMappingsForField(draft.pages, catalog, configuration.fieldId, runtimeFilterFields);
+    const mappings = filterTileMappingsForField(draft.pages, catalog, configuration.fieldId, runtimeFilterFields, draft.sources);
     const selectedMappings = mappings.filter((mapping) => mapping.supported && selected.has(mapping.key));
     if (selectedMappings.length === 0) {
       setError('Link this filter to at least one compatible component.');
@@ -941,12 +983,10 @@ export function AppStudioV2({
   const refreshCertifiedSourceTrust = async () => {
     if (!draft) return;
     const operations: AppStudioDraftOperation[] = [];
-    const matchBlock = (reference: string) => catalog.find((item) => (
-      item.status === 'certified'
-      && (item.id === reference || item.name === reference || item.path === reference)
-    ));
-    const certifiedSources = draft.sources.filter((item) => item.kind === 'certified_block');
-    const unavailableSources = certifiedSources.filter((source) => !matchBlock(source.sourceRef));
+    const blockSources = draft.sources.filter((item) => item.kind === 'block' || item.kind === 'certified_block' || item.kind === 'review_block');
+    const resolved = await api.resolveAppSourceCandidates(draft.id, blockSources.map((source) => source.id));
+    const byId = new Map(resolved.items.map((source) => [source.id, source]));
+    const unavailableSources = blockSources.filter((source) => !byId.has(source.id));
     if (unavailableSources.length) {
       setPublishReviewOpen(false);
       setPanel('sources');
@@ -954,25 +994,47 @@ export function AppStudioV2({
       setError(`${unavailableSources.map((source) => humanize(source.sourceRef)).join(', ')} ${unavailableSources.length === 1 ? 'is' : 'are'} no longer certified. Replace or remove ${unavailableSources.length === 1 ? 'this source' : 'these sources'} before publication.`);
       return;
     }
-    for (const source of certifiedSources) {
-      const block = matchBlock(source.sourceRef);
-      if (block && (source.sourceFingerprint !== block.fingerprint || source.trustState !== 'certified' || source.reviewStatus !== 'not_required')) {
-        operations.push({ type: 'upsert_source', source: { ...source, sourceFingerprint: block.fingerprint, trustState: 'certified', reviewStatus: 'not_required' } });
+    for (const source of blockSources) {
+      const block = byId.get(source.id);
+      if (block && block.lifecycle === 'certified' && (source.sourceRevision !== block.sourceRevision || source.trustState !== 'certified' || source.reviewStatus !== 'not_required')) {
+        operations.push({
+          type: 'upsert_source',
+          source: {
+            ...source,
+            kind: 'block',
+            sourceRef: block.path,
+            sourcePath: block.path,
+            executionRef: block.path,
+            qualifiedIdentity: block.qualifiedIdentity,
+            snapshotId: block.snapshotId,
+            sourceRevision: block.sourceRevision,
+            sourceFingerprint: block.sourceRevision,
+            lifecycle: 'certified',
+            capabilities: block.capabilities,
+            trustState: 'certified',
+            reviewStatus: 'not_required',
+          },
+        });
       }
     }
     for (const page of draft.pages) {
       for (const tile of page.layout.items) {
-        if (!tile.block) continue;
-        const reference = 'blockId' in tile.block ? tile.block.blockId : tile.block.ref;
-        if (!reference) continue;
-        const block = matchBlock(reference);
-        if (!block) continue;
-        if (tile.review?.sourceFingerprint !== block.fingerprint || tile.review?.status !== 'not_required') {
+        if (!tile.sourceId) continue;
+        const block = byId.get(tile.sourceId);
+        if (!block || block.lifecycle !== 'certified') continue;
+        if (tile.sourceRevision !== block.sourceRevision || tile.review?.sourceFingerprint !== block.sourceRevision || tile.review?.status !== 'not_required') {
           operations.push({
             type: 'update_tile',
             pageId: page.id,
             tileId: tile.i,
-            patch: { review: { ...tile.review, status: 'not_required', sourceFingerprint: block.fingerprint } },
+            patch: {
+              sourceRevision: block.sourceRevision,
+              block: { ref: block.path },
+              sourceClass: 'certified_block',
+              trustState: 'certified',
+              reviewStatus: 'certified',
+              review: { ...tile.review, status: 'not_required', sourceFingerprint: block.sourceRevision },
+            },
           });
         }
       }
@@ -1175,7 +1237,7 @@ export function AppStudioV2({
         <section className={`left-content ${panelOpen ? 'open' : ''}`}>
           <button type="button" className="mobile-drawer-close" onClick={() => setPanelOpen(false)} aria-label="Close Studio drawer"><X size={16} /></button>
           {panel === 'pages' ? <PagesPanel draft={draft} activePageId={activePage?.id} onOpen={setActivePageId} onAdd={() => void addPage()} /> : null}
-          {panel === 'sources' ? <SourcesPanel usedSources={draft.sources} items={filteredCatalog} selected={selectedSource} query={catalogQuery} loading={catalogLoading} error={catalogError} disabled={busy || previewing} onQuery={setCatalogQuery} onSelect={selectSource} onAdd={(item, kind) => void addComponent(kind, item)} onAddContent={(kind) => void addComponent(kind, null)} policy={draft.sourcePolicy} /> : null}
+          {panel === 'sources' ? <SourcesPanel usedSources={draft.sources} items={filteredCatalog} selected={selectedSource} query={catalogQuery} loading={catalogLoading} error={catalogError} disabled={busy || previewing} onQuery={setCatalogQuery} onSelect={selectSource} onAdd={(item, kind) => void addComponent(kind, item)} onAddContent={(kind) => void addComponent(kind, null)} policy={draft.sourcePolicy} total={catalogTotal} hasMore={Boolean(catalogNextCursor)} onLoadMore={() => void loadMoreSources()} onEnableReview={() => void mutate([{ type: 'set_source_policy', sourcePolicy: 'include_review_required' }])} /> : null}
           {panel === 'filters' ? <FiltersPanel draft={draft} activePageId={activePage?.id} catalog={catalog} candidates={filterCandidates} runtimeFilterFields={runtimeFilterFields} previewRunsByPage={previewRunsByPage} previewing={previewing} disabled={busy || previewing} onRunPreview={() => void runPreview()} onSave={(configuration) => void saveFilter(configuration)} onRemove={(id) => void removeFilter(id)} /> : null}
           {panel === 'templates' ? <TemplatesPanel current={draft.template} onApply={(nextTemplate) => void applyTemplate(nextTemplate)} /> : null}
         </section>
@@ -1196,6 +1258,13 @@ export function AppStudioV2({
           onDismiss={() => setProposal(null)}
           onCatalogQuery={setCatalogQuery}
           onAddSource={addSourceToAiProposal}
+          onAnswerClarification={(questionId, answerId) => void reviseAiProposal({ [questionId]: answerId })}
+          onGenerateGap={(requirementId) => void generateAiGap(requirementId)}
+          onEnableReview={() => void mutate([{ type: 'set_source_policy', sourcePolicy: 'include_review_required' }]).then((next) => {
+            if (!next) return;
+            setProposal(null);
+            void requestAiProposal(next, prompt);
+          })}
           onToggleSource={(sourceId) => setSelectedProposalSourceIds((current) => {
             const next = new Set(current);
             if (next.has(sourceId)) next.delete(sourceId); else next.add(sourceId);
@@ -1389,7 +1458,7 @@ function PublishReadinessDialog({
         </section> : null}
         {remainingIssues.map((issue) => <section className="readiness-item" key={issue.id}>
           <span className="step-mark"><Settings2 size={15} /></span>
-          <div><strong>{issue.title}</strong><p>{issue.detail}</p><div className="readiness-actions">{issue.action === 'filters' ? <button type="button" className="primary" onClick={onOpenFilters}><Filter size={13} /> Open Filters</button> : issue.id === 'sources' || issue.id.startsWith('sources:') ? <button type="button" className="primary" onClick={onRefreshSources} disabled={busy}><ShieldCheck size={13} /> Accept current certified sources</button> : issue.id === 'preview' ? <button type="button" className="primary" onClick={onRunAllPreviews} disabled={busy}><Play size={13} /> {busy ? 'Refreshing previews…' : 'Refresh all page previews'}</button> : <button type="button" className="primary" onClick={onOpenSources}><Blocks size={13} /> Open Sources</button>}</div></div>
+          <div><strong>{issue.title}</strong><p>{issue.detail}</p><div className="readiness-actions">{issue.action === 'filters' ? <button type="button" className="primary" onClick={onOpenFilters}><Filter size={13} /> Open Filters</button> : issue.action === 'refresh_sources' ? <button type="button" className="primary" onClick={onRefreshSources} disabled={busy}><ShieldCheck size={13} /> Accept current certified source</button> : issue.action === 'preview' ? <button type="button" className="primary" onClick={onRunAllPreviews} disabled={busy}><Play size={13} /> {busy ? 'Refreshing previews…' : 'Refresh all page previews'}</button> : <button type="button" className="primary" onClick={onOpenSources}><Blocks size={13} /> Replace or remove source</button>}</div></div>
         </section>)}
         {ready ? <div className="readiness-ready"><Check size={18} /><div><strong>Governed checks passed</strong><span>The published package will be Git-reviewable and no files are auto-staged or committed.</span></div></div> : null}
       </div>
@@ -1411,6 +1480,9 @@ function AiPlanReview({
   onDismiss,
   onCatalogQuery,
   onAddSource,
+  onAnswerClarification,
+  onGenerateGap,
+  onEnableReview,
   onToggleSource,
 }: {
   proposal: AppStudioAiProposal;
@@ -1425,9 +1497,16 @@ function AiPlanReview({
   onDismiss: () => void;
   onCatalogQuery: (query: string) => void;
   onAddSource: (source: AppBlockRecommendation) => void;
+  onAnswerClarification: (questionId: string, answerId: string) => void;
+  onGenerateGap: (requirementId: string) => void;
+  onEnableReview: () => void;
   onToggleSource: (sourceId: string) => void;
 }): JSX.Element {
   const unresolved = proposal.clarifications.filter((item) => item.required && !item.answerId);
+  const requirementOperation = proposal.operations.find((operation) => operation.type === 'set_requirements');
+  const uncoveredRequirements = requirementOperation?.type === 'set_requirements'
+    ? requirementOperation.requirements.filter((requirement) => requirementOperation.coverage?.some((coverage) => coverage.requirementId === requirement.id && coverage.status === 'gap'))
+    : [];
   const selectedComponents = summary.components.filter((component) => !component.sourceId || selectedSourceIds.has(component.sourceId));
   const selectedSources = summary.sources.filter((source) => selectedSourceIds.has(source.id));
   const suggestedSources = summary.sources.filter((source) => !selectedSourceIds.has(source.id));
@@ -1444,13 +1523,16 @@ function AiPlanReview({
     if (!views.length) return 'AI will use this source as governed context.';
     return `Creates ${views.length} ${views.length === 1 ? 'view' : 'views'}: ${views.map((view) => view.title).join(', ')}`;
   };
-  const sourceRow = (source: AppStudioAiPlanSummary['sources'][number], selected: boolean) => <article key={source.id} className={`proposal-source-row ${selected ? 'selected' : ''}`}>
+  const sourceRow = (source: AppStudioAiPlanSummary['sources'][number], selected: boolean) => {
+    const blockedByPolicy = source.trustState !== 'certified' && sourcePolicy === 'governed_only';
+    return <article key={source.id} className={`proposal-source-row ${selected ? 'selected' : ''}`}>
     <span className={`proposal-source-trust ${source.trustState}`}>{source.trustState === 'certified' ? <ShieldCheck size={15} /> : <FileText size={15} />}</span>
     <div><strong>{source.label}</strong><small>{sourceKindLabel(source.kind)} · {source.trustState === 'certified' ? 'Certified' : 'Review required'}</small><p>{viewDescription(source)}</p></div>
-    <button type="button" className={selected ? 'remove' : 'add'} onClick={() => onToggleSource(source.id)} aria-label={`${selected ? 'Remove' : 'Add'} ${source.label}${summary.sources.filter((item) => item.label === source.label).length > 1 ? ` for ${summary.components.filter((component) => component.sourceId === source.id).map((component) => component.title).join(', ') || source.id}` : ''}`}>
-      {selected ? <><X size={13} /> Remove</> : <><Plus size={13} /> Add</>}
+    <button type="button" className={selected ? 'remove' : 'add'} disabled={!selected && blockedByPolicy} title={blockedByPolicy ? 'Enable review-required sources to add this draft block locally.' : undefined} onClick={() => onToggleSource(source.id)} aria-label={`${selected ? 'Remove' : 'Add'} ${source.label}${summary.sources.filter((item) => item.label === source.label).length > 1 ? ` for ${summary.components.filter((component) => component.sourceId === source.id).map((component) => component.title).join(', ') || source.id}` : ''}`}>
+      {selected ? <><X size={13} /> Remove</> : blockedByPolicy ? 'Review lane required' : <><Plus size={13} /> Add</>}
     </button>
   </article>;
+  };
 
   return <section className="studio-ai-plan proposal-source-picker" aria-labelledby="proposal-source-title">
     <header>
@@ -1492,14 +1574,15 @@ function AiPlanReview({
           {availableSources.map((source) => <article key={source.id}>
             <span className={source.status === 'certified' ? 'certified' : 'review_required'}>{source.status === 'certified' ? <ShieldCheck size={14} /> : <FileText size={14} />}</span>
             <div><strong>{humanize(source.name)}</strong><small>{source.domain || 'General'} · {source.status === 'certified' ? 'Certified block' : 'Review required'}</small><p>{source.description || source.reasons[0] || 'Available governed data source'}</p></div>
-            <button type="button" onClick={() => onAddSource(source)} disabled={busy}><Plus size={13} /> Add</button>
+            <button type="button" onClick={() => onAddSource(source)} disabled={busy || source.eligibility?.localPreview === false} title={source.eligibility?.localPreview === false ? 'Enable review-required sources to use this block locally.' : undefined}><Plus size={13} /> {source.eligibility?.localPreview === false ? 'Review lane required' : 'Add'}</button>
           </article>)}
           {!availableSources.length ? <p className="studio-ai-plan-empty">{catalogQuery.trim() ? 'No additional source matches this search.' : 'All available governed sources are already proposed.'}</p> : null}
         </div>
       </section>
 
-      {sourcePolicy === 'include_review_required' ? <div className="studio-ai-review-lane"><FileText size={14} /><p><strong>Review-required analysis is enabled</strong><small>It stays clearly labeled and cannot be published to the Project until it is replaced, promoted, or removed.</small></p></div> : null}
-      {unresolved.length ? <section className="studio-ai-questions"><header><strong>AI needs one more decision</strong><small>{unresolved.length} required</small></header>{unresolved.map((item) => <p key={item.id}>{item.question}</p>)}<button type="button" onClick={onRevise} disabled={busy}>{busy ? 'Updating…' : 'Update proposal'}</button></section> : null}
+      {sourcePolicy === 'include_review_required' ? <div className="studio-ai-review-lane"><FileText size={14} /><p><strong>Review-required analysis is enabled</strong><small>It stays clearly labeled and cannot be published to the Project until it is replaced, promoted, or removed.</small></p></div> : <div className="studio-ai-review-lane"><FileText size={14} /><p><strong>Draft sources are visible but not addable</strong><small>Enable the local review lane to use them without changing their trust.</small></p><button type="button" onClick={onEnableReview} disabled={busy}>Enable review lane</button></div>}
+      {uncoveredRequirements.length ? <section className="studio-ai-questions"><header><strong>Uncovered requirements</strong><small>{uncoveredRequirements.length} gaps</small></header>{uncoveredRequirements.map((requirement) => <div key={requirement.id}><p>{requirement.question}</p><button type="button" onClick={() => onGenerateGap(requirement.id)} disabled={busy || sourcePolicy !== 'include_review_required'}>{sourcePolicy === 'include_review_required' ? 'Explicitly generate review-required DQL' : 'Enable review lane to generate'}</button></div>)}</section> : null}
+      {unresolved.length ? <section className="studio-ai-questions"><header><strong>AI needs one more decision</strong><small>{unresolved.length} required</small></header>{unresolved.map((item) => <fieldset key={item.id}><legend>{item.question}</legend>{item.choices.map((choice) => <button key={choice.id} type="button" onClick={() => onAnswerClarification(item.id, choice.id)} disabled={busy}><strong>{choice.label}</strong>{choice.description ? <small>{choice.description}</small> : null}</button>)}</fieldset>)}<button type="button" onClick={onRevise} disabled={busy}>{busy ? 'Updating…' : 'Re-run proposal'}</button></section> : null}
     </div>
 
     <footer><span>{selectedSources.length} sources · {selectedComponents.length} views will be generated</span><button type="button" onClick={onDismiss}>Back to decision</button><button type="button" className="primary" onClick={onApply} disabled={busy || unresolved.length > 0 || selectedSources.length === 0}><Sparkles size={14} /> {busy ? 'Generating…' : `Generate App with ${selectedSources.length} ${selectedSources.length === 1 ? 'source' : 'sources'}`}</button></footer>
@@ -1572,6 +1655,10 @@ function SourcesPanel({
   onAdd,
   onAddContent,
   policy,
+  total,
+  hasMore,
+  onLoadMore,
+  onEnableReview,
 }: {
   usedSources: AppStudioBuildDraft['sources'];
   items: AppBlockRecommendation[];
@@ -1585,6 +1672,10 @@ function SourcesPanel({
   onAdd: (item: AppBlockRecommendation, kind: 'kpi' | 'chart' | 'table') => void;
   onAddContent: (kind: 'heading' | 'text') => void;
   policy: AppStudioBuildDraft['sourcePolicy'];
+  total: number;
+  hasMore: boolean;
+  onLoadMore: () => void;
+  onEnableReview: () => void;
 }): JSX.Element {
   const [viewFilter, setViewFilter] = useState<'all' | 'kpi' | 'chart' | 'table'>('all');
   const usedDataSources = usedSources.filter((source) => source.kind !== 'text');
@@ -1612,32 +1703,35 @@ function SourcesPanel({
       <div className="source-view-tabs" role="tablist" aria-label="Filter sources by recommended view">
         {([['all', 'All'], ['kpi', 'KPI'], ['chart', 'Charts'], ['table', 'Tables']] as const).map(([value, label]) => <button key={value} type="button" role="tab" aria-selected={viewFilter === value} className={viewFilter === value ? 'on' : ''} onClick={() => setViewFilter(value)}>{label}</button>)}
       </div>
-      <small aria-live="polite">{loading ? 'Finding…' : `${visibleItems.length} ${visibleItems.length === 1 ? 'result' : 'results'}`}</small>
+      <small aria-live="polite">{loading ? 'Finding…' : `${visibleItems.length} of ${total} ${total === 1 ? 'result' : 'results'}`}</small>
     </div>
     {loading ? <div className="source-panel-state"><Sparkles size={16} /><div><strong>Finding governed sources</strong><small>Matching certified blocks and semantic data to this App decision.</small></div></div> : null}
     {!loading && error ? <div className="source-panel-state error"><X size={16} /><div><strong>Sources could not load</strong><small>{error}</small></div></div> : null}
     {!loading && !error && visibleItems.length === 0 ? <div className="source-panel-state"><Search size={16} /><div><strong>{query.trim() || viewFilter !== 'all' ? 'No source matches these filters' : 'No governed source matched yet'}</strong><small>{query.trim() || viewFilter !== 'all' ? 'Clear the search or choose All to see every governed source.' : 'Refine the business decision or enable the review-required lane for additional local options.'}</small></div></div> : null}
-    <div className="source-catalog-list">{visibleItems.slice(0, 30).map((item) => {
+    <div className="source-catalog-list">{visibleItems.map((item) => {
       const kind = recommendedComponentKind(item);
       const isSelected = selected?.id === item.id;
       const isUsed = usedIdentifiers.has(item.id) || usedIdentifiers.has(item.name);
+      const blockedByPolicy = item.eligibility?.localPreview === false && policy === 'governed_only';
       return <article key={item.id} className={`source-catalog-row ${isSelected ? 'on' : ''}`}>
         <button type="button" className="source-catalog-summary" onClick={() => onSelect(item)} aria-label={`View ${item.name} source details`} aria-expanded={isSelected}>
           <span className={item.status === 'certified' ? 'certified' : 'review'}>{item.status === 'certified' ? <ShieldCheck size={14} /> : <FileText size={14} />}</span>
           <div><strong title={item.name}>{humanize(item.name)}</strong><small>{humanize(item.domain)} · {item.status === 'certified' ? 'Certified block' : 'Review required'}{isUsed ? ' · In App' : ''}</small></div>
         </button>
-        <button type="button" className="source-add-view" disabled={disabled} onClick={() => onAdd(item, kind)} aria-label={`Add ${item.name} as ${componentKindLabel(kind)}`}><Plus size={13} /> Add {componentKindLabel(kind)}</button>
+        <button type="button" className="source-add-view" disabled={disabled || blockedByPolicy} title={blockedByPolicy ? 'Enable review-required sources to add this draft block locally.' : undefined} onClick={() => onAdd(item, kind)} aria-label={`Add ${item.name} as ${componentKindLabel(kind)}`}><Plus size={13} /> {blockedByPolicy ? 'Review lane required' : `Add ${componentKindLabel(kind)}`}</button>
         {isSelected ? <div className="source-catalog-detail">
           <p>{item.description || `${humanize(item.name)} from the ${humanize(item.domain)} domain.`}</p>
+          {blockedByPolicy ? <button type="button" className="review-action" onClick={onEnableReview}><FileText size={12} /> Enable review-required sources</button> : null}
           {(item.filterIds?.length ?? 0) > 0 ? <span><Filter size={12} /> {item.filterIds!.length} supported {item.filterIds!.length === 1 ? 'filter' : 'filters'}</span> : null}
           <div className="source-view-options" aria-label={`Add ${item.name} with another view`}>
-            <button type="button" disabled={disabled} onClick={() => onAdd(item, 'kpi')}><Gauge size={13} /> KPI</button>
-            <button type="button" disabled={disabled} onClick={() => onAdd(item, 'chart')}><BarChart3 size={13} /> Chart</button>
-            <button type="button" disabled={disabled} onClick={() => onAdd(item, 'table')}><Table2 size={13} /> Table</button>
+            <button type="button" disabled={disabled || blockedByPolicy} onClick={() => onAdd(item, 'kpi')}><Gauge size={13} /> KPI</button>
+            <button type="button" disabled={disabled || blockedByPolicy} onClick={() => onAdd(item, 'chart')}><BarChart3 size={13} /> Chart</button>
+            <button type="button" disabled={disabled || blockedByPolicy} onClick={() => onAdd(item, 'table')}><Table2 size={13} /> Table</button>
           </div>
         </div> : null}
       </article>;
     })}</div>
+    {hasMore ? <button type="button" className="source-load-more" onClick={onLoadMore} disabled={loading || disabled}>{loading ? 'Loading…' : 'Load 50 more sources'}</button> : null}
     <div className="panel-section-label"><span>Page elements</span><small>No data required</small></div>
     <div className="content-quick-add"><button type="button" disabled={disabled} onClick={() => onAddContent('heading')}><Heading size={15} /><span><strong>Heading</strong><small>Organize the story</small></span><Plus size={13} /></button><button type="button" disabled={disabled} onClick={() => onAddContent('text')}><Type size={15} /><span><strong>Text</strong><small>Add context or guidance</small></span><Plus size={13} /></button></div>
   </>;
@@ -1688,8 +1782,8 @@ function FiltersPanel({
     return !needle || [candidate.id, ...candidate.sourceNames].join(' ').toLowerCase().includes(needle);
   });
   const mappings = useMemo(
-    () => configuration?.fieldId ? filterTileMappingsForField(draft.pages, catalog, configuration.fieldId, runtimeFilterFields) : [],
-    [catalog, configuration?.fieldId, draft.pages, runtimeFilterFields],
+    () => configuration?.fieldId ? filterTileMappingsForField(draft.pages, catalog, configuration.fieldId, runtimeFilterFields, draft.sources) : [],
+    [catalog, configuration?.fieldId, draft.pages, draft.sources, runtimeFilterFields],
   );
   const visibleMappings = configuration?.scope === 'page'
     ? mappings.filter((mapping) => mapping.pageId === activePage?.id)
@@ -1711,7 +1805,7 @@ function FiltersPanel({
   const dateFieldHasNoValues = Boolean(dateAvailabilityChecked && fieldAvailability?.valueCount === 0);
 
   const chooseField = (candidate: StudioFilterCandidate) => {
-    const candidateMappings = filterTileMappingsForField(draft.pages, catalog, candidate.id, runtimeFilterFields);
+    const candidateMappings = filterTileMappingsForField(draft.pages, catalog, candidate.id, runtimeFilterFields, draft.sources);
     setConfiguration({
       id: candidate.id,
       fieldId: candidate.id,
@@ -1724,7 +1818,7 @@ function FiltersPanel({
   };
   const editFilter = (item: { filter: StudioDashboardFilter; pageIds: string[] }) => {
     const fieldId = item.filter.field?.name ?? item.filter.bindsTo ?? item.filter.id;
-    const filterMappings = filterTileMappingsForField(draft.pages, catalog, fieldId, runtimeFilterFields);
+    const filterMappings = filterTileMappingsForField(draft.pages, catalog, fieldId, runtimeFilterFields, draft.sources);
     const linked = filterMappings.filter((mapping) => {
       const page = draft.pages.find((candidate) => candidate.id === mapping.pageId);
       const pageFilter = page?.filters?.find((filter) => filter.id === item.filter.id);
@@ -1833,7 +1927,7 @@ function ComponentInspector({ tile, run, pageId, onUpdate, onDelete }: { tile: A
     {!tile.text ? <section className="field-mapping"><label>Field mapping</label><div><span>X / category</span><select value={String(options.x ?? '')} onChange={(event) => setOption('x', event.target.value)}><option value="">Auto</option>{columns.map((column) => <option key={column} value={column}>{humanize(column)}</option>)}</select></div><div><span>Y / value</span><select value={String(options.y ?? '')} onChange={(event) => setOption('y', event.target.value)}><option value="">Auto</option>{columns.map((column) => <option key={column} value={column}>{humanize(column)}</option>)}</select></div><small className="field-help">Run preview to load the exact result fields.</small></section> : null}
     {!tile.text ? <section className="format-grid"><label>Formatting</label><div><span>Number</span><select value={String(options.format ?? 'number')} onChange={(event) => setOption('format', event.target.value)}><option value="number">Number</option><option value="currency">Currency</option><option value="percent">Percent</option><option value="duration">Duration</option></select></div><div><span>Legend</span><select value={String(options.legendPosition ?? 'right')} onChange={(event) => setOption('legendPosition', event.target.value)}><option value="top">Top</option><option value="right">Right</option><option value="bottom">Bottom</option><option value="none">Hidden</option></select></div></section> : null}
     <section><label>Responsive size</label><div className="size-buttons">{[['Compact', 3, 2], ['Standard', 6, 4], ['Wide', 12, 4], ['Tall', 6, 7]].map(([label, w, h]) => <button key={label} type="button" onClick={() => onUpdate({ w: Number(w), h: Number(h) })}>{label}</button>)}</div></section>
-    <section className="data-trust"><label>Data & trust</label><div><span className={`trust-dot ${tile.trustState ?? 'draft_ready'}`} /><strong>{humanize(tile.trustState ?? 'draft_ready')}</strong></div><p>{tile.block ? `Certified block: ${'blockId' in tile.block ? tile.block.blockId : tile.block.ref}` : tile.semantic ? `Governed semantic query: ${tile.semantic.id}` : tile.draftAnalysis ? `Review-required DQL: ${tile.draftAnalysis.ref}` : 'Local narrative component'}</p>{tile.sourceEvidence?.slice(0, 2).map((evidence, index) => <small key={`${evidence.source}-${index}`}>{evidence.reason}</small>)}{run ? <small>{run.status === 'ok' ? `Settled on ${run.result?.rowCount ?? run.result?.rows.length ?? 0} rows` : run.error}</small> : null}</section>
+    <section className="data-trust"><label>Data & trust</label><div><span className={`trust-dot ${tile.trustState ?? 'draft_ready'}`} /><strong>{humanize(tile.trustState ?? 'draft_ready')}</strong></div><p>{tile.block ? `${tile.trustState === 'certified' ? 'Certified' : 'Review-required'} block: ${'blockId' in tile.block ? tile.block.blockId : tile.block.ref}` : tile.semantic ? `Governed semantic query: ${tile.semantic.id}` : tile.draftAnalysis ? `Review-required DQL: ${tile.draftAnalysis.ref}` : 'Local narrative component'}</p>{tile.sourceEvidence?.slice(0, 2).map((evidence, index) => <small key={`${evidence.source}-${index}`}>{evidence.reason}</small>)}{run ? <small>{run.status === 'ok' ? `Settled on ${run.result?.rowCount ?? run.result?.rows.length ?? 0} rows` : run.error}</small> : null}</section>
     <button type="button" className="delete-component" onClick={onDelete}><Trash2 size={15} /> Remove component</button><small className="inspector-id">{pageId} / {tile.i}</small>
   </div>;
 }

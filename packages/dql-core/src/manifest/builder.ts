@@ -360,6 +360,7 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
     projectRoot,
     domains,
     blocks,
+    blockDeclarations: knowledgeBlocks,
     businessViews,
     terms,
     notebooks,

@@ -140,4 +140,34 @@ describe('App Studio filter discovery (UI-022)', () => {
       pageCount: 1,
     }]);
   });
+
+  it('restores filter capabilities from canonical draft bindings when the source is off-page', () => {
+    const pages = [{
+      version: 2,
+      id: 'overview',
+      metadata: { title: 'Overview' },
+      layout: {
+        kind: 'grid', cols: 12, rowHeight: 80,
+        items: [{
+          i: 'orders', title: 'Orders by region', x: 0, y: 0, w: 6, h: 4,
+          sourceId: 'app:block:sales:orders', sourceRevision: 'sha256:orders',
+          block: { ref: 'blocks/sales/orders.dql' }, viz: { type: 'bar' },
+        }],
+      },
+    }] as AppStudioBuildDraft['pages'];
+    const boundSources = [{
+      id: 'app:block:sales:orders', kind: 'block', sourceRef: 'blocks/sales/orders.dql',
+      sourceRevision: 'sha256:orders', sourceFingerprint: 'sha256:orders', lifecycle: 'draft',
+      qualifiedIdentity: 'sales::block::Orders by Region', trustState: 'review_required', reviewStatus: 'required',
+      capabilities: {
+        measures: ['orders'], dimensions: ['region'], outputs: ['orders', 'region'],
+        filters: ['order_date'], allowedVisualizations: ['bar'], parameters: [],
+      },
+    }] as AppStudioBuildDraft['sources'];
+
+    expect(discoverAppFilterCandidates(pages, [], {}, boundSources)).toEqual([
+      { id: 'order_date', sourceNames: ['sales::block::Orders by Region'], affectedTileCount: 1, pageCount: 1 },
+      { id: 'region', sourceNames: ['sales::block::Orders by Region'], affectedTileCount: 1, pageCount: 1 },
+    ]);
+  });
 });

@@ -57,6 +57,8 @@ export type {
   AppBuildSourcePolicy,
   AppBuildTemplateId,
   AppBuildDraftSourceKind,
+  AppBuildSourceLifecycle,
+  AppBuildSourceCapabilities,
   AppBuildDraftSource,
   AppBuildReviewTask,
   AppBuildDraftOperation,

@@ -433,31 +433,6 @@ export function AppsView(): JSX.Element {
   }, [activeBuildOperation, applyRecoveredBuildSession, buildOperationId, buildSession?.status, durableBuildSessionId]);
 
   useEffect(() => {
-    if (surface !== 'create') return;
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => {
-      setCatalogLoading(true);
-      setCatalogError(null);
-      void api.recommendAppBlocks({
-        domain: builderDomain || undefined,
-        purpose: builderPrompt,
-        audience: 'stakeholder',
-        certifiedOnly: true,
-      }, controller.signal).then((blocks) => {
-        if (!controller.signal.aborted) setCatalog(blocks);
-      }).catch((error) => {
-        if (!controller.signal.aborted) setCatalogError(error instanceof Error ? error.message : String(error));
-      }).finally(() => {
-        if (!controller.signal.aborted) setCatalogLoading(false);
-      });
-    }, 300);
-    return () => {
-      window.clearTimeout(timer);
-      controller.abort();
-    };
-  }, [surface, builderMode, builderDomain, builderPrompt]);
-
-  useEffect(() => {
     if (!state.activeAppId || surface !== 'workspace') {
       setAppDoc(null);
       setDashboardDoc(null);

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ensureNotebookDqlBlockSource,
+  hasCompleteBlockEnvelope,
   inferVisualParameterType,
   parseVisualBlockParameters,
   parseSemanticVisualFields,
@@ -21,6 +22,15 @@ const SOURCE = `block "Revenue by Region" {
 }`;
 
 describe('visual block parameters', () => {
+  it('distinguishes a complete block from a transient invalid editor buffer', () => {
+    expect(hasCompleteBlockEnvelope(SOURCE)).toBe(true);
+    expect(hasCompleteBlockEnvelope(SOURCE.slice(0, SOURCE.lastIndexOf('}')))).toBe(false);
+    expect(hasCompleteBlockEnvelope(`block "Braces in SQL" {
+  type = "custom"
+  query = """SELECT '{"key": 1}' AS payload"""
+}`)).toBe(true);
+  });
+
   it('infers author-entered values into safe DQL types', () => {
     expect(inferVisualParameterType('10', 'top_n')).toBe('number');
     expect(inferVisualParameterType('2026-01-01', 'start_date')).toBe('date');

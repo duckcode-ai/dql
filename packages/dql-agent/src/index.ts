@@ -68,6 +68,29 @@ export type {
   SelectRelevantSkillsOptions,
 } from "./skills/loader.js";
 export { seedDefaultSkills } from "./skills/defaults.js";
+export {
+  AppSourceCatalogError,
+  queryAppSourceCatalog,
+  resolveAppSourceCatalogRecords,
+  shortlistAppSources,
+} from './app-source-catalog.js';
+export { planAppBuildBrief } from './app-builder-orchestrator.js';
+export type {
+  AppBuilderBuildBrief,
+  AppBuilderComponentRole,
+  AppBuilderComponentView,
+  AppBuilderPlannedComponent,
+  AppBuilderPlannerCompletion,
+  AppBuilderPlannerCompletionInput,
+  PlanAppBuildBriefInput,
+} from './app-builder-orchestrator.js';
+export type {
+  AppSourceCatalogPage,
+  AppSourceCatalogQuery,
+  AppSourceCatalogRecord,
+  AppSourceEligibility,
+  AppSourceTrust,
+} from './app-source-catalog.js';
 export { seedDomainSkills, buildDomainReferenceSkills } from "./skills/domain-skills.js";
 export {
   draftDomainSkillBootstrap,

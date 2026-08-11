@@ -46,7 +46,7 @@ const STATUS_COLOR: Record<string, string> = {
  * metric/dimension/table/column to insert it into the active editor (or a new SQL
  * cell); click a block to open it in the builder.
  */
-export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSemanticCompose, blockDomain = '', onBlockDomainChange, onNewBlock, onDeleteBlock, blockLibraryRefreshKey = 0, footer, footerStatus = 'ready', onCollapse }: {
+export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSemanticCompose, blockDomain = '', onBlockDomainChange, onNewBlock, onOpenBlock, onDeleteBlock, blockLibraryRefreshKey = 0, footer, footerStatus = 'ready', onCollapse }: {
   defaultTab?: BuildTab;
   onOpenFile?: (file: NotebookFile) => void;
   /** Which tabs to show (default all four). Block Studio omits 'notebooks'. */
@@ -60,6 +60,8 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSem
   onBlockDomainChange?: (domain: string) => void;
   /** Shows a "+" new-block button beside the search input (Block Studio). */
   onNewBlock?: () => void;
+  /** Lets a hosting authoring surface guard dirty work before opening a block. */
+  onOpenBlock?: (block: BlockEntry) => void;
   /** Requests the guarded delete flow for one exact saved block. */
   onDeleteBlock?: (block: BlockEntry) => void;
   /** Explicit refresh signal after a save, move, or delete changes disk layout. */
@@ -191,7 +193,7 @@ export function BuildSidebar({ defaultTab, onOpenFile, tabs, onInsertText, onSem
         )}
         {tab === 'semantic' && <SemanticList t={t} search={search} onInsert={insertText} notebookMode={!onInsertText || Boolean(onSemanticCompose)} onSemanticCompose={onSemanticCompose} />}
         {tab === 'database' && <DbtDatabaseList t={t} search={search} onInsert={insertText} />}
-        {tab === 'blocks' && <BlocksList t={t} search={search} domain={blockDomain} onDomainChange={onBlockDomainChange} onDeleteBlock={onDeleteBlock} refreshKey={blockLibraryRefreshKey} />}
+        {tab === 'blocks' && <BlocksList t={t} search={search} domain={blockDomain} onDomainChange={onBlockDomainChange} onOpenBlock={onOpenBlock} onDeleteBlock={onDeleteBlock} refreshKey={blockLibraryRefreshKey} />}
       </div>
 
       {footer ? (
@@ -741,7 +743,7 @@ function SemanticList({ t, search, onInsert, notebookMode, onSemanticCompose }: 
   </div>;
 }
 
-function BlocksList({ t, search, domain, onDomainChange, onDeleteBlock, refreshKey }: { t: Theme; search: string; domain: string; onDomainChange?: (domain: string) => void; onDeleteBlock?: (block: BlockEntry) => void; refreshKey: number }) {
+function BlocksList({ t, search, domain, onDomainChange, onOpenBlock, onDeleteBlock, refreshKey }: { t: Theme; search: string; domain: string; onDomainChange?: (domain: string) => void; onOpenBlock?: (block: BlockEntry) => void; onDeleteBlock?: (block: BlockEntry) => void; refreshKey: number }) {
   const { state, dispatch } = useNotebook();
   const [blocks, setBlocks] = useState<BlockEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -769,6 +771,10 @@ function BlocksList({ t, search, domain, onDomainChange, onDeleteBlock, refreshK
   const scopeLabel = selectedDomain === 'uncategorized' ? 'unassigned' : selectedDomain || 'all domains';
 
   const open = (block: BlockEntry) => {
+    if (onOpenBlock) {
+      onOpenBlock(block);
+      return;
+    }
     const file = { name: block.path.split('/').pop() ?? block.name, path: block.path, type: 'block' as const, folder: 'blocks' };
     if (!state.files.some((f) => f.path === block.path)) dispatch({ type: 'FILE_ADDED', file });
     void api.openBlockStudio(block.path).then((payload) => dispatch({ type: 'OPEN_BLOCK_STUDIO', file, payload }));

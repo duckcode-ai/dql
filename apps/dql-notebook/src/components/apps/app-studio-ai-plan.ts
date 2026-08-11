@@ -156,9 +156,11 @@ function sourceIdForTile(
   tile: AppStudioBuildDraft['pages'][number]['layout']['items'][number],
   sources: AppStudioBuildDraft['sources'],
 ): string | undefined {
+  if (tile.sourceId) return tile.sourceId;
   if (tile.block) {
     const blockRef = 'blockId' in tile.block ? tile.block.blockId : tile.block.ref;
-    return sources.find((source) => source.kind === 'certified_block' && source.sourceRef === blockRef)?.id ?? `block:${blockRef}`;
+    return sources.find((source) => ['block', 'certified_block', 'review_block'].includes(source.kind) && source.sourceRef === blockRef)?.id
+      ?? `block:${blockRef}`;
   }
   if (tile.semantic) {
     return sources.find((source) => ['governed_semantic', 'semantic_query'].includes(source.kind) && source.sourceRef === tile.semantic?.id)?.id

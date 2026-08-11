@@ -107,6 +107,7 @@ const initialState: NotebookState = {
   blockStudioDraft: '',
   blockStudioDirty: false,
   blockStudioPreview: null,
+  blockStudioLastRun: null,
   blockStudioValidation: null,
   blockStudioMetadata: null,
   blockStudioCatalog: null,
@@ -315,6 +316,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         blockStudioDraft: '',
         blockStudioDirty: false,
         blockStudioPreview: null,
+        blockStudioLastRun: null,
         blockStudioValidation: null,
         blockStudioMetadata: null,
         dashboardMode: false,
@@ -337,6 +339,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         blockStudioDraft: action.file.type === 'block' ? state.blockStudioDraft : '',
         blockStudioDirty: false,
         blockStudioPreview: action.file.type === 'block' ? state.blockStudioPreview : null,
+        blockStudioLastRun: action.file.type === 'block' ? state.blockStudioLastRun : null,
         blockStudioValidation: action.file.type === 'block' ? state.blockStudioValidation : null,
         blockStudioMetadata: action.file.type === 'block' ? state.blockStudioMetadata : null,
         lineageFullscreen: false,
@@ -356,6 +359,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         blockStudioDraft: action.payload.source,
         blockStudioDirty: false,
         blockStudioPreview: null,
+        blockStudioLastRun: action.payload.lastRun ?? null,
         blockStudioValidation: action.payload.validation,
         blockStudioMetadata: action.payload.metadata,
         blockStudioImportOpen: false,
@@ -369,6 +373,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         blockStudioDraft: action.source,
         blockStudioDirty: false,
         blockStudioPreview: null,
+        blockStudioLastRun: null,
         blockStudioMetadata: state.blockStudioMetadata
           ? { ...state.blockStudioMetadata, reviewStatus: 'draft' }
           : null,
@@ -404,6 +409,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         blockStudioDraft: action.payload.source,
         blockStudioDirty: false,
         blockStudioPreview: null,
+        blockStudioLastRun: action.payload.lastRun ?? null,
         blockStudioValidation: action.payload.validation,
         blockStudioMetadata: action.payload.metadata,
         lineageFocusNodeId: `block:${action.payload.metadata.name}`,
@@ -568,6 +574,7 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
         blockStudioDraft: '',
         blockStudioDirty: false,
         blockStudioPreview: null,
+        blockStudioLastRun: null,
         blockStudioValidation: null,
         blockStudioMetadata: null,
         blockStudioImportOpen: false,
@@ -704,7 +711,16 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       return { ...state, blockStudioDirty: action.dirty };
 
     case 'SET_BLOCK_STUDIO_PREVIEW':
-      return { ...state, blockStudioPreview: action.preview };
+      return {
+        ...state,
+        blockStudioPreview: action.preview,
+        blockStudioLastRun: action.preview ? {
+          rowCount: action.preview.result.rowCount ?? action.preview.result.rows.length,
+          executionTime: action.preview.result.executionTime,
+          columns: action.preview.result.columns,
+          ranAt: new Date().toISOString(),
+        } : state.blockStudioLastRun,
+      };
 
     case 'SET_BLOCK_STUDIO_VALIDATION':
       return { ...state, blockStudioValidation: action.validation };
