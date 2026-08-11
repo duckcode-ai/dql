@@ -7,7 +7,7 @@ and inspect lineage from source data to dashboard pages.
 
 For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
-## Current State (v1.13.2)
+## Current State (v1.13.3)
 
 DQL OSS is ready for local-first use cases:
 
@@ -19,6 +19,15 @@ DQL OSS is ready for local-first use cases:
   connectors.
 - Use Block Studio to create SQL blocks, semantic blocks, imported SQL drafts,
   and locally certified blocks.
+- Run Blocks with results foregrounded, inspect generated SQL on demand, and
+  resolve save, validation, test, chart, lineage, and certification blockers
+  through one progressive checklist with focused corrective actions.
+- Build Apps manually or with a dedicated App AI orchestrator over one
+  snapshot-backed, paginated catalog that keeps certified, review, and draft
+  executable blocks visible with qualified identities and exact revisions.
+- Preview draft/review App sources locally with explicit trust labels while
+  keeping Project publication fail-closed until every source is certified,
+  current, and bound to its reviewed revision.
 - Use the same metric-first governed composer in Notebook and Block Studio:
   insertion is available after compatibility planning, only common approved
   dimensions are selectable, and preview remains an optional execution check.

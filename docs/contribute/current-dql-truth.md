@@ -12,15 +12,15 @@ agent memory, issues, old worktrees, and ignored planning files.
 
 ## Verified snapshot
 
-Last checked: **2026-08-10**
+Last checked: **2026-08-11**
 
 | Fact                | Verified state                                                                                          | Evidence                                                                                                                |
 | ------------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | Primary branch      | Local `main` and `origin/main` are synchronized at the verified release baseline                        | `git status --short --branch`; `git rev-parse main origin/main`; `git rev-list --left-right --count main...origin/main` |
-| Current OSS release | `1.13.2` across all 19 publishable packages and the starter CLI range                                   | Release manifests and starter CLI range on `main`                                                                        |
-| npm publication     | All 19 packages report `version=1.13.2` and `dist-tags.latest=1.13.2`                                  | Package-by-package `npm view` audit                                                                                       |
-| Published CLI       | Fresh project-local and global installs both reported `dql 1.13.2`                                     | `node scripts/smoke-cli-install.mjs @duckcodeailabs/dql-cli@1.13.2`                                                      |
-| Release tag         | `v1.13.2` identifies the final Git release baseline                                                    | `git rev-parse v1.13.2`; `git ls-remote --tags origin refs/tags/v1.13.2`                                                 |
+| Current OSS release | `1.13.3` across all 19 publishable packages and the starter CLI range                                   | Release manifests and starter CLI range on `main`                                                                        |
+| npm publication     | All 19 packages report `version=1.13.3` and `dist-tags.latest=1.13.3`                                   | Package-by-package `npm view` audit                                                                                       |
+| Published CLI       | Fresh project-local and global installs both reported `dql 1.13.3`                                     | `node scripts/smoke-cli-install.mjs @duckcodeailabs/dql-cli@1.13.3`                                                      |
+| Release tag         | `v1.13.3` identifies the final Git release baseline                                                    | `git rev-parse v1.13.3`; `git ls-remote --tags origin refs/tags/v1.13.3`                                                 |
 
 The missing `v1.11.3` through `v1.11.10` and `v1.12.4` through `v1.12.9` tags
 are release-history debt. They do not invalidate the verified npm publication,
@@ -59,6 +59,14 @@ review-required; only the explicit **Add to Block Studio** action writes a
 draft. Local agent memory is advisory. Certified assets, semantic/dbt facts,
 policies, runtime evidence, and current Git state outrank memory.
 
+App AI uses a separate stateful App orchestration loop over the same provider,
+immutable snapshot, meaning, execution, repair, trust, and evidence
+foundations. Manual and AI authoring share one paginated source catalog,
+canonical source-to-tile composition, local preview/filter path, and Project
+publication gate. Draft and review blocks remain discoverable and usable only
+in local review-required Apps until they are explicitly certified, replaced,
+or removed.
+
 The OSS shared-design compatibility surface is limited to the documented
 `data-theme` values, semantic color-token vocabulary, and `dql-theme`
 storage-listener contract. Managed cloud embedding, navigation, identity, and
@@ -73,8 +81,8 @@ implementation evidence, not automatic independent verification.
 
 At this snapshot:
 
-- 57 acceptance requirements are `implemented`;
-- 28 remain `specified`;
+- 87 acceptance requirements are `implemented`;
+- 27 remain `specified`;
 - 0 are `verified`;
 - `E2E-015` remains `specified`;
 - `PERF-001` remains an open release/performance gate.
@@ -129,7 +137,7 @@ For current-state decisions, use this order:
    observations as advisory context only.
 
 `ROADMAP.md`, `CHANGELOG.md`, and `docs/oss-readiness-checklist.md` contain
-useful historical release evidence. Their latest `1.13.2` entries are release
+useful historical release evidence. Their latest `1.13.3` entries are release
 documentation, while the live repository, registry audit, install smoke, and
 release tag remain the authoritative publication evidence.
 

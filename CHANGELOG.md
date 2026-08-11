@@ -58,6 +58,10 @@ local until their sources are governed.
   workspace test graph, and packed all 19 npm packages.
 - Independent focused verification passed all 76 Apps API tests, including the
   unversioned-source publication regression and zero-write assertion.
+- All 19 npm packages report `version=1.13.3` and
+  `dist-tags.latest=1.13.3`.
+- Fresh project-local and global CLI installs both report `dql 1.13.3`, and
+  `create-dql-app@1.13.3 --help` resolves successfully.
 
 ## v1.13.2 - 2026-08-10
 
