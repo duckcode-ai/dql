@@ -7,7 +7,7 @@ and inspect lineage from source data to dashboard pages.
 
 For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
-## Current State (v1.13.3)
+## Current State (v1.13.4)
 
 DQL OSS is ready for local-first use cases:
 
@@ -25,6 +25,9 @@ DQL OSS is ready for local-first use cases:
 - Build Apps manually or with a dedicated App AI orchestrator over one
   snapshot-backed, paginated catalog that keeps certified, review, and draft
   executable blocks visible with qualified identities and exact revisions.
+- Review an AI App plan with visible planning progress, retain explicitly added
+  canonical sources across revision and resume, and add manual draft blocks
+  through an explicit one-click local review lane.
 - Preview draft/review App sources locally with explicit trust labels while
   keeping Project publication fail-closed until every source is certified,
   current, and bound to its reviewed revision.
