@@ -2585,6 +2585,7 @@ export type AppBuildComposeRequest = {
   | { mode: 'ai'; proposalId: string; selectedSourceIds: string[] }
   | {
     mode: 'manual';
+    enableReviewRequired?: boolean;
     selections: Array<{
       sourceId: string;
       pageId?: string;
@@ -2879,31 +2880,33 @@ export async function proposeAppBuildDraftOperations(
     shortlistAppSources,
   } = await import('@duckcodeailabs/dql-agent');
   await ensureAgentProjectReady(projectRoot);
-  let candidates = shortlistAppSources(projectRoot, prompt, {
+  const requestedIds = unique((input.selectedBlockIds ?? []).map(cleanString).filter(Boolean));
+  if (requestedIds.length > 12) {
+    throw new Error('APP_BUILD_SOURCE_LIMIT: at most 12 required App sources can be planned at once.');
+  }
+  const resolvedRequired = requestedIds.length
+    ? resolveAppSourceCatalogRecords(projectRoot, requestedIds, draft.sourcePolicy)
+    : { items: [] as AppSourceCatalogRecord[], missingSourceIds: [] as string[] };
+  if (resolvedRequired.missingSourceIds.length) {
+    throw new Error(`APP_BUILD_SOURCE_DRIFT: these exact App sources no longer resolve: ${resolvedRequired.missingSourceIds.join(', ')}`);
+  }
+  const policyBlocked = resolvedRequired.items.filter((source) => !source.eligibility.localPreview);
+  if (policyBlocked.length) {
+    throw new Error(`APP_BUILD_REVIEW_POLICY_REQUIRED: enable review-required sources before adding ${policyBlocked.map((source) => source.title).join(', ')}.`);
+  }
+  const candidates = uniqueAppSourceRecords([
+    ...resolvedRequired.items,
+    ...shortlistAppSources(projectRoot, prompt, {
     sourcePolicy: draft.sourcePolicy,
     domains: draft.pages[0]?.metadata.domain && draft.pages[0].metadata.domain !== 'general'
       ? [draft.pages[0].metadata.domain]
       : undefined,
-  }).items;
-  const requestedIds = unique((input.selectedBlockIds ?? []).map(cleanString).filter(Boolean));
-  if (requestedIds.length) {
-    const exactIds = requestedIds.filter((id) => id.startsWith('app:block:'));
-    const exact = exactIds.length
-      ? resolveAppSourceCatalogRecords(projectRoot, exactIds, draft.sourcePolicy).items
-      : [];
-    const requested = new Set(requestedIds);
-    candidates = uniqueAppSourceRecords([
-      ...exact,
-      ...candidates.filter((candidate) => requested.has(candidate.sourceId)
-        || requested.has(candidate.name)
-        || requested.has(candidate.sourcePath)
-        || requested.has(candidate.qualifiedIdentity)),
-      ...candidates,
-    ]).slice(0, 12);
-  }
+    }).items,
+  ]).slice(0, 12);
   const brief = await planAppBuildBrief({
     prompt,
     candidates,
+    requiredSourceIds: resolvedRequired.items.map((source) => source.sourceId),
     sourcePolicy: draft.sourcePolicy,
     domain: draft.pages[0]?.metadata.domain,
     audience: draft.frame.audience,
@@ -4593,17 +4596,23 @@ async function composeStoredAppBuildDraft(
   if (selections.length > 100) throw new Error('APP_BUILD_SOURCE_LIMIT: at most 100 components can be composed at once.');
   const { ensureAgentProjectReady, resolveAppSourceCatalogRecords } = await import('@duckcodeailabs/dql-agent');
   await ensureAgentProjectReady(projectRoot);
+  const effectiveSourcePolicy = request.enableReviewRequired === true
+    ? 'include_review_required'
+    : current.sourcePolicy;
   const resolved = resolveAppSourceCatalogRecords(
     projectRoot,
     selections.map((selection) => selection.sourceId),
-    current.sourcePolicy,
+    effectiveSourcePolicy,
   );
   if (resolved.missingSourceIds.length) {
     throw new Error(`APP_BUILD_SOURCE_DRIFT: these sources no longer resolve: ${resolved.missingSourceIds.join(', ')}`);
   }
   const byId = new Map(resolved.items.map((source) => [source.sourceId, source]));
   const workingItems = new Map(current.pages.map((page) => [page.id, [...page.layout.items]]));
-  const operations: AppBuildDraftOperation[] = [];
+  const operations: AppBuildDraftOperation[] = request.enableReviewRequired === true
+    && current.sourcePolicy !== 'include_review_required'
+    ? [{ type: 'set_source_policy', sourcePolicy: 'include_review_required' }]
+    : [];
   const pageIds = new Set<string>();
   const tileIds: string[] = [];
   const coverageAdditions = new Map<string, { sourceIds: string[]; componentIds: string[] }>();

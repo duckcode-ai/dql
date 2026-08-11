@@ -2,20 +2,19 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useOperations } from '../../operations/OperationsProvider';
 import { useNotebookStore } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
-import { taskOutcomePresentation } from './task-center-presentation';
-
-const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'interrupted']);
+import { taskCenterProjection, taskOutcomePresentation } from './task-center-presentation';
 
 export function TaskCenter() {
   const themeMode = useNotebookStore((state) => state.themeMode);
   const t = themes[themeMode];
-  const { operations, activeCount, loading, cancel } = useOperations();
+  const { operations, loading, cancel } = useOperations();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  const visibleOperations = operations
-    .filter((operation) => !TERMINAL.has(operation.status) || operation.type !== 'project_refresh')
-    .slice(0, 8);
-  const attentionCount = visibleOperations.filter((operation) => taskOutcomePresentation(operation).tone === 'attention').length;
+  const {
+    operations: visibleOperations,
+    activeCount,
+    attentionCount,
+  } = taskCenterProjection(operations);
 
   useEffect(() => {
     if (!open) return;

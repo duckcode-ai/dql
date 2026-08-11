@@ -42,6 +42,8 @@ export type AppBuilderPlannerCompletion = (
 export interface PlanAppBuildBriefInput {
   prompt: string;
   candidates: AppSourceCatalogRecord[];
+  /** Exact catalog source IDs that the caller explicitly requires in the brief. */
+  requiredSourceIds: string[];
   sourcePolicy: AppBuildSourcePolicy;
   domain?: string;
   audience?: string;
@@ -59,8 +61,25 @@ export interface PlanAppBuildBriefInput {
 export async function planAppBuildBrief(input: PlanAppBuildBriefInput): Promise<AppBuilderBuildBrief> {
   const prompt = input.prompt.trim();
   if (!prompt) throw new Error('App build prompt is required.');
-  const candidates = input.candidates.slice(0, 12);
-  if (!input.complete || candidates.length === 0) return deterministicBrief(input, candidates);
+  const requiredSourceIds = Array.from(new Set(input.requiredSourceIds.map((id) => id.trim()).filter(Boolean)));
+  if (requiredSourceIds.length > 12) {
+    throw new Error('APP_BUILD_SOURCE_LIMIT: at most 12 required App sources can be planned at once.');
+  }
+  const suppliedById = new Map(input.candidates.map((candidate) => [candidate.sourceId, candidate]));
+  const missingRequiredIds = requiredSourceIds.filter((sourceId) => !suppliedById.has(sourceId));
+  if (missingRequiredIds.length) {
+    throw new Error(`APP_BUILD_REQUIRED_SOURCE_MISSING: required sources were not supplied as candidate cards: ${missingRequiredIds.join(', ')}`);
+  }
+  const candidates = uniqueCandidates([
+    ...requiredSourceIds.flatMap((sourceId) => {
+      const candidate = suppliedById.get(sourceId);
+      return candidate ? [candidate] : [];
+    }),
+    ...input.candidates,
+  ]).slice(0, 12);
+  if (!input.complete || candidates.length === 0) {
+    return ensureRequiredSources(deterministicBrief(input, candidates), candidates, requiredSourceIds);
+  }
 
   let raw: string | undefined;
   try {
@@ -69,21 +88,33 @@ export async function planAppBuildBrief(input: PlanAppBuildBriefInput): Promise<
       user: appBuilderUserPrompt(input, candidates),
     });
   } catch {
-    return deterministicBrief(input, candidates, ['The configured App planning provider was unavailable; deterministic matching was used.']);
+    return ensureRequiredSources(
+      deterministicBrief(input, candidates, ['The configured App planning provider was unavailable; deterministic matching was used.']),
+      candidates,
+      requiredSourceIds,
+    );
   }
   const parsed = parsePlannerJson(raw);
   if (!parsed) {
-    return deterministicBrief(input, candidates, ['The App planning provider returned an invalid build brief; deterministic matching was used.']);
+    return ensureRequiredSources(
+      deterministicBrief(input, candidates, ['The App planning provider returned an invalid build brief; deterministic matching was used.']),
+      candidates,
+      requiredSourceIds,
+    );
   }
   const allowedIds = new Set(candidates.map((candidate) => candidate.sourceId));
   const requirements = normalizeRequirements(parsed.requirements);
   const requirementIds = new Set(requirements.map((requirement) => requirement.id));
   const components = normalizeComponents(parsed.components, allowedIds, requirementIds);
   if (requirements.length === 0 || components.length === 0) {
-    return deterministicBrief(input, candidates, ['The App planning provider did not return grounded requirements and components; deterministic matching was used.']);
+    return ensureRequiredSources(
+      deterministicBrief(input, candidates, ['The App planning provider did not return grounded requirements and components; deterministic matching was used.']),
+      candidates,
+      requiredSourceIds,
+    );
   }
   const frame = normalizeFrame(parsed.frame, prompt, input.audience);
-  return {
+  return ensureRequiredSources({
     version: 1,
     planningMode: 'ai',
     frame,
@@ -92,7 +123,135 @@ export async function planAppBuildBrief(input: PlanAppBuildBriefInput): Promise<
     selectedSourceIds: Array.from(new Set(components.map((component) => component.sourceId))),
     candidateSourceIds: candidates.map((candidate) => candidate.sourceId),
     warnings: [],
+  }, candidates, requiredSourceIds);
+}
+
+function ensureRequiredSources(
+  brief: AppBuilderBuildBrief,
+  candidates: AppSourceCatalogRecord[],
+  requiredSourceIds: string[],
+): AppBuilderBuildBrief {
+  const byId = new Map(candidates.map((candidate) => [candidate.sourceId, candidate]));
+  const warnings = [...brief.warnings];
+  const requirementsById = new Map(brief.requirements.map((requirement) => [requirement.id, requirement]));
+  const components = brief.components.map((component) => {
+    if (component.requirementIds.length === 0) return component;
+    const candidate = byId.get(component.sourceId);
+    const requirementIds = component.requirementIds.filter((requirementId) => {
+      const requirement = requirementsById.get(requirementId);
+      return Boolean(candidate && requirement && candidateSatisfiesStructuredRequirement(requirement, candidate));
+    });
+    const removed = component.requirementIds.filter((requirementId) => !requirementIds.includes(requirementId));
+    if (removed.length) {
+      warnings.push(`${component.title} remains in the proposal, but unsupported requirement coverage was removed: ${removed.join(', ')}.`);
+    }
+    return requirementIds.length === component.requirementIds.length ? component : { ...component, requirementIds };
+  });
+  const componentIds = new Set(components.map((component) => component.id));
+  for (const sourceId of requiredSourceIds) {
+    if (components.some((component) => component.sourceId === sourceId)) continue;
+    const candidate = byId.get(sourceId);
+    if (!candidate) {
+      throw new Error(`APP_BUILD_REQUIRED_SOURCE_MISSING: required source was not retained in the bounded candidate cards: ${sourceId}`);
+    }
+    const match = brief.requirements.find((requirement) => candidateSatisfiesStructuredRequirement(requirement, candidate));
+    let componentId = `required-${candidate.sourceId.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase() || 'source'}`;
+    for (let suffix = 2; componentIds.has(componentId); suffix += 1) {
+      componentId = `${componentId.replace(/-\d+$/, '')}-${suffix}`;
+    }
+    componentIds.add(componentId);
+    components.push({
+      id: componentId,
+      title: candidate.title,
+      sourceId: candidate.sourceId,
+      requirementIds: match ? [match.id] : [],
+      role: match?.role ?? inferRole(candidate, components.length),
+      view: inferView(candidate, components.length),
+      rationale: match
+        ? `Explicitly required source with a structured capability match for ${match.question}.`
+        : 'Explicitly required source; no structured requirement capability match was found.',
+    });
+    if (!match) {
+      warnings.push(`${candidate.title} was explicitly added without requirement coverage because its declared measures, dimensions, and filters did not match a requirement.`);
+    }
+  }
+  return {
+    ...brief,
+    components,
+    selectedSourceIds: Array.from(new Set(components.map((component) => component.sourceId))),
+    warnings,
   };
+}
+
+function candidateSatisfiesStructuredRequirement(
+  requirement: AppBuildRequirement,
+  candidate: AppSourceCatalogRecord,
+): boolean {
+  const hasStructuredRequirement = requirement.measures.length > 0
+    || requirement.dimensions.length > 0
+    || requirement.filters.length > 0;
+  if (!hasStructuredRequirement) {
+    return questionEvidenceMatchesCandidate(requirement.question, candidate);
+  }
+
+  // Provider-declared capability fields are only trustworthy when the visible
+  // requirement question names them. This prevents an internally inconsistent
+  // requirement such as "Profit margin" + measure "revenue" from laundering a
+  // revenue source into false margin coverage.
+  if (!capabilityValuesMatch([
+    ...requirement.measures,
+    ...requirement.dimensions,
+    ...requirement.filters,
+  ], [requirement.question])) return false;
+
+  // A declared measure is decisive: generic words in titles or descriptions
+  // can never substitute a different metric into requirement coverage.
+  if (!capabilityValuesMatch(requirement.measures, [
+    ...candidate.capabilities.measures,
+    ...candidate.capabilities.outputs,
+  ])) return false;
+  if (!capabilityValuesMatch(requirement.dimensions, candidate.capabilities.dimensions)) return false;
+  if (!capabilityValuesMatch(requirement.filters, candidate.capabilities.filters)) return false;
+  return true;
+}
+
+function questionEvidenceMatchesCandidate(
+  question: string,
+  candidate: AppSourceCatalogRecord,
+): boolean {
+  const questionTokens = deterministicWords(question);
+  if (questionTokens.size === 0) return false;
+  const candidateTokens = deterministicWords([
+    candidate.title,
+    candidate.description ?? '',
+    candidate.qualifiedIdentity,
+    ...candidate.tags,
+    ...candidate.capabilities.measures,
+    ...candidate.capabilities.dimensions,
+    ...candidate.capabilities.filters,
+    ...candidate.capabilities.outputs,
+  ].join(' '));
+  return Array.from(questionTokens).every((token) => candidateTokens.has(token));
+}
+
+function capabilityValuesMatch(requiredValues: string[], availableValues: string[]): boolean {
+  if (requiredValues.length === 0) return true;
+  const availableTokenSets = availableValues.map((value) => deterministicWords(value));
+  return requiredValues.every((requiredValue) => {
+    const requiredTokens = deterministicWords(requiredValue);
+    return requiredTokens.size > 0 && availableTokenSets.some((availableTokens) => (
+      Array.from(requiredTokens).every((token) => availableTokens.has(token))
+    ));
+  });
+}
+
+function uniqueCandidates(candidates: AppSourceCatalogRecord[]): AppSourceCatalogRecord[] {
+  const seen = new Set<string>();
+  return candidates.filter((candidate) => {
+    if (seen.has(candidate.sourceId)) return false;
+    seen.add(candidate.sourceId);
+    return true;
+  });
 }
 
 function deterministicBrief(
@@ -237,6 +396,7 @@ function appBuilderUserPrompt(input: PlanAppBuildBriefInput, candidates: AppSour
   return JSON.stringify({
     request: input.prompt,
     sourcePolicy: input.sourcePolicy,
+    requiredSourceIds: input.requiredSourceIds,
     domain: input.domain,
     audience: input.audience,
     candidateCards: candidates.map((candidate) => ({

@@ -67,6 +67,28 @@ describe('LocalOperationCoordinator', () => {
     });
     second.close();
   });
+
+  it('lists every active operation alongside only the bounded recent terminal history', async () => {
+    const coordinator = createCoordinator();
+    const olderActive = coordinator.create({
+      type: 'block_certification',
+      scope: 'block:blocks/_drafts/older-active.dql',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    for (let index = 0; index < 55; index += 1) {
+      const terminal = coordinator.create({ type: 'project_refresh', scope: `project:${index}` });
+      await coordinator.run(terminal.id, async () => ({ index }));
+    }
+
+    const listed = coordinator.list(50);
+    expect(listed.find((operation) => operation.id === olderActive.id)).toMatchObject({
+      type: 'block_certification',
+      status: 'queued',
+    });
+    expect(listed.filter((operation) => operation.status !== 'queued' && operation.status !== 'running')).toHaveLength(50);
+    expect(listed).toHaveLength(51);
+    coordinator.close();
+  });
 });
 
 function createCoordinator(): LocalOperationCoordinator {

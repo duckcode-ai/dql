@@ -2,11 +2,18 @@ import React, { createContext, useContext, useEffect, useMemo, useRef } from 're
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   api,
-  type BlockCertificationOperationResult,
   type LocalOperation,
 } from '../api/client';
 import { useNotebookStore } from '../store/NotebookStore';
 import { streamServerEvents } from '../api/server-auth';
+import {
+  blockCertificationOperationsForReconciliation,
+  isTerminalOperation,
+  mergeOperation,
+  mergeOperationLists,
+  recoverTrackedOperationsById,
+  seedListedNonterminalOperationIds,
+} from './operation-state';
 
 const OPERATIONS_QUERY_KEY = ['local-operations'] as const;
 
@@ -20,21 +27,18 @@ interface OperationsContextValue {
 
 const OperationsContext = createContext<OperationsContextValue | null>(null);
 
-function mergeOperation(current: LocalOperation[], operation: LocalOperation): LocalOperation[] {
-  const next = current.filter((item) => item.id !== operation.id);
-  next.push(operation);
-  return next
-    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-    .slice(0, 50);
-}
-
 export function OperationsProvider({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient();
   const handledTerminalOperations = useRef(new Set<string>());
+  const trackedOperationIds = useRef(new Set<string>());
   const dispatch = useNotebookStore((state) => state.dispatch);
   const query = useQuery({
     queryKey: OPERATIONS_QUERY_KEY,
-    queryFn: async () => (await api.listOperations(50)).operations,
+    queryFn: async () => {
+      const listed = (await api.listOperations(50)).operations;
+      const current = queryClient.getQueryData<LocalOperation[]>(OPERATIONS_QUERY_KEY) ?? [];
+      return mergeOperationLists(current, listed);
+    },
     staleTime: 15_000,
     refetchOnWindowFocus: false,
     // Polling is a recovery path if the authenticated event stream is dropped.
@@ -72,11 +76,47 @@ export function OperationsProvider({ children }: { children: React.ReactNode }) 
   }, [queryClient]);
 
   useEffect(() => {
-    for (const operation of operations) {
-      if (operation.type !== 'block_certification' || operation.status !== 'succeeded') continue;
-      if (handledTerminalOperations.current.has(operation.id)) continue;
-      const result = operation.result as BlockCertificationOperationResult | undefined;
-      if (!result?.block || !result.outcome) continue;
+    // A provider remount loses its component-local ref even though durable
+    // queued/running operations survive. Seed exact-id recovery from every
+    // nonterminal operation returned by the list endpoint.
+    seedListedNonterminalOperationIds(trackedOperationIds.current, operations);
+  }, [operations]);
+
+  useEffect(() => {
+    let alive = true;
+    let recovering = false;
+    const recoverTrackedOperations = async () => {
+      if (recovering || trackedOperationIds.current.size === 0) return;
+      recovering = true;
+      try {
+        await recoverTrackedOperationsById(
+          trackedOperationIds.current,
+          (operationId) => api.getOperation(operationId),
+          (operation) => {
+            if (!alive) return false;
+            queryClient.setQueryData<LocalOperation[]>(OPERATIONS_QUERY_KEY, (current = []) => (
+              mergeOperation(current, operation)
+            ));
+          },
+        );
+      } finally {
+        recovering = false;
+      }
+    };
+    void recoverTrackedOperations();
+    const timer = window.setInterval(() => void recoverTrackedOperations(), 1_000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [queryClient]);
+
+  useEffect(() => {
+    for (const operation of blockCertificationOperationsForReconciliation(
+      operations,
+      handledTerminalOperations.current,
+    )) {
+      const result = operation.result;
       handledTerminalOperations.current.add(operation.id);
       dispatch({
         type: 'RECONCILE_BLOCK_CERTIFICATION',
@@ -98,11 +138,14 @@ export function OperationsProvider({ children }: { children: React.ReactNode }) 
     loading: query.isLoading,
     cancel: async (operationId: string) => {
       const operation = await api.cancelOperation(operationId);
+      trackedOperationIds.current.delete(operationId);
       queryClient.setQueryData<LocalOperation[]>(OPERATIONS_QUERY_KEY, (current = []) => (
         mergeOperation(current, operation)
       ));
     },
     track: (operation: LocalOperation) => {
+      if (isTerminalOperation(operation)) trackedOperationIds.current.delete(operation.id);
+      else trackedOperationIds.current.add(operation.id);
       queryClient.setQueryData<LocalOperation[]>(OPERATIONS_QUERY_KEY, (current = []) => (
         mergeOperation(current, operation)
       ));

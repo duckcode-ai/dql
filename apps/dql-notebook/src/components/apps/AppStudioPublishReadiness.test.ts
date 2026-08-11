@@ -4,6 +4,7 @@ import {
   blockingPublicationReviewTasks,
   localPublicationSteps,
   pagesNeedingSettledPreview,
+  publicationBlockerCount,
   publicationBlockingSources,
   publicationIssueSummaries,
   unresolvedPublicationRequirements,
@@ -93,5 +94,25 @@ describe('App Studio publication readiness (API-013, UI-022)', () => {
     }];
     expect(publicationBlockingSources(draft).map((source) => source.id)).toEqual(['source:draft-orders']);
     expect(localPublicationSteps(draft).map((step) => step.id)).toContain('sources');
+  });
+
+  it('uses the actionable blocker total for both the toolbar and publish review (UI-023)', () => {
+    const draft = draftFixture();
+    draft.requirements.push({ id: 'orders', question: 'Orders by region', role: 'breakdown', required: true, measures: ['orders'], dimensions: ['region'], filters: [] });
+    draft.coverage.push({ requirementId: 'orders', status: 'gap', sourceIds: [], componentIds: [], reasons: [] });
+    draft.reviewTasks.push({ id: 'review-revenue', message: 'Validate revenue grain.', status: 'open', tileId: 'revenue' });
+    draft.sources = [{
+      id: 'source:draft-orders',
+      kind: 'block',
+      sourceRef: 'orders_by_region',
+      lifecycle: 'draft',
+      trustState: 'review_required',
+      reviewStatus: 'required',
+    }];
+
+    expect(publicationBlockerCount(draft, [
+      'Source sales.revenue changed after selection.',
+      'overview/orders no longer resolves to a certified block.',
+    ])).toBe(7);
   });
 });

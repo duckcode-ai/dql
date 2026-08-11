@@ -476,6 +476,7 @@ import {
 } from "./notebook-datasets.js";
 import { prepareBlockInvocation } from './block-invocation.js';
 
+export const APP_SOURCE_REUSABLE_TAG = 'app-source';
 const NOTEBOOK_EXECUTE_PREVIEW_ROW_LIMIT = 500;
 const NOTEBOOK_FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#6d5dfc"/><path d="M9 9h14v14H9z" fill="none" stroke="#fff" stroke-width="2"/><path d="M13 13h6M13 17h6M13 21h4" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>';
 
@@ -7204,13 +7205,26 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const certifyBlockStudioSource = async (
     source: string,
     blockPath?: string | null,
-    options: { enterprise?: boolean } = {},
+    options: {
+      enterprise?: boolean;
+      reportProgress?: (progress: { phase: string; progress: number; message: string }) => void;
+    } = {},
   ) => {
+    options.reportProgress?.({
+      phase: 'validating',
+      progress: 10,
+      message: 'Validating the saved DQL source.',
+    });
     let validation = validateBlockStudioSource(source, semanticLayer);
     let preview: Awaited<ReturnType<typeof runBlockStudioPreviewSource>> | null = null;
     let testResults: TestResultSummary | null = null;
     const blockers: string[] = [];
 
+    options.reportProgress?.({
+      phase: 'previewing',
+      progress: 30,
+      message: 'Compiling and previewing the saved block.',
+    });
     try {
       preview = await runBlockStudioPreviewSource(source);
       validation = preview.validation;
@@ -7218,6 +7232,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       blockers.push(error instanceof Error ? error.message : String(error));
     }
 
+    options.reportProgress?.({
+      phase: 'testing',
+      progress: 60,
+      message: 'Evaluating declared block tests.',
+    });
     try {
       testResults = preview
         ? await runBlockStudioTestSummary(source, undefined, preview)
@@ -7232,6 +7251,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         runAt: new Date(),
       };
     }
+    options.reportProgress?.({
+      phase: 'assessing',
+      progress: 75,
+      message: 'Assessing certification rules and evidence.',
+    });
 
     const parsed = parseBlockSourceMetadata(source);
     const record: BlockRecord = {
@@ -13170,7 +13194,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
         }
 
-        const draftSource = setBlockStudioStatusInSource(source, 'draft');
+        const draftSource = markBlockStudioSourceReusable(setBlockStudioStatusInSource(source, 'draft'));
         const parsed = parseBlockSourceMetadata(draftSource);
         const name = typeof suppliedMetadata.name === 'string' && suppliedMetadata.name.trim()
           ? suppliedMetadata.name.trim()
@@ -13191,7 +13215,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           domain: typeof suppliedMetadata.domain === 'string' ? suppliedMetadata.domain : parsed.domain,
           description: typeof suppliedMetadata.description === 'string' ? suppliedMetadata.description : parsed.description,
           owner: typeof suppliedMetadata.owner === 'string' ? suppliedMetadata.owner : parsed.owner,
-          tags: Array.isArray(suppliedMetadata.tags) ? suppliedMetadata.tags.map(String) : parsed.tags,
+          tags: Array.from(new Set([
+            ...(Array.isArray(suppliedMetadata.tags) ? suppliedMetadata.tags.map(String) : parsed.tags),
+            APP_SOURCE_REUSABLE_TAG,
+          ])),
           lineage: Array.isArray(suppliedMetadata.lineage) ? suppliedMetadata.lineage.map(String) : undefined,
         };
         // A saved draft already has a durable identity, even when it lives in
@@ -13228,8 +13255,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }
 
         operationCoordinator.run(operation.id, async (signal, report) => {
-          report({ phase: 'validating', progress: 15, message: 'Validating and running the saved draft once.' });
-          const result = await certifyBlockStudioSource(draftSource, draftPath, { enterprise: body.enterprise === true });
+          const result = await certifyBlockStudioSource(draftSource, draftPath, {
+            enterprise: body.enterprise === true,
+            reportProgress: (progress) => {
+              if (signal.aborted) throw Object.assign(new Error('Certification cancelled.'), { code: 'OPERATION_CANCELLED' });
+              report(progress);
+            },
+          });
           const blockers = Array.from(new Set(result.checklist.blockers));
           if (signal.aborted) throw Object.assign(new Error('Certification cancelled.'), { code: 'OPERATION_CANCELLED' });
           if (!result.certification.certified || blockers.length > 0) {
@@ -13251,7 +13283,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             };
           }
 
-          report({ phase: 'publishing', progress: 80, message: 'Publishing the certified block.' });
+          report({ phase: 'publishing', progress: 82, message: 'Publishing the certified block.' });
           const certifiedSource = setBlockStudioStatusInSource(draftSource, 'certified');
           const certifiedMetadata = parseBlockSourceMetadata(certifiedSource);
           const savedPath = saveBlockStudioArtifacts(projectRoot, {
@@ -13290,7 +13322,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           } catch {
             /* best-effort: learning capture must never block certification */
           }
+          report({ phase: 'indexing', progress: 92, message: 'Queueing the certified source index refresh.' });
           const refreshOperation = scheduleProjectRefresh('block-studio-certification');
+          report({ phase: 'indexing', progress: 96, message: 'Certified source saved; index refresh queued.' });
           if (result.preview) writeBlockStudioRunSummary(projectRoot, savedPath, certifiedSource, result.preview.result);
           const openedCertified = openBlockStudioDocument(projectRoot, savedPath, semanticLayer);
           return {
@@ -13994,13 +14028,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             }));
             return;
           }
+          const reusableSource = markBlockStudioSourceReusable(readiness.candidate.dqlSource);
           const savedPath = saveBlockStudioArtifacts(projectRoot, {
-            source: readiness.candidate.dqlSource,
+            source: reusableSource,
             name: readiness.candidate.name,
             domain: readiness.candidate.domain,
             description: readiness.candidate.description,
             owner: readiness.candidate.owner,
-            tags: readiness.candidate.tags,
+            tags: Array.from(new Set([...readiness.candidate.tags, APP_SOURCE_REUSABLE_TAG])),
             lineage: readiness.candidate.lineage.sourceTables,
             importMeta: {
               importId,
@@ -14009,7 +14044,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               sourcePath: readiness.candidate.sourcePath,
             },
           });
-          const next = { ...readiness.candidate, reviewStatus: 'saved' as const, savedPath };
+          const next = {
+            ...readiness.candidate,
+            dqlSource: reusableSource,
+            tags: Array.from(new Set([...readiness.candidate.tags, APP_SOURCE_REUSABLE_TAG])),
+            reviewStatus: 'saved' as const,
+            savedPath,
+          };
           writeBlockStudioImportCandidate(projectRoot, importId, next);
           await refreshLocalMetadataCatalog(projectRoot);
           const payload = openBlockStudioDocument(projectRoot, savedPath, semanticLayer);
@@ -14254,7 +14295,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       try {
         const body = await readJSON(req);
         const source = typeof body.source === 'string'
-          ? sanitizeAgentBlockDraftSource(body.source)
+          ? markBlockStudioSourceReusable(sanitizeAgentBlockDraftSource(body.source))
           : '';
         const name = typeof body.name === 'string' ? body.name.trim() : '';
         if (!source.trim() || !name) {
@@ -14267,7 +14308,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           name,
           domain: typeof body.domain === 'string' ? body.domain : undefined,
           description: typeof body.description === 'string' ? body.description : undefined,
-          tags: Array.isArray(body.tags) ? body.tags.map(String) : ['ai-generated', 'review-required'],
+          tags: Array.from(new Set([
+            ...(Array.isArray(body.tags) ? body.tags.map(String) : ['ai-generated', 'review-required']),
+            APP_SOURCE_REUSABLE_TAG,
+          ])),
           stableSuffix: typeof body.runId === 'string' ? body.runId : undefined,
         });
         const payload = openBlockStudioDocument(projectRoot, savedPath, semanticLayer);
@@ -14283,7 +14327,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (req.method === 'POST' && path === '/api/block-studio/save') {
       try {
         const body = await readJSON(req);
-        const source = typeof body.source === 'string' ? body.source : '';
+        const source = typeof body.source === 'string'
+          ? markBlockStudioSourceReusable(body.source)
+          : '';
         const metadata = body.metadata && typeof body.metadata === 'object'
           ? body.metadata as {
             name?: string;
@@ -14334,7 +14380,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           folderPath: metadata.folderPath,
           description: metadata.description,
           owner: metadata.owner,
-          tags: Array.isArray(metadata.tags) ? metadata.tags.map(String) : [],
+          tags: Array.from(new Set([
+            ...(Array.isArray(metadata.tags) ? metadata.tags.map(String) : []),
+            APP_SOURCE_REUSABLE_TAG,
+          ])),
           lineage: Array.isArray(metadata.lineage) ? metadata.lineage.map(String) : undefined,
           importMeta: metadata.sourceKind || metadata.sourcePath || metadata.importId || metadata.candidateId
             ? {
@@ -24703,13 +24752,17 @@ export async function createDqlArtifactGenerationSessionForProject(
   options: CreateDqlArtifactGenerationSessionForProjectOptions,
   semanticLayer?: SemanticLayer,
 ): Promise<DqlGenerationSession> {
-  const dqlArtifact = normalizeDqlArtifactReference(options.dqlArtifact);
-  if (!dqlArtifact) throw new Error('A DQL artifact with source is required for DQL draft promotion.');
+  const normalizedDqlArtifact = normalizeDqlArtifactReference(options.dqlArtifact);
+  if (!normalizedDqlArtifact) throw new Error('A DQL artifact with source is required for DQL draft promotion.');
+  const dqlArtifact = {
+    ...normalizedDqlArtifact,
+    source: markBlockStudioSourceReusable(normalizedDqlArtifact.source),
+  };
   const question = notebookResearchString(options.question) ?? dqlArtifact.name ?? 'Generated DQL artifact';
   const slug = deriveGeneratedDraftSlug(dqlArtifact.name ?? question);
   const domain = notebookResearchString(options.domain) ?? 'misc';
   const owner = notebookResearchString(options.owner) ?? '';
-  const tags = Array.from(new Set(['notebook-research', 'review-required', 'dql-artifact', ...(Array.isArray(options.tags) ? options.tags : [])]
+  const tags = Array.from(new Set(['notebook-research', 'review-required', 'dql-artifact', APP_SOURCE_REUSABLE_TAG, ...(Array.isArray(options.tags) ? options.tags : [])]
     .map((tag) => notebookResearchString(tag))
     .filter((tag): tag is string => Boolean(tag))));
   const proposedContractId = `${domain}.Unknown.${slug}`;
@@ -25692,6 +25745,23 @@ export function parseBlockSourceMetadata(source: string): {
     metricRef: extractString('metric'),
     metricsRef: extractStringArray('metrics'),
   };
+}
+
+/**
+ * Persist the explicit App-source reuse decision in canonical DQL. Generated
+ * execution stays transient; only Block Studio save/promotion routes call this
+ * helper. The marker is a normal parser-supported tag, so refresh/reindex can
+ * make the participation decision without relying on filenames or prose.
+ */
+export function markBlockStudioSourceReusable(source: string): string {
+  const parsed = parseBlockSourceMetadata(source);
+  if (parsed.tags.some((tag) => tag.trim().toLowerCase() === APP_SOURCE_REUSABLE_TAG)) return source;
+  const tags = Array.from(new Set([...parsed.tags, APP_SOURCE_REUSABLE_TAG]));
+  const rendered = tags.map((tag) => JSON.stringify(tag)).join(', ');
+  if (/\btags\s*=\s*\[[\s\S]*?\]/i.test(source)) {
+    return source.replace(/\btags\s*=\s*\[[\s\S]*?\]/i, `tags = [${rendered}]`);
+  }
+  return source.replace(/(\bblock\s+"[^"]+"\s*\{)/i, `$1\n  tags = [${rendered}]`);
 }
 
 function compareBlockStudioValues(actual: unknown, operator: string, expected: unknown): boolean {

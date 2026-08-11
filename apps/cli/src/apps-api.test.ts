@@ -1154,7 +1154,7 @@ describe('Apps command center API helpers', () => {
     });
     const proposal = (proposalResponse.payload as any).proposal;
     expect(planningCalls).toBe(1);
-    expect(proposal.summary).toMatchObject({ requirements: 2, covered: 1, gaps: 1, certifiedSources: 0 });
+    expect(proposal.summary).toMatchObject({ requirements: 2, covered: 0, gaps: 2, certifiedSources: 0 });
     expect(proposal.defaultSelectedSourceIds).toEqual([draftSource.sourceId]);
 
     const gapResponse = await invokeAppsApi(
@@ -1173,8 +1173,128 @@ describe('Apps command center API helpers', () => {
     const revised = (gapResponse.payload as any).proposal;
     const reviewSource = revised.operations.find((operation: any) => operation.type === 'upsert_source' && operation.source.kind === 'review_dql');
     expect(reviewSource?.source).toMatchObject({ lifecycle: 'review', trustState: 'review_required' });
-    expect(revised.summary).toMatchObject({ covered: 2, gaps: 0 });
+    expect(revised.summary).toMatchObject({ covered: 1, gaps: 1 });
     expect(existsSync(join(root, '.dql', 'local', 'app-builds', aiDraft.id, reviewSource.source.sourceRef))).toBe(true);
+  });
+
+  it('keeps exact source additions authoritative across proposal revisions and review policy (PRD-007, AGT-026, API-014)', async () => {
+    const root = createProject();
+    writeBlock(root, 'sales/revenue.dql', {
+      name: 'Revenue KPI', domain: 'sales', status: 'certified', tags: ['revenue'],
+      description: 'Certified revenue total', chart: 'single_value', query: 'SELECT 1 AS revenue',
+    });
+    writeBlock(root, 'sales/orders.dql', {
+      name: 'Revenue Order Detail', domain: 'sales', status: 'certified', tags: ['orders', 'revenue'],
+      description: 'Certified weekly order trend', chart: 'line', dimensions: ['order_week'],
+    });
+    writeBlock(root, 'sales/margin.dql', {
+      name: 'Margin Review', domain: 'sales', status: 'draft', tags: ['margin'],
+      description: 'Draft margin analysis', chart: 'bar', dimensions: ['region'],
+    });
+    const created = await invokeAppsApi(root, '/api/app-builds', 'POST', {
+      name: 'Sales Decisions', goal: 'Track revenue, orders, and margin', authoringMode: 'ai',
+      sourcePolicy: 'governed_only', domain: 'sales',
+    });
+    const draft = (created.payload as any).draft;
+    const catalog = await invokeAppsApi(root, `/api/app-builds/${draft.id}/source-candidates?limit=50`, 'GET', {});
+    const catalogItems = (catalog.payload as any).items as any[];
+    const revenue = catalogItems.find((source) => source.name === 'Revenue KPI');
+    const orders = catalogItems.find((source) => source.name === 'Revenue Order Detail');
+    const margin = catalogItems.find((source) => source.name === 'Margin Review');
+    const provider = async () => JSON.stringify({
+      frame: { goal: 'Track sales decisions' },
+      requirements: [
+        { id: 'revenue', question: 'Revenue KPI', role: 'kpi', required: true, measures: ['revenue'], dimensions: [], filters: [] },
+        { id: 'margin', question: 'Profit margin', role: 'kpi', required: true, measures: ['revenue'], dimensions: [], filters: [] },
+      ],
+      components: [{ id: 'revenue-kpi', title: 'Revenue KPI', sourceId: revenue.sourceId, requirementIds: ['revenue', 'margin'], role: 'kpi', view: 'kpi', rationale: 'Provider incorrectly claimed margin coverage from revenue' }],
+    });
+    const initial = await invokeAppsApi(root, `/api/app-builds/${draft.id}/ai-proposals`, 'POST', {
+      prompt: draft.frame.goal, expectedRevision: draft.revision, proposalHash: draft.proposalHash,
+    }, { planAppBuild: provider });
+    const initialProposal = (initial.payload as any).proposal;
+
+    const revised = await invokeAppsApi(root, `/api/app-builds/${draft.id}/ai-proposals/${initialProposal.id}/revisions`, 'POST', {
+      expectedRevision: draft.revision,
+      expectedProposalHash: draft.proposalHash,
+      selectedSourceIds: [revenue.sourceId],
+      additionalSourceIds: [orders.sourceId],
+    }, { planAppBuild: provider });
+    expect(revised.status).toBe(201);
+    const revisedProposal = (revised.payload as any).proposal;
+    expect(revisedProposal.defaultSelectedSourceIds).toEqual([revenue.sourceId, orders.sourceId]);
+    expect(revisedProposal.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'upsert_source', source: expect.objectContaining({ id: orders.sourceId }) }),
+      expect.objectContaining({ type: 'upsert_page', page: expect.objectContaining({
+        layout: expect.objectContaining({ items: expect.arrayContaining([expect.objectContaining({ sourceId: orders.sourceId })]) }),
+      }) }),
+    ]));
+    const revisedRequirements = revisedProposal.operations.find((operation: any) => operation.type === 'set_requirements');
+    expect(revisedRequirements.coverage).toEqual(expect.arrayContaining([
+      expect.objectContaining({ requirementId: 'margin', status: 'gap', sourceIds: [], componentIds: [] }),
+    ]));
+
+    const blocked = await invokeAppsApi(root, `/api/app-builds/${draft.id}/ai-proposals/${revisedProposal.id}/revisions`, 'POST', {
+      expectedRevision: draft.revision,
+      expectedProposalHash: draft.proposalHash,
+      selectedSourceIds: [revenue.sourceId, orders.sourceId],
+      additionalSourceIds: [margin.sourceId],
+    }, { planAppBuild: provider });
+    expect(blocked).toMatchObject({ status: 400, payload: { ok: false } });
+    expect((blocked.payload as any).error).toContain('APP_BUILD_REVIEW_POLICY_REQUIRED');
+
+    const enabled = await invokeAppsApi(root, `/api/app-builds/${draft.id}`, 'PATCH', {
+      expectedRevision: draft.revision,
+      expectedProposalHash: draft.proposalHash,
+      operations: [{ type: 'set_source_policy', sourcePolicy: 'include_review_required' }],
+    });
+    const reviewDraft = (enabled.payload as any).draft;
+    const reviewProposalResponse = await invokeAppsApi(root, `/api/app-builds/${draft.id}/ai-proposals`, 'POST', {
+      prompt: reviewDraft.frame.goal,
+      expectedRevision: reviewDraft.revision,
+      proposalHash: reviewDraft.proposalHash,
+      selectedBlockIds: [revenue.sourceId, orders.sourceId, margin.sourceId],
+    }, { planAppBuild: provider });
+    expect(reviewProposalResponse.status).toBe(201);
+    const reviewProposal = (reviewProposalResponse.payload as any).proposal;
+    expect(reviewProposal.defaultSelectedSourceIds).toHaveLength(3);
+    expect(reviewProposal.defaultSelectedSourceIds).toEqual(expect.arrayContaining([revenue.sourceId, orders.sourceId, margin.sourceId]));
+    expect(reviewProposal.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'upsert_source', source: expect.objectContaining({ id: margin.sourceId, trustState: 'review_required' }) }),
+    ]));
+  });
+
+  it('atomically enables the review lane during manual draft composition (API-014, UI-023)', async () => {
+    const root = createProject();
+    writeBlock(root, 'sales/margin.dql', {
+      name: 'Margin Review', domain: 'sales', status: 'draft', tags: ['margin'],
+      description: 'Draft margin analysis', chart: 'bar', dimensions: ['region'],
+    });
+    const created = await invokeAppsApi(root, '/api/app-builds', 'POST', {
+      name: 'Margin Decisions', goal: 'Review margin by region', authoringMode: 'manual',
+      sourcePolicy: 'governed_only', domain: 'sales',
+    });
+    const draft = (created.payload as any).draft;
+    const catalog = await invokeAppsApi(root, `/api/app-builds/${draft.id}/source-candidates?limit=50`, 'GET', {});
+    const source = (catalog.payload as any).items.find((item: any) => item.name === 'Margin Review');
+    const request = {
+      mode: 'manual', expectedRevision: draft.revision, expectedProposalHash: draft.proposalHash,
+      selections: [{ sourceId: source.sourceId, pageId: 'overview', view: 'chart' }],
+    };
+
+    const blocked = await invokeAppsApi(root, `/api/app-builds/${draft.id}/compose`, 'POST', request);
+    expect((blocked.payload as any).error).toContain('APP_BUILD_REVIEW_POLICY_REQUIRED');
+
+    const composed = await invokeAppsApi(root, `/api/app-builds/${draft.id}/compose`, 'POST', {
+      ...request,
+      enableReviewRequired: true,
+    });
+    expect(composed.status).toBe(200);
+    expect((composed.payload as any).draft).toMatchObject({
+      sourcePolicy: 'include_review_required',
+      sources: [expect.objectContaining({ id: source.sourceId, lifecycle: 'draft', trustState: 'review_required' })],
+      reviewTasks: [expect.objectContaining({ sourceId: source.sourceId, status: 'open' })],
+    });
   });
 
   it('lazily migrates v2 only when source identity is unique and exposes ambiguity as a blocker', async () => {

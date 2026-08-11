@@ -21,6 +21,7 @@ describe('App Builder orchestrator', () => {
     const brief = await planAppBuildBrief({
       prompt: 'Build an executive sales App',
       candidates,
+      requiredSourceIds: [],
       sourcePolicy: 'include_review_required',
       complete,
     });
@@ -35,6 +36,7 @@ describe('App Builder orchestrator', () => {
     const brief = await planAppBuildBrief({
       prompt: 'Build revenue and regional orders',
       candidates,
+      requiredSourceIds: [],
       sourcePolicy: 'include_review_required',
       complete: async () => 'not json',
     });
@@ -44,6 +46,7 @@ describe('App Builder orchestrator', () => {
     const generic = await planAppBuildBrief({
       prompt: 'Build an analytics app from my certified DQL blocks and available warehouse tables.',
       candidates,
+      requiredSourceIds: [],
       sourcePolicy: 'include_review_required',
     });
     expect(generic.requirements).toHaveLength(1);
@@ -59,6 +62,7 @@ describe('App Builder orchestrator', () => {
     const brief = await planAppBuildBrief({
       prompt: 'Build an executive sales App showing revenue trend, orders by region, and new-customer growth for the last 90 days.',
       candidates: allCandidates,
+      requiredSourceIds: [],
       sourcePolicy: 'include_review_required',
       complete: async () => {
         throw new Error('provider unavailable');
@@ -72,9 +76,103 @@ describe('App Builder orchestrator', () => {
       'New-customer growth for the last 90 days',
     ]);
     expect(brief.selectedSourceIds).not.toContain('app:block:runtime:acceptance');
-    expect(brief.components.flatMap((component) => component.requirementIds)).toEqual(expect.arrayContaining([
-      'requirement-1', 'requirement-2', 'requirement-3',
-    ]));
+    expect(brief.components.find((component) => component.sourceId === candidates[0].sourceId)?.requirementIds).toEqual(['requirement-1']);
+    expect(brief.components.find((component) => component.sourceId === candidates[1].sourceId)?.requirementIds).toEqual(['requirement-2']);
+    expect(brief.components.find((component) => component.sourceId === 'app:block:customers:growth')?.requirementIds).toEqual([]);
+    expect(brief.warnings).toEqual(expect.arrayContaining([expect.stringContaining('unsupported requirement coverage was removed')]));
+  });
+
+  it('retains explicitly required certified and draft sources omitted by the provider', async () => {
+    const requiredCandidates = [
+      { ...candidates[0], capabilities: { ...candidates[0].capabilities, measures: ['margin'], outputs: ['margin'] } },
+      { ...candidates[1], name: 'Revenue order detail', title: 'Revenue order detail' },
+    ];
+    const complete = vi.fn(async () => JSON.stringify({
+      frame: { goal: 'Executive sales' },
+      requirements: [{ id: 'r1', question: 'Profit margin', role: 'kpi', required: true, measures: ['margin'], dimensions: [], filters: [] }],
+      components: [{ id: 'c1', title: 'Revenue trend', sourceId: candidates[0].sourceId, requirementIds: ['r1'], role: 'trend', view: 'line', rationale: 'Provider selected only certified revenue' }],
+    }));
+
+    const brief = await planAppBuildBrief({
+      prompt: 'Build an executive sales App',
+      candidates: requiredCandidates,
+      requiredSourceIds: requiredCandidates.map((candidate) => candidate.sourceId),
+      sourcePolicy: 'include_review_required',
+      complete,
+    });
+
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(brief.components.map((component) => component.sourceId)).toEqual(requiredCandidates.map((candidate) => candidate.sourceId));
+    expect(brief.selectedSourceIds).toEqual(requiredCandidates.map((candidate) => candidate.sourceId));
+    const appendedDraft = brief.components.find((component) => component.sourceId === requiredCandidates[1].sourceId);
+    expect(appendedDraft).toMatchObject({ view: 'line', requirementIds: [] });
+    expect(brief.warnings).toEqual([expect.stringContaining('declared measures, dimensions, and filters did not match')]);
+  });
+
+  it('rejects a required source that was not supplied as a candidate card', async () => {
+    await expect(planAppBuildBrief({
+      prompt: 'Build an executive sales App',
+      candidates,
+      requiredSourceIds: ['app:block:missing'],
+      sourcePolicy: 'governed_only',
+    })).rejects.toThrow('APP_BUILD_REQUIRED_SOURCE_MISSING');
+  });
+
+  it('does not confuse partially overlapping structured capability names', async () => {
+    const capabilityCandidates = [
+      { ...candidates[0], capabilities: { ...candidates[0].capabilities, measures: ['gross_margin'], outputs: ['gross_margin'] } },
+      { ...candidates[1], name: 'Gross revenue detail', title: 'Gross revenue detail', capabilities: { ...candidates[1].capabilities, measures: ['gross_revenue'], outputs: ['gross_revenue'] } },
+    ];
+    const brief = await planAppBuildBrief({
+      prompt: 'Compare gross margin and supporting revenue detail',
+      candidates: capabilityCandidates,
+      requiredSourceIds: [capabilityCandidates[1].sourceId],
+      sourcePolicy: 'include_review_required',
+      complete: async () => JSON.stringify({
+        frame: { goal: 'Compare gross margin' },
+        requirements: [{ id: 'gross-margin', question: 'Gross margin', role: 'kpi', required: true, measures: ['gross_margin'], dimensions: [], filters: [] }],
+        components: [{ id: 'margin', title: 'Gross margin', sourceId: capabilityCandidates[0].sourceId, requirementIds: ['gross-margin'], role: 'kpi', view: 'kpi', rationale: 'Exact gross margin capability' }],
+      }),
+    });
+
+    expect(brief.components.find((component) => component.sourceId === capabilityCandidates[1].sourceId)?.requirementIds).toEqual([]);
+    expect(brief.warnings).toEqual([expect.stringContaining('declared measures, dimensions, and filters did not match')]);
+  });
+
+  it('rejects provider capability fields that contradict the visible requirement question', async () => {
+    const revenueCandidate = {
+      ...candidates[0],
+      capabilities: { ...candidates[0].capabilities, measures: ['revenue'], outputs: ['revenue'] },
+    };
+    const brief = await planAppBuildBrief({
+      prompt: 'Profit margin',
+      candidates: [revenueCandidate],
+      requiredSourceIds: [],
+      sourcePolicy: 'governed_only',
+      complete: async () => JSON.stringify({
+        frame: { goal: 'Profit margin' },
+        requirements: [{ id: 'profit-margin', question: 'Profit margin', role: 'kpi', required: true, measures: ['revenue'], dimensions: [], filters: [] }],
+        components: [{ id: 'revenue', title: 'Revenue trend', sourceId: revenueCandidate.sourceId, requirementIds: ['profit-margin'], role: 'kpi', view: 'kpi', rationale: 'Provider claimed revenue covers profit margin' }],
+      }),
+    });
+
+    expect(brief.components).toEqual([expect.objectContaining({ sourceId: revenueCandidate.sourceId, requirementIds: [] })]);
+    expect(brief.warnings).toEqual([expect.stringContaining('unsupported requirement coverage was removed')]);
+  });
+
+  it('keeps an explicitly required deterministic source without claiming unsupported coverage', async () => {
+    const revenueOrders = { ...candidates[1], name: 'Revenue orders', title: 'Revenue orders' };
+    const brief = await planAppBuildBrief({
+      prompt: 'Profit margin',
+      candidates: [revenueOrders],
+      requiredSourceIds: [revenueOrders.sourceId],
+      sourcePolicy: 'include_review_required',
+    });
+
+    expect(brief.planningMode).toBe('deterministic_fallback');
+    expect(brief.selectedSourceIds).toEqual([revenueOrders.sourceId]);
+    expect(brief.components).toEqual([expect.objectContaining({ sourceId: revenueOrders.sourceId, requirementIds: [] })]);
+    expect(brief.warnings).toEqual([expect.stringContaining('unsupported requirement coverage was removed')]);
   });
 });
 

@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { AppBlockRecommendation, AppStudioAiProposal } from '../../api/client';
-import { availableAppStudioProposalSources, operationsForSelectedAppStudioSources, summarizeAppStudioAiPlan } from './app-studio-ai-plan';
+import {
+  appStudioProposalRequestSourceIds,
+  appStudioProposalSourceAddMode,
+  appStudioProposalRequiredSourceIds,
+  availableAppStudioProposalSources,
+  operationsForSelectedAppStudioSources,
+  summarizeAppStudioAiPlan,
+} from './app-studio-ai-plan';
 
 describe('App Studio AI plan review (AGT-025, UI-022)', () => {
   it('shows the exact sources and components that typed proposal operations will apply', () => {
@@ -149,5 +156,26 @@ describe('App Studio AI plan review (AGT-025, UI-022)', () => {
     const operations = operationsForSelectedAppStudioSources(proposal, new Set(['review-block:orders-by-region']));
     const page = operations.find((operation) => operation.type === 'upsert_page');
     expect(page?.type === 'upsert_page' ? page.page.layout.items.map((item) => item.i) : []).toEqual(['orders']);
+  });
+
+  it('reselects removed proposal sources locally, including generated review DQL', () => {
+    expect(appStudioProposalRequiredSourceIds(new Set(['source:b', 'source:a']), 'source:c'))
+      .toEqual(['source:b', 'source:a', 'source:c']);
+    expect(appStudioProposalRequiredSourceIds(new Set(['source:b', 'source:a'])))
+      .toEqual(['source:b', 'source:a']);
+    expect(appStudioProposalSourceAddMode({ alreadyProposed: true, reviewRequired: false, sourcePolicy: 'governed_only' }))
+      .toBe('select_existing');
+    expect(appStudioProposalSourceAddMode({ alreadyProposed: true, reviewRequired: true, sourcePolicy: 'include_review_required' }))
+      .toBe('select_existing');
+    expect(appStudioProposalSourceAddMode({ alreadyProposed: true, reviewRequired: true, sourcePolicy: 'governed_only' }))
+      .toBe('enable_review_and_replan');
+    expect(appStudioProposalSourceAddMode({ alreadyProposed: false, reviewRequired: false, sourcePolicy: 'governed_only' }))
+      .toBe('replan');
+  });
+
+  it('preserves an explicit empty source selection instead of reviving a stale fallback', () => {
+    expect(appStudioProposalRequestSourceIds([], 'source:stale')).toEqual([]);
+    expect(appStudioProposalRequestSourceIds(undefined, 'source:current')).toEqual(['source:current']);
+    expect(appStudioProposalRequestSourceIds(undefined)).toBeUndefined();
   });
 });

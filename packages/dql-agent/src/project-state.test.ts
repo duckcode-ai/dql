@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -7,6 +7,7 @@ import {
   ensureAgentProjectReady,
   invalidateAgentProjectState,
   isAgentProjectIndexReady,
+  queryAppSourceCatalog,
   recordAgentRuntimeVersion,
 } from './index.js';
 
@@ -104,4 +105,60 @@ describe('warm agent project state', () => {
     await ensureAgentProjectReady(root);
     expect(isAgentProjectIndexReady(root)).toBe(true);
   });
+
+  it('API-014 PERF-001 rebuilds 4,000 current path-qualified blocks after watcher invalidation without warm traversal', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dql-agent-current-blocks-'));
+    roots.push(root);
+    writeFileSync(join(root, 'dql.config.json'), JSON.stringify({ project: 'current-blocks' }));
+    writeFileSync(join(root, 'dql-manifest.json'), JSON.stringify({
+      manifestVersion: 2,
+      dqlVersion: 'stale',
+      generatedAt: new Date(0).toISOString(),
+      project: 'current-blocks',
+      projectRoot: root,
+      blocks: {}, blockDeclarations: [], terms: {}, businessViews: {}, dashboards: {}, apps: {}, notebooks: {},
+      metrics: {}, dimensions: {}, sources: {},
+      lineage: { nodes: [], edges: [], domains: [], crossDomainFlows: [], domainTrust: {} },
+    }));
+    mkdirSync(join(root, 'blocks', '_drafts', 'office'), { recursive: true });
+    writeFileSync(join(root, 'blocks', '_drafts', 'office', 'manual.dql'), `block "Office Performance" {
+  domain = "office"
+  status = "draft"
+  query = """SELECT 1 AS value"""
+}`);
+    writeFileSync(join(root, 'blocks', '_drafts', 'office', 'duplicate.dql'), `block "Office Performance" {
+  domain = "office"
+  status = "draft"
+  query = """SELECT 2 AS value"""
+}`);
+    for (let index = 0; index < 4_000; index += 1) {
+      writeFileSync(join(root, 'blocks', `scale-${String(index).padStart(4, '0')}.dql`), `block "Scale Block ${index}" {
+  domain = "office"
+  status = "draft"
+  query = """SELECT ${index} AS value"""
+}`);
+    }
+
+    const first = await ensureAgentProjectReady(root);
+    const firstPage = queryAppSourceCatalog(root, { query: 'Office Performance', sourcePolicy: 'include_review_required' });
+    const duplicateDeclarations = firstPage.items.filter((item) => item.name === 'Office Performance');
+    expect(duplicateDeclarations).toHaveLength(2);
+    expect(new Set(duplicateDeclarations.map((item) => item.sourcePath)).size).toBe(2);
+
+    const latePath = join(root, 'blocks', 'scale-3999.dql');
+    writeFileSync(latePath, `block "Office Late Position" {
+  domain = "office"
+  status = "draft"
+  query = """SELECT 3 AS value"""
+}`);
+    // Warm version sampling is constant-time for block/domain roots. The
+    // runtime's recursive watcher observes this edit and performs the same
+    // explicit invalidation used here; no candidate request walks 4,000 files.
+    expect(agentProjectSourceVersion(root)).toBe(first.sourceVersion);
+    invalidateAgentProjectState(root);
+    const refreshed = await ensureAgentProjectReady(root);
+    expect(refreshed.cacheHit).toBe(false);
+    expect(queryAppSourceCatalog(root, { query: 'Office Late Position', sourcePolicy: 'include_review_required' }).items)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ name: 'Office Late Position' })]));
+  }, 15_000);
 });

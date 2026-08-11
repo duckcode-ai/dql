@@ -16,6 +16,35 @@ export interface AppStudioAiPlanSummary {
   }>;
 }
 
+export type AppStudioProposalSourceAddMode = 'select_existing' | 'enable_review_and_replan' | 'replan';
+
+export function appStudioProposalRequiredSourceIds(
+  selectedSourceIds: ReadonlySet<string>,
+  addedSourceId?: string,
+): string[] {
+  return Array.from(new Set([...selectedSourceIds, addedSourceId ?? ''].map((sourceId) => sourceId.trim()).filter(Boolean)));
+}
+
+export function appStudioProposalRequestSourceIds(
+  selectedBlockIds: readonly string[] | undefined,
+  fallbackSourceId?: string,
+): string[] | undefined {
+  const sourceIds = selectedBlockIds === undefined
+    ? (fallbackSourceId ? [fallbackSourceId] : undefined)
+    : selectedBlockIds;
+  if (sourceIds === undefined) return undefined;
+  return Array.from(new Set(sourceIds.map((sourceId) => sourceId.trim()).filter(Boolean)));
+}
+
+export function appStudioProposalSourceAddMode(input: {
+  alreadyProposed: boolean;
+  reviewRequired: boolean;
+  sourcePolicy: AppStudioBuildDraft['sourcePolicy'];
+}): AppStudioProposalSourceAddMode {
+  if (input.reviewRequired && input.sourcePolicy === 'governed_only') return 'enable_review_and_replan';
+  return input.alreadyProposed ? 'select_existing' : 'replan';
+}
+
 /** The exact, reviewable wiring an AI proposal will apply to the local draft. */
 export function summarizeAppStudioAiPlan(proposal: AppStudioAiProposal): AppStudioAiPlanSummary {
   let frame: AppStudioBuildDraft['frame'] | undefined;

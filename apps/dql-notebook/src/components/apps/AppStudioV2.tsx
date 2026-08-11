@@ -23,7 +23,24 @@ import { usePersistedAgentThreadId } from '../agent/usePersistedAgentThreadId';
 import { ChartOutput } from '../output/ChartOutput';
 import { TableOutput } from '../output/TableOutput';
 import { APP_STUDIO_V2_STYLES } from './app-studio-v2-styles';
-import { availableAppStudioProposalSources, summarizeAppStudioAiPlan, type AppStudioAiPlanSummary } from './app-studio-ai-plan';
+import {
+  APP_STUDIO_AI_ACTIVITY_LABELS,
+  appStudioProposalRetry,
+  appStudioReviewAddRetry,
+  appStudioRevisionRetry,
+  appStudioSourceActionLabel,
+  nextAppStudioAiActivityIndex,
+  type AppStudioAiActivityRetry,
+  type AppStudioSourceActionStatus,
+} from './app-studio-ai-activity';
+import {
+  appStudioProposalRequestSourceIds,
+  appStudioProposalSourceAddMode,
+  appStudioProposalRequiredSourceIds,
+  availableAppStudioProposalSources,
+  summarizeAppStudioAiPlan,
+  type AppStudioAiPlanSummary,
+} from './app-studio-ai-plan';
 import {
   discoverAppFilterCandidates,
   defaultStudioFilterType,
@@ -37,6 +54,7 @@ import {
   blockingPublicationReviewTasks,
   localPublicationSteps,
   pagesNeedingSettledPreview,
+  publicationBlockerCount,
   publicationBlockingSources,
   publicationIssueSummaries,
   unresolvedPublicationRequirements,
@@ -75,6 +93,21 @@ type StudioFieldAvailability = {
   compatibleComponents: number;
   valueCount: number;
   dateRange?: { min: string; max: string };
+};
+
+type AppStudioAiActivity = {
+  status: 'running' | 'error';
+  retry: AppStudioAiActivityRetry;
+  returnToProposal: boolean;
+  error?: string;
+};
+
+type AppStudioSourceFeedback = {
+  sourceId: string;
+  status: Exclude<AppStudioSourceActionStatus, 'idle'>;
+  view: 'KPI' | 'Chart' | 'Table';
+  pageTitle: string;
+  message?: string;
 };
 
 export interface AppStudioLaunchConfig {
@@ -159,6 +192,37 @@ export function AppStudioLaunchSurface({
   </section>;
 }
 
+function AppStudioAiActivitySurface({
+  activity,
+  label,
+  onBack,
+  onReturn,
+  onRetry,
+}: {
+  activity: AppStudioAiActivity;
+  label: string;
+  onBack: () => void;
+  onReturn?: () => void;
+  onRetry: () => void;
+}): JSX.Element {
+  return <section className="dql-studio-v2-loading studio-ai-activity" aria-labelledby="studio-ai-activity-title" aria-busy={activity.status === 'running'}>
+    <style>{APP_STUDIO_V2_STYLES}</style>
+    <button type="button" className="icon" onClick={onBack} aria-label="Back to Apps"><ArrowLeft size={18} /></button>
+    <div>
+      <span className="loading-mark"><Sparkles size={20} /></span>
+      {activity.status === 'running' ? <>
+        <strong id="studio-ai-activity-title">Preparing your editable App proposal</strong>
+        <small className="studio-ai-activity-label" role="status" aria-live="polite">{label}</small>
+        <small>Sources remain governed or review-required exactly as cataloged. You will review them before the canvas is generated.</small>
+      </> : <>
+        <strong id="studio-ai-activity-title">The source proposal needs another try</strong>
+        <small role="alert">{activity.error ?? 'App Studio could not prepare the source proposal.'}</small>
+        <span className="studio-ai-activity-actions">{onReturn ? <button type="button" onClick={onReturn}>Back to source review</button> : null}<button type="button" className="primary" onClick={onRetry}>Try AI proposal again</button></span>
+      </>}
+    </div>
+  </section>;
+}
+
 export function AppStudioV2({
   initialMode,
   initialPrompt,
@@ -196,6 +260,10 @@ export function AppStudioV2({
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [proposal, setProposal] = useState<AppStudioAiProposal | null>(null);
   const [selectedProposalSourceIds, setSelectedProposalSourceIds] = useState<Set<string>>(new Set());
+  const [proposalAddingSourceId, setProposalAddingSourceId] = useState<string | null>(null);
+  const [aiActivity, setAiActivity] = useState<AppStudioAiActivity | null>(null);
+  const [aiActivityIndex, setAiActivityIndex] = useState(0);
+  const [sourceFeedback, setSourceFeedback] = useState<AppStudioSourceFeedback | null>(null);
   const [undoStack, setUndoStack] = useState<AppStudioBuildDraft[]>([]);
   const [redoStack, setRedoStack] = useState<AppStudioBuildDraft[]>([]);
   const [busy, setBusy] = useState(false);
@@ -217,6 +285,7 @@ export function AppStudioV2({
   const immediateStartRef = useRef(false);
   const previewSequenceRef = useRef(0);
   const filterPreviewTimerRef = useRef<number | null>(null);
+  const sourceFeedbackTimerRef = useRef<number | null>(null);
   const workspaceRef = useRef<HTMLElement>(null);
   const copilotThread = usePersistedAgentThreadId(`app-studio:${draft?.id ?? initialDraftId ?? 'new'}`);
 
@@ -237,6 +306,16 @@ export function AppStudioV2({
     observer.observe(node);
     return () => observer.disconnect();
   }, [draft]);
+
+  useEffect(() => {
+    if (aiActivity?.status !== 'running') return;
+    setAiActivityIndex(0);
+    if (typeof window === 'undefined' || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+    const timer = window.setInterval(() => {
+      setAiActivityIndex((current) => nextAppStudioAiActivityIndex(current));
+    }, 1200);
+    return () => window.clearInterval(timer);
+  }, [aiActivity?.status, aiActivity?.retry.requiredSourceIds.join('|')]);
 
   useEffect(() => {
     let active = true;
@@ -357,10 +436,10 @@ export function AppStudioV2({
     [catalog, draft?.pages, draft?.sources, runtimeFilterFields],
   );
   const proposalSummary = useMemo(() => proposal ? summarizeAppStudioAiPlan(proposal) : null, [proposal]);
-  const readinessSteps = useMemo(() => draft ? localPublicationSteps(draft) : [], [draft]);
-  const serverReadinessSteps = useMemo(() => publicationIssueSummaries(publishIssues), [publishIssues]);
-  const publishStepCount = readinessSteps.length + serverReadinessSteps.length;
-  const publishReady = draft?.state === 'preflight_ready' && publishStepCount === 0;
+  const publishStepCount = useMemo(
+    () => draft ? publicationBlockerCount(draft, publishIssues) : 0,
+    [draft, publishIssues],
+  );
 
   useEffect(() => {
     setSelectedProposalSourceIds(new Set(proposal?.defaultSelectedSourceIds ?? proposalSummary?.sources.map((source) => source.id) ?? []));
@@ -395,7 +474,11 @@ export function AppStudioV2({
       setPreviewRunsByPage({});
       setPreviewVariablesByPage({});
       setFilterOptionsByPage({});
-      if (mode === 'ai') await requestAiProposal(result.draft, prompt);
+      if (mode === 'ai') {
+        setAiActivityIndex(0);
+        setAiActivity({ status: 'running', retry: appStudioProposalRetry(prompt, []), returnToProposal: false });
+        await requestAiProposal(result.draft, prompt, [], false);
+      }
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
@@ -403,8 +486,17 @@ export function AppStudioV2({
     }
   };
 
-  const requestAiProposal = async (base = draft, nextPrompt = prompt, selectedBlockIds?: string[]) => {
-    if (!base) return;
+  const requestAiProposal = async (
+    base = draft,
+    nextPrompt = prompt,
+    selectedBlockIds?: string[],
+    returnToProposal = Boolean(proposal),
+  ): Promise<boolean> => {
+    if (!base) return false;
+    const requiredSourceIds = appStudioProposalRequestSourceIds(selectedBlockIds, selectedSource?.id);
+    const retry = appStudioProposalRetry(nextPrompt, requiredSourceIds ?? []);
+    setAiActivityIndex(0);
+    setAiActivity({ status: 'running', retry, returnToProposal });
     setBusy(true);
     setError(null);
     try {
@@ -412,20 +504,35 @@ export function AppStudioV2({
         prompt: nextPrompt.trim() || base.frame.goal,
         expectedRevision: base.revision,
         proposalHash: base.proposalHash,
-        selectedBlockIds: selectedBlockIds ?? (selectedSource ? [selectedSource.id] : undefined),
+        selectedBlockIds: requiredSourceIds,
       });
       setProposal(result.proposal);
+      setAiActivity(null);
       setCopilotOpen(false);
       setSavedMessage('AI plan ready for review');
+      return true;
     } catch (cause) {
-      setError(messageOf(cause));
+      const message = messageOf(cause);
+      setSavedMessage('AI proposal needs attention');
+      setAiActivity({ status: 'error', retry, returnToProposal, error: message });
+      return false;
     } finally {
       setBusy(false);
     }
   };
 
-  const reviseAiProposal = async (answers?: Record<string, string>, additionalSourceIds?: string[]) => {
-    if (!draft || !proposal) return;
+  const reviseAiProposal = async (
+    answers?: Record<string, string>,
+    requiredSourceIds = Array.from(selectedProposalSourceIds),
+    showActivity = true,
+  ): Promise<boolean> => {
+    if (!draft || !proposal) return false;
+    const exactRequiredIds = Array.from(new Set(requiredSourceIds.filter(Boolean)));
+    const retry = appStudioRevisionRetry(answers, exactRequiredIds);
+    if (showActivity) {
+      setAiActivityIndex(0);
+      setAiActivity({ status: 'running', retry, returnToProposal: true });
+    }
     setBusy(true);
     setError(null);
     try {
@@ -433,13 +540,20 @@ export function AppStudioV2({
         expectedRevision: draft.revision,
         expectedProposalHash: draft.proposalHash,
         answers,
-        selectedSourceIds: Array.from(selectedProposalSourceIds),
-        additionalSourceIds,
+        selectedSourceIds: exactRequiredIds,
       });
       setProposal(result.proposal);
+      if (showActivity) setAiActivity(null);
       setSavedMessage('AI proposal revised on the server');
+      return true;
     } catch (cause) {
-      setError(messageOf(cause));
+      const message = messageOf(cause);
+      if (showActivity) {
+        setAiActivity({ status: 'error', retry, returnToProposal: true, error: message });
+      } else {
+        setError(message);
+      }
+      return false;
     } finally {
       setBusy(false);
     }
@@ -464,19 +578,59 @@ export function AppStudioV2({
     }
   };
 
-  const addSourceToAiProposal = async (source: AppBlockRecommendation) => {
+  const addSourceToAiProposal = async (
+    sourceId: string,
+    reviewRequired: boolean,
+    source?: AppBlockRecommendation,
+  ) => {
     if (!draft || !proposal || !proposalSummary) return;
-    if (source.eligibility && !source.eligibility.localPreview) {
-      setError('Enable review-required sources before adding this draft block to the proposal.');
-      return;
-    }
-    const sourceId = source.sourceId ?? source.id;
-    if (proposalSummary.sources.some((item) => item.id === sourceId || item.sourceRef === source.path)) {
+    const requiredSourceIds = appStudioProposalRequiredSourceIds(selectedProposalSourceIds, sourceId);
+    const addMode = appStudioProposalSourceAddMode({
+      alreadyProposed: proposalSummary.sources.some((candidate) => candidate.id === sourceId),
+      reviewRequired,
+      sourcePolicy: draft.sourcePolicy,
+    });
+    if (source) setSelectedSource(source);
+    if (addMode === 'select_existing') {
       setSelectedProposalSourceIds((current) => new Set([...current, sourceId]));
       return;
     }
-    await reviseAiProposal(undefined, [sourceId]);
-    setSelectedSource(source);
+    setProposalAddingSourceId(sourceId);
+    try {
+      if (addMode === 'enable_review_and_replan') {
+        const retry = appStudioReviewAddRetry(prompt, sourceId, requiredSourceIds);
+        setAiActivityIndex(0);
+        setAiActivity({ status: 'running', retry, returnToProposal: true });
+        const next = await mutate([{ type: 'set_source_policy', sourcePolicy: 'include_review_required' }]);
+        if (!next) {
+          setAiActivity({
+            status: 'error',
+            retry,
+            returnToProposal: true,
+            error: 'The review lane could not be enabled. Your existing proposal is unchanged.',
+          });
+          return;
+        }
+        await requestAiProposal(next, prompt, requiredSourceIds, true);
+      } else {
+        await reviseAiProposal(undefined, requiredSourceIds, false);
+      }
+    } finally {
+      setProposalAddingSourceId(null);
+    }
+  };
+
+  const retryAiActivity = (activity: AppStudioAiActivity) => {
+    const retry = activity.retry;
+    if (retry.kind === 'revise') {
+      void reviseAiProposal(retry.answers, retry.requiredSourceIds, true);
+      return;
+    }
+    if (retry.kind === 'enable_review_and_propose') {
+      void addSourceToAiProposal(retry.sourceId, true);
+      return;
+    }
+    void requestAiProposal(draft, retry.prompt, retry.requiredSourceIds, activity.returnToProposal);
   };
 
   useEffect(() => {
@@ -640,11 +794,12 @@ export function AppStudioV2({
       return;
     }
     if (source) {
-      if (source.eligibility && !source.eligibility.localPreview) {
-        setError('Enable review-required sources to add this draft block to the local App.');
-        return;
-      }
+      const sourceId = source.sourceId ?? source.id;
+      const view = componentKindLabel(kind as 'kpi' | 'chart' | 'table');
+      const enableReviewRequired = source.eligibility?.localPreview === false && draft.sourcePolicy === 'governed_only';
       setSelectedSource(source);
+      if (sourceFeedbackTimerRef.current !== null) window.clearTimeout(sourceFeedbackTimerRef.current);
+      setSourceFeedback({ sourceId, status: 'adding', view, pageTitle: activePage.metadata.title });
       setBusy(true);
       setSavedMessage('Composing source…');
       setError(null);
@@ -654,20 +809,28 @@ export function AppStudioV2({
           mode: 'manual',
           expectedRevision: draft.revision,
           expectedProposalHash: draft.proposalHash,
-          selections: [{ sourceId: source.sourceId ?? source.id, pageId: activePage.id, view: kind as 'kpi' | 'chart' | 'table' }],
+          enableReviewRequired,
+          selections: [{ sourceId, pageId: activePage.id, view: kind as 'kpi' | 'chart' | 'table' }],
         });
         setDraft(result.draft);
         setUndoStack((items) => [...items.slice(-29), previous]);
         setRedoStack([]);
         setSelectedTileId(result.tileIds[0] ?? null);
+        setSourceFeedback({ sourceId, status: 'added', view, pageTitle: activePage.metadata.title });
+        sourceFeedbackTimerRef.current = window.setTimeout(() => {
+          setSourceFeedback((current) => current?.sourceId === sourceId ? null : current);
+          sourceFeedbackTimerRef.current = null;
+        }, 1800);
         setSavedMessage(`${kind === 'chart' ? 'Chart' : humanize(kind)} added · loading data…`);
         previewSequenceRef.current += 1;
         setPreviewRunsByPage({});
         setFilterOptionsByPage({});
         await runPreviewForDraft(result.draft, activePage.id);
       } catch (cause) {
+        const message = messageOf(cause);
         setSavedMessage('Compose failed');
-        setError(messageOf(cause));
+        setSourceFeedback({ sourceId, status: 'error', view, pageTitle: activePage.metadata.title, message });
+        setError(message);
       } finally {
         setBusy(false);
       }
@@ -1190,6 +1353,7 @@ export function AppStudioV2({
 
   useEffect(() => () => {
     if (filterPreviewTimerRef.current !== null) window.clearTimeout(filterPreviewTimerRef.current);
+    if (sourceFeedbackTimerRef.current !== null) window.clearTimeout(sourceFeedbackTimerRef.current);
   }, []);
 
   if (!draft) {
@@ -1199,6 +1363,27 @@ export function AppStudioV2({
       <div><span className="loading-mark"><LayoutDashboard size={20} /></span><strong>{error ? 'Studio could not open' : initialDraftId ? 'Opening your local draft…' : baseAppId ? 'Preparing a safe edit draft…' : 'Preparing your Build Frame…'}</strong><small>{error ?? 'Keeping all work local until you explicitly publish it to the Project.'}</small>{error ? <button type="button" onClick={() => { immediateStartRef.current = false; void createDraft(); }}>Try again</button> : null}</div>
     </div>;
   }
+
+  if (aiActivity) {
+    return <AppStudioAiActivitySurface
+      activity={aiActivity}
+      label={APP_STUDIO_AI_ACTIVITY_LABELS[aiActivityIndex] ?? APP_STUDIO_AI_ACTIVITY_LABELS[0]}
+      onBack={onBack}
+      onReturn={aiActivity.returnToProposal && proposal ? () => setAiActivity(null) : undefined}
+      onRetry={() => retryAiActivity(aiActivity)}
+    />;
+  }
+
+  const selectedSourceKind = selectedSource ? recommendedComponentKind(selectedSource) : null;
+  const selectedSourceId = selectedSource?.sourceId ?? selectedSource?.id;
+  const selectedSourceFeedback = sourceFeedback?.sourceId === selectedSourceId ? sourceFeedback : null;
+  const selectedSourceAction = selectedSource && selectedSourceKind ? appStudioSourceActionLabel({
+    view: componentKindLabel(selectedSourceKind),
+    status: selectedSourceFeedback?.status ?? 'idle',
+    reviewRequired: selectedSource.eligibility?.localPreview === false && draft.sourcePolicy === 'governed_only',
+    alreadyUsed: draft.sources.some((source) => source.id === selectedSourceId || source.sourceRef === selectedSource.path),
+    pageTitle: selectedSourceFeedback?.pageTitle,
+  }) : '';
 
   return (
     <div className={`dql-studio-v2 ${proposal ? 'proposal-focus' : ''}`}>
@@ -1218,10 +1403,9 @@ export function AppStudioV2({
             <button type="button" className={previewMode === 'medium' ? 'on' : ''} onClick={() => setPreviewMode('medium')} title="Tablet preview"><PanelRight size={15} /></button>
             <button type="button" className={previewMode === 'narrow' ? 'on' : ''} onClick={() => setPreviewMode('narrow')} title="Phone preview"><Smartphone size={15} /></button>
           </div>
-          <button type="button" className={`review-state ${publishReady ? '' : 'needs-review'}`} onClick={() => void publish(false)} disabled={busy} title="Open the guided publication review"><ShieldCheck size={14} /> {publishReady ? 'Governed checks passed' : publishStepCount ? `${publishStepCount} ${publishStepCount === 1 ? 'fix' : 'fixes'} before publish` : 'Review before publish'}</button>
           <button type="button" className={`copilot ${copilotOpen ? 'on' : ''}`} onClick={() => setCopilotOpen((open) => !open)} aria-pressed={copilotOpen} aria-label="Open App Copilot"><Bot size={14} /><span>App Copilot</span></button>
           <button type="button" className="preview" onClick={() => void runPreview()} disabled={previewing || busy} aria-label={previewing ? 'Running preview' : 'Run preview'}><Play size={13} /><span>{previewing ? 'Running…' : 'Run preview'}</span></button>
-          <button type="button" className="publish" onClick={() => void publish(false)} disabled={busy} aria-label="Review and publish to Project"><Upload size={13} /><span>Publish to Project</span></button>
+          <button type="button" className="publish" onClick={() => void publish(false)} disabled={busy} aria-label={`Review and publish to Project${publishStepCount ? `, ${publishStepCount} ${publishStepCount === 1 ? 'fix' : 'fixes'} needed` : ''}`}><Upload size={13} /><span>Publish to Project</span>{publishStepCount ? <small>{publishStepCount} {publishStepCount === 1 ? 'fix' : 'fixes'}</small> : null}</button>
           <button type="button" className="icon overflow-button" aria-label="More draft actions" aria-expanded={actionsOpen} onClick={() => setActionsOpen((open) => !open)}><MoreHorizontal size={17} /></button>
           {actionsOpen ? <div className="studio-overflow-menu" role="menu"><button type="button" role="menuitem" onClick={() => { setActionsOpen(false); setDeleteConfirmOpen(true); }}><Trash2 size={14} /> Delete local draft</button></div> : null}
         </div>}
@@ -1237,7 +1421,7 @@ export function AppStudioV2({
         <section className={`left-content ${panelOpen ? 'open' : ''}`}>
           <button type="button" className="mobile-drawer-close" onClick={() => setPanelOpen(false)} aria-label="Close Studio drawer"><X size={16} /></button>
           {panel === 'pages' ? <PagesPanel draft={draft} activePageId={activePage?.id} onOpen={setActivePageId} onAdd={() => void addPage()} /> : null}
-          {panel === 'sources' ? <SourcesPanel usedSources={draft.sources} items={filteredCatalog} selected={selectedSource} query={catalogQuery} loading={catalogLoading} error={catalogError} disabled={busy || previewing} onQuery={setCatalogQuery} onSelect={selectSource} onAdd={(item, kind) => void addComponent(kind, item)} onAddContent={(kind) => void addComponent(kind, null)} policy={draft.sourcePolicy} total={catalogTotal} hasMore={Boolean(catalogNextCursor)} onLoadMore={() => void loadMoreSources()} onEnableReview={() => void mutate([{ type: 'set_source_policy', sourcePolicy: 'include_review_required' }])} /> : null}
+          {panel === 'sources' ? <SourcesPanel usedSources={draft.sources} items={filteredCatalog} selected={selectedSource} query={catalogQuery} loading={catalogLoading} error={catalogError} disabled={busy || previewing} sourceFeedback={sourceFeedback} onQuery={setCatalogQuery} onSelect={selectSource} onAdd={(item, kind) => void addComponent(kind, item)} onAddContent={(kind) => void addComponent(kind, null)} policy={draft.sourcePolicy} total={catalogTotal} hasMore={Boolean(catalogNextCursor)} onLoadMore={() => void loadMoreSources()} onEnableReview={() => void mutate([{ type: 'set_source_policy', sourcePolicy: 'include_review_required' }])} /> : null}
           {panel === 'filters' ? <FiltersPanel draft={draft} activePageId={activePage?.id} catalog={catalog} candidates={filterCandidates} runtimeFilterFields={runtimeFilterFields} previewRunsByPage={previewRunsByPage} previewing={previewing} disabled={busy || previewing} onRunPreview={() => void runPreview()} onSave={(configuration) => void saveFilter(configuration)} onRemove={(id) => void removeFilter(id)} /> : null}
           {panel === 'templates' ? <TemplatesPanel current={draft.template} onApply={(nextTemplate) => void applyTemplate(nextTemplate)} /> : null}
         </section>
@@ -1252,19 +1436,16 @@ export function AppStudioV2({
           catalogQuery={catalogQuery}
           sourcePolicy={draft.sourcePolicy}
           selectedSourceIds={selectedProposalSourceIds}
+          addingSourceId={proposalAddingSourceId}
           busy={busy}
-          onRevise={() => void requestAiProposal(draft, prompt)}
+          onRevise={() => void requestAiProposal(draft, prompt, appStudioProposalRequiredSourceIds(selectedProposalSourceIds), true)}
           onApply={() => void applyProposal()}
           onDismiss={() => setProposal(null)}
           onCatalogQuery={setCatalogQuery}
-          onAddSource={addSourceToAiProposal}
+          onAddSource={(source) => void addSourceToAiProposal(source.sourceId ?? source.id, source.eligibility?.localPreview === false, source)}
+          onAddProposalSource={(sourceId, reviewRequired) => void addSourceToAiProposal(sourceId, reviewRequired)}
           onAnswerClarification={(questionId, answerId) => void reviseAiProposal({ [questionId]: answerId })}
           onGenerateGap={(requirementId) => void generateAiGap(requirementId)}
-          onEnableReview={() => void mutate([{ type: 'set_source_policy', sourcePolicy: 'include_review_required' }]).then((next) => {
-            if (!next) return;
-            setProposal(null);
-            void requestAiProposal(next, prompt);
-          })}
           onToggleSource={(sourceId) => setSelectedProposalSourceIds((current) => {
             const next = new Set(current);
             if (next.has(sourceId)) next.delete(sourceId); else next.add(sourceId);
@@ -1275,7 +1456,7 @@ export function AppStudioV2({
           <div className="studio-canvas-label"><div><span>{previewMode === 'auto' ? 'Fit canvas' : `${breakpoint.charAt(0).toUpperCase() + breakpoint.slice(1)} preview`} · {breakpoint === 'wide' ? '12 columns' : breakpoint === 'medium' ? '6 columns' : '1 column'}</span><small>Drag components to reorder · saved instantly</small></div><button type="button" onClick={() => void arrangePage()} disabled={!activePage?.layout.items.length || busy} title="Compact gaps and restore a clean reading order"><LayoutDashboard size={13} /> Auto arrange</button></div>
           <section className="studio-canvas" aria-label="App canvas">
             <header className="studio-page-heading"><div><small>APP PAGE</small><span>{activePage?.metadata.title ?? 'Overview'}</span></div><small>{draft.frame.audience || 'Stakeholders'} · {draft.pages[0]?.metadata.domain || 'General'}</small></header>
-            {selectedSource ? <div className="studio-source-ready"><div><span className="certified"><ShieldCheck size={14} /></span><p><small>Selected data</small><strong>{humanize(selectedSource.name)}</strong></p></div><span className="studio-source-actions"><button type="button" onClick={() => void addComponent(recommendedComponentKind(selectedSource), selectedSource)}><Plus size={14} /> Add {componentKindLabel(recommendedComponentKind(selectedSource))}</button><button type="button" className="source-clear" onClick={() => setSelectedSource(null)} aria-label="Clear selected data"><X size={14} /></button></span></div> : null}
+            {selectedSource && selectedSourceKind ? <div className="studio-source-ready"><div><span className="certified"><ShieldCheck size={14} /></span><p><small>Selected data</small><strong>{humanize(selectedSource.name)}</strong></p></div><span className="studio-source-actions"><button type="button" disabled={busy || previewing} onClick={() => void addComponent(selectedSourceKind, selectedSource)}><Plus size={14} /> {selectedSourceAction}</button><button type="button" className="source-clear" onClick={() => setSelectedSource(null)} aria-label="Clear selected data"><X size={14} /></button></span></div> : null}
             {(activePage?.filters ?? []).length ? <div className="studio-page-filterbar">{activePage!.filters!.map((filter) => <StudioFilterControl key={filter.id} filter={filter} availability={activeFilterOptions[filter.id]} value={previewVariables[filter.id] ?? filter.default} applying={previewing} onChange={(value) => applyFilterValue(filter, value)} />)}</div> : null}
             <div className="studio-page-grid">
               {visibleItems.map((tile) => (
@@ -1417,12 +1598,7 @@ function PublishReadinessDialog({
     && previewPages.length === 0
     && sources.length === 0
     && remainingIssues.length === 0;
-  const blockerCount = requirements.length
-    + clarifications.length
-    + tasks.length
-    + previewPages.length
-    + sources.length
-    + remainingIssues.length;
+  const blockerCount = publicationBlockerCount(draft, serverIssues);
 
   return <div className="proposal-scrim" role="dialog" aria-modal="true" aria-labelledby="publish-readiness-title">
     <section className="studio-readiness-card">
@@ -1474,15 +1650,16 @@ function AiPlanReview({
   catalogQuery,
   sourcePolicy,
   selectedSourceIds,
+  addingSourceId,
   busy,
   onRevise,
   onApply,
   onDismiss,
   onCatalogQuery,
   onAddSource,
+  onAddProposalSource,
   onAnswerClarification,
   onGenerateGap,
-  onEnableReview,
   onToggleSource,
 }: {
   proposal: AppStudioAiProposal;
@@ -1491,15 +1668,16 @@ function AiPlanReview({
   catalogQuery: string;
   sourcePolicy: AppStudioBuildDraft['sourcePolicy'];
   selectedSourceIds: ReadonlySet<string>;
+  addingSourceId: string | null;
   busy: boolean;
   onRevise: () => void;
   onApply: () => void;
   onDismiss: () => void;
   onCatalogQuery: (query: string) => void;
   onAddSource: (source: AppBlockRecommendation) => void;
+  onAddProposalSource: (sourceId: string, reviewRequired: boolean) => void;
   onAnswerClarification: (questionId: string, answerId: string) => void;
   onGenerateGap: (requirementId: string) => void;
-  onEnableReview: () => void;
   onToggleSource: (sourceId: string) => void;
 }): JSX.Element {
   const unresolved = proposal.clarifications.filter((item) => item.required && !item.answerId);
@@ -1525,11 +1703,12 @@ function AiPlanReview({
   };
   const sourceRow = (source: AppStudioAiPlanSummary['sources'][number], selected: boolean) => {
     const blockedByPolicy = source.trustState !== 'certified' && sourcePolicy === 'governed_only';
+    const adding = addingSourceId === source.id;
     return <article key={source.id} className={`proposal-source-row ${selected ? 'selected' : ''}`}>
     <span className={`proposal-source-trust ${source.trustState}`}>{source.trustState === 'certified' ? <ShieldCheck size={15} /> : <FileText size={15} />}</span>
     <div><strong>{source.label}</strong><small>{sourceKindLabel(source.kind)} · {source.trustState === 'certified' ? 'Certified' : 'Review required'}</small><p>{viewDescription(source)}</p></div>
-    <button type="button" className={selected ? 'remove' : 'add'} disabled={!selected && blockedByPolicy} title={blockedByPolicy ? 'Enable review-required sources to add this draft block locally.' : undefined} onClick={() => onToggleSource(source.id)} aria-label={`${selected ? 'Remove' : 'Add'} ${source.label}${summary.sources.filter((item) => item.label === source.label).length > 1 ? ` for ${summary.components.filter((component) => component.sourceId === source.id).map((component) => component.title).join(', ') || source.id}` : ''}`}>
-      {selected ? <><X size={13} /> Remove</> : blockedByPolicy ? 'Review lane required' : <><Plus size={13} /> Add</>}
+    <button type="button" className={selected ? 'remove' : 'add'} disabled={busy} title={blockedByPolicy ? 'Enable the local review lane and rebuild the proposal with this source.' : undefined} onClick={() => selected ? onToggleSource(source.id) : onAddProposalSource(source.id, blockedByPolicy)} aria-label={`${selected ? 'Remove' : blockedByPolicy ? 'Enable review lane and add' : 'Add'} ${source.label}${summary.sources.filter((item) => item.label === source.label).length > 1 ? ` for ${summary.components.filter((component) => component.sourceId === source.id).map((component) => component.title).join(', ') || source.id}` : ''}`}>
+      {selected ? <><X size={13} /> Remove</> : adding ? 'Adding…' : blockedByPolicy ? 'Enable review lane & add' : <><Plus size={13} /> Add</>}
     </button>
   </article>;
   };
@@ -1569,18 +1748,18 @@ function AiPlanReview({
       </section> : null}
 
       <section className="proposal-source-group" aria-labelledby="available-proposal-sources">
-        <div className="proposal-source-heading"><div><h2 id="available-proposal-sources">More governed sources</h2><p>Add another certified block before AI generates the App.</p></div><strong>{availableSources.length}</strong></div>
+        <div className="proposal-source-heading"><div><h2 id="available-proposal-sources">More App sources</h2><p>Add a certified block, or explicitly open the local review lane for a draft.</p></div><strong>{availableSources.length}</strong></div>
         <div className="proposal-catalog-list">
           {availableSources.map((source) => <article key={source.id}>
             <span className={source.status === 'certified' ? 'certified' : 'review_required'}>{source.status === 'certified' ? <ShieldCheck size={14} /> : <FileText size={14} />}</span>
             <div><strong>{humanize(source.name)}</strong><small>{source.domain || 'General'} · {source.status === 'certified' ? 'Certified block' : 'Review required'}</small><p>{source.description || source.reasons[0] || 'Available governed data source'}</p></div>
-            <button type="button" onClick={() => onAddSource(source)} disabled={busy || source.eligibility?.localPreview === false} title={source.eligibility?.localPreview === false ? 'Enable review-required sources to use this block locally.' : undefined}><Plus size={13} /> {source.eligibility?.localPreview === false ? 'Review lane required' : 'Add'}</button>
+            <button type="button" onClick={() => onAddSource(source)} disabled={busy} title={source.eligibility?.localPreview === false ? 'Enable the local review lane and rebuild the proposal with this source.' : undefined}>{addingSourceId === (source.sourceId ?? source.id) ? 'Adding…' : source.eligibility?.localPreview === false ? 'Enable review lane & add' : <><Plus size={13} /> Add</>}</button>
           </article>)}
           {!availableSources.length ? <p className="studio-ai-plan-empty">{catalogQuery.trim() ? 'No additional source matches this search.' : 'All available governed sources are already proposed.'}</p> : null}
         </div>
       </section>
 
-      {sourcePolicy === 'include_review_required' ? <div className="studio-ai-review-lane"><FileText size={14} /><p><strong>Review-required analysis is enabled</strong><small>It stays clearly labeled and cannot be published to the Project until it is replaced, promoted, or removed.</small></p></div> : <div className="studio-ai-review-lane"><FileText size={14} /><p><strong>Draft sources are visible but not addable</strong><small>Enable the local review lane to use them without changing their trust.</small></p><button type="button" onClick={onEnableReview} disabled={busy}>Enable review lane</button></div>}
+      {sourcePolicy === 'include_review_required' ? <div className="studio-ai-review-lane"><FileText size={14} /><p><strong>Review-required analysis is enabled</strong><small>It stays clearly labeled and cannot be published to the Project until it is replaced, promoted, or removed.</small></p></div> : <div className="studio-ai-review-lane"><FileText size={14} /><p><strong>Draft sources require an explicit review lane</strong><small>Use “Enable review lane &amp; add” on the draft you want. Its trust does not change.</small></p></div>}
       {uncoveredRequirements.length ? <section className="studio-ai-questions"><header><strong>Uncovered requirements</strong><small>{uncoveredRequirements.length} gaps</small></header>{uncoveredRequirements.map((requirement) => <div key={requirement.id}><p>{requirement.question}</p><button type="button" onClick={() => onGenerateGap(requirement.id)} disabled={busy || sourcePolicy !== 'include_review_required'}>{sourcePolicy === 'include_review_required' ? 'Explicitly generate review-required DQL' : 'Enable review lane to generate'}</button></div>)}</section> : null}
       {unresolved.length ? <section className="studio-ai-questions"><header><strong>AI needs one more decision</strong><small>{unresolved.length} required</small></header>{unresolved.map((item) => <fieldset key={item.id}><legend>{item.question}</legend>{item.choices.map((choice) => <button key={choice.id} type="button" onClick={() => onAnswerClarification(item.id, choice.id)} disabled={busy}><strong>{choice.label}</strong>{choice.description ? <small>{choice.description}</small> : null}</button>)}</fieldset>)}<button type="button" onClick={onRevise} disabled={busy}>{busy ? 'Updating…' : 'Re-run proposal'}</button></section> : null}
     </div>
@@ -1650,6 +1829,7 @@ function SourcesPanel({
   loading,
   error,
   disabled,
+  sourceFeedback,
   onQuery,
   onSelect,
   onAdd,
@@ -1667,6 +1847,7 @@ function SourcesPanel({
   loading: boolean;
   error: string | null;
   disabled: boolean;
+  sourceFeedback: AppStudioSourceFeedback | null;
   onQuery: (value: string) => void;
   onSelect: (item: AppBlockRecommendation) => void;
   onAdd: (item: AppBlockRecommendation, kind: 'kpi' | 'chart' | 'table') => void;
@@ -1711,22 +1892,33 @@ function SourcesPanel({
     <div className="source-catalog-list">{visibleItems.map((item) => {
       const kind = recommendedComponentKind(item);
       const isSelected = selected?.id === item.id;
-      const isUsed = usedIdentifiers.has(item.id) || usedIdentifiers.has(item.name);
+      const sourceId = item.sourceId ?? item.id;
+      const isUsed = usedIdentifiers.has(sourceId) || usedIdentifiers.has(item.id) || usedIdentifiers.has(item.name);
       const blockedByPolicy = item.eligibility?.localPreview === false && policy === 'governed_only';
+      const rowFeedback = sourceFeedback?.sourceId === sourceId ? sourceFeedback : null;
+      const actionStatus: AppStudioSourceActionStatus = rowFeedback?.status ?? 'idle';
+      const actionLabel = appStudioSourceActionLabel({
+        view: componentKindLabel(kind),
+        status: actionStatus,
+        reviewRequired: blockedByPolicy,
+        alreadyUsed: isUsed,
+        pageTitle: rowFeedback?.pageTitle,
+      });
       return <article key={item.id} className={`source-catalog-row ${isSelected ? 'on' : ''}`}>
         <button type="button" className="source-catalog-summary" onClick={() => onSelect(item)} aria-label={`View ${item.name} source details`} aria-expanded={isSelected}>
           <span className={item.status === 'certified' ? 'certified' : 'review'}>{item.status === 'certified' ? <ShieldCheck size={14} /> : <FileText size={14} />}</span>
           <div><strong title={item.name}>{humanize(item.name)}</strong><small>{humanize(item.domain)} · {item.status === 'certified' ? 'Certified block' : 'Review required'}{isUsed ? ' · In App' : ''}</small></div>
         </button>
-        <button type="button" className="source-add-view" disabled={disabled || blockedByPolicy} title={blockedByPolicy ? 'Enable review-required sources to add this draft block locally.' : undefined} onClick={() => onAdd(item, kind)} aria-label={`Add ${item.name} as ${componentKindLabel(kind)}`}><Plus size={13} /> {blockedByPolicy ? 'Review lane required' : `Add ${componentKindLabel(kind)}`}</button>
+        <button type="button" className="source-add-view" disabled={disabled} title={blockedByPolicy ? 'Enable the review lane and add this draft block in one saved change.' : undefined} onClick={() => onAdd(item, kind)} aria-label={`${actionLabel}: ${item.name}`}><Plus size={13} /> {actionLabel}</button>
+        {rowFeedback ? <small className={`source-action-feedback ${rowFeedback.status}`} role={rowFeedback.status === 'error' ? 'alert' : 'status'}>{rowFeedback.status === 'error' ? rowFeedback.message : actionLabel}</small> : null}
         {isSelected ? <div className="source-catalog-detail">
           <p>{item.description || `${humanize(item.name)} from the ${humanize(item.domain)} domain.`}</p>
           {blockedByPolicy ? <button type="button" className="review-action" onClick={onEnableReview}><FileText size={12} /> Enable review-required sources</button> : null}
           {(item.filterIds?.length ?? 0) > 0 ? <span><Filter size={12} /> {item.filterIds!.length} supported {item.filterIds!.length === 1 ? 'filter' : 'filters'}</span> : null}
           <div className="source-view-options" aria-label={`Add ${item.name} with another view`}>
-            <button type="button" disabled={disabled || blockedByPolicy} onClick={() => onAdd(item, 'kpi')}><Gauge size={13} /> KPI</button>
-            <button type="button" disabled={disabled || blockedByPolicy} onClick={() => onAdd(item, 'chart')}><BarChart3 size={13} /> Chart</button>
-            <button type="button" disabled={disabled || blockedByPolicy} onClick={() => onAdd(item, 'table')}><Table2 size={13} /> Table</button>
+            <button type="button" disabled={disabled} aria-label={blockedByPolicy ? `Enable review lane and add ${item.name} as KPI` : undefined} onClick={() => onAdd(item, 'kpi')}><Gauge size={13} /> KPI</button>
+            <button type="button" disabled={disabled} aria-label={blockedByPolicy ? `Enable review lane and add ${item.name} as Chart` : undefined} onClick={() => onAdd(item, 'chart')}><BarChart3 size={13} /> Chart</button>
+            <button type="button" disabled={disabled} aria-label={blockedByPolicy ? `Enable review lane and add ${item.name} as Table` : undefined} onClick={() => onAdd(item, 'table')}><Table2 size={13} /> Table</button>
           </div>
         </div> : null}
       </article>;
@@ -2193,7 +2385,7 @@ function recommendedComponentKind(source: AppBlockRecommendation): 'kpi' | 'char
   return 'chart';
 }
 
-function componentKindLabel(kind: 'kpi' | 'chart' | 'table'): string {
+function componentKindLabel(kind: 'kpi' | 'chart' | 'table'): 'KPI' | 'Chart' | 'Table' {
   return kind === 'kpi' ? 'KPI' : kind === 'table' ? 'Table' : 'Chart';
 }
 

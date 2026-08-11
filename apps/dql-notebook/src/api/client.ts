@@ -3338,6 +3338,10 @@ export const api = {
     return request(`/api/operations?limit=${Math.max(1, Math.min(100, Math.floor(limit)))}`);
   },
 
+  async getOperation(operationId: string): Promise<LocalOperation> {
+    return request(`/api/operations/${encodeURIComponent(operationId)}`);
+  },
+
   async cancelOperation(operationId: string): Promise<LocalOperation> {
     return request(`/api/operations/${encodeURIComponent(operationId)}`, { method: 'DELETE' });
   },
@@ -6085,7 +6089,7 @@ export const api = {
     expectedProposalHash: string;
   } & (
     | { mode: 'ai'; proposalId: string; selectedSourceIds: string[] }
-    | { mode: 'manual'; selections: Array<{ sourceId: string; pageId?: string; view: 'kpi' | 'chart' | 'table' }> }
+    | { mode: 'manual'; enableReviewRequired?: boolean; selections: Array<{ sourceId: string; pageId?: string; view: 'kpi' | 'chart' | 'table' }> }
   )): Promise<{ ok: true; draft: AppStudioBuildDraft; pageIds: string[]; tileIds: string[] }> {
     return request(`/api/app-builds/${encodeURIComponent(id)}/compose`, {
       method: 'POST',

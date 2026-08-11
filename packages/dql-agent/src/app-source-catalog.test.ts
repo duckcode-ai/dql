@@ -77,6 +77,62 @@ describe('AppSourceCatalogService', () => {
     })).toThrow(/catalog changed/i);
   });
 
+  it('PRD-007 excludes generated legacy drafts until an explicit reusable tag is present', async () => {
+    writeFileSync(join(projectRoot, 'domains', 'sales', 'blocks', 'legacy-analysis.dql'), `block "Legacy generated analysis" {
+  domain = "sales"
+  status = "draft"
+  source_question = "Why did revenue change?"
+  query = """SELECT 1 AS value"""
+}`);
+    writeFileSync(join(projectRoot, 'domains', 'sales', 'blocks', 'tagged-legacy-analysis.dql'), `block "Tagged legacy generated analysis" {
+  domain = "sales"
+  status = "draft"
+  tags = ["ai-generated"]
+  query = """SELECT 4 AS value"""
+}`);
+    writeFileSync(join(projectRoot, 'domains', 'sales', 'blocks', 'manual-semantic-draft.dql'), `block "Manual semantic request draft" {
+  domain = "sales"
+  status = "draft"
+  requested_filters = ["region=West"]
+  requested_dimensions = ["month"]
+  time_dimension = "order_date"
+  granularity = "month"
+  limit = 12
+  draft_path = "blocks/_drafts/manual-semantic-draft.dql"
+  query = """SELECT 5 AS value"""
+}`);
+    writeFileSync(join(projectRoot, 'domains', 'sales', 'blocks', 'saved-analysis.dql'), `block "Saved generated analysis" {
+  domain = "sales"
+  status = "draft"
+  tags = ["app-source"]
+  source_question = "Why did revenue change?"
+  query = """SELECT 2 AS value"""
+}`);
+    writeFileSync(join(projectRoot, 'domains', 'sales', 'blocks', 'certified-history.dql'), `block "Certified generated history" {
+  domain = "sales"
+  status = "certified"
+  source_question = "Historical generated provenance"
+  query = """SELECT 3 AS value"""
+}`);
+
+    await ensureAgentProjectReady(projectRoot);
+    const page = queryAppSourceCatalog(projectRoot, {
+      sourcePolicy: 'include_review_required',
+      limit: 20,
+    });
+    const names = page.items.map((item) => item.name);
+
+    expect(names).not.toContain('Legacy generated analysis');
+    expect(names).not.toContain('Tagged legacy generated analysis');
+    expect(names).toContain('Manual semantic request draft');
+    expect(names).toContain('Saved generated analysis');
+    expect(names).toContain('Certified generated history');
+    expect(page.items.find((item) => item.name === 'Saved generated analysis')).toMatchObject({
+      lifecycle: 'draft',
+      trust: 'review_required',
+    });
+  });
+
   it('PERF-003 pages and exact-searches a 4,000-source warm index within response budgets', () => {
     const catalog = new MetadataCatalog(join(projectRoot, '.dql', 'cache', 'app-scale.sqlite'));
     try {

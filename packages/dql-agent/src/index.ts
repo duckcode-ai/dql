@@ -69,6 +69,11 @@ export type {
 } from "./skills/loader.js";
 export { seedDefaultSkills } from "./skills/defaults.js";
 export {
+  APP_SOURCE_REUSABLE_TAG,
+  hasGeneratedAppSourceOrigin,
+  isExplicitlyReusableAppSource,
+} from './app-source-policy.js';
+export {
   AppSourceCatalogError,
   queryAppSourceCatalog,
   resolveAppSourceCatalogRecords,
@@ -1201,10 +1206,11 @@ interface WarmProjectIndexEntry {
 const warmProjectIndexes = new Map<string, WarmProjectIndexEntry>();
 
 /**
- * Cheap source version for the agent indexes. It intentionally watches compiled
- * artifacts plus the small mutable skill/hint trees, not the entire dbt repo.
- * Large source repos are compiled explicitly; `dql compile` changes the manifest
- * token and invalidates this state without making every question scan the repo.
+ * Cheap source version for the agent indexes. It watches compiled artifacts,
+ * constant-time authoring-root directory tokens, and the small mutable
+ * skill/hint trees. File watchers and in-process mutation paths explicitly
+ * invalidate block/domain edits; warm candidate requests never traverse a
+ * large block tree just to decide whether the prepared snapshot can be reused.
  */
 export function agentProjectSourceVersion(projectRoot: string): string {
   const root = resolve(projectRoot);
@@ -1243,10 +1249,20 @@ export function agentProjectSourceVersion(projectRoot: string): string {
   // New OSS projects keep shared skills visible and Git-owned at `skills/`.
   // Watch the historical path as well until project migrations are complete.
   addSmallTreeState(skillsDir(root), tokens);
-  addSmallTreeState(join(root, 'domains'), tokens);
+  addDirectoryState(join(root, 'blocks'), tokens);
+  addDirectoryState(join(root, 'domains'), tokens);
   addSmallTreeState(join(root, '.dql', 'skills'), tokens);
   addSmallTreeState(join(root, '.dql', 'hints'), tokens);
   return createHash('sha1').update(tokens.sort().join('\n')).digest('hex');
+}
+
+function addDirectoryState(dir: string, tokens: string[]): void {
+  try {
+    const stat = statSync(dir);
+    tokens.push(`${dir}:directory:${stat.size}:${stat.mtimeMs}`);
+  } catch {
+    tokens.push(`${dir}:directory:missing`);
+  }
 }
 
 function addSmallTreeState(dir: string, tokens: string[], budget = 2_000): void {
@@ -1468,15 +1484,11 @@ export function getPromotionCandidates(
 }
 
 function loadManifest(projectRoot: string): DQLManifest {
-  // Prefer the on-disk compiled manifest, fall back to a fresh build.
-  const compiled = join(projectRoot, "dql-manifest.json");
-  if (existsSync(compiled)) {
-    try {
-      return JSON.parse(readFileSync(compiled, "utf-8")) as DQLManifest;
-    } catch {
-      // fall through
-    }
-  }
+  // Agent readiness is already source-versioned and cold-only. Build from the
+  // current Git-owned DQL declarations here instead of accepting an emitted
+  // manifest whose name-keyed block projection may predate duplicate/manual
+  // drafts. Warm App catalog queries continue to read only the active SQLite
+  // snapshot; they do not rebuild or recursively parse source artifacts.
   return buildManifest({
     projectRoot,
     dbtManifestPath: resolveDbtManifestPath(projectRoot) ?? undefined,

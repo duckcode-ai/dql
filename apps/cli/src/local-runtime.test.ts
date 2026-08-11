@@ -75,6 +75,7 @@ import {
   ensureConnectorInstalledForStartup,
   loadProjectConfig,
   isAgentValueProbeColumn,
+  markBlockStudioSourceReusable,
   normalizeProjectConnection,
   normalizeAgentRunDomain,
   resolveUiDomainContext,
@@ -3236,6 +3237,56 @@ LIMIT \${top_n}
     }
   });
 
+  it('stamps App-source reuse only when a generated draft is explicitly saved or added', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-block-reusable-save-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        connection: { driver: 'file' },
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const legacySource = `block "Legacy analysis" {
+  type = "custom"
+  status = "draft"
+  tags = ["ai-generated"]
+  source_question = "Why did revenue change?"
+  query = """SELECT 1 AS value"""
+}`;
+      expect(legacySource).not.toContain('app-source');
+
+      const saved = await fetch(`http://127.0.0.1:${port}/api/block-studio/save`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source: legacySource,
+          metadata: { name: 'Legacy analysis', domain: 'finance', owner: 'analytics', tags: ['ai-generated'] },
+        }),
+      }).then((response) => response.json()) as { path: string };
+      expect(readFileSync(join(projectRoot, saved.path), 'utf-8')).toContain('tags = ["ai-generated", "app-source"]');
+
+      const added = await fetch(`http://127.0.0.1:${port}/api/block-studio/agent-drafts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source: legacySource.replace('Legacy analysis', 'Added analysis'),
+          name: 'Added analysis',
+          domain: 'finance',
+          tags: ['ai-generated'],
+          runId: 'run-explicit-add',
+        }),
+      }).then((response) => response.json()) as { path: string };
+      expect(readFileSync(join(projectRoot, added.path), 'utf-8')).toContain('tags = ["ai-generated", "app-source"]');
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
   it('uses the shared bounded repair for App draft-analysis execution without mutating source (AGT-023, API-010)', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-app-tile-repair-'));
     tempDirs.push(projectRoot);
@@ -4321,6 +4372,7 @@ term "Player Points" {
     expect(candidate.sql).toBe('');
     expect(candidate.savedPath).toBe(candidate.draftSave.path);
     expect(candidate.dqlSource).toContain('block "monthly_revenue_by_channel"');
+    expect(candidate.dqlSource).toContain('tags = ["app-source"]');
     expect(candidate.dqlSource).toContain('proposed_contract_id = "finance.Unknown.monthly_revenue_channel"');
     expect(readFileSync(join(projectRoot, candidate.draftSave.path!), 'utf-8')).toBe(candidate.dqlSource);
   });
@@ -6625,6 +6677,23 @@ describe('semantic block save artifacts', () => {
     const sanitized = sanitizeAgentBlockDraftSource(source);
     expect(sanitized).not.toContain('owner =');
     expect(sanitized).not.toContain('invented-team');
+  });
+
+  it('stamps explicit Block Studio reuse in canonical parser-supported tags', () => {
+    const generated = `block "Revenue Draft" {
+  status = "draft"
+  tags = ["ai-generated", "review-required"]
+  source_question = "Why did revenue change?"
+  query = """SELECT 1 AS value"""
+}`;
+    const reusable = markBlockStudioSourceReusable(generated);
+
+    expect(parseBlockSourceMetadata(reusable).tags).toEqual([
+      'ai-generated',
+      'review-required',
+      'app-source',
+    ]);
+    expect(markBlockStudioSourceReusable(reusable)).toBe(reusable);
   });
 
   it('promotes domain-first drafts into the domain block folder and removes stale draft artifacts', () => {

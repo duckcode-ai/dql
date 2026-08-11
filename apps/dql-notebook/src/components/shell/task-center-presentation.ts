@@ -10,6 +10,95 @@ export interface TaskOutcomePresentation {
   guidance?: string;
 }
 
+export interface TaskCenterProjection {
+  operations: LocalOperation[];
+  activeCount: number;
+  attentionCount: number;
+}
+
+const TERMINAL_OPERATION_STATUSES = new Set<LocalOperation['status']>([
+  'succeeded',
+  'failed',
+  'cancelled',
+  'interrupted',
+]);
+
+/**
+ * Build the bounded presentation model used by Task Center without mutating
+ * or pruning the provider's durable operation history.
+ */
+export function taskCenterProjection(
+  operations: LocalOperation[],
+  visibleLimit = 8,
+): TaskCenterProjection {
+  const presentable = coalesceBlockCertificationOperations(operations)
+    .filter((operation) => (
+      !TERMINAL_OPERATION_STATUSES.has(operation.status)
+      || operation.type !== 'project_refresh'
+    ));
+  const presentations = presentable.map(taskOutcomePresentation);
+
+  return {
+    operations: presentable.slice(0, visibleLimit),
+    activeCount: presentations.filter((presentation) => presentation.active).length,
+    attentionCount: presentations.filter((presentation) => presentation.tone === 'attention').length,
+  };
+}
+
+/**
+ * Task Center represents the current state of each block, not every attempt.
+ * Certification results retain draft, certified, and block artifact aliases,
+ * so group all operations connected by one of those exact normalized paths
+ * and keep only the newest attempt. Other operation types and distinct blocks
+ * are left untouched.
+ */
+export function coalesceBlockCertificationOperations(
+  operations: LocalOperation[],
+): LocalOperation[] {
+  const certifications = operations.filter((operation) => operation.type === 'block_certification');
+  const parents = certifications.map((_, index) => index);
+  const aliasOwners = new Map<string, number>();
+
+  const find = (index: number): number => {
+    let current = index;
+    while (parents[current] !== current) {
+      parents[current] = parents[parents[current]];
+      current = parents[current];
+    }
+    return current;
+  };
+  const union = (left: number, right: number): void => {
+    const leftRoot = find(left);
+    const rightRoot = find(right);
+    if (leftRoot !== rightRoot) parents[rightRoot] = leftRoot;
+  };
+
+  certifications.forEach((operation, index) => {
+    for (const alias of blockCertificationPathAliases(operation)) {
+      const owner = aliasOwners.get(alias);
+      if (owner === undefined) aliasOwners.set(alias, index);
+      else union(index, owner);
+    }
+  });
+
+  const newestByGroup = new Map<number, LocalOperation>();
+  certifications.forEach((operation, index) => {
+    const group = find(index);
+    const current = newestByGroup.get(group);
+    if (!current || compareCertificationAttempts(operation, current) < 0) {
+      newestByGroup.set(group, operation);
+    }
+  });
+  const visibleCertificationIds = new Set(
+    [...newestByGroup.values()].map((operation) => operation.id),
+  );
+
+  return operations.filter((operation) => (
+    operation.type !== 'block_certification'
+    || visibleCertificationIds.has(operation.id)
+  ));
+}
+
 /**
  * Convert transport completion into the business outcome shown to a person.
  * A certification operation can finish successfully while its governed result
@@ -84,4 +173,38 @@ export function taskOutcomePresentation(operation: LocalOperation): TaskOutcomeP
     statusLabel: operation.status,
     message: operation.error?.message ?? operation.message,
   };
+}
+
+function blockCertificationPathAliases(operation: LocalOperation): string[] {
+  const result = objectValue(operation.result);
+  const block = objectValue(result?.block);
+  const metadata = objectValue(block?.metadata);
+  const scopePath = operation.scope.startsWith('block:')
+    ? operation.scope.slice('block:'.length)
+    : undefined;
+  return Array.from(new Set([
+    normalizeBlockPath(block?.path),
+    normalizeBlockPath(metadata?.path),
+    normalizeBlockPath(result?.oldPath),
+    normalizeBlockPath(result?.draftPath),
+    normalizeBlockPath(result?.newPath),
+    normalizeBlockPath(scopePath),
+  ].filter((value): value is string => Boolean(value))));
+}
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function normalizeBlockPath(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  return value.trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
+}
+
+function compareCertificationAttempts(left: LocalOperation, right: LocalOperation): number {
+  return right.createdAt.localeCompare(left.createdAt)
+    || right.updatedAt.localeCompare(left.updatedAt)
+    || right.id.localeCompare(left.id);
 }

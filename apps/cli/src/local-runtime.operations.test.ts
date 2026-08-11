@@ -5,6 +5,7 @@ import type { Server } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import { startLocalServer } from './local-runtime.js';
+import { LocalOperationCoordinator } from './local-operation-coordinator.js';
 
 const roots: string[] = [];
 
@@ -16,6 +17,55 @@ afterEach(() => {
 });
 
 describe('local background operation API (PERF-001, API-001)', () => {
+  it('returns an older active certification beyond terminal history and preserves exact-id recovery', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-operation-list-recovery-'));
+    roots.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({ project: 'operation_list_recovery' }));
+    let server: Server | undefined;
+    let seeder: LocalOperationCoordinator | undefined;
+
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        connection: { driver: 'file' },
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      seeder = new LocalOperationCoordinator(join(projectRoot, '.dql', 'cache', 'operations.sqlite'));
+      const olderActive = seeder.create({
+        type: 'block_certification',
+        scope: 'block:blocks/_drafts/older-active.dql',
+        resourceRevision: 'older-active-revision',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      for (let index = 0; index < 55; index += 1) {
+        const terminal = seeder.create({ type: 'project_refresh', scope: `project:${index}` });
+        await seeder.run(terminal.id, async () => ({ index }));
+      }
+
+      const listedResponse = await fetch(`${base}/api/operations?limit=50`);
+      const listed = await listedResponse.json() as { operations: Array<{ id: string; status: string }> };
+      expect(listedResponse.status).toBe(200);
+      expect(listed.operations.find((operation) => operation.id === olderActive.id)).toMatchObject({ status: 'queued' });
+      expect(listed.operations.filter((operation) => !['queued', 'running'].includes(operation.status))).toHaveLength(50);
+      expect(listed.operations).toHaveLength(51);
+
+      const exactResponse = await fetch(`${base}/api/operations/${encodeURIComponent(olderActive.id)}`);
+      expect(exactResponse.status).toBe(200);
+      expect(await exactResponse.json()).toMatchObject({
+        id: olderActive.id,
+        status: 'queued',
+        resourceRevision: 'older-active-revision',
+      });
+    } finally {
+      seeder?.close();
+      await new Promise<void>((resolve) => server?.close(() => resolve()) ?? resolve());
+    }
+  });
+
   it('acknowledges certification before execution finishes and executes the warehouse query once', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-operation-api-'));
     roots.push(projectRoot);
@@ -34,6 +84,9 @@ describe('local background operation API (PERF-001, API-001)', () => {
     });
     const executor = { executeQuery } as unknown as QueryExecutor;
     let server: Server | undefined;
+    const sseController = new AbortController();
+    const operationEvents: string[] = [];
+    let readEvents: Promise<void> | undefined;
 
     try {
       const port = await startLocalServer({
@@ -45,6 +98,21 @@ describe('local background operation API (PERF-001, API-001)', () => {
         captureServer: (created) => { server = created; },
       });
       const base = `http://127.0.0.1:${port}`;
+      const eventResponse = await fetch(`${base}/api/operations/events`, { signal: sseController.signal });
+      const eventReader = eventResponse.body?.getReader();
+      const decoder = new TextDecoder();
+      readEvents = (async () => {
+        if (!eventReader) return;
+        try {
+          while (true) {
+            const frame = await eventReader.read();
+            if (frame.done) return;
+            operationEvents.push(decoder.decode(frame.value, { stream: true }));
+          }
+        } catch {
+          // The test aborts the open SSE recovery stream after terminal state.
+        }
+      })();
       const source = `block "Async Revenue" {
   status = "draft"
   domain = "finance"
@@ -74,10 +142,13 @@ describe('local background operation API (PERF-001, API-001)', () => {
         headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'certification-1' },
         body: JSON.stringify(requestBody),
       });
-      const accepted = await acceptedResponse.json() as { operation: { id: string; status: string }; draft: { path: string } };
+      const accepted = await acceptedResponse.json() as {
+        operation: { id: string; status: string; phase: string; progress: number };
+        draft: { path: string };
+      };
 
       expect(acceptedResponse.status).toBe(202);
-      expect(accepted.operation.status).toBe('running');
+      expect(accepted.operation).toMatchObject({ status: 'running', phase: 'previewing', progress: 30 });
       expect(accepted.draft.path).toContain('/_drafts/');
       expect(executeQuery).toHaveBeenCalledTimes(1);
 
@@ -98,8 +169,17 @@ describe('local background operation API (PERF-001, API-001)', () => {
       expect(executeQuery).toHaveBeenCalledTimes(1);
       const certifiedPath = String((completed.result as { newPath?: string }).newPath);
       expect(readFileSync(join(projectRoot, certifiedPath), 'utf-8')).toContain('status = "certified"');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const progressEvents = operationEvents.join('');
+      expect(progressEvents).toContain('"phase":"validating","progress":10');
+      expect(progressEvents).toContain('"phase":"previewing","progress":30');
+      expect(progressEvents).toContain('"phase":"testing","progress":60');
+      expect(progressEvents).toContain('"phase":"publishing","progress":82');
+      expect(progressEvents).toContain('"phase":"indexing","progress":92');
     } finally {
       releaseQuery();
+      sseController.abort();
+      await readEvents;
       await new Promise<void>((resolve) => server?.close(() => resolve()) ?? resolve());
     }
   });

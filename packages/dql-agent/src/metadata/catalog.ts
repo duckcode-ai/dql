@@ -98,6 +98,10 @@ import {
   buildMeaningEvidencePackage,
   type MetadataMeaningEvidencePackage,
 } from './meaning-evidence.js';
+import {
+  hasGeneratedAppSourceOrigin,
+  isExplicitlyReusableAppSource,
+} from '../app-source-policy.js';
 
 export { applyContextPackCompatibility, toAgentRetrievalEvidence } from './meaning-evidence.js';
 
@@ -4687,6 +4691,13 @@ function addManifestBlockSourceObjects(
   const declarations = manifest.blockDeclarations ?? Object.values(manifest.blocks ?? {});
   for (const block of declarations) {
     if (!block.sql?.trim() || !block.filePath) continue;
+    // Migration rule: certified declarations remain available. Existing
+    // hand-authored review/draft declarations have no generated provenance and
+    // remain discoverable. Legacy Ask/research/generated drafts participate
+    // only after an explicit Block Studio action stamps the reusable tag into
+    // canonical DQL source. Names, folders, and prose are deliberately ignored.
+    const explicitlyReusable = isExplicitlyReusableAppSource(block);
+    if (block.status !== 'certified' && hasGeneratedAppSourceOrigin(block) && !explicitlyReusable) continue;
     const sourceRevision = manifestBlockSourceRevision(projectRoot, block);
     const domain = block.domain?.trim() || undefined;
     const pathIdentity = sha256(`${block.filePath}\u0000${block.name}`).slice(0, 20);

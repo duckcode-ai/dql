@@ -223,10 +223,24 @@ export class LocalOperationCoordinator {
 
   list(limit = 50): LocalOperation[] {
     const bounded = Math.max(1, Math.min(100, Math.floor(limit)));
-    const rows = this.db.prepare(
-      'SELECT * FROM local_operations ORDER BY updated_at DESC LIMIT ?',
-    ).all(bounded) as OperationRow[];
-    return rows.map(operationFromRow);
+    const activeRows = this.db.prepare(`
+      SELECT * FROM local_operations
+      WHERE status IN ('queued', 'running')
+      ORDER BY updated_at DESC, created_at DESC, id DESC
+    `).all() as OperationRow[];
+    const terminalRows = this.db.prepare(`
+      SELECT * FROM local_operations
+      WHERE status NOT IN ('queued', 'running')
+      ORDER BY updated_at DESC, created_at DESC, id DESC
+      LIMIT ?
+    `).all(bounded) as OperationRow[];
+    return [...activeRows, ...terminalRows]
+      .sort((left, right) => (
+        right.updated_at.localeCompare(left.updated_at)
+        || right.created_at.localeCompare(left.created_at)
+        || right.id.localeCompare(left.id)
+      ))
+      .map(operationFromRow);
   }
 
   subscribe(listener: OperationListener): () => void {

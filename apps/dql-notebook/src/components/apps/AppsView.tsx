@@ -89,6 +89,7 @@ import {
 import { semanticApprovalState } from './app-semantic-approval';
 import { authoredDomainOptions, resolveAuthoredDomainId, type AuthoredDomainOption } from '../domains/authored-domain-options';
 import { useOperations } from '../../operations/OperationsProvider';
+import { appLibraryLaunchExpanded, type AppLibraryLaunchPreference } from './app-library-launch';
 
 const UnifiedAgentRunPanel = lazy(() => import('../agent/UnifiedAgentRunPanel')
   .then((module) => ({ default: module.UnifiedAgentRunPanel })));
@@ -495,6 +496,9 @@ export function AppsView(): JSX.Element {
     if (nextSurface) setSurface(nextSurface);
   };
 
+  const localDrafts = (appBuildsQuery.data?.drafts ?? [])
+    .filter((draft) => draft.state !== 'project_published');
+  const appLibraryLoading = state.appsLoading || appsQuery.isLoading || appBuildsQuery.isLoading;
   const filteredApps = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return state.apps.filter((app) => {
@@ -880,11 +884,11 @@ export function AppsView(): JSX.Element {
         <AppLibrarySurface
           apps={filteredApps}
           allApps={state.apps}
-          loading={state.appsLoading}
+          loading={appLibraryLoading}
           search={search}
           filter={libraryFilter}
           favorites={favorites}
-          localDrafts={(appBuildsQuery.data?.drafts ?? []).filter((draft) => draft.state !== 'project_published')}
+          localDrafts={localDrafts}
           onSearch={setSearch}
           onFilter={setLibraryFilter}
           onToggleFavorite={(appId) => {
@@ -1084,6 +1088,13 @@ function AppLibrarySurface({
     template: 'operational_dashboard',
     sourcePolicy: 'governed_only',
   });
+  const [launchPreference, setLaunchPreference] = useState<AppLibraryLaunchPreference>('auto');
+  const launchExpanded = appLibraryLaunchExpanded({
+    preference: launchPreference,
+    loading,
+    appCount: allApps.length,
+    localDraftCount: localDrafts.length,
+  });
   const needle = search.trim().toLowerCase();
   const visibleDrafts = filter === 'all' || filter === 'drafts'
     ? localDrafts.filter((draft) => !needle || [
@@ -1097,11 +1108,15 @@ function AppLibrarySurface({
   const hasResults = visibleDrafts.length > 0 || apps.length > 0;
   return (
     <main className="dql-apps-wrap">
-      <AppStudioLaunchSurface
-        config={launchConfig}
-        onChange={(patch) => setLaunchConfig((current) => ({ ...current, ...patch }))}
-        onSubmit={() => onStartStudio(launchConfig)}
-      />
+      <div id="app-studio-launcher" hidden={!launchExpanded}>
+        {launchExpanded ? (
+          <AppStudioLaunchSurface
+            config={launchConfig}
+            onChange={(patch) => setLaunchConfig((current) => ({ ...current, ...patch }))}
+            onSubmit={() => onStartStudio(launchConfig)}
+          />
+        ) : null}
+      </div>
 
       <section className="dql-apps-library-head" aria-labelledby="app-library-title">
         <div>
@@ -1110,6 +1125,16 @@ function AppLibrarySurface({
           <p>Local drafts and Project-published Apps live together here, with their visibility and trust state always clear.</p>
         </div>
         <div className="dql-apps-library-summary" aria-label="App library summary">
+          <button
+            type="button"
+            className="dql-app-card-act primary"
+            aria-controls="app-studio-launcher"
+            aria-expanded={launchExpanded}
+            onClick={() => setLaunchPreference(launchExpanded ? 'collapsed' : 'expanded')}
+          >
+            {launchExpanded ? <ChevronDown size={13} aria-hidden="true" /> : <Plus size={13} aria-hidden="true" />}
+            {launchExpanded ? 'Hide new App form' : 'Build new App'}
+          </button>
           <span><strong>{localDrafts.length}</strong> local draft{localDrafts.length === 1 ? '' : 's'}</span>
           <span><strong>{counts.private}</strong> private</span>
           <span><strong>{counts.shared}</strong> shared</span>

@@ -107,6 +107,17 @@ export function publicationBlockingSources(draft: AppStudioBuildDraft): AppStudi
   });
 }
 
+export function publicationBlockerCount(draft: AppStudioBuildDraft, serverIssues: string[] = []): number {
+  const clarifications = (draft.frame.clarificationQuestions ?? [])
+    .filter((question) => question.required && !question.answerId);
+  return unresolvedPublicationRequirements(draft).length
+    + clarifications.length
+    + blockingPublicationReviewTasks(draft).length
+    + pagesNeedingSettledPreview(draft).length
+    + publicationBlockingSources(draft).length
+    + publicationIssueSummaries(serverIssues).length;
+}
+
 export function localPublicationSteps(draft: AppStudioBuildDraft): AppPublicationStep[] {
   const unansweredClarifications = (draft.frame.clarificationQuestions ?? [])
     .filter((question) => question.required && !question.answerId);

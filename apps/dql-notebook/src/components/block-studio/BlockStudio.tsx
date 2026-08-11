@@ -6,6 +6,7 @@ import { AlertTriangle, Blocks, Bot, CheckCircle2, CheckSquare, ChevronLeft, Che
 import { api, DqlApiError, type BlockCertificationOperationResult } from '../../api/client';
 import { useDispatch, useNotebookStore } from '../../store/NotebookStore';
 import { useOperations } from '../../operations/OperationsProvider';
+import { newestMatchingBlockCertificationOperation } from '../../operations/operation-state';
 import { controlStyle } from '../../themes/control-tokens';
 import { CommaListInput } from '../common/CommaListInput';
 import { SourceTextField } from '../common/SourceTextField';
@@ -265,6 +266,7 @@ export function BlockStudio() {
   } | null>(null);
   const lastActiveBlockPathRef = useRef<string | null>(state.activeBlockPath);
   const certificationPathsRef = useRef(new Set<string>());
+  const handledCertificationOperationsRef = useRef(new Set<string>());
   const blockScopeEpochRef = useRef(0);
   const liveDraftRef = useRef(state.blockStudioDraft);
   liveDraftRef.current = state.blockStudioDraft;
@@ -315,6 +317,31 @@ export function BlockStudio() {
   }, []);
 
   useEffect(() => {
+    if (certificationOperationId) return;
+    const operation = newestMatchingBlockCertificationOperation(operations, {
+      activePath: state.activeBlockPath,
+      sourceFingerprint: state.blockStudioMetadata?.sourceFingerprint,
+    });
+    if (!operation || handledCertificationOperationsRef.current.has(operation.id)) return;
+    trackOperation(operation);
+    setCertificationOperationId(operation.id);
+    const result = operation.result as BlockCertificationOperationResult | undefined;
+    certificationPathsRef.current = new Set([
+      state.activeBlockPath,
+      operation.scope.startsWith('block:') ? operation.scope.slice('block:'.length) : undefined,
+      result?.oldPath,
+      result?.draftPath,
+      result?.newPath,
+    ].filter((value): value is string => Boolean(value)));
+  }, [
+    certificationOperationId,
+    operations,
+    state.activeBlockPath,
+    state.blockStudioMetadata?.sourceFingerprint,
+    trackOperation,
+  ]);
+
+  useEffect(() => {
     if (!certificationOperationId) return;
     const operation = operations.find((candidate) => candidate.id === certificationOperationId);
     if (!operation) return;
@@ -343,6 +370,7 @@ export function BlockStudio() {
       setSaveError(operation.error?.message ?? 'Certification did not complete. The draft remains saved.');
       setCertificationResult({ pending: false, error: operation.error?.message ?? operation.message });
     }
+    handledCertificationOperationsRef.current.add(operation.id);
     setCertificationOperationId(null);
     setResultTab('save');
   }, [certificationOperationId, operations]);
