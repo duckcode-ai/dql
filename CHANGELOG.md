@@ -6,6 +6,60 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.13.4 - 2026-08-11
+
+### Reliable App authoring and durable Block certification
+
+This patch makes App AI source selection deterministic, keeps manually authored
+draft blocks available through an explicit local review lane, and makes Block
+certification progress recover correctly across navigation and busy histories.
+
+### Added
+
+- **Visible App AI activity.** App Studio shows honest planning phases while it
+  understands the request, searches certified and draft blocks, validates trust
+  and capabilities, and prepares the source review.
+- **Authoritative source selection.** Sources explicitly added in AI review are
+  resolved by canonical ID and retained through proposal revision, composition,
+  preview, retry, and resume.
+- **One-click draft composition.** A manually authored draft can atomically
+  enable the local review lane, add its source and tile, and create the required
+  review task without changing its lifecycle or publication eligibility.
+
+### Improved
+
+- **Simpler App library and Studio layout.** Existing Apps appear first, the new
+  App form expands on demand, source filters fit the compact sidebar, and source
+  rows provide adding, added, retry, and add-another feedback.
+- **Actionable publication review.** One toolbar action opens the governed
+  checklist, and its blocker count now matches the exact actionable rows.
+- **Durable certification progress.** Active operations survive list limits and
+  remounts, exact operation IDs win recovery, terminal states remain monotonic,
+  and Task Center coalesces superseded attempts by block artifact identity.
+
+### Fixed
+
+- **App source provenance.** Generated Ask and research drafts stay out of the
+  reusable App catalog unless explicitly tagged for reuse, while ordinary
+  semantic drafts with parameters or time metadata remain discoverable.
+- **Large-repository freshness.** Root and domain block changes invalidate the
+  indexed project snapshot without capped recursive warm scans.
+- **AI coverage integrity.** Provider and fallback plans cannot claim that an
+  unrelated measure, dimension, or filter satisfies a visible App requirement.
+- **Draft publication boundary.** Draft and review-required sources execute in
+  local preview but continue to block Project publication until certified,
+  replaced, or removed.
+
+### Verification
+
+- Independent pre-release verification passed 1,331 agent tests, 306 Notebook
+  tests, and 764 CLI tests with three intentional skips.
+- Built `dql notebook` acceptance verified App AI activity, certified and draft
+  source selection, server composition, partial preview, compact source filters,
+  and fail-closed publication in an isolated local fixture.
+- The synchronized release dry run passed all 22 workspace builds, all 41 test
+  tasks, and packed all 19 npm packages.
+
 ## v1.13.3 - 2026-08-11
 
 ### Enterprise App AI and clearer Block Studio recovery
