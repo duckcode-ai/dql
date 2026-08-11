@@ -6,6 +6,59 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.13.3 - 2026-08-11
+
+### Enterprise App AI and clearer Block Studio recovery
+
+This patch replaces the split App Builder paths with one snapshot-backed,
+server-owned Studio workflow and makes Block Studio runs and certification
+failures easier to understand and correct. Certified and draft blocks are
+discoverable without weakening the boundary that keeps review-required Apps
+local until their sources are governed.
+
+### Added
+
+- **Dedicated App orchestration.** App AI uses a stateful App-specific
+  orchestrator over the shared provider, immutable snapshot, meaning,
+  execution, repair, trust, and evidence foundations used by Ask and Notebook.
+- **Snapshot-backed source catalog.** Manual and AI authoring search the same
+  paginated catalog across certified, review, and draft executable blocks,
+  preserve qualified path identities and duplicate names, and resolve exact
+  source revisions on the server.
+- **Canonical App composition.** The server owns proposal revisions, source
+  allow-lists, source-to-tile bindings, requirement coverage, four-worker
+  preview coordination, filter capabilities, and restart-safe receipts.
+
+### Improved
+
+- **Block Studio guidance.** Draft, run, validation, and certification states
+  now use focused step-level messages and corrective actions instead of noisy
+  raw diagnostic text.
+- **Results-first runs.** Successful Block runs foreground result data and keep
+  generated SQL available as supporting evidence rather than the default view.
+- **Draft-to-certification flow.** Save, run, validation, tests, chart, lineage,
+  and certification blockers remain visible as one progressive checklist while
+  unrelated background work stays out of the primary action path.
+
+### Fixed
+
+- **Draft App sources.** Review-required blocks remain visible and selectable
+  for local Apps, execute with explicit trust labels, and are blocked from
+  Project publication until certified, replaced, or removed.
+- **Large and ambiguous catalogs.** Server search, cursor pagination, exact
+  resolution, and path-qualified identity replace request-time top-50 scans
+  and same-name collapse.
+- **Publication drift safety.** Certified block sources and tiles without a
+  bound revision now fail closed; current-looking preview or preflight receipts
+  cannot publish an unversioned binding.
+
+### Verification
+
+- The synchronized release dry run passed all 22 workspace builds, the full
+  workspace test graph, and packed all 19 npm packages.
+- Independent focused verification passed all 76 Apps API tests, including the
+  unversioned-source publication regression and zero-write assertion.
+
 ## v1.13.2 - 2026-08-10
 
 ### Governed App Studio authoring, filters, and publication

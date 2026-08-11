@@ -4241,7 +4241,7 @@ export function promoteAppForStakeholders(
 export interface AppPublicationReadiness {
   ready: boolean;
   governedTiles: number;
-  blockers: Array<{ dashboardId: string; tileId: string; code: 'exploratory_source' | 'semantic_review' | 'semantic_preflight' | 'block_not_certified' | 'block_source_changed' | 'filter_not_preflighted'; message: string }>;
+  blockers: Array<{ dashboardId: string; tileId: string; code: 'exploratory_source' | 'semantic_review' | 'semantic_preflight' | 'block_not_certified' | 'block_source_unversioned' | 'block_source_changed' | 'filter_not_preflighted'; message: string }>;
 }
 
 export function approveAppSemanticTiles(
@@ -4308,6 +4308,7 @@ function appPublicationReadiness(
       if (item.block) {
         governedTiles += 1;
         const blockRef = item.block;
+        const boundRevision = item.sourceRevision ?? item.review?.sourceFingerprint;
         const block = blocks.find((candidate) => (
           'blockId' in blockRef
             ? candidate.id === blockRef.blockId || candidate.name === blockRef.blockId
@@ -4320,7 +4321,14 @@ function appPublicationReadiness(
             code: 'block_not_certified',
             message: `${dashboard.id}/${item.i} no longer resolves to a certified block.`,
           });
-        } else if (item.review?.sourceFingerprint?.startsWith('sha256:') && item.review.sourceFingerprint !== block.fingerprint) {
+        } else if (!boundRevision) {
+          blockers.push({
+            dashboardId: dashboard.id,
+            tileId: item.i,
+            code: 'block_source_unversioned',
+            message: `${dashboard.id}/${item.i} has no bound source revision; refresh the certified block before publication.`,
+          });
+        } else if (boundRevision !== block.fingerprint) {
           blockers.push({
             dashboardId: dashboard.id,
             tileId: item.i,
@@ -5479,12 +5487,15 @@ export function preflightStoredAppBuildDraft(projectRoot: string, draft: AppBuil
     if (source.kind === 'block' || source.kind === 'certified_block') {
       const block = blocks.find((candidate) => candidate.id === source.sourceRef || candidate.name === source.sourceRef || candidate.path === source.sourceRef);
       const lifecycle = source.lifecycle ?? (source.kind === 'certified_block' ? 'certified' : block?.status);
+      const boundRevision = source.sourceRevision ?? source.sourceFingerprint;
       if (!block) errors.push(`Source ${source.id} no longer resolves at ${source.sourceRef}.`);
       if (block && canonicalAppBlockSourceId(block) !== source.id && source.kind === 'block') errors.push(`Source ${source.id} no longer matches its qualified path identity.`);
       if (!block || block.status !== 'certified' || lifecycle !== 'certified' || source.trustState !== 'certified') {
         errors.push(`Source ${source.qualifiedIdentity ?? source.id} is ${lifecycle ?? 'unknown'} and cannot be published to the Project.`);
       }
-      if (block && (source.sourceRevision ?? source.sourceFingerprint) && (source.sourceRevision ?? source.sourceFingerprint) !== block.fingerprint) {
+      if (block && !boundRevision) {
+        errors.push(`Source ${source.qualifiedIdentity ?? source.id} has no bound source revision; refresh it before Project publication.`);
+      } else if (block && boundRevision !== block.fingerprint) {
         errors.push(`Source ${source.qualifiedIdentity ?? source.id} changed after selection.`);
       }
     }

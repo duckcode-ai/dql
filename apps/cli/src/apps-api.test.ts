@@ -551,6 +551,42 @@ describe('Apps command center API helpers', () => {
     };
 
     expect(preflightStoredAppBuildDraft(root, readyDraft)).toEqual([]);
+    const unversionedDraft = {
+      ...readyDraft,
+      sources: [{
+        id: `block:${block.id}`,
+        kind: 'certified_block' as const,
+        sourceRef: block.id,
+        trustState: 'certified' as const,
+        reviewStatus: 'not_required' as const,
+      }],
+      pages: [{
+        ...page,
+        layout: {
+          ...page.layout,
+          items: page.layout.items.map((tile) => ({
+            ...tile,
+            sourceRevision: undefined,
+            review: { status: 'not_required' as const },
+          })),
+        },
+      }],
+    };
+    const unversionedErrors = preflightStoredAppBuildDraft(root, unversionedDraft);
+    expect(unversionedErrors).toContain(`Source block:${block.id} has no bound source revision; refresh it before Project publication.`);
+    expect(unversionedErrors).toContain('overview/customer-profile has no bound source revision; refresh the certified block before publication.');
+    expect(() => publishStoredAppBuildDraft(root, {
+      ...unversionedDraft,
+      state: 'preflight_ready' as const,
+      preflightReceipt: {
+        id: 'unversioned-preflight',
+        revision: unversionedDraft.revision,
+        proposalHash: unversionedDraft.proposalHash,
+        sourceFingerprint: 'sha256:unversioned',
+        createdAt: unversionedDraft.updatedAt,
+      },
+    })).toThrow(/has no bound source revision/);
+    expect(existsSync(join(root, 'apps', unversionedDraft.appId))).toBe(false);
     const missingExclusion = {
       ...readyDraft,
       pages: [{ ...page, layout: { ...page.layout, items: page.layout.items.map((tile) => tile.i === 'revenue-trend' ? { ...tile, filterBindings: [] } : tile) } }],
