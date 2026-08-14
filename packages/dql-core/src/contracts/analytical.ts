@@ -328,6 +328,8 @@ export interface AnalyticalRepairCapabilityV1 {
 
 export type ProviderEgressPurpose =
   | 'answer_generation'
+  /** Ordinary Ask narration: the provider writes the business-facing answer. */
+  | 'answer_narration'
   | 'research_narration'
   | 'research_tool'
   | 'repair_sql';
@@ -441,6 +443,7 @@ const REPAIR_INELIGIBILITY_REASONS = new Set<AnalyticalRepairIneligibilityReason
 ]);
 const PROVIDER_EGRESS_PURPOSES = new Set<ProviderEgressPurpose>([
   'answer_generation',
+  'answer_narration',
   'research_narration',
   'research_tool',
   'repair_sql',

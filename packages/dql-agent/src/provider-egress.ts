@@ -8,6 +8,78 @@ import type {
 
 export const PROVIDER_RESULT_ROW_REDACTION_POLICY_ID = 'research-result-rows-v1';
 export const PROVIDER_ZERO_RESULT_ROWS_POLICY_ID = 'no-result-rows-v1';
+export const ASK_NARRATION_RESULT_ROW_POLICY_ID = 'ask-narration-rows-v1';
+
+/** Hard ceiling on rows any narration policy may release, whatever the config says. */
+export const MAX_ASK_NARRATION_RESULT_ROWS = 20;
+
+/**
+ * How many executed result rows may cross the provider boundary, and under whose
+ * authority.
+ *
+ * A model cannot describe, rank, or compare values it has never seen. Blanket
+ * `allowResultRows: false` on every dispatch is what forced answer prose to be
+ * built by a local template, which is how an ordinary Ask came to return a
+ * `column: value` dump. Ordinary Ask now releases a bounded, redacted sample by
+ * default; a project admin can set it back to zero, in which case narration
+ * still runs but is grounded only in columns and computed statistics.
+ */
+export interface ProviderResultRowEgressPolicy {
+  /** Rows released to the narration/synthesis dispatch. 0 disables row egress. */
+  maxNarrationRows: number;
+  /** Rows released to tool observations inside a generation loop. */
+  maxToolRows: number;
+  /** Who decided: the shipped default, project config, or an explicit request opt-in. */
+  source: 'default' | 'project_config' | 'request_opt_in';
+  /** Recorded on every receipt so an auditor can tell which rule applied. */
+  policyId: string;
+}
+
+export const DEFAULT_ASK_ROW_EGRESS_POLICY: ProviderResultRowEgressPolicy = Object.freeze({
+  maxNarrationRows: MAX_ASK_NARRATION_RESULT_ROWS,
+  maxToolRows: 0,
+  source: 'default',
+  policyId: ASK_NARRATION_RESULT_ROW_POLICY_ID,
+});
+
+export const ZERO_ROW_EGRESS_POLICY: ProviderResultRowEgressPolicy = Object.freeze({
+  maxNarrationRows: 0,
+  maxToolRows: 0,
+  source: 'project_config',
+  policyId: PROVIDER_ZERO_RESULT_ROWS_POLICY_ID,
+});
+
+export const RESEARCH_ROW_EGRESS_POLICY: ProviderResultRowEgressPolicy = Object.freeze({
+  maxNarrationRows: MAX_ASK_NARRATION_RESULT_ROWS,
+  maxToolRows: 200,
+  source: 'request_opt_in',
+  policyId: PROVIDER_RESULT_ROW_REDACTION_POLICY_ID,
+});
+
+/**
+ * Resolve the row-egress policy for one run. The admin kill-switch wins over the
+ * default; an explicit Research opt-in is the only thing that widens tool rows.
+ */
+export function resolveProviderResultRowEgressPolicy(input: {
+  projectSetting?: { mode?: 'bounded_sample' | 'disabled'; maxNarrationRows?: number };
+  researchOptIn?: boolean;
+}): ProviderResultRowEgressPolicy {
+  if (input.projectSetting?.mode === 'disabled') return ZERO_ROW_EGRESS_POLICY;
+  const configured = input.projectSetting?.maxNarrationRows;
+  const maxNarrationRows = typeof configured === 'number' && Number.isFinite(configured)
+    ? Math.max(0, Math.min(MAX_ASK_NARRATION_RESULT_ROWS, Math.trunc(configured)))
+    : MAX_ASK_NARRATION_RESULT_ROWS;
+  // A zero ceiling from config is the kill-switch by another name: report it as
+  // such so receipts carry the honest policy id.
+  if (maxNarrationRows === 0) return ZERO_ROW_EGRESS_POLICY;
+  if (input.researchOptIn) return { ...RESEARCH_ROW_EGRESS_POLICY, maxNarrationRows };
+  return {
+    maxNarrationRows,
+    maxToolRows: 0,
+    source: configured === undefined ? 'default' : 'project_config',
+    policyId: ASK_NARRATION_RESULT_ROW_POLICY_ID,
+  };
+}
 
 export interface ProviderPayloadGuardPolicy {
   allowResultRows: boolean;

@@ -480,7 +480,10 @@ describe('conversation context follow-up routing', () => {
     expect(followUp?.priorMeasures).toEqual(['revenue']);
   });
 
-  it('resolves singular "this product" to the top prior product value', () => {
+  it('asks which product was meant instead of binding the first prior row', () => {
+    // The prior answer showed TWO products. "this product" does not identify
+    // one of them, and silently filtering on whichever sorted first invents an
+    // intent the user never expressed — the reported dead-end follow-up.
     const followUp = __test__.followUpFromConversationContext({
       provider: 'ollama',
       projectRoot: '/tmp/x',
@@ -497,17 +500,37 @@ describe('conversation context follow-up routing', () => {
       },
     } as AgentRunRequest, 'who are the customers for this product?');
 
+    expect(followUp?.filters).toBeUndefined();
     expect(followUp).toMatchObject({
-      kind: 'drilldown',
-      filters: ['for richer or pourover'],
       dimensions: ['product'],
-      priorResultColumns: ['product_name', 'category', 'revenue', 'units'],
-      priorResultValues: {
-        product_name: ['for richer or pourover', 'vanilla ice'],
-        category: ['Drink'],
+      deicticChoices: {
+        dimension: 'product',
+        values: ['for richer or pourover', 'vanilla ice'],
       },
+      priorResultColumns: ['product_name', 'category', 'revenue', 'units'],
       priorMeasures: ['revenue'],
     });
+  });
+
+  it('still binds a singular reference when the prior result named exactly one', () => {
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: 'who are the customers for this product?' }],
+      conversationContext: {
+        sourceQuestion: 'Best selling product',
+        resultColumns: ['product_name', 'revenue'],
+        resultDimensionValues: { product_name: ['vanilla ice'] },
+        priorMeasures: ['revenue'],
+      },
+    } as AgentRunRequest, 'who are the customers for this product?');
+
+    expect(followUp).toMatchObject({
+      kind: 'drilldown',
+      filters: ['vanilla ice'],
+      dimensions: ['product'],
+    });
+    expect(followUp?.deicticChoices).toBeUndefined();
   });
 
   it('does not turn ordinary "the customers" wording into prior-result member filters', () => {

@@ -896,7 +896,7 @@ export function UnifiedAgentRunPanel({
                   onOpenBlock={onOpenBlock}
                   onOpenResearch={onOpenResearch}
                   onSelectClarification={(option) => {
-                    const selection = clarificationSelectionInput(option);
+                    const selection = clarificationSelectionInput(option, item.run.question);
                     void submit(selection.question, undefined, selection.selectedEvidenceId, item.run.question);
                   }}
                   onNextAction={(action) => handleNextAction(item.run, action)}
@@ -1058,7 +1058,7 @@ export function UnifiedAgentRunPanel({
             onOpenBlock={onOpenBlock}
             onOpenResearch={onOpenResearch}
             onSelectClarification={(option) => {
-              const selection = clarificationSelectionInput(option);
+              const selection = clarificationSelectionInput(option, item.run.question);
               void submit(selection.question, undefined, selection.selectedEvidenceId, item.run.question);
             }}
             onNextAction={(action) => handleNextAction(item.run, action)}
@@ -1077,7 +1077,7 @@ export function UnifiedAgentRunPanel({
             onOpenBlock={onOpenBlock}
             onOpenResearch={onOpenResearch}
             onSelectClarification={(option) => {
-              const selection = clarificationSelectionInput(option);
+              const selection = clarificationSelectionInput(option, item.run.question);
               void submit(selection.question, undefined, selection.selectedEvidenceId, item.run.question);
             }}
             onNextAction={(action) => handleNextAction(item.run, action)}
@@ -2233,7 +2233,10 @@ function AskRunCard(props: AskRunCardProps) {
   const certified = run.trustState === 'certified';
   const blocked = run.status === 'blocked';
   const needsClarification = run.status === 'needs_clarification';
-  const presentationAnswer = blocked || needsClarification ? undefined : run.answer;
+  // A clarify turn's `answer` IS the question being asked, and a blocked run's
+  // `answer` is the business-language reason the loop wrote. Dropping both left
+  // the user with a canned headline and nothing actionable underneath.
+  const presentationAnswer = run.answer;
   const outcomeLabel = blocked
     ? 'Couldn’t run this query'
     : needsClarification
@@ -2974,11 +2977,27 @@ function formatTelemetryDuration(value: unknown): string {
   return value >= 1000 ? `${(value / 1000).toFixed(value >= 10_000 ? 0 : 1)}s` : `${Math.round(value)}ms`;
 }
 
-export function clarificationSelectionInput(option: AgentRunClarificationOption): {
+/**
+ * Turn a picked clarification option into the next request.
+ *
+ * The option's `id` carries the binding; the QUESTION must stay the user's own.
+ * Falling back to `option.label` re-asked the label as if it were the question,
+ * so picking "customers.customers" to disambiguate "who are the top customers"
+ * submitted the literal string `customers.customers` — and the run then tried to
+ * answer that, producing nonsense SQL against a question nobody asked.
+ */
+export function clarificationSelectionInput(
+  option: AgentRunClarificationOption,
+  sourceQuestion?: string,
+): {
   question: string;
   selectedEvidenceId: string;
 } {
-  return { question: option.question ?? option.label, selectedEvidenceId: option.id };
+  const original = sourceQuestion?.trim();
+  return {
+    question: option.question?.trim() || original || option.label,
+    selectedEvidenceId: option.id,
+  };
 }
 
 /**
@@ -4370,8 +4389,13 @@ function TrustBadge({ run, t }: { run: AgentRun; t: Theme }) {
       ? 'Draft'
       : isExploratoryDbtRun(run)
         ? 'Exploratory'
-      : run.trustState === 'blocked'
+      // "Needs input" promises an affordance, so it belongs only to a run that
+      // actually asked the user something. A blocked run is a refusal: calling
+      // it "Needs input" told people to supply something that was never named.
+      : run.status === 'needs_clarification'
         ? 'Needs input'
+      : run.trustState === 'blocked'
+        ? 'Refused'
         : 'AI-generated';
   return (
     <span style={{ border: `1px solid ${color}55`, color, background: `${color}12`, borderRadius: 999, padding: '3px 7px', fontSize: 10, fontWeight: 850 }}>
@@ -5391,6 +5415,12 @@ function askFailureOrigin(run: AgentRun): string {
     if (payload?.providerFailure?.code === 'orchestration_budget_exhausted'
       || payload?.providerFailure?.code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED') return 'orchestration_budget';
     if (payload?.providerFailure || payload?.refusalCode === 'provider_error') return 'provider';
+    // Without these two, every refusal that is not a modeling gap fell through
+    // to `unknown` — so the already-written ambiguity and retrieval-gap cards
+    // were unreachable and users saw "The query could not be completed" instead
+    // of the reason the run actually recorded.
+    if (payload?.refusalCode === 'ambiguous') return 'ambiguity';
+    if (payload?.refusalCode === 'grounding_gap') return 'retrieval_gap';
   }
   if (run.diagnosticReceipt?.failure?.code === 'orchestration_budget_exhausted') return 'orchestration_budget';
   if (run.diagnosticReceipt?.failure?.code === 'AI_PROVIDER_FAILURE') return 'provider';
@@ -5506,9 +5536,17 @@ function askFailureDetail(run: AgentRun): string | undefined {
     const payload = payloadOf(artifact) as {
       warehouseFailure?: { redactedMessage?: unknown; diagnostic?: unknown };
       executionError?: unknown;
+      refusalDetails?: { message?: unknown };
     } | undefined;
     const failure = payload?.warehouseFailure;
-    const specific = [failure?.redactedMessage, failure?.diagnostic, payload?.executionError]
+    // `refusalDetails.message` is the reason a refusal actually recorded. It was
+    // never read, so a blocked run showed the generic headline instead.
+    const specific = [
+      failure?.redactedMessage,
+      failure?.diagnostic,
+      payload?.executionError,
+      payload?.refusalDetails?.message,
+    ]
       .find((value): value is string => typeof value === 'string' && value.trim().length > 0);
     if (specific) return specific;
   }

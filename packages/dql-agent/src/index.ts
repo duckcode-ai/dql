@@ -154,9 +154,16 @@ export {
   providerPayloadFingerprint,
   redactProviderResultRows,
   stripProviderResultRows,
+  ASK_NARRATION_RESULT_ROW_POLICY_ID,
+  MAX_ASK_NARRATION_RESULT_ROWS,
+  DEFAULT_ASK_ROW_EGRESS_POLICY,
+  ZERO_ROW_EGRESS_POLICY,
+  RESEARCH_ROW_EGRESS_POLICY,
+  resolveProviderResultRowEgressPolicy,
   type ProviderPayloadGuardPolicy,
   type ProviderPayloadRowShape,
   type BoundedProviderResultRows,
+  type ProviderResultRowEgressPolicy,
 } from './provider-egress.js';
 export { buildAggregationSafetyProof } from './aggregation-safety-proof.js';
 export {
@@ -457,6 +464,13 @@ export {
   buildAnalyticalResultFacts,
   renderDeterministicAnalyticalNarrative,
   validateAnalyticalNarrativeClaims,
+  renderAnalyticalFactBrief,
+  parseAnalyticalNarrativeClaims,
+  composeVerifiedAnalyticalNarrative,
+} from './analytical-result-facts.js';
+export type {
+  ComposedAnalyticalNarrative,
+  AnalyticalNarrativeCompletion,
 } from './analytical-result-facts.js';
 export type {
   AnalyticalNarrativeClaimV1,

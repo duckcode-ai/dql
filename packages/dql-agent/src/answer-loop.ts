@@ -489,7 +489,9 @@ export interface AgentRefusalDetails {
     | 'EXECUTION_FAILED'
     | 'GENERATED_ANALYTICAL_TUPLE_DRIFT'
     | 'semantic_path_ambiguous'
-    | 'semantic_runtime_required';
+    | 'semantic_runtime_required'
+    /** DQL's own run budget stopped the turn; the AI provider did not fail. */
+    | 'orchestration_budget_exhausted';
   message: string;
   offending?: SqlContextValidationOffending;
 }
@@ -897,6 +899,13 @@ export interface AgentFollowUpContext {
   memberBindings?: AgentMemberBinding[];
   resolvedReferences?: string[];
   unresolvedReferences?: string[];
+  /**
+   * What a singular reference ("this customer") could have meant when the prior
+   * result offered several. Present ONLY when the reference is genuinely
+   * ambiguous; the run turns these into clarification options rather than
+   * picking one and pretending the user chose it.
+   */
+  deicticChoices?: { dimension: string; values: string[] };
   /** Prior typed contract; prose and SQL remain evidence-only. */
   priorResolvedAnalyticalPlan?: ResolvedAnalyticalPlan;
   /** Explicit qualified delta applied to the prior plan for this turn. */
@@ -2146,6 +2155,14 @@ function deriveAiRoute(result: AgentAnswer, metricMatch?: MetricMatch): AiRoute 
     : { tier: 'generated_sql', label: 'Prepared review-required SQL preview.' };
 }
 
+/** "customers_customer_name" → "customers" for a question the user has to read. */
+function humanizeDeicticDimension(dimension: string): string {
+  const leaf = dimension.split(/[.:]/).pop() ?? dimension;
+  const words = leaf.replace(/[_-]+/g, ' ').trim().toLowerCase();
+  const last = words.split(' ').filter(Boolean).pop() ?? words;
+  return last.endsWith('s') ? last : `${last}s`;
+}
+
 async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   const { question, userId, domain, provider, kg, skills = [], blockHints = [] } = input;
   // AGT-004: with no explicit domain selection, let direct question evidence
@@ -2447,7 +2464,22 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     };
   }
   if (authoritativePlanBinding?.status === 'blocked') {
-    const text = `The resolved analytical plan cannot execute safely: ${authoritativePlanBinding.reason}`;
+    // An ambiguous singular reference is answerable the moment the user says
+    // which one they meant, so offer the candidates rather than dead-ending.
+    // The old refusal shipped the binder's internal sentence as the answer
+    // text, which reached the user as a generic "could not be completed" card.
+    const choices = input.followUp?.deicticChoices;
+    const clarificationOptions: AgentRunClarificationOption[] | undefined = choices
+      ? choices.values.slice(0, 8).map((value) => ({
+          id: `member:${choices.dimension}:${value}`,
+          label: value,
+          kind: 'member' as const,
+          question: `${question} (${value})`,
+        }))
+      : undefined;
+    const text = clarificationOptions?.length
+      ? `The previous answer listed ${choices!.values.length} ${humanizeDeicticDimension(choices!.dimension)}. Which one did you mean?`
+      : `The resolved analytical plan cannot execute safely: ${authoritativePlanBinding.reason}`;
     return {
       kind: 'no_answer',
       sourceTier: 'no_answer',
@@ -2456,8 +2488,12 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       confidence: 0,
       text,
       answer: text,
-      refusalCode: authoritativePlanBinding.code === 'PLAN_BLOCKED' ? 'ambiguous' : 'grounding_gap',
+      // Offering real choices makes this a clarify turn, not a terminal block.
+      refusalCode: clarificationOptions?.length || authoritativePlanBinding.code === 'PLAN_BLOCKED'
+        ? 'ambiguous'
+        : 'grounding_gap',
       refusalDetails: { code: authoritativePlanBinding.code, message: authoritativePlanBinding.reason },
+      ...(clarificationOptions?.length ? { clarificationOptions } : {}),
       citations: contextPackCitations(input.contextPack, 8),
       considered,
       contextPack: input.contextPack,
@@ -3389,7 +3425,19 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       // instead of the misleading generic "Provider error" label.
       if (input.signal?.aborted) throw input.signal.reason ?? err;
       if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) throw err;
-      const text = `Provider error: ${(err as Error).message}`;
+      // DQL's own orchestration budget refusing a dispatch is NOT an upstream
+      // outage. Reporting it as one ("Claude subscription failed: the 25-second
+      // soft target elapsed") blames the user's AI provider for DQL's timer and
+      // sends them to debug the wrong system.
+      const budgetCode = err && typeof err === 'object' && 'code' in err
+        ? String((err as { code?: unknown }).code)
+        : '';
+      const orchestrationBudget = budgetCode === 'RUN_SOFT_TARGET_EXCEEDED'
+        || budgetCode === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED'
+        || budgetCode === 'RUN_DEADLINE_INSUFFICIENT';
+      const text = orchestrationBudget
+        ? 'DQL stopped this run at its own time budget before the query could be settled. The AI provider did not fail. Retry, or use Research for a longer budget.'
+        : `Provider error: ${(err as Error).message}`;
       return {
         kind: 'no_answer',
         sourceTier: 'no_answer',
@@ -3399,7 +3447,10 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         text,
         answer: text,
         refusalCode: 'provider_error',
-        refusalDetails: { code: 'provider_error', message: text },
+        refusalDetails: {
+          code: orchestrationBudget ? 'orchestration_budget_exhausted' : 'provider_error',
+          message: orchestrationBudget ? `${text} (${(err as Error).message})` : text,
+        },
         citations: [],
         memoryContext: input.memoryContext,
         evidence: buildNoAnswerEvidence({

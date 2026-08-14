@@ -350,7 +350,10 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
       }, { once: true });
       const withPhysicalDispatchObserver = (options?: ProviderToolLoopOptions): ProviderToolLoopOptions => ({
         ...(options ?? {}),
-        maxProviderDispatches: isResearch ? 8 : 2,
+        // A tool-calling loop capped at two physical sends can make exactly one
+        // tool call before it must answer, which is not enough to look something
+        // up and then use it. The run-scoped ledger is the real guardrail.
+        maxProviderDispatches: isResearch ? 8 : 4,
         ...(sharedDispatchEvidence?.mayStartToolCall
           ? { mayStartToolCall: () => sharedDispatchEvidence.mayStartToolCall!() }
           : {}),
@@ -375,8 +378,11 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             pendingResearchPurpose = 'research_narration';
             return envelope;
           }
-          if (!isResearch && providerRoundTrips >= 2) {
-            throw Object.assign(new Error('Provider dispatch budget exhausted after two ordinary generation attempts.'), {
+          // Fallback path only (CLI/MCP-direct runs carry no shared ledger).
+          // Kept in step with `maxProviderDispatches` above so the same question
+          // does not get a different budget depending on which surface asked it.
+          if (!isResearch && providerRoundTrips >= 4) {
+            throw Object.assign(new Error('Provider dispatch budget exhausted after four ordinary generation attempts.'), {
               code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED',
             });
           }
@@ -748,18 +754,33 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           throw reason;
         }
         const message = err instanceof Error ? err.message : String(err);
-        const orchestrationBudgetExhausted = Boolean(
-          err && typeof err === 'object'
-          && (err as { code?: unknown }).code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED',
-        );
+        // Both codes are DQL's OWN budget refusing to start another dispatch.
+        // Only the count-based one was recognized, so a time-based refusal was
+        // reported as "<provider> failed: The 30-second soft target elapsed" —
+        // blaming the user's AI subscription for DQL's timer and sending them
+        // to debug the wrong system entirely.
+        const budgetCode = err && typeof err === 'object'
+          ? String((err as { code?: unknown }).code)
+          : '';
+        const orchestrationBudgetExhausted = budgetCode === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED'
+          || budgetCode === 'RUN_SOFT_TARGET_EXCEEDED'
+          || budgetCode === 'RUN_DEADLINE_INSUFFICIENT';
+        // The project catalog was rebuilt underneath a run in flight. That is
+        // DQL's own concurrency, and telling the user their AI subscription
+        // failed sends them to re-authenticate a provider that worked fine.
+        const snapshotDrift = budgetCode === 'PROJECT_SNAPSHOT_MISMATCH';
         const setupHint = shouldShowProviderSetupHint(message) ? ` ${spec.setup}` : '';
         emit({
           kind: 'error',
           message: orchestrationBudgetExhausted
-            ? 'Ask exhausted its bounded orchestration budget before a final answer was available.'
-            : `${spec.label} failed: ${message}.${setupHint}`,
+            ? `Ask stopped at its own bounded orchestration budget before a final answer was available — the AI provider did not fail. (${message})`
+            : snapshotDrift
+              ? 'The project snapshot was rebuilt while this run was in flight, so DQL discarded the in-progress plan rather than answer from a stale catalog. The AI provider did not fail — retry the question.'
+              : `${spec.label} failed: ${message}.${setupHint}`,
           dispatchEvidence: dispatchEvidence(
-            orchestrationBudgetExhausted ? 'orchestration_budget_exhausted' : 'provider_error',
+            orchestrationBudgetExhausted ? 'orchestration_budget_exhausted'
+              : snapshotDrift ? 'project_snapshot_mismatch'
+              : 'provider_error',
           ),
         });
       }
@@ -1246,6 +1267,7 @@ function resolveAgentFollowUpContextRaw(
     })),
     resolvedReferences: resolvedReferences.labels,
     unresolvedReferences: resolvedReferences.unresolved,
+    deicticChoices: resolvedReferences.deicticChoices,
     // The prior turn's actual rows, so a follow-up can compute across the shown
     // results ("of these, the average") without a fresh query. A relative
     // comparison deliberately drops the prior contract, so skip it there too.
@@ -1485,6 +1507,11 @@ function resolveConversationReferences(
   unresolved?: string[];
   valuesByDimension?: Record<string, string[]>;
   memberBindings?: AgentMemberBinding[];
+  /**
+   * Candidates a singular reference ("this customer") could mean when the prior
+   * result offered more than one. Carried instead of guessed so the run can ask.
+   */
+  deicticChoices?: { dimension: string; values: string[] };
 } {
   const namedValues = resolveNamedConversationValues(question, turns, activeValues);
   const dimensions = [
@@ -1493,7 +1520,18 @@ function resolveConversationReferences(
   ];
   let filters = resolveDeicticFilters(question, activeValues) ?? [];
   const labels: string[] = [];
-  if (!namedValues && dimensions.length > 0 && filters.length === 0) {
+  // An ambiguous singular reference is the single most common follow-up shape
+  // ("what region does this customer belong to?" after a ranked list). Keep the
+  // candidates so the run can offer them instead of dead-ending.
+  const ambiguousSingular = !namedValues
+    ? resolveSingularDeicticCandidates(question, activeValues)
+    : undefined;
+  const deicticChoices = ambiguousSingular && ambiguousSingular.values.length > 1
+    ? ambiguousSingular
+    : undefined;
+  // Do NOT backfill an ambiguous singular from history: filtering on all of the
+  // candidates answers a different question than the one that was asked.
+  if (!namedValues && !deicticChoices && dimensions.length > 0 && filters.length === 0) {
     for (const turn of [...turns].reverse()) {
       const values = cleanStringRecordArray(cleanRecord(turn.result)?.dimensionValues);
       if (!values) continue;
@@ -1529,7 +1567,9 @@ function resolveConversationReferences(
         }]
       : [];
   const unresolved = referencesNeedValues(question) && filters.length === 0
-    ? ['Could not resolve the referenced prior result values from conversation state.']
+    ? [deicticChoices
+        ? `"${deicticChoices.dimension}" was referenced in the singular, but the previous result had ${deicticChoices.values.length} of them.`
+        : 'Could not resolve the referenced prior result values from conversation state.']
     : undefined;
   return {
     filters: filters.length > 0 ? Array.from(new Set(filters)).slice(0, 24) : undefined,
@@ -1538,6 +1578,7 @@ function resolveConversationReferences(
     unresolved,
     valuesByDimension: namedValues,
     memberBindings: memberBindings.length > 0 ? memberBindings : undefined,
+    deicticChoices,
   };
 }
 
@@ -1705,14 +1746,35 @@ function cleanStringRecordArray(value: unknown): Record<string, string[]> | unde
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/**
+ * Values a singular deictic reference ("this customer") could be pointing at.
+ *
+ * This used to `.slice(0, 1)` — silently picking the FIRST row of the previous
+ * answer and binding it as a required filter. After a ten-row ranking, "this
+ * customer" would quietly become "Melissa Lopez" because she happened to sort
+ * first, and the user was never told. An ambiguous reference must stay
+ * ambiguous so the caller can ask which one was meant.
+ */
+function resolveSingularDeicticCandidates(
+  question: string,
+  priorValues: Record<string, string[]> | undefined,
+): { dimension: string; values: string[] } | undefined {
+  if (!priorValues) return undefined;
+  const singular = resolveSingularDeicticDimension(question, priorValues);
+  if (!singular) return undefined;
+  const values = Array.from(new Set(valuesForPriorDimension(priorValues, singular))).slice(0, 24);
+  return values.length > 0 ? { dimension: singular, values } : undefined;
+}
+
 function resolveDeicticFilters(question: string, priorValues: Record<string, string[]> | undefined): string[] | undefined {
   if (!priorValues) return undefined;
   const hasExplicitPluralReference = /\b(?:these|those|same)\s+(?:customers?|products?|cat(?:egor|agor|ogor)(?:y|ies)|segments?|regions?)\b/i.test(question);
   if (!hasExplicitPluralReference) {
-    const singular = resolveSingularDeicticDimension(question, priorValues);
+    const singular = resolveSingularDeicticCandidates(question, priorValues);
     if (singular) {
-      const values = valuesForPriorDimension(priorValues, singular).slice(0, 1);
-      return values.length > 0 ? values : undefined;
+      // Exactly one candidate is unambiguous and can be bound as a filter.
+      // Several candidates are a question for the user, not a coin flip.
+      return singular.values.length === 1 ? singular.values : undefined;
     }
   }
   const dims = resolveDeicticDimensions(question, priorValues) ?? [];

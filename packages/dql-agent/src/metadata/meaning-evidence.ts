@@ -401,7 +401,13 @@ function trustedMemberBindingEvidence(
   const cards: AgentEvidenceCandidate[] = [];
   const filters: Array<{ field: string; value: string }> = [];
   for (const binding of plan.requestedShape.memberBindings ?? []) {
-    if ((binding.source !== 'prior_result' && binding.source !== 'clarification') || binding.confidence === 'deictic') continue;
+    if (binding.source !== 'prior_result' && binding.source !== 'clarification') continue;
+    // A deictic binding used to be discarded outright, which threw away the
+    // referent of every "this customer" follow-up and left the turn ungrounded.
+    // Cardinality is what matters: exactly one candidate is unambiguous and
+    // safe to bind; several must not be fanned into an OR'd filter, and are
+    // surfaced as a clarification instead.
+    if (binding.confidence === 'deictic' && binding.values.length !== 1) continue;
     const dimension = dimensions.get(normalizeText(binding.dimension))
       ?? dimensions.get(normalizeDimensionRole(binding.dimension));
     if (!dimension) continue;

@@ -315,6 +315,13 @@ export interface AgentRunBudget {
   remainingMs(): number;
   softTargetMs(route: AgentRunRoute): number;
   mayStartDiscovery(route: AgentRunRoute): boolean;
+  /**
+   * Narration runs AFTER the result has settled, so it cannot share the route's
+   * discovery target — a certified route finishes inside its 5s window and would
+   * then be refused the one dispatch that turns those rows into a sentence.
+   */
+  narrationSoftTargetMs(): number;
+  mayStartNarration(): boolean;
 }
 
 export interface AgentRunEvent {
@@ -609,7 +616,11 @@ const DEFAULT_MAX_STEPS = 4;
 export function agentRouteDeadlineMs(route: AgentRunRoute): number | undefined {
   if (route === 'certified_answer' || route === 'semantic_answer') return 5_000;
   if (route === 'clarify') return 10_000;
-  if (route === 'generated_answer') return 15_000;
+  // Generation may now take a genuine tool round (look something up, then use
+  // it) instead of a single blind shot, so the discovery window has to cover it.
+  // Subscription-CLI providers cost roughly 10-15s per dispatch, so a window
+  // under ~30s silently reduces the loop back to a single blind attempt.
+  if (route === 'generated_answer') return 30_000;
   if (route === 'research') return 120_000;
   return undefined;
 }
@@ -642,6 +653,9 @@ export function createAgentRunBudget(input: {
     if (mode === 'research') return 90_000;
     return agentRouteDeadlineMs(route) ?? 15_000;
   };
+  // Narration must still be reachable after a full generation window, and must
+  // leave the hard deadline (45s ask / 120s research) room to land.
+  const narrationSoftTargetMs = () => (mode === 'research' ? 100_000 : 38_000);
   return Object.freeze({
     startedAtMs,
     hardDeadlineMs,
@@ -651,6 +665,8 @@ export function createAgentRunBudget(input: {
     remainingMs: () => Math.max(0, hardDeadlineMs - elapsedMs()),
     softTargetMs,
     mayStartDiscovery: (route: AgentRunRoute) => !hardSignal.aborted && elapsedMs() < softTargetMs(route),
+    narrationSoftTargetMs,
+    mayStartNarration: () => !hardSignal.aborted && elapsedMs() < narrationSoftTargetMs(),
   });
 }
 

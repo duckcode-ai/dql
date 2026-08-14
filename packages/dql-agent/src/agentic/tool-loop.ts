@@ -176,8 +176,14 @@ async function runTextProtocolToolLoop(
     content: 'Tool budget reached — do not call any more tools. Answer now using only the tool results above, as a single ```json fenced object with summary, sql, viz, outputs.',
   });
   const finalText = await provider.generate(messages, runOptions).catch((error: unknown) => {
-    if (error && typeof error === 'object' && 'code' in error
-      && (error as { code?: unknown }).code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED') throw error;
+    const code = error && typeof error === 'object' && 'code' in error
+      ? (error as { code?: unknown }).code
+      : undefined;
+    // Running out of wall clock is not a reason to discard a usable draft: the
+    // model already produced text and a tool observation. Fall back to that
+    // instead of failing the whole run with nothing.
+    if (code === 'RUN_DEADLINE_INSUFFICIENT' && lastText.trim()) return '';
+    if (code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED') throw error;
     return '';
   });
   return finalText.trim() ? finalText : lastText;

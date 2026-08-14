@@ -5,6 +5,9 @@ import {
   buildAnalyticalResultFacts,
   renderDeterministicAnalyticalNarrative,
   validateAnalyticalNarrativeClaims,
+  renderAnalyticalFactBrief,
+  parseAnalyticalNarrativeClaims,
+  composeVerifiedAnalyticalNarrative,
 } from './analytical-result-facts.js';
 
 const metricId = 'commerce::metric::net_revenue';
@@ -157,5 +160,127 @@ describe('receipt-backed analytical facts and narration (AGT-020)', () => {
       columns: receipt().outputColumns,
       rows,
     })).toMatchObject({ status: 'blocked', code: 'RECEIPT_MISMATCH' });
+  });
+});
+
+describe('verified narration replaces the deterministic row join', () => {
+  const facts = () => {
+    const built = buildAnalyticalResultFacts({
+      frame: frame(), graph: graph(), receipt: receipt(), columns: receipt().outputColumns, rows,
+    });
+    if (built.status !== 'ready') throw new Error(built.reason);
+    return built.factSet;
+  };
+
+  /** The exact shape the user was shown: `Label: value` pairs joined together. */
+  const readsLikeARowDump = (text: string) => /\b\w[\w ]*: [^;.]+;/.test(text);
+
+  it('keeps the deterministic join byte-identical when no model is supplied', async () => {
+    const factSet = facts();
+    const composed = await composeVerifiedAnalyticalNarrative({
+      frame: frame(), factSet, question: 'top customers by revenue',
+    });
+    expect(composed.source).toBe('deterministic');
+    expect(composed.attempts).toBe(0);
+    expect(composed.narrative.text)
+      .toBe(renderDeterministicAnalyticalNarrative({ frame: frame(), factSet }).text);
+    // This is the regression the user reported, and it is still what an
+    // unconfigured project gets — just no longer the default for everyone.
+    expect(readsLikeARowDump(composed.narrative.text)).toBe(true);
+  });
+
+  it('returns verified prose instead of the row join when the model cites its facts', async () => {
+    const factSet = facts();
+    const rank1 = factSet.facts.find((f) => f.kind === 'rank' && f.rowIndex === 0)!;
+    const caveats = factSet.facts.filter((f) => f.kind === 'caveat');
+    const composed = await composeVerifiedAnalyticalNarrative({
+      frame: frame(), factSet, question: 'top customers by revenue',
+      complete: async () => JSON.stringify({
+        claims: [
+          { claimId: 'c1', factIds: [rank1.factId], text: 'Zoom is the top customer this period.' },
+          ...caveats.map((caveat, index) => ({
+            claimId: `caveat-${index}`, factIds: [caveat.factId], text: 'A reporting caveat applies.',
+          })),
+        ],
+      }),
+    });
+    expect(composed.source).toBe('llm');
+    expect(composed.attempts).toBe(1);
+    expect(composed.narrative.text).toContain('Zoom is the top customer this period.');
+    expect(readsLikeARowDump(composed.narrative.text)).toBe(false);
+  });
+
+  it('rejects a causal claim, feeds the code back, and accepts the corrected retry', async () => {
+    const factSet = facts();
+    const rank1 = factSet.facts.find((f) => f.kind === 'rank' && f.rowIndex === 0)!;
+    const caveats = factSet.facts.filter((f) => f.kind === 'caveat');
+    const prompts: string[] = [];
+    let call = 0;
+    const composed = await composeVerifiedAnalyticalNarrative({
+      frame: frame(), factSet, question: 'why is Zoom top?',
+      complete: async ({ user }) => {
+        prompts.push(user);
+        call += 1;
+        const claims = [
+          {
+            claimId: 'c1',
+            factIds: [rank1.factId],
+            // Causality is exactly what an analytical result cannot establish.
+            text: call === 1 ? 'Zoom ranks first because of strong demand.' : 'Zoom ranks first.',
+          },
+          ...caveats.map((caveat, index) => ({
+            claimId: `caveat-${index}`, factIds: [caveat.factId], text: 'A reporting caveat applies.',
+          })),
+        ];
+        return `\`\`\`json\n${JSON.stringify({ claims })}\n\`\`\``;
+      },
+    });
+    expect(call).toBe(2);
+    expect(composed.source).toBe('llm');
+    expect(composed.validationFailures).toEqual(['CAUSAL_CLAIM']);
+    expect(prompts[1]).toContain('CAUSAL_CLAIM');
+    expect(composed.narrative.text).toBe('Zoom ranks first. A reporting caveat applies. A reporting caveat applies.');
+  });
+
+  it('falls back to the deterministic join after two failures, and says so', async () => {
+    const composed = await composeVerifiedAnalyticalNarrative({
+      frame: frame(), factSet: facts(), question: 'top customers',
+      complete: async () => JSON.stringify({
+        claims: [{ claimId: 'c1', factIds: ['fact:does-not-exist'], text: 'Something happened.' }],
+      }),
+    });
+    expect(composed.source).toBe('deterministic');
+    expect(composed.validationFailures).toEqual(['UNKNOWN_FACT', 'UNKNOWN_FACT']);
+    expect(composed.attempts).toBe(2);
+  });
+
+  it('refuses numbers the cited facts do not contain', async () => {
+    const factSet = facts();
+    const rank1 = factSet.facts.find((f) => f.kind === 'rank' && f.rowIndex === 0)!;
+    const composed = await composeVerifiedAnalyticalNarrative({
+      frame: frame(), factSet, question: 'top customers',
+      complete: async () => JSON.stringify({
+        claims: [{ claimId: 'c1', factIds: [rank1.factId], text: 'Zoom earned 999999 dollars.' }],
+      }),
+    });
+    expect(composed.source).toBe('deterministic');
+    expect(composed.validationFailures).toEqual(['UNSUPPORTED_NUMBER', 'UNSUPPORTED_NUMBER']);
+  });
+
+  it('gives the model fact ids to cite, not a pre-joined sentence', () => {
+    const brief = renderAnalyticalFactBrief({ frame: frame(), factSet: facts() });
+    expect(brief).toContain('fact:');
+    expect(brief).toContain('kind=metric_value');
+    expect(brief).toContain('value=100.10');
+    expect(readsLikeARowDump(brief)).toBe(false);
+  });
+
+  it('treats an unparseable or empty claim payload as a failure, never as prose', () => {
+    expect(parseAnalyticalNarrativeClaims('not json at all')).toBeUndefined();
+    expect(parseAnalyticalNarrativeClaims('{"claims":[]}')).toBeUndefined();
+    // A claim with no citations cannot be verified, so it must not be accepted.
+    expect(parseAnalyticalNarrativeClaims('{"claims":[{"text":"hi","factIds":[]}]}')).toBeUndefined();
+    expect(parseAnalyticalNarrativeClaims('{"claims":[{"text":"hi","factIds":["fact:a"]}]}'))
+      .toEqual([{ claimId: 'claim:0', factIds: ['fact:a'], text: 'hi' }]);
   });
 });

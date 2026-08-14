@@ -360,6 +360,11 @@ import {
   markProviderMetadataArray,
   createProviderEgressReceipt,
   redactProviderResultRows,
+  composeVerifiedAnalyticalNarrative,
+  DEFAULT_ASK_ROW_EGRESS_POLICY,
+  ZERO_ROW_EGRESS_POLICY,
+  resolveProviderResultRowEgressPolicy,
+  type ProviderResultRowEgressPolicy,
 } from '@duckcodeailabs/dql-agent';
 import { addSqlResultFilter, dashboardFilterableResultColumns, filterableResultColumns, replaceBlockStudioSql } from './sql-result-filter.js';
 import { gatherProposeEnrichment } from './propose-enrich.js';
@@ -544,6 +549,18 @@ export interface ProjectConfig {
       mode?: 'disabled' | 'safe_automatic';
       /** Fully-qualified `schema.table.column` names approved by a project admin. */
       searchSafeColumns?: string[];
+    };
+    /**
+     * How many executed rows may reach the AI provider when it writes the answer.
+     * Defaults to a bounded, redacted sample: a model that cannot see the values
+     * cannot describe them, and the fallback for that is a `column: value` dump.
+     * Set `mode: 'disabled'` to keep every cell value on the host — narration
+     * still runs, grounded in column names and computed statistics only.
+     */
+    providerResultRowEgress?: {
+      mode?: 'bounded_sample' | 'disabled';
+      /** Clamped to 0..20. Zero is treated as the kill-switch. */
+      maxNarrationRows?: number;
     };
   };
   metadataScopes?: Record<string, ConnectionMetadataScopeInput>;
@@ -989,26 +1006,70 @@ export function agentRunDeadlineMs(
     : AGENT_LOOKUP_DEADLINE_MS;
 }
 
+/** What kind of narration a settled run has earned, and how many rows may ground it. */
+export type AgentNarrationPlan =
+  | { mode: 'skip'; reason: 'no_answer' | 'no_provider' | 'nothing_to_narrate' }
+  /** Claim-verified narration over the immutable fact set (analytical graph lanes). */
+  | { mode: 'verified_facts'; maxRows: number }
+  /** Preview-grounded narration for lanes that executed rows without a fact set. */
+  | { mode: 'preview_grounded'; maxRows: number };
+
+export type AgentNarrationAnswer =
+  Pick<AgentAnswer, 'kind'>
+  & Partial<Pick<
+    AgentAnswer,
+    'certification' | 'text' | 'answer' | 'result'
+    | 'dqlArtifact' | 'exploratoryCandidate' | 'analyticalFacts' | 'analyticalNarrative'
+  >>;
+
+/**
+ * Decide how a settled answer gets its business-facing prose.
+ *
+ * This deliberately does NOT read `requestedMode`. Gating narration on
+ * `requestedMode === 'research'` meant every ordinary Ask — which the UI sends
+ * as `'auto'` — skipped synthesis entirely and shipped the answer loop's
+ * deterministic fact-join as the primary answer: the reported `column: value`
+ * dump. Narration is owed to any run that actually produced values.
+ *
+ * Certification, a DQL artifact, and the exploratory candidate are no longer
+ * vetoes. EXP-001's grain concern is real, but the answer to "the model might
+ * relabel an entity-level measure" is to VERIFY the claims against the fact set
+ * (`verified_facts`) and pass the grain statement in as a caveat — not to refuse
+ * to write a sentence.
+ */
+export function planAgentRunNarration(
+  governedAnswer: AgentNarrationAnswer,
+  context: {
+    requestedMode?: AgentRunRequestedMode;
+    providerAvailable: boolean;
+    rowEgress: ProviderResultRowEgressPolicy;
+  },
+): AgentNarrationPlan {
+  // A refusal is not narrated. It owes the user a reason or a clarifying
+  // question, which is the clarification lane's job, not the narrator's.
+  if (governedAnswer.kind === 'no_answer') return { mode: 'skip', reason: 'no_answer' };
+  if (!context.providerAvailable) return { mode: 'skip', reason: 'no_provider' };
+  const maxRows = Math.max(0, context.rowEgress.maxNarrationRows);
+  // The fact set is the strongest grounding available: every sentence can be
+  // tied back to a fact id and rejected when it is not.
+  if (governedAnswer.analyticalFacts) return { mode: 'verified_facts', maxRows };
+  if (governedAnswer.result) return { mode: 'preview_grounded', maxRows };
+  return { mode: 'skip', reason: 'nothing_to_narrate' };
+}
+
+/**
+ * Boolean view of {@link planAgentRunNarration}, kept for callers and tests that
+ * only need "does this run narrate at all".
+ */
 export function shouldSynthesizeAgentRunAnswer(
-  governedAnswer: Pick<AgentAnswer, 'kind' | 'certification' | 'text' | 'answer' | 'result' | 'dqlArtifact' | 'exploratoryCandidate'>,
+  governedAnswer: AgentNarrationAnswer,
   requestedMode: AgentRunRequestedMode | undefined = 'ask',
 ): boolean {
-  if (requestedMode !== 'research') return false;
-  if (governedAnswer.kind === 'no_answer') return false;
-  // The executed rows are the presentation boundary: certified, semantic,
-  // DQL-first, and exploratory routes all deserve a separate stakeholder-facing
-  // explanation grounded in those values. Trust and query mechanics stay in the
-  // artifact/inspector instead of leaking into the primary answer.
-  if (governedAnswer.result) return true;
-  if (governedAnswer.kind === 'certified' || governedAnswer.certification === 'certified') return false;
-  // EXP-001: exploratory prose is part of the trust boundary. A free-form
-  // synthesis pass can accidentally relabel an entity-level lifetime measure
-  // as a child-level allocation or total repeated values. Keep the host's
-  // deterministic grain statement instead.
-  if (governedAnswer.exploratoryCandidate) return false;
-  const finalText = (governedAnswer.answer ?? governedAnswer.text ?? '').trim();
-  if (governedAnswer.dqlArtifact && finalText) return false;
-  return true;
+  return planAgentRunNarration(governedAnswer, {
+    requestedMode,
+    providerAvailable: true,
+    rowEgress: DEFAULT_ASK_ROW_EGRESS_POLICY,
+  }).mode !== 'skip';
 }
 
 /**
@@ -1744,17 +1805,76 @@ function apiErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Slowest provider dispatch we assume before any have been observed, and the
+ * settle time reserved after the last one. A subscription-CLI provider costs
+ * roughly 10-15s per call, so these keep the first admission decision honest.
+ */
+const ASSUMED_PROVIDER_DISPATCH_MS = 12_000;
+const DISPATCH_SETTLE_MARGIN_MS = 4_000;
+
 export class RunScopedProviderDispatchEvidence implements ProviderDispatchEvidenceSink {
   private readonly receipts: ProviderEgressReceiptV1[] = [];
   private readonly phaseCounts = new Map<ProviderDispatchPhaseV1, number>();
   private currentRoute: AgentRunRoute;
+  /** Wall-clock start of the previous dispatch, used to learn this provider's cost. */
+  private lastDispatchStartedAtMs?: number;
+  private readonly observedDispatchDurations: number[] = [];
+
+  /**
+   * How long the NEXT dispatch is likely to take, learned from this run.
+   *
+   * Counting dispatches is not a time budget. A provider costing ~13s a call
+   * will burn a 45s deadline in three calls and get killed mid-flight, so the
+   * run ends with nothing — strictly worse than stopping early and answering
+   * from what it already has.
+   */
+  private expectedDispatchMs(): number {
+    if (this.observedDispatchDurations.length === 0) return ASSUMED_PROVIDER_DISPATCH_MS;
+    const sorted = [...this.observedDispatchDurations].sort((left, right) => left - right);
+    // The slowest observed call is the honest predictor: an optimistic median
+    // still admits a dispatch that the deadline then kills.
+    return sorted[sorted.length - 1]!;
+  }
+
+  /** True when the remaining wall clock cannot fit another provider call. */
+  private cannotFitAnotherDispatch(): boolean {
+    if (!this.runBudget) return false;
+    return this.runBudget.remainingMs() < this.expectedDispatchMs() + DISPATCH_SETTLE_MARGIN_MS;
+  }
+
+  /**
+   * The run budget's own clock when there is one, so dispatch cost is measured
+   * against the same timeline the deadline is enforced on (and stays injectable
+   * for deterministic tests).
+   */
+  private nowMs(): number {
+    return this.runBudget ? this.runBudget.elapsedMs() : Date.now();
+  }
+
+  private recordDispatchStart(): void {
+    const now = this.nowMs();
+    if (this.lastDispatchStartedAtMs !== undefined) {
+      this.observedDispatchDurations.push(Math.max(0, now - this.lastDispatchStartedAtMs));
+    }
+    this.lastDispatchStartedAtMs = now;
+  }
 
   constructor(private readonly policy: {
     total: number;
     meaningResolution: number;
     generationGroup: number;
+    /**
+     * Narration has its own bucket. It used to share `generationGroup`, so a
+     * run that spent its generation attempts had nothing left to write the
+     * answer with and threw `PROVIDER_DISPATCH_BUDGET_EXHAUSTED` — which is how
+     * an ordinary Ask ended up shipping its deterministic draft as the answer.
+     */
+    narration: number;
     repair: number;
-  }, private readonly runBudget?: AgentRunBudget) {
+  }, private readonly runBudget?: AgentRunBudget,
+    private readonly rowEgress: ProviderResultRowEgressPolicy = ZERO_ROW_EGRESS_POLICY,
+  ) {
     this.currentRoute = runBudget?.mode === 'research' ? 'research' : 'generated_answer';
   }
 
@@ -1777,11 +1897,28 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
     },
   ): Record<string, unknown> {
     const softRoute = context.dispatchPhase === 'meaning_resolution' ? 'clarify' : this.currentRoute;
-    if (this.runBudget && !this.runBudget.mayStartDiscovery(softRoute)) {
+    // Admission control BEFORE the phase targets: starting a call that the hard
+    // deadline will kill mid-flight wastes the remaining budget and ends the run
+    // with nothing. Stopping here lets the caller answer from what it has.
+    // Narration is exempt: it is the step that produces the answer, and it is
+    // separately bounded by its own soft target below.
+    if (context.dispatchPhase !== 'narration' && this.cannotFitAnotherDispatch()) {
+      throw Object.assign(new Error(
+        `Only ${Math.round((this.runBudget?.remainingMs() ?? 0) / 1_000)}s of the run deadline remain, which is not enough for another ~${Math.round(this.expectedDispatchMs() / 1_000)}s provider call. Answering from what has already been gathered.`,
+      ), { code: 'RUN_DEADLINE_INSUFFICIENT' });
+    }
+    if (context.dispatchPhase === 'narration') {
+      if (this.runBudget && !this.runBudget.mayStartNarration()) {
+        throw Object.assign(new Error(
+          `The ${Math.round(this.runBudget.narrationSoftTargetMs() / 1_000)}-second narration target elapsed before the answer could be written.`,
+        ), { code: 'RUN_SOFT_TARGET_EXCEEDED' });
+      }
+    } else if (this.runBudget && !this.runBudget.mayStartDiscovery(softRoute)) {
       throw Object.assign(new Error(
         `The ${Math.round(this.runBudget.softTargetMs(softRoute) / 1_000)}-second soft target elapsed before this provider dispatch could start.`,
       ), { code: 'RUN_SOFT_TARGET_EXCEEDED' });
     }
+    this.recordDispatchStart();
     if (this.receipts.length >= this.policy.total) {
       throw Object.assign(new Error(
         `Run-wide provider dispatch budget exhausted after ${this.policy.total} physical attempts.`,
@@ -1792,14 +1929,18 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
       ? this.policy.meaningResolution
       : context.dispatchPhase === 'repair'
         ? this.policy.repair
-        : this.policy.generationGroup;
+        : context.dispatchPhase === 'narration'
+          ? this.policy.narration
+          : this.policy.generationGroup;
+    // Planning and generation share one ledger because they compete for the
+    // same "work out the query" budget. Narration does not: it is the step that
+    // turns a settled result into an answer, and starving it produces a run
+    // that computed the right numbers and then could not say them.
     const generationGroupCount = this.receipts.filter((receipt) =>
       receipt.dispatchPhase === 'planning'
-      || receipt.dispatchPhase === 'generation'
-      || receipt.dispatchPhase === 'narration').length;
+      || receipt.dispatchPhase === 'generation').length;
     if (phaseCount >= phaseLimit || (
-      context.dispatchPhase !== 'meaning_resolution'
-      && context.dispatchPhase !== 'repair'
+      (context.dispatchPhase === 'planning' || context.dispatchPhase === 'generation')
       && generationGroupCount >= this.policy.generationGroup
     )) {
       throw Object.assign(new Error(
@@ -1809,11 +1950,15 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
     const envelope = prepareProviderWireEnvelopeForDispatch(event.provider, event.envelope);
     const projectedRowCount = context.serializedResultShape?.resultRowCount ?? 0;
     const projectedCumulativeRowCount = context.cumulativeResultRowCount ?? projectedRowCount;
-    const permittedRowLimit = context.optIn && context.purpose === 'research_narration'
-      ? 20
-      : context.optIn && context.purpose === 'research_tool'
-        ? 200
-        : 0;
+    // Ordinary Ask narration reads its ceiling from the resolved project policy;
+    // Research keeps its own explicit opt-in limits.
+    const permittedRowLimit = context.purpose === 'answer_narration'
+      ? this.rowEgress.maxNarrationRows
+      : context.optIn && context.purpose === 'research_narration'
+        ? 20
+        : context.optIn && context.purpose === 'research_tool'
+          ? 200
+          : 0;
     if (projectedRowCount > permittedRowLimit || projectedCumulativeRowCount > permittedRowLimit) {
       throw Object.assign(new Error(
         permittedRowLimit === 0
@@ -2646,14 +2791,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     input: NarrateInput,
     allowProviderResultRows = false,
   ): Promise<NarrateResult> => {
-    // Research result narration is the only provider-facing result-row lane.
-    // Without one-run consent, keep narration deterministic and make no
-    // physical provider dispatch. With consent, serialize only the bounded,
-    // redacted sample the transport receipt will account for.
+    // Without caller consent, keep narration deterministic and make no physical
+    // provider dispatch. With consent, serialize only the bounded, redacted
+    // sample the transport receipt will account for — bounded by the project's
+    // own egress policy, so an admin kill-switch is not silently bypassed here.
     if (!allowProviderResultRows || !input.result) return narrateResult(input);
+    const narrationRowEgress = resolveProviderResultRowEgressPolicy({
+      projectSetting: projectConfig?.agent?.providerResultRowEgress,
+    });
+    if (narrationRowEgress.maxNarrationRows === 0) return narrateResult(input);
     const safeResult = {
       ...input.result,
-      rows: redactProviderResultRows(input.result.rows, 20),
+      rows: redactProviderResultRows(input.result.rows, narrationRowEgress.maxNarrationRows),
     };
     const safeInput: NarrateInput = {
       ...input,
@@ -2671,8 +2820,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           signal,
           maxProviderDispatches: 2,
           ...(agentRunProviderEvidenceContext.getStore() ? {
+            // This lane narrates App/notebook results, not Research. It used to
+            // declare `research_narration` to clear the row check, which made
+            // receipt analytics conflate two different lanes.
             onProviderDispatch: (event) => agentRunProviderEvidenceContext.getStore()!.observe(event, {
-              purpose: 'research_narration',
+              purpose: 'answer_narration',
               dispatchPhase: 'narration',
               optIn: true,
               serializedResultShape: {
@@ -3577,104 +3729,141 @@ function analyticalFailureSummary(
       || (isExploratory && !governedAnswer.result)
       ? undefined
       : sql;
-    // Render executed rows deterministically for ordinary lookups. A second LLM
-    // call is reserved for an explicit research route; certified, semantic, and
-    // generated lookup answers must not pay another provider round-trip merely
-    // to restate values the host already has.
+    // Narrate any run that actually produced values. This used to be gated on
+    // `requestedMode === 'research'`, and because the UI sends ordinary Ask as
+    // `'auto'`, every normal question skipped synthesis and shipped the answer
+    // loop's deterministic fact-join as the primary answer — the reported
+    // `column: value` dump. A model that never sees the result cannot describe
+    // it, so a bounded, redacted row sample goes with the request unless a
+    // project admin has switched row egress off.
     let synthesizedAnswer: string | undefined;
     const providerEgressReceipts: ProviderEgressReceiptV1[] = [
       ...(governedAnswer.providerEgressReceipts ?? []),
     ];
     let narrationDurationMs = 0;
-    if (shouldSynthesizeAgentRunAnswer(governedAnswer, request.requestedMode)) {
+    const researchRowsOptIn = route === 'research' && request.researchResultRowsOptIn === true;
+    const rowEgress = resolveProviderResultRowEgressPolicy({
+      projectSetting: projectConfig?.agent?.providerResultRowEgress,
+      researchOptIn: researchRowsOptIn,
+    });
+    // `createBlockStudioAssistProvider` returns null when no AI provider is
+    // configured; a narration failure must never take the governed answer down.
+    const narrationProvider = await createBlockStudioAssistProvider(projectRoot).catch(() => null);
+    const narrationPlan = planAgentRunNarration(governedAnswer, {
+      requestedMode: request.requestedMode,
+      providerAvailable: Boolean(narrationProvider),
+      rowEgress,
+    });
+    const narrationMaxRows = narrationPlan.mode === 'skip' ? 0 : narrationPlan.maxRows;
+    const preview = agentResultToSynthesisPreview(governedAnswer.result);
+    const providerPreview = preview
+      ? { ...preview, rows: redactProviderResultRows(preview.rows, narrationMaxRows) }
+      : undefined;
+    let narrationSource: 'llm' | 'deterministic' | undefined;
+    let narrationValidationFailures: string[] = [];
+    if (narrationPlan.mode !== 'skip' && narrationProvider) {
       const narrationStartedAtMs = Date.now();
-      try {
-        const researchRowsOptIn = route === 'research' && request.researchResultRowsOptIn === true;
-        const provider = researchRowsOptIn
-          ? await createBlockStudioAssistProvider(projectRoot)
-          : null;
-        const preview = agentResultToSynthesisPreview(governedAnswer.result);
-        const providerPreview = preview
-          ? { ...preview, rows: redactProviderResultRows(preview.rows, 20) }
-          : undefined;
-        const draft = governedAnswer.answer ?? governedAnswer.text;
-        const result = await synthesizeAnswer(
-          {
-            question: request.question,
-            category: routeDecision?.category,
-            // The primary Ask reply is always business-facing. Analysts keep
-            // the full DQL, SQL, lineage, gates, and grain in the inspector.
-            audience: 'stakeholder',
-            resultPreview: provider ? providerPreview : preview,
-            sql: sql,
-            draftText: draft,
-            gaps: businessNarrativeGaps(governedAnswer.validationWarnings),
-            rankingDirection: governedAnswer.contextPack?.questionPlan.requestedShape.rankingDirection,
-            // Governed display contract: metric/measure displayFormat metadata
-            // beats column-name guessing, so $ and decimals stay consistent
-            // between the narration and the table for names like total_bcm.
-            ...(preview ? { columnFormats: agentColumnDisplayFormats(projectRoot, preview.columns) } : {}),
+      const draft = governedAnswer.answer ?? governedAnswer.text;
+      const observeNarrationDispatch = (event: ProviderDispatchEvent) =>
+        agentRunProviderEvidenceContext.getStore()!.observe(event, {
+          purpose: 'answer_narration',
+          dispatchPhase: 'narration',
+          optIn: narrationMaxRows > 0,
+          serializedResultShape: {
+            resultRowCount: providerPreview?.rows.length ?? 0,
+            columnCount: providerPreview?.columns.length ?? 0,
           },
-          provider
-            ? {
+        });
+      const narrationDispatchOptions = () => ({
+        maxTokens: 350,
+        temperature: 0.3,
+        maxProviderDispatches: 2,
+        ...(agentRunProviderEvidenceContext.getStore()
+          ? { onProviderDispatch: observeNarrationDispatch }
+          : {}),
+      });
+      try {
+        const frame = governedAnswer.resolvedAnalyticalPlan?.analyticalFrame;
+        if (narrationPlan.mode === 'verified_facts' && governedAnswer.analyticalFacts && frame) {
+          // The fact set is the grounding contract: the model drafts, and every
+          // claim is resolved against a fact id before it can reach the user.
+          const composed = await composeVerifiedAnalyticalNarrative({
+            frame,
+            factSet: governedAnswer.analyticalFacts,
+            question: request.question,
+            maxRows: narrationPlan.maxRows,
+            complete: async ({ system, user }) => streamOrGenerate(
+              narrationProvider,
+              [{ role: 'system', content: system }, { role: 'user', content: user }],
+              narrationDispatchOptions(),
+              () => {},
+            ),
+          });
+          narrationSource = composed.source;
+          narrationValidationFailures = composed.validationFailures;
+          synthesizedAnswer = composed.source === 'llm'
+            ? composed.narrative.text
+            // A verification failure is not silent: the deterministic join is a
+            // fallback, and the reader is told so rather than handed a dump that
+            // looks like it was written on purpose.
+            : `_Verified narration was unavailable, so this is the deterministic result record._\n\n${composed.narrative.text}`;
+        } else {
+          const result = await synthesizeAnswer(
+            {
+              question: request.question,
+              category: routeDecision?.category,
+              // The primary Ask reply is always business-facing. Analysts keep
+              // the full DQL, SQL, lineage, gates, and grain in the inspector.
+              audience: 'stakeholder',
+              resultPreview: providerPreview ?? preview,
+              sql: sql,
+              draftText: draft,
+              gaps: businessNarrativeGaps(governedAnswer.validationWarnings),
+              rankingDirection: governedAnswer.contextPack?.questionPlan.requestedShape.rankingDirection,
+              // Governed display contract: metric/measure displayFormat metadata
+              // beats column-name guessing, so $ and decimals stay consistent
+              // between the narration and the table for names like total_bcm.
+              ...(preview ? { columnFormats: agentColumnDisplayFormats(projectRoot, preview.columns) } : {}),
+            },
+            {
               complete: ({ system, user, signal, onDelta }) =>
                 streamOrGenerate(
-                  provider,
+                  narrationProvider,
                   [{ role: 'system', content: system }, { role: 'user', content: user }],
-                  {
-                    maxTokens: 350,
-                    temperature: 0.3,
-                    signal,
-                    maxProviderDispatches: 2,
-                    ...(agentRunProviderEvidenceContext.getStore() ? {
-                      onProviderDispatch: (event) => agentRunProviderEvidenceContext.getStore()!.observe(event, {
-                        purpose: 'research_narration',
-                        dispatchPhase: 'narration',
-                        optIn: researchRowsOptIn,
-                        serializedResultShape: {
-                          resultRowCount: providerPreview?.rows.length ?? 0,
-                          columnCount: providerPreview?.columns.length ?? 0,
-                        },
-                      }),
-                    } : {}),
-                  },
+                  { ...narrationDispatchOptions(), signal },
                   onDelta ?? (() => {}),
                 ),
-              }
-            : {},
-        );
-        if (result.text) synthesizedAnswer = result.text;
-        if (route === 'research') {
-          providerEgressReceipts.push(createProviderEgressReceipt({
-            purpose: 'research_narration',
-            provider: provider?.name ?? 'none',
-            permittedCategories: provider
-              ? ['instructions', 'question', 'governed_context', 'result_rows']
-              : ['instructions', 'question', 'governed_context'],
-            optIn: researchRowsOptIn,
-            payload: provider
-              ? { question: request.question, resultPreview: providerPreview, draft }
-              : { resultRows: 0, providerDisabled: true },
-            resultRowCount: provider ? providerPreview?.rows.length ?? 0 : 0,
-            columnCount: provider ? providerPreview?.columns.length ?? 0 : 0,
-          }));
+            },
+          );
+          narrationSource = result.source;
+          if (result.text) synthesizedAnswer = result.text;
         }
       } catch {
-        // Keep the governed draft on any synthesis failure.
+        // Keep the governed draft on any narration failure.
         synthesizedAnswer = undefined;
       } finally {
         narrationDurationMs = Date.now() - narrationStartedAtMs;
       }
     }
-    if (route === 'research' && !providerEgressReceipts.some((receipt) => receipt.purpose === 'research_narration')) {
+    // Every run accounts for its narration egress, including the runs that did
+    // not narrate — "no receipt" must never be ambiguous between "no rows left
+    // the host" and "nobody looked".
+    {
+      const narrated = narrationSource !== undefined;
+      const rowsSent = narrated ? providerPreview?.rows.length ?? 0 : 0;
       providerEgressReceipts.push(createProviderEgressReceipt({
-        purpose: 'research_narration',
-        provider: 'none',
-        permittedCategories: ['instructions', 'question', 'governed_context'],
-        optIn: false,
-        payload: { resultRows: 0, providerDisabled: true },
-        resultRowCount: 0,
-        columnCount: 0,
+        purpose: 'answer_narration',
+        provider: narrated ? narrationProvider?.name ?? 'none' : 'none',
+        permittedCategories: rowsSent > 0
+          ? ['instructions', 'question', 'governed_context', 'result_rows']
+          : ['instructions', 'question', 'governed_context'],
+        optIn: rowsSent > 0,
+        redactionPolicyId: rowEgress.policyId,
+        payload: narrated
+          ? { question: request.question, resultPreview: rowsSent > 0 ? providerPreview : undefined }
+          : { resultRows: 0, providerDisabled: !narrationProvider },
+        resultRowCount: rowsSent,
+        columnCount: narrated ? providerPreview?.columns.length ?? 0 : 0,
       }));
     }
     // A grounding/modeling gap is a REFUSAL. It was computed above but never
@@ -10139,11 +10328,20 @@ function analyticalFailureSummary(
               inheritedSignal: ingressSignal,
             });
             parsed.request!.signal = parsed.request!.runBudget.hardSignal;
+            // Ordinary Ask needs room to think, write, and recover: meaning (1)
+            // + planning/generation (3) + narration (2) + one repair. The old
+            // `total: 2` left nothing for narration once generation had run,
+            // which is why the answer arrived as a deterministic fact-join.
             const runProviderEvidence = new RunScopedProviderDispatchEvidence(
               parsed.request!.requestedMode === 'research'
-                ? { total: 12, meaningResolution: 1, generationGroup: 11, repair: 0 }
-                : { total: 2, meaningResolution: 1, generationGroup: 2, repair: 0 },
+                ? { total: 14, meaningResolution: 1, generationGroup: 11, narration: 2, repair: 1 }
+                : { total: 6, meaningResolution: 1, generationGroup: 3, narration: 2, repair: 1 },
               parsed.request!.runBudget,
+              resolveProviderResultRowEgressPolicy({
+                projectSetting: projectConfig?.agent?.providerResultRowEgress,
+                researchOptIn: parsed.request!.requestedMode === 'research'
+                  && parsed.request!.researchResultRowsOptIn === true,
+              }),
             );
             report?.({ phase: 'reasoning', progress: 8, message: 'Grounding the request and selecting the governed route.' });
             try {

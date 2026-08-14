@@ -104,6 +104,7 @@ import {
   semanticAnswerHasPassedAggregationProof,
   shouldAugmentAgentRuntimeSchema,
   shouldSynthesizeAgentRunAnswer,
+  planAgentRunNarration,
   serializeJSON,
   staticResponseCacheControl,
   startLocalServer,
@@ -135,6 +136,8 @@ import {
   SqliteAgentRunStore,
   assertProviderPayloadAllowed,
   prepareProviderContextForDispatch,
+  DEFAULT_ASK_ROW_EGRESS_POLICY,
+  ZERO_ROW_EGRESS_POLICY,
 } from '@duckcodeailabs/dql-agent';
 import type { DatabaseConnector, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
 import { saveTestedSemanticRuntimeSettings } from './semantic-runtime-settings.js';
@@ -2762,7 +2765,7 @@ describe('agent run runtime API', () => {
     }
   });
 
-  it('uses deterministic presentation for ordinary DQL-first answers', () => {
+  it('synthesizes DQL-first answers when executed rows are available', () => {
     expect(shouldSynthesizeAgentRunAnswer({
       kind: 'uncertified',
       certification: 'ai_generated',
@@ -2773,10 +2776,11 @@ describe('agent run runtime API', () => {
         name: 'top_products_by_value',
         source: 'block "top_products_by_value" { query = """select 1""" }',
       },
-    })).toBe(false);
+    })).toBe(true);
   });
 
-  it('permits provider narration only for explicit Research', () => {
+  it('synthesizes every executed result regardless of certification tier', () => {
+    // A run that produced no values has nothing to narrate...
     expect(shouldSynthesizeAgentRunAnswer({
       kind: 'uncertified',
       certification: 'ai_generated',
@@ -2789,13 +2793,16 @@ describe('agent run runtime API', () => {
       text: 'Certified answer',
     })).toBe(false);
 
+    // ...but "certified" is not a reason to hand the user a raw record. The
+    // trust boundary is enforced by verifying claims, not by refusing prose.
     expect(shouldSynthesizeAgentRunAnswer({
       kind: 'certified',
       certification: 'certified',
       text: 'Answered by certified block top_customers.',
       result: { columns: ['customer_name', 'lifetime_spend'], rows: [{ customer_name: 'Matthew', lifetime_spend: 3000 }], rowCount: 1 },
-    })).toBe(false);
+    })).toBe(true);
 
+    // A refusal is never narrated: it owes a reason or a question instead.
     expect(shouldSynthesizeAgentRunAnswer({
       kind: 'no_answer',
       text: 'Need more context.',
@@ -2831,6 +2838,45 @@ describe('agent run runtime API', () => {
         executionStatus: 'not_executed',
       },
     }, 'research')).toBe(true);
+  });
+
+  it('plans narration independently of the requested mode', () => {
+    const result = { columns: ['customer_name'], rows: [{ customer_name: 'Matthew' }], rowCount: 1 };
+    const context = { providerAvailable: true, rowEgress: DEFAULT_ASK_ROW_EGRESS_POLICY };
+
+    // The regression: 'auto' is what the Ask panel actually sends, and gating on
+    // 'research' meant it never narrated.
+    for (const requestedMode of ['ask', 'auto', 'research'] as const) {
+      expect(planAgentRunNarration({ kind: 'uncertified', result }, { ...context, requestedMode }))
+        .toEqual({ mode: 'preview_grounded', maxRows: 20 });
+    }
+  });
+
+  it('prefers claim-verified narration when the run carries an analytical fact set', () => {
+    const plan = planAgentRunNarration(
+      {
+        kind: 'uncertified',
+        result: { columns: ['customer_name'], rows: [{ customer_name: 'Matthew' }], rowCount: 1 },
+        analyticalFacts: { factSetId: 'analytical-facts:test', facts: [] } as never,
+      },
+      { requestedMode: 'auto', providerAvailable: true, rowEgress: DEFAULT_ASK_ROW_EGRESS_POLICY },
+    );
+    expect(plan).toEqual({ mode: 'verified_facts', maxRows: 20 });
+  });
+
+  it('skips narration when no provider is configured, and sends no rows when egress is off', () => {
+    const answer = {
+      kind: 'uncertified' as const,
+      result: { columns: ['customer_name'], rows: [{ customer_name: 'Matthew' }], rowCount: 1 },
+    };
+    expect(planAgentRunNarration(answer, {
+      requestedMode: 'auto', providerAvailable: false, rowEgress: DEFAULT_ASK_ROW_EGRESS_POLICY,
+    })).toEqual({ mode: 'skip', reason: 'no_provider' });
+
+    // The kill-switch does not stop narration; it stops cell values leaving.
+    expect(planAgentRunNarration(answer, {
+      requestedMode: 'auto', providerAvailable: true, rowEgress: ZERO_ROW_EGRESS_POLICY,
+    })).toEqual({ mode: 'preview_grounded', maxRows: 0 });
   });
 
   it('API-007 derives repairs through the HTTP API while permission denial stays terminal', async () => {

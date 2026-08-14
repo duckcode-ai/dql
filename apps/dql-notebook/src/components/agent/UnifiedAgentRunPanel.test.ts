@@ -362,16 +362,29 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     })).toEqual({ product_name: 'Flame Impala', top_n: 5 });
   });
 
-  it('UI-010 preserves a governed clarification choice as stable identity input', () => {
+  it('UI-010 keeps the user question and carries the choice as stable identity', () => {
+    // The regression this pins: with no source question the label was re-asked
+    // AS the question, so picking "customers.customers" to disambiguate
+    // "who are the top customers" submitted the literal string
+    // `customers.customers` — and the next run tried to answer that.
     expect(clarificationSelectionInput({
       id: 'semantic:metric:dbt_core_models.total_ccu_count',
       label: 'Total CCU Count',
       description: 'Billable CCU consumption.',
       kind: 'semantic_metric',
-    })).toEqual({
-      question: 'Total CCU Count',
+    }, 'How much CCU did we bill last month?')).toEqual({
+      question: 'How much CCU did we bill last month?',
       selectedEvidenceId: 'semantic:metric:dbt_core_models.total_ccu_count',
     });
+  });
+
+  it('never re-asks a bare governed identifier as the question', () => {
+    const option = { id: 'semantic:model:customers', label: 'customers.customers', kind: 'semantic_member' };
+    expect(clarificationSelectionInput(option, 'who are the top customers').question)
+      .toBe('who are the top customers');
+    // The label remains the last resort only when no original question exists.
+    expect(clarificationSelectionInput(option).question).toBe('customers.customers');
+    expect(clarificationSelectionInput(option, '   ').question).toBe('customers.customers');
   });
 
   it('UI-012 resubmits the original question while a semantic path option carries stable identity', () => {

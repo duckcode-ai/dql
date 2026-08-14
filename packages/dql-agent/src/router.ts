@@ -882,12 +882,66 @@ function buildClarificationOptions(
   const pool = governed.length > 1
     ? governed
     : candidates.filter((candidate) => candidate.compatibility !== "incompatible");
-  return pool.slice(0, 3).map((candidate) => ({
-    id: candidate.id,
-    label: candidate.name,
-    ...(candidate.definition?.trim() ? { description: candidate.definition.trim() } : {}),
-    kind: candidate.kind,
-  }));
+  const chosen = pool.slice(0, 3);
+  // Two candidates can legitimately share a display name (a dbt model and its
+  // MetricFlow measure are both "customers"). Rendering both as "customers"
+  // asks the user to choose between two identical-looking buttons, so the
+  // duplicates carry their distinguishing identity.
+  const nameCounts = new Map<string, number>();
+  for (const candidate of chosen) {
+    nameCounts.set(candidate.name, (nameCounts.get(candidate.name) ?? 0) + 1);
+  }
+  return chosen.map((candidate) => {
+    const ambiguousName = (nameCounts.get(candidate.name) ?? 0) > 1;
+    const description = humanizeCandidateDefinition(candidate.definition);
+    return {
+      id: candidate.id,
+      label: ambiguousName
+        ? `${candidate.name} (${candidateKindLabel(candidate.kind)})`
+        : candidate.name,
+      ...(description ? { description } : {}),
+      kind: candidate.kind,
+    };
+  });
+}
+
+function candidateKindLabel(kind: string): string {
+  if (kind === 'certified_block') return 'certified block';
+  if (kind === 'semantic_metric') return 'metric';
+  if (kind === 'semantic_member') return 'model field';
+  return kind.replace(/[_-]+/g, ' ');
+}
+
+/**
+ * A candidate's `definition` is sometimes the raw semantic-layer record —
+ * `label: customers\naggregation: count_distinct\ntable: "..."\nexpr: customer_id`.
+ * Dumping that into a question asks a business user to disambiguate by reading
+ * YAML. Turn a recognisable key/value record into one plain sentence; leave
+ * genuine authored prose alone.
+ */
+export function humanizeCandidateDefinition(definition: string | undefined): string | undefined {
+  const text = definition?.trim();
+  if (!text) return undefined;
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const fields = new Map<string, string>();
+  for (const line of lines) {
+    const match = /^([a-z_][a-z0-9_]*)\s*:\s*(.+)$/i.exec(line);
+    if (match) fields.set(match[1]!.toLowerCase(), match[2]!.trim().replace(/^["']|["']$/g, ''));
+  }
+  // Only treat it as a record when MOST of it is key/value pairs; a one-line
+  // sentence containing a colon is prose, not a dump.
+  if (fields.size < 2 || fields.size < lines.length - 1) {
+    return text.replace(/\s+/g, ' ').slice(0, 200);
+  }
+  const aggregation = fields.get('aggregation');
+  const expr = fields.get('expr');
+  const table = fields.get('table');
+  const parts: string[] = [];
+  if (aggregation) parts.push(`${aggregation.replace(/_/g, ' ')}${expr ? ` of ${expr}` : ''}`);
+  else if (expr) parts.push(expr);
+  if (table) parts.push(`from ${table.split('.').pop()?.replace(/"/g, '') ?? table}`);
+  const summary = parts.join(' ');
+  return summary ? `${summary}.` : undefined;
 }
 
 function buildEvidenceClarification(candidates: AgentEvidenceCandidate[], missing: string[] = []): string {
@@ -1063,6 +1117,15 @@ function routeWithoutMeaningModel(
   evidence: AgentRetrievalEvidence,
   candidates: AgentEvidenceCandidate[],
   planMode: ResolvedAnalyticalPlan['mode'] = 'authoritative',
+  /**
+   * Whether DQL may commit to the best-ranked reading on the user's behalf.
+   *
+   * False when the meaning resolver never got to run (provider outage). Two
+   * genuinely different metrics that merely share an alias — `booked_revenue`
+   * and `billed_revenue` both aliased "revenue" — must not be settled by
+   * lexical rank alone with the semantic judgment switched off. AGT-017.
+   */
+  mayAssumeInterpretation = true,
 ): IntentDecision {
   const multiMetricPrimary = exactMultiMetricPrimary(request.question, evidence, candidates);
   if (multiMetricPrimary) {
@@ -1106,7 +1169,110 @@ function routeWithoutMeaningModel(
       planMode,
     );
   }
-  return unresolvedAnalyticalPlanDecision(base, evidence, candidates);
+  // Last resort before asking the user: commit to the best governed reading.
+  // Clarifying whenever retrieval returned more than one candidate meant a
+  // `type: simple` metric, the measure it wraps, and the model that holds them
+  // were offered as three competing "meanings" of the same number.
+  const best = mayAssumeInterpretation
+    ? bestGovernedInterpretation(request.question, candidates)
+    : undefined;
+  if (best) {
+    return routeDecisionForResolution(
+      base,
+      evidence,
+      candidates,
+      directResolution(request, evidence, best, candidates),
+      "heuristic",
+      request.question,
+      planMode,
+    );
+  }
+  return unresolvedAnalyticalPlanDecision(base, evidence, candidates, request.question);
+}
+
+/** Leaf identity of a governed candidate, ignoring its source qualification. */
+function candidateLeafName(candidate: AgentEvidenceCandidate): string {
+  const identity = candidate.qualifiedId ?? candidate.id;
+  return (identity.split(/[.:]/).at(-1) ?? candidate.name).trim().toLowerCase();
+}
+
+/** Prefer the most authoritative representative of one underlying meaning. */
+function governedObjectAuthority(candidate: AgentEvidenceCandidate): number {
+  if (candidate.semanticObjectType === 'metric') return 3;
+  if (candidate.semanticObjectType === 'measure') return 2;
+  if (candidate.semanticObjectType === 'model') return 1;
+  return 0;
+}
+
+/**
+ * Reduce retrieval output to genuinely DIFFERENT governed meanings.
+ *
+ * Two collapses, both provable from the semantic registry rather than guessed:
+ *  - A simple metric, the measure it wraps, and the model that holds them are
+ *    one meaning. Offering all three asks a person to choose between a thing
+ *    and its own wrapper.
+ *  - An entity is a join key, not an answer. When the question asks for an
+ *    attribute ("customer names") and a dimension matched, entities are not
+ *    candidate readings of it at all.
+ */
+export function collapseRedundantGovernedCandidates(
+  question: string,
+  candidates: AgentEvidenceCandidate[],
+): AgentEvidenceCandidate[] {
+  const byScore = [...new Map(
+    candidates
+      .filter((candidate) => candidate.eligible !== false && candidate.compatibility !== 'incompatible')
+      .map((candidate) => [candidate.id, candidate] as const),
+  ).values()].sort((left, right) =>
+    right.relevanceScore - left.relevanceScore || left.id.localeCompare(right.id));
+
+  const wantsAttribute = /\b(names?|labels?|titles?|descriptions?)\b/i.test(question);
+  const hasDimension = byScore.some((candidate) => candidate.semanticObjectType === 'dimension');
+  const kindFiltered = wantsAttribute && hasDimension
+    ? byScore.filter((candidate) => candidate.semanticObjectType !== 'entity')
+    : byScore;
+
+  const representatives = new Map<string, AgentEvidenceCandidate>();
+  const passthrough: AgentEvidenceCandidate[] = [];
+  for (const candidate of kindFiltered) {
+    const type = candidate.semanticObjectType;
+    if (type !== 'metric' && type !== 'measure' && type !== 'model') {
+      passthrough.push(candidate);
+      continue;
+    }
+    const key = `${(candidate.semanticModel ?? '').toLowerCase()}::${candidateLeafName(candidate)}`;
+    const current = representatives.get(key);
+    if (!current || governedObjectAuthority(candidate) > governedObjectAuthority(current)) {
+      representatives.set(key, candidate);
+    }
+  }
+  return [...passthrough, ...representatives.values()].sort((left, right) =>
+    right.relevanceScore - left.relevanceScore || left.id.localeCompare(right.id));
+}
+
+/**
+ * The governed meaning to run when nothing proved a single exact reading.
+ *
+ * DQL commits to the best-ranked interpretation and discloses it through the
+ * route label, instead of stopping to ask. Asking on every multi-candidate
+ * question made ordinary lookups feel like an interrogation, and most of those
+ * questions had no real ambiguity behind them.
+ */
+export function bestGovernedInterpretation(
+  question: string,
+  candidates: AgentEvidenceCandidate[],
+): AgentEvidenceCandidate | undefined {
+  // Take the best candidate that is actually executable, rather than refusing
+  // because the top-ranked hit happens to be a descriptive modeling entity.
+  // `compatibility: 'unknown'` is common for governed objects that execute
+  // perfectly well, so it does not disqualify — but 'partial' does. A partial
+  // match has already been proven NOT to cover the request, and running one
+  // silently answers a different question than the one that was asked.
+  return collapseRedundantGovernedCandidates(question, candidates).find((candidate) =>
+    candidate.compatibility !== 'partial'
+    && (candidate.kind === 'certified_block'
+      || candidate.kind === 'semantic_metric'
+      || candidate.kind === 'semantic_member'));
 }
 
 /**
@@ -1120,11 +1286,12 @@ function unresolvedAnalyticalPlanDecision(
   base: IntentDecision,
   evidence?: AgentRetrievalEvidence,
   candidates: AgentEvidenceCandidate[] = [],
+  question = '',
 ): IntentDecision {
-  const eligible = candidates
-    .filter((candidate) => candidate.eligible !== false && candidate.compatibility !== 'incompatible')
-    .filter((candidate, index, all) => all.findIndex((other) => other.id === candidate.id) === index)
-    .sort((left, right) => right.relevanceScore - left.relevanceScore || left.id.localeCompare(right.id));
+  // Ask only about meanings that genuinely differ. A metric, the measure it
+  // wraps, and their model are one reading, and a join key is not a reading of
+  // an attribute question at all.
+  const eligible = collapseRedundantGovernedCandidates(question, candidates);
   const trace = evidence ? retrievalTrace(evidence, candidates) : {
     candidateCount: 0,
     candidateIds: [],
@@ -1408,11 +1575,14 @@ function substantiveLexicalTokens(value: string): string[] {
 function renderCandidateChoice(candidate: AgentEvidenceCandidate): string {
   const identity = candidate.qualifiedId ?? candidate.id;
   const stableName = identity.split(/[.:]/).at(-1) ?? candidate.name;
-  const description = candidate.definition?.trim();
+  // Never paste a raw semantic-layer record into the question a person reads.
+  const description = humanizeCandidateDefinition(candidate.definition);
   const grain = candidate.primaryEntity?.trim();
-  return description
-    ? `${candidate.name} (${stableName} — ${description}${grain ? `; grain: ${grain}` : ''})`
-    : `${candidate.name} (${stableName})`;
+  const kind = candidateKindLabel(candidate.kind);
+  const detail = [description, grain ? `grain: ${grain}` : ''].filter(Boolean).join('; ');
+  return detail
+    ? `${candidate.name} — ${kind}, ${detail}`
+    : `${candidate.name} — ${kind} (${stableName})`;
 }
 
 /**
@@ -1753,6 +1923,12 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
             return { ...cached.decision, source: "cache" };
           }
 
+          // Distinguish "the resolver could not run" from "the resolver ran and
+          // froze nothing". Only the first is a reason to refuse to interpret:
+          // with the semantic judgment unavailable, lexical rank alone must not
+          // settle two genuinely different metrics (AGT-017). When the resolver
+          // did run, committing to the best governed reading is the whole point.
+          let meaningResolverReachable = true;
           try {
             if (request.runBudget && !request.runBudget.mayStartDiscovery('clarify')) {
               return softBoundaryDecision(request, base, 'clarify');
@@ -1824,8 +2000,16 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
             rethrowCancellation(error, request.signal, options.signal);
             // A resolver transport/parse failure falls back without losing the
             // retrieval signal or permitting a general-knowledge misroute.
+            meaningResolverReachable = false;
           }
-          return routeWithoutMeaningModel(request, base, evidence, candidates, options.resolvedPlanMode ?? 'authoritative');
+          return routeWithoutMeaningModel(
+            request,
+            base,
+            evidence,
+            candidates,
+            options.resolvedPlanMode ?? 'authoritative',
+            meaningResolverReachable,
+          );
         }
       }
 

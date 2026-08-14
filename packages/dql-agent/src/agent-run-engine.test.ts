@@ -2180,7 +2180,9 @@ describe("AgentRunEngine — conversation route", () => {
     expect(agentRequestDeadlineMs('research')).toBe(120_000);
     expect(agentRouteDeadlineMs('certified_answer')).toBe(5_000);
     expect(agentRouteDeadlineMs('semantic_answer')).toBe(5_000);
-    expect(agentRouteDeadlineMs('generated_answer')).toBe(15_000);
+    // Generation may take a real tool round (look something up, then use it)
+    // rather than a single blind shot, so its discovery window covers that.
+    expect(agentRouteDeadlineMs('generated_answer')).toBe(30_000);
     expect(agentRouteDeadlineMs('research')).toBe(120_000);
     const observed: number[] = [];
     const controller = new AbortController();
@@ -2236,7 +2238,8 @@ describe("AgentRunEngine — conversation route", () => {
   });
 
   it('refuses a new ordinary analytical branch after its soft target when no plan is frozen', async () => {
-    let nowMs = 16_000;
+    // Past the 30s generated-answer soft target.
+    let nowMs = 31_000;
     const budget = createAgentRunBudget({
       requestedMode: 'ask', startedAtMs: 0, nowMs: () => nowMs,
       timeoutSignal: () => new AbortController().signal,

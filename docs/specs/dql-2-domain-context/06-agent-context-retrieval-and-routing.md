@@ -428,24 +428,37 @@ Simple routes are deliberately shallow (`PERF-002`):
 | ----- | ------------- | -------------------- | ----------------------------- | --- | ------ | --------- |
 | explicit qualified definition | 0 | 0 | 0 | 0 | 0 | 0 |
 | explicit qualified data | 0 | 0 | 0 | 1 | 0 | 0 |
-| natural-language certified/semantic | <= 1 | 0 | <= 1 | <= 1 | 0 | 0 |
-| governed/exploratory generated SQL | <= 1 | <= 1 | <= 2 across meaning and generation | <= 1 | 0 automatic | 0 |
-| explicit research/diagnosis | <= 1 | <= 11 | <= 12 under the separate Research policy | <= 6 | <= 1 total | <= 1 |
+| natural-language certified/semantic | <= 1 | 0 | <= 1 | <= 1 | 0 | <= 2 |
+| governed/exploratory generated SQL | <= 1 | <= 3 | <= 6 across meaning, generation, narration, repair | <= 1 | <= 1 | <= 2 |
+| explicit research/diagnosis | <= 1 | <= 11 | <= 14 under the separate Research policy | <= 6 | <= 1 total | <= 2 |
 
-Definition and simple-result rendering are deterministic. A successful direct
-certified or semantic route never pays a generic planner, open-ended provider
-tool loop, or answer-synthesis call. Cancellation and inherited deadlines
-propagate through retrieval, meaning resolution, generation, validation,
-database execution, repair, and research.
+Definition rendering is deterministic. **Result rendering is not.** Any route
+that produced values narrates them, because a `label: value` join of the result
+rows is a record, not an answer — gating narration on `requestedMode` meant
+every ordinary Ask (which the UI sends as `auto`) shipped that record as its
+answer. Narration is *verified, not authored*: on the analytical-graph lanes the
+model drafts claims that must each cite a fact id, and
+`validateAnalyticalNarrativeClaims` rejects causal wording, unknown facts,
+unsupported numbers, and hidden material caveats before the prose is shown. The
+deterministic join remains the floor and is explicitly labelled when a
+verification failure forces it.
 
-Ordinary generation has one provider tool round with at most four tool calls,
-but no more than two physical provider sends for the entire run. Meaning and
-generation share that ledger: when meaning uses one send, only one later send
-remains and no provider replan or forced-final third send is permitted. A failed
-ordinary generated attempt stops for review/manual action without replanning.
-Certified/semantic execution has a 5-second orchestration deadline,
-generated execution has 15 seconds, and explicit Research retains 120 seconds.
-The warehouse duration is recorded separately from total orchestration time.
+Narration has its own dispatch bucket. Sharing `generationGroup` meant a run
+that spent its generation attempts could not afford to write the answer, and
+failed with a budget error after computing the correct numbers.
+
+Cancellation and inherited deadlines propagate through retrieval, meaning
+resolution, generation, validation, database execution, repair, and research.
+Certified/semantic execution has a 5-second orchestration deadline, generated
+execution has 30 seconds, narration has until 38 seconds, and explicit Research
+retains 120 seconds; the 45s/120s request deadline is unchanged and remains the
+authority. Subscription-CLI providers cost roughly 10-15s per dispatch, so
+windows tighter than these silently collapse the tool loop back to a single
+blind attempt. The warehouse duration is recorded separately from total
+orchestration time.
+
+A refusal caused by DQL's own dispatch ledger or soft target is reported as an
+orchestration-budget diagnostic, never as an upstream provider outage.
 
 ### Temporary migration boundary
 
@@ -453,8 +466,10 @@ Production analytical Ask is authoritative by default and exposes no
 `DQL_ANALYTICAL_ENGINE` environment flag or request field. The remaining
 `shadow` plan discriminator and comparison helper are reachable only from
 explicit development/test fixtures; ordinary authoritative Ask cannot select
-them and does not call the LLM planner, replan, fuzzy metric rematch, or legacy
-semantic composer. The LLM planner and legacy matching/composition utilities
-remain for non-Ask conversation, explicit Research, App planning, and Block
-authoring. Their final symbol deletion is gated on built-CLI parity for those
+them, and it does not yet call the LLM planner, replan, fuzzy metric rematch, or
+legacy semantic composer. Re-admitting a bounded one-shot LLM planner for a
+COVERAGE gap (never for a genuine ambiguity, which owes the user a question
+instead) is intended follow-on work, gated on the dispatch budget above. The LLM
+planner and legacy matching/composition utilities remain for non-Ask
+conversation, explicit Research, App planning, and Block authoring. Their final symbol deletion is gated on built-CLI parity for those
 separate consumers; this implementation does not claim that cleanup complete.

@@ -17,9 +17,59 @@ const dispatchEvent = {
   envelope: { messages: [{ role: 'user', content: 'bounded research follow-up' }] },
 };
 
+it('still narrates after generation has spent its whole budget', () => {
+  // The regression this pins: narration used to share `generationGroup`, so a
+  // run that used its generation attempts had nothing left to write the answer
+  // and threw PROVIDER_DISPATCH_BUDGET_EXHAUSTED. The user saw the deterministic
+  // draft instead of prose, with no error anywhere.
+  const run = new RunScopedProviderDispatchEvidence({
+    total: 6, meaningResolution: 1, generationGroup: 2, narration: 2, repair: 1,
+  });
+  run.observe(dispatchEvent, {
+    purpose: 'answer_generation', dispatchPhase: 'generation', optIn: false,
+  });
+  run.observe({ ...dispatchEvent, attemptIndex: 2 }, {
+    purpose: 'answer_generation', dispatchPhase: 'generation', optIn: false,
+  });
+  expect(() => run.observe({ ...dispatchEvent, attemptIndex: 3 }, {
+    purpose: 'answer_generation', dispatchPhase: 'generation', optIn: false,
+  })).toThrow(expect.objectContaining({ code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' }));
+
+  expect(() => run.observe({ ...dispatchEvent, attemptIndex: 4 }, {
+    purpose: 'answer_narration', dispatchPhase: 'narration', optIn: false,
+  })).not.toThrow();
+  expect(() => run.observe({ ...dispatchEvent, attemptIndex: 5 }, {
+    purpose: 'answer_narration', dispatchPhase: 'narration', optIn: false,
+  })).not.toThrow();
+  // Narration has its own ceiling; it is not unbounded.
+  expect(() => run.observe({ ...dispatchEvent, attemptIndex: 6 }, {
+    purpose: 'answer_narration', dispatchPhase: 'narration', optIn: false,
+  })).toThrow(expect.objectContaining({ code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' }));
+});
+
+it('bounds ordinary narration rows by the resolved project egress policy', () => {
+  const withLimit = (maxNarrationRows: number) => new RunScopedProviderDispatchEvidence(
+    { total: 6, meaningResolution: 1, generationGroup: 3, narration: 2, repair: 1 },
+    undefined,
+    { maxNarrationRows, maxToolRows: 0, source: 'project_config', policyId: 'test-policy' },
+  );
+
+  expect(() => withLimit(20).observe(dispatchEvent, {
+    purpose: 'answer_narration', dispatchPhase: 'narration', optIn: true,
+    serializedResultShape: { resultRowCount: 20, columnCount: 2 },
+  })).not.toThrow();
+
+  // The admin kill-switch: zero rows permitted means a row payload is refused
+  // outright rather than quietly truncated.
+  expect(() => withLimit(0).observe(dispatchEvent, {
+    purpose: 'answer_narration', dispatchPhase: 'narration', optIn: true,
+    serializedResultShape: { resultRowCount: 1, columnCount: 2 },
+  })).toThrow();
+});
+
 it('enforces independent Research narration/sample and local-analysis physical egress caps per run', () => {
   const collector = () => new RunScopedProviderDispatchEvidence({
-    total: 8, meaningResolution: 1, generationGroup: 8, repair: 1,
+    total: 8, meaningResolution: 1, generationGroup: 8, narration: 2, repair: 1,
   });
   const run = collector();
 
@@ -57,9 +107,9 @@ it('enforces independent Research narration/sample and local-analysis physical e
   })).not.toThrow();
 });
 
-it('shares one two-send ledger across ordinary meaning and generation phases', () => {
+it('shares one ledger across ordinary meaning and generation phases', () => {
   const run = new RunScopedProviderDispatchEvidence({
-    total: 2, meaningResolution: 1, generationGroup: 2, repair: 0,
+    total: 2, meaningResolution: 1, generationGroup: 2, narration: 2, repair: 0,
   });
 
   expect(() => run.observe(dispatchEvent, {
@@ -76,7 +126,7 @@ it('shares one two-send ledger across ordinary meaning and generation phases', (
 
 it('retains the separate twelve-send Research ledger', () => {
   const run = new RunScopedProviderDispatchEvidence({
-    total: 12, meaningResolution: 1, generationGroup: 11, repair: 0,
+    total: 12, meaningResolution: 1, generationGroup: 11, narration: 2, repair: 0,
   });
   run.observe(dispatchEvent, {
     purpose: 'answer_generation', dispatchPhase: 'meaning_resolution', optIn: false,
@@ -369,3 +419,47 @@ it('isolates dispatch receipts across concurrent HTTP AgentRuns', async () => {
     rmSync(projectRoot, { recursive: true, force: true });
   }
 }, 30_000);
+
+it('stops before starting a dispatch the deadline cannot fit', () => {
+  // The regression this pins: a provider costing ~13s a call burned the whole
+  // 45s deadline in three calls and was killed mid-flight, so the run ended
+  // with NO answer — strictly worse than stopping early and answering from
+  // what it already gathered.
+  let nowMs = 0;
+  const budget = {
+    startedAtMs: 0,
+    hardDeadlineMs: 45_000,
+    hardSignal: new AbortController().signal,
+    mode: 'ask' as const,
+    elapsedMs: () => nowMs,
+    remainingMs: () => Math.max(0, 45_000 - nowMs),
+    softTargetMs: () => 30_000,
+    mayStartDiscovery: () => true,
+    narrationSoftTargetMs: () => 38_000,
+    mayStartNarration: () => true,
+  };
+  const run = new RunScopedProviderDispatchEvidence(
+    { total: 6, meaningResolution: 1, generationGroup: 3, narration: 2, repair: 1 },
+    budget,
+  );
+
+  // Two real dispatches, 13s apart, teach the sink what this provider costs.
+  expect(() => run.observe(dispatchEvent, {
+    purpose: 'answer_generation', dispatchPhase: 'generation', optIn: false,
+  })).not.toThrow();
+  nowMs = 13_000;
+  expect(() => run.observe({ ...dispatchEvent, attemptIndex: 2 }, {
+    purpose: 'answer_generation', dispatchPhase: 'generation', optIn: false,
+  })).not.toThrow();
+
+  // 32s in: 13s left, which cannot fit another ~13s call plus settle time.
+  nowMs = 32_000;
+  expect(() => run.observe({ ...dispatchEvent, attemptIndex: 3 }, {
+    purpose: 'answer_generation', dispatchPhase: 'generation', optIn: false,
+  })).toThrow(expect.objectContaining({ code: 'RUN_DEADLINE_INSUFFICIENT' }));
+
+  // Narration is exempt — it is the step that turns gathered work into an answer.
+  expect(() => run.observe({ ...dispatchEvent, attemptIndex: 4 }, {
+    purpose: 'answer_narration', dispatchPhase: 'narration', optIn: false,
+  })).not.toThrow();
+});

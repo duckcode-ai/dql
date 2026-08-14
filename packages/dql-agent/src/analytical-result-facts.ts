@@ -329,6 +329,171 @@ export function validateAnalyticalNarrativeClaims(input: {
   return { status: 'valid', citedFactIds: [...cited].sort() };
 }
 
+/**
+ * Serialize the fact set for a model that must cite it.
+ *
+ * This is deliberately NOT `renderDeterministicAnalyticalNarrative`: it carries
+ * fact ids so `validateAnalyticalNarrativeClaims` can resolve every citation,
+ * and it never joins values into prose. The model reads facts and writes
+ * sentences; it does not get to invent numbers, because any numeric token that
+ * is not present in a cited fact is rejected as `UNSUPPORTED_NUMBER`.
+ */
+export function renderAnalyticalFactBrief(input: {
+  frame: AnalyticalQuestionFrameV2;
+  factSet: AnalyticalResultFactSetV1;
+  maxFacts?: number;
+}): string {
+  const outputById = new Map(input.frame.requestedOutputs.map((output) => [output.id, output]));
+  const limit = Math.min(Math.max(1, input.maxFacts ?? 120), 400);
+  const lines = input.factSet.facts.slice(0, limit).map((fact) => {
+    const outputId = fact.outputIds[0] ?? fact.kind;
+    const label = humanizeOutput(outputId, outputById.get(outputId)?.kind);
+    const coordinates = Object.entries(fact.coordinates ?? {})
+      .map(([key, value]) => `${key}=${displayValue(value)}`)
+      .join(', ');
+    const parts = [
+      fact.factId,
+      `kind=${fact.kind}`,
+      `label=${label}`,
+      coordinates ? `at=${coordinates}` : '',
+      fact.rowIndex === undefined ? '' : `row=${fact.rowIndex}`,
+      `value=${displayValue(fact.value)}`,
+      fact.kind === 'caveat' ? `caveat=${caveatText(fact)}` : '',
+    ].filter(Boolean);
+    return `- ${parts.join(' | ')}`;
+  });
+  return lines.join('\n');
+}
+
+/**
+ * Parse the model's claim payload. Prose without explicit `factIds` cannot be
+ * verified — the validator resolves every id against the fact map — so a strict
+ * JSON contract is the only shape that can be checked rather than trusted.
+ */
+export function parseAnalyticalNarrativeClaims(raw: string): AnalyticalNarrativeClaimV1[] | undefined {
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const candidate = (fenced ? fenced[1] : raw).trim();
+  if (!candidate) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(candidate);
+  } catch {
+    return undefined;
+  }
+  const claims = (parsed as { claims?: unknown })?.claims;
+  if (!Array.isArray(claims) || claims.length === 0) return undefined;
+  const out: AnalyticalNarrativeClaimV1[] = [];
+  for (const entry of claims) {
+    if (!entry || typeof entry !== 'object') return undefined;
+    const record = entry as { claimId?: unknown; factIds?: unknown; text?: unknown };
+    const text = typeof record.text === 'string' ? record.text.trim() : '';
+    const factIds = Array.isArray(record.factIds)
+      ? record.factIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+      : [];
+    if (!text || factIds.length === 0) return undefined;
+    out.push({
+      claimId: typeof record.claimId === 'string' && record.claimId ? record.claimId : `claim:${out.length}`,
+      factIds,
+      text,
+    });
+  }
+  return out;
+}
+
+export interface ComposedAnalyticalNarrative {
+  narrative: AnalyticalNarrativeV1;
+  source: 'llm' | 'deterministic';
+  /** Validation codes that forced the deterministic floor, newest last. */
+  validationFailures: string[];
+  attempts: number;
+}
+
+export interface AnalyticalNarrativeCompletion {
+  (input: { system: string; user: string }): Promise<string>;
+}
+
+const NARRATIVE_SYSTEM_PROMPT = [
+  'You write one short, business-facing answer from verified analytical facts.',
+  'Return ONLY a JSON object: {"claims":[{"claimId":"...","factIds":["fact:..."],"text":"..."}]}.',
+  'Rules, all enforced by an automatic verifier that will reject your output:',
+  '1. Every claim must cite the exact factIds whose values it states.',
+  '2. Every number you write must appear in a fact you cited. Never compute, round, or infer a new number.',
+  '3. Never explain WHY something happened. No "because", "caused", "driven by", "led to", "resulted in".',
+  '4. Every fact whose kind is "caveat" must be cited by some claim.',
+  'Write plainly, like an analyst answering a colleague. Lead with the direct answer.',
+].join('\n');
+
+/**
+ * Compose the answer prose for an analytical result: the model drafts, the fact
+ * set verifies, and the deterministic render is the floor.
+ *
+ * The deterministic join used to BE the answer, which is why an ordinary Ask
+ * returned `label: value label: value`. It is still the guaranteed fallback, but
+ * it is now the last resort rather than the default, and a fallback caused by a
+ * failed verification is labelled so it is never silently mistaken for prose.
+ *
+ * With no `complete`, behaviour is byte-identical to the old deterministic path,
+ * which is what keeps every non-Ask consumer unchanged.
+ */
+export async function composeVerifiedAnalyticalNarrative(input: {
+  frame: AnalyticalQuestionFrameV2;
+  factSet: AnalyticalResultFactSetV1;
+  question: string;
+  complete?: AnalyticalNarrativeCompletion;
+  maxAttempts?: number;
+  maxRows?: number;
+}): Promise<ComposedAnalyticalNarrative> {
+  const floor = renderDeterministicAnalyticalNarrative({
+    frame: input.frame,
+    factSet: input.factSet,
+    ...(input.maxRows === undefined ? {} : { maxRows: input.maxRows }),
+  });
+  if (!input.complete) {
+    return { narrative: floor, source: 'deterministic', validationFailures: [], attempts: 0 };
+  }
+  const brief = renderAnalyticalFactBrief({ frame: input.frame, factSet: input.factSet });
+  const maxAttempts = Math.min(Math.max(1, input.maxAttempts ?? 2), 3);
+  const failures: string[] = [];
+  let correction = '';
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let raw: string;
+    try {
+      raw = await input.complete({
+        system: NARRATIVE_SYSTEM_PROMPT,
+        user: [
+          `Question: ${input.question}`,
+          '',
+          'Verified facts:',
+          brief,
+          correction ? `\nYour previous attempt was REJECTED: ${correction}\nFix exactly that and return the JSON again.` : '',
+        ].join('\n'),
+      });
+    } catch (error) {
+      failures.push(`PROVIDER_ERROR: ${error instanceof Error ? error.message : String(error)}`);
+      break;
+    }
+    const claims = parseAnalyticalNarrativeClaims(raw);
+    if (!claims) {
+      correction = 'The response was not the required JSON claims object.';
+      failures.push('UNPARSEABLE_CLAIMS');
+      continue;
+    }
+    const validation = validateAnalyticalNarrativeClaims({ factSet: input.factSet, claims });
+    if (validation.status === 'valid') {
+      const text = claims.map((claim) => claim.text.trim()).filter(Boolean).join(' ');
+      return {
+        narrative: deepFreeze({ version: 1, factSetId: input.factSet.factSetId, text, claims }),
+        source: 'llm',
+        validationFailures: failures,
+        attempts: attempt,
+      };
+    }
+    correction = `${validation.code} — ${validation.reason}`;
+    failures.push(validation.code);
+  }
+  return { narrative: floor, source: 'deterministic', validationFailures: failures, attempts: maxAttempts };
+}
+
 function makeFact(
   receipt: AnalyticalExecutionReceiptV1,
   input: Omit<AnalyticalResultFactV1, 'factId' | 'receiptId' | 'graphFingerprint' | 'resultFingerprint'>,
