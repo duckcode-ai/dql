@@ -638,7 +638,7 @@ function dbtSource(
  * named `location`. This index maps that entity name → the target cube and its
  * join key, so cross-model joins resolve to a real cube instead of the entity name.
  */
-export type PrimaryEntityIndex = Map<string, { cube: string; key: string }>;
+export type PrimaryEntityIndex = Map<string, { cube: string; key: string } | null>;
 
 /** Build the primary-entity → {cube, key} index across all semantic models. */
 export function buildPrimaryEntityIndex(models: DbtSemanticModel[]): PrimaryEntityIndex {
@@ -646,10 +646,13 @@ export function buildPrimaryEntityIndex(models: DbtSemanticModel[]): PrimaryEnti
   for (const model of models) {
     for (const entity of model.entities ?? []) {
       if (entity.type === 'primary' || entity.type === 'natural' || entity.type === 'unique') {
-        // First primary wins; a model's identity is its primary entity.
-        if (!index.has(entity.name)) {
-          index.set(entity.name, { cube: model.name, key: entity.expr ?? entity.name });
-        }
+        const target = { cube: model.name, key: entity.expr ?? entity.name };
+        const existing = index.get(entity.name);
+        if (existing === undefined) index.set(entity.name, target);
+        // A bare foreign entity cannot safely select between two primary model
+        // targets. Retain the ambiguity explicitly so conversion emits no
+        // model-authoritative join instead of depending on manifest order.
+        else if (existing && existing.cube !== target.cube) index.set(entity.name, null);
       }
     }
   }
@@ -1009,6 +1012,9 @@ function convertDbtMetric(
   // changes its meaning and previously produced plausible but incorrect SQL.
   const resolvedMeasure = isSimple && measureName ? measureLookup.get(measureName) : undefined;
   const nativeMetricType = resolvedMeasure ? AGG_TYPE_MAP[resolvedMeasure.agg] : undefined;
+  const governedDerivedExpression = dbtMetric.type.toLowerCase() === 'ratio'
+    ? governedRatioExpression(dbtMetric, measureLookup)
+    : undefined;
 
   return {
     name: dbtMetric.name,
@@ -1017,7 +1023,7 @@ function convertDbtMetric(
     domain: deriveDbtMetricDomain(dbtMetric, resolvedMeasure?.modelName),
     sql: resolvedMeasure && nativeMetricType
       ? buildAggSql(resolvedMeasure.agg, resolvedMeasure.sql)
-      : String(dbtMetric.type_params?.expr ?? dbtMetric.name),
+      : governedDerivedExpression ?? String(dbtMetric.type_params?.expr ?? dbtMetric.name),
     type: nativeMetricType ?? 'custom',
     table: nativeMetricType ? resolvedMeasure?.table ?? '' : '',
     cube: resolvedMeasure?.modelName,
@@ -1033,6 +1039,23 @@ function convertDbtMetric(
     aggTimeDimension: resolvedMeasure?.measure.agg_time_dimension,
     source: dbtSource('metric', dbtMetric.unique_id ?? dbtMetric.name, dbtMetric.name, dbtMetric as unknown as Record<string, unknown>),
   };
+}
+
+function governedRatioExpression(
+  metric: DbtMetric,
+  measureLookup: DbtMeasureLookup,
+): string | undefined {
+  const numeratorName = firstSemanticRefName(metric.type_params?.numerator);
+  const denominatorName = firstSemanticRefName(metric.type_params?.denominator);
+  if (!numeratorName || !denominatorName) return undefined;
+  const numerator = measureLookup.get(numeratorName);
+  const denominator = measureLookup.get(denominatorName);
+  if (!numerator || !denominator
+    || numerator.modelName !== denominator.modelName
+    || numerator.table !== denominator.table) return undefined;
+  const numeratorSql = buildAggSql(numerator.agg, numerator.sql);
+  const denominatorSql = buildAggSql(denominator.agg, denominator.sql);
+  return `(${numeratorSql}) / (${denominatorSql})`;
 }
 
 /**

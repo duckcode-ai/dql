@@ -2,7 +2,12 @@ import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import * as http from 'node:http';
 import { URL } from 'node:url';
-import type { AgentProvider, AgentMessage, ProviderRunOptions } from '@duckcodeailabs/dql-agent';
+import {
+  prepareProviderHttpDispatch,
+  type AgentProvider,
+  type AgentMessage,
+  type ProviderRunOptions,
+} from '@duckcodeailabs/dql-agent';
 import {
   getCodexCredentials,
   setCodexCredentials,
@@ -384,6 +389,13 @@ export class CodexOAuthProvider implements AgentProvider {
       body.reasoning = { effort: options.reasoningEffort, summary: 'auto' };
       body.include = ['reasoning.encrypted_content'];
     }
+    const dispatchBody = prepareProviderHttpDispatch({
+      provider: this.name,
+      operation: 'generate_stream',
+      attemptIndex: 1,
+      options,
+      envelope: body,
+    });
 
     const res = await fetch(`${CODEX_API_BASE_URL}/responses`, {
       method: 'POST',
@@ -395,7 +407,7 @@ export class CodexOAuthProvider implements AgentProvider {
         'User-Agent': `dql/${os.platform()} node/${process.version.slice(1)}`,
         ...(accountId ? { 'ChatGPT-Account-Id': accountId } : {}),
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(dispatchBody),
       signal: options.signal,
     });
     if (!res.ok || !res.body) {

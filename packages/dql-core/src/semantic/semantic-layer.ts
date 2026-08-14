@@ -532,7 +532,14 @@ export class SemanticLayer {
    */
   private compatibilityCache: Map<string, ReturnType<SemanticLayer['explainCompatibleDimensions']>> = new Map();
   private measures: Map<string, MeasureDefinition> = new Map();
+  /**
+   * Backwards-compatible bare-name entity lookup. dbt/MetricFlow legitimately
+   * repeats an entity name as a foreign key on one model and as the primary
+   * entity on another, so this map cannot be the authoritative registry.
+   */
   private entities: Map<string, EntityDefinition> = new Map();
+  /** Every model-owned entity variant, keyed by its authored entity name. */
+  private entityVariants: Map<string, EntityDefinition[]> = new Map();
   private semanticModels: Map<string, SemanticModelDefinition> = new Map();
   private savedQueries: Map<string, SavedQueryDefinition> = new Map();
   // cube-name → list of joins for that cube (adjacency list)
@@ -610,6 +617,14 @@ export class SemanticLayer {
   }
 
   addEntity(entity: EntityDefinition): void {
+    const variants = this.entityVariants.get(entity.name) ?? [];
+    const identity = semanticEntityIdentity(entity);
+    const existingIndex = variants.findIndex((candidate) => semanticEntityIdentity(candidate) === identity);
+    if (existingIndex >= 0) variants[existingIndex] = entity;
+    else variants.push(entity);
+    this.entityVariants.set(entity.name, variants);
+    // Preserve historical last-write-wins behavior for callers that ask for an
+    // unqualified bare name. Capability and relationship proof use variants.
     this.entities.set(entity.name, entity);
   }
 
@@ -818,6 +833,7 @@ export class SemanticLayer {
 
     // Build SELECT
     const selectParts: string[] = [];
+    const metricOrderExpressions: string[] = [];
 
     // Add dimensions
     for (const d of resolvedDimensions) {
@@ -849,6 +865,7 @@ export class SemanticLayer {
         expr = wrapped;
       }
       selectParts.push(`${expr} AS ${m.name}`);
+      metricOrderExpressions.push(expr);
     }
 
     // Build FROM + JOINs (apply tableMapping for actual DB table names)
@@ -968,10 +985,22 @@ export class SemanticLayer {
     // that was actually selected.
     const orderByParts: string[] = [];
     const timeAlias = timeDimDef && timeDimension ? `${timeDimDef.name}_${timeDimension.granularity}` : undefined;
+    const allowedOrderTargets = new Set([
+      ...resolvedDimensions.map((dimension) => normalizeSemanticOrderTarget(dimension.name)),
+      ...resolvedMetrics.map((metric) => normalizeSemanticOrderTarget(metric.name)),
+      ...(timeAlias ? [normalizeSemanticOrderTarget(timeAlias)] : []),
+      ...groupByParts.map(normalizeSemanticOrderTarget),
+      ...metricOrderExpressions.map(normalizeSemanticOrderTarget),
+    ]);
     for (const o of orderBy ?? []) {
       const target = timeAlias && (o.name === timeDimDef?.name || o.name === timeDimension?.name)
         ? timeAlias
         : o.name;
+      // Semantic registry paths (for example `customer__customer_name`) are
+      // lookup identities, not necessarily SQL identifiers. ORDER BY is
+      // executable only when it names a projected alias or exactly repeats a
+      // compiler-owned selected physical expression.
+      if (!allowedOrderTargets.has(normalizeSemanticOrderTarget(target))) return null;
       orderByParts.push(`${target} ${o.direction.toUpperCase()}`);
     }
 
@@ -1203,6 +1232,13 @@ export class SemanticLayer {
       // ambiguous across N+1 relations. Metric names stay unqualified: they are
       // output aliases owned by exactly one CTE.
       const grainKeySet = new Set(grainKeys.map((key) => key.toLowerCase()));
+      const outputAliases = new Set([
+        ...grainKeys.map(normalizeSemanticOrderTarget),
+        ...metrics.map((metric) => normalizeSemanticOrderTarget(metric.name)),
+      ]);
+      if (options.orderBy!.some((order) => !outputAliases.has(normalizeSemanticOrderTarget(order.name)))) {
+        return null;
+      }
       body += `\nORDER BY ${options.orderBy!.map((order) => {
         const qualified = grainKeySet.has(order.name.toLowerCase()) ? `grain_keys.${order.name}` : order.name;
         return `${qualified} ${order.direction.toUpperCase()}`;
@@ -1257,7 +1293,16 @@ export class SemanticLayer {
     return this.measures.get(name);
   }
 
-  getEntity(name: string): EntityDefinition | undefined {
+  getEntity(name: string, cube?: string): EntityDefinition | undefined {
+    if (cube) {
+      return this.entityVariants.get(name)?.find((entity) => entity.cube === cube);
+    }
+    const qualified = name.match(/^(.+?)(?:\.|__)([^.]+)$/);
+    if (qualified) {
+      const [, requestedCube, leaf] = qualified;
+      const match = this.entityVariants.get(leaf)?.find((entity) => entity.cube === requestedCube);
+      if (match) return match;
+    }
     return this.entities.get(name);
   }
 
@@ -1341,7 +1386,8 @@ export class SemanticLayer {
   }
 
   listEntities(domain?: string): EntityDefinition[] {
-    const all = Array.from(this.entities.values());
+    const all = Array.from(this.entityVariants.values()).flat()
+      .sort((left, right) => semanticEntityIdentity(left).localeCompare(semanticEntityIdentity(right)));
     return domain ? all.filter((e) => e.domain === domain) : all;
   }
 
@@ -1415,7 +1461,7 @@ export class SemanticLayer {
     for (const measure of this.measures.values()) {
       addDomain(measure.domain);
     }
-    for (const entity of this.entities.values()) {
+    for (const entity of this.listEntities()) {
       addDomain(entity.domain);
     }
     for (const model of this.semanticModels.values()) {
@@ -1441,7 +1487,7 @@ export class SemanticLayer {
     for (const preAggregation of this.preAggregations.values()) collect(preAggregation.tags);
     for (const cube of this.cubes.values()) collect(cube.tags);
     for (const measure of this.measures.values()) collect(measure.tags);
-    for (const entity of this.entities.values()) collect(entity.tags);
+    for (const entity of this.listEntities()) collect(entity.tags);
     for (const model of this.semanticModels.values()) collect(model.tags);
     for (const query of this.savedQueries.values()) collect(query.tags);
     return Array.from(tags).sort((a, b) => a.localeCompare(b));
@@ -1555,7 +1601,7 @@ export class SemanticLayer {
           )
         : [],
       entities: wantsType('entity')
-        ? Array.from(this.entities.values()).filter((entity) =>
+        ? this.listEntities().filter((entity) =>
             matchesQuery([entity.name, entity.label, entity.description, entity.table, entity.domain, entity.type, ...(entity.tags ?? [])]) &&
             matchesDomain(entity.domain) &&
             matchesTags(entity.tags),
@@ -1831,7 +1877,7 @@ export class SemanticLayer {
         Boolean(this.resolveGroupBy(ref)) ||
         this.hierarchies.has(ref) ||
         this.measures.has(ref) ||
-        this.entities.has(ref) ||
+        Boolean(this.getEntity(ref)) ||
         this.semanticModels.has(ref) ||
         this.savedQueries.has(ref) ||
         knownLevel
@@ -2142,6 +2188,11 @@ function semanticDimensionIdentity(dimension: DimensionDefinition): string {
   ].join('|').toLowerCase();
 }
 
+/** Model-qualified identity for repeated primary/foreign entity names. */
+function semanticEntityIdentity(entity: EntityDefinition): string {
+  return [entity.cube ?? entity.table, entity.name].join('|').toLowerCase();
+}
+
 /** Stable provider-neutral registry reference for a model-owned dimension. */
 export function semanticDimensionReference(dimension: Pick<DimensionDefinition, 'name' | 'cube' | 'source'>): string {
   if (dimension.cube) return `${dimension.cube}.${dimension.name}`;
@@ -2163,6 +2214,10 @@ function semanticDimensionReferences(dimension: DimensionDefinition): string[] {
 function sanitizeSqlAlias(value: string): string {
   const normalized = value.replace(/[^a-zA-Z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
   return normalized || 'metric';
+}
+
+function normalizeSemanticOrderTarget(value: string): string {
+  return value.trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
 const SQL_EXPRESSION_KEYWORDS = new Set([

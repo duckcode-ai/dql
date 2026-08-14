@@ -79,6 +79,44 @@ export interface SqlReferenceAnalysis {
   error?: string;
 }
 
+export interface SqlAnalyticalSignature {
+  version: 1;
+  statementType: 'select';
+  canonicalAst: string;
+  positionalParameters: number[];
+}
+
+/** Parser-owned identity for one named SELECT output expression. */
+export interface SqlOutputExpressionSignature {
+  version: 1;
+  outputAlias: string;
+  canonicalExpression: string;
+  operators: string[];
+  columns: string[];
+  aggregateFunctions: string[];
+}
+
+export interface GeneratedAnalyticalOutputSignature extends SqlOutputExpressionSignature {
+  /** Aggregate calls and their parser-resolved physical inputs for this output only. */
+  aggregateInputs: SqlAggregateReference[];
+}
+
+/** Parser-owned semantic facts for a generated analytical SELECT. */
+export interface GeneratedAnalyticalSqlSignatureV1 {
+  version: 1;
+  canonicalAst: string;
+  outputs: GeneratedAnalyticalOutputSignature[];
+  groupByColumns: string[];
+  filterExpression?: string;
+  orderBy: Array<{ expression: string; direction: 'asc' | 'desc' }>;
+  limit?: { kind: 'literal'; value: number } | { kind: 'parameter'; value: string };
+  sourceRelations: string[];
+  joins: SqlJoinCondition[];
+  setOperations: string[];
+  hasWindow: boolean;
+  positionalParameters: number[];
+}
+
 const DIALECT_MAP: Record<string, string> = {
   duckdb: 'postgresql',
   postgres: 'postgresql',
@@ -243,6 +281,316 @@ export function analyzeSqlReferences(sql: string, dialect = 'duckdb'): SqlRefere
     aliasToRelation: Object.fromEntries(aliasToRelation),
     scopes,
   };
+}
+
+/**
+ * Parser-owned same-plan authority for bounded SQL repair. The complete SELECT
+ * AST is retained (including projections, predicates, grouping, joins,
+ * aggregates, ordering, and bounds); only parser locations and identifier
+ * quoting/case are normalized. Unsupported or multi-statement SQL has no
+ * signature and therefore cannot be automatically repaired.
+ */
+export function buildSqlAnalyticalSignature(sql: string, dialect = 'duckdb'): SqlAnalyticalSignature | undefined {
+  const parser = new Parser();
+  let astRoot: unknown;
+  try {
+    astRoot = parser.astify(sql, { database: DIALECT_MAP[dialect.toLowerCase()] ?? 'postgresql' });
+  } catch {
+    return undefined;
+  }
+  const statements = Array.isArray(astRoot) ? astRoot : [astRoot];
+  if (statements.length !== 1 || readStatementType(statements[0]) !== 'select') return undefined;
+  const canonical = canonicalSqlAst(statements[0]);
+  return {
+    version: 1,
+    statementType: 'select',
+    canonicalAst: stableSqlAstJson(canonical),
+    positionalParameters: Array.from(sql.matchAll(/\$(\d+)\b/g), (match) => Number(match[1])),
+  };
+}
+
+/**
+ * Return an exact expression-tree signature for one unambiguous named output.
+ * Relation aliases are intentionally excluded from the expression identity;
+ * callers must bind physical relations separately. Column names, functions,
+ * operators, CASE predicates, literals, and nesting remain in the signature.
+ */
+export function buildSqlOutputExpressionSignature(
+  sql: string,
+  outputAlias: string,
+  dialect = 'duckdb',
+): SqlOutputExpressionSignature | undefined {
+  const parser = new Parser();
+  let astRoot: unknown;
+  try {
+    astRoot = parser.astify(sql, { database: DIALECT_MAP[dialect.toLowerCase()] ?? 'postgresql' });
+  } catch {
+    return undefined;
+  }
+  const normalizedAlias = normalizeSqlIdentifier(outputAlias);
+  const expressions: unknown[] = [];
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    if (readStatementType(record) === 'select' && Array.isArray(record.columns)) {
+      for (const column of record.columns) {
+        if (!column || typeof column !== 'object') continue;
+        const projection = column as Record<string, unknown>;
+        const alias = stringField(projection, 'as');
+        if (alias && normalizeSqlIdentifier(alias) === normalizedAlias && projection.expr) {
+          expressions.push(projection.expr);
+        }
+      }
+    }
+    for (const child of Object.values(record)) visit(child);
+  };
+  visit(astRoot);
+  if (expressions.length !== 1) return undefined;
+
+  return buildOutputExpressionSignatureFromAst(expressions[0], normalizedAlias);
+}
+
+function buildOutputExpressionSignatureFromAst(
+  expression: unknown,
+  normalizedAlias: string,
+): SqlOutputExpressionSignature {
+
+  const operators = new Set<string>();
+  const columns = new Set<string>();
+  const aggregateFunctions = new Set<string>();
+  const collect = (value: unknown): void => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      for (const item of value) collect(item);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    if (typeof record.operator === 'string') operators.add(record.operator.toUpperCase());
+    if (record.type === 'column_ref') {
+      const column = readColumnRefName(record);
+      if (column && column !== '*') columns.add(normalizeSqlIdentifier(column));
+    }
+    if (record.type === 'aggr_func' && typeof record.name === 'string') {
+      aggregateFunctions.add(record.name.toUpperCase());
+    }
+    for (const child of Object.values(record)) collect(child);
+  };
+  collect(expression);
+  return {
+    version: 1,
+    outputAlias: normalizedAlias,
+    canonicalExpression: stableSqlAstJson(canonicalSqlOutputExpressionAst(expression)),
+    operators: Array.from(operators).sort(),
+    columns: Array.from(columns).sort(),
+    aggregateFunctions: Array.from(aggregateFunctions).sort(),
+  };
+}
+
+export function buildGeneratedAnalyticalSqlSignature(
+  sql: string,
+  dialect = 'duckdb',
+): GeneratedAnalyticalSqlSignatureV1 | undefined {
+  const parser = new Parser();
+  let astRoot: unknown;
+  try {
+    astRoot = parser.astify(sql, { database: DIALECT_MAP[dialect.toLowerCase()] ?? 'postgresql' });
+  } catch {
+    return undefined;
+  }
+  const statements = Array.isArray(astRoot) ? astRoot : [astRoot];
+  if (statements.length !== 1 || readStatementType(statements[0]) !== 'select') return undefined;
+  const statement = statements[0] as Record<string, unknown>;
+  if (!Array.isArray(statement.columns)) return undefined;
+  const outputAliases: string[] = [];
+  for (const column of statement.columns) {
+    if (!column || typeof column !== 'object') return undefined;
+    const projection = column as Record<string, unknown>;
+    const alias = stringField(projection, 'as')
+      ?? (projection.expr && typeof projection.expr === 'object'
+        ? readColumnRefName(projection.expr as Record<string, unknown>)
+        : undefined);
+    if (!alias) return undefined;
+    outputAliases.push(alias);
+  }
+  if (new Set(outputAliases.map(normalizeSqlIdentifier)).size !== outputAliases.length) return undefined;
+  const analysis = analyzeSqlReferences(sql, dialect);
+  if (!analysis.parsed || analysis.statementTypes.some((type) => type !== 'select')) return undefined;
+  const aliasToRelation = new Map(Object.entries(analysis.aliasToRelation));
+  const singleRelation = analysis.tables.length === 1 ? analysis.tables[0] : undefined;
+  const derivedRelations = new Set(analysis.derivedRelations.map(normalizeSqlIdentifier));
+  const outputs = statement.columns.map((column, index) => {
+    const expression = (column as Record<string, unknown>).expr;
+    const aggregateInputs: SqlAggregateReference[] = [];
+    collectSqlAggregates(expression, {
+      ctes: new Set(analysis.ctes.map(normalizeSqlIdentifier)),
+      derivedRelations,
+      aliasToRelation,
+      ...(singleRelation ? { singleRelation } : {}),
+      aggregates: aggregateInputs,
+    });
+    return {
+      ...buildOutputExpressionSignatureFromAst(expression, normalizeSqlIdentifier(outputAliases[index]!)),
+      aggregateInputs,
+    };
+  });
+
+  const groupBy = statement.groupby && typeof statement.groupby === 'object'
+    ? (statement.groupby as Record<string, unknown>).columns
+    : undefined;
+  const groupByColumns = Array.isArray(groupBy)
+    ? groupBy.flatMap((expression) => {
+        if (!expression || typeof expression !== 'object') return [];
+        const column = readColumnRefName(expression as Record<string, unknown>);
+        return column ? [normalizeSqlIdentifier(column)] : [];
+      })
+    : [];
+  if (Array.isArray(groupBy) && groupByColumns.length !== groupBy.length) return undefined;
+
+  const orderBy = Array.isArray(statement.orderby)
+    ? statement.orderby.flatMap((item) => {
+        if (!item || typeof item !== 'object') return [];
+        const order = item as Record<string, unknown>;
+        if (!order.expr || typeof order.expr !== 'object') return [];
+        const expression = readColumnRefName(order.expr as Record<string, unknown>);
+        if (!expression) return [];
+        const direction = typeof order.type === 'string' && order.type.toLowerCase() === 'desc' ? 'desc' as const : 'asc' as const;
+        return [{ expression: normalizeSqlIdentifier(expression), direction }];
+      })
+    : [];
+  if (Array.isArray(statement.orderby) && orderBy.length !== statement.orderby.length) return undefined;
+
+  const limitValues = statement.limit && typeof statement.limit === 'object'
+    ? (statement.limit as Record<string, unknown>).value
+    : undefined;
+  let limit: GeneratedAnalyticalSqlSignatureV1['limit'];
+  if (Array.isArray(limitValues) && limitValues.length > 0) {
+    if (limitValues.length !== 1 || !limitValues[0] || typeof limitValues[0] !== 'object') return undefined;
+    const value = limitValues[0] as Record<string, unknown>;
+    if (value.type === 'number' && typeof value.value === 'number') limit = { kind: 'literal', value: value.value };
+    else if (value.type === 'param' || value.type === 'origin') limit = { kind: 'parameter', value: stableSqlAstJson(canonicalSqlAst(value)) };
+    else return undefined;
+  }
+
+  const setOperations: string[] = [];
+  let setCursor: Record<string, unknown> | undefined = statement;
+  while (setCursor?._next && typeof setCursor._next === 'object') {
+    setOperations.push(typeof setCursor.set_op === 'string' ? setCursor.set_op.toLowerCase() : 'unknown');
+    setCursor = setCursor._next as Record<string, unknown>;
+  }
+  let hasWindow = false;
+  const detectWindow = (value: unknown): void => {
+    if (!value || typeof value !== 'object' || hasWindow) return;
+    if (Array.isArray(value)) {
+      for (const child of value) detectWindow(child);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    if (record.over || record.window) hasWindow = true;
+    for (const child of Object.values(record)) detectWindow(child);
+  };
+  detectWindow(statement);
+  const analytical = buildSqlAnalyticalSignature(sql, dialect);
+  if (!analytical) return undefined;
+  return {
+    version: 1,
+    canonicalAst: analytical.canonicalAst,
+    outputs,
+    groupByColumns: Array.from(new Set(groupByColumns)).sort(),
+    ...(statement.where ? { filterExpression: stableSqlAstJson(canonicalSqlOutputExpressionAst(statement.where)) } : {}),
+    orderBy,
+    ...(limit ? { limit } : {}),
+    sourceRelations: [...analysis.tables].sort(),
+    joins: analysis.joins,
+    setOperations,
+    hasWindow,
+    positionalParameters: analytical.positionalParameters,
+  };
+}
+
+function canonicalSqlOutputExpressionAst(value: unknown, key = ''): unknown {
+  if (Array.isArray(value)) return value.map((item) => canonicalSqlOutputExpressionAst(item));
+  if (!value || typeof value !== 'object') {
+    if (typeof value === 'string' && ['column', 'name'].includes(key)) return normalizeSqlIdentifier(value);
+    if (typeof value === 'string' && key === 'operator' && value === '!=') return '<>';
+    return value;
+  }
+  const record = value as Record<string, unknown>;
+  // MetricFlow preserves ratio meaning while adding numeric transport wrappers.
+  // Strip only wrappers whose semantics are provably aggregation-neutral:
+  // CAST(expr AS numeric) and NULLIF(expr, 0) on the denominator. Arbitrary
+  // functions, fallback values, or operators remain part of the identity.
+  if (record.type === 'cast' && record.expr && isAggregationNeutralNumericCast(record)) {
+    return canonicalSqlOutputExpressionAst(record.expr);
+  }
+  const functionName = sqlFunctionName(record);
+  const functionArgs = record.args && typeof record.args === 'object' && !Array.isArray(record.args)
+    ? (record.args as Record<string, unknown>).value
+    : undefined;
+  if (functionName === 'nullif' && Array.isArray(functionArgs) && functionArgs.length === 2
+    && isSqlNumericZero(functionArgs[1])) {
+    return canonicalSqlOutputExpressionAst(functionArgs[0]);
+  }
+  return Object.fromEntries(Object.entries(record)
+    .filter(([entryKey]) => entryKey !== 'loc'
+      && entryKey !== 'parentheses'
+      && !(record.type === 'column_ref' && entryKey === 'table'))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([entryKey, nested]) => [entryKey, canonicalSqlOutputExpressionAst(nested, entryKey)]));
+}
+
+function isAggregationNeutralNumericCast(record: Record<string, unknown>): boolean {
+  const target = record.target;
+  const targetValue = Array.isArray(target) ? target[0] : target;
+  const targetType = targetValue && typeof targetValue === 'object' && !Array.isArray(targetValue)
+    ? (targetValue as Record<string, unknown>).dataType ?? (targetValue as Record<string, unknown>).type
+    : targetValue;
+  if (typeof targetType !== 'string') return false;
+  return new Set([
+    'bigint', 'decimal', 'double', 'double precision', 'float', 'hugeint',
+    'int', 'integer', 'numeric', 'real', 'smallint', 'tinyint',
+  ]).has(targetType.trim().toLowerCase());
+}
+
+function sqlFunctionName(record: Record<string, unknown>): string | undefined {
+  if (record.type !== 'function') return undefined;
+  const name = record.name;
+  if (typeof name === 'string') return normalizeSqlIdentifier(name);
+  if (!name || typeof name !== 'object' || Array.isArray(name)) return undefined;
+  const parts = (name as Record<string, unknown>).name;
+  if (!Array.isArray(parts) || parts.length !== 1) return undefined;
+  const part = parts[0];
+  if (!part || typeof part !== 'object' || Array.isArray(part)) return undefined;
+  const value = (part as Record<string, unknown>).value;
+  return typeof value === 'string' ? normalizeSqlIdentifier(value) : undefined;
+}
+
+function isSqlNumericZero(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return record.type === 'number' && Number(record.value) === 0;
+}
+
+function canonicalSqlAst(value: unknown, key = ''): unknown {
+  if (Array.isArray(value)) return value.map((item) => canonicalSqlAst(item));
+  if (!value || typeof value !== 'object') {
+    if (typeof value === 'string' && ['table', 'column', 'db', 'database', 'schema', 'as', 'name'].includes(key)) {
+      return normalizeSqlIdentifier(value);
+    }
+    if (typeof value === 'string' && key === 'operator' && value === '!=') return '<>';
+    return value;
+  }
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([entryKey]) => entryKey !== 'loc')
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([entryKey, nested]) => [entryKey, canonicalSqlAst(nested, entryKey)]));
+}
+
+function stableSqlAstJson(value: unknown): string {
+  return JSON.stringify(value);
 }
 
 function collectSqlReferenceScopes(node: unknown, id: string): SqlReferenceScope[] {

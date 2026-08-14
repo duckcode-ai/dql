@@ -1,13 +1,20 @@
 /**
  * Immutable, snapshot-bound analytical plan shared by every downstream route.
- * The router emits it authoritatively by default. Shadow mode remains the
- * bounded route-level rollback switch while integration verification closes.
+ * The router emits it authoritatively by default. The `shadow` discriminator
+ * remains only for explicit dev/test comparison fixtures; production has no
+ * environment flag or request field that can select it.
  *
  * Acceptance: AGT-013, API-006.
  */
 
 import { createHash } from "node:crypto";
-import type { AnalyticalQuestionFrameV2 } from "@duckcodeailabs/dql-core";
+import {
+  normalizeMetricCapabilityContract,
+  type AnalyticalDimensionRole,
+  type AnalyticalQuestionFrameV2,
+  type MetricCapabilityContract,
+  type ResolvedRelationshipProofV1,
+} from "@duckcodeailabs/dql-core";
 import type { KnowledgeLens } from "./domain-context.js";
 import type {
   AgentEvidenceCandidate,
@@ -16,6 +23,7 @@ import type {
   MeaningQuestionType,
   MeaningResolution,
 } from './meaning-resolution.js';
+import { buildResolvedRelationshipProofsV1 } from './relationship-proof.js';
 
 export type ResolvedPlanCapability =
   | 'certified_execution'
@@ -54,6 +62,10 @@ export interface ResolvedAnalyticalPlan {
   confidence: MeaningResolution['confidence'];
   selectedConceptIds: string[];
   executionId?: string;
+  /** Exact normalized execution authority selected before the plan was frozen. */
+  selectedCapability?: MetricCapabilityContract;
+  /** Stable authority identity retained separately for receipt comparison. */
+  selectedCapabilityFingerprint?: string;
   recommendedRoute: MeaningExecutionRoute;
   capability: ResolvedPlanCapability;
   query: {
@@ -78,6 +90,8 @@ export interface ResolvedAnalyticalPlan {
   entityGrain?: string;
   sourceRelationIds: string[];
   relationshipPathIds: string[];
+  /** Exact selected relationship authority; native semantic paths are never DQL relationship IDs. */
+  relationshipProofs?: ResolvedRelationshipProofV1[];
   compatibilityProof: ResolvedPlanCompatibilityProof[];
   outputContract: {
     measures: string[];
@@ -90,6 +104,21 @@ export interface ResolvedAnalyticalPlan {
   rejectedCandidates: Array<{ id: string; reason: string }>;
   missingInformation: string[];
   clarification?: string;
+  /** Typed deterministic failure retained without changing the selected plan. */
+  resolutionFailure?: {
+    outcome: 'clarify' | 'modeling_gap' | 'policy_blocked';
+    codes: string[];
+    candidateIds: string[];
+    selectedCapabilityId?: string;
+    selectedExecutionId?: string;
+    finalCapability: ResolvedPlanCapability;
+    bindings: Array<{
+      kind: 'measure' | 'dimension' | 'filter';
+      requested: string;
+      status: ResolvedPlanMemberBinding['status'];
+      candidateIds: string[];
+    }>;
+  };
   knowledgeLens?: KnowledgeLens;
   /** Exact selected policy identities and source hashes used for defaults. */
   analyticalPolicies?: Array<{ policyId: string; sourceHash: string }>;
@@ -134,7 +163,12 @@ export function buildResolvedAnalyticalPlan(
   const executionCandidate = input.resolution.recommendedExecutionId
     ? byLegacyId.get(input.resolution.recommendedExecutionId)
     : selectedCandidates[0];
-  const bindingCandidates = resolutionUsesRelationalEvidence(input.resolution)
+  const bindingCandidates = input.resolution.recommendedRoute === 'certified' && executionCandidate
+    // A deterministically compatible certified block has already proved the
+    // complete tuple. Bind its declared inputs/outputs as one execution
+    // authority instead of mixing in the semantic concept used to select it.
+    ? [executionCandidate]
+    : resolutionUsesRelationalEvidence(input.resolution)
     ? input.candidates
     : selectedCandidates.length > 0
       ? selectedCandidates
@@ -161,31 +195,108 @@ export function buildResolvedAnalyticalPlan(
   const dimensionBindingCandidates = input.resolution.analyticalFrame
     ? input.candidates
     : bindingCandidates;
+  const selectedCapability = normalizeMetricCapabilityContract(executionCandidate?.analyticalCapability);
+  const bindDimension = (
+    requested: string,
+    roles: AnalyticalDimensionRole[],
+  ): ResolvedPlanMemberBinding => {
+    const capabilityBinding = bindSelectedCapabilityDimension(
+      requested,
+      selectedCapability,
+      roles,
+      input.candidates,
+    );
+    // A provider frame may describe a selected capability, but it cannot pick
+    // one of that capability's grouping dimensions for the host. Once a
+    // normalized capability supplies a relevant binding, its identifiers,
+    // roles, entity/grain and relationship proof are authoritative.
+    if (capabilityBinding && capabilityBinding.status !== 'unresolved') return capabilityBinding;
+    const normalizedRequested = normalize(requested);
+    const frameIds = uniqueSorted((input.resolution.analyticalFrame?.dimensions ?? [])
+      .filter((binding) =>
+        capabilityEntailsFrameDimension(selectedCapability, binding)
+        && (!selectedCapability || binding.role === 'time_axis')
+        && memberTermMatches(normalize(binding.dimensionId), normalizedRequested))
+      .map((binding) => binding.dimensionId));
+    if (frameIds.length === 1) {
+      return {
+        requested,
+        qualifiedId: frameIds[0],
+        status: 'resolved',
+        candidateIds: frameIds,
+      };
+    }
+    if (capabilityBinding) return capabilityBinding;
+    return bindRequestedMember(requested, dimensionBindingCandidates, 'dimension');
+  };
+  const rankingRequested = input.resolution.questionType === 'ranking'
+    || input.resolution.queryIntent.order !== undefined
+    || input.resolution.queryIntent.limit !== undefined;
   const dimensions = input.resolution.queryIntent.dimensions
-    .map((requested) => bindRequestedMember(requested, dimensionBindingCandidates, 'dimension'));
+    .map((requested) => bindDimension(
+      requested,
+      rankingRequested ? ['group_by', 'rank_entity'] : ['group_by'],
+    ));
   const filters = input.resolution.queryIntent.filters.map((filter) => ({
     ...filter,
-    binding: bindRequestedMember(filter.field, dimensionBindingCandidates, 'dimension'),
+    binding: bindDimension(filter.field, ['filter']),
   }));
-  const compatibilityProof = selectedCandidates.map((candidate) => ({
+  const capabilityDimensionProof = resolvedCapabilityDimensionProof(
+    selectedCapability,
+    dimensions,
+    filters,
+  );
+  const proofCandidates = [
+    ...selectedCandidates,
+    ...(executionCandidate && !selectedCandidates.some((candidate) => candidate.id === executionCandidate.id)
+      ? [executionCandidate]
+      : []),
+  ];
+  const compatibilityProof = proofCandidates.map((candidate) => ({
     candidateId: canonicalId(candidate),
     compatibility: candidate.compatibility,
-    facts: [...(candidate.compatibilityFacts ?? [])].sort(),
+    facts: uniqueSorted([
+      ...(candidate.compatibilityFacts ?? []),
+      ...(candidate.id === executionCandidate?.id && selectedCapability
+        ? selectedCapabilityProofFacts(selectedCapability, capabilityDimensionProof)
+        : []),
+    ]),
   }));
   const capability = resolveCapability(input.resolution, executionCandidate, measures, dimensions, filters);
+  const bindingGaps = bindingMissingInformation(measures, dimensions, filters);
+  const missingInformation = uniqueSorted([
+    ...input.resolution.missingInformation,
+    ...bindingGaps,
+    ...(capability === 'blocked' && input.resolution.missingInformation.length === 0 && bindingGaps.length === 0
+      ? [`The selected ${input.resolution.recommendedRoute} capability is not executable for this analytical tuple.`]
+      : []),
+  ]);
   const timeBounds = input.resolution.queryIntent.timeRange
     ? resolvePlanTimeRange(input.resolution.queryIntent.timeRange, input.referenceTime ?? new Date())
     : undefined;
+  const snapshotId = input.evidence.knowledgeLens?.snapshotId
+    ?? input.evidence.snapshotId
+    ?? input.evidence.sourceFingerprint
+    ?? 'snapshot-unavailable';
+  const selectedExecutionCapability = selectedCapability?.executionCapabilities.find((candidate) =>
+    candidate.route === input.resolution.recommendedRoute);
+  const relationshipProofs = selectedCapability && selectedExecutionCapability && executionId
+    ? buildResolvedRelationshipProofsV1({
+        capability: selectedCapability,
+        dimensionIds: capabilityDimensionProof.map((dimension) => dimension.dimensionId),
+        route: selectedExecutionCapability.route,
+        ...(selectedExecutionCapability.adapterId ? { adapterId: selectedExecutionCapability.adapterId } : {}),
+        executionId,
+        snapshotId,
+      })
+    : [];
   const payload = {
     schemaVersion: input.resolution.analyticalFrame
       ? (2 as const)
       : (1 as const),
-    mode: input.mode ?? ("shadow" as const),
+    mode: input.mode ?? ("authoritative" as const),
     revision: 0,
-    snapshotId: input.evidence.knowledgeLens?.snapshotId
-      ?? input.evidence.snapshotId
-      ?? input.evidence.sourceFingerprint
-      ?? 'snapshot-unavailable',
+    snapshotId,
     sourceFingerprint: input.evidence.sourceFingerprint,
     question: input.question,
     interpretedQuestion: input.resolution.interpretedQuestion,
@@ -193,6 +304,12 @@ export function buildResolvedAnalyticalPlan(
     confidence: input.resolution.confidence,
     selectedConceptIds,
     executionId,
+    ...(selectedCapability
+      ? {
+          selectedCapability,
+          selectedCapabilityFingerprint: selectedCapability.sourceFingerprint,
+        }
+      : {}),
     recommendedRoute: input.resolution.recommendedRoute,
     capability,
     query: {
@@ -205,17 +322,19 @@ export function buildResolvedAnalyticalPlan(
       ...(input.resolution.queryIntent.order ? { order: input.resolution.queryIntent.order } : {}),
       ...(input.resolution.queryIntent.limit !== undefined ? { limit: input.resolution.queryIntent.limit } : {}),
     },
-    entityGrain:
-      input.resolution.analyticalFrame?.entityGrainIds[0] ??
-      executionCandidate?.primaryEntity,
+    entityGrain: selectedCapability
+      ? resolvedCapabilityEntityGrain(selectedCapability, dimensions)
+      : input.resolution.analyticalFrame?.entityGrainIds[0] ?? executionCandidate?.primaryEntity,
     sourceRelationIds: uniqueSorted(
       selectedCandidates.flatMap((candidate) => candidate.sourceObjects ?? []),
     ),
-    relationshipPathIds: uniqueSorted(
-      selectedCandidates.flatMap(
+    relationshipPathIds: selectedCapability
+      ? uniqueSorted(relationshipProofs.flatMap((proof) =>
+        proof.kind === 'dql_relationship_path' ? proof.relationshipPathIds : []))
+      : uniqueSorted(selectedCandidates.flatMap(
         (candidate) => candidate.relationshipEvidence ?? [],
-      ),
-    ),
+      )),
+    relationshipProofs,
     compatibilityProof,
     outputContract: {
       measures: uniqueSorted(
@@ -248,8 +367,34 @@ export function buildResolvedAnalyticalPlan(
       const retrieved = byLegacyId.get(candidate.id);
       return { id: retrieved ? canonicalId(retrieved) : candidate.id, reason: candidate.reason };
     }),
-    missingInformation: [...input.resolution.missingInformation],
+    missingInformation,
     clarification: input.resolution.clarifyingQuestion,
+    ...(capability === 'blocked'
+      ? {
+          resolutionFailure: {
+            outcome: input.resolution.compatibilityOutcome
+              ?? (input.resolution.recommendedRoute === 'clarify' || input.resolution.confidence === 'low'
+                ? 'clarify'
+                : bindingCandidateIds(measures, dimensions, filters).length > 0
+                  ? 'clarify'
+                  : 'modeling_gap'),
+            codes: uniqueSorted([
+              ...(input.resolution.compatibilityFailures ?? []).map((failure) => failure.code),
+              ...bindingFailureCodes(measures, dimensions, filters),
+            ]),
+            candidateIds: uniqueSorted([
+              ...(input.resolution.compatibilityFailures ?? []).flatMap((failure) => failure.candidateIds),
+              ...bindingCandidateIds(measures, dimensions, filters),
+            ]),
+            ...(selectedCapability?.metricId
+              ? { selectedCapabilityId: selectedCapability.metricId }
+              : {}),
+            ...(executionId ? { selectedExecutionId: executionId } : {}),
+            finalCapability: capability,
+            bindings: unresolvedBindingReceipts(measures, dimensions, filters),
+          },
+        }
+      : {}),
     knowledgeLens: input.evidence.knowledgeLens,
     ...((input.resolution.analyticalPolicyIds?.length ?? 0) > 0
       ? {
@@ -274,6 +419,306 @@ export function buildResolvedAnalyticalPlan(
     ...payload,
     planId: `rap:${fingerprint.slice(0, 24)}`,
     fingerprint,
+  });
+}
+
+/**
+ * The selected metric capability is the sole authority for metric-relative
+ * dimensions. Standalone member cards can help the model explain meaning, but
+ * cannot introduce a second execution binding or substitute a same-name ID.
+ */
+function bindSelectedCapabilityDimension(
+  requested: string,
+  capability: MetricCapabilityContract | undefined,
+  requiredRoles: AnalyticalDimensionRole[],
+  candidates: AgentEvidenceCandidate[],
+): ResolvedPlanMemberBinding | undefined {
+  if (!capability) return undefined;
+  const eligible = eligibleCapabilityDimensions(capability, requiredRoles);
+  const exactIds = uniqueSorted(eligible
+    .filter((dimension) => dimension.dimensionId === requested)
+    .map((dimension) => dimension.dimensionId));
+  if (exactIds.length === 1) {
+    return {
+      requested,
+      qualifiedId: exactIds[0],
+      status: 'resolved',
+      candidateIds: exactIds,
+    };
+  }
+  const requestedEntityEvidence = candidates.filter((candidate) =>
+    candidate.semanticObjectType === 'entity'
+    && candidateTerms(candidate).some((term) =>
+      termMatchSpecificity(term, canonicalTokens(requested)) > 0));
+  const entityScoped = requestedEntityEvidence.length > 0
+    ? eligible.filter((dimension) => capabilityDimensionMatchesEntityEvidence(
+      dimension,
+      requestedEntityEvidence,
+    ))
+    : [];
+  const bindingPool = entityScoped.length > 0 ? entityScoped : eligible;
+  const scored = bindingPool
+    .map((dimension) => ({
+      dimension,
+      score: capabilityDimensionMatchScore(requested, dimension, capability, candidates),
+    }))
+    .filter((match) => match.score > 0);
+  if (scored.length === 0) {
+    return {
+      requested,
+      status: 'unresolved',
+      // Role-compatible but semantically unrelated members are not choices a
+      // user can use to repair this binding. Keep the list empty so the router
+      // reports a modeling/binding gap instead of offering arbitrary booleans.
+      candidateIds: [],
+    };
+  }
+  const bestScore = Math.max(...scored.map((match) => match.score));
+  const matches = scored
+    .filter((match) => match.score === bestScore)
+    .map((match) => match.dimension);
+  const ids = uniqueSorted(matches.map((dimension) => dimension.dimensionId));
+  return {
+    requested,
+    ...(ids.length === 1 ? { qualifiedId: ids[0] } : {}),
+    status: ids.length === 1 ? 'resolved' : 'ambiguous',
+    candidateIds: ids,
+  };
+}
+
+function capabilityDimensionMatchScore(
+  requested: string,
+  dimension: MetricCapabilityContract['dimensions'][number],
+  capability: MetricCapabilityContract,
+  candidates: AgentEvidenceCandidate[],
+): number {
+  const requestedTokens = canonicalTokens(requested);
+  if (requestedTokens.length === 0) return 0;
+  const evidenceTerms = candidates
+    .filter((candidate) => candidate.kind === 'semantic_member'
+      && candidate.semanticObjectType !== 'entity'
+      && (candidate.qualifiedId ?? candidate.id) === dimension.dimensionId)
+    .flatMap((candidate) => [candidate.name, ...(candidate.aliases ?? [])]);
+  const evidenceScore = Math.max(0, ...evidenceTerms.map((term) =>
+    termMatchSpecificity(term, requestedTokens)));
+  const authoredDisplayScore = Math.max(
+    0,
+    ...[dimension.label, ...(dimension.aliases ?? [])]
+      .filter((term): term is string => Boolean(term))
+      .map((term) => termMatchSpecificity(term, requestedTokens)),
+  );
+  const localScore = termMatchSpecificity(localQualifiedLeaf(dimension.dimensionId), requestedTokens);
+  const conventionalIdentityScore = conventionalIdentitySpecificity(
+    localQualifiedLeaf(dimension.dimensionId),
+    requestedTokens,
+  );
+  const entityScore = termMatchSpecificity(localQualifiedLeaf(dimension.entityId), requestedTokens);
+  const identityScore = Math.max(
+    evidenceScore > 0 ? 1_000 + evidenceScore : 0,
+    authoredDisplayScore > 0 ? 900 + authoredDisplayScore : 0,
+    conventionalIdentityScore > 0 ? 1_100 + conventionalIdentityScore : 0,
+    localScore > 0 ? 600 + localScore : 0,
+    entityScore > 0 ? 300 + entityScore : 0,
+  );
+  if (identityScore === 0) return 0;
+  const authorityScore =
+    (dimension.supportedRoles.includes('display') ? 8 : 0)
+    + (dimension.entityId === capability.primaryEntityId ? 4 : 0)
+    + (capability.resultGrainIds.includes(dimension.entityId) ? 4 : 0)
+    + ((dimension.relationshipPathIds?.length ?? 0) > 0 ? 4 : 0);
+  return identityScore + authorityScore;
+}
+
+function conventionalIdentitySpecificity(term: string, requestedTokens: string[]): number {
+  const termTokens = canonicalTokens(term);
+  if (!requestedTokens.every((token) => termTokens.includes(token))) return 0;
+  const remaining = termTokens.filter((token) => !requestedTokens.includes(token));
+  const identityDescriptors = new Set(['display', 'identifier', 'id', 'key', 'label', 'name', 'title']);
+  return remaining.length === 1 && identityDescriptors.has(remaining[0]!) ? 100 : 0;
+}
+
+function capabilityDimensionMatchesEntityEvidence(
+  dimension: MetricCapabilityContract['dimensions'][number],
+  entityCandidates: AgentEvidenceCandidate[],
+): boolean {
+  const ownerTokens = canonicalTokens(localQualifiedOwner(dimension.dimensionId));
+  return entityCandidates.some((candidate) => {
+    const candidateId = candidate.qualifiedId ?? candidate.id;
+    if (dimension.entityId === candidateId) return true;
+    if (ownerTokens.length === 0) return false;
+    const entityTerms = [candidate.name, ...(candidate.aliases ?? []), localQualifiedLeaf(candidateId)];
+    return entityTerms.some((term) => {
+      const tokens = canonicalTokens(localQualifiedLeaf(term));
+      return tokens.length > 0 && tokens.every((token) => ownerTokens.includes(token));
+    });
+  });
+}
+
+function termMatchSpecificity(term: string, requestedTokens: string[]): number {
+  const termTokens = canonicalTokens(term);
+  if (termTokens.length === 0 || !requestedTokens.every((token) => termTokens.includes(token))) return 0;
+  if (termTokens.length === requestedTokens.length
+    && termTokens.every((token, index) => token === requestedTokens[index])) return 100;
+  return 50 + requestedTokens.length;
+}
+
+function canonicalTokens(value: string): string[] {
+  return normalize(value)
+    .split(' ')
+    .filter(Boolean)
+    .map(singularizeBindingToken);
+}
+
+function singularizeBindingToken(value: string): string {
+  if (value.length <= 4 || value.endsWith('ss') || value.endsWith('us') || value.endsWith('is')) return value;
+  if (value.endsWith('ies')) return `${value.slice(0, -3)}y`;
+  return value.endsWith('s') ? value.slice(0, -1) : value;
+}
+
+function localQualifiedLeaf(value: string): string {
+  const leaf = value.split(/[:./]+/).filter(Boolean).at(-1);
+  return leaf ?? value;
+}
+
+function localQualifiedOwner(value: string): string {
+  const local = value.split(':').at(-1) ?? value;
+  const segments = local.split(/[./]+/).filter(Boolean);
+  return segments.length > 1 ? segments[0]! : '';
+}
+
+function eligibleCapabilityDimensions(
+  capability: MetricCapabilityContract | undefined,
+  requiredRoles: AnalyticalDimensionRole[],
+): MetricCapabilityContract['dimensions'] {
+  if (!capability) return [];
+  return capability.dimensions.filter((dimension) => {
+    if (!requiredRoles.every((role) => dimension.supportedRoles.includes(role))) return false;
+    const sameEntity = dimension.entityId === capability.primaryEntityId;
+    const declaredGrain = capability.resultGrainIds.includes(dimension.entityId);
+    const relationshipProven = (dimension.relationshipPathIds?.length ?? 0) > 0;
+    const nativeGroupingProven = Boolean(dimension.nativeGroupingReference)
+      && capability.executionCapabilities.some((execution) => execution.route === 'semantic');
+    return sameEntity || declaredGrain || relationshipProven || nativeGroupingProven;
+  });
+}
+
+function capabilityEntailsFrameDimension(
+  capability: MetricCapabilityContract | undefined,
+  binding: { dimensionId: string; role: AnalyticalDimensionRole },
+): boolean {
+  if (!capability) return false;
+  if (binding.role === 'time_axis') {
+    return capability.timeDimensions.some((dimension) =>
+      dimension.dimensionId === binding.dimensionId);
+  }
+  return eligibleCapabilityDimensions(capability, [binding.role])
+    .some((dimension) => dimension.dimensionId === binding.dimensionId);
+}
+
+function resolvedCapabilityDimensionProof(
+  capability: MetricCapabilityContract | undefined,
+  dimensions: ResolvedPlanMemberBinding[],
+  filters: ResolvedAnalyticalPlan['query']['filters'],
+): MetricCapabilityContract['dimensions'] {
+  if (!capability) return [];
+  const boundIds = new Set([
+    ...dimensions.flatMap((binding) => binding.qualifiedId ? [binding.qualifiedId] : []),
+    ...filters.flatMap((filter) =>
+      filter.binding.qualifiedId ? [filter.binding.qualifiedId] : []),
+  ]);
+  return capability.dimensions
+    .filter((dimension) => boundIds.has(dimension.dimensionId))
+    .sort((left, right) => left.dimensionId.localeCompare(right.dimensionId));
+}
+
+function resolvedCapabilityEntityGrain(
+  capability: MetricCapabilityContract,
+  dimensions: ResolvedPlanMemberBinding[],
+): string {
+  const groupedIds = new Set(dimensions.flatMap((binding) =>
+    binding.qualifiedId ? [binding.qualifiedId] : []));
+  const groupedEntityIds = uniqueSorted(capability.dimensions
+    .filter((dimension) => groupedIds.has(dimension.dimensionId))
+    .map((dimension) => dimension.entityId));
+  if (groupedEntityIds.length === 1 && capability.resultGrainIds.includes(groupedEntityIds[0]!)) {
+    return groupedEntityIds[0]!;
+  }
+  return capability.defaultResultGrainId;
+}
+
+function selectedCapabilityProofFacts(
+  capability: MetricCapabilityContract,
+  dimensions: MetricCapabilityContract['dimensions'],
+): string[] {
+  return [
+    `capability:metric:${capability.metricId}`,
+    `capability:primary_entity:${capability.primaryEntityId}`,
+    `capability:default_result_grain:${capability.defaultResultGrainId}`,
+    ...capability.resultGrainIds.map((grain) => `capability:result_grain:${grain}`),
+    ...dimensions.map((dimension) => `capability:dimension:${dimension.dimensionId}:${dimension.entityId}`),
+    ...dimensions.flatMap((dimension) => dimension.nativeGroupingReference
+      ? [`capability:native_grouping:${dimension.dimensionId}:${dimension.nativeGroupingReference}`]
+      : []),
+    ...dimensions.flatMap((dimension) =>
+      (dimension.relationshipPathIds ?? []).map((relationshipId) =>
+        `capability:relationship:${relationshipId}`)),
+    ...capability.executionCapabilities.map((execution) =>
+      `capability:route:${execution.route}:${execution.adapterId ?? 'native'}`),
+  ];
+}
+
+function unresolvedBindingReceipts(
+  measures: ResolvedPlanMemberBinding[],
+  dimensions: ResolvedPlanMemberBinding[],
+  filters: ResolvedAnalyticalPlan['query']['filters'],
+): NonNullable<ResolvedAnalyticalPlan['resolutionFailure']>['bindings'] {
+  return [
+    ...measures.map((binding) => ({ kind: 'measure' as const, binding })),
+    ...dimensions.map((binding) => ({ kind: 'dimension' as const, binding })),
+    ...filters.map((filter) => ({ kind: 'filter' as const, binding: filter.binding })),
+  ]
+    .filter(({ binding }) => binding.status !== 'resolved')
+    .map(({ kind, binding }) => ({
+      kind,
+      requested: binding.requested,
+      status: binding.status,
+      candidateIds: [...binding.candidateIds],
+    }));
+}
+
+function bindingCandidateIds(
+  measures: ResolvedPlanMemberBinding[],
+  dimensions: ResolvedPlanMemberBinding[],
+  filters: ResolvedAnalyticalPlan['query']['filters'],
+): string[] {
+  return unresolvedBindingReceipts(measures, dimensions, filters)
+    .flatMap((binding) => binding.candidateIds);
+}
+
+function bindingFailureCodes(
+  measures: ResolvedPlanMemberBinding[],
+  dimensions: ResolvedPlanMemberBinding[],
+  filters: ResolvedAnalyticalPlan['query']['filters'],
+): string[] {
+  return unresolvedBindingReceipts(measures, dimensions, filters)
+    .map((binding) => `${binding.kind.toUpperCase()}_${binding.status.toUpperCase()}`);
+}
+
+function bindingMissingInformation(
+  measures: ResolvedPlanMemberBinding[],
+  dimensions: ResolvedPlanMemberBinding[],
+  filters: ResolvedAnalyticalPlan['query']['filters'],
+): string[] {
+  return [
+    ...measures.map((binding) => ({ kind: 'measure', binding })),
+    ...dimensions.map((binding) => ({ kind: 'dimension', binding })),
+    ...filters.map((filter) => ({ kind: 'filter', binding: filter.binding })),
+  ].flatMap(({ kind, binding }) => {
+    if (binding.status === 'resolved') return [];
+    const choices = binding.candidateIds.length > 0
+      ? ` Qualified choices: ${binding.candidateIds.join(', ')}.`
+      : '';
+    return [`Requested ${kind} “${binding.requested}” is ${binding.status}.${choices}`];
   });
 }
 
@@ -392,7 +837,11 @@ function bindRequestedMember(
   kind: 'measure' | 'dimension',
 ): ResolvedPlanMemberBinding {
   const normalized = normalize(requested);
-  const directCandidates = candidates.filter((candidate) => {
+  // A lexical decoy that compatibility already rejected must never introduce
+  // a second binding identity into the frozen plan. Only candidates still
+  // eligible for the requested tuple can contribute member authority.
+  const eligibleCandidates = candidates.filter((candidate) => candidate.compatibility !== 'incompatible');
+  const directCandidates = eligibleCandidates.filter((candidate) => {
     const kindMatches = kind === 'measure'
       ? candidate.kind === 'semantic_metric' || candidate.kind === 'sql_column'
       : candidate.kind === 'semantic_member' || candidate.kind === 'sql_column';
@@ -401,14 +850,14 @@ function bindRequestedMember(
   });
   const ids = uniqueSorted([
     ...directCandidates.map((candidate) => candidate.qualifiedId ?? candidate.id),
-    ...(kind === 'dimension' ? candidates.flatMap((candidate) =>
+    ...(kind === 'dimension' ? eligibleCandidates.flatMap((candidate) =>
       (candidate.dimensions ?? []).filter((dimension) => {
         const value = normalize(dimension);
         return value === normalized || value.endsWith(` ${normalized}`);
       }).map((dimension) => qualifyDeclaredDimension(candidate, dimension))) : []),
   ]);
-  if (ids.length === 0 && kind === 'measure' && candidates.length === 1) {
-    const certified = candidates[0]!;
+  if (ids.length === 0 && kind === 'measure' && eligibleCandidates.length === 1) {
+    const certified = eligibleCandidates[0]!;
     if (certified.kind === 'certified_block' && certified.compatibility === 'compatible') {
       const id = certified.qualifiedId ?? certified.id;
       return {
@@ -500,7 +949,12 @@ function resolveCapability(
 }
 
 function normalize(value: string): string {
-  return value.toLowerCase().replace(/[_./:-]+/g, ' ').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return value.toLowerCase()
+    .replace(/%/g, ' percentage ')
+    .replace(/[_./:-]+/g, ' ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /** Resolve common analytical ranges once so no executor reinterprets "last month". */

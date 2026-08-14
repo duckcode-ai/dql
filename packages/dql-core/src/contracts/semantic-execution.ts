@@ -103,6 +103,30 @@ export interface SemanticTargetBindingV1 {
   };
 }
 
+/** Immutable compiler-issued authority for one governed derived metric output. */
+export interface SemanticAggregationCompilerReceiptV1 {
+  version: 1;
+  executionId: string;
+  capabilityFingerprint: string;
+  metricId: string;
+  metricExpressionSql: string;
+  operator: 'ratio';
+  orderedMeasureIds: string[];
+  physicalRelation: string;
+  relationAliases: string[];
+  outputAlias: string;
+  dimensionIds: string[];
+  relationshipPathIds: string[];
+  relationshipProofFingerprints: string[];
+  orderBy: Array<{ expression: string; direction: 'asc' | 'desc' }>;
+  compiledSqlFingerprint: string;
+  compiledExpressionFingerprint: string;
+  planFingerprint: string;
+  snapshotId: string;
+  targetFingerprint: string;
+  receiptFingerprint: string;
+}
+
 export interface SemanticRuntimeMemberBindingV1 {
   role: 'metric' | 'dimension' | 'time_dimension' | 'filter' | 'order_by' | 'technical';
   qualifiedId: string;

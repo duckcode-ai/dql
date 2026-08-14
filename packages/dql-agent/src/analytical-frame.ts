@@ -10,10 +10,130 @@
  */
 
 import { normalizeMetricCapabilityContract, type AnalyticalDimensionBindingV2, type AnalyticalQuestionFrameV2, type MetricCapabilityContract } from '@duckcodeailabs/dql-core';
-import { questionTypeFromText, type AgentEvidenceCandidate, type AgentRetrievalEvidence, type MeaningQueryIntent } from './meaning-resolution.js';
+import { questionTypeFromText, type AgentEvidenceCandidate, type AgentRetrievalEvidence, type MeaningQueryIntent, type MeaningQuestionType } from './meaning-resolution.js';
+import type { ResolvedAnalyticalPlan, ResolvedPlanMemberBinding } from './resolved-analytical-plan.js';
+
+/**
+ * Project the final analytical frame from the immutable RAP bindings. Candidate
+ * names are deliberately absent from this boundary: retrieval may help bind the
+ * RAP, but it cannot re-open a uniquely resolved metric, dimension, or filter.
+ */
+export function projectResolvedAnalyticalFrame(input: {
+  plan: ResolvedAnalyticalPlan;
+  sourceFrame: AnalyticalQuestionFrameV2;
+}): AnalyticalQuestionFrameV2 {
+  const { plan, sourceFrame } = input;
+  const resolvedMeasureIds = plan.query.measures.flatMap((binding) =>
+    binding.status === 'resolved' && binding.qualifiedId ? [binding.qualifiedId] : []);
+  const metricConceptIds = plan.selectedCapability?.metricId
+    ? unique([
+        plan.selectedCapability.metricId,
+        ...sourceFrame.metricConceptIds.filter((metricId) => metricId !== sourceFrame.metricConceptIds[0]),
+      ])
+    : unique(resolvedMeasureIds);
+  const groupedDimensionIds = unique(plan.query.dimensions.flatMap((binding) =>
+    binding.status === 'resolved' && binding.qualifiedId ? [binding.qualifiedId] : []));
+  const rankingRequested = Boolean(sourceFrame.ranking || plan.query.order || plan.query.limit !== undefined);
+  const dimensions: AnalyticalDimensionBindingV2[] = groupedDimensionIds.flatMap((dimensionId, index) => [
+    { dimensionId, role: 'group_by' as const },
+    ...(rankingRequested && index === 0 ? [{ dimensionId, role: 'rank_entity' as const }] : []),
+  ]);
+  for (const filter of plan.query.filters) {
+    const dimensionId = filter.binding.status === 'resolved' ? filter.binding.qualifiedId : undefined;
+    if (dimensionId && !dimensions.some((binding) => binding.dimensionId === dimensionId && binding.role === 'filter')) {
+      dimensions.push({ dimensionId, role: 'filter' });
+    }
+  }
+  if (sourceFrame.timeContext?.timeDimensionId) {
+    dimensions.push({ dimensionId: sourceFrame.timeContext.timeDimensionId, role: 'time_axis' });
+  }
+
+  const ambiguity = [
+    ...plan.query.measures.flatMap((binding) => frameBindingAmbiguity('metrics', binding)),
+    ...plan.query.dimensions.flatMap((binding) => frameBindingAmbiguity('dimensions', binding)),
+    ...plan.query.filters.flatMap((filter) => frameBindingAmbiguity('filters', filter.binding)),
+  ];
+  const dimensionOutputs = groupedDimensionIds.map((dimensionId) => ({
+    id: localId(dimensionId),
+    kind: 'dimension' as const,
+  }));
+  const sourceMetricOutputs = sourceFrame.requestedOutputs.filter((output) =>
+    output.kind !== 'dimension' && output.kind !== 'rank');
+  const metricOutputs: AnalyticalQuestionFrameV2['requestedOutputs'] = sourceMetricOutputs.length > 0
+    ? sourceMetricOutputs.map((output) => ({
+        ...output,
+        ...('metricId' in output && metricConceptIds.length === 1 ? { metricId: metricConceptIds[0]! } : {}),
+      }))
+    : metricConceptIds.map((metricId) => ({ id: localId(metricId), kind: 'metric_value' as const, metricId }));
+  const explicitRankOutputs = sourceFrame.requestedOutputs.filter((output) => output.kind === 'rank');
+  const requestedOutputs = uniqueOutputs([
+    ...dimensionOutputs,
+    ...sourceFrame.requestedOutputs.filter((output) => output.kind === 'dimension'
+      && sourceFrame.timeContext?.timeDimensionId
+      && output.id === localId(sourceFrame.timeContext.timeDimensionId)),
+    ...metricOutputs,
+    ...explicitRankOutputs,
+  ]);
+  const rankEntityDimensionId = dimensions.find((binding) => binding.role === 'rank_entity')?.dimensionId;
+  const ranking = rankingRequested && rankEntityDimensionId && metricConceptIds[0]
+    ? {
+        entityDimensionId: rankEntityDimensionId,
+        byMetricId: metricConceptIds[0],
+        ...(sourceFrame.ranking?.byPeriodId ? { byPeriodId: sourceFrame.ranking.byPeriodId } : {}),
+        direction: plan.query.order ?? sourceFrame.ranking?.direction ?? 'desc',
+        limit: plan.query.limit ?? sourceFrame.ranking?.limit ?? 10,
+        tiePolicy: sourceFrame.ranking?.tiePolicy ?? 'stable_secondary_key' as const,
+      }
+    : undefined;
+
+  const { ranking: _sourceRanking, ...frameBase } = sourceFrame;
+  return {
+    ...frameBase,
+    metricConceptIds,
+    entityGrainIds: plan.entityGrain ? [plan.entityGrain] : sourceFrame.entityGrainIds,
+    dimensions,
+    memberBindings: plan.query.filters.flatMap((filter) =>
+      filter.binding.status === 'resolved' && filter.binding.qualifiedId
+        ? [{
+            dimensionId: filter.binding.qualifiedId,
+            canonicalValues: [filter.value],
+            source: 'question' as const,
+            confidence: 'exact' as const,
+          }]
+        : []),
+    ...(ranking ? { ranking } : {}),
+    requestedOutputs,
+    ambiguity,
+  };
+}
+
+function frameBindingAmbiguity(
+  lane: 'metrics' | 'dimensions' | 'filters',
+  binding: ResolvedPlanMemberBinding,
+): AnalyticalQuestionFrameV2['ambiguity'] {
+  if (binding.status === 'resolved') return [];
+  return [{
+    field: `${lane}.${binding.requested}`,
+    candidateIds: [...binding.candidateIds].sort(),
+    reasonCode: binding.status === 'ambiguous'
+      ? `${lane.slice(0, -1).toUpperCase()}_AMBIGUOUS`
+      : `${lane.slice(0, -1).toUpperCase()}_UNRESOLVED`,
+  }];
+}
+
+function uniqueOutputs(
+  outputs: AnalyticalQuestionFrameV2['requestedOutputs'],
+): AnalyticalQuestionFrameV2['requestedOutputs'] {
+  return outputs.filter((output, index, all) => all.findIndex((candidate) => candidate.id === output.id) === index);
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values)];
+}
 
 export function buildDeterministicAnalyticalFrame(input: {
   question: string;
+  questionType?: MeaningQuestionType;
   evidence: AgentRetrievalEvidence;
   metricCandidate: AgentEvidenceCandidate;
   /** Complete explicitly requested metric set; the first remains the ranking/default metric. */
@@ -32,7 +152,7 @@ export function buildDeterministicAnalyticalFrame(input: {
       }),
   ].filter((candidate, index, all) =>
     all.findIndex((other) => other.metricId === candidate.metricId) === index);
-  const meaningType = questionTypeFromText(input.question);
+  const meaningType = input.questionType ?? questionTypeFromText(input.question);
   if (meaningType === 'definition') return undefined;
   const queryIntent: MeaningQueryIntent = {
     measures: input.evidence.parsedIntent?.measures ?? [],
@@ -233,7 +353,6 @@ export function buildDeterministicAnalyticalFrame(input: {
       kind: 'dimension' as const,
     })),
     ...metricOutputs,
-    ...(ranking ? [{ id: 'rank', kind: 'rank' as const }] : []),
   ];
 
   return {

@@ -10,6 +10,8 @@
 export const ANALYTICAL_QUESTION_FRAME_VERSION = 2 as const;
 export const ANALYTICAL_FAILURE_VERSION = 1 as const;
 export const ANALYTICAL_FAILURE_V2_VERSION = 2 as const;
+export const ANALYTICAL_REPAIR_CAPABILITY_VERSION = 1 as const;
+export const PROVIDER_EGRESS_RECEIPT_VERSION = 1 as const;
 
 export type AnalyticalDimensionRole = 'group_by' | 'filter' | 'display' | 'rank_entity' | 'time_axis';
 
@@ -96,6 +98,29 @@ export interface AnalyticalQuestionFrameV2 {
 
 export type AnalyticalOperation = 'filter' | 'group' | 'trend' | 'compare' | 'rank' | 'window' | 'having';
 
+/**
+ * One immutable relationship authority selected with an analytical metric.
+ * DQL relationship IDs and adapter-native semantic paths remain distinct:
+ * only the former can authorize generated physical SQL joins.
+ */
+export interface ResolvedRelationshipProofV1 {
+  version: 1;
+  kind: 'dql_relationship_path' | 'semantic_native_grouping';
+  metricId: string;
+  dimensionId: string;
+  sourceEntityId: string;
+  targetEntityId: string;
+  route: MetricCapabilityContract['executionCapabilities'][number]['route'];
+  adapterId?: string;
+  executionId: string;
+  snapshotId: string;
+  capabilityFingerprint: string;
+  relationshipPathIds: string[];
+  nativeGroupingReference?: string;
+  nativeGroupingPath?: string[];
+  authorityFingerprint: string;
+}
+
 export interface MetricCapabilityContract {
   metricId: string;
   semanticModelId?: string;
@@ -115,6 +140,14 @@ export interface MetricCapabilityContract {
     /** Entity grain produced/filtered by this dimension. */
     entityId: string;
     supportedRoles: AnalyticalDimensionRole[];
+    /** Authored semantic-layer display label; never inferred from the ID. */
+    label?: string;
+    /** Authored registry aliases retained for deterministic binding only. */
+    aliases?: string[];
+    /** Exact adapter-native group-by reference proved compatible for this metric. */
+    nativeGroupingReference?: string;
+    /** Exact adapter-native entity path; empty means the metric's own model. */
+    nativeGroupingPath?: string[];
     relationshipPathIds?: string[];
   }>;
   timeDimensions: Array<{
@@ -241,8 +274,114 @@ export interface AnalyticalRepairTrustTransition {
   preservesCertifiedAssetIdentity: boolean;
 }
 
+export type AnalyticalAutomaticRepairAction = 'repair_embedded_sql' | 'none';
+
+export type AnalyticalRepairCorrectionCode =
+  | 'SQL_EXECUTION_REPAIR'
+  | 'MANUAL_REVIEW_REQUIRED';
+
+export type AnalyticalManualRepairAction =
+  | 'edit_dql'
+  | 'open_sql_notebook'
+  | 'refresh_snapshot'
+  | 'retry_same_plan'
+  | 'change_authorized_connection'
+  | 'request_access';
+
+export type AnalyticalRepairIneligibilityReason =
+  | 'failure_not_eligible'
+  | 'missing_failure_authority'
+  | 'missing_dql_wrapper'
+  | 'invalid_dql_wrapper'
+  | 'missing_compiled_sql'
+  | 'missing_plan_fingerprint'
+  | 'missing_execution_target'
+  | 'attempt_exhausted';
+
+/**
+ * Server-owned authority for one automatic Ask execution repair.
+ *
+ * A retained warehouse diagnostic is deliberately absent: it may explain a
+ * failure, but it never grants repair authority. Legacy runs without this
+ * capability remain readable and are manual-only.
+ */
+export interface AnalyticalRepairCapabilityV1 {
+  version: 1;
+  automatic: {
+    eligible: boolean;
+    action: AnalyticalAutomaticRepairAction;
+    correctionCode: AnalyticalRepairCorrectionCode;
+    attemptsRemaining: number;
+  };
+  failureFingerprint: string;
+  sourceFingerprint: string;
+  planFingerprint: string;
+  dqlFingerprint: string;
+  sqlFingerprint: string;
+  targetFingerprint: string;
+  routeLocked: true;
+  targetLocked: true;
+  sourceImmutable: true;
+  manualActions: AnalyticalManualRepairAction[];
+  ineligibilityReason?: AnalyticalRepairIneligibilityReason;
+}
+
+export type ProviderEgressPurpose =
+  | 'answer_generation'
+  | 'research_narration'
+  | 'research_tool'
+  | 'repair_sql';
+
+export type ProviderEgressCategory =
+  | 'instructions'
+  | 'question'
+  | 'schema_metadata'
+  | 'governed_context'
+  | 'result_rows';
+
+/** Server-owned orchestration phase for one physical provider dispatch. */
+export type ProviderDispatchPhaseV1 =
+  | 'meaning_resolution'
+  | 'planning'
+  | 'generation'
+  | 'narration'
+  | 'repair';
+
+/** Content-free evidence for one provider-bound payload class. */
+export interface ProviderEgressReceiptV1 {
+  version: 1;
+  purpose: ProviderEgressPurpose;
+  /** Additive for legacy compatibility; absent means the phase was not recorded. */
+  dispatchPhase?: ProviderDispatchPhaseV1;
+  provider: string;
+  /** Exact physical transport identity; absent only on legacy receipts. */
+  model?: string;
+  operation?: 'generate' | 'generate_with_tools' | 'generate_stream';
+  attemptIndex?: number;
+  options?: {
+    maxTokens?: number;
+    temperature?: number;
+    reasoningEffort?: 'low' | 'medium' | 'high';
+  };
+  permittedCategories: ProviderEgressCategory[];
+  resultRowCount: number;
+  /** Rows disclosed so far in this receipt's per-run budget group. */
+  cumulativeResultRowCount?: number;
+  columnCount: number;
+  redactionPolicyId: string;
+  optIn: boolean;
+  payloadFingerprint: string;
+}
+
 const DIMENSION_ROLES = new Set<AnalyticalDimensionRole>(['group_by', 'filter', 'display', 'rank_entity', 'time_axis']);
 const QUESTION_TYPES = new Set<AnalyticalQuestionType>(['definition', 'scalar', 'ranking', 'trend', 'comparison', 'diagnosis', 'research']);
+const PROVIDER_DISPATCH_PHASES = new Set<ProviderDispatchPhaseV1>([
+  'meaning_resolution',
+  'planning',
+  'generation',
+  'narration',
+  'repair',
+]);
 const PERIOD_KINDS = new Set<AnalyticalPeriodKind>(['absolute', 'current', 'previous_period', 'previous_year']);
 const COMPLETENESS_POLICIES = new Set(['partial_current', 'latest_complete', 'closed_period'] as const);
 const FAILURE_CODES = new Set<AnalyticalFailureCode>([
@@ -280,6 +419,184 @@ const RECOVERABILITY = new Set<AnalyticalFailureRecoverability>([
   'modeling_change',
   'none',
 ]);
+const AUTOMATIC_REPAIR_ACTIONS = new Set<AnalyticalAutomaticRepairAction>(['repair_embedded_sql', 'none']);
+const REPAIR_CORRECTION_CODES = new Set<AnalyticalRepairCorrectionCode>(['SQL_EXECUTION_REPAIR', 'MANUAL_REVIEW_REQUIRED']);
+const MANUAL_REPAIR_ACTIONS = new Set<AnalyticalManualRepairAction>([
+  'edit_dql',
+  'open_sql_notebook',
+  'refresh_snapshot',
+  'retry_same_plan',
+  'change_authorized_connection',
+  'request_access',
+]);
+const REPAIR_INELIGIBILITY_REASONS = new Set<AnalyticalRepairIneligibilityReason>([
+  'failure_not_eligible',
+  'missing_failure_authority',
+  'missing_dql_wrapper',
+  'invalid_dql_wrapper',
+  'missing_compiled_sql',
+  'missing_plan_fingerprint',
+  'missing_execution_target',
+  'attempt_exhausted',
+]);
+const PROVIDER_EGRESS_PURPOSES = new Set<ProviderEgressPurpose>([
+  'answer_generation',
+  'research_narration',
+  'research_tool',
+  'repair_sql',
+]);
+const PROVIDER_EGRESS_CATEGORIES = new Set<ProviderEgressCategory>([
+  'instructions',
+  'question',
+  'schema_metadata',
+  'governed_context',
+  'result_rows',
+]);
+
+/** Strictly normalize server-owned automatic repair authority. */
+export function normalizeAnalyticalRepairCapabilityV1(value: unknown): AnalyticalRepairCapabilityV1 | undefined {
+  const record = objectRecord(value);
+  const automatic = objectRecord(record?.automatic);
+  const action = enumValue(automatic?.action, AUTOMATIC_REPAIR_ACTIONS);
+  const correctionCode = enumValue(automatic?.correctionCode, REPAIR_CORRECTION_CODES);
+  const attemptsRemaining = automatic?.attemptsRemaining;
+  const rawManualActions = Array.isArray(record?.manualActions) ? record.manualActions : undefined;
+  const manualActions = rawManualActions
+    ? rawManualActions.flatMap((item) => {
+        const action = enumValue(item, MANUAL_REPAIR_ACTIONS);
+        return action ? [action] : [];
+      })
+    : undefined;
+  const ineligibilityReason = record?.ineligibilityReason === undefined
+    ? undefined
+    : enumValue(record.ineligibilityReason, REPAIR_INELIGIBILITY_REASONS);
+  if (
+    !record
+    || record.version !== ANALYTICAL_REPAIR_CAPABILITY_VERSION
+    || !automatic
+    || typeof automatic.eligible !== 'boolean'
+    || !action
+    || !correctionCode
+    || typeof attemptsRemaining !== 'number'
+    || !Number.isInteger(attemptsRemaining)
+    || attemptsRemaining < 0
+    || !manualActions
+    || manualActions.length !== rawManualActions?.length
+    || (record.ineligibilityReason !== undefined && !ineligibilityReason)
+    || record.routeLocked !== true
+    || record.targetLocked !== true
+    || record.sourceImmutable !== true
+  ) return undefined;
+  const failureFingerprint = cleanString(record.failureFingerprint);
+  const sourceFingerprint = cleanString(record.sourceFingerprint);
+  const planFingerprint = cleanString(record.planFingerprint);
+  const dqlFingerprint = cleanString(record.dqlFingerprint);
+  const sqlFingerprint = cleanString(record.sqlFingerprint);
+  const targetFingerprint = cleanString(record.targetFingerprint);
+  if (!failureFingerprint || !sourceFingerprint || !planFingerprint || !dqlFingerprint || !sqlFingerprint || !targetFingerprint) return undefined;
+  if (automatic.eligible && (action !== 'repair_embedded_sql' || correctionCode !== 'SQL_EXECUTION_REPAIR' || attemptsRemaining < 1 || ineligibilityReason)) return undefined;
+  if (!automatic.eligible && (action !== 'none' || correctionCode !== 'MANUAL_REVIEW_REQUIRED' || attemptsRemaining !== 0 || !ineligibilityReason)) return undefined;
+  return {
+    version: ANALYTICAL_REPAIR_CAPABILITY_VERSION,
+    automatic: { eligible: automatic.eligible, action, correctionCode, attemptsRemaining },
+    failureFingerprint,
+    sourceFingerprint,
+    planFingerprint,
+    dqlFingerprint,
+    sqlFingerprint,
+    targetFingerprint,
+    routeLocked: true,
+    targetLocked: true,
+    sourceImmutable: true,
+    manualActions,
+    ...(ineligibilityReason ? { ineligibilityReason } : {}),
+  };
+}
+
+/** Strictly normalize a content-free provider egress receipt. */
+export function normalizeProviderEgressReceiptV1(value: unknown): ProviderEgressReceiptV1 | undefined {
+  const record = objectRecord(value);
+  const purpose = enumValue(record?.purpose, PROVIDER_EGRESS_PURPOSES);
+  const dispatchPhase = record?.dispatchPhase === undefined
+    ? undefined
+    : enumValue(record.dispatchPhase, PROVIDER_DISPATCH_PHASES);
+  const provider = cleanString(record?.provider);
+  const model = cleanString(record?.model);
+  const operation = record?.operation === 'generate'
+    || record?.operation === 'generate_with_tools'
+    || record?.operation === 'generate_stream'
+    ? record.operation
+    : undefined;
+  const attemptIndex = record?.attemptIndex;
+  const optionsRecord = objectRecord(record?.options);
+  const options: ProviderEgressReceiptV1['options'] = optionsRecord ? {
+    ...(typeof optionsRecord.maxTokens === 'number' && Number.isInteger(optionsRecord.maxTokens) && optionsRecord.maxTokens > 0
+      ? { maxTokens: optionsRecord.maxTokens }
+      : {}),
+    ...(typeof optionsRecord.temperature === 'number' && Number.isFinite(optionsRecord.temperature)
+      ? { temperature: optionsRecord.temperature }
+      : {}),
+    ...(optionsRecord.reasoningEffort === 'low' || optionsRecord.reasoningEffort === 'medium' || optionsRecord.reasoningEffort === 'high'
+      ? { reasoningEffort: optionsRecord.reasoningEffort }
+      : {}),
+  } : undefined;
+  const rawCategories = Array.isArray(record?.permittedCategories) ? record.permittedCategories : undefined;
+  const categories = rawCategories
+    ? rawCategories.flatMap((item) => {
+        const category = enumValue(item, PROVIDER_EGRESS_CATEGORIES);
+        return category ? [category] : [];
+      })
+    : undefined;
+  const resultRowCount = record?.resultRowCount;
+  const columnCount = record?.columnCount;
+  const cumulativeResultRowCount = record?.cumulativeResultRowCount;
+  const redactionPolicyId = cleanString(record?.redactionPolicyId);
+  const payloadFingerprint = cleanString(record?.payloadFingerprint);
+  if (
+    !record
+    || record.version !== PROVIDER_EGRESS_RECEIPT_VERSION
+    || !purpose
+    || (record.dispatchPhase !== undefined && !dispatchPhase)
+    || !provider
+    || (record.operation !== undefined && !operation)
+    || (record.attemptIndex !== undefined && (typeof attemptIndex !== 'number' || !Number.isInteger(attemptIndex) || attemptIndex < 1))
+    || (record.options !== undefined && !optionsRecord)
+    || !categories
+    || categories.length !== rawCategories?.length
+    || typeof resultRowCount !== 'number'
+    || !Number.isInteger(resultRowCount)
+    || resultRowCount < 0
+    || (cumulativeResultRowCount !== undefined && (
+      typeof cumulativeResultRowCount !== 'number'
+      || !Number.isInteger(cumulativeResultRowCount)
+      || cumulativeResultRowCount < resultRowCount
+    ))
+    || typeof columnCount !== 'number'
+    || !Number.isInteger(columnCount)
+    || columnCount < 0
+    || !redactionPolicyId
+    || typeof record.optIn !== 'boolean'
+    || !payloadFingerprint
+  ) return undefined;
+  if (resultRowCount > 0 && (!record.optIn || !categories.includes('result_rows'))) return undefined;
+  return {
+    version: PROVIDER_EGRESS_RECEIPT_VERSION,
+    ...(dispatchPhase ? { dispatchPhase } : {}),
+    purpose,
+    provider,
+    ...(model ? { model } : {}),
+    ...(operation ? { operation } : {}),
+    ...(typeof attemptIndex === 'number' ? { attemptIndex } : {}),
+    ...(options ? { options } : {}),
+    permittedCategories: categories,
+    resultRowCount,
+    ...(typeof cumulativeResultRowCount === 'number' ? { cumulativeResultRowCount } : {}),
+    columnCount,
+    redactionPolicyId,
+    optIn: record.optIn,
+    payloadFingerprint,
+  };
+}
 
 /** Strictly normalize an untrusted cross-surface analytical frame. */
 export function normalizeAnalyticalQuestionFrameV2(value: unknown): AnalyticalQuestionFrameV2 | undefined {
@@ -677,13 +994,32 @@ function normalizeCapabilityDimensions(value: unknown): MetricCapabilityContract
       const normalized = enumValue(role, DIMENSION_ROLES);
       return normalized ? [normalized] : [];
     });
+    const label = record.label === undefined ? undefined : cleanString(record.label);
+    const aliases = record.aliases === undefined ? undefined : cleanStringArray(record.aliases);
+    const nativeGroupingReference = record.nativeGroupingReference === undefined
+      ? undefined
+      : cleanString(record.nativeGroupingReference);
+    const nativeGroupingPath = record.nativeGroupingPath === undefined
+      ? undefined
+      : cleanStringArray(record.nativeGroupingPath);
     const relationshipPathIds = record.relationshipPathIds === undefined ? undefined : cleanStringArray(record.relationshipPathIds);
-    if (supportedRoles.length !== record.supportedRoles.length || (record.relationshipPathIds !== undefined && !relationshipPathIds)) return [];
+    if (
+      supportedRoles.length !== record.supportedRoles.length
+      || (record.label !== undefined && !label)
+      || (record.aliases !== undefined && !aliases)
+      || (record.nativeGroupingReference !== undefined && !nativeGroupingReference)
+      || (record.nativeGroupingPath !== undefined && !nativeGroupingPath)
+      || (record.relationshipPathIds !== undefined && !relationshipPathIds)
+    ) return [];
     return [
       {
         dimensionId,
         entityId,
         supportedRoles,
+        ...(label ? { label } : {}),
+        ...(aliases ? { aliases } : {}),
+        ...(nativeGroupingReference ? { nativeGroupingReference } : {}),
+        ...(nativeGroupingPath ? { nativeGroupingPath } : {}),
         ...(relationshipPathIds ? { relationshipPathIds } : {}),
       },
     ];

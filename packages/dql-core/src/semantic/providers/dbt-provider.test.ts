@@ -759,6 +759,84 @@ saved_queries:
       const { incompatible } = layer.explainCompatibleDimensions(['does_not_exist']);
       expect(incompatible).toContainEqual({ name: 'does_not_exist', reason: 'metric_unresolved' });
     });
+
+    it('preserves repeated foreign/primary entities across a production-shaped multi-hop path', () => {
+      const targetDir = join(tmpDir, 'target');
+      mkdirSync(targetDir, { recursive: true });
+      writeFileSync(join(targetDir, 'manifest.json'), JSON.stringify({
+        semantic_models: {
+          'semantic_model.demo.order_item': {
+            name: 'order_item', model: "ref('order_items')",
+            entities: [
+              { name: 'order_item', type: 'primary', expr: 'order_item_id' },
+              { name: 'order_id', type: 'foreign', expr: 'order_id' },
+            ],
+            dimensions: [{ name: 'is_drink_item', type: 'categorical' }],
+            measures: [{ name: 'revenue_measure', agg: 'sum', expr: 'revenue' }],
+          },
+          'semantic_model.demo.orders': {
+            name: 'orders', model: "ref('orders')",
+            entities: [
+              { name: 'order_id', type: 'primary', expr: 'order_id' },
+              { name: 'customer', type: 'foreign', expr: 'customer_id' },
+            ],
+            dimensions: [{ name: 'customer_order_number', type: 'categorical' }], measures: [],
+          },
+          'semantic_model.demo.customers': {
+            name: 'customers', model: "ref('customers')",
+            entities: [{ name: 'customer', type: 'primary', expr: 'customer_id' }],
+            dimensions: [{ name: 'customer_name', label: 'Customer', type: 'categorical' }], measures: [],
+          },
+        },
+        metrics: {
+          'metric.demo.revenue': {
+            name: 'revenue', label: 'Revenue', type: 'simple',
+            type_params: { measure: 'revenue_measure' },
+          },
+        },
+      }), 'utf-8');
+
+      const layer = new DbtProvider().load({ provider: 'dbt' }, tmpDir);
+      expect(layer.listEntities().filter((entity) => entity.name === 'customer')).toEqual(expect.arrayContaining([
+        expect.objectContaining({ cube: 'orders', type: 'foreign' }),
+        expect.objectContaining({ cube: 'customers', type: 'primary' }),
+      ]));
+      expect(layer.explainCompatibleDimensions(['revenue']).compatible).toContainEqual(expect.objectContaining({
+        cube: 'customers',
+        name: 'customer_name',
+        qualifiedName: 'order_id__customer__customer_name',
+        entityPath: ['order_id', 'customer'],
+      }));
+    });
+
+    it('fails closed when a foreign entity has two primary model targets', () => {
+      const targetDir = join(tmpDir, 'target');
+      mkdirSync(targetDir, { recursive: true });
+      writeFileSync(join(targetDir, 'manifest.json'), JSON.stringify({
+        semantic_models: {
+          'semantic_model.demo.orders': {
+            name: 'orders', model: "ref('orders')",
+            entities: [{ name: 'order_id', type: 'primary' }, { name: 'customer', type: 'foreign' }],
+            dimensions: [], measures: [{ name: 'revenue_measure', agg: 'sum', expr: 'revenue' }],
+          },
+          'semantic_model.demo.customers_current': {
+            name: 'customers_current', model: "ref('customers_current')",
+            entities: [{ name: 'customer', type: 'primary' }], dimensions: [{ name: 'customer_name', type: 'categorical' }], measures: [],
+          },
+          'semantic_model.demo.customers_archive': {
+            name: 'customers_archive', model: "ref('customers_archive')",
+            entities: [{ name: 'customer', type: 'primary' }], dimensions: [{ name: 'customer_label', type: 'categorical' }], measures: [],
+          },
+        },
+        metrics: { 'metric.demo.revenue': { name: 'revenue', type: 'simple', type_params: { measure: 'revenue_measure' } } },
+      }), 'utf-8');
+
+      const layer = new DbtProvider().load({ provider: 'dbt' }, tmpDir);
+      expect(layer.listEntities().filter((entity) => entity.name === 'customer')).toHaveLength(3);
+      const compatible = layer.explainCompatibleDimensions(['revenue']).compatible;
+      expect(compatible.map((dimension) => `${dimension.cube}.${dimension.name}`)).not.toContain('customers_current.customer_name');
+      expect(compatible.map((dimension) => `${dimension.cube}.${dimension.name}`)).not.toContain('customers_archive.customer_label');
+    });
   });
 
   it('native composeQuery accepts qualified names identically to bare (Phase 3)', () => {

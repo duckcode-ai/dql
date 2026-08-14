@@ -4,9 +4,11 @@ import type {
   AgentToolDefinition,
   ProviderToolLoopOptions,
   ProviderRunOptions,
+  ProviderDispatchOperation,
 } from './types.js';
 import { supportsReasoningEffort } from './reasoning-effort.js';
 import { compactToolOutput } from './tool-output.js';
+import { DEFAULT_PROVIDER_DISPATCH_LIMIT, prepareProviderHttpDispatch } from './dispatch.js';
 
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
 
@@ -37,18 +39,32 @@ async function postMessages(
   headers: Record<string, string>,
   baseBody: Record<string, unknown>,
   reasoning: Record<string, unknown>,
-  signal: AbortSignal | undefined,
+  dispatch: {
+    operation: ProviderDispatchOperation;
+    options: ProviderRunOptions;
+    nextAttempt(): number;
+  },
 ): Promise<Response> {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ ...baseBody, ...reasoning }),
-    signal,
-  });
+  const send = (envelope: Record<string, unknown>): Promise<Response> => {
+    const dispatchedBody = prepareProviderHttpDispatch({
+      provider: 'claude',
+      operation: dispatch.operation,
+      attemptIndex: dispatch.nextAttempt(),
+      envelope,
+      options: dispatch.options,
+    });
+    return fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(dispatchedBody),
+      signal: dispatch.options.signal,
+    });
+  };
+  const res = await send({ ...baseBody, ...reasoning });
   if (res.ok || Object.keys(reasoning).length === 0) return res;
   const peek = await res.clone().text().catch(() => '');
   if (!isEffortRejection(res.status, peek)) return res;
-  return fetch(url, { method: 'POST', headers, body: JSON.stringify(baseBody), signal });
+  return send(baseBody);
 }
 
 /**
@@ -100,6 +116,7 @@ export class ClaudeProvider implements AgentProvider {
       .map((m) => ({ role: m.role, content: m.content }));
 
     const model = options.model ?? this.defaultModel;
+    let dispatches = 0;
     const res = await postMessages(
       `${this.baseUrl}/v1/messages`,
       {
@@ -115,7 +132,7 @@ export class ClaudeProvider implements AgentProvider {
         messages: turns,
       },
       anthropicReasoning(model, options),
-      options.signal,
+      { operation: 'generate', options, nextAttempt: () => ++dispatches },
     );
     if (!res.ok) {
       const body = await res.text().catch(() => res.statusText);
@@ -150,9 +167,43 @@ export class ClaudeProvider implements AgentProvider {
       description: tool.description,
       input_schema: tool.inputSchema,
     }));
-    const maxToolCalls = Math.max(0, Math.min(30, options.maxToolCalls ?? 8));
+    const dispatchLimit = Math.max(1, Math.min(30, options.maxProviderDispatches ?? DEFAULT_PROVIDER_DISPATCH_LIMIT));
+    const maxToolCalls = Math.max(0, Math.min(dispatchLimit <= 2 ? 4 : 30, options.maxToolCalls ?? 8));
     let toolCallsUsed = 0;
     let lastText = '';
+    let dispatches = 0;
+    const dispatch = {
+      operation: 'generate_with_tools' as const,
+      options,
+      nextAttempt: () => ++dispatches,
+    };
+
+    const forcedFinal = async (): Promise<string> => {
+      const finalRes = await postMessages(
+        `${this.baseUrl}/v1/messages`,
+        {
+          'x-api-key': this.apiKey!,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        {
+          model,
+          max_tokens: options.maxTokens ?? 1024,
+          temperature: options.temperature ?? 0.2,
+          system: system || undefined,
+          messages: turns,
+        },
+        anthropicReasoning(model, options),
+        dispatch,
+      );
+      if (!finalRes.ok) return '';
+      const finalJson = (await finalRes.json()) as {
+        content?: Array<{ type: string; text?: string }>;
+      };
+      const blocks = finalJson.content ?? [];
+      if (blocks.some((block) => block.type === 'tool_use')) return '';
+      return blocks.filter((block) => block.type === 'text').map((block) => block.text ?? '').join('').trim();
+    };
 
     for (;;) {
       const res = await postMessages(
@@ -171,7 +222,7 @@ export class ClaudeProvider implements AgentProvider {
           tools: toolDefs,
         },
         anthropicReasoning(model, options),
-        options.signal,
+        dispatch,
       );
       if (!res.ok) {
         const body = await res.text().catch(() => res.statusText);
@@ -210,34 +261,8 @@ export class ClaudeProvider implements AgentProvider {
           content: 'Tool budget reached — do not call any more tools. Answer now using only the information the tool calls above already returned, following the required output format.',
         });
         try {
-          const finalRes = await postMessages(
-            `${this.baseUrl}/v1/messages`,
-            {
-              'x-api-key': this.apiKey,
-              'anthropic-version': '2023-06-01',
-              'content-type': 'application/json',
-            },
-            {
-              model,
-              max_tokens: options.maxTokens ?? 1024,
-              temperature: options.temperature ?? 0.2,
-              system: system || undefined,
-              messages: turns,
-              // tools intentionally omitted — forces a final answer, no more tool_use.
-            },
-            anthropicReasoning(model, options),
-            options.signal,
-          );
-          if (finalRes.ok) {
-            const finalJson = (await finalRes.json()) as {
-              content?: Array<{ type: string; text?: string }>;
-            };
-            const finalText = (finalJson.content ?? [])
-              .filter((block) => block.type === 'text')
-              .map((block) => block.text ?? '')
-              .join('');
-            if (finalText.trim()) return finalText;
-          }
+          const finalText = await forcedFinal();
+          if (finalText) return finalText;
         } catch {
           // Fall through to the legacy behavior on any final-turn failure.
         }
@@ -259,6 +284,7 @@ export class ClaudeProvider implements AgentProvider {
           isError = true;
         } else {
           try {
+            assertMayStartToolCall(options);
             output = await tool.run(call.input ?? {});
           } catch (err) {
             output = { error: err instanceof Error ? err.message : String(err) };
@@ -274,6 +300,18 @@ export class ClaudeProvider implements AgentProvider {
         });
       }
       turns.push({ role: 'user', content: toolResults });
+      if (dispatchLimit <= 2) {
+        try {
+          const finalText = await forcedFinal();
+          return finalText || lastText || JSON.stringify({
+            summary: 'The provider did not return a final answer within the bounded tool round.',
+          });
+        } catch {
+          return lastText || JSON.stringify({
+            summary: 'The provider dispatch budget was exhausted before a final answer.',
+          });
+        }
+      }
     }
   }
 
@@ -288,6 +326,7 @@ export class ClaudeProvider implements AgentProvider {
     const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
     const turns = messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role, content: m.content }));
     const model = options.model ?? this.defaultModel;
+    let dispatches = 0;
     const res = await postMessages(
       `${this.baseUrl}/v1/messages`,
       {
@@ -304,7 +343,7 @@ export class ClaudeProvider implements AgentProvider {
         stream: true,
       },
       anthropicReasoning(model, options),
-      options.signal,
+      { operation: 'generate_stream', options, nextAttempt: () => ++dispatches },
     );
     if (!res.ok || !res.body) {
       const body = await res.text().catch(() => res.statusText);
@@ -323,6 +362,14 @@ export class ClaudeProvider implements AgentProvider {
       }
     });
     return full;
+  }
+}
+
+function assertMayStartToolCall(options: ProviderToolLoopOptions): void {
+  if (options.mayStartToolCall?.() === false) {
+    throw Object.assign(new Error('The run soft target elapsed before this tool branch could start.'), {
+      code: 'RUN_SOFT_TARGET_EXCEEDED',
+    });
   }
 }
 
@@ -353,4 +400,3 @@ export async function consumeSse(
     if (done) break;
   }
 }
-

@@ -2,7 +2,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SemanticLayer, type AnalyticalQuestionFrameV2, type MetricCapabilityContract } from '@duckcodeailabs/dql-core';
+import {
+  buildSqlOutputExpressionSignature,
+  semanticExecutionFingerprint,
+  SemanticLayer,
+  type AnalyticalQuestionFrameV2,
+  type MetricCapabilityContract,
+  type SemanticAggregationCompilerReceiptV1,
+} from '@duckcodeailabs/dql-core';
 import { answer } from './answer-loop.js';
 import { KGStore } from './kg/sqlite-fts.js';
 import { buildResolvedAnalyticalPlan } from './resolved-analytical-plan.js';
@@ -192,7 +199,13 @@ describe('authoritative plan answer loop (AGT-013 / AGT-014)', () => {
       kind: 'metric',
       name: 'rollover_balance',
       status: 'certified',
-      payload: { qualifiedId: 'semantic:consumption:rollover_balance', localId: 'rollover_balance' },
+      payload: {
+        qualifiedId: 'semantic:consumption:rollover_balance',
+        localId: 'rollover_balance',
+        relation: 'usage',
+        measureColumn: 'balance',
+        analyticalCapability: semanticCapability('semantic:consumption:rollover_balance', 'balance'),
+      },
     }, {
       nodeId: 'dimension:customer_name',
       kind: 'dimension',
@@ -260,6 +273,12 @@ describe('authoritative plan answer loop (AGT-013 / AGT-014)', () => {
     expect(executed[0]).toContain('SUM(balance) AS rollover_balance');
     expect(executed[0]).toContain('customer_name');
     expect(result.route?.tier).toBe('semantic_metric');
+    expect(result.aggregationSafetyProof).toMatchObject({
+      status: 'safe',
+      metricIds: ['semantic:consumption:rollover_balance'],
+      planFingerprint: plan.fingerprint,
+      issueCodes: [],
+    });
     expect(result.resolvedAnalyticalPlan?.fingerprint).toBe(plan.fingerprint);
 
     const failedProvider = new NeverProvider();
@@ -278,6 +297,269 @@ describe('authoritative plan answer loop (AGT-013 / AGT-014)', () => {
     expect(failed.route?.tier).toBe('no_answer');
     expect(failed.executionError).toContain('column balance does not exist');
     expect(failed.resolvedAnalyticalPlan?.fingerprint).toBe(plan.fingerprint);
+  });
+
+  it('executes only the exact compiler-bound governed ratio expression', async () => {
+    const metricId = 'semantic:metric:order_item.food_revenue_pct';
+    const capability: MetricCapabilityContract = {
+      metricId,
+      semanticModelId: 'semantic:model:order_item',
+      measureIds: [
+        'semantic:measure:order_item.food_revenue',
+        'semantic:measure:order_item.revenue',
+      ],
+      primaryEntityId: 'order_item',
+      defaultResultGrainId: 'order_item',
+      resultGrainIds: ['order_item'],
+      aggregation: 'ratio',
+      additivity: { entities: 'non_additive', time: 'non_additive' },
+      dimensions: [],
+      timeDimensions: [],
+      operations: [],
+      supportedOutputKinds: ['metric_value'],
+      executionCapabilities: [{ route: 'semantic', adapterId: 'native' }],
+      declaredOutputIds: ['food_revenue_pct'],
+      sourceFingerprint: 'fixture:food-revenue-ratio',
+    };
+    const sameNameDecoyCapability: MetricCapabilityContract = {
+      ...capability,
+      metricId: 'semantic:metric:customer.food_revenue_pct',
+      semanticModelId: 'semantic:model:customer',
+      measureIds: [
+        'semantic:measure:customer.food_revenue',
+        'semantic:measure:customer.revenue',
+      ],
+      primaryEntityId: 'customer',
+      defaultResultGrainId: 'customer',
+      resultGrainIds: ['customer'],
+      sourceFingerprint: 'fixture:customer-food-revenue-ratio-decoy',
+    };
+    kg.rebuild([{
+      nodeId: 'metric:food_revenue_pct',
+      kind: 'metric',
+      name: 'food_revenue_pct',
+      status: 'certified',
+      payload: {
+        qualifiedId: metricId,
+        localId: 'food_revenue_pct',
+        analyticalCapability: capability,
+      },
+    }, {
+      nodeId: 'metric:customer_food_revenue_pct',
+      kind: 'metric',
+      name: 'food_revenue_pct',
+      status: 'certified',
+      payload: {
+        qualifiedId: sameNameDecoyCapability.metricId,
+        localId: 'food_revenue_pct',
+        analyticalCapability: sameNameDecoyCapability,
+      },
+    }], []);
+    const selected: AgentEvidenceCandidate = {
+      id: 'metric:food_revenue_pct',
+      qualifiedId: metricId,
+      kind: 'semantic_metric',
+      trustTier: 'semantic',
+      name: 'Food Revenue Percentage',
+      relevanceScore: 1,
+      matchReasons: ['exact qualified metric'],
+      compatibility: 'compatible',
+      analyticalCapability: capability,
+    };
+    const plan = planFor(selected, {
+      interpretedQuestion: 'What is the food revenue percentage?',
+      questionType: 'value',
+      selectedConceptIds: [selected.id],
+      recommendedExecutionId: selected.id,
+      queryIntent: { measures: ['food revenue percentage'], dimensions: [], filters: [] },
+      rejectedCandidates: [],
+      confidence: 'high',
+      missingInformation: [],
+      recommendedRoute: 'semantic',
+      analyticalFrame: {
+        version: 2,
+        interpretedQuestion: 'What is the food revenue percentage?',
+        questionType: 'value',
+        metricConceptIds: [metricId],
+        entityGrainIds: ['order_item'],
+        dimensions: [],
+        memberBindings: [],
+        requestedOutputs: [{ id: 'food_revenue_pct', kind: 'metric_value', metricId }],
+        ambiguity: [],
+      },
+    });
+    const metricExpression = 'SUM(CASE WHEN is_food_item THEN product_price ELSE 0 END) / SUM(order_item.product_price)';
+    const semanticLayer = new SemanticLayer({
+      metrics: [{
+        name: 'food_revenue_pct',
+        label: 'Food Revenue %',
+        description: '',
+        domain: 'sales',
+        sql: metricExpression,
+        type: 'custom',
+        aggregation: 'ratio',
+        table: '',
+        cube: 'order_item',
+        metricType: 'ratio',
+        typeParams: { numerator: { name: 'food_revenue' }, denominator: { name: 'revenue' } },
+      }],
+      dimensions: [],
+      measures: [{
+        name: 'food_revenue', label: 'Food Revenue', description: '', domain: 'sales', agg: 'sum',
+        expr: 'CASE WHEN is_food_item THEN product_price ELSE 0 END', table: 'analytics.order_items', cube: 'order_item',
+      }, {
+        name: 'revenue', label: 'Revenue', description: '', domain: 'sales', agg: 'sum',
+        expr: 'product_price', table: 'analytics.order_items', cube: 'order_item',
+      }],
+    });
+    const provider = new NeverProvider();
+    let executions = 0;
+    const safeSql = 'SELECT CAST(SUM(CASE WHEN is_food_item THEN product_price ELSE 0 END) AS DOUBLE) / CAST(NULLIF(SUM(product_price), 0) AS DOUBLE) AS food_revenue_pct FROM analytics.order_items';
+    const receiptFor = (sql: string): SemanticAggregationCompilerReceiptV1 => {
+      const compiledExpression = buildSqlOutputExpressionSignature(sql, 'food_revenue_pct');
+      if (!compiledExpression) throw new Error('fixture SQL has no exact output expression');
+      const body = {
+        version: 1 as const,
+        executionId: plan.executionId!,
+        capabilityFingerprint: plan.selectedCapabilityFingerprint!,
+        metricId,
+        metricExpressionSql: metricExpression,
+        operator: 'ratio' as const,
+        orderedMeasureIds: [...capability.measureIds],
+        physicalRelation: 'analytics.order_items',
+        relationAliases: ['order_item'],
+        outputAlias: 'food_revenue_pct',
+        dimensionIds: [],
+        relationshipPathIds: [],
+        relationshipProofFingerprints: [...new Set(
+          plan.relationshipProofs?.map((proof) => proof.authorityFingerprint) ?? [],
+        )].sort(),
+        orderBy: [],
+        compiledSqlFingerprint: semanticExecutionFingerprint(sql),
+        compiledExpressionFingerprint: semanticExecutionFingerprint(compiledExpression.canonicalExpression),
+        planFingerprint: plan.fingerprint,
+        snapshotId: plan.snapshotId,
+        targetFingerprint: 'target:fixture',
+      };
+      return { ...body, receiptFingerprint: semanticExecutionFingerprint(body) };
+    };
+    const safe = await answer({
+      question: 'What is the food revenue percentage?',
+      provider,
+      kg,
+      semanticLayer,
+      resolvedAnalyticalPlan: plan,
+      semanticQueryCompiler: async (selection) => ({
+        sql: safeSql,
+        engine: 'metricflow-cli',
+        selection,
+        trace: {
+          version: 1,
+          adapter: 'metricflow-cli',
+          status: 'compiled',
+          authoringRequest: { metrics: selection.metrics, dimensions: selection.dimensions ?? [] },
+          bindings: [],
+          warnings: [],
+          steps: [],
+          targetBinding: { executionTarget: { identityFingerprint: 'target:fixture' } },
+        },
+        aggregationCompilerReceipt: receiptFor(safeSql),
+      }),
+      executeGeneratedSql: async (sql) => {
+        executions += 1;
+        return { columns: ['food_revenue_pct'], rows: [{ food_revenue_pct: 0.42 }], rowCount: 1, sql };
+      },
+    });
+    expect(safe).toMatchObject({
+      kind: 'uncertified',
+      aggregationSafetyProof: { status: 'safe', issueCodes: [] },
+    });
+    expect(executions).toBe(1);
+
+    const selectedReceipt = receiptFor(safeSql);
+    const { receiptFingerprint: _selectedFingerprint, ...wrongReceiptBody } = {
+      ...selectedReceipt,
+      executionId: sameNameDecoyCapability.metricId,
+      capabilityFingerprint: sameNameDecoyCapability.sourceFingerprint,
+    };
+    const wrongReceipt = {
+      ...wrongReceiptBody,
+      receiptFingerprint: semanticExecutionFingerprint(wrongReceiptBody),
+    };
+    const wrongAuthority = await answer({
+      question: 'What is the food revenue percentage?',
+      provider,
+      kg,
+      semanticLayer,
+      resolvedAnalyticalPlan: plan,
+      semanticQueryCompiler: async (selection) => ({
+        sql: safeSql,
+        engine: 'metricflow-cli',
+        selection,
+        trace: {
+          version: 1,
+          adapter: 'metricflow-cli',
+          status: 'compiled',
+          authoringRequest: { metrics: selection.metrics, dimensions: selection.dimensions ?? [] },
+          bindings: [],
+          warnings: [],
+          steps: [],
+          targetBinding: { executionTarget: { identityFingerprint: 'target:fixture' } },
+        },
+        aggregationCompilerReceipt: wrongReceipt,
+      }),
+      executeGeneratedSql: async () => {
+        executions += 1;
+        throw new Error('a nonselected same-name capability must not execute');
+      },
+    });
+    expect(wrongAuthority.kind).toBe('no_answer');
+    expect(wrongAuthority.aggregationSafetyProof).toMatchObject({
+      status: 'blocked',
+      metricIds: [metricId],
+      issueCodes: expect.arrayContaining(['SEMANTIC_COMPILER_RECEIPT_AUTHORITY_MISMATCH']),
+    });
+    expect(executions).toBe(1);
+
+    for (const sql of [
+      'SELECT SUM(secret_salary) / SUM(secret_tax) AS food_revenue_pct FROM analytics.order_items',
+      'SELECT SUM(CASE WHEN is_food_item THEN product_price ELSE 0 END) + SUM(order_item.product_price) AS food_revenue_pct FROM analytics.order_items AS order_item',
+    ]) {
+      const blocked = await answer({
+        question: 'What is the food revenue percentage?',
+        provider,
+        kg,
+        semanticLayer,
+        resolvedAnalyticalPlan: plan,
+        semanticQueryCompiler: async (selection) => ({
+          sql,
+          engine: 'metricflow-cli',
+          selection,
+          trace: {
+            version: 1,
+            adapter: 'metricflow-cli',
+            status: 'compiled',
+            authoringRequest: { metrics: selection.metrics, dimensions: selection.dimensions ?? [] },
+            bindings: [],
+            warnings: [],
+            steps: [],
+            targetBinding: { executionTarget: { identityFingerprint: 'target:fixture' } },
+          },
+          aggregationCompilerReceipt: receiptFor(sql),
+        }),
+        executeGeneratedSql: async () => {
+          executions += 1;
+          throw new Error('unsafe SQL must not execute');
+        },
+      });
+      expect(blocked.kind, sql).toBe('no_answer');
+      expect(blocked.aggregationSafetyProof, sql).toMatchObject({
+        status: 'blocked',
+        issueCodes: expect.arrayContaining(['SEMANTIC_RATIO_COMPILER_BINDING_REQUIRED']),
+      });
+    }
+    expect(provider.calls).toBe(0);
+    expect(executions).toBe(1);
   });
 
   it('executes a bounded current/prior semantic graph before calculating and ranking the result', async () => {
@@ -567,3 +849,26 @@ describe('authoritative plan answer loop (AGT-013 / AGT-014)', () => {
     expect(freshnessBound.analyticalFreshnessObservation?.observedThrough).toBe('2026-07-22T00:00:00.000Z');
   });
 });
+
+function semanticCapability(metricId: string, measure: string): MetricCapabilityContract {
+  return {
+    metricId,
+    semanticModelId: 'semantic:consumption',
+    measureIds: [measure],
+    primaryEntityId: 'usage',
+    defaultResultGrainId: 'usage',
+    resultGrainIds: ['usage', 'customer_name'],
+    aggregation: 'sum',
+    additivity: { entities: 'additive', time: 'additive' },
+    dimensions: [{
+      dimensionId: 'customer_name',
+      entityId: 'customer_name',
+      supportedRoles: ['group_by', 'rank_entity'],
+    }],
+    timeDimensions: [],
+    operations: ['group', 'rank'],
+    supportedOutputKinds: ['dimension', 'metric_value', 'rank'],
+    executionCapabilities: [{ route: 'semantic', adapterId: 'native' }],
+    sourceFingerprint: `fixture:${metricId}`,
+  };
+}

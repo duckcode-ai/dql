@@ -31,6 +31,28 @@ export interface DqlArtifactExecutionReceipt {
   resultFingerprint: string;
 }
 
+export interface DqlExecutableArtifactV1 {
+  version: 1;
+  kind: DqlArtifactKind;
+  /** Fingerprints only: this binding must not become a second persisted source or SQL payload. */
+  dqlFingerprint: string;
+  sourceFingerprint: string;
+  compiledSqlFingerprint: string;
+  normalizedSqlFingerprint: string;
+  parameterFingerprint: string;
+  provenanceFingerprint: string;
+  targetFingerprint: string;
+  snapshotFingerprint: string;
+  planFingerprint: string;
+  semanticAdapter: string;
+  previewPolicy: {
+    mode: 'read_only_bounded' | 'compiler_governed';
+    rowLimit?: number;
+  };
+  trustState: DqlArtifactTrustState;
+  receipt: DqlArtifactExecutionReceipt;
+}
+
 export interface DqlArtifactReference {
   kind: DqlArtifactKind;
   source: string;
@@ -54,6 +76,8 @@ export interface DqlArtifactReference {
   compiledSql?: string;
   /** Exact execution contract used for the displayed result. */
   executionReceipt?: DqlArtifactExecutionReceipt;
+  /** Immutable preparation/execution binding shared by Ask and Notebook consumers. */
+  executableArtifact?: DqlExecutableArtifactV1;
   /**
    * Result columns that may safely be promoted to a runtime filter input.
    *
@@ -88,8 +112,49 @@ export function normalizeDqlArtifactReference(value: unknown): DqlArtifactRefere
     trustState: normalizeDqlArtifactTrustState(record.trustState),
     compiledSql: cleanString(record.compiledSql),
     executionReceipt: normalizeExecutionReceipt(record.executionReceipt),
+    executableArtifact: normalizeDqlExecutableArtifactV1(record.executableArtifact),
     filterableColumns: normalizeFilterableColumns(record.filterableColumns),
     ...(limit === undefined ? {} : { limit }),
+  };
+}
+
+export function normalizeDqlExecutableArtifactV1(value: unknown): DqlExecutableArtifactV1 | undefined {
+  const record = objectRecord(value);
+  if (!record || record.version !== 1) return undefined;
+  const kind = normalizeDqlArtifactKind(record.kind);
+  const trustState = normalizeDqlArtifactTrustState(record.trustState);
+  const semanticAdapter = cleanString(record.semanticAdapter);
+  const preview = objectRecord(record.previewPolicy);
+  const previewMode = preview?.mode === 'read_only_bounded' || preview?.mode === 'compiler_governed'
+    ? preview.mode
+    : undefined;
+  const receipt = normalizeExecutionReceipt(record.receipt);
+  const fingerprints = {
+    dqlFingerprint: normalizeFingerprint(record.dqlFingerprint),
+    sourceFingerprint: normalizeFingerprint(record.sourceFingerprint),
+    compiledSqlFingerprint: normalizeFingerprint(record.compiledSqlFingerprint),
+    normalizedSqlFingerprint: normalizeFingerprint(record.normalizedSqlFingerprint),
+    parameterFingerprint: normalizeFingerprint(record.parameterFingerprint),
+    provenanceFingerprint: normalizeFingerprint(record.provenanceFingerprint),
+    targetFingerprint: normalizeFingerprint(record.targetFingerprint),
+    snapshotFingerprint: normalizeFingerprint(record.snapshotFingerprint),
+    planFingerprint: normalizeFingerprint(record.planFingerprint),
+  };
+  if (!kind || !trustState || !semanticAdapter || !previewMode || !receipt
+    || Object.values(fingerprints).some((fingerprint) => !fingerprint)) return undefined;
+  const rowLimit = finitePositiveInteger(preview?.rowLimit);
+  if (previewMode === 'read_only_bounded' && rowLimit === undefined) return undefined;
+  return {
+    version: 1,
+    kind,
+    ...(fingerprints as Record<keyof typeof fingerprints, string>),
+    semanticAdapter,
+    previewPolicy: {
+      mode: previewMode,
+      ...(rowLimit === undefined ? {} : { rowLimit }),
+    },
+    trustState,
+    receipt,
   };
 }
 

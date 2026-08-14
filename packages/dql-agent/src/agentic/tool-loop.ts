@@ -26,6 +26,7 @@ import type {
   AgentToolDefinition,
   ProviderToolLoopOptions,
 } from '../providers/types.js';
+import { assertProviderPayloadAllowed, boundProviderResultRows } from '../provider-egress.js';
 
 export interface AgenticToolLoopOptions extends ProviderToolLoopOptions {
   /**
@@ -46,7 +47,10 @@ export async function runAgenticToolLoop(
   tools: AgentToolDefinition[],
   options: AgenticToolLoopOptions = {},
 ): Promise<string> {
-  const usable = tools.filter((tool) => tool.name && tool.description);
+  const resultRowBudgetUsage = new Map<string, number>();
+  const usable = tools
+    .filter((tool) => tool.name && tool.description)
+    .map((tool) => guardToolOutput(tool, options, resultRowBudgetUsage));
   const policyMessages: AgentMessage[] = options.toolPolicy
     ? [{ role: 'system', content: options.toolPolicy }]
     : [];
@@ -63,6 +67,42 @@ export async function runAgenticToolLoop(
   return runTextProtocolToolLoop(provider, [...messages, ...policyMessages], usable, options);
 }
 
+function guardToolOutput(
+  tool: AgentToolDefinition,
+  options: AgenticToolLoopOptions,
+  resultRowBudgetUsage: Map<string, number>,
+): AgentToolDefinition {
+  const policy = options.providerPayloadGuard;
+  if (!policy) return tool;
+  return {
+    ...tool,
+    run: async (args) => {
+      const output = await tool.run(args);
+      const maxResultRows = policy.allowedResultRowTools?.[tool.name] ?? 0;
+      const budgetGroup = policy.resultRowBudgetGroupByTool?.[tool.name] ?? tool.name;
+      const cumulativeLimit = policy.cumulativeResultRowBudgets?.[budgetGroup] ?? maxResultRows;
+      const alreadyUsed = resultRowBudgetUsage.get(budgetGroup) ?? 0;
+      const bounded = boundProviderResultRows(output, Math.max(0, cumulativeLimit - alreadyUsed));
+      const shape = assertProviderPayloadAllowed(bounded.value, {
+        allowResultRows: maxResultRows > 0,
+        maxResultRows: Math.max(0, cumulativeLimit - alreadyUsed),
+        purpose: policy.purpose,
+      });
+      const cumulativeResultRowCount = alreadyUsed + shape.resultRowCount;
+      resultRowBudgetUsage.set(budgetGroup, cumulativeResultRowCount);
+      policy.onPayload?.({
+        toolName: tool.name,
+        output: bounded.value,
+        ...shape,
+        cumulativeResultRowCount,
+        budgetGroup,
+        budgetExhausted: bounded.exhausted || cumulativeResultRowCount >= cumulativeLimit,
+      });
+      return bounded.value;
+    },
+  };
+}
+
 /**
  * Text-protocol ReAct loop for providers without native tool use. The model
  * chooses ONE action per turn: call a tool, or emit the final answer. We parse its
@@ -77,51 +117,78 @@ async function runTextProtocolToolLoop(
 ): Promise<string> {
   const maxToolCalls = Math.max(0, Math.min(30, options.maxToolCalls ?? 8));
   const toolMap = new Map(tools.map((tool) => [tool.name, tool]));
-  const runOptions = { signal: options.signal, reasoningEffort: options.reasoningEffort, model: options.model };
+  // Preserve the complete transport contract across both text-protocol turns.
+  // Reconstructing a small options subset silently dropped the physical-send
+  // observer, dispatch cap, redaction guard, and egress accounting for CLI and
+  // Ollama providers.
+  const dispatchLimit = Math.max(1, Math.min(30, options.maxProviderDispatches ?? 2));
+  let physicalDispatches = 0;
+  const outerObserver = options.onProviderDispatch;
+  const runOptions: ProviderToolLoopOptions = {
+    ...options,
+    onProviderDispatch: (event) => {
+      physicalDispatches += 1;
+      if (physicalDispatches > dispatchLimit) {
+        throw Object.assign(new Error(
+          `Provider dispatch budget exhausted after ${dispatchLimit} physical attempt${dispatchLimit === 1 ? '' : 's'}.`,
+        ), { code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' });
+      }
+      return outerObserver?.(event) ?? event.envelope;
+    },
+  };
 
   const messages: AgentMessage[] = [
     ...baseMessages,
     { role: 'system', content: buildTextToolContract(tools, maxToolCalls) },
   ];
 
-  let toolCallsUsed = 0;
   let lastText = '';
-  while (toolCallsUsed < maxToolCalls) {
-    const text = await provider.generate(messages, runOptions);
-    if (text.trim()) lastText = text;
-    const call = parseTextToolCall(text);
-    if (!call) return text || lastText; // final answer (or unparseable → treat as final)
+  const text = await provider.generate(messages, runOptions);
+  if (text.trim()) lastText = text;
+  const call = maxToolCalls > 0 ? parseTextToolCall(text) : undefined;
+  if (!call) return text || lastText;
 
-    const tool = toolMap.get(call.name);
-    toolCallsUsed += 1;
-    let output: unknown;
-    let isError = false;
-    const startedAt = Date.now();
-    if (!tool) {
-      output = { error: `Unknown tool: ${call.name}. Available: ${tools.map((t) => t.name).join(', ')}` };
+  const tool = toolMap.get(call.name);
+  let output: unknown;
+  let isError = false;
+  const startedAt = Date.now();
+  if (!tool) {
+    output = { error: `Unknown tool: ${call.name}. Available: ${tools.map((t) => t.name).join(', ')}` };
+    isError = true;
+  } else {
+    try {
+      assertMayStartToolCall(options);
+      output = await tool.run(call.input ?? {});
+    } catch (err) {
+      output = { error: err instanceof Error ? err.message : String(err) };
       isError = true;
-    } else {
-      try {
-        output = await tool.run(call.input ?? {});
-      } catch (err) {
-        output = { error: err instanceof Error ? err.message : String(err) };
-        isError = true;
-      }
     }
-    options.onToolCall?.({ name: call.name, input: call.input, output, isError, durationMs: Date.now() - startedAt });
-
-    messages.push({ role: 'assistant', content: text });
-    messages.push({ role: 'user', content: renderObservation(call.name, output) });
   }
+  options.onToolCall?.({ name: call.name, input: call.input, output, isError, durationMs: Date.now() - startedAt });
 
-  // Budget spent: force a final answer with the tool contract omitted so the model
-  // cannot request another tool and the loop is guaranteed to terminate.
+  messages.push({ role: 'assistant', content: text });
+  messages.push({ role: 'user', content: renderObservation(call.name, output) });
+
+  // One provider proposal plus one final generation is the complete ordinary
+  // tool round. The final instruction prohibits a second tool proposal.
   messages.push({
     role: 'user',
     content: 'Tool budget reached — do not call any more tools. Answer now using only the tool results above, as a single ```json fenced object with summary, sql, viz, outputs.',
   });
-  const finalText = await provider.generate(messages, runOptions).catch(() => '');
+  const finalText = await provider.generate(messages, runOptions).catch((error: unknown) => {
+    if (error && typeof error === 'object' && 'code' in error
+      && (error as { code?: unknown }).code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED') throw error;
+    return '';
+  });
   return finalText.trim() ? finalText : lastText;
+}
+
+function assertMayStartToolCall(options: ProviderToolLoopOptions): void {
+  if (options.mayStartToolCall?.() === false) {
+    throw Object.assign(new Error('The run soft target elapsed before this tool branch could start.'), {
+      code: 'RUN_SOFT_TARGET_EXCEEDED',
+    });
+  }
 }
 
 interface TextToolCall {

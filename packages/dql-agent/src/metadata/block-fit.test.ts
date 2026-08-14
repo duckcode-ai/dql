@@ -36,7 +36,10 @@ describe('certified block fit', () => {
     expect(result.reasons.join(' ')).toContain('unsupported requested filters');
   });
 
-  it('accepts a certified customer ranking whose beverage restriction is baked into its contract and SQL (AGT-009, AGT-010)', () => {
+  it.each([
+    'who are the top customers who spent on beverage category products?',
+    'who are the top customers by drink revenue?',
+  ])('accepts a certified customer ranking whose requested category restriction is baked into its contract and SQL (AGT-009, AGT-010): %s', (question) => {
     const block = certifiedBlock('top_beverage_customers', {
       grain: 'customer',
       entities: ['Customer'],
@@ -54,13 +57,51 @@ describe('certified block fit', () => {
         limit 10`,
     });
 
-    const result = fit('who are the top customers who spent on beverage category products?', block);
+    const result = fit(question, block);
 
     expect(result.kind).toBe('exact');
     expect(result.confidence).toBe('high');
     expect(result.missingDimensions).toEqual([]);
     expect(result.missingOutputs).toEqual([]);
     expect(result.unsupportedFilters).toEqual([]);
+  });
+
+  it('AGT-006 rejects any category-scoped certified ranking when the question requests the overall metric', () => {
+    const block = certifiedBlock('priority_account_value', {
+      grain: 'account',
+      declaredOutputs: ['account_label', 'contract_value'],
+      dimensions: ['account'],
+      sql: `select account_label, sum(contract_value) as contract_value
+        from contracts
+        where account_tier = 'priority'
+        group by account_label
+        order by contract_value desc
+        limit 10`,
+    });
+
+    const result = fit('Which accounts have the highest contract value?', block);
+
+    expect(result.kind).toBe('context_only');
+    expect(result.reasons).toContain('certified static scope is not requested: priority');
+  });
+
+  it('AGT-006 accepts the same arbitrary category scope when the question entails it', () => {
+    const block = certifiedBlock('priority_account_value', {
+      grain: 'account',
+      declaredOutputs: ['account_label', 'contract_value'],
+      dimensions: ['account'],
+      sql: `select account_label, sum(contract_value) as contract_value
+        from contracts
+        where account_tier = 'priority'
+        group by account_label
+        order by contract_value desc
+        limit 10`,
+    });
+
+    const result = fit('Which priority accounts have the highest contract value?', block);
+
+    expect(result.kind).toBe('exact');
+    expect(result.reasons).not.toEqual(expect.arrayContaining([expect.stringMatching(/scope is not requested/i)]));
   });
 
   it('rejects a high-overlap customer block for a product flow with different required outputs', () => {

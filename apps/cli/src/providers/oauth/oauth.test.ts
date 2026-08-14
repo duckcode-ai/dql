@@ -97,12 +97,17 @@ describe('ClaudeOAuthProvider request', () => {
       return new Response(JSON.stringify({ content: [{ type: 'text', text: 'answer' }] }), { status: 200, headers: { 'content-type': 'application/json' } });
     }));
     const provider = new ClaudeOAuthProvider({ projectRoot: root, model: 'claude-sonnet-4-5' });
-    const out = await provider.generate([{ role: 'user', content: 'hi' }], { reasoningEffort: 'high' });
+    const dispatches: unknown[] = [];
+    const out = await provider.generate([{ role: 'user', content: 'hi' }], {
+      reasoningEffort: 'high',
+      onProviderDispatch: (event) => { dispatches.push(event); return event.envelope; },
+    });
     expect(out).toBe('answer');
     expect(captured?.headers.Authorization).toBe('Bearer TOK');
     expect(captured?.headers['Anthropic-Beta']).toContain('oauth-2025-04-20');
     expect(captured?.body.system[0].text).toContain('Claude Code');
     expect(captured?.body.thinking).toEqual({ type: 'enabled', budget_tokens: 20000 });
+    expect(dispatches).toHaveLength(1);
   });
 
   it('throws a clear error when there is no credential at all', async () => {
@@ -144,10 +149,33 @@ describe('CodexOAuthProvider request', () => {
       return new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } });
     }));
     const provider = new CodexOAuthProvider({ projectRoot: root });
-    const out = await provider.generate([{ role: 'user', content: 'hi' }], { reasoningEffort: 'medium' });
+    const dispatches: unknown[] = [];
+    const out = await provider.generate([{ role: 'user', content: 'hi' }], {
+      reasoningEffort: 'medium',
+      onProviderDispatch: (event) => { dispatches.push(event); return event.envelope; },
+    });
     expect(out).toBe('Hello');
     expect(captured?.Authorization).toBe('Bearer CTOK');
     expect(captured?.['ChatGPT-Account-Id']).toBe('acct_9');
+    expect(dispatches).toHaveLength(1);
+  });
+
+  it.each([
+    ['Claude', () => {
+      setClaudeCredentials(root, { type: 'claude', access_token: 'TOK', refresh_token: 'REF', expired: new Date(Date.now() + 3.6e6).toISOString() });
+      return new ClaudeOAuthProvider({ projectRoot: root });
+    }],
+    ['Codex', () => {
+      setCodexCredentials(root, { type: 'openai-codex', access_token: 'TOK', refresh_token: 'REF', expires: Date.now() + 3.6e6 });
+      return new CodexOAuthProvider({ projectRoot: root });
+    }],
+  ])('records the %s physical attempt when fetch fails', async (_label, createProvider) => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new DOMException('cancelled', 'AbortError'); }));
+    const dispatches: unknown[] = [];
+    await expect(createProvider().generate([{ role: 'user', content: 'hi' }], {
+      onProviderDispatch: (event) => { dispatches.push(event); return event.envelope; },
+    })).rejects.toThrow();
+    expect(dispatches).toHaveLength(1);
   });
 
   it('flushes a final text delta even when the stream lacks a trailing blank line', async () => {

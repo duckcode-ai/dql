@@ -52,45 +52,59 @@ const baselineContract = loadYaml(readFileSync(
 ));
 const answerEngineBaseline = [];
 for (const testCase of (baselineContract.cases ?? []).filter(isScaleAnswerEngineCase)) {
-  const started = performance.now();
-  const caseDomainContext = testCase.context?.domain
-    ? agent.resolveDomainContextEnvelope({
-        manifest,
-        activeDomain: testCase.context.domain,
-        purpose: 'performance_validation',
-        snapshotId: generated.digest,
-      })
-    : undefined;
-  const planned = await agent.planAgentAnswer(projectRoot, {
-    question: testCase.question,
-    surface: 'cli',
-    limit: baselineContract.defaults?.maxCandidateCards ?? 12,
-    preparedMetadataFingerprint: warmProjectState.metadataFingerprint,
-    ...(caseDomainContext ? { domainContext: caseDomainContext } : {}),
+  let latest;
+  const routeSamples = await sampleAsync(args.samples, async () => {
+    const calls = { meaningResolution: 0, providerSynthesis: 0, toolCalls: 0, sqlExecutions: 0, repairs: 0 };
+    const caseDomainContext = testCase.context?.domain
+      ? agent.resolveDomainContextEnvelope({
+          manifest,
+          activeDomain: testCase.context.domain,
+          purpose: 'performance_validation',
+          snapshotId: generated.digest,
+        })
+      : undefined;
+    const planned = await agent.planAgentAnswer(projectRoot, {
+      question: testCase.question,
+      surface: 'cli',
+      limit: baselineContract.defaults?.maxCandidateCards ?? 12,
+      preparedMetadataFingerprint: warmProjectState.metadataFingerprint,
+      ...(caseDomainContext ? { domainContext: caseDomainContext } : {}),
+    });
+    const meaningEvidence = planned.contextPack.retrievalDiagnostics.meaningEvidence;
+    const baseEvidence = meaningEvidence
+      ? agent.applyContextPackCompatibility(agent.toAgentRetrievalEvidence(
+          meaningEvidence,
+          planned.contextPack.questionPlan,
+          {
+            snapshotId: planned.contextPack.knowledgeLens.snapshotId,
+            sourceFingerprint: planned.contextPack.freshness.fingerprint ?? undefined,
+            knowledgeLens: planned.contextPack.knowledgeLens,
+          },
+        ), planned.contextPack)
+      : { snapshotId: planned.contextPack.knowledgeLens.snapshotId, knowledgeLens: planned.contextPack.knowledgeLens, candidates: [] };
+    const evidence = augmentFixtureEvidence(testCase, baseEvidence);
+    const router = agent.createHybridRouter({
+      getEvidence: async () => evidence,
+      resolveMeaning: async ({ candidates }) => {
+        calls.meaningResolution += 1;
+        return evalMeaningResolution(testCase, evidence, candidates);
+      },
+      resolvedPlanMode: 'authoritative',
+    });
+    const decision = await router.decide({
+      question: testCase.question,
+      intent: planned.contextPack.routeDecision.intent,
+    });
+    latest = { planned, decision, telemetry: { calls } };
+  }, args.warmups);
+  const routeTiming = summarize(routeSamples);
+  answerEngineBaseline.push({
+    ...baselineTrace(testCase, latest.planned, latest.decision, latest.telemetry, routeTiming.p50Ms),
+    warmups: args.warmups,
+    samples: args.samples,
+    p50Ms: routeTiming.p50Ms,
+    p95Ms: routeTiming.p95Ms,
   });
-  const meaningEvidence = planned.contextPack.retrievalDiagnostics.meaningEvidence;
-  const baseEvidence = meaningEvidence
-    ? agent.applyContextPackCompatibility(agent.toAgentRetrievalEvidence(
-        meaningEvidence,
-        planned.contextPack.questionPlan,
-        {
-          snapshotId: planned.contextPack.knowledgeLens.snapshotId,
-          sourceFingerprint: planned.contextPack.freshness.fingerprint ?? undefined,
-          knowledgeLens: planned.contextPack.knowledgeLens,
-        },
-      ), planned.contextPack)
-    : { snapshotId: planned.contextPack.knowledgeLens.snapshotId, knowledgeLens: planned.contextPack.knowledgeLens, candidates: [] };
-  const evidence = augmentFixtureEvidence(testCase, baseEvidence);
-  const router = agent.createHybridRouter({
-    getEvidence: async () => evidence,
-    resolveMeaning: async ({ candidates }) => evalMeaningResolution(testCase, evidence, candidates),
-    resolvedPlanMode: 'authoritative',
-  });
-  const decision = await router.decide({
-    question: testCase.question,
-    intent: planned.contextPack.routeDecision.intent,
-  });
-  answerEngineBaseline.push(baselineTrace(testCase, planned, decision, performance.now() - started));
 }
 
 let server;
@@ -148,8 +162,8 @@ const measurements = {
   },
   answerEngineBaseline: {
     cases: answerEngineBaseline,
-    p50Ms: round(percentile(answerEngineBaseline.map((item) => item.durationMs).sort((a, b) => a - b), 0.50)),
-    p95Ms: round(percentile(answerEngineBaseline.map((item) => item.durationMs).sort((a, b) => a - b), 0.95)),
+    p50Ms: round(percentile(answerEngineBaseline.map((item) => item.p50Ms).sort((a, b) => a - b), 0.50)),
+    p95Ms: round(percentile(answerEngineBaseline.map((item) => item.p95Ms).sort((a, b) => a - b), 0.95)),
     wrongCertifiedCount: answerEngineBaseline.filter((item) => item.actualRoute === 'certified' && item.expectedRoute !== 'certified').length,
     inventedIdExecutionCount: 0,
     routeParityFailures: answerEngineBaseline.filter((item) =>
@@ -170,6 +184,7 @@ const evidence = {
   fixture: { ...generated, expectedCounts: PERF_001_COUNTS, observedCounts: countEvidence },
   hardware: hardwareEvidence(),
   samples: args.samples,
+  warmups: args.warmups,
   measurements,
   gates,
   limitations: [
@@ -255,7 +270,8 @@ async function runMeasuredWorker(operation, root) {
   });
 }
 
-async function sampleAsync(count, operation) {
+async function sampleAsync(count, operation, warmups = 0) {
+  for (let index = 0; index < warmups; index += 1) await operation(index);
   const samples = [];
   for (let index = 0; index < count; index += 1) {
     const started = performance.now();
@@ -333,9 +349,70 @@ function evaluateGates(measurements, observed) {
   return { passed: Object.values(checks).every(Boolean), checks };
 }
 
-function baselineTrace(testCase, planned, decision, durationMs) {
+function baselineTrace(testCase, planned, decision, telemetry, durationMs) {
   const selectedEvidence = planned.contextPack.retrievalDiagnostics.selectedEvidence ?? [];
   const expectedRoute = testCase.expected?.route;
+  const stages = [
+    {
+      stage: 'snapshot_envelope',
+      status: 'passed',
+      snapshotId: planned.contextPack.knowledgeLens.snapshotId,
+      contextPackId: planned.contextPackId,
+      activeDomainId: planned.contextPack.knowledgeLens.activeDomainId,
+    },
+    {
+      stage: 'retrieval',
+      status: 'passed',
+      strategy: planned.contextPack.retrievalDiagnostics.strategy,
+      selectedEvidence: selectedEvidence.slice(0, 12).map((item) => ({
+        objectKey: item.objectKey,
+        score: item.score,
+        rank: item.rank,
+        reason: item.reason,
+      })),
+      topRejected: planned.contextPack.retrievalDiagnostics.topRejected.slice(0, 12),
+    },
+    {
+      stage: 'domain_skill',
+      status: 'passed',
+      skillRefs: planned.contextPack.knowledgeLens.skillRefs,
+      skillFingerprints: planned.contextPack.knowledgeLens.skillFingerprints,
+    },
+    {
+      stage: 'meaning_resolution',
+      status: decision.meaningResolution ? 'passed' : decision.requiresClarification ? 'blocked' : 'not_run',
+      selectedConceptIds: decision.meaningResolution?.selectedConceptIds ?? [],
+      recommendedExecutionId: decision.meaningResolution?.recommendedExecutionId,
+      confidence: decision.meaningResolution?.confidence,
+      errorCode: decision.meaningResolutionErrorCode,
+    },
+    {
+      stage: 'resolved_analytical_plan',
+      status: decision.resolvedAnalyticalPlan ? 'passed' : 'not_run',
+      planId: decision.resolvedAnalyticalPlan?.planId,
+      fingerprint: decision.resolvedAnalyticalPlan?.fingerprint,
+      snapshotId: decision.resolvedAnalyticalPlan?.snapshotId,
+      capability: decision.resolvedAnalyticalPlan?.capability,
+    },
+    {
+      stage: 'compatibility_time_join_proof',
+      status: decision.resolvedAnalyticalPlan?.capability === 'blocked' ? 'blocked' : decision.resolvedAnalyticalPlan ? 'passed' : 'not_run',
+      compatibilityProof: decision.resolvedAnalyticalPlan?.compatibilityProof ?? [],
+      relationshipPathIds: decision.resolvedAnalyticalPlan?.relationshipPathIds ?? [],
+      timeBounds: decision.resolvedAnalyticalPlan?.query.timeBounds,
+    },
+    {
+      stage: 'route',
+      status: 'passed',
+      route: routeFromDecision(decision, planned.routeDecision.route),
+      intent: planned.routeDecision.intent,
+      reason: planned.routeDecision.reason,
+      exactObjectKey: planned.routeDecision.exactObjectKey,
+    },
+    { stage: 'compile', status: 'not_run', reason: 'No live warehouse/runtime is attached to the deterministic scale fixture.' },
+    { stage: 'execution_receipt', status: 'not_run', reason: 'No live warehouse/runtime is attached to the deterministic scale fixture.' },
+    { stage: 'result_contract', status: 'not_run', reason: 'No live warehouse/runtime is attached to the deterministic scale fixture.' },
+  ];
   return {
     name: testCase.name,
     question: testCase.question,
@@ -345,67 +422,9 @@ function baselineTrace(testCase, planned, decision, durationMs) {
     expectedConceptIds: testCase.expected?.selectedConceptIds ?? [],
     selectedConceptIds: decision.resolvedAnalyticalPlan?.selectedConceptIds ?? [],
     retrievedObjectKeys: selectedEvidence.map((item) => item.objectKey),
-    stages: [
-      {
-        stage: 'snapshot_envelope',
-        status: 'passed',
-        snapshotId: planned.contextPack.knowledgeLens.snapshotId,
-        contextPackId: planned.contextPackId,
-        activeDomainId: planned.contextPack.knowledgeLens.activeDomainId,
-      },
-      {
-        stage: 'retrieval',
-        status: 'passed',
-        strategy: planned.contextPack.retrievalDiagnostics.strategy,
-        selectedEvidence: selectedEvidence.slice(0, 12).map((item) => ({
-          objectKey: item.objectKey,
-          score: item.score,
-          rank: item.rank,
-          reason: item.reason,
-        })),
-        topRejected: planned.contextPack.retrievalDiagnostics.topRejected.slice(0, 12),
-      },
-      {
-        stage: 'domain_skill',
-        status: 'passed',
-        skillRefs: planned.contextPack.knowledgeLens.skillRefs,
-        skillFingerprints: planned.contextPack.knowledgeLens.skillFingerprints,
-      },
-      {
-        stage: 'meaning_resolution',
-        status: decision.meaningResolution ? 'passed' : decision.requiresClarification ? 'blocked' : 'not_run',
-        selectedConceptIds: decision.meaningResolution?.selectedConceptIds ?? [],
-        recommendedExecutionId: decision.meaningResolution?.recommendedExecutionId,
-        confidence: decision.meaningResolution?.confidence,
-        errorCode: decision.meaningResolutionErrorCode,
-      },
-      {
-        stage: 'resolved_analytical_plan',
-        status: decision.resolvedAnalyticalPlan ? 'passed' : 'not_run',
-        planId: decision.resolvedAnalyticalPlan?.planId,
-        fingerprint: decision.resolvedAnalyticalPlan?.fingerprint,
-        snapshotId: decision.resolvedAnalyticalPlan?.snapshotId,
-        capability: decision.resolvedAnalyticalPlan?.capability,
-      },
-      {
-        stage: 'compatibility_time_join_proof',
-        status: decision.resolvedAnalyticalPlan?.capability === 'blocked' ? 'blocked' : decision.resolvedAnalyticalPlan ? 'passed' : 'not_run',
-        compatibilityProof: decision.resolvedAnalyticalPlan?.compatibilityProof ?? [],
-        relationshipPathIds: decision.resolvedAnalyticalPlan?.relationshipPathIds ?? [],
-        timeBounds: decision.resolvedAnalyticalPlan?.query.timeBounds,
-      },
-      {
-        stage: 'route',
-        status: 'passed',
-        route: routeFromDecision(decision, planned.routeDecision.route),
-        intent: planned.routeDecision.intent,
-        reason: planned.routeDecision.reason,
-        exactObjectKey: planned.routeDecision.exactObjectKey,
-      },
-      { stage: 'compile', status: 'not_run', reason: 'No live warehouse/runtime is attached to the deterministic scale fixture.' },
-      { stage: 'execution_receipt', status: 'not_run', reason: 'No live warehouse/runtime is attached to the deterministic scale fixture.' },
-      { stage: 'result_contract', status: 'not_run', reason: 'No live warehouse/runtime is attached to the deterministic scale fixture.' },
-    ],
+    stageCount: stages.length,
+    calls: { ...telemetry.calls },
+    stages,
   };
 }
 
@@ -532,13 +551,14 @@ function hardwareEvidence() {
 }
 
 function parseArgs(values) {
-  const parsed = { seed: PERF_001_SEED, samples: 20, gate: false, summary: false };
+  const parsed = { seed: PERF_001_SEED, samples: 30, warmups: 5, gate: false, summary: false };
   for (let index = 0; index < values.length; index += 1) {
     const value = values[index];
     if (value === '--gate') parsed.gate = true;
     else if (value === '--summary') parsed.summary = true;
     else if (value === '--seed') parsed.seed = values[++index];
-    else if (value === '--samples') parsed.samples = Math.max(1, Number(values[++index]) || 20);
+    else if (value === '--samples') parsed.samples = Math.max(1, Number(values[++index]) || 30);
+    else if (value === '--warmups') parsed.warmups = Math.max(0, Number(values[++index]) || 0);
     else if (value === '--project') parsed.project = values[++index];
     else if (value === '--evidence') parsed.evidence = values[++index];
     else if (value === '--worker') parsed.worker = values[++index];

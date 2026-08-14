@@ -156,8 +156,8 @@ describe('Ask ↔ Notebook execution parity', () => {
    * `source::` identities ahead of the resolution that would have cleared them.
    *
    * Reproducing that behaviourally needs a semantic-layer + MetricFlow fixture;
-   * asserting the pipeline still contains those steps, in the right order, is
-   * the cheap check that would have caught it.
+   * asserting both surfaces still enter ExecutionService, whose preparation
+   * validates after resolution, is the cheap check that would have caught it.
    */
   it('resolves what the notebook resolves, and validates only after resolving', () => {
     const source = readFileSync(new URL('./local-runtime.ts', import.meta.url), 'utf8');
@@ -170,15 +170,16 @@ describe('Ask ↔ Notebook execution parity', () => {
     for (const step of [
       'prepareSemanticSql',
       'resolveSemanticTableMapping',
-      'prepareAnalyticalExecutionSql',
+      'analyticalExecutionService.execute',
       'executeTargetBoundSemanticQuery',
     ]) {
       expect(direct, `the direct executor no longer performs ${step}`).toContain(step);
     }
     const gateway = source.slice(
-      source.indexOf('export async function prepareAnalyticalExecutionSql'),
+      source.indexOf('export class ExecutionService'),
       source.indexOf('export function dashboardRuntimeVariables'),
     );
+    expect(gateway).toContain('prepareAnalyticalExecutionSql');
     expect(gateway).toContain('resolveInternalRelationIds');
     expect(gateway).toContain('resolveBareInternalRelationIds');
     expect(gateway).toContain('prepareLocalExecution');
@@ -187,6 +188,11 @@ describe('Ask ↔ Notebook execution parity', () => {
       gateway.indexOf('prepareLocalExecution'),
       'read-only enforcement must run on the resolved statement',
     ).toBeLessThan(gateway.indexOf('readOnlySqlValidationError'));
+    const notebook = source.slice(
+      source.indexOf("path === '/api/query'"),
+      source.indexOf("path === '/api/query/cancel'"),
+    );
+    expect(notebook).toContain('analyticalExecutionService.execute');
   });
 
   it('accepts every fixture shape through the generated-SQL read-only gate', async () => {

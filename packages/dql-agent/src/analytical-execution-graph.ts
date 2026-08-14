@@ -9,12 +9,15 @@
 
 import { createHash } from 'node:crypto';
 import type {
+  AnalyticalExecutionReceiptV1,
   AnalyticalPeriodV2,
   AnalyticalQuestionFrameV2,
   MetricCapabilityContract,
 } from '@duckcodeailabs/dql-core';
+export type { AnalyticalExecutionReceiptV1 } from '@duckcodeailabs/dql-core';
 import type { AnalyticalFitClass } from './analytical-compatibility.js';
 import type { ResolvedAnalyticalPlan } from './resolved-analytical-plan.js';
+import { resolvedRelationshipProofMatches } from './relationship-proof.js';
 
 export type AnalyticalExecutionRoute =
   | 'certified'
@@ -26,6 +29,7 @@ export type AnalyticalExecutionGraphBlockedCode =
   | 'PLAN_V2_REQUIRED'
   | 'PLAN_BLOCKED'
   | 'CAPABILITY_MISMATCH'
+  | 'RELATIONSHIP_PROOF_MISMATCH'
   | 'ROUTE_MISMATCH'
   | 'PERIOD_CONTRACT_INVALID'
   | 'PERIOD_BOUNDS_REQUIRED'
@@ -132,6 +136,7 @@ export interface AnalyticalExecutionGraphV1 {
   fitClass: AnalyticalFitClass;
   metricId: string;
   capabilityFingerprint: string;
+  relationshipProofFingerprints?: string[];
   nodes: AnalyticalExecutionGraphNode[];
   terminalNodeId: string;
 }
@@ -149,23 +154,6 @@ export interface AnalyticalSourceResult {
   columns: string[];
   rows: Array<Record<string, unknown>>;
   receiptFingerprint: string;
-}
-
-export interface AnalyticalExecutionReceiptV1 {
-  version: 1;
-  receiptId: string;
-  graphId: string;
-  graphFingerprint: string;
-  planId: string;
-  planFingerprint: string;
-  snapshotId: string;
-  route: AnalyticalExecutionRoute;
-  trustState: 'certified' | 'governed' | 'review_required';
-  subReceipts: Array<{ nodeId: string; receiptFingerprint: string }>;
-  outputColumns: string[];
-  rowCount: number;
-  rowBound: number;
-  resultFingerprint: string;
 }
 
 export type AnalyticalGraphExecutionFailureCode =
@@ -209,11 +197,36 @@ export function buildAnalyticalExecutionGraph(input: {
   if (frame.metricConceptIds.length !== 1 || frame.metricConceptIds[0] !== capability.metricId) {
     return blocked('CAPABILITY_MISMATCH', 'The selected capability does not match the plan metric.', 'metricConceptIds');
   }
+  if (plan.selectedCapabilityFingerprint
+    && plan.selectedCapabilityFingerprint !== capability.sourceFingerprint) {
+    return blocked('CAPABILITY_MISMATCH', 'The selected capability fingerprint does not match the immutable plan.', 'selectedCapabilityFingerprint');
+  }
   const routeCapability = capability.executionCapabilities.find(
     (candidate) => candidate.route === route && (!input.adapterId || candidate.adapterId === input.adapterId),
   );
   if (!routeCapability) {
     return blocked('ROUTE_MISMATCH', `${capability.metricId} does not declare the selected ${route} adapter.`, 'executionCapabilities');
+  }
+  const requiredRelationshipDimensionIds = [...new Set([
+    ...frame.dimensions.map((binding) => binding.dimensionId),
+    ...frame.memberBindings.map((binding) => binding.dimensionId),
+  ])].filter((dimensionId) => {
+    const dimension = capability.dimensions.find((candidate) => candidate.dimensionId === dimensionId);
+    return dimension && dimension.entityId !== capability.primaryEntityId;
+  });
+  const relationshipProofs = plan.relationshipProofs ?? [];
+  if (plan.selectedCapabilityFingerprint && requiredRelationshipDimensionIds.some((dimensionId) => {
+    const matches = relationshipProofs.filter((proof) => proof.dimensionId === dimensionId);
+    return matches.length !== 1 || !resolvedRelationshipProofMatches({
+      proof: matches[0]!,
+      capability,
+      route,
+      ...(input.adapterId ? { adapterId: input.adapterId } : {}),
+      executionId: plan.executionId ?? '',
+      snapshotId: plan.snapshotId,
+    });
+  })) {
+    return blocked('RELATIONSHIP_PROOF_MISMATCH', 'The selected relationship authority does not match the plan, capability, dimension, snapshot, and adapter.', 'relationshipProofs');
   }
 
   const requestedOutputIds = frame.requestedOutputs.map((output) => output.id);
@@ -760,6 +773,9 @@ function readyGraph(
     fitClass: input.fitClass ?? ('exact' as const),
     metricId: capability.metricId,
     capabilityFingerprint: capability.sourceFingerprint,
+    relationshipProofFingerprints: [...new Set(
+      input.plan.relationshipProofs?.map((proof) => proof.authorityFingerprint) ?? [],
+    )].sort(),
     nodes,
     terminalNodeId,
   };

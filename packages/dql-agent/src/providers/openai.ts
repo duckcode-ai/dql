@@ -8,6 +8,7 @@ import type {
 import { consumeSse } from './claude.js';
 import { supportsReasoningEffort } from './reasoning-effort.js';
 import { compactToolOutput } from './tool-output.js';
+import { DEFAULT_PROVIDER_DISPATCH_LIMIT, prepareProviderHttpDispatch } from './dispatch.js';
 
 /**
  * Translate reasoning effort into the Chat Completions `reasoning_effort` param.
@@ -58,6 +59,7 @@ export class OpenAIProvider implements AgentProvider {
     let includeTemperature = true;
     let lastStatus = 0;
     let lastBody = '';
+    let dispatches = 0;
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const body: Record<string, unknown> = {
         ...bodyBase,
@@ -65,10 +67,18 @@ export class OpenAIProvider implements AgentProvider {
       };
       if (includeTemperature) body.temperature = options.temperature ?? 0.2;
 
+      dispatches += 1;
+      const dispatchedBody = prepareProviderHttpDispatch({
+        provider: this.name,
+        operation: 'generate',
+        attemptIndex: dispatches,
+        envelope: body,
+        options,
+      });
       const res = await fetch(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers,
-        body: JSON.stringify(body),
+        body: JSON.stringify(dispatchedBody),
         signal: options.signal,
       });
       if (res.ok) return extractOpenAIChatContent(await res.json());
@@ -117,11 +127,46 @@ export class OpenAIProvider implements AgentProvider {
       },
     }));
 
-    const maxToolCalls = Math.max(0, Math.min(30, options.maxToolCalls ?? 8));
+    const dispatchLimit = Math.max(1, Math.min(30, options.maxProviderDispatches ?? DEFAULT_PROVIDER_DISPATCH_LIMIT));
+    const maxToolCalls = Math.max(0, Math.min(dispatchLimit <= 2 ? 4 : 30, options.maxToolCalls ?? 8));
     let toolCallsUsed = 0;
     let lastText = '';
     let useMaxCompletionTokens = false;
     let includeTemperature = true;
+    let dispatches = 0;
+
+    const send = (body: Record<string, unknown>): Promise<Response> => {
+      dispatches += 1;
+      const dispatchedBody = prepareProviderHttpDispatch({
+        provider: this.name,
+        operation: 'generate_with_tools',
+        attemptIndex: dispatches,
+        envelope: body,
+        options,
+      });
+      return fetch(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(dispatchedBody),
+        signal: options.signal,
+      });
+    };
+
+    const forcedFinal = async (): Promise<string> => {
+      const finalBody: Record<string, unknown> = {
+        model,
+        messages: chatMessages,
+        ...openaiReasoning(model, options),
+        [useMaxCompletionTokens ? 'max_completion_tokens' : 'max_tokens']: completionTokenBudget,
+      };
+      if (includeTemperature) finalBody.temperature = options.temperature ?? 0.2;
+      const finalRes = await send(finalBody);
+      if (!finalRes.ok) return '';
+      const finalMessage = extractOpenAIChatMessage(await finalRes.json());
+      // Tools were physically disabled. A provider that still returns a tool
+      // request cannot trigger another round.
+      return finalMessage.toolCalls.length === 0 ? finalMessage.content?.trim() ?? '' : '';
+    };
 
     for (;;) {
       const bodyBase = {
@@ -137,12 +182,7 @@ export class OpenAIProvider implements AgentProvider {
       };
       if (includeTemperature) body.temperature = options.temperature ?? 0.2;
 
-      const res = await fetch(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        signal: options.signal,
-      });
+      const res = await send(body);
       if (!res.ok) {
         const errorBody = await res.text().catch(() => res.statusText);
         if (!useMaxCompletionTokens && shouldRetryWithMaxCompletionTokens(errorBody)) {
@@ -178,24 +218,8 @@ export class OpenAIProvider implements AgentProvider {
           content: 'Tool budget reached — do not call any more tools. Answer now using only the information the tool calls above already returned, following the required output format.',
         });
         try {
-          const finalBody: Record<string, unknown> = {
-            model,
-            messages: chatMessages,
-            ...openaiReasoning(model, options),
-            [useMaxCompletionTokens ? 'max_completion_tokens' : 'max_tokens']: completionTokenBudget,
-            // tools + tool_choice intentionally omitted — forces a final answer.
-          };
-          if (includeTemperature) finalBody.temperature = options.temperature ?? 0.2;
-          const finalRes = await fetch(`${this.baseUrl}/chat/completions`, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(finalBody),
-            signal: options.signal,
-          });
-          if (finalRes.ok) {
-            const finalMessage = extractOpenAIChatMessage(await finalRes.json());
-            if (finalMessage.content?.trim()) return finalMessage.content;
-          }
+          const finalText = await forcedFinal();
+          if (finalText) return finalText;
         } catch {
           // Fall through to the legacy behavior on any final-turn failure.
         }
@@ -226,6 +250,7 @@ export class OpenAIProvider implements AgentProvider {
           isError = true;
         } else {
           try {
+            assertMayStartToolCall(options);
             output = await tool.run(args);
           } catch (err) {
             output = { error: err instanceof Error ? err.message : String(err) };
@@ -238,6 +263,22 @@ export class OpenAIProvider implements AgentProvider {
           tool_call_id: call.id,
           content: compactToolOutput(output),
         });
+      }
+      if (dispatchLimit <= 2) {
+        try {
+          const finalText = await forcedFinal();
+          return finalText || lastText || JSON.stringify({
+            summary: 'The provider did not return a final answer within the bounded tool round.',
+          });
+        } catch (error) {
+          if (error && typeof error === 'object'
+            && (error as { code?: unknown }).code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED') {
+            throw error;
+          }
+          return lastText || JSON.stringify({
+            summary: 'The provider dispatch budget was exhausted before a final answer.',
+          });
+        }
       }
     }
   }
@@ -252,17 +293,25 @@ export class OpenAIProvider implements AgentProvider {
     }
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
+    const body = {
+      model: options.model ?? this.defaultModel,
+      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      max_tokens: options.maxTokens ?? 1024,
+      temperature: options.temperature ?? 0.2,
+      stream: true,
+      ...openaiReasoning(options.model ?? this.defaultModel, options),
+    };
+    const dispatchedBody = prepareProviderHttpDispatch({
+      provider: this.name,
+      operation: 'generate_stream',
+      attemptIndex: 1,
+      envelope: body,
+      options,
+    });
     const res = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        model: options.model ?? this.defaultModel,
-        messages: messages.map((m) => ({ role: m.role, content: m.content })),
-        max_tokens: options.maxTokens ?? 1024,
-        temperature: options.temperature ?? 0.2,
-        stream: true,
-        ...openaiReasoning(options.model ?? this.defaultModel, options),
-      }),
+      body: JSON.stringify(dispatchedBody),
       signal: options.signal,
     });
     if (!res.ok || !res.body) {
@@ -285,6 +334,14 @@ export class OpenAIProvider implements AgentProvider {
       }
     });
     return full;
+  }
+}
+
+function assertMayStartToolCall(options: ProviderToolLoopOptions): void {
+  if (options.mayStartToolCall?.() === false) {
+    throw Object.assign(new Error('The run soft target elapsed before this tool branch could start.'), {
+      code: 'RUN_SOFT_TARGET_EXCEEDED',
+    });
   }
 }
 
@@ -339,4 +396,3 @@ function parseToolArguments(raw: string): unknown {
     return { _raw: raw };
   }
 }
-

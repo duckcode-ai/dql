@@ -11,6 +11,9 @@ import {
   selectRoute,
   routeReasoningEffort,
   compareResolvedPlanShadow,
+  agentRouteDeadlineMs,
+  agentRequestDeadlineMs,
+  createAgentRunBudget,
   type AgentRouteExecutorResult,
   type AgentRunEvent,
   type AgentRunPlanner,
@@ -52,13 +55,14 @@ describe("compareResolvedPlanShadow (AGT-013 / API-006)", () => {
     reason: 'Resolved governed metric.',
     followsUp: false,
     resolvedAnalyticalPlan: {
+      mode: 'shadow',
       planId: 'rap:metric-plan',
       fingerprint: 'metric-plan-fingerprint',
       capability: 'semantic_execution',
     } as IntentDecision['resolvedAnalyticalPlan'],
   } satisfies IntentDecision;
 
-  it("reports parity without influencing the legacy route", () => {
+  it("reports parity only for an explicit shadow plan", () => {
     expect(compareResolvedPlanShadow(decision, 'semantic_answer')).toEqual({
       planId: 'rap:metric-plan',
       fingerprint: 'metric-plan-fingerprint',
@@ -72,9 +76,299 @@ describe("compareResolvedPlanShadow (AGT-013 / API-006)", () => {
       matches: false,
     });
   });
+
+  it('omits the comparison for an authoritative plan', () => {
+    expect(compareResolvedPlanShadow({
+      ...decision,
+      resolvedAnalyticalPlan: {
+        ...decision.resolvedAnalyticalPlan!,
+        mode: 'authoritative',
+      },
+    }, 'semantic_answer')).toBeUndefined();
+  });
 });
 
 describe("AgentRunEngine", () => {
+  it.each([
+    ['missing category', { action: 'answer', category: undefined }, 'ad_hoc_ranking', 'ask'],
+    ['missing category in auto', { action: 'answer', category: undefined }, 'ad_hoc_ranking', 'auto'],
+    ['forged conversational category', { action: 'answer', category: 'conversational' }, 'ad_hoc_ranking', 'ask'],
+    ['forged conversational action', { action: 'converse', category: 'conversational' }, 'ad_hoc_ranking', 'ask'],
+    ['mismatched clarify intent', { action: 'answer', category: 'unclear' }, 'clarify', 'ask'],
+  ] as const)('fails closed for analytical Ask with %s and no RAP', async (_label, forged, intent, requestedMode) => {
+    let generatedCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => `run-host-analytical-${_label}`,
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: forged.action,
+          confidence: 0.99,
+          reason: 'Injected router decision.',
+          followsUp: false,
+          source: 'llm',
+          ...(forged.category ? { category: forged.category } : {}),
+        }),
+      },
+      executors: {
+        generated_answer: () => {
+          generatedCalls += 1;
+          return { answer: 'A 999', trustState: 'review_required', status: 'needs_review' };
+        },
+      },
+    });
+
+    const run = await engine.run({
+      question: 'who are the top customers by revenue',
+      requestedMode,
+      intent,
+    });
+
+    expect(generatedCalls).toBe(0);
+    expect(run).toMatchObject({ route: 'blocked', status: 'blocked', trustState: 'blocked' });
+    expect(run.answer).toContain('could not freeze an exact analytical plan');
+    expect(run.events.some((event) => event.type === 'executor.started' && event.route === 'generated_answer')).toBe(false);
+  });
+
+  it.each([
+    ['hi', 'greeting'],
+    ['explain revenue definition', undefined],
+  ] as const)('keeps the no-data turn %j out of analytical execution', async (question, expectedKind) => {
+    let generatedCalls = 0;
+    let conversationCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => `run-host-non-data-${question}`,
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: 'answer',
+          confidence: 0.99,
+          reason: 'Injected analytical route.',
+          followsUp: false,
+          source: 'llm',
+          category: 'data_analysis',
+        }),
+      },
+      executors: {
+        generated_answer: () => {
+          generatedCalls += 1;
+          return { answer: 'must not run' };
+        },
+        conversation: () => {
+          conversationCalls += 1;
+          return { answer: 'No warehouse query was needed.', answerKind: 'conversational' };
+        },
+      },
+    });
+
+    const run = await engine.run({ question, requestedMode: 'ask', intent: 'ad_hoc_ranking' });
+
+    expect(generatedCalls).toBe(0);
+    expect(conversationCalls).toBe(1);
+    expect(run).toMatchObject({ route: 'conversation', status: 'completed', trustState: 'not_applicable' });
+    expect(run.routeDecision?.conversationalKind).toBe(expectedKind);
+  });
+
+  it('fails closed before the legacy generated-answer executor when analytical Ask has no frozen plan', async () => {
+    let generatedCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-analytical-no-rap',
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: 'answer',
+          confidence: 0.8,
+          reason: 'Retrieved candidates, but no exact analytical tuple was resolved.',
+          followsUp: false,
+          source: 'heuristic',
+          category: 'data_lookup',
+          retrievalEvidence: {
+            snapshotId: 'snapshot-jaffle',
+            candidateCount: 2,
+            candidateIds: ['semantic:metric:orders.revenue', 'dql:block:top_beverage_customers'],
+          },
+        }),
+      },
+      executors: {
+        generated_answer: () => {
+          generatedCalls += 1;
+          return { answer: 'Legacy generator chose customers instead of revenue.' };
+        },
+      },
+    });
+
+    const run = await engine.run({
+      question: 'who are the top customers by revenue',
+      requestedMode: 'ask',
+    });
+
+    expect(generatedCalls).toBe(0);
+    expect(run.route).toBe('blocked');
+    expect(run.status).toBe('blocked');
+    expect(run.summary).toContain('exact analytical plan');
+    expect(run.summary).not.toBe('Agent run is blocked.');
+    expect(run.events.some((event) => event.type === 'executor.started' && event.route === 'generated_answer')).toBe(false);
+  });
+
+  it('does not call an injected replanner after an ordinary generated Ask attempt fails', async () => {
+    let replanCalls = 0;
+    const events: AgentRunEvent[] = [];
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-ordinary-ask-no-replan',
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: 'answer',
+          confidence: 0.8,
+          reason: 'A review-required generated answer is needed.',
+          followsUp: false,
+          source: 'heuristic',
+        }),
+      },
+      planner: {
+        plan: ({ request, routeDecision }) => ({
+          source: 'deterministic',
+          rationale: routeDecision.reason,
+          steps: [{
+            id: 'step-1',
+            route: 'generated_answer',
+            goal: request.question,
+            successCriteria: [],
+          }],
+        }),
+        replan: () => {
+          replanCalls += 1;
+          return { decision: 'repair', repairHint: 'Try another provider plan.' };
+        },
+      },
+      executors: {
+        generated_answer: () => ({
+          summary: 'The generated attempt needs manual review.',
+          evaluations: [{
+            id: 'generated-contract',
+            label: 'Generated contract',
+            passed: false,
+            severity: 'blocking',
+            message: 'The generated attempt did not satisfy its result contract.',
+            suggestedRepair: 'Replan the generated answer.',
+          }],
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: 'revenue by customer', requestedMode: 'ask' },
+      (event) => events.push(event));
+
+    expect(replanCalls).toBe(0);
+    expect(run.steps[0]).toMatchObject({ route: 'generated_answer', attempts: 1, status: 'blocked' });
+    expect(events.find((event) => event.type === 'replan.decided')?.payload).toEqual({
+      decision: 'accept',
+      authority: 'deterministic_fail_closed',
+    });
+  });
+
+  it('retains the separately budgeted replanner for explicit Research', async () => {
+    let replanCalls = 0;
+    let executionCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-research-replan-separate',
+      now: fixedClock(),
+      planner: {
+        plan: ({ request }) => ({
+          source: 'llm',
+          rationale: 'Explicit Research plan.',
+          steps: [{ id: 'step-1', route: 'research', goal: request.question, successCriteria: [] }],
+        }),
+        replan: () => {
+          replanCalls += 1;
+          return { decision: 'repair', repairHint: 'Retry the bounded Research step.' };
+        },
+      },
+      executors: {
+        research: () => {
+          executionCalls += 1;
+          return executionCalls === 1
+            ? {
+                summary: 'Research evidence is incomplete.',
+                evaluations: [{
+                  id: 'research-evidence',
+                  label: 'Research evidence',
+                  passed: false,
+                  severity: 'warning',
+                  message: 'One bounded Research retry is needed.',
+                  suggestedRepair: 'Retry the Research step.',
+                }],
+              }
+            : { summary: 'Research evidence complete.', answer: 'Research complete.' };
+        },
+      },
+    });
+
+    const run = await engine.run({ question: 'diagnose revenue risk', requestedMode: 'research' });
+
+    expect(replanCalls).toBe(1);
+    expect(executionCalls).toBe(2);
+    expect(run.steps[0]).toMatchObject({ route: 'research', attempts: 2, status: 'repaired' });
+  });
+
+  it('does not grant an injected planner or replanner authority after an Ask plan is frozen', async () => {
+    let plannerCalls = 0;
+    let replanCalls = 0;
+    const events: AgentRunEvent[] = [];
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-authoritative-plan-boundary',
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: 'answer',
+          confidence: 1,
+          reason: 'Exact governed semantic binding.',
+          followsUp: false,
+          resolvedAnalyticalPlan: {
+            mode: 'authoritative',
+            capability: 'semantic_execution',
+            planId: 'resolved-plan:food-revenue',
+            fingerprint: 'sha256:food-revenue-plan',
+          },
+        } as IntentDecision),
+      },
+      planner: {
+        plan: () => {
+          plannerCalls += 1;
+          throw new Error('injected planner must not run');
+        },
+        replan: () => {
+          replanCalls += 1;
+          throw new Error('injected replanner must not run');
+        },
+      },
+      executors: {
+        semantic_answer: () => ({
+          summary: 'Exact plan execution failed validation.',
+          evaluations: [{
+            id: 'result-contract',
+            label: 'Result contract',
+            passed: false,
+            severity: 'blocking',
+            message: 'The frozen output contract did not validate.',
+            suggestedRepair: 'Regenerate the answer.',
+          }],
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: 'food revenue', requestedMode: 'ask' }, (event) => events.push(event));
+
+    expect(plannerCalls).toBe(0);
+    expect(replanCalls).toBe(0);
+    expect(run.route).toBe('semantic_answer');
+    expect(run.steps[0]).toMatchObject({ attempts: 1, status: 'blocked' });
+    expect(events.map((event) => event.type)).not.toContain('replan.decided');
+    expect(events.map((event) => event.type)).not.toContain('repair.attempted');
+    const routeEvent = events.find((event) => event.type === 'route.decided');
+    expect(routeEvent?.payload).not.toHaveProperty('resolvedPlanShadow');
+  });
+
   it("routes a confident certified match to a completed certified answer run", async () => {
     const store = new InMemoryAgentRunStore();
     const events: AgentRunEvent[] = [];
@@ -326,6 +620,7 @@ describe("AgentRunEngine", () => {
     const run = await engine.run({
       question: "why is revenue down by segment?",
       intent: "diagnose_change",
+      requestedMode: "research",
       signals: { certifiedScore: 0.8, hasRetrieval: true },
     });
 
@@ -339,7 +634,7 @@ describe("AgentRunEngine", () => {
     expect(run.nextActions[0]).toMatchObject({ label: "Review DQL draft" });
   });
 
-  it("separates generated answers from explicit SQL-cell artifacts", async () => {
+  it("fails closed ordinary generated answers while preserving explicit SQL-cell authoring", async () => {
     const engine = new AgentRunEngine({ idGenerator: () => "run-generated", now: fixedClock() });
 
     const generated = await engine.run({
@@ -353,44 +648,48 @@ describe("AgentRunEngine", () => {
       signals: { metricScore: 0.7, hasRetrieval: true },
     });
 
-    expect(generated.route).toBe("generated_answer");
-    expect(generated.artifacts[0]?.kind).toBe("answer");
-    expect(generated.trustState).toBe("review_required");
+    expect(generated.route).toBe("blocked");
+    expect(generated.status).toBe("blocked");
+    expect(generated.trustState).toBe("blocked");
     expect(sqlCell.route).toBe("sql_cell");
     expect(sqlCell.artifacts[0]?.kind).toBe("sql_cell");
     expect(sqlCell.stopReason).toBe("artifact_created");
   });
 
-  it("finalizes the run route from an executor-resolved cascade route", async () => {
+  it("does not let a generated executor self-promote an analytical Ask without a RAP", async () => {
+    let executorCalls = 0;
     const engine = new AgentRunEngine({
       idGenerator: () => "run-resolved-certified",
       now: fixedClock(),
       executors: {
-        generated_answer: () => ({
-          resolvedRoute: "certified_answer",
-          summary: "Answered from certified block revenue_total.",
-          answer: "Revenue is $2.8M.",
-          status: "completed",
-          trustState: "certified",
-          stopReason: "certified_answer_found",
-          artifacts: [{
-            id: "answer:certified",
-            kind: "answer",
-            title: "Certified answer",
+        generated_answer: () => {
+          executorCalls += 1;
+          return {
+            resolvedRoute: "certified_answer",
+            summary: "Answered from certified block revenue_total.",
+            answer: "Revenue is $2.8M.",
+            status: "completed",
             trustState: "certified",
-            payload: { route: { tier: "certified_block", ref: "revenue_total" } },
-          }],
-        }),
+            stopReason: "certified_answer_found",
+            artifacts: [{
+              id: "answer:certified",
+              kind: "answer",
+              title: "Certified answer",
+              trustState: "certified",
+              payload: { route: { tier: "certified_block", ref: "revenue_total" } },
+            }],
+          };
+        },
       },
     });
 
     const run = await engine.run({ question: "what is total revenue?", requestedMode: "ask" });
 
-    expect(run.route).toBe("certified_answer");
-    expect(run.status).toBe("completed");
-    expect(run.trustState).toBe("certified");
-    expect(run.steps[0]?.route).toBe("generated_answer");
-    expect(run.steps[0]?.resolvedRoute).toBe("certified_answer");
+    expect(executorCalls).toBe(0);
+    expect(run.route).toBe("blocked");
+    expect(run.status).toBe("blocked");
+    expect(run.trustState).toBe("blocked");
+    expect(run.steps[0]?.route).toBe("blocked");
   });
 
   it("routes block and app requests to their durable artifact surfaces", async () => {
@@ -451,10 +750,51 @@ describe("AgentRunEngine", () => {
     });
   });
 
+  it('discards executor answer prose when a blocking result-contract evaluation fails', async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-invalid-result-discarded',
+      now: fixedClock(),
+      router: { decide: () => authoritativeDecision('semantic_execution') },
+      planner: fixedRoutePlanner('semantic_answer'),
+      executors: {
+        semantic_answer: () => ({
+          answer: 'INVALID_RESULT_MUST_DISCARD',
+          summary: 'INVALID_SUMMARY_MUST_DISCARD',
+          evaluations: [{
+            id: 'result-contract',
+            label: 'Result contract',
+            passed: false,
+            severity: 'blocking',
+            message: 'The semantic result did not satisfy the frozen output contract.',
+          }],
+          artifacts: [{
+            id: 'invalid-result-diagnostic',
+            kind: 'answer',
+            title: 'Invalid result diagnostic',
+            trustState: 'blocked',
+            payload: { result: { rows: [{ secret: 'INVALID_ROW' }] } },
+          }],
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: 'food revenue percentage', requestedMode: 'ask' });
+
+    expect(run).toMatchObject({
+      status: 'blocked',
+      trustState: 'blocked',
+      summary: 'The semantic result did not satisfy the frozen output contract.',
+      answer: 'The semantic result did not satisfy the frozen output contract.',
+    });
+    expect(JSON.stringify({ answer: run.answer, summary: run.summary })).not.toContain('INVALID_');
+    expect(run.artifacts).toEqual([expect.objectContaining({ id: 'invalid-result-diagnostic' })]);
+  });
+
   it("API-007 retains only explicitly blocked diagnostic artifacts on terminal runs", async () => {
     const engine = new AgentRunEngine({
       idGenerator: () => "run-blocked-diagnostic",
       now: fixedClock(),
+      router: { decide: () => authoritativeDecision('bounded_exploration') },
       executors: {
         generated_answer: () => ({
           status: "blocked",
@@ -666,7 +1006,7 @@ describe("AgentRunEngine loop (plan → build → evaluate → modify)", () => {
       },
     });
 
-    const run = await engine.run({ question: "include product supply details", requestedMode: "ask" }, (event) => events.push(event));
+    const run = await engine.run({ question: "include product supply details", requestedMode: "app" }, (event) => events.push(event));
 
     expect(run.repairAttempts).toBe(1);
     expect(seenRepairHints).toEqual([undefined, "code=unknown_relation; relation=dev.supplies"]);
@@ -730,6 +1070,7 @@ describe("AgentRunEngine loop (plan → build → evaluate → modify)", () => {
     const engine = new AgentRunEngine({
       idGenerator: () => "run-escalate",
       now: fixedClock(),
+      router: { decide: () => authoritativeDecision('bounded_exploration') },
       gates: defaultAgentRunGates,
       executors: {
         generated_answer: () => ({ answer: "", artifacts: [] }),
@@ -765,6 +1106,7 @@ describe("AgentRunEngine loop (plan → build → evaluate → modify)", () => {
     const engine = new AgentRunEngine({
       idGenerator: () => "run-escalation-budget",
       now: fixedClock(),
+      router: { decide: () => authoritativeDecision('bounded_exploration') },
       maxEngineEscalations: 0,
       gates: defaultAgentRunGates,
       executors: {
@@ -791,7 +1133,7 @@ describe("AgentRunEngine loop (plan → build → evaluate → modify)", () => {
     expect(events.some((event) => event.type === "escalated")).toBe(false);
   });
 
-  it("does not silently turn an exhausted ordinary shape repair into Research", async () => {
+  it("does not retry or silently turn an ordinary shape failure into Research", async () => {
     let generatedCalls = 0;
     let researchCalls = 0;
     const engine = new AgentRunEngine({
@@ -825,10 +1167,11 @@ describe("AgentRunEngine loop (plan → build → evaluate → modify)", () => {
 
     const run = await engine.run({ question: "Who are the top customers by revenue?" });
 
-    expect(generatedCalls).toBe(2);
+    expect(generatedCalls).toBe(1);
     expect(researchCalls).toBe(0);
     expect(run.steps.map((step) => step.route)).toEqual(["generated_answer"]);
     expect(run.escalationAttempts).toBe(0);
+    expect(run.repairAttempts).toBe(0);
     expect(run.status).toBe("needs_review");
   });
 
@@ -959,7 +1302,7 @@ describe("AgentRunEngine audience", () => {
     expect(run.route).toBe("sql_cell");
   });
 
-  it("escalates a stakeholder app-coverage gap to research, not a block draft", async () => {
+  it("keeps a stakeholder app-coverage gap in ordinary Ask, not implicit Research", async () => {
     const engine = new AgentRunEngine({
       idGenerator: () => "run-sh-app",
       now: fixedClock(),
@@ -978,7 +1321,7 @@ describe("AgentRunEngine audience", () => {
     const run = await engine.run({ question: "build a revenue dashboard", requestedMode: "app", audience: "stakeholder" });
     expect(run.steps[0]?.route).toBe("app_build");
     expect(run.steps[0]?.status).toBe("escalated");
-    expect(run.route).toBe("research");
+    expect(run.route).toBe("generated_answer");
   });
 
   it("answers anyway for a stakeholder instead of dead-ending on clarify", async () => {
@@ -1273,7 +1616,7 @@ describe("clarification continuations", () => {
     expect(continuation?.resolvedQuestion).toContain("User clarification: yes, per product");
   });
 
-  it("bypasses another router clarification and executes DQL against the resolved question", async () => {
+  it("fails closed a free-text clarification continuation that still has no frozen RAP", async () => {
     let routed = false;
     let executedQuestion = "";
     const engine = new AgentRunEngine({
@@ -1307,11 +1650,10 @@ describe("clarification continuations", () => {
     });
 
     expect(routed).toBe(false);
-    expect(executedQuestion).toContain("Who are the top customers buying different beverage products?");
-    expect(executedQuestion).toContain("User clarification: yes");
+    expect(executedQuestion).toBe("");
     expect(run.question).toBe("yes");
-    expect(run.route).toBe("generated_answer");
-    expect(run.answer).toContain("five beverage product types");
+    expect(run.route).toBe("blocked");
+    expect(run.answer).toContain("could not freeze an exact analytical plan");
     expect(run.events[0]?.payload).toMatchObject({ question: "yes", clarificationResolved: true });
   });
 
@@ -1435,6 +1777,12 @@ describe("clarification continuations", () => {
             missingInformation: [],
             recommendedRoute: "semantic",
           },
+          resolvedAnalyticalPlan: {
+            mode: 'authoritative',
+            capability: 'semantic_execution',
+            planId: 'rap:total-bcm-customer-month',
+            fingerprint: 'sha256:total-bcm-customer-month',
+          } as IntentDecision['resolvedAnalyticalPlan'],
         }),
       },
       executors: {
@@ -1455,13 +1803,14 @@ describe("clarification continuations", () => {
     expect(run.clarificationOptions).toEqual(clarificationOptions);
   });
 
-  it("does not return the same clarification option after that structured choice was consumed", async () => {
+  it("fails closed before a legacy generator can reinterpret a consumed structured choice", async () => {
     const selectedEvidenceId = "semantic:metric:sales.lost_opportunities_count";
     const repeatedOptions = [{
       id: selectedEvidenceId,
       label: "Lost Opportunities Count",
       kind: "semantic_metric",
     }];
+    let generatedCalls = 0;
     const engine = new AgentRunEngine({
       idGenerator: () => "run-no-repeated-clarification",
       now: fixedClock(),
@@ -1475,14 +1824,17 @@ describe("clarification continuations", () => {
         }),
       },
       executors: {
-        generated_answer: () => ({
-          status: "needs_clarification",
-          trustState: "not_applicable",
-          stopReason: "needs_clarification",
-          answerRefusalCode: "ambiguous",
-          answer: "Which governed metric should I use?",
-          clarificationOptions: repeatedOptions,
-        }),
+        generated_answer: () => {
+          generatedCalls += 1;
+          return {
+            status: "needs_clarification",
+            trustState: "not_applicable",
+            stopReason: "needs_clarification",
+            answerRefusalCode: "ambiguous",
+            answer: "Which governed metric should I use?",
+            clarificationOptions: repeatedOptions,
+          };
+        },
       },
     });
 
@@ -1491,10 +1843,11 @@ describe("clarification continuations", () => {
       selectedEvidenceId,
     });
 
-    expect(run.status).toBe("needs_review");
-    expect(run.trustState).toBe("review_required");
+    expect(run.status).toBe("blocked");
+    expect(run.trustState).toBe("blocked");
+    expect(generatedCalls).toBe(0);
     expect(run.clarificationOptions).toBeUndefined();
-    expect(run.answer).toContain("does not cover every requested metric");
+    expect(run.answer).toContain("could not freeze an exact analytical plan");
   });
 });
 
@@ -1621,23 +1974,26 @@ describe("AgentRunEngine — conversation route", () => {
     expect(run.artifacts).toHaveLength(0);
   });
 
-  it("prefers an injected router decision over the deterministic path", async () => {
+  it("does not let an injected conversational decision bypass an analytical RAP boundary", async () => {
+    let conversationCalls = 0;
     const engine = new AgentRunEngine({
       idGenerator: () => "run-router",
       now: fixedClock(),
       router: { decide: () => ({ action: "converse", confidence: 0.99, reason: "router says hi", conversationalKind: "greeting", followsUp: false }) },
       executors: {
-        conversation: () => ({ answer: "routed reply", answerKind: "conversational", status: "completed", trustState: "not_applicable", evaluations: [] }),
+        conversation: () => { conversationCalls += 1; return { answer: "routed reply", answerKind: "conversational", status: "completed", trustState: "not_applicable", evaluations: [] }; },
       },
     });
     // A question the deterministic tier would send to the data cascade, forced to converse by the router.
     const run = await engine.run({ question: "what is total revenue?", signals: { certifiedScore: 0.9 } });
-    expect(run.route).toBe("conversation");
-    expect(run.answer).toBe("routed reply");
+    expect(conversationCalls).toBe(0);
+    expect(run.route).toBe("blocked");
+    expect(run.answer).toContain('could not freeze an exact analytical plan');
   });
 
   it("runs retrieval-first routing for Ask mode before selecting the governed executor", async () => {
     let routerCalls = 0;
+    let semanticCalls = 0;
     const engine = new AgentRunEngine({
       idGenerator: () => "run-ask-router",
       now: fixedClock(),
@@ -1664,17 +2020,21 @@ describe("AgentRunEngine — conversation route", () => {
         },
       },
       executors: {
-        semantic_answer: () => ({
-          answer: "Resolved semantic answer.",
-          answerTier: "semantic_metric",
-        }),
+        semantic_answer: () => {
+          semanticCalls += 1;
+          return {
+            answer: "Resolved semantic answer.",
+            answerTier: "semantic_metric",
+          };
+        },
       },
     });
 
     const run = await engine.run({ question: "monthly rollover balance", requestedMode: "ask" });
 
     expect(routerCalls).toBe(1);
-    expect(run.route).toBe("semantic_answer");
+    expect(semanticCalls).toBe(0);
+    expect(run.route).toBe("blocked");
   });
 
   it("falls back to deterministic routing when the router throws", async () => {
@@ -1689,10 +2049,368 @@ describe("AgentRunEngine — conversation route", () => {
     const run = await engine.run({ question: "hi" });
     expect(run.route).toBe("conversation");
   });
+
+  it('persists additive content-free V2 telemetry while retaining the V1 receipt', async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-telemetry',
+      now: fixedClock(),
+      planner: fixedRoutePlanner('generated_answer'),
+      executors: {
+        generated_answer: () => ({
+          answer: 'done',
+          status: 'needs_review',
+          trustState: 'review_required',
+          telemetry: {
+            version: 1,
+            stageDurationsMs: { retrieval: 12, execution: 8, total: 30 },
+            providerRoundTrips: 1,
+            toolCalls: 2,
+            sqlExecutions: 1,
+            repairs: 0,
+            egressReceipts: 1,
+            warehouseDurationMs: 8,
+          },
+          providerEgressReceipts: [{
+            version: 1,
+            purpose: 'answer_generation',
+            provider: 'test',
+            permittedCategories: ['question'],
+            resultRowCount: 0,
+            columnCount: 0,
+            redactionPolicyId: 'zero-result-rows-v1',
+            optIn: false,
+            payloadFingerprint: 'a'.repeat(64),
+          }],
+        }),
+      },
+    });
+    const run = await engine.run({ question: 'revenue', requestedMode: 'ask' });
+    expect(run.diagnosticReceipt?.version).toBe(1);
+    expect(run.diagnosticReceiptV2).toMatchObject({
+      version: 2,
+      runId: 'run-telemetry',
+      telemetry: {
+        providerRoundTrips: 1,
+        toolCalls: 2,
+        sqlExecutions: 1,
+        egressReceipts: 1,
+        warehouseDurationMs: 8,
+      },
+      providerEgressReceiptFingerprints: [expect.stringMatching(/^[a-f0-9]{64}$/)],
+    });
+    expect(JSON.stringify(run.diagnosticReceiptV2)).not.toContain('done');
+    expect(JSON.stringify(run.diagnosticReceiptV2)).not.toContain('rows');
+  });
+
+  it('persists physical dispatch evidence when the executor throws after send', async () => {
+    const receipt = {
+      version: 1 as const,
+      purpose: 'answer_generation' as const,
+      provider: 'openai',
+      permittedCategories: ['question' as const],
+      resultRowCount: 0,
+      columnCount: 0,
+      redactionPolicyId: 'no-result-rows-v1',
+      optIn: false,
+      payloadFingerprint: `sha256:${'a'.repeat(64)}`,
+    };
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-failed-dispatch-evidence',
+      now: fixedClock(),
+      planner: fixedRoutePlanner('generated_answer'),
+      executors: {
+        generated_answer: () => {
+          throw Object.assign(new Error('provider failed after send'), {
+            providerDispatchEvidence: {
+              providerEgressReceipts: [receipt],
+              providerRoundTrips: 1,
+              toolCalls: 0,
+              sqlExecutions: 0,
+              repairs: 0,
+              fallbackReason: 'provider_error',
+            },
+          });
+        },
+      },
+    });
+    const run = await engine.run({ question: 'revenue', requestedMode: 'ask' });
+    expect(run.status).toBe('blocked');
+    expect(run.providerEgressReceipts).toEqual([receipt]);
+    expect(run.telemetry).toMatchObject({ providerRoundTrips: 1, egressReceipts: 1, fallbackReason: 'provider_error' });
+    expect(run.diagnosticReceiptV2).toMatchObject({
+      telemetry: { providerRoundTrips: 1, egressReceipts: 1 },
+      providerEgressReceiptFingerprints: [expect.stringMatching(/^[a-f0-9]{64}$/)],
+    });
+  });
+
+  it('retains physical dispatch evidence on cancellation after send', async () => {
+    const cancellation = Object.assign(new DOMException('cancelled after send', 'AbortError'), {
+      providerDispatchEvidence: {
+        providerEgressReceipts: [{
+          version: 1,
+          purpose: 'answer_generation',
+          provider: 'ollama',
+          permittedCategories: ['question'],
+          resultRowCount: 0,
+          columnCount: 0,
+          redactionPolicyId: 'no-result-rows-v1',
+          optIn: false,
+          payloadFingerprint: `sha256:${'b'.repeat(64)}`,
+        }],
+        providerRoundTrips: 1,
+        toolCalls: 0,
+        sqlExecutions: 0,
+        repairs: 0,
+        fallbackReason: 'cancelled',
+      },
+    });
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-cancelled-dispatch-evidence',
+      now: fixedClock(),
+      planner: fixedRoutePlanner('generated_answer'),
+      executors: { generated_answer: () => { throw cancellation; } },
+    });
+    const run = await engine.run({ question: 'revenue', requestedMode: 'ask' });
+    expect(run.telemetry).toMatchObject({ providerRoundTrips: 1, egressReceipts: 1, fallbackReason: 'cancelled' });
+    expect(run.providerEgressReceipts).toHaveLength(1);
+  });
+
+  it('applies one 45s/120s hard deadline with deterministic route soft targets', async () => {
+    expect(agentRequestDeadlineMs('ask')).toBe(45_000);
+    expect(agentRequestDeadlineMs('research')).toBe(120_000);
+    expect(agentRouteDeadlineMs('certified_answer')).toBe(5_000);
+    expect(agentRouteDeadlineMs('semantic_answer')).toBe(5_000);
+    expect(agentRouteDeadlineMs('generated_answer')).toBe(15_000);
+    expect(agentRouteDeadlineMs('research')).toBe(120_000);
+    const observed: number[] = [];
+    const controller = new AbortController();
+    controller.abort(new DOMException('route deadline', 'TimeoutError'));
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-route-deadline',
+      now: fixedClock(),
+      planner: fixedRoutePlanner('generated_answer'),
+      routeTimeoutSignal: (durationMs) => {
+        observed.push(durationMs);
+        return controller.signal;
+      },
+      executors: {
+        generated_answer: ({ request }) => {
+          if (request.signal?.aborted) throw request.signal.reason;
+          return { answer: 'unreachable' };
+        },
+      },
+    });
+    const run = await engine.run({ question: 'revenue', requestedMode: 'ask' });
+    expect(observed).toEqual([45_000]);
+    expect(run).toMatchObject({
+      status: 'blocked',
+      trustState: 'blocked',
+      diagnosticReceiptV2: { telemetry: { fallbackReason: 'executor_failure' } },
+    });
+    expect(run.summary).toContain('time limit');
+  });
+
+  it('accepts a frozen semantic result after its 5s soft target but before the 45s hard ceiling', async () => {
+    let nowMs = 0;
+    const budget = createAgentRunBudget({
+      requestedMode: 'ask', startedAtMs: 0, nowMs: () => nowMs,
+      timeoutSignal: () => new AbortController().signal,
+    });
+    const decision = {
+      action: 'answer', confidence: 1, reason: 'exact semantic binding', followsUp: false,
+      resolvedAnalyticalPlan: { mode: 'authoritative', capability: 'semantic_execution' } as never,
+    } satisfies IntentDecision;
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-late-frozen-semantic',
+      now: () => new Date(nowMs),
+      router: { decide: async () => decision },
+      planner: fixedRoutePlanner('semantic_answer'),
+      executors: { semantic_answer: () => {
+        nowMs = 6_000;
+        return { answer: 'Validated late semantic result.' };
+      } },
+    });
+    const run = await engine.run({ question: 'revenue', requestedMode: 'ask', runBudget: budget });
+    expect(run.answer).toBe('Validated late semantic result.');
+    expect(run.status).not.toBe('needs_clarification');
+  });
+
+  it('refuses a new ordinary analytical branch after its soft target when no plan is frozen', async () => {
+    let nowMs = 16_000;
+    const budget = createAgentRunBudget({
+      requestedMode: 'ask', startedAtMs: 0, nowMs: () => nowMs,
+      timeoutSignal: () => new AbortController().signal,
+    });
+    let executions = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-soft-refusal', now: () => new Date(nowMs),
+      router: { decide: async () => ({ action: 'answer', confidence: 0.5, reason: 'no frozen plan', followsUp: false }) },
+      planner: fixedRoutePlanner('generated_answer'),
+      executors: { generated_answer: () => { executions += 1; return { answer: 'must not run' }; } },
+    });
+    const run = await engine.run({ question: 'unknown metric', requestedMode: 'ask', runBudget: budget });
+    expect(executions).toBe(0);
+    expect(run.status).toBe('needs_clarification');
+    expect(run.answer).toContain('discovery window ended');
+  });
+
+  it('stops new Research branches at 90s while retaining a validated partial executor result', async () => {
+    let nowMs = 89_000;
+    const budget = createAgentRunBudget({
+      requestedMode: 'research', startedAtMs: 0, nowMs: () => nowMs,
+      timeoutSignal: () => new AbortController().signal,
+    });
+    let calls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-research-soft', now: () => new Date(nowMs),
+      router: { decide: async () => ({ action: 'investigate', confidence: 0.8, reason: 'explicit research', followsUp: false }) },
+      planner: fixedRoutePlanner('research'),
+      executors: { research: () => {
+        calls += 1;
+        nowMs = 91_000;
+        return { answer: 'Validated partial finding.', artifacts: [{ id: 'partial', kind: 'research_run', title: 'Partial', trustState: 'review_required', payload: { limitations: ['branch budget ended'] } }] };
+      } },
+    });
+    const run = await engine.run({ question: 'research revenue', requestedMode: 'research', runBudget: budget });
+    expect(calls).toBe(1);
+    expect(run.answer).toBe('Validated partial finding.');
+    expect(budget.mayStartDiscovery('research')).toBe(false);
+    expect(run.artifacts).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'partial' })]));
+  });
+
+  it('starts the absolute deadline before a router that ignores AbortSignal', async () => {
+    const deadline = new AbortController();
+    deadline.abort(new DOMException('request deadline', 'TimeoutError'));
+    const observed: number[] = [];
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-routing-deadline',
+      router: { decide: async () => new Promise<IntentDecision>(() => {}) },
+      routeTimeoutSignal: (durationMs) => {
+        observed.push(durationMs);
+        return deadline.signal;
+      },
+    });
+    const run = await engine.run({ question: 'revenue', requestedMode: 'ask' });
+    expect(observed).toEqual([45_000]);
+    expect(run).toMatchObject({ status: 'blocked', trustState: 'blocked' });
+    expect(run.answer).toBeUndefined();
+  });
+
+  it('uses the typed modeling outcome instead of the generic blocked fallback', async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-typed-modeling-gap',
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: 'block', confidence: 1, followsUp: false, source: 'heuristic',
+          reason: 'The selected metric does not model a reachable workspace grouping.',
+          terminalOutcome: {
+            kind: 'modeling_gap',
+            code: 'ANALYTICAL_MODELING_GAP',
+            message: 'The selected metric does not model a reachable workspace grouping.',
+            candidateIds: [],
+          },
+        }),
+      },
+    });
+    const run = await engine.run({ question: 'Rank workspaces by cost', requestedMode: 'ask' });
+    expect(run).toMatchObject({
+      status: 'blocked',
+      summary: 'The selected metric does not model a reachable workspace grouping.',
+    });
+    expect(run.summary).not.toBe('Agent run is blocked.');
+  });
+
+  it('rejects a late executor success even when the executor ignores AbortSignal', async () => {
+    const controller = new AbortController();
+    let complete!: (value: AgentRouteExecutorResult) => void;
+    const ignoredSignalWork = new Promise<AgentRouteExecutorResult>((resolve) => { complete = resolve; });
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-ignored-signal',
+      now: fixedClock(),
+      planner: fixedRoutePlanner('generated_answer'),
+      routeTimeoutSignal: () => controller.signal,
+      executors: { generated_answer: () => ignoredSignalWork },
+    });
+    const pending = engine.run({ question: 'revenue', requestedMode: 'ask' });
+    await Promise.resolve();
+    controller.abort(new DOMException('route deadline', 'TimeoutError'));
+    complete({ answer: 'late success must not persist' });
+    const run = await pending;
+    expect(run).toMatchObject({ status: 'blocked', trustState: 'blocked' });
+    expect(run.answer).toBeUndefined();
+    expect(JSON.stringify(run)).not.toContain('late success must not persist');
+  });
+
+  it('uses one absolute deadline across planning and execution', async () => {
+    const epoch = Date.parse('2026-06-29T00:00:00.000Z');
+    let elapsedMs = 0;
+    const observed: number[] = [];
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-absolute-deadline',
+      now: () => new Date(epoch + elapsedMs),
+      router: {
+        decide: () => {
+          elapsedMs = 10_000;
+          return { action: 'answer', confidence: 1, reason: 'generated', followsUp: false, source: 'heuristic' };
+        },
+      },
+      planner: {
+        plan: ({ request, routeDecision }) => {
+          elapsedMs = 12_000;
+          return {
+            source: 'deterministic' as const,
+            rationale: routeDecision.reason,
+            steps: [{ id: 'step-1', route: 'generated_answer' as const, goal: request.question, successCriteria: [] }],
+          };
+        },
+        replan: () => ({ decision: 'accept' }),
+      },
+      routeTimeoutSignal: (durationMs) => {
+        observed.push(durationMs);
+        return new AbortController().signal;
+      },
+      executors: { generated_answer: () => ({ answer: 'within remaining budget' }) },
+    });
+    const run = await engine.run({ question: 'revenue', requestedMode: 'ask' });
+    expect(run.status).not.toBe('blocked');
+    expect(observed).toEqual([45_000]);
+  });
+
+  it('keeps an already-aborted cancellation terminal during routing', async () => {
+    const controller = new AbortController();
+    controller.abort(new DOMException('cancelled', 'AbortError'));
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-routing-cancelled',
+      now: fixedClock(),
+      router: { decide: async () => new Promise<IntentDecision>(() => {}) },
+    });
+    const run = await engine.run({ question: 'revenue', requestedMode: 'ask', signal: controller.signal });
+    expect(run).toMatchObject({ status: 'blocked', trustState: 'blocked' });
+    expect(run.answer).toBeUndefined();
+  });
 });
 
 function fixedClock(): () => Date {
   return () => new Date("2026-06-29T00:00:00.000Z");
+}
+
+function authoritativeDecision(
+  capability: 'certified_execution' | 'semantic_execution' | 'governed_relational' | 'bounded_exploration',
+): IntentDecision {
+  return {
+    action: 'answer',
+    confidence: 1,
+    reason: 'Exact immutable analytical plan.',
+    followsUp: false,
+    source: 'heuristic',
+    resolvedAnalyticalPlan: {
+      mode: 'authoritative',
+      capability,
+      planId: `rap:test:${capability}`,
+      fingerprint: `sha256:test:${capability}`,
+    } as IntentDecision['resolvedAnalyticalPlan'],
+  };
 }
 
 function fixedRoutePlanner(route: AgentRunRoute): AgentRunPlanner {

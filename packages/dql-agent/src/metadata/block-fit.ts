@@ -117,6 +117,8 @@ export function evaluateCertifiedBlockFit(input: {
     || requestedMeasures.some((measure) => blockMeasures.has(measure) || block.textTokens.has(measure) || outputHasEntity(blockOutputs, measure));
 
   const unsupportedFilters = unsupportedRequestedFilters(requested, block, input.question);
+  const unentailedScope = [...block.staticScopeTokens]
+    .filter((token) => !questionEntailsScopeToken(input.question, input.plan, requested, token));
   const grainMismatch = requested.grain && block.grain && canonicalToken(requested.grain) !== block.grain
     && !blockDimensions.has(canonicalToken(requested.grain))
     ? `certified block grain=${block.grain} does not cover requested grain=${canonicalToken(requested.grain)}`
@@ -125,12 +127,13 @@ export function evaluateCertifiedBlockFit(input: {
       : undefined;
   const topNAction = topNFitAction(requested, block);
 
-  if (grainMismatch || missingDimensions.length > 0 || missingOutputs.length > 0 || unsupportedFilters.length > 0 || !measureMatch || topNAction === 'generate') {
+  if (grainMismatch || missingDimensions.length > 0 || missingOutputs.length > 0 || unsupportedFilters.length > 0 || unentailedScope.length > 0 || !measureMatch || topNAction === 'generate') {
     const reasons = [
       grainMismatch,
       missingDimensions.length ? `missing requested dimensions: ${missingDimensions.join(', ')}` : '',
       missingOutputs.length ? `missing requested outputs: ${missingOutputs.join(', ')}` : '',
       unsupportedFilters.length ? `unsupported requested filters: ${unsupportedFilters.join(', ')}` : '',
+      unentailedScope.length ? `certified static scope is not requested: ${unentailedScope.join(', ')}` : '',
       !measureMatch ? `missing requested measures: ${requestedMeasures.join(', ')}` : '',
       topNAction === 'generate' ? 'certified block limit is narrower than requested top-N' : '',
     ].filter((reason): reason is string => Boolean(reason));
@@ -206,6 +209,8 @@ interface BlockShape {
   filters: string[];
   /** Static scope proven by the certified name/tags/WHERE clause. */
   scopeTokens: Set<string>;
+  /** Scope that must be entailed before the block may terminate. */
+  staticScopeTokens: Set<string>;
   limit?: number;
   textTokens: Set<string>;
   relevance: number;
@@ -258,11 +263,23 @@ function blockShape(block: MetadataObject | KGNode): BlockShape {
     ...parameterNames(payload.parameters),
     ...parameterNames(record.parameters),
   ].map(canonicalToken).filter(Boolean));
+  const declaredStaticScopeText = [
+    ...stringArray(payload.scopeTokens),
+    ...stringArray(record.scopeTokens),
+    ...stringArray(payload.staticScope),
+    ...stringArray(record.staticScope),
+    sql ? extractSqlStaticScope(sql) : '',
+  ].filter(Boolean).join(' ');
+  const outputScopeTokens = outputs.flatMap((output) => inferredOutputScopeTokens(output));
+  const staticScopeTokens = new Set([
+    ...tokensFromValue(declaredStaticScopeText).map(canonicalToken).filter(Boolean),
+    ...outputScopeTokens,
+  ]);
   const scopeText = [
     stringValue(record.name),
     Array.isArray(record.tags) ? (record.tags as unknown[]).filter((item): item is string => typeof item === 'string').join(' ') : '',
     Array.isArray(payload.tags) ? (payload.tags as unknown[]).filter((item): item is string => typeof item === 'string').join(' ') : '',
-    sql ? extractSqlFilterScope(sql) : '',
+    declaredStaticScopeText,
   ].filter(Boolean).join(' ');
   const scopeTokens = new Set(tokensFromValue(scopeText).map(canonicalToken).filter(Boolean));
   const grain = canonicalToken(stringValue(payload.grain) ?? stringValue(record.grain) ?? explicitDimensions[0] ?? '');
@@ -274,11 +291,23 @@ function blockShape(block: MetadataObject | KGNode): BlockShape {
     outputs,
     filters,
     scopeTokens,
+    staticScopeTokens,
     limit: sql ? parseSqlLimit(sql) : undefined,
     textTokens,
     relevance,
     inferredContract: stringArray(payload.declaredOutputs).length === 0 && stringArray(record.declaredOutputs).length === 0,
   };
+}
+
+function inferredOutputScopeTokens(output: string): string[] {
+  const tokens = output.split('_').filter(Boolean);
+  const measureIndex = tokens.findIndex((token) => isMeasureLike(token));
+  if (measureIndex <= 0) return [];
+  const genericModifiers = new Set(['adjusted', 'average', 'avg', 'cumulative', 'gross', 'lifetime', 'monthly', 'net', 'total']);
+  return tokens.slice(0, measureIndex)
+    .filter((token) => !genericModifiers.has(token) && !isDimensionLike(token))
+    .map(canonicalToken)
+    .filter(Boolean);
 }
 
 function parameterNames(value: unknown): string[] {
@@ -373,6 +402,38 @@ function filterContractMatchesDimension(filter: string, dimension: string): bool
 function extractSqlFilterScope(sql: string): string {
   const match = /\bwhere\b([\s\S]*?)(?=\bgroup\s+by\b|\border\s+by\b|\bhaving\b|\blimit\b|$)/i.exec(sql);
   return match?.[1] ?? '';
+}
+
+/**
+ * Static SQL predicates are execution scope, not descriptive relevance. Keep
+ * only literal values and boolean `is_*` predicates so table aliases, SQL
+ * keywords, and generic block tags do not become accidental business filters.
+ */
+function extractSqlStaticScope(sql: string): string {
+  const where = extractSqlFilterScope(sql);
+  if (!where) return '';
+  const literals = [...where.matchAll(/'(?:''|[^'])*'|"(?:""|[^"])*"/g)]
+    .map((match) => (match[0] ?? '').slice(1, -1).replace(/''/g, "'").replace(/""/g, '"'));
+  const booleanPredicates = [...where.matchAll(/\b(?:[a-z_][a-z0-9_]*\.)?is_([a-z][a-z0-9_]*)\s*=\s*(?:true|1)\b/gi)]
+    .map((match) => match[1] ?? '');
+  return [...literals, ...booleanPredicates].join(' ');
+}
+
+function questionEntailsScopeToken(
+  question: string,
+  plan: AnalysisQuestionPlan,
+  requested: RequestedAnswerShape,
+  token: string,
+): boolean {
+  const requestedTokens = new Set(tokensFromValue([
+    question,
+    ...plan.searchTerms,
+    ...plan.filterTerms,
+    ...requested.filters,
+    ...(requested.memberBindings ?? []).flatMap((binding) => binding.values),
+    ...requested.followUpReferences.flatMap((reference) => reference.resolvedValues ?? []),
+  ].join(' ')).map(canonicalToken));
+  return requestedTokens.has(canonicalToken(token));
 }
 
 function isTemporalFilter(filter: string): boolean {

@@ -1040,6 +1040,69 @@ export interface AgentRunDiagnosticReceiptV1 {
     recoverable: boolean;
     safeActions: string[];
   };
+  repairCapability?: AnalyticalRepairCapabilityV1;
+  providerEgressReceipts?: ProviderEgressReceiptV1[];
+}
+
+export interface AnalyticalRepairCapabilityV1 {
+  version: 1;
+  automatic: {
+    eligible: boolean;
+    action: 'repair_embedded_sql' | 'none';
+    correctionCode: 'SQL_EXECUTION_REPAIR' | 'MANUAL_REVIEW_REQUIRED';
+    attemptsRemaining: number;
+  };
+  failureFingerprint: string;
+  sourceFingerprint: string;
+  planFingerprint: string;
+  dqlFingerprint: string;
+  sqlFingerprint: string;
+  targetFingerprint: string;
+  routeLocked: true;
+  targetLocked: true;
+  sourceImmutable: true;
+  manualActions: Array<'edit_dql' | 'open_sql_notebook' | 'refresh_snapshot' | 'retry_same_plan' | 'change_authorized_connection' | 'request_access'>;
+  ineligibilityReason?: string;
+}
+
+export interface ProviderEgressReceiptV1 {
+  version: 1;
+  purpose: 'answer_generation' | 'research_narration' | 'research_tool' | 'repair_sql';
+  dispatchPhase?: 'meaning_resolution' | 'planning' | 'generation' | 'narration' | 'repair';
+  provider: string;
+  model?: string;
+  operation?: 'generate' | 'generate_with_tools' | 'generate_stream';
+  attemptIndex?: number;
+  options?: { maxTokens?: number; temperature?: number; reasoningEffort?: 'low' | 'medium' | 'high' };
+  permittedCategories: string[];
+  resultRowCount: number;
+  cumulativeResultRowCount?: number;
+  columnCount: number;
+  redactionPolicyId: string;
+  optIn: boolean;
+  payloadFingerprint: string;
+}
+
+export interface AgentRunTelemetryV1 {
+  version: 1;
+  stageDurationsMs: Partial<Record<'snapshot' | 'retrieval' | 'schema' | 'meaning' | 'provider' | 'tools' | 'validation' | 'repair' | 'execution' | 'narration' | 'persistence' | 'total', number>>;
+  providerRoundTrips: number;
+  toolCalls: number;
+  sqlExecutions: number;
+  repairs: number;
+  egressReceipts: number;
+  warehouseDurationMs?: number;
+  fallbackReason?: string;
+}
+
+export interface AgentRunDiagnosticReceiptV2 {
+  version: 2;
+  runId: string;
+  route?: AgentRunRoute;
+  status: AgentRunStatus;
+  telemetry: AgentRunTelemetryV1;
+  providerEgressReceiptFingerprints: string[];
+  repairCapabilityFingerprint?: string;
 }
 
 export interface AgentRunProgressV1 {
@@ -1085,6 +1148,10 @@ export interface AgentRun {
   repairAttempts: number;
   lifecycle?: AgentRunLifecycleV1;
   diagnosticReceipt?: AgentRunDiagnosticReceiptV1;
+  diagnosticReceiptV2?: AgentRunDiagnosticReceiptV2;
+  telemetry?: AgentRunTelemetryV1;
+  repairCapability?: AnalyticalRepairCapabilityV1;
+  providerEgressReceipts?: ProviderEgressReceiptV1[];
   derivation?: {
     version: 1 | 2;
     kind: 'analytical_repair' | 'authoring_revision';
@@ -1191,6 +1258,8 @@ export interface CreateAgentRunInput {
   runId?: string;
   /** The composer's thinking selection for this run (auto/low/medium/high). */
   thinkingMode?: AgentThinkingMode;
+  /** Explicit consent for this Research run only; defaults false and is never inherited. */
+  researchResultRowsOptIn?: boolean;
 }
 
 export interface RequestCertificationInput {

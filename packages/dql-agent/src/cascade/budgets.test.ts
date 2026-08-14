@@ -85,7 +85,7 @@ describe('cascade budgets', () => {
       buildAnalysisQuestionPlan('Research why margin dropped in Q2'),
       'diagnose_change',
     )).toMatchObject({
-      maxToolCalls: 8,
+      maxToolCalls: 4,
       effortClass: 'deep_research',
     });
   });

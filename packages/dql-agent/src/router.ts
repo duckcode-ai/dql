@@ -24,6 +24,7 @@ import type { AgentRunRequest, AgentRouter } from "./agent-run-engine.js";
 import type { MetadataAgentIntent } from "./metadata/catalog.js";
 import {
   buildMeaningEvidencePackage,
+  canonicalizeMetricMeasureCandidates,
   defaultQueryIntent,
   findExplicitEvidenceReference,
   questionTypeFromText,
@@ -44,7 +45,7 @@ import {
   normalizeEvidenceAnalyticalCapability,
   solveAnalyticalCompatibility,
 } from "./analytical-compatibility.js";
-import { buildDeterministicAnalyticalFrame } from "./analytical-frame.js";
+import { buildDeterministicAnalyticalFrame, projectResolvedAnalyticalFrame } from "./analytical-frame.js";
 import {
   conversationHistoryFromContext,
   renderConversationEnvelopeForPrompt,
@@ -519,20 +520,26 @@ function routeDecisionForResolution(
   question = resolution.interpretedQuestion,
   mode: ResolvedAnalyticalPlan['mode'] = 'authoritative',
 ): IntentDecision {
+  let planBoundResolution = resolution;
+  if (resolution.analyticalFrame && resolution.recommendedRoute === 'semantic') {
+    const { analyticalFrame: sourceFrame, ...resolutionWithoutFrame } = resolution;
+    const bindingPlan = buildResolvedAnalyticalPlan({
+      question,
+      resolution: resolutionWithoutFrame,
+      evidence,
+      candidates,
+      mode,
+    });
+    planBoundResolution = {
+      ...resolution,
+      analyticalFrame: projectResolvedAnalyticalFrame({ plan: bindingPlan, sourceFrame }),
+    };
+  }
   const routedResolution = enforceAnalyticalCompatibility(
-    resolution,
+    planBoundResolution,
     evidence,
     candidates,
   );
-  const needsClarification =
-    routedResolution.confidence === "low" ||
-    routedResolution.recommendedRoute === "clarify";
-  const analytical =
-    routedResolution.questionType === "diagnosis" ||
-    routedResolution.questionType === "research";
-  const reason = needsClarification
-    ? `The retrieved evidence does not prove one complete analytical tuple: ${routedResolution.missingInformation.join(" ") || routedResolution.interpretedQuestion}`
-    : `Resolved the question against ${routedResolution.selectedConceptIds.join(", ")}: ${routedResolution.interpretedQuestion}`;
   const resolvedAnalyticalPlan = buildResolvedAnalyticalPlan({
     question,
     resolution: routedResolution,
@@ -540,10 +547,24 @@ function routeDecisionForResolution(
     candidates,
     mode,
   });
+  const reconciliation = reconcileResolvedPlanOutcome(
+    routedResolution,
+    resolvedAnalyticalPlan,
+    candidates,
+  );
+  const needsClarification = reconciliation.outcome === 'clarify';
+  const terminallyBlocked = reconciliation.outcome === 'modeling_gap'
+    || reconciliation.outcome === 'policy_blocked';
+  const analytical =
+    routedResolution.questionType === "diagnosis" ||
+    routedResolution.questionType === "research";
+  const reason = reconciliation.reason;
   return {
     ...base,
     action: needsClarification
       ? "clarify"
+      : terminallyBlocked
+        ? "block"
       : analytical
         ? "investigate"
         : "answer",
@@ -561,20 +582,142 @@ function routeDecisionForResolution(
     resolvedAnalyticalPlan,
     retrievalEvidence: retrievalTrace(evidence, candidates),
     requiresClarification: needsClarification,
+    ...(terminallyBlocked
+      ? {
+          terminalOutcome: {
+            kind: reconciliation.outcome === 'policy_blocked'
+              ? 'policy_blocked' as const
+              : 'modeling_gap' as const,
+            code: reconciliation.outcome === 'policy_blocked'
+              ? 'ANALYTICAL_POLICY_BLOCKED' as const
+              : 'ANALYTICAL_MODELING_GAP' as const,
+            message: reconciliation.reason,
+            candidateIds: resolvedAnalyticalPlan.resolutionFailure?.candidateIds ?? [],
+          },
+        }
+      : {}),
     ...(needsClarification
-      ? { clarificationOptions: buildClarificationOptions(candidates) }
+      ? { clarificationOptions: reconciliation.options }
       : {}),
     ...(needsClarification
       ? {
-          clarifyingQuestion:
-            routedResolution.clarifyingQuestion ??
-            buildEvidenceClarification(
-              candidates,
-              routedResolution.missingInformation,
-            ),
+          clarifyingQuestion: reconciliation.question,
         }
       : {}),
   };
+}
+
+type ReconciledPlanOutcome = {
+  outcome: 'ready' | 'clarify' | 'modeling_gap' | 'policy_blocked';
+  reason: string;
+  question?: string;
+  options?: NonNullable<IntentDecision['clarificationOptions']>;
+};
+
+/**
+ * The immutable RAP is the final routing authority. Meaning may nominate an
+ * execution route, but cannot leave the router claiming an answer after the
+ * host has retained an ambiguous or blocked qualified binding.
+ */
+function reconcileResolvedPlanOutcome(
+  resolution: MeaningResolution,
+  plan: ResolvedAnalyticalPlan,
+  candidates: AgentEvidenceCandidate[],
+): ReconciledPlanOutcome {
+  if (plan.capability !== 'blocked') {
+    return {
+      outcome: 'ready',
+      reason: `Resolved the question against ${plan.selectedConceptIds.join(', ')}: ${resolution.interpretedQuestion}`,
+    };
+  }
+
+  const bindings = [
+    ...plan.query.measures.map((binding) => ({ kind: 'measure', binding })),
+    ...plan.query.dimensions.map((binding) => ({ kind: 'dimension', binding })),
+    ...plan.query.filters.map((filter) => ({ kind: 'filter', binding: filter.binding })),
+  ].filter(({ binding }) => binding.status !== 'resolved');
+  const qualifiedChoiceIds = [...new Set(bindings.flatMap(({ binding }) => binding.candidateIds))].sort();
+  const userResolvableBinding = bindings.some(({ binding }) =>
+    binding.candidateIds.length > 0);
+
+  if (plan.resolutionFailure?.outcome === 'policy_blocked') {
+    return {
+      outcome: 'policy_blocked',
+      reason: `Policy blocked the selected analytical plan: ${plan.missingInformation.join(' ') || 'review the retained policy diagnostic.'}`,
+    };
+  }
+  if (plan.resolutionFailure?.outcome === 'modeling_gap') {
+    return {
+      outcome: 'modeling_gap',
+      reason: `The selected analytical plan has a governed modeling gap: ${plan.missingInformation.join(' ') || 'review the retained capability diagnostic.'}`,
+    };
+  }
+  if (userResolvableBinding || plan.resolutionFailure?.outcome === 'clarify') {
+    const optionIds = qualifiedChoiceIds.length > 0
+      ? qualifiedChoiceIds
+      : [...new Set((resolution.compatibilityFailures ?? []).flatMap((failure) => failure.candidateIds))].sort();
+    const options = optionIds.length > 0
+      ? clarificationOptionsForQualifiedIds(optionIds, candidates)
+      : buildClarificationOptions(candidates);
+    const bindingSummary = bindings.map(({ kind, binding }) =>
+      `${kind} “${binding.requested}” is ${binding.status}`).join('; ');
+    const question = routedClarificationQuestion(resolution, bindings, options);
+    return {
+      outcome: 'clarify',
+      reason: `The immutable analytical plan needs one identifier-bound choice: ${bindingSummary || plan.missingInformation.join(' ')}`,
+      question,
+      options,
+    };
+  }
+  if (resolution.confidence === 'low' || resolution.recommendedRoute === 'clarify') {
+    return {
+      outcome: 'clarify',
+      reason: `The retrieved evidence needs one governed meaning choice: ${plan.missingInformation.join(' ') || resolution.interpretedQuestion}`,
+      question: resolution.clarifyingQuestion ?? buildEvidenceClarification(candidates, plan.missingInformation),
+      options: buildClarificationOptions(candidates),
+    };
+  }
+  return {
+    outcome: 'modeling_gap',
+    reason: `The selected analytical plan is not executable from the governed model: ${plan.missingInformation.join(' ') || 'review its capability and relationship proof.'}`,
+  };
+}
+
+function clarificationOptionsForQualifiedIds(
+  ids: string[],
+  candidates: AgentEvidenceCandidate[],
+): NonNullable<IntentDecision['clarificationOptions']> {
+  return ids.slice(0, 3).map((id) => {
+    const candidate = candidates.find((item) => item.id === id || item.qualifiedId === id);
+    return {
+      id,
+      label: candidate?.name ?? qualifiedIdLabel(id),
+      ...(candidate?.definition?.trim() ? { description: candidate.definition.trim() } : {}),
+      kind: candidate?.kind ?? 'semantic_member',
+    };
+  });
+}
+
+function qualifiedIdLabel(id: string): string {
+  const local = id.split(/[:./]/).filter(Boolean).at(-1) ?? id;
+  return local.replace(/[_-]+/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function routedClarificationQuestion(
+  resolution: MeaningResolution,
+  bindings: Array<{ kind: string; binding: ResolvedAnalyticalPlan['query']['measures'][number] }>,
+  options: NonNullable<IntentDecision['clarificationOptions']>,
+): string {
+  if (resolution.clarifyingQuestion && !/^The analytical frame has unresolved ambiguity:/i.test(resolution.clarifyingQuestion)) {
+    return resolution.clarifyingQuestion;
+  }
+  const first = bindings[0];
+  const labels = options.map((option) => option.label);
+  if (first && labels.length > 1) {
+    return `Which governed ${first.kind} should I use for “${first.binding.requested}”: ${labels.join(' or ')}?`;
+  }
+  return resolution.clarifyingQuestion
+    ?? `Which governed binding should I use before running this query?`;
 }
 
 function continueCascadeAfterIncompleteSelection(
@@ -610,8 +753,17 @@ function enforceAnalyticalCompatibility(
       .map(normalizeMetricPhrase)
       .filter(Boolean),
   ).size;
+  // Parser hints may split one business metric name into overlapping measure
+  // tokens (for example "rollover balance amount" -> "balance", "amount").
+  // Treat several hints as a multi-metric contract only when the question
+  // actually coordinates separate measures; otherwise one exact qualified
+  // capability is allowed to bind all synonymous hints.
+  const explicitlyCoordinatesMetrics = /(?:,|\b(?:and|plus|versus|vs\.?|along with)\b)/i.test(
+    resolution.interpretedQuestion,
+  );
   if (
     requestedMetricCount > 1
+    && explicitlyCoordinatesMetrics
     && (missingMetricTerms.length > 0
       || (resolution.analyticalFrame?.metricConceptIds.length ?? 0) < requestedMetricCount)
   ) {
@@ -666,6 +818,8 @@ function enforceAnalyticalCompatibility(
       recommendedExecutionId: result.candidateId,
       recommendedRoute: result.route,
       missingInformation: [],
+      compatibilityOutcome: undefined,
+      compatibilityFailures: undefined,
     };
   }
   // A question asking for SEVERAL metrics ("revenue and refunds by month") is a
@@ -684,12 +838,26 @@ function enforceAnalyticalCompatibility(
     };
   }
   const failures = result.failures.map((failure) => failure.message);
+  const compatibilityFailures = result.failures.map((failure) => ({
+    code: failure.code,
+    field: failure.field,
+    message: failure.message,
+    candidateIds: [...(failure.candidateIds ?? [])],
+  }));
+  const policyFailure = result.failures.some((failure) => failure.code.startsWith('POLICY_'));
+  const compatibilityOutcome = policyFailure
+    ? 'policy_blocked' as const
+    : result.status === 'clarify'
+      ? 'clarify' as const
+      : 'modeling_gap' as const;
   return {
     ...resolution,
     analyticalFrame: result.frame,
     analyticalPolicyIds: result.policyIds,
     confidence: result.status === "clarify" ? "low" : resolution.confidence,
     recommendedRoute: "clarify",
+    compatibilityOutcome,
+    compatibilityFailures,
     missingInformation: [
       ...new Set([...resolution.missingInformation, ...failures]),
     ],
@@ -745,6 +913,15 @@ function directResolution(
   candidate: AgentEvidenceCandidate,
   candidates: AgentEvidenceCandidate[],
 ): MeaningResolution {
+  const inferredQuestionType = questionTypeFromText(request.question);
+  const questionType = inferredQuestionType === 'definition'
+    && candidate.kind === 'semantic_metric'
+    && candidate.exactMatch
+    && Boolean(normalizeEvidenceAnalyticalCapability(candidate).capability)
+    && /^\s*what (?:is|was|were|are)\b/i.test(request.question)
+    && !/\b(?:define|definition|meaning|mean)\b/i.test(request.question)
+      ? 'value'
+      : inferredQuestionType;
   const metricCandidates = explicitlyRequestedMetricCandidates(
     request.question,
     evidence,
@@ -753,17 +930,31 @@ function directResolution(
   );
   const analyticalFrame = buildDeterministicAnalyticalFrame({
     question: request.question,
+    questionType,
     evidence,
     metricCandidate: candidate,
     metricCandidates,
     candidates,
   });
+  const queryIntent = defaultQueryIntent(evidence);
+  const memberCandidates = candidates.filter((item) => {
+    if (item.kind !== 'semantic_member' || item.compatibility === 'incompatible') return false;
+    const identities = [item.name, ...(item.aliases ?? [])].map(normalizeMetricPhrase).filter(Boolean);
+    return queryIntent.filters.some((filter) => identities.includes(normalizeMetricPhrase(filter.value)));
+  });
+  const canonicalFilters = queryIntent.filters.map((filter) => {
+    const member = memberCandidates.find((item) =>
+      [item.name, ...(item.aliases ?? [])]
+        .map(normalizeMetricPhrase)
+        .includes(normalizeMetricPhrase(filter.value)));
+    return member ? { ...filter, value: member.name } : filter;
+  });
   return {
     interpretedQuestion: request.question,
-    questionType: questionTypeFromText(request.question),
-    selectedConceptIds: metricCandidates.map((metric) => metric.id),
+    questionType,
+    selectedConceptIds: [...metricCandidates, ...memberCandidates].map((item) => item.id),
     recommendedExecutionId: candidate.id,
-    queryIntent: defaultQueryIntent(evidence),
+    queryIntent: { ...queryIntent, filters: canonicalFilters },
     rejectedCandidates: [],
     confidence: "high",
     missingInformation: [],
@@ -786,6 +977,12 @@ function explicitlyRequestedMetricCandidates(
   // shims and registry aliases that share its words. Those are execution
   // representations of the same request, not additional requested metrics.
   if (requestedTerms.length <= 1) return [primary];
+  const primaryNames = [primary.name, ...(primary.aliases ?? [])]
+    .map(normalizeMetricPhrase)
+    .filter(Boolean);
+  if (requestedTerms.every((term) => primaryNames.some((name) => metricTermsMatch(name, term)))) {
+    return [primary];
+  }
   const questionText = normalizeMetricPhrase(question);
   const metrics = candidates.filter((candidate) => {
     if (candidate.kind !== 'semantic_metric' || candidate.compatibility === 'incompatible') return false;
@@ -808,6 +1005,7 @@ function explicitlyRequestedMetricCandidates(
 function normalizeMetricPhrase(value: string): string {
   return value
     .toLowerCase()
+    .replace(/%/g, ' percentage ')
     .replace(/[_./:-]+/g, ' ')
     .replace(/[^a-z0-9 ]+/g, ' ')
     .replace(/\s+/g, ' ')
@@ -908,21 +1106,313 @@ function routeWithoutMeaningModel(
       planMode,
     );
   }
-  if (base.action === "investigate") {
+  return unresolvedAnalyticalPlanDecision(base, evidence, candidates);
+}
+
+/**
+ * Retrieval may nominate qualified candidates, but only the resolved plan may
+ * authorize analytical execution. If bounded meaning cannot freeze one exact
+ * tuple, retain stable candidate identities for a focused continuation or emit
+ * a typed modeling gap. Never hand those candidates to the legacy answer loop
+ * as another meaning/planning authority.
+ */
+function unresolvedAnalyticalPlanDecision(
+  base: IntentDecision,
+  evidence?: AgentRetrievalEvidence,
+  candidates: AgentEvidenceCandidate[] = [],
+): IntentDecision {
+  const eligible = candidates
+    .filter((candidate) => candidate.eligible !== false && candidate.compatibility !== 'incompatible')
+    .filter((candidate, index, all) => all.findIndex((other) => other.id === candidate.id) === index)
+    .sort((left, right) => right.relevanceScore - left.relevanceScore || left.id.localeCompare(right.id));
+  const trace = evidence ? retrievalTrace(evidence, candidates) : {
+    candidateCount: 0,
+    candidateIds: [],
+  };
+  if (eligible.length > 1) {
+    const choices = eligible.slice(0, 3);
     return {
       ...base,
-      category: "data_analysis",
-      retrievalEvidence: retrievalTrace(evidence, candidates),
+      action: 'clarify',
+      confidence: 1,
+      source: 'heuristic',
+      category: 'unclear',
+      depth: 'quick',
+      reason: 'Bounded retrieval found multiple governed meanings, so no analytical plan was frozen.',
+      requiresClarification: true,
+      clarifyingQuestion: `Which governed meaning should DQL bind: ${choices.map(renderCandidateChoice).join(' or ')}?`,
+      clarificationOptions: buildClarificationOptions(choices),
+      retrievalEvidence: trace,
+      resolvedAnalyticalPlan: undefined,
+      meaningResolution: undefined,
     };
   }
+
+  const candidateIds = eligible.map((candidate) => candidate.qualifiedId ?? candidate.id);
+  const message = candidateIds.length === 1
+    ? `The retrieved governed candidate ${candidateIds[0]} did not prove the complete requested metric, grain, filters, ordering, and outputs. Model the missing capability before retrying.`
+    : 'No governed candidate proved the complete requested metric, grain, filters, ordering, and outputs. Model the missing capability or choose a governed identifier before retrying.';
   return {
     ...base,
-    action: "answer",
-    confidence: Math.max(base.confidence, 0.7),
-    reason: `Retrieved ${candidates.length} governed candidate${candidates.length === 1 ? "" : "s"}; the answer executor will resolve them without a router general-knowledge fallback.`,
-    category: "data_lookup",
-    retrievalEvidence: retrievalTrace(evidence, candidates),
+    action: 'block',
+    confidence: 1,
+    source: 'heuristic',
+    category: base.action === 'investigate' ? 'data_analysis' : 'data_lookup',
+    depth: 'quick',
+    reason: message,
+    requiresClarification: false,
+    retrievalEvidence: trace,
+    terminalOutcome: {
+      kind: 'modeling_gap',
+      code: 'ANALYTICAL_MODELING_GAP',
+      message,
+      candidateIds,
+    },
+    resolvedAnalyticalPlan: undefined,
+    meaningResolution: undefined,
   };
+}
+
+/**
+ * Deterministic business questions that must be settled before meaning/model
+ * orchestration.  These are not proof failures: no immutable analytical plan
+ * exists yet, so the only valid outcome is one concise clarification.
+ */
+function deterministicPrePlanClarification(
+  request: AgentRunRequest,
+  base: IntentDecision,
+  evidence: AgentRetrievalEvidence,
+  candidates: AgentEvidenceCandidate[],
+): IntentDecision | undefined {
+  const asksForRanking = questionTypeFromText(request.question) === 'ranking';
+  const requestedMeasures = (evidence.parsedIntent?.measures ?? [])
+    .map(normalizeMetricPhrase)
+    .filter(Boolean);
+  const hasExplicitRankingMetric = requestedMeasures.length > 0
+    && requestedMeasures.every((requested) =>
+      candidates.some((candidate) => candidateProvesMetricTerm(candidate, requested)))
+    || hasStrongQualifiedMetricEvidence(candidates)
+    || hasQuestionQualifiedMetricEvidence(request.question, evidence, candidates);
+  const retrievalEvidence = retrievalTrace(evidence, candidates);
+
+  const requestedDimensions = uniqueNormalizedTerms(evidence.parsedIntent?.dimensions ?? []);
+  const modeledFilterFields = new Set(
+    (evidence.parsedIntent?.filters ?? []).flatMap((filter) =>
+      candidates.some((candidate) =>
+        isCompatibleQualifiedMember(candidate)
+        && candidateIdentityTerms(candidate).some((term) =>
+          metricTermsMatch(term, normalizeMetricPhrase(filter.value))))
+        ? [normalizeMetricPhrase(filter.field)]
+        : []),
+  );
+  const missingDimensions = requestedDimensions.filter((requested) =>
+    !modeledFilterFields.has(requested)
+    && !candidates.some((candidate) => candidateProvesDimensionTerm(candidate, requested)));
+
+  if (missingDimensions.length > 0) {
+    const filterValues = (evidence.parsedIntent?.filters ?? []).map((filter) =>
+      normalizeMetricPhrase(filter.value));
+    const alternatives = candidates
+      .filter(isCompatibleQualifiedMember)
+      .filter((candidate) => candidateIsDeclaredDimensionAlternative(candidate, missingDimensions))
+      .filter((candidate) => !candidateIdentityTerms(candidate).some((term) =>
+        requestedDimensions.some((requested) => metricTermsMatch(term, requested))
+        || filterValues.some((value) => metricTermsMatch(term, value))))
+      .sort((left, right) =>
+        right.relevanceScore - left.relevanceScore || left.id.localeCompare(right.id))
+      .slice(0, 3);
+    if (alternatives.length === 0) {
+      if (!asksForRanking || hasExplicitRankingMetric) return undefined;
+      return bareRankingClarification(base, retrievalEvidence);
+    }
+    const requestedLabel = missingDimensions.map((term) => `“${term}”`).join(' and ');
+    const alternativeLabels = alternatives.map(renderCandidateChoice);
+    return {
+      ...base,
+      action: 'clarify',
+      confidence: 1,
+      reason: `The requested dimension ${requestedLabel} is absent from the retrieved qualified evidence, so no analytical plan was frozen.`,
+      source: 'heuristic',
+      category: 'unclear',
+      depth: 'quick',
+      requiresClarification: true,
+      clarifyingQuestion: alternativeLabels.length > 0
+        ? `${requestedLabel} is not modeled. Should I use ${alternativeLabels.join(' or ')} instead?`
+        : `${requestedLabel} is not modeled. Which governed dimension should I use instead?`,
+      retrievalEvidence,
+      ...(alternatives.length > 0 ? { clarificationOptions: buildClarificationOptions(alternatives) } : {}),
+      resolvedAnalyticalPlan: undefined,
+      meaningResolution: undefined,
+    };
+  }
+
+  if (asksForRanking && !hasExplicitRankingMetric) {
+    return bareRankingClarification(base, retrievalEvidence);
+  }
+  return undefined;
+}
+
+function bareRankingClarification(
+  base: IntentDecision,
+  retrievalEvidence: NonNullable<IntentDecision['retrievalEvidence']>,
+): IntentDecision {
+  return {
+    ...base,
+    action: 'clarify',
+    confidence: 1,
+    reason: 'A ranking needs a positively identified governed metric before an execution capability can be selected.',
+    source: 'heuristic',
+    category: 'unclear',
+    depth: 'quick',
+    requiresClarification: true,
+    clarifyingQuestion: 'Top by which governed metric?',
+    retrievalEvidence,
+    resolvedAnalyticalPlan: undefined,
+    meaningResolution: undefined,
+  };
+}
+
+function uniqueNormalizedTerms(values: string[]): string[] {
+  return [...new Set(values.map(normalizeMetricPhrase).filter(Boolean))];
+}
+
+function isCompatibleQualifiedMember(candidate: AgentEvidenceCandidate): boolean {
+  return candidate.kind === 'semantic_member'
+    && candidate.compatibility !== 'incompatible'
+    && Boolean(candidate.qualifiedId ?? candidate.id);
+}
+
+function candidateIdentityTerms(candidate: AgentEvidenceCandidate): string[] {
+  return uniqueNormalizedTerms([
+    candidate.id,
+    candidate.qualifiedId ?? '',
+    candidate.name,
+    ...(candidate.aliases ?? []),
+    ...(candidate.dimensions ?? []),
+  ]);
+}
+
+function candidateProvesDimensionTerm(candidate: AgentEvidenceCandidate, requested: string): boolean {
+  if (candidate.compatibility === 'incompatible') return false;
+  if (
+    candidate.kind === 'semantic_member'
+    && candidateIdentityTerms(candidate).some((term) => metricTermsMatch(term, requested))
+  ) return true;
+  const normalized = normalizeEvidenceAnalyticalCapability(candidate);
+  return normalized.status === 'complete'
+    && Boolean(normalized.capability?.dimensions.some((dimension) =>
+      metricTermsMatch(normalizeMetricPhrase(dimension.dimensionId), requested)));
+}
+
+function candidateProvesMetricTerm(candidate: AgentEvidenceCandidate, requested: string): boolean {
+  if (candidate.compatibility === 'incompatible') return false;
+  if (candidate.kind === 'certified_block') {
+    return candidate.compatibility === 'compatible';
+  }
+  if (candidate.kind !== 'semantic_metric') return false;
+  const stableIdentity = candidate.qualifiedId ?? candidate.id;
+  if (!stableIdentity) return false;
+  return [candidate.name, ...(candidate.aliases ?? [])]
+    .map(normalizeMetricPhrase)
+    .some((term) => metricTermsMatch(term, requested));
+}
+
+function candidateIsDeclaredDimensionAlternative(
+  candidate: AgentEvidenceCandidate,
+  missingDimensions: string[],
+): boolean {
+  const facts = candidate.compatibilityFacts?.map(normalizeMetricPhrase) ?? [];
+  return missingDimensions.some((requested) =>
+    facts.includes(`alternative for ${requested}`)
+    || facts.includes(`dimension alternative for ${requested}`));
+}
+
+/**
+ * A missing optional parsed-intent projection must not erase positive metric
+ * evidence already retrieved for the question. Only complete, compatible,
+ * qualified semantic metrics with an exact/explicit match reason can bypass
+ * the bare-ranking clarification; mere catalog presence is insufficient.
+ */
+function hasStrongQualifiedMetricEvidence(candidates: AgentEvidenceCandidate[]): boolean {
+  return candidates.some((candidate) => {
+    if (candidate.kind !== 'semantic_metric' || candidate.compatibility === 'incompatible') return false;
+    if (!candidate.qualifiedId || !normalizeEvidenceAnalyticalCapability(candidate).capability) return false;
+    if (candidate.exactMatch) return true;
+    return candidate.matchReasons.some((reason) => {
+      const normalized = normalizeMetricPhrase(reason);
+      return /\b(?:exact|explicit)\b/.test(normalized)
+        && /\b(?:metric|measure|meaning|name|alias)\b/.test(normalized);
+    });
+  });
+}
+
+function hasQuestionQualifiedMetricEvidence(
+  question: string,
+  evidence: AgentRetrievalEvidence,
+  candidates: AgentEvidenceCandidate[],
+): boolean {
+  const questionTokens = new Set(substantiveLexicalTokens(question));
+  const dimensionTokens = new Set(substantiveLexicalTokens(
+    (evidence.parsedIntent?.dimensions ?? []).join(' '),
+  ));
+  return candidates.some((candidate) => {
+    if (candidate.kind !== 'semantic_metric' || candidate.compatibility === 'incompatible') return false;
+    const normalized = normalizeEvidenceAnalyticalCapability(candidate);
+    if (normalized.status !== 'complete' || !candidate.qualifiedId) return false;
+    return metricLexicalVariants(candidate).some((variant) => {
+      const metricTokens = [...new Set(
+        substantiveLexicalTokens(variant)
+          .filter((token) => !dimensionTokens.has(token)),
+      )];
+      if (metricTokens.length === 0) return false;
+      const matched = metricTokens.filter((token) => questionTokens.has(token)).length;
+      return metricTokens.length === 1
+        ? matched === 1
+        : matched >= 2 && matched / metricTokens.length >= 0.5;
+    });
+  });
+}
+
+/**
+ * Compare both authored identities and their canonical local names. Generated
+ * semantic-model namespaces remain available as authored evidence, but cannot
+ * dilute the leaf metric phrase that users naturally ask for.
+ */
+function metricLexicalVariants(candidate: AgentEvidenceCandidate): string[] {
+  const authored = [
+    candidate.name,
+    ...(candidate.aliases ?? []),
+    ...(candidate.qualifiedId ? [candidate.qualifiedId] : []),
+  ].filter(Boolean);
+  return [...new Set(authored.flatMap((value) => {
+    const local = value.split(/[.:/]/).filter(Boolean).at(-1);
+    return local && local !== value ? [value, local] : [value];
+  }))];
+}
+
+const NON_SUBSTANTIVE_RANKING_TOKENS = new Set([
+  'a', 'an', 'and', 'are', 'at', 'best', 'bottom', 'by', 'count', 'for',
+  'from', 'give', 'has', 'have', 'highest', 'in', 'is', 'least', 'list',
+  'lowest', 'me', 'measure', 'metric', 'most', 'number', 'of', 'on', 'or',
+  'per', 'rank', 'ranked', 'ranking', 'show', 'that', 'the', 'this', 'to',
+  'top', 'total', 'value', 'what', 'which', 'who', 'with', 'without', 'worst',
+  'amount',
+]);
+
+function substantiveLexicalTokens(value: string): string[] {
+  return normalizeMetricPhrase(value)
+    .split(' ')
+    .filter((token) => token.length >= 2 && !NON_SUBSTANTIVE_RANKING_TOKENS.has(token));
+}
+
+function renderCandidateChoice(candidate: AgentEvidenceCandidate): string {
+  const identity = candidate.qualifiedId ?? candidate.id;
+  const stableName = identity.split(/[.:]/).at(-1) ?? candidate.name;
+  const description = candidate.definition?.trim();
+  const grain = candidate.primaryEntity?.trim();
+  return description
+    ? `${candidate.name} (${stableName} — ${description}${grain ? `; grain: ${grain}` : ''})`
+    : `${candidate.name} (${stableName})`;
 }
 
 /**
@@ -989,6 +1479,12 @@ function hasMateriallyRelatedCompetitor(
     candidate.id !== exact.id
     && candidate.compatibility !== "incompatible"
     && candidate.relevanceScore >= floor
+    // A dimension/member card can help bind the selected metric's tuple, but
+    // it is not a competing business metric meaning. Treating it as one sends
+    // an exact metric plus its own dimension candidates back to the resolver.
+    && (exact.kind !== 'semantic_metric'
+      || candidate.kind === 'semantic_metric'
+      || candidate.kind === 'certified_block')
   );
 }
 
@@ -1025,6 +1521,17 @@ function dominantCompatibleGovernedCandidate(
     candidate.id !== best.id && candidate.relevanceScore >= competitorFloor
   );
   return hasExecutableCompetitor ? undefined : best;
+}
+
+function authoritativeExactCertifiedExample(
+  candidates: AgentEvidenceCandidate[],
+): AgentEvidenceCandidate | undefined {
+  const exact = candidates.filter((candidate) =>
+    candidate.kind === 'certified_block'
+    && candidate.exactMatch
+    && candidate.compatibility === 'compatible'
+    && candidate.analyticalFitClass === 'exact');
+  return exact.length === 1 ? exact[0] : undefined;
 }
 
 function shouldDeferCompositionalFollowUpToExecutor(
@@ -1105,6 +1612,11 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
         return { ...base, source: base.source ?? "heuristic" };
       }
 
+      const initialDiscoveryRoute = discoveryRouteBeforeRetrieval(request, base);
+      if (request.runBudget && !request.runBudget.mayStartDiscovery(initialDiscoveryRoute)) {
+        return softBoundaryDecision(request, base, initialDiscoveryRoute);
+      }
+
       let evidence: AgentRetrievalEvidence | undefined;
       if (options.getEvidence) {
         try {
@@ -1117,6 +1629,16 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
       }
 
       if (evidence) {
+        evidence = {
+          ...evidence,
+          candidates: canonicalizeMetricMeasureCandidates(evidence.candidates),
+          ...(evidence.clarificationCandidates
+            ? { clarificationCandidates: canonicalizeMetricMeasureCandidates([
+                ...evidence.candidates,
+                ...evidence.clarificationCandidates,
+              ]).filter((candidate) => evidence!.clarificationCandidates!.some((item) => item.id === candidate.id)) }
+            : {}),
+        };
         let candidates = buildMeaningEvidencePackage(evidence, options.maxMeaningCandidates ?? 12);
         // A structured clarification selection is authoritative identity input,
         // not a new fuzzy-search phrase. Keep it in the bounded package even if
@@ -1129,6 +1651,22 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
             .slice(0, options.maxMeaningCandidates ?? 12);
         }
         if (candidates.length > 0) {
+          // Clarification is local and never provider-bound, so it can inspect the
+          // complete already-retrieved set. Keep the smaller package below for
+          // any later meaning call.
+          const clarificationCandidates = [
+            ...evidence.candidates,
+            ...(evidence.clarificationCandidates ?? []),
+          ].filter((candidate, index, all) =>
+            candidate.eligible !== false && all.findIndex((other) => other.id === candidate.id) === index);
+          const deterministicClarification = deterministicPrePlanClarification(
+            request,
+            base,
+            evidence,
+            clarificationCandidates,
+          );
+          if (deterministicClarification) return deterministicClarification;
+
           const explicit = selectedEvidence ?? findExplicitEvidenceReference(request.question, candidates);
           if (explicit && explicit.compatibility !== "incompatible") {
             const decision = routeDecisionForResolution(
@@ -1153,6 +1691,20 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
               candidates,
               directResolution(request, evidence, multiMetricPrimary, candidates),
               "heuristic",
+              request.question,
+              options.resolvedPlanMode ?? 'authoritative',
+            );
+          }
+
+
+          const authoredExample = authoritativeExactCertifiedExample(candidates);
+          if (authoredExample) {
+            return routeDecisionForResolution(
+              base,
+              evidence,
+              candidates,
+              directResolution(request, evidence, authoredExample, candidates),
+              'heuristic',
               request.question,
               options.resolvedPlanMode ?? 'authoritative',
             );
@@ -1202,11 +1754,22 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
           }
 
           try {
+            if (request.runBudget && !request.runBudget.mayStartDiscovery('clarify')) {
+              return softBoundaryDecision(request, base, 'clarify');
+            }
             const resolution = options.resolveMeaning
               ? await options.resolveMeaning({
                   question: request.question,
                   history: effectiveConversationHistory(request),
-                  evidence,
+                  // The resolver/provider receives the same bounded evidence
+                  // package as its candidate argument. Supplemental qualified
+                  // cards are a host-only clarification aid and must not leak
+                  // through this richer carrier.
+                  evidence: {
+                    ...evidence,
+                    candidates,
+                    clarificationCandidates: undefined,
+                  },
                   candidates,
                   signal: request.signal ?? options.signal,
                 })
@@ -1228,13 +1791,20 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
               const invalidResolution: MeaningResolution = {
                 interpretedQuestion: request.question,
                 questionType: questionTypeFromText(request.question),
-                selectedConceptIds: [],
-                queryIntent: defaultQueryIntent(evidence),
+                selectedConceptIds: resolution.selectedConceptIds,
+                recommendedExecutionId: resolution.recommendedExecutionId,
+                queryIntent: resolution.queryIntent,
                 rejectedCandidates: [],
                 confidence: "low",
                 missingInformation: [validated.reason],
                 recommendedRoute: "clarify",
-                clarifyingQuestion: buildEvidenceClarification(candidates, [validated.reason]),
+                compatibilityOutcome: 'modeling_gap',
+                compatibilityFailures: [{
+                  code: 'INVALID_EVIDENCE_REFERENCE',
+                  field: 'meaningResolution',
+                  message: validated.reason,
+                  candidateIds: [],
+                }],
               };
               const invalidDecision = routeDecisionForResolution(
                 base,
@@ -1247,10 +1817,6 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
               );
               return remember(key, {
                 ...invalidDecision,
-                action: 'answer',
-                requiresClarification: false,
-                clarificationOptions: undefined,
-                clarifyingQuestion: undefined,
                 meaningResolutionErrorCode: 'invalid_evidence_reference',
               });
             }
@@ -1270,6 +1836,9 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
         return { ...base, source: base.source ?? "heuristic" };
       }
       let catalogContext: string | undefined;
+      if (request.runBudget && !request.runBudget.mayStartDiscovery('clarify')) {
+        return softBoundaryDecision(request, base, 'clarify');
+      }
       try {
         catalogContext = options.getCatalogContext ? await options.getCatalogContext(request) : undefined;
       } catch (error) {
@@ -1295,6 +1864,36 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
       }
       return { ...base, source: "heuristic" };
     },
+  };
+}
+
+function discoveryRouteBeforeRetrieval(request: AgentRunRequest, base: IntentDecision): import('./agent-run-engine.js').AgentRunRoute {
+  if (request.runBudget?.mode === 'research' || request.requestedMode === 'research') return 'research';
+  if (base.action === 'clarify' || base.requiresClarification || request.signals?.missingContext?.length) return 'clarify';
+  if (
+    request.intent === 'exact_certified_lookup'
+    || (request.signals?.certifiedScore ?? 0) >= 0.5
+    || (request.signals?.metricScore ?? 0) >= 0.5
+  ) return 'semantic_answer';
+  return 'generated_answer';
+}
+
+function softBoundaryDecision(
+  request: AgentRunRequest,
+  base: IntentDecision,
+  route: import('./agent-run-engine.js').AgentRunRoute,
+): IntentDecision {
+  const seconds = Math.round((request.runBudget?.softTargetMs(route) ?? 15_000) / 1_000);
+  return {
+    ...base,
+    action: 'clarify',
+    confidence: 1,
+    source: 'heuristic',
+    requiresClarification: true,
+    reason: `The ${seconds}-second discovery target elapsed before a plan was frozen, so DQL did not start another retrieval or provider branch.`,
+    clarifyingQuestion: request.runBudget?.mode === 'research'
+      ? 'Research has stopped starting new branches. Would you like to narrow the question and retry?'
+      : 'The discovery window ended before an exact plan was frozen. Which metric or grain should DQL use on retry?',
   };
 }
 

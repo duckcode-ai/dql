@@ -9,6 +9,8 @@ import { sourceSqlShapeColumns } from './sql-shape.js';
 import { shouldClarifyBeforeGeneration } from '../cascade/triage.js';
 import { aggregationIntegrityIssuesForSql } from './grain-ledger.js';
 import { internalRelationIdsInSql } from './sql-grounding.js';
+import { buildAggregationSafetyProof } from '../aggregation-safety-proof.js';
+import type { AggregationSafetyProofV1 } from '@duckcodeailabs/dql-core';
 
 export type SqlContextValidationCode =
   | 'unknown_relation'
@@ -38,12 +40,14 @@ export interface SqlContextValidationOffending {
 export type SqlContextValidationResult =
   | {
       ok: true;
+      aggregationSafetyProof: AggregationSafetyProofV1;
       warnings: string[];
       referencedRelations: string[];
       referencedColumns: Array<{ relation?: string; column: string }>;
     }
   | {
       ok: false;
+      aggregationSafetyProof: AggregationSafetyProofV1;
       code: SqlContextValidationCode;
       error: string;
       warnings: string[];
@@ -89,6 +93,7 @@ export function validateSqlAgainstLocalContext(
   contextPack: LocalContextPack | undefined,
   options: SqlContextValidationOptions = {},
 ): SqlContextValidationResult {
+  const aggregationSafetyProof = buildAggregationSafetyProof(sql, contextPack, options.dialect);
   const internalRelationIds = internalRelationIdsInSql(sql);
   if (internalRelationIds.length > 0) {
     return {
@@ -98,6 +103,7 @@ export function validateSqlAgainstLocalContext(
       warnings: [],
       referencedRelations: [],
       referencedColumns: [],
+      aggregationSafetyProof,
       offending: {
         relation: internalRelationIds[0],
         relations: internalRelationIds,
@@ -115,6 +121,7 @@ export function validateSqlAgainstLocalContext(
     warnings: [] as string[],
     referencedRelations,
     referencedColumns,
+    aggregationSafetyProof,
   };
 
   if (!analysis.parsed) {
@@ -157,7 +164,7 @@ export function validateSqlAgainstLocalContext(
 
   if (!contextPack && allowed.size === 0) {
     return aggregationIssues.length > 0
-      ? aggregationIntegrityFailure(aggregationIssues, base.warnings, referencedRelations, referencedColumns)
+      ? aggregationIntegrityFailure(aggregationIssues, base.warnings, referencedRelations, referencedColumns, aggregationSafetyProof)
       : { ok: true, ...base };
   }
   if (contextPack?.routeDecision?.route === 'clarify' && shouldClarifyBeforeGeneration({
@@ -183,7 +190,7 @@ export function validateSqlAgainstLocalContext(
 
   if (!contextPack?.allowedSqlContext && allowed.size === 0) {
     if (aggregationIssues.length > 0) {
-      return aggregationIntegrityFailure(aggregationIssues, base.warnings, referencedRelations, referencedColumns);
+      return aggregationIntegrityFailure(aggregationIssues, base.warnings, referencedRelations, referencedColumns, aggregationSafetyProof);
     }
     return {
       ok: true,
@@ -194,7 +201,7 @@ export function validateSqlAgainstLocalContext(
 
   if (allowed.size === 0) {
     if (aggregationIssues.length > 0) {
-      return aggregationIntegrityFailure(aggregationIssues, base.warnings, referencedRelations, referencedColumns);
+      return aggregationIntegrityFailure(aggregationIssues, base.warnings, referencedRelations, referencedColumns, aggregationSafetyProof);
     }
     return {
       ok: true,
@@ -239,6 +246,7 @@ export function validateSqlAgainstLocalContext(
         relation: unknownColumn.relation,
         column: unknownColumn.column,
       },
+      aggregationSafetyProof,
     };
   }
   // A partial list is sufficient when every referenced column is present. Only
@@ -271,11 +279,12 @@ export function validateSqlAgainstLocalContext(
       referencedRelations,
       referencedColumns,
       offending: { column: ambiguousColumn.column },
+      aggregationSafetyProof,
     };
   }
 
   if (aggregationIssues.length > 0) {
-    return aggregationIntegrityFailure(aggregationIssues, warnings, referencedRelations, referencedColumns);
+    return aggregationIntegrityFailure(aggregationIssues, warnings, referencedRelations, referencedColumns, aggregationSafetyProof);
   }
 
   if (options.intent === 'diagnose_change' && !contextHasTimeLikeColumn(allowed)) {
@@ -286,6 +295,7 @@ export function validateSqlAgainstLocalContext(
       warnings,
       referencedRelations,
       referencedColumns,
+      aggregationSafetyProof,
     };
   }
 
@@ -300,6 +310,7 @@ export function validateSqlAgainstLocalContext(
       warnings,
       referencedRelations,
       referencedColumns,
+      aggregationSafetyProof,
     };
   }
 
@@ -313,6 +324,7 @@ export function validateSqlAgainstLocalContext(
       referencedRelations,
       referencedColumns,
       offending: { relation: misboundMemberFilter.relation, column: misboundMemberFilter.column },
+      aggregationSafetyProof,
     };
   }
 
@@ -321,6 +333,7 @@ export function validateSqlAgainstLocalContext(
     warnings,
     referencedRelations,
     referencedColumns,
+    aggregationSafetyProof,
   };
 }
 
@@ -329,6 +342,7 @@ function aggregationIntegrityFailure(
   warnings: string[],
   referencedRelations: string[],
   referencedColumns: Array<{ relation?: string; column: string }>,
+  aggregationSafetyProof?: AggregationSafetyProofV1,
 ): SqlContextValidationResult {
   return {
     ok: false,
@@ -337,6 +351,7 @@ function aggregationIntegrityFailure(
     warnings,
     referencedRelations,
     referencedColumns,
+    aggregationSafetyProof: aggregationSafetyProof ?? buildAggregationSafetyProof('', undefined),
   };
 }
 

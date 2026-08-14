@@ -32,6 +32,8 @@ export interface AgentEvidenceCandidate {
   /** Canonical registry identity; `id` may remain a legacy execution key during shadow rollout. */
   qualifiedId?: string;
   kind: AgentEvidenceKind;
+  /** Exact semantic registry object class when `kind` intentionally collapses members. */
+  semanticObjectType?: 'metric' | 'measure' | 'dimension' | 'entity' | 'model' | 'saved_query';
   trustTier: AgentEvidenceTrustTier;
   name: string;
   aliases?: string[];
@@ -68,6 +70,11 @@ export interface AgentRetrievalEvidence {
   sourceFingerprint?: string;
   knowledgeLens?: KnowledgeLens;
   candidates: AgentEvidenceCandidate[];
+  /**
+   * Already-retrieved, qualified cards reserved for deterministic host
+   * clarification. They do not enter the smaller provider meaning package.
+   */
+  clarificationCandidates?: AgentEvidenceCandidate[];
   parsedIntent?: Partial<MeaningQueryIntent>;
   /** Snapshot-compiled policy only; Skill prose never enters route authority. */
   analyticalPolicies?: AnalyticalPolicyContract[];
@@ -115,6 +122,15 @@ export interface MeaningResolution {
   analyticalFrame?: AnalyticalQuestionFrameV2;
   /** Exact eligible structured policies applied by the deterministic solver. */
   analyticalPolicyIds?: string[];
+  /** Host-owned result of deterministic capability solving; never model-authored. */
+  compatibilityOutcome?: 'clarify' | 'modeling_gap' | 'policy_blocked';
+  /** Stable solver codes and qualified candidates retained for route diagnostics. */
+  compatibilityFailures?: Array<{
+    code: string;
+    field: string;
+    message: string;
+    candidateIds: string[];
+  }>;
 }
 
 export interface MeaningResolutionInput {
@@ -151,18 +167,45 @@ export function buildMeaningEvidencePackage(
   maxCandidates = 12,
 ): AgentEvidenceCandidate[] {
   const limit = Math.max(1, Math.min(20, Math.floor(maxCandidates)));
-  const perTierLimit = Math.max(2, Math.ceil(limit / 2));
-  const tierCounts = new Map<AgentEvidenceTrustTier, number>();
-  return evidence.candidates
+  const perKindLimit = Math.max(2, Math.ceil(limit / 2));
+  const kindCounts = new Map<AgentEvidenceKind, number>();
+  return canonicalizeMetricMeasureCandidates(evidence.candidates)
     .filter((candidate) => candidate.eligible !== false)
     .sort(compareCandidates)
     .filter((candidate) => {
-      const count = tierCounts.get(candidate.trustTier) ?? 0;
-      if (count >= perTierLimit) return false;
-      tierCounts.set(candidate.trustTier, count + 1);
+      // Metric and member evidence share the semantic trust tier but serve
+      // different binding lanes. Counting only by trust let several exact
+      // member values crowd the executable metric out of the resolver package.
+      // Bound noise per evidence kind so every retrieved lane retains recall;
+      // downstream compatibility still owns execution authority.
+      const count = kindCounts.get(candidate.kind) ?? 0;
+      if (count >= perKindLimit) return false;
+      kindCounts.set(candidate.kind, count + 1);
       return true;
     })
     .slice(0, limit);
+}
+
+/**
+ * A dbt semantic metric and its backing measure are one execution authority,
+ * not two business meanings. Retain the metric capability and suppress only
+ * exact measure identities named by that capability; unrelated measures remain
+ * available for genuine ambiguity and multi-metric questions.
+ */
+export function canonicalizeMetricMeasureCandidates(
+  candidates: AgentEvidenceCandidate[],
+): AgentEvidenceCandidate[] {
+  const backingMeasureIds = new Set(candidates.flatMap((candidate) =>
+    candidate.semanticObjectType === 'metric'
+      || candidate.kind === 'semantic_metric'
+      ? candidate.analyticalCapability?.measureIds ?? []
+      : []));
+  return candidates.filter((candidate) => {
+    if (candidate.semanticObjectType !== 'measure') return true;
+    return ![candidate.id, candidate.qualifiedId]
+      .filter((value): value is string => Boolean(value))
+      .some((identity) => backingMeasureIds.has(identity));
+  });
 }
 
 function compareCandidates(left: AgentEvidenceCandidate, right: AgentEvidenceCandidate): number {
@@ -250,7 +293,11 @@ export function validateMeaningResolution(
     }
   }
   if (value.analyticalFrame) {
-    const invalidFrameReference = firstInvalidAnalyticalFrameReference(value.analyticalFrame, candidates);
+    const invalidFrameReference = firstInvalidAnalyticalFrameReference(
+      value.analyticalFrame,
+      candidates,
+      executionId,
+    );
     if (invalidFrameReference) {
       return { ok: false, reason: `The analytical frame referenced evidence that was not retrieved: ${invalidFrameReference}` };
     }
@@ -266,6 +313,7 @@ export function validateMeaningResolution(
 function firstInvalidAnalyticalFrameReference(
   frame: AnalyticalQuestionFrameV2,
   candidates: AgentEvidenceCandidate[],
+  executionId?: string,
 ): string | undefined {
   const metricIds = new Set<string>();
   const dimensionIds = new Set<string>();
@@ -310,6 +358,36 @@ function firstInvalidAnalyticalFrameReference(
   }
   for (const [kind, ids, allowed] of checks) {
     for (const id of ids) if (!allowed.has(id)) return `${kind} ${id}`;
+  }
+  const selected = executionId
+    ? candidates.find((candidate) => candidate.id === executionId || candidate.qualifiedId === executionId)
+    : undefined;
+  const selectedCapability = selected?.analyticalCapability;
+  if (selectedCapability) {
+    const selectedMetricIds = new Set([selectedCapability.metricId]);
+    const selectedDimensionIds = new Set([
+      ...selectedCapability.dimensions.map((dimension) => dimension.dimensionId),
+      ...selectedCapability.timeDimensions.map((dimension) => dimension.dimensionId),
+    ]);
+    const selectedEntityIds = new Set([
+      selectedCapability.primaryEntityId,
+      ...selectedCapability.resultGrainIds,
+    ]);
+    const selectedChecks: Array<[string, Iterable<string>, Set<string>]> = [
+      ['selected capability metric', frame.metricConceptIds, selectedMetricIds],
+      ['selected capability entity grain', frame.entityGrainIds, selectedEntityIds],
+      ['selected capability dimension', frame.dimensions.map((dimension) => dimension.dimensionId), selectedDimensionIds],
+      ['selected capability member dimension', frame.memberBindings.map((binding) => binding.dimensionId), selectedDimensionIds],
+    ];
+    if (frame.ranking) {
+      selectedChecks.push(
+        ['selected capability ranking dimension', [frame.ranking.entityDimensionId], selectedDimensionIds],
+        ['selected capability ranking metric', [frame.ranking.byMetricId], selectedMetricIds],
+      );
+    }
+    for (const [kind, ids, allowed] of selectedChecks) {
+      for (const id of ids) if (!allowed.has(id)) return `${kind} ${id}`;
+    }
   }
   for (const ambiguity of frame.ambiguity) {
     for (const id of ambiguity.candidateIds) if (!evidenceIds.has(id)) return `ambiguity candidate ${id}`;

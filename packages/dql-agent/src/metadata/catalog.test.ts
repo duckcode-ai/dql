@@ -8,6 +8,7 @@ import {
   buildLocalContextPack,
   buildMetadataSnapshot,
   buildFollowUpSearchQuery,
+  applyContextPackCompatibility,
   defaultMetadataPath,
   ensureMetadataCatalogFresh,
   MetadataCatalog,
@@ -1301,6 +1302,18 @@ Use the finance model area.
       reviewStatus: 'certified',
       exactObjectKey: 'dql:block:Top 10 Goal Scorers',
     });
+    const meaning = plan.contextPack.retrievalDiagnostics.meaningEvidence;
+    expect(meaning).toBeDefined();
+    const evidence = applyContextPackCompatibility(toAgentRetrievalEvidence(
+      meaning!,
+      plan.contextPack.questionPlan,
+      { contextObjects: plan.contextPack.objects },
+    ), plan.contextPack);
+    expect(evidence.candidates.find((candidate) => candidate.id === 'dql:block:Top 10 Goal Scorers')).toMatchObject({
+      compatibility: 'compatible',
+      exactMatch: false,
+      analyticalFitClass: undefined,
+    });
   });
 
   it('indexes optional DataLex contract evidence and links bound DQL blocks', async () => {
@@ -1504,6 +1517,18 @@ Use the finance model area.
       intent: 'ad_hoc_ranking',
       reviewStatus: 'certified',
       exactObjectKey: 'dql:block:Top 10 Goal Scorers',
+    });
+    const meaning = plan.contextPack.retrievalDiagnostics.meaningEvidence;
+    expect(meaning).toBeDefined();
+    const evidence = applyContextPackCompatibility(toAgentRetrievalEvidence(
+      meaning!,
+      plan.contextPack.questionPlan,
+      { contextObjects: plan.contextPack.objects },
+    ), plan.contextPack);
+    expect(evidence.candidates.find((candidate) => candidate.id === 'dql:block:Top 10 Goal Scorers')).toMatchObject({
+      compatibility: 'compatible',
+      exactMatch: true,
+      analyticalFitClass: 'exact',
     });
   });
 

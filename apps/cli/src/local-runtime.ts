@@ -1,4 +1,5 @@
-import type { SemanticDisplayFormat } from '@duckcodeailabs/dql-core';
+import type { ProviderDispatchPhaseV1, ProviderEgressPurpose, SemanticAggregationCompilerReceiptV1, SemanticDisplayFormat } from '@duckcodeailabs/dql-core';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { execFileSync, execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gzip } from "node:zlib";
@@ -112,6 +113,7 @@ import {
   type DQLManifest,
   type DqlArtifactReference,
   type DqlArtifactExecutionReceipt,
+  type DqlExecutableArtifactV1,
   type ManifestBlock,
   canonicalize,
   canonicalizeNotebook,
@@ -134,6 +136,10 @@ import {
   type RelationshipAuthoringInput,
   type ManifestRelationshipValidationEvidence,
   normalizeAnalyticalFailureV1,
+  normalizeAnalyticalRepairCapabilityV1,
+  type AnalyticalRepairCapabilityV1,
+  type ProviderEgressReceiptV1,
+  type AgentRunTelemetryV1,
   relationshipValidationProofFingerprint,
   renderSemanticBlockSource,
   discoverDbtDomains,
@@ -141,7 +147,11 @@ import {
   renderDomainDeclaration,
   ProjectSnapshotService,
   analyzeSqlReferences,
+  buildSqlAnalyticalSignature,
+  buildGeneratedAnalyticalSqlSignature,
+  buildSqlOutputExpressionSignature,
   semanticDimensionReference,
+  semanticExecutionFingerprint,
   modelAreaLocalId,
   DEFAULT_MODEL_AREA_ID,
 } from '@duckcodeailabs/dql-core';
@@ -152,7 +162,13 @@ import { rethrowIfCancelled } from './llm/cancellation.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from './version-status.js';
 import { resolveRetrievalHealthStatus } from './retrieval-health.js';
 import { createDqlAgentProviderRunner, resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
-import type { AgentConversationContext, AgentRunner as LLMAgentRunner, ProviderId } from './llm/types.js';
+import type {
+  AgentConversationContext,
+  AgentRunner as LLMAgentRunner,
+  ProviderDispatchTerminalEvidence,
+  ProviderDispatchEvidenceSink,
+  ProviderId,
+} from './llm/types.js';
 import { listRemoteMcpSettings, saveRemoteMcpSettings } from './llm/mcp-config.js';
 import {
   ClaudeProvider,
@@ -171,6 +187,7 @@ import {
   buildAnalysisQuestionPlan,
   composeSemanticQueryForQuestion,
   aggregationIntegrityIssuesForSql,
+  buildAggregationSafetyProof,
   buildLocalContextPack,
   applyContextPackCompatibility,
   toAgentRetrievalEvidence,
@@ -293,6 +310,7 @@ import {
   createCascadeAnswerResult,
   createCascadeTrace,
   routeReasoningEffort,
+  createAgentRunBudget,
   routeForCascadeAnswerTier,
   clampReasoningEffort,
   bumpReasoningEffort,
@@ -306,6 +324,7 @@ import {
   type AgentRunExecutors,
   type AgentRunNextAction,
   type AgentRunRequest,
+  type AgentRunBudget,
   type AgentRunRequestedMode,
   type AgentRunRoute,
   type AgentRunSelectedObject,
@@ -333,6 +352,14 @@ import {
   withAnalyticalErrorOrigin,
   withAnalyticalErrorOriginSync,
   type AnalyticalErrorStage,
+  type ProviderDispatchEvent,
+  assertProviderPayloadAllowed,
+  createProviderDispatchEgressReceipt,
+  prepareProviderContextForDispatch,
+  prepareProviderWireEnvelopeForDispatch,
+  markProviderMetadataArray,
+  createProviderEgressReceipt,
+  redactProviderResultRows,
 } from '@duckcodeailabs/dql-agent';
 import { addSqlResultFilter, dashboardFilterableResultColumns, filterableResultColumns, replaceBlockStudioSql } from './sql-result-filter.js';
 import { gatherProposeEnrichment } from './propose-enrich.js';
@@ -869,6 +896,12 @@ export function parseAgentRunRequestBody(body: unknown): { request?: AgentRunReq
   const workspaceContext = agentRunRecord(record.workspaceContext) ?? agentRunRecord(record.context);
   const signals = agentRunRecord(record.signals);
   const requestedMode = parseAgentRunRequestedMode(record.requestedMode) ?? parseAgentRunRequestedMode(record.mode);
+  if (record.researchResultRowsOptIn !== undefined && typeof record.researchResultRowsOptIn !== 'boolean') {
+    return { error: 'researchResultRowsOptIn must be a boolean.' };
+  }
+  if (record.researchResultRowsOptIn === true && requestedMode !== 'research') {
+    return { error: 'researchResultRowsOptIn is accepted only for an explicitly requested Research run.' };
+  }
   const audience = record.audience === 'stakeholder' || record.audience === 'analyst'
     ? record.audience
     : undefined;
@@ -884,31 +917,51 @@ export function parseAgentRunRequestBody(body: unknown): { request?: AgentRunReq
       selectedObject,
       executionTarget,
       workspaceContext,
-      conversationContext: agentRunRecord(record.conversationContext),
+      conversationContext: sanitizeClientConversationContext(agentRunRecord(record.conversationContext)),
       history: parseAgentRunHistory(record.history),
       threadId: agentRunString(record.threadId),
       runId: agentRunString(record.runId),
       reasoningEffort: parseAgentRunReasoningEffort(record.reasoningEffort),
       analysisDepth: parseAgentRunAnalysisDepth(record.analysisDepth) ?? parseAgentRunAnalysisDepth(record.depth),
       thinkingMode: coerceThinkingMode(record.thinkingMode),
+      researchResultRowsOptIn: requestedMode === 'research' && record.researchResultRowsOptIn === true,
     },
   };
+}
+
+const CLIENT_PLAN_AUTHORITY_KEYS = new Set([
+  'priorResolvedAnalyticalPlan',
+  'resolvedAnalyticalPlan',
+  'analyticalFrame',
+]);
+
+/**
+ * Browser/embedding context is useful retrieval and history input, but it is
+ * not a plan-authority channel. Remove plan-shaped fields recursively at HTTP
+ * ingress; server-retained thread context is added afterwards from local state.
+ */
+function sanitizeClientConversationContext(
+  context: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!context) return undefined;
+  const sanitize = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(sanitize);
+    const record = agentRunRecord(value);
+    if (!record) return value;
+    return Object.fromEntries(Object.entries(record).flatMap(([key, nested]) =>
+      CLIENT_PLAN_AUTHORITY_KEYS.has(key) ? [] : [[key, sanitize(nested)]]));
+  };
+  return sanitize(context) as Record<string, unknown>;
 }
 
 const AGENT_LOOKUP_DEADLINE_MS = 45_000;
 const AGENT_RESEARCH_DEADLINE_MS = 120_000;
 
-/** Env-tunable run deadline (e.g. slow subscription-CLI providers), clamped to sane bounds. */
-function resolveAgentDeadlineMs(envKey: string, fallback: number, env: NodeJS.ProcessEnv = process.env): number {
-  const configured = Number(env[envKey]);
-  if (!Number.isFinite(configured) || configured <= 0) return fallback;
-  return Math.max(15_000, Math.min(600_000, Math.floor(configured)));
-}
-
 /**
  * PERF-002: one wall-clock budget follows the request through routing, provider
  * calls, repair, and execution. Ordinary Ask never inherits Research's budget
- * merely because it spans two tables; explicit/deep investigation does.
+ * because of question wording, depth, provider, or relational shape; only an
+ * explicit `requestedMode: research` activates the Research budget.
  */
 /** Resolve governed display formats for result columns from the semantic layer (best-effort, cached per call). */
 function agentColumnDisplayFormats(projectRoot: string, columns: string[]): Record<string, SemanticDisplayFormat> {
@@ -924,87 +977,23 @@ function agentColumnDisplayFormats(projectRoot: string, columns: string[]): Reco
   return formats;
 }
 
-/** Subscription CLI providers spawn a cold external process per LLM call (2-15s
- * startup each) across a multi-call loop, so the API-sized 45s default made even
- * simple questions "reach the bounded execution deadline" on office laptops with
- * no env override. The defaults must fit the transport's physics. */
-const AGENT_CLI_LOOKUP_DEADLINE_MS = 150_000;
-const AGENT_CLI_RESEARCH_DEADLINE_MS = 300_000;
-
-/** High reasoning effort makes every LLM call materially slower, so the same
- * multi-step build that fits a budget at medium effort overruns it at high. The
- * budget must scale with effort or "High · thorough" reliably times out. */
-function reasoningEffortBudgetMultiplier(effort: unknown): number {
-  return effort === 'high' ? 1.8 : effort === 'low' ? 0.9 : 1;
-}
-
-/**
- * A ranking/breakdown/filtered question needs LLM SQL generation (the grain
- * dimension usually lives on a joined model the semantic layer can't compose),
- * and that multi-call build does NOT fit the bare lookup budget on a slow or
- * high-effort provider — it dead-ends at the deadline. It is not "research", but
- * it needs research-sized time to finish. Detected from the requested SHAPE (a
- * top-N, a member filter, a breakdown dimension, or a time window) rather than a
- * recognized metric word, since office questions like "top bcm customers from
- * the south region" name no metric the planner knows yet. A bare scalar
- * ("total revenue") has none of these and stays on the short budget.
- */
-function isAnalyticalBuildQuestion(plan: ReturnType<typeof buildAnalysisQuestionPlan>): boolean {
-  if (!plan.needsGeneratedSql) return false;
-  return plan.requestedShape.dimensions.length > 0
-    || plan.dimensionTerms.length > 0
-    || plan.requestedShape.filters.length > 0
-    || plan.timeTerms.length > 0
-    || Boolean(plan.requestedShape.topN);
-}
-
 export function agentRunDeadlineMs(
   request: Pick<AgentRunRequest, 'question' | 'selectedEvidenceId' | 'clarificationSourceQuestion' | 'requestedMode' | 'analysisDepth' | 'reasoningEffort' | 'thinkingMode'>,
   env: NodeJS.ProcessEnv = process.env,
   activeProviderId?: string | null,
 ): number {
-  const cliProvider = activeProviderId === 'claude-code' || activeProviderId === 'codex';
-  const lookupDeadline = resolveAgentDeadlineMs(
-    'DQL_AGENT_LOOKUP_DEADLINE_MS',
-    cliProvider ? AGENT_CLI_LOOKUP_DEADLINE_MS : AGENT_LOOKUP_DEADLINE_MS,
-    env,
-  );
-  const researchDeadline = resolveAgentDeadlineMs(
-    'DQL_AGENT_RESEARCH_DEADLINE_MS',
-    cliProvider ? AGENT_CLI_RESEARCH_DEADLINE_MS : AGENT_RESEARCH_DEADLINE_MS,
-    env,
-  );
-  // The "Thinking" control sends a thinkingMode; explicit reasoningEffort/
-  // analysisDepth (CLI flags) take precedence but the mode is the common case.
-  // The deadline MUST see the resolved values — "High" both slows every call
-  // AND means deep — or picking High reliably times out at the lookup budget.
-  const resolvedMode = request.thinkingMode ? resolveThinkingMode(request.thinkingMode) : {};
-  const effectiveEffort = request.reasoningEffort ?? resolvedMode.reasoningEffort;
-  const effectiveDepth = request.analysisDepth ?? resolvedMode.analysisDepth;
-  // The budget is a CEILING, not a target — a fast answer returns immediately;
-  // the larger tiers only matter when the build genuinely needs the time.
-  const scale = (ms: number): number => Math.min(600_000, Math.round(ms * reasoningEffortBudgetMultiplier(effectiveEffort)));
-
-  if (request.requestedMode === 'research' || effectiveDepth === 'deep') {
-    return scale(researchDeadline);
-  }
-  // A structured clarification chip displays a compact metric/path label, but
-  // the engine restores and executes the original analytical question. Budget
-  // from that same original question as well. Otherwise a complex ranking or
-  // cross-model request can incorrectly inherit the 45s scalar-lookup budget
-  // merely because the selected label is short, then time out after the user
-  // already supplied the exact governed meaning.
-  const deadlineQuestion = request.selectedEvidenceId
-    ? request.clarificationSourceQuestion?.trim() || request.question
-    : request.question;
-  const plan = buildAnalysisQuestionPlan(deadlineQuestion);
-  if (plan.needsResearchWorkspace || isAnalyticalBuildQuestion(plan)) {
-    return scale(researchDeadline);
-  }
-  return scale(lookupDeadline);
+  void env;
+  void activeProviderId;
+  return request.requestedMode === 'research'
+    ? AGENT_RESEARCH_DEADLINE_MS
+    : AGENT_LOOKUP_DEADLINE_MS;
 }
 
-export function shouldSynthesizeAgentRunAnswer(governedAnswer: Pick<AgentAnswer, 'kind' | 'certification' | 'text' | 'answer' | 'result' | 'dqlArtifact' | 'exploratoryCandidate'>): boolean {
+export function shouldSynthesizeAgentRunAnswer(
+  governedAnswer: Pick<AgentAnswer, 'kind' | 'certification' | 'text' | 'answer' | 'result' | 'dqlArtifact' | 'exploratoryCandidate'>,
+  requestedMode: AgentRunRequestedMode | undefined = 'ask',
+): boolean {
+  if (requestedMode !== 'research') return false;
   if (governedAnswer.kind === 'no_answer') return false;
   // The executed rows are the presentation boundary: certified, semantic,
   // DQL-first, and exploratory routes all deserve a separate stakeholder-facing
@@ -1020,6 +1009,18 @@ export function shouldSynthesizeAgentRunAnswer(governedAnswer: Pick<AgentAnswer,
   const finalText = (governedAnswer.answer ?? governedAnswer.text ?? '').trim();
   if (governedAnswer.dqlArtifact && finalText) return false;
   return true;
+}
+
+/**
+ * AGT-010 — the semantic route label is descriptive, while the exact
+ * route-specific aggregation proof is authoritative for governed trust.
+ * Missing proof remains blocked for legacy or malformed results.
+ */
+export function semanticAnswerHasPassedAggregationProof(
+  governedAnswer: Pick<AgentAnswer, 'route' | 'aggregationSafetyProof'>,
+): boolean {
+  return governedAnswer.route?.tier === 'semantic_metric'
+    && governedAnswer.aggregationSafetyProof?.status === 'safe';
 }
 
 export function agentAnswerHasExecutionFailure(
@@ -1134,6 +1135,197 @@ export function warehouseFailureFromAgentRun(run: AgentRun): WarehouseSqlFailure
     return failure as unknown as WarehouseSqlFailureV1;
   }
   return undefined;
+}
+
+const AUTOMATIC_ASK_REPAIR_FAILURE_CODES = new Set([
+  'COLUMN_NOT_FOUND',
+  'RELATION_NOT_FOUND',
+  'AMBIGUOUS_COLUMN',
+  'DIALECT_ERROR',
+]);
+
+/** Validate the immutable custom wrapper before any automatic repair is offered. */
+export function validAskRepairDqlWrapper(source: string): boolean {
+  try {
+    const program = new Parser(source, '<ask-repair-capability>').parse();
+    if (program.statements.length !== 1) return false;
+    const block = program.statements[0];
+    return block.kind === NodeKind.BlockDecl
+      && block.blockType === 'custom'
+      && Boolean(extractBlockStudioSql(source)?.trim());
+  } catch {
+    return false;
+  }
+}
+
+/** Build retained automatic-repair authority from analytical failure state only. */
+export function analyticalRepairCapabilityForAgentRun(
+  run: AgentRun,
+  resolvedTargetFingerprint?: string,
+): AnalyticalRepairCapabilityV1 | undefined {
+  if (run.status !== 'blocked') return undefined;
+  const failedRun = analyticalFailedRunFromAgentRun(run);
+  const failure = failedRun?.failure;
+  const dqlArtifact = run.artifacts.flatMap((artifact) => {
+    const payload = agentRunRecord(artifact.payload);
+    const candidate = normalizeDqlArtifactReference(payload?.dqlArtifact);
+    return candidate?.kind === 'sql_block' && candidate.source?.trim() ? [candidate] : [];
+  })[0];
+  const dqlSource = dqlArtifact?.source?.trim();
+  const sql = dqlArtifact?.compiledSql?.trim() || repairableSqlFromAgentRun(run);
+  const target = run.executionTarget;
+  const planFingerprint = failure?.planFingerprint?.trim();
+  const hash = (value: unknown): string => `sha256:${createHash('sha256').update(stableExecutionValue(value)).digest('hex')}`;
+  const sourceArtifact = run.artifacts.find((artifact) => {
+    const payload = agentRunRecord(artifact.payload);
+    return Boolean(normalizeDqlArtifactReference(payload?.dqlArtifact)?.source?.trim());
+  });
+  const retainedPlanFingerprint = sourceArtifact
+    ? agentRunString(agentRunRecord(agentRunRecord(sourceArtifact.payload)?.resolvedAnalyticalPlan)?.fingerprint)
+    : undefined;
+  const sourceFingerprint = sourceArtifact && dqlArtifact
+    ? hash({
+        runId: run.id,
+        artifactId: sourceArtifact.id,
+        dqlArtifact: {
+          kind: dqlArtifact.kind,
+          name: dqlArtifact.name,
+          source: dqlArtifact.source?.trim(),
+          parameterValues: dqlArtifact.parameterValues ?? {},
+          trustState: dqlArtifact.trustState,
+          persistence: dqlArtifact.persistence,
+        },
+      })
+    : undefined;
+  const manualActions: Array<AnalyticalRepairCapabilityV1['manualActions'][number]> = (failure?.safeActions ?? []).flatMap((action) => {
+    if (action === 'edit_dql' || action === 'open_sql_notebook' || action === 'refresh_snapshot'
+      || action === 'retry_same_plan' || action === 'change_authorized_connection' || action === 'request_access') {
+      return [action];
+    }
+    return [];
+  });
+  const ineligibilityReason: AnalyticalRepairCapabilityV1['ineligibilityReason'] = !failure
+    ? 'missing_failure_authority'
+    : failure.phase !== 'execution' || !AUTOMATIC_ASK_REPAIR_FAILURE_CODES.has(failure.code)
+      ? 'failure_not_eligible'
+      : !dqlSource
+        ? 'missing_dql_wrapper'
+        : !validAskRepairDqlWrapper(dqlSource)
+          ? 'invalid_dql_wrapper'
+          : !sql
+            ? 'missing_compiled_sql'
+          : !planFingerprint || !retainedPlanFingerprint || retainedPlanFingerprint !== planFingerprint
+              ? 'missing_plan_fingerprint'
+              : !sourceFingerprint
+                ? 'missing_dql_wrapper'
+              : !target || !resolvedTargetFingerprint
+                ? 'missing_execution_target'
+                : undefined;
+  const eligible = ineligibilityReason === undefined;
+  return {
+    version: 1,
+    automatic: {
+      eligible,
+      action: eligible ? 'repair_embedded_sql' : 'none',
+      correctionCode: eligible ? 'SQL_EXECUTION_REPAIR' : 'MANUAL_REVIEW_REQUIRED',
+      attemptsRemaining: eligible ? 1 : 0,
+    },
+    failureFingerprint: hash(failure ?? { unavailable: 'analytical_failure', runId: run.id }),
+    sourceFingerprint: sourceFingerprint ?? hash({ unavailable: 'source', runId: run.id }),
+    planFingerprint: retainedPlanFingerprint ?? planFingerprint ?? hash({ unavailable: 'plan', runId: run.id }),
+    dqlFingerprint: dqlSource ? hash(dqlSource) : hash({ unavailable: 'dql', runId: run.id }),
+    sqlFingerprint: sql ? hash(sql) : hash({ unavailable: 'sql', runId: run.id }),
+    targetFingerprint: resolvedTargetFingerprint ?? hash({ unavailable: 'target', runId: run.id }),
+    routeLocked: true,
+    targetLocked: true,
+    sourceImmutable: true,
+    manualActions: Array.from(new Set(manualActions)),
+    ...(ineligibilityReason ? { ineligibilityReason } : {}),
+  };
+}
+
+function attachAnalyticalRepairCapability(run: AgentRun, resolvedTargetFingerprint?: string): AgentRun {
+  const capability = analyticalRepairCapabilityForAgentRun(run, resolvedTargetFingerprint);
+  if (!capability) return run;
+  run.repairCapability = capability;
+  if (run.diagnosticReceipt) run.diagnosticReceipt = { ...run.diagnosticReceipt, repairCapability: capability };
+  run.artifacts = run.artifacts.map((artifact) => {
+    const payload = agentRunRecord(artifact.payload);
+    if (!payload) return artifact;
+    const diagnostic = agentRunRecord(payload.diagnosticReceipt);
+    return {
+      ...artifact,
+      payload: {
+        ...payload,
+        repairCapability: capability,
+        ...(diagnostic ? { diagnosticReceipt: { ...diagnostic, repairCapability: capability } } : {}),
+      },
+    };
+  });
+  return run;
+}
+
+export function targetGenerationFingerprint(connection: ConnectionConfig, connectionName?: string): string {
+  const identity = {
+    driver: connection.driver,
+    connectionName: connectionName ?? null,
+    host: connection.host ?? null,
+    port: connection.port ?? null,
+    username: connection.username ?? null,
+    authMethod: connection.authMethod ?? null,
+    authenticator: connection.authenticator ?? null,
+    profile: connection.profile ?? null,
+    ssl: connection.ssl ?? null,
+    account: connection.account ?? null,
+    database: connection.database ?? null,
+    schema: connection.schema ?? null,
+    warehouse: connection.warehouse ?? null,
+    role: connection.role ?? null,
+    catalog: connection.catalog ?? null,
+    httpPath: connection.httpPath ?? null,
+    filepath: connection.filepath ?? null,
+    projectId: connection.projectId ?? null,
+    region: connection.region ?? null,
+    workgroup: connection.workgroup ?? null,
+    location: connection.location ?? null,
+    outputLocation: connection.outputLocation ?? null,
+    accessUrl: connection.accessUrl ?? null,
+    application: connection.application ?? null,
+    queryTag: connection.queryTag ?? null,
+    workloadIdentityProvider: connection.workloadIdentityProvider ?? null,
+    workloadIdentityAzureClientId: connection.workloadIdentityAzureClientId ?? null,
+    workloadIdentityImpersonationPath: connection.workloadIdentityImpersonationPath ?? null,
+    oauthAuthorizationUrl: connection.oauthAuthorizationUrl ?? null,
+    oauthClientId: connection.oauthClientId ?? null,
+    oauthRedirectUri: connection.oauthRedirectUri ?? null,
+    oauthScope: connection.oauthScope ?? null,
+    oauthTokenRequestUrl: connection.oauthTokenRequestUrl ?? null,
+    keyFilename: connection.keyFilename ?? null,
+    privateKeyPath: connection.privateKeyPath ?? null,
+    accessKeyId: connection.accessKeyId ?? null,
+    proxyHost: connection.proxyHost ?? null,
+    proxyPort: connection.proxyPort ?? null,
+    proxyProtocol: connection.proxyProtocol ?? null,
+    proxyUser: connection.proxyUser ?? null,
+    noProxy: connection.noProxy ?? null,
+    credentialCacheDir: connection.credentialCacheDir ?? null,
+    moduleSearchPaths: connection.moduleSearchPaths ?? null,
+    clientRequestMFAToken: connection.clientRequestMFAToken ?? null,
+    clientStoreTemporaryCredential: connection.clientStoreTemporaryCredential ?? null,
+    clientSessionKeepAlive: connection.clientSessionKeepAlive ?? null,
+    clientSessionKeepAliveHeartbeatFrequency: connection.clientSessionKeepAliveHeartbeatFrequency ?? null,
+    keepAlive: connection.keepAlive ?? null,
+    passcodeInPassword: connection.passcodeInPassword ?? null,
+    browserActionTimeout: connection.browserActionTimeout ?? null,
+    timeout: connection.timeout ?? null,
+    waitTimeout: connection.waitTimeout ?? null,
+    byteLimit: connection.byteLimit ?? null,
+  };
+  return executionFingerprint(stableExecutionValue(identity));
+}
+
+function normalizeSqlForComparison(sql: string): string {
+  return sql.trim().replace(/;\s*$/, '').replace(/\s+/g, ' ');
 }
 
 /**
@@ -1259,7 +1451,7 @@ async function conversationContextFromThread(
     });
   }
   return {
-    ...(clientContext ?? {}),
+    ...(sanitizeClientConversationContext(clientContext) ?? {}),
     conversationStateVersion: 1,
     threadId,
     ...(serverSnapshot ? { conversationEnvelope: serverSnapshot } : {}),
@@ -1278,7 +1470,7 @@ async function conversationContextFromThread(
           latestTurnId: (turns[turns.length - 1] as { id?: string }).id,
         }
       : {}),
-  };
+  } as Record<string, unknown>;
 }
 
 /** The most recent turn a follow-up may safely build on. */
@@ -1380,7 +1572,9 @@ export function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInp
     ?? run.artifacts.find((candidate) => candidate.kind === 'research_run')
     ?? run.artifacts[0];
   const payload = agentRunRecord(artifact?.payload);
-  const result = agentRunRecord(payload?.result);
+  // A blocked run may retain diagnostic artifacts, but their result-shaped
+  // payload is never accepted conversation evidence or prose authority.
+  const result = run.status === 'blocked' ? undefined : agentRunRecord(payload?.result);
   const columns = conversationResultColumns(result?.columns);
   // The visual preview stays tiny, but member resolution needs a wider bounded
   // value window. Deriving dimensions from only the eight preview rows caused a
@@ -1550,6 +1744,189 @@ function apiErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+export class RunScopedProviderDispatchEvidence implements ProviderDispatchEvidenceSink {
+  private readonly receipts: ProviderEgressReceiptV1[] = [];
+  private readonly phaseCounts = new Map<ProviderDispatchPhaseV1, number>();
+  private currentRoute: AgentRunRoute;
+
+  constructor(private readonly policy: {
+    total: number;
+    meaningResolution: number;
+    generationGroup: number;
+    repair: number;
+  }, private readonly runBudget?: AgentRunBudget) {
+    this.currentRoute = runBudget?.mode === 'research' ? 'research' : 'generated_answer';
+  }
+
+  setRoute(route: AgentRunRoute | undefined): void {
+    if (route) this.currentRoute = route;
+  }
+
+  mayStartToolCall(): boolean {
+    return !this.runBudget || this.runBudget.mayStartDiscovery(this.currentRoute);
+  }
+
+  observe(
+    event: ProviderDispatchEvent,
+    context: {
+      purpose: ProviderEgressPurpose;
+      dispatchPhase: ProviderDispatchPhaseV1;
+      optIn: boolean;
+      serializedResultShape?: { resultRowCount: number; columnCount: number };
+      cumulativeResultRowCount?: number;
+    },
+  ): Record<string, unknown> {
+    const softRoute = context.dispatchPhase === 'meaning_resolution' ? 'clarify' : this.currentRoute;
+    if (this.runBudget && !this.runBudget.mayStartDiscovery(softRoute)) {
+      throw Object.assign(new Error(
+        `The ${Math.round(this.runBudget.softTargetMs(softRoute) / 1_000)}-second soft target elapsed before this provider dispatch could start.`,
+      ), { code: 'RUN_SOFT_TARGET_EXCEEDED' });
+    }
+    if (this.receipts.length >= this.policy.total) {
+      throw Object.assign(new Error(
+        `Run-wide provider dispatch budget exhausted after ${this.policy.total} physical attempts.`,
+      ), { code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' });
+    }
+    const phaseCount = this.phaseCounts.get(context.dispatchPhase) ?? 0;
+    const phaseLimit = context.dispatchPhase === 'meaning_resolution'
+      ? this.policy.meaningResolution
+      : context.dispatchPhase === 'repair'
+        ? this.policy.repair
+        : this.policy.generationGroup;
+    const generationGroupCount = this.receipts.filter((receipt) =>
+      receipt.dispatchPhase === 'planning'
+      || receipt.dispatchPhase === 'generation'
+      || receipt.dispatchPhase === 'narration').length;
+    if (phaseCount >= phaseLimit || (
+      context.dispatchPhase !== 'meaning_resolution'
+      && context.dispatchPhase !== 'repair'
+      && generationGroupCount >= this.policy.generationGroup
+    )) {
+      throw Object.assign(new Error(
+        `Provider dispatch budget exhausted for ${context.dispatchPhase} after ${phaseLimit} physical attempts.`,
+      ), { code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' });
+    }
+    const envelope = prepareProviderWireEnvelopeForDispatch(event.provider, event.envelope);
+    const projectedRowCount = context.serializedResultShape?.resultRowCount ?? 0;
+    const projectedCumulativeRowCount = context.cumulativeResultRowCount ?? projectedRowCount;
+    const permittedRowLimit = context.optIn && context.purpose === 'research_narration'
+      ? 20
+      : context.optIn && context.purpose === 'research_tool'
+        ? 200
+        : 0;
+    if (projectedRowCount > permittedRowLimit || projectedCumulativeRowCount > permittedRowLimit) {
+      throw Object.assign(new Error(
+        permittedRowLimit === 0
+          ? 'Provider egress blocked result rows without explicit Research run consent.'
+          : `Provider egress blocked result rows beyond the cumulative Research limit of ${permittedRowLimit}.`,
+      ), { code: permittedRowLimit === 0 ? 'PROVIDER_RESULT_ROWS_BLOCKED' : 'PROVIDER_RESULT_ROWS_LIMIT_EXCEEDED' });
+    }
+    assertProviderPayloadAllowed(envelope, {
+      allowResultRows: false,
+      maxResultRows: 0,
+      purpose: context.purpose,
+    });
+    const rowCount = projectedRowCount;
+    this.receipts.push(createProviderDispatchEgressReceipt({
+      purpose: context.purpose,
+      dispatchPhase: context.dispatchPhase,
+      provider: event.provider,
+      ...(event.model ? { model: event.model } : {}),
+      operation: event.operation,
+      attemptIndex: event.attemptIndex,
+      options: event.options,
+      permittedCategories: rowCount > 0
+        ? ['instructions', 'question', 'schema_metadata', 'governed_context', 'result_rows']
+        : ['instructions', 'question', 'schema_metadata', 'governed_context'],
+      optIn: context.optIn && rowCount > 0,
+      envelope,
+      ...(context.serializedResultShape ? { serializedResultShape: context.serializedResultShape } : {}),
+      ...(typeof context.cumulativeResultRowCount === 'number'
+        ? { cumulativeResultRowCount: context.cumulativeResultRowCount }
+        : {}),
+    }));
+    this.phaseCounts.set(context.dispatchPhase, phaseCount + 1);
+    return envelope;
+  }
+
+  snapshot(fallbackReason = 'none'): ProviderDispatchTerminalEvidence {
+    return {
+      providerEgressReceipts: [...this.receipts],
+      providerRoundTrips: this.receipts.length,
+      toolCalls: 0,
+      sqlExecutions: 0,
+      repairs: 0,
+      fallbackReason,
+    };
+  }
+}
+
+const agentRunProviderEvidenceContext = new AsyncLocalStorage<RunScopedProviderDispatchEvidence>();
+
+function mergeRunScopedProviderDispatchEvidence(
+  run: AgentRun,
+  evidence: ProviderDispatchTerminalEvidence,
+): AgentRun {
+  const providerEgressReceipts = [...evidence.providerEgressReceipts];
+  const elapsed = Math.max(0, Date.parse(run.completedAt) - Date.parse(run.startedAt));
+  const telemetry: AgentRunTelemetryV1 = {
+    version: 1,
+    stageDurationsMs: {
+      ...(run.telemetry?.stageDurationsMs ?? {}),
+      total: Number.isFinite(elapsed) ? Math.min(86_400_000, elapsed) : 0,
+    },
+    providerRoundTrips: evidence.providerRoundTrips,
+    toolCalls: run.telemetry?.toolCalls ?? evidence.toolCalls,
+    sqlExecutions: run.telemetry?.sqlExecutions ?? evidence.sqlExecutions,
+    repairs: run.telemetry?.repairs ?? evidence.repairs,
+    egressReceipts: providerEgressReceipts.length,
+    ...(run.telemetry?.warehouseDurationMs !== undefined
+      ? { warehouseDurationMs: run.telemetry.warehouseDurationMs }
+      : {}),
+    ...(run.telemetry?.fallbackReason
+      ? { fallbackReason: run.telemetry.fallbackReason }
+      : evidence.fallbackReason !== 'none'
+        ? { fallbackReason: evidence.fallbackReason }
+        : {}),
+  };
+  const diagnosticReceipt = run.diagnosticReceipt
+    ? { ...run.diagnosticReceipt, providerEgressReceipts }
+    : undefined;
+  const diagnosticReceiptV2 = {
+    version: 2 as const,
+    runId: run.id,
+    route: run.route,
+    status: run.status,
+    telemetry,
+    providerEgressReceiptFingerprints: providerEgressReceipts.map((receipt) =>
+      executionFingerprint(stableExecutionValue(receipt))),
+    ...(run.diagnosticReceiptV2?.repairCapabilityFingerprint
+      ? { repairCapabilityFingerprint: run.diagnosticReceiptV2.repairCapabilityFingerprint }
+      : {}),
+  };
+  const artifacts = run.artifacts.map((artifact) => {
+    if (!artifact.payload || typeof artifact.payload !== 'object' || Array.isArray(artifact.payload)) return artifact;
+    const payload = artifact.payload as Record<string, unknown>;
+    if (!('diagnosticReceipt' in payload) && !('diagnosticReceiptV2' in payload)) return artifact;
+    return {
+      ...artifact,
+      payload: {
+        ...payload,
+        ...(diagnosticReceipt ? { diagnosticReceipt } : {}),
+        diagnosticReceiptV2,
+      },
+    };
+  });
+  return {
+    ...run,
+    artifacts,
+    providerEgressReceipts,
+    telemetry,
+    ...(diagnosticReceipt ? { diagnosticReceipt } : {}),
+    diagnosticReceiptV2,
+  };
+}
+
 export async function startLocalServer(opts: LocalServerOptions): Promise<number> {
   const { rootDir, executor, connection: rawConnection, preferredPort, projectRoot = process.cwd() } = opts;
   const bindHost = opts.host ?? process.env.DQL_HOST ?? '127.0.0.1';
@@ -1570,6 +1947,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const gitRoot = await resolveGitRoot(projectRoot);
   if (gitRoot) ensureLocalRuntimeGitignore(projectRoot);
   let projectConfig = loadProjectConfig(projectRoot);
+  const analyticalExecutionService = new ExecutionService({
+    executor,
+    projectRoot,
+    projectConfig: () => projectConfig,
+  });
   recordAgentRuntimeVersion(projectRoot, runtimeVersion);
   // A clone carries governed Hint Graph files in Git, never the rebuildable
   // `.dql/cache` database. Materialize that projection as soon as the Notebook
@@ -2260,16 +2642,51 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
   // Provider-backed narration for stakeholder stories. Reuses the same provider
   // adapter as the planner; narrateResult always returns (deterministic fallback).
-  const narrateForAgentRun = async (input: NarrateInput): Promise<NarrateResult> => narrateResult(input, {
+  const narrateForAgentRun = async (
+    input: NarrateInput,
+    allowProviderResultRows = false,
+  ): Promise<NarrateResult> => {
+    // Research result narration is the only provider-facing result-row lane.
+    // Without one-run consent, keep narration deterministic and make no
+    // physical provider dispatch. With consent, serialize only the bounded,
+    // redacted sample the transport receipt will account for.
+    if (!allowProviderResultRows || !input.result) return narrateResult(input);
+    const safeResult = {
+      ...input.result,
+      rows: redactProviderResultRows(input.result.rows, 20),
+    };
+    const safeInput: NarrateInput = {
+      ...input,
+      result: safeResult,
+    };
+    return narrateResult(safeInput, {
     complete: async ({ system, user, signal }) => {
       const provider = await createBlockStudioAssistProvider(projectRoot);
       if (!provider) throw new Error('No AI provider configured for narration.');
       return provider.generate(
         [{ role: 'system', content: system }, { role: 'user', content: user }],
-        { maxTokens: 600, temperature: 0.2, signal },
+        {
+          maxTokens: 600,
+          temperature: 0.2,
+          signal,
+          maxProviderDispatches: 2,
+          ...(agentRunProviderEvidenceContext.getStore() ? {
+            onProviderDispatch: (event) => agentRunProviderEvidenceContext.getStore()!.observe(event, {
+              purpose: 'research_narration',
+              dispatchPhase: 'narration',
+              optIn: true,
+              serializedResultShape: {
+                resultRowCount: safeResult.rows.length,
+                columnCount: safeResult.columns.length,
+              },
+              cumulativeResultRowCount: safeResult.rows.length,
+            }),
+          } : {}),
+        },
       );
     },
-  });
+    });
+  };
 
   async function runGovernedAgentAnswerForRun(
     request: AgentRunRequest,
@@ -2279,13 +2696,30 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     routeDecision?: IntentDecision,
   ): Promise<AgentAnswer> {
     const governed = resolveGovernedAnswerRunner(projectRoot);
-    const resolvedProvider = governed?.provider ?? null;
-    const runner = governed?.runner ?? null;
+    let resolvedProvider = governed?.provider ?? null;
+    let runner = governed?.runner ?? null;
+    const exactProviderFreePlan = routeDecision?.resolvedAnalyticalPlan?.mode === 'authoritative'
+      && (routeDecision.resolvedAnalyticalPlan.capability === 'certified_execution'
+        || routeDecision.resolvedAnalyticalPlan.capability === 'semantic_execution');
+    if ((!resolvedProvider || !runner) && exactProviderFreePlan) {
+      const deterministicProvider: AgentProvider = {
+        name: 'ollama',
+        available: async () => true,
+        generate: async () => {
+          throw Object.assign(new Error('Exact certified/semantic execution must not dispatch a provider.'), {
+            code: 'EXACT_ROUTE_PROVIDER_DISPATCH_FORBIDDEN',
+          });
+        },
+      };
+      resolvedProvider = 'ollama';
+      runner = createDqlAgentProviderRunner('ollama', deterministicProvider);
+    }
     if (!resolvedProvider || !runner) {
       throw new Error('No AI provider is configured. Configure a subscription (Claude Code / Codex), OpenAI, Gemini, Ollama, or a custom OpenAI-compatible endpoint in Settings.');
     }
     let governedAnswer: AgentAnswer | undefined;
     let providerError: string | undefined;
+    let providerDispatchEvidence: ProviderDispatchTerminalEvidence | undefined;
     const isRepair = (repair?.attempt ?? 0) > 0 && Boolean(repair?.repairHint);
     // The chat composer sends a `thinkingMode` (auto/low/medium/high); resolve it
     // into the effort+depth bundle it stands for. An explicit `reasoningEffort` /
@@ -2347,7 +2781,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           semanticLayer,
           projectRoot,
           semanticConnectionName,
-        )
+      )
+      : undefined;
+    const generatedProposalTargetIdentity = semanticConnection
+      ? await observeWarehouseTargetIdentity(executor, semanticConnection)
       : undefined;
     const requestedDomain = normalizeAgentRunDomain(agentRunWorkspaceValue(request, 'domain'));
     const requestedPurpose = agentRunWorkspaceValue(request, 'purpose');
@@ -2367,6 +2804,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     await runner.run(
       {
         provider: resolvedProvider,
+        ...(agentRunProviderEvidenceContext.getStore()
+          ? { providerDispatchEvidenceSink: agentRunProviderEvidenceContext.getStore() }
+          : {}),
         messages: [
           // No-thread fallback path: bound the raw client history so follow-ups
           // cannot inflate every provider call (8 turns × 4k chars).
@@ -2386,6 +2826,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         },
         reasoningEffort,
         ...(analysisDepth ? { analysisDepth } : {}),
+        allowProviderSemanticMemberSelection: route === 'research',
+        researchResultRowsOptIn: route === 'research' && request.researchResultRowsOptIn === true,
         projectRoot,
         preparedContextPack: preparedAgentContextPacks.get(request),
         domainContext,
@@ -2523,9 +2965,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 : projectConfig.dbt?.projectDir;
               throw new SemanticRuntimeRequiredError(await explainMissingSemanticRuntime(projectRoot, dbtProjectPath));
             }
-            compiledSemanticQueries.set(executionFingerprint(compiled.sql), compiled);
+            // The semantic bridge freezes the compiler output after trimming
+            // transport-only surrounding whitespace. Bind the compiler receipt
+            // and execution lookup to that exact consumed SQL identity.
+            const governedCompiledSql = compiled.sql.trim();
+            compiledSemanticQueries.set(executionFingerprint(governedCompiledSql), compiled);
+            const aggregationCompilerReceipt = buildSemanticAggregationCompilerReceipt({
+              semanticLayer: semanticLayer!,
+              metricNames: compiled.effectiveRequest.metrics,
+              compiledSql: governedCompiledSql,
+              plan: routeDecision?.resolvedAnalyticalPlan,
+              targetFingerprint: targetBinding?.executionTarget.identityFingerprint,
+            });
             return {
-              sql: compiled.sql,
+              sql: governedCompiledSql,
               engine: compiled.engine,
               selection: {
                 ...selection,
@@ -2538,7 +2991,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               trace: {
                 ...compiled.semanticTrace,
                 ...(targetBinding ? { targetBinding } : {}),
+                ...(aggregationCompilerReceipt ? { aggregationCompilerReceipt } : {}),
               },
+              ...(aggregationCompilerReceipt ? { aggregationCompilerReceipt } : {}),
             };
           },
         } : {}),
@@ -2550,6 +3005,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           : {}),
         ...(routeDecision?.resolvedAnalyticalPlan
           ? { resolvedAnalyticalPlan: routeDecision.resolvedAnalyticalPlan }
+          : {}),
+        ...(generatedProposalTargetIdentity?.identityFingerprint
+          ? { generatedProposalTargetFingerprint: generatedProposalTargetIdentity.identityFingerprint }
           : {}),
         analyticalReferenceInstant: new Date().toISOString(),
         executeCertifiedBlock: (node, invocation) => executeCertifiedBlockForAgent(
@@ -2588,12 +3046,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }
         if (turn.kind === 'error') {
           providerError = turn.message;
+          providerDispatchEvidence = turn.dispatchEvidence;
         }
       },
       runSignal,
     );
     if (!governedAnswer) {
-      throw new Error(providerError ?? 'The AI provider did not return a governed answer.');
+      throw Object.assign(
+        new Error(providerError ?? 'The AI provider did not return a governed answer.'),
+        ...(providerDispatchEvidence ? [{ providerDispatchEvidence }] : []),
+      );
     }
     return governedAnswer;
   }
@@ -2613,7 +3075,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
    * `redactAnalyticalDiagnostic`. Appending it costs nothing and is the
    * difference between a dead end and a fixable error.
    */
-  function analyticalFailureSummary(
+function analyticalFailureSummary(
     failure: AgentAnswer['analyticalFailure'],
   ): string | undefined {
     if (!failure) return undefined;
@@ -2820,7 +3282,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       surface: 'ask_ai',
     });
     const certified = governedAnswer.certification === 'certified' || governedAnswer.kind === 'certified';
-    const semantic = governedAnswer.route?.tier === 'semantic_metric';
+    // A semantic route is governed only when its route-specific aggregation
+    // proof passed. The route label is not authority: treating a blocked or
+    // missing proof as governed caused the CLI to persist a successful badge
+    // even though the answer artifact recorded insufficient context.
+    const semantic = semanticAnswerHasPassedAggregationProof(governedAnswer);
     governedAnswer.dqlArtifact = {
       ...artifact,
       ...(invocation.parameters.length > 0 ? { parameters: invocation.parameters } : {}),
@@ -2829,11 +3295,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       trustState: certified ? 'certified' : semantic ? 'governed' : 'review_required',
       ...(governedAnswer.result?.sql ? { compiledSql: governedAnswer.result.sql } : originalSql ? { compiledSql: originalSql } : {}),
       ...(governedAnswer.result?.executionReceipt ? { executionReceipt: governedAnswer.result.executionReceipt } : {}),
+      ...(governedAnswer.result?.executableArtifact ? {
+        executableArtifact: {
+          ...governedAnswer.result.executableArtifact,
+          kind: artifact.kind,
+          trustState: certified ? 'certified' : semantic ? 'governed' : 'review_required',
+        },
+      } : {}),
     };
     if (governedAnswer.result) delete governedAnswer.result.dqlArtifact;
   }
 
   const answerRunExecutor: AgentRouteExecutor = async ({ request, route, routeDecision, attempt, repairHint, emit }) => {
+    const runStartedAtMs = Date.now();
     let governedAnswer: AgentAnswer;
     try {
       governedAnswer = await runGovernedAgentAnswerForRun(
@@ -2980,7 +3454,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       // Deadline/cancellation propagates to the engine, which renders the
       // graceful "bounded execution deadline" outcome — never a provider error.
       rethrowIfCancelled(error, request.signal);
-      const message = formatAgentRunInfrastructureError(error, 'AI answer provider');
+      const dispatchEvidence = providerDispatchTerminalEvidence(error);
+      const dispatchBudgetExhausted = Boolean(
+        (error && typeof error === 'object'
+          && (error as { code?: unknown }).code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED')
+        || dispatchEvidence?.fallbackReason === 'orchestration_budget_exhausted',
+      );
+      const message = dispatchBudgetExhausted
+        ? 'Ask reached its internal provider-dispatch limit before it froze one executable analytical plan. Nothing was run. Narrow the metric or dimension and retry; this is an orchestration-budget diagnostic, not a provider outage.'
+        : formatAgentRunInfrastructureError(error, 'AI answer provider');
       return {
         summary: message,
         status: 'blocked',
@@ -2988,19 +3470,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         stopReason: 'blocked',
         artifacts: [agentRunArtifact(
           'answer',
-          'AI answer provider failed',
+          dispatchBudgetExhausted ? 'Internal orchestration budget exhausted' : 'AI answer provider failed',
           {
             kind: 'no_answer',
-            refusalCode: 'provider_error',
+            refusalCode: dispatchBudgetExhausted ? 'orchestration_budget_exhausted' : 'provider_error',
             text: message,
             answer: message,
             ...(routeDecision?.resolvedAnalyticalPlan
               ? { resolvedAnalyticalPlan: routeDecision.resolvedAnalyticalPlan }
               : {}),
             providerFailure: {
-              code: 'AI_PROVIDER_FAILURE',
+              code: dispatchBudgetExhausted ? 'orchestration_budget_exhausted' : 'AI_PROVIDER_FAILURE',
               message,
-              recoverable: true,
+              recoverable: !dispatchBudgetExhausted,
             },
           },
           undefined,
@@ -3009,8 +3491,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         evaluations: [
           agentRunEvaluation('route-decision', 'Route decision', true, 'info', routeDecision?.reason ?? 'Routed request to governed answer.'),
           agentRunEvaluation(
-            'ai-provider',
-            'AI provider',
+            dispatchBudgetExhausted ? 'orchestration-budget' : 'ai-provider',
+            dispatchBudgetExhausted ? 'Internal orchestration budget' : 'AI provider',
             false,
             'blocking',
             message,
@@ -3018,14 +3500,36 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ),
         ],
         nextActions: [
-          { id: 'retry-ask-after-provider', label: 'Retry after provider setup', route: 'generated_answer' },
-          { id: 'research-without-answer', label: 'Research with available metadata', route: 'research', artifactKind: 'research_run' },
+          ...(dispatchBudgetExhausted
+            ? [{ id: 'narrow-and-retry-ask', label: 'Narrow the metric or dimension and retry', route: 'generated_answer' as const }]
+            : [
+                { id: 'retry-ask-after-provider', label: 'Retry after provider setup', route: 'generated_answer' as const },
+                { id: 'research-without-answer', label: 'Research with available metadata', route: 'research' as const, artifactKind: 'research_run' as const },
+              ]),
         ],
+        ...(dispatchEvidence?.providerEgressReceipts.length
+          ? { providerEgressReceipts: dispatchEvidence.providerEgressReceipts }
+          : {}),
+        telemetry: {
+          version: 1,
+          stageDurationsMs: { total: Date.now() - runStartedAtMs },
+          providerRoundTrips: dispatchEvidence?.providerRoundTrips ?? 0,
+          toolCalls: dispatchEvidence?.toolCalls ?? 0,
+          sqlExecutions: dispatchEvidence?.sqlExecutions ?? 0,
+          repairs: Math.max(attempt, dispatchEvidence?.repairs ?? 0),
+          egressReceipts: dispatchEvidence?.providerEgressReceipts.length ?? 0,
+          fallbackReason: dispatchBudgetExhausted
+            ? 'provider_dispatch_budget_exhausted'
+            : dispatchEvidence?.fallbackReason ?? 'provider_error',
+        },
       };
     }
     const answeredRoute = resolvedRunRouteFromAnswer(governedAnswer) ?? route;
     const isCertified = governedAnswer.certification === 'certified' || governedAnswer.kind === 'certified';
-    const isSemantic = governedAnswer.route?.tier === 'semantic_metric';
+    const semanticRouteClaimed = governedAnswer.route?.tier === 'semantic_metric';
+    const semanticAggregationProofPassed = semanticAnswerHasPassedAggregationProof(governedAnswer);
+    const semanticAggregationBlocked = semanticRouteClaimed && !semanticAggregationProofPassed;
+    const isSemantic = semanticRouteClaimed && semanticAggregationProofPassed;
     const requestedNotebookDataset = findMentionedNotebookDataset(
       request.question,
       datasetWorkspace.list(),
@@ -3047,7 +3551,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // governance boundary, not an ambiguous user question and not a repairable
     // retrieval miss. Keep the precise policy detail visible, but never burn two
     // more provider calls retrying the same incompatible candidate.
-    const isPolicyBlocked = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'policy_blocked';
+    const isPolicyBlocked = (governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'policy_blocked')
+      || semanticAggregationBlocked;
     const isTerminalFailure = isProviderError || isExecutionFailure || isAnalyticalFailure || isPolicyBlocked;
     // The model tried to compose a governed query and declined despite having usable
     // context (e.g. it wasn't confident about a multi-table join). The answer loop
@@ -3066,7 +3571,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // reply ran context-free and was clarified again: the reported clarify loop.
     const resolvedRoute = needsClarification ? 'clarify' as const : answeredRoute;
     const sql = governedAnswer.proposedSql ?? governedAnswer.sql;
-    const runnableSql = governedAnswer.kind === 'no_answer' || isExecutionFailure || (isExploratory && !governedAnswer.result)
+    const runnableSql = governedAnswer.kind === 'no_answer'
+      || isExecutionFailure
+      || semanticAggregationBlocked
+      || (isExploratory && !governedAnswer.result)
       ? undefined
       : sql;
     // Render executed rows deterministically for ordinary lookups. A second LLM
@@ -3074,12 +3582,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // generated lookup answers must not pay another provider round-trip merely
     // to restate values the host already has.
     let synthesizedAnswer: string | undefined;
-    if (shouldSynthesizeAgentRunAnswer(governedAnswer)) {
+    const providerEgressReceipts: ProviderEgressReceiptV1[] = [
+      ...(governedAnswer.providerEgressReceipts ?? []),
+    ];
+    let narrationDurationMs = 0;
+    if (shouldSynthesizeAgentRunAnswer(governedAnswer, request.requestedMode)) {
+      const narrationStartedAtMs = Date.now();
       try {
-        const provider = route === 'research'
+        const researchRowsOptIn = route === 'research' && request.researchResultRowsOptIn === true;
+        const provider = researchRowsOptIn
           ? await createBlockStudioAssistProvider(projectRoot)
           : null;
         const preview = agentResultToSynthesisPreview(governedAnswer.result);
+        const providerPreview = preview
+          ? { ...preview, rows: redactProviderResultRows(preview.rows, 20) }
+          : undefined;
         const draft = governedAnswer.answer ?? governedAnswer.text;
         const result = await synthesizeAnswer(
           {
@@ -3088,7 +3605,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             // The primary Ask reply is always business-facing. Analysts keep
             // the full DQL, SQL, lineage, gates, and grain in the inspector.
             audience: 'stakeholder',
-            resultPreview: preview,
+            resultPreview: provider ? providerPreview : preview,
             sql: sql,
             draftText: draft,
             gaps: businessNarrativeGaps(governedAnswer.validationWarnings),
@@ -3104,17 +3621,61 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 streamOrGenerate(
                   provider,
                   [{ role: 'system', content: system }, { role: 'user', content: user }],
-                  { maxTokens: 350, temperature: 0.3, signal },
+                  {
+                    maxTokens: 350,
+                    temperature: 0.3,
+                    signal,
+                    maxProviderDispatches: 2,
+                    ...(agentRunProviderEvidenceContext.getStore() ? {
+                      onProviderDispatch: (event) => agentRunProviderEvidenceContext.getStore()!.observe(event, {
+                        purpose: 'research_narration',
+                        dispatchPhase: 'narration',
+                        optIn: researchRowsOptIn,
+                        serializedResultShape: {
+                          resultRowCount: providerPreview?.rows.length ?? 0,
+                          columnCount: providerPreview?.columns.length ?? 0,
+                        },
+                      }),
+                    } : {}),
+                  },
                   onDelta ?? (() => {}),
                 ),
               }
             : {},
         );
         if (result.text) synthesizedAnswer = result.text;
+        if (route === 'research') {
+          providerEgressReceipts.push(createProviderEgressReceipt({
+            purpose: 'research_narration',
+            provider: provider?.name ?? 'none',
+            permittedCategories: provider
+              ? ['instructions', 'question', 'governed_context', 'result_rows']
+              : ['instructions', 'question', 'governed_context'],
+            optIn: researchRowsOptIn,
+            payload: provider
+              ? { question: request.question, resultPreview: providerPreview, draft }
+              : { resultRows: 0, providerDisabled: true },
+            resultRowCount: provider ? providerPreview?.rows.length ?? 0 : 0,
+            columnCount: provider ? providerPreview?.columns.length ?? 0 : 0,
+          }));
+        }
       } catch {
         // Keep the governed draft on any synthesis failure.
         synthesizedAnswer = undefined;
+      } finally {
+        narrationDurationMs = Date.now() - narrationStartedAtMs;
       }
+    }
+    if (route === 'research' && !providerEgressReceipts.some((receipt) => receipt.purpose === 'research_narration')) {
+      providerEgressReceipts.push(createProviderEgressReceipt({
+        purpose: 'research_narration',
+        provider: 'none',
+        permittedCategories: ['instructions', 'question', 'governed_context'],
+        optIn: false,
+        payload: { resultRows: 0, providerDisabled: true },
+        resultRowCount: 0,
+        columnCount: 0,
+      }));
     }
     // A grounding/modeling gap is a REFUSAL. It was computed above but never
     // reached this ternary, so it fell through to `needs_review` — the same
@@ -3198,9 +3759,29 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             artifactKind: 'sql_cell' as const,
           }] : []),
         ];
+    const runDispatchEvidence = agentRunProviderEvidenceContext.getStore()?.snapshot(
+      governedAnswer.refusalCode ?? 'none',
+    );
+    const finalProviderEgressReceipts = runDispatchEvidence?.providerEgressReceipts
+      ?? providerEgressReceipts;
+    const finalTelemetry = agentRunTelemetryForAnswer(
+      governedAnswer,
+      finalProviderEgressReceipts,
+      Date.now() - runStartedAtMs,
+      narrationDurationMs,
+      attempt,
+    );
+    if (runDispatchEvidence) {
+      finalTelemetry.providerRoundTrips = runDispatchEvidence.providerRoundTrips;
+      finalTelemetry.egressReceipts = finalProviderEgressReceipts.length;
+    }
     return {
       resolvedRoute,
-      answerRefusalCode: governedAnswer.kind === 'no_answer' ? governedAnswer.refusalCode : undefined,
+      answerRefusalCode: governedAnswer.kind === 'no_answer'
+        ? governedAnswer.refusalCode
+        : semanticAggregationBlocked
+          ? 'policy_blocked'
+          : undefined,
       answerTier: governedAnswer.route?.tier,
       summary: isTerminalFailure
         ? analyticalFailureSummary(governedAnswer.analyticalFailure)
@@ -3302,7 +3883,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             : needsClarification
               ? 'The answer loop needs more context before producing a governed answer.'
               : isPolicyBlocked
-                ? `DQL blocked the generated path under its relationship policy: ${governedAnswer.refusalDetails?.message ?? 'the relationship is not authorized for this analysis.'}`
+                ? semanticAggregationBlocked
+                  ? `DQL blocked semantic execution because its exact aggregation proof did not pass: ${governedAnswer.aggregationSafetyProof?.issueCodes.join(', ') || 'required proof evidence is missing.'}`
+                  : `DQL blocked the generated path under its relationship policy: ${governedAnswer.refusalDetails?.message ?? 'the relationship is not authorized for this analysis.'}`
               : isExploratory
                 ? 'The answer used bounded DBT/schema evidence because no certified modeled relationship path covered the request. It is review-required and was not certified.'
               : 'The answer is generated or semantic-layer backed and remains review-required.',
@@ -3351,15 +3934,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ] : []),
         ...(isPolicyBlocked ? [
           agentRunEvaluation(
-            'relationship-policy',
-            'Relationship policy',
+            semanticAggregationBlocked ? 'aggregation-safety-proof' : 'relationship-policy',
+            semanticAggregationBlocked ? 'Aggregation safety proof' : 'Relationship policy',
             false,
-            'warning',
-            governedAnswer.refusalDetails?.message
-              ?? 'The selected relationship is not authorized for this analysis.',
+            semanticAggregationBlocked ? 'blocking' : 'warning',
+            semanticAggregationBlocked
+              ? `Semantic execution was refused because the exact aggregation proof did not pass: ${governedAnswer.aggregationSafetyProof?.issueCodes.join(', ') || 'required proof evidence is missing.'}`
+              : governedAnswer.refusalDetails?.message
+                ?? 'The selected relationship is not authorized for this analysis.',
             {
               refusalCode: governedAnswer.refusalCode,
               refusalDetails: governedAnswer.refusalDetails,
+              aggregationSafetyProof: governedAnswer.aggregationSafetyProof,
               validationWarnings: governedAnswer.validationWarnings,
               route: governedAnswer.route,
             },
@@ -3370,6 +3956,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ] : []),
       ],
       nextActions,
+      providerEgressReceipts: finalProviderEgressReceipts,
+      telemetry: finalTelemetry,
     };
   };
 
@@ -3404,11 +3992,26 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             ...(request.history ?? []).slice(-6).map((message) => ({ role: message.role, content: message.text })),
             { role: 'user' as const, content: request.question },
           ];
-          text = (await provider.generate(messages, { maxTokens: 320, temperature: 0.6 })).trim();
+          text = (await provider.generate(messages, {
+            maxTokens: 320,
+            temperature: 0.6,
+            maxProviderDispatches: 2,
+            ...(agentRunProviderEvidenceContext.getStore() ? {
+              onProviderDispatch: (event) => agentRunProviderEvidenceContext.getStore()!.observe(event, {
+                purpose: 'answer_generation',
+                dispatchPhase: 'generation',
+                optIn: false,
+              }),
+            } : {}),
+          })).trim();
           // Perceived-latency: surface the reply as one delta for surfaces wired to stream.
           if (text) emitAnswerDelta?.(text);
         }
-      } catch {
+      } catch (error) {
+        if (error && typeof error === 'object'
+          && (error as { code?: unknown }).code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED') {
+          throw error;
+        }
         // Provider unavailable / errored — fall through to the deterministic reply.
         text = undefined;
       }
@@ -3945,8 +4548,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             intent: request.intent,
             result: researchResultData,
             evidence: plan.sources,
-            reviewRequired: true,
-          })
+          reviewRequired: true,
+          }, request.researchResultRowsOptIn === true)
         : undefined;
       const summary = needsClarification
         ? 'Needs clarification before running deeper research.'
@@ -4567,7 +5170,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           { role: 'system', content: system },
           { role: 'user', content: user },
         ],
-        { maxTokens: 700, temperature: 0.1, signal },
+        {
+          maxTokens: 700,
+          temperature: 0.1,
+          signal,
+          maxProviderDispatches: 2,
+          ...(agentRunProviderEvidenceContext.getStore() ? {
+            onProviderDispatch: (event) => agentRunProviderEvidenceContext.getStore()!.observe(event, {
+              purpose: 'answer_generation',
+              dispatchPhase: 'planning',
+              optIn: false,
+            }),
+          } : {}),
+        },
       );
     },
     getCatalogContext: buildRankedAgentRunCatalogContext,
@@ -4594,6 +5209,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           // instead of leaving the UI in "Generating and validating SQL" for a
           // minute or more.
           signal: boundedAgentMeaningSignal(signal),
+          maxProviderDispatches: 1,
+          ...(agentRunProviderEvidenceContext.getStore() ? {
+            onProviderDispatch: (event) => agentRunProviderEvidenceContext.getStore()!.observe(event, {
+              purpose: 'answer_generation',
+              dispatchPhase: 'meaning_resolution',
+              optIn: false,
+            }),
+          } : {}),
         },
       );
     },
@@ -4612,6 +5235,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   // A run may outlive its streaming browser connection, so cancellation is
   // server-owned and keyed by run id rather than relying on fetch abort alone.
   const activeAgentRunControllers = new Map<string, AbortController>();
+  const activeAnalyticalRepairReservations = new Set<string>();
+  const consumedAnalyticalRepairCapabilities = new Set<string>();
   // Server-side conversation threads: persisted multi-turn state (survives refresh).
   // Lazy so a failed native-sqlite load never blocks the runtime; conversation
   // persistence degrades to the per-request context instead.
@@ -4655,6 +5280,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       cellId: string;
       status: 'idle' | 'running' | 'success' | 'error';
       result?: ReturnType<typeof normalizeQueryResult>;
+      compiledSqlFingerprint?: string;
+      resultFingerprint?: string;
       error?: string;
       executionCount?: number;
       executedAt?: string;
@@ -4712,19 +5339,21 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             snapshotCells.push({ cellId, status: 'idle', executionCount: 0, executedAt });
             continue;
           }
-          const prepared = prepareLocalExecution(executableSql, activeConnection, projectRoot, projectConfig);
           assertAppAccess({ app, domain: resolved.domain ?? app.domain, level: 'execute' });
-          const rawResult = await executor.executeQuery(
-            prepared.sql,
-            plan?.sqlParams ?? [],
-            runtimeVariables(plan?.variables ?? {}),
-            prepared.connection,
-          );
-          const result = normalizeQueryResult(rawResult);
+          const execution = await analyticalExecutionService.execute({
+            sql: executableSql,
+            subject: 'App notebook query',
+            connection: activeConnection,
+            sqlParams: plan?.sqlParams,
+            variables: plan?.variables,
+          });
+          const result = execution.result;
           snapshotCells.push({
             cellId,
             status: 'success',
             result,
+            compiledSqlFingerprint: execution.compiledSqlFingerprint,
+            resultFingerprint: execution.resultFingerprint,
             executionCount: 1,
             executedAt,
           });
@@ -4844,54 +5473,93 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       );
     }
 
-    const preparation = await prepareAnalyticalExecutionSql({
-      sql: semanticCompose?.sql ?? plan!.sql,
-      subject: 'DQL artifact query',
-      executor,
-      connection: activeConnection,
-      projectRoot,
-      projectConfig,
-      // Preserve the existing contract: previewed Ask artifacts are explicitly
-      // read-only and bounded; saved/manual DQL execution keeps its compiler-
-      // governed behavior when no preview bound was requested.
-      enforceReadOnly: invocationInput?.rowLimit !== undefined,
-      rowLimit: invocationInput?.rowLimit,
-    });
-    const prepared = { sql: preparation.preparedSql, connection: preparation.connection };
-    const executionSql = preparation.executedSql;
     const app = loadRuntimeApp(projectRoot, activePersonaAppId());
     const sourceDomain = metadata.domain ?? source.match(/\bdomain\s*=\s*"([^"]+)"/i)?.[1];
     assertAppAccess({ app, domain: sourceDomain ?? app?.domain, level: 'execute' });
     const pinnedSemanticCompile = semanticCompose?.sql
       ? compiledSemanticQueries.get(executionFingerprint(semanticCompose.sql))
       : undefined;
-    const semanticExecution = pinnedSemanticCompile
-      ? await executeTargetBoundSemanticQuery({
-          executor,
-          connection: activeConnection,
-          projectRoot,
-          plannedAdapter: pinnedSemanticCompile.engine,
-          metricFlow: pinnedSemanticCompile.engine === 'metricflow-cli'
-            ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
-            : undefined,
-          compile: async () => pinnedSemanticCompile,
-          prepareSql: () => ({ sql: executionSql, connection: prepared.connection }),
-          rowBound: invocationInput?.rowLimit ?? pinnedSemanticCompile.effectiveRequest.limit,
-        })
-      : null;
-    const rawResult = semanticExecution?.result ?? await executor.executeQuery(
-        executionSql,
-        plan?.sqlParams ?? [],
-        runtimeVariables({ ...(plan?.variables ?? {}), ...invocation.values }),
-        prepared.connection,
-      );
-    const normalized = normalizeQueryResult(rawResult);
+    const semanticExecutionHolder: {
+      value: Awaited<ReturnType<typeof executeTargetBoundSemanticQuery>> | null;
+    } = { value: null };
+    const execution = await analyticalExecutionService.execute({
+      sql: semanticCompose?.sql ?? plan!.sql,
+      subject: 'DQL artifact query',
+      connection: activeConnection,
+      // Preserve the existing contract: previewed Ask artifacts are explicitly
+      // read-only and bounded; saved/manual DQL execution keeps its compiler-
+      // governed behavior when no preview bound was requested.
+      enforceReadOnly: invocationInput?.rowLimit !== undefined,
+      rowLimit: invocationInput?.rowLimit,
+      sqlParams: plan?.sqlParams,
+      variables: { ...(plan?.variables ?? {}), ...invocation.values },
+      executePrepared: async (preparation) => {
+        if (pinnedSemanticCompile) {
+          const semanticExecution = await executeTargetBoundSemanticQuery({
+            executor,
+            connection: activeConnection,
+            projectRoot,
+            plannedAdapter: pinnedSemanticCompile.engine,
+            metricFlow: pinnedSemanticCompile.engine === 'metricflow-cli'
+              ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
+              : undefined,
+            compile: async () => pinnedSemanticCompile,
+            prepareSql: () => ({ sql: preparation.executedSql, connection: preparation.connection }),
+            rowBound: invocationInput?.rowLimit ?? pinnedSemanticCompile.effectiveRequest.limit,
+          });
+          if (semanticExecution) {
+            semanticExecutionHolder.value = semanticExecution;
+            return semanticExecution.result;
+          }
+        }
+        return executor.executeQuery(
+          preparation.executedSql,
+          plan?.sqlParams ?? [],
+          runtimeVariables({ ...(plan?.variables ?? {}), ...invocation.values }),
+          preparation.connection,
+        );
+      },
+    });
+    const semanticExecution = semanticExecutionHolder.value;
+    const { preparation, result: normalized } = execution;
+    const executionSql = preparation.executedSql;
     const executionReceipt = createDqlArtifactExecutionReceipt(
       source,
       executionSql,
       invocation.values,
       normalized,
     );
+    const executableArtifact: DqlExecutableArtifactV1 = {
+      version: 1,
+      kind: precompiledSemanticQuery || semanticCompose?.sql ? 'semantic_block' : 'sql_block',
+      dqlFingerprint: executionFingerprint(source),
+      sourceFingerprint: executionFingerprint(stableExecutionValue({
+        name: metadata.name ?? null,
+        path: metadata.path ?? null,
+        domain: sourceDomain ?? null,
+      })),
+      compiledSqlFingerprint: executionFingerprint(semanticCompose?.sql ?? plan?.sql ?? preparation.sourceSql),
+      normalizedSqlFingerprint: executionFingerprint(preparation.decodedSql),
+      parameterFingerprint: executionReceipt.parameterFingerprint,
+      provenanceFingerprint: executionFingerprint(stableExecutionValue(invocation.resolvedParameters.map((parameter) => ({
+        name: parameter.name,
+        source: parameter.source,
+      })))),
+      targetFingerprint: targetGenerationFingerprint(activeConnection, executionConnectionName),
+      snapshotFingerprint: executionFingerprint(projectSnapshot().snapshotId),
+      planFingerprint: executionFingerprint(stableExecutionValue({
+        sqlFingerprint: executionFingerprint(semanticCompose?.sql ?? plan?.sql ?? preparation.sourceSql),
+        parameterCount: plan?.sqlParams?.length ?? 0,
+        variableNames: Object.keys(plan?.variables ?? {}).sort(),
+        chartConfig: plan?.chartConfig ?? null,
+      })),
+      semanticAdapter: pinnedSemanticCompile?.engine ?? 'native',
+      previewPolicy: invocationInput?.rowLimit === undefined
+        ? { mode: 'compiler_governed' }
+        : { mode: 'read_only_bounded', rowLimit: invocationInput.rowLimit },
+      trustState: 'review_required',
+      receipt: executionReceipt,
+    };
     return {
       columns: normalized.columns,
       rows: normalized.rows,
@@ -4904,6 +5572,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       parameters: invocation.resolvedParameters,
       auditId: invocation.auditId,
       executionReceipt,
+      executableArtifact,
       ...(semanticExecution ? {
         semanticExecutionReceipt: semanticExecution.executionReceipt,
         semanticTargetBinding: semanticExecution.targetBinding,
@@ -4945,6 +5614,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         trustState: 'certified',
         compiledSql: result.sql,
         executionReceipt: result.executionReceipt,
+        ...(result.executableArtifact ? {
+          executableArtifact: { ...result.executableArtifact, kind: 'certified_block', trustState: 'certified' },
+        } : {}),
         ...(invocationInput?.rowLimit ? { limit: invocationInput.rowLimit } : {}),
         ...(invocationInput?.parameters && Object.keys(invocationInput.parameters).length > 0
           ? { parameterValues: invocationInput.parameters }
@@ -5018,6 +5690,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ...(Object.keys(invocation.values).length > 0 ? { parameterValues: invocation.values } : {}),
         compiledSql: result.sql,
         executionReceipt: result.executionReceipt,
+        ...(result.executableArtifact ? { executableArtifact: result.executableArtifact } : {}),
       },
     };
   };
@@ -5114,6 +5787,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       sqlParams?: SQLParamSpec[];
       variables?: Record<string, unknown>;
     },
+    executionConnectionName?: string,
   ): Promise<AgentResultPayload> => {
     const activeConnection = requireActiveConnection(executionConnection);
     const rowBound = clampAnalyticalRowBound(seed?.limit ?? 200);
@@ -5139,18 +5813,6 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         { origin: 'dql_compilation', stage: 'compile', code: 'semantic_ref' },
       );
     }
-    const preparation = await prepareAnalyticalExecutionSql({
-      sql: semantic.sql,
-      subject: 'Generated SQL',
-      executor,
-      connection: activeConnection,
-      projectRoot,
-      projectConfig,
-      enforceReadOnly: true,
-      rowLimit: rowBound,
-    });
-    const prepared = { sql: preparation.preparedSql, connection: preparation.connection };
-    const bounded = preparation.rowBound!;
     const app = loadRuntimeApp(projectRoot, activePersonaAppId());
     // Generated SQL is governed as 'uncategorized' unless its seed declares a
     // domain — the same value `generatedSqlArtifactContract` stamps into the
@@ -5162,31 +5824,50 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
 
     // A semantic query the loop already compiled (MetricFlow / dbt Cloud) must
     // execute through its pinned target binding, not as loose SQL.
-    const pinnedSemanticCompile = compiledSemanticQueries.get(executionFingerprint(prepared.sql))
-      ?? compiledSemanticQueries.get(executionFingerprint(trimmed));
-    const semanticExecution = pinnedSemanticCompile
-      ? await executeTargetBoundSemanticQuery({
-          executor,
-          connection: activeConnection,
-          projectRoot,
-          plannedAdapter: pinnedSemanticCompile.engine,
-          metricFlow: pinnedSemanticCompile.engine === 'metricflow-cli'
-            ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
-            : undefined,
-          compile: async () => pinnedSemanticCompile,
-          prepareSql: () => ({ sql: bounded.sql, connection: prepared.connection }),
-          rowBound,
-        })
-      : null;
-
-    const rawResult = semanticExecution?.result
-      ?? await executor.executeQuery(
-        preparation.executedSql,
-        bindings?.sqlParams ?? [],
-        runtimeVariables(bindings?.variables ?? {}),
-        preparation.connection,
-      );
-    const normalized = normalizeQueryResult(rawResult, semantic.semanticRefs);
+    const semanticExecutionHolder: {
+      value: Awaited<ReturnType<typeof executeTargetBoundSemanticQuery>> | null;
+    } = { value: null };
+    const execution = await analyticalExecutionService.execute({
+      sql: semantic.sql,
+      subject: 'Generated SQL',
+      connection: activeConnection,
+      enforceReadOnly: true,
+      rowLimit: rowBound,
+      sqlParams: bindings?.sqlParams,
+      variables: bindings?.variables,
+      semanticRefs: semantic.semanticRefs,
+      executePrepared: async (preparation) => {
+        const pinnedSemanticCompile = compiledSemanticQueries.get(executionFingerprint(preparation.preparedSql))
+          ?? compiledSemanticQueries.get(executionFingerprint(trimmed));
+        if (pinnedSemanticCompile) {
+          const semanticExecution = await executeTargetBoundSemanticQuery({
+            executor,
+            connection: activeConnection,
+            projectRoot,
+            plannedAdapter: pinnedSemanticCompile.engine,
+            metricFlow: pinnedSemanticCompile.engine === 'metricflow-cli'
+              ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
+              : undefined,
+            compile: async () => pinnedSemanticCompile,
+            prepareSql: () => ({ sql: preparation.executedSql, connection: preparation.connection }),
+            rowBound,
+          });
+          if (semanticExecution) {
+            semanticExecutionHolder.value = semanticExecution;
+            return semanticExecution.result;
+          }
+        }
+        return executor.executeQuery(
+          preparation.executedSql,
+          bindings?.sqlParams ?? [],
+          runtimeVariables(bindings?.variables ?? {}),
+          preparation.connection,
+        );
+      },
+    });
+    const semanticExecution = semanticExecutionHolder.value;
+    const { preparation, result: normalized } = execution;
+    const bounded = preparation.rowBound!;
     // The authoritative bound. `buildRowBoundedSql` may legitimately decline to
     // touch the statement, and only one of 15 drivers honours a maxRows hint, so
     // the host is the only layer correctness may depend on.
@@ -5197,6 +5878,43 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const artifact = buildVerifiedGeneratedArtifact(
       question, trimmed, bounded.sql, seed, warnings, normalized.columns, activeConnection.driver,
     );
+    const receiptSource = artifact?.source ?? trimmed;
+    const executionBindings = bindings && ((bindings.sqlParams?.length ?? 0) > 0 || Object.keys(bindings.variables ?? {}).length > 0)
+      ? { sqlParams: bindings.sqlParams ?? [], variables: bindings.variables ?? {} }
+      : {};
+    const executionReceipt = createDqlArtifactExecutionReceipt(
+      receiptSource,
+      bounded.sql,
+      executionBindings,
+      { columns: normalized.columns, rows, rowCount: rows.length },
+    );
+    const executableArtifact: DqlExecutableArtifactV1 = {
+      version: 1,
+      kind: 'sql_block',
+      dqlFingerprint: executionFingerprint(receiptSource),
+      sourceFingerprint: executionFingerprint(stableExecutionValue({
+        name: artifact?.name ?? seed?.name ?? null,
+        path: artifact?.sourcePath ?? seed?.sourcePath ?? null,
+      })),
+      compiledSqlFingerprint: executionFingerprint(semantic.sql),
+      normalizedSqlFingerprint: executionFingerprint(preparation.decodedSql),
+      parameterFingerprint: executionReceipt.parameterFingerprint,
+      provenanceFingerprint: executionFingerprint(stableExecutionValue({
+        sqlParamCount: bindings?.sqlParams?.length ?? 0,
+        variableNames: Object.keys(bindings?.variables ?? {}).sort(),
+      })),
+      targetFingerprint: targetGenerationFingerprint(activeConnection, executionConnectionName),
+      snapshotFingerprint: executionFingerprint(projectSnapshot().snapshotId),
+      planFingerprint: executionFingerprint(stableExecutionValue({
+        compiledSqlFingerprint: executionFingerprint(semantic.sql),
+        executedSqlFingerprint: executionFingerprint(bounded.sql),
+        rowBound,
+      })),
+      semanticAdapter: semanticExecution?.targetBinding.adapterId ?? 'native',
+      previewPolicy: { mode: 'read_only_bounded', rowLimit: rowBound },
+      trustState: 'review_required',
+      receipt: executionReceipt,
+    };
     return {
       columns: normalized.columns,
       rows,
@@ -5204,14 +5922,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       executionTime: normalized.executionTime,
       sql: bounded.sql,
       ...(truncated ? { truncated: true } : {}),
-      ...(artifact ? { dqlArtifact: { ...artifact, limit: rowBound } } : {}),
+      ...(artifact ? { dqlArtifact: { ...artifact, limit: rowBound, executionReceipt, executableArtifact } } : {}),
       ...(warnings.length > 0 ? { validationWarnings: warnings } : {}),
-      executionReceipt: createDqlArtifactExecutionReceipt(
-        artifact?.source ?? trimmed,
-        bounded.sql,
-        {},
-        { columns: normalized.columns, rows, rowCount: rows.length },
-      ),
+      executionReceipt,
+      executableArtifact,
     };
   };
 
@@ -5233,7 +5947,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         executionConnectionName,
       );
     }
-    return executeGeneratedSqlDirect(question, sql, seed, executionConnection);
+    return executeGeneratedSqlDirect(question, sql, seed, executionConnection, undefined, executionConnectionName);
   };
 
   /**
@@ -5596,6 +6310,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     repairedSql: string;
     repairMode: 'deterministic' | 'ai';
     firstFailure?: WarehouseSqlFailureV1;
+    providerEgressReceipts: ProviderEgressReceiptV1[];
+    providerRoundTrips: number;
     rewrites: Array<{ from: string; to: string }>;
   };
 
@@ -5661,17 +6377,39 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     sqlParams?: SQLParamSpec[];
     variables?: Record<string, unknown>;
   }): Promise<BoundedSqlRepairResult> => {
+    let sourceSql = input.sourceSql;
+    let rewrites: Array<{ from: string; to: string }> = [];
+    if (internalRelationIdsInSql(sourceSql).length > 0) {
+      const normalizedSource = await prepareAnalyticalExecutionSql({
+        sql: sourceSql,
+        subject: 'Repair source SQL',
+        executor,
+        connection: input.targetConnection,
+        projectRoot,
+        projectConfig,
+        enforceReadOnly: true,
+      });
+      sourceSql = normalizedSource.decodedSql;
+      rewrites = normalizedSource.rewrites;
+    }
+    const sourceSignature = buildSqlAnalyticalSignature(sourceSql, input.targetConnection.driver);
+    if (!sourceSignature) {
+      throw boundedRepairError('DQL could not prove an immutable analytical signature for the source SQL. Repair it manually.', 409);
+    }
     let result: AgentResultPayload | undefined;
-    let repairedSql = input.sourceSql;
+    let repairedSql = sourceSql;
     let repairMode: 'deterministic' | 'ai' = 'deterministic';
     let firstFailure: WarehouseSqlFailureV1 | undefined;
+    const providerEgressReceipts: ProviderEgressReceiptV1[] = [];
+    let providerRoundTrips = 0;
     try {
       result = await executeGeneratedSqlDirect(
         input.question,
-        input.sourceSql,
+        sourceSql,
         undefined,
         input.targetConnection,
         { sqlParams: input.sqlParams, variables: input.variables },
+        input.targetConnectionName,
       );
     } catch (error) {
       firstFailure = normalizeWarehouseSqlFailure(error, input.targetConnection.driver);
@@ -5702,49 +6440,95 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const failure = normalizeWarehouseSqlFailure(error, input.targetConnection.driver);
         throw boundedRepairError(failure.redactedMessage, 422, failure);
       }
-      const boundedSchema = schemaContext.slice(0, 16).map((table) => ({
+      const boundedSchema = markProviderMetadataArray(schemaContext.slice(0, 16).map((table) => ({
         relation: table.relation,
-        columns: table.columns.slice(0, 40).map((column) => ({ name: column.name, type: column.type })),
-      }));
+        columns: markProviderMetadataArray(table.columns.slice(0, 40).map((column) => ({ name: column.name, type: column.type }))),
+      })));
       // CTX-008: a repair that re-derives joins from column names can undo a
       // join the original query got right. Give it the authored key pairs.
-      const governedJoins = governedJoinFactsForRelations(schemaContext.slice(0, 16).map((table) => table.relation));
+      const governedJoins = markProviderMetadataArray(
+        governedJoinFactsForRelations(schemaContext.slice(0, 16).map((table) => table.relation)),
+      );
+      const repairPayload = {
+        question: input.question,
+        driver: input.targetConnection.driver,
+        failure: firstFailure.redactedMessage,
+        sql: sourceSql,
+        parameters: input.sqlParams ? markProviderMetadataArray(input.sqlParams.map((parameter) => ({
+          name: parameter.name,
+          placeholder: `$${parameter.position}`,
+        }))) : undefined,
+        schema: boundedSchema,
+        ...(governedJoins.length ? { governedJoins } : {}),
+      };
+      const repairMessages = [
+        {
+          role: 'system' as const,
+          content: [
+            'Repair one failed read-only analytical SQL statement.',
+            'Return exactly one JSON object in a ```json fence with keys summary, sql, viz, outputs.',
+            'Preserve the requested grain, filters, output columns, and aggregation semantics.',
+            input.sqlParams?.length
+              ? 'Preserve every positional parameter placeholder exactly; do not add, remove, or renumber placeholders.'
+              : '',
+            'Use only relations and columns present in the supplied schema context.',
+            'When governedJoins is present, join on those exact key pairs rather than inferring a join from column names.',
+            'Never emit internal DQL relation identities such as source::, model::, seed::, or snapshot::.',
+            'Do not add writes, DDL, multiple statements, or commentary outside the JSON fence.',
+          ].join(' '),
+        },
+        {
+          role: 'user' as const,
+          content: JSON.stringify(repairPayload),
+        },
+      ];
+      const repairEnvelope = prepareProviderWireEnvelopeForDispatch(provider.name, { messages: repairMessages }) as {
+        messages: Parameters<AgentProvider['generate']>[0];
+      };
+      assertProviderPayloadAllowed(repairEnvelope, {
+        allowResultRows: false,
+        maxResultRows: 0,
+        purpose: 'repair_sql',
+      });
       let raw: string;
       try {
-        raw = await provider.generate([
-          {
-            role: 'system',
-            content: [
-              'Repair one failed read-only analytical SQL statement.',
-              'Return exactly one JSON object in a ```json fence with keys summary, sql, viz, outputs.',
-              'Preserve the requested grain, filters, output columns, and aggregation semantics.',
-              input.sqlParams?.length
-                ? 'Preserve every positional parameter placeholder exactly; do not add, remove, or renumber placeholders.'
-                : '',
-              'Use only relations and columns present in the supplied schema context.',
-              'When governedJoins is present, join on those exact key pairs rather than inferring a join from column names.',
-              'Never emit internal DQL relation identities such as source::, model::, seed::, or snapshot::.',
-              'Do not add writes, DDL, multiple statements, or commentary outside the JSON fence.',
-            ].join(' '),
+        raw = await provider.generate(repairEnvelope.messages, {
+          maxTokens: 1200,
+          temperature: 0,
+          maxProviderDispatches: 2,
+          onProviderDispatch: (event) => {
+            const envelope = prepareProviderWireEnvelopeForDispatch(provider.name, event.envelope);
+            assertProviderPayloadAllowed(envelope, {
+              allowResultRows: false,
+              maxResultRows: 0,
+              purpose: 'repair_sql',
+            });
+            providerRoundTrips += 1;
+            providerEgressReceipts.push(createProviderDispatchEgressReceipt({
+              purpose: 'repair_sql',
+              dispatchPhase: 'repair',
+              provider: provider.name,
+              permittedCategories: ['instructions', 'question', 'schema_metadata', 'governed_context'],
+              optIn: false,
+              envelope,
+            }));
+            return envelope;
           },
-          {
-            role: 'user',
-            content: JSON.stringify({
-              question: input.question,
-              driver: input.targetConnection.driver,
-              failure: firstFailure.redactedMessage,
-              sql: input.sourceSql,
-              parameters: input.sqlParams?.map((parameter) => ({
-                name: parameter.name,
-                placeholder: `$${parameter.position}`,
-              })),
-              schema: boundedSchema,
-              ...(governedJoins.length ? { governedJoins } : {}),
-            }),
-          },
-        ], { maxTokens: 1200, temperature: 0 });
+        });
       } catch {
-        throw boundedRepairError('The AI provider could not complete this repair. Check Provider Settings and retry.', 502);
+        throw Object.assign(
+          boundedRepairError('The AI provider could not complete this repair. Check Provider Settings and retry.', 502),
+          {
+            providerDispatchEvidence: {
+              providerEgressReceipts: [...providerEgressReceipts],
+              providerRoundTrips,
+              toolCalls: 0,
+              sqlExecutions: 0,
+              repairs: 1,
+              fallbackReason: 'repair_provider_error',
+            } satisfies ProviderDispatchTerminalEvidence,
+          },
+        );
       }
       const proposal = parseProposal(raw);
       if (!proposal.sql?.trim()) {
@@ -5755,6 +6539,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       if (requiredPlaceholders.some((placeholder) => !new RegExp(`${placeholder.replace('$', '\\$')}\\b`).test(repairedSql))) {
         throw boundedRepairError('The repair changed this cell\'s parameter contract, so DQL stopped it before execution.', 422);
       }
+      const repairedSignature = buildSqlAnalyticalSignature(repairedSql, input.targetConnection.driver);
+      if (!repairedSignature || stableExecutionValue(repairedSignature) !== stableExecutionValue(sourceSignature)) {
+        throw boundedRepairError('The provider repair changed or could not prove the immutable analytical plan, so DQL stopped before execution.', 409);
+      }
+      const aggregationProof = buildAggregationSafetyProof(repairedSql, undefined, input.targetConnection.driver);
+      if (aggregationProof.status !== 'safe') {
+        throw boundedRepairError(`The repaired SQL lacks complete aggregation-safety evidence (${aggregationProof.issueCodes.join(', ')}). Repair it manually.`, 409);
+      }
       repairMode = 'ai';
       try {
         result = await executeGeneratedSqlDirect(
@@ -5763,6 +6555,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           undefined,
           input.targetConnection,
           { sqlParams: input.sqlParams, variables: input.variables },
+          input.targetConnectionName,
         );
       } catch (error) {
         const failure = normalizeWarehouseSqlFailure(error, input.targetConnection.driver);
@@ -5773,7 +6566,6 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // Keep preview-only row bounds out of editable notebook source. The one
     // deterministic source rewrite we do persist is decoding internal graph
     // identities, because those can never execute as warehouse SQL.
-    let rewrites: Array<{ from: string; to: string }> = [];
     if (internalRelationIdsInSql(repairedSql).length > 0) {
       const normalizedSource = await prepareAnalyticalExecutionSql({
         sql: repairedSql,
@@ -5785,10 +6577,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         enforceReadOnly: true,
       });
       repairedSql = normalizedSource.decodedSql;
-      rewrites = normalizedSource.rewrites;
+      rewrites.push(...normalizedSource.rewrites);
     }
 
-    return { result, repairedSql, repairMode, firstFailure, rewrites };
+    return { result, repairedSql, repairMode, firstFailure, providerEgressReceipts, providerRoundTrips, rewrites };
   };
 
   /**
@@ -5810,6 +6602,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (!provider) {
       throw boundedRepairError('Configure an available AI provider in Settings to repair this DQL draft.', 409);
     }
+    const providerEgressReceipts: ProviderEgressReceiptV1[] = [];
+    let providerRoundTrips = 0;
 
     let schemaContext: AgentSchemaTable[];
     try {
@@ -5861,9 +6655,43 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             ...(governedJoins.length ? { governedJoins } : {}),
           }),
         },
-      ], { maxTokens: 2400, temperature: 0 });
+      ], {
+        maxTokens: 2400,
+        temperature: 0,
+        maxProviderDispatches: 2,
+        onProviderDispatch: (event) => {
+          const envelope = prepareProviderWireEnvelopeForDispatch(provider.name, event.envelope);
+          assertProviderPayloadAllowed(envelope, {
+            allowResultRows: false,
+            maxResultRows: 0,
+            purpose: 'repair_sql',
+          });
+          providerRoundTrips += 1;
+          providerEgressReceipts.push(createProviderDispatchEgressReceipt({
+            purpose: 'repair_sql',
+            dispatchPhase: 'repair',
+            provider: provider.name,
+            permittedCategories: ['instructions', 'question', 'schema_metadata', 'governed_context'],
+            optIn: false,
+            envelope,
+          }));
+          return envelope;
+        },
+      });
     } catch {
-      throw boundedRepairError('The AI provider could not complete this DQL repair. Check Provider Settings and retry.', 502);
+      throw Object.assign(
+        boundedRepairError('The AI provider could not complete this DQL repair. Check Provider Settings and retry.', 502),
+        {
+          providerDispatchEvidence: {
+            providerEgressReceipts: [...providerEgressReceipts],
+            providerRoundTrips,
+            toolCalls: 0,
+            sqlExecutions: 0,
+            repairs: 1,
+            fallbackReason: 'repair_provider_error',
+          } satisfies ProviderDispatchTerminalEvidence,
+        },
+      );
     }
 
     let repairedSource: string | undefined;
@@ -5976,6 +6804,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       repairedSql: plan.sql,
       repairedSource,
       repairMode: 'ai',
+      providerEgressReceipts,
+      providerRoundTrips,
       rewrites: [],
       sqlParams: plan.sqlParams,
       variables: { ...plan.variables, ...invocation.values },
@@ -7007,6 +7837,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   ): Promise<{
     sql: string;
     result: ReturnType<typeof normalizeQueryResult>;
+    compiledSqlFingerprint: string;
+    resultFingerprint: string;
     chartConfig: { chart?: string; x?: string; y?: string; color?: string; title?: string } | null;
     invocation: ReturnType<typeof prepareBlockInvocation>;
     tests: NonNullable<ReturnType<typeof buildExecutionPlan>>['tests'];
@@ -7057,21 +7889,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         semanticSql: semanticCompose?.sql ?? undefined,
       },
     );
-    const prepared = prepareLocalExecution(
-      semanticCompose?.sql ?? plan?.sql ?? executableSql,
-      activeConnection,
-      projectRoot,
-      projectConfig,
-    );
-    const result = await executor.executeQuery(
-      prepared.sql,
-      plan?.sqlParams ?? [],
-      runtimeVariables({ ...(plan?.variables ?? {}), ...invocation.values }),
-      prepared.connection,
-    );
+    const execution = await analyticalExecutionService.execute({
+      sql: semanticCompose?.sql ?? plan?.sql ?? executableSql,
+      subject: 'Block Studio preview query',
+      connection: activeConnection,
+      sqlParams: plan?.sqlParams,
+      variables: { ...(plan?.variables ?? {}), ...invocation.values },
+    });
     return {
-      sql: prepared.sql,
-      result: normalizeQueryResult(result),
+      sql: execution.preparation.executedSql,
+      result: execution.result,
+      compiledSqlFingerprint: execution.compiledSqlFingerprint,
+      resultFingerprint: execution.resultFingerprint,
       chartConfig: plan?.chartConfig ?? validation.chartConfig ?? null,
       invocation,
       tests: plan?.tests ?? [],
@@ -7135,17 +7964,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (tests.length === 0) {
       return { passed: 0, failed: 0, skipped: 0, duration: Date.now() - start, assertions: [], runAt: new Date() };
     }
-    const prepared = prepareLocalExecution(semanticCompose?.sql ?? plan.sql, activeConnection, projectRoot, projectConfig);
-    const rawResult = await executor.executeQuery(
-      prepared.sql,
-      plan.sqlParams ?? [],
-      runtimeVariables(plan.variables ?? {}),
-      prepared.connection,
-    );
-    const rows = Array.isArray(rawResult?.rows) ? rawResult.rows : [];
-    const columns = Array.isArray(rawResult?.columns)
-      ? rawResult.columns.map((column: any) => typeof column === 'string' ? column : column?.name ?? String(column))
-      : [];
+    const execution = await analyticalExecutionService.execute({
+      sql: semanticCompose?.sql ?? plan.sql,
+      subject: 'Block Studio certification test query',
+      connection: activeConnection,
+      sqlParams: plan.sqlParams,
+      variables: plan.variables,
+    });
+    const { rows, columns } = execution.result;
     return evaluateBlockStudioTests(tests, rows, columns, start);
   };
 
@@ -8644,24 +9470,87 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         return;
       }
 
-      const derivedRunId = `${sourceRun.id}:repair:1`;
-      const existing = await agentRunStore.get(derivedRunId);
-      if (existing) {
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(serializeJSON({ run: existing }));
+      const capability = normalizeAnalyticalRepairCapabilityV1(sourceRun.repairCapability);
+      if (!capability?.automatic.eligible || capability.automatic.attemptsRemaining < 1) {
+        const manualActions = capability?.manualActions?.length
+          ? capability.manualActions
+          : ['edit_dql', 'open_sql_notebook'] as const;
+        res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          code: 'REPAIR_CAPABILITY_REQUIRED',
+          error: 'This run does not retain eligible automatic execution-repair authority.',
+          manualActions,
+          ...(capability?.ineligibilityReason ? { ineligibilityReason: capability.ineligibilityReason } : {}),
+        }));
         return;
       }
 
-      const sourceSql = repairableSqlFromAgentRun(sourceRun);
-      const sourceDqlArtifact = repairableDqlArtifactFromAgentRun(sourceRun);
-      const retainedFailure = warehouseFailureFromAgentRun(sourceRun);
-      if ((!sourceSql && !sourceDqlArtifact) || !analyticalFailureAllowsDeterministicRetry(retainedFailure)) {
+      // Rebind every server-issued capability identity to the currently
+      // persisted immutable source run before checking idempotence or reserving
+      // an attempt. A copied/stale capability must never authorize provider or
+      // SQL work against a mutated plan, failure, or source artifact.
+      const canonicalCapability = analyticalRepairCapabilityForAgentRun(
+        sourceRun,
+        capability.targetFingerprint,
+      );
+      const bindingMatches = canonicalCapability
+        && canonicalCapability.automatic.eligible
+        && canonicalCapability.planFingerprint === capability.planFingerprint
+        && canonicalCapability.failureFingerprint === capability.failureFingerprint
+        && canonicalCapability.sourceFingerprint === capability.sourceFingerprint;
+      if (!bindingMatches) {
         res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
-          error: sourceSql || sourceDqlArtifact
-            ? 'This failure requires authorized access or a policy change and cannot be repaired by AI.'
-            : 'This run has no retained SQL statement or editable DQL artifact to repair.',
-          ...(retainedFailure ? { warehouseFailure: retainedFailure } : {}),
+          code: 'REPAIR_CAPABILITY_REQUIRED',
+          error: 'The persisted source plan, failure, or artifact no longer matches its server-issued repair capability.',
+          manualActions: capability.manualActions,
+        }));
+        return;
+      }
+
+      const derivedRunId = `${sourceRun.id}:repair:1`;
+      if (activeAnalyticalRepairReservations.has(derivedRunId)) {
+        res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          code: 'REPAIR_IN_PROGRESS',
+          error: 'The single permitted repair attempt is already in progress.',
+          manualActions: capability.manualActions,
+        }));
+        return;
+      }
+      const existing = await agentRunStore.get(derivedRunId);
+      if (existing) {
+        const succeeded = existing.status === 'needs_review' && existing.trustState === 'review_required';
+        res.writeHead(succeeded ? 200 : 409, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON(succeeded
+          ? { run: existing }
+          : {
+              code: 'REPAIR_ATTEMPT_EXHAUSTED',
+              error: 'The single permitted repair attempt was already consumed and did not complete successfully.',
+              manualActions: capability.manualActions,
+              run: existing,
+            }));
+        return;
+      }
+
+      const sourceDqlArtifact = repairableDqlArtifactFromAgentRun(sourceRun);
+      const retainedFailure = warehouseFailureFromAgentRun(sourceRun);
+      if (!sourceDqlArtifact || !validAskRepairDqlWrapper(sourceDqlArtifact.source)) {
+        res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          code: 'REPAIR_CAPABILITY_REQUIRED',
+          error: 'The retained DQL wrapper is unavailable or invalid. Keep it editable and repair it manually.',
+          manualActions: capability.manualActions,
+        }));
+        return;
+      }
+      const capabilityHash = (value: unknown): string => `sha256:${createHash('sha256').update(stableExecutionValue(value)).digest('hex')}`;
+      if (capability.dqlFingerprint !== capabilityHash(sourceDqlArtifact.source.trim())) {
+        res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          code: 'REPAIR_CAPABILITY_REQUIRED',
+          error: 'The retained DQL source no longer matches its immutable repair capability.',
+          manualActions: capability.manualActions,
         }));
         return;
       }
@@ -8684,32 +9573,256 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         : sourceRun.executionTarget?.target === 'local'
           ? 'local'
           : projectConfig.defaultConnectionName;
+      const resolvedTargetFingerprint = targetGenerationFingerprint(targetConnection, targetConnectionName);
+      if (resolvedTargetFingerprint !== capability.targetFingerprint) {
+        res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          code: 'REPAIR_TARGET_DRIFT',
+          error: 'The named execution target now resolves to a different connection generation. Automatic repair was not attempted.',
+          manualActions: capability.manualActions,
+        }));
+        return;
+      }
 
-      let repaired: BoundedSqlRepairResult | BoundedDqlRepairResult;
+      if (consumedAnalyticalRepairCapabilities.has(derivedRunId)) {
+        res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          code: 'REPAIR_ATTEMPT_EXHAUSTED',
+          error: 'The single permitted repair attempt has already been consumed.',
+          manualActions: capability.manualActions,
+        }));
+        return;
+      }
+      activeAnalyticalRepairReservations.add(derivedRunId);
+      consumedAnalyticalRepairCapabilities.add(derivedRunId);
+      const releaseRepairReservation = (): void => { activeAnalyticalRepairReservations.delete(derivedRunId); };
+      res.once('finish', releaseRepairReservation);
+      res.once('close', releaseRepairReservation);
+
+      const repairStartedAt = new Date().toISOString();
+      const repairStartedAtMs = Date.now();
+      const sourceFailureForReservation = analyticalFailedRunFromAgentRun(sourceRun)?.failure;
+      const reservationEvent: AgentRunEvent = {
+        id: `${derivedRunId}:repair`,
+        runId: derivedRunId,
+        type: 'repair.attempted',
+        at: repairStartedAt,
+        message: 'Reserved the single bounded repair attempt.',
+        route: 'generated_answer',
+      };
+      const reservedRun: AgentRun = {
+        id: derivedRunId,
+        question: sourceRun.question,
+        requestedMode: sourceRun.requestedMode,
+        route: 'generated_answer',
+        status: 'blocked',
+        trustState: 'blocked',
+        stopReason: 'blocked',
+        startedAt: repairStartedAt,
+        completedAt: repairStartedAt,
+        selectedObject: sourceRun.selectedObject,
+        executionTarget: sourceRun.executionTarget,
+        routeDecision: sourceRun.routeDecision,
+        plan: sourceRun.plan,
+        steps: [],
+        summary: 'The single repair attempt was reserved but has not completed successfully.',
+        artifacts: [],
+        evaluations: [],
+        events: [reservationEvent],
+        nextActions: sourceRun.nextActions,
+        repairAttempts: 1,
+        lifecycle: {
+          version: 1,
+          state: 'terminal',
+          phase: 'repair.attempted',
+          revision: 1,
+          eventCursor: 1,
+          startedAt: repairStartedAt,
+          updatedAt: repairStartedAt,
+          completedAt: repairStartedAt,
+        },
+        derivation: {
+          version: 1,
+          kind: 'analytical_repair',
+          sourceRunId: sourceRun.id,
+          ...(sourceFailureForReservation?.failureId ? { sourceFailureId: sourceFailureForReservation.failureId } : {}),
+          attempt: 1,
+        },
+      };
       try {
-        // Prefer the editable DQL contract even when the failed run also
-        // retained compiled SQL. This keeps parameters, visualization, tests,
-        // and the corrected wrapper attached to the repaired Ask result.
-        repaired = sourceDqlArtifact
-          ? await executeBoundedDqlRepair({
-              question: sourceRun.question,
-              source: sourceDqlArtifact.source,
-              failure: retainedFailure?.redactedMessage
-                ?? sourceRun.diagnosticReceipt?.failure?.message
-                ?? sourceRun.summary,
-              targetConnection,
-              targetConnectionName,
-              parameters: sourceDqlArtifact.parameterValues,
-              artifactName: sourceDqlArtifact.name,
-            })
-          : await executeBoundedSqlRepair({
-              question: sourceRun.question,
-              sourceSql: sourceSql!,
-              targetConnection,
-              targetConnectionName,
-            });
+        await agentRunStore.save(reservedRun);
+      } catch (error) {
+        releaseRepairReservation();
+        throw error;
+      }
+      let repaired: BoundedDqlRepairResult;
+      try {
+        // Compile the immutable original wrapper first. A provider receives only
+        // this embedded SQL, never the DQL wrapper or its surrounding fields.
+        const invocation = prepareBlockInvocation({
+          source: sourceDqlArtifact.source,
+          parameters: sourceDqlArtifact.parameterValues,
+          question: sourceRun.question,
+          surface: 'ask_ai',
+        });
+        if (invocation.errors.length || invocation.unresolvedParameters.length) {
+          throw boundedRepairError(
+            invocation.errors.join(' ') || `Provide required parameters before retrying: ${invocation.unresolvedParameters.join(', ')}.`,
+            409,
+          );
+        }
+        const originalPlan = buildExecutionPlan({
+          id: 'ask-execution-repair-source',
+          type: 'dql',
+          source: sourceDqlArtifact.source,
+          title: sourceDqlArtifact.name,
+        }, {
+          semanticLayer,
+          driver: targetConnection.driver,
+          parameters: invocation.values,
+        });
+        if (!originalPlan?.sql?.trim()) throw boundedRepairError('The original DQL wrapper did not compile to SQL.', 409);
+        if (capability.sqlFingerprint !== capabilityHash(originalPlan.sql.trim())) {
+          throw boundedRepairError('The original compiled SQL no longer matches its immutable repair capability.', 409);
+        }
+        const sqlRepair = await executeBoundedSqlRepair({
+          question: sourceRun.question,
+          sourceSql: originalPlan.sql,
+          targetConnection,
+          targetConnectionName,
+          sqlParams: originalPlan.sqlParams,
+          variables: { ...originalPlan.variables, ...invocation.values },
+        });
+        const embeddedSql = restoreNotebookDqlParameterInterpolations(sqlRepair.repairedSql, originalPlan.sqlParams);
+        const repairedSource = replaceNotebookDqlQueryForRepair(sourceDqlArtifact.source, embeddedSql);
+        if (!repairedSource) throw boundedRepairError('DQL could not reinsert the repaired SQL into the immutable wrapper.', 422);
+        const repairedInvocation = prepareBlockInvocation({
+          source: repairedSource,
+          parameters: sourceDqlArtifact.parameterValues,
+          question: sourceRun.question,
+          surface: 'ask_ai',
+        });
+        if (repairedInvocation.errors.length || repairedInvocation.unresolvedParameters.length) {
+          throw boundedRepairError('The SQL-only repair did not preserve a compilable DQL wrapper.', 422);
+        }
+        const repairedPlan = buildExecutionPlan({
+          id: 'ask-execution-repair-derived',
+          type: 'dql',
+          source: repairedSource,
+          title: sourceDqlArtifact.name,
+        }, {
+          semanticLayer,
+          driver: targetConnection.driver,
+          parameters: repairedInvocation.values,
+        });
+        if (!repairedPlan?.sql?.trim() || normalizeSqlForComparison(repairedPlan.sql) !== normalizeSqlForComparison(sqlRepair.repairedSql)) {
+          throw boundedRepairError('The repaired wrapper recompiled to different SQL, so DQL stopped before publishing it.', 422);
+        }
+        const repairedExecutionReceipt = createDqlArtifactExecutionReceipt(
+          repairedSource,
+          sqlRepair.result.sql ?? repairedPlan.sql,
+          repairedInvocation.values,
+          sqlRepair.result,
+        );
+        const repairedExecutableArtifact = sqlRepair.result.executableArtifact
+          ? {
+              ...sqlRepair.result.executableArtifact,
+              kind: 'sql_block' as const,
+              dqlFingerprint: executionFingerprint(repairedSource),
+              sourceFingerprint: executionFingerprint(stableExecutionValue({
+                name: sourceDqlArtifact.name ?? null,
+                path: sourceDqlArtifact.sourcePath ?? null,
+              })),
+              compiledSqlFingerprint: executionFingerprint(repairedPlan.sql),
+              normalizedSqlFingerprint: executionFingerprint(sqlRepair.repairedSql),
+              parameterFingerprint: repairedExecutionReceipt.parameterFingerprint,
+              provenanceFingerprint: executionFingerprint(stableExecutionValue(repairedInvocation.resolvedParameters.map((parameter) => ({
+                name: parameter.name,
+                source: parameter.source,
+              })))),
+              planFingerprint: executionFingerprint(stableExecutionValue({
+                compiledSqlFingerprint: executionFingerprint(repairedPlan.sql),
+                parameterCount: repairedPlan.sqlParams?.length ?? 0,
+                variableNames: Object.keys(repairedPlan.variables ?? {}).sort(),
+              })),
+              trustState: 'review_required' as const,
+              receipt: repairedExecutionReceipt,
+            }
+          : undefined;
+        const repairedArtifact: DqlArtifactReference = {
+          ...sourceDqlArtifact,
+          source: repairedSource,
+          compiledSql: repairedPlan.sql,
+          trustState: 'review_required',
+          persistence: 'transient',
+          executionReceipt: repairedExecutionReceipt,
+          ...(repairedExecutableArtifact ? { executableArtifact: repairedExecutableArtifact } : {}),
+          ...(repairedInvocation.parameters.length ? { parameters: repairedInvocation.parameters } : {}),
+          ...(Object.keys(repairedInvocation.values).length ? { parameterValues: repairedInvocation.values } : {}),
+        };
+        repaired = {
+          ...sqlRepair,
+          result: {
+            ...sqlRepair.result,
+            executionReceipt: repairedExecutionReceipt,
+            ...(repairedExecutableArtifact ? { executableArtifact: repairedExecutableArtifact } : {}),
+            dqlArtifact: repairedArtifact,
+          },
+          repairedSql: repairedPlan.sql,
+          repairedSource,
+          sqlParams: repairedPlan.sqlParams,
+          variables: { ...repairedPlan.variables, ...repairedInvocation.values },
+        };
       } catch (error) {
         const repairError = error as Error & { status?: number; warehouseFailure?: WarehouseSqlFailureV1 };
+        const dispatchEvidence = providerDispatchTerminalEvidence(error);
+        const failedAt = new Date().toISOString();
+        const failedTelemetry: AgentRunTelemetryV1 = {
+          version: 1,
+          stageDurationsMs: { repair: Date.now() - repairStartedAtMs, total: Date.now() - repairStartedAtMs },
+          providerRoundTrips: dispatchEvidence?.providerRoundTrips ?? 0,
+          toolCalls: dispatchEvidence?.toolCalls ?? 0,
+          sqlExecutions: dispatchEvidence?.sqlExecutions ?? 0,
+          repairs: Math.max(1, dispatchEvidence?.repairs ?? 0),
+          egressReceipts: dispatchEvidence?.providerEgressReceipts.length ?? 0,
+          fallbackReason: dispatchEvidence?.fallbackReason ?? 'repair_failed',
+        };
+        const failedReceipts = dispatchEvidence?.providerEgressReceipts ?? [];
+        await agentRunStore.save({
+          ...reservedRun,
+          completedAt: failedAt,
+          summary: repairError.message,
+          lifecycle: reservedRun.lifecycle ? {
+            ...reservedRun.lifecycle,
+            phase: 'run.failed',
+            updatedAt: failedAt,
+            completedAt: failedAt,
+          } : undefined,
+          events: [
+            reservationEvent,
+            {
+              id: `${derivedRunId}:failed`,
+              runId: derivedRunId,
+              type: 'run.failed',
+              at: failedAt,
+              message: repairError.message,
+              route: 'generated_answer',
+              status: 'blocked',
+              trustState: 'blocked',
+            },
+          ],
+          telemetry: failedTelemetry,
+          ...(failedReceipts.length ? { providerEgressReceipts: failedReceipts } : {}),
+          diagnosticReceiptV2: {
+            version: 2,
+            runId: derivedRunId,
+            route: 'generated_answer',
+            status: 'blocked',
+            telemetry: failedTelemetry,
+            providerEgressReceiptFingerprints: failedReceipts.map((receipt) => executionFingerprint(stableExecutionValue(receipt))),
+            repairCapabilityFingerprint: executionFingerprint(stableExecutionValue(capability)),
+          },
+        });
         res.writeHead(repairError.status ?? 500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           error: repairError.message,
@@ -8717,21 +9830,33 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }));
         return;
       }
-      const { result, repairedSql, repairMode, firstFailure } = repaired;
+      const { result, repairedSql, repairMode, firstFailure, providerEgressReceipts, providerRoundTrips } = repaired;
 
       const completedAt = new Date().toISOString();
-      const preview = agentResultToSynthesisPreview(result);
-      const synthesis = await synthesizeAnswer({
-        question: sourceRun.question,
-        audience: 'stakeholder',
-        resultPreview: preview,
-        sql: repairedSql,
-        draftText: `The repaired query returned ${result.rowCount} row${result.rowCount === 1 ? '' : 's'}.`,
-        ...(preview ? { columnFormats: agentColumnDisplayFormats(projectRoot, preview.columns) } : {}),
-      });
+      // Repair never grants a second answer/narration call and never sends rows
+      // to a provider. Present the validated contract deterministically.
+      const presentationText = `The repaired query returned ${result.rowCount} row${result.rowCount === 1 ? '' : 's'}. Review the derived SQL before reuse.`;
       const sourceFailure = analyticalFailedRunFromAgentRun(sourceRun)?.failure;
       const presentationContext = repairPresentationContextFromAgentRun(sourceRun);
       const executionResultFingerprint = result.executionReceipt?.resultFingerprint;
+      const repairTotalDurationMs = Date.now() - repairStartedAtMs;
+      const repairTelemetry: AgentRunTelemetryV1 = {
+        version: 1,
+        stageDurationsMs: {
+          retrieval: 0,
+          meaning: 0,
+          repair: repairTotalDurationMs,
+          ...(typeof result.executionTime === 'number' ? { execution: result.executionTime } : {}),
+          narration: 0,
+          total: repairTotalDurationMs,
+        },
+        providerRoundTrips,
+        toolCalls: 0,
+        sqlExecutions: firstFailure ? 2 : 1,
+        repairs: 1,
+        egressReceipts: providerEgressReceipts.length,
+        ...(typeof result.executionTime === 'number' ? { warehouseDurationMs: result.executionTime } : {}),
+      };
       const artifact = agentRunArtifact(
         'answer',
         'Repaired analytical answer',
@@ -8740,8 +9865,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           certification: 'analyst_review_required',
           reviewStatus: 'analyst_review_required',
           trustLabel: 'AI-generated · review required',
-          answer: synthesis.text,
-          text: synthesis.text,
+          answer: presentationText,
+          text: presentationText,
           ...presentationContext,
           result,
           proposedSql: repairedSql,
@@ -8762,10 +9887,11 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               rowCount: result.rowCount,
               ...(executionResultFingerprint ? { resultFingerprint: executionResultFingerprint } : {}),
             },
+            providerEgressReceipts,
           },
           previousAttempt: {
             sourceRunId: sourceRun.id,
-            ...(sourceSql ? { sql: sourceSql } : {}),
+            sql: repairableSqlFromAgentRun(sourceRun),
             ...(sourceDqlArtifact?.source ? { dql: sourceDqlArtifact.source } : {}),
             failure: retainedFailure ?? firstFailure,
           },
@@ -8795,7 +9921,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         artifacts: [artifact],
       };
       const events: AgentRunEvent[] = [
-        { id: `${derivedRunId}:repair`, runId: derivedRunId, type: 'repair.attempted', at: completedAt, message: 'Started one bounded query repair.', route: 'generated_answer' },
+        { id: `${derivedRunId}:repair`, runId: derivedRunId, type: 'repair.attempted', at: repairStartedAt, message: 'Started one bounded query repair.', route: 'generated_answer' },
         { id: `${derivedRunId}:artifact`, runId: derivedRunId, type: 'artifact.created', at: completedAt, message: 'Created the repaired result artifact.', route: 'generated_answer', trustState: 'review_required' },
         { id: `${derivedRunId}:complete`, runId: derivedRunId, type: 'run.completed', at: completedAt, message: 'The repaired query executed successfully.', route: 'generated_answer', status: 'needs_review', trustState: 'review_required' },
       ];
@@ -8807,15 +9933,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         status: 'needs_review',
         trustState: 'review_required',
         stopReason: 'generated_review_required',
-        startedAt: completedAt,
+        startedAt: repairStartedAt,
         completedAt,
         selectedObject: sourceRun.selectedObject,
         executionTarget: sourceRun.executionTarget,
         routeDecision: sourceRun.routeDecision,
         plan: sourceRun.plan,
         steps: [repairStep],
-        summary: synthesis.text,
-        answer: synthesis.text,
+        summary: presentationText,
+        answer: presentationText,
         answerKind: 'governed',
         artifacts: [artifact],
         evaluations: [evaluation],
@@ -8828,7 +9954,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           phase: 'run.completed',
           revision: 1,
           eventCursor: events.length,
-          startedAt: completedAt,
+          startedAt: repairStartedAt,
           updatedAt: completedAt,
           completedAt,
         },
@@ -8841,7 +9967,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           steps: [repairStep],
           artifacts: [artifact],
           evaluations: [evaluation],
+          providerEgressReceipts,
         },
+        diagnosticReceiptV2: {
+          version: 2,
+          runId: derivedRunId,
+          route: 'generated_answer',
+          status: 'needs_review',
+          telemetry: repairTelemetry,
+          providerEgressReceiptFingerprints: providerEgressReceipts.map((receipt) => executionFingerprint(stableExecutionValue(receipt))),
+          repairCapabilityFingerprint: executionFingerprint(stableExecutionValue(capability)),
+        },
+        telemetry: repairTelemetry,
+        providerEgressReceipts,
         derivation: {
           version: 1,
           kind: 'analytical_repair',
@@ -8992,19 +10130,57 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             operationSignal?: AbortSignal,
             report?: (progress: Partial<LocalOperationProgress>) => void,
           ) => {
-            parsed.request!.signal = AbortSignal.any([
+            const ingressSignal = AbortSignal.any([
               runController.signal,
               ...(operationSignal ? [operationSignal] : []),
-              AbortSignal.timeout(agentRunDeadlineMs(parsed.request!, process.env, getActiveProvider(projectRoot))),
             ]);
+            parsed.request!.runBudget = createAgentRunBudget({
+              requestedMode: parsed.request!.requestedMode,
+              inheritedSignal: ingressSignal,
+            });
+            parsed.request!.signal = parsed.request!.runBudget.hardSignal;
+            const runProviderEvidence = new RunScopedProviderDispatchEvidence(
+              parsed.request!.requestedMode === 'research'
+                ? { total: 12, meaningResolution: 1, generationGroup: 11, repair: 0 }
+                : { total: 2, meaningResolution: 1, generationGroup: 2, repair: 0 },
+              parsed.request!.runBudget,
+            );
             report?.({ phase: 'reasoning', progress: 8, message: 'Grounding the request and selecting the governed route.' });
             try {
-              const run = await agentRunEngine.run(parsed.request!, (event) => {
-                if (wantsStream) writeStream('agent-run-event', event);
-                report?.({ phase: event.type, progress: 45, message: event.message });
-              }, (delta) => {
-                if (wantsStream) writeStream('agent-run-answer-delta', { runId: parsed.request!.runId, delta });
-              });
+              const engineRun = await agentRunProviderEvidenceContext.run(
+                runProviderEvidence,
+                () => agentRunEngine.run(parsed.request!, (event) => {
+                  runProviderEvidence.setRoute(event.route);
+                  if (wantsStream) writeStream('agent-run-event', event);
+                  report?.({ phase: event.type, progress: 45, message: event.message });
+                }, (delta) => {
+                  if (wantsStream) writeStream('agent-run-answer-delta', { runId: parsed.request!.runId, delta });
+                }),
+              );
+              const rawRun = mergeRunScopedProviderDispatchEvidence(
+                engineRun,
+                runProviderEvidence.snapshot(engineRun.telemetry?.fallbackReason ?? engineRun.stopReason),
+              );
+              let resolvedTargetFingerprint: string | undefined;
+              try {
+                const resolvedTarget = await resolveAgentRunExecutionConnection({
+                  question: rawRun.question,
+                  executionTarget: rawRun.executionTarget,
+                });
+                const resolvedTargetName = rawRun.executionTarget?.target === 'connection'
+                  ? rawRun.executionTarget.connectionName
+                  : rawRun.executionTarget?.target === 'local'
+                    ? 'local'
+                    : projectConfig.defaultConnectionName;
+                resolvedTargetFingerprint = targetGenerationFingerprint(resolvedTarget, resolvedTargetName);
+              } catch {
+                // Missing target-generation evidence keeps automatic repair
+                // ineligible; the failed run itself remains fully inspectable.
+              }
+              const run = attachAnalyticalRepairCapability(rawRun, resolvedTargetFingerprint);
+              // The engine persists before the host can validate the DQL wrapper;
+              // replace that row with the server-owned capability atomically.
+              await agentRunStore.save(run);
               completedRun = run;
               recordConversationTurn(conversationStore, parsed.request!.threadId, run);
               return { runId: run.id, threadId: parsed.request!.threadId, status: run.status };
@@ -11068,13 +12244,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 tableMapping,
               });
               if (!composed) throw new Error('The governed semantic query could not be composed.');
-              const prepared = prepareLocalExecution(composed.sql, targetConnection, projectRoot, projectConfig);
               let normalizedResult: ReturnType<typeof normalizeQueryResult>;
               let repair: AppExecutionRepairTrace | undefined;
               let executedSql = composed.sql;
+              let executionFingerprints: Pick<ExecutionServiceResult, 'compiledSqlFingerprint' | 'resultFingerprint'> | undefined;
               try {
-                const result = await executor.executeQuery(prepared.sql, [], {}, prepared.connection);
-                normalizedResult = normalizeQueryResult(result);
+                const execution = await analyticalExecutionService.execute({
+                  sql: composed.sql,
+                  subject: 'App tile semantic query',
+                  connection: targetConnection,
+                });
+                normalizedResult = execution.result;
+                executedSql = execution.preparation.executedSql;
+                executionFingerprints = {
+                  compiledSqlFingerprint: execution.compiledSqlFingerprint,
+                  resultFingerprint: execution.resultFingerprint,
+                };
               } catch (executionError) {
                 const repaired = await repairFailedAppTileExecution({
                   source: 'semantic_query',
@@ -11115,6 +12300,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 title: item.title ?? item.semantic.id,
                 viz: item.viz,
                 result: normalizedResult,
+                ...(executionFingerprints ?? {}),
                 trustState: 'review_required',
                 citation: { kind: repair ? 'semantic_query_repaired' : 'semantic_query', name: item.semantic.id },
                 ...(repair ? { repair } : {}),
@@ -11252,18 +12438,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               tileId: item.i,
               tileFilterBindings: item.filterBindings,
             });
-            const prepared = prepareLocalExecution(
-              blockFilterApplication.sql,
-              blockTargetConnection,
-              projectRoot,
-              projectConfig,
-            );
-            const result = await executor.executeQuery(
-              prepared.sql,
-              blockFilterApplication.sqlParams,
-              runtimeVariables({ ...blockFilterApplication.variables, ...blockInvocation.values }),
-              prepared.connection,
-            );
+            const execution = await analyticalExecutionService.execute({
+              sql: blockFilterApplication.sql,
+              subject: 'App tile block query',
+              connection: blockTargetConnection,
+              sqlParams: blockFilterApplication.sqlParams,
+              variables: { ...blockFilterApplication.variables, ...blockInvocation.values },
+            });
             tiles.push({
               tileId: item.i,
               status: 'ok',
@@ -11273,7 +12454,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               title: item.title ?? block.name,
               viz: item.viz,
               chartConfig: mergeDashboardChartConfig(blockPlan?.chartConfig, item),
-              result: normalizeQueryResult(result),
+              result: execution.result,
+              compiledSqlFingerprint: execution.compiledSqlFingerprint,
+              resultFingerprint: execution.resultFingerprint,
               filters: {
                 applied: blockFilterApplication.appliedFilters,
                 skipped: blockFilterApplication.skippedFilters,
@@ -16477,25 +17660,18 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }));
           return;
         }
-        const preparation = await prepareAnalyticalExecutionSql({
-          sql: semantic.sql,
-          subject: 'Notebook query',
-          executor,
-          connection: executionConnection,
-          projectRoot,
-          projectConfig,
-        });
-        const prepared = { sql: preparation.preparedSql, connection: preparation.connection };
         const app = loadRuntimeApp(projectRoot, typeof body.appId === 'string' ? body.appId : activePersonaAppId());
         const domain = typeof body.domain === 'string' ? body.domain : app?.domain;
         assertAppAccess({ app, domain, level: 'execute' });
-        const result = await executor.executeQuery(
-          prepared.sql,
-          Array.isArray(body.sqlParams) ? body.sqlParams : [],
-          runtimeVariables(body.variables && typeof body.variables === 'object' ? body.variables : {}),
-          prepared.connection,
-        );
-        const normalized = normalizeQueryResult(result, semantic.semanticRefs);
+        const execution = await analyticalExecutionService.execute({
+          sql: semantic.sql,
+          subject: 'Notebook query',
+          connection: executionConnection,
+          sqlParams: Array.isArray(body.sqlParams) ? body.sqlParams : [],
+          variables: body.variables && typeof body.variables === 'object' ? body.variables : {},
+          semanticRefs: semantic.semanticRefs,
+        });
+        const { preparation, result: normalized } = execution;
         if (execContext?.notebookPath) {
           recordNotebookQueryRun(projectRoot, {
             notebookPath: execContext.notebookPath!,
@@ -17222,7 +18398,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         const invocation = prepareBlockInvocation({ source, surface: 'ask_ai' });
         if (invocation.errors.length > 0) throw new Error(invocation.errors.join(' '));
 
-        const { executionReceipt: _receipt, compiledSql: _compiled, ...unexecuted } = artifact;
+        const { executionReceipt: _receipt, executableArtifact: _executable, compiledSql: _compiled, ...unexecuted } = artifact;
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
           artifact: {
@@ -17339,6 +18515,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             trustState: certified ? 'certified' : semantic ? 'governed' : 'review_required',
             compiledSql: result.sql,
             executionReceipt: result.executionReceipt,
+            ...(result.executableArtifact ? {
+              executableArtifact: {
+                ...result.executableArtifact,
+                kind: certified ? 'certified_block' : semantic ? 'semantic_block' : 'sql_block',
+                trustState: certified ? 'certified' : semantic ? 'governed' : 'review_required',
+              },
+            } : {}),
             ...(requestedArtifact?.limit ? { limit: requestedArtifact.limit } : {}),
           },
         }));
@@ -17464,42 +18647,50 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           res.end(serializeJSON({ cellType: cell.type, result: null }));
           return;
         }
-        const preparation = await prepareAnalyticalExecutionSql({
-          sql: executableSql,
-          subject: cell.type === 'dql' ? 'DQL query' : 'Notebook query',
-          executor,
-          connection: cellConnection,
-          projectRoot,
-          projectConfig,
-        });
-        const decodedSql = preparation.decodedSql;
-        const prepared = { sql: preparation.preparedSql, connection: preparation.connection };
         const app = loadRuntimeApp(projectRoot, typeof body.appId === 'string' ? body.appId : activePersonaAppId());
         assertAppAccess({ app, domain: resolved.domain ?? app?.domain, level: 'execute' });
-        const semanticExecution = semanticCompose?.compiled
-          ? await executeTargetBoundSemanticQuery({
-              executor,
-              connection: cellConnection,
-              projectRoot,
-              plannedAdapter: semanticCompose.compiled.engine,
-              metricFlow: semanticCompose.compiled.engine === 'metricflow-cli'
-                ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
-                : undefined,
-              // Compilation already produced the exact pinned adapter result
-              // used by the plan. The gateway validates target identity before
-              // accepting that result for preflight and execution.
-              compile: async () => semanticCompose.compiled!,
-              prepareSql: () => ({ sql: prepared.sql, connection: prepared.connection }),
-              rowBound: semanticCompose.compiled.effectiveRequest.limit,
-            })
-          : null;
-        const rawResult = semanticExecution?.result ?? await executor.executeQuery(
-            prepared.sql,
-            plan?.sqlParams ?? [],
-            runtimeVariables({ ...(plan?.variables ?? {}), ...(invocation?.values ?? {}) }),
-            prepared.connection,
-          );
-        const normalized = normalizeQueryResult(rawResult);
+        const semanticExecutionHolder: {
+          value: Awaited<ReturnType<typeof executeTargetBoundSemanticQuery>> | null;
+        } = { value: null };
+        const execution = await analyticalExecutionService.execute({
+          sql: executableSql,
+          subject: cell.type === 'dql' ? 'DQL query' : 'Notebook query',
+          connection: cellConnection,
+          sqlParams: plan?.sqlParams,
+          variables: { ...(plan?.variables ?? {}), ...(invocation?.values ?? {}) },
+          executePrepared: semanticCompose?.compiled
+            ? async (preparation) => {
+                const semanticExecution = await executeTargetBoundSemanticQuery({
+                  executor,
+                  connection: cellConnection,
+                  projectRoot,
+                  plannedAdapter: semanticCompose.compiled!.engine,
+                  metricFlow: semanticCompose.compiled!.engine === 'metricflow-cli'
+                    ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
+                    : undefined,
+                  // Compilation already produced the exact pinned adapter result
+                  // used by the plan. The gateway validates target identity before
+                  // accepting that result for preflight and execution.
+                  compile: async () => semanticCompose.compiled!,
+                  prepareSql: () => ({ sql: preparation.executedSql, connection: preparation.connection }),
+                  rowBound: semanticCompose.compiled!.effectiveRequest.limit,
+                });
+                if (semanticExecution) {
+                  semanticExecutionHolder.value = semanticExecution;
+                  return semanticExecution.result;
+                }
+                return executor.executeQuery(
+                  preparation.executedSql,
+                  plan?.sqlParams ?? [],
+                  runtimeVariables({ ...(plan?.variables ?? {}), ...(invocation?.values ?? {}) }),
+                  preparation.connection,
+                );
+              }
+            : undefined,
+        });
+        const { preparation, result: normalized } = execution;
+        const decodedSql = preparation.decodedSql;
+        const semanticExecution = semanticExecutionHolder.value;
         // Enforce the block's declared invariants against the result set. This
         // is additive: blocks without invariants produce `null` and the
         // response is unchanged. The agent surface (`query_via_block`) reads
@@ -17758,6 +18949,24 @@ table: ${table}${tagList}
       resolvePromise(address.port);
     });
   });
+}
+
+function providerDispatchTerminalEvidence(value: unknown): ProviderDispatchTerminalEvidence | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const candidate = (value as { providerDispatchEvidence?: unknown }).providerDispatchEvidence;
+  if (!candidate || typeof candidate !== 'object') return undefined;
+  const evidence = candidate as Partial<ProviderDispatchTerminalEvidence>;
+  if (!Array.isArray(evidence.providerEgressReceipts)
+    || !Number.isInteger(evidence.providerRoundTrips)
+    || (evidence.providerRoundTrips ?? -1) < 0) return undefined;
+  return {
+    providerEgressReceipts: evidence.providerEgressReceipts,
+    providerRoundTrips: evidence.providerRoundTrips!,
+    toolCalls: Number.isInteger(evidence.toolCalls) && (evidence.toolCalls ?? -1) >= 0 ? evidence.toolCalls! : 0,
+    sqlExecutions: Number.isInteger(evidence.sqlExecutions) && (evidence.sqlExecutions ?? -1) >= 0 ? evidence.sqlExecutions! : 0,
+    repairs: Number.isInteger(evidence.repairs) && (evidence.repairs ?? -1) >= 0 ? evidence.repairs! : 0,
+    fallbackReason: typeof evidence.fallbackReason === 'string' ? evidence.fallbackReason : 'provider_error',
+  };
 }
 
 async function validateModelingRelationship(
@@ -20916,8 +22125,110 @@ function createDqlArtifactExecutionReceipt(
   };
 }
 
+function agentRunTelemetryForAnswer(
+  answer: AgentAnswer,
+  egressReceipts: ProviderEgressReceiptV1[],
+  totalDurationMs: number,
+  narrationDurationMs: number,
+  engineRepairAttempts: number,
+): AgentRunTelemetryV1 {
+  const timings = new Map((answer.evidence?.timings ?? []).map((timing) => [timing.phase, timing.durationMs]));
+  const toolCalls = answer.evidence?.toolCalls ?? [];
+  const toolDurationMs = toolCalls.reduce((sum, call) => sum + Math.max(0, call.durationMs ?? 0), 0);
+  const warehouseDurationMs = answer.evidence?.execution?.executionTime ?? answer.result?.executionTime;
+  const counters = answer.evidence?.runtimeCounters;
+  const stageDurationsMs: AgentRunTelemetryV1['stageDurationsMs'] = {
+    ...(timings.has('project_state') ? { snapshot: timings.get('project_state')! } : {}),
+    ...(timings.has('context_retrieval') ? { retrieval: timings.get('context_retrieval')! } : {}),
+    ...(timings.has('runtime_schema') ? { schema: timings.get('runtime_schema')! } : {}),
+    ...(timings.has('source_search') ? { meaning: timings.get('source_search')! } : {}),
+    ...(timings.has('answer_resolution') ? { provider: timings.get('answer_resolution')! } : {}),
+    ...(toolCalls.length > 0 ? { tools: toolDurationMs } : {}),
+    ...(typeof warehouseDurationMs === 'number' ? { execution: Math.max(0, warehouseDurationMs) } : {}),
+    ...(narrationDurationMs > 0 ? { narration: narrationDurationMs } : {}),
+    total: Math.max(0, totalDurationMs),
+  };
+  return {
+    version: 1,
+    stageDurationsMs,
+    providerRoundTrips: counters?.providerRoundTrips ?? 0,
+    toolCalls: counters?.toolCalls ?? toolCalls.length,
+    sqlExecutions: counters?.sqlExecutions ?? 0,
+    repairs: Math.max(engineRepairAttempts, counters?.repairs ?? 0),
+    egressReceipts: egressReceipts.length,
+    ...(typeof warehouseDurationMs === 'number' ? { warehouseDurationMs: Math.max(0, warehouseDurationMs) } : {}),
+    ...(answer.refusalCode ? { fallbackReason: answer.refusalCode } : {}),
+  };
+}
+
 function executionFingerprint(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function buildSemanticAggregationCompilerReceipt(input: {
+  semanticLayer: SemanticLayer;
+  metricNames: string[];
+  compiledSql: string;
+  plan?: NonNullable<IntentDecision['resolvedAnalyticalPlan']>;
+  targetFingerprint?: string;
+}): SemanticAggregationCompilerReceiptV1 | undefined {
+  const plan = input.plan;
+  const metricId = plan?.analyticalFrame?.metricConceptIds[0];
+  if (input.metricNames.length !== 1 || !plan || !metricId || !plan.executionId
+    || !plan.selectedCapabilityFingerprint || !input.targetFingerprint) return undefined;
+  const metric = input.semanticLayer.getMetric(input.metricNames[0]);
+  if (!metric || (metric.aggregation ?? metric.metricType)?.toLowerCase() !== 'ratio') return undefined;
+  const refName = (value: unknown): string | undefined => {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const name = (value as Record<string, unknown>).name;
+    return typeof name === 'string' && name.trim() ? name.trim() : undefined;
+  };
+  const numeratorName = refName(metric.typeParams?.numerator);
+  const denominatorName = refName(metric.typeParams?.denominator);
+  if (!numeratorName || !denominatorName || !metric.sql.trim()) return undefined;
+  const measures = [numeratorName, denominatorName].map((name) => {
+    const matches = input.semanticLayer.listMeasures().filter((measure) => measure.name === name
+      && (!metric.cube || !measure.cube || measure.cube === metric.cube));
+    return matches.length === 1 ? matches[0] : undefined;
+  });
+  if (measures.some((measure) => !measure)) return undefined;
+  const relations = Array.from(new Set(measures.map((measure) => measure!.table.trim()).filter(Boolean)));
+  if (relations.length !== 1) return undefined;
+  const outputAlias = metricId.split(/[:.]/).at(-1);
+  if (!outputAlias) return undefined;
+  const orderedMeasureIds = measures.map((measure) =>
+    `semantic:${measure!.domain || 'uncategorized'}:measure:${measure!.cube ? `${measure!.cube}.` : ''}${measure!.name}`);
+  const compiledSqlFingerprint = semanticExecutionFingerprint(input.compiledSql);
+  const compiledOutputExpression = buildSqlOutputExpressionSignature(input.compiledSql, outputAlias);
+  if (!compiledOutputExpression) return undefined;
+  const compiledExpressionFingerprint = semanticExecutionFingerprint(compiledOutputExpression.canonicalExpression);
+  const compiledSignature = buildGeneratedAnalyticalSqlSignature(input.compiledSql);
+  if (!compiledSignature) return undefined;
+  const body = {
+    version: 1 as const,
+    executionId: plan.executionId,
+    capabilityFingerprint: plan.selectedCapabilityFingerprint,
+    metricId,
+    metricExpressionSql: metric.sql,
+    operator: 'ratio' as const,
+    orderedMeasureIds,
+    physicalRelation: relations[0],
+    relationAliases: Array.from(new Set([metric.cube, ...measures.map((measure) => measure!.cube)].filter((value): value is string => Boolean(value)))),
+    outputAlias,
+    dimensionIds: [...new Set(plan.analyticalFrame?.dimensions.map((dimension) => dimension.dimensionId) ?? [])].sort(),
+    relationshipPathIds: [...plan.relationshipPathIds].sort(),
+    relationshipProofFingerprints: [...new Set(
+      plan.relationshipProofs?.map((proof) => proof.authorityFingerprint) ?? [],
+    )].sort(),
+    orderBy: compiledSignature.orderBy,
+    compiledSqlFingerprint,
+    compiledExpressionFingerprint,
+    planFingerprint: plan.fingerprint,
+    snapshotId: plan.snapshotId,
+    targetFingerprint: input.targetFingerprint,
+  };
+  return { ...body, receiptFingerprint: semanticExecutionFingerprint(body) };
 }
 
 /**
@@ -21453,6 +22764,70 @@ export interface AnalyticalExecutionPreparation {
   connection: ConnectionConfig;
   rewrites: Array<{ from: string; to: string }>;
   rowBound?: AnalyticalRowBoundResult;
+}
+
+export interface ExecutionServiceInput {
+  sql: string;
+  subject: string;
+  connection: ConnectionConfig;
+  enforceReadOnly?: boolean;
+  rowLimit?: number;
+  sqlParams?: SQLParamSpec[];
+  variables?: Record<string, unknown>;
+  semanticRefs?: { metrics: string[]; dimensions: string[] };
+  executePrepared?: (preparation: AnalyticalExecutionPreparation) => Promise<QueryResult>;
+}
+
+export interface ExecutionServiceResult {
+  preparation: AnalyticalExecutionPreparation;
+  result: ReturnType<typeof normalizeQueryResult>;
+  compiledSqlFingerprint: string;
+  resultFingerprint: string;
+}
+
+/**
+ * The single connector boundary for Ask, Notebook, and artifact execution.
+ * Callers compile their route-specific source first; this service owns target
+ * preparation, parameters, execution, and result normalization after that.
+ */
+export class ExecutionService {
+  constructor(private readonly host: {
+    executor: QueryExecutor;
+    projectRoot: string;
+    projectConfig: () => ProjectConfig;
+  }) {}
+
+  async execute(input: ExecutionServiceInput): Promise<ExecutionServiceResult> {
+    const preparation = await prepareAnalyticalExecutionSql({
+      sql: input.sql,
+      subject: input.subject,
+      executor: this.host.executor,
+      connection: input.connection,
+      projectRoot: this.host.projectRoot,
+      projectConfig: this.host.projectConfig(),
+      enforceReadOnly: input.enforceReadOnly,
+      rowLimit: input.rowLimit,
+    });
+    const raw = input.executePrepared
+      ? await input.executePrepared(preparation)
+      : await this.host.executor.executeQuery(
+          preparation.executedSql,
+          input.sqlParams ?? [],
+          runtimeVariables(input.variables ?? {}),
+          preparation.connection,
+        );
+    const result = normalizeQueryResult(raw, input.semanticRefs);
+    return {
+      preparation,
+      result,
+      compiledSqlFingerprint: executionFingerprint(preparation.executedSql),
+      resultFingerprint: executionFingerprint(stableExecutionValue({
+        columns: result.columns,
+        rows: result.rows,
+        rowCount: result.rowCount,
+      })),
+    };
+  }
 }
 
 /**

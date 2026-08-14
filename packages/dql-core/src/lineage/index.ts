@@ -2,12 +2,19 @@
 
 export {
   analyzeSqlReferences,
+  buildSqlAnalyticalSignature,
+  buildGeneratedAnalyticalSqlSignature,
+  buildSqlOutputExpressionSignature,
   extractTablesFromSql,
   type SqlColumnReference,
   type SqlParseResult,
   type SqlReferenceAnalysis,
   type SqlJoinCondition,
   type SqlAggregateReference,
+  type SqlAnalyticalSignature,
+  type SqlOutputExpressionSignature,
+  type GeneratedAnalyticalSqlSignatureV1,
+  type GeneratedAnalyticalOutputSignature,
 } from './sql-parser.js';
 
 export {

@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   analyticalRepairTrustTransition,
+  normalizeAnalyticalRepairCapabilityV1,
   normalizeAnalyticalFailureV1,
   normalizeAnalyticalFailureV2,
   normalizeAnalyticalQuestionFrameV2,
+  normalizeProviderEgressReceiptV1,
   type AnalyticalQuestionFrameV2,
 } from './analytical.js';
 
@@ -206,6 +208,64 @@ describe('analytical cross-surface contracts (CONTRACT-002 / AGT-017 / API-007)'
       next: 'review_required',
       requiresReview: true,
       preservesCertifiedAssetIdentity: false,
+    });
+  });
+
+  it('normalizes typed automatic repair authority and fails closed on incomplete authority', () => {
+    const capability = normalizeAnalyticalRepairCapabilityV1({
+      version: 1,
+      automatic: {
+        eligible: true,
+        action: 'repair_embedded_sql',
+        correctionCode: 'SQL_EXECUTION_REPAIR',
+        attemptsRemaining: 1,
+      },
+      failureFingerprint: 'sha256:failure',
+      sourceFingerprint: 'sha256:source',
+      planFingerprint: 'sha256:plan',
+      dqlFingerprint: 'sha256:dql',
+      sqlFingerprint: 'sha256:sql',
+      targetFingerprint: 'sha256:target',
+      routeLocked: true,
+      targetLocked: true,
+      sourceImmutable: true,
+      manualActions: ['edit_dql', 'open_sql_notebook'],
+    });
+
+    expect(capability?.automatic).toEqual({
+      eligible: true,
+      action: 'repair_embedded_sql',
+      correctionCode: 'SQL_EXECUTION_REPAIR',
+      attemptsRemaining: 1,
+    });
+    expect(normalizeAnalyticalRepairCapabilityV1({
+      ...capability,
+      automatic: { eligible: true, action: 'none', correctionCode: 'MANUAL_REVIEW_REQUIRED', attemptsRemaining: 0 },
+    })).toBeUndefined();
+  });
+
+  it('normalizes content-free egress receipts and rejects unconsented row counts', () => {
+    const receipt = normalizeProviderEgressReceiptV1({
+      version: 1,
+      purpose: 'research_narration',
+      dispatchPhase: 'narration',
+      provider: 'openai',
+      permittedCategories: ['question', 'schema_metadata', 'result_rows'],
+      resultRowCount: 20,
+      cumulativeResultRowCount: 20,
+      columnCount: 3,
+      redactionPolicyId: 'research-result-rows-v1',
+      optIn: true,
+      payloadFingerprint: 'sha256:payload',
+    });
+    expect(receipt).toMatchObject({ dispatchPhase: 'narration', resultRowCount: 20, cumulativeResultRowCount: 20, columnCount: 3, optIn: true });
+    expect(JSON.stringify(receipt)).not.toContain('Ada Canary');
+    expect(normalizeProviderEgressReceiptV1({ ...receipt, optIn: false })).toBeUndefined();
+    expect(normalizeProviderEgressReceiptV1({ ...receipt, cumulativeResultRowCount: 19 })).toBeUndefined();
+    expect(normalizeProviderEgressReceiptV1({ ...receipt, dispatchPhase: 'untrusted_phase' })).toBeUndefined();
+    expect(normalizeProviderEgressReceiptV1({ ...receipt, dispatchPhase: undefined })).toMatchObject({
+      version: 1,
+      purpose: 'research_narration',
     });
   });
 });

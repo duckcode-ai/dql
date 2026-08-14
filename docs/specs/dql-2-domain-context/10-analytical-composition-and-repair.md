@@ -479,6 +479,27 @@ the caller is authorized to inspect. Logs, telemetry, and streamed phase events
 redact secrets, sensitive parameter values, raw provider prompts, and
 unauthorized metadata.
 
+Each prepared Ask/Notebook execution may also carry `DqlExecutableArtifactV1`:
+a content-free binding of the immutable DQL/source, compiled and normalized SQL,
+exact parameter/provenance, target, snapshot, plan, semantic adapter, preview
+policy, trust state, and execution receipt fingerprints. Generated SQL and DQL
+artifacts use the existing compiler/preparation boundary; this contract does not
+introduce a second parser or alter Notebook authoring.
+
+Generated aggregation decisions carry `AggregationSafetyProofV1`. Safety comes
+only from positive metric provenance, native/requested grain, additivity,
+cardinality, fanout, and rounding evidence. Missing evidence is `blocked`, and a
+successful warehouse execution is never authority. The current shared parser
+does not expose nested-expression AST nodes or source spans, so
+`SUM(ROUND(x,n)) -> ROUND(SUM(x),n)` remains blocked with
+`AST_SAFE_ROUNDING_REWRITE_UNAVAILABLE`; text/regex rewriting is forbidden.
+
+`AgentRunDiagnosticReceiptV2` adds only bounded `AgentRunTelemetryV1` durations,
+counts, and receipt/capability fingerprints. V1 receipts remain readable. The
+Ask inspector displays total versus warehouse time, recorded stages and calls,
+and content-free provider-row egress; legacy runs say that performance details
+were not recorded.
+
 ### 11.1 Repair actions
 
 - **Retry same plan:** appropriate for a transient connector failure; no

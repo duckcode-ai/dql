@@ -65,7 +65,7 @@ describe('resolveEffectiveQuestion — clarify follow-up folding', () => {
 });
 
 describe('answer-loop tool surface', () => {
-  it('uses the canonical registry surface instead of a provider-local allowlist', () => {
+  it('defaults Research row tools off and enables only the bounded tools on explicit opt-in', () => {
     const tools = __test__.buildAnswerLoopTools('/tmp/dql-agent-provider-tools');
     const names = tools.map((tool) => tool.name);
 
@@ -74,11 +74,25 @@ describe('answer-loop tool surface', () => {
       "search_project_files",
       "list_notebook_datasets",
       "describe_notebook_dataset",
+      "propose_cross_source_join",
+    ]);
+    expect(names).not.toEqual(expect.arrayContaining([
+      "sample_notebook_dataset",
+      "execute_local_analysis",
+    ]));
+    const optedInNames = __test__.buildAnswerLoopTools('/tmp/dql-agent-provider-tools', {
+      researchResultRowsOptIn: true,
+    }).map((tool) => tool.name);
+    expect(optedInNames).toEqual([
+      ...dqlToolNamesForSurface("answer_loop"),
+      "search_project_files",
+      "list_notebook_datasets",
+      "describe_notebook_dataset",
       "sample_notebook_dataset",
       "propose_cross_source_join",
       "execute_local_analysis",
     ]);
-    expect(names).toEqual(
+    expect(optedInNames).toEqual(
       expect.arrayContaining([
         "expand_context",
         "search_metadata",
@@ -99,6 +113,12 @@ describe('answer-loop tool surface', () => {
         "query_via_block",
       ]),
     );
+  });
+
+  it('labels local-analysis follow-ups separately from bounded narration samples', () => {
+    expect(__test__.researchDispatchPurposeForTool('execute_local_analysis')).toBe('research_tool');
+    expect(__test__.researchDispatchPurposeForTool('sample_notebook_dataset')).toBe('research_narration');
+    expect(__test__.researchDispatchPurposeForTool('search_project_files')).toBe('research_narration');
   });
 });
 

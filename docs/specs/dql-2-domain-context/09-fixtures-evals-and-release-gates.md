@@ -300,8 +300,9 @@ query/result fingerprints, stable error, call counts, timings, bytes, RSS, and
 source-artifact reads. Browser, direct CLI, MCP, and Chat compare these identities
 rather than comparing prose or SQL formatting (`API-006`, `E2E-012`).
 
-Explicit Research is bounded to one planner, six SQL executions, one total
-repair, one narrator, and the existing 120-second wall-clock budget. Every
+Explicit Research is bounded to twelve physical provider sends total, one
+planner, six SQL executions, one total repair, one narrator, and the existing
+120-second wall-clock budget. Every
 numeric claim must reference a successful execution receipt; partial evidence
 cannot be presented as a completed causal conclusion (`AGT-016`).
 
@@ -316,9 +317,9 @@ Budgets on the documented reference developer machine:
 | evidence package assembly | p95 `< 250ms` after retrieval; `8–12` cards; `<= 12,000` tokens |
 | natural-language meaning resolution | `<= 1` call; `<= 15s`; `<= 600` output tokens |
 | direct certified/semantic dispatch | `< 1s` excluding warehouse; no planner/tool-loop/synthesis |
-| generated lookup | `<= 1` meaning + `<= 1` generation + `<= 1` repair |
+| generated lookup | `<= 2` physical provider sends total across meaning and generation; no ordinary LLM replan; `<= 1` SQL |
 | standard analytical run | `< 45s` excluding separately reported warehouse delay |
-| explicit research run | `< 120s`; `<= 1` planner and `<= 1` narrator |
+| explicit research run | `< 120s`; `<= 12` physical provider sends total; `<= 1` planner and `<= 1` narrator |
 | warm Domain Workspace summary | p95 `< 250ms` |
 | inventory first page | `< 500KB` uncompressed response |
 | node detail | p95 `< 100ms`, no full artifact parse |

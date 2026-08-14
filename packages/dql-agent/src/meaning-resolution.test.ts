@@ -57,7 +57,7 @@ describe("AGT-010 meaning-resolution evidence boundary", () => {
     ]);
   });
 
-  it("removes ineligible evidence and bounds noisy candidates per trust lane", () => {
+  it("removes ineligible evidence and bounds noisy candidates per evidence lane", () => {
     const sql = Array.from({ length: 20 }, (_, index) => candidate({
       id: `sql:table:${index}`,
       kind: "sql_table",
@@ -70,6 +70,29 @@ describe("AGT-010 meaning-resolution evidence boundary", () => {
     expect(candidates).toHaveLength(5);
     expect(candidates.some((item) => item.id === "secret")).toBe(false);
     expect(candidates.some((item) => item.id.includes("rollover_balance"))).toBe(true);
+  });
+
+  it("keeps an executable semantic metric when same-tier member matches fill the package", () => {
+    const members = Array.from({ length: 8 }, (_, index) => candidate({
+      id: `semantic:member:region_${index}`,
+      kind: "semantic_member",
+      name: `Region ${index}`,
+      exactMatch: true,
+      relevanceScore: 1 - index / 100,
+    }));
+    const metricCandidate = candidate({
+      id: "semantic:metric:total_revenue",
+      name: "Total Revenue",
+      relevanceScore: 0.91,
+    });
+
+    const candidates = buildMeaningEvidencePackage({
+      candidates: [...members, metricCandidate],
+    }, 6);
+
+    expect(candidates).toHaveLength(4);
+    expect(candidates.some((item) => item.id === metricCandidate.id)).toBe(true);
+    expect(candidates.filter((item) => item.kind === "semantic_member")).toHaveLength(3);
   });
 
   it("recognizes a unique explicit reference without fuzzy guessing", () => {

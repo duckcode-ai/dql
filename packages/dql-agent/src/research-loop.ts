@@ -15,6 +15,7 @@ import { decideAgentAction, type AgentAction } from './intent-controller.js';
 import type { MetadataAgentIntent } from './metadata/catalog.js';
 import { matchSemanticMetric } from './metadata/metric-match.js';
 import type { KGNode } from './kg/types.js';
+import { authorityIdentitiesForKGNode } from './semantic-identities.js';
 import type { PlanBlock } from './app-planner.js';
 import type { ResolvedAnalyticalPlan } from './resolved-analytical-plan.js';
 
@@ -142,7 +143,7 @@ export async function planResearch(input: {
     (m) => backedNames.has(m.name.toLowerCase()) || backedNames.has(m.name.toLowerCase().split('.').pop() ?? ''),
   );
   const rootMetric = input.rootPlan?.executionId
-    ? input.metrics.find((metric) => nodeIdentities(metric).includes(input.rootPlan!.executionId!))
+    ? input.metrics.find((metric) => authorityIdentitiesForKGNode(metric).includes(input.rootPlan!.executionId!))
     : undefined;
   const match = input.rootPlan
     ? null
@@ -154,7 +155,9 @@ export async function planResearch(input: {
   const decision = input.rootPlan
     ? {
         action: input.rootPlan.capability === 'blocked'
-          ? 'clarify' as const
+          ? input.rootPlan.resolutionFailure?.outcome === 'clarify'
+            ? 'clarify' as const
+            : 'block' as const
           : (input.forceInvestigate || input.rootPlan.questionType === 'diagnosis' || input.rootPlan.questionType === 'research')
             ? 'investigate' as const
             : 'answer' as const,
@@ -195,6 +198,19 @@ export async function planResearch(input: {
     if (input.rootPlan.executionId) sources.add(input.rootPlan.executionId);
   } else if (metricName) sources.add(metricName);
   for (const b of metricBlocks) sources.add(b.name);
+
+  if (action === 'block') {
+    return {
+      decision: 'block',
+      confidence: decision.confidence,
+      rationale: decision.reason,
+      steps: [],
+      sources: Array.from(sources),
+      done: false,
+      rootPlanId: input.rootPlan?.rootPlanId ?? input.rootPlan?.planId,
+      budget: RESEARCH_BUDGET,
+    };
+  }
 
   // ── compose_app: hand off to the app planner (P1). ───────────────────────────
   if (action === 'compose_app') {
@@ -306,16 +322,6 @@ export async function planResearch(input: {
     rootPlanId: input.rootPlan?.rootPlanId ?? input.rootPlan?.planId,
     budget: RESEARCH_BUDGET,
   };
-}
-
-function nodeIdentities(node: KGNode): string[] {
-  const payload = node.payload ?? {};
-  return [
-    node.nodeId,
-    typeof payload.qualifiedId === 'string' ? payload.qualifiedId : undefined,
-    typeof payload.sourceNativeId === 'string' ? payload.sourceNativeId : undefined,
-    ...(Array.isArray(payload.aliases) ? payload.aliases.filter((value): value is string => typeof value === 'string') : []),
-  ].filter((value): value is string => Boolean(value));
 }
 
 /**

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { SemanticLayer, type DQLManifest } from '@duckcodeailabs/dql-core';
 import { buildKGFromManifest, buildKGFromSemanticLayer } from './build.js';
+import { buildResolvedAnalyticalPlan } from '../resolved-analytical-plan.js';
+import type { AgentEvidenceCandidate } from '../meaning-resolution.js';
 
 describe('buildKGFromManifest', () => {
   it('indexes business terms and business views as first-class KG context', () => {
@@ -500,11 +502,15 @@ describe('buildKGFromManifest', () => {
       timeDimensions: [{
         name: 'ordered_at', label: 'Ordered at', description: '', sql: 'ordered_at',
         type: 'date', table: 'analytics.orders', cube: 'orders', isTimeDimension: true,
-        granularities: ['day', 'week', 'month', 'quarter', 'year'], primaryTime: true,
+        granularities: ['day', 'week', 'month', 'quarter', 'year'],
         source: {
           provider: 'dbt', objectType: 'time_dimension', objectId: 'dimension.orders.ordered_at',
           extra: { raw: { meta: { dql: { time_role: 'order_event_time' } } } },
         },
+      }, {
+        name: 'loaded_at', label: 'Loaded at', description: '', sql: 'loaded_at',
+        type: 'date', table: 'analytics.orders', cube: 'orders', isTimeDimension: true,
+        granularities: ['day', 'week', 'month'], primaryTime: true,
       }],
       joins: [], segments: [], preAggregations: [], defaultTimeDimension: 'ordered_at',
     });
@@ -516,18 +522,37 @@ describe('buildKGFromManifest', () => {
       name: 'revenue', label: 'Revenue', description: '', agg: 'sum', expr: 'revenue_amount',
       table: 'analytics.orders', cube: 'orders', domain: 'sales', aggTimeDimension: 'ordered_at',
     });
+    layer.addMeasure({
+      name: 'median_revenue_measure', label: 'Median revenue', description: '', agg: 'median', expr: 'revenue_amount',
+      table: 'analytics.orders', cube: 'orders', domain: 'sales', aggTimeDimension: 'ordered_at',
+    });
+    layer.addMeasure({
+      name: 'order_count', label: 'Order count', description: '', agg: 'count', expr: 'order_id',
+      table: 'analytics.orders', cube: 'orders', domain: 'sales', aggTimeDimension: 'ordered_at',
+    });
     layer.addSemanticModel({
       name: 'orders', label: 'Orders', description: '', domain: 'sales', table: 'analytics.orders',
-      entities: ['order'], measures: ['revenue'], dimensions: ['customer_name'], timeDimensions: ['ordered_at'],
+      entities: ['order'], measures: ['revenue', 'median_revenue_measure', 'order_count'], dimensions: ['customer_name'], timeDimensions: ['ordered_at', 'loaded_at'],
     });
     layer.addMetric({
       name: 'revenue', label: 'Revenue', description: 'Recognized revenue.', domain: 'sales',
-      sql: 'revenue', type: 'custom', metricType: 'simple', aggregation: 'sum', table: '',
+      sql: 'revenue', type: 'simple', metricType: 'simple', aggregation: 'simple', table: '',
       cube: 'orders', aggTimeDimension: 'ordered_at', typeParams: { measure: { name: 'revenue' } },
       source,
     });
+    layer.addMetric({
+      name: 'median_revenue', label: 'Median revenue', description: '', domain: 'sales',
+      sql: 'median_revenue_measure', type: 'simple', metricType: 'simple', aggregation: 'simple', table: '',
+      cube: 'orders', typeParams: { measure: { name: 'median_revenue_measure' } }, source,
+    });
+    layer.addMetric({
+      name: 'revenue_per_order', label: 'Revenue per order', description: '', domain: 'sales',
+      sql: 'revenue / order_count', type: 'ratio', metricType: 'ratio', aggregation: 'ratio', table: '',
+      cube: 'orders', typeParams: { input_measures: [{ name: 'revenue' }, { name: 'order_count' }] }, source,
+    });
 
-    const metric = buildKGFromSemanticLayer(layer).nodes.find((node) => node.nodeId === 'metric:orders.revenue');
+    const graph = buildKGFromSemanticLayer(layer);
+    const metric = graph.nodes.find((node) => node.nodeId === 'metric:orders.revenue');
     expect(metric?.payload?.analyticalCapability).toMatchObject({
       metricId: 'semantic:sales:revenue',
       semanticModelId: 'semantic:sales:model:orders',
@@ -538,17 +563,172 @@ describe('buildKGFromManifest', () => {
         dimensionId: 'semantic:sales:dimension:orders.customer_name',
         entityId: 'semantic:sales:entity:orders.order',
         supportedRoles: ['group_by', 'filter', 'display', 'rank_entity'],
+        label: 'Customer',
+        aliases: expect.arrayContaining(['customer_name', 'Customer', 'orders.customer_name']),
+        nativeGroupingReference: 'customer_name',
+        nativeGroupingPath: [],
       }],
       timeDimensions: [{
         dimensionId: 'semantic:sales:dimension:orders.ordered_at',
         role: 'order_event_time',
         defaultFor: ['scalar', 'trend', 'comparison'],
+      }, {
+        dimensionId: 'semantic:sales:dimension:orders.loaded_at',
+        role: 'semantic:sales:dimension:orders.loaded_at',
+        supportedGrains: ['day', 'week', 'month'],
       }],
       freshness: { defaultCompletenessPolicy: 'latest_complete' },
       operations: ['filter', 'group', 'trend', 'rank'],
       executionCapabilities: [{ route: 'semantic', adapterId: 'metricflow' }],
       sourceFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
     });
+    expect(graph.nodes.find((node) => node.nodeId === 'metric:orders.median_revenue')?.payload?.analyticalCapability).toMatchObject({
+      aggregation: 'median',
+      additivity: { entities: 'non_additive', time: 'non_additive' },
+    });
+    expect(graph.nodes.find((node) => node.nodeId === 'metric:orders.revenue_per_order')?.payload?.analyticalCapability).toMatchObject({
+      aggregation: 'ratio',
+      additivity: { entities: 'non_additive', time: 'non_additive' },
+      measureIds: expect.arrayContaining([
+        'semantic:sales:measure:orders.revenue',
+        'semantic:sales:measure:orders.order_count',
+      ]),
+    });
+  });
+
+  it('AGT-012 admits only exact non-ambiguous native cross-model grouping paths', () => {
+    const layer = new SemanticLayer();
+    layer.addCube({
+      name: 'order_item', label: 'Order item', description: '', sql: 'select * from order_items', table: 'order_items',
+      measures: [],
+      dimensions: [
+        { name: 'is_drink_item', label: 'Is drink item', description: '', sql: 'is_drink_item', type: 'boolean', table: 'order_items', cube: 'order_item', entityLink: 'order_item', qualifiedName: 'order_item__is_drink_item' },
+        { name: 'is_food_item', label: 'Is food item', description: '', sql: 'is_food_item', type: 'boolean', table: 'order_items', cube: 'order_item', entityLink: 'order_item', qualifiedName: 'order_item__is_food_item' },
+      ],
+      timeDimensions: [], preAggregations: [], segments: [],
+      joins: [{ name: 'orders', left: 'order_item', right: 'orders', type: 'left', sql: '${left}.order_id = ${right}.order_id', entity: 'order_id' }],
+    });
+    layer.addCube({
+      name: 'orders', label: 'Orders', description: '', sql: 'select * from orders', table: 'orders', measures: [],
+      dimensions: [
+        { name: 'customer_order_number', label: 'Customer order number', description: '', sql: 'customer_order_number', type: 'number', table: 'orders', cube: 'orders', entityLink: 'order_id', qualifiedName: 'order_id__customer_order_number' },
+      ],
+      timeDimensions: [], preAggregations: [], segments: [],
+      joins: [{ name: 'customers', left: 'orders', right: 'customers', type: 'left', sql: '${left}.customer_id = ${right}.customer_id', entity: 'customer' }],
+    });
+    layer.addCube({
+      name: 'customers', label: 'Customers', description: '', sql: 'select * from customers', table: 'customers', measures: [],
+      dimensions: [
+        { name: 'customer_name', label: 'Customer', description: 'Customer display identity.', sql: 'customer_name', type: 'string', table: 'customers', cube: 'customers', entityLink: 'customer', qualifiedName: 'customer__customer_name' },
+        { name: 'customer_type', label: 'Customer type', description: '', sql: 'customer_type', type: 'string', table: 'customers', cube: 'customers', entityLink: 'customer', qualifiedName: 'customer__customer_type' },
+      ],
+      timeDimensions: [], joins: [], preAggregations: [], segments: [],
+    });
+    layer.addEntity({ name: 'order_item', label: 'Order item', description: '', type: 'primary', expr: 'order_item_id', table: 'order_items', cube: 'order_item', domain: 'commerce' });
+    layer.addEntity({ name: 'order_id', label: 'Order', description: '', type: 'foreign', expr: 'order_id', table: 'order_items', cube: 'order_item', domain: 'commerce' });
+    layer.addEntity({ name: 'order_id', label: 'Order', description: '', type: 'primary', expr: 'order_id', table: 'orders', cube: 'orders', domain: 'commerce' });
+    layer.addEntity({ name: 'customer', label: 'Customer', description: '', type: 'foreign', expr: 'customer_id', table: 'orders', cube: 'orders', domain: 'commerce' });
+    layer.addEntity({ name: 'customer', label: 'Customer', description: '', type: 'primary', expr: 'customer_id', table: 'customers', cube: 'customers', domain: 'commerce' });
+    layer.addMeasure({ name: 'revenue_measure', label: 'Revenue', description: '', agg: 'sum', expr: 'revenue', table: 'order_items', cube: 'order_item', domain: 'commerce' });
+    layer.addSemanticModel({ name: 'order_item', label: 'Order item', description: '', table: 'order_items', domain: 'commerce', entities: ['order_item', 'order_id'], measures: ['revenue_measure'], dimensions: ['is_drink_item', 'is_food_item'], timeDimensions: [] });
+    layer.addSemanticModel({ name: 'orders', label: 'Orders', description: '', table: 'orders', domain: 'commerce', entities: ['order_id', 'customer'], measures: [], dimensions: ['customer_order_number'], timeDimensions: [] });
+    layer.addSemanticModel({ name: 'customers', label: 'Customers', description: '', table: 'customers', domain: 'commerce', entities: ['customer'], measures: [], dimensions: ['customer_name', 'customer_type'], timeDimensions: [] });
+    layer.addMetric({ name: 'revenue', label: 'Revenue', description: '', sql: 'revenue_measure', type: 'simple', metricType: 'simple', aggregation: 'sum', table: 'order_items', cube: 'order_item', domain: 'commerce', typeParams: { measure: { name: 'revenue_measure' } } });
+
+    const capability = buildKGFromSemanticLayer(layer).nodes
+      .find((node) => node.nodeId === 'metric:order_item.revenue')?.payload?.analyticalCapability as NonNullable<AgentEvidenceCandidate['analyticalCapability']>;
+    const dimensions = capability.dimensions ?? [];
+    expect(dimensions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        dimensionId: 'semantic:customers:dimension:customers.customer_name',
+        entityId: 'semantic:commerce:entity:customers.customer',
+        label: 'Customer',
+        nativeGroupingReference: 'order_id__customer__customer_name',
+        nativeGroupingPath: ['order_id', 'customer'],
+      }),
+      expect.objectContaining({ dimensionId: 'semantic:customers:dimension:customers.customer_type', nativeGroupingReference: 'order_id__customer__customer_type' }),
+      expect.objectContaining({ dimensionId: 'semantic:order_item:dimension:order_item.is_drink_item' }),
+    ]));
+    const repeated = buildKGFromSemanticLayer(layer).nodes
+      .find((node) => node.nodeId === 'metric:order_item.revenue')?.payload?.analyticalCapability as { sourceFingerprint?: string };
+    expect(repeated.sourceFingerprint).toBe(capability.sourceFingerprint);
+
+    const metric: AgentEvidenceCandidate = {
+      id: 'metric:order_item.revenue', qualifiedId: capability.metricId, kind: 'semantic_metric', trustTier: 'semantic',
+      name: 'Revenue', aliases: ['revenue'], relevanceScore: 1, matchReasons: ['exact metric'], compatibility: 'compatible', analyticalCapability: capability,
+    };
+    const plan = buildResolvedAnalyticalPlan({
+      question: 'Which customers have the highest revenue?',
+      resolution: {
+        interpretedQuestion: 'Rank customers by revenue.', questionType: 'ranking', selectedConceptIds: [metric.id], recommendedExecutionId: metric.id,
+        queryIntent: { measures: ['revenue'], dimensions: ['customer'], filters: [], order: 'desc', limit: 10 },
+        rejectedCandidates: [], confidence: 'high', missingInformation: [], recommendedRoute: 'semantic',
+      },
+      evidence: { snapshotId: 'snapshot-cross-model', candidates: [metric] },
+      candidates: [metric],
+    });
+    expect(plan.query.dimensions).toEqual([expect.objectContaining({
+      qualifiedId: 'semantic:customers:dimension:customers.customer_name',
+      status: 'resolved',
+    })]);
+    expect(plan.capability).toBe('semantic_execution');
+    expect(plan.compatibilityProof).toContainEqual(expect.objectContaining({
+      facts: expect.arrayContaining([
+        'capability:native_grouping:semantic:customers:dimension:customers.customer_name:order_id__customer__customer_name',
+      ]),
+    }));
+  });
+
+  it('AGT-012 excludes cross-model dimensions when the native path is absent', () => {
+    const layer = new SemanticLayer();
+    layer.addCube({ name: 'work_order', label: 'Work order', description: '', sql: 'select * from work_orders', table: 'work_orders', measures: [], dimensions: [], timeDimensions: [], joins: [], preAggregations: [], segments: [] });
+    layer.addCube({ name: 'workspaces', label: 'Workspaces', description: '', sql: 'select * from workspaces', table: 'workspaces', measures: [], dimensions: [{ name: 'workspace_label', label: 'Workspace', description: '', sql: 'workspace_label', type: 'string', table: 'workspaces', cube: 'workspaces', entityLink: 'workspace', qualifiedName: 'workspace__workspace_label' }], timeDimensions: [], joins: [], preAggregations: [], segments: [] });
+    layer.addEntity({ name: 'work_order', label: 'Work order', description: '', type: 'primary', table: 'work_orders', cube: 'work_order', domain: 'maintenance' });
+    layer.addEntity({ name: 'workspace', label: 'Workspace', description: '', type: 'primary', table: 'workspaces', cube: 'workspaces', domain: 'maintenance' });
+    layer.addMeasure({ name: 'open_cost_measure', label: 'Open cost', description: '', agg: 'sum', table: 'work_orders', cube: 'work_order', domain: 'maintenance' });
+    layer.addSemanticModel({ name: 'work_order', label: 'Work order', description: '', table: 'work_orders', domain: 'maintenance', entities: ['work_order'], measures: ['open_cost_measure'], dimensions: [], timeDimensions: [] });
+    layer.addSemanticModel({ name: 'workspaces', label: 'Workspaces', description: '', table: 'workspaces', domain: 'maintenance', entities: ['workspace'], measures: [], dimensions: ['workspace_label'], timeDimensions: [] });
+    layer.addMetric({ name: 'open_cost', label: 'Open cost', description: '', sql: 'open_cost_measure', type: 'simple', metricType: 'simple', aggregation: 'sum', table: 'work_orders', cube: 'work_order', domain: 'maintenance', typeParams: { measure: { name: 'open_cost_measure' } } });
+
+    const capability = buildKGFromSemanticLayer(layer).nodes
+      .find((node) => node.nodeId === 'metric:work_order.open_cost')?.payload?.analyticalCapability as { dimensions?: Array<{ dimensionId: string }> };
+    expect(capability.dimensions?.map((dimension) => dimension.dimensionId)).not.toContain('semantic:maintenance:dimension:workspaces.workspace_label');
+
+    layer.addCube({
+      name: 'work_order', label: 'Work order', description: '', sql: 'select * from work_orders', table: 'work_orders', measures: [], dimensions: [], timeDimensions: [], preAggregations: [], segments: [],
+      joins: [{ name: 'workspaces', left: 'work_order', right: 'workspaces', type: 'left', sql: '${left}.workspace_id = ${right}.workspace_id', entity: 'workspace' }],
+    });
+    const reachable = buildKGFromSemanticLayer(layer).nodes
+      .find((node) => node.nodeId === 'metric:work_order.open_cost')?.payload?.analyticalCapability as { dimensions?: Array<Record<string, unknown>> };
+    expect(reachable.dimensions).toContainEqual(expect.objectContaining({
+      dimensionId: 'semantic:workspaces:dimension:workspaces.workspace_label',
+      entityId: 'semantic:maintenance:entity:workspaces.workspace',
+      label: 'Workspace',
+      nativeGroupingReference: 'workspace__workspace_label',
+      nativeGroupingPath: ['workspace'],
+    }));
+
+    // Two model-owned dimensions that compile to the same native grouping
+    // reference are not safe capability evidence. The adapter can expose both
+    // as reachable, but the KG must refuse to choose either one.
+    layer.addCube({
+      name: 'workspace_archive', label: 'Workspace archive', description: '', sql: 'select * from workspace_archive', table: 'workspace_archive', measures: [],
+      dimensions: [{ name: 'workspace_label', label: 'Archived workspace', description: '', sql: 'workspace_label', type: 'string', table: 'workspace_archive', cube: 'workspace_archive', entityLink: 'workspace', qualifiedName: 'workspace__workspace_label' }],
+      timeDimensions: [], joins: [], preAggregations: [], segments: [],
+    });
+    layer.addEntity({ name: 'workspace', label: 'Workspace archive', description: '', type: 'primary', table: 'workspace_archive', cube: 'workspace_archive', domain: 'maintenance' });
+    layer.addSemanticModel({ name: 'workspace_archive', label: 'Workspace archive', description: '', table: 'workspace_archive', domain: 'maintenance', entities: ['workspace'], measures: [], dimensions: ['workspace_label'], timeDimensions: [] });
+    layer.addCube({
+      name: 'work_order', label: 'Work order', description: '', sql: 'select * from work_orders', table: 'work_orders', measures: [], dimensions: [], timeDimensions: [], preAggregations: [], segments: [],
+      joins: [
+        { name: 'workspaces', left: 'work_order', right: 'workspaces', type: 'left', sql: '${left}.workspace_id = ${right}.workspace_id', entity: 'workspace' },
+        { name: 'workspace_archive', left: 'work_order', right: 'workspace_archive', type: 'left', sql: '${left}.workspace_id = ${right}.workspace_id', entity: 'workspace' },
+      ],
+    });
+    const ambiguous = buildKGFromSemanticLayer(layer).nodes
+      .find((node) => node.nodeId === 'metric:work_order.open_cost')?.payload?.analyticalCapability as { dimensions?: Array<{ dimensionId: string }> };
+    expect(ambiguous.dimensions?.map((dimension) => dimension.dimensionId)).not.toContain('semantic:workspaces:dimension:workspaces.workspace_label');
+    expect(ambiguous.dimensions?.map((dimension) => dimension.dimensionId)).not.toContain('semantic:workspace_archive:dimension:workspace_archive.workspace_label');
   });
 
   it('keeps synthetic physical dimensions model-scoped above the PERF-001 threshold', () => {

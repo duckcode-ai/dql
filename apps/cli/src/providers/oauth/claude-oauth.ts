@@ -1,7 +1,12 @@
 import * as crypto from 'node:crypto';
 import * as http from 'node:http';
 import { URL } from 'node:url';
-import type { AgentProvider, AgentMessage, ProviderRunOptions } from '@duckcodeailabs/dql-agent';
+import {
+  prepareProviderHttpDispatch,
+  type AgentProvider,
+  type AgentMessage,
+  type ProviderRunOptions,
+} from '@duckcodeailabs/dql-agent';
 import {
   getClaudeCredentials,
   setClaudeCredentials,
@@ -334,7 +339,12 @@ export class ClaudeOAuthProvider implements AgentProvider {
     const userId = generateUserId(this.manager.getEmail() || undefined);
     const maxTokens = options.maxTokens ?? this.maxTokens;
 
-    const body = {
+    const body = prepareProviderHttpDispatch({
+      provider: this.name,
+      operation: 'generate',
+      attemptIndex: 1,
+      options,
+      envelope: {
       model: options.model || this.defaultModel,
       max_tokens: maxTokens,
       system: [
@@ -344,7 +354,8 @@ export class ClaudeOAuthProvider implements AgentProvider {
       messages: turns,
       thinking: thinkingFor(options.reasoningEffort, maxTokens),
       metadata: { user_id: userId },
-    };
+      },
+    });
 
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',

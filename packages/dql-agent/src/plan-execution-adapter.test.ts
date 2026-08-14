@@ -6,6 +6,7 @@ import {
   adaptAnalyticalFreshnessRequest,
   adaptAnalyticalSemanticGraph,
   adaptResolvedAnalyticalPlan,
+  appendStableSemanticSecondaryOrder,
   buildPlanExecutionRegistry,
 } from './plan-execution-adapter.js';
 import type { AgentEvidenceCandidate, AgentRetrievalEvidence, MeaningResolution } from './meaning-resolution.js';
@@ -86,13 +87,38 @@ function semanticNodes(): KGNode[] {
     name: 'customer_name',
     domain: 'consumption',
     payload: {
-      qualifiedId: 'semantic:consumption:dimension:customer',
+      registryQualifiedId: 'semantic:consumption:dimension:customer',
+      qualifiedId: 'semantic:consumption:dimension:customer_name',
       localId: 'customer_name',
     },
   }];
 }
 
 describe('plan execution adapter (AGT-013 / AGT-014 / API-006)', () => {
+  it('adds only canonical frozen grouping dimensions as stable secondary order', () => {
+    expect(appendStableSemanticSecondaryOrder(
+      [{ name: 'revenue', direction: 'desc' }],
+      ['customer_name'],
+      'stable_secondary_key',
+    )).toEqual([
+      { name: 'revenue', direction: 'desc' },
+      { name: 'customer_name', direction: 'asc' },
+    ]);
+    expect(appendStableSemanticSecondaryOrder(
+      [{ name: 'revenue', direction: 'desc' }, { name: 'customer_name', direction: 'desc' }],
+      ['customer_name', 'region'],
+      'stable_secondary_key',
+    )).toEqual([
+      { name: 'revenue', direction: 'desc' },
+      { name: 'customer_name', direction: 'desc' },
+      { name: 'region', direction: 'asc' },
+    ]);
+    expect(appendStableSemanticSecondaryOrder(
+      [{ name: 'revenue', direction: 'desc' }],
+      ['customer_name'],
+      'include_ties',
+    )).toEqual([{ name: 'revenue', direction: 'desc' }]);
+  });
   it('binds exact qualified semantic IDs to a compiler selection without question rematching', () => {
     const layer = new SemanticLayer({
       metrics: [{ name: 'rollover_balance', label: 'Rollover', description: '', domain: 'consumption', sql: 'balance', type: 'sum', table: 'usage' }],
@@ -114,6 +140,46 @@ describe('plan execution adapter (AGT-013 / AGT-014 / API-006)', () => {
         limit: 10,
       },
     });
+  });
+
+  it('fails closed on duplicate canonical registry IDs and never binds a retrieval alias', () => {
+    const layer = new SemanticLayer({
+      metrics: [{ name: 'rollover_balance', label: 'Rollover', description: '', domain: 'consumption', sql: 'balance', type: 'sum', table: 'usage' }],
+      dimensions: [{ name: 'customer_name', label: 'Customer', description: '', domain: 'consumption', sql: 'customer_name', type: 'string', table: 'usage' }],
+    });
+    const duplicate = {
+      ...semanticNodes()[1]!,
+      nodeId: 'dimension:other.customer_name',
+      name: 'other_customer_name',
+      payload: {
+        registryQualifiedId: 'semantic:consumption:dimension:customer',
+        qualifiedId: 'semantic:other:dimension:customer_name',
+        localId: 'other_customer_name',
+      },
+    };
+    expect(adaptResolvedAnalyticalPlan({
+      plan: semanticPlan(),
+      registry: buildPlanExecutionRegistry({ nodes: [...semanticNodes(), duplicate] }),
+      semanticLayer: layer,
+      expectedSnapshotId: 'snapshot-1',
+    })).toMatchObject({ status: 'blocked', code: 'SEMANTIC_MEMBER_AMBIGUOUS' });
+
+    const forgedAliasNodes = semanticNodes().map((node) => node.kind === 'dimension'
+      ? {
+          ...node,
+          payload: {
+            ...node.payload,
+            registryQualifiedId: 'semantic:other:dimension:customer',
+            aliases: ['semantic:consumption:dimension:customer'],
+          },
+        }
+      : node);
+    expect(adaptResolvedAnalyticalPlan({
+      plan: semanticPlan(),
+      registry: buildPlanExecutionRegistry({ nodes: forgedAliasNodes }),
+      semanticLayer: layer,
+      expectedSnapshotId: 'snapshot-1',
+    })).toMatchObject({ status: 'blocked', code: 'SEMANTIC_MEMBER_MISSING' });
   });
 
   it('AGT-017 binds every resolved metric instead of collapsing to the execution metric', () => {
@@ -472,5 +538,18 @@ describe('plan execution adapter (AGT-013 / AGT-014 / API-006)', () => {
         },
       ],
     });
+
+    const { analyticalFrame: _frame, ...planWithoutFrame } = plan;
+    const noFrameBinding = adaptAnalyticalSemanticGraph({
+      graph: built.graph,
+      plan: planWithoutFrame,
+      registry: buildPlanExecutionRegistry({ nodes }),
+      semanticLayer: layer,
+      expectedSnapshotId: 'snapshot-1',
+    });
+    expect(noFrameBinding).toMatchObject({ status: 'ready', kind: 'semantic_graph' });
+    if (noFrameBinding.status === 'ready') {
+      expect(noFrameBinding.invocations.every((invocation) => invocation.selection.orderBy === undefined)).toBe(true);
+    }
   });
 });

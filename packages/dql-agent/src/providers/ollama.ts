@@ -3,6 +3,7 @@ import type {
   AgentMessage,
   ProviderRunOptions,
 } from './types.js';
+import { prepareProviderHttpDispatch } from './dispatch.js';
 
 /**
  * Local Ollama provider — talks to a local Ollama daemon on
@@ -29,12 +30,16 @@ export class OllamaProvider implements AgentProvider {
 
   async generate(messages: AgentMessage[], options: ProviderRunOptions = {}): Promise<string> {
     const errors: string[] = [];
+    let attemptIndex = 0;
     for (const baseUrl of await this.orderedBaseUrls()) {
       try {
-        const res = await fetch(`${baseUrl}/api/chat`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
+        attemptIndex += 1;
+        const envelope = prepareProviderHttpDispatch({
+          provider: this.name,
+          operation: 'generate',
+          attemptIndex,
+          options,
+          envelope: {
             model: options.model ?? this.defaultModel,
             messages: messages.map((m) => ({ role: m.role, content: m.content })),
             stream: false,
@@ -43,7 +48,12 @@ export class OllamaProvider implements AgentProvider {
               temperature: options.temperature ?? 0.2,
               num_predict: options.maxTokens ?? 1024,
             },
-          }),
+          },
+        });
+        const res = await fetch(`${baseUrl}/api/chat`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(envelope),
           signal: options.signal,
         });
         if (!res.ok) {
@@ -68,18 +78,27 @@ export class OllamaProvider implements AgentProvider {
     onDelta: (delta: string) => void,
   ): Promise<string> {
     const errors: string[] = [];
+    let attemptIndex = 0;
     for (const baseUrl of await this.orderedBaseUrls()) {
       try {
-        const res = await fetch(`${baseUrl}/api/chat`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
+        attemptIndex += 1;
+        const envelope = prepareProviderHttpDispatch({
+          provider: this.name,
+          operation: 'generate_stream',
+          attemptIndex,
+          options,
+          envelope: {
             model: options.model ?? this.defaultModel,
             messages: messages.map((m) => ({ role: m.role, content: m.content })),
             stream: true,
             think: false,
             options: { temperature: options.temperature ?? 0.2, num_predict: options.maxTokens ?? 1024 },
-          }),
+          },
+        });
+        const res = await fetch(`${baseUrl}/api/chat`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(envelope),
           signal: options.signal,
         });
         if (!res.ok || !res.body) {

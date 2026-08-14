@@ -1,9 +1,16 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  normalizeProviderEgressReceiptV1,
+  type AgentRunTelemetryV1,
+  type AnalyticalRepairCapabilityV1,
+  type ProviderEgressReceiptV1,
+} from '@duckcodeailabs/dql-core';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   classifyConversationalTurn,
   decideAgentAction,
+  looksLikeComposeApp,
   type IntentDecision,
   type IntentSignals,
 } from "./intent-controller.js";
@@ -20,6 +27,7 @@ import {
   type PartialCascadeBudgetModel,
 } from "./cascade/budgets.js";
 import type { MetadataAgentIntent } from "./metadata/catalog.js";
+import { buildAnalysisQuestionPlan } from "./metadata/analysis-planner.js";
 import type { ReasoningEffort, ThinkingMode } from "./providers/reasoning-effort.js";
 import {
   conversationHistoryFromContext,
@@ -62,8 +70,8 @@ export interface ResolvedPlanShadowComparison {
 }
 
 /**
- * Compare the pre-execution plan with the legacy route without changing the
- * route. This is the R3 shadow-mode cutover signal used before R4 enforcement.
+ * Compare the pre-execution plan with the selected route without changing it.
+ * Authoritative plans never emit or persist this migration-only diagnostic.
  * Acceptance: AGT-013, API-006.
  */
 export function compareResolvedPlanShadow(
@@ -71,7 +79,7 @@ export function compareResolvedPlanShadow(
   actualRoute: AgentRunRoute,
 ): ResolvedPlanShadowComparison | undefined {
   const plan = decision.resolvedAnalyticalPlan;
-  if (!plan) return undefined;
+  if (!plan || plan.mode !== 'shadow') return undefined;
   const plannedRoute: AgentRunRoute = decision.action === 'investigate'
     ? 'research'
     : plan.capability === 'certified_execution'
@@ -208,6 +216,19 @@ export interface AgentRunDiagnosticReceiptV1 {
   artifacts: AgentRunArtifact[];
   evaluations: AgentRunEvaluation[];
   failure?: AgentRunDiagnosticFailureV1;
+  repairCapability?: AnalyticalRepairCapabilityV1;
+  providerEgressReceipts?: ProviderEgressReceiptV1[];
+}
+
+/** Content-free additive diagnostics; V1 remains readable for legacy detail. */
+export interface AgentRunDiagnosticReceiptV2 {
+  version: 2;
+  runId: string;
+  route?: AgentRunRoute;
+  status: AgentRunStatus;
+  telemetry: AgentRunTelemetryV1;
+  providerEgressReceiptFingerprints: string[];
+  repairCapabilityFingerprint?: string;
 }
 
 export interface AgentRunNextAction {
@@ -249,6 +270,8 @@ export interface AgentRunRequest {
    */
   clarificationSourceQuestion?: string;
   requestedMode?: AgentRunRequestedMode;
+  /** Explicit, per-run Research consent. Never inherited by later runs. */
+  researchResultRowsOptIn?: boolean;
   /** Defaults to "analyst" (Notebook). Stakeholder surfaces pass "stakeholder". */
   audience?: AgentRunAudience;
   intent?: MetadataAgentIntent;
@@ -275,6 +298,23 @@ export interface AgentRunRequest {
   thinkingMode?: ThinkingMode;
   /** Host-only cancellation signal. JSON request parsers must never hydrate it. */
   signal?: AbortSignal;
+  /**
+   * Host-only single wall-clock authority. Soft targets stop new discovery;
+   * only `hardSignal` cancels a frozen plan/compile/execution. JSON parsers
+   * must never hydrate this object.
+   */
+  runBudget?: AgentRunBudget;
+}
+
+export interface AgentRunBudget {
+  readonly startedAtMs: number;
+  readonly hardDeadlineMs: number;
+  readonly hardSignal: AbortSignal;
+  readonly mode: 'ask' | 'research';
+  elapsedMs(): number;
+  remainingMs(): number;
+  softTargetMs(route: AgentRunRoute): number;
+  mayStartDiscovery(route: AgentRunRoute): boolean;
 }
 
 export interface AgentRunEvent {
@@ -385,6 +425,12 @@ export interface AgentRun {
   budgetUsage?: CascadeBudgetTrace;
   lifecycle?: AgentRunLifecycleV1;
   diagnosticReceipt?: AgentRunDiagnosticReceiptV1;
+  diagnosticReceiptV2?: AgentRunDiagnosticReceiptV2;
+  telemetry?: AgentRunTelemetryV1;
+  /** Server-owned automatic repair authority. Legacy runs omit it and fail closed. */
+  repairCapability?: AnalyticalRepairCapabilityV1;
+  /** Content-free provider payload evidence. */
+  providerEgressReceipts?: ProviderEgressReceiptV1[];
   /** The source run remains immutable; repaired executions are new runs. */
   derivation?: AgentRunDerivationV1;
 }
@@ -469,6 +515,8 @@ export interface AgentRouteExecutorResult {
   /** Executor-discovered ambiguity options, such as MetricFlow entity paths. */
   clarificationOptions?: AgentRunClarificationOption[];
   repairAttempts?: number;
+  providerEgressReceipts?: ProviderEgressReceiptV1[];
+  telemetry?: AgentRunTelemetryV1;
 }
 
 export type AgentRouteExecutor = (
@@ -552,9 +600,59 @@ export interface AgentRunEngineOptions {
   maxEngineEscalations?: number;
   budgets?: PartialCascadeBudgetModel;
   maxSteps?: number;
+  /** Injectable for deterministic deadline tests; production uses AbortSignal.timeout. */
+  routeTimeoutSignal?: (durationMs: number) => AbortSignal;
 }
 
 const DEFAULT_MAX_STEPS = 4;
+
+export function agentRouteDeadlineMs(route: AgentRunRoute): number | undefined {
+  if (route === 'certified_answer' || route === 'semantic_answer') return 5_000;
+  if (route === 'clarify') return 10_000;
+  if (route === 'generated_answer') return 15_000;
+  if (route === 'research') return 120_000;
+  return undefined;
+}
+
+/** The request envelope starts before retrieval/routing, so a stuck router can
+ * never evade the route-specific deadline that is selected later. */
+export function agentRequestDeadlineMs(requestedMode: AgentRunRequestedMode): number {
+  return requestedMode === 'research' ? 120_000 : 45_000;
+}
+
+/** Create the one request-ingress deadline authority used by every stage. */
+export function createAgentRunBudget(input: {
+  requestedMode?: AgentRunRequestedMode;
+  startedAtMs?: number;
+  inheritedSignal?: AbortSignal;
+  timeoutSignal?: (durationMs: number) => AbortSignal;
+  /** Injectable monotonic wall clock for deterministic soft-boundary tests. */
+  nowMs?: () => number;
+}): AgentRunBudget {
+  const nowMs = input.nowMs ?? Date.now;
+  const startedAtMs = input.startedAtMs ?? nowMs();
+  const mode = input.requestedMode === 'research' ? 'research' as const : 'ask' as const;
+  const hardDeadlineMs = mode === 'research' ? 120_000 : 45_000;
+  const timeout = (input.timeoutSignal ?? AbortSignal.timeout)(hardDeadlineMs);
+  const hardSignal = input.inheritedSignal
+    ? AbortSignal.any([input.inheritedSignal, timeout])
+    : timeout;
+  const elapsedMs = () => Math.max(0, nowMs() - startedAtMs);
+  const softTargetMs = (route: AgentRunRoute): number => {
+    if (mode === 'research') return 90_000;
+    return agentRouteDeadlineMs(route) ?? 15_000;
+  };
+  return Object.freeze({
+    startedAtMs,
+    hardDeadlineMs,
+    hardSignal,
+    mode,
+    elapsedMs,
+    remainingMs: () => Math.max(0, hardDeadlineMs - elapsedMs()),
+    softTargetMs,
+    mayStartDiscovery: (route: AgentRunRoute) => !hardSignal.aborted && elapsedMs() < softTargetMs(route),
+  });
+}
 
 /**
  * Routes whose gate failure is better answered by switching routes than by
@@ -782,7 +880,7 @@ export function routeReasoningEffort(route: AgentRunRoute): ReasoningEffort {
 export function escalationRouteFor(route: AgentRunRoute, audience: AgentRunAudience): AgentRunRoute | undefined {
   const target = AGENT_RUN_ESCALATION_MAP[route];
   if (!target) return undefined;
-  if (audience === "stakeholder" && ANALYST_ONLY_ROUTES.has(target)) return "research";
+  if (audience === "stakeholder" && ANALYST_ONLY_ROUTES.has(target)) return "generated_answer";
   return target;
 }
 
@@ -936,6 +1034,7 @@ export class AgentRunEngine {
   private readonly now: () => Date;
   private readonly budgetModel: PartialCascadeBudgetModel;
   private readonly maxSteps: number;
+  private readonly routeTimeoutSignal: (durationMs: number) => AbortSignal;
 
   constructor(options: AgentRunEngineOptions = {}) {
     this.executors = options.executors ?? {};
@@ -954,6 +1053,7 @@ export class AgentRunEngine {
       engineEscalations: options.maxEngineEscalations ?? options.budgets?.engineEscalations,
     };
     this.maxSteps = Math.max(1, options.maxSteps ?? DEFAULT_MAX_STEPS);
+    this.routeTimeoutSignal = options.routeTimeoutSignal ?? ((durationMs) => AbortSignal.timeout(durationMs));
   }
 
   /**
@@ -976,6 +1076,7 @@ export class AgentRunEngine {
           && routed.action !== "converse"
           && routed.action !== "compose_app"
           && routed.requiresClarification !== true
+          && !routed.terminalOutcome
         ) {
           return { ...routed, action: "answer" };
         }
@@ -1012,7 +1113,16 @@ export class AgentRunEngine {
     }
     const runId = request.runId ?? this.idGenerator();
     const startedAt = this.timestamp();
+    const runStartedAtMs = Date.parse(startedAt);
     const requestedMode = request.requestedMode ?? "auto";
+    const runBudget = request.runBudget ?? createAgentRunBudget({
+      requestedMode,
+      startedAtMs: runStartedAtMs,
+      inheritedSignal: request.signal,
+      timeoutSignal: this.routeTimeoutSignal,
+      nowMs: () => this.now().getTime(),
+    });
+    request = { ...request, runBudget, signal: runBudget.hardSignal };
     const events: AgentRunEvent[] = [];
     let plan: AgentRunPlan | undefined;
     const executedSteps: AgentRunStep[] = [];
@@ -1118,21 +1228,28 @@ export class AgentRunEngine {
             reason: "This continues a pending clarification, so I will resolve it against the original analytical question and produce a governed answer instead of asking again.",
             followsUp: true,
             source: "heuristic",
-          }
-        : await this.decideRoute(request);
+        }
+        : await awaitWithAbort(this.decideRoute(request), request.signal);
+      routeDecision = enforceOrdinaryAnalyticalPlanBoundary(request, routeDecision);
       const defaultRoute = answerAnywayRoute(
         constrainRouteForAudience(selectRoute(request, routeDecision), audience),
         request,
         audience,
         routeDecision,
       );
-      plan = await this.planner.plan({
+      const authoritativeAsk = routeDecision.resolvedAnalyticalPlan?.mode === 'authoritative'
+        && requestedMode !== 'research';
+      const activePlanner = authoritativeAsk
+        ? createDeterministicAgentRunPlanner()
+        : this.planner;
+      const planningSignal = request.runBudget?.hardSignal ?? request.signal;
+      plan = await awaitWithAbort(Promise.resolve(activePlanner.plan({
         request,
         routeDecision,
         defaultRoute,
         maxSteps: this.maxSteps,
         audience,
-      });
+      })), planningSignal);
       emit({
         type: "plan.created",
         message: plan.rationale,
@@ -1245,6 +1362,32 @@ export class AgentRunEngine {
             break;
           }
 
+          // A frozen analytical plan has one route and no downstream planner,
+          // rematch, route escalation, or whole-answer regeneration authority.
+          // Typed server-issued repair is a separate derived run.
+          if (authoritativeAsk) {
+            stepStatus = 'needs_review';
+            break;
+          }
+
+          // Ordinary generated Ask freezes one analytical attempt. A failed
+          // attempt is terminal review/manual-action work; it cannot hand
+          // authority back to an injected LLM replanner for another physical
+          // provider send. Explicit Research and authoring modes retain their
+          // separately budgeted planner behavior.
+          const ordinaryGeneratedAsk = route === 'generated_answer'
+            && (requestedMode === 'ask' || requestedMode === 'auto');
+          if (ordinaryGeneratedAsk) {
+            stepStatus = 'needs_review';
+            emit({
+              type: 'replan.decided',
+              message: 'Ordinary Ask kept the frozen analytical attempt and stopped for review without replanning.',
+              route,
+              payload: { decision: 'accept', authority: 'deterministic_fail_closed' },
+            });
+            break;
+          }
+
           const currentStep: AgentRunStep = {
             id: stepId,
             index: stepCount,
@@ -1257,7 +1400,7 @@ export class AgentRunEngine {
             evaluations,
             artifacts: result.artifacts ?? [],
           };
-          const decision = await this.planner.replan({
+          const decision = await activePlanner.replan({
             request,
             plan,
             currentStep,
@@ -1365,7 +1508,15 @@ export class AgentRunEngine {
           continue;
         }
 
-        const outcome = computeStepOutcome(route, result, evaluations, request, isClarify, clarifyQuestion);
+        const outcome = computeStepOutcome(
+          route,
+          result,
+          evaluations,
+          request,
+          isClarify,
+          clarifyQuestion,
+          routeDecision.terminalOutcome?.message,
+        );
         const step: AgentRunStep = {
           id: stepId,
           index: stepCount,
@@ -1455,12 +1606,16 @@ export class AgentRunEngine {
         events.length,
       );
       run.diagnosticReceipt = diagnosticReceiptForRun(run);
-      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt);
+      run.diagnosticReceiptV2 = diagnosticReceiptV2ForRun(run);
+      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2);
       await checkpointQueue;
       await this.store?.save(run);
       return run;
     } catch (err) {
-      const message = err instanceof Error && err.name === "TimeoutError"
+      const dispatchEvidence = providerDispatchEvidenceFromError(err);
+      const message = isOrchestrationBudgetExhausted(err)
+        ? 'Ask could not complete within its bounded orchestration. Nothing was executed; narrow the metric or dimension and retry.'
+        : err instanceof Error && err.name === "TimeoutError"
         ? "This analytical run reached its time limit before it finished. A timeout alone does not prove a cross-model join or semantic-modeling problem. Open Trust & Steps to see the last recorded phase; retry the same bounded question or use Research for a longer budget. No result was accepted."
         : err instanceof Error ? err.message : String(err);
       const failedRoute = progress.route;
@@ -1523,8 +1678,21 @@ export class AgentRunEngine {
         escalationAttempts: 0,
         budgetUsage: cascadeBudgetTrace(createCascadeBudgetState(this.budgetModel)),
         diagnosticReceipt: receipt,
+        ...(dispatchEvidence.providerEgressReceipts.length
+          ? { providerEgressReceipts: dispatchEvidence.providerEgressReceipts }
+          : {}),
+        telemetry: {
+          ...emptyRunTelemetry(durationBetweenMs(startedAt, completedAt), dispatchEvidence.fallbackReason),
+          providerRoundTrips: dispatchEvidence.providerRoundTrips,
+          toolCalls: dispatchEvidence.toolCalls,
+          sqlExecutions: dispatchEvidence.sqlExecutions,
+          repairs: dispatchEvidence.repairs,
+          egressReceipts: dispatchEvidence.providerEgressReceipts.length,
+        },
         lifecycle: terminalLifecycle(progress.lifecycle, "run.failed", completedAt, events.length),
       };
+      run.diagnosticReceiptV2 = diagnosticReceiptV2ForRun(run);
+      run.artifacts = attachDiagnosticReceipt(retainedArtifacts, receipt, run.diagnosticReceiptV2);
       await checkpointQueue;
       await this.store?.save(run);
       return run;
@@ -1595,8 +1763,12 @@ export class AgentRunEngine {
     // If the final step produced no user-facing answer (e.g. it only drafted an
     // artifact), fall back to the last step that DID answer so the run never
     // drops a data answer an earlier step already computed.
-    const finalHasAnswer = typeof finalResult.answer === "string" && finalResult.answer.trim().length > 0;
+    const finalHasAnswer = finalOutcome.status !== "blocked"
+      && typeof finalResult.answer === "string" && finalResult.answer.trim().length > 0;
     const answerSource = finalHasAnswer ? finalResult : (input.bestAnswerResult ?? finalResult);
+    const acceptedAnswer = finalOutcome.status === "blocked"
+      ? finalOutcome.summary
+      : input.clarifyOutcome?.question ?? answerSource.answer;
     return {
       id: input.runId,
       question: input.request.question,
@@ -1613,7 +1785,7 @@ export class AgentRunEngine {
       plan: input.plan,
       steps: input.steps,
       summary: finalOutcome.summary,
-      answer: input.clarifyOutcome?.question ?? answerSource.answer,
+      answer: acceptedAnswer,
       answerKind: answerSource.answerKind ?? "governed",
       artifacts,
       evaluations: finalStep.evaluations,
@@ -1628,6 +1800,12 @@ export class AgentRunEngine {
         ? { clarificationOptions: finalResult.clarificationOptions ?? input.routeDecision.clarificationOptions }
         : {}),
       repairAttempts: finalResult.repairAttempts ?? repairAttempts,
+      ...(finalResult.providerEgressReceipts?.length
+        ? { providerEgressReceipts: finalResult.providerEgressReceipts }
+        : {}),
+      ...(finalResult.telemetry ? {
+        telemetry: withTotalDuration(finalResult.telemetry, durationBetweenMs(input.startedAt, completedAt)),
+      } : {}),
       escalationAttempts,
       budgetUsage: input.budgetUsage,
       ...authoringDerivationFromRequest(input.request),
@@ -1643,13 +1821,239 @@ export class AgentRunEngine {
 
   private async executeRoute(context: AgentRouteExecutionContext): Promise<AgentRouteExecutorResult> {
     const executor = this.executors[context.route];
-    if (executor) return executor(context);
+    if (executor) {
+      const frozenPlan = context.routeDecision?.resolvedAnalyticalPlan?.mode === 'authoritative';
+      const startsAnalyticalWork = context.route === 'certified_answer'
+        || context.route === 'semantic_answer'
+        || context.route === 'generated_answer'
+        || context.route === 'research';
+      if (
+        startsAnalyticalWork
+        && !frozenPlan
+        && context.request.runBudget
+        && !context.request.runBudget.mayStartDiscovery(context.route)
+      ) {
+        return softBoundaryResult(context.route, context.request.runBudget);
+      }
+      const signal = context.request.runBudget?.hardSignal ?? context.request.signal;
+      if (signal?.aborted) throw signal.reason ?? routeTimeoutError();
+      const execution = Promise.resolve(executor({
+        ...context,
+        request: { ...context.request, ...(signal ? { signal } : {}) },
+      }));
+      return awaitWithAbort(execution, signal);
+    }
     return defaultExecutorResult(context.route, context.request, context.routeDecision);
+  }
+
+  private absoluteDeadlineSignal(
+    deadlineMs: number,
+    runStartedAtMs: number,
+    inherited: AbortSignal | undefined,
+  ): AbortSignal {
+    const elapsedMs = Math.max(0, this.now().getTime() - runStartedAtMs);
+    const remainingMs = deadlineMs - elapsedMs;
+    const deadlineSignal = remainingMs <= 0
+      ? alreadyAbortedSignal(routeTimeoutError())
+      : this.routeTimeoutSignal(remainingMs);
+    return inherited ? AbortSignal.any([inherited, deadlineSignal]) : deadlineSignal;
   }
 
   private timestamp(): string {
     return this.now().toISOString();
   }
+}
+
+/**
+ * Ordinary analytical Ask cannot delegate meaning to the legacy answer
+ * generator. Retrieval/meaning must first produce the immutable RAP consumed by
+ * every later compiler and executor. This host-side gate protects callers that
+ * inject or deserialize an older router decision as well as the canonical
+ * router producer.
+ */
+function enforceOrdinaryAnalyticalPlanBoundary(
+  request: AgentRunRequest,
+  decision: IntentDecision,
+): IntentDecision {
+  const ordinaryAsk = request.requestedMode === undefined
+    || request.requestedMode === 'auto'
+    || request.requestedMode === 'ask';
+  const terminal = decision.action === 'clarify'
+    || decision.action === 'block'
+    || decision.requiresClarification === true
+    || Boolean(decision.terminalOutcome);
+  const exactSemanticContinuation = Boolean(
+    request.selectedEvidenceId
+    && decision.meaningResolution?.recommendedRoute === 'semantic'
+    && decision.meaningResolution.recommendedExecutionId === request.selectedEvidenceId,
+  );
+  if (
+    !ordinaryAsk
+    || terminal
+    || exactSemanticContinuation
+    || decision.resolvedAnalyticalPlan?.mode === 'authoritative'
+  ) return decision;
+  const explicitAuthoring = looksLikeComposeApp(request.question)
+    || /\b(sql\s+(?:notebook\s+)?cell|notebook\s+cell|write a select|generate a query|dql block|block draft|draft block|create[^.?!]*block|turn[^.?!]*into[^.?!]*block)\b/i.test(request.question);
+  if (explicitAuthoring) return decision;
+  const history = request.history?.length
+    ? request.history
+    : conversationHistoryFromContext(request.conversationContext);
+  const questionPlan = buildAnalysisQuestionPlan(request.question);
+  const conversationalKind = classifyConversationalTurn(
+    request.question,
+    history.length > 0 || Boolean(request.conversationContext && Object.keys(request.conversationContext).length > 0),
+  );
+  const definitionOnly = questionPlan.mode === 'definition'
+    && questionPlan.requestedShape.dimensions.length === 0
+    && questionPlan.requestedShape.filters.length === 0
+    && questionPlan.timeTerms.length === 0;
+  // Router category/action are advisory and may be absent or forged. A
+  // deterministic host parse owns the no-data lanes too, so a forged
+  // `data_analysis` cannot turn "hi" into SQL and a forged `answer` cannot
+  // turn a glossary definition into an analytical execution.
+  if (ordinaryAsk && (conversationalKind || definitionOnly)) {
+    return {
+      ...decision,
+      action: 'converse',
+      category: 'conversational',
+      ...(conversationalKind ? { conversationalKind } : {}),
+      confidence: 1,
+      reason: definitionOnly
+        ? 'This requests a definition, not a warehouse result, so no analytical execution is needed.'
+        : 'This is a conversational turn and does not request governed data.',
+      requiresClarification: false,
+    };
+  }
+  const analyticalIntents = new Set<MetadataAgentIntent>([
+    'exact_certified_lookup',
+    'ad_hoc_ranking',
+    'driver_breakdown',
+    'diagnose_change',
+    'segment_compare',
+    'entity_drilldown',
+    'anomaly_investigation',
+  ]);
+  const analyticalIntent = analyticalIntents.has(questionPlan.routeIntent)
+    || Boolean(request.intent && analyticalIntents.has(request.intent));
+  const analyticalShape = questionPlan.mode !== 'clarify'
+    && questionPlan.mode !== 'definition'
+    && (
+      questionPlan.requestedShape.measures.length > 0
+      || questionPlan.requestedShape.dimensions.length > 0
+      || questionPlan.requestedShape.filters.length > 0
+      || questionPlan.timeTerms.length > 0
+      || questionPlan.requestedShape.rankingDirection !== undefined
+    );
+  const governedEvidence = (decision.retrievalEvidence?.candidateCount ?? 0) > 0
+    || (decision.meaningResolution?.selectedConceptIds.length ?? 0) > 0;
+  const analytical = analyticalIntent || analyticalShape || governedEvidence;
+  if (
+    !analytical
+  ) return decision;
+
+  const message = 'DQL could not freeze an exact analytical plan for the requested metric, grain, filters, ordering, and outputs. Choose a governed identifier or model the missing capability before retrying.';
+  return {
+    ...decision,
+    action: 'block',
+    confidence: 1,
+    reason: message,
+    requiresClarification: false,
+    terminalOutcome: {
+      kind: 'modeling_gap',
+      code: 'ANALYTICAL_MODELING_GAP',
+      message,
+      candidateIds: decision.retrievalEvidence?.candidateIds ?? [],
+    },
+  };
+}
+
+function softBoundaryResult(route: AgentRunRoute, budget: AgentRunBudget): AgentRouteExecutorResult {
+  const seconds = Math.round(budget.softTargetMs(route) / 1_000);
+  return {
+    resolvedRoute: 'clarify',
+    status: 'needs_clarification',
+    trustState: 'blocked',
+    stopReason: 'needs_clarification',
+    summary: `The ${seconds}-second discovery target elapsed before an analytical plan was frozen. No new provider, tool, or retrieval branch was started.`,
+    answer: budget.mode === 'research'
+      ? 'Research stopped starting new branches at 90 seconds. Refine the question or retry; any already validated partial findings remain available.'
+      : 'The discovery window ended before DQL could freeze an exact analytical plan. Refine the metric or grain, or retry the same bounded question.',
+    artifacts: [],
+    evaluations: [],
+    nextActions: [{ id: 'retry-after-soft-target', label: 'Retry the same question' }],
+  };
+}
+
+function providerDispatchEvidenceFromError(error: unknown): {
+  providerEgressReceipts: ProviderEgressReceiptV1[];
+  providerRoundTrips: number;
+  toolCalls: number;
+  sqlExecutions: number;
+  repairs: number;
+  fallbackReason: string;
+} {
+  const empty = {
+    providerEgressReceipts: [] as ProviderEgressReceiptV1[],
+    providerRoundTrips: 0,
+    toolCalls: 0,
+    sqlExecutions: 0,
+    repairs: 0,
+    fallbackReason: 'executor_failure',
+  };
+  if (!error || typeof error !== 'object') return empty;
+  const value = (error as { providerDispatchEvidence?: unknown }).providerDispatchEvidence;
+  if (!value || typeof value !== 'object') return empty;
+  const record = value as Record<string, unknown>;
+  const count = (key: string): number => Number.isInteger(record[key]) && Number(record[key]) >= 0 ? Number(record[key]) : 0;
+  return {
+    providerEgressReceipts: Array.isArray(record.providerEgressReceipts)
+      ? record.providerEgressReceipts.flatMap((receipt) => {
+          const normalized = normalizeProviderEgressReceiptV1(receipt);
+          return normalized ? [normalized] : [];
+        })
+      : [],
+    providerRoundTrips: count('providerRoundTrips'),
+    toolCalls: count('toolCalls'),
+    sqlExecutions: count('sqlExecutions'),
+    repairs: count('repairs'),
+    fallbackReason: typeof record.fallbackReason === 'string' ? record.fallbackReason : 'executor_failure',
+  };
+}
+
+function alreadyAbortedSignal(reason: unknown): AbortSignal {
+  const controller = new AbortController();
+  controller.abort(reason);
+  return controller.signal;
+}
+
+function routeTimeoutError(): DOMException {
+  return new DOMException('The absolute agent route deadline elapsed.', 'TimeoutError');
+}
+
+function awaitWithAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted) {
+    // The callee may already have started before its cancellation state was
+    // observed. Consume any eventual rejection while refusing its result.
+    void work.catch(() => undefined);
+    return Promise.reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      callback();
+    };
+    const onAbort = (): void => finish(() => reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError')));
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    );
+  });
 }
 
 function authoringDerivationFromRequest(request: AgentRunRequest): { derivation?: AgentRunDerivationV1 } {
@@ -1697,6 +2101,15 @@ function diagnosticFailureFromError(
   const name = error instanceof Error ? error.name : "";
   const message = error instanceof Error ? error.message : String(error);
   const lower = `${name} ${message}`.toLowerCase();
+  if (isOrchestrationBudgetExhausted(error)) {
+    return {
+      code: 'orchestration_budget_exhausted',
+      phase,
+      message: 'Ask exhausted its bounded orchestration before a final answer was available.',
+      recoverable: false,
+      safeActions: ['inspect_failure'],
+    };
+  }
   if (name === "TimeoutError" || lower.includes("time limit") || lower.includes("timeout")) {
     return {
       code: "TIMEOUT",
@@ -1722,6 +2135,13 @@ function diagnosticFailureFromError(
     recoverable: true,
     safeActions: ["retry_same_request", "inspect_failure"],
   };
+}
+
+function isOrchestrationBudgetExhausted(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  if ((error as { code?: unknown }).code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED') return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:run-wide provider dispatch|orchestration) budget exhausted/i.test(message);
 }
 
 function diagnosticReceiptForRun(run: AgentRun): AgentRunDiagnosticReceiptV1 {
@@ -1754,6 +2174,8 @@ function diagnosticReceiptForRun(run: AgentRun): AgentRunDiagnosticReceiptV1 {
     steps: run.steps,
     artifacts: run.artifacts,
     evaluations: run.evaluations,
+    ...(run.repairCapability ? { repairCapability: run.repairCapability } : {}),
+    ...(run.providerEgressReceipts?.length ? { providerEgressReceipts: run.providerEgressReceipts } : {}),
     ...(run.status === "blocked"
       ? {
           failure: {
@@ -1768,9 +2190,52 @@ function diagnosticReceiptForRun(run: AgentRun): AgentRunDiagnosticReceiptV1 {
   };
 }
 
+function diagnosticReceiptV2ForRun(run: AgentRun): AgentRunDiagnosticReceiptV2 {
+  const telemetry = run.telemetry ?? emptyRunTelemetry(durationBetweenMs(run.startedAt, run.completedAt), 'not_recorded');
+  return {
+    version: 2,
+    runId: run.id,
+    route: run.route,
+    status: run.status,
+    telemetry,
+    providerEgressReceiptFingerprints: (run.providerEgressReceipts ?? []).map(receiptFingerprint),
+    ...(run.repairCapability ? { repairCapabilityFingerprint: receiptFingerprint(run.repairCapability) } : {}),
+  };
+}
+
+function emptyRunTelemetry(total: number, fallbackReason: string): AgentRunTelemetryV1 {
+  return {
+    version: 1,
+    stageDurationsMs: { total },
+    providerRoundTrips: 0,
+    toolCalls: 0,
+    sqlExecutions: 0,
+    repairs: 0,
+    egressReceipts: 0,
+    fallbackReason,
+  };
+}
+
+function withTotalDuration(telemetry: AgentRunTelemetryV1, total: number): AgentRunTelemetryV1 {
+  return {
+    ...telemetry,
+    stageDurationsMs: { ...telemetry.stageDurationsMs, total },
+  };
+}
+
+function durationBetweenMs(startedAt: string, completedAt: string): number {
+  const duration = Date.parse(completedAt) - Date.parse(startedAt);
+  return Number.isFinite(duration) && duration >= 0 ? Math.min(86_400_000, duration) : 0;
+}
+
+function receiptFingerprint(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
 function attachDiagnosticReceipt(
   artifacts: AgentRunArtifact[],
   receipt: AgentRunDiagnosticReceiptV1,
+  receiptV2?: AgentRunDiagnosticReceiptV2,
 ): AgentRunArtifact[] {
   if (artifacts.length === 0) {
     if (!receipt.failure) return artifacts;
@@ -1779,7 +2244,7 @@ function attachDiagnosticReceipt(
       kind: "answer",
       title: "Agent run diagnostics",
       trustState: "blocked",
-      payload: { diagnosticReceipt: receipt },
+      payload: { diagnosticReceipt: receipt, ...(receiptV2 ? { diagnosticReceiptV2: receiptV2 } : {}) },
     }];
   }
   const preferredIndex = Math.max(0, artifacts.findIndex((artifact) => artifact.kind === "answer"));
@@ -1793,6 +2258,7 @@ function attachDiagnosticReceipt(
       payload: {
         ...payload,
         diagnosticReceipt: receipt,
+        ...(receiptV2 ? { diagnosticReceiptV2: receiptV2 } : {}),
       },
     };
   });
@@ -1805,6 +2271,7 @@ function computeStepOutcome(
   request: AgentRunRequest,
   isClarify: boolean,
   clarifyQuestion?: string,
+  terminalOutcomeMessage?: string,
 ): StepOutcome {
   const fallback = defaultOutcome(route);
   if (isClarify) {
@@ -1832,9 +2299,21 @@ function computeStepOutcome(
     trustState,
     artifacts,
     stopReason,
-    summary: result.summary ?? fallback.summary,
+    summary: status === "blocked"
+      ? terminalOutcomeMessage ?? blockingOutcomeSummary(evaluations, fallback.summary)
+      : result.summary ?? fallback.summary,
     ...(result.answerTier ? { terminalTier: result.answerTier } : {}),
   };
+}
+
+function blockingOutcomeSummary(evaluations: AgentRunEvaluation[], fallback: string): string {
+  const messages = evaluations
+    .filter((evaluation) => !evaluation.passed && evaluation.severity === 'blocking')
+    .map((evaluation) => evaluation.message.trim())
+    .filter(Boolean);
+  return messages[0] ?? (fallback.includes('Answered')
+    ? 'The analytical result did not pass its required validation and was not accepted.'
+    : fallback);
 }
 
 function consumeRepeatedClarificationSelection(
@@ -1922,7 +2401,7 @@ export function createDeterministicAgentRunPlanner(): AgentRunPlanner {
       // Honor an explicit escalate target, else the route's default — then clamp for the audience.
       const rawEscalation = requested ?? AGENT_RUN_ESCALATION_MAP[currentStep.route];
       const escalationRoute = rawEscalation
-        ? (audience === "stakeholder" && ANALYST_ONLY_ROUTES.has(rawEscalation) ? "research" : rawEscalation)
+        ? (audience === "stakeholder" && ANALYST_ONLY_ROUTES.has(rawEscalation) ? "generated_answer" : rawEscalation)
         : undefined;
       const hint = action?.hint ?? failing.suggestedRepair ?? "Revise and retry.";
 
@@ -2019,19 +2498,39 @@ function requestedModeToAction(mode: AgentRunRequestedMode | undefined): IntentD
 
 export function selectRoute(request: AgentRunRequest, decision: IntentDecision): AgentRunRoute {
   if (decision.meaningResolutionErrorCode === 'invalid_evidence_reference') return 'blocked';
+  if (decision.action === 'block') return 'blocked';
+  const authoritativePlan = decision.resolvedAnalyticalPlan?.mode === 'authoritative'
+    ? decision.resolvedAnalyticalPlan
+    : undefined;
+  // Producer invariant: the immutable plan is the authority. A caller cannot
+  // combine an answer decision with blocked capability and suppress both the
+  // typed clarification and modeling/policy diagnostic.
+  if (authoritativePlan?.capability === 'blocked') {
+    if (decision.requiresClarification === true) return 'clarify';
+    return 'blocked';
+  }
   const explicitMode = request.requestedMode;
   if (explicitMode === 'modeling') return 'modeling_draft';
   if (explicitMode === 'skill') return 'skill_draft';
   if (explicitMode && explicitMode !== 'auto' && explicitMode !== 'ask') {
     return selectCascadeRunRoute(request, decision);
   }
-  if (decision.action !== 'answer') return selectCascadeRunRoute(request, decision);
   const plan = decision.resolvedAnalyticalPlan;
+  // Research is an explicit request mode, never a phrase/category/depth
+  // inference. Diagnosis and bounded exploration in ordinary Ask stay on the
+  // review-required generated route over the same frozen plan.
+  if (decision.action === 'investigate') {
+    if (plan?.capability === 'certified_execution') return 'certified_answer';
+    if (plan?.capability === 'semantic_execution') return 'semantic_answer';
+    if (plan?.capability === 'governed_relational' || plan?.capability === 'bounded_exploration') return 'generated_answer';
+    return decision.requiresClarification ? 'clarify' : 'blocked';
+  }
+  if (decision.action !== 'answer') return selectCascadeRunRoute(request, decision);
   if (plan?.mode === 'authoritative' && decision.requiresClarification !== true) {
     if (plan.capability === 'certified_execution') return 'certified_answer';
     if (plan.capability === 'semantic_execution') return 'semantic_answer';
     if (plan.capability === 'governed_relational') return 'generated_answer';
-    if (plan.capability === 'bounded_exploration') return 'research';
+    if (plan.capability === 'bounded_exploration') return 'generated_answer';
     return 'blocked';
   }
   // Retrieval + meaning resolution already established a compatible execution
@@ -2051,8 +2550,9 @@ function defaultExecutorResult(
   decision?: IntentDecision,
 ): AgentRouteExecutorResult {
   const fallback = defaultOutcome(route);
+  const terminalMessage = route === 'blocked' ? decision?.terminalOutcome?.message : undefined;
   return {
-    summary: fallback.summary,
+    summary: terminalMessage ?? fallback.summary,
     answer: route === "clarify" ? decision?.clarifyingQuestion : undefined,
     evaluations: defaultEvaluations(route, request, decision),
     artifacts: defaultArtifacts(route, {}, request),

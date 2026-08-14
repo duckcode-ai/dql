@@ -18,22 +18,28 @@
 import { createHash } from 'node:crypto';
 import {
   describeDialectForPrompt,
+  buildSqlOutputExpressionSignature,
   normalizeMetricCapabilityContract,
+  semanticExecutionFingerprint,
   type SemanticLayer,
   type ResolvedTrustLabel,
   type TrustLabelId,
   type DqlArtifactReference,
   type DqlArtifactExecutionReceipt,
+  type DqlExecutableArtifactV1,
   type DQLManifest,
   type AnalyticalFailureCode,
   type AnalyticalFailurePhase,
   type AnalyticalFailureV1,
   type AnalyticalQuestionFrameV2,
   type MetricCapabilityContract,
+  type SemanticAggregationCompilerReceiptV1,
+  type ProviderEgressReceiptV1,
+  type AggregationSafetyProofV1,
 } from '@duckcodeailabs/dql-core';
 import type { KGStore } from './kg/sqlite-fts.js';
 import type { KGNode, KGNodeKind, KGSearchHit } from './kg/types.js';
-import type { AgentProvider, AgentMessage, AgentToolDefinition } from './providers/types.js';
+import type { AgentProvider, AgentMessage, AgentToolDefinition, ProviderToolLoopOptions } from './providers/types.js';
 import type { AgentRunClarificationOption } from './agent-run-engine.js';
 import type { ReasoningEffort } from './providers/reasoning-effort.js';
 import type { Skill } from './skills/loader.js';
@@ -47,7 +53,7 @@ import { isTrustedConversationTurn } from './conversation/turn-trust.js';
 import { renderStructuredConversationSummary } from './conversation/rolling-summary.js';
 import { detectResultSetOperation, computeResultSetOperation } from './conversation/result-ops.js';
 import { classifyGovernedQueryShape } from './semantic-bridge/query-shape.js';
-import type { LocalContextPack, MetadataAgentIntent, MetadataRouteDecision, RuntimeSchemaTable } from './metadata/catalog.js';
+import type { LocalContextPack, MetadataAgentIntent, MetadataObject, MetadataRouteDecision, RuntimeSchemaTable } from './metadata/catalog.js';
 import { domainContextSearchDomains, type DomainContextEnvelope } from './domain-context.js';
 import type { GeneratedDraftBlock, GeneratedDraftSourceDqlArtifact } from './metadata/drafts.js';
 import { deriveGeneratedDraftSlug, renderGeneratedSqlDqlArtifact } from './metadata/drafts.js';
@@ -71,6 +77,15 @@ import {
   type AnalyticalErrorStage,
 } from './analytical-error.js';
 import { fanoutWarningsForSql } from './metadata/grain-ledger.js';
+import {
+  buildAggregationSafetyProof,
+  buildSemanticCompilationAggregationSafetyProof,
+} from './aggregation-safety-proof.js';
+import { buildSemanticProofAuthorityV1 } from './semantic-proof-authority.js';
+import {
+  GENERATED_ANALYTICAL_TUPLE_DRIFT_MESSAGE,
+  validateGeneratedAnalyticalProposal,
+} from './generated-analytical-proposal.js';
 import { evaluateDbtFirstGeneratedSql } from './metadata/dbt-first-safety.js';
 import {
   planAnalyticalPath,
@@ -113,7 +128,7 @@ import {
 } from './cascade/cascade.js';
 import { shouldClarifyBeforeGeneration } from './cascade/triage.js';
 import { stampTrustLabel } from './trust/stamp.js';
-import { deriveResolvedAnalyticalPlan, type ResolvedAnalyticalPlan, type ResolvedAnalyticalPlanDelta } from './resolved-analytical-plan.js';
+import { buildResolvedAnalyticalPlan, deriveResolvedAnalyticalPlan, type ResolvedAnalyticalPlan, type ResolvedAnalyticalPlanDelta } from './resolved-analytical-plan.js';
 import {
   adaptAnalyticalFreshnessRequest,
   adaptAnalyticalSemanticGraph,
@@ -169,7 +184,6 @@ import {
   canUseLaneRepair,
   cascadeBudgetTrace,
   createCascadeBudgetState,
-  deepAlternativeCountForQuestion,
   promptContextBudgetForQuestion,
   proposalToolBudgetForQuestion,
   recordLaneRepair,
@@ -229,6 +243,7 @@ export interface SemanticExecutionTrace {
   }>;
   targetBinding?: object;
   executionReceipt?: object;
+  aggregationCompilerReceipt?: SemanticAggregationCompilerReceiptV1;
   failure?: {
     code: string;
     phase: string;
@@ -256,6 +271,7 @@ export type SemanticQueryCompiler = (selection: SemanticMemberSelection) => Prom
   selection?: SemanticMemberSelection;
   /** Authoring identity, exact runtime binding, adapter, and compiler phases. */
   trace?: SemanticExecutionTrace;
+  aggregationCompilerReceipt?: SemanticAggregationCompilerReceiptV1;
 }>;
 
 interface SemanticCompilerFailure {
@@ -471,6 +487,7 @@ export interface AgentRefusalDetails {
     | Extract<GovernedAnalyticalGraphCompileResult, { status: 'blocked' }>['code']
     | 'COMPILATION_FAILED'
     | 'EXECUTION_FAILED'
+    | 'GENERATED_ANALYTICAL_TUPLE_DRIFT'
     | 'semantic_path_ambiguous'
     | 'semantic_runtime_required';
   message: string;
@@ -908,6 +925,13 @@ export interface AgentEvidence {
   /** Real provider-visible tool observations, distinct from deterministic route breadcrumbs. */
   toolCalls?: AgentEvidenceToolCall[];
   timings?: AgentEvidenceTiming[];
+  /** Exact invocation counters captured at provider/tool/execution boundaries. */
+  runtimeCounters?: {
+    providerRoundTrips: number;
+    toolCalls: number;
+    sqlExecutions: number;
+    repairs: number;
+  };
   validation?: {
     status: 'passed' | 'warning' | 'failed' | 'not_run';
     message: string;
@@ -956,6 +980,10 @@ export interface AgentAnswer {
   analyticalFreshnessObservation?: AnalyticalFreshnessObservationV1;
   /** Stable redacted diagnostics for the immutable failed analytical run. */
   analyticalFailure?: AnalyticalFailureV1;
+  /** Content-free evidence for provider-bound payloads used by this answer. */
+  providerEgressReceipts?: ProviderEgressReceiptV1[];
+  /** Positive-evidence aggregation authority; missing/blocked never authorizes repair. */
+  aggregationSafetyProof?: AggregationSafetyProofV1;
   /** Semantic member/path/compiler trace surfaced in How it was answered. */
   semanticExecutionTrace?: SemanticExecutionTrace;
   /** Runtime ambiguity choices discovered after the initial route decision. */
@@ -1088,6 +1116,8 @@ export interface AgentResultPayload {
   dqlArtifact?: DqlArtifactReference;
   /** Redacted proof binding source, compiled SQL, parameters, and rows. */
   executionReceipt?: DqlArtifactExecutionReceipt;
+  /** Immutable preparation binding produced by the shared Ask/Notebook runtime boundary. */
+  executableArtifact?: DqlExecutableArtifactV1;
   /** Full target-bound semantic proof; separate from the compact DQL receipt. */
   semanticExecutionReceipt?: object;
   semanticTargetBinding?: object;
@@ -1159,6 +1189,8 @@ export interface AnswerLoopInput {
   question: string;
   /** Immutable interpretation selected by the evidence-first router. */
   resolvedAnalyticalPlan?: ResolvedAnalyticalPlan;
+  /** Exact host-selected target authority for a bounded generated proposal. */
+  generatedProposalTargetFingerprint?: string;
   /** Internal: the single adapter result prepared once at the answer boundary. */
   resolvedPlanExecutionBinding?: PlanExecutionBinding;
   /** Internal: immutable route-neutral graph prepared once at the answer boundary. */
@@ -1241,6 +1273,12 @@ export interface AnswerLoopInput {
    * rendering for research, diagnostics, or explicitly high-effort runs.
    */
   analysisDepth?: AnalysisDepth;
+  /**
+   * Research-only escape hatch for bounded semantic-member selection. Ordinary
+   * Ask resolves meaning before entering this loop and must not reopen routing
+   * with another provider call when deterministic composition misses.
+   */
+  allowProviderSemanticMemberSelection?: boolean;
   /** Qualified candidate IDs selected by the bounded meaning resolver. */
   preferredEvidenceIds?: string[];
   /** Qualified execution ID recommended by meaning resolution. */
@@ -1307,6 +1345,8 @@ export interface AnswerLoopInput {
    * support ignore this through the generate() fallback.
    */
   answerLoopTools?: AgentToolDefinition[];
+  /** Recursive, server-owned guard for provider-visible tool results. */
+  providerPayloadGuard?: ProviderToolLoopOptions['providerPayloadGuard'];
   /** Shared local metadata context pack from `.dql/cache/metadata.sqlite`. */
   contextPack?: LocalContextPack;
 }
@@ -1602,6 +1642,136 @@ export function materializeKnowledgeLensSkills(
   });
 }
 
+/**
+ * Older direct AnswerLoop callers supplied the semantic catalog but no frozen
+ * route contract. Migrate that one bounded retrieval result exactly once at
+ * ingress: the chosen KG identity and its normalized capability are copied into
+ * an authoritative RAP before compiler/proof code runs. No downstream stage is
+ * permitted to repeat this name/family selection.
+ */
+async function freezeLegacySemanticSelection(input: AnswerLoopInput): Promise<ResolvedAnalyticalPlan | undefined> {
+  const metricNodes = input.kg.getNodesByKind('metric', 100_000);
+  if (metricNodes.length === 0) return undefined;
+  const questionPlan = input.contextPack?.questionPlan?.requestedShape
+    ? input.contextPack.questionPlan
+    : buildAnalysisQuestionPlan(input.question, input.followUp);
+  const semanticLayer = input.semanticLayer;
+  const match = await matchSemanticMetric(input.question, metricNodes, {
+    measureTerms: [...questionPlan.requestedShape.measures, ...questionPlan.metricTerms],
+    ...(semanticLayer ? { canExecute: (name: string) => semanticLayer.canComposeMetric(name) } : {}),
+  }).catch(() => null);
+  if (!match) return undefined;
+  const normalizedCapability = normalizeMetricCapabilityContract(match.metric.payload?.analyticalCapability);
+  if (!normalizedCapability) return undefined;
+  const metricDefinition = semanticLayer?.listMetrics().find((metric) =>
+    metric.name === match.metric.name
+    || metric.name.endsWith(`.${match.metric.name}`)
+    || match.metric.name.endsWith(`.${metric.name}`));
+  const composed = semanticLayer ? composeSemanticQueryForQuestion({
+    semanticLayer,
+    question: input.question,
+    questionPlan,
+    matchedMetric: match.metric,
+    filterValueColumns: (value) => resolveFilterValueColumns(value, input.schemaContext ?? []),
+    filterValueBindings: (value) => resolveAgentFilterValueBindings(value, input.schemaContext ?? []),
+    ...(input.semanticDriver ? { driver: input.semanticDriver } : {}),
+    ...(input.semanticTableMapping ? { tableMapping: input.semanticTableMapping } : {}),
+  }) : undefined;
+  // A semantic runtime may still resolve the shape later (Research/member-tool
+  // lane). Do not freeze a partial tuple here.
+  if (semanticLayer && !composed) return undefined;
+  const capability: MetricCapabilityContract = {
+    ...normalizedCapability,
+    dimensions: normalizedCapability.dimensions.map((dimension) => {
+      const definition = semanticLayer?.resolveGroupBy(dimension.dimensionId);
+      const compilerSelected = composed?.dimensions.includes(dimension.dimensionId)
+        || composed?.timeDimension?.name === dimension.dimensionId;
+      return definition
+        ? {
+            ...dimension,
+            nativeGroupingReference: definition.qualifiedName ?? definition.name,
+            ...(compilerSelected && questionPlan.requestedShape.rankingDirection
+              ? { supportedRoles: [...new Set([...dimension.supportedRoles, 'rank_entity' as const])] }
+              : {}),
+          }
+        : dimension;
+    }),
+  };
+  const identity = match.metric.nodeId;
+  const selectedMetricNames = composed?.metrics ?? [match.metric.name];
+  const selectedNodes = selectedMetricNames.flatMap((name) => {
+    const matches = metricNodes.filter((node) => node.name === name || node.name.endsWith(`.${name}`) || name.endsWith(`.${node.name}`));
+    return matches.length === 1 ? matches : [];
+  });
+  if (selectedNodes.length !== selectedMetricNames.length) return undefined;
+  const candidates = selectedNodes.flatMap((node) => {
+    const nodeCapability = normalizeMetricCapabilityContract(node.payload?.analyticalCapability);
+    if (!nodeCapability) return [];
+    const isPrimary = node.nodeId === match.metric.nodeId;
+    return [{
+      id: node.nodeId,
+      kind: 'semantic_metric' as const,
+      semanticObjectType: 'metric' as const,
+      trustTier: 'semantic' as const,
+      name: node.name,
+      aliases: node.tags,
+      definition: node.description,
+      domain: node.domain,
+      primaryEntity: nodeCapability.primaryEntityId,
+      dimensions: nodeCapability.dimensions.map((dimension) => dimension.dimensionId),
+      sourceObjects: nodeCapability.semanticModelId ? [nodeCapability.semanticModelId] : [],
+      relevanceScore: isPrimary ? match.score : 1,
+      matchReasons: [`bounded_${isPrimary ? match.basis ?? 'semantic' : 'compiler'}_retrieval`],
+      compatibility: 'compatible' as const,
+      compatibilityFacts: ['The selected KG identity carries the exact normalized semantic capability embedded in this plan.'],
+      analyticalCapability: isPrimary ? capability : nodeCapability,
+      eligible: true,
+      exactMatch: true,
+    }];
+  });
+  if (candidates.length !== selectedNodes.length) return undefined;
+  return buildResolvedAnalyticalPlan({
+    question: input.question,
+    resolution: {
+      interpretedQuestion: input.question,
+      questionType: questionTypeFromText(input.question),
+      selectedConceptIds: candidates.map((item) => item.id),
+      recommendedExecutionId: identity,
+      queryIntent: {
+        measures: composed?.metrics ?? [match.metric.name],
+        dimensions: composed ? [
+          ...composed.dimensions,
+          ...(composed.timeDimension ? [composed.timeDimension.name] : []),
+        ] : [
+          ...questionPlan.requestedShape.dimensions,
+          ...(questionPlan.timeTerms.length > 0 && (metricDefinition?.aggTimeDimension ?? capability.timeDimensions[0]?.dimensionId)
+            ? [metricDefinition?.aggTimeDimension ?? capability.timeDimensions[0]!.dimensionId]
+            : []),
+        ],
+        filters: composed?.filters.map((filter) => ({ field: filter.dimension, value: String(filter.values[0] ?? '') })) ?? [],
+        ...(composed?.timeDimension?.granularity
+          ? { timeGrain: composed.timeDimension.granularity }
+          : questionPlan.timeTerms.some((term) => /month/i.test(term)) ? { timeGrain: 'month' } : {}),
+        ...(questionPlan.requestedShape.rankingDirection
+          ? { order: questionPlan.requestedShape.rankingDirection === 'top' ? 'desc' as const : 'asc' as const }
+          : {}),
+        ...(questionPlan.requestedShape.topN ? { limit: questionPlan.requestedShape.topN.n } : {}),
+      },
+      rejectedCandidates: [],
+      confidence: match.score >= 0.7 ? 'high' : 'medium',
+      missingInformation: [],
+      recommendedRoute: 'semantic',
+    },
+    evidence: {
+      snapshotId: input.contextPack?.knowledgeLens?.snapshotId ?? input.contextPack?.id ?? 'legacy-answer-loop-snapshot',
+      sourceFingerprint: capability.sourceFingerprint,
+      candidates,
+    },
+    candidates,
+    mode: 'authoritative',
+  });
+}
+
 export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
   const inheritedPlan = !input.resolvedAnalyticalPlan
     && input.followUp?.priorResolvedAnalyticalPlan
@@ -1623,6 +1793,10 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       ...earlyCrossResult,
       resolvedAnalyticalPlan: normalizedInput.resolvedAnalyticalPlan,
     };
+  }
+  if (!normalizedInput.resolvedAnalyticalPlan) {
+    const migratedPlan = await freezeLegacySemanticSelection(normalizedInput);
+    if (migratedPlan) normalizedInput = { ...normalizedInput, resolvedAnalyticalPlan: migratedPlan };
   }
   const executionRegistry = buildPlanExecutionRegistry({
     nodes: [
@@ -1665,7 +1839,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
               request: freshnessRequest,
               registry: executionRegistry,
               semanticLayer: normalizedInput.semanticLayer,
-              expectedSnapshotId: normalizedInput.contextPack?.knowledgeLens.snapshotId,
+              expectedSnapshotId: normalizedInput.contextPack?.knowledgeLens?.snapshotId,
             })
           : undefined;
         if (adapterBinding?.status === 'blocked') {
@@ -1720,7 +1894,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
         plan: normalizedInput.resolvedAnalyticalPlan,
         registry: executionRegistry,
         semanticLayer: normalizedInput.semanticLayer,
-        expectedSnapshotId: normalizedInput.contextPack?.knowledgeLens.snapshotId,
+        expectedSnapshotId: normalizedInput.contextPack?.knowledgeLens?.snapshotId,
       })
     : undefined;
   const analyticalCapability = normalizedInput.resolvedAnalyticalPlan
@@ -1733,9 +1907,11 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     ? analyticalCapability.executionCapabilities.find((candidate) => candidate.route === analyticalRoute)?.adapterId
     : undefined;
   const multiMetricPlan = (normalizedInput.resolvedAnalyticalPlan?.analyticalFrame?.metricConceptIds.length ?? 0) > 1;
+  const generatedProposalPlan = normalizedInput.resolvedAnalyticalPlan?.capability === 'bounded_exploration';
   const analyticalGraphBuild = normalizedInput.resolvedAnalyticalPlan?.schemaVersion === 2
     && normalizedInput.resolvedAnalyticalPlan.analyticalFrame
     && !multiMetricPlan
+    && !generatedProposalPlan
     && !normalizedInput.analyticalPeriodResolutionFailure
     && analyticalCapability
     && analyticalRoute
@@ -1751,6 +1927,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
     : undefined;
   const analyticalExecutionGraphFailure: AnswerLoopInput['analyticalExecutionGraphFailure'] = normalizedInput.resolvedAnalyticalPlan?.schemaVersion === 2
     && !multiMetricPlan
+    && !generatedProposalPlan
     ? analyticalGraphBuild?.status === 'blocked'
       ? {
           code: analyticalGraphBuild.code,
@@ -1771,7 +1948,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
         plan: normalizedInput.resolvedAnalyticalPlan,
         registry: executionRegistry,
         semanticLayer: normalizedInput.semanticLayer,
-        expectedSnapshotId: normalizedInput.contextPack?.knowledgeLens.snapshotId,
+        expectedSnapshotId: normalizedInput.contextPack?.knowledgeLens?.snapshotId,
       })
     : undefined;
   const planBoundInput: AnswerLoopInput = resolvedPlanExecutionBinding || analyticalExecutionGraph || analyticalExecutionGraphFailure
@@ -1954,11 +2131,14 @@ function deriveAiRoute(result: AgentAnswer, metricMatch?: MetricMatch): AiRoute 
     };
   }
   // Uncertified: a governed metric matched → semantic_metric; else generated preview.
-  if (result.sourceTier === 'semantic_layer' && metricMatch) {
+  if (result.sourceTier === 'semantic_layer' && (metricMatch || result.analyticalExecutionGraph?.route === 'semantic')) {
+    const metricName = metricMatch?.metric.name
+      ?? result.dqlArtifact?.metrics?.join(', ')
+      ?? result.analyticalExecutionGraph?.metricId;
     return {
       tier: 'semantic_metric',
-      label: `Answered from metric ${metricMatch.metric.name}`,
-      ref: metricMatch.metric.name,
+      label: metricName ? `Answered from metric ${metricName}` : 'Answered from the snapshot-bound semantic plan',
+      ...(metricName ? { ref: metricName } : {}),
     };
   }
   return result.dqlArtifact
@@ -2150,6 +2330,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       input,
       binding: input.semanticGraphExecutionBinding,
       graph: input.analyticalExecutionGraph,
+      capability: normalizeMetricCapabilityContract(
+        input.semanticGraphExecutionBinding.metricNode.payload?.analyticalCapability,
+      )!,
       considered,
       providerName: provider.name,
     });
@@ -2773,7 +2956,8 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   const semanticBridgeToolCalls: AgentEvidenceToolCall[] = [];
   let semanticBridgeAnswer: SemanticBridgeQueryResult | undefined;
   let semanticRuntimeFailure: SemanticCompilerFailure | undefined;
-  let semanticExecutionTrace: SemanticExecutionTrace | undefined;
+    let semanticExecutionTrace: SemanticExecutionTrace | undefined;
+    let aggregationCompilerReceipt: SemanticAggregationCompilerReceiptV1 | undefined;
   let semanticAttemptedArtifact: DqlArtifactReference | undefined;
   let semanticRuntimeCompiledAnswer = false;
   if (authoritativeSemanticBinding && input.semanticLayer) {
@@ -2879,7 +3063,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     // AGT-005: a governed runtime failure is terminal for this selected metric. Do not
     // spend another model call re-selecting the same member or silently fall
     // into exploratory SQL; surface the compiler's actionable error instead.
-    if (!semanticBridgeAnswer && !semanticRuntimeFailure) {
+    if (!semanticBridgeAnswer && !semanticRuntimeFailure && input.allowProviderSemanticMemberSelection === true) {
       const requestedGroupingDims = requestedGroupingDimensions(questionPlan);
       const wantedBreakdown = questionPlan.requestedShape.dimensions.length > 0
         || questionPlan.dimensionTerms.length > 0;
@@ -3196,6 +3380,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         reasoningEffort: input.reasoningEffort,
         analysisDepth: input.analysisDepth,
         toolCalls: proposalToolCalls,
+        providerPayloadGuard: input.providerPayloadGuard,
       });
     } catch (err) {
       // A request-level cancellation/deadline is orchestration state, not an
@@ -3282,7 +3467,10 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       executeGeneratedSql: input.executeGeneratedSql,
       signal: input.signal,
       reasoningEffort: input.reasoningEffort,
-      maxAlternatives: deepAlternativeCountForQuestion(questionPlan, intent),
+      // One initial generation plus one diverse candidate stays within the
+      // ordinary two-round ceiling. Candidates are validated without preview
+      // execution below; only the selected SQL reaches the gateway once.
+      maxAlternatives: 1,
     });
     if (selection.selected) {
       proposed = selection.selected.raw;
@@ -3346,13 +3534,16 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       proposed = await generateProposalWithOptionalTools({
         provider,
         messages: [...messages, { role: 'system', content: FORCE_JOIN_INSTRUCTION }],
-        tools: stageBTools,
+        // One tool round per ordinary Ask. The second generation is a bounded
+        // composition correction over already-retrieved evidence.
+        tools: [],
         questionPlan,
         intent,
         signal: input.signal,
         reasoningEffort: input.reasoningEffort,
         analysisDepth: input.analysisDepth,
         toolCalls: proposalToolCalls,
+        providerPayloadGuard: input.providerPayloadGuard,
       });
       parsed = parseProposal(proposed);
     } catch (err) {
@@ -3422,6 +3613,48 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   }
 
   if (parsed.sql) {
+    const frozenPlan = input.resolvedAnalyticalPlan;
+    if (!governedMetricAnswer && frozenPlan?.mode === 'authoritative' && frozenPlan.schemaVersion === 2) {
+      const targetFingerprint = input.generatedProposalTargetFingerprint ?? '';
+      const validation = validateGeneratedAnalyticalProposal({
+        plan: frozenPlan,
+        expectedTargetFingerprint: targetFingerprint,
+        contextPack: input.contextPack,
+        dialect: input.semanticDriver,
+        proposal: {
+          version: 1,
+          planId: frozenPlan.planId,
+          planFingerprint: frozenPlan.fingerprint,
+          snapshotId: frozenPlan.snapshotId,
+          executionId: frozenPlan.executionId ?? '',
+          capabilityFingerprint: frozenPlan.selectedCapabilityFingerprint ?? '',
+          targetFingerprint,
+          sql: parsed.sql,
+        },
+      });
+      if (!validation.ok) {
+        return {
+          kind: 'no_answer',
+          sourceTier: 'no_answer',
+          certification: 'analyst_review_required',
+          reviewStatus: 'none',
+          confidence: 0,
+          text: GENERATED_ANALYTICAL_TUPLE_DRIFT_MESSAGE,
+          answer: GENERATED_ANALYTICAL_TUPLE_DRIFT_MESSAGE,
+          refusalCode: 'policy_blocked',
+          refusalDetails: {
+            code: validation.code,
+            message: `${validation.message}: ${validation.driftCodes.join(', ')}`,
+          },
+          validationWarnings: validation.driftCodes,
+          citations: contextPackCitations(input.contextPack, 8),
+          memoryContext: input.memoryContext,
+          contextPack: input.contextPack,
+          considered,
+          providerUsed: provider.name,
+        };
+      }
+    }
     const tightenedFlow = tightenSourceTargetFlowProjection(parsed.sql, question, questionPlan);
     if (tightenedFlow && tightenedFlow.sql !== parsed.sql) {
       parsed.sql = tightenedFlow.sql;
@@ -3453,21 +3686,76 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     && questionPlan.requestedShape.filters.length === 0
     && !questionPlan.requestedShape.topN;
   type AnswerValidation =
-    | { ok: true; warnings: string[] }
+    | { ok: true; warnings: string[]; aggregationSafetyProof?: AggregationSafetyProofV1 }
     | {
         ok: false;
         code?: SqlContextValidationCode;
         error: string;
         warnings: string[];
         offending?: SqlContextValidationOffending;
+        aggregationSafetyProof?: AggregationSafetyProofV1;
       };
   let contextValidation: AnswerValidation;
   // dbt Cloud/MetricFlow SQL has already been compiled against the selected
   // semantic environment. A thin local retrieval pack cannot safely reject it
   // and replace it with a guessed leaf-measure SQL. Warehouse execution remains
   // the final binder/runtime check.
+  const toolOwnedMetricNames = semanticBridgeAnswer?.metrics
+    ?? compiledSemanticRecords.flatMap((record) => record.metrics);
+  const semanticProofAuthority = input.resolvedAnalyticalPlan
+    ? exactSemanticProofAuthority(input.resolvedAnalyticalPlan, semanticMetricNodes)
+    : (input.allowProviderSemanticMemberSelection === true || compiledSemanticRecords.length > 0)
+      ? exactToolSemanticProofAuthority(toolOwnedMetricNames, semanticMetricNodes)
+      : { metricObjects: [] };
+  const semanticProofContext = semanticRouteAggregationProofContext(
+    input.contextPack,
+    input.resolvedAnalyticalPlan,
+    semanticProofAuthority.capability,
+    semanticProofAuthority.metricObjects,
+  );
+  const toolOwnedSemanticProofContext = !input.resolvedAnalyticalPlan
+    && semanticProofAuthority.capability
+    && (input.allowProviderSemanticMemberSelection === true || compiledSemanticRecords.length > 0)
+    ? {
+        ...(semanticProofContext ?? {} as LocalContextPack),
+        questionPlan: {
+          ...(semanticProofContext?.questionPlan ?? buildAnalysisQuestionPlan(question)),
+          requestedShape: {
+            ...(semanticProofContext?.questionPlan?.requestedShape ?? buildAnalysisQuestionPlan(question).requestedShape),
+            grain: semanticBridgeAnswer?.dimensions[0] ?? semanticProofAuthority.capability.defaultResultGrainId,
+            dimensions: semanticBridgeAnswer?.dimensions ?? [],
+          },
+        },
+      }
+    : semanticProofContext;
+  const semanticAggregationProof = governedMetricAnswer && !certifiedAdaptation
+    ? buildAggregationSafetyProof(
+        parsed.sql,
+        toolOwnedSemanticProofContext,
+        input.semanticDriver,
+        input.resolvedAnalyticalPlan?.fingerprint,
+      )
+    : undefined;
+  const semanticExecutionRequested = governedMetricAnswer
+    && !certifiedAdaptation
+    && Boolean(input.executeGeneratedSql || input.executeDqlArtifact);
+  const semanticAggregationAuthorityBlocked = semanticExecutionRequested
+    && semanticAggregationProof?.status !== 'safe';
   const initialValidation = semanticRuntimeCompiledAnswer
-    ? { ok: true as const, warnings: ['SQL compiled by the configured semantic runtime.'] }
+    ? semanticAggregationProof?.status === 'safe' || !semanticExecutionRequested
+      ? {
+          ok: true as const,
+          warnings: ['SQL compiled by the configured semantic runtime.'],
+          aggregationSafetyProof: semanticAggregationProof,
+        }
+      : {
+          ok: false as const,
+          code: 'unsafe_aggregation' as const,
+          error: semanticAggregationSafetyFailure(semanticAggregationProof),
+          warnings: ['Semantic runtime compilation did not establish complete aggregation authority.'],
+          offending: undefined,
+          aggregationSafetyProof: semanticAggregationProof,
+        }
     : contextLedger.validateSql(parsed.sql, {
         question,
         intent,
@@ -3476,6 +3764,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         memberBindings: input.followUp?.memberBindings,
         enforceAggregationIntegrity: !governedMetricAnswer,
       });
+  let aggregationSafetyProof = 'aggregationSafetyProof' in initialValidation
+    ? initialValidation.aggregationSafetyProof
+    : undefined;
   const rankedGrainGap = missingRankedGrainOutput(questionPlan, parsed.sql, semanticBridgeAnswer?.dimensions);
   contextValidation = initialValidation.ok && rankedGrainGap
     ? {
@@ -3485,14 +3776,38 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         warnings: initialValidation.warnings,
       }
     : initialValidation.ok
-    ? { ok: true, warnings: initialValidation.warnings }
+    ? { ok: true, warnings: initialValidation.warnings, aggregationSafetyProof }
     : {
         ok: false,
         code: initialValidation.code,
         error: initialValidation.error,
         warnings: initialValidation.warnings,
         offending: initialValidation.offending,
+        aggregationSafetyProof,
       };
+  // The route-specific semantic proof is authoritative for execution. Context
+  // validation can prove SQL names without proving that the selected metric's
+  // exact capability, grain, additivity and joins own this aggregate. Never let
+  // a broad context pack or warehouse success elevate that blocked state.
+  if (
+    contextValidation.ok
+    && semanticAggregationAuthorityBlocked
+  ) {
+    aggregationSafetyProof = semanticAggregationProof;
+    contextValidation = {
+      ok: false,
+      code: 'unsafe_aggregation',
+      error: semanticAggregationSafetyFailure(semanticAggregationProof),
+      warnings: [
+        ...contextValidation.warnings,
+        'The selected semantic route lacks an exact positive aggregation proof.',
+      ],
+      aggregationSafetyProof: semanticAggregationProof,
+    };
+  } else if (semanticAggregationProof) {
+    aggregationSafetyProof = semanticAggregationProof;
+    contextValidation = { ...contextValidation, aggregationSafetyProof: semanticAggregationProof };
+  }
   // A canonical member value that resolves to exactly one inspected column is
   // compiler-owned request state, not creative SQL. If the proposal omitted
   // that predicate entirely, inject it deterministically before spending the
@@ -3516,6 +3831,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       const reboundGrainGap = rebound.ok
         ? missingRankedGrainOutput(questionPlan, parsed.sql, semanticBridgeAnswer?.dimensions)
         : undefined;
+      aggregationSafetyProof = rebound.aggregationSafetyProof;
       contextValidation = rebound.ok && !reboundGrainGap
         ? { ok: true, warnings: [...rebound.warnings, ...injected.notes] }
         : rebound.ok
@@ -3660,7 +3976,22 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // provider get the same single chance; any provider failure keeps the honest
   // refusal below. This mirrors the engine-level repair loop, applied to the
   // context-validation gate that previously refused on first failure.
-  if (!contextValidation.ok && !governedMetricAnswer && canUseLaneRepair(repairBudgetState, 'validation')) {
+  // Semantic aggregation authority cannot be created by a provider rewrite. In
+  // particular, clearing governedMetricAnswer after a blocked semantic proof
+  // must not turn that refusal into the generic SQL-repair lane: the provider
+  // could return grounded raw-row SQL and silently downgrade the attempt to an
+  // uncertified execution. Keep this semantic proof failure terminal while
+  // retaining only the separate typed warehouse SQL-only repair capability.
+  // Unsafe aggregation/rounding is never rewritten automatically until the SQL
+  // parser supplies exact nested-expression AST spans.
+  if (
+    !contextValidation.ok
+    && contextValidation.code !== 'unsafe_aggregation'
+    && input.resolvedAnalyticalPlan?.mode !== 'authoritative'
+    && !semanticAggregationAuthorityBlocked
+    && !governedMetricAnswer
+    && canUseLaneRepair(repairBudgetState, 'validation')
+  ) {
     recordLaneRepair(repairBudgetState, 'validation');
     try {
       const failedSql = parsed.sql ?? '';
@@ -3766,7 +4097,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       answer: text,
       proposedSql: parsed.sql,
       sql: parsed.sql,
-      trustLabel: input.contextPack?.trustLabel,
+      trustLabel: contextValidation.code === 'unsafe_aggregation'
+        ? 'blocked'
+        : input.contextPack?.trustLabel,
       sourceCertifiedBlock: followUpSourceBlock?.name ?? input.followUp?.sourceBlockName,
       contextPackId: input.contextPack?.id,
       validationWarnings: [
@@ -3792,6 +4125,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       contextPack: input.contextPack,
       considered,
       providerUsed: provider.name,
+      aggregationSafetyProof,
     };
   }
 
@@ -4043,6 +4377,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
               memberBindings: input.followUp?.memberBindings,
             });
             if (repairedValidation.ok) {
+              aggregationSafetyProof = repairedValidation.aggregationSafetyProof;
               repairAttempts += 1;
               // Adopt the corrected SQL, but do NOT let the repair prose become the answer.
               repairNarrative = repaired.text?.trim() || undefined;
@@ -4272,6 +4607,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       contextPack: input.contextPack,
       considered,
       providerUsed: provider.name,
+      aggregationSafetyProof,
       // Carry the governed metric match so the exit point can name a
       // `semantic_metric` route (spec 17, part C).
       _semanticMetricMatch: governedMetricAnswer ? semanticMetricMatch ?? undefined : undefined,
@@ -4317,6 +4653,24 @@ function analyticalCapabilityForPlan(
   contextPack?: LocalContextPack,
   registry: PlanExecutionRegistryEntry[] = [],
 ): MetricCapabilityContract | undefined {
+  const selected = normalizeMetricCapabilityContract(plan.selectedCapability);
+  if (selected) {
+    const selectedMetricId = plan.analyticalFrame?.metricConceptIds[0]
+      ?? plan.query.measures[0]?.qualifiedId;
+    const exactRegistryAuthority = registry.some((entry) =>
+      Boolean(plan.executionId)
+      && entry.identities.includes(plan.executionId!)
+      && normalizeMetricCapabilityContract(entry.node.payload?.analyticalCapability)?.sourceFingerprint
+        === selected.sourceFingerprint);
+    if (
+      plan.selectedCapabilityFingerprint !== selected.sourceFingerprint
+      || (selectedMetricId && selected.metricId !== selectedMetricId && !exactRegistryAuthority)
+    ) return undefined;
+    return selected;
+  }
+  // New authoritative v2 plans always carry the exact normalized capability.
+  // A missing authority is terminal rather than permission to rematch by name.
+  if (plan.mode === 'authoritative' && plan.schemaVersion === 2) return undefined;
   const candidates = contextPack?.retrievalDiagnostics.meaningEvidence?.candidates ?? [];
   const exactExecution = candidates.filter((candidate) =>
     candidate.objectKey === plan.executionId || candidate.qualifiedId === plan.executionId);
@@ -4339,6 +4693,156 @@ function analyticalCapabilityForPlan(
   }
   const byFingerprint = new Map(normalized.map((capability) => [capability.sourceFingerprint, capability]));
   return byFingerprint.size === 1 ? [...byFingerprint.values()][0] : undefined;
+}
+
+function semanticRouteAggregationProofContext(
+  contextPack: LocalContextPack | undefined,
+  plan: ResolvedAnalyticalPlan | undefined,
+  capability: MetricCapabilityContract | undefined,
+  exactMetricObjects: MetadataObject[] = [],
+): LocalContextPack | undefined {
+  if (!plan || !capability) {
+    return exactMetricObjects.length > 0
+      ? { ...(contextPack ?? {} as LocalContextPack), objects: exactMetricObjects }
+      : contextPack;
+  }
+  const baseQuestionPlan = buildAnalysisQuestionPlan(plan.question);
+  if (
+    (plan.selectedCapabilityFingerprint !== undefined
+      && plan.selectedCapabilityFingerprint !== capability.sourceFingerprint)
+    || (plan.analyticalFrame !== undefined
+      && plan.analyticalFrame.metricConceptIds[0] !== capability.metricId)
+  ) return {
+    ...(contextPack ?? {} as LocalContextPack),
+    objects: [],
+    questionPlan: {
+      ...baseQuestionPlan,
+      requestedShape: { ...baseQuestionPlan.requestedShape, dimensions: [] },
+    },
+  };
+
+  const contextMetricObjects = (contextPack?.objects ?? []).filter((object) => {
+    const objectCapability = normalizeMetricCapabilityContract(object.payload?.analyticalCapability);
+    if (!objectCapability || objectCapability.sourceFingerprint !== capability.sourceFingerprint) return false;
+    return [object.objectKey, object.fullName, object.name, object.payload?.qualifiedId]
+      .filter((value): value is string => Boolean(value))
+      .includes(plan.executionId ?? capability.metricId);
+  });
+  const relationshipIds = new Set(plan.relationshipPathIds);
+  const relationshipObjects = (contextPack?.objects ?? []).filter((object) =>
+    object.objectType.includes('relationship')
+    && [object.objectKey, object.fullName, object.name, object.payload?.qualifiedId]
+      .filter((value): value is string => Boolean(value))
+      .some((value) => relationshipIds.has(value)));
+  const frozenDimensions = plan.analyticalFrame?.dimensions
+    .filter((dimension) => dimension.role === 'group_by' || dimension.role === 'rank_entity')
+    .map((dimension) => dimension.dimensionId);
+  const legacyCapabilityDimensions = !plan.analyticalFrame && plan.query.dimensions.length > 0
+    ? capability.dimensions.filter((dimension) => dimension.supportedRoles.includes('group_by'))
+    : [];
+  const dimensions = frozenDimensions
+    ?? (legacyCapabilityDimensions.length === plan.query.dimensions.length
+      ? legacyCapabilityDimensions.map((dimension) => dimension.dimensionId)
+      : plan.query.dimensions.flatMap((dimension) => dimension.qualifiedId ? [dimension.qualifiedId] : []));
+  const legacyGrains = legacyCapabilityDimensions.map((dimension) => dimension.entityId)
+    .filter((entityId) => capability.resultGrainIds.includes(entityId));
+  const grain = plan.analyticalFrame?.entityGrainIds[0]
+    ?? plan.entityGrain
+    ?? (legacyGrains.length === 1 ? legacyGrains[0] : undefined)
+    ?? (dimensions.length === 0 ? capability.defaultResultGrainId : undefined);
+  const exactObjects = new Map<string, MetadataObject>();
+  for (const object of [...contextMetricObjects, ...exactMetricObjects, ...relationshipObjects]) {
+    const authorityKey = `${object.objectKey}:${normalizeMetricCapabilityContract(object.payload?.analyticalCapability)?.sourceFingerprint ?? ''}`;
+    if (!exactObjects.has(authorityKey)) exactObjects.set(authorityKey, object);
+  }
+  return {
+    ...(contextPack ?? {} as LocalContextPack),
+    objects: [...exactObjects.values()],
+    questionPlan: {
+      ...baseQuestionPlan,
+      requestedShape: {
+        ...baseQuestionPlan.requestedShape,
+        dimensions,
+        ...(grain ? { grain } : {}),
+      },
+    },
+  };
+}
+
+function exactSemanticProofAuthority(
+  plan: ResolvedAnalyticalPlan | undefined,
+  metricNodes: KGNode[],
+): { capability?: MetricCapabilityContract; metricObjects: MetadataObject[] } {
+  if (!plan) return { metricObjects: [] };
+  const embedded = normalizeMetricCapabilityContract(plan.selectedCapability);
+  const planMetricIds = new Set([
+    plan.executionId,
+    ...plan.query.measures.flatMap((binding) => binding.qualifiedId ? [binding.qualifiedId] : []),
+  ].filter((value): value is string => Boolean(value)));
+  const exactNodes = metricNodes.filter((metric) => {
+    const identities = [
+      metric.nodeId,
+      metric.payload?.qualifiedId,
+      metric.payload?.localId,
+    ].filter((value): value is string => typeof value === 'string' && Boolean(value));
+    return identities.some((identity) => planMetricIds.has(identity));
+  });
+  const capabilities = exactNodes.flatMap((metric) => {
+    const capability = normalizeMetricCapabilityContract(metric.payload?.analyticalCapability);
+    return capability ? [capability] : [];
+  });
+  const selected = embedded ?? (new Map(capabilities.map((capability) => [capability.sourceFingerprint, capability])).size === 1
+    ? capabilities[0]
+    : undefined);
+  if (!selected || (plan.selectedCapabilityFingerprint && plan.selectedCapabilityFingerprint !== selected.sourceFingerprint)) {
+    return { metricObjects: [] };
+  }
+  return {
+    capability: selected,
+    metricObjects: exactNodes.flatMap((metric) => metric.payload ? [{
+      objectKey: metric.nodeId,
+      objectType: 'semantic_metric',
+      name: metric.name,
+      ...(metric.domain ? { domain: metric.domain } : {}),
+      ...(metric.status ? { status: metric.status } : {}),
+      payload: metric.payload,
+    }] : []),
+  };
+}
+
+function exactToolSemanticProofAuthority(
+  metricNames: string[],
+  metricNodes: KGNode[],
+): { capability?: MetricCapabilityContract; metricObjects: MetadataObject[] } {
+  const exactNodes = [...new Set(metricNames)].flatMap((name) => {
+    const matches = metricNodes.filter((node) =>
+      node.name === name || node.name.endsWith(`.${name}`) || name.endsWith(`.${node.name}`));
+    return matches.length === 1 ? matches : [];
+  });
+  if (exactNodes.length !== new Set(metricNames).size) return { metricObjects: [] };
+  const capabilities = exactNodes.flatMap((node) => {
+    const capability = normalizeMetricCapabilityContract(node.payload?.analyticalCapability);
+    return capability ? [capability] : [];
+  });
+  if (capabilities.length !== exactNodes.length) return { metricObjects: [] };
+  return {
+    capability: capabilities[0],
+    metricObjects: exactNodes.map((metric) => ({
+      objectKey: metric.nodeId,
+      objectType: 'semantic_metric',
+      name: metric.name,
+      ...(metric.domain ? { domain: metric.domain } : {}),
+      ...(metric.status ? { status: metric.status } : {}),
+      payload: metric.payload,
+    })),
+  };
+}
+
+function semanticAggregationSafetyFailure(proof: AggregationSafetyProofV1 | undefined): string {
+  const issues = proof?.issueCodes.length
+    ? proof.issueCodes.join(', ')
+    : 'AGGREGATION_PROOF_MISSING';
+  return `The selected semantic route did not establish an exact aggregation safety proof (${issues}). No SQL was executed.`;
 }
 
 function analyticalRouteForPlan(plan: ResolvedAnalyticalPlan): AnalyticalExecutionRoute | undefined {
@@ -4443,6 +4947,7 @@ async function executeSemanticAnalyticalGraph(input: {
   input: AnswerLoopInput;
   binding: Extract<SemanticGraphExecutionBinding, { status: 'ready' }>;
   graph: AnalyticalExecutionGraphV1;
+  capability: MetricCapabilityContract;
   considered: KGSearchHit[];
   providerName: string;
 }): Promise<AgentAnswer> {
@@ -4454,6 +4959,8 @@ async function executeSemanticAnalyticalGraph(input: {
   const compiledSql: string[] = [];
   const artifacts: DqlArtifactReference[] = [];
   let semanticExecutionTrace: SemanticExecutionTrace | undefined;
+  let aggregationCompilerReceipt: SemanticAggregationCompilerReceiptV1 | undefined;
+  let aggregationSafetyProof: AggregationSafetyProofV1 | undefined;
   for (const invocation of input.binding.invocations) {
     const attemptedArtifact = semanticAttemptArtifact(
       layer,
@@ -4471,6 +4978,7 @@ async function executeSemanticAnalyticalGraph(input: {
       try {
         const compiled = await input.input.semanticQueryCompiler(invocation.selection);
         semanticExecutionTrace = compiled.trace;
+        aggregationCompilerReceipt = compiled.aggregationCompilerReceipt;
         composed = composeSemanticQueryFromCompiledMembers({
           semanticLayer: layer,
           question: input.input.question,
@@ -4527,6 +5035,59 @@ async function executeSemanticAnalyticalGraph(input: {
           dqlArtifact: attemptedArtifact,
           ...(compiledSql.length ? { compiledSql: renderAnalyticalStatements(compiledSql) } : {}),
           failedBindings: [{ role: 'source_invocation', reasonCode: 'SEMANTIC_COMPILE_FAILED' }],
+        },
+      );
+    }
+    const compilerProof = semanticRatioCompilerProofBinding(
+      layer,
+      invocation.selection.metrics,
+      input.capability,
+      input.input.resolvedAnalyticalPlan!,
+      semanticTraceTargetFingerprint(semanticExecutionTrace),
+      composed.sql,
+      aggregationCompilerReceipt,
+    );
+    const proof = buildSemanticCompilationAggregationSafetyProof({
+      sql: composed.sql,
+      capability: input.capability,
+      semanticAuthority: input.input.resolvedAnalyticalPlan
+        ? buildSemanticProofAuthorityV1({
+            plan: input.input.resolvedAnalyticalPlan,
+            capability: input.capability,
+            contextPack: input.input.contextPack,
+            compilerReceipt: aggregationCompilerReceipt,
+          })
+        : undefined,
+      relationshipProofs: input.input.resolvedAnalyticalPlan?.relationshipProofs,
+      executionId: input.input.resolvedAnalyticalPlan?.executionId,
+      snapshotId: input.input.resolvedAnalyticalPlan?.snapshotId,
+      capabilityFingerprint: input.input.resolvedAnalyticalPlan?.selectedCapabilityFingerprint,
+      route: 'semantic',
+      adapterId: input.graph.adapterId,
+      ...compilerProof.binding,
+      ...(compilerProof.issueCodes.length
+        ? { compilerAuthorityIssueCodes: compilerProof.issueCodes }
+        : {}),
+      contextPack: semanticRouteAggregationProofContext(
+        input.input.contextPack,
+        input.input.resolvedAnalyticalPlan,
+        input.capability,
+      ),
+      dialect: input.input.semanticDriver,
+      planFingerprint: input.binding.planFingerprint,
+    });
+    aggregationSafetyProof = proof;
+    if (proof.status !== 'safe') {
+      return analyticalGraphFailureAnswer(
+        input,
+        'EXECUTION_GRAPH_MISMATCH',
+        semanticAggregationSafetyFailure(proof),
+        {
+          phase: 'validation',
+          dqlArtifact: composed.dqlArtifact,
+          compiledSql: composed.sql,
+          semanticExecutionTrace,
+          aggregationSafetyProof: proof,
         },
       );
     }
@@ -4592,6 +5153,7 @@ async function executeSemanticAnalyticalGraph(input: {
       sql,
       ...(artifacts.length === 1 ? { dqlArtifact: artifacts[0] } : {}),
       analyticalExecutionGraph: input.graph,
+      aggregationSafetyProof,
       ...(semanticExecutionTrace
         ? { semanticExecutionTrace: semanticTraceAfterExecution(semanticExecutionTrace, { executed: false }) }
         : {}),
@@ -4634,6 +5196,7 @@ async function executeSemanticAnalyticalGraph(input: {
     ...(artifacts.length === 1 ? { dqlArtifact: artifacts[0] } : {}),
     result,
     analyticalExecutionGraph: input.graph,
+    aggregationSafetyProof,
     analyticalExecutionReceipt: executed.receipt,
     analyticalFacts: story.factSet,
     analyticalNarrative: story.narrative,
@@ -4645,6 +5208,156 @@ async function executeSemanticAnalyticalGraph(input: {
     contextPack: input.input.contextPack,
     providerUsed: input.providerName,
   };
+}
+
+function semanticRatioCompilerProofBinding(
+  layer: SemanticLayer,
+  selectedMetricNames: string[],
+  capability: MetricCapabilityContract,
+  plan: ResolvedAnalyticalPlan,
+  targetFingerprint: string | undefined,
+  compiledSql: string,
+  receipt?: SemanticAggregationCompilerReceiptV1,
+): {
+  binding?: {
+    compilerMetricExpressionSql: string;
+    compilerMetricId: string;
+    compilerMeasureIds: string[];
+    compilerRelation: string;
+    compilerRelationAliases?: string[];
+  };
+  issueCodes: string[];
+} {
+  if (capability.aggregation.trim().toLowerCase() !== 'ratio') return { issueCodes: [] };
+  if (receipt) {
+    const outputAlias = capability.declaredOutputIds?.length === 1
+      ? capability.declaredOutputIds[0]
+      : capability.metricId.split(/[:.]/).at(-1);
+    const { receiptFingerprint, ...receiptBody } = receipt;
+    const compiledExpression = outputAlias
+      ? buildSqlOutputExpressionSignature(compiledSql, outputAlias)
+      : undefined;
+    const dimensionIds = [...new Set(plan.analyticalFrame?.dimensions.map((dimension) => dimension.dimensionId) ?? [])].sort();
+    const relationshipPathIds = [...plan.relationshipPathIds].sort();
+    const relationshipProofFingerprints = [...new Set(
+      plan.relationshipProofs?.map((proof) => proof.authorityFingerprint) ?? [],
+    )].sort();
+    const expectedOrderBy = semanticCompilerReceiptOrder(plan, capability);
+    if (receipt.version !== 1
+      || receipt.executionId !== plan.executionId
+      || receipt.capabilityFingerprint !== plan.selectedCapabilityFingerprint
+      || receipt.metricId !== capability.metricId
+      || receipt.operator !== 'ratio'
+      || receipt.planFingerprint !== plan.fingerprint
+      || receipt.snapshotId !== plan.snapshotId
+      || !targetFingerprint
+      || receipt.targetFingerprint !== targetFingerprint
+      || receipt.compiledSqlFingerprint !== semanticExecutionFingerprint(compiledSql)
+      || !compiledExpression
+      || receipt.compiledExpressionFingerprint !== semanticExecutionFingerprint(compiledExpression.canonicalExpression)
+      || receipt.orderedMeasureIds.join('|') !== capability.measureIds.join('|')
+      || [...receipt.dimensionIds].sort().join('|') !== dimensionIds.join('|')
+      || [...receipt.relationshipPathIds].sort().join('|') !== relationshipPathIds.join('|')
+      || [...receipt.relationshipProofFingerprints].sort().join('|') !== relationshipProofFingerprints.join('|')
+      || receipt.orderBy.length !== expectedOrderBy.length
+      || receipt.orderBy.some((order, index) => {
+        const expected = expectedOrderBy[index];
+        return !expected
+          || normalizeSemanticProofId(order.expression) !== normalizeSemanticProofId(expected.expression)
+          || order.direction !== expected.direction;
+      })
+      || receipt.outputAlias !== outputAlias
+      || receiptFingerprint !== semanticExecutionFingerprint(receiptBody)) {
+      return { issueCodes: ['SEMANTIC_COMPILER_RECEIPT_AUTHORITY_MISMATCH'] };
+    }
+    return {
+      binding: {
+        compilerMetricExpressionSql: receipt.metricExpressionSql,
+        compilerMetricId: receipt.metricId,
+        compilerMeasureIds: receipt.orderedMeasureIds,
+        compilerRelation: receipt.physicalRelation,
+        compilerRelationAliases: receipt.relationAliases,
+      },
+      issueCodes: [],
+    };
+  }
+  const selected = new Set(selectedMetricNames.map(normalizeSemanticProofId));
+  const capabilityMetric = normalizeSemanticProofId(capability.metricId);
+  const metrics = layer.listMetrics(undefined, { includeMeasures: false }).filter((metric) => {
+    const names = [metric.name, metric.cube ? `${metric.cube}.${metric.name}` : undefined]
+      .filter((value): value is string => Boolean(value))
+      .map(normalizeSemanticProofId);
+    return names.includes(capabilityMetric)
+      && names.some((name) => selected.has(name));
+  });
+  if (metrics.length !== 1 || !metrics[0].sql.trim()) return { issueCodes: ['SEMANTIC_COMPILER_RECEIPT_AUTHORITY_MISSING'] };
+
+  const metric = metrics[0];
+  const measures = capability.measureIds.map((measureId) => {
+    const normalizedId = normalizeSemanticProofId(measureId);
+    const matches = layer.listMeasures().filter((measure) => {
+      const names = [measure.name, measure.cube ? `${measure.cube}.${measure.name}` : undefined]
+        .filter((value): value is string => Boolean(value))
+        .map(normalizeSemanticProofId);
+      return names.includes(normalizedId)
+        && (!metric.cube || !measure.cube || measure.cube === metric.cube);
+    });
+    return matches.length === 1 ? matches[0] : undefined;
+  });
+  if (measures.some((measure) => !measure)) return { issueCodes: ['SEMANTIC_COMPILER_RECEIPT_AUTHORITY_MISSING'] };
+  const relations = Array.from(new Set(measures.map((measure) => measure!.table.trim()).filter(Boolean)));
+  if (relations.length !== 1) return { issueCodes: ['SEMANTIC_COMPILER_RECEIPT_AUTHORITY_MISSING'] };
+  return {
+    binding: {
+      compilerMetricExpressionSql: metric.sql,
+      compilerMetricId: capability.metricId,
+      compilerMeasureIds: [...capability.measureIds],
+      compilerRelation: relations[0],
+      ...(metric.cube ? { compilerRelationAliases: [metric.cube] } : {}),
+    },
+    issueCodes: [],
+  };
+}
+
+function semanticCompilerReceiptOrder(
+  plan: ResolvedAnalyticalPlan,
+  capability: MetricCapabilityContract,
+): Array<{ expression: string; direction: 'asc' | 'desc' }> {
+  const ranking = plan.analyticalFrame?.ranking;
+  if (!ranking || ranking.byMetricId !== capability.metricId) return [];
+  const metricOutput = plan.analyticalFrame?.requestedOutputs.find((output) =>
+    output.kind === 'metric_value'
+    && output.metricId === ranking.byMetricId
+    && (!ranking.byPeriodId || output.periodId === ranking.byPeriodId));
+  if (!metricOutput) return [];
+  const order = [{ expression: metricOutput.id, direction: ranking.direction }];
+  if (ranking.tiePolicy !== 'stable_secondary_key') return order;
+  const dimensionOutputs = plan.analyticalFrame!.requestedOutputs
+    .filter((output) => output.kind === 'dimension');
+  return [
+    ...order,
+    ...dimensionOutputs.map((output) => ({ expression: output.id, direction: 'asc' as const })),
+  ];
+}
+
+function semanticTraceTargetFingerprint(trace: SemanticExecutionTrace | undefined): string | undefined {
+  const targetBinding = trace?.targetBinding;
+  if (!targetBinding || typeof targetBinding !== 'object' || Array.isArray(targetBinding)) return undefined;
+  const executionTarget = (targetBinding as Record<string, unknown>).executionTarget;
+  if (!executionTarget || typeof executionTarget !== 'object' || Array.isArray(executionTarget)) return undefined;
+  const identityFingerprint = (executionTarget as Record<string, unknown>).identityFingerprint;
+  return typeof identityFingerprint === 'string' && identityFingerprint.trim()
+    ? identityFingerprint
+    : undefined;
+}
+
+function normalizeSemanticProofId(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^semantic(?:::|:)/, '')
+    .replace(/^(?:metric|measure)[.:]/, '')
+    .replaceAll(':', '.');
 }
 
 async function executeGovernedRelationalAnalyticalGraph(input: {
@@ -4871,6 +5584,7 @@ function analyticalGraphFailureAnswer(
     compiledSql?: string;
     failedBindings?: AnalyticalFailedBindingInput[];
     semanticExecutionTrace?: SemanticExecutionTrace;
+    aggregationSafetyProof?: AggregationSafetyProofV1;
   } = {},
 ): AgentAnswer {
   const analyticalFailure = analyticalFailureForInput(input.input, {
@@ -4899,6 +5613,7 @@ function analyticalGraphFailureAnswer(
     ...(artifacts.compiledSql ? { proposedSql: artifacts.compiledSql, sql: artifacts.compiledSql } : {}),
     ...(artifacts.dqlArtifact ? { dqlArtifact: artifacts.dqlArtifact } : {}),
     ...(artifacts.semanticExecutionTrace ? { semanticExecutionTrace: artifacts.semanticExecutionTrace } : {}),
+    ...(artifacts.aggregationSafetyProof ? { aggregationSafetyProof: artifacts.aggregationSafetyProof } : {}),
     citations: contextPackCitations(input.input.contextPack, 8),
     considered: input.considered,
     contextPack: input.input.contextPack,
@@ -4923,7 +5638,7 @@ function analyticalFailureForInput(
     error: diagnostic.error,
     code: diagnostic.code,
     phase: diagnostic.phase,
-    snapshotId: plan?.snapshotId ?? input.contextPack?.knowledgeLens.snapshotId ?? 'snapshot-unavailable',
+    snapshotId: plan?.snapshotId ?? input.contextPack?.knowledgeLens?.snapshotId ?? 'snapshot-unavailable',
     runId: diagnostic.runId ?? plan?.planId,
     planFingerprint: plan?.fingerprint,
     dqlSource: diagnostic.dqlArtifact?.source,
@@ -7652,6 +8367,7 @@ async function generateProposalWithOptionalTools(input: {
   reasoningEffort?: ReasoningEffort;
   analysisDepth?: AnalysisDepth;
   toolCalls?: AgentEvidenceToolCall[];
+  providerPayloadGuard?: ProviderToolLoopOptions['providerPayloadGuard'];
 }): Promise<string> {
   const tools = input.tools?.filter((tool) => tool.name && tool.description) ?? [];
   const options = {
@@ -7683,6 +8399,7 @@ async function generateProposalWithOptionalTools(input: {
     ...options,
     toolPolicy,
     maxToolCalls: toolBudget.maxToolCalls,
+    providerPayloadGuard: input.providerPayloadGuard,
     onToolCall: (event) => {
       const sink = input.toolCalls;
       if (sink) sink.push(evidenceToolCallFromEvent(event, sink.length + 1));
@@ -7817,19 +8534,9 @@ async function scoreDeepGeneratedProposalCandidate(
     validationOk = validation.ok;
     if (validation.ok) {
       score += 100;
-      if (input.executeGeneratedSql) {
-        try {
-          result = await input.executeGeneratedSql(parsed.sql);
-          score += 40;
-          if (result.rowCount > 0) score += 8;
-          const resultShape = validateAnswerResultShape(input.questionPlan, result);
-          score -= resultShape.warnings.length * 6;
-          if (generatedResultShapeIsPartial(resultShape)) score -= 120;
-        } catch (error) {
-          executionError = error instanceof Error ? error.message : String(error);
-          score -= 20;
-        }
-      }
+      // Budget authority: candidate comparison is parser/context validation
+      // only. Executing each candidate would violate the one-SQL-call ordinary
+      // Ask budget and make telemetry dependent on speculative work.
     } else {
       validationError = validation.error;
       score -= 100;

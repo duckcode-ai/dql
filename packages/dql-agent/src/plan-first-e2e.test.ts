@@ -1,8 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SemanticLayer } from '@duckcodeailabs/dql-core';
+import { SemanticLayer, type MetricCapabilityContract } from '@duckcodeailabs/dql-core';
 import { answer } from './answer-loop.js';
 import { selectRoute } from './agent-run-engine.js';
 import { KGStore } from './kg/sqlite-fts.js';
@@ -100,7 +100,13 @@ beforeEach(() => {
     kind: 'metric',
     name: 'actual_rollover_balance',
     status: 'certified',
-    payload: { qualifiedId: metric.qualifiedId, localId: 'actual_rollover_balance' },
+    payload: {
+      qualifiedId: metric.qualifiedId,
+      localId: 'actual_rollover_balance',
+      relation: 'usage',
+      measureColumn: 'balance',
+      analyticalCapability: semanticCapability(metric.qualifiedId!, 'balance'),
+    },
   }, {
     nodeId: wrongMetric.id,
     kind: 'metric',
@@ -115,12 +121,234 @@ beforeEach(() => {
   }], []);
 });
 
+function semanticCapability(metricId: string, measure: string): MetricCapabilityContract {
+  return {
+    metricId,
+    semanticModelId: 'semantic:consumption',
+    measureIds: [measure],
+    primaryEntityId: 'usage',
+    defaultResultGrainId: 'usage',
+    resultGrainIds: ['usage', 'customer_name'],
+    aggregation: 'sum',
+    additivity: { entities: 'additive', time: 'additive' },
+    dimensions: [{ dimensionId: 'customer_name', entityId: 'customer_name', supportedRoles: ['group_by', 'rank_entity'] }],
+    timeDimensions: [],
+    operations: ['group', 'rank'],
+    supportedOutputKinds: ['dimension', 'metric_value', 'rank'],
+    executionCapabilities: [{ route: 'semantic', adapterId: 'native' }],
+    sourceFingerprint: `fixture:${metricId}`,
+  };
+}
+
 afterEach(() => {
   kg.close();
   rmSync(root, { recursive: true, force: true });
 });
 
 describe('plan-first surface parity E2E (API-006 / E2E-012)', () => {
+  it('deterministically executes the exact revenue capability and excludes narrower/duplicate candidates', async () => {
+    const customerRegistryId = 'semantic:uncategorized:dimension:customers.customer_name';
+    const capability = {
+      ...semanticCapability('semantic:orders:revenue', 'product_price'),
+      primaryEntityId: 'order_item',
+      defaultResultGrainId: 'order_item',
+      resultGrainIds: ['order_item', 'customer_name'],
+      executionCapabilities: [{ route: 'semantic' as const, adapterId: 'metricflow-cli' }],
+      dimensions: [{
+        dimensionId: customerRegistryId,
+        entityId: 'order_item',
+        supportedRoles: ['group_by' as const, 'rank_entity' as const],
+      }],
+    };
+    const revenue: AgentEvidenceCandidate = {
+      id: capability.metricId,
+      qualifiedId: capability.metricId,
+      kind: 'semantic_metric',
+      semanticObjectType: 'metric',
+      trustTier: 'semantic',
+      name: 'Revenue',
+      aliases: ['revenue'],
+      dimensions: ['customer_name'],
+      exactMatch: true,
+      relevanceScore: 1,
+      matchReasons: ['exact governed metric'],
+      compatibility: 'compatible',
+      analyticalCapability: capability,
+    };
+    const backingMeasure: AgentEvidenceCandidate = {
+      id: 'product_price',
+      qualifiedId: 'product_price',
+      kind: 'semantic_member',
+      semanticObjectType: 'measure',
+      trustTier: 'semantic',
+      name: 'Revenue',
+      aliases: ['revenue'],
+      exactMatch: true,
+      relevanceScore: 1,
+      matchReasons: ['backing measure'],
+      compatibility: 'compatible',
+    };
+    const beverageBlock: AgentEvidenceCandidate = {
+      id: 'dql:block:top_beverage_customers',
+      kind: 'certified_block',
+      trustTier: 'certified',
+      name: 'top_beverage_customers',
+      aliases: ['top customers by revenue'],
+      relevanceScore: 0.99,
+      matchReasons: ['ranking phrase'],
+      compatibility: 'partial',
+      compatibilityFacts: ['certified static scope is not requested: beverage'],
+      eligible: false,
+    };
+    const customerDimension: AgentEvidenceCandidate = {
+      id: customerRegistryId,
+      qualifiedId: customerRegistryId,
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      trustTier: 'semantic',
+      name: 'Customer',
+      aliases: ['customer', 'customers'],
+      relevanceScore: 0.98,
+      matchReasons: ['exact grouping'],
+      compatibility: 'compatible',
+    };
+    kg.rebuild([{
+      nodeId: revenue.id,
+      kind: 'metric',
+      name: 'revenue',
+      status: 'certified',
+      payload: {
+        qualifiedId: revenue.qualifiedId,
+        localId: 'revenue',
+        relation: 'order_items',
+        measureColumn: 'product_price',
+        analyticalCapability: capability,
+      },
+    }, {
+      nodeId: 'dimension:customers.customer_name',
+      kind: 'dimension',
+      name: 'customer_name',
+      payload: {
+        registryQualifiedId: customerRegistryId,
+        qualifiedId: 'semantic:uncategorized:dimension:customer_name',
+        localId: 'customer_name',
+        registryReference: 'customers.customer_name',
+      },
+    }], []);
+    const router = createHybridRouter({
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-jaffle-revenue',
+        sourceFingerprint: 'sha256:jaffle-revenue',
+        candidates: [beverageBlock, backingMeasure, revenue, customerDimension],
+        parsedIntent: { measures: ['revenue'], dimensions: ['customer'], filters: [], order: 'desc', limit: 10 },
+      }),
+      resolveMeaning: async () => { throw new Error('Exact Jaffle revenue route must not call a provider.'); },
+      resolvedPlanMode: 'authoritative',
+    });
+    const question = 'who are the top customers by revenue';
+    const decision = await router.decide({ question, intent: 'ad_hoc_ranking' });
+    expect(decision.action).toBe('answer');
+    expect(selectRoute({ question }, decision)).toBe('semantic_answer');
+    expect(decision.resolvedAnalyticalPlan?.selectedConceptIds).toEqual([capability.metricId]);
+    expect(decision.resolvedAnalyticalPlan?.query.dimensions).toEqual([
+      expect.objectContaining({ qualifiedId: customerDimension.qualifiedId }),
+    ]);
+    expect(decision.resolvedAnalyticalPlan?.analyticalFrame?.dimensions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ dimensionId: customerDimension.qualifiedId, role: 'group_by' }),
+      expect.objectContaining({ dimensionId: customerDimension.qualifiedId, role: 'rank_entity' }),
+    ]));
+    expect(decision.retrievalEvidence?.candidateIds).not.toEqual(expect.arrayContaining([
+      backingMeasure.id,
+      beverageBlock.id,
+    ]));
+
+    const semanticLayer = new SemanticLayer({
+      metrics: [{ name: 'revenue', label: 'Revenue', description: '', domain: 'orders', sql: 'product_price', type: 'sum', table: '' }],
+      dimensions: [{
+        name: 'customer_name',
+        qualifiedName: 'customer__customer_name',
+        label: 'Customer',
+        description: '',
+        domain: 'orders',
+        sql: 'customer_name',
+        type: 'string',
+        table: 'order_items',
+      }],
+    });
+    const provider = new NeverProvider();
+    const compiler = vi.fn(async () => ({
+      sql: [
+        'SELECT customer_name, SUM(product_price) AS revenue',
+        'FROM order_items',
+        'GROUP BY customer_name',
+        'ORDER BY revenue DESC, customer_name ASC',
+        'LIMIT 10',
+      ].join('\n'),
+      engine: 'metricflow-cli' as const,
+      selection: { metrics: ['revenue'], dimensions: ['customer_name'] },
+    }));
+    const executed: string[] = [];
+    const result = await answer({
+      question,
+      provider,
+      kg,
+      semanticLayer,
+      semanticQueryCompiler: compiler,
+      contextPack: {
+        objects: [],
+        allowedSqlContext: { relations: [], columns: [] },
+        routeDecision: {
+          grainGate: {
+            requestedGrain: 'customer',
+            sourceId: 'dql:block:customer_profile',
+          },
+        },
+        questionPlan: {
+          requestedShape: {
+            grain: 'customer',
+            dimensions: ['customer'],
+          },
+        },
+        retrievalDiagnostics: {
+          meaningEvidence: {
+            candidates: [{ objectKey: 'dql:block:customer_profile', compatibility: 'incompatible' }],
+          },
+        },
+      } as never,
+      resolvedAnalyticalPlan: decision.resolvedAnalyticalPlan,
+      executeGeneratedSql: async (sql) => {
+        executed.push(sql);
+        return {
+          columns: ['customer_name', 'revenue'],
+          rows: [{ customer_name: 'Alice Johnson', revenue: 40 }],
+          rowCount: 1,
+          sql,
+        };
+      },
+    });
+
+    expect(provider.calls).toBe(0);
+    expect(compiler).toHaveBeenCalledOnce();
+    expect(result.kind).toBe('uncertified');
+    expect(executed).toHaveLength(1);
+    expect(executed[0]).toContain('SUM(product_price) AS revenue');
+    expect(executed[0]).toContain('ORDER BY revenue DESC');
+    expect(executed[0]).toMatch(/ORDER BY revenue DESC, customer_name ASC\s+LIMIT 10/);
+    expect(compiler).toHaveBeenCalledWith(expect.objectContaining({
+      dimensions: ['customer__customer_name'],
+      orderBy: [
+        { name: 'revenue', direction: 'desc' },
+        { name: 'customer_name', direction: 'asc' },
+      ],
+      limit: 10,
+    }));
+    expect(result.route?.tier).toBe('semantic_metric');
+    expect(result.result?.columns).toEqual(['customer_name', 'revenue']);
+    expect(result.aggregationSafetyProof).toMatchObject({
+      status: 'safe', metricIds: [capability.metricId], issueCodes: [],
+    });
+  });
+
   it('produces the same qualified plan, route, executable contract, and SQL on every surface', async () => {
     const semanticLayer = new SemanticLayer({
       metrics: [

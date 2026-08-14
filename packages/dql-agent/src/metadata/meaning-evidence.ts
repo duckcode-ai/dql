@@ -126,6 +126,12 @@ export function buildMeaningEvidencePackage(
     || left.item.rank - right.item.rank
     || left.item.row.objectKey.localeCompare(right.item.row.objectKey));
 
+  const requiredSemanticMetricKey = questionPlan.requestedShape.measures.length > 0
+    ? eligible.find((candidate) =>
+      candidate.evidenceClass === 'semantic'
+      && candidate.item.row.objectType === 'semantic_metric')?.item.row.objectKey
+    : undefined;
+
   const selectedByClass: Record<MetadataEvidenceClass, typeof eligible> = {
     certified: [], semantic: [], sql: [],
   };
@@ -133,6 +139,17 @@ export function buildMeaningEvidencePackage(
   for (const candidate of eligible) {
     const lane = selectedByClass[candidate.evidenceClass];
     if (candidate.evidenceClass === 'semantic') {
+      // Dimensions and metrics share the semantic trust class. Preserve one
+      // retrieved metric for a measure-bearing question before member matches
+      // consume the bounded lane; deterministic compatibility still decides
+      // whether that metric is executable.
+      if (
+        requiredSemanticMetricKey
+        && candidate.item.row.objectKey !== requiredSemanticMetricKey
+        && lane.length >= MAX_CANDIDATES_PER_CLASS - 1
+        && !lane.some((selectedCandidate) =>
+          selectedCandidate.item.row.objectKey === requiredSemanticMetricKey)
+      ) continue;
       const definitionKey = normalizeText(candidate.item.row.description ?? '');
       const meaningKey = definitionKey ? `${candidate.item.row.domain ?? ''}|${definitionKey}` : '';
       const existingIndex = meaningKey ? semanticMeaningIndexes.get(meaningKey) : undefined;
@@ -224,8 +241,26 @@ function attachRelationshipEvidence(
   if (identitiesByEntity.size === 0) return;
 
   for (const candidate of candidates) {
+    for (const dimension of candidate.analyticalCapability?.dimensions ?? []) {
+      const pathRelationships = new Set(dimension.relationshipPathIds ?? []);
+      for (const reference of [dimension.entityId, ...(dimension.nativeGroupingPath ?? [])]) {
+        for (const alias of entityAliasesForRelationshipMatch(reference)) {
+          for (const identity of identitiesByEntity.get(alias) ?? []) pathRelationships.add(identity);
+        }
+      }
+      if (pathRelationships.size > 0) dimension.relationshipPathIds = [...pathRelationships].sort();
+    }
     const touched = new Set<string>();
-    for (const reference of [candidate.primaryEntity, ...(candidate.sourceObjects ?? [])]) {
+    const capabilityPathEntities = candidate.analyticalCapability?.dimensions.flatMap((dimension) => [
+      dimension.entityId,
+      ...(dimension.nativeGroupingPath ?? []),
+    ]) ?? [];
+    for (const reference of [
+      candidate.primaryEntity,
+      candidate.analyticalCapability?.primaryEntityId,
+      ...capabilityPathEntities,
+      ...(candidate.sourceObjects ?? []),
+    ]) {
       if (!reference) continue;
       for (const alias of entityAliasesForRelationshipMatch(reference)) {
         for (const identity of identitiesByEntity.get(alias) ?? []) touched.add(identity);
@@ -251,10 +286,63 @@ export function toAgentRetrievalEvidence(
     ...evidence.candidates.map((candidate) => candidate.relevanceScore),
   );
   const candidates: AgentEvidenceCandidate[] = evidence.candidates.map(
-    (candidate) => ({
+    (candidate) => agentCandidateFromMeaning(candidate, maxRelevance),
+  );
+  const trustedBindings = trustedMemberBindingEvidence(
+    questionPlan,
+    candidates,
+    options.contextObjects ?? [],
+  );
+  for (const member of trustedBindings.candidates) {
+    if (!candidates.some((candidate) => candidate.id === member.id)) candidates.push(member);
+  }
+  const clarificationCandidates = supplementalClarificationEvidence(
+    questionPlan,
+    options.contextObjects ?? [],
+    candidates,
+  );
+  attachRelationshipEvidence(candidates, options.contextObjects ?? []);
+  attachRelationshipEvidence(clarificationCandidates, options.contextObjects ?? []);
+  const groundedFilters = [
+    ...trustedBindings.filters,
+    ...groundedMemberFilters(questionPlan, candidates, options.contextObjects ?? []),
+  ].filter((filter, index, all) => all.findIndex((other) =>
+    other.field === filter.field && other.value === filter.value) === index);
+  return {
+    snapshotId: options.snapshotId,
+    sourceFingerprint: options.sourceFingerprint,
+    knowledgeLens: options.knowledgeLens,
+    analyticalPolicies: options.analyticalPolicies,
+    candidates,
+    ...(clarificationCandidates.length > 0 ? { clarificationCandidates } : {}),
+    parsedIntent: {
+      measures: questionPlan.requestedShape.measures,
+      dimensions: questionPlan.requestedShape.dimensions,
+      filters: groundedFilters,
+      ...(analysisTimeGrain(questionPlan)
+        ? { timeGrain: analysisTimeGrain(questionPlan) }
+        : {}),
+      ...(questionPlan.requestedShape.rankingDirection
+        ? { order: questionPlan.requestedShape.rankingDirection === 'top' ? 'desc' as const : 'asc' as const }
+        : {}),
+      ...(questionPlan.requestedShape.topN ? { limit: questionPlan.requestedShape.topN.n } : {}),
+    },
+    diagnostics: {
+      searchedKinds: [...new Set([...candidates, ...clarificationCandidates].map((candidate) => candidate.kind))],
+      durationMs: options.durationMs,
+      truncated: options.truncated ?? false,
+    },
+  };
+}
+
+function agentCandidateFromMeaning(candidate: MetadataMeaningCandidate, maxRelevance = 1): AgentEvidenceCandidate {
+  return {
       id: candidate.objectKey,
       qualifiedId: candidate.qualifiedId,
       kind: agentEvidenceKind(candidate),
+      ...(semanticObjectType(candidate.objectType)
+        ? { semanticObjectType: semanticObjectType(candidate.objectType) }
+        : {}),
       trustTier: candidate.trustTier,
       name: candidate.name,
       aliases: candidate.aliases,
@@ -265,7 +353,7 @@ export function toAgentRetrievalEvidence(
       domain: candidate.domain,
       semanticModel: candidate.semanticModel,
       primaryEntity: candidate.businessShape.entities[0],
-      dimensions: candidate.businessShape.dimensions,
+      dimensions: dimensionLookupAliases(candidate.businessShape.dimensions),
       timeGrains: candidate.businessShape.timeGrains,
       requiredParameters: candidate.businessShape.parameters,
       sourceObjects: candidate.businessShape.sourceRelations,
@@ -280,38 +368,191 @@ export function toAgentRetrievalEvidence(
       analyticalCapability: candidate.analyticalCapability,
       eligible: true,
       exactMatch: candidate.relevanceReasons.includes("exact name or alias"),
-    }),
-  );
-  attachRelationshipEvidence(candidates, options.contextObjects ?? []);
-  const groundedFilters = groundedMemberFilters(
-    questionPlan,
-    candidates,
-    options.contextObjects ?? [],
-  );
-  return {
-    snapshotId: options.snapshotId,
-    sourceFingerprint: options.sourceFingerprint,
-    knowledgeLens: options.knowledgeLens,
-    analyticalPolicies: options.analyticalPolicies,
-    candidates,
-    parsedIntent: {
-      measures: questionPlan.requestedShape.measures,
-      dimensions: questionPlan.requestedShape.dimensions,
-      filters: groundedFilters,
-      ...(analysisTimeGrain(questionPlan)
-        ? { timeGrain: analysisTimeGrain(questionPlan) }
-        : {}),
-      ...(questionPlan.requestedShape.rankingDirection
-        ? { order: questionPlan.requestedShape.rankingDirection === 'top' ? 'desc' as const : 'asc' as const }
-        : {}),
-      ...(questionPlan.requestedShape.topN ? { limit: questionPlan.requestedShape.topN.n } : {}),
-    },
-    diagnostics: {
-      searchedKinds: [...new Set(candidates.map((candidate) => candidate.kind))],
-      durationMs: options.durationMs,
-      truncated: options.truncated ?? false,
-    },
   };
+}
+
+function trustedMemberBindingEvidence(
+  plan: AnalysisQuestionPlan,
+  candidates: AgentEvidenceCandidate[],
+  objects: MetadataObject[],
+): { candidates: AgentEvidenceCandidate[]; filters: Array<{ field: string; value: string }> } {
+  const dimensions = new Map<string, { id: string; entityId?: string; definition?: string }>();
+  for (const object of objects) {
+    if (object.objectType !== 'semantic_dimension') continue;
+    const id = firstString(object.payload?.qualifiedId, object.fullName);
+    if (!id) continue;
+    dimensions.set(normalizeText(object.name), { id, definition: object.description });
+    dimensions.set(normalizeDimensionRole(object.name), { id, definition: object.description });
+  }
+  for (const candidate of candidates) {
+    const capability = normalizeMetricCapabilityContract(candidate.analyticalCapability);
+    for (const dimension of capability?.dimensions ?? []) {
+      const value = { id: dimension.dimensionId, entityId: dimension.entityId };
+      dimensions.set(normalizeText(dimension.dimensionId), value);
+      dimensions.set(normalizeDimensionRole(dimension.dimensionId), value);
+    }
+    for (const dimensionId of candidate.dimensions ?? []) {
+      if (!/[:./]/.test(dimensionId)) continue;
+      const value = { id: dimensionId, entityId: normalizeDimensionRole(dimensionId) };
+      dimensions.set(normalizeText(dimensionId), value);
+      dimensions.set(normalizeDimensionRole(dimensionId), value);
+    }
+  }
+  const cards: AgentEvidenceCandidate[] = [];
+  const filters: Array<{ field: string; value: string }> = [];
+  for (const binding of plan.requestedShape.memberBindings ?? []) {
+    if ((binding.source !== 'prior_result' && binding.source !== 'clarification') || binding.confidence === 'deictic') continue;
+    const dimension = dimensions.get(normalizeText(binding.dimension))
+      ?? dimensions.get(normalizeDimensionRole(binding.dimension));
+    if (!dimension) continue;
+    for (const value of binding.values) {
+      filters.push({ field: dimension.id, value });
+      const id = `semantic:member:${encodeURIComponent(dimension.id)}:${encodeURIComponent(normalizeText(value))}`;
+      cards.push({
+        id,
+        qualifiedId: id,
+        kind: 'semantic_member',
+        trustTier: 'semantic',
+        name: value,
+        aliases: [value],
+        definition: `Trusted ${binding.source.replace('_', ' ')} member for ${dimension.id}.`,
+        primaryEntity: dimension.entityId,
+        dimensions: [dimension.id],
+        relevanceScore: 1,
+        matchReasons: [`typed ${binding.source} member binding`],
+        compatibility: 'compatible',
+        eligible: true,
+        exactMatch: true,
+      });
+    }
+  }
+  return { candidates: cards, filters };
+}
+
+function supplementalClarificationEvidence(
+  plan: AnalysisQuestionPlan,
+  objects: MetadataObject[],
+  existing: AgentEvidenceCandidate[],
+): AgentEvidenceCandidate[] {
+  const MAX_SUPPLEMENTAL_CANDIDATES = 12;
+  const MAX_PER_REQUESTED_ROLE = 3;
+  const existingIds = new Set(existing.map((candidate) => candidate.id));
+  const requestedMeasures = expandedRequestedTerms(plan.requestedShape.measures, objects);
+  const requestedDimensions = expandedRequestedTerms(plan.requestedShape.dimensions, objects);
+  const objectCards = objects.flatMap((object) => {
+    if (existingIds.has(object.objectKey)) return [];
+    if (!['semantic_metric', 'semantic_measure', 'semantic_dimension'].includes(object.objectType)) return [];
+    const names = aliasesFor(object).map(normalizeText);
+    const role = normalizeDimensionRole(object.name);
+    const relevant = object.objectType === 'semantic_metric' || object.objectType === 'semantic_measure'
+      ? requestedMeasures.some((term) => names.some((name) => phraseTermsMatch(term, name)))
+      : requestedDimensions.some((term) =>
+        names.some((name) => phraseTermsMatch(term, name))
+        || (isGeographicRole(term) && isGeographicRole(role)));
+    if (!relevant) return [];
+    const card = candidateCard(object, 'semantic', 1, 1, aliasesFor(object), ['requested clarification capability'], []);
+    return [agentCandidateFromMeaning(card)];
+  });
+  const declaredDimensionCards: AgentEvidenceCandidate[] = existing.flatMap((candidate) =>
+    (candidate.dimensions ?? []).flatMap((dimensionId) => {
+      if (!/[:./]/.test(dimensionId) || existingIds.has(dimensionId)) return [];
+      const role = normalizeDimensionRole(dimensionId);
+      const relevant = requestedDimensions.some((term) =>
+        phraseTermsMatch(term, role) || (isGeographicRole(term) && isGeographicRole(role)));
+      if (!relevant) return [];
+      return [{
+        id: dimensionId,
+        qualifiedId: dimensionId,
+        kind: 'semantic_member' as const,
+        trustTier: 'semantic' as const,
+        name: dimensionId.split(/[.:/]/).at(-1) ?? dimensionId,
+        aliases: [role],
+        definition: `Modeled ${role} dimension available through ${candidate.name}.`,
+        primaryEntity: candidate.primaryEntity,
+        dimensions: [dimensionId],
+        relevanceScore: candidate.relevanceScore,
+        matchReasons: ['requested clarification capability role'],
+        compatibility: 'partial' as const,
+        eligible: true,
+        exactMatch: false,
+      }];
+    }));
+  const unique = [...objectCards, ...declaredDimensionCards]
+    .filter((candidate, index, all) => all.findIndex((other) =>
+      (other.qualifiedId ?? other.id) === (candidate.qualifiedId ?? candidate.id)) === index);
+  const roleLanes = [
+    ...requestedDimensions.map((term) => ({ kind: 'dimension' as const, term })),
+    ...requestedMeasures.map((term) => ({ kind: 'metric' as const, term })),
+  ];
+  const selected: AgentEvidenceCandidate[] = [];
+  for (const lane of roleLanes) {
+    const matches = unique.filter((candidate) => {
+      const candidateTerms = [candidate.name, ...(candidate.aliases ?? [])].map(normalizeText);
+      if (lane.kind === 'metric') {
+        return candidate.kind === 'semantic_metric'
+          && candidateTerms.some((term) => phraseTermsMatch(lane.term, term));
+      }
+      if (candidate.kind !== 'semantic_member') return false;
+      return candidateTerms.some((term) => phraseTermsMatch(lane.term, term))
+        || (isGeographicRole(lane.term) && candidateTerms.some(isGeographicRole));
+    }).sort((left, right) => right.relevanceScore - left.relevanceScore || left.id.localeCompare(right.id));
+    for (const candidate of matches.slice(0, MAX_PER_REQUESTED_ROLE)) {
+      if (!selected.some((item) => (item.qualifiedId ?? item.id) === (candidate.qualifiedId ?? candidate.id))) {
+        selected.push(candidate);
+      }
+    }
+  }
+  return selected.slice(0, MAX_SUPPLEMENTAL_CANDIDATES);
+}
+
+function expandedRequestedTerms(terms: string[], objects: MetadataObject[]): string[] {
+  const vocabulary = new Map<string, Set<string>>();
+  for (const object of objects) {
+    if (object.objectType !== 'dql_term') continue;
+    const words = [object.name, ...stringArray(object.payload?.synonyms)].map(normalizeText).filter(Boolean);
+    for (const word of words) {
+      const peers = vocabulary.get(word) ?? new Set<string>();
+      for (const peer of words) peers.add(peer);
+      vocabulary.set(word, peers);
+    }
+  }
+  const expanded = new Set<string>();
+  for (const term of terms.map(normalizeText)) {
+    expanded.add(term);
+    const tokens = term.split(' ');
+    tokens.forEach((token, index) => {
+      for (const peer of vocabulary.get(token) ?? []) {
+        expanded.add(tokens.map((value, tokenIndex) => tokenIndex === index ? peer : value).join(' '));
+      }
+    });
+  }
+  return [...expanded];
+}
+
+function phraseTermsMatch(left: string, right: string): boolean {
+  return left === right || left.endsWith(` ${right}`) || right.endsWith(` ${left}`);
+}
+
+function normalizeDimensionRole(value: string): string {
+  const leaf = value.split(/[.:/]/).at(-1) ?? value;
+  const normalized = normalizeText(leaf);
+  if (/^customer(?: name| id| key| label)?$/.test(normalized)) return 'customer';
+  if (/^location(?: name| id| key| label)?$/.test(normalized)) return 'location';
+  if (/^region(?: name| id| key| label)?$/.test(normalized)) return 'region';
+  if (/^product(?: name| id| key| label)?$/.test(normalized)) return 'product';
+  return normalized;
+}
+
+function dimensionLookupAliases(dimensions: string[]): string[] {
+  return uniqueStrings(dimensions.flatMap((dimension) => {
+    const leaf = dimension.split(/[.:/]/).at(-1) ?? dimension;
+    const role = leaf.replace(/(?:_name|_id|_key|_label)$/i, '');
+    return role && role !== leaf ? [dimension, role] : [dimension];
+  }));
+}
+
+function isGeographicRole(value: string): boolean {
+  return /^(?:region|location|geography|territory|market|site|store)$/.test(normalizeDimensionRole(value));
 }
 
 /**
@@ -442,16 +683,29 @@ export function applyContextPackCompatibility(
   selectedEvidenceId?: string,
 ): AgentRetrievalEvidence {
   const certifiedFits = new Map(pack.retrievalDiagnostics.certifiedCandidateFits.map((fit) => [fit.objectKey, fit]));
-  const semanticEvidence = new Set(pack.routeDecision.selectedEvidence
-    .filter((item) => item.role === 'semantic_metric')
-    .map((item) => item.objectKey));
   return {
     ...evidence,
     candidates: evidence.candidates.map((candidate): AgentEvidenceCandidate => {
       if (candidate.kind === 'certified_block') {
         const fit = certifiedFits.get(candidate.id);
+        const unrequestedStaticScope = fit?.fit.reasons.some((reason) =>
+          reason.startsWith('certified static scope is not requested:')) ?? false;
+        const exactAuthoredExample = fit?.action === 'certified_answer'
+          && pack.routeDecision.exactObjectKey === candidate.id
+          && fit.fit.reasons.includes('question matches a certified example');
         return {
           ...candidate,
+          // Lexical equality to a block name/alias is useful retrieval signal,
+          // but it is not exact analytical authority. Only the selected block's
+          // authored exact-example fit may grant the router shortcut.
+          exactMatch: exactAuthoredExample,
+          ...(exactAuthoredExample
+            ? { analyticalFitClass: 'exact' as const }
+            : { analyticalFitClass: undefined }),
+          // A statically scoped certified artifact is not an alternative for a
+          // broader question. Exclude it before both meaning resolution and
+          // identifier-bound clarification; later fit rejection is too late.
+          eligible: unrequestedStaticScope ? false : candidate.eligible,
           compatibility: fit?.action === 'certified_answer'
             ? 'compatible'
             : fit?.action === 'rejected_for_fit'
@@ -460,7 +714,7 @@ export function applyContextPackCompatibility(
         };
       }
       if ((candidate.kind === 'semantic_metric' || candidate.kind === 'semantic_member')
-        && (semanticEvidence.has(candidate.id) || selectedEvidenceId === candidate.id)
+        && (Boolean(candidate.analyticalCapability) || selectedEvidenceId === candidate.id)
         && (selectedEvidenceId === candidate.id
           || (pack.routeDecision.route !== 'clarify' && pack.routeDecision.route !== 'conflict'))) {
         const requestedDimensions = pack.questionPlan.requestedShape.dimensions.map((dimension) => normalizeText(dimension));
@@ -471,7 +725,12 @@ export function applyContextPackCompatibility(
         const requestedTimeGrain = analysisTimeGrain(pack.questionPlan);
         const availableTimeGrains = (candidate.timeGrains ?? []).map((grain) => grain.toLowerCase());
         const timeGrainFits = !requestedTimeGrain || availableTimeGrains.includes(requestedTimeGrain);
-        return { ...candidate, compatibility: dimensionsFit && timeGrainFits ? 'compatible' : 'partial' };
+        const requestedMeasures = pack.questionPlan.requestedShape.measures.map((measure) => normalizeText(measure));
+        const metricPhrases = [candidate.name, ...(candidate.aliases ?? [])].map((value) => normalizeText(value));
+        const measuresFit = requestedMeasures.length === 0 || requestedMeasures.every((measure) =>
+          metricPhrases.some((phrase) => phrase === measure || phrase.includes(measure))
+        );
+        return { ...candidate, compatibility: dimensionsFit && timeGrainFits && measuresFit ? 'compatible' : 'partial' };
       }
       if (candidate.trustTier === 'governed_sql') return { ...candidate, compatibility: 'partial' };
       return candidate;
@@ -600,6 +859,18 @@ function agentEvidenceKind(candidate: MetadataMeaningCandidate): AgentEvidenceKi
   return 'sql_table';
 }
 
+function semanticObjectType(
+  objectType: string,
+): AgentEvidenceCandidate['semanticObjectType'] | undefined {
+  if (objectType === 'semantic_metric') return 'metric';
+  if (objectType === 'semantic_measure') return 'measure';
+  if (objectType === 'semantic_dimension') return 'dimension';
+  if (objectType === 'semantic_entity') return 'entity';
+  if (objectType === 'semantic_model') return 'model';
+  if (objectType === 'semantic_saved_query') return 'saved_query';
+  return undefined;
+}
+
 function aliasesFor(object: MetadataObject): string[] {
   const payload = object.payload ?? {};
   return uniqueStrings([
@@ -623,7 +894,7 @@ function lexicalRelevance(
   const normalizedAliases = aliases.map(normalizeText).filter(Boolean);
   const reasons: string[] = [];
   let score = 0;
-  if (normalizedAliases.some((alias) => alias === normalizedQuestion)) {
+  if (normalizedAliases.some((alias) => isExactAnalyticalPhrase(normalizedQuestion, alias))) {
     score += 80;
     reasons.push('exact name or alias');
   } else if (normalizedAliases.some((alias) => alias.length >= 3 && normalizedQuestion.includes(alias))) {
@@ -685,7 +956,24 @@ function addPeer(peers: Map<string, Set<string>>, key: string, peer: string): vo
 }
 
 function normalizeText(value: string): string {
-  return value.toLowerCase().replace(/[_./:-]+/g, ' ').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return value.toLowerCase()
+    .replace(/%/g, ' percentage ')
+    .replace(/[_./:-]+/g, ' ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isExactAnalyticalPhrase(question: string, alias: string): boolean {
+  if (!alias) return false;
+  if (alias === question) return true;
+  const index = question.indexOf(alias);
+  if (index < 0) return false;
+  const remaining = `${question.slice(0, index)} ${question.slice(index + alias.length)}`
+    .replace(/\s+/g, ' ')
+    .trim();
+  return remaining.length === 0 || remaining.split(' ').every((token) =>
+    ['a', 'an', 'are', 'can', 'could', 'do', 'does', 'for', 'give', 'is', 'me', 'of', 'please', 'show', 'tell', 'the', 'what', 'which'].includes(token));
 }
 
 function tokenSet(value: string): Set<string> {

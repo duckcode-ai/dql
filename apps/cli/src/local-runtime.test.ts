@@ -28,6 +28,7 @@ import {
   buildRuntimeSchemaSearchSql,
   buildNamedRelationProbeSql,
   prepareAnalyticalExecutionSql,
+  ExecutionService,
   repairableSqlFromAgentRun,
   repairableDqlArtifactFromAgentRun,
   repairPresentationContextFromAgentRun,
@@ -42,6 +43,8 @@ import {
   sqlMayContainJoin,
   analyticalFailureAllowsDeterministicRetry,
   analyticalFailureAllowsAppRepair,
+  analyticalRepairCapabilityForAgentRun,
+  targetGenerationFingerprint,
   buildDbtStatus,
   buildDbtDatabaseSchemaTree,
   schemaColumnsFromDescribeRows,
@@ -98,6 +101,7 @@ import {
   saveBlockStudioDraftArtifacts,
   sanitizeAgentBlockDraftSource,
   setBlockStudioStatus,
+  semanticAnswerHasPassedAggregationProof,
   shouldAugmentAgentRuntimeSchema,
   shouldSynthesizeAgentRunAnswer,
   serializeJSON,
@@ -122,12 +126,66 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import type { Server } from 'node:http';
 import { createWarehouseTargetIdentity, loadSemanticLayerFromDir, SemanticLayer } from '@duckcodeailabs/dql-core';
-import { createAnalyticalFailure, recordRuntimeSchemaSnapshot, latestRuntimeSchemaSnapshotForProject } from '@duckcodeailabs/dql-agent';
+import type { AggregationSafetyProofV1 } from '@duckcodeailabs/dql-core';
+import {
+  createAnalyticalFailure,
+  defaultAgentRunSqlitePath,
+  latestRuntimeSchemaSnapshotForProject,
+  recordRuntimeSchemaSnapshot,
+  SqliteAgentRunStore,
+  assertProviderPayloadAllowed,
+  prepareProviderContextForDispatch,
+} from '@duckcodeailabs/dql-agent';
 import type { DatabaseConnector, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
 import { saveTestedSemanticRuntimeSettings } from './semantic-runtime-settings.js';
 import { addAskResultToAppBuildDraft, createAppPackage, createStoredAppBuildDraft } from './apps-api.js';
 
 const tempDirs: string[] = [];
+
+describe('repair target generation identity (API-007)', () => {
+  it('detects same-name connection drift without hashing secrets into the identity', () => {
+    const base = targetGenerationFingerprint({
+      driver: 'snowflake', account: 'acct', database: 'analytics', schema: 'public', warehouse: 'wh', role: 'reader', password: 'secret-a',
+    }, 'reporting');
+    expect(targetGenerationFingerprint({
+      driver: 'snowflake', account: 'acct', database: 'analytics', schema: 'public', warehouse: 'wh', role: 'reader', password: 'secret-b',
+    }, 'reporting')).toBe(base);
+    expect(targetGenerationFingerprint({
+      driver: 'snowflake', account: 'acct', database: 'analytics', schema: 'public', warehouse: 'wh-2', role: 'reader', password: 'secret-a',
+    }, 'reporting')).not.toBe(base);
+    expect(base).not.toContain('secret-a');
+  });
+
+  it('binds connector authorization identity while allowing credential rotation for the same principal', () => {
+    const snowflake = targetGenerationFingerprint({
+      driver: 'snowflake', account: 'acct', database: 'analytics', schema: 'public', warehouse: 'wh', role: 'reader',
+      username: 'analyst_a', authMethod: 'password', password: 'rotated-secret-a',
+    }, 'reporting');
+    expect(targetGenerationFingerprint({
+      driver: 'snowflake', account: 'acct', database: 'analytics', schema: 'public', warehouse: 'wh', role: 'reader',
+      username: 'analyst_a', authMethod: 'password', password: 'rotated-secret-b',
+    }, 'reporting')).toBe(snowflake);
+    expect(targetGenerationFingerprint({
+      driver: 'snowflake', account: 'acct', database: 'analytics', schema: 'public', warehouse: 'wh', role: 'reader',
+      username: 'analyst_b', authMethod: 'oauth', password: 'rotated-secret-a',
+    }, 'reporting')).not.toBe(snowflake);
+
+    const databricks = targetGenerationFingerprint({
+      driver: 'databricks', host: 'workspace.example', httpPath: '/sql/warehouses/a', catalog: 'main', schema: 'gold',
+      username: 'service-principal-a', authMethod: 'oauth_client_credentials', oauthClientId: 'client-a', token: 'token-a',
+    }, 'lakehouse');
+    expect(targetGenerationFingerprint({
+      driver: 'databricks', host: 'workspace.example', httpPath: '/sql/warehouses/a', catalog: 'main', schema: 'gold',
+      username: 'service-principal-a', authMethod: 'oauth_client_credentials', oauthClientId: 'client-a', token: 'token-b',
+    }, 'lakehouse')).toBe(databricks);
+    expect(targetGenerationFingerprint({
+      driver: 'databricks', host: 'workspace.example', httpPath: '/sql/warehouses/a', catalog: 'main', schema: 'gold',
+      username: 'service-principal-b', authMethod: 'oauth_client_credentials', oauthClientId: 'client-b', token: 'token-a',
+    }, 'lakehouse')).not.toBe(databricks);
+    expect(`${snowflake}${databricks}`).not.toContain('rotated-secret');
+    expect(`${snowflake}${databricks}`).not.toContain('token-a');
+  });
+});
 
 describe('App Copilot uniform orchestration (AGT-007, AGT-022)', () => {
   it('adapts App research evidence into a deep stakeholder AgentRun', () => {
@@ -454,23 +512,21 @@ describe('bounded Ask meaning resolution (AGT-009, PERF-002)', () => {
     expect(deadline.aborted).toBe(true);
   });
 
-  it('keeps a bare scalar lookup on the short budget but gives analytical builds and deep work the longer budget', () => {
+  it('keeps every ordinary Ask under one 45s hard ceiling and Research explicit', () => {
     // A bare scalar metric ("total revenue") composes in one shot — short budget.
     expect(agentRunDeadlineMs({
       question: 'total revenue',
       requestedMode: 'ask',
     })).toBe(45_000);
-    // A metric + filter/breakdown needs an LLM SQL build (semantic can't compose
-    // the cross-model join), which does NOT fit 45s on a slow provider — it must
-    // get the research-sized budget so the build finishes instead of timing out.
+    // Shape and depth change soft targets, never the hard Ask ceiling.
     expect(agentRunDeadlineMs({
       question: 'what are the top products Melissa Lopez bought and what is the revenue?',
       requestedMode: 'ask',
-    })).toBe(120_000);
+    })).toBe(45_000);
     expect(agentRunDeadlineMs({
       question: 'top bcm customers from the south region',
       requestedMode: 'ask',
-    })).toBe(120_000);
+    })).toBe(45_000);
     expect(agentRunDeadlineMs({
       question: 'investigate why revenue declined and identify the drivers',
       requestedMode: 'research',
@@ -479,61 +535,52 @@ describe('bounded Ask meaning resolution (AGT-009, PERF-002)', () => {
       question: 'analyze revenue',
       requestedMode: 'ask',
       analysisDepth: 'deep',
-    })).toBe(120_000);
-    // A clarification chip is intentionally compact, but the continuation
-    // executes the original complex question and needs that question's budget.
+    })).toBe(45_000);
+    // A clarification continuation stays inside the same Ask ceiling.
     expect(agentRunDeadlineMs({
       question: 'Lost Deal Activity Count',
       selectedEvidenceId: 'semantic:metric:sales.lost_deal_activity_count',
       clarificationSourceQuestion: 'Compare monthly competitive losses by competitor and total activity count for each lost opportunity',
       requestedMode: 'ask',
-    })).toBe(120_000);
+    })).toBe(45_000);
   });
 
-  it('scales the budget for high reasoning effort and resolves thinkingMode', () => {
-    // "High" both slows every call and means deep — thinkingMode alone must lift
-    // the budget, or picking High reliably times out at the lookup deadline.
+  it('does not let reasoning controls broaden the hard deadline', () => {
+    // Thinking depth affects provider effort, not wall-clock authority.
     expect(agentRunDeadlineMs({
       question: 'total revenue',
       requestedMode: 'ask',
       thinkingMode: 'high',
-    })).toBe(Math.round(120_000 * 1.8));
-    // Explicit high effort on an analytical build scales the research budget.
+    })).toBe(45_000);
     expect(agentRunDeadlineMs({
       question: 'top customers in south region based on last 6 months',
       requestedMode: 'ask',
       reasoningEffort: 'high',
-    })).toBe(Math.round(120_000 * 1.8));
-    // Low effort trims a plain lookup slightly.
+    })).toBe(45_000);
     expect(agentRunDeadlineMs({
       question: 'total revenue',
       requestedMode: 'ask',
       reasoningEffort: 'low',
-    })).toBe(Math.round(45_000 * 0.9));
+    })).toBe(45_000);
   });
 
-  it('gives subscription-CLI providers a transport-sized default budget', () => {
-    // A cold `claude`/`codex` spawn per LLM call cannot fit the API-sized 45s
-    // default — simple office questions were dying at the bounded deadline.
-    // Bare scalar on CLI → the larger CLI lookup base (a build/ranking question
-    // would instead get the CLI research base, covered below).
+  it('does not let provider transport or env overrides broaden the ceiling', () => {
+    // Transport selection changes no product deadline contract.
     expect(agentRunDeadlineMs(
       { question: 'what is total bcm?', requestedMode: 'ask' },
       {} as NodeJS.ProcessEnv,
       'claude-code',
-    )).toBe(150_000);
-    // An analytical build on CLI gets the CLI research base.
+    )).toBe(45_000);
     expect(agentRunDeadlineMs(
       { question: 'top 10 customers for bcm', requestedMode: 'ask' },
       {} as NodeJS.ProcessEnv,
       'claude-code',
-    )).toBe(300_000);
+    )).toBe(45_000);
     expect(agentRunDeadlineMs(
       { question: 'investigate revenue drivers', requestedMode: 'research' },
       {} as NodeJS.ProcessEnv,
       'codex',
-    )).toBe(300_000);
-    // API providers keep the tight budget; env overrides still win everywhere.
+    )).toBe(120_000);
     expect(agentRunDeadlineMs(
       { question: 'total revenue?', requestedMode: 'ask' },
       {} as NodeJS.ProcessEnv,
@@ -543,7 +590,7 @@ describe('bounded Ask meaning resolution (AGT-009, PERF-002)', () => {
       { question: 'total revenue?', requestedMode: 'ask' },
       { DQL_AGENT_LOOKUP_DEADLINE_MS: '60000' } as unknown as NodeJS.ProcessEnv,
       'claude-code',
-    )).toBe(60_000);
+    )).toBe(45_000);
   });
 });
 
@@ -1035,6 +1082,7 @@ describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-0
           parameters: Array<{ name: string; type: string }>;
           parameterValues: Record<string, unknown>;
           executionReceipt: Record<string, string>;
+          executableArtifact: Record<string, unknown>;
         };
       };
       expect({ status: generatedResponse.status, error: generated.error }).toEqual({ status: 200, error: undefined });
@@ -1055,6 +1103,20 @@ describe('uniform DQL artifact parameter invocation API (PRD-001, CTX-001, AGT-0
         parameterFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
         resultFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
       });
+      expect(generated.artifact.executableArtifact).toMatchObject({
+        version: 1,
+        kind: 'sql_block',
+        trustState: 'review_required',
+        previewPolicy: { mode: 'compiler_governed' },
+        dqlFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        normalizedSqlFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        provenanceFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        targetFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        snapshotFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        planFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+      expect(generated.artifact.executableArtifact).not.toHaveProperty('rows');
+      expect(generated.artifact.executableArtifact).not.toHaveProperty('sql');
 
       const parityResponse = await fetch(`${base}/api/dql/artifacts/execute`, {
         method: 'POST',
@@ -2306,10 +2368,79 @@ describe('agent run runtime API', () => {
     expect(turn.result?.dimensionValues?.product_name).toContain('flame impala');
   });
 
+  it('does not persist blocked result prose or rows into conversation context', () => {
+    const turn = conversationTurnInputFromRun({
+      id: 'run_invalid_result',
+      question: 'food revenue percentage',
+      status: 'blocked',
+      route: 'semantic_answer',
+      trustState: 'blocked',
+      stopReason: 'blocked',
+      summary: 'The semantic result did not satisfy the frozen output contract.',
+      answer: 'The semantic result did not satisfy the frozen output contract.',
+      artifacts: [{
+        id: 'invalid-result-diagnostic',
+        kind: 'answer',
+        title: 'Invalid result diagnostic',
+        trustState: 'blocked',
+        payload: {
+          result: {
+            columns: ['secret'],
+            rows: [{ secret: 'INVALID_ROW_MUST_DISCARD' }],
+            rowCount: 1,
+          },
+        },
+      }],
+      evaluations: [],
+      nextActions: [],
+    } as any);
+
+    expect(turn.answerSummary).toBe('The semantic result did not satisfy the frozen output contract.');
+    expect(turn.answerText).toBe('The semantic result did not satisfy the frozen output contract.');
+    expect(turn.result).toBeUndefined();
+    expect(JSON.stringify(turn)).not.toContain('INVALID_ROW_MUST_DISCARD');
+  });
+
   it('UI-010 classifies governed SQL execution errors as failed outcomes', () => {
     expect(agentAnswerHasExecutionFailure({ executionError: 'DuckDB lock conflict' })).toBe(true);
     expect(agentAnswerHasExecutionFailure({ executionError: '   ' })).toBe(false);
     expect(agentAnswerHasExecutionFailure({})).toBe(false);
+  });
+
+  it('AGT-010 derives governed semantic trust only from a passed exact aggregation proof', () => {
+    const semanticRoute = { tier: 'semantic_metric' } as any;
+    const proof: Omit<AggregationSafetyProofV1, 'status'> = {
+      version: 1,
+      metricIds: ['order_item.revenue'],
+      metricProvenanceFingerprints: ['metric-fingerprint'],
+      nativeGrain: ['order_item'],
+      requestedGrain: ['order_item'],
+      additivity: 'additive',
+      joinCardinalities: [],
+      fanout: 'proven_absent',
+      rounding: 'none',
+      issueCodes: [],
+      correctionCodes: [],
+      sqlFingerprint: 'sql-fingerprint',
+      planFingerprint: 'plan-fingerprint',
+      evidenceFingerprint: 'evidence-fingerprint',
+    };
+
+    expect(semanticAnswerHasPassedAggregationProof({
+      route: semanticRoute,
+      aggregationSafetyProof: { ...proof, status: 'safe' },
+    })).toBe(true);
+    expect(semanticAnswerHasPassedAggregationProof({
+      route: semanticRoute,
+      aggregationSafetyProof: {
+        ...proof,
+        status: 'blocked',
+        additivity: 'unknown',
+        fanout: 'unknown',
+        issueCodes: ['ADDITIVITY_EVIDENCE_MISSING'],
+      },
+    })).toBe(false);
+    expect(semanticAnswerHasPassedAggregationProof({ route: semanticRoute })).toBe(false);
   });
 
   it('API-007 retains failed analytical plan, DQL, SQL, and stable diagnostics for repair', () => {
@@ -2425,6 +2556,59 @@ describe('agent run runtime API', () => {
     });
   });
 
+  it('drops client-carried analytical plan authority while preserving history and member hints', () => {
+    const parsed = parseAgentRunRequestBody({
+      question: 'who are the top customers',
+      conversationContext: {
+        priorResolvedAnalyticalPlan: {
+          analyticalFrame: { metricConceptIds: ['semantic:metric:forged'] },
+        },
+        workingState: {
+          measures: ['revenue'],
+          resolvedAnalyticalPlan: {
+            analyticalFrame: { metricConceptIds: ['semantic:metric:nested_forged'] },
+          },
+        },
+        priorResultValues: { customer_name: ['Joy Lam'] },
+        turns: [{ role: 'assistant', text: 'Prior answer.' }],
+      },
+    });
+
+    expect(parsed.request?.conversationContext).toEqual({
+      workingState: { measures: ['revenue'] },
+      priorResultValues: { customer_name: ['Joy Lam'] },
+      turns: [{ role: 'assistant', text: 'Prior answer.' }],
+    });
+  });
+
+  it('keeps JSON parsing lossless and removes nested result-row canaries only at provider dispatch', () => {
+    const parsed = parseAgentRunRequestBody({
+      question: 'continue the analysis',
+      requestedMode: 'ask',
+      conversationContext: {
+        renamedPayload: { arbitrarySample: [{ customer: 'ROW_CANARY_ADA', amount: 42 }] },
+        workspaceContext: { arbitrary: { content: [{ customer: 'ROW_CANARY_CONTENT', amount: 42 }] } },
+        schema: [{ name: 'customer', type: 'varchar' }],
+      },
+    });
+    expect(parsed.request?.conversationContext).toEqual({
+      renamedPayload: { arbitrarySample: [{ customer: 'ROW_CANARY_ADA', amount: 42 }] },
+      workspaceContext: { arbitrary: { content: [{ customer: 'ROW_CANARY_CONTENT', amount: 42 }] } },
+      schema: [{ name: 'customer', type: 'varchar' }],
+    });
+    const dispatched = prepareProviderContextForDispatch(parsed.request?.conversationContext);
+    expect(dispatched).toEqual({
+      renamedPayload: { arbitrarySample: [] },
+      workspaceContext: { arbitrary: { content: [] } },
+      schema: [],
+    });
+    expect(JSON.stringify(dispatched)).not.toContain('ROW_CANARY_ADA');
+    expect(JSON.stringify(dispatched)).not.toContain('ROW_CANARY_CONTENT');
+    expect(() => assertProviderPayloadAllowed(dispatched, {
+      allowResultRows: false, maxResultRows: 0, purpose: 'answer_generation',
+    })).not.toThrow();
+  });
+
   it('preserves every authoring mode so Modeling and Skills AI reach their own routes', () => {
     // Regression: the runtime whitelist was a strict subset of
     // `AgentRunRequestedMode` — it omitted 'modeling' and 'skill'. A
@@ -2439,6 +2623,23 @@ describe('agent run runtime API', () => {
     }
 
     expect(parseAgentRunRequestBody({ question: 'q', requestedMode: 'nonsense' }).request?.requestedMode).toBeUndefined();
+  });
+
+  it('keeps Research result-row consent explicit, Research-only, and per run', () => {
+    expect(parseAgentRunRequestBody({ question: 'research this', requestedMode: 'research' }).request)
+      .toMatchObject({ researchResultRowsOptIn: false });
+    expect(parseAgentRunRequestBody({
+      question: 'research this',
+      requestedMode: 'research',
+      researchResultRowsOptIn: true,
+    }).request).toMatchObject({ researchResultRowsOptIn: true });
+    expect(parseAgentRunRequestBody({ question: 'research again', requestedMode: 'research' }).request)
+      .toMatchObject({ researchResultRowsOptIn: false });
+    expect(parseAgentRunRequestBody({
+      question: 'ordinary ask',
+      requestedMode: 'ask',
+      researchResultRowsOptIn: true,
+    })).toMatchObject({ error: expect.stringMatching(/Research/i) });
   });
 
   it('ignores invalid governed agent run depth and reasoning values', () => {
@@ -2561,7 +2762,7 @@ describe('agent run runtime API', () => {
     }
   });
 
-  it('synthesizes DQL-first answers when executed rows are available', () => {
+  it('uses deterministic presentation for ordinary DQL-first answers', () => {
     expect(shouldSynthesizeAgentRunAnswer({
       kind: 'uncertified',
       certification: 'ai_generated',
@@ -2572,15 +2773,15 @@ describe('agent run runtime API', () => {
         name: 'top_products_by_value',
         source: 'block "top_products_by_value" { query = """select 1""" }',
       },
-    })).toBe(true);
+    })).toBe(false);
   });
 
-  it('synthesizes every executed result while preserving non-executed trust boundaries', () => {
+  it('permits provider narration only for explicit Research', () => {
     expect(shouldSynthesizeAgentRunAnswer({
       kind: 'uncertified',
       certification: 'ai_generated',
       text: 'Draft answer',
-    })).toBe(true);
+    })).toBe(false);
 
     expect(shouldSynthesizeAgentRunAnswer({
       kind: 'certified',
@@ -2593,7 +2794,7 @@ describe('agent run runtime API', () => {
       certification: 'certified',
       text: 'Answered by certified block top_customers.',
       result: { columns: ['customer_name', 'lifetime_spend'], rows: [{ customer_name: 'Matthew', lifetime_spend: 3000 }], rowCount: 1 },
-    })).toBe(true);
+    })).toBe(false);
 
     expect(shouldSynthesizeAgentRunAnswer({
       kind: 'no_answer',
@@ -2629,7 +2830,7 @@ describe('agent run runtime API', () => {
         relationshipIds: [],
         executionStatus: 'not_executed',
       },
-    })).toBe(true);
+    }, 'research')).toBe(true);
   });
 
   it('API-007 derives repairs through the HTTP API while permission denial stays terminal', async () => {
@@ -2745,12 +2946,32 @@ describe('agent run runtime API', () => {
     }
   });
 
-  it('API-007 executes a deterministic derived repair without mutating the failed run', async () => {
+  it('API-007 repairs only embedded SQL and preserves the immutable wrapper contract', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-executable-repair-api-'));
     tempDirs.push(projectRoot);
     writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    saveProviderSettings(projectRoot, {
+      id: 'openai', enabled: true, apiKey: 'sk-ask-sql-repair',
+      baseUrl: 'https://ask-sql-repair.example.test/v1', model: 'repair-test',
+    });
     let server: Server | undefined;
-    const failedSql = 'SELECT order_id FROM source::analytics.main.orders';
+    const failedSql = 'SELECT order_id FROM main.orders WHERE order_id >= $1';
+    const repairedSql = 'SELECT order_id FROM "main"."orders" WHERE order_id >= $1';
+    const sourceDql = `block "Orders" {
+  type = "custom"
+  params { min_order_id: number = 1 }
+  parameterPolicy { min_order_id = "dynamic" }
+  query = """SELECT order_id FROM main.orders WHERE order_id >= \${min_order_id}"""
+}`;
+    const failure = createAnalyticalFailure({
+      code: 'DIALECT_ERROR',
+      phase: 'execution',
+      snapshotId: 'snapshot-repair-sql',
+      runId: 'failed-sql-repair',
+      planFingerprint: 'd'.repeat(64),
+      dqlSource: sourceDql,
+      compiledSql: failedSql,
+    });
     const failedAnswerExecutor = () => ({
       summary: 'The query could not be completed.',
       status: 'blocked' as const,
@@ -2763,16 +2984,27 @@ describe('agent run runtime API', () => {
         trustState: 'blocked' as const,
         payload: {
           kind: 'no_answer',
+          analyticalFailure: failure,
+          resolvedAnalyticalPlan: { fingerprint: failure.planFingerprint, recommendedRoute: 'generated_answer' },
+          dqlArtifact: {
+            kind: 'sql_block',
+            name: 'Orders',
+            source: sourceDql,
+            compiledSql: failedSql,
+            parameterValues: { min_order_id: 7 },
+            trustState: 'review_required',
+            persistence: 'transient',
+          },
           proposedSql: failedSql,
           sql: failedSql,
-          executionError: 'syntax error near source::',
+          executionError: 'The warehouse rejected the source dialect quoting.',
           warehouseFailure: {
             version: 1,
             origin: 'warehouse',
             stage: 'execution',
-            category: 'syntax',
+            category: 'dialect_error',
             retryDisposition: 'model_repair',
-            redactedMessage: 'syntax error near source::',
+            redactedMessage: 'The warehouse rejected the source dialect quoting.',
             driver: 'duckdb',
           },
         },
@@ -2780,14 +3012,44 @@ describe('agent run runtime API', () => {
       evaluations: [],
       nextActions: [],
     });
+    let executionAttempts = 0;
     const executor = {
-      executeQuery: vi.fn(async (sql: string) => ({
+      executeQuery: vi.fn(async (sql: string, _parameters?: unknown[], variables?: Record<string, unknown>) => {
+        executionAttempts += 1;
+        if (executionAttempts === 1) throw new Error('Parser Error: dialect quoting requires explicit identifiers');
+        return ({
         columns: ['order_id'],
         rows: [{ order_id: 42 }],
         rowCount: 1,
         sql,
-      })),
+        variables,
+      });
+      }),
     } as unknown as QueryExecutor;
+    const nativeFetch = globalThis.fetch;
+    const providerRequests: string[] = [];
+    let releaseProvider!: () => void;
+    let providerStarted!: () => void;
+    const providerGate = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    const providerObserved = new Promise<void>((resolve) => { providerStarted = resolve; });
+    const providerFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).startsWith('https://ask-sql-repair.example.test/')) {
+        const request = JSON.parse(String(init?.body ?? '{}')) as { messages?: Array<{ content?: string }> };
+        const messages = request.messages ?? [];
+        const userPayload = JSON.parse(messages.at(-1)?.content ?? '{}') as { sql?: string };
+        const serialized = JSON.stringify(messages);
+        providerRequests.push(serialized);
+        expect(userPayload.sql).toBe(failedSql);
+        expect(serialized).not.toContain(sourceDql);
+        providerStarted();
+        await providerGate;
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: `\`\`\`json\n${JSON.stringify({ summary: 'Repair the missing column.', sql: repairedSql, viz: 'table', outputs: ['order_id'] })}\n\`\`\`` } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return nativeFetch(input, init);
+    });
+    vi.stubGlobal('fetch', providerFetch);
 
     try {
       const port = await startLocalServer({
@@ -2808,18 +3070,38 @@ describe('agent run runtime API', () => {
         },
       });
       const base = `http://127.0.0.1:${port}`;
-      const createdResponse = await fetch(`${base}/api/agent-runs`, {
+      const createdResponse = await nativeFetch(`${base}/api/agent-runs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: 'Show orders', requestedMode: 'ask' }),
+        body: JSON.stringify({
+          question: 'Show orders',
+          requestedMode: 'ask',
+          executionTarget: { target: 'local' },
+        }),
       });
-      const created = await createdResponse.json() as { run: { id: string } };
+      const created = await createdResponse.json() as { run: { id: string; repairCapability?: { automatic?: { eligible?: boolean } } } };
+      expect(created.run.repairCapability?.automatic?.eligible).toBe(true);
 
-      const repairedResponse = await fetch(`${base}/api/agent-runs/${encodeURIComponent(created.run.id)}/repair-execution`, {
+      const repairedRequest = nativeFetch(`${base}/api/agent-runs/${encodeURIComponent(created.run.id)}/repair-execution`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: '{}',
       });
+      const firstRepairState = await Promise.race([
+        providerObserved.then(() => ({ kind: 'provider' as const })),
+        repairedRequest.then((response) => ({
+          kind: 'response' as const,
+          status: response.status,
+        })),
+      ]);
+      expect(firstRepairState).toEqual({ kind: 'provider' });
+      const concurrentResponse = await nativeFetch(`${base}/api/agent-runs/${encodeURIComponent(created.run.id)}/repair-execution`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(concurrentResponse.status).toBe(409);
+      await expect(concurrentResponse.json()).resolves.toMatchObject({ code: 'REPAIR_IN_PROGRESS' });
+      releaseProvider();
+      const repairedResponse = await repairedRequest;
       expect(repairedResponse.status).toBe(201);
       const repaired = await repairedResponse.json() as { run: any };
       expect(repaired.run).toMatchObject({
@@ -2834,31 +3116,292 @@ describe('agent run runtime API', () => {
           attempt: 1,
         },
       });
-      expect(repaired.run.artifacts[0].payload.sql).not.toContain('source::');
+      expect(repaired.run.artifacts[0].payload.proposedSql).toBe(repairedSql);
+      expect(repaired.run.artifacts[0].payload.sql).toBe(`${repairedSql}\nLIMIT 200`);
+      expect(repaired.run.executionTarget).toEqual({ target: 'local' });
+      expect(repaired.run.artifacts[0].payload.dqlArtifact).toMatchObject({
+        compiledSql: repairedSql,
+        parameterValues: { min_order_id: 7 },
+        trustState: 'review_required',
+        persistence: 'transient',
+        executableArtifact: {
+          version: 1,
+          kind: 'sql_block',
+          trustState: 'review_required',
+          targetFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+          planFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        },
+      });
+      expect(repaired.run.artifacts[0].payload.dqlArtifact.source).toContain('SELECT order_id FROM "main"."orders" WHERE order_id >= ${min_order_id}');
       expect(repaired.run.artifacts[0].payload.result.rows).toEqual([{ order_id: 42 }]);
       expect(repaired.run.artifacts[0].payload.diagnosticReceipt).toMatchObject({
         phase: 'run.completed',
         repair: { sourceRunId: created.run.id, targetPreserved: true, readOnly: true },
         execution: { rowCount: 1 },
+        providerEgressReceipts: [expect.objectContaining({ resultRowCount: 0, columnCount: 0, optIn: false })],
       });
+      expect(repaired.run.providerEgressReceipts).toEqual([
+        expect.objectContaining({ purpose: 'repair_sql', dispatchPhase: 'repair', resultRowCount: 0, columnCount: 0, optIn: false }),
+      ]);
+      expect(JSON.stringify(repaired.run.providerEgressReceipts)).not.toContain('order_id');
+      expect(repaired.run.telemetry).toMatchObject({
+        providerRoundTrips: 1,
+        toolCalls: 0,
+        sqlExecutions: 2,
+        repairs: 1,
+        egressReceipts: 1,
+        stageDurationsMs: { retrieval: 0, meaning: 0 },
+      });
+      expect(repaired.run.diagnosticReceiptV2).toMatchObject({ version: 2, telemetry: repaired.run.telemetry });
+      expect(providerRequests).toHaveLength(1);
 
-      const sourceResponse = await fetch(`${base}/api/agent-runs/${encodeURIComponent(created.run.id)}`);
+      const sourceResponse = await nativeFetch(`${base}/api/agent-runs/${encodeURIComponent(created.run.id)}`);
       const sourceState = await sourceResponse.json() as { lifecycleState: string; run: any };
       expect(sourceState.run.status).toBe('blocked');
       expect(sourceState.run.artifacts[0].payload.sql).toBe(failedSql);
+      expect(sourceState.run.artifacts[0].payload.dqlArtifact.source).toBe(sourceDql);
 
-      const idempotent = await fetch(`${base}/api/agent-runs/${encodeURIComponent(created.run.id)}/repair-execution`, {
+      const idempotent = await nativeFetch(`${base}/api/agent-runs/${encodeURIComponent(created.run.id)}/repair-execution`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
       });
       expect(idempotent.status).toBe(200);
       await expect(idempotent.json()).resolves.toMatchObject({ run: { id: repaired.run.id } });
-      expect(executor.executeQuery).toHaveBeenCalledTimes(1);
+      expect(providerRequests).toHaveLength(1);
+    } finally {
+      releaseProvider();
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  }, 90_000);
+
+  it('returns typed manual actions when a legacy run lacks repair capability authority', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-legacy-repair-capability-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    const completedAt = new Date().toISOString();
+    const legacyStore = new SqliteAgentRunStore({ path: defaultAgentRunSqlitePath(projectRoot) });
+    legacyStore.save({
+      id: 'legacy-blocked-run',
+      question: 'Show orders',
+      requestedMode: 'ask',
+      route: 'generated_answer',
+      status: 'blocked',
+      trustState: 'blocked',
+      startedAt: completedAt,
+      completedAt,
+      artifacts: [],
+      evaluations: [],
+      events: [],
+      nextActions: [{ id: 'edit', label: 'Edit DQL', action: 'edit_dql', enabled: true }],
+    } as never);
+    legacyStore.close();
+
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs/legacy-blocked-run/repair-execution`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        code: 'REPAIR_CAPABILITY_REQUIRED',
+        error: expect.any(String),
+        manualActions: ['edit_dql', 'open_sql_notebook'],
+      });
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
   });
 
-  it('repairs a DQL-compiler-only Ask failure and returns an inspectable derived result', async () => {
+  it('rejects mutated plan, failure, and source fingerprints before reserving or dispatching repair', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-repair-capability-binding-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    const source = `block "Orders" {
+  type = "custom"
+  query = """SELECT order_id FROM main.orders"""
+}`;
+    const sql = 'SELECT order_id FROM main.orders';
+    const targetFingerprint = targetGenerationFingerprint({ driver: 'file' });
+    const store = new SqliteAgentRunStore({ path: defaultAgentRunSqlitePath(projectRoot) });
+    for (const mismatch of ['plan', 'failure', 'source'] as const) {
+      const id = `repair-binding-${mismatch}`;
+      const failure = createAnalyticalFailure({
+        code: 'DIALECT_ERROR',
+        phase: 'execution',
+        snapshotId: 'snapshot-binding',
+        runId: id,
+        planFingerprint: 'a'.repeat(64),
+        dqlSource: source,
+        compiledSql: sql,
+      });
+      const run = {
+        id,
+        question: 'Show orders',
+        requestedMode: 'ask',
+        route: 'generated_answer',
+        status: 'blocked',
+        trustState: 'blocked',
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        executionTarget: { target: 'local' },
+        artifacts: [{
+          id: `answer:${id}`,
+          kind: 'answer',
+          title: 'Failed analytical run',
+          trustState: 'blocked',
+          payload: {
+            kind: 'no_answer',
+            resolvedAnalyticalPlan: { fingerprint: failure.planFingerprint, recommendedRoute: 'generated_answer' },
+            analyticalFailure: failure,
+            dqlArtifact: {
+              kind: 'sql_block', name: 'Orders', source, compiledSql: sql,
+              trustState: 'review_required', persistence: 'transient',
+            },
+            proposedSql: sql,
+            sql,
+            warehouseFailure: {
+              version: 1, origin: 'warehouse', stage: 'execution', category: 'dialect_error',
+              retryDisposition: 'model_repair', redactedMessage: 'Dialect error.', driver: 'file',
+            },
+          },
+        }],
+        evaluations: [],
+        events: [],
+        nextActions: [],
+      } as any;
+      run.repairCapability = analyticalRepairCapabilityForAgentRun(run, targetFingerprint);
+      const payload = run.artifacts[0].payload;
+      if (mismatch === 'plan') payload.resolvedAnalyticalPlan.fingerprint = 'b'.repeat(64);
+      if (mismatch === 'failure') payload.analyticalFailure = { ...payload.analyticalFailure, code: 'COLUMN_NOT_FOUND' };
+      if (mismatch === 'source') payload.dqlArtifact.source = source.replace('main.orders', 'main.changed_orders');
+      store.save(run);
+    }
+    store.close();
+
+    const executor = { executeQuery: vi.fn() } as unknown as QueryExecutor;
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor,
+        connection: { driver: 'file' },
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      for (const mismatch of ['plan', 'failure', 'source'] as const) {
+        const sourceRunId = `repair-binding-${mismatch}`;
+        const response = await fetch(`${base}/api/agent-runs/${sourceRunId}/repair-execution`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toMatchObject({ code: 'REPAIR_CAPABILITY_REQUIRED' });
+        const derived = await fetch(`${base}/api/agent-runs/${sourceRunId}:repair:1`);
+        expect(derived.status).toBe(404);
+      }
+      expect(executor.executeQuery).not.toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
+  it('rejects a stale fabricated capability before consulting persisted repair attempts after restart', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-durable-repair-attempt-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    const completedAt = new Date().toISOString();
+    const sourceRunId = 'durable-failed-repair-source';
+    const derivedRunId = `${sourceRunId}:repair:1`;
+    const store = new SqliteAgentRunStore({ path: defaultAgentRunSqlitePath(projectRoot) });
+    store.save({
+      id: sourceRunId,
+      question: 'Show orders',
+      requestedMode: 'ask',
+      route: 'generated_answer',
+      status: 'blocked',
+      trustState: 'blocked',
+      startedAt: completedAt,
+      completedAt,
+      artifacts: [],
+      evaluations: [],
+      events: [],
+      nextActions: [],
+      repairCapability: {
+        version: 1,
+        automatic: {
+          eligible: true,
+          action: 'repair_embedded_sql',
+          correctionCode: 'SQL_EXECUTION_REPAIR',
+          attemptsRemaining: 1,
+        },
+        failureFingerprint: 'failure-fingerprint',
+        sourceFingerprint: 'source-fingerprint',
+        planFingerprint: 'plan-fingerprint',
+        dqlFingerprint: 'dql-fingerprint',
+        sqlFingerprint: 'sql-fingerprint',
+        targetFingerprint: 'target-fingerprint',
+        routeLocked: true,
+        targetLocked: true,
+        sourceImmutable: true,
+        manualActions: ['edit_dql', 'open_sql_notebook'],
+      },
+    } as never);
+    store.save({
+      id: derivedRunId,
+      question: 'Show orders',
+      requestedMode: 'ask',
+      route: 'generated_answer',
+      status: 'blocked',
+      trustState: 'blocked',
+      stopReason: 'blocked',
+      startedAt: completedAt,
+      completedAt,
+      summary: 'The provider repair changed the immutable plan.',
+      artifacts: [],
+      evaluations: [],
+      events: [],
+      nextActions: [],
+      repairAttempts: 1,
+      derivation: {
+        version: 1,
+        kind: 'analytical_repair',
+        sourceRunId,
+        attempt: 1,
+      },
+    } as never);
+    store.close();
+
+    const executor = { executeQuery: vi.fn() } as unknown as QueryExecutor;
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs/${sourceRunId}/repair-execution`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({
+        code: 'REPAIR_CAPABILITY_REQUIRED',
+      });
+      expect(executor.executeQuery).not.toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
+  it('keeps an invalid DQL wrapper editable and never sends it to provider repair', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-ask-dql-compiler-repair-'));
     tempDirs.push(projectRoot);
     writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
@@ -2868,25 +3411,26 @@ describe('agent run runtime API', () => {
     });
     const nativeFetch = globalThis.fetch;
     const malformedSource = 'block "Orders" { type = "custom" query """SELECT order_id FROM main.orders""" }';
-    const repairedSource = 'block "Orders" { type = "custom" query = """SELECT order_id FROM main.orders""" }';
-    const repairRequests: string[] = [];
+    const providerRequests: string[] = [];
     const providerFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       if (String(input).startsWith('https://ask-repair.example.test/')) {
-        const request = JSON.parse(String(init?.body ?? '{}')) as { messages?: Array<{ content?: string }> };
-        const messages = JSON.stringify(request.messages) ?? '';
-        if (messages.includes('Repair one malformed executable DQL custom block')) {
-          repairRequests.push(messages);
-          expect(messages).toContain('DQL compiler expected equals');
-        }
+        providerRequests.push(String(init?.body ?? ''));
         return new Response(JSON.stringify({
-          choices: [{ message: { content: messages.includes('Repair one malformed executable DQL custom block')
-            ? JSON.stringify({ dql: repairedSource })
-            : 'The repaired query returned one order.' } }],
+          choices: [{ message: { content: JSON.stringify({ sql: 'SELECT order_id FROM main.orders' }) } }],
         }), { status: 200, headers: { 'content-type': 'application/json' } });
       }
       return nativeFetch(input, init);
     });
     vi.stubGlobal('fetch', providerFetch);
+    const analyticalFailure = createAnalyticalFailure({
+      code: 'DIALECT_ERROR',
+      phase: 'execution',
+      snapshotId: 'snapshot-invalid-wrapper',
+      runId: 'failed-invalid-wrapper',
+      planFingerprint: 'e'.repeat(64),
+      dqlSource: malformedSource,
+      compiledSql: 'SELECT order_id FROM main.orders',
+    });
     const failedAnswerExecutor = () => ({
       summary: 'DQL compiler expected equals before query.',
       status: 'blocked' as const,
@@ -2899,6 +3443,7 @@ describe('agent run runtime API', () => {
         trustState: 'blocked' as const,
         payload: {
           kind: 'no_answer',
+          analyticalFailure,
           dqlArtifact: { kind: 'sql_block', name: 'Orders', source: malformedSource, trustState: 'review_required' },
           proposedSql: 'SELECT order_id FROM main.orders',
           executionError: 'DQL compiler expected equals before query.',
@@ -2951,17 +3496,16 @@ describe('agent run runtime API', () => {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
       });
       const text = await response.text();
-      expect(response.status, text).toBe(201);
-      const repaired = JSON.parse(text) as any;
-      expect(repaired.run).toMatchObject({
-        status: 'needs_review',
-        derivation: { kind: 'analytical_repair', sourceRunId: created.run.id },
+      expect(response.status, text).toBe(409);
+      expect(JSON.parse(text)).toMatchObject({
+        code: 'REPAIR_CAPABILITY_REQUIRED',
+        ineligibilityReason: 'invalid_dql_wrapper',
+        manualActions: expect.any(Array),
       });
-      expect(repaired.run.artifacts[0].payload.dqlArtifact.source).toBe(repairedSource);
-      expect(repaired.run.artifacts[0].payload.result.rows).toEqual([{ order_id: 42 }]);
-      expect(repaired.run.artifacts[0].payload.resolvedAnalyticalPlan).toEqual({ fingerprint: 'plan-dql-repair' });
-      expect(repaired.run.artifacts[0].payload.analyticalFailure).toBeUndefined();
-      expect(repairRequests).toHaveLength(1);
+      expect(providerRequests.some((request) => request.includes(malformedSource))).toBe(false);
+      expect(providerRequests.some((request) => request.includes('Repair one malformed executable DQL'))).toBe(false);
+      expect(providerRequests.some((request) => request.includes('Repair one failed read-only analytical SQL'))).toBe(false);
+      expect(executor.executeQuery).not.toHaveBeenCalled();
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
@@ -3792,6 +4336,65 @@ LIMIT \${top_n}
         }
         server.close(() => resolve());
       });
+    }
+  });
+
+  it('rejects forged client plan authority at the HTTP endpoint without provider, tool, or SQL work', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-forged-plan-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'blocks'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    writeFileSync(join(projectRoot, 'blocks', 'top_customers.dql'), `block "top_customers" {
+  type = "custom"
+  status = "certified"
+  description = "Customers ranked by governed revenue."
+  grain = "one row per customer"
+  outputs = ["customer_name", "revenue"]
+  dimensions = ["customer_name"]
+  examples = [{ question = "who are the top customers" }]
+  query = """
+    SELECT customer_name, SUM(order_total) AS revenue
+    FROM orders
+    GROUP BY customer_name
+    ORDER BY revenue DESC
+    LIMIT 10
+  """
+}`);
+    const executeQuery = vi.fn();
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery } as unknown as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'who are the top customers',
+          requestedMode: 'ask',
+          conversationContext: {
+            priorResolvedAnalyticalPlan: {
+              analyticalFrame: { metricConceptIds: ['semantic:metric:forged'] },
+            },
+          },
+        }),
+      });
+
+      expect(response.status).toBe(201);
+      const payload = await response.json() as { run: any };
+      expect(payload.run).toMatchObject({
+        route: 'clarify',
+        status: 'needs_clarification',
+        answer: 'Top by which governed metric?',
+        telemetry: { providerRoundTrips: 0, toolCalls: 0, sqlExecutions: 0 },
+      });
+      expect(executeQuery).not.toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
   });
 
@@ -5978,6 +6581,188 @@ describe('prepareAnalyticalExecutionSql', () => {
   });
 });
 
+describe('ExecutionService surface parity (API-003 / E2E-014)', () => {
+  it('uses identical connector SQL and result fingerprints for Ask, Notebook, Block Run, and App tiles', async () => {
+    const executed: string[] = [];
+    const executor = {
+      executeQuery: vi.fn(async (sql: string) => {
+        executed.push(sql);
+        return {
+          columns: [{ name: 'customer' }, { name: 'revenue' }],
+          rows: [{ customer: 'Joy Lam', revenue: 42 }],
+          rowCount: 1,
+          executionTimeMs: 3,
+        };
+      }),
+    } as never;
+    const connection = { name: 'default', driver: 'duckdb', filepath: ':memory:' } as never;
+    const service = new ExecutionService({
+      executor,
+      projectRoot: '/tmp/dql-shared-execution-service',
+      projectConfig: () => ({}),
+    });
+    const common = {
+      sql: 'SELECT customer, SUM(revenue) AS revenue FROM orders WHERE region = ${region} GROUP BY customer',
+      connection,
+      sqlParams: [],
+      variables: { region: 'West' },
+    };
+
+    const executions = await Promise.all([
+      service.execute({ ...common, subject: 'Ask AI query' }),
+      service.execute({ ...common, subject: 'Notebook query' }),
+      service.execute({ ...common, subject: 'Block Run query' }),
+      service.execute({ ...common, subject: 'App tile block query' }),
+    ]);
+    const [ask, notebook, blockRun, appTile] = executions;
+
+    expect(new Set(executed)).toEqual(new Set([ask.preparation.executedSql]));
+    expect(new Set(executions.map((item) => item.compiledSqlFingerprint))).toEqual(new Set([ask.compiledSqlFingerprint]));
+    expect(new Set(executions.map((item) => item.resultFingerprint))).toEqual(new Set([ask.resultFingerprint]));
+    expect(notebook.result).toEqual(ask.result);
+    expect(blockRun.result).toEqual(ask.result);
+    expect(appTile.result).toEqual(ask.result);
+  });
+
+  it('preserves connector SQL and fingerprints through real Block Run, certification, and App block ingress', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-execution-service-ingress-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'semantic-layer', 'metrics'), { recursive: true });
+    mkdirSync(join(projectRoot, 'blocks', 'revenue'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'execution-service-ingress',
+      semanticLayer: { provider: 'dql', path: 'semantic-layer' },
+    }));
+    writeFileSync(join(projectRoot, 'semantic-layer', 'metrics', 'revenue.yaml'), [
+      'name: revenue',
+      'label: Revenue',
+      'description: Governed revenue',
+      'domain: revenue',
+      'sql: SUM(amount)',
+      'type: sum',
+      'table: orders',
+      '',
+    ].join('\n'));
+    const blockSource = `block "Revenue Metric" {
+  type = "semantic"
+  status = "certified"
+  owner = "analytics"
+  domain = "revenue"
+  metrics = ["revenue"]
+}\n`;
+    writeFileSync(join(projectRoot, 'blocks', 'revenue', 'revenue-metric.dql'), blockSource);
+    const created = createAppPackage(projectRoot, {
+      name: 'Execution Parity App',
+      domain: 'revenue',
+      owners: ['analytics'],
+      tags: [],
+      selectedBlockIds: ['Revenue Metric'],
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const dashboardPath = join(projectRoot, 'apps', created.app.id, 'dashboards', `${created.dashboardId}.dqld`);
+    const dashboard = JSON.parse(readFileSync(dashboardPath, 'utf8')) as any;
+    writeFileSync(dashboardPath, `${JSON.stringify(dashboard, null, 2)}\n`);
+
+    const executedSql: string[] = [];
+    const executor = {
+      executeQuery: vi.fn(async (sql: string) => {
+        executedSql.push(sql);
+        return { columns: ['revenue'], rows: [{ revenue: 42 }], rowCount: 1 };
+      }),
+    } as unknown as QueryExecutor;
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor,
+        connection: { driver: 'file' },
+        preferredPort: 0,
+        captureServer: (createdServer) => { server = createdServer; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const previewResponse = await fetch(`${base}/api/block-studio/run`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: blockSource }),
+      });
+      const previewText = await previewResponse.text();
+      expect(previewResponse.status, previewText).toBe(200);
+      const preview = JSON.parse(previewText) as any;
+
+      const certificationResponse = await fetch(`${base}/api/block-studio/certification-check`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: blockSource }),
+      });
+      const certificationText = await certificationResponse.text();
+      expect(certificationResponse.status, certificationText).toBe(200);
+      const certification = JSON.parse(certificationText) as any;
+
+      const appResponse = await fetch(`${base}/api/apps/${created.app.id}/dashboards/${created.dashboardId}/run`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const appText = await appResponse.text();
+      expect(appResponse.status, appText).toBe(200);
+      const app = JSON.parse(appText) as any;
+      const executedTiles = app.tiles.filter((tile: any) => tile.status === 'ok' && tile.blockId);
+      expect(executedTiles).toHaveLength(1);
+
+      const fingerprints = [
+        preview,
+        certification.preview,
+        ...executedTiles,
+      ].map((value) => ({
+        compiledSqlFingerprint: value.compiledSqlFingerprint,
+        resultFingerprint: value.resultFingerprint,
+      }));
+      const analyticalSql = executedSql.filter((sql) => /SUM\s*\(\s*amount\s*\)/i.test(sql));
+      expect(analyticalSql).toHaveLength(3);
+      expect(new Set(analyticalSql).size).toBe(1);
+      expect(new Set(fingerprints.map((value) => value.compiledSqlFingerprint)).size).toBe(1);
+      expect(new Set(fingerprints.map((value) => value.resultFingerprint)).size).toBe(1);
+      expect(fingerprints.every((value) => /^[a-f0-9]{64}$/.test(value.compiledSqlFingerprint))).toBe(true);
+      expect(fingerprints.every((value) => /^[a-f0-9]{64}$/.test(value.resultFingerprint))).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
+  it('keeps every production execution adapter on the shared service boundary', () => {
+    const source = readFileSync(new URL('./local-runtime.ts', import.meta.url), 'utf8');
+    const artifactExecutor = source.slice(
+      source.indexOf('const executeDqlArtifactSourceForAgent = async'),
+      source.indexOf('const executeCertifiedBlockByNameForAgent = async'),
+    );
+    const appTiles = source.slice(
+      source.indexOf('const appDashRun = path.match'),
+      source.indexOf("path === '/api/apps/generate'"),
+    );
+    const notebookStart = source.indexOf("path === '/api/notebook/execute'");
+    const notebookExecution = source.slice(
+      notebookStart,
+      source.indexOf("path === '/api/query'", notebookStart),
+    );
+    const blockRunStart = source.indexOf("path === '/api/dql/artifacts/execute'");
+    const blockRun = source.slice(blockRunStart, notebookStart);
+
+    expect(artifactExecutor).toContain('analyticalExecutionService.execute');
+    expect(appTiles).toContain("subject: 'App tile block query'");
+    expect(appTiles).toContain("subject: 'App tile semantic query'");
+    const appNotebook = source.slice(
+      source.indexOf('const runNotebookForApp = async'),
+      source.indexOf('const runNotebookForAppSnapshot', source.indexOf('const runNotebookForApp = async')),
+    );
+    expect(appNotebook).toContain("subject: 'App notebook query'");
+    const blockPreview = source.slice(
+      source.indexOf('const runBlockStudioPreviewSource = async'),
+      source.indexOf('const runBlockStudioTestSummary', source.indexOf('const runBlockStudioPreviewSource = async')),
+    );
+    expect(blockPreview).toContain("subject: 'Block Studio preview query'");
+    expect(blockPreview).not.toContain('executor.executeQuery(');
+    expect(notebookExecution).toContain('analyticalExecutionService.execute');
+    expect(blockRun).toContain('executeDqlArtifactSourceForAgent');
+    expect(blockRun).toContain('executeCertifiedBlockByNameForAgent');
+  });
+});
+
 describe('bounded analytical repair inputs', () => {
   it('retains the exact proposed SQL from the immutable failed run', () => {
     expect(repairableSqlFromAgentRun({
@@ -6021,6 +6806,32 @@ describe('bounded analytical repair inputs', () => {
     expect(analyticalFailureAllowsAppRepair({ code: 'PERMISSION_DENIED' } as never)).toBe(false);
     expect(analyticalFailureAllowsAppRepair({ code: 'POLICY_DENIED' } as never)).toBe(false);
     expect(analyticalFailureAllowsAppRepair({ code: 'COLUMN_NOT_FOUND' } as never)).toBe(true);
+  });
+
+  it('does not infer provider repair authority from a policy refusal without a warehouse failure', () => {
+    const source = 'block "Orders" { type = "custom" query = """SELECT order_id FROM main.orders""" }';
+    const failure = createAnalyticalFailure({
+      code: 'POLICY_DENIED',
+      phase: 'validation',
+      snapshotId: 'snapshot-policy',
+      runId: 'policy-run',
+      planFingerprint: 'f'.repeat(64),
+      dqlSource: source,
+      compiledSql: 'SELECT order_id FROM main.orders',
+    });
+    const capability = analyticalRepairCapabilityForAgentRun({
+      id: 'policy-run',
+      status: 'blocked',
+      executionTarget: { target: 'local' },
+      artifacts: [{ payload: {
+        analyticalFailure: failure,
+        dqlArtifact: { kind: 'sql_block', source, compiledSql: 'SELECT order_id FROM main.orders' },
+      } }],
+    } as never);
+    expect(capability).toMatchObject({
+      automatic: { eligible: false, action: 'none', attemptsRemaining: 0 },
+      ineligibilityReason: 'failure_not_eligible',
+    });
   });
 });
 
@@ -8111,11 +8922,11 @@ describe('agentRunDeadlineMs env overrides (Slice 1)', () => {
     expect(agentRunDeadlineMs({ question: 'total revenue', requestedMode: 'research' }, {})).toBe(120_000);
   });
 
-  it('honors env overrides with clamping', () => {
-    expect(agentRunDeadlineMs({ question: 'total revenue' }, { DQL_AGENT_LOOKUP_DEADLINE_MS: '180000' })).toBe(180_000);
-    expect(agentRunDeadlineMs({ question: 'x', requestedMode: 'research' }, { DQL_AGENT_RESEARCH_DEADLINE_MS: '420000' })).toBe(420_000);
-    expect(agentRunDeadlineMs({ question: 'total revenue' }, { DQL_AGENT_LOOKUP_DEADLINE_MS: '1' })).toBe(15_000);
-    expect(agentRunDeadlineMs({ question: 'total revenue' }, { DQL_AGENT_LOOKUP_DEADLINE_MS: '99999999' })).toBe(600_000);
+  it('keeps normative ceilings despite legacy env overrides', () => {
+    expect(agentRunDeadlineMs({ question: 'total revenue' }, { DQL_AGENT_LOOKUP_DEADLINE_MS: '180000' })).toBe(45_000);
+    expect(agentRunDeadlineMs({ question: 'x', requestedMode: 'research' }, { DQL_AGENT_RESEARCH_DEADLINE_MS: '420000' })).toBe(120_000);
+    expect(agentRunDeadlineMs({ question: 'total revenue' }, { DQL_AGENT_LOOKUP_DEADLINE_MS: '1' })).toBe(45_000);
+    expect(agentRunDeadlineMs({ question: 'total revenue' }, { DQL_AGENT_LOOKUP_DEADLINE_MS: '99999999' })).toBe(45_000);
     expect(agentRunDeadlineMs({ question: 'total revenue' }, { DQL_AGENT_LOOKUP_DEADLINE_MS: 'not-a-number' })).toBe(45_000);
   });
 });

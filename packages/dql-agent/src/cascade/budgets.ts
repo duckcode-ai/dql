@@ -330,7 +330,7 @@ export function proposalToolBudgetForQuestion(
         // Research has its own orchestration route; generated-answer discovery
         // remains bounded so a missed semantic match cannot trigger 15 serial
         // provider round trips.
-        maxToolCalls: 8,
+        maxToolCalls: 4,
         effortClass: 'deep_research',
         reason: 'deep analysis, diagnosis, anomaly, trust review, or research workspace request',
       };

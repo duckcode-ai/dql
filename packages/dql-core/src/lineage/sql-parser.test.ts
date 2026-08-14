@@ -1,5 +1,97 @@
 import { describe, it, expect } from 'vitest';
-import { analyzeSqlReferences, extractTablesFromSql } from './sql-parser.js';
+import { analyzeSqlReferences, buildGeneratedAnalyticalSqlSignature, buildSqlAnalyticalSignature, buildSqlOutputExpressionSignature, extractTablesFromSql } from './sql-parser.js';
+
+describe('buildSqlAnalyticalSignature', () => {
+  it('normalizes cosmetic quoting but rejects semantic plan changes', () => {
+    const source = buildSqlAnalyticalSignature('SELECT SUM(o.amount) AS total FROM orders o WHERE o.status = $1 GROUP BY o.region');
+    expect(source).toEqual(buildSqlAnalyticalSignature('select sum(o.amount) as total from "orders" o where o.status = $1 group by o.region'));
+    expect(source).not.toEqual(buildSqlAnalyticalSignature('SELECT AVG(o.amount) AS total FROM orders o WHERE o.status = $1 GROUP BY o.region'));
+    expect(source).not.toEqual(buildSqlAnalyticalSignature('SELECT SUM(o.amount) AS total FROM orders o GROUP BY o.region'));
+    expect(source).not.toEqual(buildSqlAnalyticalSignature('SELECT SUM(o.amount) AS total FROM orders o WHERE o.status = $2 GROUP BY o.region'));
+    expect(source).not.toEqual(buildSqlAnalyticalSignature('SELECT SUM(o.amount) AS changed FROM orders o WHERE o.status = $1 GROUP BY o.region'));
+    expect(source).not.toEqual(buildSqlAnalyticalSignature('SELECT SUM(o.amount) AS total, o.region FROM orders o WHERE o.status = $1 GROUP BY o.region'));
+    expect(source).not.toEqual(buildSqlAnalyticalSignature('SELECT SUM(o.amount) AS total FROM orders o WHERE o.status = $1 GROUP BY o.status'));
+    expect(source).not.toEqual(buildSqlAnalyticalSignature('SELECT SUM(o.amount) AS total FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.status = $1 GROUP BY o.region'));
+    expect(source).not.toEqual(buildSqlAnalyticalSignature('SELECT SUM(o.amount) AS total FROM orders o JOIN customers c ON o.account_id = c.id WHERE o.status = $1 GROUP BY o.region'));
+    const joined = buildSqlAnalyticalSignature('SELECT SUM(o.amount) AS total FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.status = $1 GROUP BY o.region');
+    expect(joined).not.toEqual(buildSqlAnalyticalSignature('SELECT SUM(o.amount) AS total FROM orders o JOIN accounts c ON o.customer_id = c.id WHERE o.status = $1 GROUP BY o.region'));
+    expect(joined).not.toEqual(buildSqlAnalyticalSignature('SELECT SUM(o.amount) AS total FROM orders o JOIN customers c ON o.account_id = c.id WHERE o.status = $1 GROUP BY o.region'));
+  });
+
+  it('fails closed for unsupported and multi-statement SQL', () => {
+    expect(buildSqlAnalyticalSignature('SELECT 1; SELECT 2')).toBeUndefined();
+    expect(buildSqlAnalyticalSignature('not sql')).toBeUndefined();
+  });
+});
+
+describe('buildSqlOutputExpressionSignature', () => {
+  it('binds the complete named output expression while ignoring relation aliases only', () => {
+    const signature = buildSqlOutputExpressionSignature(
+      'SELECT SUM(o.food_revenue) / SUM(o.revenue) AS food_revenue_pct FROM orders o',
+      'food_revenue_pct',
+    );
+    expect(signature).toMatchObject({
+      outputAlias: 'food_revenue_pct',
+      operators: ['/'],
+      columns: ['food_revenue', 'revenue'],
+      aggregateFunctions: ['SUM'],
+    });
+    expect(signature?.canonicalExpression).toBe(buildSqlOutputExpressionSignature(
+      'SELECT SUM(items.food_revenue) / SUM(items.revenue) AS food_revenue_pct FROM orders items',
+      'food_revenue_pct',
+    )?.canonicalExpression);
+    expect(signature?.canonicalExpression).toBe(buildSqlOutputExpressionSignature(
+      'SELECT CAST(SUM(items.food_revenue) AS DOUBLE) / CAST(NULLIF(SUM(items.revenue), 0) AS DOUBLE) AS food_revenue_pct FROM orders items',
+      'food_revenue_pct',
+    )?.canonicalExpression);
+    expect(signature?.canonicalExpression).not.toBe(buildSqlOutputExpressionSignature(
+      'SELECT SUM(o.food_revenue) + SUM(o.revenue) AS food_revenue_pct FROM orders o',
+      'food_revenue_pct',
+    )?.canonicalExpression);
+  });
+
+  it('fails closed when the output alias is absent or ambiguous across scopes', () => {
+    expect(buildSqlOutputExpressionSignature('SELECT SUM(amount) AS total FROM orders', 'missing')).toBeUndefined();
+    expect(buildSqlOutputExpressionSignature(
+      'WITH a AS (SELECT SUM(amount) AS total FROM orders) SELECT SUM(amount) AS total FROM orders',
+      'total',
+    )).toBeUndefined();
+  });
+});
+
+describe('buildGeneratedAnalyticalSqlSignature', () => {
+  it('retains parser-owned output, grouping, join, filter, order, and limit semantics', () => {
+    const signature = buildGeneratedAnalyticalSqlSignature(`
+      SELECT c.customer_name AS customer_name, SUM(o.revenue) AS revenue
+      FROM orders o JOIN customers c ON o.customer_id = c.customer_id
+      WHERE c.status = 'active'
+      GROUP BY c.customer_name ORDER BY revenue DESC LIMIT 10
+    `);
+    expect(signature).toMatchObject({
+      groupByColumns: ['customer_name'],
+      orderBy: [{ expression: 'revenue', direction: 'desc' }],
+      limit: { kind: 'literal', value: 10 },
+      sourceRelations: ['customers', 'orders'],
+      joins: [{ leftRelation: 'orders', leftColumn: 'customer_id', rightRelation: 'customers', rightColumn: 'customer_id' }],
+      setOperations: [],
+      hasWindow: false,
+    });
+    expect(signature?.outputs.find((output) => output.outputAlias === 'revenue')).toMatchObject({
+      aggregateFunctions: ['SUM'],
+      columns: ['revenue'],
+      aggregateInputs: [{ func: 'SUM', distinct: false, column: 'revenue', relation: 'orders' }],
+    });
+    expect(signature?.filterExpression).toBeTruthy();
+  });
+
+  it('exposes spoofed aggregate expressions and UNION branches', () => {
+    const spoof = buildGeneratedAnalyticalSqlSignature(
+      'SELECT customer_name, SUM(revenue) + COUNT(*) AS revenue FROM orders GROUP BY customer_name UNION SELECT customer_name, SUM(revenue) AS revenue FROM archive GROUP BY customer_name',
+    );
+    expect(spoof?.outputs.find((output) => output.outputAlias === 'revenue')).toMatchObject({ aggregateFunctions: ['COUNT', 'SUM'] });
+    expect(spoof?.setOperations).toEqual(['union']);
+  });
+});
 
 describe('extractTablesFromSql', () => {
   it('extracts a single table from a simple SELECT', () => {

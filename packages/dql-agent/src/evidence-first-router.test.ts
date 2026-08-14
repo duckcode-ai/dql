@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { answerAnywayRoute, selectRoute, type AgentRunRequest } from "./agent-run-engine.js";
 import type { AgentEvidenceCandidate, AgentRetrievalEvidence, MeaningResolution } from "./meaning-resolution.js";
 import { createHybridRouter } from "./router.js";
+import { buildAnalysisQuestionPlan } from './metadata/analysis-planner.js';
 
 const request = (question: string): AgentRunRequest => ({ question });
 
@@ -31,6 +32,47 @@ function evidence(candidates: AgentEvidenceCandidate[]): AgentRetrievalEvidence 
   };
 }
 
+function jaffleMetric(
+  id: string,
+  name: string,
+  aliases: string[],
+  exactMatch: boolean,
+  compatibility: AgentEvidenceCandidate['compatibility'] = 'compatible',
+): AgentEvidenceCandidate {
+  return candidate({
+    id,
+    qualifiedId: id,
+    kind: 'semantic_metric',
+    trustTier: 'semantic',
+    name,
+    aliases,
+    dimensions: ['semantic:dimension:customer'],
+    exactMatch,
+    relevanceScore: exactMatch ? 1 : 0.9,
+    compatibility,
+    analyticalCapability: {
+      metricId: id,
+      measureIds: [`${id}:measure`],
+      primaryEntityId: 'order',
+      defaultResultGrainId: 'scalar',
+      resultGrainIds: ['scalar', 'customer'],
+      aggregation: name.endsWith('_pct') ? 'ratio' : 'sum',
+      additivity: { entities: 'additive', time: 'additive' },
+      dimensions: [{
+        dimensionId: 'semantic:dimension:customer',
+        entityId: 'customer',
+        supportedRoles: ['group_by', 'filter', 'display', 'rank_entity'],
+        relationshipPathIds: ['relationship:order_to_customer'],
+      }],
+      timeDimensions: [],
+      operations: ['filter', 'group', 'rank'],
+      supportedOutputKinds: ['dimension', 'metric_value', 'rank'],
+      executionCapabilities: [{ route: 'semantic', adapterId: 'native' }],
+      sourceFingerprint: `sha256:${id.replace(/[^a-z0-9]/gi, '')}`,
+    },
+  });
+}
+
 function resolved(overrides: Partial<MeaningResolution> = {}): MeaningResolution {
   return {
     interpretedQuestion: "Rank customers by actual monthly rollover balance",
@@ -47,6 +89,1054 @@ function resolved(overrides: Partial<MeaningResolution> = {}): MeaningResolution
 }
 
 describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
+  it.each([
+    {
+      question: 'what is the food revenue percentage?',
+      parsedIntent: { measures: ['food revenue percentage'], dimensions: [], filters: [] },
+      selectedId: 'semantic:metric:order_item.food_revenue_pct',
+      rejectedId: 'semantic:metric:revenue_growth_mom',
+      candidates: [
+        jaffleMetric('semantic:metric:order_item.food_revenue_pct', 'order_item.food_revenue_pct', ['food revenue percentage', 'food_revenue_pct'], true),
+        jaffleMetric('semantic:metric:revenue_growth_mom', 'revenue_growth_mom', ['revenue growth'], false, 'incompatible'),
+      ],
+    },
+    {
+      question: 'what is the food revenue by customers?',
+      parsedIntent: { measures: ['food revenue'], dimensions: ['customer'], filters: [] },
+      selectedId: 'semantic:metric:order_item.food_revenue',
+      rejectedId: 'block:customer_profile',
+      candidates: [
+        jaffleMetric('semantic:metric:order_item.food_revenue', 'order_item.food_revenue', ['food revenue'], true),
+        candidate({
+          id: 'block:customer_profile', kind: 'certified_block', trustTier: 'certified', name: 'customer_profile',
+          aliases: ['customer profile'], dimensions: ['customer'], exactMatch: false,
+          relevanceScore: 0.92, compatibility: 'incompatible', compatibilityFacts: ['missing food revenue measure'],
+        }),
+      ],
+    },
+    {
+      question: 'who are the top customers by revenue',
+      parsedIntent: { measures: ['revenue'], dimensions: ['customer'], filters: [], order: 'desc' as const, limit: 10 },
+      selectedId: 'semantic:metric:order.total_revenue',
+      rejectedId: 'block:top_beverage_customers',
+      candidates: [
+        jaffleMetric('semantic:metric:order.total_revenue', 'order.total_revenue', ['total revenue', 'revenue'], true),
+        candidate({
+          id: 'block:top_beverage_customers', kind: 'certified_block', trustTier: 'certified', name: 'top_beverage_customers',
+          aliases: ['top customers by revenue'], dimensions: ['customer'], exactMatch: false,
+          relevanceScore: 0.99, compatibility: 'incompatible', compatibilityFacts: ['beverage filter was not requested'],
+        }),
+      ],
+    },
+    {
+      question: 'who are the top customers have a highest revenue',
+      parsedIntent: { measures: ['total revenue'], dimensions: ['customer'], filters: [], order: 'desc' as const, limit: 10 },
+      selectedId: 'semantic:metric:order.total_revenue',
+      rejectedId: 'block:top_beverage_customers',
+      candidates: [
+        jaffleMetric('semantic:metric:order.total_revenue', 'order.total_revenue', ['total revenue', 'revenue'], true),
+        candidate({
+          id: 'block:top_beverage_customers', kind: 'certified_block', trustTier: 'certified', name: 'top_beverage_customers',
+          aliases: ['top customers', 'highest revenue'], dimensions: ['customer'], exactMatch: false,
+          relevanceScore: 0.96, compatibility: 'incompatible', compatibilityFacts: ['beverage filter was not requested'],
+        }),
+      ],
+    },
+    {
+      question: 'who are the customers with the explicit highest beverage revenue?',
+      parsedIntent: { measures: ['beverage revenue'], dimensions: ['customer'], filters: [{ field: 'category', value: 'beverage' }], order: 'desc' as const, limit: 10 },
+      selectedId: 'block:top_beverage_customers',
+      rejectedId: 'semantic:metric:order.total_revenue',
+      candidates: [
+        candidate({
+          id: 'block:top_beverage_customers', kind: 'certified_block', trustTier: 'certified', name: 'top_beverage_customers',
+          aliases: ['highest beverage revenue'], dimensions: ['customer', 'category'], exactMatch: true,
+          relevanceScore: 1, compatibility: 'compatible', compatibilityFacts: ['measure, customer grain, beverage filter, and ranking all match'],
+        }),
+        jaffleMetric('semantic:metric:order.total_revenue', 'order.total_revenue', ['total revenue'], false, 'incompatible'),
+      ],
+    },
+  ])('jaffle golden: $question freezes the compatible identity, never the lexical decoy', async ({ question, parsedIntent, selectedId, rejectedId, candidates }) => {
+    const resolveMeaning = vi.fn(async () => { throw new Error('exact compatible Jaffle route must not call AI'); });
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-jaffle-goldens',
+        sourceFingerprint: 'sha256:jaffle-goldens',
+        candidates,
+        parsedIntent,
+      }),
+    });
+
+    const decision = await router.decide(request(question));
+
+    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(decision.resolvedAnalyticalPlan).toMatchObject({
+      mode: 'authoritative',
+      selectedConceptIds: expect.arrayContaining([selectedId]),
+    });
+    expect(
+      decision.resolvedAnalyticalPlan?.capability,
+      JSON.stringify({
+        question,
+        route: decision.resolvedAnalyticalPlan?.recommendedRoute,
+        missing: decision.resolvedAnalyticalPlan?.missingInformation,
+        frame: decision.resolvedAnalyticalPlan?.analyticalFrame,
+        query: decision.resolvedAnalyticalPlan?.query,
+      }),
+    ).not.toBe('blocked');
+    expect(decision.resolvedAnalyticalPlan?.selectedConceptIds).not.toContain(rejectedId);
+  });
+
+  it('freezes the actual parsed customer-revenue ranking without treating the sort metric as grain', async () => {
+    const question = 'who are the top customers by revenue';
+    const parsed = buildAnalysisQuestionPlan(question);
+    const revenue = jaffleMetric(
+      'semantic:metric:order_item.revenue',
+      'order_item.revenue',
+      ['revenue'],
+      true,
+    );
+    revenue.analyticalCapability = {
+      ...revenue.analyticalCapability!,
+      executionCapabilities: [{ route: 'semantic', adapterId: 'metricflow-cli' }],
+      dimensions: [{
+        dimensionId: 'semantic:uncategorized:dimension:customers.customer_name',
+        entityId: 'customer',
+        label: 'Customer name',
+        aliases: ['customer'],
+        supportedRoles: ['group_by', 'filter', 'display', 'rank_entity'],
+        nativeGroupingReference: 'order_id__customer__customer_name',
+        nativeGroupingPath: ['order_id', 'customer'],
+      }, {
+        dimensionId: 'semantic:uncategorized:dimension:customers.customer_type',
+        entityId: 'customer',
+        label: 'Customer type',
+        aliases: ['customer'],
+        supportedRoles: ['group_by', 'filter', 'display', 'rank_entity'],
+        nativeGroupingReference: 'order_id__customer__customer_type',
+        nativeGroupingPath: ['order_id', 'customer'],
+      }, {
+        dimensionId: 'semantic:uncategorized:dimension:customers.customer_order_number',
+        entityId: 'customer',
+        label: 'Customer order number',
+        aliases: ['customer'],
+        supportedRoles: ['group_by', 'filter', 'display', 'rank_entity'],
+        nativeGroupingReference: 'order_id__customer__customer_order_number',
+        nativeGroupingPath: ['order_id', 'customer'],
+      }],
+    };
+    const rawCustomerDimensions = revenue.analyticalCapability.dimensions.map((dimension) => candidate({
+      id: dimension.dimensionId,
+      qualifiedId: dimension.dimensionId,
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      trustTier: 'semantic',
+      name: dimension.label!,
+      aliases: dimension.aliases,
+      compatibility: 'compatible',
+      relevanceScore: 0.8,
+    }));
+    const resolveMeaning = vi.fn(async () => { throw new Error('exact parsed Jaffle route must not call AI'); });
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-jaffle-actual-parser',
+        sourceFingerprint: 'sha256:jaffle-actual-parser',
+        candidates: [revenue, ...rawCustomerDimensions],
+        parsedIntent: {
+          measures: parsed.requestedShape.measures,
+          dimensions: parsed.requestedShape.dimensions,
+          filters: [],
+          order: parsed.requestedShape.rankingDirection === 'bottom' ? 'asc' : 'desc',
+          limit: parsed.requestedShape.topN?.n ?? 10,
+        },
+      }),
+    });
+
+    const decision = await router.decide(request(question));
+
+    expect(parsed.metricTerms).toEqual(['revenue']);
+    expect(parsed.dimensionTerms).toEqual(['customer']);
+    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(selectRoute(request(question), decision)).toBe('semantic_answer');
+    expect(decision.resolvedAnalyticalPlan).toMatchObject({
+      mode: 'authoritative',
+      selectedConceptIds: [revenue.id],
+      query: {
+        measures: [expect.objectContaining({ qualifiedId: revenue.id })],
+        dimensions: [expect.objectContaining({ requested: 'customer' })],
+        order: 'desc',
+        limit: 10,
+      },
+      relationshipPathIds: [],
+      relationshipProofs: [expect.objectContaining({
+        kind: 'semantic_native_grouping',
+        dimensionId: 'semantic:uncategorized:dimension:customers.customer_name',
+        nativeGroupingReference: 'order_id__customer__customer_name',
+        nativeGroupingPath: ['order_id', 'customer'],
+        route: 'semantic',
+        adapterId: 'metricflow-cli',
+        snapshotId: 'snapshot-jaffle-actual-parser',
+        capabilityFingerprint: revenue.analyticalCapability!.sourceFingerprint,
+        authorityFingerprint: expect.any(String),
+      })],
+      analyticalFrame: {
+        dimensions: expect.arrayContaining([
+          expect.objectContaining({
+            dimensionId: 'semantic:uncategorized:dimension:customers.customer_name',
+            role: 'group_by',
+          }),
+        ]),
+        ambiguity: [],
+      },
+    });
+    expect(decision.resolvedAnalyticalPlan?.analyticalFrame?.dimensions
+      .some((dimension) => /customer_(?:type|order_number)$/.test(dimension.dimensionId))).toBe(false);
+  });
+
+  it('jaffle golden preserves both measures and the canonical Joy Lam member for typo input', async () => {
+    const food = jaffleMetric('semantic:metric:order.total_revenue', 'order.total_revenue', ['total revenue'], true);
+    const beverage = jaffleMetric('semantic:metric:order.beverage_revenue', 'order.beverage_revenue', ['beverage revenue'], true);
+    const joy: AgentEvidenceCandidate = candidate({
+      id: 'semantic:member:customer.joy_lam',
+      qualifiedId: 'semantic:member:customer.joy_lam',
+      kind: 'semantic_member',
+      trustTier: 'semantic',
+      name: 'Joy Lam',
+      aliases: ['Joy ram'],
+      exactMatch: false,
+      relevanceScore: 0.99,
+      compatibility: 'compatible',
+    });
+    const resolveMeaning = vi.fn(async () => ({
+      interpretedQuestion: 'Total revenue and beverage revenue for Joy Lam in West.',
+      questionType: 'value' as const,
+      selectedConceptIds: [food.id, beverage.id, joy.id],
+      recommendedExecutionId: food.id,
+      queryIntent: {
+        measures: ['total revenue', 'beverage revenue'],
+        dimensions: ['customer'],
+        filters: [{ field: 'customer', value: 'Joy Lam' }, { field: 'region', value: 'West' }],
+      },
+      rejectedCandidates: [],
+      confidence: 'high' as const,
+      missingInformation: [],
+      recommendedRoute: 'semantic' as const,
+    }));
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-jaffle-joy',
+        sourceFingerprint: 'sha256:jaffle-joy',
+        candidates: [food, beverage, joy],
+        parsedIntent: {
+          measures: ['total revenue', 'beverage revenue'],
+          dimensions: ['customer'],
+          filters: [{ field: 'customer', value: 'Joy ram' }, { field: 'region', value: 'West' }],
+        },
+      }),
+    });
+
+    const decision = await router.decide(request('Joy ram in West total revenue and beverage revenue'));
+
+    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(decision.resolvedAnalyticalPlan?.selectedConceptIds).toEqual(expect.arrayContaining([food.id, beverage.id, joy.id]));
+    expect(decision.resolvedAnalyticalPlan?.query.measures.map((measure) => measure.qualifiedId)).toEqual(expect.arrayContaining([food.id, beverage.id]));
+    expect(decision.resolvedAnalyticalPlan?.query.filters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ value: 'Joy Lam' }),
+      expect.objectContaining({ value: 'West' }),
+    ]));
+  });
+
+  it('AGT-009/012 reconciles the exact reported phrase after one meaning call without a generic blocked outcome', async () => {
+    const revenue = jaffleMetric('semantic:metric:order_item.revenue', 'order_item.revenue', ['revenue'], false);
+    const genericCustomer = candidate({
+      id: 'semantic:commerce:member:customer',
+      qualifiedId: 'semantic:commerce:member:customer',
+      kind: 'semantic_member',
+      trustTier: 'semantic',
+      name: 'customer',
+      aliases: ['customers'],
+      compatibility: 'compatible',
+      relevanceScore: 0.97,
+    });
+    const beverageBlock = candidate({
+      id: 'block:top_beverage_customers',
+      kind: 'certified_block',
+      trustTier: 'certified',
+      name: 'top_beverage_customers',
+      compatibility: 'incompatible',
+      compatibilityFacts: ['beverage filter was not requested'],
+      relevanceScore: 0.96,
+    });
+    const resolveMeaning = vi.fn(async () => resolved({
+      interpretedQuestion: 'Rank customers by revenue.',
+      selectedConceptIds: [revenue.id, genericCustomer.id],
+      recommendedExecutionId: revenue.id,
+      queryIntent: { measures: ['revenue'], dimensions: ['customer'], filters: [], order: 'desc', limit: 10 },
+      recommendedRoute: 'semantic',
+    }));
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-exact-reported-phrase',
+        sourceFingerprint: 'sha256:exact-reported-phrase',
+        parsedIntent: { measures: ['revenue'], dimensions: ['customer'], filters: [], order: 'desc', limit: 10 },
+        candidates: [revenue, genericCustomer, beverageBlock],
+      }),
+    });
+
+    const decision = await router.decide(request('who are the top customers have a highest revenue'));
+
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
+    expect(decision).toMatchObject({ action: 'answer', requiresClarification: false });
+    expect(decision.reason).not.toMatch(/generic|blocked/i);
+    expect(decision.resolvedAnalyticalPlan).toMatchObject({
+      capability: 'semantic_execution',
+      selectedConceptIds: expect.arrayContaining([revenue.id]),
+      query: {
+        dimensions: [{
+          requested: 'customer',
+          qualifiedId: 'semantic:dimension:customer',
+          status: 'resolved',
+          candidateIds: ['semantic:dimension:customer'],
+        }],
+      },
+    });
+    expect(decision.resolvedAnalyticalPlan?.selectedConceptIds).not.toContain(beverageBlock.id);
+    expect(selectRoute(request('who are the top customers have a highest revenue'), decision)).toBe('semantic_answer');
+  });
+
+  it('AGT-009/PERF-002 clarifies a bare customer ranking before selecting the beverage block', async () => {
+    const resolveMeaning = vi.fn(async () => resolved());
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-jaffle-ranking',
+        sourceFingerprint: 'sha256:jaffle-ranking',
+        parsedIntent: { measures: [], dimensions: ['customer'], filters: [], order: 'desc', limit: 10 },
+        candidates: [candidate({
+          id: 'dql:block:top_beverage_customers',
+          kind: 'certified_block',
+          trustTier: 'certified',
+          name: 'top_beverage_customers',
+          aliases: ['top customers by drink revenue'],
+          dimensions: ['customer_name'],
+          compatibility: 'compatible',
+          exactMatch: true,
+          relevanceScore: 1,
+        })],
+      }),
+    });
+
+    const decision = await router.decide(request('who are the top customers'));
+
+    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(decision).toMatchObject({
+      action: 'clarify',
+      requiresClarification: true,
+      clarifyingQuestion: 'Top by which governed metric?',
+    });
+    expect(decision.resolvedAnalyticalPlan).toBeUndefined();
+  });
+
+  it('AGT-009/PERF-002 clarifies a bare ranking for an arbitrary entity without domain wording', async () => {
+    const resolveMeaning = vi.fn(async () => resolved());
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-bare-ranking-generic',
+        sourceFingerprint: 'sha256:bare-ranking-generic',
+        parsedIntent: { measures: [], dimensions: ['workspace'], filters: [], order: 'desc', limit: 10 },
+        candidates: [candidate({
+          id: 'semantic:workforce:dimension:workspace',
+          qualifiedId: 'semantic:workforce:dimension:workspace',
+          kind: 'semantic_member',
+          trustTier: 'semantic',
+          name: 'Workspace',
+          aliases: ['workspaces'],
+          compatibility: 'compatible',
+          relevanceScore: 1,
+        })],
+      }),
+    });
+
+    const decision = await router.decide(request('Which workspaces are top?'));
+
+    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(decision).toMatchObject({
+      action: 'clarify',
+      requiresClarification: true,
+      clarifyingQuestion: 'Top by which governed metric?',
+    });
+    expect(decision.reason).not.toMatch(/customer|revenue|beverage|drink|food|region/i);
+  });
+
+  it('AGT-009/PERF-002 does not treat unrelated qualified metric presence as a bare-ranking choice', async () => {
+    const decoy = jaffleMetric(
+      'semantic:workforce:metric:licensed_seats',
+      'Licensed seat count',
+      [],
+      false,
+    );
+    const resolveMeaning = vi.fn(async () => resolved());
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-bare-ranking-qualified-decoy',
+        sourceFingerprint: 'sha256:bare-ranking-qualified-decoy',
+        parsedIntent: { measures: [], dimensions: ['workspace'], filters: [], order: 'desc', limit: 10 },
+        candidates: [decoy],
+      }),
+    });
+
+    const decision = await router.decide(request('Which workspaces are top?'));
+
+    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(decision).toMatchObject({
+      action: 'clarify',
+      requiresClarification: true,
+      clarifyingQuestion: 'Top by which governed metric?',
+    });
+  });
+
+  it('AGT-009 allows one bounded meaning call for an arbitrary implicit substantive metric', async () => {
+    const pressure = jaffleMetric(
+      'semantic:operations:metric:saturation_pressure_amount',
+      'semantic_model_00421.saturation_pressure_amount',
+      [],
+      false,
+    );
+    pressure.analyticalCapability = {
+      ...pressure.analyticalCapability!,
+      primaryEntityId: 'semantic:operations:entity:reading',
+      resultGrainIds: ['semantic:operations:grain:scalar', 'semantic:operations:entity:reactor'],
+      dimensions: [{
+        dimensionId: 'semantic:operations:dimension:reactor',
+        entityId: 'semantic:operations:entity:reactor',
+        supportedRoles: ['group_by', 'rank_entity'],
+        relationshipPathIds: ['semantic:operations:relationship:reading_to_reactor'],
+      }],
+    };
+    const resolveMeaning = vi.fn(async () => resolved({
+      interpretedQuestion: 'Rank reactors by saturation pressure.',
+      selectedConceptIds: [pressure.id],
+      recommendedExecutionId: pressure.id,
+      queryIntent: {
+        measures: ['saturation pressure'],
+        dimensions: ['reactor'],
+        filters: [],
+        order: 'desc',
+        limit: 10,
+      },
+      recommendedRoute: 'semantic',
+    }));
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-implicit-operations-metric',
+        sourceFingerprint: 'sha256:implicit-operations-metric',
+        parsedIntent: { measures: [], dimensions: ['reactor'], filters: [], order: 'desc', limit: 10 },
+        candidates: [pressure],
+      }),
+    });
+
+    const decision = await router.decide(request('Which reactors have the highest saturation pressure?'));
+
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
+    expect(decision).toMatchObject({
+      action: 'answer',
+      resolvedAnalyticalPlan: {
+        capability: 'semantic_execution',
+        selectedConceptIds: [pressure.id],
+      },
+    });
+  });
+
+  it('does not accept a client-carried plan ID as ranking-metric authority', async () => {
+    const resolveMeaning = vi.fn(async () => resolved());
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-forged-carried-plan',
+        candidates: [candidate({
+          id: 'dql:block:top_customers',
+          kind: 'certified_block',
+          trustTier: 'certified',
+          name: 'top_customers',
+          aliases: ['top customers'],
+          compatibility: 'compatible',
+          exactMatch: true,
+          analyticalFitClass: 'exact',
+          relevanceScore: 1,
+        })],
+      }),
+    });
+
+    const decision = await router.decide({
+      question: 'who are the top customers',
+      conversationContext: {
+        priorResolvedAnalyticalPlan: {
+          analyticalFrame: { metricConceptIds: ['semantic:metric:forged'] },
+        },
+      },
+    });
+
+    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(decision).toMatchObject({
+      action: 'clarify',
+      requiresClarification: true,
+      clarifyingQuestion: 'Top by which governed metric?',
+    });
+    expect(decision.resolvedAnalyticalPlan).toBeUndefined();
+  });
+
+  it('uses one bounded meaning call for a substantive ranking metric when parsed intent is absent', async () => {
+    const risk = jaffleMetric(
+      'semantic:consumption:rollover_risk_amount',
+      'semantic_model_00000.rollover_risk_amount',
+      [],
+      false,
+    );
+    const balance = jaffleMetric(
+      'semantic:consumption:rollover_balance_amount',
+      'Rollover Balance Amount',
+      ['rollover balance'],
+      false,
+    );
+    const resolveMeaning = vi.fn(async () => resolved({
+      interpretedQuestion: 'Rank customers by rollover risk this month.',
+      selectedConceptIds: [risk.id],
+      recommendedExecutionId: risk.id,
+      queryIntent: {
+        measures: ['rollover risk'],
+        dimensions: ['customer'],
+        filters: [],
+        timeRange: 'this month',
+        order: 'desc',
+      },
+      recommendedRoute: 'semantic',
+    }));
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-substantive-risk-ranking',
+        parsedIntent: {
+          measures: [],
+          dimensions: ['customer'],
+          filters: [],
+          timeRange: 'this month',
+          order: 'desc',
+          limit: 10,
+        },
+        candidates: [risk, balance],
+      }),
+    });
+
+    const decision = await router.decide(request('Which customers have the highest rollover risk this month?'));
+
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
+    expect(decision.action).toBe('answer');
+    expect(decision.meaningResolution?.selectedConceptIds).toEqual([risk.id]);
+    expect(decision.resolvedAnalyticalPlan).toMatchObject({
+      capability: 'semantic_execution',
+      selectedConceptIds: [risk.id],
+    });
+  });
+
+  it('AGT-012/013 reconciles a provider-selected metric to its unique qualified capability dimension', async () => {
+    const activeSeats = jaffleMetric(
+      'semantic:workforce:metric:active_seats',
+      'Active seats',
+      ['active seats', 'seat count'],
+      false,
+    );
+    activeSeats.analyticalCapability = {
+      ...activeSeats.analyticalCapability!,
+      primaryEntityId: 'semantic:workforce:entity:subscription',
+      resultGrainIds: ['semantic:workforce:grain:scalar', 'semantic:workforce:entity:workspace'],
+      dimensions: [{
+        dimensionId: 'semantic:workforce:dimension:workspace',
+        entityId: 'semantic:workforce:entity:workspace',
+        supportedRoles: ['group_by', 'filter', 'display', 'rank_entity'],
+        relationshipPathIds: ['semantic:workforce:relationship:subscription_to_workspace'],
+      }],
+    };
+    const genericWorkspace = candidate({
+      id: 'semantic:member:workspace',
+      qualifiedId: 'semantic:catalog:member:workspace',
+      kind: 'semantic_member',
+      trustTier: 'semantic',
+      name: 'Workspace',
+      aliases: ['workspaces'],
+      compatibility: 'compatible',
+      exactMatch: false,
+    });
+    const decoy = jaffleMetric(
+      'semantic:workforce:metric:licensed_seats',
+      'Licensed seats',
+      ['seat count'],
+      false,
+      'partial',
+    );
+    const resolveMeaning = vi.fn(async () => resolved({
+      interpretedQuestion: 'Rank workspaces by active seats.',
+      selectedConceptIds: [activeSeats.id, genericWorkspace.id],
+      recommendedExecutionId: activeSeats.id,
+      queryIntent: { measures: ['active seats'], dimensions: ['workspace'], filters: [], order: 'desc', limit: 10 },
+      recommendedRoute: 'semantic',
+    }));
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-workforce',
+        sourceFingerprint: 'sha256:workforce',
+        parsedIntent: { measures: ['active seats'], dimensions: ['workspace'], filters: [], order: 'desc', limit: 10 },
+        candidates: [activeSeats, genericWorkspace, decoy],
+      }),
+    });
+
+    const decision = await router.decide(request('Which workspaces have the most active seats?'));
+
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
+    expect(decision).toMatchObject({ action: 'answer', requiresClarification: false });
+    expect(decision.resolvedAnalyticalPlan).toMatchObject({
+      capability: 'semantic_execution',
+      query: {
+        dimensions: [{
+          requested: 'workspace',
+          qualifiedId: 'semantic:workforce:dimension:workspace',
+          status: 'resolved',
+          candidateIds: ['semantic:workforce:dimension:workspace'],
+        }],
+      },
+    });
+    expect(selectRoute(request('Which workspaces have the most active seats?'), decision)).toBe('semantic_answer');
+  });
+
+  it('AGT-012/UI-010 turns two qualified selected-capability dimensions into one hard identifier-bound clarification', async () => {
+    const caseVolume = jaffleMetric(
+      'semantic:support:metric:case_volume',
+      'Case volume',
+      ['cases', 'case volume'],
+      false,
+    );
+    caseVolume.analyticalCapability = {
+      ...caseVolume.analyticalCapability!,
+      primaryEntityId: 'semantic:support:entity:case',
+      resultGrainIds: ['semantic:support:grain:scalar', 'semantic:support:entity:account'],
+      dimensions: [
+        {
+          dimensionId: 'semantic:support:dimension:billing_account',
+          entityId: 'semantic:support:entity:account',
+          supportedRoles: ['group_by', 'rank_entity'],
+          relationshipPathIds: ['semantic:support:relationship:case_to_billing_account'],
+        },
+        {
+          dimensionId: 'semantic:support:dimension:service_account',
+          entityId: 'semantic:support:entity:account',
+          supportedRoles: ['group_by', 'rank_entity'],
+          relationshipPathIds: ['semantic:support:relationship:case_to_service_account'],
+        },
+      ],
+    };
+    const decoy = jaffleMetric(
+      'semantic:support:metric:case_resolution_time',
+      'Case resolution time',
+      ['cases'],
+      false,
+      'partial',
+    );
+    const resolveMeaning = vi.fn(async () => resolved({
+      interpretedQuestion: 'Rank accounts by case volume.',
+      selectedConceptIds: [caseVolume.id],
+      recommendedExecutionId: caseVolume.id,
+      queryIntent: { measures: ['case volume'], dimensions: ['account'], filters: [], order: 'desc', limit: 10 },
+      recommendedRoute: 'semantic',
+    }));
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-support',
+        sourceFingerprint: 'sha256:support',
+        parsedIntent: { measures: ['case volume'], dimensions: ['account'], filters: [], order: 'desc', limit: 10 },
+        candidates: [caseVolume, decoy],
+      }),
+    });
+
+    const decision = await router.decide(request('Which accounts have the most cases?'));
+
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
+    expect(decision).toMatchObject({
+      action: 'clarify',
+      requiresClarification: true,
+      clarificationOptions: [
+        { id: 'semantic:support:dimension:billing_account' },
+        { id: 'semantic:support:dimension:service_account' },
+      ],
+    });
+    expect(decision.clarifyingQuestion).toMatch(/billing account.*service account/i);
+    expect(decision.resolvedAnalyticalPlan).toMatchObject({
+      capability: 'blocked',
+      query: { dimensions: [expect.objectContaining({ status: 'ambiguous' })] },
+    });
+    expect(decision.resolvedAnalyticalPlan?.missingInformation).not.toEqual([]);
+    expect(selectRoute(request('Which accounts have the most cases?'), decision)).toBe('clarify');
+  });
+
+  it('AGT-010/012 blocks an unresolved arbitrary dimension without offering unrelated capability members', async () => {
+    const deploymentCount = jaffleMetric(
+      'semantic:delivery:metric:deployment_count',
+      'Deployment count',
+      ['deployments'],
+      false,
+    );
+    deploymentCount.analyticalCapability = {
+      ...deploymentCount.analyticalCapability!,
+      primaryEntityId: 'semantic:delivery:entity:deployment',
+      resultGrainIds: ['semantic:delivery:grain:scalar', 'semantic:delivery:entity:team'],
+      dimensions: [
+        {
+          dimensionId: 'semantic:delivery:dimension:owning_team',
+          entityId: 'semantic:delivery:entity:team',
+          supportedRoles: ['group_by', 'rank_entity'],
+          relationshipPathIds: ['semantic:delivery:relationship:deployment_to_owner'],
+        },
+        {
+          dimensionId: 'semantic:delivery:dimension:operating_team',
+          entityId: 'semantic:delivery:entity:team',
+          supportedRoles: ['group_by', 'rank_entity'],
+          relationshipPathIds: ['semantic:delivery:relationship:deployment_to_operator'],
+        },
+      ],
+    };
+    const decoy = jaffleMetric('semantic:delivery:metric:change_failure_rate', 'Change failure rate', ['deployments'], false, 'partial');
+    const resolveMeaning = vi.fn(async () => resolved({
+      interpretedQuestion: 'Rank crews by deployment count.',
+      selectedConceptIds: [deploymentCount.id],
+      recommendedExecutionId: deploymentCount.id,
+      queryIntent: { measures: ['deployment count'], dimensions: ['crew'], filters: [], order: 'desc', limit: 10 },
+      recommendedRoute: 'semantic',
+    }));
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-unresolved-dimension',
+        sourceFingerprint: 'sha256:unresolved-dimension',
+        parsedIntent: { measures: ['deployment count'], dimensions: ['crew'], filters: [], order: 'desc', limit: 10 },
+        candidates: [deploymentCount, decoy],
+      }),
+    });
+
+    const decision = await router.decide(request('Which crews have the most deployments?'));
+
+    expect(decision).toMatchObject({
+      action: 'block',
+      requiresClarification: false,
+      terminalOutcome: {
+        kind: 'modeling_gap',
+        code: 'ANALYTICAL_MODELING_GAP',
+      },
+      resolvedAnalyticalPlan: {
+        capability: 'blocked',
+        query: { dimensions: [expect.objectContaining({ status: 'unresolved', candidateIds: [] })] },
+        resolutionFailure: {
+          outcome: 'modeling_gap',
+          candidateIds: [],
+        },
+      },
+    });
+    expect(decision.clarificationOptions ?? []).toEqual([]);
+  });
+
+  it('AGT-010/013 emits an explicit typed terminal action for a relationship modeling gap', async () => {
+    const unsupported = jaffleMetric('semantic:delivery:metric:deployment_count', 'Deployment count', ['deployments'], false);
+    unsupported.analyticalCapability = {
+      ...unsupported.analyticalCapability!,
+      dimensions: [],
+      resultGrainIds: ['semantic:delivery:grain:scalar'],
+    };
+    const decoy = jaffleMetric('semantic:delivery:metric:change_failure_rate', 'Change failure rate', ['deployments'], false, 'partial');
+    const unsupportedWorkspace = candidate({
+      id: 'semantic:delivery:dimension:workspace',
+      qualifiedId: 'semantic:delivery:dimension:workspace',
+      kind: 'semantic_member',
+      trustTier: 'semantic',
+      name: 'Workspace',
+      compatibility: 'compatible',
+    });
+    const unsupportedEntity = candidate({
+      id: 'semantic:delivery:entity:workspace',
+      qualifiedId: 'semantic:delivery:entity:workspace',
+      kind: 'semantic_member',
+      trustTier: 'semantic',
+      name: 'Workspace entity',
+      compatibility: 'compatible',
+    });
+    const resolveMeaning = vi.fn(async () => resolved({
+      interpretedQuestion: 'Rank workspaces by deployment count.',
+      selectedConceptIds: [unsupported.id],
+      recommendedExecutionId: unsupported.id,
+      queryIntent: { measures: ['deployment count'], dimensions: ['workspace'], filters: [], order: 'desc', limit: 10 },
+      recommendedRoute: 'semantic',
+      analyticalFrame: {
+        version: 2,
+        interpretedQuestion: 'Rank workspaces by deployment count.',
+        questionType: 'ranking',
+        metricConceptIds: [unsupported.analyticalCapability.metricId],
+        entityGrainIds: ['semantic:delivery:entity:workspace'],
+        dimensions: [{ dimensionId: 'semantic:delivery:dimension:workspace', role: 'group_by' }],
+        memberBindings: [],
+        ranking: {
+          entityDimensionId: 'semantic:delivery:dimension:workspace',
+          byMetricId: unsupported.analyticalCapability.metricId,
+          direction: 'desc',
+          limit: 10,
+          tiePolicy: 'stable_secondary_key',
+        },
+        requestedOutputs: [{ id: 'deployment_count', kind: 'metric_value', metricId: unsupported.analyticalCapability.metricId }],
+        ambiguity: [],
+      },
+    }));
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-modeling-gap-action',
+        sourceFingerprint: 'sha256:modeling-gap-action',
+        parsedIntent: { measures: ['deployment count'], dimensions: ['workspace'], filters: [], order: 'desc', limit: 10 },
+        candidates: [unsupported, unsupportedWorkspace, unsupportedEntity, decoy],
+      }),
+    });
+
+    const decision = await router.decide(request('Which workspaces have the most deployments?'));
+
+    expect(decision).toMatchObject({
+      action: 'block',
+      requiresClarification: false,
+      terminalOutcome: {
+        kind: 'modeling_gap',
+        code: 'ANALYTICAL_MODELING_GAP',
+      },
+      resolvedAnalyticalPlan: {
+        capability: 'blocked',
+        resolutionFailure: {
+          outcome: 'modeling_gap',
+          selectedCapabilityId: unsupported.analyticalCapability.metricId,
+        },
+      },
+    });
+    expect(decision.reason).not.toHaveLength(0);
+    expect(decision.resolvedAnalyticalPlan?.missingInformation).not.toEqual([]);
+    expect(selectRoute(request('Which workspaces have the most deployments?'), decision)).toBe('blocked');
+  });
+
+  it('AGT-010/013 rejects a provider frame dimension outside the selected capability', async () => {
+    const activeSeats = jaffleMetric('semantic:workforce:metric:active_seats', 'Active seats', ['active seats'], false);
+    activeSeats.analyticalCapability = {
+      ...activeSeats.analyticalCapability!,
+      primaryEntityId: 'semantic:workforce:entity:subscription',
+      resultGrainIds: ['semantic:workforce:grain:scalar', 'semantic:workforce:entity:workspace'],
+      dimensions: [{
+        dimensionId: 'semantic:workforce:dimension:workspace',
+        entityId: 'semantic:workforce:entity:workspace',
+        supportedRoles: ['group_by', 'rank_entity'],
+        relationshipPathIds: ['semantic:workforce:relationship:subscription_to_workspace'],
+      }],
+    };
+    const unrelatedDimension = candidate({
+      id: 'semantic:finance:dimension:cost_center',
+      qualifiedId: 'semantic:finance:dimension:cost_center',
+      kind: 'semantic_member',
+      trustTier: 'semantic',
+      name: 'Workspace',
+      compatibility: 'compatible',
+      relevanceScore: 0.9,
+    });
+    const decoy = jaffleMetric('semantic:workforce:metric:licensed_seats', 'Licensed seats', ['active seats'], false, 'partial');
+    const resolveMeaning = vi.fn(async () => resolved({
+      interpretedQuestion: 'Rank workspaces by active seats.',
+      selectedConceptIds: [activeSeats.id, unrelatedDimension.id],
+      recommendedExecutionId: activeSeats.id,
+      queryIntent: { measures: ['active seats'], dimensions: ['workspace'], filters: [], order: 'desc', limit: 10 },
+      recommendedRoute: 'semantic',
+      analyticalFrame: {
+        version: 2,
+        interpretedQuestion: 'Rank workspaces by active seats.',
+        questionType: 'ranking',
+        metricConceptIds: [activeSeats.analyticalCapability.metricId],
+        entityGrainIds: ['semantic:workforce:entity:workspace'],
+        dimensions: [{ dimensionId: unrelatedDimension.qualifiedId!, role: 'group_by' }],
+        memberBindings: [],
+        ranking: {
+          entityDimensionId: unrelatedDimension.qualifiedId!,
+          byMetricId: activeSeats.analyticalCapability.metricId,
+          direction: 'desc', limit: 10, tiePolicy: 'stable_secondary_key',
+        },
+        requestedOutputs: [{ id: 'active_seats', kind: 'metric_value', metricId: activeSeats.analyticalCapability.metricId }],
+        ambiguity: [],
+      },
+    }));
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-adversarial-frame',
+        sourceFingerprint: 'sha256:adversarial-frame',
+        parsedIntent: { measures: ['active seats'], dimensions: ['workspace'], filters: [], order: 'desc', limit: 10 },
+        candidates: [activeSeats, unrelatedDimension, decoy],
+      }),
+    });
+
+    const decision = await router.decide(request('Which workspaces have the most active seats?'));
+
+    expect(decision.action).toBe('block');
+    expect(decision.resolvedAnalyticalPlan?.query.dimensions[0]?.qualifiedId).not.toBe(unrelatedDimension.qualifiedId);
+    expect(decision.resolvedAnalyticalPlan?.resolutionFailure).toMatchObject({ outcome: 'modeling_gap' });
+    expect(JSON.stringify(decision.resolvedAnalyticalPlan)).toContain(activeSeats.analyticalCapability.metricId);
+  });
+
+  it('AGT-009 keeps explicit drink-revenue customer ranking on the certified fast path', async () => {
+    const resolveMeaning = vi.fn(async () => resolved());
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-jaffle-ranking-explicit',
+        sourceFingerprint: 'sha256:jaffle-ranking-explicit',
+        parsedIntent: { measures: ['drink_revenue'], dimensions: ['customer_name'], filters: [], order: 'desc', limit: 10 },
+        candidates: [candidate({
+          id: 'dql:block:top_beverage_customers',
+          kind: 'certified_block',
+          trustTier: 'certified',
+          name: 'top_beverage_customers',
+          aliases: ['top customers by beverage revenue', 'top customers by drink revenue'],
+          dimensions: ['customer_name'],
+          compatibility: 'compatible',
+          exactMatch: true,
+          analyticalFitClass: 'exact',
+          relevanceScore: 1,
+        }), candidate({
+          id: 'semantic:metric:order_item.revenue',
+          kind: 'semantic_metric',
+          trustTier: 'semantic',
+          name: 'order_item.revenue',
+          compatibility: 'partial',
+          exactMatch: false,
+          relevanceScore: 0.95,
+        })],
+      }),
+    });
+
+    const decision = await router.decide(request('top customers by beverage revenue'));
+
+    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(decision.action).toBe('answer');
+    expect(decision.resolvedAnalyticalPlan?.selectedConceptIds).toContain('dql:block:top_beverage_customers');
+  });
+
+  it.each([
+    'who are the top customers by region',
+    'what is the region by each customer',
+  ])('AGT-010/PERF-002 clarifies the unmodeled customer region immediately: %s', async (question) => {
+    const resolveMeaning = vi.fn(async () => resolved());
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-jaffle-location',
+        sourceFingerprint: 'sha256:jaffle-location',
+        parsedIntent: { measures: [], dimensions: ['customer_name', 'region'], filters: [] },
+        candidates: [
+          candidate({ id: 'semantic:dimension:customer.customer_name', kind: 'semantic_member', name: 'customer_name', primaryEntity: 'customer', compatibility: 'compatible' }),
+          candidate({ id: 'semantic:dimension:order.location_name', kind: 'semantic_member', name: 'location_name', primaryEntity: 'order', compatibility: 'compatible', compatibilityFacts: ['alternative-for:region'] }),
+        ],
+      }),
+    });
+
+    const decision = await router.decide(request(question));
+
+    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(decision.action).toBe('clarify');
+    expect(decision.clarifyingQuestion).toContain('“region” is not modeled');
+    expect(decision.clarifyingQuestion).toContain('location_name');
+    expect(decision.resolvedAnalyticalPlan).toBeUndefined();
+  });
+
+  it('AGT-012-014 keeps the typed member filter while asking for a qualified dimension', async () => {
+    const orderTotal = jaffleMetric('semantic:metric:order.order_total', 'order_total', ['total revenue', 'order total'], false);
+    const productRevenue = jaffleMetric('semantic:metric:order_item.revenue', 'revenue', ['product revenue'], false);
+    const drinkRevenue = jaffleMetric('semantic:metric:order_item.drink_revenue', 'drink_revenue', ['beverage revenue', 'drink revenue'], true);
+    const resolveMeaning = vi.fn(async () => resolved());
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-jaffle-joy-clarify',
+        sourceFingerprint: 'sha256:jaffle-joy-clarify',
+        parsedIntent: {
+          measures: ['total revenue', 'beverage revenue'],
+          dimensions: ['customer_name', 'region'],
+          filters: [{ field: 'customer_name', value: 'Joy Lam' }],
+        },
+        candidates: [
+          orderTotal,
+          productRevenue,
+          drinkRevenue,
+          candidate({ id: 'semantic:member:customer.joy_lam', kind: 'semantic_member', name: 'Joy Lam', aliases: ['Joy ram'], compatibility: 'compatible' }),
+          candidate({ id: 'semantic:dimension:order.location_name', kind: 'semantic_member', name: 'location_name', primaryEntity: 'order', compatibility: 'compatible', compatibilityFacts: ['alternative-for:region'] }),
+        ],
+      }),
+    });
+
+    const decision = await router.decide(request(
+      'what is the region for Joy lam customer? what is total revenue along with beverage revenue',
+    ));
+
+    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(decision.action).toBe('clarify');
+    expect(decision.clarifyingQuestion).toContain('“region” is not modeled');
+    expect(decision.clarifyingQuestion).toContain('location_name');
+    expect(decision.clarificationOptions).toEqual([
+      expect.objectContaining({ id: 'semantic:dimension:order.location_name' }),
+    ]);
+    expect(decision.resolvedAnalyticalPlan).toBeUndefined();
+  });
+
+  it('jaffle golden keeps duplicate display names qualified and clarifies gross/net/lifetime ambiguity', async () => {
+    const gross = jaffleMetric('semantic:metric:orders.gross_revenue', 'Revenue', ['gross revenue'], false);
+    const net = jaffleMetric('semantic:metric:orders.net_revenue', 'Revenue', ['net revenue'], false);
+    const lifetime = jaffleMetric('semantic:metric:customers.lifetime_revenue', 'Revenue', ['lifetime revenue'], false);
+    const resolveMeaning = vi.fn(async () => ({
+      interpretedQuestion: 'Revenue.',
+      questionType: 'value' as const,
+      selectedConceptIds: [],
+      queryIntent: { measures: ['revenue'], dimensions: [], filters: [] },
+      rejectedCandidates: [
+        { id: gross.id, reason: 'Gross was not specified.' },
+        { id: net.id, reason: 'Net was not specified.' },
+        { id: lifetime.id, reason: 'Lifetime was not specified.' },
+      ],
+      confidence: 'low' as const,
+      missingInformation: ['Choose gross, net, or lifetime revenue.'],
+      recommendedRoute: 'clarify' as const,
+      clarifyingQuestion: 'Which revenue do you mean: gross, net, or customer lifetime revenue?',
+    }));
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-jaffle-duplicate-names',
+        sourceFingerprint: 'sha256:jaffle-duplicate-names',
+        candidates: [gross, net, lifetime],
+        parsedIntent: { measures: ['revenue'], dimensions: [], filters: [] },
+      }),
+    });
+
+    const decision = await router.decide(request('what is revenue?'));
+
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
+    expect(decision.requiresClarification).toBe(true);
+    expect(decision.clarifyingQuestion).toMatch(/gross, net, or customer lifetime/i);
+    expect(decision.resolvedAnalyticalPlan?.selectedConceptIds).toEqual([]);
+    expect(decision.meaningResolution?.rejectedCandidates.map((item) => item.id)).toEqual([gross.id, net.id, lifetime.id]);
+  });
+
   it("retrieves before routing and sends a bounded evidence package to meaning resolution", async () => {
     const getEvidence = vi.fn(async () => evidence([
       candidate(),
@@ -81,6 +1171,41 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     });
     expect(Object.isFrozen(decision.resolvedAnalyticalPlan)).toBe(true);
     expect(decision.retrievalEvidence?.candidateIds).toHaveLength(2);
+  });
+
+  it("keeps supplemental clarification cards out of every provider meaning carrier", async () => {
+    const hostOnly = candidate({
+      id: "semantic:dimension:location.location_name",
+      kind: "semantic_member",
+      name: "location_name",
+      dimensions: ["semantic:dimension:location.location_name"],
+      relevanceScore: 1,
+    });
+    const resolveMeaning = vi.fn(async () => resolved({
+      rejectedCandidates: [{ id: "semantic:consumption:rollover_risk_amount", reason: "Risk is not actual balance." }],
+    }));
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        ...evidence([
+          candidate(),
+          candidate({
+            id: "semantic:consumption:rollover_risk_amount",
+            name: "Rollover Risk Amount",
+            relevanceScore: 0.8,
+          }),
+        ]),
+        clarificationCandidates: [hostOnly],
+      }),
+    });
+
+    await router.decide(request("Who are the top customers by monthly rollover amount?"));
+
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
+    const input = resolveMeaning.mock.calls[0][0];
+    expect(input.candidates.map((item) => item.id)).not.toContain(hostOnly.id);
+    expect(input.evidence.candidates.map((item) => item.id)).not.toContain(hostOnly.id);
+    expect(input.evidence.clarificationCandidates).toBeUndefined();
   });
 
   it("propagates the request cancellation signal into meaning resolution", async () => {
@@ -325,7 +1450,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     expect(decision.meaningResolution).toBeUndefined();
   });
 
-  it("AGT-010 avoids a duplicate meaning call for typed compositional follow-ups", async () => {
+  it("AGT-010 avoids a duplicate meaning call and asks an identifier-bound compositional clarification", async () => {
     const resolveMeaning = vi.fn(async () => resolved());
     const router = createHybridRouter({
       resolveMeaning,
@@ -354,7 +1479,12 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     });
 
     expect(resolveMeaning).not.toHaveBeenCalled();
-    expect(decision.action).toBe('answer');
+    expect(decision.action).toBe('clarify');
+    expect(decision.resolvedAnalyticalPlan).toBeUndefined();
+    expect(decision.clarificationOptions?.map((option) => option.id)).toEqual([
+      'dql:block:top_beverage_customers',
+      'semantic:order_item:product',
+    ]);
     expect(decision.followsUp).toBe(true);
     expect(decision.retrievalEvidence?.candidateIds).toHaveLength(2);
   });
@@ -372,7 +1502,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     });
     const ask = request("monthly rollover amount");
     const decision = await router.decide(ask);
-    expect(decision.action).toBe("answer");
+    expect(decision.action).toBe("block");
     expect(decision.requiresClarification).toBe(false);
     expect(decision.meaningResolutionErrorCode).toBe('invalid_evidence_reference');
     expect(answerAnywayRoute(selectRoute(ask, decision), ask, "stakeholder", decision)).toBe("blocked");
@@ -407,6 +1537,30 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
       }),
     ]);
     expect(selectRoute(ask, decision)).toBe("clarify");
+  });
+
+  it('AGT-013 prohibits answer plus blocked capability from routing as an answer', () => {
+    const blockedPlan = {
+      mode: 'authoritative',
+      capability: 'blocked',
+      missingInformation: ['Requested dimension “account” is ambiguous.'],
+    } as NonNullable<import('./intent-controller.js').IntentDecision['resolvedAnalyticalPlan']>;
+    const impossible = {
+      action: 'answer',
+      confidence: 0.9,
+      reason: 'legacy inconsistent decision',
+      followsUp: false,
+      requiresClarification: false,
+      resolvedAnalyticalPlan: blockedPlan,
+    } as import('./intent-controller.js').IntentDecision;
+
+    expect(selectRoute(request('Which accounts have the most cases?'), impossible)).toBe('blocked');
+    expect(answerAnywayRoute(
+      selectRoute(request('Which accounts have the most cases?'), impossible),
+      request('Which accounts have the most cases?'),
+      'stakeholder',
+      impossible,
+    )).toBe('blocked');
   });
 
   it("AGT-011 resolves a structured clarification by stable evidence ID without another AI planning call", async () => {
@@ -574,7 +1728,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     expect(decision.action).toBe("converse");
   });
 });
-describe("AGT-017 multi-metric questions divert to the semantic bridge", () => {
+describe("AGT-017 multi-metric questions require one frozen execution tuple", () => {
   const revenueId = "semantic:orders:revenue";
   const refundsId = "semantic:orders:refunds";
   const monthGrain = "semantic:grain:month";
@@ -599,7 +1753,7 @@ describe("AGT-017 multi-metric questions divert to the semantic bridge", () => {
     ambiguity: { status: "resolved" as const, competingConceptIds: [] },
   };
 
-  it("drops the single-metric frame instead of asking the user to clarify", async () => {
+  it("fails closed instead of handing an unresolved tuple to a second semantic planner", async () => {
     const router = createHybridRouter({
       getEvidence: async () => evidence([
         metricCandidate(revenueId, "Revenue"),
@@ -616,16 +1770,13 @@ describe("AGT-017 multi-metric questions divert to the semantic bridge", () => {
 
     const decision = await router.decide(request("show revenue and refunds by month"));
 
-    // The v2 analytical lane is contract-per-metric by construction, so it cannot
-    // carry this question — but a legitimate multi-metric ask is not ambiguous.
-    // It must fall through to the semantic bridge, which compiles several metrics,
-    // rather than clarifying or silently collapsing to one metric.
-    expect(decision.requiresClarification).toBeFalsy();
-    expect(decision.action).not.toBe("clarify");
-    expect(decision.meaningResolution?.recommendedRoute).not.toBe("clarify");
-    expect(decision.meaningResolution?.analyticalFrame).toBeUndefined();
-    expect(decision.meaningResolution?.missingInformation ?? []).not.toContain(
-      "This composition stage requires exactly one metric contract.",
-    );
+    expect(decision.action).toBe("clarify");
+    expect(decision.requiresClarification).toBe(true);
+    expect(decision.resolvedAnalyticalPlan).toBeUndefined();
+    expect(decision.meaningResolution).toBeUndefined();
+    expect(decision.clarificationOptions?.map((option) => option.id)).toEqual([
+      refundsId,
+      revenueId,
+    ]);
   });
 });

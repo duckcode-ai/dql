@@ -9,8 +9,14 @@ class ScriptedTextProvider implements AgentProvider {
   calls: AgentMessage[][] = [];
   constructor(private readonly responses: string[]) {}
   async available(): Promise<boolean> { return true; }
-  async generate(messages: AgentMessage[]): Promise<string> {
+  async generate(messages: AgentMessage[], options?: ProviderToolLoopOptions): Promise<string> {
     this.calls.push(messages);
+    options?.onProviderDispatch?.({
+      provider: this.name,
+      operation: 'generate',
+      attemptIndex: 1,
+      envelope: { messages },
+    });
     return this.responses[Math.min(this.calls.length - 1, this.responses.length - 1)];
   }
 }
@@ -88,17 +94,45 @@ describe('runAgenticToolLoop — text protocol (no native tools)', () => {
   });
 
   it('forces a final answer when the tool budget is exhausted', async () => {
-    // Always asks for a tool → must be cut off and forced to answer.
+    // The first response asks for a tool; the second is the one permitted final.
     const provider = new ScriptedTextProvider([
-      '```json\n{"tool":"t","input":{}}\n```',
       '```json\n{"tool":"t","input":{}}\n```',
       '```json\n{"summary":"forced final"}\n```',
     ]);
     const text = await runAgenticToolLoop(provider, [{ role: 'user', content: 'q' }], [echoTool('t', { ok: true })], { maxToolCalls: 2 });
     expect(text).toContain('forced final');
-    // 2 tool turns + 1 forced-final generate = 3 generate calls.
-    expect(provider.calls).toHaveLength(3);
-    expect(provider.calls[2].some((m) => m.content.includes('Tool budget reached'))).toBe(true);
+    // One tool proposal + one forced final is the complete provider budget.
+    expect(provider.calls).toHaveLength(2);
+    expect(provider.calls[1].some((m) => m.content.includes('Tool budget reached'))).toBe(true);
+  });
+
+  it('preserves the physical observer and blocks a second subscription/Ollama text dispatch at cap one', async () => {
+    const provider = new ScriptedTextProvider([
+      '```json\n{"tool":"t","input":{}}\n```',
+      '```json\n{"summary":"ROW_CANARY_MUST_NOT_ESCAPE"}\n```',
+    ]);
+    const observed: string[] = [];
+    const tool = echoTool('t', { rows: [{ secret: 'ROW_CANARY_TOOL' }] });
+
+    await expect(runAgenticToolLoop(
+      provider,
+      [{ role: 'user', content: 'q' }],
+      [tool],
+      {
+        maxToolCalls: 1,
+        maxProviderDispatches: 1,
+        onProviderDispatch: (event) => {
+          observed.push(JSON.stringify(event.envelope));
+          return event.envelope;
+        },
+        providerPayloadGuard: { purpose: 'answer_generation', allowedResultRowTools: {} },
+      },
+    )).rejects.toMatchObject({ code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' });
+
+    expect(provider.calls).toHaveLength(2);
+    expect(observed).toHaveLength(1);
+    expect(observed.join('\n')).not.toContain('ROW_CANARY_TOOL');
+    expect(observed.join('\n')).not.toContain('ROW_CANARY_MUST_NOT_ESCAPE');
   });
 });
 

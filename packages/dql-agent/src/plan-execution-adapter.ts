@@ -6,7 +6,7 @@
  * Acceptance: AGT-013, AGT-014, API-006.
  */
 
-import type { SemanticLayer } from '@duckcodeailabs/dql-core';
+import { normalizeMetricCapabilityContract, type SemanticLayer } from '@duckcodeailabs/dql-core';
 import type { KGNode } from './kg/types.js';
 import type { MetadataObject } from './metadata/catalog.js';
 import type { SemanticMemberSelection } from './semantic-bridge/compose.js';
@@ -16,10 +16,40 @@ import type {
 } from './analytical-execution-graph.js';
 import type { ResolvedAnalyticalPlan, ResolvedPlanMemberBinding } from './resolved-analytical-plan.js';
 import type { AnalyticalFreshnessRequestV1 } from './analytical-period-resolution.js';
+import {
+  authorityIdentitiesForKGNode,
+  authorityIdentitiesForMetadataObject,
+  retrievalAliasesForKGNode,
+  semanticRuntimeReferencesForKGNode,
+} from './semantic-identities.js';
 
 export interface PlanExecutionRegistryEntry {
   node: KGNode;
+  /** Exact execution identities only; free-form aliases are never included. */
   identities: string[];
+  retrievalAliases?: string[];
+}
+
+/**
+ * Add the frozen grouping outputs as deterministic ascending tie breakers.
+ * Their order is the RAP/source output order; retrieval aliases and unrelated
+ * compatible dimensions are never consulted.
+ */
+export function appendStableSemanticSecondaryOrder(
+  orderBy: NonNullable<SemanticMemberSelection['orderBy']>,
+  frozenGroupingNames: string[],
+  tiePolicy: 'stable_secondary_key' | 'include_ties' | undefined,
+): NonNullable<SemanticMemberSelection['orderBy']> {
+  if (tiePolicy !== 'stable_secondary_key') return [...orderBy];
+  const ordered = [...orderBy];
+  const existing = new Set(ordered.map((order) => order.name));
+  for (const name of frozenGroupingNames) {
+    if (!existing.has(name)) {
+      ordered.push({ name, direction: 'asc' });
+      existing.add(name);
+    }
+  }
+  return ordered;
 }
 
 export type PlanExecutionBlockedCode =
@@ -136,18 +166,19 @@ export function buildPlanExecutionRegistry(input: {
   const byNodeId = new Map(input.nodes.map((node) => [node.nodeId, node]));
   const identitiesByNode = new Map<string, Set<string>>();
   for (const node of input.nodes) {
-    identitiesByNode.set(node.nodeId, new Set(nodeIdentities(node)));
+    identitiesByNode.set(node.nodeId, new Set(authorityIdentitiesForKGNode(node)));
   }
   for (const object of input.objects ?? []) {
     const nodeId = nodeIdForMetadataObject(object);
     if (!nodeId || !byNodeId.has(nodeId)) continue;
     const identities = identitiesByNode.get(nodeId) ?? new Set<string>();
-    for (const identity of metadataObjectIdentities(object)) identities.add(identity);
+    for (const identity of authorityIdentitiesForMetadataObject(object)) identities.add(identity);
     identitiesByNode.set(nodeId, identities);
   }
   return input.nodes.map((node) => ({
     node,
     identities: [...(identitiesByNode.get(node.nodeId) ?? [])].filter(Boolean).sort(),
+    retrievalAliases: retrievalAliasesForKGNode(node).sort(),
   }));
 }
 
@@ -208,7 +239,25 @@ export function adaptResolvedAnalyticalPlan(
   if (entry.node.kind !== 'metric') {
     return block('EXECUTION_KIND_MISMATCH', `${plan.executionId} is ${entry.node.kind}, not a semantic metric.`);
   }
-  if (!input.semanticLayer) return block('SEMANTIC_LAYER_REQUIRED', 'The pinned semantic layer is unavailable.');
+  const selectedCapability = normalizeMetricCapabilityContract(plan.selectedCapability);
+  if (!input.semanticLayer) {
+    const entryCapability = normalizeMetricCapabilityContract(entry.node.payload?.analyticalCapability);
+    if (
+      !selectedCapability
+      || !entryCapability
+      || selectedCapability.sourceFingerprint !== entryCapability.sourceFingerprint
+      || plan.selectedCapabilityFingerprint !== selectedCapability.sourceFingerprint
+    ) return block('SEMANTIC_LAYER_REQUIRED', 'The pinned semantic layer is unavailable.');
+    return {
+      schemaVersion: 1,
+      status: 'ready',
+      kind: 'semantic',
+      planId: plan.planId,
+      fingerprint: plan.fingerprint,
+      metricNode: entry.node,
+      selection: { metrics: [entry.node.name], dimensions: [] },
+    };
+  }
   const metricNames: string[] = [];
   const metricBindings = plan.query.measures.length > 0
     ? plan.query.measures
@@ -225,10 +274,17 @@ export function adaptResolvedAnalyticalPlan(
   }
 
   const dimensions: string[] = [];
+  const dimensionOutputAliases: string[] = [];
   let timeDimension: SemanticMemberSelection['timeDimension'];
   let timeFilterDimensionName: string | undefined;
   for (const binding of plan.query.dimensions) {
-    const resolved = resolveSemanticDimension(binding, input.registry, input.semanticLayer);
+    const resolved = resolveSemanticDimension(
+      binding,
+      input.registry,
+      input.semanticLayer,
+      selectedCapability,
+      plan.schemaVersion === 1,
+    );
     if ('code' in resolved) return block(resolved.code, resolved.reason, resolved.candidateIds);
     if (isTimeDimension(resolved.definition)) {
       timeFilterDimensionName = resolved.name;
@@ -239,11 +295,18 @@ export function adaptResolvedAnalyticalPlan(
       else dimensions.push(resolved.name);
     } else {
       dimensions.push(resolved.name);
+      dimensionOutputAliases.push(resolved.definition.name);
     }
   }
   const filters: NonNullable<SemanticMemberSelection['filters']> = [];
   for (const filter of plan.query.filters) {
-    const resolved = resolveSemanticDimension(filter.binding, input.registry, input.semanticLayer);
+    const resolved = resolveSemanticDimension(
+      filter.binding,
+      input.registry,
+      input.semanticLayer,
+      selectedCapability,
+      plan.schemaVersion === 1,
+    );
     if ('code' in resolved) return block(resolved.code, resolved.reason, resolved.candidateIds);
     filters.push({ dimension: resolved.name, operator: 'equals', values: [filter.value] });
   }
@@ -280,7 +343,13 @@ export function adaptResolvedAnalyticalPlan(
     dimensions,
     ...(timeDimension ? { timeDimension } : {}),
     ...(filters.length ? { filters } : {}),
-    ...(plan.query.order ? { orderBy: [{ name: metricNames[0]!, direction: plan.query.order }] } : {}),
+    ...(plan.query.order ? {
+      orderBy: appendStableSemanticSecondaryOrder(
+        [{ name: metricNames[0]!, direction: plan.query.order }],
+        dimensionOutputAliases,
+        plan.analyticalFrame?.ranking?.tiePolicy,
+      ),
+    } : {}),
     ...(plan.query.limit !== undefined ? { limit: plan.query.limit } : {}),
   };
   return {
@@ -434,6 +503,12 @@ export function adaptAnalyticalSemanticGraph(input: {
   ) {
     return block('EXECUTION_GRAPH_MISMATCH', 'The executable graph does not bind the supplied immutable plan.');
   }
+  const expectedRelationshipProofs = [...new Set(
+    plan.relationshipProofs?.map((proof) => proof.authorityFingerprint) ?? [],
+  )].sort();
+  if ([...graph.relationshipProofFingerprints ?? []].sort().join('|') !== expectedRelationshipProofs.join('|')) {
+    return block('EXECUTION_GRAPH_MISMATCH', 'The executable graph relationship authority does not match the immutable plan.');
+  }
   if (input.expectedSnapshotId && graph.snapshotId !== input.expectedSnapshotId) {
     return block(
       'SNAPSHOT_MISMATCH',
@@ -466,6 +541,11 @@ export function adaptAnalyticalSemanticGraph(input: {
   }
 
   const invocations: SemanticGraphInvocation[] = [];
+  const frame = plan.analyticalFrame;
+  const sourceRanking = frame && !frame.comparison
+    && frame.ranking?.byMetricId === frame.metricConceptIds[0]
+    ? frame.ranking
+    : undefined;
   for (const source of graph.nodes.filter(
     (node): node is AnalyticalGraphSourceInvocationNode => node.kind === 'source_invocation',
   )) {
@@ -473,6 +553,7 @@ export function adaptAnalyticalSemanticGraph(input: {
       return block('EXECUTION_GRAPH_ROUTE_MISMATCH', 'A semantic graph cannot invoke a complete certified asset.');
     }
     const dimensions: string[] = [];
+    const dimensionOutputAliases: string[] = [];
     let timeDimension: SemanticMemberSelection['timeDimension'];
     for (const dimensionId of source.groupByDimensionIds) {
       const resolved = resolveSemanticDimensionId(dimensionId, input.registry, input.semanticLayer);
@@ -481,6 +562,7 @@ export function adaptAnalyticalSemanticGraph(input: {
         timeDimension = { name: resolved.name, granularity: source.period.grain };
       } else {
         dimensions.push(resolved.name);
+        dimensionOutputAliases.push(resolved.definition.name);
       }
     }
     const filters: NonNullable<SemanticMemberSelection['filters']> = [];
@@ -521,6 +603,16 @@ export function adaptAnalyticalSemanticGraph(input: {
         dimensions,
         ...(timeDimension ? { timeDimension } : {}),
         ...(filters.length ? { filters } : {}),
+        ...(sourceRanking
+          ? {
+              orderBy: appendStableSemanticSecondaryOrder(
+                [{ name: metricNames[0]!, direction: sourceRanking.direction }],
+                dimensionOutputAliases,
+                sourceRanking.tiePolicy,
+              ),
+              limit: sourceRanking.limit,
+            }
+          : {}),
       },
       outputAliases: structuredClone(source.outputAliases),
       ...(source.period ? { period: structuredClone(source.period) } : {}),
@@ -582,7 +674,9 @@ function resolveSemanticDimension(
   binding: ResolvedPlanMemberBinding,
   registry: PlanExecutionRegistryEntry[],
   layer: SemanticLayer,
-): { name: string; definition: ReturnType<SemanticLayer['resolveGroupBy']> } | {
+  selectedCapability = undefined as ReturnType<typeof normalizeMetricCapabilityContract>,
+  allowLegacyCapabilityFallback = false,
+): { name: string; definition: NonNullable<ReturnType<SemanticLayer['resolveGroupBy']>> } | {
   code: 'SEMANTIC_MEMBER_MISSING' | 'SEMANTIC_MEMBER_AMBIGUOUS';
   reason: string;
   candidateIds?: string[];
@@ -595,6 +689,19 @@ function resolveSemanticDimension(
     };
   }
   const matches = resolveRegistryIdentity(binding.qualifiedId, registry).filter((entry) => entry.node.kind === 'dimension');
+  if (matches.length === 0 && allowLegacyCapabilityFallback) {
+    const capabilityMatches = selectedCapability?.dimensions.filter((dimension) =>
+      dimension.dimensionId === binding.qualifiedId) ?? [];
+    const definitions = capabilityMatches.length === 1
+      ? uniqueDefinitions([layer.resolveGroupBy(binding.qualifiedId), layer.resolveGroupBy(binding.requested)])
+      : [];
+    if (definitions.length === 1) {
+      return {
+        name: definitions[0]!.qualifiedName ?? definitions[0]!.name,
+        definition: definitions[0],
+      };
+    }
+  }
   if (matches.length !== 1) {
     return {
       code: matches.length > 1 ? 'SEMANTIC_MEMBER_AMBIGUOUS' : 'SEMANTIC_MEMBER_MISSING',
@@ -604,11 +711,8 @@ function resolveSemanticDimension(
   }
   const node = matches[0]!.node;
   const localId = stringValue(node.payload?.localId) ?? node.name;
-  const candidates = uniqueDefinitions([
-    layer.resolveGroupBy(node.name),
-    layer.resolveGroupBy(localId),
-    ...stringArray(node.payload?.aliases).map((alias) => layer.resolveGroupBy(alias)),
-  ]);
+  const candidates = uniqueDefinitions(semanticRuntimeReferencesForKGNode(node)
+    .map((reference) => layer.resolveGroupBy(reference)));
   if (candidates.length !== 1) {
     return {
       code: candidates.length > 1 ? 'SEMANTIC_MEMBER_AMBIGUOUS' : 'SEMANTIC_MEMBER_MISSING',
@@ -637,32 +741,12 @@ function resolveSemanticDimensionId(
 }
 
 function semanticMetricNames(node: KGNode, layer: SemanticLayer): string[] {
-  const localId = stringValue(node.payload?.localId) ?? node.name;
-  const exactIdentities = new Set([node.name, localId, ...stringArray(node.payload?.aliases)]);
+  const exactIdentities = new Set(semanticRuntimeReferencesForKGNode(node));
   return [...new Set(layer.listMetrics().filter((metric) =>
     exactIdentities.has(metric.name)
     || exactIdentities.has(`${metric.cube ?? ''}.${metric.name}`)
     || (metric.source?.objectId ? exactIdentities.has(metric.source.objectId) : false)
   ).map((metric) => metric.name))].sort();
-}
-
-function nodeIdentities(node: KGNode): string[] {
-  return [
-    node.nodeId,
-    stringValue(node.payload?.qualifiedId),
-    stringValue(node.payload?.sourceNativeId),
-    ...stringArray(node.payload?.aliases),
-  ].filter((value): value is string => Boolean(value));
-}
-
-function metadataObjectIdentities(object: MetadataObject): string[] {
-  return [
-    object.objectKey,
-    object.fullName,
-    stringValue(object.payload?.qualifiedId),
-    stringValue(object.payload?.sourceNativeId),
-    ...stringArray(object.payload?.aliases),
-  ].filter((value): value is string => Boolean(value));
 }
 
 function nodeIdForMetadataObject(object: MetadataObject): string | undefined {

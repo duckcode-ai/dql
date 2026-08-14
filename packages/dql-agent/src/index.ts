@@ -139,6 +139,27 @@ export {
   redactAnalyticalDiagnostic,
 } from './analytical-failure-repair.js';
 export {
+  PROVIDER_RESULT_ROW_REDACTION_POLICY_ID,
+  PROVIDER_ZERO_RESULT_ROWS_POLICY_ID,
+  assertProviderPayloadAllowed,
+  boundProviderResultRows,
+  createProviderDispatchEgressReceipt,
+  createProviderEgressReceipt,
+  inspectProviderPayloadRowShape,
+  markProviderMetadata,
+  markProviderMetadataArray,
+  prepareProviderContextForDispatch,
+  prepareServerOwnedProviderSchemaContext,
+  prepareProviderWireEnvelopeForDispatch,
+  providerPayloadFingerprint,
+  redactProviderResultRows,
+  stripProviderResultRows,
+  type ProviderPayloadGuardPolicy,
+  type ProviderPayloadRowShape,
+  type BoundedProviderResultRows,
+} from './provider-egress.js';
+export { buildAggregationSafetyProof } from './aggregation-safety-proof.js';
+export {
   analyticalError,
   analyticalErrorBlocksAnswer,
   analyticalErrorDetail,
@@ -172,6 +193,13 @@ export type {
 export { detectResultSetOperation, computeResultSetOperation } from "./conversation/result-ops.js";
 export type { ResultSetOperation, PriorResultData, ResultSetComputation } from "./conversation/result-ops.js";
 export type { SemanticExecutionTrace, SemanticQueryCompiler } from "./answer-loop.js";
+export {
+  GENERATED_ANALYTICAL_TUPLE_DRIFT_MESSAGE,
+  validateGeneratedAnalyticalProposal,
+  type GeneratedAnalyticalProposalV1,
+  type GeneratedAnalyticalProposalValidation,
+  type GeneratedAnalyticalTupleDriftCode,
+} from './generated-analytical-proposal.js';
 export { resolveDomainContextEnvelope, domainContextSearchDomains } from './domain-context.js';
 export type { DomainContextEnvelope, KnowledgeLens, ResolveDomainContextInput } from './domain-context.js';
 export {
@@ -201,6 +229,9 @@ export {
   selectRoute,
   routeReasoningEffort,
   compareResolvedPlanShadow,
+  agentRouteDeadlineMs,
+  agentRequestDeadlineMs,
+  createAgentRunBudget,
 } from "./agent-run-engine.js";
 export type { FileAgentRunStoreOptions } from "./agent-run-engine.js";
 export {
@@ -225,11 +256,13 @@ export type {
   AgentRunArtifact,
   AgentRunArtifactKind,
   AgentRunAudience,
+  AgentRunBudget,
   AgentRunEngineOptions,
   AgentRunEvaluation,
   AgentRunEvaluationSeverity,
   AgentRunDiagnosticFailureV1,
   AgentRunDiagnosticReceiptV1,
+  AgentRunDiagnosticReceiptV2,
   AgentRunEvent,
   AgentRunExecutionTarget,
   AgentRunExecutors,
@@ -1121,12 +1154,16 @@ export {
   isThinkingMode,
   coerceThinkingMode,
   resolveThinkingMode,
+  prepareProviderHttpDispatch,
 } from "./providers/index.js";
 export type {
   AgentProvider,
   AgentMessage,
   AgentToolDefinition,
   ProviderName,
+  ProviderDispatchEvent,
+  ProviderDispatchObserver,
+  ProviderDispatchOperation,
   ProviderRunOptions,
   ProviderToolLoopOptions,
   ReasoningEffort,

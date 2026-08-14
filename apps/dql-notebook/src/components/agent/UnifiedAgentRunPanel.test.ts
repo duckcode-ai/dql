@@ -30,6 +30,11 @@ let selectAgentExecutionConnection: typeof UnifiedAgentRunPanelModule.selectAgen
 let appPinDestinationLabel: typeof UnifiedAgentRunPanelModule.appPinDestinationLabel;
 let askAppDestinations: typeof UnifiedAgentRunPanelModule.askAppDestinations;
 let askAppWriteErrorMessage: typeof UnifiedAgentRunPanelModule.askAppWriteErrorMessage;
+let askRunAllowsExecutionRepair: typeof UnifiedAgentRunPanelModule.askRunAllowsExecutionRepair;
+let agentRunPerformanceRows: typeof UnifiedAgentRunPanelModule.agentRunPerformanceRows;
+let askRunCaptureWarning: typeof UnifiedAgentRunPanelModule.askRunCaptureWarning;
+let askFailureOriginTyped: typeof UnifiedAgentRunPanelModule.askFailureOrigin;
+let askFailurePresentation: typeof UnifiedAgentRunPanelModule.ASK_FAILURE_PRESENTATION;
 
 describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
   beforeAll(async () => {
@@ -62,6 +67,11 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     appPinDestinationLabel = module.appPinDestinationLabel;
     askAppDestinations = module.askAppDestinations;
     askAppWriteErrorMessage = module.askAppWriteErrorMessage;
+    askRunAllowsExecutionRepair = module.askRunAllowsExecutionRepair;
+    agentRunPerformanceRows = module.agentRunPerformanceRows;
+    askRunCaptureWarning = module.askRunCaptureWarning;
+    askFailureOriginTyped = module.askFailureOrigin;
+    askFailurePresentation = module.ASK_FAILURE_PRESENTATION;
   });
 
   it('names the exact App page used by the added-result confirmation', () => {
@@ -104,6 +114,34 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     expect(selectAgentExecutionConnection(names, 'analytics', 'deleted-connection')).toBe('analytics');
     expect(selectAgentExecutionConnection(names, 'missing-default')).toBe('analytics');
     expect(selectAgentExecutionConnection([], 'analytics')).toBeUndefined();
+  });
+
+  it('shows automatic Ask repair only from the retained server capability', () => {
+    const inferredLegacyRun = {
+      status: 'blocked',
+      artifacts: [{ payload: { sql: 'select 1', warehouseFailure: { category: 'syntax' } } }],
+    };
+    expect(askRunAllowsExecutionRepair(inferredLegacyRun as never)).toBe(false);
+    expect(askRunAllowsExecutionRepair({
+      ...inferredLegacyRun,
+      repairCapability: {
+        version: 1,
+        automatic: { eligible: true, action: 'repair_embedded_sql', correctionCode: 'SQL_EXECUTION_REPAIR', attemptsRemaining: 1 },
+        routeLocked: true,
+        targetLocked: true,
+        sourceImmutable: true,
+      },
+    } as never)).toBe(true);
+    expect(askRunAllowsExecutionRepair({
+      ...inferredLegacyRun,
+      repairCapability: {
+        version: 1,
+        automatic: { eligible: false, action: 'none', correctionCode: 'MANUAL_REVIEW_REQUIRED', attemptsRemaining: 0 },
+        routeLocked: true,
+        targetLocked: true,
+        sourceImmutable: true,
+      },
+    } as never)).toBe(false);
   });
 
   it('promotes a repaired run into the presented transcript for inspector and follow-up actions', () => {
@@ -179,6 +217,7 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
       },
     })).toBe(true);
     expect(analyticalInspectorSections()).toEqual([
+      'Performance & provider egress',
       'Plan',
       'DQL',
       'Compiled SQL',
@@ -187,6 +226,65 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
       'Actual steps',
       'Failure & repair',
     ]);
+  });
+
+  it('shows content-free timing/call/egress evidence and leaves legacy runs unrecorded', () => {
+    const run = {
+      telemetry: {
+        version: 1,
+        stageDurationsMs: { retrieval: 20, total: 1500 },
+        providerRoundTrips: 1,
+        toolCalls: 2,
+        sqlExecutions: 1,
+        repairs: 0,
+        egressReceipts: 1,
+        warehouseDurationMs: 10,
+      },
+      providerEgressReceipts: [{ resultRowCount: 0 }],
+      artifacts: [{ id: 'artifact-1', payload: { resolvedAnalyticalPlan: { planId: 'plan-1' } } }],
+    } as unknown as Parameters<typeof agentRunPerformanceRows>[0];
+    expect(agentRunPerformanceRows(run)).toEqual(expect.arrayContaining([
+      ['Total', '1.5s'],
+      ['Warehouse', '10ms'],
+      ['Orchestration', '1.5s'],
+      ['Calls', '1 provider · 2 tool · 1 SQL · 0 repair'],
+      ['Provider rows', '0 result rows sent to providers (1 content-free receipt)'],
+      ['Plan ID', 'plan-1'],
+      ['Artifact IDs', 'artifact-1'],
+    ]));
+    expect(agentRunPerformanceRows({} as Parameters<typeof agentRunPerformanceRows>[0])).toBeUndefined();
+  });
+
+  it.each([
+    [{ analyticalFailure: { code: 'POLICY_DENIED' } }, 'policy'],
+    [{ analyticalFailure: { code: 'PERMISSION_DENIED' } }, 'policy'],
+    [{ analyticalFailure: { code: 'RESULT_CONTRACT_MISMATCH' } }, 'result_contract'],
+    [{ analyticalFailure: { code: 'TIMEOUT' } }, 'timeout'],
+    [{ analyticalFailure: { code: 'EXECUTION_CANCELLED' } }, 'cancel'],
+    [{ analyticalFailure: { code: 'COMPILATION_FAILED' } }, 'compile'],
+    [{ analyticalFailure: { code: 'IDENTIFIER_SCOPE_INVALID' } }, 'identity_integrity'],
+    [{ aggregationSafetyProof: { status: 'blocked' } }, 'proof_integrity'],
+    [{ refusalCode: 'modeling_gap' }, 'modeling_gap'],
+    [{ warehouseFailure: { origin: 'warehouse' } }, 'warehouse'],
+  ])('renders a truthful typed failure state for %j', (payload, expected) => {
+    expect((askFailureOriginTyped as (run: unknown) => string)({
+      status: 'blocked', artifacts: [{ payload }],
+    })).toBe(expected);
+  });
+
+  it('separates post-execution capture warnings from query failure', () => {
+    expect(askRunCaptureWarning({
+      status: 'needs_review',
+      artifacts: [{ payload: { validationWarnings: ['This answer could not be captured as a reusable DQL block: parser error'] } }],
+    } as never)).toMatch(/captured as a reusable DQL block/);
+    expect(askRunCaptureWarning({ status: 'blocked', artifacts: [] } as never)).toBeUndefined();
+  });
+
+  it('uses proof-specific not-executed copy for blocked semantic authority', () => {
+    expect(askFailurePresentation.proof_integrity).toEqual({
+      title: 'Not executed: exact semantic proof was not established',
+      hint: 'DQL could not establish the exact metric, requested grain, join keys, and fanout proof. Warehouse success cannot create that authority.',
+    });
   });
 
   it('UI-012 never interprets the orchestration step plan as an analytical ranking plan', () => {
@@ -1167,6 +1265,24 @@ describe('failure card origin and detail', () => {
     }))).toBe('provider');
   });
 
+  it('UI-011 distinguishes an internal dispatch budget from a provider outage', () => {
+    expect(askFailureOrigin(runWith({
+      providerFailure: { code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' },
+      refusalCode: 'model_declined',
+    }))).toBe('orchestration_budget');
+    expect(askFailureOrigin(runWith({
+      providerFailure: { code: 'orchestration_budget_exhausted' },
+      refusalCode: 'orchestration_budget_exhausted',
+    }))).toBe('orchestration_budget');
+    expect(askFailureOrigin(runWith({}, {
+      diagnosticReceipt: {
+        failure: { code: 'orchestration_budget_exhausted', message: 'bounded orchestration exhausted' },
+      },
+    }))).toBe('orchestration_budget');
+    expect(ASK_FAILURE_PRESENTATION.orchestration_budget.title).not.toMatch(/provider failed/i);
+    expect(ASK_FAILURE_PRESENTATION.orchestration_budget.hint).not.toMatch(/settings/i);
+  });
+
   it('keeps an unknown or missing origin unattributed', () => {
     expect(askFailureOrigin(runWith({}))).toBe('unknown');
     expect(askFailureOrigin(runWith({ warehouseFailure: { origin: 'not_a_real_origin' } }))).toBe('unknown');
@@ -1196,5 +1312,34 @@ describe('failure card origin and detail', () => {
   it('falls back through executionError, then summary', () => {
     expect(askFailureDetail(runWith({ executionError: 'exec blew up' }))).toBe('exec blew up');
     expect(askFailureDetail(runWith({}))).toBe('safe headline. real cause from summary');
+  });
+
+  it('UI-010/012 explains a legacy generic blocked run from its retained qualified bindings', () => {
+    const run = runWith({
+      resolvedAnalyticalPlan: {
+        capability: 'blocked',
+        query: {
+          measures: [{ requested: 'case volume', status: 'resolved', candidateIds: ['semantic:support:metric:case_volume'] }],
+          dimensions: [{
+            requested: 'account',
+            status: 'ambiguous',
+            candidateIds: [
+              'semantic:support:dimension:billing_account',
+              'semantic:support:dimension:service_account',
+            ],
+          }],
+          filters: [],
+        },
+      },
+    }, {
+      status: 'blocked',
+      summary: 'Agent run is blocked.',
+      diagnosticReceipt: { failure: { message: 'Agent run is blocked.' } },
+    });
+
+    expect(askFailureDetail(run)).toBe(
+      'I found more than one governed dimension for “account”: Billing Account or Service Account. Choose one before I run the query.',
+    );
+    expect(askFailureDetail(run)).not.toBe('Agent run is blocked.');
   });
 });

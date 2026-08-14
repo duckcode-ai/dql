@@ -2,6 +2,9 @@ import {
   dqlToolNamesForSurface,
   expandGroundingFromCatalog,
   openMetadataCatalog,
+  redactProviderResultRows,
+  markProviderMetadata,
+  markProviderMetadataArray,
   type AgentToolDefinition,
   type GroundingExpansionResult,
 } from "@duckcodeailabs/dql-agent";
@@ -57,20 +60,29 @@ export function createGroundingContextExpander(projectRoot: string, liveProbe?: 
   };
 }
 
-export function buildAnswerLoopTools(projectRoot: string): AgentToolDefinition[] {
+export function buildAnswerLoopTools(
+  projectRoot: string,
+  options: { researchResultRowsOptIn?: boolean } = {},
+): AgentToolDefinition[] {
   const ctx = new DQLContext({ projectRoot });
   const allowed = new Set<string>(dqlToolNamesForSurface("answer_loop"));
   const catalogTools = buildAgentTools(ctx).filter((tool) =>
     allowed.has(tool.name),
   );
   return [
-    ...catalogTools,
+    ...catalogTools.map((tool) => ({
+      ...tool,
+      run: async (args: unknown) => {
+        const output = await tool.run(args);
+        return output && typeof output === 'object' ? markProviderMetadata(output as object) : output;
+      },
+    })),
     projectSourceSearchTool(projectRoot),
-    ...notebookDatasetTools(projectRoot),
+    ...notebookDatasetTools(projectRoot, options.researchResultRowsOptIn === true),
   ];
 }
 
-function notebookDatasetTools(projectRoot: string): AgentToolDefinition[] {
+function notebookDatasetTools(projectRoot: string, resultRowsOptIn: boolean): AgentToolDefinition[] {
   const executor = new QueryExecutor();
   const workspace = new NotebookDatasetWorkspace(projectRoot, executor, [
     join(projectRoot, ".dql", "connectors"),
@@ -104,7 +116,7 @@ function notebookDatasetTools(projectRoot: string): AgentToolDefinition[] {
         properties: {},
       },
       run: async () => ({
-        datasets: workspace.list().map((dataset) => ({
+        datasets: markProviderMetadataArray(workspace.list().map((dataset) => ({
           id: dataset.id,
           name: dataset.name,
           alias: dataset.alias,
@@ -118,7 +130,7 @@ function notebookDatasetTools(projectRoot: string): AgentToolDefinition[] {
             flags: column.flags,
           })),
           lineage: dataset.lineage,
-        })),
+        }))),
       }),
     },
     {
@@ -131,10 +143,10 @@ function notebookDatasetTools(projectRoot: string): AgentToolDefinition[] {
         required: ["id"],
         properties: { id: { type: "string" } },
       },
-      run: async (args) => {
+      run: async (args: unknown) => {
         const dataset = datasetByInput(args);
         if (!dataset) return { found: false, error: "Dataset not found." };
-        return {
+        return markProviderMetadata({
           found: true,
           dataset: {
             ...dataset,
@@ -147,7 +159,7 @@ function notebookDatasetTools(projectRoot: string): AgentToolDefinition[] {
               })),
             },
           },
-        };
+        });
       },
     },
     {
@@ -163,7 +175,7 @@ function notebookDatasetTools(projectRoot: string): AgentToolDefinition[] {
           limit: { type: "number", minimum: 1, maximum: 20 },
         },
       },
-      run: async (args) => {
+      run: async (args: unknown) => {
         const dataset = datasetByInput(args);
         if (!dataset) return { found: false, error: "Dataset not found." };
         const input = objectArgs(args);
@@ -179,16 +191,12 @@ function notebookDatasetTools(projectRoot: string): AgentToolDefinition[] {
         return {
           found: true,
           dataset: dataset.alias,
-          rows: dataset.profile.preview
-            .slice(0, limit)
-            .map((row) =>
-              Object.fromEntries(
-                Object.entries(row).map(([key, value]) => [
-                  key,
-                  sensitive.has(key) ? "[REDACTED]" : value,
-                ]),
-              ),
-            ),
+          rows: redactProviderResultRows(
+            dataset.profile.preview.map((row) => Object.fromEntries(
+              Object.entries(row).map(([key, value]) => [key, sensitive.has(key) ? '[REDACTED]' : value]),
+            )),
+            limit,
+          ),
           sampledRows: Math.min(limit, dataset.profile.preview.length),
           totalRows: dataset.profile.rowCount,
           warning:
@@ -206,7 +214,7 @@ function notebookDatasetTools(projectRoot: string): AgentToolDefinition[] {
         required: ["left", "right"],
         properties: { left: { type: "string" }, right: { type: "string" } },
       },
-      run: async (args) => {
+      run: async (args: unknown) => {
         const input = objectArgs(args);
         const all = workspace.list();
         const find = (value: unknown) =>
@@ -245,7 +253,7 @@ function notebookDatasetTools(projectRoot: string): AgentToolDefinition[] {
           found: true,
           left: left.alias,
           right: right.alias,
-          candidates: candidates.map((column) => column.name),
+          candidates: markProviderMetadataArray(candidates.map((column) => column.name)),
           manyToManyRisk: manyRisk,
           clarificationRequired: candidates.length !== 1 || manyRisk,
           recommendation:
@@ -270,7 +278,7 @@ function notebookDatasetTools(projectRoot: string): AgentToolDefinition[] {
         required: ["sql"],
         properties: { sql: { type: "string" } },
       },
-      run: async (args) => {
+      run: async (args: unknown) => {
         const input = objectArgs(args);
         const sql =
           typeof input.sql === "string"
@@ -294,17 +302,22 @@ function notebookDatasetTools(projectRoot: string): AgentToolDefinition[] {
           {},
           workspace.localConnection,
         );
+        const normalizedRows = result.rows.slice(0, 200).map((row) => {
+          if (row && typeof row === 'object' && !Array.isArray(row)) return row as Record<string, unknown>;
+          if (Array.isArray(row)) return Object.fromEntries(result.columns.map((column, index) => [String(column), row[index]]));
+          return { value: row };
+        });
         return {
           trust: "review_required",
           source: "notebook_local_workspace",
-          columns: result.columns,
-          rows: result.rows.slice(0, 200),
+          columns: markProviderMetadataArray(result.columns),
+          rows: redactProviderResultRows(normalizedRows, 200),
           rowCount: result.rows.length,
           warning: "Mixed or local analysis cannot be certified automatically.",
         };
       },
     },
-  ];
+  ].filter((tool) => resultRowsOptIn || (tool.name !== 'sample_notebook_dataset' && tool.name !== 'execute_local_analysis'));
 }
 
 function projectSourceSearchTool(projectRoot: string): AgentToolDefinition {
@@ -326,19 +339,19 @@ function projectSourceSearchTool(projectRoot: string): AgentToolDefinition {
       const query = typeof input.query === 'string' ? input.query : '';
       const limit = typeof input.limit === 'number' ? Math.max(1, Math.min(100, Math.floor(input.limit))) : 40;
       const terms = sourceSearchTerms(query);
-      if (terms.length === 0) return { query, matches: [], note: 'No distinctive search terms.' };
+      if (terms.length === 0) return { query, matches: markProviderMetadataArray([]), note: 'No distinctive search terms.' };
       const pattern = terms.map(escapeRegex).join('|');
       const lines = await runRipgrep(projectRoot, pattern, limit);
       return {
         query,
-        terms,
-        matches: lines.map((line) => ({
+        terms: markProviderMetadataArray(terms),
+        matches: markProviderMetadataArray(lines.map((line) => ({
           path: line.path.startsWith('.')
             ? line.path.replace(/^\.\//, '')
             : relative(projectRoot, line.path) || line.path,
           line: line.line,
           text: line.text,
-        })),
+        }))),
       };
     },
   };

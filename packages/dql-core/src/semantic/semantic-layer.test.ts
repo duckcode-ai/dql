@@ -109,6 +109,20 @@ describe('SemanticLayer', () => {
     expect(layer.composeQuery({ metrics: ['revenue'], dimensions: ['region'], driver: 'duckdb' })?.sql).toContain('SUM(amount) AS revenue');
   });
 
+  it('preserves model-qualified primary and foreign variants of the same entity name', () => {
+    const layer = new SemanticLayer();
+    layer.addEntity({ name: 'customer', label: 'Order customer', description: '', type: 'foreign', table: 'orders', cube: 'orders' });
+    layer.addEntity({ name: 'customer', label: 'Customer', description: '', type: 'primary', table: 'customers', cube: 'customers' });
+
+    expect(layer.listEntities().filter((entity) => entity.name === 'customer')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ cube: 'orders', type: 'foreign' }),
+      expect.objectContaining({ cube: 'customers', type: 'primary' }),
+    ]));
+    expect(layer.getEntity('customer')).toEqual(expect.objectContaining({ cube: 'customers', type: 'primary' }));
+    expect(layer.getEntity('customer', 'orders')).toEqual(expect.objectContaining({ cube: 'orders', type: 'foreign' }));
+    expect(layer.getEntity('customers.customer')).toEqual(expect.objectContaining({ cube: 'customers', type: 'primary' }));
+  });
+
   it('AGT-010 emits stable aliases and qualified members across a multi-hop semantic path', () => {
     const layer = new SemanticLayer();
     const cube = (
@@ -183,6 +197,44 @@ describe('SemanticLayer', () => {
     const result = layer.composeQuery({ metrics: ['revenue'], dimensions: ['region'], driver: 'duckdb' });
     expect(result?.sql).toContain('SUM(amount) AS revenue');
     expect(result?.fanoutProbeSql).toBeUndefined();
+  });
+
+  it('orders only by selected output aliases or exact selected physical expressions', () => {
+    const layer = new SemanticLayer({
+      metrics: [{ name: 'revenue', label: 'Revenue', description: '', domain: 'sales', sql: 'amount', type: 'sum', table: 'orders' }],
+      dimensions: [{
+        name: 'customer_name',
+        qualifiedName: 'customer__customer_name',
+        label: 'Customer',
+        description: '',
+        sql: 'customer_name',
+        type: 'string',
+        table: 'orders',
+      }],
+    });
+
+    const valid = layer.composeQuery({
+      metrics: ['revenue'],
+      dimensions: ['customer__customer_name'],
+      orderBy: [
+        { name: 'revenue', direction: 'desc' },
+        { name: 'customer_name', direction: 'asc' },
+      ],
+      limit: 10,
+      driver: 'duckdb',
+    });
+    expect(valid?.sql).toContain('ORDER BY revenue DESC, customer_name ASC\nLIMIT 10');
+
+    expect(layer.composeQuery({
+      metrics: ['revenue'],
+      dimensions: ['customer__customer_name'],
+      orderBy: [
+        { name: 'revenue', direction: 'desc' },
+        { name: 'customer__customer_name', direction: 'asc' },
+      ],
+      limit: 10,
+      driver: 'duckdb',
+    })).toBeNull();
   });
 
   it('pre-aggregates metrics from different fact tables before joining at a conformed grain', () => {

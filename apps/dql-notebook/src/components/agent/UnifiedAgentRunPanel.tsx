@@ -290,6 +290,7 @@ export function UnifiedAgentRunPanel({
   // The composer "thinking" selection, sticky across refreshes. `auto` defers to
   // the engine's shape-adaptive routing; the user can change it mid-conversation.
   const [thinkingMode, setThinkingMode] = useState<AgentThinkingMode>(() => readStoredThinkingMode());
+  const [researchResultRowsOptIn, setResearchResultRowsOptIn] = useState(false);
   const [executionConnectionNames, setExecutionConnectionNames] = useState<string[]>([]);
   const [executionConnectionName, setExecutionConnectionName] = useState<string>();
   const changeThinkingMode = useCallback((mode: AgentThinkingMode) => {
@@ -556,6 +557,9 @@ export function UnifiedAgentRunPanel({
     const text = (textOverride ?? input).trim();
     if (!text || running) return;
     const activeMode = modeOverride ?? pendingModeRef.current ?? initialMode;
+    const resultRowsOptInForRun = activeMode === 'research' && researchResultRowsOptIn;
+    // Consent is intentionally one-shot and never inherited by the next run.
+    setResearchResultRowsOptIn(false);
     pendingModeRef.current = undefined;
     const userItem: ThreadItem = { kind: 'user', id: makeId('user'), text };
     setItems((current) => [...current, userItem]);
@@ -632,6 +636,7 @@ export function UnifiedAgentRunPanel({
         conversationContext: buildConversationContext(items),
         history,
         thinkingMode,
+        researchResultRowsOptIn: resultRowsOptInForRun,
         runId,
         ...(threadIdRef.current ? { threadId: threadIdRef.current } : {}),
       };
@@ -922,6 +927,11 @@ export function UnifiedAgentRunPanel({
                 />
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px 10px 12px' }}>
                   <ThinkingModeControl t={t} value={thinkingMode} onChange={changeThinkingMode} />
+                  <ResearchRowsConsent
+                    checked={researchResultRowsOptIn}
+                    onChange={setResearchResultRowsOptIn}
+                    t={t}
+                  />
                   <AgentExecutionConnectionControl
                     names={executionConnectionNames}
                     value={executionConnectionName}
@@ -1093,6 +1103,11 @@ export function UnifiedAgentRunPanel({
               t={t}
             />
             <ThinkingModeControl t={t} value={thinkingMode} onChange={changeThinkingMode} />
+            <ResearchRowsConsent
+              checked={researchResultRowsOptIn}
+              onChange={setResearchResultRowsOptIn}
+              t={t}
+            />
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
@@ -1195,6 +1210,43 @@ export function selectAgentExecutionConnection(
   if (preferredName && names.includes(preferredName)) return preferredName;
   if (defaultName && names.includes(defaultName)) return defaultName;
   return names[0];
+}
+
+function ResearchRowsConsent({
+  checked,
+  onChange,
+  t,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  t: Theme;
+}): JSX.Element {
+  return (
+    <label
+      title="One-run consent: Research may send at most 20 redacted narration rows and 200 redacted local-analysis rows. Ask and repair always send zero rows."
+      style={{
+        minHeight: 30,
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 5,
+        padding: '0 7px',
+        border: '1px solid var(--border-default)',
+        borderRadius: 8,
+        background: 'var(--bg-2)',
+        color: t.textMuted,
+        fontSize: 10.5,
+        cursor: 'pointer',
+      }}
+    >
+      <input
+        type="checkbox"
+        aria-label="Allow redacted result rows for this Research run"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+      />
+      Research rows (this run)
+    </label>
+  );
 }
 
 function AgentExecutionConnectionControl({
@@ -2193,6 +2245,7 @@ function AskRunCard(props: AskRunCardProps) {
   // available: the producer's own message beats the canned per-code headline,
   // which is the same sentence for everything unclassified.
   const failureMessage = blocked ? askFailureDetail(run) : undefined;
+  const captureWarning = askRunCaptureWarning(run);
   const passedChecks = run.evaluations.filter((e) => e.severity === 'info').length;
   const evidence = evidenceFromRun(run);
   const inlineResultArtifacts = run.artifacts.filter((artifact) => {
@@ -2257,6 +2310,12 @@ function AskRunCard(props: AskRunCardProps) {
         />
       ) : run.summary ? (
         <div data-followup="answer" style={{ fontSize: 14, lineHeight: 1.6, color: t.textSecondary }}>{cleanPresentationText(run.summary)}</div>
+      ) : null}
+
+      {captureWarning ? (
+        <div role="status" style={{ fontSize: 11.5, lineHeight: 1.5, color: t.warning, borderLeft: `2px solid ${t.warning}`, paddingLeft: 8 }}>
+          Capture warning: {cleanPresentationText(captureWarning)} The query result is still valid.
+        </div>
       ) : null}
 
       <ClarificationChoiceList run={run} t={t} onSelect={onSelectClarification} />
@@ -2467,7 +2526,7 @@ export function analyticalInspectorContract(payload: Record<string, unknown>): A
 }
 
 export function analyticalInspectorSections(): string[] {
-  return ['Plan', 'DQL', 'Compiled SQL', 'Lineage', 'Trust & evidence', 'Actual steps', 'Failure & repair'];
+  return ['Performance & provider egress', 'Plan', 'DQL', 'Compiled SQL', 'Lineage', 'Trust & evidence', 'Actual steps', 'Failure & repair'];
 }
 
 export function analyticalRepairActionLabels(safeActions: string[]): string[] {
@@ -2481,6 +2540,43 @@ export function analyticalRepairActionLabels(safeActions: string[]): string[] {
     safeActions.includes('open_sql_notebook') ? 'Open SQL in Notebook' : undefined,
     safeActions.includes('reapply_semantic_runtime') ? 'Reapply semantic runtime settings' : undefined,
   ].filter((label): label is string => Boolean(label));
+}
+
+export function agentRunPerformanceRows(run: AgentRun): Array<[string, string]> | undefined {
+  const telemetry = run.telemetry;
+  if (!telemetry) return undefined;
+  const egressRowCount = (run.providerEgressReceipts ?? []).reduce((sum, item) => sum + item.resultRowCount, 0);
+  const totalDurationMs = telemetry.stageDurationsMs.total;
+  const warehouseDurationMs = telemetry.warehouseDurationMs;
+  const orchestrationDurationMs = totalDurationMs === undefined || warehouseDurationMs === undefined
+    ? undefined
+    : Math.max(0, totalDurationMs - warehouseDurationMs);
+  const planIds = Array.from(new Set((run.artifacts ?? []).flatMap((artifact) => {
+    const payload = payloadOf(artifact);
+    const plan = recordOf(payload.resolvedAnalyticalPlan)
+      ?? recordOf(recordOf(payload.diagnosticReceipt)?.resolvedAnalyticalPlan);
+    const receipt = recordOf(payload.analyticalExecutionReceipt);
+    return [plan?.planId, receipt?.planId].filter((value): value is string => typeof value === 'string' && value.length > 0);
+  })));
+  const artifactIds = Array.from(new Set((run.artifacts ?? [])
+    .map((artifact) => artifact.id)
+    .filter((value): value is string => typeof value === 'string' && value.length > 0)));
+  return [
+    ['Total', formatTelemetryDuration(telemetry.stageDurationsMs.total)],
+    ['Warehouse', telemetry.warehouseDurationMs === undefined ? 'Not recorded' : formatTelemetryDuration(telemetry.warehouseDurationMs)],
+    ['Orchestration', orchestrationDurationMs === undefined ? 'Not recorded' : formatTelemetryDuration(orchestrationDurationMs)],
+    ['Stages', Object.entries(telemetry.stageDurationsMs)
+      .filter(([stage]) => stage !== 'total')
+      .map(([stage, duration]) => `${stage}: ${formatTelemetryDuration(duration)}`)
+      .join(' · ')],
+    ['Calls', `${telemetry.providerRoundTrips} provider · ${telemetry.toolCalls} tool · ${telemetry.sqlExecutions} SQL · ${telemetry.repairs} repair`],
+    ['Provider rows', egressRowCount === 0
+      ? `0 result rows sent to providers (${telemetry.egressReceipts} content-free receipt${telemetry.egressReceipts === 1 ? '' : 's'})`
+      : `${egressRowCount} bounded, redacted Research result row${egressRowCount === 1 ? '' : 's'} sent with explicit run consent`],
+    ['Plan ID', planIds.length > 0 ? planIds.join(', ') : 'Not recorded'],
+    ['Artifact IDs', artifactIds.length > 0 ? artifactIds.join(', ') : 'None'],
+    ['Fallback', telemetry.fallbackReason ?? 'None'],
+  ];
 }
 
 function AnalyticalHowAnswered({
@@ -2538,6 +2634,7 @@ function AnalyticalHowAnswered({
   const failedBindings = recordList(failure?.failedBindings);
   const semanticSqlExcerpt = recordOf(semanticFailure?.sqlExcerpt);
   const result = run.artifacts.map((artifact) => extractResult(payloadOf(artifact))).find(Boolean);
+  const performanceRows = agentRunPerformanceRows(run);
   const sourceTitle = dqlArtifact?.name ?? run.question;
   const [repairMessage, setRepairMessage] = useState<string | null>(null);
   const repairResultMessage = (
@@ -2650,7 +2747,15 @@ function AnalyticalHowAnswered({
         </div>
       </div>
 
-      <AnalyticalInspectorSection index={1} label="Plan" t={t} open={!failure}>
+      <AnalyticalInspectorSection index={1} label="Performance & provider egress" t={t} open>
+        {performanceRows ? (
+          <InspectorRows rows={performanceRows} t={t} />
+        ) : (
+          <InspectorEmpty t={t}>Performance details were not recorded for this legacy run.</InspectorEmpty>
+        )}
+      </AnalyticalInspectorSection>
+
+      <AnalyticalInspectorSection index={2} label="Plan" t={t} open={!failure}>
         <InspectorRows rows={[
           ['Question type', displayValue(frame?.questionType ?? plan?.questionType)],
           ['Selected route', displayValue(graph?.route ?? plan?.recommendedRoute)],
@@ -2674,7 +2779,7 @@ function AnalyticalHowAnswered({
         the two copies were the same thing — which is exactly the confusion this
         panel should remove. Diagnostics that exist nowhere else stay below.
       */}
-      <AnalyticalInspectorSection index={2} label="Trust & evidence" t={t}>
+      <AnalyticalInspectorSection index={3} label="Trust & evidence" t={t}>
         <InspectorRows rows={[
           ['Trust state', run.trustState],
           ['Snapshot', displayValue(plan?.snapshotId ?? graph?.snapshotId)],
@@ -2711,7 +2816,7 @@ function AnalyticalHowAnswered({
         ]} t={t} mono />
       </AnalyticalInspectorSection>
 
-      <AnalyticalInspectorSection index={3} label="Actual steps" t={t}>
+      <AnalyticalInspectorSection index={4} label="Actual steps" t={t}>
         <div style={{ display: 'grid', gap: 6 }}>
           {semanticSteps.map((step, index) => (
             <div key={`semantic:${displayValue(step.id) || index}`} style={{ fontSize: 11.5, color: t.textSecondary }}>
@@ -2736,7 +2841,7 @@ function AnalyticalHowAnswered({
         </div>
       </AnalyticalInspectorSection>
 
-      <AnalyticalInspectorSection index={4} label="Failure & repair" t={t} open={Boolean(failure)}>
+      <AnalyticalInspectorSection index={5} label="Failure & repair" t={t} open={Boolean(failure)}>
         {failure ? (
           <div style={{ display: 'grid', gap: 9 }}>
             {/* The engine's message now leads the whole panel, so only the
@@ -2862,6 +2967,11 @@ function displayValue(value: unknown): string {
   if (typeof value === 'string') return value;
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   return '';
+}
+
+function formatTelemetryDuration(value: unknown): string {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return 'Not recorded';
+  return value >= 1000 ? `${(value / 1000).toFixed(value >= 10_000 ? 0 : 1)}s` : `${Math.round(value)}ms`;
 }
 
 export function clarificationSelectionInput(option: AgentRunClarificationOption): {
@@ -5211,9 +5321,45 @@ const ASK_FAILURE_PRESENTATION: Record<string, { title: string; hint: string }> 
     title: 'The AI provider failed',
     hint: 'Nothing was run. Retry, or check the provider in Settings.',
   },
+  orchestration_budget: {
+    title: 'Ask could not freeze one executable plan',
+    hint: 'Nothing was run. Ask stopped its own planning loop before another provider call; narrow the metric or dimension and retry.',
+  },
   host: {
     title: 'DQL hit an internal error',
     hint: 'This is a defect in DQL. The detail below is what to report.',
+  },
+  modeling_gap: {
+    title: 'The governed model does not cover this question',
+    hint: 'No query ran. Add or review the missing metric, dimension, relationship, or allocation rule.',
+  },
+  proof_integrity: {
+    title: 'Not executed: exact semantic proof was not established',
+    hint: 'DQL could not establish the exact metric, requested grain, join keys, and fanout proof. Warehouse success cannot create that authority.',
+  },
+  identity_integrity: {
+    title: 'DQL found an internal identity or target-binding defect',
+    hint: 'No query ran. This is an orchestration integrity defect, not missing business modeling.',
+  },
+  policy: {
+    title: 'Policy or permissions blocked this query',
+    hint: 'No AI repair was attempted. Use only the server-provided access or connection actions.',
+  },
+  result_contract: {
+    title: 'The warehouse result did not match the frozen plan',
+    hint: 'The query ran, but DQL rejected the returned columns, types, grain, or row bound.',
+  },
+  compile: {
+    title: 'DQL could not compile the frozen plan',
+    hint: 'The query did not reach the warehouse. Review the exact plan binding and compiler diagnostic.',
+  },
+  timeout: {
+    title: 'This run reached its hard deadline',
+    hint: 'DQL stopped the run at its request-owned deadline and did not accept a later result.',
+  },
+  cancel: {
+    title: 'This run was cancelled',
+    hint: 'Cancellation is terminal and no later provider or warehouse result was accepted.',
   },
   unknown: {
     title: 'The query could not be completed',
@@ -5226,27 +5372,53 @@ function askFailureOrigin(run: AgentRun): string {
   for (const artifact of run.artifacts ?? []) {
     const payload = payloadOf(artifact) as {
       warehouseFailure?: { origin?: unknown };
-      providerFailure?: unknown;
+      providerFailure?: { code?: unknown };
       refusalCode?: unknown;
+      analyticalFailure?: { code?: unknown; phase?: unknown };
+      aggregationSafetyProof?: { status?: unknown };
     } | undefined;
     const origin = payload?.warehouseFailure?.origin;
+    const code = typeof payload?.analyticalFailure?.code === 'string' ? payload.analyticalFailure.code : '';
+    if (payload?.refusalCode === 'modeling_gap') return 'modeling_gap';
+    if (payload?.aggregationSafetyProof?.status === 'blocked') return 'proof_integrity';
+    if (['IDENTIFIER_SCOPE_INVALID', 'EXECUTION_TARGET_MISMATCH', 'SEMANTIC_TARGET_BINDING_MISSING', 'SEMANTIC_SOURCE_DRIFT'].includes(code)) return 'identity_integrity';
+    if (['POLICY_DENIED', 'PERMISSION_DENIED'].includes(code)) return 'policy';
+    if (code === 'RESULT_CONTRACT_MISMATCH') return 'result_contract';
+    if (['TIMEOUT', 'SEMANTIC_COMPILATION_TIMEOUT'].includes(code)) return 'timeout';
+    if (code === 'EXECUTION_CANCELLED') return 'cancel';
+    if (['COMPILATION_FAILED', 'DIALECT_ERROR', 'SEMANTIC_ADAPTER_NOT_READY'].includes(code)) return 'compile';
     if (typeof origin === 'string' && origin in ASK_FAILURE_PRESENTATION) return origin;
+    if (payload?.providerFailure?.code === 'orchestration_budget_exhausted'
+      || payload?.providerFailure?.code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED') return 'orchestration_budget';
     if (payload?.providerFailure || payload?.refusalCode === 'provider_error') return 'provider';
   }
+  if (run.diagnosticReceipt?.failure?.code === 'orchestration_budget_exhausted') return 'orchestration_budget';
   if (run.diagnosticReceipt?.failure?.code === 'AI_PROVIDER_FAILURE') return 'provider';
   return 'unknown';
 }
 
-function askRunAllowsExecutionRepair(run: AgentRun): boolean {
-  if (run.status !== 'blocked' || (!answerSqlFromRun(run) && !answerDqlArtifactFromRun(run)?.source)) return false;
+export function askRunCaptureWarning(run: AgentRun): string | undefined {
   for (const artifact of run.artifacts ?? []) {
-    const payload = payloadOf(artifact) as { warehouseFailure?: { category?: unknown } } | undefined;
-    const category = payload?.warehouseFailure?.category;
-    if (typeof category === 'string' && ['permission', 'authentication', 'unsafe', 'cancelled'].includes(category)) {
-      return false;
-    }
+    const payload = payloadOf(artifact);
+    const warnings = Array.isArray(payload.validationWarnings)
+      ? payload.validationWarnings.filter((item): item is string => typeof item === 'string')
+      : [];
+    const warning = warnings.find((item) => /captur|reusable DQL block|save as (?:a )?block/i.test(item));
+    if (warning) return warning;
   }
-  return true;
+  return undefined;
+}
+
+export function askRunAllowsExecutionRepair(run: AgentRun): boolean {
+  const capability = run.repairCapability;
+  return capability?.version === 1
+    && capability.automatic.eligible === true
+    && capability.automatic.action === 'repair_embedded_sql'
+    && capability.automatic.correctionCode === 'SQL_EXECUTION_REPAIR'
+    && capability.automatic.attemptsRemaining > 0
+    && capability.routeLocked === true
+    && capability.targetLocked === true
+    && capability.sourceImmutable === true;
 }
 
 /**
@@ -5340,5 +5512,51 @@ function askFailureDetail(run: AgentRun): string | undefined {
       .find((value): value is string => typeof value === 'string' && value.trim().length > 0);
     if (specific) return specific;
   }
+  const bindingDetail = retainedPlanBindingFailure(run);
+  if (bindingDetail) return bindingDetail;
   return run.summary || run.diagnosticReceipt?.failure?.message;
+}
+
+/** Defensive compatibility for persisted runs produced before router
+ * reconciliation. New runs should arrive as clarification/modeling-gap
+ * outcomes, but a retained RAP still contains enough safe business context to
+ * avoid the legacy one-line “Agent run is blocked” presentation. */
+function retainedPlanBindingFailure(run: AgentRun): string | undefined {
+  const plans = [
+    recordOf(recordOf(run.diagnosticReceipt)?.resolvedAnalyticalPlan),
+    ...(run.artifacts ?? []).flatMap((artifact) => {
+      const payload = payloadOf(artifact);
+      return [
+        recordOf(payload.resolvedAnalyticalPlan),
+        recordOf(recordOf(payload.diagnosticReceipt)?.resolvedAnalyticalPlan),
+      ];
+    }),
+  ].filter((plan): plan is Record<string, unknown> => Boolean(plan));
+  for (const plan of plans) {
+    const query = recordOf(plan.query);
+    const bindings = [
+      ...recordList(query?.measures).map((binding) => ({ kind: 'metric', binding })),
+      ...recordList(query?.dimensions).map((binding) => ({ kind: 'dimension', binding })),
+      ...recordList(query?.filters).flatMap((filter) => {
+        const binding = recordOf(filter.binding);
+        return binding ? [{ kind: 'filter', binding }] : [];
+      }),
+    ];
+    const failed = bindings.find(({ binding }) => binding.status === 'ambiguous' || binding.status === 'unresolved');
+    if (!failed) continue;
+    const requested = displayValue(failed.binding.requested) || `requested ${failed.kind}`;
+    const choices = Array.isArray(failed.binding.candidateIds)
+      ? failed.binding.candidateIds.filter((value): value is string => typeof value === 'string').map(qualifiedBindingLabel)
+      : [];
+    if (failed.binding.status === 'ambiguous' && choices.length > 1) {
+      return `I found more than one governed ${failed.kind} for “${requested}”: ${choices.join(' or ')}. Choose one before I run the query.`;
+    }
+    return `I couldn’t identify one governed ${failed.kind} for “${requested}”. Review that model binding before retrying.`;
+  }
+  return undefined;
+}
+
+function qualifiedBindingLabel(id: string): string {
+  const local = id.split(/[:./]/).filter(Boolean).at(-1) ?? id;
+  return local.replace(/[_-]+/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase());
 }

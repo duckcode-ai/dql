@@ -4,6 +4,7 @@ import type {
   ProviderRunOptions,
 } from './types.js';
 import { geminiReasoningStyle, effortToThinkingBudget } from './reasoning-effort.js';
+import { prepareProviderHttpDispatch } from './dispatch.js';
 
 const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
@@ -81,13 +82,12 @@ export class GeminiProvider implements AgentProvider {
 
     const model = options.model ?? this.defaultModel;
     const url = `${this.baseUrl}/models/${encodeURIComponent(model)}:generateContent`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-goog-api-key': this.apiKey,
-      },
-      body: JSON.stringify({
+    const envelope = prepareProviderHttpDispatch({
+      provider: this.name,
+      operation: 'generate',
+      attemptIndex: 1,
+      options,
+      envelope: {
         contents: turns.map((m) => ({
           role: m.role === 'assistant' ? 'model' : 'user',
           parts: [{ text: m.content }],
@@ -97,7 +97,15 @@ export class GeminiProvider implements AgentProvider {
           maxOutputTokens: options.maxTokens ?? 1024,
           ...geminiThinkingConfig(model, options),
         },
-      }),
+      },
+    });
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-goog-api-key': this.apiKey,
+      },
+      body: JSON.stringify(envelope),
       signal: options.signal,
     });
     if (!res.ok) {

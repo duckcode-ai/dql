@@ -22,17 +22,24 @@ import {
   type AgentMemberBinding,
   type AgentPriorResultReference,
   type AgentProvider,
+  type ProviderToolLoopOptions,
   type AgentResultPayload,
   type ConversationSnapshot,
   type LocalContextPack,
+  type ProviderDispatchEvent,
   type Skill,
   isTrustedConversationTurn,
+  createProviderDispatchEgressReceipt,
+  createProviderEgressReceipt,
+  assertProviderPayloadAllowed,
+  prepareProviderContextForDispatch,
+  prepareProviderWireEnvelopeForDispatch,
+  prepareServerOwnedProviderSchemaContext,
 } from '@duckcodeailabs/dql-agent';
-import { buildManifest, normalizeDqlArtifactReference, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
+import { buildManifest, normalizeDqlArtifactReference, resolveDbtManifestPath, type ProviderEgressReceiptV1 } from '@duckcodeailabs/dql-core';
 import { existsSync } from 'node:fs';
 import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal, ProviderId } from '../types.js';
 import { buildAnswerLoopTools, createGroundingContextExpander } from '../answer-loop-tools.js';
-import { rethrowIfCancelled } from '../cancellation.js';
 import { getSemanticRuntimeStatus } from '../../semantic-runtime.js';
 import { blockProposalDqlMetadata } from '../proposal-metadata.js';
 import { getEffectiveProviderConfig } from '../../settings/provider-settings.js';
@@ -307,11 +314,120 @@ function emitProposalFromText(text: string, emit: (turn: AgentTurn) => void): vo
   }
 }
 
-export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner {
+export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverride?: AgentProvider): AgentRunner {
   return {
     async run(req, emit, signal) {
       const spec = SPECS[id];
-      const provider = spec.create(req.projectRoot);
+      const rawProvider = providerOverride ?? spec.create(req.projectRoot);
+      const isResearch = req.analysisDepth === 'deep';
+      const researchRowsOptIn = isResearch && req.researchResultRowsOptIn === true;
+      const sharedDispatchEvidence = req.providerDispatchEvidenceSink;
+      let providerRoundTrips = 0;
+      let sqlExecutions = 0;
+      let pendingResultRowCount = 0;
+      let pendingColumnCount = 0;
+      let pendingCumulativeResultRowCount = 0;
+      let pendingResearchPurpose: 'research_narration' | 'research_tool' = 'research_narration';
+      const providerEgressReceipts: ProviderEgressReceiptV1[] = [];
+      const dispatchEvidence = (fallbackReason: string) => {
+        const shared = sharedDispatchEvidence?.snapshot(fallbackReason);
+        return shared
+          ? { ...shared, sqlExecutions, fallbackReason }
+          : {
+              providerEgressReceipts: [...providerEgressReceipts],
+              providerRoundTrips,
+              toolCalls: 0,
+              sqlExecutions,
+              repairs: 0,
+              fallbackReason,
+            };
+      };
+      signal.addEventListener('abort', () => {
+        const reason = signal.reason;
+        if (reason && typeof reason === 'object') {
+          Object.assign(reason, { providerDispatchEvidence: dispatchEvidence('cancelled') });
+        }
+      }, { once: true });
+      const withPhysicalDispatchObserver = (options?: ProviderToolLoopOptions): ProviderToolLoopOptions => ({
+        ...(options ?? {}),
+        maxProviderDispatches: isResearch ? 8 : 2,
+        ...(sharedDispatchEvidence?.mayStartToolCall
+          ? { mayStartToolCall: () => sharedDispatchEvidence.mayStartToolCall!() }
+          : {}),
+        onProviderDispatch: (event: ProviderDispatchEvent) => {
+          const purpose = isResearch ? pendingResearchPurpose : 'answer_generation';
+          if (sharedDispatchEvidence) {
+            const envelope = sharedDispatchEvidence.observe(event, {
+              purpose,
+              dispatchPhase: 'generation',
+              optIn: pendingResultRowCount > 0 && researchRowsOptIn,
+              serializedResultShape: {
+                resultRowCount: pendingResultRowCount,
+                columnCount: pendingColumnCount,
+              },
+              ...(pendingCumulativeResultRowCount > 0
+                ? { cumulativeResultRowCount: pendingCumulativeResultRowCount }
+                : {}),
+            });
+            pendingResultRowCount = 0;
+            pendingColumnCount = 0;
+            pendingCumulativeResultRowCount = 0;
+            pendingResearchPurpose = 'research_narration';
+            return envelope;
+          }
+          if (!isResearch && providerRoundTrips >= 2) {
+            throw Object.assign(new Error('Provider dispatch budget exhausted after two ordinary generation attempts.'), {
+              code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED',
+            });
+          }
+          const envelope = prepareProviderWireEnvelopeForDispatch(rawProvider.name, event.envelope);
+          assertProviderPayloadAllowed(envelope, {
+            allowResultRows: false,
+            maxResultRows: 0,
+            purpose,
+          });
+          providerRoundTrips += 1;
+          providerEgressReceipts.push(createProviderDispatchEgressReceipt({
+            purpose,
+            dispatchPhase: 'generation',
+            provider: rawProvider.name,
+            permittedCategories: pendingResultRowCount > 0
+              ? ['instructions', 'question', 'schema_metadata', 'governed_context', 'result_rows']
+              : ['instructions', 'question', 'schema_metadata', 'governed_context'],
+            optIn: pendingResultRowCount > 0 && researchRowsOptIn,
+            envelope,
+            serializedResultShape: {
+              resultRowCount: pendingResultRowCount,
+              columnCount: pendingColumnCount,
+            },
+            ...(pendingCumulativeResultRowCount > 0
+              ? { cumulativeResultRowCount: pendingCumulativeResultRowCount }
+              : {}),
+          }));
+          pendingResultRowCount = 0;
+          pendingColumnCount = 0;
+          pendingCumulativeResultRowCount = 0;
+          pendingResearchPurpose = 'research_narration';
+          return envelope;
+        },
+      });
+      const provider: AgentProvider = {
+        name: rawProvider.name,
+        available: () => rawProvider.available(),
+        generate: (...args) => {
+          return rawProvider.generate(args[0], withPhysicalDispatchObserver(args[1]));
+        },
+        ...(rawProvider.generateWithTools ? {
+          generateWithTools: (...args: Parameters<NonNullable<AgentProvider['generateWithTools']>>) => {
+            return rawProvider.generateWithTools!(args[0], args[1], withPhysicalDispatchObserver(args[2]));
+          },
+        } : {}),
+        ...(rawProvider.generateStream ? {
+          generateStream: (...args: Parameters<NonNullable<AgentProvider['generateStream']>>) => {
+            return rawProvider.generateStream!(args[0], withPhysicalDispatchObserver(args[1]), args[2]);
+          },
+        } : {}),
+      };
       const available = await provider.available().catch(() => false);
       if (!available) {
         emit({ kind: 'error', message: `${spec.label} is not configured or reachable. ${spec.setup}` });
@@ -414,7 +530,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             sourcePath: skill.sourcePath ?? '',
           }));
           const contextDurationMs = Date.now() - contextStartedAt;
-          const answerLoopTools = buildAnswerLoopTools(req.projectRoot);
+          const answerLoopTools = buildAnswerLoopTools(req.projectRoot, {
+            researchResultRowsOptIn: researchRowsOptIn,
+          });
           const sourceSearchTool = answerLoopTools.find((tool) => tool.name === 'search_project_files');
           const sourceSearchStartedAt = Date.now();
           const earlySourceSearch = sourceSearchTool && shouldSearchProjectFiles(contextPack)
@@ -455,6 +573,19 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
           const guardSnapshot = (): void => {
             if (req.projectSnapshot) req.assertProjectSnapshot?.(req.projectSnapshot.snapshotId);
           };
+          assertProviderPayloadAllowed(prepareProviderContextForDispatch({
+            question,
+            ...(conversationSnapshot ? { conversationSnapshot } : {}),
+            ...(memoryContext ? { memoryContext } : {}),
+            schemaContext: prepareServerOwnedProviderSchemaContext(schemaContext),
+            ...(contextPack ? { contextPack } : {}),
+            skills,
+            ...(followUp ? { followUp } : {}),
+          }), {
+            allowResultRows: false,
+            maxResultRows: 0,
+            purpose: 'answer_generation',
+          });
           const result = await answer({
             question,
             ...(req.resolvedAnalyticalPlan
@@ -494,22 +625,54 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             signal,
             reasoningEffort: req.reasoningEffort,
             analysisDepth: contextBudget.analysisDepth,
+            allowProviderSemanticMemberSelection: req.allowProviderSemanticMemberSelection === true,
             ...(req.semanticDriver ? { semanticDriver: req.semanticDriver } : {}),
             ...(req.semanticTableMapping ? { semanticTableMapping: req.semanticTableMapping } : {}),
             ...(req.semanticQueryCompiler ? { semanticQueryCompiler: req.semanticQueryCompiler } : {}),
             ...(req.preferredEvidenceIds?.length ? { preferredEvidenceIds: req.preferredEvidenceIds } : {}),
             ...(req.preferredExecutionId ? { preferredExecutionId: req.preferredExecutionId } : {}),
             executeCertifiedBlock: req.executeCertifiedBlock
-              ? async (...args) => { guardSnapshot(); return req.executeCertifiedBlock!(...args); }
+              ? async (...args) => { guardSnapshot(); sqlExecutions += 1; return req.executeCertifiedBlock!(...args); }
               : undefined,
             executeGeneratedSql: req.executeGeneratedSql
-              ? async (...args) => { guardSnapshot(); return req.executeGeneratedSql!(...args); }
+              ? async (...args) => { guardSnapshot(); sqlExecutions += 1; return req.executeGeneratedSql!(...args); }
               : undefined,
             executeDqlArtifact: req.executeDqlArtifact
-              ? async (...args) => { guardSnapshot(); return req.executeDqlArtifact!(...args); }
+              ? async (...args) => { guardSnapshot(); sqlExecutions += 1; return req.executeDqlArtifact!(...args); }
               : undefined,
             expandGroundingContext: createGroundingContextExpander(req.projectRoot, req.probeNamedRelations),
             answerLoopTools,
+            providerPayloadGuard: {
+              purpose: 'research_tool',
+              allowedResultRowTools: researchRowsOptIn
+                ? { sample_notebook_dataset: 20, execute_local_analysis: 200 }
+                : {},
+              resultRowBudgetGroupByTool: {
+                sample_notebook_dataset: 'research_sample',
+                execute_local_analysis: 'research_local_analysis',
+              },
+              cumulativeResultRowBudgets: {
+                research_sample: 20,
+                research_local_analysis: 200,
+              },
+              onPayload: ({ toolName, output, resultRowCount, columnCount, cumulativeResultRowCount }) => {
+                pendingResearchPurpose = researchDispatchPurposeForTool(toolName);
+                pendingResultRowCount += resultRowCount;
+                pendingColumnCount = Math.max(pendingColumnCount, columnCount);
+                pendingCumulativeResultRowCount = Math.max(pendingCumulativeResultRowCount, cumulativeResultRowCount);
+                if (resultRowCount === 0) return;
+                providerEgressReceipts.push(createProviderEgressReceipt({
+                  purpose: researchDispatchPurposeForTool(toolName),
+                  provider: provider.name,
+                  permittedCategories: ['question', 'schema_metadata', 'result_rows'],
+                  optIn: researchRowsOptIn,
+                  payload: { toolName, output },
+                  resultRowCount,
+                  columnCount,
+                  cumulativeResultRowCount,
+                }));
+              },
+            },
             // NOTE: no captureGeneratedDraft here — a plain answer/research question must NOT
             // auto-write a draft into the blocks space. A draft is created only when the user
             // explicitly acts (the "Create DQL draft" action → the dql_block_draft route).
@@ -535,6 +698,27 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
             { phase: 'answer_resolution', durationMs: answerDurationMs, detail: result.route?.tier ?? result.kind },
             { phase: 'total', durationMs: Date.now() - requestStartedAt },
           ];
+          const terminalDispatchEvidence = dispatchEvidence('none');
+          result.evidence.runtimeCounters = {
+            providerRoundTrips: terminalDispatchEvidence.providerRoundTrips,
+            toolCalls: result.evidence.toolCalls?.length ?? 0,
+            sqlExecutions,
+            repairs: result.analysisPlan?.repairAttempts ?? 0,
+          };
+          if (req.analysisDepth === 'deep' && !providerEgressReceipts.some((receipt) => receipt.purpose === 'research_tool')) {
+            providerEgressReceipts.push(createProviderEgressReceipt({
+              purpose: 'research_tool',
+              provider: provider.name,
+              permittedCategories: ['instructions', 'question', 'schema_metadata', 'governed_context'],
+              optIn: researchRowsOptIn,
+              payload: { resultRows: 0, enabled: researchRowsOptIn },
+              resultRowCount: 0,
+              columnCount: 0,
+            }));
+          }
+          result.providerEgressReceipts = sharedDispatchEvidence
+            ? terminalDispatchEvidence.providerEgressReceipts
+            : providerEgressReceipts;
           emit({ kind: 'tool_result', id: 'governed_answer', output: result });
           emit({ kind: 'text', text: formatAgentAnswer(result) });
           if (result.proposedSql) {
@@ -556,10 +740,28 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId): AgentRunner 
         // A deadline/cancellation is NOT a provider failure. Rethrow it intact so
         // the engine renders its graceful bounded-deadline message instead of a
         // raw "<provider> failed: The operation was aborted due to timeout".
-        rethrowIfCancelled(err, signal);
+        if (signal.aborted) {
+          const reason = signal.reason ?? err;
+          if (reason && typeof reason === 'object') {
+            Object.assign(reason, { providerDispatchEvidence: dispatchEvidence('cancelled') });
+          }
+          throw reason;
+        }
         const message = err instanceof Error ? err.message : String(err);
+        const orchestrationBudgetExhausted = Boolean(
+          err && typeof err === 'object'
+          && (err as { code?: unknown }).code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED',
+        );
         const setupHint = shouldShowProviderSetupHint(message) ? ` ${spec.setup}` : '';
-        emit({ kind: 'error', message: `${spec.label} failed: ${message}.${setupHint}` });
+        emit({
+          kind: 'error',
+          message: orchestrationBudgetExhausted
+            ? 'Ask exhausted its bounded orchestration budget before a final answer was available.'
+            : `${spec.label} failed: ${message}.${setupHint}`,
+          dispatchEvidence: dispatchEvidence(
+            orchestrationBudgetExhausted ? 'orchestration_budget_exhausted' : 'provider_error',
+          ),
+        });
       }
     },
   };
@@ -721,13 +923,19 @@ export function renderExtraContext(req: AgentRunRequest, followUp?: AgentFollowU
     // questions. Render it as prose with its trust instruction, and strip it
     // from the JSON below rather than shipping the same content twice.
     try {
-      const envelope = JSON.parse(upstream) as { workspaceContext?: Record<string, unknown> };
-      const appContext = envelope.workspaceContext?.appContext;
+      const rawEnvelope = JSON.parse(upstream) as { workspaceContext?: Record<string, unknown> };
+      const appContext = rawEnvelope.workspaceContext?.appContext;
       const rendered = renderAppContextForPrompt(appContext);
       if (rendered) {
         parts.push(rendered);
-        const { appContext: _dropped, ...restWorkspace } = envelope.workspaceContext ?? {};
-        upstream = JSON.stringify({ ...envelope, workspaceContext: restWorkspace }, null, 2);
+        const { appContext: _dropped, ...restWorkspace } = rawEnvelope.workspaceContext ?? {};
+        const envelope = prepareProviderContextForDispatch({
+          ...rawEnvelope,
+          workspaceContext: restWorkspace,
+        }) as { workspaceContext?: Record<string, unknown> };
+        upstream = JSON.stringify(envelope, null, 2);
+      } else {
+        upstream = JSON.stringify(prepareProviderContextForDispatch(rawEnvelope), null, 2);
       }
     } catch {
       // Not the structured envelope — fall through and carry it verbatim.
@@ -1635,7 +1843,12 @@ export const __test__ = {
   shouldLoadSchemaContext,
   shouldSearchProjectFiles,
   renderProjectSourceSearch,
+  researchDispatchPurposeForTool,
 };
+
+function researchDispatchPurposeForTool(toolName: string): 'research_narration' | 'research_tool' {
+  return toolName === 'execute_local_analysis' ? 'research_tool' : 'research_narration';
+}
 
 const GENERIC_FOLLOW_UP_WORDS = new Set([
   'a', 'about', 'again', 'all', 'also', 'and', 'are', 'as', 'be', 'block', 'can', 'could', 'data', 'did', 'do', 'does',

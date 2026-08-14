@@ -12,8 +12,10 @@ import {
   type AnalyticalPolicyContract,
   type AnalyticalQuestionFrameV2,
   type MetricCapabilityContract,
+  type ResolvedRelationshipProofV1,
 } from '@duckcodeailabs/dql-core';
 import type { AgentEvidenceCandidate } from './meaning-resolution.js';
+import { buildResolvedRelationshipProofsV1 } from './relationship-proof.js';
 
 export type AnalyticalFitClass = 'exact' | 'parameterized' | 'adaptable';
 
@@ -205,21 +207,10 @@ export function solveAnalyticalCompatibility(input: {
       });
       continue;
     }
-    const candidateFailures = evaluateCapabilityTuple(resolvedTime.frame, candidate.capability);
-    if (candidateFailures.length > 0) {
-      failed.push(
-        ...candidateFailures.map((failure) => ({
-          ...failure,
-          candidateIds: [candidate.candidateId],
-        })),
-      );
-      continue;
-    }
     const routes = [...candidate.capability.executionCapabilities].sort(
       (left, right) => ROUTE_PRIORITY[right.route] - ROUTE_PRIORITY[left.route] || (left.adapterId ?? '').localeCompare(right.adapterId ?? ''),
     );
-    const route = routes[0];
-    if (!route) {
+    if (routes.length === 0) {
       failed.push({
         code: 'EXECUTION_CAPABILITY_MISSING',
         field: 'executionCapabilities',
@@ -228,13 +219,32 @@ export function solveAnalyticalCompatibility(input: {
       });
       continue;
     }
-    ready.push({
-      candidate,
-      frame: resolvedTime.frame,
-      route,
-      fitClass: candidate.fitClass ?? 'exact',
-      proof: buildProof(resolvedTime.frame, candidate.capability, route),
-    });
+    for (const route of routes) {
+      const relationshipProofs = capabilityRelationshipProofs(
+        resolvedTime.frame,
+        candidate,
+        route,
+      );
+      const candidateFailures = evaluateCapabilityTuple(
+        resolvedTime.frame,
+        candidate.capability,
+        relationshipProofs,
+      );
+      if (candidateFailures.length > 0) {
+        failed.push(...candidateFailures.map((failure) => ({
+          ...failure,
+          candidateIds: [candidate.candidateId],
+        })));
+        continue;
+      }
+      ready.push({
+        candidate,
+        frame: resolvedTime.frame,
+        route,
+        fitClass: candidate.fitClass ?? 'exact',
+        proof: buildProof(resolvedTime.frame, candidate.capability, route),
+      });
+    }
   }
 
   ready.sort(
@@ -320,12 +330,16 @@ function solveMultiMetricCompatibility(input: {
         failed.push({ ...resolvedTime.failure, candidateIds: [candidate.candidateId] });
         continue;
       }
-      const failures = evaluateCapabilityTuple(resolvedTime.frame, candidate.capability);
-      if (failures.length > 0) {
-        failed.push(...failures.map((failure) => ({ ...failure, candidateIds: [candidate.candidateId] })));
-        continue;
-      }
       for (const route of candidate.capability.executionCapabilities) {
+        const failures = evaluateCapabilityTuple(
+          resolvedTime.frame,
+          candidate.capability,
+          capabilityRelationshipProofs(resolvedTime.frame, candidate, route),
+        );
+        if (failures.length > 0) {
+          failed.push(...failures.map((failure) => ({ ...failure, candidateIds: [candidate.candidateId] })));
+          continue;
+        }
         const executionKey = compatibleMultiMetricExecutionKey(candidate, route, resolvedTime.frame);
         if (!executionKey) continue;
         ready.push({
@@ -602,8 +616,13 @@ function resolveTimeDimension(
   };
 }
 
-function evaluateCapabilityTuple(frame: AnalyticalQuestionFrameV2, capability: MetricCapabilityContract): AnalyticalCompatibilityFailure[] {
+function evaluateCapabilityTuple(
+  frame: AnalyticalQuestionFrameV2,
+  capability: MetricCapabilityContract,
+  relationshipProofs: ResolvedRelationshipProofV1[],
+): AnalyticalCompatibilityFailure[] {
   const failures: AnalyticalCompatibilityFailure[] = [];
+  const relationshipDimensions = new Set(relationshipProofs.map((proof) => proof.dimensionId));
   for (const entityId of frame.entityGrainIds) {
     if (entityId !== capability.primaryEntityId && !capability.resultGrainIds.includes(entityId)) {
       failures.push({
@@ -627,7 +646,7 @@ function evaluateCapabilityTuple(frame: AnalyticalQuestionFrameV2, capability: M
     if (
       dimension.entityId !== capability.primaryEntityId &&
       (binding.role === 'group_by' || binding.role === 'rank_entity' || binding.role === 'filter') &&
-      !dimension.relationshipPathIds?.length
+      !relationshipDimensions.has(dimension.dimensionId)
     ) {
       failures.push({
         code: 'RELATIONSHIP_PROOF_MISSING',
@@ -644,7 +663,7 @@ function evaluateCapabilityTuple(frame: AnalyticalQuestionFrameV2, capability: M
         field: `memberBindings.${member.dimensionId}`,
         message: `${capability.metricId} cannot filter by ${member.dimensionId}.`,
       });
-    } else if (dimension.entityId !== capability.primaryEntityId && !dimension.relationshipPathIds?.length) {
+    } else if (dimension.entityId !== capability.primaryEntityId && !relationshipDimensions.has(dimension.dimensionId)) {
       failures.push({
         code: 'RELATIONSHIP_PROOF_MISSING',
         field: `memberBindings.${member.dimensionId}`,
@@ -745,6 +764,24 @@ function evaluateCapabilityTuple(frame: AnalyticalQuestionFrameV2, capability: M
     }
   }
   return dedupeFailures(failures);
+}
+
+function capabilityRelationshipProofs(
+  frame: AnalyticalQuestionFrameV2,
+  candidate: AnalyticalCapabilityCandidate,
+  route: MetricCapabilityContract['executionCapabilities'][number],
+): ResolvedRelationshipProofV1[] {
+  return buildResolvedRelationshipProofsV1({
+    capability: candidate.capability,
+    dimensionIds: [...new Set([
+      ...frame.dimensions.map((binding) => binding.dimensionId),
+      ...frame.memberBindings.map((binding) => binding.dimensionId),
+    ])],
+    route: route.route,
+    ...(route.adapterId ? { adapterId: route.adapterId } : {}),
+    executionId: candidate.candidateId,
+    snapshotId: `capability-selection:${candidate.capability.sourceFingerprint}`,
+  });
 }
 
 function validatePeriodContract(frame: AnalyticalQuestionFrameV2): AnalyticalCompatibilityFailure[] {

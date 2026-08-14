@@ -1,0 +1,243 @@
+import { describe, expect, it } from 'vitest';
+import {
+  assertProviderPayloadAllowed,
+  createProviderEgressReceipt,
+  createProviderDispatchEgressReceipt,
+  inspectProviderPayloadRowShape,
+  markProviderMetadataArray,
+  prepareProviderContextForDispatch,
+  prepareProviderWireEnvelopeForDispatch,
+  prepareServerOwnedProviderSchemaContext,
+  redactProviderResultRows,
+} from './provider-egress.js';
+
+describe('provider egress guard (SEC-004)', () => {
+  it('rejects recursively nested row canaries without relying on a rows field', () => {
+    const payload = { observation: { arbitrary: [{ customer: 'ROW_CANARY_ADA', amount: 42 }] } };
+    expect(() => assertProviderPayloadAllowed(payload, {
+      allowResultRows: false,
+      maxResultRows: 0,
+      purpose: 'answer_generation',
+    })).toThrow(/row-shaped result payload/i);
+  });
+
+  it('rejects descriptor-shaped, primitive, empty, single-row, and renamed row arrays', () => {
+    for (const rows of [
+      [{ name: 'ROW_CANARY_ADA', type: 'vip' }],
+      ['ROW_CANARY_ADA'],
+      [],
+      [{ value: 'ROW_CANARY_ADA' }],
+      [{ arbitrary_alias: 'ROW_CANARY_ADA' }],
+      [{ relation: 'ROW_CANARY_ADA', columns: 'vip', keys: 'secret' }],
+    ]) {
+      expect(() => assertProviderPayloadAllowed({ observation: rows }, {
+        allowResultRows: false,
+        maxResultRows: 0,
+        purpose: 'answer_generation',
+      })).toThrow(/row-shaped|row|payload/i);
+    }
+  });
+
+  it('fails closed at excessive depth and on cycles', () => {
+    let deep: unknown = [{ customer: 'ROW_CANARY_ADA' }];
+    for (let index = 0; index < 14; index += 1) deep = { nested: deep };
+    expect(() => assertProviderPayloadAllowed(deep, {
+      allowResultRows: false,
+      maxResultRows: 0,
+      purpose: 'answer_generation',
+    })).toThrow(/completely inspect/i);
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    expect(() => assertProviderPayloadAllowed(cyclic, {
+      allowResultRows: false,
+      maxResultRows: 0,
+      purpose: 'research_tool',
+    })).toThrow(/completely inspect/i);
+  });
+
+  it('accepts only explicitly marked legitimate schema metadata arrays', () => {
+    const payload = {
+      tables: markProviderMetadataArray([{ relation: 'analytics.orders', columns: [{ name: 'order_id', type: 'integer' }] }]),
+      matches: markProviderMetadataArray([{ path: 'models/orders.sql', line: 4, text: 'select order_id' }]),
+    };
+    expect(inspectProviderPayloadRowShape(payload)).toEqual({ resultRowCount: 0, columnCount: 0 });
+    expect(() => assertProviderPayloadAllowed(payload, {
+      allowResultRows: false,
+      maxResultRows: 0,
+      purpose: 'answer_generation',
+    })).not.toThrow();
+  });
+
+  it('normalizes typed governed context only at dispatch and strips unclassified arrays', () => {
+    const parsedJson = JSON.parse(JSON.stringify({
+      resultColumns: ['customer', 'revenue'],
+      resultDimensionValues: { customer: ['Ada'] },
+      schema: [{ name: 'customer', type: 'varchar' }],
+      dqlArtifact: { metrics: ['revenue', 'order_count'], dimensions: ['region'] },
+      rowsSample: [['ROW_CANARY_ADA', 42]],
+      renamedPayload: { arbitrarySample: [{ customer: 'ROW_CANARY_ADA' }] },
+    }));
+    const prepared = prepareProviderContextForDispatch(parsedJson);
+    expect(prepared).toEqual({
+      resultColumns: ['customer', 'revenue'],
+      resultDimensionValues: { customer: ['Ada'] },
+      schema: [],
+      dqlArtifact: { metrics: ['revenue', 'order_count'], dimensions: ['region'] },
+      rowsSample: [],
+      renamedPayload: { arbitrarySample: [] },
+    });
+    expect(() => assertProviderPayloadAllowed(prepared, {
+      allowResultRows: false,
+      maxResultRows: 0,
+      purpose: 'answer_generation',
+    })).not.toThrow();
+    expect(JSON.stringify(prepared)).not.toContain('ROW_CANARY_ADA');
+  });
+
+  it('trusts only strictly validated server-owned relation schema DTOs', () => {
+    const schemaContext = prepareServerOwnedProviderSchemaContext([
+      { relation: 'analytics.orders', columns: [{ name: 'order_id', type: 'integer' }] },
+      { relation: 'analytics.bad', columns: [{ customer_name: 'ROW_CANARY_SCHEMA', amount: 42 }] },
+    ]);
+    expect(schemaContext).toEqual([
+      { relation: 'analytics.orders', columns: [{ name: 'order_id', type: 'integer' }] },
+    ]);
+    expect(() => assertProviderPayloadAllowed({ schemaContext }, {
+      allowResultRows: false,
+      maxResultRows: 0,
+      purpose: 'answer_generation',
+    })).not.toThrow();
+    const untrusted = prepareProviderContextForDispatch({
+      workspaceContext: {
+        schema: [{ name: 'customer_name', type: 'ROW_CANARY_SCHEMA' }],
+        nested: { schemaContext: [{ customer_name: 'ROW_CANARY_NESTED', amount: 42 }] },
+      },
+    });
+    expect(JSON.stringify(untrusted)).not.toContain('ROW_CANARY');
+  });
+
+  it('does not grant untrusted context provenance from provider-native leaf names', () => {
+    const prepared = prepareProviderContextForDispatch({
+      workspaceContext: {
+        arbitrary: {
+          content: [{ customer_name: 'ROW_CANARY_ADA', amount: 42 }],
+          toolCalls: [{ customer_name: 'ROW_CANARY_GRACE' }],
+          required: ['ROW_CANARY_REQUIRED'],
+          enum: ['ROW_CANARY_ENUM'],
+          metrics: ['ROW_CANARY_METRIC'],
+        },
+      },
+    });
+    expect(JSON.stringify(prepared)).not.toContain('ROW_CANARY');
+    expect(() => assertProviderPayloadAllowed(prepared, {
+      allowResultRows: false,
+      maxResultRows: 0,
+      purpose: 'answer_generation',
+    })).not.toThrow();
+  });
+
+  it('preserves only validated provider wire array paths and shapes', () => {
+    const prepared = prepareProviderWireEnvelopeForDispatch('openai', {
+      model: 'gpt-test',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+      tools: [{
+        type: 'function',
+        function: {
+          name: 'lookup',
+          parameters: { type: 'object', required: ['metric'], properties: { metric: { type: 'string' } } },
+        },
+      }],
+      workspaceContext: { arbitrary: { content: [{ customer_name: 'ROW_CANARY_ADA' }] } },
+    });
+    expect(prepared).toMatchObject({
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }],
+      tools: [{ function: { parameters: { required: ['metric'] } } }],
+    });
+    expect(JSON.stringify(prepared)).not.toContain('ROW_CANARY_ADA');
+    expect(() => assertProviderPayloadAllowed(prepared, {
+      allowResultRows: false,
+      maxResultRows: 0,
+      purpose: 'answer_generation',
+    })).not.toThrow();
+  });
+
+  it('recursively preserves validated JSON Schema arrays only below tools', () => {
+    const nestedSchema = {
+      type: 'object',
+      required: ['mode'],
+      properties: {
+        mode: { oneOf: [{ enum: ['safe', 'strict'] }, { type: 'null' }] },
+        filters: {
+          anyOf: [
+            { type: 'array', prefixItems: [{ type: 'string', examples: ['region'] }] },
+            { allOf: [{ type: 'object' }, { required: ['field'] }] },
+          ],
+        },
+      },
+      $defs: { grain: { enum: ['day', 'month'] } },
+    };
+    const prepared = prepareProviderWireEnvelopeForDispatch('openai', {
+      messages: [{ role: 'user', content: 'hello' }],
+      tools: [{ type: 'function', function: { name: 'query', parameters: nestedSchema } }],
+      arbitrary: { required: ['ROW_CANARY_REQUIRED'], enum: ['ROW_CANARY_ENUM'] },
+    });
+    expect((prepared.tools as any[])[0].function.parameters).toEqual(nestedSchema);
+    expect(prepared.arbitrary).toEqual({ required: [], enum: [] });
+  });
+
+  it('bounds and redacts explicitly opted-in research rows and records no content', () => {
+    const input = Array.from({ length: 25 }, (_, index) => ({ customer_name: `Canary ${index}`, amount: index }));
+    const rows = redactProviderResultRows(input, 20);
+    expect(rows).toHaveLength(20);
+    expect(rows[0]).toEqual({ customer_name: '[REDACTED]', amount: 0 });
+    const receipt = createProviderEgressReceipt({
+      purpose: 'research_narration',
+      provider: 'openai',
+      permittedCategories: ['question', 'result_rows'],
+      optIn: true,
+      payload: { sample: rows },
+    });
+    expect(receipt).toMatchObject({ resultRowCount: 20, columnCount: 2, optIn: true });
+    expect(JSON.stringify(receipt)).not.toContain('Canary');
+    expect(JSON.stringify(receipt)).not.toContain('[REDACTED]');
+
+    const inaccurateProjection = createProviderEgressReceipt({
+      purpose: 'research_tool',
+      provider: 'openai',
+      permittedCategories: ['result_rows'],
+      optIn: true,
+      payload: { observation: [{ disguised: 'ROW_CANARY_ADA' }] },
+      resultRowCount: 0,
+      columnCount: 0,
+    });
+    expect(inaccurateProjection).toMatchObject({ resultRowCount: 1, columnCount: 1 });
+    expect(JSON.stringify(inaccurateProjection)).not.toContain('ROW_CANARY_ADA');
+
+    const localAnalysisRows = redactProviderResultRows(
+      Array.from({ length: 240 }, (_, index) => ({ account_email: `canary-${index}@example.test`, amount: index })),
+      200,
+    );
+    expect(localAnalysisRows).toHaveLength(200);
+    expect(localAnalysisRows.at(-1)).toEqual({ account_email: '[REDACTED]', amount: 199 });
+  });
+
+  it('fingerprints the exact dispatch envelope while retaining inspected serialized-row counts', () => {
+    const envelope = prepareProviderWireEnvelopeForDispatch('openai', {
+      model: 'provider-model',
+      messages: [{ role: 'tool', content: '{"rows":[{"name":"[REDACTED]"}]}' }],
+      tools: [],
+    });
+    const receipt = createProviderDispatchEgressReceipt({
+      purpose: 'research_narration',
+      provider: 'openai',
+      permittedCategories: ['instructions', 'result_rows'],
+      optIn: true,
+      envelope,
+      serializedResultShape: { resultRowCount: 1, columnCount: 1 },
+    });
+    expect(receipt).toMatchObject({ resultRowCount: 1, columnCount: 1, optIn: true });
+    expect(receipt.payloadFingerprint).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(JSON.stringify(receipt)).not.toContain('provider-model');
+    expect(JSON.stringify(receipt)).not.toContain('[REDACTED]');
+  });
+});

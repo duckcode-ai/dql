@@ -14,7 +14,7 @@ export type CascadeRunRoute =
   | 'clarify'
   | 'blocked';
 
-export type CascadeAction = 'answer' | 'clarify' | 'investigate' | 'compose_app' | 'converse';
+export type CascadeAction = 'answer' | 'clarify' | 'investigate' | 'compose_app' | 'converse' | 'block';
 export type CascadeAnswerRouteTier =
   | 'certified_block'
   | 'semantic_metric'
@@ -52,6 +52,7 @@ export function selectCascadeRunRoute(
   if (decision.action === 'compose_app') return 'app_build';
   if (decision.action === 'investigate') return 'research';
   if (decision.action === 'clarify') return 'clarify';
+  if (decision.action === 'block') return 'blocked';
 
   return 'generated_answer';
 }

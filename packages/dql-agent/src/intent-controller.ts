@@ -20,7 +20,7 @@ import type { MeaningResolution } from './meaning-resolution.js';
 import type { ResolvedAnalyticalPlan } from './resolved-analytical-plan.js';
 
 /** The high-level action the agent will take for a turn. */
-export type AgentAction = 'answer' | 'clarify' | 'investigate' | 'compose_app' | 'converse';
+export type AgentAction = 'answer' | 'clarify' | 'investigate' | 'compose_app' | 'converse' | 'block';
 
 /**
  * Conversational turn kinds that deserve a plain, warm reply instead of the data
@@ -114,6 +114,13 @@ export interface IntentDecision {
     description?: string;
     kind?: string;
   }>;
+  /** Explicit non-answer terminal authority for policy/modeling failures. */
+  terminalOutcome?: {
+    kind: 'modeling_gap' | 'policy_blocked';
+    code: 'ANALYTICAL_MODELING_GAP' | 'ANALYTICAL_POLICY_BLOCKED';
+    message: string;
+    candidateIds: string[];
+  };
 }
 
 /** A confident match means a certified block or governed metric clearly fits. */

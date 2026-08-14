@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeDqlArtifactReference } from './dql-artifact.js';
+import { normalizeDqlArtifactReference, normalizeDqlExecutableArtifactV1 } from './dql-artifact.js';
 
 describe('normalizeDqlArtifactReference', () => {
   it('normalizes generated DQL artifact metadata for handoffs', () => {
@@ -68,5 +68,49 @@ describe('normalizeDqlArtifactReference', () => {
       kind: 'semantic_block',
       source,
     })?.source).toBe(source);
+  });
+
+  it('normalizes a content-free executable artifact binding', () => {
+    const fingerprint = (value: string) => value.repeat(64);
+    const receipt = {
+      sourceFingerprint: fingerprint('1'),
+      compiledSqlFingerprint: fingerprint('2'),
+      parameterFingerprint: fingerprint('3'),
+      resultFingerprint: fingerprint('4'),
+    };
+    expect(normalizeDqlExecutableArtifactV1({
+      version: 1,
+      kind: 'sql_block',
+      dqlFingerprint: fingerprint('5'),
+      sourceFingerprint: fingerprint('1'),
+      compiledSqlFingerprint: fingerprint('2'),
+      normalizedSqlFingerprint: fingerprint('6'),
+      parameterFingerprint: fingerprint('3'),
+      provenanceFingerprint: fingerprint('7'),
+      targetFingerprint: fingerprint('8'),
+      snapshotFingerprint: fingerprint('9'),
+      planFingerprint: 'a'.repeat(64),
+      semanticAdapter: 'native',
+      previewPolicy: { mode: 'read_only_bounded', rowLimit: 200 },
+      trustState: 'review_required',
+      receipt,
+      rows: [{ secret: 'must not survive' }],
+    })).toEqual({
+      version: 1,
+      kind: 'sql_block',
+      dqlFingerprint: fingerprint('5'),
+      sourceFingerprint: fingerprint('1'),
+      compiledSqlFingerprint: fingerprint('2'),
+      normalizedSqlFingerprint: fingerprint('6'),
+      parameterFingerprint: fingerprint('3'),
+      provenanceFingerprint: fingerprint('7'),
+      targetFingerprint: fingerprint('8'),
+      snapshotFingerprint: fingerprint('9'),
+      planFingerprint: 'a'.repeat(64),
+      semanticAdapter: 'native',
+      previewPolicy: { mode: 'read_only_bounded', rowLimit: 200 },
+      trustState: 'review_required',
+      receipt,
+    });
   });
 });

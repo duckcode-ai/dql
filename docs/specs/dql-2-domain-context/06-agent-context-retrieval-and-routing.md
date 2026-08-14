@@ -424,16 +424,37 @@ Ask excludes authoring, certification, proposal, and hint-mutation tools.
 
 Simple routes are deliberately shallow (`PERF-002`):
 
-| Route | Meaning calls | Planning/generation calls | SQL | Repair | Narration |
-| ----- | ------------- | ------------------------- | --- | ------ | --------- |
-| explicit qualified definition | 0 | 0 | 0 | 0 | 0 |
-| explicit qualified data | 0 | 0 | 1 | 0 | 0 |
-| natural-language certified/semantic | <= 1 | 0 | <= 1 | 0 | 0 |
-| governed/exploratory generated SQL | <= 1 | <= 1 | 1 initial | <= 1 | 0 |
-| explicit research/diagnosis | <= 1 | <= 1 plan | <= 6 | <= 1 total | <= 1 |
+| Route | Meaning calls | Later provider sends | Physical provider sends total | SQL | Repair | Narration |
+| ----- | ------------- | -------------------- | ----------------------------- | --- | ------ | --------- |
+| explicit qualified definition | 0 | 0 | 0 | 0 | 0 | 0 |
+| explicit qualified data | 0 | 0 | 0 | 1 | 0 | 0 |
+| natural-language certified/semantic | <= 1 | 0 | <= 1 | <= 1 | 0 | 0 |
+| governed/exploratory generated SQL | <= 1 | <= 1 | <= 2 across meaning and generation | <= 1 | 0 automatic | 0 |
+| explicit research/diagnosis | <= 1 | <= 11 | <= 12 under the separate Research policy | <= 6 | <= 1 total | <= 1 |
 
 Definition and simple-result rendering are deterministic. A successful direct
 certified or semantic route never pays a generic planner, open-ended provider
 tool loop, or answer-synthesis call. Cancellation and inherited deadlines
 propagate through retrieval, meaning resolution, generation, validation,
 database execution, repair, and research.
+
+Ordinary generation has one provider tool round with at most four tool calls,
+but no more than two physical provider sends for the entire run. Meaning and
+generation share that ledger: when meaning uses one send, only one later send
+remains and no provider replan or forced-final third send is permitted. A failed
+ordinary generated attempt stops for review/manual action without replanning.
+Certified/semantic execution has a 5-second orchestration deadline,
+generated execution has 15 seconds, and explicit Research retains 120 seconds.
+The warehouse duration is recorded separately from total orchestration time.
+
+### Temporary migration boundary
+
+Production analytical Ask is authoritative by default and exposes no
+`DQL_ANALYTICAL_ENGINE` environment flag or request field. The remaining
+`shadow` plan discriminator and comparison helper are reachable only from
+explicit development/test fixtures; ordinary authoritative Ask cannot select
+them and does not call the LLM planner, replan, fuzzy metric rematch, or legacy
+semantic composer. The LLM planner and legacy matching/composition utilities
+remain for non-Ask conversation, explicit Research, App planning, and Block
+authoring. Their final symbol deletion is gated on built-CLI parity for those
+separate consumers; this implementation does not claim that cleanup complete.

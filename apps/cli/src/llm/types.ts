@@ -15,8 +15,10 @@ import type {
   ResolvedAnalyticalPlan,
   SemanticQueryCompiler,
   DomainContextEnvelope,
+  ProviderDispatchEvent,
+  ProviderPayloadRowShape,
 } from '@duckcodeailabs/dql-agent';
-import type { DQLManifest } from '@duckcodeailabs/dql-core';
+import type { DQLManifest, ProviderDispatchPhaseV1, ProviderEgressPurpose, ProviderEgressReceiptV1 } from '@duckcodeailabs/dql-core';
 
 export type ProviderId = 'anthropic' | 'claude-agent-sdk' | 'claude-code' | 'codex' | 'openai' | 'gemini' | 'ollama' | 'custom-openai';
 
@@ -121,11 +123,38 @@ export type AgentTurn =
   | { kind: 'tool_call'; id: string; name: string; input: unknown }
   | { kind: 'tool_result'; id: string; output: unknown; isError?: boolean }
   | { kind: 'proposal'; proposal: BlockProposal; governance: { certified: boolean; errors: string[]; warnings: string[] } }
-  | { kind: 'error'; message: string }
+  | { kind: 'error'; message: string; dispatchEvidence?: ProviderDispatchTerminalEvidence }
   | { kind: 'done'; stopReason?: string };
+
+export interface ProviderDispatchTerminalEvidence {
+  providerEgressReceipts: ProviderEgressReceiptV1[];
+  providerRoundTrips: number;
+  toolCalls: number;
+  sqlExecutions: number;
+  repairs: number;
+  fallbackReason: string;
+}
+
+export interface ProviderDispatchEvidenceSink {
+  observe(
+    event: ProviderDispatchEvent,
+    context: {
+      purpose: ProviderEgressPurpose;
+      dispatchPhase: ProviderDispatchPhaseV1;
+      optIn: boolean;
+      serializedResultShape?: ProviderPayloadRowShape;
+      cumulativeResultRowCount?: number;
+    },
+  ): Record<string, unknown>;
+  snapshot(fallbackReason?: string): ProviderDispatchTerminalEvidence;
+  /** Run-budget guard checked before every provider-visible tool branch. */
+  mayStartToolCall?(): boolean;
+}
 
 export interface AgentRunRequest {
   provider: ProviderId;
+  /** Server-owned run-scoped accounting shared by routing, planning and answer generation. */
+  providerDispatchEvidenceSink?: ProviderDispatchEvidenceSink;
   messages: ChatTurn[];
   upstream?: { cellId?: string; sql?: string; preview?: unknown };
   conversationContext?: AgentConversationContext;
@@ -137,6 +166,10 @@ export interface AgentRunRequest {
   reasoningEffort?: ReasoningEffort;
   /** Context/prompt depth for governed Ask AI. Research routes pass deep. */
   analysisDepth?: AnalysisDepth;
+  /** Explicit per-run Research consent; absent/false for every ordinary Ask and repair. */
+  researchResultRowsOptIn?: boolean;
+  /** Explicit Research-only permission for bounded semantic-member selection. */
+  allowProviderSemanticMemberSelection?: boolean;
   projectRoot: string;
   /** Server-resolved domain and purpose scope; clients never supply imports. */
   domainContext?: DomainContextEnvelope;

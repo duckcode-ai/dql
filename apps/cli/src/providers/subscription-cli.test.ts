@@ -119,3 +119,27 @@ describe('pre-spawn cancellation (Slice 1)', () => {
       .rejects.toBe(deadline);
   });
 });
+
+describe('subscription CLI dispatch accounting', () => {
+  it.each([
+    ['Claude', new ClaudeCodeCliProvider({ command: '/definitely/not/a/real/claude' })],
+    ['Codex', new CodexCliProvider({ command: '/definitely/not/a/real/codex' })],
+  ])('records one %s process dispatch before a spawn failure', async (_label, provider) => {
+    const dispatches: unknown[] = [];
+    await expect(provider.generate([{ role: 'user', content: 'hi' }], {
+      onProviderDispatch: (event) => { dispatches.push(event); return event.envelope; },
+    })).rejects.toThrow();
+    expect(dispatches).toHaveLength(1);
+  });
+
+  it('does not record a process dispatch when cancellation prevents spawning', async () => {
+    const controller = new AbortController();
+    controller.abort(new DOMException('cancelled', 'AbortError'));
+    const dispatches: unknown[] = [];
+    await expect(new ClaudeCodeCliProvider({ command: '/not-used' }).generate(
+      [{ role: 'user', content: 'hi' }],
+      { signal: controller.signal, onProviderDispatch: (event) => { dispatches.push(event); return event.envelope; } },
+    )).rejects.toThrow();
+    expect(dispatches).toHaveLength(0);
+  });
+});

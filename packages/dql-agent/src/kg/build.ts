@@ -1075,18 +1075,27 @@ function buildSemanticMetricCapability(input: {
   const timeNameSet = new Set(model.timeDimensions);
   const normalDimensions: MetricCapabilityContract["dimensions"] = [];
   const timeDimensions: MetricCapabilityContract["timeDimensions"] = [];
+  const authoredDefaultNames = [
+    metric.aggTimeDimension,
+    cube?.defaultTimeDimension,
+    ...backingMeasures.map((measure) => measure.aggTimeDimension),
+  ].filter((value): value is string => Boolean(value?.trim()));
+  const primaryTimeFallbackNames = [...dimensionsByName.values()]
+    .filter((dimension) => isTimeDimension(dimension) && dimension.primaryTime)
+    .map((dimension) => dimension.name);
+  // An explicit metric/model aggregate time dimension is stronger than a
+  // generic primary-time marker. Combining both made two dimensions default
+  // for the same scalar request and forced a false clarification.
   const explicitDefaultNames = new Set(
-    [
-      metric.aggTimeDimension,
-      cube?.defaultTimeDimension,
-      ...backingMeasures.map((measure) => measure.aggTimeDimension),
-      ...[...dimensionsByName.values()]
-        .filter(
-          (dimension) => isTimeDimension(dimension) && dimension.primaryTime,
-        )
-        .map((dimension) => dimension.name),
-    ].filter((value): value is string => Boolean(value?.trim())),
+    authoredDefaultNames.length > 0 ? authoredDefaultNames : primaryTimeFallbackNames,
   );
+  const compatibleDimensions = (() => {
+    try {
+      return layer.explainCompatibleDimensions([metric.name]).compatible;
+    } catch {
+      return [];
+    }
+  })();
 
   for (const name of declaredDimensionNames) {
     const dimension = dimensionsByName.get(name)!;
@@ -1121,10 +1130,79 @@ function buildSemanticMetricCapability(input: {
     // model's primary grain. Cross-model dimensions require a separately
     // normalized, governed relationship path and are not admitted here.
     if (entityId !== primaryEntityId) return undefined;
+    const dimensionIdentity = semanticIdentityPayload("dimension", dimension);
+    const nativeGrouping = compatibleDimensions.find((candidate) =>
+      candidate.name === dimension.name
+      && candidate.cube === dimension.cube);
     normalDimensions.push({
       dimensionId,
       entityId,
       supportedRoles: ["group_by", "filter", "display", "rank_entity"],
+      ...(dimension.label ? { label: dimension.label } : {}),
+      ...(Array.isArray(dimensionIdentity.aliases)
+        ? { aliases: dimensionIdentity.aliases.filter((alias): alias is string => typeof alias === 'string') }
+        : {}),
+      ...(nativeGrouping?.qualifiedName
+        ? { nativeGroupingReference: nativeGrouping.qualifiedName }
+        : dimension.qualifiedName
+          ? { nativeGroupingReference: dimension.qualifiedName }
+          : nativeGrouping
+            ? { nativeGroupingReference: dimension.name }
+          : {}),
+      ...(nativeGrouping?.entityPath
+        ? { nativeGroupingPath: [...nativeGrouping.entityPath] }
+        : {}),
+    });
+  }
+
+  // Cross-model grouping authority comes only from the semantic adapter's
+  // metric-relative compatibility result. Do not project the general catalog:
+  // require an exact declared target-model dimension, one target entity, one
+  // native grouping reference, and a non-empty entity path whose terminal
+  // entity is that target. Ambiguous or merely lexical reachability is omitted.
+  const compatibleReferenceCounts = new Map<string, number>();
+  for (const dimension of compatibleDimensions) {
+    if (!dimension.qualifiedName) continue;
+    compatibleReferenceCounts.set(
+      dimension.qualifiedName,
+      (compatibleReferenceCounts.get(dimension.qualifiedName) ?? 0) + 1,
+    );
+  }
+  const semanticModels = layer.listSemanticModels();
+  const allEntities = layer.listEntities();
+  for (const dimension of compatibleDimensions) {
+    if (!dimension.cube || dimension.cube === metric.cube || isTimeDimension(dimension)) continue;
+    const nativePath = dimension.entityPath;
+    const nativeReference = dimension.qualifiedName;
+    if (!nativeReference || !nativePath || nativePath.length === 0) continue;
+    if (nativePath.some((part) => !part.trim())) continue;
+    if (nativeReference !== [...nativePath, dimension.name].join('__')) continue;
+    if (compatibleReferenceCounts.get(nativeReference) !== 1) continue;
+    const targetModels = semanticModels.filter((candidate) =>
+      candidate.name === dimension.cube
+      && candidate.dimensions.includes(dimension.name));
+    if (targetModels.length !== 1) continue;
+    const targetEntities = allEntities.filter((entity) =>
+      entity.cube === dimension.cube
+      && (entity.type === 'primary' || entity.type === 'natural' || entity.type === 'unique')
+      && (!dimension.entityLink || entity.name === dimension.entityLink));
+    if (targetEntities.length !== 1) continue;
+    const targetEntity = targetEntities[0]!;
+    if (nativePath.at(-1) !== targetEntity.name) continue;
+    const dimensionId = registrySemanticIdentity(semanticIdentityPayload('dimension', dimension));
+    const entityId = registrySemanticIdentity(semanticIdentityPayload('entity', targetEntity));
+    if (!dimensionId || !entityId) continue;
+    const identity = semanticIdentityPayload('dimension', dimension);
+    normalDimensions.push({
+      dimensionId,
+      entityId,
+      supportedRoles: ['group_by', 'filter', 'display', 'rank_entity'],
+      ...(dimension.label ? { label: dimension.label } : {}),
+      ...(Array.isArray(identity.aliases)
+        ? { aliases: identity.aliases.filter((alias): alias is string => typeof alias === 'string') }
+        : {}),
+      nativeGroupingReference: nativeReference,
+      nativeGroupingPath: [...nativePath],
     });
   }
 
@@ -1137,7 +1215,19 @@ function buildSemanticMetricCapability(input: {
       registrySemanticIdentity(semanticIdentityPayload("dimension", dimension));
     return id ? [id] : [];
   });
-  const aggregation = metric.aggregation ?? metric.type ?? metric.metricType;
+  const metricKind = (metric.metricType ?? metric.type ?? '').trim().toLowerCase();
+  const declaredAggregation = metric.aggregation?.trim().toLowerCase();
+  // dbt's `simple` describes how a semantic metric references one measure; it
+  // is not an aggregation operator. Bind execution to the exact backing
+  // measure operation so SUM revenue remains additive, while median and other
+  // non-additive measures remain fail-closed. Derived/ratio metric kinds keep
+  // their authored calculation semantics.
+  const simpleMetric = metricKind === 'simple' || declaredAggregation === 'simple';
+  const aggregation = simpleMetric
+    ? backingMeasures.length === 1
+      ? backingMeasures[0]!.agg?.trim().toLowerCase()
+      : undefined
+    : declaredAggregation ?? metricKind;
   if (!aggregation) return undefined;
   const completenessPolicy = authoredCompletenessPolicy(metric);
   const measureIds = backingMeasures.flatMap((measure) => {

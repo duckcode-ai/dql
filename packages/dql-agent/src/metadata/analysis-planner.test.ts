@@ -8,6 +8,17 @@ import {
 import type { MetadataAllowedSqlContext, MetadataObject } from './catalog.js';
 
 describe('analysis planner', () => {
+  it('AGT-001 parses coordinated Jaffle revenue intent without inventing along metrics', () => {
+    const plan = buildAnalysisQuestionPlan(
+      'what is the region for Joy lam customer? what is total revenue along with beverage revenue',
+    );
+
+    expect(plan.metricTerms).toEqual(expect.arrayContaining(['total revenue', 'beverage revenue']));
+    expect(plan.requestedShape.measures).toEqual(expect.arrayContaining(['total_revenue', 'beverage_revenue']));
+    expect(plan.metricTerms).not.toEqual(expect.arrayContaining(['total revenue along', 'revenue along']));
+    expect(plan.requestedShape.measures.some((measure) => measure.includes('along'))).toBe(false);
+  });
+
   it('AGT-021 treats quoted technical metric IDs as measures instead of filter values', () => {
     const metrics = [
       'percent_dod_eu_core_ccu_acm_qty',
@@ -32,6 +43,38 @@ describe('analysis planner', () => {
     expect(plan.timeTerms).toContain('month');
     expect(plan.requestedShape.dimensions).toEqual(['customer']);
     expect(plan.requestedShape.requiredOutputs).not.toContain('monthly_rollover_balance_amount');
+  });
+
+  it.each([
+    ['who are the top customers by revenue', 'customer', 'revenue'],
+    ['show the top accounts by margin', 'account', 'margin'],
+    ['which are the highest products by sales', 'product', 'sale'],
+    ['list the top jobs by cost', 'job', 'cost'],
+  ])('reconciles the ranking sort measure without duplicating it as a dimension: %s', (question, dimension, measure) => {
+    const plan = buildAnalysisQuestionPlan(question);
+
+    expect(plan.mode).toBe('ranking');
+    expect(plan.metricTerms).toContain(measure);
+    expect(plan.dimensionTerms).toContain(dimension);
+    expect(plan.dimensionTerms).not.toContain(measure);
+    expect(plan.requestedShape.dimensions).toContain(dimension);
+    expect(plan.requestedShape.dimensions).not.toContain(measure);
+    expect(plan.requestedShape.measures).toContain(measure);
+    expect(plan.requestedShape.requiredOutputs).toEqual(expect.arrayContaining([dimension, measure]));
+    expect(plan.requestedShape.rankingDirection).toBe('top');
+  });
+
+  it.each([
+    ['revenue by region', ['region'], ['revenue']],
+    ['top accounts by region', ['account', 'region'], []],
+    ['top revenue by customer', ['customer'], ['revenue']],
+    ['top customers by margin and revenue by region', ['customer', 'region'], ['margin', 'revenue']],
+  ])('preserves genuine grouping roles alongside ranking measures: %s', (question, dimensions, measures) => {
+    const plan = buildAnalysisQuestionPlan(question);
+
+    expect(plan.dimensionTerms).toEqual(expect.arrayContaining(dimensions));
+    expect(plan.metricTerms).toEqual(expect.arrayContaining(measures));
+    for (const measure of measures) expect(plan.dimensionTerms).not.toContain(measure);
   });
 
   it('treats a relative month as a filter/time grain instead of an output dimension', () => {

@@ -193,7 +193,11 @@ export function buildAnalysisQuestionPlan(
     ]),
     extractFollowUpMetricTerms(followUp, lower),
   );
-  const extractedDimensionTerms = extractDimensionTerms(languageQuestion);
+  const extractedDimensionTerms = reconcileRankingRoles(
+    languageQuestion,
+    extractDimensionTerms(languageQuestion),
+    metricTerms,
+  );
   const filterTerms = extractFilterTerms(languageQuestion, entities);
   const timeTerms = extractTimeTerms(languageQuestion);
   const dimensionTerms = removeTemporalFilterDimensionTerms(
@@ -842,6 +846,15 @@ function extractMetricTerms(question: string): string[] {
   if (/\b(spend|spends|spent|spending)\b/i.test(lower)) {
     terms.add('spend');
   }
+  // Coordinated revenue questions must retain each business concept without
+  // turning the connector into part of a metric name.  Previously the generic
+  // `total <tail>` matcher stopped at `with` but retained the preceding word
+  // `along`, producing fake measures such as `total_revenue_along` and
+  // `revenue_along`.  These are search hints only; qualified metric identities
+  // are still selected later from retrieved evidence.
+  for (const match of lower.matchAll(/\b(beverage|drink|food|gross|net|product|order)\s+(revenue|sales|spend)\b/g)) {
+    terms.add(normalizeTerm(`${match[1]} ${match[2]}`));
+  }
   for (const word of METRIC_WORDS) {
     if (new RegExp(`\\b${escapeRegExp(word)}s?\\b`, 'i').test(lower)) terms.add(normalizeTerm(word));
   }
@@ -849,7 +862,7 @@ function extractMetricTerms(question: string): string[] {
     // Keep only the measure noun-phrase up to the first grouping/clause boundary,
     // so "average tax info by location by product" yields the measure "tax info",
     // not a 6-word blob that pollutes retrieval and masquerades as a column.
-    const tail = match[2].replace(/\s+\b(by|per|for|across|grouped?|over|where|with|and|or|from|in|of)\b.*$/i, '').trim();
+    const tail = match[2].replace(/\s+\b(along\s+with|by|per|for|across|grouped?|over|where|with|and|or|from|in|of)\b.*$/i, '').trim();
     if (tail.length < 2) continue;
     terms.add(normalizeTerm(`${match[1]} ${tail}`));
     terms.add(normalizeTerm(tail));
@@ -880,6 +893,46 @@ function extractDimensionTerms(question: string): string[] {
     }
   }
   return uniqueStrings([...terms]).slice(0, 16);
+}
+
+/**
+ * In ranking grammar, `by <measure>` names the sort authority, while the noun
+ * after `top`/`highest` names the row grain. Reconcile those roles only when an
+ * extracted `by` term exactly matches a requested metric; unknown or ambiguous
+ * nouns remain dimensions for bounded meaning resolution.
+ */
+function reconcileRankingRoles(
+  question: string,
+  dimensions: string[],
+  metrics: string[],
+): string[] {
+  const lower = question.toLowerCase();
+  const rankingConstruction = /\b(?:top|bottom|highest|lowest|most|least|best|worst|rank(?:ed|ing)?)\b[^?.!,;]{0,80}\bby\s+/i;
+  if (!rankingConstruction.test(lower)) return dimensions;
+
+  const metricKeys = new Set(metrics.map(normalizeTerm).filter(Boolean));
+  const sortMetricKeys = new Set<string>();
+  const sortTail = /\b(?:top|bottom|highest|lowest|most|least|best|worst|rank(?:ed|ing)?)\b[^?.!,;]{0,80}?\bby\s+([^?.!,;]+)/i.exec(lower)?.[1];
+  if (sortTail) {
+    for (const phrase of sortTail.split(/\s+(?:and|or)\s+|\s*,\s*/)) {
+      const normalized = normalizeTerm(phrase.replace(/\b(by|for|where|with|from|over|in|per|of)\b.*$/i, '').trim());
+      if (metricKeys.has(normalized)) sortMetricKeys.add(normalized);
+    }
+  }
+
+  const reconciled = dimensions.filter((dimension) => !sortMetricKeys.has(normalizeTerm(dimension)));
+  const subject = /\b(?:top|bottom|highest|lowest|most|least|best|worst|rank(?:ed|ing)?)\b(?:\s+\d+)?\s+(?:the\s+)?([a-z][a-z0-9_-]*)\s+by\b/i.exec(lower)?.[1];
+  const normalizedSubject = subject ? normalizeTerm(subject) : '';
+  const subjectRole = normalizedSubject.endsWith('s')
+    && normalizedSubject.length > 3
+    && !normalizedSubject.endsWith('ss')
+    && !normalizedSubject.endsWith('us')
+    ? normalizedSubject.slice(0, -1)
+    : normalizedSubject;
+  if (subjectRole && !metricKeys.has(subjectRole) && !reconciled.includes(subjectRole)) {
+    reconciled.push(subjectRole);
+  }
+  return uniqueStrings(reconciled).slice(0, 16);
 }
 
 function removeFilterOnlyDimensionTerms(question: string, dimensions: string[]): string[] {

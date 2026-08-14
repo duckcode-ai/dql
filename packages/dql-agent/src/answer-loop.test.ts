@@ -289,27 +289,58 @@ describe("answer (block-first loop)", () => {
     // Governed hierarchy: certified blocks → semantic metrics → generated SQL.
     // With no certified block in play, a confident metric match must run the
     // metric's own definition and return rows — the provider is never invoked.
-    kg.rebuild(
-      [
-        {
-          nodeId: "metric:order_item.revenue",
-          kind: "metric",
-          name: "order_item.revenue",
-          domain: "growth",
-          status: "certified",
-          description: "Recognized revenue measure over order items.",
-          llmContext: "sql: SUM(product_price)\ntable: dev.order_items",
-          sourceTier: "semantic_layer",
-        },
-      ],
-      [],
-    );
+    const capability = {
+      metricId: "semantic:growth:metric:order_item.revenue",
+      semanticModelId: "semantic:growth:model:order_item",
+      measureIds: ["semantic:growth:measure:product_price"],
+      primaryEntityId: "semantic:growth:entity:order_item",
+      defaultResultGrainId: "semantic:growth:entity:order_item",
+      resultGrainIds: ["semantic:growth:entity:order_item"],
+      aggregation: "sum",
+      additivity: { entities: "additive", time: "additive" },
+      dimensions: [],
+      timeDimensions: [],
+      operations: ["group"],
+      supportedOutputKinds: ["metric_value"],
+      executionCapabilities: [{ route: "semantic", adapterId: "semantic-native" }],
+      sourceFingerprint: "sha256:order-item-revenue",
+    };
+    const metric: KGNode = {
+      nodeId: "metric:order_item.revenue",
+      kind: "metric",
+      name: "order_item.revenue",
+      domain: "growth",
+      status: "certified",
+      description: "Recognized revenue measure over order items.",
+      llmContext: "sql: SUM(product_price)\ntable: dev.order_items",
+      sourceTier: "semantic_layer",
+      payload: {
+        table: "dev.order_items",
+        formula: "product_price",
+        analyticalCapability: capability,
+      },
+    };
+    kg.rebuild([metric], []);
     const provider = new StubProvider("should never be called");
     const executed: string[] = [];
     const result = await answer({
       question: "what is our total revenue?",
       provider,
       kg,
+      contextPack: contextPackForRankedRelations("what is our total revenue?", [{
+        relation: "dev.order_items",
+        name: "order_items",
+        source: "semantic layer",
+        columns: [{ name: "product_price", type: "number" }],
+        rank: 1,
+        score: 1,
+        reason: "exact governed metric source",
+      }], { dimensionTerms: [], objects: [{
+        objectKey: metric.nodeId,
+        objectType: "semantic_metric",
+        name: metric.name,
+        payload: metric.payload,
+      }] }) as any,
       executeGeneratedSql: async (sql) => {
         executed.push(sql);
         return {
@@ -328,6 +359,64 @@ describe("answer (block-first loop)", () => {
     expect(result.result?.rowCount).toBe(1);
     expect(result.sourceTier).toBe("semantic_layer");
     expect(result.text).toContain("governed metric order_item.revenue");
+    expect(result.aggregationSafetyProof).toMatchObject({ status: "safe", issueCodes: [] });
+  });
+
+  it("blocks a semantic execution before SQL when its exact aggregation proof is incomplete", async () => {
+    kg.rebuild([{
+      nodeId: "metric:order_item.revenue",
+      kind: "metric",
+      name: "order_item.revenue",
+      domain: "growth",
+      status: "certified",
+      description: "Recognized revenue measure over order items.",
+      llmContext: "sql: SUM(product_price)\ntable: dev.order_items",
+      sourceTier: "semantic_layer",
+    }], []);
+    const executeGeneratedSql = vi.fn(async (sql: string) => ({
+      columns: ["order_item_revenue"], rows: [{ order_item_revenue: 1 }], rowCount: 1, sql,
+    }));
+    // This would pass ordinary relation/column validation if the generic repair
+    // lane were incorrectly entered, reproducing the verifier's downgrade from
+    // a blocked semantic aggregate to raw-row uncertified execution.
+    const provider = new StubProvider([
+      "```json",
+      JSON.stringify({
+        summary: "Use grounded raw rows instead.",
+        sql: "SELECT product_price AS order_item_revenue FROM dev.order_items",
+        outputs: ["order_item_revenue"],
+      }),
+      "```",
+    ].join("\n"));
+    const result = await answer({
+      question: "what is our total revenue?",
+      provider,
+      kg,
+      contextPack: contextPackForRankedRelations("what is our total revenue?", [{
+        relation: "dev.order_items",
+        name: "order_items",
+        source: "semantic layer",
+        columns: [{ name: "product_price", type: "number" }],
+        rank: 1,
+        score: 1,
+        reason: "metric source without aggregation authority",
+      }], { dimensionTerms: [] }) as any,
+      executeGeneratedSql,
+    });
+
+    expect(executeGeneratedSql).not.toHaveBeenCalled();
+    expect(provider.calls).toHaveLength(0);
+    expect(result).toMatchObject({
+      kind: "no_answer",
+      refusalCode: "policy_blocked",
+      trustLabel: "blocked",
+      route: { tier: "no_answer" },
+      aggregationSafetyProof: {
+        status: "blocked",
+        issueCodes: expect.arrayContaining(["METRIC_CAPABILITY_MISSING", "ADDITIVITY_EVIDENCE_MISSING"]),
+      },
+    });
+    expect(result.result).toBeUndefined();
   });
 
   it("does NOT terminate a data conversation with a business-view document (360-profile regression)", async () => {
@@ -639,6 +728,25 @@ describe("answer (block-first loop)", () => {
           description: "Gross customer lifetime spend inclusive of taxes.",
           llmContext: "sql: SUM(lifetime_spend)\ntable: dev.customers",
           sourceTier: "semantic_layer",
+          payload: {
+            table: "dev.customers",
+            formula: "lifetime_spend",
+            analyticalCapability: {
+              metricId: "semantic:customers:metric:lifetime_spend",
+              measureIds: ["semantic:customers:measure:lifetime_spend"],
+              primaryEntityId: "customer",
+              defaultResultGrainId: "customer",
+              resultGrainIds: ["customer"],
+              aggregation: "sum",
+              additivity: { entities: "additive", time: "additive" },
+              dimensions: [],
+              timeDimensions: [],
+              operations: ["group"],
+              supportedOutputKinds: ["metric_value"],
+              executionCapabilities: [{ route: "semantic", adapterId: "semantic-native" }],
+              sourceFingerprint: "sha256:customers-lifetime-spend",
+            },
+          },
         },
       ],
       [],
@@ -1348,9 +1456,8 @@ describe("answer (block-first loop)", () => {
       },
     });
 
-    // Initial (invalid) + three diverse alternatives (direct / query-plan /
-    // decomposition) = 4 candidates generated.
-    expect(provider.calls).toHaveLength(4);
+    // Initial + one diverse alternative stays within the two-round budget.
+    expect(provider.calls).toHaveLength(2);
     expect(executedSql).toEqual([
       "SELECT region, COUNT(*) AS order_count FROM analytics.orders GROUP BY region",
     ]);
@@ -1359,7 +1466,7 @@ describe("answer (block-first loop)", () => {
     expect(result.result?.rowCount).toBe(1);
     expect(result.validationWarnings).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("Deep candidate selection reviewed 4 candidates and selected candidate 2"),
+        expect.stringContaining("Deep candidate selection reviewed 2 candidates and selected candidate 2"),
       ]),
     );
   });
@@ -1398,10 +1505,12 @@ describe("answer (block-first loop)", () => {
       }),
     });
 
-    // Initial + 3 diverse alternatives — diversified despite a clean first candidate.
-    expect(provider.calls.length).toBeGreaterThan(1);
+    // One alternative diversifies within the two-provider-round ceiling; only
+    // the selected candidate executes, so speculative candidates are not used
+    // to manufacture result agreement.
+    expect(provider.calls).toHaveLength(2);
     expect(result.kind).toBe("uncertified");
-    expect(result.validationWarnings.join(" ")).toContain("executed candidates agreed on the result");
+    expect(result.validationWarnings.join(" ")).toContain("reviewed 2 candidates");
   });
 
   it("renders rich prior result refs from the conversation snapshot into generated-answer prompts", async () => {
@@ -5749,7 +5858,7 @@ describe("answer (block-first loop)", () => {
     );
   });
 
-  it("AGT-005 repairs premature currency rounding before any SQL is executed", async () => {
+  it("AGT-005 blocks premature currency rounding without an automatic rewrite", async () => {
     const provider = new StubProvider([
       "```sql\nSELECT SUM(ROUND(COALESCE(o.amount, 0), 2)) AS booked_amount FROM analytics.fct_orders o\n```",
       "```sql\nSELECT ROUND(COALESCE(SUM(o.amount), 0), 2) AS booked_amount FROM analytics.fct_orders o\n```",
@@ -5785,15 +5894,11 @@ describe("answer (block-first loop)", () => {
       },
     });
 
-    expect(provider.calls).toHaveLength(2);
-    expect(executed).toHaveLength(1);
-    expect(executed[0]).toContain("ROUND(COALESCE(SUM(o.amount), 0), 2)");
-    expect(executed[0]).not.toContain("SUM(ROUND(");
-    expect(provider.calls[1]!.map((message) => message.content).join("\n")).toContain("Preserve the source DECIMAL/NUMERIC precision");
-    expect(result.result?.rows).toEqual([{ booked_amount: 300567.85 }]);
-    expect(result.validationWarnings).toEqual(
-      expect.arrayContaining([expect.stringContaining("Repaired after context-validation failure")]),
-    );
+    expect(provider.calls).toHaveLength(1);
+    expect(executed).toHaveLength(0);
+    expect(result.kind).toBe('no_answer');
+    expect(result.refusalDetails?.code).toBe('unsafe_aggregation');
+    expect(result.aggregationSafetyProof).toMatchObject({ status: 'blocked', rounding: 'inner' });
   });
 
   it("repairs a ranked query that omits its ranked entity before execution", async () => {
@@ -6566,6 +6671,38 @@ describe("answer — freshness-aware trust", () => {
 });
 
 describe("answer route exposure + semantic-metric routing (spec 17, part C)", () => {
+  function governedMetricPayload(
+    name: string,
+    table: string,
+    column: string,
+    aggregation = "sum",
+  ): Record<string, unknown> {
+    return {
+      table,
+      formula: column,
+      analyticalCapability: {
+        metricId: `semantic:finance:metric:${name}`,
+        semanticModelId: `semantic:finance:model:${table}`,
+        measureIds: [`semantic:finance:measure:${column}`],
+        primaryEntityId: table,
+        defaultResultGrainId: table,
+        resultGrainIds: [table],
+        aggregation,
+        additivity: { entities: "additive", time: "additive" },
+        dimensions: ["channel", "region", "product", "customer_name", "order_date"].map((dimensionId) => ({
+          dimensionId,
+          entityId: dimensionId,
+          supportedRoles: ["group_by", "filter"],
+        })),
+        timeDimensions: [{ dimensionId: "order_date", role: "event_time", supportedGrains: ["day", "month", "year"] }],
+        operations: ["filter", "group", "trend", "rank"],
+        supportedOutputKinds: ["metric_value"],
+        executionCapabilities: [{ route: "semantic", adapterId: "semantic-native" }],
+        sourceFingerprint: `sha256:${table}:${name}:${column}:${aggregation}`,
+      },
+    };
+  }
+
   function revenueMetric(name: string, description: string): KGNode {
     return {
       nodeId: `metric:${name}`,
@@ -6578,6 +6715,7 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
       sourceTier: "semantic_layer",
       certification: "ai_generated",
       provenance: "semantic layer",
+      payload: governedMetricPayload(name, "orders", "amount"),
     };
   }
 
@@ -7315,7 +7453,6 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
         };
       },
     });
-
     expect(result.route?.tier).toBe("semantic_metric");
     expect(result.cascade).toMatchObject({
       terminalLane: "semantic",
@@ -7369,7 +7506,7 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     });
   });
 
-  it("falls back to ONE LLM member selection when deterministic selection misses (Lane 2, not Lane 3)", async () => {
+  it("Research may use one bounded LLM member selection when deterministic selection misses", async () => {
     kg.rebuild([revenueMetric("total_revenue", "Total recognized revenue")], []);
     const semanticLayer = new SemanticLayer({
       metrics: [
@@ -7409,6 +7546,7 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
       provider,
       kg,
       semanticLayer,
+      allowProviderSemanticMemberSelection: true,
       executeGeneratedSql: async (sql) => ({
         columns: ["channel", "total_revenue"],
         rows: [{ channel: "Direct", total_revenue: 100 }],
@@ -7444,6 +7582,7 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
       sourceTier: "semantic_layer",
       certification: "ai_generated",
       provenance: "semantic layer",
+      payload: governedMetricPayload("tax_amount", "orders", "tax_paid"),
     };
     kg.rebuild([taxMetric], []);
     const semanticLayer = new SemanticLayer({
@@ -7479,7 +7618,7 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.kind).not.toBe("no_answer");
   });
 
-  it("Tier 2.5: anchors generation on a matched metric when the shape needs a cross-table join", async () => {
+  it("Research Tier 2.5 anchors generation on a matched metric when the shape needs a cross-table join", async () => {
     // total_revenue lives on `orders`; the question breaks it down by a dimension on a
     // DIFFERENT table (warehouse region) that the semantic layer can't compose. Instead
     // of throwing the metric away and reinventing the aggregate as raw SQL, generation
@@ -7506,6 +7645,7 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
       provider,
       kg,
       semanticLayer,
+      allowProviderSemanticMemberSelection: true,
       executeGeneratedSql: async (sql) => ({ columns: ["region", "total_revenue"], rows: [{ region: "West", total_revenue: 100 }], rowCount: 1, sql }),
     });
 
@@ -7601,7 +7741,7 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.text.toLowerCase()).toContain("join path");
   });
 
-  it("Structured selection: a per-group top-N (genuine compiler gap) still falls through to free SQL, never refused", async () => {
+  it("Research structured selection keeps a per-group top-N compiler gap on its bounded free-SQL path", async () => {
     // "top 2 channels per warehouse region" is per-group top-N — neither the native
     // compiler nor MetricFlow expresses it, so free SQL is the legitimate path. Even
     // though warehouse_region is unconnected, a genuine_gap shape must NOT be refused.
@@ -7624,6 +7764,7 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
       provider,
       kg,
       semanticLayer,
+      allowProviderSemanticMemberSelection: true,
       executeGeneratedSql: async (sql) => ({ columns: ["channel", "total_revenue"], rows: [{ channel: "Direct", total_revenue: 100 }], rowCount: 1, sql }),
     });
     // The contract point: a genuine compiler gap is NEVER converted into a
@@ -8015,6 +8156,7 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
           sourceTier: "semantic_layer",
           certification: "ai_generated",
           provenance: "semantic layer",
+          payload: governedMetricPayload("order_count", "orders", "order_id", "count"),
         },
       ],
       [],
@@ -8077,7 +8219,7 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
     expect(result.text).toContain("governed semantic metrics");
   });
 
-  it("AGT-021 keeps five exact metric/measure identities through the LLM member fallback and DQL compiler", async () => {
+  it("AGT-021 keeps five exact metric/measure identities through the Research-only LLM member fallback and DQL compiler", async () => {
     const names = [
       "percent_dod_eu_core_ccu_acm_qty",
       "percent_dod_eu_core_ccu_bcm",
@@ -8096,6 +8238,7 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
       sourceTier: "semantic_layer" as const,
       certification: "ai_generated" as const,
       provenance: "semantic layer",
+      payload: governedMetricPayload(name, "consumption_daily", name),
     })), []);
     const semanticLayer = new SemanticLayer({
       metrics: names.map((name, index) => ({
@@ -8129,6 +8272,7 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
       provider,
       kg,
       semanticLayer,
+      allowProviderSemanticMemberSelection: true,
       executeGeneratedSql: async (sql) => ({
         columns: names,
         rows: [Object.fromEntries(names.map((name, index) => [name, index + 1]))],
@@ -8225,10 +8369,9 @@ describe("answer route exposure + semantic-metric routing (spec 17, part C)", ()
       },
     });
 
-    // Two calls: one governed member-selection attempt (declines — product is not
-    // a semantic dimension) then Lane-3 generation. R3.5 spends one cheap call to
-    // try the governed tier before falling through.
-    expect(provider.calls).toHaveLength(2);
+    // Ordinary Ask does not reopen semantic member selection after routing.
+    // One generation call handles the unresolved shape.
+    expect(provider.calls).toHaveLength(1);
     expect(result.route?.tier).toBe("generated_sql");
     expect(result.dqlArtifact?.kind).toBe("sql_block");
     expect(executedArtifact?.limit).toBe(200);

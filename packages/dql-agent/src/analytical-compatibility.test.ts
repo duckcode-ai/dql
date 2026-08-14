@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AnalyticalQuestionFrameV2, MetricCapabilityContract } from '@duckcodeailabs/dql-core';
 import { normalizeEvidenceAnalyticalCapability, solveAnalyticalCompatibility } from './analytical-compatibility.js';
-import { buildDeterministicAnalyticalFrame } from './analytical-frame.js';
+import { buildDeterministicAnalyticalFrame, projectResolvedAnalyticalFrame } from './analytical-frame.js';
 import { buildAnalyticalCapabilityReadiness } from './analytical-readiness.js';
 import { buildResolvedAnalyticalPlan } from './resolved-analytical-plan.js';
 import { createHybridRouter } from './router.js';
@@ -338,7 +338,6 @@ describe('deterministic analytical compatibility (CONTRACT-002 / AGT-017 / AGT-0
         { id: 'net_revenue__previous_year', kind: 'metric_value' },
         { id: 'net_revenue__delta', kind: 'delta' },
         { id: 'net_revenue__percent_delta', kind: 'percent_delta' },
-        { id: 'rank', kind: 'rank' },
       ],
     });
   });
@@ -602,6 +601,47 @@ describe('deterministic analytical compatibility (CONTRACT-002 / AGT-017 / AGT-0
     }
   });
 
+  it('accepts an exact adapter-native grouping proof only on its pinned semantic route', () => {
+    const nativeSemanticCapability: MetricCapabilityContract = {
+      ...semanticCapability,
+      primaryEntityId: 'semantic:uncategorized:entity:order_item',
+      defaultResultGrainId: 'semantic:uncategorized:entity:order_item',
+      resultGrainIds: [
+        'semantic:uncategorized:entity:order_item',
+        'semantic:uncategorized:entity:customer',
+      ],
+      dimensions: [{
+        dimensionId: 'semantic:uncategorized:dimension:customers.customer_name',
+        entityId: 'semantic:uncategorized:entity:customer',
+        supportedRoles: ['group_by', 'filter', 'display', 'rank_entity'],
+        nativeGroupingReference: 'order_id__customer__customer_name',
+        nativeGroupingPath: ['order_id', 'customer'],
+      }],
+      executionCapabilities: [{ route: 'semantic', adapterId: 'metricflow-cli' }],
+      sourceFingerprint: 'jaffle-revenue-capability-v1',
+    };
+    const frame = topCustomersComparisonFrame();
+    frame.metricConceptIds = [nativeSemanticCapability.metricId];
+    frame.entityGrainIds = ['semantic:uncategorized:entity:customer'];
+    frame.dimensions = frame.dimensions.map((binding) => binding.role === 'time_axis'
+      ? binding
+      : { ...binding, dimensionId: nativeSemanticCapability.dimensions[0]!.dimensionId });
+    frame.memberBindings = [];
+    frame.ranking = {
+      ...frame.ranking!,
+      entityDimensionId: nativeSemanticCapability.dimensions[0]!.dimensionId,
+      byMetricId: nativeSemanticCapability.metricId,
+    };
+    frame.requestedOutputs = frame.requestedOutputs.map((output) => 'metricId' in output
+      ? { ...output, metricId: nativeSemanticCapability.metricId }
+      : output);
+
+    expect(solveAnalyticalCompatibility({
+      frame,
+      candidates: [{ candidateId: nativeSemanticCapability.metricId, capability: nativeSemanticCapability }],
+    })).toMatchObject({ status: 'ready', route: 'semantic', adapterId: 'metricflow-cli' });
+  });
+
   it('keeps the canonical output contract equivalent across certified, semantic, and governed SQL routes (E2E-013)', () => {
     const frame = topCustomersComparisonFrame();
     const variants = [
@@ -692,6 +732,37 @@ describe('deterministic analytical compatibility (CONTRACT-002 / AGT-017 / AGT-0
       },
     });
     expect(Object.isFrozen(plan.analyticalFrame)).toBe(true);
+
+    const projected = projectResolvedAnalyticalFrame({ plan, sourceFrame: frame });
+    expect(projected.metricConceptIds).toEqual([ids.metric]);
+    expect(projected.ambiguity).toEqual([]);
+
+    const ambiguousPlan = {
+      ...plan,
+      query: {
+        ...plan.query,
+        dimensions: [
+          {
+            requested: 'customer',
+            status: 'ambiguous' as const,
+            candidateIds: [ids.customerName, 'commerce::dimension::customer_type'],
+          },
+          ...plan.query.dimensions.slice(1),
+        ],
+      },
+    };
+    const ambiguousProjection = projectResolvedAnalyticalFrame({
+      plan: ambiguousPlan,
+      sourceFrame: frame,
+    });
+    expect(ambiguousProjection.ambiguity).toContainEqual({
+      field: 'dimensions.customer',
+      candidateIds: [ids.customerName, 'commerce::dimension::customer_type'].sort(),
+      reasonCode: 'DIMENSION_AMBIGUOUS',
+    });
+    expect(ambiguousProjection.dimensions).not.toContainEqual(
+      expect.objectContaining({ dimensionId: ids.customerName, role: 'group_by' }),
+    );
   });
 
   it('overrides an AI route recommendation with deterministic complete-tuple fit', async () => {

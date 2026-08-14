@@ -20,7 +20,13 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentMessage, AgentProvider, ProviderName, ProviderRunOptions } from '@duckcodeailabs/dql-agent';
+import {
+  prepareProviderHttpDispatch,
+  type AgentMessage,
+  type AgentProvider,
+  type ProviderName,
+  type ProviderRunOptions,
+} from '@duckcodeailabs/dql-agent';
 
 interface RunResult {
   code: number | null;
@@ -185,8 +191,22 @@ export class ClaudeCodeCliProvider implements AgentProvider {
   async generate(messages: AgentMessage[], options: ProviderRunOptions = {}): Promise<string> {
     // A run whose deadline already fired must not spawn a doomed child process.
     throwIfAlreadyCancelled(options.signal);
-    const { system, prompt } = flattenMessages(messages);
-    const model = options.model ?? this.defaultModel;
+    const flattened = flattenMessages(messages);
+    const prepared = prepareProviderHttpDispatch({
+      provider: this.name,
+      operation: 'generate',
+      attemptIndex: 1,
+      options,
+      envelope: {
+        model: options.model ?? this.defaultModel,
+        system: flattened.system,
+        prompt: flattened.prompt,
+        options: { tools: false, maxTurns: 1, permissionMode: 'dontAsk', sessionPersistence: false },
+      },
+    });
+    const system = typeof prepared.system === 'string' ? prepared.system : '';
+    const prompt = typeof prepared.prompt === 'string' ? prepared.prompt : '';
+    const model = typeof prepared.model === 'string' ? prepared.model : undefined;
     const args = [
       '-p',
       '--output-format', 'json',
@@ -302,8 +322,22 @@ export class CodexCliProvider implements AgentProvider {
   async generate(messages: AgentMessage[], options: ProviderRunOptions = {}): Promise<string> {
     // A run whose deadline already fired must not spawn a doomed child process.
     throwIfAlreadyCancelled(options.signal);
-    const { system, prompt } = flattenMessages(messages);
-    const model = options.model ?? this.defaultModel;
+    const flattened = flattenMessages(messages);
+    const prepared = prepareProviderHttpDispatch({
+      provider: this.name,
+      operation: 'generate',
+      attemptIndex: 1,
+      options,
+      envelope: {
+        model: options.model ?? this.defaultModel,
+        system: flattened.system,
+        prompt: flattened.prompt,
+        options: { sandbox: 'read-only', ephemeral: true, sessionPersistence: false },
+      },
+    });
+    const system = typeof prepared.system === 'string' ? prepared.system : '';
+    const prompt = typeof prepared.prompt === 'string' ? prepared.prompt : '';
+    const model = typeof prepared.model === 'string' ? prepared.model : undefined;
     // Codex exec has no --system-prompt; prepend the system text as a labeled preamble.
     const fullPrompt = system ? `${system}\n\n---\n\n${prompt}` : prompt;
     const cwd = mkdtempSync(join(tmpdir(), 'dql-codex-'));
