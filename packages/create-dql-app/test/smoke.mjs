@@ -30,10 +30,15 @@ function assert(cond, msg) {
   console.log(`  ✓ ${msg}`);
 }
 
-// Must pin the current CLI so a fresh scaffold includes the supported OSS layout.
-// install of an older CLI fails there and never links the `dql` binary). Keep in
-// sync with templates/starter/package.json.
-const EXPECTED_CLI_RANGE = '^1.13.4';
+// Must pin the current CLI so a fresh scaffold includes the supported OSS layout
+// (install of an older CLI fails there and never links the `dql` binary).
+//
+// Derived from this package's own version rather than hand-written: every
+// release bumps the whole workspace in lockstep, and a hardcoded literal here
+// just fails the release gate one version late, every single time.
+const EXPECTED_CLI_RANGE = `^${JSON.parse(
+  readFileSync(resolve(__dirname, '..', 'package.json'), 'utf8'),
+).version}`;
 
 function collectFiles(dir, predicate, out = []) {
   for (const entry of readdirSync(dir)) {

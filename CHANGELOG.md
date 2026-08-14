@@ -6,6 +6,60 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.13.5 - 2026-08-14
+
+### Ask AI answers in sentences again
+
+Ordinary Ask had stopped narrating. Answer synthesis was gated on
+`requestedMode === 'research'`, but the Ask panel sends `auto`, so every normal
+question shipped the answer loop's internal `column: value` record as its
+answer. This release restores the language lane and makes failures say what
+actually went wrong.
+
+### Added
+
+- **Bounded result-row egress with an admin kill-switch.** A model that cannot
+  see the values it is describing cannot describe them, so a redacted sample of
+  up to 20 rows now accompanies narration. Set
+  `agent.providerResultRowEgress.mode` to `"disabled"` in `dql.config.json` to
+  keep every cell value on the host — narration still runs, grounded in column
+  names and computed statistics only. Every run emits an egress receipt naming
+  the policy that applied, whether or not rows were sent.
+- **Claim-verified narration.** On analytical-graph routes the model drafts
+  claims that each cite a fact id, and each is checked against the immutable
+  fact set before display: causal wording, unknown facts, numbers absent from
+  the cited facts, and hidden material caveats are all rejected, retried once,
+  and only then replaced by the deterministic record — which now says so.
+
+### Improved
+
+- **Narration has its own dispatch budget.** It previously shared the generation
+  bucket, so a run could compute the right numbers and then have nothing left to
+  say them with.
+- **Dispatch admission is latency-aware.** DQL measures what your provider
+  actually costs and refuses to start a call the deadline cannot finish, instead
+  of being killed mid-flight with nothing to show. Subscription-CLI providers
+  benefit most.
+- **Clarification cards are readable and answerable.** Duplicate labels are
+  disambiguated by kind, raw semantic-layer records are summarized into a
+  sentence instead of pasted as YAML, and choosing an option keeps your original
+  question rather than re-asking the option's own label.
+- **Follow-ups ask instead of guessing.** "This customer" after a ten-row answer
+  silently bound the first row as the referent; ambiguous references now become
+  clarification options.
+
+### Fixed
+
+- **A DQL-side stop is no longer reported as your AI provider failing.** Run
+  budget exhaustion, the orchestration soft target, and a mid-run project
+  snapshot rebuild were all surfaced as `<provider> failed`, sending users to
+  re-authenticate a provider that was working.
+- **A refusal no longer reads "Needs input".** Terminal refusals are labelled
+  `Refused`, clarifications keep `Needs input`, and the reason the run actually
+  recorded now reaches the card instead of a generic headline.
+
+---
+
 ## v1.13.4 - 2026-08-11
 
 ### Reliable App authoring and durable Block certification
