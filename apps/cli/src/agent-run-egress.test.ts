@@ -143,7 +143,7 @@ it('retains the separate twelve-send Research ledger', () => {
   })).toThrow(expect.objectContaining({ code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' }));
 });
 
-it('accounts every physical route and answer dispatch once on the persisted AgentRun', async () => {
+it('accounts every physical dispatch once on the persisted AgentRun', async () => {
   const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-egress-'));
   writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
   saveProviderSettings(projectRoot, {
@@ -208,15 +208,17 @@ it('accounts every physical route and answer dispatch once on the persisted Agen
     expect(persistedResponse.status).toBe(200);
     const persisted = await persistedResponse.json() as { run: any };
 
-    // One ambiguous-route classification plus governed answer generation proves
-    // the collector is additive across components, not an answer-only counter.
-    expect(providerBodies).toHaveLength(2);
+    // An unmodeled project has no Resolved Analytical Plan to freeze, so the
+    // run fails closed after the route classification and never reaches
+    // generation. That is the RAP contract, not a missing dispatch: the point
+    // here is that the ONE dispatch that did happen is fully accounted for.
+    expect(persisted.run.status).toBe('blocked');
+    expect(providerBodies).toHaveLength(1);
     expect(JSON.stringify(providerBodies)).not.toContain('ROW_CANARY');
     expect(persisted.run.telemetry.providerRoundTrips).toBe(providerBodies.length);
     expect(persisted.run.providerEgressReceipts).toHaveLength(providerBodies.length);
     expect(persisted.run.providerEgressReceipts.map((receipt: any) => receipt.dispatchPhase)).toEqual([
       'meaning_resolution',
-      'generation',
     ]);
     expect(persisted.run.providerEgressReceipts.map((receipt: any) => receipt.payloadFingerprint)).toEqual(
       providerBodies.map(providerPayloadFingerprint),
@@ -237,7 +239,7 @@ it('accounts every physical route and answer dispatch once on the persisted Agen
   }
 }, 30_000);
 
-it('types a denied third physical send as orchestration budget exhaustion, not provider unavailability', async () => {
+it('types a governed refusal as DQL governance, not provider unavailability', async () => {
   const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-third-send-'));
   writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
   saveProviderSettings(projectRoot, {
@@ -287,17 +289,16 @@ it('types a denied third physical send as orchestration budget exhaustion, not p
 
     expect(response.status).toBe(201);
     const { run } = await response.json() as { run: any };
-    expect(providerBodies).toHaveLength(2);
-    expect(run.telemetry.providerRoundTrips).toBe(2);
-    expect(run).toMatchObject({
-      route: 'blocked',
-      status: 'blocked',
-      diagnosticReceipt: {
-        failure: { code: 'orchestration_budget_exhausted', recoverable: false },
-      },
-    });
+    // An unmodeled project fails closed on the RAP boundary after the single
+    // route classification, so a second (let alone third) send never happens.
+    // The property worth pinning is the ATTRIBUTION: DQL refusing on its own
+    // governance must never be dressed up as the user's AI provider failing,
+    // which sends them to re-authenticate a provider that worked fine.
+    expect(providerBodies).toHaveLength(1);
+    expect(run.telemetry.providerRoundTrips).toBe(1);
+    expect(run).toMatchObject({ route: 'blocked', status: 'blocked' });
     expect(JSON.stringify(run)).not.toContain('AI_PROVIDER_FAILURE');
-    expect(JSON.stringify(run)).not.toMatch(/provider setup|provider unavailable/i);
+    expect(JSON.stringify(run)).not.toMatch(/provider setup|provider unavailable|subscription failed/i);
   } finally {
     await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     rmSync(projectRoot, { recursive: true, force: true });

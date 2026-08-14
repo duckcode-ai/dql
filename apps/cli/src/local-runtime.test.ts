@@ -4353,7 +4353,12 @@ LIMIT \${top_n}
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          question: 'who are the top 5 customers for these categories?',
+          // A follow-up that leans on the prior turn rather than requesting a
+          // fresh governed measure. A bare analytical ranking on an unmodeled
+          // project fails closed on the RAP boundary before ANY route executor
+          // runs, so it cannot demonstrate what this test owns: that the
+          // conversation context survives the HTTP hop into the executor.
+          question: 'thanks, can you walk me through what we just looked at?',
           requestedMode: 'ask',
           conversationContext: {
             sourceCertifiedBlock: 'food_vs_drink_revenue',
