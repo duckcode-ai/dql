@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  splitAnalyticalTasks,
   assertCanonicalResult,
   buildAnalyticalTaskGraph,
   buildAnalyticalTurnPlan,
@@ -234,5 +235,24 @@ describe('conversational analytical orchestration contracts', () => {
       question: 'what region is this customer in?',
       zeroCallReason: 'explicit_binding',
     })).toMatchObject({ meaningCallBudget: 0, meaningCallReason: 'explicit_binding' });
+  });
+});
+
+describe('splitAnalyticalTasks separators', () => {
+  it('does not carry the separator into the child clause', () => {
+    // The reader pasted two questions joined by `" then "`. The clause split is
+    // correct; the punctuation must not travel with it and become the task title.
+    const parts = splitAnalyticalTasks(
+      'Who are the top 10 customers by revenue?" then "What customer type is Wesley Jenkins?',
+    );
+    expect(parts).toEqual([
+      'Who are the top 10 customers by revenue',
+      'What customer type is Wesley Jenkins',
+    ]);
+  });
+
+  it('keeps an ordinary single question untouched', () => {
+    expect(splitAnalyticalTasks('What customer type is Wesley Jenkins?'))
+      .toEqual(['What customer type is Wesley Jenkins']);
   });
 });

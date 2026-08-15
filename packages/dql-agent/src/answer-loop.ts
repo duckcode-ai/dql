@@ -3443,12 +3443,21 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       const budgetCode = err && typeof err === 'object' && 'code' in err
         ? String((err as { code?: unknown }).code)
         : '';
+      // Admission control is NOT an exhausted clock. `RUN_DEADLINE_INSUFFICIENT`
+      // means DQL declined to START a call it predicted would not fit in the
+      // remaining budget — it can fire seconds into a run, and a compound turn's
+      // second task hit it after 6.4s of a 45s budget. Sharing the "stopped at
+      // its own time budget" wording with the genuine soft-target codes told the
+      // reader the run ran out of time when most of it remained, sending them to
+      // debug latency instead of the estimate.
+      const admissionDeclined = budgetCode === 'RUN_DEADLINE_INSUFFICIENT';
       const orchestrationBudget = budgetCode === 'RUN_SOFT_TARGET_EXCEEDED'
-        || budgetCode === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED'
-        || budgetCode === 'RUN_DEADLINE_INSUFFICIENT';
-      const text = orchestrationBudget
-        ? 'DQL stopped this run at its own time budget before the query could be settled. The AI provider did not fail. Retry, or use Research for a longer budget.'
-        : `Provider error: ${(err as Error).message}`;
+        || budgetCode === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED';
+      const text = admissionDeclined
+        ? `DQL did not start another AI call because it estimated the call would not finish inside this run's remaining budget, so the run stopped early rather than mid-flight. The AI provider did not fail and the time limit was not necessarily reached. ${(err as Error).message} Retry, or use Research for a longer budget.`
+        : orchestrationBudget
+          ? 'DQL stopped this run at its own time budget before the query could be settled. The AI provider did not fail. Retry, or use Research for a longer budget.'
+          : `Provider error: ${(err as Error).message}`;
       return {
         kind: 'no_answer',
         sourceTier: 'no_answer',

@@ -244,7 +244,19 @@ export function buildResolvedAnalyticalPlan(
       requested,
       rankingRequested ? ['group_by', 'rank_entity'] : ['group_by'],
     ));
-  const filters = input.resolution.queryIntent.filters.map((filter) => ({
+  // A provider may name the field it is grouping by and forget the MEMBER the
+  // reader asked about: "What customer type is Wesley Jenkins?" came back with
+  // `filters: []`, so the run returned all 200 customers and the narration
+  // truthfully reported that his value was not present.
+  //
+  // DQL had already found him. `evidence.parsedIntent.filters` are GROUNDED
+  // member bindings — matched against the retrieved context, not guessed — so
+  // falling back to them adds no unproven predicate. The provider's own filters
+  // still win whenever it supplies any.
+  const requestedFilters = input.resolution.queryIntent.filters.length > 0
+    ? input.resolution.queryIntent.filters
+    : (input.evidence.parsedIntent?.filters ?? []).filter((filter) => filter.field && filter.value);
+  const filters = requestedFilters.map((filter) => ({
     ...filter,
     binding: bindDimension(filter.field, ['filter']),
   }));

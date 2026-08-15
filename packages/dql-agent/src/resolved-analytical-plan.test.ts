@@ -112,6 +112,79 @@ describe('ResolvedAnalyticalPlan (AGT-013 / API-006)', () => {
     expect(Object.isFrozen(first.query.dimensions)).toBe(true);
   });
 
+  it('AGT-031 binds the grounded member when the provider returns no filter', () => {
+    // The provider named the grouping field and forgot the member, so the run
+    // returned every customer. DQL had already grounded "Wesley Jenkins" in
+    // `parsedIntent.filters`; that binding is evidence-backed, not a guess.
+    const attribute = {
+      id: 'semantic:dimension:customers.customer_type',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'customer_type', aliases: ['customer type'],
+      primaryEntity: 'customer', dimensions: ['customer_type', 'customer_name'],
+      relevanceScore: 1, matchReasons: [], compatibility: 'compatible', eligible: true,
+    } as unknown as AgentEvidenceCandidate;
+
+    const plan = buildResolvedAnalyticalPlan({
+      question: 'What customer type is Wesley Jenkins?',
+      resolution: {
+        interpretedQuestion: 'Look up customer_type.',
+        questionType: 'value',
+        selectedConceptIds: [attribute.id],
+        recommendedExecutionId: attribute.id,
+        queryIntent: { measures: [], dimensions: ['customer_type'], filters: [] },
+        rejectedCandidates: [], confidence: 'high', missingInformation: [],
+        recommendedRoute: 'semantic',
+      } as unknown as MeaningResolution,
+      evidence: {
+        ...evidence,
+        candidates: [attribute],
+        parsedIntent: {
+          measures: [], dimensions: ['customer_type'],
+          filters: [{ field: 'customer_name', value: 'Wesley Jenkins' }],
+        },
+      } as never,
+      candidates: [attribute],
+    });
+
+    expect(plan.query.filters).toHaveLength(1);
+    expect(plan.query.filters[0]).toMatchObject({ field: 'customer_name', value: 'Wesley Jenkins' });
+    expect(plan.query.filters[0]?.binding.status).toBe('resolved');
+  });
+
+  it('AGT-031 lets the provider\'s own filters win over the grounded fallback', () => {
+    const attribute = {
+      id: 'semantic:dimension:customers.customer_type',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'customer_type', aliases: [], primaryEntity: 'customer',
+      dimensions: ['customer_type', 'customer_name'],
+      relevanceScore: 1, matchReasons: [], compatibility: 'compatible', eligible: true,
+    } as unknown as AgentEvidenceCandidate;
+
+    const plan = buildResolvedAnalyticalPlan({
+      question: 'What customer type is Wesley Jenkins?',
+      resolution: {
+        interpretedQuestion: 'x', questionType: 'value',
+        selectedConceptIds: [attribute.id], recommendedExecutionId: attribute.id,
+        queryIntent: {
+          measures: [], dimensions: ['customer_type'],
+          filters: [{ field: 'customer_name', value: 'Benjamin Bell' }],
+        },
+        rejectedCandidates: [], confidence: 'high', missingInformation: [],
+        recommendedRoute: 'semantic',
+      } as unknown as MeaningResolution,
+      evidence: {
+        ...evidence, candidates: [attribute],
+        parsedIntent: {
+          measures: [], dimensions: ['customer_type'],
+          filters: [{ field: 'customer_name', value: 'Wesley Jenkins' }],
+        },
+      } as never,
+      candidates: [attribute],
+    });
+
+    expect(plan.query.filters[0]).toMatchObject({ value: 'Benjamin Bell' });
+  });
+
   it('AGT-031 freezes a metric-free attribute lookup as semantic execution', () => {
     // "What customer type is <member>?" names a FIELD and a MEMBER and no
     // measure at all. The claim under test is whether the plan builder can

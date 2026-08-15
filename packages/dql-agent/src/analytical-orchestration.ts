@@ -165,10 +165,17 @@ export function inferAnalyticalTurnKind(question: string): AnalyticalTurnKind {
 }
 
 export function splitAnalyticalTasks(question: string): string[] {
+  // The separator belongs to the SPLIT, not to the clause. Carrying it through
+  // produced a child task whose question was literally
+  // `" then "What customer type is Wesley Jenkins` — quote, connector and all —
+  // which then failed to resolve and surfaced that punctuation to the reader as
+  // the task title.
+  const leadingJunk = /^(?:[\s"'“”‘’,:;.\-]+|\b(?:then|and|also)\b)+/i;
+  const trailingJunk = /[\s"'“”‘’,:;.\-]+$/;
   const parts = question
     .split(/\s*(?:\?|;|\band then\b|\balso\b)\s*/i)
     .flatMap((part) => part.split(/\s+\band\s+(?=(?:what|who|which|show|list|tell|give|how|why)\b)/i))
-    .map((part) => part.trim())
+    .map((part) => part.replace(leadingJunk, '').replace(trailingJunk, '').trim())
     .filter(Boolean);
   return parts.length > 0 ? parts : [question.trim()];
 }
