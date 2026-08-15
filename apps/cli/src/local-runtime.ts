@@ -4375,6 +4375,21 @@ function analyticalFailureSummary(
         ...(governedAnswer.executionError ? [
           agentRunEvaluation('execution-error', 'Execution error', false, 'warning', governedAnswer.executionError),
         ] : []),
+        // A rejected narration must say WHY it was rejected. The failures were
+        // computed and then dropped, so a reader saw "Verified narration was
+        // unavailable" with no way to tell whether the model invented a number,
+        // cited a fact id that does not exist, or the provider simply failed.
+        // The fallback itself stays: this only makes its reason inspectable.
+        ...(narrationSource === 'deterministic' && narrationValidationFailures.length > 0 ? [
+          agentRunEvaluation(
+            'narration-verification',
+            'Narration verification',
+            false,
+            'warning',
+            `The drafted narration was rejected against the result fact set, so the deterministic record was shown instead: ${narrationValidationFailures.join('; ')}`,
+            { narrationSource, validationFailures: narrationValidationFailures },
+          ),
+        ] : []),
       ],
       nextActions,
       providerEgressReceipts: finalProviderEgressReceipts,
