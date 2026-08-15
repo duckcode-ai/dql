@@ -2108,8 +2108,14 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
         // A structured clarification selection is authoritative identity input,
         // not a new fuzzy-search phrase. Keep it in the bounded package even if
         // per-tier limits would otherwise trim it from a large catalog.
+        // Look in BOTH lists. The ranking-measure choices are supplemental
+        // clarification candidates, not execution candidates, so resolving the
+        // selection against `candidates` alone silently found nothing — the
+        // click looked identical to no click, the ranking gate fired again, and
+        // the same three options came back forever.
         const selectedEvidence = request.selectedEvidenceId
-          ? evidence.candidates.find((candidate) => candidate.id === request.selectedEvidenceId && candidate.eligible !== false)
+          ? [...evidence.candidates, ...(evidence.clarificationCandidates ?? [])]
+            .find((candidate) => candidate.id === request.selectedEvidenceId && candidate.eligible !== false)
           : undefined;
         if (selectedEvidence && !candidates.some((candidate) => candidate.id === selectedEvidence.id)) {
           candidates = [selectedEvidence, ...candidates.filter((candidate) => candidate.id !== selectedEvidence.id)]
@@ -2316,10 +2322,22 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
                 const resolutionResolvedRanking = safeResolution.recommendedRoute !== 'clarify'
                   && Boolean(safeResolution.recommendedExecutionId
                     || safeResolution.selectedConceptIds.length > 0);
+                // An explicit SELECTION answers this gate as well as words in
+                // the question do. `hasExplicitRankingMeasure` reads the
+                // question TEXT, and clicking a choice never changes the text —
+                // so picking `customers.average_order_value` re-asked "Top by
+                // which governed metric?" with the same three options, forever.
+                // A degenerate pick is still refused above, so anything
+                // arriving here is a measure the reader chose from governed
+                // evidence.
+                const explicitRankingSelection = Boolean(request.selectedEvidenceId)
+                  && Boolean(selectedEvidence)
+                  && !isDegenerateRankingMetric(request.question, evidence, selectedEvidence!);
                 if (
                   safeResolution.questionType === 'ranking'
                   && !hasExplicitRankingMeasure(request.question, evidence)
                   && !resolutionResolvedRanking
+                  && !explicitRankingSelection
                 ) {
                   return bareRankingClarification(
                     base,
