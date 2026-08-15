@@ -848,7 +848,7 @@ function bindRequestedMember(
     return kindMatches
       && candidateTerms(candidate).some((term) => memberTermMatches(term, normalized));
   });
-  const ids = uniqueSorted([
+  const collectedIds = uniqueSorted([
     ...directCandidates.map((candidate) => candidate.qualifiedId ?? candidate.id),
     ...(kind === 'dimension' ? eligibleCandidates.flatMap((candidate) =>
       (candidate.dimensions ?? []).filter((dimension) => {
@@ -856,6 +856,20 @@ function bindRequestedMember(
         return value === normalized || value.endsWith(` ${normalized}`);
       }).map((dimension) => qualifyDeclaredDimension(candidate, dimension))) : []),
   ]);
+  // A candidate contributes its qualified identity AND its own declared
+  // dimension list, so a dimension that IS the candidate arrived twice —
+  // `semantic:dimension:customers.customer_type` alongside a bare
+  // `customer_type`. Two ids read as ambiguous, the binding failed, and the
+  // plan blocked, which is why a metric-free attribute lookup could never
+  // freeze. A bare name that is the LEAF of a qualified id in the same set is
+  // the same member named twice, not a second choice.
+  const qualifiedIds = collectedIds.filter((id) => /[:./]/.test(id));
+  const ids = collectedIds.filter((id) => {
+    if (/[:./]/.test(id)) return true;
+    const bare = normalize(id);
+    return !qualifiedIds.some((qualified) =>
+      normalize(qualified.split(/[.:/]/).at(-1) ?? '') === bare);
+  });
   if (ids.length === 0 && kind === 'measure' && eligibleCandidates.length === 1) {
     const certified = eligibleCandidates[0]!;
     if (certified.kind === 'certified_block' && certified.compatibility === 'compatible') {

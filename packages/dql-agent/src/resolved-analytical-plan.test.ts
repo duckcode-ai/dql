@@ -112,6 +112,64 @@ describe('ResolvedAnalyticalPlan (AGT-013 / API-006)', () => {
     expect(Object.isFrozen(first.query.dimensions)).toBe(true);
   });
 
+  it('AGT-031 freezes a metric-free attribute lookup as semantic execution', () => {
+    // "What customer type is <member>?" names a FIELD and a MEMBER and no
+    // measure at all. The claim under test is whether the plan builder can
+    // freeze such a plan, or whether it is structurally metric-only.
+    const attribute: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:customers.customer_type',
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      trustTier: 'semantic',
+      name: 'customer_type',
+      aliases: ['customer type'],
+      definition: 'Whether the customer is new or returning.',
+      primaryEntity: 'customer',
+      dimensions: ['customer_type', 'customer_name'],
+      relevanceScore: 1,
+      matchReasons: ['exact name or alias'],
+      compatibility: 'compatible',
+      eligible: true,
+      exactMatch: true,
+    } as AgentEvidenceCandidate;
+
+    const plan = buildResolvedAnalyticalPlan({
+      question: 'What customer type is Wesley Jenkins?',
+      resolution: {
+        interpretedQuestion: 'Look up the customer_type attribute for one customer.',
+        questionType: 'value',
+        selectedConceptIds: [attribute.id],
+        recommendedExecutionId: attribute.id,
+        queryIntent: {
+          measures: [],
+          dimensions: ['customer_type'],
+          filters: [{ field: 'customer_name', value: 'Wesley Jenkins' }],
+        },
+        rejectedCandidates: [],
+        confidence: 'high',
+        missingInformation: [],
+        recommendedRoute: 'semantic',
+      } as unknown as MeaningResolution,
+      evidence: { ...evidence, candidates: [attribute] },
+      candidates: [attribute],
+    });
+
+    expect(plan.capability).toBe('semantic_execution');
+    expect(plan.query.measures).toEqual([]);
+    // The dimension arrived twice — once as the candidate's qualified identity
+    // and once as its own declared dimension name — and two ids read as
+    // ambiguous, which blocked every metric-free lookup.
+    expect(plan.query.dimensions).toEqual([
+      expect.objectContaining({
+        requested: 'customer_type',
+        qualifiedId: 'semantic:dimension:customers.customer_type',
+        status: 'resolved',
+        candidateIds: ['semantic:dimension:customers.customer_type'],
+      }),
+    ]);
+    expect(plan.query.filters[0]?.binding.status).toBe('resolved');
+  });
+
   it('fails capability closed when a requested semantic dimension is unresolved', () => {
     const plan = buildResolvedAnalyticalPlan({
       question: 'Show rollover balance by campaign channel.',

@@ -1378,10 +1378,29 @@ export function collapseRedundantGovernedCandidates(
   ).values()].sort((left, right) =>
     right.relevanceScore - left.relevanceScore || left.id.localeCompare(right.id));
 
-  const wantsAttribute = /\b(names?|labels?|titles?|descriptions?)\b/i.test(question);
+  // An entity is a JOIN KEY. It is a reading of "how many customers", but never
+  // of "what customer type is <member>" — there the reader named a field and a
+  // member, and the entity cannot answer either. The trigger used to be a
+  // four-word list (name/label/title/description), so "customer type", "region",
+  // and "when did X first order" all left the entity competing and turned an
+  // ordinary attribute lookup into a bind-interrogation. Recognise the
+  // interrogative FORM as well as the vocabulary; `hasDimension` below still
+  // requires that a real attribute was actually retrieved.
+  const wantsAttribute = /\b(names?|labels?|titles?|descriptions?|types?|status(?:es)?|categor(?:y|ies)|segments?|tiers?|regions?|emails?|addresses?)\b/i.test(question)
+    || /\b(what|which|when|where)\b[^?]*\b(is|are|was|were|does|do|did|belongs?)\b/i.test(question);
   const hasDimension = byScore.some((candidate) => candidate.semanticObjectType === 'dimension');
+  // An entity arrives as a semantic-layer entity OR as a DQL modeling entity
+  // (`dql:entity:…`, kind `dql_modeling`). Testing only `semanticObjectType`
+  // left the DQL one competing, so the interrogation survived the fix above.
+  // Check BOTH identities: a DQL entity's `qualifiedId` is the bare
+  // `commerce::entity::customer`, so testing the qualified id alone still let
+  // it through.
+  const isEntityCandidate = (candidate: AgentEvidenceCandidate): boolean =>
+    candidate.semanticObjectType === 'entity'
+    || [candidate.id, candidate.qualifiedId ?? ''].some((identity) =>
+      /(^|:)entity(:|::)/i.test(identity));
   const kindFiltered = wantsAttribute && hasDimension
-    ? byScore.filter((candidate) => candidate.semanticObjectType !== 'entity')
+    ? byScore.filter((candidate) => !isEntityCandidate(candidate))
     : byScore;
 
   const representatives = new Map<string, AgentEvidenceCandidate>();
