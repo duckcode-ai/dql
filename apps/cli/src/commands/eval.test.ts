@@ -409,7 +409,16 @@ describe('meetsThresholds', () => {
     refusalPrecision: 1,
     refusalRecall: 0.85,
     answerRate: 0.9,
+    executableCandidateRecall: 0.95,
   };
+
+  it('fails when executable candidate recall is below its threshold', () => {
+    // Recall bounds selection: if retrieval never surfaced the block, no router
+    // change can fix block accuracy, and the report must say which half broke.
+    expect(meetsThresholds(base, null, null, null, 0.98)).toBe(false);
+    expect(meetsThresholds(base, null, null, null, 0.9)).toBe(true);
+    expect(meetsThresholds({ ...base, executableCandidateRecall: null }, null, null, null, 0.98)).toBe(true);
+  });
 
   it('passes when above both thresholds', () => {
     expect(meetsThresholds(base, 0.85, 0.8)).toBe(true);

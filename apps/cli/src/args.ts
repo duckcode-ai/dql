@@ -65,6 +65,8 @@ export interface CLIFlags {
   analysisDepth?: string;
   /** `dql eval --min-route-accuracy <0..1>` — fail CI below this route accuracy. */
   minRouteAccuracy?: number;
+  /** `dql eval --min-candidate-recall <0..1>` — fail CI below this retrieval recall. */
+  minCandidateRecall?: number;
   /** `dql eval --min-refusal <0..1>` — fail CI below this refusal recall. */
   minRefusal?: number;
   /** `dql eval --min-answer-rate <0..1>` — fail CI below answer rate on non-refusal cases. */
@@ -219,6 +221,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.reasoningEffort = argv[++i];
     } else if ((arg === '--analysis-depth' || arg === '--depth') && i + 1 < argv.length) {
       flags.analysisDepth = argv[++i];
+    } else if (arg === '--min-candidate-recall' && i + 1 < argv.length) {
+      const value = Number(argv[++i]);
+      if (Number.isFinite(value) && value >= 0 && value <= 1) flags.minCandidateRecall = value;
     } else if (arg === '--min-route-accuracy' && i + 1 < argv.length) {
       const value = Number(argv[++i]);
       if (Number.isFinite(value) && value >= 0 && value <= 1) flags.minRouteAccuracy = value;

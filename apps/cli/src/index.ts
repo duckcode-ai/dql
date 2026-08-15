@@ -268,7 +268,7 @@ const COMMAND_HELP: Record<string, string> = {
 
   Usage:
     dql eval [path] [--format json]
-    dql eval [path] --min-route-accuracy <0..1> --min-refusal <0..1>
+    dql eval [path] --min-route-accuracy <0..1> --min-refusal <0..1> --min-candidate-recall <0..1>
     dql eval [path] --no-examples
     dql eval [path] --init          Write a starter eval/golden.yaml template
 

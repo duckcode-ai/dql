@@ -111,6 +111,12 @@ export interface EvalCaseResult {
   refusalMatch?: boolean;
   /** Question-plan shape outcomes (metric terms + member filters + evidence). */
   planShapeMatch?: boolean;
+  /**
+   * Was the expected block RETRIEVED at all, regardless of whether the router
+   * then chose it? Separates a retrieval miss from a routing miss — without it
+   * a drop in `blockSelectionAccuracy` cannot tell you which half broke.
+   */
+  retrievedExpectedBlock?: boolean;
   failures: string[];
   trace: EvalTraceStage[];
 }
@@ -133,6 +139,12 @@ export interface EvalScores {
   blockSelectionAccuracy: number | null;
   /** grain-match precision: correct grain / cases that expected a specific grain. */
   grainMatchPrecision: number | null;
+  /**
+   * executable candidate recall: expected block present in the retrieved
+   * context / cases that expected a specific block. The router can only choose
+   * from what retrieval surfaced, so this bounds every selection metric above.
+   */
+  executableCandidateRecall: number | null;
   /** refusal precision: true refusals / all router refusals across the set. */
   refusalPrecision: number | null;
   /** refusal recall: refusals correctly produced / cases that expected a refusal. */
@@ -156,7 +168,7 @@ export interface EvalReport {
   ok: boolean;
   scores: EvalScores;
   distributions: EvalDistributions;
-  thresholds: { minRouteAccuracy: number | null; minRefusal: number | null; minAnswerRate: number | null };
+  thresholds: { minRouteAccuracy: number | null; minRefusal: number | null; minAnswerRate: number | null; minCandidateRecall: number | null };
   results: EvalCaseResult[];
 }
 
@@ -243,6 +255,16 @@ export function scoreCase(
   const hasBlockingMissingContext = (plan.missingContext ?? []).some(
     (item) => item.severity === 'blocking',
   );
+  // Certified block keys are minted as `dql:block:<name>`.
+  //
+  // Only measured when retrieval actually returned objects. An empty pack means
+  // recall is UNKNOWN, not zero — scoring it as a miss would turn every
+  // stubbed or context-free plan into a false retrieval failure.
+  const retrievedObjects = plan.contextPack?.objects ?? [];
+  const retrievedExpectedBlock = testCase.expectBlock === undefined || retrievedObjects.length === 0
+    ? undefined
+    : retrievedObjects.some((object) =>
+      blockNameFromObjectKey(object.objectKey) === testCase.expectBlock);
 
   const failures: string[] = [];
 
@@ -274,6 +296,10 @@ export function scoreCase(
     if (!blockMatch) {
       failures.push(`block expected ${testCase.expectBlock}, got ${actualBlock ?? 'none'}`);
     }
+  }
+
+  if (retrievedExpectedBlock === false) {
+    failures.push(`retrieval did not surface expected block ${testCase.expectBlock}`);
   }
 
   let grainMatch: boolean | undefined;
@@ -348,6 +374,7 @@ export function scoreCase(
     grainMatch,
     refusalMatch,
     planShapeMatch,
+    ...(retrievedExpectedBlock !== undefined ? { retrievedExpectedBlock } : {}),
     failures,
   };
   return {
@@ -454,6 +481,10 @@ export function computeScores(results: EvalCaseResult[]): EvalScores {
       blockCases.length,
     ),
     grainMatchPrecision: ratio(grainCases.filter((r) => r.grainMatch).length, grainCases.length),
+    executableCandidateRecall: ratio(
+      blockCases.filter((r) => r.retrievedExpectedBlock).length,
+      blockCases.length,
+    ),
     refusalPrecision: ratio(routerRefusedCorrectly.length, routerRefused.length),
     refusalRecall: ratio(
       refusalExpected.filter((r) => r.refusalMatch).length,
@@ -629,6 +660,7 @@ export async function runEvalHarness(
     minRouteAccuracy: number | null;
     minRefusal: number | null;
     minAnswerRate?: number | null;
+    minCandidateRecall?: number | null;
   },
 ): Promise<EvalReport> {
   const manifest = buildManifest({
@@ -672,13 +704,15 @@ export async function runEvalHarness(
   const scores = computeScores(results.length > 0 ? results : ZERO_RESULTS);
   const distributions = computeDistributions(results.length > 0 ? results : ZERO_RESULTS);
   const minAnswerRate = options.minAnswerRate ?? null;
-  const ok = meetsThresholds(scores, options.minRouteAccuracy, options.minRefusal, minAnswerRate);
+  const minCandidateRecall = options.minCandidateRecall ?? null;
+  const ok = meetsThresholds(scores, options.minRouteAccuracy, options.minRefusal, minAnswerRate, minCandidateRecall);
 
   return {
     ok,
     scores,
     distributions,
     thresholds: {
+      minCandidateRecall,
       minRouteAccuracy: options.minRouteAccuracy,
       minRefusal: options.minRefusal,
       minAnswerRate,
@@ -693,6 +727,7 @@ export function meetsThresholds(
   minRouteAccuracy: number | null,
   minRefusal: number | null,
   minAnswerRate: number | null = null,
+  minCandidateRecall: number | null = null,
 ): boolean {
   if (
     minRouteAccuracy !== null &&
@@ -705,6 +740,15 @@ export function meetsThresholds(
     return false;
   }
   if (minAnswerRate !== null && scores.answerRate !== null && scores.answerRate < minAnswerRate) {
+    return false;
+  }
+  // Recall bounds every selection metric: the router can only choose from what
+  // retrieval surfaced, so a drop here explains a drop there.
+  if (
+    minCandidateRecall !== null &&
+    scores.executableCandidateRecall !== null &&
+    scores.executableCandidateRecall < minCandidateRecall
+  ) {
     return false;
   }
   return true;
@@ -801,12 +845,14 @@ export async function runEval(
 
   const includeBlockExamples = !flags.noExamples;
   const minRouteAccuracy = flags.minRouteAccuracy ?? null;
+  const minCandidateRecallFlag = flags.minCandidateRecall ?? null;
   const minRefusal = flags.minRefusal ?? null;
   const minAnswerRate = flags.minAnswerRate ?? null;
 
   const report = await runEvalHarness(projectRoot, {
     includeBlockExamples,
     minRouteAccuracy,
+    minCandidateRecall: minCandidateRecallFlag,
     minRefusal,
     minAnswerRate,
   });
@@ -848,6 +894,7 @@ function printReport(report: EvalReport): void {
   console.log('  ' + '-'.repeat(50));
   console.log(`  Cases passed:            ${scores.passed}/${scores.total}`);
   console.log(`  Answer rate:             ${formatRate(scores.answerRate)}`);
+  console.log(`  Candidate recall:        ${formatRate(scores.executableCandidateRecall)}`);
   console.log(`  Route accuracy:          ${formatRate(scores.routeAccuracy)}`);
   console.log(`  Block-selection accuracy:${formatRate(scores.blockSelectionAccuracy).padStart(7)}`);
   console.log(`  Grain-match precision:   ${formatRate(scores.grainMatchPrecision)}`);
@@ -862,9 +909,12 @@ function printReport(report: EvalReport): void {
   console.log(`  Research:                ${formatCountAndShare(distributions.actualRoutes.research, scores.total)}`);
 
   const t = report.thresholds;
-  if (t.minRouteAccuracy !== null || t.minRefusal !== null || t.minAnswerRate !== null) {
+  if (t.minRouteAccuracy !== null || t.minRefusal !== null || t.minAnswerRate !== null || t.minCandidateRecall !== null) {
     console.log('\n  Thresholds');
     console.log('  ' + '-'.repeat(50));
+    if (t.minCandidateRecall !== null) {
+      console.log(`  --min-candidate-recall ${t.minCandidateRecall}  (candidate recall ${formatRate(scores.executableCandidateRecall)})`);
+    }
     if (t.minRouteAccuracy !== null) {
       console.log(`  --min-route-accuracy ${t.minRouteAccuracy}  (route accuracy ${formatRate(scores.routeAccuracy)})`);
     }
