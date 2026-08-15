@@ -1399,9 +1399,47 @@ export function collapseRedundantGovernedCandidates(
     candidate.semanticObjectType === 'entity'
     || [candidate.id, candidate.qualifiedId ?? ''].some((identity) =>
       /(^|:)entity(:|::)/i.test(identity));
-  const kindFiltered = wantsAttribute && hasDimension
+  const entityFiltered = wantsAttribute && hasDimension
     ? byScore.filter((candidate) => !isEntityCandidate(candidate))
     : byScore;
+
+  // Within an attribute question, a candidate matching only a SUB-TOKEN of the
+  // requested field is a lexical decoy, not a competing reading. "What customer
+  // type is <member>?" dragged in `raw_products.type` and
+  // `orders.new_customer_orders` purely because they contain "type" and
+  // "customer", and two decoys are enough to trip the ambiguity gate and turn
+  // the lookup into an interrogation. Score how much of the question each
+  // candidate actually accounts for — including the fields a block declares,
+  // which is how the block that OUTPUTS `customer_type` outranks a column
+  // merely named `type` — and keep only the most specific matches.
+  const normalizedQuestion = normalizeMetricPhrase(question);
+  const phraseSpecificity = (candidate: AgentEvidenceCandidate): number => {
+    const terms = [
+      candidate.name,
+      ...(candidate.aliases ?? []),
+      ...(candidate.dimensions ?? []),
+      ...(candidate.compatibilityFacts ?? [])
+        .filter((fact) => fact.startsWith('output: '))
+        .map((fact) => fact.slice('output: '.length)),
+    ].map((term) => normalizeMetricPhrase(String(term ?? '').split(/[.:/]/).at(-1) ?? ''));
+    let best = 0;
+    for (const term of terms) {
+      if (!term) continue;
+      const matches = normalizedQuestion === term
+        || normalizedQuestion.startsWith(`${term} `)
+        || normalizedQuestion.endsWith(` ${term}`)
+        || normalizedQuestion.includes(` ${term} `);
+      if (matches) best = Math.max(best, term.split(' ').length);
+    }
+    return best;
+  };
+  const specificity = new Map(entityFiltered.map((candidate) => [candidate.id, phraseSpecificity(candidate)]));
+  const bestSpecificity = Math.max(0, ...specificity.values());
+  // Only prune when something matched a MULTI-word field name. A single shared
+  // token is not enough evidence to call the others decoys.
+  const kindFiltered = wantsAttribute && hasDimension && bestSpecificity >= 2
+    ? entityFiltered.filter((candidate) => (specificity.get(candidate.id) ?? 0) === bestSpecificity)
+    : entityFiltered;
 
   const representatives = new Map<string, AgentEvidenceCandidate>();
   const passthrough: AgentEvidenceCandidate[] = [];

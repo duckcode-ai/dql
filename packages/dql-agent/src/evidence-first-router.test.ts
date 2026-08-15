@@ -504,7 +504,26 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
         name: 'customer_type',
         relevanceScore: 0.7,
       }),
-      // A different field entirely; it must survive.
+    ]).map((entry) => entry.id);
+
+    expect(survivors).toContain('dql:block:customer_profile');
+    expect(survivors).not.toContain('dbt:column:customers.customer_type');
+    expect(survivors).not.toContain('semantic:dimension:customers.customer_type');
+  });
+
+  it('supersedes only what a block actually publishes, leaving unrelated fields alone', () => {
+    // Guards the coverage rule against over-collapsing. The question is not an
+    // attribute lookup, so decoy pruning is inactive and this isolates coverage.
+    const survivors = collapseRedundantGovernedCandidates('show me revenue', [
+      candidate({
+        id: 'dql:block:customer_profile',
+        kind: 'certified_block',
+        trustTier: 'certified',
+        name: 'customer_profile',
+        relevanceScore: 0.9,
+        dimensions: ['customer_name', 'customer_type'],
+        compatibilityFacts: ['output: customer_name', 'output: customer_type'],
+      }),
       candidate({
         id: 'dbt:column:raw_products.type',
         qualifiedId: 'raw_products',
@@ -514,10 +533,39 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
       }),
     ]).map((entry) => entry.id);
 
-    expect(survivors).toContain('dql:block:customer_profile');
-    expect(survivors).not.toContain('dbt:column:customers.customer_type');
-    expect(survivors).not.toContain('semantic:dimension:customers.customer_type');
+    // `type` is not a field the block publishes, so coverage must not touch it.
     expect(survivors).toContain('dbt:column:raw_products.type');
+    expect(survivors).toContain('dql:block:customer_profile');
+  });
+
+  it('AGT-031 drops lexical decoys that match only a sub-token of the requested field', () => {
+    // "customer type" pulled in a products column named `type` and a metric
+    // named `new_customer_orders`. Two decoys are enough to trip the ambiguity
+    // gate and turn an ordinary lookup into an interrogation.
+    const survivors = collapseRedundantGovernedCandidates('what customer type is joe', [
+      candidate({
+        id: 'dql:block:customer_profile',
+        kind: 'certified_block',
+        trustTier: 'certified',
+        name: 'customer_profile',
+        relevanceScore: 0.9,
+        dimensions: ['customer_name', 'customer_type'],
+        compatibilityFacts: ['output: customer_type'],
+      }),
+      candidate({
+        id: 'semantic:dimension:customers.customer_type',
+        kind: 'semantic_member',
+        semanticObjectType: 'dimension',
+        name: 'customer_type',
+        relevanceScore: 0.85,
+      }),
+      candidate({ id: 'dbt:column:raw_products.type', qualifiedId: 'raw_products', kind: 'sql_column', name: 'type', relevanceScore: 0.6 }),
+      candidate({ id: 'semantic:metric:orders.new_customer_orders', kind: 'semantic_metric', semanticObjectType: 'metric', name: 'new_customer_orders', relevanceScore: 0.55 }),
+    ]).map((entry) => entry.id);
+
+    // The block accounts for the full requested field; the decoys account for
+    // one shared word each.
+    expect(survivors).toEqual(['dql:block:customer_profile']);
   });
 
   it('AGT-031 does not preempt an attribute lookup that merely contains the word "top"', async () => {
