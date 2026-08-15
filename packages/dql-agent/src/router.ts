@@ -2205,9 +2205,27 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
                 // supplied an entity. Preserve the precise follow-up after the
                 // bounded call so this does not regress into a generic block
                 // or a repeated customer-count answer.
+                //
+                // Gate on the MEANING MODEL's classification, not on
+                // `questionTypeFromText`. The text heuristic only looks for
+                // words like "top", so it also claimed "what region does the
+                // top customer belong to" (an attribute lookup) and "top
+                // products in Philadelphia and the customers who bought them"
+                // (a compound turn) — both were preempted here and never
+                // routed, even though the bounded call had just resolved them.
+                //
+                // A resolution that named an execution target is honored:
+                // `preventDegenerateRankingResolution` above has already
+                // downgraded a same-grain entity count to `clarify`, so
+                // anything still standing is a governed measure the model
+                // selected from qualified candidate ids.
+                const resolutionResolvedRanking = safeResolution.recommendedRoute !== 'clarify'
+                  && Boolean(safeResolution.recommendedExecutionId
+                    || safeResolution.selectedConceptIds.length > 0);
                 if (
-                  questionTypeFromText(request.question) === 'ranking'
+                  safeResolution.questionType === 'ranking'
                   && !hasExplicitRankingMeasure(request.question, evidence)
+                  && !resolutionResolvedRanking
                 ) {
                   return bareRankingClarification(
                     base,

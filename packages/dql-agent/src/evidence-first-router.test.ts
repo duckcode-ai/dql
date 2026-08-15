@@ -473,6 +473,76 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     expect(decision.resolvedAnalyticalPlan).toBeUndefined();
   });
 
+  it('AGT-031 does not preempt an attribute lookup that merely contains the word "top"', async () => {
+    const region = candidate({
+      id: 'semantic:dimension:customers.region',
+      kind: 'semantic_member',
+      name: 'region',
+      dimensions: ['customer'],
+      compatibility: 'compatible',
+      relevanceScore: 0.95,
+    });
+    // The meaning model classifies this as a value lookup, not a ranking.
+    const resolveMeaning = vi.fn(async () => resolved({
+      interpretedQuestion: 'Look up the region attribute of the named customer.',
+      questionType: 'value',
+      selectedConceptIds: [region.id],
+      recommendedExecutionId: region.id,
+      queryIntent: { measures: [], dimensions: ['region'], filters: [], order: 'desc', limit: 10 },
+      recommendedRoute: 'semantic',
+    }));
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-attribute-lookup',
+        sourceFingerprint: 'sha256:attribute-lookup',
+        parsedIntent: { measures: [], dimensions: ['region'], filters: [] },
+        candidates: [region],
+      }),
+    });
+
+    const decision = await router.decide(request('what region does the top customer belong to'));
+
+    // The text heuristic sees "top" and used to send this to the ranking
+    // clarification, so an attribute lookup could never route.
+    expect(decision.action).not.toBe('clarify');
+    expect(decision.clarifyingQuestion).not.toBe('Top by which governed metric?');
+  });
+
+  it('AGT-030 honors a ranking resolution that already named a governed measure', async () => {
+    const revenue = candidate({
+      id: 'semantic:metric:revenue',
+      kind: 'semantic_metric',
+      name: 'revenue',
+      aggregation: 'sum',
+      dimensions: ['customer'],
+      compatibility: 'compatible',
+      relevanceScore: 0.9,
+    });
+    const resolveMeaning = vi.fn(async () => resolved({
+      questionType: 'ranking',
+      selectedConceptIds: [revenue.id],
+      recommendedExecutionId: revenue.id,
+      queryIntent: { measures: [revenue.id], dimensions: ['customer'], filters: [], order: 'desc', limit: 10 },
+      recommendedRoute: 'semantic',
+    }));
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-resolved-ranking',
+        sourceFingerprint: 'sha256:resolved-ranking',
+        parsedIntent: { measures: [], dimensions: ['customer'], filters: [], order: 'desc', limit: 10 },
+        candidates: [revenue],
+      }),
+    });
+
+    const decision = await router.decide(request('who are the top customers'));
+
+    // A measure the model selected from qualified candidates is not thrown away.
+    expect(decision.action).not.toBe('clarify');
+    expect(decision.resolvedAnalyticalPlan?.selectedConceptIds).toContain(revenue.id);
+  });
+
   it('AGT-030 offers the compatible ranking measures and never the same-grain entity count', async () => {
     const resolveMeaning = vi.fn(async () => clarifyingRanking());
     const router = createHybridRouter({
