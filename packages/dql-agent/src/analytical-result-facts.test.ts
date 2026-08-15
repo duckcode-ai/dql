@@ -137,6 +137,49 @@ describe('receipt-backed analytical facts and narration (AGT-020)', () => {
     expect(validateAnalyticalNarrativeClaims({ factSet: built.factSet, claims: narrative.claims })).toMatchObject({ status: 'valid' });
   });
 
+  it('AGT-020 rejects a claim that an entity is absent from the source', () => {
+    // The live failure: a run returned 200 of 500 customers with no member
+    // filter, and the narrator reported a customer who IS in the warehouse as
+    // missing. No result fact can establish absence from the SOURCE — facts
+    // describe a bounded projection.
+    const built = buildAnalyticalResultFacts({ frame: frame(), graph: graph(), receipt: receipt(), columns: receipt().outputColumns, rows });
+    if (built.status !== 'ready') throw new Error(built.reason);
+    const valueFact = built.factSet.facts.find((fact) => fact.kind === 'metric_value')!;
+
+    expect(validateAnalyticalNarrativeClaims({
+      factSet: built.factSet,
+      claims: [{
+        claimId: 'absent',
+        factIds: [valueFact.factId],
+        text: 'Wesley Jenkins is not available in the provided customer data.',
+      }],
+    })).toMatchObject({ status: 'invalid', code: 'ABSENCE_CLAIM' });
+
+    // Every caveat must still be cited, so these cases carry them.
+    const allCaveats = built.factSet.facts.filter((fact) => fact.kind === 'caveat');
+    const caveatClaims = allCaveats.map((fact, index) => ({
+      claimId: `caveat-${index}`, factIds: [fact.factId], text: 'A reporting caveat applies.',
+    }));
+
+    // A rendered null VALUE is not an absence claim about the world.
+    expect(validateAnalyticalNarrativeClaims({
+      factSet: built.factSet,
+      claims: [
+        { claimId: 'value', factIds: [valueFact.factId], text: 'Zoom — Revenue: 100.10; change: not available.' },
+        ...caveatClaims,
+      ],
+    })).toMatchObject({ status: 'valid' });
+
+    // A cited caveat still licenses its own limitation wording.
+    expect(validateAnalyticalNarrativeClaims({
+      factSet: built.factSet,
+      claims: [
+        { claimId: 'lim', factIds: [allCaveats[0]!.factId], text: 'A comparison value is unavailable in the results.' },
+        ...caveatClaims.slice(1),
+      ],
+    })).toMatchObject({ status: 'valid' });
+  });
+
   it('rejects invented numbers, causal wording, hidden caveats, and receipt drift', () => {
     const built = buildAnalyticalResultFacts({ frame: frame(), graph: graph(), receipt: receipt(), columns: receipt().outputColumns, rows });
     if (built.status !== 'ready') throw new Error(built.reason);

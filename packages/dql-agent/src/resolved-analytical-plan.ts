@@ -283,9 +283,19 @@ export function buildResolvedAnalyticalPlan(
   }));
   const capability = resolveCapability(input.resolution, executionCandidate, measures, dimensions, filters);
   const bindingGaps = bindingMissingInformation(measures, dimensions, filters);
+  // The reader named a member that no grounding lane could bind. Answering the
+  // question WITHOUT it silently changes what was asked — "what customer type
+  // is Wesley Jenkins" became "list every customer" — so the plan carries it as
+  // a gap rather than dropping it. Live value lookup is opt-in per project, so
+  // the remedy is named here instead of leaving a bare failure.
+  const unboundMembers = filters.length === 0 ? (input.evidence.unboundMemberTerms ?? []) : [];
+  const unboundMemberGaps = unboundMembers.length > 0
+    ? [`The named value ${unboundMembers.map((term) => `“${term}”`).join(' and ')} could not be bound to a governed member, so it was not applied as a filter. Enable live value grounding (agent.runtimeValueGrounding.mode = "safe_automatic" with a searchSafeColumns allowlist) or filter on a modeled dimension.`]
+    : [];
   const missingInformation = uniqueSorted([
     ...input.resolution.missingInformation,
     ...bindingGaps,
+    ...unboundMemberGaps,
     ...(capability === 'blocked' && input.resolution.missingInformation.length === 0 && bindingGaps.length === 0
       ? [`The selected ${input.resolution.recommendedRoute} capability is not executable for this analytical tuple.`]
       : []),

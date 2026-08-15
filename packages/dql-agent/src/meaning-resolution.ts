@@ -76,6 +76,13 @@ export interface AgentRetrievalEvidence {
    */
   clarificationCandidates?: AgentEvidenceCandidate[];
   parsedIntent?: Partial<MeaningQueryIntent>;
+  /**
+   * Member values the reader named that could NOT be bound to a governed value.
+   * Live value grounding is opt-in per project, so with it disabled a named
+   * member silently vanished from the plan and the run answered as though no
+   * member had been asked for.
+   */
+  unboundMemberTerms?: string[];
   /** Snapshot-compiled policy only; Skill prose never enters route authority. */
   analyticalPolicies?: AnalyticalPolicyContract[];
   diagnostics?: {

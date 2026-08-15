@@ -303,11 +303,33 @@ export function toAgentRetrievalEvidence(
   );
   attachRelationshipEvidence(candidates, options.contextObjects ?? []);
   attachRelationshipEvidence(clarificationCandidates, options.contextObjects ?? []);
+  // A member the reader named that survived NO grounding lane. Live value
+  // lookup is opt-in per project (`agent.runtimeValueGrounding`), so with it
+  // disabled "What customer type is Wesley Jenkins?" produced zero grounded
+  // filters and the run quietly returned every customer instead of saying it
+  // could not bind him.
   const groundedFilters = [
     ...trustedBindings.filters,
     ...groundedMemberFilters(questionPlan, candidates, options.contextObjects ?? []),
   ].filter((filter, index, all) => all.findIndex((other) =>
     other.field === filter.field && other.value === filter.value) === index);
+  const groundedValues = new Set(groundedFilters.map((filter) => normalizeText(String(filter.value))));
+  const unboundCandidates = uniqueStrings(
+    (questionPlan.requestedShape.filters ?? [])
+      .filter((term) => term.trim().length > 0 && !groundedValues.has(normalizeText(term))),
+  );
+  // The planner emits stemmed variants beside the literal ("Wesley Jenkins" and
+  // "wesley jenkin"). Naming both back to the reader reads like two different
+  // missing values, so keep only the longest form of each.
+  const unboundMemberTerms = unboundCandidates.filter((term) => {
+    const normalized = normalizeText(term);
+    return !unboundCandidates.some((other) => {
+      const otherNormalized = normalizeText(other);
+      return otherNormalized !== normalized
+        && otherNormalized.length > normalized.length
+        && otherNormalized.startsWith(normalized);
+    });
+  });
   return {
     snapshotId: options.snapshotId,
     sourceFingerprint: options.sourceFingerprint,
@@ -315,6 +337,7 @@ export function toAgentRetrievalEvidence(
     analyticalPolicies: options.analyticalPolicies,
     candidates,
     ...(clarificationCandidates.length > 0 ? { clarificationCandidates } : {}),
+    ...(unboundMemberTerms.length > 0 ? { unboundMemberTerms } : {}),
     parsedIntent: {
       measures: questionPlan.requestedShape.measures,
       dimensions: questionPlan.requestedShape.dimensions,

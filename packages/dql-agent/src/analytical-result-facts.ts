@@ -77,7 +77,7 @@ export type AnalyticalNarrativeValidationResult =
   | { status: 'valid'; citedFactIds: string[] }
   | {
       status: 'invalid';
-      code: 'UNKNOWN_FACT' | 'UNSUPPORTED_NUMBER' | 'CAUSAL_CLAIM' | 'MATERIAL_CAVEAT_HIDDEN';
+      code: 'UNKNOWN_FACT' | 'UNSUPPORTED_NUMBER' | 'CAUSAL_CLAIM' | 'MATERIAL_CAVEAT_HIDDEN' | 'ABSENCE_CLAIM';
       reason: string;
       claimId?: string;
     };
@@ -281,6 +281,25 @@ export function renderDeterministicAnalyticalNarrative(input: {
   return deepFreeze({ version: 1, factSetId: input.factSet.factSetId, text, claims });
 }
 
+/**
+ * Does this sentence assert that something is ABSENT FROM THE SOURCE?
+ *
+ * Two parts are required, because either alone produces false positives. A
+ * deterministic row renders a null comparison as `change: not available`, which
+ * is a VALUE, not a claim about the world; and plenty of harmless sentences
+ * mention "the data". Only the combination — absence wording plus a reference
+ * to the data/result itself — asserts non-existence, as in "Wesley Jenkins is
+ * not available in the provided customer data".
+ */
+const ABSENCE_PHRASE =
+  /\b(?:not\s+(?:available|present|found|listed|included|shown)|does\s+not\s+(?:appear|exist)|do\s+not\s+(?:appear|exist)|(?:is|are|was|were)\s+(?:absent|unavailable|missing)|could\s+not\s+be\s+found|nothing\s+(?:found|matched)|no\s+(?:records?|data|information|matches?|entries))\b/i;
+const SOURCE_SCOPE =
+  /\b(?:in|from|within)\s+(?:the\s+)?(?:provided\s+|available\s+|governed\s+|current\s+)?(?:\w+\s+){0,2}(?:data|dataset|datasets|results?|records?|rows|tables?|customers|dimensions?)\b/i;
+
+function assertsAbsenceFromSource(text: string): boolean {
+  return ABSENCE_PHRASE.test(text) && SOURCE_SCOPE.test(text);
+}
+
 export function validateAnalyticalNarrativeClaims(input: {
   factSet: AnalyticalResultFactSetV1;
   claims: AnalyticalNarrativeClaimV1[];
@@ -297,6 +316,30 @@ export function validateAnalyticalNarrativeClaims(input: {
     });
     if (claimFacts.length !== claim.factIds.length || claimFacts.length === 0) {
       return { status: 'invalid', code: 'UNKNOWN_FACT', reason: 'Every narrative claim must cite existing result facts.', claimId: claim.claimId };
+    }
+    // An ABSENCE claim cannot be supported by a result fact set. Every fact
+    // asserts what IS in a bounded projection of the result; none of them can
+    // establish that something is missing from the SOURCE. A run that returned
+    // 200 of 500 customers led the narrator to report a real customer —
+    // present in the warehouse — as "not available in the provided customer
+    // data", which is worse than refusing to answer.
+    //
+    // A caveat fact that explicitly encodes missingness is the one legitimate
+    // basis for saying a value is absent, so a claim citing one is allowed.
+    if (assertsAbsenceFromSource(claim.text)) {
+      // A cited CAVEAT fact is the licensed basis for a limitation statement —
+      // "a comparison value is unavailable", "percentage change is not
+      // available" are caveats the fact set does establish. What it can never
+      // establish is that an ENTITY is absent from the source.
+      const caveatCited = claimFacts.some((fact) => fact.kind === 'caveat');
+      if (!caveatCited) {
+        return {
+          status: 'invalid',
+          code: 'ABSENCE_CLAIM',
+          reason: 'Result facts describe a bounded result and cannot establish that a value is absent from the source.',
+          claimId: claim.claimId,
+        };
+      }
     }
     claim.factIds.forEach((factId) => cited.add(factId));
     const allowedNumbers = new Set(
