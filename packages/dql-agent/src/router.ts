@@ -1398,7 +1398,44 @@ export function collapseRedundantGovernedCandidates(
       representatives.set(key, candidate);
     }
   }
-  return [...passthrough, ...representatives.values()].sort((left, right) =>
+  // A certified block that already OUTPUTS an attribute is not a competing
+  // MEANING of that attribute — it is the same reading at higher authority.
+  // Keeping both turned an ordinary attribute lookup ("what customer type is
+  // <member>?") into a "Which governed meaning should DQL bind: customer_profile
+  // or customers.customer_type?" interrogation, even though the block declares
+  // that exact output, sits at the requested grain, and permits the member
+  // filter. The cascade already says certified outranks semantic for one
+  // reading; this stops the tie from being mistaken for ambiguity.
+  const certifiedCoverage = passthrough
+    .filter((candidate) => candidate.kind === 'certified_block')
+    .map((candidate) => new Set([
+      ...(candidate.dimensions ?? []),
+      ...(candidate.compatibilityFacts ?? [])
+        .filter((fact) => fact.startsWith('output: '))
+        .map((fact) => fact.slice('output: '.length)),
+    ].map((value) => normalizeMetricPhrase(String(value).split(/[.:/]/).at(-1) ?? ''))
+      .filter(Boolean)));
+  const survivingPassthrough = certifiedCoverage.length === 0
+    ? passthrough
+    : passthrough.filter((candidate) => {
+      // The same field can arrive three ways — the block's declared output, the
+      // semantic dimension, and the raw warehouse/dbt column. Only the first is
+      // a governed meaning; the other two are lower-trust representations of it.
+      const supersedable = candidate.semanticObjectType === 'dimension'
+        || candidate.kind === 'sql_column';
+      if (!supersedable) return true;
+      // A column's qualified identity points at its PARENT RELATION, so
+      // `candidateLeafName` yields "customers" for `customers.customer_type`.
+      // Match the candidate's own name as well, or a raw column is never
+      // recognised as the field a block already publishes.
+      const leaves = [
+        normalizeMetricPhrase(String(candidate.name ?? '').split(/[.:/]/).at(-1) ?? ''),
+        normalizeMetricPhrase(candidateLeafName(candidate)),
+      ].filter(Boolean);
+      return !leaves.some((leaf) => certifiedCoverage.some((outputs) => outputs.has(leaf)));
+    });
+
+  return [...survivingPassthrough, ...representatives.values()].sort((left, right) =>
     right.relevanceScore - left.relevanceScore || left.id.localeCompare(right.id));
 }
 

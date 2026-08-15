@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { answerAnywayRoute, selectRoute, type AgentRunRequest } from "./agent-run-engine.js";
 import type { AgentEvidenceCandidate, AgentRetrievalEvidence, MeaningResolution } from "./meaning-resolution.js";
-import { createHybridRouter } from "./router.js";
+import { collapseRedundantGovernedCandidates, createHybridRouter } from "./router.js";
 import { buildAnalysisQuestionPlan } from './metadata/analysis-planner.js';
 
 const request = (question: string): AgentRunRequest => ({ question });
@@ -471,6 +471,53 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
       clarifyingQuestion: 'Top by which governed metric?',
     });
     expect(decision.resolvedAnalyticalPlan).toBeUndefined();
+  });
+
+  it('AGT-031 collapses lower-trust copies of a field a certified block already publishes', () => {
+    // The same field arrives three ways: the block's declared output, the
+    // semantic dimension, and the raw dbt/warehouse column. Treating them as
+    // three governed MEANINGS turned an attribute lookup into a "which meaning
+    // should DQL bind" interrogation.
+    const survivors = collapseRedundantGovernedCandidates('what customer type is joe', [
+      candidate({
+        id: 'dql:block:customer_profile',
+        kind: 'certified_block',
+        trustTier: 'certified',
+        name: 'customer_profile',
+        relevanceScore: 0.9,
+        dimensions: ['customer_name', 'customer', 'customer_type'],
+        compatibilityFacts: ['output: customer_name', 'output: customer_type'],
+      }),
+      // A column's qualified identity points at its PARENT RELATION, so this
+      // one only matches on its own name.
+      candidate({
+        id: 'dbt:column:customers.customer_type',
+        qualifiedId: 'customers',
+        kind: 'sql_column',
+        name: 'customer_type',
+        relevanceScore: 0.8,
+      }),
+      candidate({
+        id: 'semantic:dimension:customers.customer_type',
+        kind: 'semantic_member',
+        semanticObjectType: 'dimension',
+        name: 'customer_type',
+        relevanceScore: 0.7,
+      }),
+      // A different field entirely; it must survive.
+      candidate({
+        id: 'dbt:column:raw_products.type',
+        qualifiedId: 'raw_products',
+        kind: 'sql_column',
+        name: 'type',
+        relevanceScore: 0.6,
+      }),
+    ]).map((entry) => entry.id);
+
+    expect(survivors).toContain('dql:block:customer_profile');
+    expect(survivors).not.toContain('dbt:column:customers.customer_type');
+    expect(survivors).not.toContain('semantic:dimension:customers.customer_type');
+    expect(survivors).toContain('dbt:column:raw_products.type');
   });
 
   it('AGT-031 does not preempt an attribute lookup that merely contains the word "top"', async () => {
