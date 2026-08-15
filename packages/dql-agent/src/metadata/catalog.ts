@@ -2413,6 +2413,18 @@ function addManifestKnowledgeGraph(
     const displayName = knowledgeDisplayName(item.kind, item.localId, itemPayload);
     const objectKey = knowledgeMetadataKey(item.kind, displayName, item.id, item.source.system);
     keyByGraphId.set(item.id, objectKey);
+    // The registry emits an UNRESOLVED ALIAS beside the entity-qualified node
+    // for the same semantic member: `semantic::metric.jaffle_shop.revenue`
+    // (note the empty entity segment) beside `semantic:order_item:revenue`.
+    // The alias carries no aggregation, grain, or prose — its description is
+    // the raw dbt unique_id — so it can never be proven compatible, yet it
+    // competes for bounded retrieval and clarification slots with the node that
+    // can. 18 of 37 metrics in the commerce fixture were these.
+    //
+    // Skipping it is a no-op for meaning: it holds nothing the qualified node
+    // does not. The graph-id mapping above is still recorded so edges keep
+    // resolving. Anything carrying real payload is indexed as before.
+    if (isUnresolvedSemanticAlias(item.kind, item.id, itemPayload)) continue;
     const description = stringValue(itemPayload?.description)
       ?? stringValue(itemPayload?.businessContext)
       ?? itemAliases?.find((alias) => alias !== item.localId);
@@ -2517,6 +2529,35 @@ function addMetadataEdge(
 ): void {
   const key = `${edgeType}\u0000${fromKey}\u0000${toKey}`;
   if (!edges.has(key)) edges.set(key, { edgeType, fromKey, toKey, confidence: 1, payload: compactObject(payload) });
+}
+
+/**
+ * True for the registry's payload-less alias of a semantic member.
+ *
+ * A qualified semantic identity is `semantic:<entity>:<member>`. When the
+ * owning entity could not be resolved the registry still emits the node with an
+ * EMPTY entity segment — `semantic::metric.jaffle_shop.revenue` — carrying only
+ * the source's native id. Requiring an entity segment is the same
+ * entity-qualified identity rule the semantic catalog is built on.
+ *
+ * Anything holding real meaning (an aggregation, a label, an expression, or
+ * LLM context) is NOT an alias and is kept, even unqualified.
+ */
+function isUnresolvedSemanticAlias(
+  kind: string,
+  qualifiedId: string,
+  payload: Record<string, unknown> | undefined,
+): boolean {
+  if (!['metric', 'measure', 'dimension'].includes(kind)) return false;
+  if (!/^semantic::/.test(qualifiedId)) return false;
+  const record = payload ?? {};
+  return !record.aggregation
+    && !record.llmContext
+    && !record.label
+    && !record.expression
+    && !record.formula
+    && !record.dimensions
+    && !record.entities;
 }
 
 function knowledgeMetadataKey(kind: string, localId: string, qualifiedId: string, sourceSystem: string): string {

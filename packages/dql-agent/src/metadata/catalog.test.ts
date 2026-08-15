@@ -636,6 +636,63 @@ describe('local metadata catalog', () => {
     expect(unpinned.domainBriefing).toMatchObject({ domainId: 'growth', requiredFilters: ['is_test = false'] });
   });
 
+  it('AGT-030 does not index the registry alias beside an entity-qualified metric', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-metric-alias-'));
+    const graphObject = (over: Record<string, unknown>) => ({
+      kind: 'metric',
+      domainId: 'commerce',
+      status: 'active',
+      modelAreaIds: [],
+      ...over,
+    });
+    const manifest = {
+      manifestVersion: 3,
+      dqlVersion: 'test', generatedAt: '1970-01-01T00:00:00.000Z', project: 'test', projectRoot,
+      domains: { commerce: { id: 'commerce', name: 'Commerce', filePath: 'domains/commerce/domain.dql' } },
+      blocks: {}, businessViews: {}, notebooks: {}, dashboards: {}, apps: {}, metrics: {}, dimensions: {},
+      sources: {}, terms: {},
+      lineage: { nodes: [], edges: [] }, diagnostics: [],
+      dbtProvenance: { manifestPath: join(projectRoot, 'target/manifest.json'), manifestFingerprint: 'alias-snapshot', nodes: {}, metricFlow: {} },
+      modeling: {
+        mode: 'dbt-first', packages: {}, areas: {}, entities: {}, relationships: {}, contracts: {},
+        conformance: {}, rules: {}, interfaces: { exports: {}, imports: {} }, domainLineage: [],
+      },
+      knowledgeGraph: {
+        objects: {
+          // The real metric: entity-qualified, and it carries meaning.
+          'semantic:order_item:revenue': graphObject({
+            id: 'semantic:order_item:revenue',
+            localId: 'revenue',
+            aliases: ['revenue', 'Revenue'],
+            payload: { aggregation: 'simple', label: 'Revenue', entities: ['order_item'] },
+            source: { system: 'dbt', path: 'semantic-layer', fingerprint: 'f1', nativeId: 'revenue' },
+          }),
+          // The registry's unresolved alias for the SAME metric: empty entity
+          // segment, no meaning, dbt unique_id standing in for a description.
+          'semantic::metric.jaffle_shop.revenue': graphObject({
+            id: 'semantic::metric.jaffle_shop.revenue',
+            aliases: ['revenue', 'metric.jaffle_shop.revenue'],
+            payload: {},
+            source: { system: 'dbt', path: 'semantic-layer', fingerprint: 'f1', nativeId: 'metric.jaffle_shop.revenue' },
+          }),
+        },
+        objectRefs: [], edges: [], crossDomainRoutes: [], diagnostics: [],
+        sourceFingerprint: 'kg-alias', domainCapsules: {},
+      },
+    } as unknown as DQLManifest;
+
+    const snapshot = buildMetadataSnapshot(projectRoot, manifest);
+    const metricKeys = snapshot.objects
+      .filter((object) => object.objectType === 'semantic_metric')
+      .map((object) => object.objectKey);
+
+    // Two graph nodes, one real metric.
+    expect(metricKeys).toHaveLength(1);
+    const kept = snapshot.objects.find((object) => object.objectType === 'semantic_metric');
+    expect(kept?.payload?.aggregation).toBe('simple');
+    rmSync(projectRoot, { recursive: true, force: true });
+  });
+
   it('CTX-007 renders no briefing when the retrieved domain is ambiguous', async () => {
     // Inference is briefing-only and must stay conservative: two plausible
     // domains means no briefing rather than a confidently wrong one. It also
