@@ -1193,6 +1193,27 @@ function resolveAgentFollowUpContextRaw(
     context.outputColumns,
   );
   const priorResultRef = priorResultRefFromTurn(activeTurn, activeResult, priorResultColumns);
+  // The prior turn's actual rows, so a follow-up that computes ACROSS what was
+  // already shown ("show only the top 3", "of these, the average") is answered
+  // from those rows instead of a fresh warehouse query.
+  //
+  // `answer-loop.ts` declared `followUp.priorResult` and `tryCrossResultAnswer`
+  // read it, but NOTHING ever populated it — the cross-result path was dead in
+  // the repository. The turn already persists everything it needs: `columns`,
+  // the bounded `rowsSample`, `measureColumns` and the full `rowCount`.
+  const priorSampleRows = Array.isArray(activeResult?.rowsSample)
+    ? (activeResult.rowsSample as unknown[]).filter((row): row is unknown[] => Array.isArray(row))
+    : [];
+  const priorResultRowCount = typeof activeResult?.rowCount === 'number' ? activeResult.rowCount : undefined;
+  const priorMeasureColumns = arrayValue(activeResult?.measureColumns);
+  const priorResult = priorResultColumns?.length && priorSampleRows.length > 0
+    ? {
+        columns: priorResultColumns,
+        rows: priorSampleRows,
+        ...(priorMeasureColumns?.length ? { measureColumns: priorMeasureColumns } : {}),
+        ...(priorResultRowCount !== undefined ? { rowCount: priorResultRowCount } : {}),
+      }
+    : undefined;
   const priorDqlArtifact = cleanDqlArtifactReference(activeTurn?.dqlArtifact) ?? cleanDqlArtifactReference(context.dqlArtifact);
   const resolvedReferences = resolveConversationReferences(question, turns, priorResultValues);
   const focusedPriorResultValues = resolvedReferences.valuesByDimension ?? priorResultValues;
@@ -1245,6 +1266,7 @@ function resolveAgentFollowUpContextRaw(
         )
       : undefined,
     priorResultColumns: relativeComparison ? undefined : priorResultColumns,
+    ...(priorResult && !relativeComparison ? { priorResult } : {}),
     priorResultValues: focusedPriorResultValues,
     priorResultRef: relativeComparison ? undefined : priorResultRef,
     priorDqlArtifact: relativeComparison ? undefined : priorDqlArtifact,
