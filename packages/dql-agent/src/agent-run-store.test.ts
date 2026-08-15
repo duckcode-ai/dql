@@ -104,6 +104,39 @@ describe('SqliteAgentRunStore', () => {
     reopened.close();
   });
 
+  it('preserves a user cancellation as cancelled across restart', () => {
+    const path = join(tmp(), 'runs.sqlite');
+    const store = new SqliteAgentRunStore({ path });
+    const initial = progress('cancelled-restart');
+    store.saveProgress({
+      ...initial,
+      lifecycle: {
+        ...initial.lifecycle,
+        state: 'cancelling',
+        updatedAt: '2026-07-20T10:00:01Z',
+      },
+    });
+    store.close();
+
+    const reopened = new SqliteAgentRunStore({ path });
+    const cancelled = reopened.get('cancelled-restart');
+    expect(cancelled).toMatchObject({
+      route: 'generated_answer',
+      status: 'cancelled',
+      trustState: 'not_applicable',
+      stopReason: 'cancelled',
+      summary: 'Stopped by user.',
+      nextActions: [],
+      lifecycle: { state: 'terminal', phase: 'run.cancelled' },
+      diagnosticReceipt: {
+        failure: { code: 'RUN_CANCELLED', recoverable: false, safeActions: [] },
+      },
+    });
+    expect(cancelled?.events.at(-1)?.type).toBe('run.cancelled');
+    expect(cancelled?.artifacts).toEqual([]);
+    reopened.close();
+  });
+
   it('enforces retention on write (oldest pruned)', () => {
     const store = new SqliteAgentRunStore({ path: join(tmp(), 'runs.sqlite'), maxRuns: 20 });
     for (let index = 0; index < 30; index += 1) {

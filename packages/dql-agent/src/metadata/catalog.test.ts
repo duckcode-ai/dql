@@ -856,6 +856,41 @@ it('upgrades the vector index to a real embedder after the sync write, and is id
     }
   });
 
+  it('CTX-007 preserves source-lane candidates when graph object hydration fails', async () => {
+    writeQualifiedSemanticIdentityFixture(projectRoot);
+    const semanticLayer = resolveSemanticLayerWithDiagnostics({
+      provider: 'dbt',
+      projectPath: '.',
+    }, projectRoot).layer;
+    await ensureMetadataCatalogFresh(projectRoot, { force: true, semanticLayer });
+    const catalog = openMetadataCatalog(projectRoot);
+    const graphObjects = vi.spyOn(MetadataCatalog.prototype, 'getObjectsByKeys')
+      .mockImplementation(() => { throw new Error('graph hydration unavailable'); });
+    try {
+      const retrieved = await retrieveMetadataSnapshotCandidates(catalog, {
+        question: 'rollover balance amount',
+        domainContext: {
+          activeDomain: 'consumption',
+          ancestors: [], descendants: [],
+          allowedImports: [],
+          source: 'explicit_api',
+          confidence: 'high',
+          snapshotId: catalog.state('fingerprint')!,
+        },
+        limit: 20,
+      });
+      expect(retrieved.selected.length).toBeGreaterThan(0);
+      expect(retrieved.lanes.find((lane) => lane.lane === 'lexical')?.candidates.length).toBeGreaterThan(0);
+      expect(retrieved.fusion?.lanes?.graph).toMatchObject({
+        status: 'error',
+        error: 'graph hydration unavailable',
+      });
+    } finally {
+      graphObjects.mockRestore();
+      catalog.close();
+    }
+  });
+
   it('SKILL-001 / CTX-002 snapshots parsed skills, invalidates on source changes, and returns only domain/Area-eligible guidance', async () => {
     mkdirSync(join(projectRoot, 'skills'), { recursive: true });
     writeFileSync(join(projectRoot, 'skills', 'nba-ranking.skill.md'), `---
@@ -2042,6 +2077,37 @@ Use the finance model area.
       intent: 'entity_drilldown',
       reviewStatus: 'draft_ready',
     });
+  });
+
+  it('CTX-007 isolates follow-up source hydration failures from the live context lanes', async () => {
+    await ensureMetadataCatalogFresh(projectRoot, { force: true });
+    const sourceKey = 'dql:block:Top 10 Goal Scorers';
+    const hydration = vi.spyOn(MetadataCatalog.prototype, 'getObjectsByKeys')
+      .mockImplementation((keys) => {
+        if (keys.includes(sourceKey)) throw new Error('follow-up source hydration unavailable');
+        return [];
+      });
+    try {
+      const pack = await buildLocalContextPack(projectRoot, {
+        question: 'Which team did the top scorer belong to?',
+        followUp: {
+          kind: 'drilldown',
+          sourceBlockName: 'Top 10 Goal Scorers',
+          sourceQuestion: 'Who were the top scorers?',
+          dimensions: ['team'],
+        },
+        limit: 20,
+      });
+      expect(pack.objects.length).toBeGreaterThan(0);
+      expect(pack.retrievalDiagnostics.lanes?.some((lane) => lane.candidates.length > 0)).toBe(true);
+      expect(pack.retrievalDiagnostics.fusion?.lanes?.graph).toMatchObject({
+        status: 'error',
+        error: 'follow-up source hydration unavailable',
+      });
+      expect(pack.warnings).toContain('Graph/context enrichment lane unavailable: follow-up source hydration unavailable');
+    } finally {
+      hydration.mockRestore();
+    }
   });
 
   it('preserves prior DQL artifact context for generic previous-result follow-ups', async () => {

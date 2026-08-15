@@ -831,7 +831,7 @@ describe('deterministic analytical compatibility (CONTRACT-002 / AGT-017 / AGT-0
     });
   });
 
-  it('uses the zero-AI exact-metric path to produce a v2 plan and semantic route', async () => {
+  it('uses one bounded meaning call before the exact-metric v2 plan and semantic route', async () => {
     let resolverCalls = 0;
     const exactMetric = { ...metricCandidate, exactMatch: true };
     const router = createHybridRouter({
@@ -851,7 +851,7 @@ describe('deterministic analytical compatibility (CONTRACT-002 / AGT-017 / AGT-0
       question: 'What is revenue today?',
       intent: 'ad_hoc_ranking',
     });
-    expect(resolverCalls).toBe(0);
+    expect(resolverCalls).toBe(1);
     expect(decision.resolvedAnalyticalPlan).toMatchObject({
       schemaVersion: 2,
       capability: 'semantic_execution',
@@ -870,7 +870,7 @@ describe('deterministic analytical compatibility (CONTRACT-002 / AGT-017 / AGT-0
     });
   });
 
-  it('uses the zero-AI path for compatible multi-metric questions without dropping a metric', async () => {
+  it('uses one bounded meaning call for compatible multi-metric questions without dropping a metric', async () => {
     let resolverCalls = 0;
     const router = createHybridRouter({
       getEvidence: async () => ({
@@ -896,7 +896,7 @@ describe('deterministic analytical compatibility (CONTRACT-002 / AGT-017 / AGT-0
       intent: 'ad_hoc_ranking',
     });
 
-    expect(resolverCalls).toBe(0);
+    expect(resolverCalls).toBe(1);
     expect(decision.resolvedAnalyticalPlan).toMatchObject({
       schemaVersion: 2,
       capability: 'semantic_execution',
@@ -940,7 +940,7 @@ describe('deterministic analytical compatibility (CONTRACT-002 / AGT-017 / AGT-0
     });
   });
 
-  it('routes the named-customer and current/prior top-customer canonical plans with zero AI calls', async () => {
+  it('routes named-customer and current/prior top-customer plans after bounded meaning calls', async () => {
     let resolverCalls = 0;
     const exactMetric = { ...metricCandidate, exactMatch: true };
     const decide = async (question: string, parsedIntent: AgentRetrievalEvidence['parsedIntent']) => {
@@ -991,6 +991,6 @@ describe('deterministic analytical compatibility (CONTRACT-002 / AGT-017 / AGT-0
         ranking: { byPeriodId: 'current', limit: 5 },
       },
     });
-    expect(resolverCalls).toBe(0);
+    expect(resolverCalls).toBe(2);
   });
 });

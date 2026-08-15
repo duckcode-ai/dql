@@ -229,6 +229,7 @@ function eventLabel(event: AgentRunEvent): string | null {
     case 'artifact.created': return 'Produced the answer';
     case 'step.completed': return 'Step complete';
     case 'run.completed': return 'Done';
+    case 'run.cancelled': return 'Stopped by user';
     case 'run.failed': return 'Failed';
     default: return null;
   }
@@ -237,7 +238,7 @@ function eventLabel(event: AgentRunEvent): string | null {
 function eventDetail(event: AgentRunEvent): string | undefined {
   const payload = event.payload as { tool?: string; message?: string } | undefined;
   if (typeof payload?.tool === 'string') return `tool: ${payload.tool}`;
-  if (event.type === 'route.decided' || event.type === 'run.failed') return event.message || undefined;
+  if (event.type === 'route.decided' || event.type === 'run.failed' || event.type === 'run.cancelled') return event.message || undefined;
   return undefined;
 }
 

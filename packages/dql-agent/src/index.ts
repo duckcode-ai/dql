@@ -69,6 +69,42 @@ export type {
 } from "./skills/loader.js";
 export { seedDefaultSkills } from "./skills/defaults.js";
 export {
+  ANALYTICAL_ORCHESTRATION_CONTRACT_VERSION,
+  assertCanonicalResult,
+  buildAnalyticalTaskGraph,
+  buildAnalyticalTurnPlan,
+  buildCoverageGap,
+  buildResearchEvidenceLedger,
+  canonicalResultRows,
+  capResearchBranches,
+  fuseContextCandidates,
+  inferAnalyticalTurnKind,
+  normalizeCanonicalQueryResult,
+  normalizeAnalyticalExecutionFingerprint,
+  normalizeAnalyticalExecutionReceipt,
+  retrieveContextLanes,
+  splitAnalyticalTasks,
+  summarizeTaskOutcomes,
+} from './analytical-orchestration.js';
+export type {
+  AnalyticalAnswerSectionV1,
+  AnalyticalCoverageGapV1,
+  AnalyticalTaskKind,
+  AnalyticalTaskOutputContractV1,
+  AnalyticalTaskStatus,
+  AnalyticalTaskV1,
+  AnalyticalTaskOutcomeV1,
+  AnalyticalTurnAnswerV1,
+  AnalyticalTurnKind,
+  AnalyticalTurnPlanV1,
+  CanonicalQueryResultV1,
+  ContextCandidateCardV1,
+  ContextFusionDiagnosticsV1,
+  ContextFusionResultV1,
+  ResearchEvidenceLedgerV1,
+  ResearchLedgerEntryV1,
+} from './analytical-orchestration.js';
+export {
   APP_SOURCE_REUSABLE_TAG,
   hasGeneratedAppSourceOrigin,
   isExplicitlyReusableAppSource,
@@ -239,6 +275,9 @@ export {
   agentRouteDeadlineMs,
   agentRequestDeadlineMs,
   createAgentRunBudget,
+  AGENT_RUN_USER_CANCEL_CODE,
+  createAgentRunCancellationError,
+  isAgentRunUserCancellation,
 } from "./agent-run-engine.js";
 export type { FileAgentRunStoreOptions } from "./agent-run-engine.js";
 export {

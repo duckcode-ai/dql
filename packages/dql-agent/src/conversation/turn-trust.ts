@@ -72,6 +72,12 @@ function hasResult(turn: ConversationTurnTrustInput): boolean {
 }
 
 export function conversationTurnTrust(turn: ConversationTurnTrustInput): ConversationTurnTrust {
+  // A user cancellation is terminal but not an analytical block. It must not
+  // become follow-up authority, even when a partial result or prose was staged
+  // before the abort reached the executor.
+  if (turn.runStatus === 'cancelled' || turn.stopReason === 'cancelled' || turn.route === 'cancelled') {
+    return 'failed';
+  }
   if (turn.runStatus === 'blocked' || turn.trustLabel === 'blocked' || turn.route === 'blocked') {
     return 'blocked';
   }

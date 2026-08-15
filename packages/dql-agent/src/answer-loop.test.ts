@@ -4025,6 +4025,81 @@ describe("answer (block-first loop)", () => {
     expect(provider.messages.map((message) => message.content).join("\n\n")).toContain("customer_id");
   });
 
+  it('AGT-031 generates a metric-independent attribute lookup from a typed conversational member', async () => {
+    kg.rebuild([], []);
+    const question = 'what region he belongs to?';
+    const provider = new StubProvider([
+      '```json',
+      JSON.stringify({
+        summary: 'Jessica Richard belongs to Philadelphia.',
+        sql: [
+          'SELECT c.customer_name, c.region',
+          'FROM analytics.customers AS c',
+          "WHERE c.customer_name = 'Jessica Richard'",
+        ].join('\n'),
+        viz: 'table',
+        outputs: ['customer_name', 'region'],
+      }),
+      '```',
+    ].join('\n'));
+    const followUp = {
+      kind: 'drilldown' as const,
+      filters: ['Jessica Richard'],
+      dimensions: ['customer', 'region'],
+      priorResultColumns: ['product_name', 'customer_name', 'revenue'],
+      priorResultValues: { customer_name: ['Jessica Richard'] },
+      memberBindings: [{
+        dimension: 'customer',
+        values: ['Jessica Richard'],
+        source: 'prior_result' as const,
+        confidence: 'deictic' as const,
+      }],
+    };
+    const relations = [{
+      relation: 'analytics.customers',
+      name: 'customers',
+      source: 'dbt manifest',
+      columns: [
+        { name: 'customer_name', type: 'VARCHAR', sampleValues: ['Jessica Richard'] },
+        { name: 'region', type: 'VARCHAR', sampleValues: ['Philadelphia'] },
+      ],
+      rank: 1,
+      score: 90,
+      reason: 'selected customer dimension relation',
+    }];
+    const contextPack = contextPackForRankedRelations(question, relations, {
+      metricTerms: [],
+      dimensionTerms: ['customer', 'region'],
+      mode: 'entity_drilldown',
+      routeIntent: 'entity_drilldown',
+    });
+    const result = await answerBase({
+      question,
+      provider,
+      kg,
+      followUp,
+      contextPack,
+      schemaContext: relations.map(({ relation, name, source, columns }) => ({
+        relation,
+        name,
+        source,
+        columns,
+      })),
+      executeGeneratedSql: async (sql) => ({
+        columns: ['customer_name', 'region'],
+        rows: [{ customer_name: 'Jessica Richard', region: 'Philadelphia' }],
+        rowCount: 1,
+        sql,
+      }),
+    });
+
+    expect(result.kind).toBe('uncertified');
+    expect(result.proposedSql).toContain("c.customer_name = 'Jessica Richard'");
+    expect(result.proposedSql).toContain('c.region');
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.messages.map((message) => message.content).join('\\n\\n')).toContain('METRIC-INDEPENDENT ATTRIBUTE LOOKUP');
+  });
+
   it("generates distinct order count SQL for count-by-time questions", async () => {
     kg.rebuild([], []);
     const provider = new StubProvider([

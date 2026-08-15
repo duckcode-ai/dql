@@ -98,6 +98,7 @@ import {
   buildMeaningEvidencePackage,
   type MetadataMeaningEvidencePackage,
 } from './meaning-evidence.js';
+import { fuseContextCandidates, retrieveContextLanes, type ContextCandidateCardV1 } from '../analytical-orchestration.js';
 import {
   hasGeneratedAppSourceOrigin,
   isExplicitlyReusableAppSource,
@@ -196,6 +197,18 @@ export interface MetadataSnapshotRetrievalResult {
   snapshotId: string;
   selected: MetadataObject[];
   lanes: MetadataRetrievalLaneResult[];
+  /** Stable-key fusion diagnostics for the bounded Ask context pack. */
+  fusion?: {
+    selectedKeys: string[];
+    truncated: boolean;
+    lanes?: Record<string, {
+      returned: number;
+      durationMs?: number;
+      status?: 'ok' | 'empty' | 'error' | 'skipped';
+      error?: string;
+      skippedReason?: string;
+    }>;
+  };
 }
 
 export interface MetadataEdge {
@@ -647,6 +660,18 @@ export interface LocalContextPack {
     strategy: 'sqlite_fts' | 'reused_pack_refinement' | 'expanded_context' | 'full_catalog';
     /** Independent snapshot-bound candidate lanes; vector is not a BM25 reranker. */
     lanes?: MetadataRetrievalLaneResult[];
+    /** Stable qualified-key fusion trace for bounded multi-lane retrieval. */
+    fusion?: {
+      selectedKeys: string[];
+      truncated: boolean;
+      lanes?: Record<string, {
+        returned: number;
+        durationMs?: number;
+        status?: 'ok' | 'empty' | 'error' | 'skipped';
+        error?: string;
+        skippedReason?: string;
+      }>;
+    };
     /** Qualified focused Model Area selected explicitly or inferred inside the active domain. */
     focusedModelAreaId?: string;
     modelAreaSource?: 'explicit' | 'inferred';
@@ -1208,59 +1233,150 @@ export async function retrieveMetadataSnapshotCandidates(
     && (domains.length === 0 || !object.domain || domains.includes(object.domain))
   );
   const explicitIdentities = explicitMetadataIdentities(input.question);
-  const exactObjects = explicitIdentities.flatMap((identity) => {
-    const resolution = catalog.resolveIdentity(identity);
-    return resolution.status === 'resolved' && resolution.object && isEligible(resolution.object)
-      ? [resolution.object]
-      : [];
-  });
   const queries = uniqueMetadataSearchQueries(input.searchQueries?.length
     ? input.searchQueries
     : [input.question]);
-  const lexicalObjects = mergeObjects(queries.flatMap((query) => catalog.searchObjects({
-    query,
-    objectTypes: input.objectTypes,
-    domains: domains.length > 0 ? domains : undefined,
-    limit,
-  }))).filter(isEligible).slice(0, limit);
-  const vector = await catalog.searchVectorObjects({
-    query: input.question,
-    objectTypes: input.objectTypes,
-    domains: domains.length > 0 ? domains : undefined,
-    limit: Math.min(limit, 24),
-    // Fall back to the PROJECT's configured embedder rather than the hashed
-    // default, so a project that turned on a real one actually queries with it.
-    // searchVectorObjects still refuses (with a reason) if the index was built
-    // by a different provider, which keeps a half-migrated index from silently
-    // returning nonsense.
-    provider: input.embeddingProvider
-      ?? (input.projectRoot ? projectEmbeddingProvider(input.projectRoot) : undefined),
-  });
-  const vectorObjects = vector.candidates.filter(isEligible);
+  // Context lanes are genuinely independent and bounded. Their fan-out is
+  // deliberately before graph expansion: graph admission depends on the
+  // successful seed lanes, while an embedding failure must not block lexical
+  // or exact retrieval (CTX-007/PERF-003).
+  let vector: Awaited<ReturnType<MetadataCatalog['searchVectorObjects']>> | undefined;
+  let exactObjects: MetadataObject[] = [];
+  let lexicalObjects: MetadataObject[] = [];
+  let vectorObjects: MetadataObject[] = [];
+  const laneCards = await retrieveContextLanes({
+    exact: async () => {
+      exactObjects = explicitIdentities.flatMap((identity) => {
+        const resolution = catalog.resolveIdentity(identity);
+        return resolution.status === 'resolved' && resolution.object && isEligible(resolution.object)
+          ? [resolution.object]
+          : [];
+      });
+      return exactObjects.map((object) => ({
+        id: object.objectKey,
+        lane: 'exact' as const,
+        relevance: 1,
+        summary: object.name,
+      }));
+    },
+    lexical: async () => {
+      lexicalObjects = mergeObjects(queries.flatMap((query) => catalog.searchObjects({
+        query,
+        objectTypes: input.objectTypes,
+        domains: domains.length > 0 ? domains : undefined,
+        limit,
+      }))).filter(isEligible).slice(0, limit);
+      return lexicalObjects.map((object) => ({
+        id: object.objectKey,
+        lane: 'lexical' as const,
+        relevance: object.score ?? 0,
+        summary: object.name,
+      }));
+    },
+    vector: async () => {
+      vector = await catalog.searchVectorObjects({
+        query: input.question,
+        objectTypes: input.objectTypes,
+        domains: domains.length > 0 ? domains : undefined,
+        limit: Math.min(limit, 24),
+        provider: input.embeddingProvider
+          ?? (input.projectRoot ? projectEmbeddingProvider(input.projectRoot) : undefined),
+      });
+      vectorObjects = vector.candidates.filter(isEligible);
+      return vectorObjects.map((object) => ({
+        id: object.objectKey,
+        lane: 'vector' as const,
+        relevance: object.score ?? 0,
+        summary: object.name,
+      }));
+    },
+  }, Math.min(limit * 2, 100));
   const seedKeys = mergeObjects([...exactObjects, ...lexicalObjects.slice(0, 12), ...vectorObjects.slice(0, 12)])
     .map((object) => object.objectKey);
-  const graphEdges = catalog.edgesForKeys(seedKeys, 1);
-  const graphObjects = catalog.getObjectsByKeys(
-    Array.from(new Set(graphEdges.flatMap((edge) => [edge.fromKey, edge.toKey]))),
-  ).filter((object) => isEligible(object) && !seedKeys.includes(object.objectKey)).slice(0, Math.min(limit, 24));
+  const graphStartedAt = Date.now();
+  let graphError: string | undefined;
+  let graphEdges: MetadataEdge[] = [];
+  try {
+    graphEdges = catalog.edgesForKeys(seedKeys, 1);
+  } catch (error) {
+    graphError = error instanceof Error ? error.message : String(error);
+  }
+  let graphObjects: MetadataObject[] = [];
+  if (!graphError) {
+    try {
+      graphObjects = catalog.getObjectsByKeys(
+        Array.from(new Set(graphEdges.flatMap((edge) => [edge.fromKey, edge.toKey]))),
+      ).filter((object) => isEligible(object) && !seedKeys.includes(object.objectKey)).slice(0, Math.min(limit, 24));
+    } catch (error) {
+      // Graph expansion is advisory. Preserve exact/lexical/vector candidates
+      // and expose the typed graph failure in the lane diagnostics.
+      graphError = error instanceof Error ? error.message : String(error);
+      graphObjects = [];
+    }
+  }
   const lanes: MetadataRetrievalLaneResult[] = [
     retrievalLane('exact', exactObjects, (object) => explicitIdentities.includes(object.objectKey)
       ? 'exact object-key reference'
       : 'resolved qualified/native/alias reference'),
     retrievalLane('lexical', lexicalObjects, () => 'BM25/lexical candidate from the immutable snapshot'),
     {
-      ...retrievalLane('vector', vectorObjects, () => `independent vector candidate from ${vector.providerId}`),
-      provider: vector.providerId,
-      unavailableReason: vector.unavailableReason,
+      ...retrievalLane('vector', vectorObjects, () => `independent vector candidate from ${vector?.providerId ?? 'unavailable'}`),
+      ...(vector?.providerId ? { provider: vector.providerId } : {}),
+      ...(vector?.unavailableReason ? { unavailableReason: vector.unavailableReason } : {}),
     },
     retrievalLane('graph', graphObjects, () => 'one-hop neighbor of an eligible exact/lexical/vector seed'),
   ];
-  const selected = mergeObjects([...exactObjects, ...lexicalObjects, ...vectorObjects, ...graphObjects])
-    .slice(0, limit * 2);
+  const allLaneCards = {
+    exact: exactObjects.map((object): ContextCandidateCardV1 => ({
+      id: object.objectKey,
+      lane: 'exact',
+      relevance: 1,
+      summary: object.name,
+    })),
+    lexical: lexicalObjects.map((object): ContextCandidateCardV1 => ({
+      id: object.objectKey,
+      lane: 'lexical',
+      relevance: object.score ?? 0,
+      summary: object.name,
+    })),
+    vector: vectorObjects.map((object): ContextCandidateCardV1 => ({
+      id: object.objectKey,
+      lane: 'vector',
+      relevance: object.score ?? 0,
+      summary: object.name,
+    })),
+    graph: graphObjects.map((object): ContextCandidateCardV1 => ({
+      id: object.objectKey,
+      lane: 'graph',
+      relevance: object.score ?? 0,
+      summary: object.name,
+    })),
+  } satisfies Record<string, ContextCandidateCardV1[]>;
+  const fused = fuseContextCandidates(allLaneCards, Math.min(limit * 2, 100));
+  const objectsByKey = new Map(
+    mergeObjects([...exactObjects, ...lexicalObjects, ...vectorObjects, ...graphObjects])
+      .map((object) => [object.objectKey, object] as const),
+  );
+  const selected = fused.candidates
+    .map((candidate) => objectsByKey.get(candidate.id))
+    .filter((object): object is MetadataObject => Boolean(object));
   return {
     snapshotId: catalog.state('fingerprint') ?? 'metadata-unavailable',
     selected,
     lanes,
+    fusion: {
+      selectedKeys: fused.diagnostics.selectedIds,
+      truncated: fused.diagnostics.truncated,
+      lanes: {
+        ...laneCards.diagnostics.lanes,
+        graph: {
+          returned: graphObjects.length,
+          durationMs: Date.now() - graphStartedAt,
+          status: graphError ? 'error' : graphObjects.length > 0 ? 'ok' : 'empty',
+          ...(graphError ? { error: graphError } : {}),
+        },
+      },
+    },
   };
 }
 
@@ -1430,7 +1546,16 @@ export async function buildLocalContextPack(
     ));
     const selectedObjects = selectedContextObjects(request.selectedContext);
     const followUpObjects = followUpContextObjects(followUp);
-    const followUpSourceObjects = catalog.getObjectsByKeys(followUpSourceObjectKeys(followUp));
+    let graphError: string | undefined;
+    let followUpSourceObjects: MetadataObject[] = [];
+    try {
+      followUpSourceObjects = catalog.getObjectsByKeys(followUpSourceObjectKeys(followUp));
+    } catch (error) {
+      // A stale follow-up source reference is advisory context. Keep the
+      // successful exact/lexical/vector lanes and surface a typed graph lane
+      // diagnostic instead of failing the entire context pack (CTX-007).
+      graphError = error instanceof Error ? error.message : String(error);
+    }
     const areaObjects = filterMetadataObjectsByDomainContext(
       catalog.listAllObjects({ objectTypes: ['model_area'] }),
       request.domainContext,
@@ -1476,9 +1601,19 @@ export async function buildLocalContextPack(
       ? ranked.selected
       : mergeObjects([...followUpSourceObjects, ...followUpObjects, ...ranked.selected]);
     const focusObjectKey = request.focusObjectKey ?? selected[0]?.objectKey ?? null;
-    const edgeWalk = catalog.edgesForKeys(selected.map((row) => row.objectKey), 3);
-    const edgeObjectKeys = Array.from(new Set(edgeWalk.flatMap((edge) => [edge.fromKey, edge.toKey])));
-    const graphObjects = retrievalObjects(catalog.getObjectsByKeys(edgeObjectKeys));
+    let edgeWalk: MetadataEdge[] = [];
+    let graphObjects: MetadataObject[] = [];
+    try {
+      edgeWalk = catalog.edgesForKeys(selected.map((row) => row.objectKey), 3);
+      const edgeObjectKeys = Array.from(new Set(edgeWalk.flatMap((edge) => [edge.fromKey, edge.toKey])));
+      graphObjects = retrievalObjects(catalog.getObjectsByKeys(edgeObjectKeys));
+    } catch (error) {
+      // The graph is an enrichment lane. A stale/corrupt graph must not discard
+      // successful snapshot, runtime, or semantic candidates (CTX-007).
+      graphError = error instanceof Error ? error.message : String(error);
+      edgeWalk = [];
+      graphObjects = [];
+    }
     const rankedObjects = rankMetadataObjects({
       rows: retrievalObjects(mergeObjects([...followUpSourceObjects, ...followUpObjects, ...selected, ...graphObjects, ...schemaShapeObjects, ...runtimeObjects, ...runtimeValueObjects, ...selectedObjects])),
       question: searchQueries.join(' '),
@@ -1523,13 +1658,22 @@ export async function buildLocalContextPack(
       : mergeObjects([...rankedObjects, ...sqlParentObjects, ...selectedSkillObjects, ...routeObjects]);
     const objectKeys = objects.map((row) => row.objectKey);
     const allowedObjectKeys = new Set(objectKeys);
-    const contextEdges = mergeMetadataEdges([
-      ...edgeWalk,
-      ...catalog.edgesForKeys(objectKeys, 2),
-    ]).filter((edge) => allowedObjectKeys.has(edge.fromKey) && allowedObjectKeys.has(edge.toKey));
+    let contextEdges = mergeMetadataEdges(edgeWalk)
+      .filter((edge) => allowedObjectKeys.has(edge.fromKey) && allowedObjectKeys.has(edge.toKey));
+    try {
+      contextEdges = mergeMetadataEdges([
+        ...contextEdges,
+        ...catalog.edgesForKeys(objectKeys, 2),
+      ]).filter((edge) => allowedObjectKeys.has(edge.fromKey) && allowedObjectKeys.has(edge.toKey));
+    } catch (error) {
+      graphError ??= error instanceof Error ? error.message : String(error);
+    }
     const queryRuns = runtimeCatalog.queryRunsForObjectKeys(objectKeys, 20);
     const diagnostics = catalog.diagnostics();
-    const warnings = buildWarnings(diagnostics, objects);
+    const warnings = [
+      ...buildWarnings(diagnostics, objects),
+      ...(graphError ? [`Graph/context enrichment lane unavailable: ${graphError}`] : []),
+    ];
     const trustLabel = deriveTrust(objects);
     const citations = buildCitations(objects, contextEdges);
     const evidenceSummaries = buildEvidenceSummaries(objects, contextEdges, queryRuns, diagnostics);
@@ -1635,6 +1779,29 @@ export async function buildLocalContextPack(
       retrievalDiagnostics: {
         strategy: usedFullCatalog ? 'full_catalog' : 'sqlite_fts',
         lanes: snapshotRetrieval.lanes,
+        ...(snapshotRetrieval.fusion ? {
+          fusion: {
+            ...snapshotRetrieval.fusion,
+            ...(graphError ? {
+              lanes: {
+                ...(snapshotRetrieval.fusion.lanes ?? {}),
+                graph: {
+                  ...(snapshotRetrieval.fusion.lanes?.graph ?? { returned: 0 }),
+                  status: 'error' as const,
+                  error: graphError,
+                },
+              },
+            } : {}),
+          },
+        } : graphError ? {
+          fusion: {
+            selectedKeys: selected.map((object) => object.objectKey),
+            truncated: false,
+            lanes: {
+              graph: { returned: 0, status: 'error' as const, error: graphError },
+            },
+          },
+        } : {}),
         focusedModelAreaId: focusedArea?.id,
         modelAreaSource: focusedArea?.source,
         selectedObjects: objects.length,

@@ -142,6 +142,10 @@ export interface AgentAnswerEnvelope {
     columns?: unknown[];
     rows?: unknown[];
     rowCount?: number;
+    resultFingerprint?: string;
+    executionReceipt?: Record<string, unknown>;
+    trustState?: string;
+    answerTier?: string;
     executionTime?: number;
     chartConfig?: unknown;
     sql?: string;
@@ -228,13 +232,29 @@ function normalizeAgentResult(answer: AgentAnswerEnvelope): QueryResult | null {
     }
     return String(column);
   });
-  const rows = result.rows
-    .filter((row): row is Record<string, unknown> => Boolean(row && typeof row === 'object' && !Array.isArray(row)))
-    .map((row) => row);
+  const inferredColumns = columns.length > 0
+    ? columns
+    : result.rows.find((row) => row && typeof row === 'object' && !Array.isArray(row))
+      ? Object.keys(result.rows.find((row) => row && typeof row === 'object' && !Array.isArray(row)) as Record<string, unknown>)
+      : result.rows.find((row) => Array.isArray(row))
+        ? (result.rows.find((row) => Array.isArray(row)) as unknown[]).map((_, index) => `column_${index + 1}`)
+        : [];
+  const rows = result.rows.map((row): Record<string, unknown> => {
+    if (Array.isArray(row)) return Object.fromEntries(inferredColumns.map((column, index) => [column, row[index]]));
+    if (row && typeof row === 'object') {
+      const record = row as Record<string, unknown>;
+      return Object.fromEntries(inferredColumns.map((column) => [column, record[column]]));
+    }
+    return Object.fromEntries(inferredColumns.map((column) => [column, undefined]));
+  });
   return {
-    columns,
+    columns: inferredColumns,
     rows,
     rowCount: typeof result.rowCount === 'number' ? result.rowCount : rows.length,
+    ...(typeof result.resultFingerprint === 'string' ? { resultFingerprint: result.resultFingerprint } : {}),
+    ...(result.executionReceipt && typeof result.executionReceipt === 'object' ? { executionReceipt: result.executionReceipt } : {}),
+    ...(typeof result.trustState === 'string' ? { trustState: result.trustState } : {}),
+    ...(typeof result.answerTier === 'string' ? { answerTier: result.answerTier } : {}),
     executionTime: result.executionTime,
   };
 }

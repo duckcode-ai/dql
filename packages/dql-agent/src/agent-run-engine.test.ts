@@ -14,6 +14,7 @@ import {
   agentRouteDeadlineMs,
   agentRequestDeadlineMs,
   createAgentRunBudget,
+  createAgentRunCancellationError,
   type AgentRouteExecutorResult,
   type AgentRunEvent,
   type AgentRunPlanner,
@@ -210,7 +211,7 @@ describe("AgentRunEngine", () => {
     expect(run.events.some((event) => event.type === 'executor.started' && event.route === 'generated_answer')).toBe(false);
   });
 
-  it('does not call an injected replanner after an ordinary generated Ask attempt fails', async () => {
+  it('allows one bounded same-route repair after an ordinary generated Ask attempt fails', async () => {
     let replanCalls = 0;
     const events: AgentRunEvent[] = [];
     const engine = new AgentRunEngine({
@@ -238,7 +239,9 @@ describe("AgentRunEngine", () => {
         }),
         replan: () => {
           replanCalls += 1;
-          return { decision: 'repair', repairHint: 'Try another provider plan.' };
+          return replanCalls === 1
+            ? { decision: 'repair', repairHint: 'Try another provider plan.' }
+            : { decision: 'accept' };
         },
       },
       executors: {
@@ -259,12 +262,10 @@ describe("AgentRunEngine", () => {
     const run = await engine.run({ question: 'revenue by customer', requestedMode: 'ask' },
       (event) => events.push(event));
 
-    expect(replanCalls).toBe(0);
-    expect(run.steps[0]).toMatchObject({ route: 'generated_answer', attempts: 1, status: 'blocked' });
-    expect(events.find((event) => event.type === 'replan.decided')?.payload).toEqual({
-      decision: 'accept',
-      authority: 'deterministic_fail_closed',
-    });
+    expect(replanCalls).toBe(2);
+    expect(run.steps[0]).toMatchObject({ route: 'generated_answer', attempts: 2, status: 'blocked' });
+    expect(events.filter((event) => event.type === 'repair.attempted')).toHaveLength(1);
+    expect(events.filter((event) => event.type === 'replan.decided')).toHaveLength(2);
   });
 
   it('retains the separately budgeted replanner for explicit Research', async () => {
@@ -1133,7 +1134,7 @@ describe("AgentRunEngine loop (plan → build → evaluate → modify)", () => {
     expect(events.some((event) => event.type === "escalated")).toBe(false);
   });
 
-  it("does not retry or silently turn an ordinary shape failure into Research", async () => {
+  it("repairs one ordinary shape failure without turning it into Research", async () => {
     let generatedCalls = 0;
     let researchCalls = 0;
     const engine = new AgentRunEngine({
@@ -1167,11 +1168,11 @@ describe("AgentRunEngine loop (plan → build → evaluate → modify)", () => {
 
     const run = await engine.run({ question: "Who are the top customers by revenue?" });
 
-    expect(generatedCalls).toBe(1);
+    expect(generatedCalls).toBe(2);
     expect(researchCalls).toBe(0);
     expect(run.steps.map((step) => step.route)).toEqual(["generated_answer"]);
     expect(run.escalationAttempts).toBe(0);
-    expect(run.repairAttempts).toBe(0);
+    expect(run.repairAttempts).toBe(1);
     expect(run.status).toBe("needs_review");
   });
 
@@ -2171,8 +2172,34 @@ describe("AgentRunEngine — conversation route", () => {
       executors: { generated_answer: () => { throw cancellation; } },
     });
     const run = await engine.run({ question: 'revenue', requestedMode: 'ask' });
+    expect(run.status).toBe('blocked');
+    expect(run.diagnosticReceipt?.failure?.code).not.toBe('RUN_CANCELLED');
     expect(run.telemetry).toMatchObject({ providerRoundTrips: 1, egressReceipts: 1, fallbackReason: 'cancelled' });
     expect(run.providerEgressReceipts).toHaveLength(1);
+  });
+
+  it('does not treat an unbranded executor AbortError as user cancellation', async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-unbranded-cancel-message',
+      now: fixedClock(),
+      planner: fixedRoutePlanner('generated_answer'),
+      executors: {
+        generated_answer: () => {
+          throw new DOMException('Stopped by user.', 'AbortError');
+        },
+      },
+    });
+    const run = await engine.run({ question: 'revenue', requestedMode: 'ask' });
+    expect(run).toMatchObject({
+      status: 'blocked',
+      trustState: 'blocked',
+      stopReason: 'blocked',
+    });
+    expect(run.diagnosticReceipt?.failure).toMatchObject({
+      code: 'EXECUTOR_FAILURE',
+      recoverable: true,
+    });
+    expect(run.events.at(-1)?.type).toBe('run.failed');
   });
 
   it('applies one 45s/120s hard deadline with deterministic route soft targets', async () => {
@@ -2299,7 +2326,7 @@ describe("AgentRunEngine — conversation route", () => {
     expect(run.answer).toBeUndefined();
   });
 
-  it('uses the typed modeling outcome instead of the generic blocked fallback', async () => {
+  it('continues a pre-freeze modeling gap into the review-required generated tier', async () => {
     const engine = new AgentRunEngine({
       idGenerator: () => 'run-typed-modeling-gap',
       now: fixedClock(),
@@ -2318,9 +2345,10 @@ describe("AgentRunEngine — conversation route", () => {
     });
     const run = await engine.run({ question: 'Rank workspaces by cost', requestedMode: 'ask' });
     expect(run).toMatchObject({
-      status: 'blocked',
-      summary: 'The selected metric does not model a reachable workspace grouping.',
+      route: 'generated_answer',
+      status: 'needs_review',
     });
+    expect(run.summary).toBe('Created review-required agent output.');
     expect(run.summary).not.toBe('Agent run is blocked.');
   });
 
@@ -2380,17 +2408,91 @@ describe("AgentRunEngine — conversation route", () => {
     expect(observed).toEqual([45_000]);
   });
 
-  it('keeps an already-aborted cancellation terminal during routing', async () => {
+  it('keeps an already-aborted user cancellation terminal during routing', async () => {
     const controller = new AbortController();
-    controller.abort(new DOMException('cancelled', 'AbortError'));
+    controller.abort(createAgentRunCancellationError());
     const engine = new AgentRunEngine({
       idGenerator: () => 'run-routing-cancelled',
       now: fixedClock(),
       router: { decide: async () => new Promise<IntentDecision>(() => {}) },
     });
     const run = await engine.run({ question: 'revenue', requestedMode: 'ask', signal: controller.signal });
-    expect(run).toMatchObject({ status: 'blocked', trustState: 'blocked' });
+    expect(run).toMatchObject({
+      route: 'cancelled',
+      status: 'cancelled',
+      trustState: 'not_applicable',
+      stopReason: 'cancelled',
+      summary: 'Stopped by user.',
+      nextActions: [],
+    });
+    expect(run.events.at(-1)?.type).toBe('run.cancelled');
+    expect(run.diagnosticReceipt).toMatchObject({
+      failure: { code: 'RUN_CANCELLED', recoverable: false, safeActions: [] },
+    });
     expect(run.answer).toBeUndefined();
+  });
+
+  it('records user cancellation while the meaning router is still running', async () => {
+    const controller = new AbortController();
+    let started!: () => void;
+    const meaningStarted = new Promise<void>((resolve) => { started = resolve; });
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-meaning-cancelled',
+      now: fixedClock(),
+      router: {
+        decide: async () => {
+          started();
+          return new Promise<IntentDecision>(() => {});
+        },
+      },
+    });
+    const pending = engine.run({ question: 'top customers', requestedMode: 'ask', signal: controller.signal });
+    await meaningStarted;
+    controller.abort(createAgentRunCancellationError());
+    const run = await pending;
+    expect(run).toMatchObject({
+      route: 'cancelled',
+      status: 'cancelled',
+      trustState: 'not_applicable',
+      stopReason: 'cancelled',
+      nextActions: [],
+      telemetry: { fallbackReason: 'cancelled' },
+    });
+    expect(run.events.at(-1)?.type).toBe('run.cancelled');
+  });
+
+  it('records user cancellation during a research executor without repair or escalation', async () => {
+    const controller = new AbortController();
+    let started!: () => void;
+    const researchStarted = new Promise<void>((resolve) => { started = resolve; });
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-research-cancelled',
+      now: fixedClock(),
+      planner: fixedRoutePlanner('research'),
+      executors: {
+        research: ({ request }) => new Promise<AgentRouteExecutorResult>((_resolve, reject) => {
+          started();
+          if (request.signal?.aborted) {
+            reject(request.signal.reason);
+            return;
+          }
+          request.signal?.addEventListener('abort', () => reject(request.signal?.reason), { once: true });
+        }),
+      },
+    });
+    const pending = engine.run({ question: 'research revenue drivers', requestedMode: 'research', signal: controller.signal });
+    await researchStarted;
+    controller.abort(createAgentRunCancellationError());
+    const run = await pending;
+    expect(run).toMatchObject({
+      route: 'research',
+      status: 'cancelled',
+      trustState: 'not_applicable',
+      stopReason: 'cancelled',
+      nextActions: [],
+      diagnosticReceipt: { failure: { code: 'RUN_CANCELLED', recoverable: false } },
+    });
+    expect(run.events.at(-1)?.type).toBe('run.cancelled');
   });
 });
 

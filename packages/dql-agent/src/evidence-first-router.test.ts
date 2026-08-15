@@ -88,6 +88,21 @@ function resolved(overrides: Partial<MeaningResolution> = {}): MeaningResolution
   };
 }
 
+function clarifyingRanking(overrides: Partial<MeaningResolution> = {}): MeaningResolution {
+  return resolved({
+    interpretedQuestion: 'The ranking measure is not specified.',
+    questionType: 'ranking',
+    selectedConceptIds: [],
+    recommendedExecutionId: undefined,
+    queryIntent: { measures: [], dimensions: ['customer'], filters: [], order: 'desc', limit: 10 },
+    confidence: 'low',
+    missingInformation: ['Top by which governed metric?'],
+    recommendedRoute: 'clarify',
+    compatibilityOutcome: 'clarify',
+    ...overrides,
+  });
+}
+
 describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
   it.each([
     {
@@ -157,7 +172,22 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
       ],
     },
   ])('jaffle golden: $question freezes the compatible identity, never the lexical decoy', async ({ question, parsedIntent, selectedId, rejectedId, candidates }) => {
-    const resolveMeaning = vi.fn(async () => { throw new Error('exact compatible Jaffle route must not call AI'); });
+    const resolveMeaning = vi.fn(async ({ candidates, evidence }: { candidates: AgentEvidenceCandidate[]; evidence: AgentRetrievalEvidence }) => {
+      const selected = candidates.find((item) => item.compatibility !== 'incompatible') ?? candidates[0];
+      return resolved({
+        interpretedQuestion: question,
+        selectedConceptIds: selected ? [selected.id] : [],
+        recommendedExecutionId: selected?.id,
+        queryIntent: {
+          measures: evidence.parsedIntent?.measures ?? (selected ? [selected.name] : []),
+          dimensions: evidence.parsedIntent?.dimensions ?? [],
+          filters: evidence.parsedIntent?.filters ?? [],
+          order: evidence.parsedIntent?.order,
+          limit: evidence.parsedIntent?.limit,
+        },
+        recommendedRoute: selected?.kind === 'certified_block' ? 'certified' : 'semantic',
+      });
+    });
     const router = createHybridRouter({
       resolveMeaning,
       getEvidence: async () => ({
@@ -170,7 +200,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
 
     const decision = await router.decide(request(question));
 
-    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
     expect(decision.resolvedAnalyticalPlan).toMatchObject({
       mode: 'authoritative',
       selectedConceptIds: expect.arrayContaining([selectedId]),
@@ -237,7 +267,9 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
       compatibility: 'compatible',
       relevanceScore: 0.8,
     }));
-    const resolveMeaning = vi.fn(async () => { throw new Error('exact parsed Jaffle route must not call AI'); });
+    const resolveMeaning = vi.fn(async () => {
+      throw new Error('meaning resolver unavailable after the bounded call');
+    });
     const router = createHybridRouter({
       resolveMeaning,
       getEvidence: async () => ({
@@ -258,7 +290,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
 
     expect(parsed.metricTerms).toEqual(['revenue']);
     expect(parsed.dimensionTerms).toEqual(['customer']);
-    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
     expect(selectRoute(request(question), decision)).toBe('semantic_answer');
     expect(decision.resolvedAnalyticalPlan).toMatchObject({
       mode: 'authoritative',
@@ -340,7 +372,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
 
     const decision = await router.decide(request('Joy ram in West total revenue and beverage revenue'));
 
-    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
     expect(decision.resolvedAnalyticalPlan?.selectedConceptIds).toEqual(expect.arrayContaining([food.id, beverage.id, joy.id]));
     expect(decision.resolvedAnalyticalPlan?.query.measures.map((measure) => measure.qualifiedId)).toEqual(expect.arrayContaining([food.id, beverage.id]));
     expect(decision.resolvedAnalyticalPlan?.query.filters).toEqual(expect.arrayContaining([
@@ -409,7 +441,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
   });
 
   it('AGT-009/PERF-002 clarifies a bare customer ranking before selecting the beverage block', async () => {
-    const resolveMeaning = vi.fn(async () => resolved());
+    const resolveMeaning = vi.fn(async () => clarifyingRanking());
     const router = createHybridRouter({
       resolveMeaning,
       getEvidence: async () => ({
@@ -432,7 +464,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
 
     const decision = await router.decide(request('who are the top customers'));
 
-    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
     expect(decision).toMatchObject({
       action: 'clarify',
       requiresClarification: true,
@@ -441,8 +473,65 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     expect(decision.resolvedAnalyticalPlan).toBeUndefined();
   });
 
+  it('AGT-030 offers the compatible ranking measures and never the same-grain entity count', async () => {
+    const resolveMeaning = vi.fn(async () => clarifyingRanking());
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-jaffle-ranking-options',
+        sourceFingerprint: 'sha256:jaffle-ranking-options',
+        parsedIntent: { measures: [], dimensions: ['customer'], filters: [], order: 'desc', limit: 10 },
+        candidates: [
+          candidate({
+            id: 'semantic:measure:customers.customers',
+            kind: 'semantic_metric',
+            name: 'customers',
+            primaryEntity: 'customers',
+            aggregation: 'count_distinct',
+            dimensions: ['customers'],
+            compatibility: 'compatible',
+            relevanceScore: 0.9,
+          }),
+          candidate({
+            id: 'semantic:metric:revenue',
+            kind: 'semantic_metric',
+            name: 'revenue',
+            aggregation: 'sum',
+            dimensions: ['customer'],
+            compatibility: 'compatible',
+            relevanceScore: 0.8,
+          }),
+          candidate({
+            id: 'semantic:metric:lifetime_spend_pretax',
+            kind: 'semantic_metric',
+            name: 'lifetime_spend_pretax',
+            aggregation: 'sum',
+            dimensions: ['customer'],
+            compatibility: 'compatible',
+            relevanceScore: 0.7,
+          }),
+        ],
+      }),
+    });
+
+    const decision = await router.decide(request('who are the top customers'));
+
+    expect(decision).toMatchObject({
+      action: 'clarify',
+      requiresClarification: true,
+      clarifyingQuestion: 'Top by which governed metric?',
+    });
+    // The dead end was a clarification with nothing to choose from.
+    const optionIds = (decision.clarificationOptions ?? []).map((option) => option.id);
+    expect(optionIds.length).toBeGreaterThan(0);
+    expect(optionIds).toContain('semantic:metric:revenue');
+    // Ranking individual customers by a distinct count of customers is degenerate.
+    expect(optionIds).not.toContain('semantic:measure:customers.customers');
+    expect(decision.resolvedAnalyticalPlan).toBeUndefined();
+  });
+
   it('AGT-009/PERF-002 clarifies a bare ranking for an arbitrary entity without domain wording', async () => {
-    const resolveMeaning = vi.fn(async () => resolved());
+    const resolveMeaning = vi.fn(async () => clarifyingRanking({ queryIntent: { measures: [], dimensions: ['workspace'], filters: [], order: 'desc', limit: 10 } }));
     const router = createHybridRouter({
       resolveMeaning,
       getEvidence: async () => ({
@@ -464,7 +553,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
 
     const decision = await router.decide(request('Which workspaces are top?'));
 
-    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
     expect(decision).toMatchObject({
       action: 'clarify',
       requiresClarification: true,
@@ -480,7 +569,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
       [],
       false,
     );
-    const resolveMeaning = vi.fn(async () => resolved());
+    const resolveMeaning = vi.fn(async () => clarifyingRanking({ queryIntent: { measures: [], dimensions: ['workspace'], filters: [], order: 'desc', limit: 10 } }));
     const router = createHybridRouter({
       resolveMeaning,
       getEvidence: async () => ({
@@ -493,7 +582,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
 
     const decision = await router.decide(request('Which workspaces are top?'));
 
-    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
     expect(decision).toMatchObject({
       action: 'clarify',
       requiresClarification: true,
@@ -555,7 +644,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
   });
 
   it('does not accept a client-carried plan ID as ranking-metric authority', async () => {
-    const resolveMeaning = vi.fn(async () => resolved());
+    const resolveMeaning = vi.fn(async () => clarifyingRanking());
     const router = createHybridRouter({
       resolveMeaning,
       getEvidence: async () => ({
@@ -583,7 +672,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
       },
     });
 
-    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
     expect(decision).toMatchObject({
       action: 'clarify',
       requiresClarification: true,
@@ -996,7 +1085,15 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
   });
 
   it('AGT-009 keeps explicit drink-revenue customer ranking on the certified fast path', async () => {
-    const resolveMeaning = vi.fn(async () => resolved());
+    const resolveMeaning = vi.fn(async ({ candidates, evidence }: { candidates: AgentEvidenceCandidate[]; evidence: AgentRetrievalEvidence }) => {
+      const selected = candidates.find((item) => item.id === 'dql:block:top_beverage_customers') ?? candidates[0];
+      return resolved({
+        selectedConceptIds: selected ? [selected.id] : [],
+        recommendedExecutionId: selected?.id,
+        queryIntent: { measures: evidence.parsedIntent?.measures ?? ['drink_revenue'], dimensions: evidence.parsedIntent?.dimensions ?? ['customer_name'], filters: [], order: 'desc', limit: 10 },
+        recommendedRoute: 'certified',
+      });
+    });
     const router = createHybridRouter({
       resolveMeaning,
       getEvidence: async () => ({
@@ -1028,7 +1125,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
 
     const decision = await router.decide(request('top customers by beverage revenue'));
 
-    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
     expect(decision.action).toBe('answer');
     expect(decision.resolvedAnalyticalPlan?.selectedConceptIds).toContain('dql:block:top_beverage_customers');
   });
@@ -1037,7 +1134,15 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     'who are the top customers by region',
     'what is the region by each customer',
   ])('AGT-010/PERF-002 clarifies the unmodeled customer region immediately: %s', async (question) => {
-    const resolveMeaning = vi.fn(async () => resolved());
+    const resolveMeaning = vi.fn(async () => resolved({
+      selectedConceptIds: [],
+      recommendedExecutionId: undefined,
+      queryIntent: { measures: [], dimensions: ['customer_name', 'region'], filters: [] },
+      recommendedRoute: 'clarify',
+      confidence: 'low',
+      missingInformation: ['region is not modeled'],
+      compatibilityOutcome: 'clarify',
+    }));
     const router = createHybridRouter({
       resolveMeaning,
       getEvidence: async () => ({
@@ -1053,7 +1158,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
 
     const decision = await router.decide(request(question));
 
-    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
     expect(decision.action).toBe('clarify');
     expect(decision.clarifyingQuestion).toContain('“region” is not modeled');
     expect(decision.clarifyingQuestion).toContain('location_name');
@@ -1064,7 +1169,15 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     const orderTotal = jaffleMetric('semantic:metric:order.order_total', 'order_total', ['total revenue', 'order total'], false);
     const productRevenue = jaffleMetric('semantic:metric:order_item.revenue', 'revenue', ['product revenue'], false);
     const drinkRevenue = jaffleMetric('semantic:metric:order_item.drink_revenue', 'drink_revenue', ['beverage revenue', 'drink revenue'], true);
-    const resolveMeaning = vi.fn(async () => resolved());
+    const resolveMeaning = vi.fn(async () => resolved({
+      selectedConceptIds: [],
+      recommendedExecutionId: undefined,
+      queryIntent: { measures: ['total revenue', 'beverage revenue'], dimensions: ['customer', 'region'], filters: [{ field: 'customer', value: 'Joy Lam' }] },
+      recommendedRoute: 'clarify',
+      confidence: 'low',
+      missingInformation: ['region is not modeled'],
+      compatibilityOutcome: 'clarify',
+    }));
     const router = createHybridRouter({
       resolveMeaning,
       getEvidence: async () => ({
@@ -1089,7 +1202,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
       'what is the region for Joy lam customer? what is total revenue along with beverage revenue',
     ));
 
-    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
     expect(decision.action).toBe('clarify');
     expect(decision.clarifyingQuestion).toContain('“region” is not modeled');
     expect(decision.clarifyingQuestion).toContain('location_name');
@@ -1451,7 +1564,9 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
   });
 
   it("AGT-010 avoids a duplicate meaning call and asks an identifier-bound compositional clarification", async () => {
-    const resolveMeaning = vi.fn(async () => resolved());
+    const resolveMeaning = vi.fn(async () => {
+      throw new Error('The bounded meaning call did not add a stable product binding.');
+    });
     const router = createHybridRouter({
       resolveMeaning,
       getEvidence: async () => evidence([
@@ -1478,7 +1593,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
       conversationContext: { priorResultValues: { customer_name: ['Melissa Lopez'] } },
     });
 
-    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
     expect(decision.action).toBe('clarify');
     expect(decision.resolvedAnalyticalPlan).toBeUndefined();
     expect(decision.clarificationOptions?.map((option) => option.id)).toEqual([
@@ -1685,7 +1800,15 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
       relevanceScore: 0.88,
       compatibility: "unknown",
     });
-    const resolveMeaning = vi.fn(async () => resolved());
+    const resolveMeaning = vi.fn(async ({ candidates, evidence }: { candidates: AgentEvidenceCandidate[]; evidence: AgentRetrievalEvidence }) => {
+      const selected = candidates.find((item) => item.id === topCustomers.id) ?? candidates[0];
+      return resolved({
+        selectedConceptIds: selected ? [selected.id] : [],
+        recommendedExecutionId: selected?.id,
+        queryIntent: { measures: evidence.parsedIntent?.measures ?? ['spend'], dimensions: evidence.parsedIntent?.dimensions ?? ['customer'], filters: evidence.parsedIntent?.filters ?? [], order: 'desc', limit: 10 },
+        recommendedRoute: 'certified',
+      });
+    });
     const router = createHybridRouter({
       resolveMeaning,
       getEvidence: async () => ({
@@ -1703,7 +1826,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     const ask = request("who are the top customers who spent on beverage category products?");
     const decision = await router.decide(ask);
 
-    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
     expect(decision.action).toBe("answer");
     expect(decision.meaningResolution?.recommendedExecutionId).toBe(topCustomers.id);
     expect(decision.meaningResolution?.recommendedRoute).toBe("certified");

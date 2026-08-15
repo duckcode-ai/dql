@@ -877,9 +877,10 @@ export type AgentRunRoute =
   | 'skill_draft'
   | 'app_build'
   | 'clarify'
+  | 'cancelled'
   | 'blocked';
 export type AgentRunAnswerKind = 'governed' | 'conversational' | 'general_knowledge';
-export type AgentRunStatus = 'completed' | 'needs_review' | 'needs_clarification' | 'blocked';
+export type AgentRunStatus = 'completed' | 'needs_review' | 'needs_clarification' | 'cancelled' | 'blocked';
 export type AgentRunTrustState = 'certified' | 'governed' | 'grounded' | 'review_required' | 'blocked' | 'not_applicable';
 export type AgentRunLifecycleState = 'queued' | 'running' | 'cancelling' | 'terminal';
 export type AgentRunStopReason =
@@ -890,6 +891,7 @@ export type AgentRunStopReason =
   | 'artifact_created'
   | 'needs_clarification'
   | 'human_review_required'
+  | 'cancelled'
   | 'blocked';
 export type AgentRunArtifactKind = 'answer' | 'research_run' | 'sql_cell' | 'dql_block_draft' | 'app_draft' | 'app_proposal' | 'modeling_change_proposal' | 'skill_change_proposal';
 
@@ -1004,6 +1006,7 @@ export interface AgentRunEvent {
     | 'artifact.created'
     | 'step.completed'
     | 'run.completed'
+    | 'run.cancelled'
     | 'run.failed';
   at: string;
   message: string;
@@ -1120,6 +1123,8 @@ export interface AgentRunProgressV1 {
   evaluations: AgentRunEvaluation[];
   events: AgentRunEvent[];
   lifecycle: AgentRunLifecycleV1;
+  analyticalTurnPlan?: Record<string, unknown>;
+  analyticalTaskOutcomes?: Array<Record<string, unknown>>;
 }
 
 export interface AgentRun {
@@ -1161,6 +1166,8 @@ export interface AgentRun {
     attempt: number;
     revision?: number;
   };
+  analyticalTurnPlan?: Record<string, unknown>;
+  analyticalTaskOutcomes?: Array<Record<string, unknown>>;
 }
 
 export type AgentRunStateResponse =
@@ -2767,7 +2774,14 @@ async function streamAgentRunResponse(
   return completed;
 }
 
-function normalizeQueryResultPayload(raw: any): QueryResult {
+/**
+ * Canonicalize connector/MetricFlow result rows at the API boundary.  A few
+ * drivers return positional arrays while the notebook renderer is keyed by
+ * column name; retaining the arrays is what produced the visible em-dash rows
+ * in Ask.  Every downstream surface receives object rows with all declared
+ * columns, including empty-result metadata.
+ */
+export function normalizeQueryResultPayload(raw: any): QueryResult {
   const columns: string[] = Array.isArray(raw?.columns)
     ? raw.columns.map((c: unknown) =>
         typeof c === 'string' ? c : typeof (c as any)?.name === 'string' ? (c as any).name : String(c)
@@ -2779,10 +2793,30 @@ function normalizeQueryResultPayload(raw: any): QueryResult {
         dimensions: Array.isArray(raw.semanticRefs.dimensions) ? raw.semanticRefs.dimensions.map(String) : [],
       }
     : undefined;
+  const rawRows = Array.isArray(raw?.rows) ? raw.rows : [];
+  const inferredColumns = columns.length > 0
+    ? columns
+    : rawRows.find((row: unknown) => row && typeof row === 'object' && !Array.isArray(row))
+      ? Object.keys(rawRows.find((row: unknown) => row && typeof row === 'object' && !Array.isArray(row)) as Record<string, unknown>)
+      : rawRows.find((row: unknown) => Array.isArray(row))
+        ? (rawRows.find((row: unknown) => Array.isArray(row)) as unknown[]).map((_, index) => `column_${index + 1}`)
+        : [];
+  const rows = rawRows.map((row: unknown): Record<string, unknown> => {
+    if (Array.isArray(row)) return Object.fromEntries(inferredColumns.map((column, index) => [column, row[index]]));
+    if (row && typeof row === 'object') {
+      const record = row as Record<string, unknown>;
+      return Object.fromEntries(inferredColumns.map((column) => [column, record[column]]));
+    }
+    return Object.fromEntries(inferredColumns.map((column) => [column, undefined]));
+  });
   return {
-    columns,
-    rows: Array.isArray(raw?.rows) ? raw.rows : [],
-    rowCount: raw?.rowCount ?? raw?.rows?.length ?? 0,
+    columns: inferredColumns,
+    rows,
+    ...(typeof raw?.resultFingerprint === 'string' ? { resultFingerprint: raw.resultFingerprint } : {}),
+    ...(raw?.executionReceipt && typeof raw.executionReceipt === 'object' ? { executionReceipt: raw.executionReceipt as Record<string, unknown> } : {}),
+    ...(typeof raw?.trustState === 'string' ? { trustState: raw.trustState } : {}),
+    ...(typeof raw?.answerTier === 'string' ? { answerTier: raw.answerTier } : {}),
+    rowCount: typeof raw?.rowCount === 'number' ? raw.rowCount : rows.length,
     executionTime: raw?.executionTime ?? raw?.executionTimeMs ?? 0,
     ...(semanticRefs ? { semanticRefs } : {}),
   };

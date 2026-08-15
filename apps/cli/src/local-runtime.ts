@@ -361,10 +361,20 @@ import {
   createProviderEgressReceipt,
   redactProviderResultRows,
   composeVerifiedAnalyticalNarrative,
+  buildCoverageGap,
+  capResearchBranches,
+  buildResearchEvidenceLedger,
+  buildAnalyticalTurnPlan,
   DEFAULT_ASK_ROW_EGRESS_POLICY,
   ZERO_ROW_EGRESS_POLICY,
   resolveProviderResultRowEgressPolicy,
   type ProviderResultRowEgressPolicy,
+  type AnalyticalTaskOutcomeV1,
+  type AnalyticalTurnPlanV1,
+  normalizeCanonicalQueryResult,
+  normalizeAnalyticalExecutionFingerprint,
+  normalizeAnalyticalExecutionReceipt,
+  createAgentRunCancellationError,
 } from '@duckcodeailabs/dql-agent';
 import { addSqlResultFilter, dashboardFilterableResultColumns, filterableResultColumns, replaceBlockStudioSql } from './sql-result-filter.js';
 import { gatherProposeEnrichment } from './propose-enrich.js';
@@ -679,8 +689,10 @@ export interface LocalServerOptions {
   /**
    * Test/embedding seam for deterministic agent-run execution without a live LLM.
    * Production callers leave this unset and use the default governed executors.
-   */
+  */
   agentRunExecutors?: AgentRunExecutors;
+  /** Host-owned rollback seam; never read from client request payloads. */
+  requireMeaningCallForNaturalLanguage?: boolean;
 }
 
 // Every member of `AgentRunRequestedMode`. The `Record` (rather than a bare
@@ -1224,7 +1236,7 @@ export function analyticalRepairCapabilityForAgentRun(
   run: AgentRun,
   resolvedTargetFingerprint?: string,
 ): AnalyticalRepairCapabilityV1 | undefined {
-  if (run.status !== 'blocked') return undefined;
+  if (run.status !== 'blocked' || run.stopReason !== 'blocked') return undefined;
   const failedRun = analyticalFailedRunFromAgentRun(run);
   const failure = failedRun?.failure;
   const dqlArtifact = run.artifacts.flatMap((artifact) => {
@@ -1628,6 +1640,33 @@ export function slimAgentRunForTransport(run: AgentRun): AgentRun {
   };
 }
 
+/**
+ * INDEX projection for `GET /api/agent-runs` — strictly lighter than the
+ * presentation projection above.
+ *
+ * A run history list renders one ROW per run: question, route, status, trust,
+ * timing, summary. It never renders an answer body, an event stream, or a step
+ * trace. Shipping those anyway dominated the response: on 300 real stored runs
+ * a 20-run page was 47.61 MB whole and still 6.80 MB under the presentation
+ * projection, of which 6.35 MB was `artifacts[].payload` alone.
+ *
+ * Artifact identity (`id`/`kind`/`title`/`trustState`) is kept so a row can say
+ * what it produced; only the payload body is dropped. The complete immutable
+ * record stays available from `GET /api/agent-runs/:id`.
+ *
+ * Acceptance: PERF-003, E2E-022.
+ */
+export function agentRunListEntryForTransport(run: AgentRun): AgentRun {
+  const slim = slimAgentRunForTransport(run);
+  const artifacts = (slim.artifacts ?? []).map((artifact) => {
+    const record = agentRunRecord(artifact);
+    if (!record) return artifact;
+    const { payload: _payload, ...rest } = record;
+    return rest as unknown as typeof artifact;
+  });
+  return { ...slim, artifacts, steps: [], events: [] };
+}
+
 export function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInput {
   const artifact = run.artifacts.find((candidate) => candidate.kind === 'answer')
     ?? run.artifacts.find((candidate) => candidate.kind === 'research_run')
@@ -1635,7 +1674,9 @@ export function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInp
   const payload = agentRunRecord(artifact?.payload);
   // A blocked run may retain diagnostic artifacts, but their result-shaped
   // payload is never accepted conversation evidence or prose authority.
-  const result = run.status === 'blocked' ? undefined : agentRunRecord(payload?.result);
+  const result = run.status === 'blocked' || run.status === 'cancelled'
+    ? undefined
+    : agentRunRecord(payload?.result);
   const columns = conversationResultColumns(result?.columns);
   // The visual preview stays tiny, but member resolution needs a wider bounded
   // value window. Deriving dimensions from only the eight preview rows caused a
@@ -3460,6 +3501,118 @@ function analyticalFailureSummary(
 
   const answerRunExecutor: AgentRouteExecutor = async ({ request, route, routeDecision, attempt, repairHint, emit }) => {
     const runStartedAtMs = Date.now();
+    const turnPlan = buildAnalyticalTurnPlan({
+      question: request.question,
+      turnId: request.runId,
+      candidateIds: routeDecision?.retrievalEvidence?.candidateIds ?? [],
+      frozen: routeDecision?.resolvedAnalyticalPlan?.mode === 'authoritative',
+      snapshotId: routeDecision?.resolvedAnalyticalPlan?.snapshotId ?? routeDecision?.retrievalEvidence?.snapshotId,
+      sourceFingerprint: routeDecision?.resolvedAnalyticalPlan?.sourceFingerprint ?? routeDecision?.retrievalEvidence?.sourceFingerprint,
+    });
+    const childTurn = Boolean(request.workspaceContext && typeof request.workspaceContext === 'object'
+      && (request.workspaceContext as Record<string, unknown>).analyticalTaskChild === true);
+    // Compound questions are a bounded task graph, not one query whose answer
+    // is copied into several labels. Independent children share the parent's
+    // signal/deadline and return truthful partial success.
+    if (turnPlan.tasks.length > 1 && !childTurn && (attempt ?? 0) === 0) {
+      const childResults = await Promise.all(turnPlan.tasks.slice(0, 6).map(async (task) => {
+        if (request.signal?.aborted) rethrowIfCancelled(request.signal.reason, request.signal);
+        try {
+          const childRequest: AgentRunRequest = {
+            ...request,
+            question: task.question,
+            workspaceContext: {
+              ...(request.workspaceContext && typeof request.workspaceContext === 'object' ? request.workspaceContext : {}),
+              analyticalTaskChild: true,
+              analyticalParentRunId: request.runId,
+              analyticalTaskId: task.id,
+            },
+          };
+          const answer = await runGovernedAgentAnswerForRun(
+            childRequest,
+            { attempt: 0, repairHint },
+            route,
+            (message) => emit({ type: 'executor.started', message: `Task ${task.id}: ${message}`, route }),
+            undefined,
+          );
+          if (answer.result) {
+            const canonical = normalizeCanonicalQueryResult({
+              ...answer.result,
+              resultFingerprint: answer.result.resultFingerprint ?? answer.result.executionReceipt?.resultFingerprint,
+              executionReceipt: answer.result.executionReceipt,
+              answerTier: answer.route?.tier ?? answer.sourceTier,
+            });
+            answer.result = {
+              ...answer.result,
+              columns: canonical.columns,
+              rows: canonical.rows,
+              rowCount: canonical.rowCount,
+              resultFingerprint: canonical.resultFingerprint,
+              ...(canonical.executionReceipt ? { executionReceipt: canonical.executionReceipt } : {}),
+              ...(canonical.answerTier ? { answerTier: canonical.answerTier } : {}),
+            };
+          }
+          return { task, answer };
+        } catch (error) {
+          rethrowIfCancelled(error, request.signal);
+          return { task, error: error instanceof Error ? error.message : String(error) };
+        }
+      }));
+      const outcomes: AnalyticalTaskOutcomeV1[] = childResults.map(({ task, answer, error }) => ({
+        version: 1,
+        taskId: task.id,
+        status: error || answer?.kind === 'no_answer' ? 'gap' : 'completed',
+        ...(answer?.answer || answer?.text ? { summary: answer.answer ?? answer.text } : {}),
+        ...(answer?.result?.resultFingerprint ? { resultFingerprint: answer.result.resultFingerprint } : {}),
+        ...(error || answer?.kind === 'no_answer' ? {
+          gap: buildCoverageGap({
+            code: answer?.refusalCode === 'ambiguous' ? 'AMBIGUOUS_MEANING' : 'EXECUTION_FAILED',
+            phase: answer?.executionError ? 'execution' : 'meaning',
+            message: error ?? answer?.answer ?? answer?.text ?? 'The task did not produce an accepted analytical result.',
+            searchedSources: routeDecision?.retrievalEvidence?.candidateIds ?? [],
+            attemptedRoutes: ['certified', 'semantic', 'governed_relational', 'generated'],
+            missing: [],
+            recoverable: false,
+            planFrozen: turnPlan.frozen,
+            nextActions: ['Review the task context and retry the clause.'],
+          }),
+        } : {}),
+      }));
+      const completedCount = outcomes.filter((outcome) => outcome.status === 'completed').length;
+      const tasks = turnPlan.tasks.map((task) => ({
+        ...task,
+        status: outcomes.find((outcome) => outcome.taskId === task.id)?.status === 'completed' ? 'completed' as const : 'gap' as const,
+      }));
+      const answerText = childResults.map(({ task, answer, error }) =>
+        `${task.question}: ${error ?? answer?.answer ?? answer?.text ?? 'No accepted result was produced.'}`,
+      ).join('\n\n');
+      return {
+        summary: completedCount === outcomes.length
+          ? `Answered ${completedCount} independent analytical clauses.`
+          : `Answered ${completedCount} of ${outcomes.length} analytical clauses; the remaining clauses need review.`,
+        answer: answerText,
+        status: completedCount === outcomes.length ? 'completed' : completedCount > 0 ? 'needs_review' : 'needs_clarification',
+        trustState: completedCount === outcomes.length ? 'governed' : 'review_required',
+        stopReason: completedCount === outcomes.length ? 'governed_semantic_answer' : 'human_review_required',
+        artifacts: childResults.map(({ task, answer, error }) => agentRunArtifact('answer', `Task: ${task.question}`, {
+          taskId: task.id,
+          question: task.question,
+          answer: answer?.answer ?? answer?.text,
+          resultFingerprint: answer?.result?.resultFingerprint,
+          error,
+        })),
+        evaluations: outcomes.map((outcome) => agentRunEvaluation(
+          `analytical-task-${outcome.taskId}`,
+          `Analytical task ${outcome.taskId}`,
+          outcome.status === 'completed',
+          outcome.status === 'completed' ? 'info' : 'warning',
+          outcome.summary ?? outcome.gap?.message ?? 'Task outcome recorded.',
+          outcome,
+        )),
+        analyticalTurnPlan: { ...turnPlan, tasks, frozen: true },
+        analyticalTaskOutcomes: outcomes,
+      };
+    }
     let governedAnswer: AgentAnswer;
     try {
       governedAnswer = await runGovernedAgentAnswerForRun(
@@ -3469,6 +3622,41 @@ function analyticalFailureSummary(
         (message) => emit({ type: 'executor.started', message, route }),
         routeDecision,
       );
+      // Keep the canonical result contract on the answer itself, not only on
+      // the narration preview. Conversation persistence, follow-up member
+      // resolution, Apply, and the notebook table all read this payload; if a
+      // connector returned positional rows, dropping normalization here makes
+      // the next question lose its customer/product/region binding (AGT-032).
+      if (governedAnswer.result) {
+        const canonical = normalizeCanonicalQueryResult({
+          ...governedAnswer.result,
+          resultFingerprint: governedAnswer.result.resultFingerprint
+            ?? governedAnswer.result.executionReceipt?.resultFingerprint,
+          executionReceipt: governedAnswer.result.executionReceipt,
+          answerTier: governedAnswer.route?.tier ?? governedAnswer.sourceTier,
+          trustState: governedAnswer.certification === 'certified'
+            ? 'certified'
+            : governedAnswer.kind === 'no_answer'
+              ? 'blocked'
+              : governedAnswer.reviewStatus === 'analyst_review_required'
+                ? 'review_required'
+                : 'governed',
+        });
+        governedAnswer.result = {
+          ...governedAnswer.result,
+          columns: canonical.columns,
+          rows: canonical.rows,
+          rowCount: canonical.rowCount,
+          // Preserve the execution-service/receipt fingerprint. A local UI
+          // digest is only a legacy fallback in normalizeCanonicalQueryResult;
+          // it must never replace the cryptographic identity of this run.
+          resultFingerprint: canonical.resultFingerprint,
+          ...(canonical.executionTime !== undefined ? { executionTime: canonical.executionTime } : {}),
+          ...(canonical.truncated ? { truncated: true } : {}),
+          ...(canonical.executionReceipt ? { executionReceipt: canonical.executionReceipt } : {}),
+          ...(canonical.answerTier ? { answerTier: canonical.answerTier } : {}),
+        };
+      }
       // Surface the approved Hint-Graph corrections that shaped this answer so the
       // UI can show an "applied learnings" chip (memoryContext is already on the answer).
       if (!governedAnswer.appliedHints) {
@@ -3711,6 +3899,38 @@ function analyticalFailureSummary(
     // has already spent its one evidence-aware repair. Keep this terminal and
     // inspectable; an ordinary Ask must never silently become a second Research run.
     const isModelDeclined = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'model_declined';
+    // Before an analytical plan is frozen, a generated Ask gap is a recoverable
+    // coverage result rather than a terminal governed error. Let the run engine
+    // consume the typed evaluation and make one bounded cascade decision. Frozen
+    // certified/semantic plans and provider/policy/execution failures remain
+    // fail-closed.
+    const canRecoverPreFreezeGap = (isGroundingGap || isModelDeclined)
+      && route === 'generated_answer'
+      && (request.requestedMode === undefined || request.requestedMode === 'auto' || request.requestedMode === 'ask')
+      && routeDecision?.resolvedAnalyticalPlan?.mode !== 'authoritative';
+    const typedCoverageGap = (isGroundingGap || isModelDeclined)
+      ? buildCoverageGap({
+          code: governedAnswer.refusalCode === 'modeling_gap' ? 'MISSING_RELATIONSHIP' : 'MISSING_RUNTIME_CAPABILITY',
+          phase: 'planning',
+          message: governedAnswer.refusalDetails?.message
+            ?? (isModelDeclined
+              ? 'The available context did not produce a safe analytical tuple.'
+              : 'The retrieved context did not prove the metadata required for this analytical question.'),
+          searchedSources: ['certified_blocks', 'semantic_metrics', 'dbt_manifest', 'relationship_graph', 'warehouse_metadata'],
+          attemptedRoutes: ['certified', 'semantic', 'governed_relational', 'generated'],
+          missing: governedAnswer.refusalDetails?.offending
+            ? [
+                governedAnswer.refusalDetails.offending.relation,
+                governedAnswer.refusalDetails.offending.column,
+              ].filter((value): value is string => Boolean(value))
+            : ['an executable metric/dimension/relationship tuple'],
+          recoverable: canRecoverPreFreezeGap,
+          planFrozen: routeDecision?.resolvedAnalyticalPlan?.mode === 'authoritative',
+          nextActions: canRecoverPreFreezeGap
+            ? ['continue through DBT-grounded relational context', 'run review-required generated SQL', 'start bounded Research if coverage remains incomplete']
+            : ['review the retained metadata gap', 'select a governed metric or dimension', 'repair modeling if the relationship is missing'],
+        })
+      : undefined;
     // Only a genuinely AMBIGUOUS question is surfaced as "needs clarification".
     // Grounding/compiler gaps are terminal review states with their evidence trace;
     // provider outages are blocked so the UI can offer an explicit retry.
@@ -3875,7 +4095,7 @@ function analyticalFailureSummary(
       ? 'blocked'
       : needsClarification
         ? 'needs_clarification'
-        : isGroundingGap || isModelDeclined
+        : (isGroundingGap || isModelDeclined) && !canRecoverPreFreezeGap
           ? 'blocked'
           : isCertified || isSemantic
             ? 'completed'
@@ -3884,7 +4104,7 @@ function analyticalFailureSummary(
       ? 'blocked'
       : needsClarification
         ? 'not_applicable'
-        : isGroundingGap || isModelDeclined
+        : (isGroundingGap || isModelDeclined) && !canRecoverPreFreezeGap
           ? 'blocked'
           : isCertified
             ? 'certified'
@@ -3898,7 +4118,7 @@ function analyticalFailureSummary(
         // A gap is terminal, but it is NOT a provider outage: it still owes the
         // user its evidence trace, and its next-actions below stay the
         // grounding-gap set rather than "retry the provider".
-        : isGroundingGap || isModelDeclined
+        : (isGroundingGap || isModelDeclined) && !canRecoverPreFreezeGap
           ? 'human_review_required'
           : isCertified
             ? 'certified_answer_found'
@@ -4004,7 +4224,7 @@ function analyticalFailureSummary(
                 governedAnswer.refusalCode === 'ambiguous'
                   ? 'Semantic path selection required'
                   : 'Semantic compilation details',
-                governedAnswer,
+                typedCoverageGap ? { ...governedAnswer, coverageGap: typedCoverageGap } : governedAnswer,
                 undefined,
                 needsClarification ? 'not_applicable' : 'review_required',
               )]
@@ -4025,7 +4245,7 @@ function analyticalFailureSummary(
             : [agentRunArtifact(
                 'answer',
                 'No answer was accepted',
-                governedAnswer,
+                typedCoverageGap ? { ...governedAnswer, coverageGap: typedCoverageGap } : governedAnswer,
                 undefined,
                 needsClarification ? 'not_applicable' : 'blocked',
               )])
@@ -4094,14 +4314,20 @@ function analyticalFailureSummary(
               'Metadata grounding',
               false,
               'warning',
-              'The bounded lookup could not prove the required metadata grounding. No automatic retry or Research escalation was started.',
+              canRecoverPreFreezeGap
+                ? 'The first governed lookup did not prove the required metadata grounding. Continue through the bounded relational/generated cascade before asking the user to repair modeling.'
+                : 'The bounded lookup could not prove the required metadata grounding. This plan is already frozen, so no automatic Research escalation was started.',
               {
                 refusalCode: governedAnswer.refusalCode,
                 refusalDetails: governedAnswer.refusalDetails,
                 validationWarnings: governedAnswer.validationWarnings,
                 route: governedAnswer.route,
+                coverageGap: typedCoverageGap,
               },
             ),
+            ...(canRecoverPreFreezeGap ? {
+              suggestedRepair: 'Continue the unfrozen Ask cascade through DBT-grounded relational context and review-required generated SQL.',
+            } : {}),
           },
         ] : []),
         ...(isModelDeclined ? [
@@ -4111,14 +4337,20 @@ function analyticalFailureSummary(
               'Answer grounding',
               false,
               'blocking',
-              'The bounded lookup could not compose a governed query after its in-lane repair. Start Research explicitly to investigate beyond this lookup budget.',
+              canRecoverPreFreezeGap
+                ? 'The governed lookup could not compose a query after its bounded in-lane repair. Continue with the Research context ledger before returning a typed gap.'
+                : 'The bounded lookup could not compose a governed query after its in-lane repair. Start Research explicitly to investigate beyond this lookup budget.',
               {
                 refusalCode: governedAnswer.refusalCode,
                 refusalDetails: governedAnswer.refusalDetails,
                 validationWarnings: governedAnswer.validationWarnings,
                 route: governedAnswer.route,
+                coverageGap: typedCoverageGap,
               },
             ),
+            ...(canRecoverPreFreezeGap ? {
+              suggestedRepair: 'Search the surrounding metadata and relationship context before giving up on the analytical turn.',
+            } : {}),
           },
         ] : []),
         ...(isPolicyBlocked ? [
@@ -4670,6 +4902,7 @@ function analyticalFailureSummary(
         plan,
       };
       let researchRun: ReturnType<typeof withNotebookResearchChecklist> | undefined;
+      const researchRuns: Array<ReturnType<typeof withNotebookResearchChecklist>> = [];
       let researchWorkspaceError: string | undefined;
       if (!needsClarification) {
         try {
@@ -4694,26 +4927,106 @@ function analyticalFailureSummary(
             });
             emit({
               type: 'artifact.created',
-              message: 'Saved notebook research workspace record.',
+              message: 'Saved the immutable root research plan; executing bounded child branches.',
               route: 'research',
               trustState: 'review_required',
-              payload: { researchRunId: created.id, notebookPath },
+              payload: { researchRunId: created.id, notebookPath, branchCap: 6 },
             });
-            const executed = await runNotebookResearch(storage, created, {
-              domain: agentRunWorkspaceValue(request, 'domain'),
-              owner: agentRunWorkspaceValue(request, 'owner'),
-              sourceCellFingerprint,
-              question: request.question,
-              intent: researchIntent,
-              context: researchContextEnvelope,
-              executionConnection: researchExecutionConnection,
-              executionConnectionName: researchExecutionConnectionName,
-              signal: request.signal,
-              baselineSql: agentRunString(researchSource?.sql),
-              baselineDqlArtifact: researchSource?.dqlArtifact as NotebookResearchDqlArtifact | undefined,
-              baselineRunId: agentRunString(researchSource?.runId),
-            });
-            researchRun = withNotebookResearchChecklist(executed);
+            // The root record is a plan/dossier parent. Only child runs are
+            // observed research executions. This prevents one root result from
+            // being copied into six fabricated ledger entries (AGT-016/033).
+            // An explicit Research request still gets one real child when the
+            // catalog planner has no grounded step (for example, an empty
+            // starter project). The child is an observed metadata/baseline
+            // attempt, not a fabricated successful finding; its durable status
+            // and receipt determine the ledger entry.
+            const fallbackBranch = {
+              thought: 'Inspect the requested analytical question against the frozen root context.',
+              action: {
+                kind: 'lookup_metric' as const,
+                target: routeDecision?.resolvedAnalyticalPlan?.executionId ?? request.question,
+              },
+              expectation: 'Whether the frozen context contains enough evidence for a bounded answer.',
+            };
+            const branches = capResearchBranches(
+              plan.steps.length > 0 ? plan.steps : [fallbackBranch],
+              6,
+            );
+            for (let index = 0; index < branches.length; index += 1) {
+              const step = branches[index];
+              if (request.signal?.aborted) rethrowIfCancelled(request.signal.reason, request.signal);
+              const branchId = `${step.action.kind}:${step.action.target}`;
+              const branchQuestion = `${request.question}\nResearch branch ${index + 1} (${branchId}): ${step.expectation}`;
+              const childId = `${created.id}:research:${index + 1}`;
+              const child = storage.createRun({
+                id: childId,
+                notebookPath,
+                title: `${agentRunTitle(request.question, 'Agent research')} · branch ${index + 1}`,
+                question: branchQuestion,
+                sourceCell,
+                sourceCellId,
+                sourceCellName,
+                sourceCellFingerprint,
+                intent: researchIntent,
+                domain: agentRunWorkspaceValue(request, 'domain'),
+                owner: agentRunWorkspaceValue(request, 'owner'),
+                context: {
+                  ...researchContextEnvelope,
+                  rootRunId: created.id,
+                  rootPlanId: plan.rootPlanId,
+                  branch: {
+                    id: branchId,
+                    index: index + 1,
+                    expectation: step.expectation,
+                    action: step.action,
+                  },
+                },
+              });
+              emit({
+                type: 'artifact.created',
+                message: `Started research branch ${index + 1} of ${branches.length}.`,
+                route: 'research',
+                trustState: 'review_required',
+                payload: { researchRunId: child.id, parentResearchRunId: created.id, branchId },
+              });
+              try {
+                const executed = await runNotebookResearch(storage, child, {
+                  domain: agentRunWorkspaceValue(request, 'domain'),
+                  owner: agentRunWorkspaceValue(request, 'owner'),
+                  sourceCellFingerprint,
+                  question: branchQuestion,
+                  intent: researchIntent,
+                  context: {
+                    ...researchContextEnvelope,
+                    rootRunId: created.id,
+                    rootPlanId: plan.rootPlanId,
+                    branch: { id: branchId, index: index + 1, expectation: step.expectation, action: step.action },
+                  },
+                  executionConnection: researchExecutionConnection,
+                  executionConnectionName: researchExecutionConnectionName,
+                  signal: request.signal,
+                  baselineSql: agentRunString(researchSource?.sql),
+                  baselineDqlArtifact: researchSource?.dqlArtifact as NotebookResearchDqlArtifact | undefined,
+                  baselineRunId: agentRunString(researchSource?.runId),
+                });
+                researchRuns.push(withNotebookResearchChecklist(executed));
+              } catch (error) {
+                // A child is a real durable run even when cancellation stops the
+                // shared branch budget. Persist the truthful stop before
+                // propagating cancellation to the parent run.
+                const message = error instanceof Error ? error.message : String(error);
+                storage.updateRun(child.id, {
+                  status: 'error',
+                  error: message,
+                  summary: 'Research branch stopped before producing a result.',
+                  reviewStatus: 'needs_review',
+                });
+                const stopped = storage.getRun(child.id);
+                if (stopped) researchRuns.push(withNotebookResearchChecklist(stopped));
+                rethrowIfCancelled(error, request.signal);
+              }
+            }
+            researchRun = researchRuns[0];
           } finally {
             storage.close();
           }
@@ -4722,15 +5035,81 @@ function analyticalFailureSummary(
           researchWorkspaceError = formatNotebookResearchStorageError(error);
         }
       }
-      const researchResultPreview = (researchRun as { resultPreview?: unknown })?.resultPreview;
+      const researchResultPreview = researchRuns
+        .map((run) => (run as { resultPreview?: unknown }).resultPreview)
+        // Keep zero-row executions in the proof path. `coerceNarrateResultData`
+        // intentionally omits empty row sets for prose, but an empty result is
+        // still an executed result when it carries its execution identity.
+        .find((preview) => {
+          const record = agentRunRecord(preview);
+          return Boolean(record && Array.isArray(record.rows));
+        })
+        ?? (researchRun as { resultPreview?: unknown } | undefined)?.resultPreview;
       const researchResultData = coerceNarrateResultData(researchResultPreview);
       const researchResultRecord = agentRunRecord(researchResultPreview);
+      // Keep each bounded research branch inspectable as an evidence ledger.
+      // The notebook workspace remains the durable execution record; this
+      // additive projection gives Ask/Research narration a stable list of
+      // observations, failures, facts, and receipts without exposing provider
+      // chain-of-thought. Six is the hard branch budget for one root question.
+      const researchLedger = buildResearchEvidenceLedger({
+        rootQuestion: request.question,
+        planId: plan.rootPlanId,
+        snapshotId: routeDecision?.resolvedAnalyticalPlan?.snapshotId,
+        entries: researchRuns.slice(0, 6).map((branch, index) => {
+          const branchContext = agentRunRecord(branch.context)?.branch as Record<string, unknown> | undefined;
+          const branchPreviewRecord = agentRunRecord((branch as { resultPreview?: unknown }).resultPreview);
+          const branchPreview = coerceNarrateResultData(branchPreviewRecord);
+          const previewRecord = branchPreviewRecord;
+          const executionReceipt = normalizeAnalyticalExecutionReceipt(previewRecord?.executionReceipt);
+          const resultFingerprint = normalizeAnalyticalExecutionFingerprint(previewRecord?.resultFingerprint)
+            ?? executionReceipt?.resultFingerprint;
+          // A child run ID or context-pack ID proves that planning happened,
+          // not that a query executed. Only the canonical result fingerprint
+          // (on the result or its execution receipt) can make a branch
+          // observed (AGT-016/033).
+          const executionProof = resultFingerprint;
+          const observed = branch.status === 'ready' && Boolean(executionProof);
+          return {
+            id: branch.id,
+            branchId: agentRunString(branchContext?.id) ?? `branch:${index + 1}`,
+            question: branch.question,
+            status: observed ? 'observed' as const : branch.status === 'error' ? 'failed' as const : 'skipped' as const,
+            ...(branchPreviewRecord && Array.isArray(branchPreviewRecord.rows)
+              ? { rowCount: branchPreviewRecord.rows.length }
+              : {}),
+            ...(resultFingerprint ? { resultFingerprint } : {}),
+            ...(executionReceipt ? { executionReceipt } : {}),
+            facts: [agentRunString(branchContext?.expectation) ?? branch.question, ...((branch.evidence as { citations?: unknown[] } | undefined)?.citations ?? []).flatMap((item) => typeof item === 'string' ? [item] : [])].slice(0, 8),
+            // A context-pack ID or child run ID is not execution evidence. Keep
+            // the receipt list empty until the execution service supplies a
+            // receipt/fingerprint (AGT-016/033).
+            receipts: executionProof ? [executionProof] : [],
+            ...(!observed ? {
+              error: branch.error
+                ?? (branch.status === 'error'
+                  ? branch.summary
+                  : 'Research branch did not produce an execution receipt or result fingerprint.'),
+            } : {}),
+          };
+        }),
+        stoppingReason: needsClarification
+          ? 'not_started'
+          : researchRuns.some((run) => run.status === 'error')
+            ? 'insufficient_evidence'
+            : plan.steps.length > 6
+              ? 'budget'
+              : 'completed',
+      });
       // A query that ran and matched 0 rows STILL executed — treat it as a clean,
       // grounded execution (not "no result"), so an empty answer is surfaced as
       // "0 rows matched" rather than silently downgraded to review-required.
       const researchDidExecute = Boolean(researchResultData) || Boolean(researchResultRecord && Array.isArray(researchResultRecord.rows));
       const researchZeroRows = !researchResultData && researchDidExecute;
-      const researchExecutedCleanly = researchDidExecute && !researchWorkspaceError && researchRun?.status !== 'error';
+      const researchExecutedCleanly = researchDidExecute
+        && !researchWorkspaceError
+        && researchRuns.length > 0
+        && researchRuns.every((run) => run.status === 'ready');
       const narration = !needsClarification && researchResultData
         ? await narrateForAgentRun({
             question: request.question,
@@ -4766,8 +5145,11 @@ function analyticalFailureSummary(
           ? []
           : [agentRunArtifact('research_run', 'Research plan', {
               plan,
+              researchLedger,
               researchRun,
+              researchRuns,
               researchRunId: researchRun?.id,
+              researchRunIds: researchRuns.map((run) => run.id),
               notebookPath,
               workspaceError: researchWorkspaceError,
               routeDecision,
@@ -4819,7 +5201,7 @@ function analyticalFailureSummary(
           : [
               ...(researchRun?.id ? [{ id: 'open-research', label: 'Open research dossier', artifactKind: 'research_run' as const }] : []),
               { id: 'create-block', label: 'Review DQL draft', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
-              ...(researchRun?.generatedSql || researchRun?.reviewedSql ? [{ id: 'insert-sql', label: 'Insert SQL preview', route: 'sql_cell' as const, artifactKind: 'sql_cell' as const }] : []),
+              ...(researchRuns.some((run) => run.generatedSql || run.reviewedSql) ? [{ id: 'insert-sql', label: 'Insert SQL preview', route: 'sql_cell' as const, artifactKind: 'sql_cell' as const }] : []),
             ],
       };
     },
@@ -5377,11 +5759,12 @@ function analyticalFailureSummary(
     getCatalogContext: buildRankedAgentRunCatalogContext,
   });
 
-  // Hybrid router: keep the deterministic decision when it is confident (certified
-  // fast paths + greetings stay 0-LLM); spend one cheap classification call only for
-  // the ambiguous middle so Auto reliably picks quick-answer vs deep research without
-  // the user clicking "Dig deeper". Same provider completion as the planner.
+  // Explicit selections and conversation-only turns remain deterministic;
+  // each fresh natural-language analytical turn gets one bounded candidate-ID
+  // interpretation call by default. The rollback is host-owned and cannot be
+  // supplied by an HTTP/MCP client.
   const agentRunRouter = createHybridRouter({
+    requireMeaningCallForNaturalLanguage: opts.requireMeaningCallForNaturalLanguage ?? true,
     complete: async ({ system, user, signal }) => {
       const provider = await createBlockStudioAssistProvider(projectRoot);
       if (!provider) throw new Error('No AI provider configured for meaning resolution.');
@@ -5424,6 +5807,24 @@ function analyticalFailureSummary(
   // A run may outlive its streaming browser connection, so cancellation is
   // server-owned and keyed by run id rather than relying on fetch abort alone.
   const activeAgentRunControllers = new Map<string, AbortController>();
+  const cancelActiveAgentRun = (id: string): boolean => {
+    const controller = activeAgentRunControllers.get(id);
+    if (!controller) return false;
+    const progress = agentRunStore.getProgress(id);
+    if (progress) {
+      agentRunStore.saveProgress({
+        ...progress,
+        lifecycle: {
+          ...progress.lifecycle,
+          state: 'cancelling',
+          revision: progress.lifecycle.revision + 1,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+    }
+    controller.abort(createAgentRunCancellationError());
+    return true;
+  };
   const activeAnalyticalRepairReservations = new Set<string>();
   const consumedAnalyticalRepairCapabilities = new Set<string>();
   // Server-side conversation threads: persisted multi-turn state (survives refresh).
@@ -7606,6 +8007,19 @@ function analyticalFailureSummary(
         : notebookResearchString(governedAnswer?.answer)
           ?? notebookResearchString(governedAnswer?.text)
           ?? notebookResearchSummary(question, resultPreview, previewError);
+      const previewRecord = agentRunRecord(resultPreview);
+      const executionReceipt = normalizeAnalyticalExecutionReceipt(previewRecord?.executionReceipt);
+      // Do not treat a child run ID as execution evidence. The canonical
+      // fingerprint is the only proof that this Research branch produced a
+      // result; planning, SQL text, and a durable run record remain review
+      // required until that proof exists (AGT-016/033).
+      const executionProof = normalizeAnalyticalExecutionFingerprint(previewRecord?.resultFingerprint)
+        ?? executionReceipt?.resultFingerprint;
+      const executionUnavailable = !previewError && !executionProof;
+      const terminalError = previewError
+        ?? (executionUnavailable
+          ? 'Research did not produce an executed result or execution receipt; the branch remains review-required.'
+          : undefined);
       const recommendation = previewError
         ? 'Review the SQL, selected metadata, and connection context before rerunning.'
         : dqlArtifact && !reviewedSql
@@ -7630,8 +8044,14 @@ function analyticalFailureSummary(
         question,
         intent,
         context,
-        status: previewError ? 'error' : 'ready',
-        summary,
+        // A plan, generated SQL, or DQL artifact is not an observed execution.
+        // Only a result carrying an execution fingerprint/receipt may become
+        // `ready`; otherwise persist a failed review state with no fabricated
+        // evidence (AGT-016/033).
+        status: terminalError ? 'error' : 'ready',
+        summary: terminalError && executionUnavailable
+          ? 'Research branch stopped without an executed result; no observation was recorded.'
+          : summary,
         recommendation,
         resultPreview,
         evidence,
@@ -7651,7 +8071,7 @@ function analyticalFailureSummary(
           ...(display && display.ok ? display.warnings : []),
         ],
         reviewStatus: 'needs_review',
-        error: previewError,
+        error: terminalError,
         lastRunAt: startedAt,
       }) ?? run;
     } catch (error) {
@@ -8529,7 +8949,12 @@ function analyticalFailureSummary(
       return;
     }
     if (operationMatch && req.method === 'DELETE') {
-      const operation = operationCoordinator.cancel(decodeURIComponent(operationMatch[1]));
+      const operationId = decodeURIComponent(operationMatch[1]);
+      const existingOperation = operationCoordinator.get(operationId);
+      if (existingOperation?.type === 'agent_run' && existingOperation.scope.startsWith('agent-run:')) {
+        cancelActiveAgentRun(existingOperation.scope.slice('agent-run:'.length));
+      }
+      const operation = operationCoordinator.cancel(operationId);
       res.writeHead(operation ? 200 : 404, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON(operation ?? { error: 'Operation not found.' }));
       return;
@@ -9628,12 +10053,17 @@ function analyticalFailureSummary(
       const limit = Number.isFinite(rawLimit) && rawLimit > 0
         ? Math.min(200, Math.floor(rawLimit))
         : 50;
-      const runs = agentRunStore
-        .list()
+      const stored = agentRunStore.list();
+      // This is an INDEX payload: one row per run, no answer bodies. Shipping
+      // stored runs whole meant a measured 47.61 MB for 20 real runs.
+      // `GET /api/agent-runs/:id` still serves the complete immutable record.
+      const runs = stored
+        .slice()
         .sort((a: AgentRun, b: AgentRun) => b.startedAt.localeCompare(a.startedAt))
-        .slice(0, limit);
+        .slice(0, limit)
+        .map(agentRunListEntryForTransport);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(serializeJSON({ runs, total: agentRunStore.list().length, limit }));
+      res.end(serializeJSON({ runs, total: stored.length, limit }));
       return;
     }
 
@@ -10193,6 +10623,14 @@ function analyticalFailureSummary(
         res.end(serializeJSON({ error: 'Agent run not found.' }));
         return;
       }
+      if (run.status !== 'blocked' || run.stopReason !== 'blocked') {
+        res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({
+          code: 'REPAIR_CAPABILITY_REQUIRED',
+          error: 'Only a terminal blocked run with a blocked stop reason may derive an analytical repair.',
+        }));
+        return;
+      }
       const source = analyticalFailedRunFromAgentRun(run);
       if (!source) {
         res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -10232,25 +10670,11 @@ function analyticalFailureSummary(
     if (req.method === 'POST' && /^\/api\/agent-runs\/[^/]+\/cancel$/.test(path)) {
       const match = path.match(/^\/api\/agent-runs\/([^/]+)\/cancel$/);
       const id = decodeURIComponent(match?.[1] ?? '');
-      const controller = activeAgentRunControllers.get(id);
-      if (!controller) {
+      if (!cancelActiveAgentRun(id)) {
         res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({ ok: false, error: 'This run is no longer active.' }));
         return;
       }
-      const progress = agentRunStore.getProgress(id);
-      if (progress) {
-        agentRunStore.saveProgress({
-          ...progress,
-          lifecycle: {
-            ...progress.lifecycle,
-            state: 'cancelling',
-            revision: progress.lifecycle.revision + 1,
-            updatedAt: new Date().toISOString(),
-          },
-        });
-      }
-      controller.abort(new Error('Stopped by user.'));
       res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ ok: true, id }));
       return;
@@ -19513,27 +19937,39 @@ function normalizeQueryResult(
   columns: string[];
   rows: Record<string, unknown>[];
   rowCount: number;
+  resultFingerprint: string;
   executionTime: number;
   truncated?: boolean;
+  executionReceipt?: AgentResultPayload['executionReceipt'];
+  trustState?: string;
+  answerTier?: string;
   semanticRefs?: { metrics: string[]; dimensions: string[] };
 } {
-  const rawCols: unknown[] = Array.isArray(result?.columns) ? result.columns : [];
-  const columns = rawCols.map((c) =>
-    typeof c === 'string' ? c : typeof (c as any)?.name === 'string' ? (c as any).name : String(c)
-  );
+  const canonical = normalizeCanonicalQueryResult({
+    columns: result?.columns,
+    rows: result?.rows,
+    rowCount: result?.rowCount,
+    executionTime: result?.executionTime,
+    executionTimeMs: result?.executionTimeMs,
+    truncated: result?.truncated,
+    resultFingerprint: result?.resultFingerprint,
+    executionReceipt: result?.executionReceipt,
+    trustState: result?.trustState,
+    answerTier: result?.answerTier,
+  });
   const rawRows = Array.isArray(result?.rows) ? result.rows : [];
-  const rows = rawRows.slice(0, NOTEBOOK_EXECUTE_PREVIEW_ROW_LIMIT);
+  const rows = canonical.rows.slice(0, NOTEBOOK_EXECUTE_PREVIEW_ROW_LIMIT);
   const hasRefs = semanticRefs && (semanticRefs.metrics.length > 0 || semanticRefs.dimensions.length > 0);
   return {
-    columns,
+    columns: canonical.columns,
     rows,
-    rowCount: typeof result?.rowCount === 'number' ? result.rowCount : rawRows.length,
-    executionTime: typeof result?.executionTimeMs === 'number'
-      ? result.executionTimeMs
-      : typeof result?.executionTime === 'number'
-        ? result.executionTime
-        : 0,
-    ...(rawRows.length > rows.length ? { truncated: true } : {}),
+    rowCount: canonical.rowCount,
+    resultFingerprint: canonical.resultFingerprint,
+    executionTime: canonical.executionTime ?? 0,
+    ...(rawRows.length > rows.length || canonical.truncated ? { truncated: true } : {}),
+    ...(canonical.executionReceipt ? { executionReceipt: canonical.executionReceipt } : {}),
+    ...(canonical.trustState ? { trustState: canonical.trustState } : {}),
+    ...(canonical.answerTier ? { answerTier: canonical.answerTier } : {}),
     ...(hasRefs ? { semanticRefs } : {}),
   };
 }
@@ -32626,25 +33062,25 @@ function notebookResearchContextPreview(contextPack: LocalContextPack): Record<s
 }
 
 function normalizeNotebookAgentResult(result: AgentResultPayload): ReturnType<typeof normalizeQueryResult> {
-  const columns = Array.isArray(result.columns)
-    ? result.columns.map((column) => {
-        if (typeof column === 'string') return column;
-        if (column && typeof column === 'object' && typeof (column as { name?: unknown }).name === 'string') {
-          return String((column as { name: unknown }).name);
-        }
-        return String(column);
-      })
-    : [];
-  const rows = Array.isArray(result.rows)
-    ? result.rows
-        .filter((row): row is Record<string, unknown> => Boolean(row && typeof row === 'object' && !Array.isArray(row)))
-        .map((row) => row)
-    : [];
+  const canonical = normalizeCanonicalQueryResult({
+    columns: result.columns,
+    rows: result.rows,
+    rowCount: result.rowCount,
+    executionTime: result.executionTime,
+    resultFingerprint: result.resultFingerprint,
+    executionReceipt: result.executionReceipt,
+    trustState: result.executableArtifact?.trustState,
+    answerTier: result.answerTier,
+  });
   return {
-    columns,
-    rows,
-    rowCount: typeof result.rowCount === 'number' ? result.rowCount : rows.length,
-    executionTime: typeof result.executionTime === 'number' ? result.executionTime : 0,
+    columns: canonical.columns,
+    rows: canonical.rows,
+    rowCount: canonical.rowCount,
+    resultFingerprint: canonical.resultFingerprint,
+    executionTime: canonical.executionTime ?? 0,
+    ...(canonical.truncated ? { truncated: true } : {}),
+    ...(canonical.executionReceipt ? { executionReceipt: canonical.executionReceipt } : {}),
+    ...(canonical.answerTier ? { answerTier: canonical.answerTier } : {}),
   };
 }
 

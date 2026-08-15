@@ -480,6 +480,45 @@ describe('conversation context follow-up routing', () => {
     expect(followUp?.priorMeasures).toEqual(['revenue']);
   });
 
+  it('AGT-031 resolves singular people pronouns to one prior customer for attribute lookup', () => {
+    const question = 'what region he belongs to?';
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: question }],
+      conversationContext: {
+        conversationStateVersion: 1,
+        activeTurnId: 'turn_customer',
+        turns: [{
+          id: 'turn_customer',
+          question: 'Who are the top customers for each product who have highest revenue?',
+          result: {
+            columns: ['product_name', 'customer_name', 'revenue'],
+            dimensionValues: {
+              product_name: ['doctor stew'],
+              customer_name: ['Jessica Richard'],
+            },
+            measureColumns: ['revenue'],
+          },
+        }],
+      },
+    } as AgentRunRequest, question);
+
+    expect(followUp).toMatchObject({
+      kind: 'drilldown',
+      filters: ['Jessica Richard'],
+      dimensions: expect.arrayContaining(['customer', 'region']),
+      memberBindings: [{
+        dimension: 'customer',
+        values: ['Jessica Richard'],
+        source: 'prior_result',
+        confidence: 'deictic',
+        sourceTurnId: 'turn_customer',
+      }],
+      resolvedReferences: ['customer: Jessica Richard'],
+    });
+  });
+
   it('asks which product was meant instead of binding the first prior row', () => {
     // The prior answer showed TWO products. "this product" does not identify
     // one of them, and silently filtering on whichever sorted first invents an

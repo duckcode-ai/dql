@@ -1,0 +1,152 @@
+version: 1
+name: ask-ai-orchestration-contract
+description: >-
+  Contract fixtures for the unified Ask analytical cascade. These cases are
+  evaluated against a prepared metadata snapshot and must preserve trust state,
+  candidate identity, and canonical result shape.
+acceptanceIds:
+  - AGT-027
+  - AGT-028
+  - AGT-029
+  - AGT-030
+  - AGT-031
+  - AGT-032
+  - AGT-033
+  - CTX-007
+  - PERF-003
+  - E2E-022
+cases:
+  - id: governed-ranking-cascade
+    verification: executable
+    question: "Who are the top customers for each product who have highest revenue?"
+    candidates:
+      - id: block:top_customer_revenue
+        kind: certified_block
+        name: Top Customer Revenue
+        trustTier: certified
+        relevanceScore: 0.99
+        compatibility: compatible
+        domain: commerce
+        dimensions: [customer, product]
+        exactMatch: true
+        analyticalRoute: certified
+      - id: semantic:metric:revenue
+        kind: semantic_metric
+        name: Revenue
+        trustTier: semantic
+        relevanceScore: 0.82
+        compatibility: compatible
+        domain: commerce
+        dimensions: [customer, product]
+        analyticalRoute: semantic
+    resolution:
+      questionType: ranking
+      selectedConceptIds: [block:top_customer_revenue]
+      recommendedExecutionId: block:top_customer_revenue
+      recommendedRoute: certified
+      measures: [revenue]
+      dimensions: [customer, product]
+      order: desc
+      limit: 10
+      confidence: high
+    expected:
+      meaningCalls: 1
+      firstEligibleTier: certified_block
+      fallbackTiers: [semantic_layer, governed_relational, generated_sql]
+      resultRowsAreObjects: true
+  - id: ranking-measure-clarification
+    verification: executable
+    question: "Who are the top customers?"
+    candidates:
+      - id: semantic:metric:customers.customers
+        kind: semantic_metric
+        name: Customers
+        trustTier: semantic
+        relevanceScore: 0.96
+        compatibility: compatible
+        domain: commerce
+        dimensions: [customer]
+        aggregation: count_distinct
+        analyticalRoute: semantic
+      - id: semantic:metric:revenue
+        kind: semantic_metric
+        name: Revenue
+        trustTier: semantic
+        relevanceScore: 0.84
+        compatibility: compatible
+        domain: commerce
+        dimensions: [customer]
+        aggregation: sum
+        analyticalRoute: semantic
+    resolution:
+      questionType: ranking
+      selectedConceptIds: [semantic:metric:customers.customers]
+      recommendedExecutionId: semantic:metric:customers.customers
+      recommendedRoute: clarify
+      measures: []
+      dimensions: [customer]
+      order: desc
+      limit: 10
+      confidence: low
+      missingInformation: [ranking measure]
+    expected:
+      meaningCalls: 1
+      clarificationCode: missing_ranking_measure
+      repeats: 0
+  - id: attribute-follow-up
+    verification: executable
+    prior:
+      columns: [product_name, customer_name, revenue]
+      values:
+        customer_name: [Jessica Richard]
+    question: "what region he belongs to?"
+    candidates:
+      - id: semantic:dimension:customer_name
+        kind: semantic_member
+        name: Customer
+        aliases: [customer, customer_name]
+        trustTier: semantic
+        relevanceScore: 0.96
+        compatibility: compatible
+        domain: commerce
+      - id: semantic:dimension:region
+        kind: semantic_member
+        name: Region
+        aliases: [region]
+        trustTier: semantic
+        relevanceScore: 0.94
+        compatibility: compatible
+        domain: commerce
+    resolution:
+      questionType: value
+      selectedConceptIds: [semantic:dimension:customer_name, semantic:dimension:region]
+      recommendedExecutionId: semantic:dimension:region
+      recommendedRoute: governed_sql
+      measures: []
+      dimensions: [region]
+      filters:
+        - field: customer_name
+          value: Jessica Richard
+      confidence: high
+    expected:
+      meaningCalls: 1
+      route: generated_sql
+      memberBinding:
+        dimension: customer_name
+        value: Jessica Richard
+      metricRequired: false
+      resultColumns: [customer_name, region]
+  - id: compound-partial-success
+    verification: specified
+    question: "What region has top revenue, and which products drive it?"
+    expected:
+      taskGraph: true
+      allowsPartialSuccess: true
+      maxResearchBranches: 6
+  - id: bounded-research-ledger
+    verification: specified
+    question: "Deep research the revenue decline and its customer, product, and regional drivers"
+    expected:
+      route: research
+      maxBranches: 6
+      receiptBackedFacts: true

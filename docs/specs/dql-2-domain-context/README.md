@@ -27,8 +27,9 @@ through review before continuing.
 10. [Fixtures, evaluations, and release gates](09-fixtures-evals-and-release-gates.md)
 11. [Analytical composition and transparent repair](10-analytical-composition-and-repair.md)
 12. [Context authoring, YAML import, and authoring AI](11-context-authoring-and-ai.md)
-13. [Acceptance matrix](acceptance-matrix.md)
-14. [Execution tracker](execution-tracker.md)
+13. [Ask AI orchestration contract](12-ask-ai-orchestration.md)
+14. [Acceptance matrix](acceptance-matrix.md)
+15. [Execution tracker](execution-tracker.md)
 
 ## Stable requirement IDs
 

@@ -444,6 +444,9 @@ function snapshotTurn(turn: ConversationTurn): ConversationSnapshotTurn {
 }
 
 export function conversationTurnContextState(turn: ConversationSnapshotTurn): string {
+  if (turn.runStatus === 'cancelled' || turn.stopReason === 'cancelled' || turn.route === 'cancelled') {
+    return 'cancelled';
+  }
   if (turn.runStatus === 'blocked' || turn.trustLabel === 'blocked' || turn.route === 'blocked') {
     return 'blocked';
   }

@@ -1099,6 +1099,10 @@ export interface AgentResultPayload {
   columns: unknown[];
   rows: unknown[];
   rowCount: number;
+  /** Canonical result-contract fingerprint, stable for the named rows/columns. */
+  resultFingerprint?: string;
+  /** Cascade tier that produced the rows; renderers do not infer it. */
+  answerTier?: string;
   executionTime?: number;
   /**
    * The row bound actually cut rows off. Previously a bounded result was
@@ -2947,6 +2951,13 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   const analyticalPlanPrompt = renderAnalyticalPlanPrompt(analyticalPlan)
     ?? renderSingleEntityModelingPrompt(analyticalPlan, input.manifest);
   if (analyticalPlanPrompt) messages.push({ role: 'system', content: analyticalPlanPrompt });
+  const attributeLookup = isMetricIndependentAttributeLookup(question, questionPlan, input.followUp);
+  if (attributeLookup) {
+    messages.push({
+      role: 'system',
+      content: renderAttributeLookupInstruction(questionPlan, input.followUp),
+    });
+  }
   if (questionDomainScope.length > 0) {
     messages.push({
       role: 'system',
@@ -3623,7 +3634,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       ? analyticalPlan.userFacingReason
         ?? analyticalPolicyUserFacingReason(analyticalPlan.code ?? 'unsafe_relationship', analyticalPlan.entities)
       : declinedDespiteContext
-      ? 'I could not compose a governed query for this from the available tables and metrics. This usually needs a clearer join path or an explicit metric and grouping — name the specific measure and how to break it down, and I can generate a review-required draft.'
+      ? attributeLookup
+        ? 'I could not resolve the requested attribute from the available metadata. I preserved the conversation member, but the inspected models do not prove a relationship to that attribute. Tell me the exact field or table, or re-sync the dbt metadata, and I can prepare a review-required lookup.'
+        : 'I could not compose a governed query for this from the available tables and metrics. This usually needs a clearer join path or an explicit metric and grouping — name the specific measure and how to break it down, and I can generate a review-required draft.'
       : parsed.text || 'No answer (the model declined to propose SQL).';
     return {
       kind: 'no_answer',
@@ -6286,6 +6299,83 @@ function renderContextPrompt(
     ? `\n\n## Local metadata context pack\n\n${renderContextPackForPrompt(contextPack, budget)}`
     : '';
   return `${intentSection}${budgetSection}${dialectSection}\n\n${blockSection}${businessSection}${otherSection}${kgJoinSection}${schemaSection}${contextPackSection}${memorySection}${hintsSection}${conversationSection}${extraSection}${followUpSection}`;
+}
+
+const ATTRIBUTE_LOOKUP_CONCEPTS = new Set([
+  'account', 'category', 'channel', 'city', 'country', 'department', 'description',
+  'industry', 'label', 'location', 'market', 'name', 'owner', 'region', 'segment',
+  'state', 'status', 'team', 'tier', 'title', 'type', 'user',
+]);
+
+/**
+ * Attribute questions are valid analytical asks even when they have no
+ * measure. A conversational reference such as "what region does he belong to?"
+ * carries a typed member binding from the prior result; forcing a metric here
+ * turns a straightforward dimensional lookup into the old generic governed
+ * error. Keep this as a generation hint, not a deterministic semantic match:
+ * the provider still has to choose a relation and the SQL guard still proves
+ * the resulting query. AGT-031.
+ */
+function isMetricIndependentAttributeLookup(
+  question: string,
+  questionPlan: AnalysisQuestionPlan,
+  followUp?: AgentFollowUpContext,
+): boolean {
+  if (questionPlan.mode === 'ranking' || questionPlan.mode === 'comparison' || questionPlan.mode === 'definition') return false;
+  const lower = question.toLowerCase();
+  // Follow-up planning intentionally carries the previous measure so that a
+  // refinement such as "and by region?" remains grounded. That carry must not
+  // turn a new attribute request into a metric request. Only a measure named in
+  // this question (or a non-carried custom term) disables this lane.
+  const carriedTerms = new Set([
+    ...(followUp?.priorMeasures ?? []),
+    ...(followUp?.priorResultColumns ?? []),
+    ...(followUp?.priorDqlArtifact?.metrics ?? []),
+  ].map((term) => term.toLowerCase().replace(/[_-]+/g, ' ').trim()));
+  const carriedOnly = (term: string): boolean => carriedTerms.has(term.toLowerCase().replace(/[_-]+/g, ' ').trim());
+  const directMeasures = questionPlan.requestedShape.measures.filter((term) => !carriedOnly(term));
+  const directMetricTerms = questionPlan.metricTerms.filter((term) => !carriedOnly(term));
+  if (directMeasures.length > 0 || directMetricTerms.length > 0) return false;
+  if (/\b(?:revenue|sales?|amount|spend|cost|margin|profit|orders?|count|quantity|units?|value|rate|score|usage|growth|churn|conversion|tax)\b/i.test(lower)) return false;
+  const attributeTerms = new Set([
+    ...questionPlan.dimensionTerms,
+    ...questionPlan.requestedShape.dimensions,
+    ...questionPlan.requestedShape.requiredOutputs,
+  ].map((term) => term.toLowerCase().replace(/[_-]+/g, ' ').trim()));
+  const hasAttribute = Array.from(attributeTerms).some((term) => {
+    if (!term) return false;
+    return ATTRIBUTE_LOOKUP_CONCEPTS.has(term) || Array.from(ATTRIBUTE_LOOKUP_CONCEPTS).some((concept) =>
+      new RegExp(`\\b${concept}\\b`, 'i').test(term));
+  }) || /\b(?:region|segment|category|channel|location|country|state|city|status|type|name|label|title|description)\b/i.test(lower);
+  if (!hasAttribute) return false;
+  const asksForAttribute = /\b(?:what|which|where|who|show|give|tell|find|list)\b/i.test(lower)
+    || /\b(?:belongs?|assigned|associated|located|based|part\s+of)\b/i.test(lower);
+  if (!asksForAttribute) return false;
+  const hasTarget = Boolean(followUp?.memberBindings?.length)
+    || questionPlan.entities.length > 0
+    || /\b(?:he|she|him|his|her|hers|this|that|these|those|same|above|previous|prior)\b/i.test(lower);
+  return hasTarget;
+}
+
+function renderAttributeLookupInstruction(
+  questionPlan: AnalysisQuestionPlan,
+  followUp?: AgentFollowUpContext,
+): string {
+  const requested = Array.from(new Set([
+    ...questionPlan.dimensionTerms,
+    ...questionPlan.requestedShape.dimensions,
+    ...questionPlan.requestedShape.requiredOutputs,
+  ].filter((term) => ATTRIBUTE_LOOKUP_CONCEPTS.has(term.toLowerCase().replace(/[_-]+/g, ' ').trim()))));
+  const bindings = followUp?.memberBindings?.map((binding) =>
+    `${binding.dimension} = ${binding.values.join(' | ')}`).join('; ');
+  return [
+    'METRIC-INDEPENDENT ATTRIBUTE LOOKUP (authoritative for this turn):',
+    'This is a valid lookup of an entity attribute; it does not require a revenue, count, or other measure.',
+    requested.length > 0 ? `Return the requested attribute column(s): ${requested.join(', ')}.` : 'Return the requested descriptive attribute column.',
+    bindings ? `Preserve the typed conversation member binding exactly: ${bindings}.` : 'Preserve the explicitly named entity/member exactly.',
+    'Use the inspected metadata and documented join keys to find the owning relation, select the attribute, and apply the member predicate. Do not invent a metric, add an arbitrary aggregate, or broaden a singular member to all prior rows.',
+    'If the attribute or relationship is absent from inspected metadata, return no SQL and state the precise missing relation/column so the host can surface a typed gap.',
+  ].join('\n');
 }
 
 function buildKgJoinPathHints(kg: KGStore, nodes: KGNode[], questionPlan: AnalysisQuestionPlan): string[] {

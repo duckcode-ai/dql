@@ -38,6 +38,7 @@ import {
 import {
   api,
   DqlApiError,
+  normalizeQueryResultPayload,
   type AgentConversationTurn,
   type AgentRun,
   type AgentRunArtifact,
@@ -96,7 +97,7 @@ export function agentRunHistoryFromItems(items: ThreadItem[]): Array<{ role: 'us
       history.push({ role: 'user', text: item.text });
       continue;
     }
-    const failed = item.run.status === 'blocked' || item.run.artifacts?.some((artifact) => {
+    const failed = item.run.status === 'blocked' || item.run.status === 'cancelled' || item.run.stopReason === 'cancelled' || item.run.artifacts?.some((artifact) => {
       const payload = payloadOf(artifact);
       return Boolean(payload.executionError || payload.warehouseFailure || payload.analyticalFailure);
     });
@@ -235,6 +236,7 @@ const ROUTE_LABEL: Record<AgentRunRoute, string> = {
   skill_draft: 'Skill proposal',
   app_build: 'App plan',
   clarify: 'Clarify',
+  cancelled: 'Stopped by user',
   blocked: 'Blocked',
 };
 
@@ -1309,13 +1311,13 @@ function readStoredThinkingMode(): AgentThinkingMode {
 
 const AGENT_RUN_ROUTES = new Set<AgentRunRoute>([
   'conversation', 'certified_answer', 'semantic_answer', 'generated_answer', 'research',
-  'sql_cell', 'dql_block_draft', 'modeling_draft', 'skill_draft', 'app_build', 'clarify', 'blocked',
+  'sql_cell', 'dql_block_draft', 'modeling_draft', 'skill_draft', 'app_build', 'clarify', 'cancelled', 'blocked',
 ]);
 const AGENT_RUN_TRUST_STATES = new Set<AgentRunTrustState>([
   'certified', 'governed', 'grounded', 'review_required', 'blocked', 'not_applicable',
 ]);
 const AGENT_RUN_STATUSES = new Set<AgentRunStatus>([
-  'completed', 'needs_review', 'needs_clarification', 'blocked',
+  'completed', 'needs_review', 'needs_clarification', 'cancelled', 'blocked',
 ]);
 const AGENT_RUN_STOP_REASONS = new Set<AgentRunStopReason>([
   'conversational_reply',
@@ -1325,6 +1327,7 @@ const AGENT_RUN_STOP_REASONS = new Set<AgentRunStopReason>([
   'artifact_created',
   'needs_clarification',
   'human_review_required',
+  'cancelled',
   'blocked',
 ]);
 
@@ -1373,7 +1376,9 @@ function runFromConversationTurn(turn: AgentConversationTurn): AgentRun {
     : 'completed';
   const stopReason: AgentRunStopReason = AGENT_RUN_STOP_REASONS.has(turn.stopReason as AgentRunStopReason)
     ? (turn.stopReason as AgentRunStopReason)
-    : status === 'blocked'
+    : status === 'cancelled'
+      ? 'cancelled'
+      : status === 'blocked'
       ? 'blocked'
       : status === 'needs_clarification'
         ? 'needs_clarification'
@@ -1447,6 +1452,7 @@ function routeMatchLabel(route?: AgentRunRoute): string {
     case 'modeling_draft': return 'Resolved current models and relationship evidence';
     case 'skill_draft': return 'Resolved current domain guidance and governed references';
     case 'clarify': return 'Identified a missing business detail';
+    case 'cancelled': return 'Stopped by user';
     default: return 'Identified the best answer path';
   }
 }
@@ -1789,6 +1795,26 @@ function RunCard({
         <div style={{ fontSize: 12.5, lineHeight: 1.45, color: t.textSecondary }}>{cleanPresentationText(run.summary)}</div>
       ) : null}
       {run.answer ? <div style={answerBoxStyle(t)}><StructuredAnswerText text={cleanAnswerText(run.answer)} t={t} /></div> : null}
+
+      {run.analyticalTaskOutcomes && run.analyticalTaskOutcomes.length > 1 ? (
+        <div style={{ display: 'grid', gap: 5, padding: '8px 10px', border: `1px solid ${t.cellBorder}`, borderRadius: 8, background: t.cellBg }}>
+          <div style={{ fontSize: 10.5, fontWeight: 800, color: t.textMuted, textTransform: 'uppercase', letterSpacing: 0.4 }}>Analytical tasks</div>
+          {run.analyticalTaskOutcomes.map((outcome) => {
+            const status = typeof outcome.status === 'string' ? outcome.status : 'gap';
+            const summary = typeof outcome.summary === 'string'
+              ? outcome.summary
+              : typeof (outcome.gap as Record<string, unknown> | undefined)?.message === 'string'
+                ? String((outcome.gap as Record<string, unknown>).message)
+                : 'Task outcome recorded.';
+            return (
+              <div key={String(outcome.taskId)} style={{ display: 'flex', gap: 7, alignItems: 'flex-start', fontSize: 11.5, color: t.textSecondary }}>
+                <span style={{ color: status === 'completed' ? t.success : t.warning, fontWeight: 800 }}>{status === 'completed' ? '✓' : '!'}</span>
+                <span><strong>{String(outcome.taskId)}</strong> · {summary}</span>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
 
       <ClarificationChoiceList run={run} t={t} onSelect={onSelectClarification} />
 
@@ -2232,12 +2258,15 @@ function AskRunCard(props: AskRunCardProps) {
 
   const certified = run.trustState === 'certified';
   const blocked = run.status === 'blocked';
+  const cancelled = run.status === 'cancelled' || run.stopReason === 'cancelled' || run.route === 'cancelled';
   const needsClarification = run.status === 'needs_clarification';
   // A clarify turn's `answer` IS the question being asked, and a blocked run's
   // `answer` is the business-language reason the loop wrote. Dropping both left
   // the user with a canned headline and nothing actionable underneath.
   const presentationAnswer = run.answer;
-  const outcomeLabel = blocked
+  const outcomeLabel = cancelled
+    ? 'Stopped by user'
+    : blocked
     ? 'Couldn’t run this query'
     : needsClarification
       ? 'Needs clarification'
@@ -2247,18 +2276,19 @@ function AskRunCard(props: AskRunCardProps) {
   // The card supplies its own headline, so the body wants the most SPECIFIC text
   // available: the producer's own message beats the canned per-code headline,
   // which is the same sentence for everything unclassified.
-  const failureMessage = blocked ? askFailureDetail(run) : undefined;
+  const failureMessage = cancelled ? (run.summary || 'Stopped by user.') : blocked ? askFailureDetail(run) : undefined;
   const captureWarning = askRunCaptureWarning(run);
   const passedChecks = run.evaluations.filter((e) => e.severity === 'info').length;
   const evidence = evidenceFromRun(run);
-  const inlineResultArtifacts = run.artifacts.filter((artifact) => {
+  const displayArtifacts = cancelled ? [] : run.artifacts;
+  const inlineResultArtifacts = displayArtifacts.filter((artifact) => {
     const payload = payloadOf(artifact);
     return !isRichAskArtifact(artifact, payload) && Boolean(extractResult(payload));
   });
   const inlineResultIds = new Set(inlineResultArtifacts.map((artifact) => artifact.id));
-  const chipArtifacts = run.artifacts.filter((a) => !isRichAskArtifact(a, payloadOf(a)) && !inlineResultIds.has(a.id));
-  const richArtifacts = run.artifacts.filter((a) => isRichAskArtifact(a, payloadOf(a)));
-  const primaryArtifact = inlineResultArtifacts[0] ?? chipArtifacts[0] ?? run.artifacts[0];
+  const chipArtifacts = displayArtifacts.filter((a) => !isRichAskArtifact(a, payloadOf(a)) && !inlineResultIds.has(a.id));
+  const richArtifacts = displayArtifacts.filter((a) => isRichAskArtifact(a, payloadOf(a)));
+  const primaryArtifact = inlineResultArtifacts[0] ?? chipArtifacts[0] ?? displayArtifacts[0];
 
   // Reuse RunCard's action gating so the quiet row offers the same real actions.
   const pinnable = isAgentRunPinnable(run);
@@ -2283,15 +2313,17 @@ function AskRunCard(props: AskRunCardProps) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: '100%', animation: 'dql-agent-fadein 0.3s ease-out' }}>
       {/* Trust line */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
-        {blocked
+        {cancelled
+          ? <Route size={14} color={t.textMuted} />
+          : blocked
           ? <ShieldAlert size={14} color={t.error} />
           : certified
             ? <ShieldCheck size={14} color={t.success} />
             : <Sparkles size={14} color={t.accent} />}
-        <span style={{ fontSize: 12, fontWeight: 650, color: blocked ? t.error : t.textSecondary }}>{outcomeLabel}</span>
+        <span style={{ fontSize: 12, fontWeight: 650, color: cancelled ? t.textMuted : blocked ? t.error : t.textSecondary }}>{outcomeLabel}</span>
         {certified && evidence[0] ? (
           <span style={{ fontSize: 11, color: t.textMuted }}>from <span style={{ color: t.accent, fontWeight: 600 }}>{evidence[0].label}</span></span>
-        ) : !blocked && primaryArtifact && passedChecks > 0 ? (
+        ) : !blocked && !cancelled && primaryArtifact && passedChecks > 0 ? (
           <button type="button" onClick={() => openArtifact(primaryArtifact.id, 'trust')} style={{ fontSize: 11, color: t.textMuted, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontFamily: t.font, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
             <Check size={11} color={t.success} /> {passedChecks} check{passedChecks === 1 ? '' : 's'} passed
           </button>
@@ -2303,6 +2335,8 @@ function AskRunCard(props: AskRunCardProps) {
         <div data-followup="answer" style={{ fontSize: 14.5, lineHeight: 1.65, color: t.textPrimary }}>
           <StructuredAnswerText text={cleanAnswerText(presentationAnswer)} t={t} />
         </div>
+      ) : cancelled ? (
+        <div data-followup="answer" style={{ fontSize: 14, lineHeight: 1.6, color: t.textMuted }}>{cleanPresentationText(run.summary || 'Stopped by user.')}</div>
       ) : failureMessage ? (
         <AskFailureCard
           run={run}
@@ -3035,6 +3069,8 @@ export function isAgentRunPinnable(run: AgentRun): boolean {
   );
   return !hasMixedSourcePlan
     && run.status !== 'blocked'
+    && run.status !== 'cancelled'
+    && run.stopReason !== 'cancelled'
     && run.status !== 'needs_clarification'
     // A run that produced only a DQL artifact — "the DQL from Ask AI" — is
     // exactly what people want on a page, but it used to render no Add-to-App
@@ -3078,7 +3114,8 @@ function AskInspector({
   const lineage = lineageEntriesFromRun(run);
   const trustNote = trustExplainer(run);
   const certified = artifact.trustState === 'certified';
-  const blocked = run.status === 'blocked' || artifact.trustState === 'blocked';
+  const cancelled = run.status === 'cancelled' || run.stopReason === 'cancelled' || run.route === 'cancelled';
+  const blocked = !cancelled && (run.status === 'blocked' || artifact.trustState === 'blocked');
   const pinnable = isAgentRunPinnable(run);
   const analytical = analyticalInspectorContract(payload);
 
@@ -3091,9 +3128,9 @@ function AskInspector({
   });
   const activeTab = tabs.some((x) => x.id === tab) ? tab : tabs[0].id;
 
-  const badgeLabel = blocked ? 'Blocked' : certified ? 'Certified' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'Governed' : 'AI-generated';
-  const badgeColor = blocked ? 'var(--status-error)' : certified ? 'var(--status-success)' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'var(--accent)' : 'var(--status-warning)';
-  const badgeBg = blocked ? 'var(--status-error-bg)' : certified ? 'var(--status-success-bg)' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'var(--accent-dim)' : 'var(--status-warning-bg)';
+  const badgeLabel = cancelled ? 'Cancelled' : blocked ? 'Blocked' : certified ? 'Certified' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'Governed' : 'AI-generated';
+  const badgeColor = cancelled ? 'var(--text-tertiary)' : blocked ? 'var(--status-error)' : certified ? 'var(--status-success)' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'var(--accent)' : 'var(--status-warning)';
+  const badgeBg = cancelled ? 'var(--bg-3)' : blocked ? 'var(--status-error-bg)' : certified ? 'var(--status-success-bg)' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'var(--accent-dim)' : 'var(--status-warning-bg)';
 
   return (
     <div style={{ width: 'clamp(300px, 34vw, 440px)', flexShrink: 0, background: 'var(--bg-2)', borderLeft: '1px solid var(--border-default)', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -3678,6 +3715,7 @@ function AddToAppButton({
  * candidate is not an executed answer merely because dbt-grounded SQL exists.
  */
 export function trustExplainer(run: AgentRun): string | null {
+  if (run.status === 'cancelled' || run.stopReason === 'cancelled' || run.route === 'cancelled') return 'Stopped by user. No result was accepted.';
   if (run.trustState === 'certified') return 'Answered from a certified block.';
   if (run.route === 'dql_block_draft') return 'Prepared an ownerless review draft. Add it to Block Studio when you are ready to save it.';
   if (run.trustState === 'governed') return 'Built from governed metrics and dimensions.';
@@ -3718,6 +3756,7 @@ function isExploratoryDbtRun(run: AgentRun): boolean {
 }
 
 function simpleRunTitle(run: AgentRun): string {
+  if (run.status === 'cancelled' || run.stopReason === 'cancelled' || run.route === 'cancelled') return 'Stopped by user';
   if (run.trustState === 'certified') return 'Certified answer';
   if (run.route === 'dql_block_draft') return 'Draft block';
   if (isExploratoryDbtRun(run)) return 'Exploratory DBT-grounded answer';
@@ -4361,6 +4400,7 @@ function StatusIcon({ run }: { run: AgentRun }) {
   if (run.trustState === 'governed') return <ShieldCheck size={16} color="#2563eb" />;
   if (run.trustState === 'grounded') return <ShieldCheck size={16} color="#2563eb" />;
   if (run.status === 'completed') return <CheckCircle2 size={16} color="#16a34a" />;
+  if (run.status === 'cancelled' || run.stopReason === 'cancelled') return <Route size={16} color="#737373" />;
   if (run.status === 'blocked') return <Route size={16} color="#ef4444" />;
   return <Route size={16} color="#d97706" />;
 }
@@ -4383,7 +4423,9 @@ function TrustBadge({ run, t }: { run: AgentRun; t: Theme }) {
         : run.trustState === 'not_applicable'
           ? t.textMuted
           : t.warning;
-  const label = run.trustState === 'certified'
+  const label = run.status === 'cancelled' || run.stopReason === 'cancelled'
+    ? 'Cancelled'
+    : run.trustState === 'certified'
     ? 'Certified'
     : run.route === 'dql_block_draft'
       ? 'Draft'
@@ -4573,7 +4615,7 @@ function sameText(a: string, b: string): boolean {
 }
 
 /** Pull a QueryResult (columns/rows) out of an artifact payload, for visualization. */
-function extractResult(payload: Record<string, unknown>): QueryResult | undefined {
+export function extractResult(payload: Record<string, unknown>): QueryResult | undefined {
   const candidates: unknown[] = [
     payload.result,
     payload.resultPreview,
@@ -4586,10 +4628,9 @@ function extractResult(payload: Record<string, unknown>): QueryResult | undefine
     // A result-shaped object has a rows array and/or a columns array. Anything
     // else isn't a query result.
     if (!Array.isArray(record.rows) && !Array.isArray(record.columns)) continue;
-    const rows = Array.isArray(record.rows) ? record.rows.filter((r): r is Record<string, unknown> => Boolean(r && typeof r === 'object')) : [];
-    const columns = Array.isArray(record.columns) && record.columns.length > 0
-      ? record.columns.map((c) => (typeof c === 'string' ? c : (c as { name?: string })?.name ?? String(c)))
-      : (rows.length > 0 ? Object.keys(rows[0]) : []);
+    const normalized = normalizeQueryResultPayload(record);
+    const rows = normalized.rows;
+    const columns = normalized.columns;
     // Return a legitimately-empty result (0 rows, known columns/rowCount) so it
     // renders as "0 rows matched" instead of vanishing — a run that executed and
     // matched nothing must be distinguishable from one that produced no result.
@@ -4597,8 +4638,12 @@ function extractResult(payload: Record<string, unknown>): QueryResult | undefine
     return {
       columns,
       rows,
-      rowCount: typeof record.rowCount === 'number' ? record.rowCount : rows.length,
-      ...(typeof record.executionTime === 'number' ? { executionTime: record.executionTime } : {}),
+      rowCount: normalized.rowCount,
+      ...(normalized.resultFingerprint ? { resultFingerprint: normalized.resultFingerprint } : {}),
+      ...(normalized.executionReceipt ? { executionReceipt: normalized.executionReceipt } : {}),
+      ...(normalized.trustState ? { trustState: normalized.trustState } : {}),
+      ...(normalized.answerTier ? { answerTier: normalized.answerTier } : {}),
+      ...(normalized.executionTime !== undefined ? { executionTime: normalized.executionTime } : {}),
     } as QueryResult;
   }
   return undefined;
@@ -4932,6 +4977,8 @@ function answerDqlArtifactFromRun(run: AgentRun): AgentConversationDqlArtifact |
 export function artifactReadyPayloadFromRun(run: AgentRun): InsertDqlPayload | undefined {
   const canCommitBlockDraft = run.route === 'dql_block_draft'
     && run.status !== 'blocked'
+    && run.status !== 'cancelled'
+    && run.stopReason !== 'cancelled'
     && run.status !== 'needs_clarification';
   if (run.route === 'certified_answer' || (!isAgentRunPinnable(run) && !canCommitBlockDraft)) return undefined;
   const dqlArtifact = answerDqlArtifactFromRun(run);
@@ -5393,6 +5440,9 @@ const ASK_FAILURE_PRESENTATION: Record<string, { title: string; hint: string }> 
 
 /** The failure origin recorded on the run. Missing attribution stays unknown. */
 function askFailureOrigin(run: AgentRun): string {
+  if (run.status === 'cancelled' || run.stopReason === 'cancelled' || run.route === 'cancelled' || run.diagnosticReceipt?.failure?.code === 'RUN_CANCELLED') {
+    return 'cancel';
+  }
   for (const artifact of run.artifacts ?? []) {
     const payload = payloadOf(artifact) as {
       warehouseFailure?: { origin?: unknown };

@@ -35,9 +35,9 @@ let agentRunPerformanceRows: typeof UnifiedAgentRunPanelModule.agentRunPerforman
 let askRunCaptureWarning: typeof UnifiedAgentRunPanelModule.askRunCaptureWarning;
 let askFailureOriginTyped: typeof UnifiedAgentRunPanelModule.askFailureOrigin;
 let askFailurePresentation: typeof UnifiedAgentRunPanelModule.ASK_FAILURE_PRESENTATION;
+let extractResult: typeof UnifiedAgentRunPanelModule.extractResult;
 
-describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
-  beforeAll(async () => {
+beforeAll(async () => {
     vi.stubGlobal('window', { location: { origin: 'http://localhost' } });
     const module = await import('./UnifiedAgentRunPanel');
     resolveArtifactDqlView = module.resolveArtifactDqlView;
@@ -72,7 +72,10 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     askRunCaptureWarning = module.askRunCaptureWarning;
     askFailureOriginTyped = module.askFailureOrigin;
     askFailurePresentation = module.ASK_FAILURE_PRESENTATION;
-  });
+    extractResult = module.extractResult;
+});
+
+describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
 
   it('names the exact App page used by the added-result confirmation', () => {
     expect(appPinDestinationLabel('Customer Health', 'Executive overview')).toBe('Customer Health › Executive overview');
@@ -114,6 +117,23 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     expect(selectAgentExecutionConnection(names, 'analytics', 'deleted-connection')).toBe('analytics');
     expect(selectAgentExecutionConnection(names, 'missing-default')).toBe('analytics');
     expect(selectAgentExecutionConnection([], 'analytics')).toBeUndefined();
+  });
+
+  it('normalizes positional connector rows before the result renderer indexes them (AGT-032)', () => {
+    expect(extractResult({
+      result: {
+        columns: [{ name: 'customer' }, { name: 'revenue' }],
+        rows: [['Ada', 42], ['Grace', 37]],
+        rowCount: 2,
+      },
+    })).toMatchObject({
+      columns: ['customer', 'revenue'],
+      rows: [
+        { customer: 'Ada', revenue: 42 },
+        { customer: 'Grace', revenue: 37 },
+      ],
+      rowCount: 2,
+    });
   });
 
   it('shows automatic Ask repair only from the retained server capability', () => {
@@ -877,6 +897,32 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
 });
 
 describe('persisted conversation hydration', () => {
+  it('preserves cancelled lifecycle truth and excludes it from fallback authority', () => {
+    const items = threadItemsFromTurns([{
+      id: 'turn_cancelled',
+      threadId: 'thread_1',
+      seq: 1,
+      question: 'show revenue by region',
+      answerSummary: 'Stopped by user.',
+      route: 'sql_cell',
+      trustLabel: 'not_applicable',
+      runStatus: 'cancelled',
+      stopReason: 'cancelled',
+      createdAt: '2026-07-29T00:00:00.000Z',
+    }]);
+    const runItem = items.find((item) => item.kind === 'run');
+    const run = runItem?.kind === 'run' ? runItem.run : undefined;
+    expect(run).toMatchObject({
+      route: 'sql_cell',
+      status: 'cancelled',
+      trustState: 'not_applicable',
+      stopReason: 'cancelled',
+      summary: 'Stopped by user.',
+    });
+    expect(run ? isAgentRunPinnable(run) : true).toBe(false);
+    expect(agentRunHistoryFromItems(items)).toEqual([]);
+  });
+
   it('preserves blocked lifecycle truth instead of fabricating a completed run', () => {
     const items = threadItemsFromTurns([{
       id: 'turn_blocked',

@@ -164,18 +164,23 @@ export class SqliteAgentRunStore implements AgentRunStore {
         const progress = parseProgress(row.payload_json);
         if (!progress) continue;
         const completedAt = new Date().toISOString();
+        const userCancelled = progress.lifecycle.state === 'cancelling'
+          || progress.events.some((event) => event.type === 'run.cancelled');
+        const route = progress.route ?? (userCancelled ? 'cancelled' : 'blocked');
         const failure: AgentRunDiagnosticReceiptV1['failure'] = {
-          code: 'RUN_INTERRUPTED',
+          code: userCancelled ? 'RUN_CANCELLED' : 'RUN_INTERRUPTED',
           phase: progress.lifecycle.phase,
-          message: 'The local DQL runtime restarted before this agent run completed. No result was accepted.',
-          recoverable: true,
-          safeActions: ['retry_same_request'],
+          message: userCancelled
+            ? 'Stopped by user.'
+            : 'The local DQL runtime restarted before this agent run completed. No result was accepted.',
+          recoverable: !userCancelled,
+          safeActions: userCancelled ? [] : ['retry_same_request'],
         };
         const receipt: AgentRunDiagnosticReceiptV1 = {
           version: 1,
           runId: progress.id,
           phase: progress.lifecycle.phase,
-          route: progress.route,
+          route,
           plan: progress.plan,
           steps: progress.steps,
           artifacts: progress.artifacts,
@@ -185,7 +190,7 @@ export class SqliteAgentRunStore implements AgentRunStore {
         const diagnosticArtifact = {
           id: `${progress.id}:diagnostic`,
           kind: 'answer' as const,
-          title: 'Interrupted agent run',
+          title: userCancelled ? 'Cancelled agent run' : 'Interrupted agent run',
           trustState: 'blocked' as const,
           payload: { diagnosticReceipt: receipt },
         };
@@ -193,49 +198,61 @@ export class SqliteAgentRunStore implements AgentRunStore {
           id: progress.id,
           question: progress.question,
           requestedMode: progress.requestedMode,
-          route: progress.route ?? 'blocked',
-          status: 'blocked',
-          trustState: 'blocked',
-          stopReason: 'blocked',
+          route,
+          status: userCancelled ? 'cancelled' : 'blocked',
+          trustState: userCancelled ? 'not_applicable' : 'blocked',
+          stopReason: userCancelled ? 'cancelled' : 'blocked',
           startedAt: progress.lifecycle.startedAt,
           completedAt,
           selectedObject: progress.selectedObject,
           plan: progress.plan,
           steps: progress.steps,
           summary: failure.message,
-          artifacts: [...progress.artifacts.filter((artifact) => artifact.trustState === 'blocked'), diagnosticArtifact],
+          artifacts: userCancelled
+            ? progress.artifacts
+            : [...progress.artifacts.filter((artifact) => artifact.trustState === 'blocked'), diagnosticArtifact],
           evaluations: [
             ...progress.evaluations,
-            {
-              id: 'run-interrupted',
-              label: 'Run interrupted',
-              passed: false,
-              severity: 'blocking',
-              message: failure.message,
-              suggestedRepair: 'Retry the same request.',
-            },
+            userCancelled
+              ? {
+                  id: 'run-cancelled',
+                  label: 'Run cancelled',
+                  passed: true,
+                  severity: 'info' as const,
+                  message: failure.message,
+                }
+              : {
+                  id: 'run-interrupted',
+                  label: 'Run interrupted',
+                  passed: false,
+                  severity: 'blocking' as const,
+                  message: failure.message,
+                  suggestedRepair: 'Retry the same request.',
+                },
           ],
           events: [
             ...progress.events,
             {
               id: `${progress.id}:event:${progress.events.length + 1}`,
               runId: progress.id,
-              type: 'run.failed',
+              type: userCancelled ? 'run.cancelled' : 'run.failed',
               at: completedAt,
               message: failure.message,
-              route: progress.route ?? 'blocked',
-              status: 'blocked',
-              trustState: 'blocked',
+              route,
+              status: userCancelled ? 'cancelled' : 'blocked',
+              trustState: userCancelled ? 'not_applicable' : 'blocked',
             },
           ],
-          nextActions: [{ id: 'retry-interrupted-run', label: 'Retry request', route: progress.route }],
+          nextActions: userCancelled
+            ? []
+            : [{ id: 'retry-interrupted-run', label: 'Retry request', route: progress.route }],
           repairAttempts: 0,
           escalationAttempts: 0,
           diagnosticReceipt: receipt,
           lifecycle: {
             ...progress.lifecycle,
             state: 'terminal',
-            phase: 'run.failed',
+            phase: userCancelled ? 'run.cancelled' : 'run.failed',
             revision: progress.lifecycle.revision + 1,
             eventCursor: progress.events.length + 1,
             updatedAt: completedAt,

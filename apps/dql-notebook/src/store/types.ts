@@ -557,6 +557,10 @@ export interface ActivePersona {
 export interface QueryResult {
   columns: string[];
   rows: Record<string, unknown>[];
+  resultFingerprint?: string;
+  executionReceipt?: Record<string, unknown>;
+  trustState?: string;
+  answerTier?: string;
   executionTime?: number;
   rowCount?: number;
   semanticRefs?: {

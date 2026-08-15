@@ -63,6 +63,18 @@ describe('conversationTurnTrust', () => {
     expect(conversationTurnTrust({ route: 'clarify' })).toBe('unresolved');
   });
 
+  it('does not grant conversation authority to a cancelled run', () => {
+    const turn = {
+      runStatus: 'cancelled',
+      route: 'sql_cell',
+      stopReason: 'cancelled',
+      answerSummary: 'Stopped by user.',
+      result: { columns: ['region'], rowCount: 1 },
+    };
+    expect(conversationTurnTrust(turn)).toBe('failed');
+    expect(isTrustedConversationTurn(turn)).toBe(false);
+  });
+
   it('does not trust a turn with neither a result nor any answer text', () => {
     expect(conversationTurnTrust({ runStatus: 'needs_review' })).toBe('failed');
   });

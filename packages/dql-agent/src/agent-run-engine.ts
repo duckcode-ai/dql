@@ -33,6 +33,7 @@ import {
   conversationHistoryFromContext,
   isLikelyClarificationReply,
 } from "./conversation/snapshot.js";
+import type { AnalyticalTaskOutcomeV1, AnalyticalTurnPlanV1 } from './analytical-orchestration.js';
 
 export type AgentRunRequestedMode = "auto" | "ask" | "research" | "sql" | "block" | "app" | "modeling" | "skill";
 
@@ -59,6 +60,8 @@ export type AgentRunRoute =
   | "skill_draft"
   | "app_build"
   | "clarify"
+  /** Terminal sentinel used when cancellation happens before a route is chosen. */
+  | "cancelled"
   | "blocked";
 
 export interface ResolvedPlanShadowComparison {
@@ -108,7 +111,7 @@ export function compareResolvedPlanShadow(
  */
 export type AgentRunAnswerKind = "governed" | "conversational" | "general_knowledge";
 
-export type AgentRunStatus = "completed" | "needs_review" | "needs_clarification" | "blocked";
+export type AgentRunStatus = "completed" | "needs_review" | "needs_clarification" | "cancelled" | "blocked";
 export type AgentRunTrustState = "certified" | "governed" | "grounded" | "review_required" | "blocked" | "not_applicable";
 export type AgentRunLifecycleState = "queued" | "running" | "cancelling" | "terminal";
 
@@ -137,7 +140,21 @@ export type AgentRunStopReason =
   | "artifact_created"
   | "needs_clarification"
   | "human_review_required"
+  | "cancelled"
   | "blocked";
+
+/** Stable host-issued reason for a user cancellation. Provider AbortErrors do
+ * not carry this code and therefore remain distinguishable executor failures. */
+export const AGENT_RUN_USER_CANCEL_CODE = "RUN_CANCELLED" as const;
+
+export function createAgentRunCancellationError(): Error & { code: typeof AGENT_RUN_USER_CANCEL_CODE } {
+  return Object.assign(new Error("Stopped by user."), { code: AGENT_RUN_USER_CANCEL_CODE });
+}
+
+export function isAgentRunUserCancellation(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  return (error as { code?: unknown }).code === AGENT_RUN_USER_CANCEL_CODE;
+}
 
 export type AgentRunArtifactKind =
   | "answer"
@@ -340,6 +357,7 @@ export interface AgentRunEvent {
     | "artifact.created"
     | "step.completed"
     | "run.completed"
+    | "run.cancelled"
     | "run.failed";
   at: string;
   message: string;
@@ -440,6 +458,9 @@ export interface AgentRun {
   providerEgressReceipts?: ProviderEgressReceiptV1[];
   /** The source run remains immutable; repaired executions are new runs. */
   derivation?: AgentRunDerivationV1;
+  /** Turn-level clause graph and per-clause outcomes for conversational analytics. */
+  analyticalTurnPlan?: AnalyticalTurnPlanV1;
+  analyticalTaskOutcomes?: AnalyticalTaskOutcomeV1[];
 }
 
 /**
@@ -464,6 +485,8 @@ export interface AgentRunProgressV1 {
   evaluations: AgentRunEvaluation[];
   events: AgentRunEvent[];
   lifecycle: AgentRunLifecycleV1;
+  analyticalTurnPlan?: AnalyticalTurnPlanV1;
+  analyticalTaskOutcomes?: AnalyticalTaskOutcomeV1[];
 }
 
 export interface AgentRouteExecutionContext {
@@ -524,6 +547,8 @@ export interface AgentRouteExecutorResult {
   repairAttempts?: number;
   providerEgressReceipts?: ProviderEgressReceiptV1[];
   telemetry?: AgentRunTelemetryV1;
+  analyticalTurnPlan?: AnalyticalTurnPlanV1;
+  analyticalTaskOutcomes?: AnalyticalTaskOutcomeV1[];
 }
 
 export type AgentRouteExecutor = (
@@ -1355,6 +1380,9 @@ export class AgentRunEngine {
             emitAnswerDelta: onAnswerDelta,
           });
           result = consumeRepeatedClarificationSelection(request, routeDecision, result);
+          if (result.analyticalTurnPlan) progress.analyticalTurnPlan = result.analyticalTurnPlan;
+          if (result.analyticalTaskOutcomes) progress.analyticalTaskOutcomes = result.analyticalTaskOutcomes;
+          persistProgress();
 
           evaluations = this.evaluate({ route, request, routeDecision, result, attempt });
           for (const evaluation of evaluations) {
@@ -1383,24 +1411,6 @@ export class AgentRunEngine {
           // Typed server-issued repair is a separate derived run.
           if (authoritativeAsk) {
             stepStatus = 'needs_review';
-            break;
-          }
-
-          // Ordinary generated Ask freezes one analytical attempt. A failed
-          // attempt is terminal review/manual-action work; it cannot hand
-          // authority back to an injected LLM replanner for another physical
-          // provider send. Explicit Research and authoring modes retain their
-          // separately budgeted planner behavior.
-          const ordinaryGeneratedAsk = route === 'generated_answer'
-            && (requestedMode === 'ask' || requestedMode === 'auto');
-          if (ordinaryGeneratedAsk) {
-            stepStatus = 'needs_review';
-            emit({
-              type: 'replan.decided',
-              message: 'Ordinary Ask kept the frozen analytical attempt and stopped for review without replanning.',
-              route,
-              payload: { decision: 'accept', authority: 'deterministic_fail_closed' },
-            });
             break;
           }
 
@@ -1629,6 +1639,89 @@ export class AgentRunEngine {
       return run;
     } catch (err) {
       const dispatchEvidence = providerDispatchEvidenceFromError(err);
+      const userCancelled = isAgentRunUserCancellation(request.signal?.reason) || isAgentRunUserCancellation(err);
+      if (userCancelled) {
+        const message = "Stopped by user.";
+        const cancelledRoute = progress.route ?? "cancelled";
+        const cancelledPhase = progress.lifecycle.phase;
+        emit({
+          type: "run.cancelled",
+          message,
+          route: cancelledRoute,
+          status: "cancelled",
+          trustState: "not_applicable",
+        });
+        const completedAt = this.timestamp();
+        const failure: AgentRunDiagnosticFailureV1 = {
+          code: AGENT_RUN_USER_CANCEL_CODE,
+          phase: cancelledPhase,
+          message,
+          recoverable: false,
+          safeActions: [],
+        };
+        const evaluations: AgentRunEvaluation[] = [
+          ...progress.evaluations,
+          {
+            id: "run-cancelled",
+            label: "Run cancelled",
+            passed: true,
+            severity: "info",
+            message,
+          },
+        ];
+        const receipt: AgentRunDiagnosticReceiptV1 = {
+          version: 1,
+          runId,
+          phase: failure.phase,
+          route: cancelledRoute,
+          plan,
+          steps: executedSteps,
+          artifacts: progress.artifacts,
+          evaluations,
+          failure,
+        };
+        const run: AgentRun = {
+          id: runId,
+          question: submittedQuestion,
+          requestedMode,
+          route: cancelledRoute,
+          status: "cancelled",
+          trustState: "not_applicable",
+          stopReason: "cancelled",
+          startedAt,
+          completedAt,
+          selectedObject: request.selectedObject,
+          executionTarget: request.executionTarget,
+          routeDecision,
+          plan,
+          steps: executedSteps,
+          summary: message,
+          artifacts: progress.artifacts,
+          evaluations,
+          events,
+          nextActions: [],
+          repairAttempts: 0,
+          escalationAttempts: 0,
+          budgetUsage: cascadeBudgetTrace(createCascadeBudgetState(this.budgetModel)),
+          diagnosticReceipt: receipt,
+          ...(dispatchEvidence.providerEgressReceipts.length
+            ? { providerEgressReceipts: dispatchEvidence.providerEgressReceipts }
+            : {}),
+          telemetry: {
+            ...emptyRunTelemetry(durationBetweenMs(startedAt, completedAt), "cancelled"),
+            providerRoundTrips: dispatchEvidence.providerRoundTrips,
+            toolCalls: dispatchEvidence.toolCalls,
+            sqlExecutions: dispatchEvidence.sqlExecutions,
+            repairs: dispatchEvidence.repairs,
+            egressReceipts: dispatchEvidence.providerEgressReceipts.length,
+          },
+          lifecycle: terminalLifecycle(progress.lifecycle, "run.cancelled", completedAt, events.length),
+        };
+        run.diagnosticReceiptV2 = diagnosticReceiptV2ForRun(run);
+        await checkpointQueue;
+        await this.store?.save(run);
+        return run;
+      }
       const message = isOrchestrationBudgetExhausted(err)
         ? 'Ask could not complete within its bounded orchestration. Nothing was executed; narrow the metric or dimension and retry.'
         : err instanceof Error && err.name === "TimeoutError"
@@ -1824,6 +1917,8 @@ export class AgentRunEngine {
       } : {}),
       escalationAttempts,
       budgetUsage: input.budgetUsage,
+      ...(finalResult.analyticalTurnPlan ? { analyticalTurnPlan: finalResult.analyticalTurnPlan } : {}),
+      ...(finalResult.analyticalTaskOutcomes ? { analyticalTaskOutcomes: finalResult.analyticalTaskOutcomes } : {}),
       ...authoringDerivationFromRequest(input.request),
     };
   }
@@ -1898,6 +1993,28 @@ function enforceOrdinaryAnalyticalPlanBoundary(
     || decision.action === 'block'
     || decision.requiresClarification === true
     || Boolean(decision.terminalOutcome);
+  // A modeling/coverage gap is a pre-freeze discovery result, not permission to
+  // terminate an ordinary Ask. Keep the diagnostic as a typed reason in the
+  // route decision, clear the blocked RAP, and let the answer executor continue
+  // through the governed relational and review-required generated lanes. Policy
+  // blocks and genuine user ambiguity remain terminal. This is the key
+  // governed-first-but-not-governed-only boundary (AGT-028, EXP-001).
+  if (
+    ordinaryAsk
+    && decision.terminalOutcome?.kind === 'modeling_gap'
+    && decision.requiresClarification !== true
+    && !request.selectedEvidenceId
+  ) {
+    return {
+      ...decision,
+      action: 'answer',
+      confidence: Math.min(decision.confidence, 0.55),
+      reason: `${decision.terminalOutcome.message} Continuing through DBT-grounded relational and review-required generated analysis before asking for a modeling change.`,
+      terminalOutcome: undefined,
+      resolvedAnalyticalPlan: undefined,
+      requiresClarification: false,
+    };
+  }
   const exactSemanticContinuation = Boolean(
     request.selectedEvidenceId
     && decision.meaningResolution?.recommendedRoute === 'semantic'
@@ -2095,7 +2212,7 @@ function authoringDerivationFromRequest(request: AgentRunRequest): { derivation?
 
 function terminalLifecycle(
   prior: AgentRunLifecycleV1,
-  phase: "run.completed" | "run.failed",
+  phase: "run.completed" | "run.cancelled" | "run.failed",
   completedAt: string,
   eventCursor: number,
 ): AgentRunLifecycleV1 {
@@ -2135,13 +2252,13 @@ function diagnosticFailureFromError(
       safeActions: ["retry_same_plan"],
     };
   }
-  if (lower.includes("stopped by user") || lower.includes("cancel")) {
+  if (isAgentRunUserCancellation(error)) {
     return {
       code: "RUN_CANCELLED",
       phase,
-      message,
-      recoverable: true,
-      safeActions: ["retry_same_request"],
+      message: "Stopped by user.",
+      recoverable: false,
+      safeActions: [],
     };
   }
   return {
@@ -2181,7 +2298,7 @@ function diagnosticReceiptForRun(run: AgentRun): AgentRunDiagnosticReceiptV1 {
   return {
     version: 1,
     runId: run.id,
-    phase: run.lifecycle?.phase ?? (run.status === "blocked" ? "run.failed" : "run.completed"),
+    phase: run.lifecycle?.phase ?? (run.status === "blocked" ? "run.failed" : run.status === "cancelled" ? "run.cancelled" : "run.completed"),
     route: run.route,
     ...(run.routeDecision?.resolvedAnalyticalPlan
       ? { resolvedAnalyticalPlan: run.routeDecision.resolvedAnalyticalPlan }
@@ -2192,14 +2309,14 @@ function diagnosticReceiptForRun(run: AgentRun): AgentRunDiagnosticReceiptV1 {
     evaluations: run.evaluations,
     ...(run.repairCapability ? { repairCapability: run.repairCapability } : {}),
     ...(run.providerEgressReceipts?.length ? { providerEgressReceipts: run.providerEgressReceipts } : {}),
-    ...(run.status === "blocked"
+    ...(run.status === "blocked" || run.status === "cancelled"
       ? {
           failure: {
-            code: failureCode,
-            phase: run.lifecycle?.phase ?? "run.failed",
-            message: failureEvaluation?.message ?? run.summary,
-            recoverable: Boolean(run.nextActions.length),
-            safeActions: run.nextActions.map((action) => action.id),
+            code: run.status === "cancelled" ? AGENT_RUN_USER_CANCEL_CODE : failureCode,
+            phase: run.lifecycle?.phase ?? (run.status === "cancelled" ? "run.cancelled" : "run.failed"),
+            message: run.status === "cancelled" ? "Stopped by user." : failureEvaluation?.message ?? run.summary,
+            recoverable: run.status === "cancelled" ? false : Boolean(run.nextActions.length),
+            safeActions: run.status === "cancelled" ? [] : run.nextActions.map((action) => action.id),
           },
         }
       : {}),
@@ -2765,6 +2882,7 @@ function stopReasonFor(
   trustState: AgentRunTrustState,
   artifacts: AgentRunArtifact[],
 ): AgentRunStopReason {
+  if (status === "cancelled") return "cancelled";
   if (status === "blocked" || trustState === "blocked") return "blocked";
   if (route === "conversation") return "conversational_reply";
   if (status === "needs_clarification") return "needs_clarification";
@@ -2776,7 +2894,7 @@ function stopReasonFor(
 }
 
 function defaultNextActions(route: AgentRunRoute, status: AgentRunStatus): AgentRunNextAction[] {
-  if (status === "blocked") return [];
+  if (status === "blocked" || status === "cancelled") return [];
   if (route === "certified_answer") {
     return [
       { id: "research-gap", label: "Research missing breakdown", route: "research" },

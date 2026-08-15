@@ -119,7 +119,7 @@ import {
 } from './settings/provider-settings.js';
 import { getRunner } from './llm/index.js';
 import { afterEach } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -139,6 +139,7 @@ import {
   DEFAULT_ASK_ROW_EGRESS_POLICY,
   ZERO_ROW_EGRESS_POLICY,
 } from '@duckcodeailabs/dql-agent';
+import type { AgentRouteExecutorResult, AgentRun, AgentRunRequest } from '@duckcodeailabs/dql-agent';
 import type { DatabaseConnector, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
 import { saveTestedSemanticRuntimeSettings } from './semantic-runtime-settings.js';
 import { addAskResultToAppBuildDraft, createAppPackage, createStoredAppBuildDraft } from './apps-api.js';
@@ -2992,6 +2993,72 @@ describe('agent run runtime API', () => {
     }
   });
 
+  it('rejects analytical repair derivation from a cancelled run even with a retained failure artifact', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-cancelled-analytical-repair-api-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    const dqlSource = 'block "revenue" { type = "custom" query = """select sum(revenue) from orders""" }';
+    const failure = createAnalyticalFailure({
+      code: 'COLUMN_NOT_FOUND',
+      phase: 'execution',
+      snapshotId: 'snapshot-cancelled',
+      runId: 'cancelled-repair-source',
+      planFingerprint: 'e'.repeat(64),
+      dqlSource,
+      compiledSql: 'select sum(revenue) from orders',
+    });
+    const store = new SqliteAgentRunStore({ path: defaultAgentRunSqlitePath(projectRoot) });
+    store.save({
+      id: 'cancelled-repair-source',
+      question: 'show revenue',
+      requestedMode: 'ask',
+      route: 'generated_answer',
+      status: 'cancelled',
+      trustState: 'not_applicable',
+      stopReason: 'cancelled',
+      startedAt: '2026-08-15T00:00:00.000Z',
+      completedAt: '2026-08-15T00:00:01.000Z',
+      summary: 'Stopped by user.',
+      steps: [],
+      artifacts: [{
+        id: 'cancelled-answer',
+        kind: 'answer',
+        title: 'Cancelled analytical run',
+        trustState: 'not_applicable',
+        payload: {
+          analyticalFailure: failure,
+          dqlArtifact: { kind: 'sql_block', source: dqlSource, compiledSql: 'select sum(revenue) from orders' },
+        },
+      }],
+      evaluations: [],
+      events: [],
+      nextActions: [],
+      repairAttempts: 0,
+    } as AgentRun);
+    store.close();
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const response = await fetch(`${base}/api/agent-runs/cancelled-repair-source/analytical-repair`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repair: { version: 1, action: 'edit_dql', dqlSource } }),
+      });
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ code: 'REPAIR_CAPABILITY_REQUIRED' });
+      expect((await fetch(`${base}/api/agent-runs/cancelled-repair-source:repair:1`)).status).toBe(404);
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
   it('API-007 repairs only embedded SQL and preserves the immutable wrapper contract', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-executable-repair-api-'));
     tempDirs.push(projectRoot);
@@ -3293,6 +3360,7 @@ describe('agent run runtime API', () => {
         route: 'generated_answer',
         status: 'blocked',
         trustState: 'blocked',
+        stopReason: 'blocked',
         startedAt: new Date().toISOString(),
         completedAt: new Date().toISOString(),
         executionTarget: { target: 'local' },
@@ -4757,6 +4825,258 @@ LIMIT \${top_n}
         }
         server.close(() => resolve());
       });
+    }
+  });
+
+  it('persists a truthful user cancellation through the API and a runtime reload', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-cancel-api-'));
+    tempDirs.push(projectRoot);
+    let server: Server | undefined;
+    let runStarted!: () => void;
+    const executionStarted = new Promise<void>((resolve) => { runStarted = resolve; });
+    const waitForCancellation = ({ request }: { request: AgentRunRequest }) => new Promise<AgentRouteExecutorResult>((_resolve, reject) => {
+      runStarted();
+      if (request.signal?.aborted) {
+        reject(request.signal.reason);
+        return;
+      }
+      request.signal?.addEventListener('abort', () => reject(request.signal?.reason), { once: true });
+    });
+
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        requireMeaningCallForNaturalLanguage: false,
+        agentRunExecutors: { sql_cell: waitForCancellation },
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const pendingCreate = fetch(`${base}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          runId: 'e2e-cancel-003',
+          question: 'show revenue as sql',
+          requestedMode: 'sql',
+        }),
+      });
+      await executionStarted;
+
+      const cancelResponse = await fetch(`${base}/api/agent-runs/e2e-cancel-003/cancel`, { method: 'POST' });
+      expect(cancelResponse.status).toBe(202);
+      const createResponse = await pendingCreate;
+      expect(createResponse.status).toBe(201);
+      const created = await createResponse.json() as { run: AgentRun };
+      expect(created.run).toMatchObject({
+        id: 'e2e-cancel-003',
+        route: 'sql_cell',
+        status: 'cancelled',
+        trustState: 'not_applicable',
+        stopReason: 'cancelled',
+        summary: 'Stopped by user.',
+        nextActions: [],
+        telemetry: { fallbackReason: 'cancelled' },
+        diagnosticReceipt: { failure: { code: 'RUN_CANCELLED', recoverable: false, safeActions: [] } },
+        lifecycle: { state: 'terminal', phase: 'run.cancelled' },
+      });
+      expect(created.run.events.at(-1)?.type).toBe('run.cancelled');
+      expect(created.run.repairCapability).toBeUndefined();
+
+      const getResponse = await fetch(`${base}/api/agent-runs/e2e-cancel-003`);
+      expect(getResponse.status).toBe(200);
+      const fetched = await getResponse.json() as { run: AgentRun };
+      expect(fetched.run).toMatchObject({ status: 'cancelled', stopReason: 'cancelled', summary: 'Stopped by user.' });
+
+      await new Promise<void>((resolve) => server?.close(() => resolve()));
+      server = undefined;
+      const reloadedPort = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (createdReloaded) => { server = createdReloaded; },
+      });
+      const reloadedResponse = await fetch(`http://127.0.0.1:${reloadedPort}/api/agent-runs/e2e-cancel-003`);
+      expect(reloadedResponse.status).toBe(200);
+      const reloaded = await reloadedResponse.json() as { run: AgentRun };
+      expect(reloaded.run).toMatchObject({
+        status: 'cancelled',
+        trustState: 'not_applicable',
+        stopReason: 'cancelled',
+        summary: 'Stopped by user.',
+        nextActions: [],
+        lifecycle: { state: 'terminal', phase: 'run.cancelled' },
+        diagnosticReceipt: { failure: { code: 'RUN_CANCELLED', recoverable: false } },
+      });
+      expect(reloaded.run.events.at(-1)?.type).toBe('run.cancelled');
+    } finally {
+      await new Promise<void>((resolve) => {
+        if (!server) {
+          resolve();
+          return;
+        }
+        server.close(() => resolve());
+      });
+    }
+  });
+
+  it('cancels an agent run through Task Center operation DELETE with the branded lifecycle', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-operation-cancel-api-'));
+    tempDirs.push(projectRoot);
+    let server: Server | undefined;
+    let runStarted!: () => void;
+    const executionStarted = new Promise<void>((resolve) => { runStarted = resolve; });
+    const waitForCancellation = ({ request }: { request: AgentRunRequest }) => new Promise<AgentRouteExecutorResult>((_resolve, reject) => {
+      runStarted();
+      if (request.signal?.aborted) {
+        reject(request.signal.reason);
+        return;
+      }
+      request.signal?.addEventListener('abort', () => reject(request.signal?.reason), { once: true });
+    });
+
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        requireMeaningCallForNaturalLanguage: false,
+        agentRunExecutors: { sql_cell: waitForCancellation },
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const runId = 'e2e-cancel-operation-004';
+      const pendingCreate = fetch(`${base}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ runId, question: 'show revenue as sql', requestedMode: 'sql' }),
+      });
+      await executionStarted;
+      const operationsResponse = await fetch(`${base}/api/operations`);
+      const operations = await operationsResponse.json() as { operations: Array<{ id: string; type: string; scope: string }> };
+      const operation = operations.operations.find((candidate) => candidate.type === 'agent_run' && candidate.scope === `agent-run:${runId}`);
+      expect(operation).toBeDefined();
+      const deleteResponse = await fetch(`${base}/api/operations/${encodeURIComponent(operation!.id)}`, { method: 'DELETE' });
+      expect(deleteResponse.status).toBe(200);
+      await expect(deleteResponse.json()).resolves.toMatchObject({ status: 'cancelled', scope: `agent-run:${runId}` });
+
+      const createResponse = await pendingCreate;
+      expect(createResponse.status).toBe(201);
+      const created = await createResponse.json() as { run: AgentRun };
+      expect(created.run).toMatchObject({
+        id: runId,
+        route: 'sql_cell',
+        status: 'cancelled',
+        trustState: 'not_applicable',
+        stopReason: 'cancelled',
+        summary: 'Stopped by user.',
+        nextActions: [],
+        lifecycle: { state: 'terminal', phase: 'run.cancelled' },
+      });
+      expect(created.run.events.at(-1)?.type).toBe('run.cancelled');
+
+      await new Promise<void>((resolve) => server?.close(() => resolve()));
+      server = undefined;
+      const reloadedPort = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (createdReloaded) => { server = createdReloaded; },
+      });
+      const reloadedResponse = await fetch(`http://127.0.0.1:${reloadedPort}/api/agent-runs/${runId}`);
+      expect(reloadedResponse.status).toBe(200);
+      const reloaded = await reloadedResponse.json() as { run: AgentRun };
+      expect(reloaded.run).toMatchObject({
+        status: 'cancelled',
+        trustState: 'not_applicable',
+        stopReason: 'cancelled',
+        summary: 'Stopped by user.',
+        nextActions: [],
+        lifecycle: { state: 'terminal', phase: 'run.cancelled' },
+      });
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+});
+
+describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
+  it('records one receipt-backed branch and one failed branch without synthesizing receipts', async () => {
+    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/dbt-first-commerce');
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-research-branch-evidence-'));
+    tempDirs.push(projectRoot);
+    cpSync(join(fixtureRoot, 'domains'), join(projectRoot, 'domains'), { recursive: true });
+    cpSync(join(fixtureRoot, 'target'), join(projectRoot, 'target'), { recursive: true });
+    cpSync(join(fixtureRoot, 'dql.config.json'), join(projectRoot, 'dql.config.json'));
+    cpSync(join(fixtureRoot, 'dbt_project.yml'), join(projectRoot, 'dbt_project.yml'));
+    mkdirSync(join(projectRoot, '.dql', 'cache'), { recursive: true });
+    cpSync(join(fixtureRoot, '.dql', 'cache', 'agent-kg.sqlite'), join(projectRoot, '.dql', 'cache', 'agent-kg.sqlite'));
+    // Deliberately do not copy provider settings: branch 2 must remain a
+    // no-provider/no-SQL failure rather than becoming an invented observation.
+    const executionReceipt = {
+      version: 1,
+      runId: 'research-child-1',
+      resultFingerprint: 'a'.repeat(64),
+    };
+    let baselineExecutions = 0;
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {
+          executeQuery: vi.fn(async () => {
+            baselineExecutions += 1;
+            if (baselineExecutions === 1) {
+              return {
+                columns: ['branch_value'],
+                rows: [{ branch_value: 1 }],
+                rowCount: 1,
+                executionReceipt,
+              };
+            }
+            throw new Error('child branch produced no SQL result');
+          }),
+        } as unknown as QueryExecutor,
+        connection: { driver: 'file' },
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'Deep research the revenue decline and its customer, product, and regional drivers',
+          requestedMode: 'research',
+          workspaceContext: {
+            researchSource: {
+              runId: 'ask-baseline-1',
+              sql: 'SELECT 1 AS branch_value',
+              trustState: 'review_required',
+            },
+          },
+        }),
+      });
+      const payload = await response.json() as { run?: any; error?: string };
+      expect(response.status, payload.error).toBe(201);
+      const researchArtifact = payload.run?.artifacts?.find((artifact: any) => artifact.kind === 'research_run');
+      const researchRuns = researchArtifact?.payload?.researchRuns ?? [];
+      const ledger = researchArtifact?.payload?.researchLedger;
+      expect(researchRuns.length).toBeGreaterThanOrEqual(2);
+      expect(researchRuns[0]).toMatchObject({ status: 'ready', resultPreview: { executionReceipt } });
+      expect(researchRuns[1]).toMatchObject({ status: 'error' });
+      expect(ledger.entries).toEqual(expect.arrayContaining([
+        expect.objectContaining({ status: 'observed', receipts: [executionReceipt.resultFingerprint] }),
+        expect.objectContaining({ status: 'failed', receipts: [] }),
+      ]));
+      expect(ledger.entries.every((entry: any) => entry.status !== 'observed' || entry.receipts.length > 0)).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
   });
 });
@@ -6873,6 +7193,7 @@ describe('bounded analytical repair inputs', () => {
     const capability = analyticalRepairCapabilityForAgentRun({
       id: 'policy-run',
       status: 'blocked',
+      stopReason: 'blocked',
       executionTarget: { target: 'local' },
       artifacts: [{ payload: {
         analyticalFailure: failure,
@@ -9558,6 +9879,96 @@ describe('slimAgentRunForTransport', () => {
     const [small, big] = slim.events as unknown as Array<{ payload?: Record<string, unknown> }>;
     expect(small.payload).toEqual({ ok: true });
     expect(big.payload).toMatchObject({ omitted: 'oversized' });
+  });
+});
+
+/**
+ * `GET /api/agent-runs` is a LIST payload, but it shipped stored runs whole.
+ * A measured 20-run page was 15.01 MB — ~750 KB per run of the same
+ * self-referential diagnostics the list never renders, while the endpoint will
+ * serve up to 200. Thread history and the SSE stream already ship the
+ * `slimAgentRunForTransport` projection; the list route was simply missed.
+ *
+ * Acceptance: PERF-003, E2E-022.
+ */
+describe('GET /api/agent-runs list payload (PERF-003)', () => {
+  function bulkyRun(id: string): AgentRun {
+    const bulk = { rows: Array.from({ length: 600 }, (_, i) => ({ id: i, value: `value-${i}` })) };
+    const receipt = { version: 1, runId: id, failure: { message: 'the real cause' }, steps: [bulk], artifacts: [bulk] };
+    return {
+      id,
+      question: `question ${id}`,
+      requestedMode: 'ask',
+      route: 'generated_answer',
+      status: 'completed',
+      startedAt: `2026-08-15T00:00:0${id.slice(-1)}.000Z`,
+      completedAt: `2026-08-15T00:00:0${id.slice(-1)}.500Z`,
+      summary: 'done',
+      steps: [{ id: `${id}-s1`, goal: 'g', artifacts: [bulk] }],
+      artifacts: [{
+        id: `${id}-a1`,
+        kind: 'answer',
+        title: 'Answer',
+        payload: {
+          result: { columns: ['id'], rows: [{ id: 1 }] },
+          considered: bulk,
+          diagnosticReceipt: receipt,
+        },
+      }],
+      diagnosticReceipt: receipt,
+      evaluations: [],
+      events: [{ id: `${id}-e1`, runId: id, message: 'big', payload: bulk }],
+      nextActions: [],
+      repairAttempts: 0,
+    } as unknown as AgentRun;
+  }
+
+  it('ships the presentation projection, not the stored record', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-runs-list-payload-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    const stored = [bulkyRun('run-1'), bulkyRun('run-2')];
+    const store = new SqliteAgentRunStore({ path: defaultAgentRunSqlitePath(projectRoot) });
+    for (const run of stored) store.save(run);
+    store.close();
+
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`);
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      const storedBytes = JSON.stringify(stored).length;
+      expect(body.length).toBeLessThan(storedBytes * 0.05);
+
+      const parsed = JSON.parse(body) as { runs: AgentRun[]; total: number };
+      expect(parsed.total).toBe(2);
+      expect(parsed.runs.map((run) => run.id).sort()).toEqual(['run-1', 'run-2']);
+
+      // Every field a history ROW renders survives.
+      const first = parsed.runs[0] as unknown as Record<string, unknown>;
+      expect(first.question).toBe('question run-2');
+      expect(first.status).toBe('completed');
+      expect(first.route).toBe('generated_answer');
+      expect(first.summary).toBe('done');
+      expect((first.diagnosticReceipt as { failure?: { message?: string } })?.failure?.message).toBe('the real cause');
+
+      // Artifact identity is kept; only the body the list never renders is dropped.
+      const artifact = (first.artifacts as Array<Record<string, unknown>>)[0];
+      expect(artifact.kind).toBe('answer');
+      expect(artifact.title).toBe('Answer');
+      expect(artifact.payload).toBeUndefined();
+      expect(first.steps).toEqual([]);
+      expect(first.events).toEqual([]);
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
   });
 });
 

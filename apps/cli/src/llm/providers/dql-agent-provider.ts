@@ -1686,7 +1686,7 @@ function activeTurnNumber(turn: Record<string, unknown> | undefined, key: string
 }
 
 function referencesNeedValues(question: string): boolean {
-  return /\b(?:it|its|they|their|them|this|that|these|those|same|above|previous|prior)\b/i.test(question);
+  return /\b(?:it|its|they|their|them|he|she|him|his|her|hers|this|that|these|those|same|above|previous|prior)\b/i.test(question);
 }
 
 function extractCertifiedBlockName(content: string): string | undefined {
@@ -1812,7 +1812,18 @@ function resolveDeicticDimensions(question: string, priorValues: Record<string, 
     && /\b(?:they|their|them)\b[^.?!]{0,48}\b(?:buy|bought|purchase|purchased|order|ordered|spend|spent|use|used)\b/.test(lower)
     && valuesForPriorDimension(priorValues, 'customer').length > 0
   ) dims.push('customer');
-  if (dims.length === 0 && /\b(?:it|its|they|their|them|this|these|those|that|same|above|previous|prior)\b/.test(lower)) {
+  // Singular people pronouns are common in conversational analytical follow-ups
+  // ("what region does he belong to?", "what is her segment?"). Resolve them
+  // against the prior result's typed customer values, preserving the same
+  // ambiguity guard used by "this customer". This is intentionally limited to
+  // a person-like prior dimension; a pronoun must never make us guess a product
+  // or metric member from the first row.
+  if (dims.length === 0
+    && /\b(?:he|she|him|his|her|hers)\b/.test(lower)
+    && valuesForPriorDimension(priorValues, 'customer').length > 0) {
+    dims.push('customer');
+  }
+  if (dims.length === 0 && /\b(?:it|its|they|their|them|he|she|him|his|her|hers|this|these|those|that|same|above|previous|prior)\b/.test(lower)) {
     const single = singlePriorValueDimension(priorValues);
     if (single) dims.push(single);
   }
@@ -1824,6 +1835,7 @@ function resolveSingularDeicticDimension(question: string, priorValues: Record<s
   const candidates: Array<[RegExp, string]> = [
     [/\b(?:this|that|same|previous|prior|above)\s+product\b/, 'product'],
     [/\b(?:this|that|same|previous|prior|above)\s+customer\b/, 'customer'],
+    [/\b(?:he|she|him|his|her|hers)\b/, 'customer'],
     [/\b(?:this|that|same|previous|prior|above)\s+category\b/, 'category'],
     [/\b(?:this|that|same|previous|prior|above)\s+segment\b/, 'segment'],
     [/\b(?:this|that|same|previous|prior|above)\s+region\b/, 'region'],
@@ -1950,7 +1962,7 @@ function isGenericFollowUp(question: string): boolean {
 function isDrilldownFollowUp(question: string, priorTerms: string[] = []): boolean {
   const lower = question.toLowerCase();
   const deicticDrilldown = /\b(?:this|that|these|those|same|above|previous|prior)\s+(?:amount|value|orders?|results?|rows?|customers?|products?|cat(?:egor|agor|ogor)(?:y|ies)|segments?|regions?)\b/.test(lower)
-    || /\b(?:they|their|them)\b/.test(lower);
+    || /\b(?:they|their|them|he|she|him|his|her|hers)\b/.test(lower);
   // `break ... down` is split by its object more often than not ("break that
   // down", "break the revenue down"), so the verb and particle are matched with
   // a short gap between them rather than adjacently.

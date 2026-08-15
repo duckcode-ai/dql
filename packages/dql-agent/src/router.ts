@@ -91,6 +91,14 @@ export interface HybridRouterOptions {
   maxMeaningCandidates?: number;
   /** Authoritative by default; `shadow` is the bounded rollback switch. */
   resolvedPlanMode?: ResolvedAnalyticalPlan['mode'];
+  /**
+   * Natural-language analytical turns use one bounded candidate-ID meaning
+   * call by default.  Hosts may disable this only for migration/testing; an
+   * explicit selectedEvidenceId or qualified @ reference is always allowed to
+   * use the zero-call path because the user has already supplied identity.
+   * Acceptance: AGT-027, AGT-028.
+   */
+  requireMeaningCallForNaturalLanguage?: boolean;
   /** Deterministic confidence at/above which the LLM is never called. Default 0.7. */
   llmThreshold?: number;
   /** Max cached classifications. Default 200. */
@@ -961,6 +969,135 @@ function buildEvidenceClarification(candidates: AgentEvidenceCandidate[], missin
   return "Which governed business meaning should I use for this question?";
 }
 
+/**
+ * A distinct-entity count is not a useful ranking measure at the same entity
+ * grain: every customer normally has a count of one. Keep the candidate in the
+ * evidence trace, but do not let lexical relevance freeze it as the answer to
+ * "top customers". This is deliberately a semantic suitability check, not a
+ * name-based ban; an explicit "top customers by customer count" request remains
+ * the user's choice and can proceed through normal compatibility checks.
+ */
+function isDegenerateRankingMetric(
+  question: string,
+  evidence: AgentRetrievalEvidence,
+  candidate: AgentEvidenceCandidate,
+): boolean {
+  if (questionTypeFromText(question) !== 'ranking') return false;
+  if (candidate.kind !== 'semantic_metric' && candidate.kind !== 'semantic_member') return false;
+  const capability = normalizeEvidenceAnalyticalCapability(candidate).capability;
+  const aggregation = normalizeMetricPhrase(candidate.aggregation ?? capability?.aggregation ?? '');
+  if (!aggregation || !/^(count|count distinct|count unique|count distinct values)$/.test(aggregation)) return false;
+  const questionTerms = new Set(substantiveLexicalTokens(question));
+  const entityTerms = [
+    candidate.primaryEntity ?? '',
+    ...(candidate.analyticalCapability?.resultGrainIds ?? []),
+    ...(candidate.dimensions ?? []),
+    ...(evidence.parsedIntent?.dimensions ?? []),
+  ].flatMap((value) => substantiveLexicalTokens(value));
+  const metricTerms = [candidate.name, candidate.qualifiedId ?? '', ...(candidate.aliases ?? [])]
+    .flatMap((value) => substantiveLexicalTokens(value));
+  return entityTerms.some((term) => questionTerms.has(term))
+    && metricTerms.some((term) => entityTerms.includes(term));
+}
+
+function hasExplicitRankingMeasure(
+  question: string,
+  evidence: AgentRetrievalEvidence,
+): boolean {
+  const parsed = [
+    ...(evidence.parsedIntent?.measures ?? []),
+    ...extractRankingMeasurePhrases(question),
+  ].map(normalizeMetricPhrase).filter(Boolean);
+  return parsed.length > 0;
+}
+
+function extractRankingMeasurePhrases(question: string): string[] {
+  const matches: string[] = [];
+  for (const pattern of [
+    /\b(?:by|based on|using|with|for)\s+(?:the\s+)?([a-z][a-z0-9_. -]{1,80}?)(?=\s+(?:among|for each|per|in|where|during|over)|[?.!,]|$)/gi,
+    /\b(?:highest|lowest|most|least)\s+([a-z][a-z0-9_. -]{1,80}?)(?=\s+(?:among|for each|per|in|where|during|over)|[?.!,]|$)/gi,
+  ]) {
+    for (const match of question.matchAll(pattern)) if (match[1]) matches.push(match[1]);
+  }
+  return matches;
+}
+
+function rankingMetricChoiceDecision(
+  base: IntentDecision,
+  evidence: AgentRetrievalEvidence,
+  candidates: AgentEvidenceCandidate[],
+  selected: AgentEvidenceCandidate,
+  question: string,
+): IntentDecision {
+  const options = candidates
+    .filter((candidate) =>
+      candidate.id !== selected.id
+      && candidate.compatibility !== 'incompatible'
+      && candidate.kind === 'semantic_metric'
+      && !isDegenerateRankingMetric(question, evidence, candidate),
+    )
+    .slice(0, 3);
+  const labels = options.length > 0
+    ? options.map((candidate) => renderCandidateChoice(candidate)).join(' or ')
+    : 'revenue, order count, or another measure available in the model';
+  return {
+    ...base,
+    action: 'clarify',
+    confidence: 1,
+    source: 'heuristic',
+    category: 'unclear',
+    depth: 'quick',
+    followsUp: true,
+    requiresClarification: true,
+    reason: `${selected.name} counts customers; it cannot distinguish individual customers for a top-customer ranking.`,
+    clarifyingQuestion: `That metric counts unique customers and cannot rank individual customers. Which measure should rank them: ${labels}?`,
+    clarificationOptions: options.length > 0 ? buildClarificationOptions(options) : undefined,
+    retrievalEvidence: retrievalTrace(evidence, candidates),
+    resolvedAnalyticalPlan: undefined,
+    meaningResolution: undefined,
+  };
+}
+
+function preventDegenerateRankingResolution(
+  resolution: MeaningResolution,
+  evidence: AgentRetrievalEvidence,
+  candidates: AgentEvidenceCandidate[],
+  question: string,
+): MeaningResolution {
+  if (hasExplicitRankingMeasure(question, evidence)) return resolution;
+  const selected = candidates.find((candidate) =>
+    candidate.id === resolution.recommendedExecutionId
+    || resolution.selectedConceptIds.includes(candidate.id),
+  );
+  if (!selected || !isDegenerateRankingMetric(question, evidence, selected)) return resolution;
+  const alternatives = candidates
+    .filter((candidate) =>
+      candidate.id !== selected.id
+      && candidate.kind === 'semantic_metric'
+      && candidate.compatibility !== 'incompatible'
+      && !isDegenerateRankingMetric(question, evidence, candidate),
+    )
+    .slice(0, 3);
+  const alternativeLabels = alternatives.map(renderCandidateChoice).join(' or ');
+  return {
+    ...resolution,
+    confidence: 'low',
+    recommendedRoute: 'clarify',
+    recommendedExecutionId: undefined,
+    selectedConceptIds: [],
+    analyticalFrame: undefined,
+    missingInformation: [
+      ...new Set([
+        ...resolution.missingInformation,
+        `${selected.name} counts the ranked entity and is not a suitable ranking measure`,
+      ]),
+    ],
+    clarifyingQuestion: alternativeLabels
+      ? `I found ${selected.name}, but it counts the ranked entity and cannot identify the top individual customers. Which measure should I use: ${alternativeLabels}?`
+      : `I found ${selected.name}, but it counts the ranked entity and cannot identify the top individual customers. Which measure should I use for the ranking?`,
+  };
+}
+
 function directResolution(
   request: AgentRunRequest,
   evidence: AgentRetrievalEvidence,
@@ -1139,9 +1276,24 @@ function routeWithoutMeaningModel(
       planMode,
     );
   }
+  const rankingCandidates = hasExplicitRankingMeasure(request.question, evidence)
+    ? candidates
+    : candidates.filter((candidate) => !isDegenerateRankingMetric(request.question, evidence, candidate));
+  if (questionTypeFromText(request.question) === 'ranking'
+    && !hasExplicitRankingMeasure(request.question, evidence)) {
+    return bareRankingClarification(
+      base,
+      retrievalTrace(evidence, candidates),
+      request.question,
+      evidence,
+      rankingCandidates,
+    );
+  }
   const exactCompatible = candidates.filter(
     (candidate) =>
-      candidate.exactMatch && candidate.compatibility !== "incompatible",
+      candidate.exactMatch
+      && candidate.compatibility !== "incompatible"
+      && rankingCandidates.includes(candidate),
   );
   if (
     exactCompatible.length === 1 &&
@@ -1157,7 +1309,7 @@ function routeWithoutMeaningModel(
       planMode,
     );
   }
-  const semanticMetric = uniqueExecutableSemanticMetric(evidence, candidates);
+  const semanticMetric = uniqueExecutableSemanticMetric(evidence, rankingCandidates);
   if (semanticMetric) {
     return routeDecisionForResolution(
       base,
@@ -1174,7 +1326,7 @@ function routeWithoutMeaningModel(
   // `type: simple` metric, the measure it wraps, and the model that holds them
   // were offered as three competing "meanings" of the same number.
   const best = mayAssumeInterpretation
-    ? bestGovernedInterpretation(request.question, candidates)
+    ? bestGovernedInterpretation(request.question, rankingCandidates)
     : undefined;
   if (best) {
     return routeDecisionForResolution(
@@ -1390,7 +1542,7 @@ function deterministicPrePlanClarification(
       .slice(0, 3);
     if (alternatives.length === 0) {
       if (!asksForRanking || hasExplicitRankingMetric) return undefined;
-      return bareRankingClarification(base, retrievalEvidence);
+      return bareRankingClarification(base, retrievalEvidence, request.question, evidence, candidates);
     }
     const requestedLabel = missingDimensions.map((term) => `“${term}”`).join(' and ');
     const alternativeLabels = alternatives.map(renderCandidateChoice);
@@ -1414,15 +1566,60 @@ function deterministicPrePlanClarification(
   }
 
   if (asksForRanking && !hasExplicitRankingMetric) {
-    return bareRankingClarification(base, retrievalEvidence);
+    return bareRankingClarification(base, retrievalEvidence, request.question, evidence, candidates);
   }
   return undefined;
 }
 
+/**
+ * "Top by which governed metric?" with NO choices is a dead end: the asker
+ * cannot know which measures are both governed and valid at the ranked grain,
+ * so the only move left is to guess. A built-CLI run on the commerce fixture
+ * ended here with zero options while `revenue`, `lifetime_spend_pretax`, and
+ * `orders` were all modeled.
+ *
+ * The question stays exactly as it was — this only attaches the compatible
+ * ranking measures as selectable choices, minus any same-grain entity count,
+ * which is degenerate for ranking individuals. Selecting one returns an
+ * explicit qualified id, which takes the resolved-selection path instead of
+ * asking again.
+ *
+ * Acceptance: AGT-030.
+ */
 function bareRankingClarification(
   base: IntentDecision,
   retrievalEvidence: NonNullable<IntentDecision['retrievalEvidence']>,
+  question?: string,
+  evidence?: AgentRetrievalEvidence,
+  candidates?: AgentEvidenceCandidate[],
 ): IntentDecision {
+  const rankingChoices = (candidates ?? []).filter((candidate) => {
+    if (candidate.compatibility === 'incompatible') return false;
+    if (candidate.kind !== 'certified_block'
+      && candidate.kind !== 'semantic_metric'
+      && candidate.kind !== 'semantic_member') return false;
+    // Check BOTH identities: `qualifiedId` is often the bare semantic-layer
+    // name, so testing it alone let `semantic:model:customers` through.
+    const identities = [candidate.id, candidate.qualifiedId ?? ''].filter(Boolean);
+    // A model, entity, dimension, dbt node, or warehouse table cannot BE the
+    // measure a ranking is ordered by; offering one as a "governed metric" is
+    // how `semantic:model:customers` reached the choice list.
+    if (identities.some((identity) =>
+      /^(semantic:(model|entity|dimension|time_dimension):|dbt:|warehouse:)/i.test(identity))) return false;
+    // `semantic:measure:X.X` is a count of X reported at X's own grain — every
+    // row scores 1, so it can never order X. The metadata-driven guard below
+    // needs a declared aggregation, which retrieval does not always carry, so
+    // this identity check catches the case that metadata misses.
+    const degenerateIdentity = identities.some((identity) => {
+      const measurePath = /^semantic:(?:measure|metric):(.+)$/i.exec(identity)?.[1] ?? '';
+      const [owner, measureName] = measurePath.split('.');
+      return Boolean(owner && measureName
+        && normalizeMetricPhrase(owner) === normalizeMetricPhrase(measureName));
+    });
+    if (degenerateIdentity) return false;
+    if (question && evidence && isDegenerateRankingMetric(question, evidence, candidate)) return false;
+    return true;
+  });
   return {
     ...base,
     action: 'clarify',
@@ -1434,6 +1631,9 @@ function bareRankingClarification(
     requiresClarification: true,
     clarifyingQuestion: 'Top by which governed metric?',
     retrievalEvidence,
+    ...(rankingChoices.length > 0
+      ? { clarificationOptions: buildClarificationOptions(rankingChoices) }
+      : {}),
     resolvedAnalyticalPlan: undefined,
     meaningResolution: undefined,
   };
@@ -1748,6 +1948,7 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
   const threshold = options.llmThreshold ?? DEFAULT_THRESHOLD;
   const cacheSize = options.cacheSize ?? DEFAULT_CACHE_SIZE;
   const cacheTtlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
+  const requireMeaningCall = options.requireMeaningCallForNaturalLanguage ?? true;
   const cache = new Map<string, CacheEntry>();
   let tick = 0;
   const now = options.now ?? (() => { tick += 1; return tick; });
@@ -1829,16 +2030,44 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
             ...(evidence.clarificationCandidates ?? []),
           ].filter((candidate, index, all) =>
             candidate.eligible !== false && all.findIndex((other) => other.id === candidate.id) === index);
-          const deterministicClarification = deterministicPrePlanClarification(
-            request,
-            base,
-            evidence,
-            clarificationCandidates,
-          );
-          if (deterministicClarification) return deterministicClarification;
-
           const explicit = selectedEvidence ?? findExplicitEvidenceReference(request.question, candidates);
-          if (explicit && explicit.compatibility !== "incompatible") {
+          const explicitMeaningBinding = Boolean(explicit && (
+            request.selectedEvidenceId
+            || /@(metric|block|model|table|column)\(/i.test(request.question)
+          ));
+          const shouldUseMeaningCall = requireMeaningCall
+            && !explicitMeaningBinding
+            && Boolean(options.resolveMeaning || options.complete);
+
+          // A normal natural-language turn must be interpreted against the
+          // candidate cards before a deterministic clarification is allowed.
+          // Running this gate first was the source of the "Top by which
+          // governed metric?" repeat loop: it treated a customer-count
+          // execution shim as the answer and never let the meaning model see
+          // the ranking entity/measure distinction.
+          if (!shouldUseMeaningCall && !explicitMeaningBinding) {
+            const deterministicClarification = deterministicPrePlanClarification(
+              request,
+              base,
+              evidence,
+              clarificationCandidates,
+            );
+            if (deterministicClarification) return deterministicClarification;
+          }
+
+          if (explicit
+            && explicit.compatibility !== "incompatible"
+            && (!shouldUseMeaningCall || explicitMeaningBinding)) {
+            if (isDegenerateRankingMetric(request.question, evidence, explicit)
+              && !hasExplicitRankingMeasure(request.question, evidence)) {
+              return rankingMetricChoiceDecision(
+                base,
+                evidence,
+                candidates,
+                explicit,
+                request.question,
+              );
+            }
             const decision = routeDecisionForResolution(
               base,
               evidence,
@@ -1853,7 +2082,9 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
               : decision;
           }
 
-          const multiMetricPrimary = exactMultiMetricPrimary(request.question, evidence, candidates);
+          const multiMetricPrimary = !shouldUseMeaningCall
+            ? exactMultiMetricPrimary(request.question, evidence, candidates)
+            : undefined;
           if (multiMetricPrimary) {
             return routeDecisionForResolution(
               base,
@@ -1867,7 +2098,9 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
           }
 
 
-          const authoredExample = authoritativeExactCertifiedExample(candidates);
+          const authoredExample = !shouldUseMeaningCall
+            ? authoritativeExactCertifiedExample(candidates)
+            : undefined;
           if (authoredExample) {
             return routeDecisionForResolution(
               base,
@@ -1880,9 +2113,9 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
             );
           }
 
-          const exactCompatible = candidates.filter((candidate) =>
+          const exactCompatible = !shouldUseMeaningCall ? candidates.filter((candidate) =>
             candidate.exactMatch && candidate.compatibility !== "incompatible"
-          );
+          ) : [];
           if (exactCompatible.length === 1 && !hasMateriallyRelatedCompetitor(exactCompatible[0], candidates)) {
             return routeDecisionForResolution(
               base,
@@ -1900,7 +2133,9 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
             );
           }
 
-          const dominant = dominantCompatibleGovernedCandidate(candidates);
+          const dominant = !shouldUseMeaningCall
+            ? dominantCompatibleGovernedCandidate(candidates)
+            : undefined;
           if (dominant) {
             return routeDecisionForResolution(
               base,
@@ -1913,7 +2148,7 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
             );
           }
 
-          if (shouldDeferCompositionalFollowUpToExecutor(base, candidates)) {
+          if (!shouldUseMeaningCall && shouldDeferCompositionalFollowUpToExecutor(base, candidates)) {
             return routeWithoutMeaningModel(request, base, evidence, candidates, options.resolvedPlanMode ?? 'authoritative');
           }
 
@@ -1959,9 +2194,41 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
             if (resolution) {
               const validated = validateMeaningResolution(resolution, candidates);
               if (validated.ok) {
+                const safeResolution = preventDegenerateRankingResolution(
+                  validated.resolution,
+                  evidence,
+                  candidates,
+                  request.question,
+                );
+                // Meaning interpretation is still required for a fresh turn,
+                // but it cannot invent a ranking measure when the user only
+                // supplied an entity. Preserve the precise follow-up after the
+                // bounded call so this does not regress into a generic block
+                // or a repeated customer-count answer.
+                if (
+                  questionTypeFromText(request.question) === 'ranking'
+                  && !hasExplicitRankingMeasure(request.question, evidence)
+                ) {
+                  return bareRankingClarification(
+                    base,
+                    retrievalTrace(evidence, candidates),
+                    request.question,
+                    evidence,
+                    candidates,
+                  );
+                }
+                const deterministicGap = deterministicPrePlanClarification(
+                  request,
+                  base,
+                  evidence,
+                  clarificationCandidates,
+                );
+                if (deterministicGap && safeResolution.recommendedRoute === 'clarify') {
+                  return deterministicGap;
+                }
                 return remember(
                   key,
-                  routeDecisionForResolution(base, evidence, candidates, validated.resolution, "llm", request.question, options.resolvedPlanMode ?? 'authoritative'),
+                  routeDecisionForResolution(base, evidence, candidates, safeResolution, "llm", request.question, options.resolvedPlanMode ?? 'authoritative'),
                 );
               }
               const invalidResolution: MeaningResolution = {
@@ -2002,7 +2269,7 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
             // retrieval signal or permitting a general-knowledge misroute.
             meaningResolverReachable = false;
           }
-          return routeWithoutMeaningModel(
+          const fallbackDecision = routeWithoutMeaningModel(
             request,
             base,
             evidence,
@@ -2010,6 +2277,13 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
             options.resolvedPlanMode ?? 'authoritative',
             meaningResolverReachable,
           );
+          if (!shouldUseMeaningCall) return fallbackDecision;
+          // The provider was unavailable or returned malformed JSON. Apply the
+          // deterministic clarification only after the bounded meaning attempt
+          // has been exhausted; this preserves a precise recovery path without
+          // allowing the generic governed error to terminate the question.
+          return deterministicPrePlanClarification(request, base, evidence, clarificationCandidates)
+            ?? fallbackDecision;
         }
       }
 
