@@ -179,7 +179,7 @@ export function buildResolvedAnalyticalPlan(
   const selectedConceptIds = selectedCandidates.map(canonicalId);
   const executionId = executionCandidate ? canonicalId(executionCandidate) : undefined;
   const measures = input.resolution.queryIntent.measures.length > 0
-    ? input.resolution.queryIntent.measures.map((requested) => bindRequestedMember(requested, bindingCandidates, 'measure'))
+    ? input.resolution.queryIntent.measures.map((requested) => bindRequestedMember(requested, bindingCandidates, 'measure', input.question))
     : selectedCandidates
       .filter((candidate) => candidate.kind === 'semantic_metric')
       .map((candidate) => ({
@@ -210,6 +210,13 @@ export function buildResolvedAnalyticalPlan(
     // one of that capability's grouping dimensions for the host. Once a
     // normalized capability supplies a relevant binding, its identifiers,
     // roles, entity/grain and relationship proof are authoritative.
+    // A selected capability owns its grouping dimensions, but when it reports
+    // AMBIGUITY the question text can still settle it — and until it did, an
+    // answerable lookup stopped to ask.
+    if (capabilityBinding && capabilityBinding.status === 'ambiguous') {
+      const settled = memberNamedInQuestion(capabilityBinding.candidateIds, input.candidates, input.question);
+      if (settled) return { ...capabilityBinding, qualifiedId: settled, status: 'resolved', candidateIds: [settled] };
+    }
     if (capabilityBinding && capabilityBinding.status !== 'unresolved') return capabilityBinding;
     const normalizedRequested = normalize(requested);
     const frameIds = uniqueSorted((input.resolution.analyticalFrame?.dimensions ?? [])
@@ -227,7 +234,7 @@ export function buildResolvedAnalyticalPlan(
       };
     }
     if (capabilityBinding) return capabilityBinding;
-    return bindRequestedMember(requested, dimensionBindingCandidates, 'dimension');
+    return bindRequestedMember(requested, dimensionBindingCandidates, 'dimension', input.question);
   };
   const rankingRequested = input.resolution.questionType === 'ranking'
     || input.resolution.queryIntent.order !== undefined
@@ -831,10 +838,47 @@ function cloneFilter(filter: ResolvedAnalyticalPlan['query']['filters'][number])
   return { ...filter, binding: cloneBinding(filter.binding) };
 }
 
+/**
+ * Disambiguate a member binding using the QUESTION TEXT.
+ *
+ * A planner (or a provider) often reduces "customer type" to the bare term
+ * `type`, and worse, may split it into two requested dimensions ("customer",
+ * "type"). A bare `type` then matches `customers.customer_type` AND
+ * `products.product_type` and reads as ambiguous, so an answerable question
+ * stops to ask which dimension was meant. The question already answers it:
+ * "customer type" appears in it and "product type" does not.
+ *
+ * Returns the single id the reader actually named, or undefined when the text
+ * does not settle it. Only multi-word names count — one shared token is not
+ * evidence.
+ */
+function memberNamedInQuestion(
+  ids: string[],
+  candidates: AgentEvidenceCandidate[],
+  question: string,
+): string | undefined {
+  if (ids.length < 2) return undefined;
+  const questionText = normalize(question);
+  if (!questionText) return undefined;
+  const named = ids.filter((id) => {
+    const candidate = candidates.find((item) => (item.qualifiedId ?? item.id) === id || item.id === id);
+    const terms = [candidate?.name ?? '', ...(candidate?.aliases ?? []), id.split(/[.:/]/).at(-1) ?? '']
+      .map((term) => normalize(String(term)))
+      .filter((term) => term.split(' ').length > 1);
+    return terms.some((term) =>
+      questionText === term
+      || questionText.startsWith(`${term} `)
+      || questionText.endsWith(` ${term}`)
+      || questionText.includes(` ${term} `));
+  });
+  return named.length === 1 ? named[0] : undefined;
+}
+
 function bindRequestedMember(
   requested: string,
   candidates: AgentEvidenceCandidate[],
   kind: 'measure' | 'dimension',
+  question = '',
 ): ResolvedPlanMemberBinding {
   const normalized = normalize(requested);
   // A lexical decoy that compatibility already rejected must never introduce
@@ -882,6 +926,18 @@ function bindRequestedMember(
       };
     }
   }
+  const namedWinner = memberNamedInQuestion(ids, eligibleCandidates, question);
+  if (namedWinner) {
+    const winnerCandidate = directCandidates.find((candidate) => (candidate.qualifiedId ?? candidate.id) === namedWinner);
+    return {
+      requested,
+      qualifiedId: namedWinner,
+      ...(winnerCandidate?.aggregation ? { aggregation: winnerCandidate.aggregation } : {}),
+      status: 'resolved',
+      candidateIds: [namedWinner],
+    };
+  }
+
   const direct = ids.length === 1
     ? directCandidates.find((candidate) => (candidate.qualifiedId ?? candidate.id) === ids[0])
     : undefined;
