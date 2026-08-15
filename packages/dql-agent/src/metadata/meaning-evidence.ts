@@ -483,7 +483,52 @@ function supplementalClarificationEvidence(
         exactMatch: false,
       }];
     }));
-  const unique = [...objectCards, ...declaredDimensionCards]
+  // A bare ranking ("who are the top customers") names an ENTITY and no
+  // measure, so every lane above — each keyed on a REQUESTED measure or
+  // dimension term — returns nothing, and the clarification has no choices to
+  // offer. Surface the governed measures that can actually order that entity.
+  const rankingMeasureCards: AgentEvidenceCandidate[] = (() => {
+    if (!plan.requestedShape.rankingDirection) return [];
+    if (requestedMeasures.length > 0) return [];
+    const entityTerms = requestedDimensions;
+    if (entityTerms.length === 0) return [];
+    return objects.flatMap((object) => {
+      if (existingIds.has(object.objectKey)) return [];
+      if (!['semantic_metric', 'semantic_measure'].includes(object.objectType)) return [];
+      const card = agentCandidateFromMeaning(candidateCard(
+        object,
+        'semantic',
+        1,
+        1,
+        aliasesFor(object),
+        ['ranking measure for the requested entity'],
+        [],
+      ));
+      // It must be reportable at the ranked entity's grain. `semanticModel`
+      // covers a measure that declares its model but no dimension list.
+      const grainTerms = [
+        card.primaryEntity ?? '',
+        card.semanticModel ?? '',
+        ...(card.dimensions ?? []),
+      ].map(normalizeText).filter(Boolean);
+      if (!entityTerms.some((term) => grainTerms.some((grain) => grainTermsMatch(term, grain)))) return [];
+      // A count of the ranked entity gives every row the same score.
+      const aggregation = normalizeText(card.aggregation ?? '');
+      const candidateNames = [card.name, ...(card.aliases ?? [])].map(normalizeText);
+      if (/count/.test(aggregation)
+        && entityTerms.some((term) => candidateNames.some((name) => grainTermsMatch(term, name)))) return [];
+      // The registry emits a bare alias node beside the entity-qualified metric
+      // (`semantic:metric:revenue` next to `semantic:metric:order_item.revenue`).
+      // The alias carries no aggregation, grain, or prose — only a raw dbt
+      // unique_id as its description — so it can never be proven compatible and
+      // must not take a choice slot from the node that can.
+      if (!card.aggregation) return [];
+      return [card];
+    }).sort((left, right) =>
+      right.relevanceScore - left.relevanceScore || left.id.localeCompare(right.id));
+  })();
+
+  const unique = [...objectCards, ...declaredDimensionCards, ...rankingMeasureCards]
     .filter((candidate, index, all) => all.findIndex((other) =>
       (other.qualifiedId ?? other.id) === (candidate.qualifiedId ?? candidate.id)) === index);
   const roleLanes = [
@@ -491,6 +536,13 @@ function supplementalClarificationEvidence(
     ...requestedMeasures.map((term) => ({ kind: 'metric' as const, term })),
   ];
   const selected: AgentEvidenceCandidate[] = [];
+  // The ranking lane has no requested term to match on — that absence is the
+  // whole reason it exists — so it seeds the selection directly.
+  for (const candidate of rankingMeasureCards.slice(0, MAX_PER_REQUESTED_ROLE)) {
+    if (!selected.some((item) => (item.qualifiedId ?? item.id) === (candidate.qualifiedId ?? candidate.id))) {
+      selected.push(candidate);
+    }
+  }
   for (const lane of roleLanes) {
     const matches = unique.filter((candidate) => {
       const candidateTerms = [candidate.name, ...(candidate.aliases ?? [])].map(normalizeText);
@@ -537,6 +589,20 @@ function expandedRequestedTerms(terms: string[], objects: MetadataObject[]): str
 
 function phraseTermsMatch(left: string, right: string): boolean {
   return left === right || left.endsWith(` ${right}`) || right.endsWith(` ${left}`);
+}
+
+/**
+ * Grain comparison for the ranking-measure lane only.
+ *
+ * A measure frequently declares the MODEL it lives on ("customers") where the
+ * question names the ENTITY ("customer"), and a plain term match misses that by
+ * one character. This stays local to grain matching rather than loosening
+ * `phraseTermsMatch`, which decides identity elsewhere.
+ */
+function grainTermsMatch(entityTerm: string, grainTerm: string): boolean {
+  if (phraseTermsMatch(entityTerm, grainTerm)) return true;
+  const singular = (value: string) => value.replace(/ies$/, 'y').replace(/s$/, '');
+  return phraseTermsMatch(singular(entityTerm), singular(grainTerm));
 }
 
 function normalizeDimensionRole(value: string): string {

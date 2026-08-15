@@ -204,6 +204,57 @@ describe('AGT-010 metadata meaning evidence lanes', () => {
     expect(untrusted.candidates.some((candidate) => candidate.name === 'Joy Lam')).toBe(false);
   });
 
+  it('AGT-030 offers entity-grain ranking measures when a bare ranking requests none', () => {
+    // "who are the top customers" names an entity and no measure, so every
+    // requested-term lane comes back empty and the clarification used to have
+    // nothing to offer.
+    const evidence = toAgentRetrievalEvidence({
+      candidates: [], byEvidenceClass: { certified: [], semantic: [], sql: [] }, ambiguousGroups: [],
+    }, buildAnalysisQuestionPlan('who are the top customers'), { contextObjects: [
+      {
+        objectKey: 'semantic:measure:customers.lifetime_spend_pretax',
+        objectType: 'semantic_measure',
+        name: 'customers.lifetime_spend_pretax',
+        fullName: 'semantic:customers:lifetime_spend_pretax',
+        description: 'Lifetime spend before tax.',
+        payload: {
+          qualifiedId: 'semantic:customers:lifetime_spend_pretax',
+          aggregation: 'sum',
+          semanticModel: 'customers',
+        },
+      },
+      {
+        // A count of the ranked entity scores every customer 1.
+        objectKey: 'semantic:measure:customers.customers',
+        objectType: 'semantic_measure',
+        name: 'customers.customers',
+        fullName: 'semantic:customers:customers',
+        description: 'Count of unique customers',
+        payload: {
+          qualifiedId: 'semantic:customers:customers',
+          aggregation: 'count_distinct',
+          semanticModel: 'customers',
+          aliases: ['customers'],
+        },
+      },
+      {
+        // The registry's bare alias node: no aggregation, no grain, and a raw
+        // dbt unique_id for prose. It can never be proven compatible.
+        objectKey: 'semantic:metric:revenue',
+        objectType: 'semantic_metric',
+        name: 'revenue',
+        fullName: 'semantic:revenue',
+        description: 'metric.jaffle_shop.revenue',
+        payload: { qualifiedId: 'semantic:revenue', aliases: ['revenue'] },
+      },
+    ] });
+
+    const ids = (evidence.clarificationCandidates ?? []).map((candidate) => candidate.id);
+    expect(ids).toContain('semantic:measure:customers.lifetime_spend_pretax');
+    expect(ids).not.toContain('semantic:measure:customers.customers');
+    expect(ids).not.toContain('semantic:metric:revenue');
+  });
+
   it('reserves the requested geography lane when many revenue cards are relevant', () => {
     const question = 'show total revenue and beverage revenue by customer region';
     const noisyRevenue = Array.from({ length: 20 }, (_, index): MetadataObject => ({

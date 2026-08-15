@@ -2232,7 +2232,10 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
                     retrievalTrace(evidence, candidates),
                     request.question,
                     evidence,
-                    candidates,
+                    // Supplemental clarification cards carry the ranking
+                    // measures for the requested entity, which the execution
+                    // candidate set deliberately does not.
+                    clarificationCandidates,
                   );
                 }
                 const deterministicGap = deterministicPrePlanClarification(

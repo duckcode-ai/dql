@@ -10839,7 +10839,10 @@ function analyticalFailureSummary(
             return;
           }
           res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ run: completedRun }));
+          // Same run, same reader as the stream above, so it ships the same
+          // projection. Sending the stored record here instead made an ordinary
+          // completed Ask a 4.66 MB reply.
+          res.end(serializeJSON({ run: slimAgentRunForTransport(completedRun) }));
         } finally {
           if (runId) activeAgentRunControllers.delete(runId);
         }
