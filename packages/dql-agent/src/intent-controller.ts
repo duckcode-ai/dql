@@ -15,6 +15,7 @@
  * but the default is fast, testable, and reliable.
  */
 
+import type { AnswerAssumption } from './agentic/assumptions.js';
 import type { MetadataAgentIntent } from './metadata/catalog.js';
 import type { MeaningResolution } from './meaning-resolution.js';
 import type { ResolvedAnalyticalPlan } from './resolved-analytical-plan.js';
@@ -89,6 +90,12 @@ export interface IntentDecision {
     | 'unclear';
   /** Where the decision came from: fast heuristics, the LLM router, or its cache. */
   source?: 'heuristic' | 'llm' | 'cache';
+  /**
+   * Bindings the router chose without proving, so the turn could answer instead
+   * of asking a question with one sensible reply. Always user-visible: an
+   * assumption the user cannot see is indistinguishable from a wrong answer.
+   */
+  assumptions?: AnswerAssumption[];
   /**
    * Retrieval-first meaning decision. Executors may use the selected qualified
    * IDs as a query specification, but must still validate/authorize execution.
