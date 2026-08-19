@@ -364,9 +364,27 @@ export async function matchSemanticMetric(
     // Descriptions/examples are a recall source, not an automatic answer. Require
     // at least two distinctive measure tokens before they can advance a metric to
     // compiler validation; a single generic prose word remains insufficient.
-    const descriptionGrounded = qContent.size >= 2
+    //
+    // But the count rule is unsatisfiable for a ONE-token question, which is the
+    // shape a domain acronym always takes. "BCM" against a metric named
+    // `billed_consumption_monthly` and described "Billed consumption (BCM)…"
+    // scored 0 on name and family, needed two hits it could never have, and came
+    // back null — the metric was unreachable by the term people actually use.
+    //
+    // The real concern behind the rule is GENERICNESS, not count: "monthly"
+    // appearing in prose proves nothing. So a lone token grounds only when it is
+    // distinctive — not a stopword, not a generic measure word, and long enough
+    // to be a real term rather than an initial.
+    const distinctiveDescriptionHit = qContent.size === 1
+      && [...qContent].some((token) =>
+        descriptionTokens.has(token)
+        && token.length >= 3
+        && !GENERIC_FAMILY_TOKENS.has(token)
+        && !STOPWORDS.has(token));
+    const descriptionGrounded = (qContent.size >= 2
       && descriptionHits >= 2
-      && descriptionHits / qContent.size >= 0.6;
+      && descriptionHits / qContent.size >= 0.6)
+      || distinctiveDescriptionHit;
     const grounded = nameHit > 0 || Boolean(sharedFamily) || descriptionGrounded;
     const basis = nameHit > 0
       ? 'name' as const

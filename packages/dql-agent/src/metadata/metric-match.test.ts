@@ -305,23 +305,36 @@ describe('recall: a metric whose NAME omits the question term (the BCM productio
     },
   };
 
-  it('grounds the match on embedding similarity when the host supplies a real embedder', async () => {
+  it('finds it deterministically — a lone distinctive term the description names', async () => {
+    // This used to need a real embedder: `descriptionGrounded` required TWO
+    // hits, which a one-token question can never have, so the acronym people
+    // actually type was unreachable by any deterministic path.
+    const match = await matchSemanticMetric('who are the top customers for BCM', bcmPool, {
+      measureTerms: ['bcm'],
+    });
+    expect(match?.metric.name).toBe('billed_consumption_monthly');
+    expect(match?.basis).toBe('description');
+  });
+
+  it('still works with a real embedder, and sends nothing when there is none', async () => {
+    // The egress property is unchanged and separate from recall: a hashed or
+    // absent provider contributes no options, so no metric definition leaves the
+    // host. What changed is that recall no longer DEPENDS on that call.
+    expect(semanticMetricEmbeddingOptions({ id: 'hashed-token-v1', dimensions: 3, async embed(t: string[]) { return t.map(() => [0, 0, 0]); } })).toEqual({});
+    expect(semanticMetricEmbeddingOptions(undefined)).toEqual({});
     const match = await matchSemanticMetric('who are the top customers for BCM', bcmPool, {
       measureTerms: ['bcm'],
       ...semanticMetricEmbeddingOptions(semanticProvider),
     });
     expect(match?.metric.name).toBe('billed_consumption_monthly');
-    expect(match?.basis).toBe('embedding');
   });
 
-  it('stays null on the offline hashed default, so nothing is sent anywhere unopted', async () => {
-    const hashed = { id: 'hashed-token-v1', dimensions: 3, async embed(t: string[]) { return t.map(() => [0, 0, 0]); } };
-    expect(semanticMetricEmbeddingOptions(hashed)).toEqual({});
-    expect(semanticMetricEmbeddingOptions(undefined)).toEqual({});
-    const match = await matchSemanticMetric('who are the top customers for BCM', bcmPool, {
-      measureTerms: ['bcm'],
-      ...semanticMetricEmbeddingOptions(hashed),
-    });
+  it('does not ground on a generic prose word, which is what the count rule guarded', async () => {
+    // `order_count` is described "Number of orders placed". The word "number"
+    // appears only in that prose, never in the name, and proves nothing about
+    // what the metric measures. Relaxing the COUNT rule must not relax the
+    // genericness rule that was its real purpose.
+    const match = await matchSemanticMetric('show me the number', bcmPool, { measureTerms: ['number'] });
     expect(match).toBeNull();
   });
 
