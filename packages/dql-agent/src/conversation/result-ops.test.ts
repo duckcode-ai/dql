@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { detectResultSetOperation, computeResultSetOperation, type PriorResultData } from './result-ops.js';
+import { detectResultSetOperation, computeResultSetOperation, type PriorResultData, refersToPriorResult } from './result-ops.js';
 
 const priorResult: PriorResultData = {
   columns: ['customer_name', 'bcm'],
@@ -88,5 +88,75 @@ describe('computeResultSetOperation', () => {
 
   it('returns null with no rows', () => {
     expect(computeResultSetOperation(detectResultSetOperation('sum these')!, { columns: ['x'], rows: [], rowCount: 0 })).toBeNull();
+  });
+});
+
+describe('refersToPriorResult — relaxing the demonstrative requirement safely', () => {
+  const prior = { columns: ['customer_name', 'lifetime_spend'], measureColumns: ['lifetime_spend'] };
+
+  it('still accepts an explicit demonstrative', () => {
+    expect(refersToPriorResult('of these, the average revenue', prior)).toBe(true);
+    expect(refersToPriorResult('top 3 of those')).toBe(true);
+    expect(refersToPriorResult('sum them')).toBe(true);
+  });
+
+  it('accepts a follow-up that names a column the prior result actually has', () => {
+    // The reported gap: this used to re-enter the full cascade and come back as a
+    // metric-composition clarification — a warehouse round-trip for arithmetic
+    // over rows already on screen.
+    expect(refersToPriorResult("what's the average lifetime_spend?", prior)).toBe(true);
+    expect(refersToPriorResult('average lifetime spend', prior)).toBe(true);
+  });
+
+  it('refuses a fresh question that names NO prior column', () => {
+    expect(refersToPriorResult('what is total revenue', prior)).toBe(false);
+    expect(refersToPriorResult('how many orders were there', prior)).toBe(false);
+  });
+
+  it('refuses everything without prior columns to anchor on', () => {
+    // Nothing to be sure about, so let the normal cascade run.
+    expect(refersToPriorResult("what's the average lifetime_spend?")).toBe(false);
+    expect(refersToPriorResult("what's the average lifetime_spend?", { columns: [] })).toBe(false);
+  });
+
+  it('vetoes a new time frame even when a prior column is named', () => {
+    // The dangerous direction: silently computing "last quarter" over whatever
+    // happened to be on screen. Being wrong here is invisible to the user;
+    // being wrong the other way just costs a query.
+    expect(refersToPriorResult('average lifetime_spend last quarter', prior)).toBe(false);
+    expect(refersToPriorResult('average lifetime_spend year to date', prior)).toBe(false);
+    expect(refersToPriorResult('average lifetime_spend since January', prior)).toBe(false);
+  });
+
+  it('vetoes a new breakdown, population, or an explicit re-run', () => {
+    expect(refersToPriorResult('average lifetime_spend by region', prior)).toBe(false);
+    expect(refersToPriorResult('average lifetime_spend for all customers', prior)).toBe(false);
+    expect(refersToPriorResult('rerun that with average lifetime_spend', prior)).toBe(false);
+  });
+
+  it('lets a new-query signal override even an explicit demonstrative', () => {
+    // "of these ... by region" is asking for a grouping the prior rows may not
+    // carry, so it is a new query wearing a back-reference.
+    expect(refersToPriorResult('of these, average lifetime_spend by region', prior)).toBe(false);
+  });
+});
+
+describe('detectResultSetOperation with prior shape', () => {
+  const prior = { columns: ['customer_name', 'lifetime_spend'], measureColumns: ['lifetime_spend'] };
+
+  it('detects an aggregate without a demonstrative when a column is named', () => {
+    expect(detectResultSetOperation("what's the average lifetime_spend?", prior))
+      .toMatchObject({ kind: 'aggregate', aggregate: 'avg' });
+  });
+
+  it('keeps returning null for a fresh question, preserving the old behaviour', () => {
+    expect(detectResultSetOperation('what is total revenue', prior)).toBeNull();
+    expect(detectResultSetOperation('what is total revenue')).toBeNull();
+  });
+
+  it('is unchanged for bare callers that pass no prior shape', () => {
+    expect(detectResultSetOperation('of these, the average revenue'))
+      .toMatchObject({ kind: 'aggregate', aggregate: 'avg' });
+    expect(detectResultSetOperation('average revenue')).toBeNull();
   });
 });

@@ -1586,7 +1586,10 @@ function applyHollowAnswerGate(result: AgentAnswer): AgentAnswer {
 function tryCrossResultAnswer(input: AnswerLoopInput): AgentAnswer | null {
   const prior = input.followUp?.priorResult;
   if (!prior || !Array.isArray(prior.rows) || prior.rows.length === 0) return null;
-  const op = detectResultSetOperation(input.question);
+  // Pass the prior result's shape so a follow-up that names one of its columns
+  // ("what's the average lifetime_spend?") is recognised without requiring a
+  // demonstrative pronoun.
+  const op = detectResultSetOperation(input.question, prior);
   if (!op) return null;
   const computed = computeResultSetOperation(op, prior);
   if (!computed) return null;

@@ -51,10 +51,75 @@ export interface ResultSetComputation {
   partial: boolean;
 }
 
-// A demonstrative back-reference to the prior result. Required — this is what
-// keeps a fresh question ("what is total revenue") from being treated as an
-// operation over nothing.
+// A demonstrative back-reference to the prior result. STRONG evidence that the
+// question is about the rows already on screen — but no longer required on its
+// own, see `refersToPriorResult`.
 const BACK_REFERENCE_RE = /\b(these|those|them|the\s+(?:results?|list|rows?|ones?|values?|numbers?)|above|shown\s+above|listed\s+above|from\s+(?:the\s+)?(?:results?|above|list))\b/i;
+
+/**
+ * Signals that the question introduces a NEW query rather than operating on the
+ * rows already returned. Any of these vetoes the cross-result path outright.
+ *
+ * This side matters more than the positive signals. The failure mode of relaxing
+ * the demonstrative requirement is answering a FRESH question from a stale
+ * table — silently computing "average revenue last quarter" over whatever
+ * happened to be on screen — which is worse than the bug being fixed, because
+ * the user cannot see that it happened.
+ */
+const NEW_QUERY_RE = new RegExp([
+  // An explicit time frame the prior result was not scoped to.
+  '\\b(last|next|this|previous|past)\\s+(year|quarter|month|week|day|\\d+\\s+\\w+)\\b',
+  '\\b(ytd|mtd|qtd|year\\s+to\\s+date|since|between|from)\\b',
+  // A new breakdown — "by region" asks for a grouping the prior rows may not have.
+  '\\bby\\s+[a-z_]',
+  // A new population.
+  '\\b(all|every|each)\\b',
+  // Explicitly asking to re-run.
+  '\\b(re-?run|recalculate|refresh|fresh|instead|new\\s+query)\\b',
+].join('|'), 'i');
+
+/** Prior-result shape the scorer consults. Optional so bare callers keep working. */
+export interface PriorResultShape {
+  columns?: readonly string[];
+  measureColumns?: readonly string[];
+}
+
+/**
+ * Should this question be answered from the prior result?
+ *
+ * The demonstrative regex used to be a hard gate, so "what's the average
+ * revenue?" right after a table re-entered the full cascade and came back as a
+ * metric-composition clarification — a fresh warehouse round-trip for arithmetic
+ * over rows already on screen.
+ *
+ * It is now the strongest of several signals rather than the only one. A named
+ * column that EXISTS in the prior result is nearly as strong: "the average
+ * lifetime_spend" can only sensibly mean the column just shown. Anything that
+ * looks like a new query vetoes both.
+ */
+export function refersToPriorResult(question: string, prior?: PriorResultShape): boolean {
+  const q = question.trim();
+  if (!q) return false;
+  // A new-query signal wins over everything. Being wrong in this direction is
+  // silent and unrecoverable; being wrong the other way just costs a query.
+  if (NEW_QUERY_RE.test(q)) return false;
+  if (BACK_REFERENCE_RE.test(q)) return true;
+
+  // No demonstrative: accept only when the question names a column the prior
+  // result actually has. Without prior columns there is nothing to anchor on,
+  // so stay conservative and let the normal cascade run.
+  const columns = [...(prior?.columns ?? []), ...(prior?.measureColumns ?? [])];
+  if (columns.length === 0) return false;
+  const lower = q.toLowerCase();
+  return columns.some((column) => {
+    const name = column.toLowerCase().trim();
+    if (!name) return false;
+    if (lower.includes(name)) return true;
+    // `lifetime_spend` should also match "lifetime spend".
+    const spaced = name.replace(/[_\s]+/g, ' ');
+    return spaced.length > 3 && lower.includes(spaced);
+  });
+}
 
 const AGGREGATE_PATTERNS: Array<{ re: RegExp; aggregate: ResultSetAggregate }> = [
   { re: /\b(average|avg|mean)\b/i, aggregate: 'avg' },
@@ -69,10 +134,13 @@ const AGGREGATE_PATTERNS: Array<{ re: RegExp; aggregate: ResultSetAggregate }> =
  * Detect a cross-result operation. Returns null unless the question both refers
  * back to the prior result AND names an aggregate or a re-rank.
  */
-export function detectResultSetOperation(question: string): ResultSetOperation | null {
+export function detectResultSetOperation(
+  question: string,
+  prior?: PriorResultShape,
+): ResultSetOperation | null {
   const q = question.trim();
   if (!q) return null;
-  if (!BACK_REFERENCE_RE.test(q)) return null;
+  if (!refersToPriorResult(q, prior)) return null;
 
   // Re-rank: "top 3 of these", "bottom 5 of those", "highest 3 above".
   const rerank = /\b(top|bottom|highest|lowest|first|last)\s+(\d{1,3})\b/i.exec(q)

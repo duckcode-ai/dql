@@ -233,7 +233,7 @@ export type {
   AnalyticalRepairRequestV1,
   CreateAnalyticalFailureInput,
 } from './analytical-failure-repair.js';
-export { detectResultSetOperation, computeResultSetOperation } from "./conversation/result-ops.js";
+export { detectResultSetOperation, computeResultSetOperation, refersToPriorResult, type PriorResultShape } from "./conversation/result-ops.js";
 export type { ResultSetOperation, PriorResultData, ResultSetComputation } from "./conversation/result-ops.js";
 export type { SemanticExecutionTrace, SemanticQueryCompiler } from "./answer-loop.js";
 export {
