@@ -1037,9 +1037,14 @@ function rankingMetricChoiceDecision(
       && !isDegenerateRankingMetric(question, evidence, candidate),
     )
     .slice(0, 3);
-  const labels = options.length > 0
-    ? options.map((candidate) => renderCandidateChoice(candidate)).join(' or ')
-    : 'revenue, order count, or another measure available in the model';
+  if (options.length === 0) {
+    return unanswerableClarificationFallback(
+      base,
+      retrievalTrace(evidence, candidates),
+      `${selected.name} counts customers and cannot rank them, and no alternative governed measure was retrieved, so DQL continued into the review-required generated lane instead of asking a question with no selectable answer.`,
+    );
+  }
+  const labels = options.map((candidate) => renderCandidateChoice(candidate)).join(' or ');
   return {
     ...base,
     action: 'clarify',
@@ -1051,7 +1056,7 @@ function rankingMetricChoiceDecision(
     requiresClarification: true,
     reason: `${selected.name} counts customers; it cannot distinguish individual customers for a top-customer ranking.`,
     clarifyingQuestion: `That metric counts unique customers and cannot rank individual customers. Which measure should rank them: ${labels}?`,
-    clarificationOptions: options.length > 0 ? buildClarificationOptions(options) : undefined,
+    clarificationOptions: buildClarificationOptions(options),
     retrievalEvidence: retrievalTrace(evidence, candidates),
     resolvedAnalyticalPlan: undefined,
     meaningResolution: undefined,
@@ -1666,6 +1671,44 @@ function deterministicPrePlanClarification(
 }
 
 /**
+ * A clarification with NO selectable options is unanswerable, and asking it is a
+ * dead end rather than a safety measure.
+ *
+ * Reported from production: "who are the top customers for BCM" returned
+ * "Top by which governed metric?" with zero choices. Answering it in prose
+ * ("...who have top revenue") produced the IDENTICAL question again, because the
+ * reply carries no `selectedEvidenceId` and re-enters the same path with the
+ * same evidence. A question that can only be answered by clicking a button that
+ * was never rendered loops forever.
+ *
+ * When the option list is empty the failure is in RETRIEVAL, not in the user's
+ * phrasing, so continue into the review-required generated lane and let the
+ * answer carry the caveat. `requiresClarification` is cleared deliberately:
+ * leaving it set would make `answerAnywayRoute` treat this as material ambiguity
+ * and re-block the turn.
+ */
+function unanswerableClarificationFallback(
+  base: IntentDecision,
+  retrievalEvidence: IntentDecision['retrievalEvidence'],
+  reason: string,
+): IntentDecision {
+  return {
+    ...base,
+    action: 'answer',
+    confidence: Math.min(base.confidence, 0.5),
+    source: 'heuristic',
+    category: 'data_lookup',
+    requiresClarification: false,
+    clarifyingQuestion: undefined,
+    clarificationOptions: undefined,
+    reason,
+    ...(retrievalEvidence ? { retrievalEvidence } : {}),
+    resolvedAnalyticalPlan: undefined,
+    meaningResolution: undefined,
+  };
+}
+
+/**
  * "Top by which governed metric?" with NO choices is a dead end: the asker
  * cannot know which measures are both governed and valid at the ranked grain,
  * so the only move left is to guess. A built-CLI run on the commerce fixture
@@ -1714,6 +1757,13 @@ function bareRankingClarification(
     if (question && evidence && isDegenerateRankingMetric(question, evidence, candidate)) return false;
     return true;
   });
+  if (rankingChoices.length === 0) {
+    return unanswerableClarificationFallback(
+      base,
+      retrievalEvidence,
+      'No retrieved governed measure can rank this entity, so DQL continued into the review-required generated lane instead of asking a question with no selectable answer.',
+    );
+  }
   return {
     ...base,
     action: 'clarify',
@@ -1725,9 +1775,7 @@ function bareRankingClarification(
     requiresClarification: true,
     clarifyingQuestion: 'Top by which governed metric?',
     retrievalEvidence,
-    ...(rankingChoices.length > 0
-      ? { clarificationOptions: buildClarificationOptions(rankingChoices) }
-      : {}),
+    clarificationOptions: buildClarificationOptions(rankingChoices),
     resolvedAnalyticalPlan: undefined,
     meaningResolution: undefined,
   };

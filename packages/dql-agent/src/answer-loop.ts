@@ -60,7 +60,8 @@ import { deriveGeneratedDraftSlug, renderGeneratedSqlDqlArtifact } from './metad
 import { buildAnalysisQuestionPlan, type AnalysisQuestionPlan } from './metadata/analysis-planner.js';
 import { certifiedFitAllowsTier1,
   certifiedTerminationVerdict, evaluateCertifiedBlockFit } from './metadata/block-fit.js';
-import { buildGovernedMetricFirstSql, matchSemanticMetric, metricToGovernedSql, resolveGovernedMetricDefinition, resolveGovernedMetricSql, type MetricMatch } from './metadata/metric-match.js';
+import { buildGovernedMetricFirstSql, matchSemanticMetric, metricToGovernedSql, resolveGovernedMetricDefinition, resolveGovernedMetricSql, semanticMetricEmbeddingOptions, type MetricMatch } from './metadata/metric-match.js';
+import type { EmbeddingProvider } from './embeddings/provider.js';
 import { decideAgentAction, type IntentDecision } from './intent-controller.js';
 import type {
   SqlContextValidationCode,
@@ -1362,6 +1363,17 @@ export interface AnswerLoopInput {
   providerPayloadGuard?: ProviderToolLoopOptions['providerPayloadGuard'];
   /** Shared local metadata context pack from `.dql/cache/metadata.sqlite`. */
   contextPack?: LocalContextPack;
+  /**
+   * The project's configured embedder, resolved by the HOST from
+   * `dql.config.json` (`ai.embeddings`). Supplying it is an explicit opt-in:
+   * without it, metric matching stays on the offline hashed-token provider and
+   * `matchSemanticMetric` can never ground a match on embedding similarity
+   * alone (`realEmbeddingProvider` is false), so a question that names a metric
+   * only by synonym or acronym — "top customers for BCM" against
+   * `billed_consumption_monthly` — finds nothing and the router falls through
+   * to a bare-ranking clarification with no options.
+   */
+  embeddingProvider?: EmbeddingProvider;
 }
 
 const CERTIFIED_HIT_THRESHOLD = 0.18;
@@ -1672,6 +1684,7 @@ async function freezeLegacySemanticSelection(input: AnswerLoopInput): Promise<Re
   const match = await matchSemanticMetric(input.question, metricNodes, {
     measureTerms: [...questionPlan.requestedShape.measures, ...questionPlan.metricTerms],
     ...(semanticLayer ? { canExecute: (name: string) => semanticLayer.canComposeMetric(name) } : {}),
+    ...semanticMetricEmbeddingOptions(input.embeddingProvider),
   }).catch(() => null);
   if (!match) return undefined;
   const normalizedCapability = normalizeMetricCapabilityContract(match.metric.payload?.analyticalCapability);
@@ -2545,6 +2558,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       : await matchSemanticMetric(semanticQuestion, semanticMetricNodes, {
           measureTerms: [...questionPlan.requestedShape.measures, ...questionPlan.metricTerms],
           ...(canExecuteSemanticMetricForMatch ? { canExecute: canExecuteSemanticMetricForMatch } : {}),
+          ...semanticMetricEmbeddingOptions(input.embeddingProvider),
         }).catch(() => null);
 
   // Stage 1: certified artifact match. Blocks can be executed; dashboards,

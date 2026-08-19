@@ -1982,6 +1982,74 @@ export class AgentRunEngine {
  * inject or deserialize an older router decision as well as the canonical
  * router producer.
  */
+/** An ordinary Ask turn (not Research, App Build, or another explicit mode). */
+function isOrdinaryAskRequest(request: AgentRunRequest): boolean {
+  return request.requestedMode === undefined
+    || request.requestedMode === 'auto'
+    || request.requestedMode === 'ask';
+}
+
+/**
+ * A modeling/coverage gap is a pre-freeze DISCOVERY result, not permission to
+ * terminate an ordinary Ask. Keep the diagnostic as a typed reason, clear the
+ * blocked RAP, and let the answer executor continue through the governed
+ * relational and review-required generated lanes (AGT-028, EXP-001).
+ *
+ * `requireGovernedEvidence` separates the two callers, and it is what keeps the
+ * analytical-RAP safety boundary intact:
+ *
+ *   - A gap the ROUTER reported is already proof that discovery ran and found a
+ *     modelling limit, so it is rescued unconditionally (the original AGT-028
+ *     behaviour).
+ *   - A block this module SYNTHESIZES only means "nothing froze here". That is
+ *     also what an absent, LLM-authored, or forged router decision looks like,
+ *     so it is rescued only when retrieval actually surfaced governed
+ *     candidates. With no evidence at all it must still fail closed — a forged
+ *     `converse`/`answer` must never bypass the boundary on an analytical
+ *     question.
+ *
+ * Returns `undefined` when the decision is not a rescuable modeling gap, so
+ * callers can fall through to their own handling.
+ */
+function rescueModelingGapForOrdinaryAsk(
+  request: AgentRunRequest,
+  decision: IntentDecision,
+  options: { requireGovernedEvidence?: boolean } = {},
+): IntentDecision | undefined {
+  if (!isOrdinaryAskRequest(request)) return undefined;
+  if (decision.terminalOutcome?.kind !== 'modeling_gap') return undefined;
+  // Genuine user-facing ambiguity and an explicit evidence pick stay terminal.
+  if (decision.requiresClarification === true) return undefined;
+  if (request.selectedEvidenceId) return undefined;
+  if (options.requireGovernedEvidence) {
+    const governedEvidence = (decision.retrievalEvidence?.candidateCount ?? 0) > 0
+      || (decision.meaningResolution?.selectedConceptIds.length ?? 0) > 0;
+    if (!governedEvidence) return undefined;
+  }
+  return {
+    ...decision,
+    action: 'answer',
+    confidence: Math.min(decision.confidence, 0.55),
+    reason: `${decision.terminalOutcome.message} Continuing through DBT-grounded relational and review-required generated analysis before asking for a modeling change.`,
+    terminalOutcome: undefined,
+    resolvedAnalyticalPlan: undefined,
+    requiresClarification: false,
+    // The premise of this rescue is that NO governed plan froze, so the turn
+    // must not take `selectRoute`'s certified/semantic shortcut — that path
+    // stamps `certified`/`governed` trust off a bare RECOMMENDATION, which is a
+    // suggestion, not a bound execution contract. Keep the meaning evidence for
+    // citations and downgrade the route to governed SQL, which is review-required.
+    ...(decision.meaningResolution
+      ? {
+          meaningResolution: {
+            ...decision.meaningResolution,
+            recommendedRoute: 'governed_sql' as const,
+          },
+        }
+      : {}),
+  };
+}
+
 function enforceOrdinaryAnalyticalPlanBoundary(
   request: AgentRunRequest,
   decision: IntentDecision,
@@ -1993,28 +2061,8 @@ function enforceOrdinaryAnalyticalPlanBoundary(
     || decision.action === 'block'
     || decision.requiresClarification === true
     || Boolean(decision.terminalOutcome);
-  // A modeling/coverage gap is a pre-freeze discovery result, not permission to
-  // terminate an ordinary Ask. Keep the diagnostic as a typed reason in the
-  // route decision, clear the blocked RAP, and let the answer executor continue
-  // through the governed relational and review-required generated lanes. Policy
-  // blocks and genuine user ambiguity remain terminal. This is the key
-  // governed-first-but-not-governed-only boundary (AGT-028, EXP-001).
-  if (
-    ordinaryAsk
-    && decision.terminalOutcome?.kind === 'modeling_gap'
-    && decision.requiresClarification !== true
-    && !request.selectedEvidenceId
-  ) {
-    return {
-      ...decision,
-      action: 'answer',
-      confidence: Math.min(decision.confidence, 0.55),
-      reason: `${decision.terminalOutcome.message} Continuing through DBT-grounded relational and review-required generated analysis before asking for a modeling change.`,
-      terminalOutcome: undefined,
-      resolvedAnalyticalPlan: undefined,
-      requiresClarification: false,
-    };
-  }
+  const inboundRescue = rescueModelingGapForOrdinaryAsk(request, decision);
+  if (inboundRescue) return inboundRescue;
   const exactSemanticContinuation = Boolean(
     request.selectedEvidenceId
     && decision.meaningResolution?.recommendedRoute === 'semantic'
@@ -2086,7 +2134,7 @@ function enforceOrdinaryAnalyticalPlanBoundary(
   ) return decision;
 
   const message = 'DQL could not freeze an exact analytical plan for the requested metric, grain, filters, ordering, and outputs. Choose a governed identifier or model the missing capability before retrying.';
-  return {
+  const blocked: IntentDecision = {
     ...decision,
     action: 'block',
     confidence: 1,
@@ -2099,6 +2147,12 @@ function enforceOrdinaryAnalyticalPlanBoundary(
       candidateIds: decision.retrievalEvidence?.candidateIds ?? [],
     },
   };
+  // The block synthesized HERE is a modeling gap too, so it must face the same
+  // rescue as one arriving from the router. Without this, the rescue above
+  // silently did not apply to the most common way an ordinary Ask gets blocked:
+  // retrieval found governed candidates, no exact tuple froze, and the run
+  // dead-ended instead of continuing to the generated lane.
+  return rescueModelingGapForOrdinaryAsk(request, blocked, { requireGovernedEvidence: true }) ?? blocked;
 }
 
 function softBoundaryResult(route: AgentRunRoute, budget: AgentRunBudget): AgentRouteExecutorResult {

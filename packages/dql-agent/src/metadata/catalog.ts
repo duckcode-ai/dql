@@ -879,8 +879,24 @@ export function defaultMetadataPath(projectRoot: string): string {
   return join(projectRoot, '.dql', 'cache', 'metadata.sqlite');
 }
 
-export function metadataSnapshotPath(projectRoot: string, fingerprint: string): string {
-  return join(projectRoot, '.dql', 'cache', 'snapshots', `${METADATA_INDEX_VERSION}-${fingerprint}.sqlite`);
+/**
+ * Snapshots are immutable and addressed by content fingerprint, so
+ * `exportSnapshot` refuses to overwrite an existing file. The embedded VECTORS
+ * are part of what a snapshot contains but are NOT part of the content
+ * fingerprint, so two different encodings of identical content would otherwise
+ * collide on one path — and switching `ai.embeddings` would silently keep
+ * serving the hashed vectors forever. Qualify the filename with the provider so
+ * they are the distinct artifacts they actually are.
+ */
+export function metadataSnapshotPath(
+  projectRoot: string,
+  fingerprint: string,
+  vectorProviderId?: string,
+): string {
+  const suffix = vectorProviderId && !vectorProviderId.startsWith('hashed-token')
+    ? `-${vectorProviderId.replace(/[^a-z0-9]+/gi, '_').slice(0, 48)}`
+    : '';
+  return join(projectRoot, '.dql', 'cache', 'snapshots', `${METADATA_INDEX_VERSION}-${fingerprint}${suffix}.sqlite`);
 }
 
 interface ActiveMetadataSnapshotPointer {
@@ -922,7 +938,7 @@ export function currentMetadataFingerprint(projectRoot: string): string | undefi
 }
 
 function activateMetadataSnapshot(projectRoot: string, fingerprint: string, catalog: MetadataCatalog): string {
-  const snapshotPath = metadataSnapshotPath(projectRoot, fingerprint);
+  const snapshotPath = metadataSnapshotPath(projectRoot, fingerprint, catalog.state('vector_provider') ?? undefined);
   catalog.exportSnapshot(snapshotPath);
   const cacheDir = join(projectRoot, '.dql', 'cache');
   const pointerPath = join(cacheDir, 'active-snapshot.json');
@@ -1112,18 +1128,26 @@ export async function awaitVectorIndexUpgrade(projectRoot: string): Promise<void
  * runs or if it fails. Best-effort by design: an unreachable Ollama must not
  * break indexing or answering.
  */
-export async function upgradeVectorIndexForProject(
-  projectRoot: string,
+/** How long a cold re-embed may hold up indexing before we ship the hashed index. */
+const VECTOR_UPGRADE_BUDGET_MS = 8_000;
+
+/**
+ * Re-embed an ALREADY-OPEN catalog. Split out from `upgradeVectorIndexForProject`
+ * so `ensureMetadataCatalogFresh` can upgrade the same catalog handle it is about
+ * to export — the vectors have to be in place BEFORE `activateMetadataSnapshot`,
+ * because retrieval reads the exported snapshot, not this working database.
+ */
+async function upgradeVectorIndexOnCatalog(
+  catalog: MetadataCatalog,
   provider: EmbeddingProvider,
 ): Promise<{ upgraded: boolean; providerId: string; reason?: string }> {
   if (provider.id.startsWith('hashed-token')) {
     return { upgraded: false, providerId: provider.id, reason: 'project uses the offline hashed embedder' };
   }
-  const catalog = openMetadataCatalog(projectRoot);
+  if (catalog.state('vector_provider') === provider.id) {
+    return { upgraded: false, providerId: provider.id, reason: 'index already embedded with this provider' };
+  }
   try {
-    if (catalog.state('vector_provider') === provider.id) {
-      return { upgraded: false, providerId: provider.id, reason: 'index already embedded with this provider' };
-    }
     await catalog.rebuildVectorIndex(provider);
     return { upgraded: true, providerId: provider.id };
   } catch (error) {
@@ -1132,6 +1156,25 @@ export async function upgradeVectorIndexForProject(
       providerId: catalog.state('vector_provider') ?? DEFAULT_VECTOR_PROVIDER.id,
       reason: error instanceof Error ? error.message : String(error),
     };
+  }
+}
+
+export async function upgradeVectorIndexForProject(
+  projectRoot: string,
+  provider: EmbeddingProvider,
+): Promise<{ upgraded: boolean; providerId: string; reason?: string }> {
+  const catalog = openMetadataCatalog(projectRoot);
+  try {
+    const result = await upgradeVectorIndexOnCatalog(catalog, provider);
+    // Re-export so the ACTIVE snapshot carries the new vectors. Without this the
+    // upgrade only ever touched the mutable working database, which the answer
+    // path never reads — so `POST /api/settings/embeddings/reindex` reported
+    // success while retrieval kept serving the hashed index.
+    if (result.upgraded) {
+      const fingerprint = catalog.state('fingerprint');
+      if (fingerprint) activateMetadataSnapshot(projectRoot, fingerprint, catalog);
+    }
+    return result;
   } finally {
     catalog.close();
   }
@@ -1151,7 +1194,30 @@ export async function ensureMetadataCatalogFresh(
   try {
     const existing = catalog.state('fingerprint');
     const compatibleIndex = catalog.state('index_version') === METADATA_INDEX_VERSION;
+    // The snapshot write embeds with the sync hashed provider (better-sqlite3
+    // transactions cannot await), so a configured Ollama/OpenAI embedder can only
+    // be applied afterwards — and it must land BEFORE the export, since retrieval
+    // reads the exported snapshot. `searchVectorObjects` returns ZERO candidates
+    // when the requested provider id does not match the indexed one, so skipping
+    // this makes configuring a real embedder strictly worse than not configuring
+    // one: an empty vector lane instead of a weak one.
+    const vectorProvider = options.embeddingProvider ?? projectEmbeddingProvider(projectRoot);
+    const upgradeVectors = async (): Promise<void> => {
+      const upgrade = upgradeVectorIndexOnCatalog(catalog, vectorProvider);
+      pendingVectorUpgrades.set(projectRoot, upgrade.then(() => undefined, () => undefined));
+      // Never let a cold or unreachable embedder block indexing: the hashed index
+      // is already in place, so timing out simply ships it and the next refresh
+      // retries.
+      await Promise.race([
+        upgrade,
+        new Promise((resolve) => setTimeout(resolve, VECTOR_UPGRADE_BUDGET_MS)),
+      ]);
+    };
     if (!options.force && compatibleIndex && existing === snapshot.fingerprint) {
+      // The project content is unchanged but the CONFIGURED EMBEDDER may not be.
+      // Without this, switching `ai.embeddings` never takes effect until an
+      // unrelated dbt change happens to move the fingerprint.
+      await upgradeVectors();
       const snapshotPath = activateMetadataSnapshot(projectRoot, snapshot.fingerprint, catalog);
       return {
         path: defaultMetadataPath(projectRoot),
@@ -1171,6 +1237,7 @@ export async function ensureMetadataCatalogFresh(
     } else {
       catalog.rebuildIncremental(snapshot);
     }
+    await upgradeVectors();
     const snapshotPath = activateMetadataSnapshot(projectRoot, snapshot.fingerprint, catalog);
     return {
       path: defaultMetadataPath(projectRoot),

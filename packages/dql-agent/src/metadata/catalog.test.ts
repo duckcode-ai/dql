@@ -23,6 +23,7 @@ import {
   buildGovernedTermIndex,
   reclassifyGovernedNameMentions,
   upgradeVectorIndexForProject,
+  openActiveKnowledgeSnapshot,
 } from './catalog.js';
 import { buildAnalysisQuestionPlan } from './analysis-planner.js';
 import { buildBlockBusinessFingerprint, buildBlockSqlFingerprints } from './block-fingerprints.js';
@@ -785,6 +786,61 @@ it('upgrades the vector index to a real embedder after the sync write, and is id
 
     // Re-running must not re-embed the whole catalog.
     expect(await upgradeVectorIndexForProject(projectRoot, remote)).toMatchObject({ upgraded: false });
+  });
+
+  it('embeds the ACTIVE snapshot, not just the working database, so the vector lane is live', async () => {
+    // The bug this covers: `upgradeVectorIndexForProject` re-embedded the mutable
+    // working catalog and never re-exported, while retrieval reads the immutable
+    // ACTIVE snapshot. `searchVectorObjects` returns zero candidates when the
+    // requested provider id differs from the indexed one, so configuring a real
+    // embedder made retrieval strictly WORSE than leaving it unconfigured: an
+    // empty vector lane instead of a weak one.
+    writeQualifiedSemanticIdentityFixture(projectRoot);
+    const semanticLayer = resolveSemanticLayerWithDiagnostics({ provider: 'dbt', projectPath: '.' }, projectRoot).layer;
+    const remote = {
+      id: 'test-remote-v1',
+      dimensions: 8,
+      async embed(texts: string[]): Promise<number[][]> {
+        return texts.map((text) => Array.from({ length: 8 }, (_, i) => ((text.charCodeAt(i % Math.max(1, text.length)) || 1) % 17) / 17));
+      },
+    };
+
+    await ensureMetadataCatalogFresh(projectRoot, { force: true, semanticLayer, embeddingProvider: remote });
+
+    const snapshot = openActiveKnowledgeSnapshot(projectRoot);
+    try {
+      expect(snapshot.state('vector_provider')).toBe('test-remote-v1');
+      const hit = await snapshot.searchVectorObjects({ query: 'revenue', provider: remote, limit: 5 });
+      expect(hit.unavailableReason).toBeUndefined();
+      expect(hit.providerId).toBe('test-remote-v1');
+    } finally { snapshot.close(); }
+  });
+
+  it('re-embeds when only the configured embedder changed, not the project content', async () => {
+    // A user configures Ollama without touching dbt. The fingerprint is
+    // unchanged, so the refresh takes the early "unchanged" return — which used
+    // to skip the upgrade entirely, leaving the new setting inert until some
+    // unrelated model edit happened to move the fingerprint.
+    writeQualifiedSemanticIdentityFixture(projectRoot);
+    const semanticLayer = resolveSemanticLayerWithDiagnostics({ provider: 'dbt', projectPath: '.' }, projectRoot).layer;
+    await ensureMetadataCatalogFresh(projectRoot, { force: true, semanticLayer });
+
+    const snapshotBefore = openActiveKnowledgeSnapshot(projectRoot);
+    try { expect(snapshotBefore.state('vector_provider')).toBe('hashed-token-v1'); } finally { snapshotBefore.close(); }
+
+    const remote = {
+      id: 'test-remote-v1',
+      dimensions: 8,
+      async embed(texts: string[]): Promise<number[][]> {
+        return texts.map((text) => Array.from({ length: 8 }, (_, i) => ((text.charCodeAt(i % Math.max(1, text.length)) || 1) % 17) / 17));
+      },
+    };
+    // Same content, same fingerprint, no `force` — only the embedder changed.
+    const result = await ensureMetadataCatalogFresh(projectRoot, { semanticLayer, embeddingProvider: remote });
+    expect(result.refreshed).toBe(false);
+
+    const snapshotAfter = openActiveKnowledgeSnapshot(projectRoot);
+    try { expect(snapshotAfter.state('vector_provider')).toBe('test-remote-v1'); } finally { snapshotAfter.close(); }
   });
 
   it('leaves the index alone for the hashed provider and survives an unreachable embedder', async () => {

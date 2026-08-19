@@ -233,6 +233,37 @@ export interface MatchSemanticMetricOptions {
 export const DEFAULT_METRIC_MATCH_EMBEDDING_ALPHA = 0.18;
 
 /**
+ * Embedding weight once a REAL (project-configured) embedder is supplied.
+ *
+ * The 0.18 default is calibrated for the offline hashed-token provider, whose
+ * "similarity" is token-hash overlap — barely better than the lexical score it
+ * is blended with, so it must stay a light tie-breaker. A real embedder carries
+ * actual meaning (acronym ⇄ expansion, synonym ⇄ synonym), which is exactly the
+ * signal the lexical pass cannot produce, so it earns a much larger share.
+ */
+export const REAL_PROVIDER_METRIC_MATCH_ALPHA = 0.4;
+
+/** True when `provider` produces real semantic vectors rather than token hashes. */
+export function isRealEmbeddingProvider(provider: EmbeddingProvider | undefined): provider is EmbeddingProvider {
+  return Boolean(provider) && !provider!.id.includes('hashed-token');
+}
+
+/**
+ * Match options for a host that has resolved the project's embedder.
+ *
+ * Returns `{}` for a missing or hashed provider so the offline default is
+ * preserved exactly — matching stays deterministic for tests, CI, and projects
+ * that never configured `ai.embeddings`, and no metric definition is sent
+ * anywhere the project did not opt into.
+ */
+export function semanticMetricEmbeddingOptions(
+  provider: EmbeddingProvider | undefined,
+): Pick<MatchSemanticMetricOptions, 'provider' | 'alpha'> {
+  if (!isRealEmbeddingProvider(provider)) return {};
+  return { provider, alpha: REAL_PROVIDER_METRIC_MATCH_ALPHA };
+}
+
+/**
  * Pick the single best governed metric for a question, or `null` when no metric
  * clears the confidence bar. Deterministic + offline by default because the
  * default provider is the hashed-token embedding.

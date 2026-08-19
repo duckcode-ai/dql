@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { SemanticLayer } from '@duckcodeailabs/dql-core';
-import { matchSemanticMetric, parseMetricDefinition } from './metric-match.js';
+import {
+  DEFAULT_METRIC_MATCH_EMBEDDING_ALPHA,
+  REAL_PROVIDER_METRIC_MATCH_ALPHA,
+  matchSemanticMetric,
+  parseMetricDefinition,
+  semanticMetricEmbeddingOptions,
+} from './metric-match.js';
 import type { KGNode } from '../kg/types.js';
 
 describe('parseMetricDefinition (R2.6: structured-first, regex fallback)', () => {
@@ -264,5 +270,63 @@ describe('Ask and Block AI must resolve the same question to the same metric', (
     const taxPool = [metric('tax_amount', 'Tax collected.'), metric('product_count', 'Distinct products sold.')];
     const ask = await matchSemanticMetric('region tax by product', taxPool, { measureTerms: ['tax'] });
     expect(ask?.metric.name).toBe('tax_amount');
+  });
+});
+
+describe('recall: a metric whose NAME omits the question term (the BCM production failure)', () => {
+  // Reported failure: "who are the top customers for BCM" returned
+  // "Top by which governed metric?" with ZERO options.
+  //
+  // The governed metric exists; its NAME just spells the acronym out, so every
+  // DETERMINISTIC grounding signal misses:
+  //   nameHit             → 0 ("bcm" is not a token of billed_consumption_monthly)
+  //   sharedFamily        → none ("bcm" is unseeded, and project families are
+  //                          derived from metric NAME tokens: {billed, consumption})
+  //   descriptionGrounded → blocked by `qContent.size >= 2`; a one-token measure
+  //                          term can never clear it, even though the description
+  //                          literally reads "Billed consumption (BCM)".
+  //
+  // The candidate DOES reach the ranker (the description puts "bcm" in
+  // metricSearchText, so ftsScore > 0), and `embeddingGrounded` exists precisely
+  // to rescue this case — but it requires `realEmbeddingProvider`. Every caller
+  // used the offline hashed default, so it could never fire in production.
+  const bcmPool: KGNode[] = [
+    metric('billed_consumption_monthly', 'Billed consumption (BCM) recognized per account each month'),
+    metric('order_count', 'Number of orders placed'),
+    metric('lifetime_spend', 'Total customer spend across all orders'),
+  ];
+
+  /** Stand-in for a project-configured embedder: BCM ⇄ billed consumption are near-identical. */
+  const semanticProvider = {
+    id: 'resilient:ollama:nomic-embed-text',
+    dimensions: 3,
+    async embed(texts: string[]): Promise<number[][]> {
+      return texts.map((text) => (/bcm|billed[_ ]consumption/i.test(text) ? [1, 0, 0] : [0, 1, 0]));
+    },
+  };
+
+  it('grounds the match on embedding similarity when the host supplies a real embedder', async () => {
+    const match = await matchSemanticMetric('who are the top customers for BCM', bcmPool, {
+      measureTerms: ['bcm'],
+      ...semanticMetricEmbeddingOptions(semanticProvider),
+    });
+    expect(match?.metric.name).toBe('billed_consumption_monthly');
+    expect(match?.basis).toBe('embedding');
+  });
+
+  it('stays null on the offline hashed default, so nothing is sent anywhere unopted', async () => {
+    const hashed = { id: 'hashed-token-v1', dimensions: 3, async embed(t: string[]) { return t.map(() => [0, 0, 0]); } };
+    expect(semanticMetricEmbeddingOptions(hashed)).toEqual({});
+    expect(semanticMetricEmbeddingOptions(undefined)).toEqual({});
+    const match = await matchSemanticMetric('who are the top customers for BCM', bcmPool, {
+      measureTerms: ['bcm'],
+      ...semanticMetricEmbeddingOptions(hashed),
+    });
+    expect(match).toBeNull();
+  });
+
+  it('weights a real embedder well above the hashed tie-breaker default', () => {
+    expect(semanticMetricEmbeddingOptions(semanticProvider).alpha).toBe(REAL_PROVIDER_METRIC_MATCH_ALPHA);
+    expect(REAL_PROVIDER_METRIC_MATCH_ALPHA).toBeGreaterThan(DEFAULT_METRIC_MATCH_EMBEDDING_ALPHA);
   });
 });

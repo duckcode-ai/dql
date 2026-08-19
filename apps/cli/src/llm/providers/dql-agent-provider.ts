@@ -35,6 +35,7 @@ import {
   prepareProviderContextForDispatch,
   prepareProviderWireEnvelopeForDispatch,
   prepareServerOwnedProviderSchemaContext,
+  projectEmbeddingProvider,
 } from '@duckcodeailabs/dql-agent';
 import { buildManifest, normalizeDqlArtifactReference, resolveDbtManifestPath, type ProviderEgressReceiptV1 } from '@duckcodeailabs/dql-core';
 import { existsSync } from 'node:fs';
@@ -628,6 +629,12 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
                 }
               : {}),
             contextPack,
+            // The project's configured embedder (dql.config.json ai.embeddings).
+            // Without it, matchSemanticMetric falls back to the offline hashed
+            // provider, whose vectors can never ground a match on similarity
+            // alone — so a metric named only by synonym or acronym is invisible
+            // and the router dead-ends on a bare-ranking clarification.
+            embeddingProvider: projectEmbeddingProvider(req.projectRoot),
             signal,
             reasoningEffort: req.reasoningEffort,
             analysisDepth: contextBudget.analysisDepth,

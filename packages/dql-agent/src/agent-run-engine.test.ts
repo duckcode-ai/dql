@@ -170,7 +170,15 @@ describe("AgentRunEngine", () => {
     expect(run.routeDecision?.conversationalKind).toBe(expectedKind);
   });
 
-  it('fails closed before the legacy generated-answer executor when analytical Ask has no frozen plan', async () => {
+  // AGT-028: retrieval surfaced governed candidates but no exact tuple froze.
+  // This used to fail closed, which is the "governed-only" dead end reported from
+  // production ("who are the top customers for BCM" → an unanswerable
+  // clarification, then "DQL could not freeze an exact analytical plan").
+  // A coverage gap is a discovery result, not a terminal state: the run now
+  // continues into the generated lane. The safety property the original test
+  // protected is preserved by the LABEL, not by refusing — the answer is never
+  // presented as governed.
+  it('continues into a review-required generated answer when analytical Ask has candidates but no frozen plan', async () => {
     let generatedCalls = 0;
     const engine = new AgentRunEngine({
       idGenerator: () => 'run-analytical-no-rap',
@@ -203,12 +211,14 @@ describe("AgentRunEngine", () => {
       requestedMode: 'ask',
     });
 
-    expect(generatedCalls).toBe(0);
-    expect(run.route).toBe('blocked');
-    expect(run.status).toBe('blocked');
-    expect(run.summary).toContain('exact analytical plan');
-    expect(run.summary).not.toBe('Agent run is blocked.');
-    expect(run.events.some((event) => event.type === 'executor.started' && event.route === 'generated_answer')).toBe(false);
+    expect(generatedCalls).toBe(1);
+    expect(run.route).toBe('generated_answer');
+    expect(run.status).toBe('needs_review');
+    // The load-bearing guarantee: an answer produced without a frozen plan is
+    // labelled review-required and is never certified or governed.
+    expect(run.trustState).toBe('review_required');
+    expect(run.summary).toBe('Created review-required agent output.');
+    expect(run.events.some((event) => event.type === 'executor.started' && event.route === 'generated_answer')).toBe(true);
   });
 
   it('allows one bounded same-route repair after an ordinary generated Ask attempt fails', async () => {
@@ -2034,8 +2044,13 @@ describe("AgentRunEngine — conversation route", () => {
     const run = await engine.run({ question: "monthly rollover balance", requestedMode: "ask" });
 
     expect(routerCalls).toBe(1);
+    // Still the point of this test: a high-confidence semantic RECOMMENDATION is
+    // not a frozen plan, so the semantic executor must not run.
     expect(semanticCalls).toBe(0);
-    expect(run.route).toBe("blocked");
+    // But the turn no longer dead-ends — it falls through to the review-required
+    // generated lane instead of blocking (AGT-028).
+    expect(run.route).toBe("generated_answer");
+    expect(run.trustState).toBe("review_required");
   });
 
   it("falls back to deterministic routing when the router throws", async () => {
@@ -2350,6 +2365,66 @@ describe("AgentRunEngine — conversation route", () => {
     });
     expect(run.summary).toBe('Created review-required agent output.');
     expect(run.summary).not.toBe('Agent run is blocked.');
+  });
+
+  it('rescues the block it synthesizes itself, not just one the router reported (AGT-028)', async () => {
+    // The reported production dead end. `enforceOrdinaryAnalyticalPlanBoundary`
+    // already converted a ROUTER-reported modeling gap into an answer, but then
+    // synthesized its OWN ANALYTICAL_MODELING_GAP block further down and never
+    // re-applied that rescue — so the most common way an ordinary Ask failed
+    // ("DQL could not freeze an exact analytical plan…") bypassed the fix.
+    let generatedCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-synthesized-gap',
+      now: fixedClock(),
+      router: {
+        // No terminalOutcome: the router is content. The block below is
+        // synthesized by the boundary itself because nothing froze.
+        decide: () => ({
+          action: 'answer', confidence: 0.8, followsUp: false, source: 'heuristic',
+          reason: 'Retrieved governed candidates.',
+          category: 'data_lookup',
+          retrievalEvidence: {
+            snapshotId: 'snapshot-bcm',
+            candidateCount: 3,
+            candidateIds: ['semantic:metric:billed_consumption_monthly'],
+          },
+        }),
+      },
+      executors: {
+        generated_answer: () => {
+          generatedCalls += 1;
+          return { answer: 'Top customers by billed consumption.' };
+        },
+      },
+    });
+    const run = await engine.run({ question: 'who are the top customers for BCM', requestedMode: 'ask' });
+    expect(generatedCalls).toBe(1);
+    expect(run.route).toBe('generated_answer');
+    expect(run.trustState).toBe('review_required');
+  });
+
+  it('still fails closed when nothing was retrieved, so a forged decision cannot bypass the boundary', async () => {
+    // The safety half of the same change: with no governed evidence at all, a
+    // synthesized modeling gap is indistinguishable from an absent/forged router
+    // decision and must remain terminal.
+    let generatedCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-no-evidence',
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: 'converse', confidence: 0.99, followsUp: false, source: 'llm',
+          category: 'conversational', reason: 'Injected router decision.',
+        }),
+      },
+      executors: {
+        generated_answer: () => { generatedCalls += 1; return { answer: 'should not run' }; },
+      },
+    });
+    const run = await engine.run({ question: 'who are the top customers by revenue', requestedMode: 'ask' });
+    expect(generatedCalls).toBe(0);
+    expect(run.route).toBe('blocked');
   });
 
   it('rejects a late executor success even when the executor ignores AbortSignal', async () => {

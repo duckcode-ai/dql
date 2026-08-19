@@ -473,6 +473,46 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     expect(decision.resolvedAnalyticalPlan).toBeUndefined();
   });
 
+  it('does not ask an unanswerable clarification when every ranking candidate is filtered out', async () => {
+    // The reported BCM loop. Retrieval returns only objects that cannot BE a
+    // ranking measure (a semantic model, a dbt node), so all five candidate
+    // filters strip them and the choice list is empty. Emitting
+    // "Top by which governed metric?" with no options is unanswerable: the reply
+    // carries no selectedEvidenceId, re-enters the same path with the same
+    // evidence, and reproduces the identical question forever.
+    const router = createHybridRouter({
+      resolveMeaning: vi.fn(async () => clarifyingRanking()),
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-bcm',
+        sourceFingerprint: 'sha256:bcm',
+        parsedIntent: { measures: [], dimensions: ['customer'], filters: [], order: 'desc', limit: 10 },
+        candidates: [
+          candidate({
+            id: 'semantic:model:customers',
+            kind: 'semantic_model',
+            name: 'customers',
+            compatibility: 'compatible',
+            relevanceScore: 0.7,
+          }),
+          candidate({
+            id: 'dbt:model:stg_billed_consumption',
+            kind: 'dbt_model',
+            name: 'stg_billed_consumption',
+            compatibility: 'compatible',
+            relevanceScore: 0.6,
+          }),
+        ],
+      }),
+    });
+
+    const decision = await router.decide(request('who are the top customers for BCM'));
+
+    expect(decision.clarificationOptions ?? []).toHaveLength(0);
+    expect(decision.action).not.toBe('clarify');
+    expect(decision.requiresClarification).not.toBe(true);
+    expect(decision.clarifyingQuestion).toBeUndefined();
+  });
+
   it('AGT-031 collapses lower-trust copies of a field a certified block already publishes', () => {
     // The same field arrives three ways: the block's declared output, the
     // semantic dimension, and the raw dbt/warehouse column. Treating them as
