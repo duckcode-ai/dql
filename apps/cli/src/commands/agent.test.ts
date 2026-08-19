@@ -474,4 +474,31 @@ describe('agent eval answer harness', () => {
     expect(metrics.refusal_recall).toBe(1);
   });
 
+  it('counts a substantive conversational reply as an answer, not a dead end', () => {
+    // A governed definition ("**top_customers** — Top 10 customers by lifetime
+    // spend…") is exactly what a "what does X mean?" turn should return. The
+    // first version of this scorer treated every conversational reply as a
+    // decline and reported the feature working as the feature failing — caught
+    // by a live run, not by a unit test.
+    const base = {
+      failures: [] as string[], durationMs: 10, contextObjects: 1, followUp: false,
+      draftSaved: false, toolCalls: 0, trace: [] as never[],
+    };
+    const metrics = __test__.computeEvalMetrics([
+      { ...base, name: 'definition', passed: true, kind: 'uncertified', route: undefined,
+        conversational: true, conversationalAnswer: true, expected: { answerable: true } },
+      { ...base, name: 'weather', passed: true, kind: 'uncertified', route: undefined,
+        conversational: true, conversationalAnswer: true, expected: { answerable: false } },
+      { ...base, name: 'dead-end', passed: false, kind: 'no_answer', route: 'clarify',
+        clarificationOptionCount: 0, expected: { answerable: true } },
+    ] as unknown as Parameters<typeof __test__.computeEvalMetrics>[0]);
+
+    expect(metrics.answerable_case_count).toBe(2);
+    // Only the true dead end counts against us; the definition does not.
+    expect(metrics.false_refusal_count).toBe(1);
+    // And an out-of-scope question answered conversationally still counts as
+    // correctly declining.
+    expect(metrics.refusal_recall).toBe(1);
+  });
+
 });

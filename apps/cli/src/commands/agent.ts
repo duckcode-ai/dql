@@ -683,6 +683,8 @@ interface AgentEvalResult {
   clarificationOptionCount?: number;
   /** True when the run replied conversationally instead of asserting data. */
   conversational?: boolean;
+  /** True when that conversational reply actually carried content. */
+  conversationalAnswer?: boolean;
   /** True when the meaning resolver ran (a provider was reachable). */
   meaningResolved?: boolean;
 }
@@ -911,6 +913,8 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
         ...(runtimeRun ? {
           clarificationOptionCount: runtimeRun.clarificationOptions?.length ?? 0,
           conversational: runtimeRun.route === 'conversation' || runtimeRun.answerKind === 'conversational',
+          conversationalAnswer: (runtimeRun.route === 'conversation' || runtimeRun.answerKind === 'conversational')
+            && Boolean(runtimeRun.answer?.trim()),
           meaningResolved: Boolean(runtimeRun.routeDecision?.meaningResolution),
         } : {}),
         intent: result.contextPack?.routeDecision.intent,
@@ -1032,8 +1036,13 @@ function evaluateCase(testCase: AgentEvalCase, result: Awaited<ReturnType<typeof
   // nothing about the warehouse. For an out-of-scope question that is the CORRECT
   // outcome — declining politely — so it must not be scored as an answer.
   const conversational = (result as { answerKind?: string }).answerKind === 'conversational';
+  const answerText = typeof result.text === 'string' ? result.text.trim() : '';
+  // Conversational replies split two ways, and the case's own expectation says
+  // which is right: for an answerable question a substantive reply IS the answer
+  // (a definition), and for an out-of-scope one it is the correct decline.
+  const conversationalAnswer = conversational && answerText.length > 0;
   const producedDataAnswer = result.kind !== 'no_answer' && !conversational;
-  const deadEnded = !producedDataAnswer && !clarifiedWithOptions;
+  const deadEnded = !producedDataAnswer && !clarifiedWithOptions && !conversationalAnswer;
   if (answerable === true && deadEnded) {
     failures.push(`FALSE REFUSAL: this question is answerable, but the run dead-ended with no answer and no options${
       result.refusalCode ? ` (${result.refusalCode})` : ''}`);
@@ -1113,8 +1122,13 @@ export function evalCaseIsAnswerable(expected: AgentEvalCase['expected']): boole
  * this, and a free-text reply to it reproduced the same question forever.
  */
 export function evalResultRefused(
-  result: Pick<AgentEvalResult, 'kind' | 'route' | 'clarificationOptionCount'>,
+  result: Pick<AgentEvalResult, 'kind' | 'route' | 'clarificationOptionCount' | 'conversationalAnswer'>,
 ): boolean {
+  // A substantive conversational reply is an ANSWER, not a dead end. A governed
+  // definition ("**top_customers** — Top 10 customers by lifetime spend…") is
+  // exactly what a "what does X mean?" turn should return, and scoring it as a
+  // refusal would report the feature working as the feature failing.
+  if (result.conversationalAnswer) return false;
   // Order matters: the drivers collapse every clarification to `no_answer`
   // (it is not an answer), so the option check has to run FIRST or an
   // option-bearing clarification is miscounted as a dead end.

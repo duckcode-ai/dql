@@ -1,4 +1,4 @@
-name: Answerability (false-refusal baseline)
+name: Answerability (false-refusal gate)
 
 # Publishes the false-refusal / refusal-recall / clarification numbers on every
 # PR, driving the REAL runtime so routing, the plan boundary, and the run gates
@@ -6,12 +6,19 @@ name: Answerability (false-refusal baseline)
 # and skips every one of those — the half where the reported dead ends actually
 # live — so a refusal rate measured there reads cleaner than users experience.
 #
-# NON-BLOCKING ON PURPOSE, for now.
-# The plan is a ratchet, not a guess: publish the baseline for a couple of weeks,
-# then make this required with thresholds set at MEASURED performance minus a
-# small margin, and tighten the number in the same PR that improves it. A
-# threshold invented before the first run is either permanently red or quietly
-# disabled, and neither protects anything.
+# BLOCKING, at thresholds taken from a MEASURED baseline — never invented.
+# Measured on this fixture, both suites 8/8:
+#     false refusal   0%    (0/5 and 0/6 answerable cases)
+#     refusal recall  100%  (3/3 and 2/2 must-refuse cases)
+#
+#   --max-false-refusal 0.05  a small margin over a measured 0%
+#   --min-refusal-recall 1    NO margin: this is the guard that stops
+#                             "never dead-end" degrading into "always answer",
+#                             and one hallucinated answer to an out-of-scope
+#                             question is worse than one extra refusal.
+#
+# Tighten the ceiling in the same PR that improves it. A threshold invented
+# before the first run is either permanently red or quietly disabled.
 #
 # Needs no API key and no cloud warehouse: the runtime starts against the
 # committed jaffle fixture. Note that WITHOUT a provider `mayAssumeInterpretation`
@@ -27,9 +34,8 @@ on:
 
 jobs:
   answerability:
-    name: answerability (runtime-driven, non-blocking)
+    name: answerability (runtime-driven)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -66,6 +72,7 @@ jobs:
         run: |
           node ../../../dist/index.js agent eval agent-evals/answerability.agent-evals.yml \
             --via runtime --runtime-url http://127.0.0.1:3479 \
+            --max-false-refusal 0.05 --min-refusal-recall 1 \
             --format json > "$GITHUB_WORKSPACE/answerability-report.json"
           cat "$GITHUB_WORKSPACE/answerability-report.json"
 
@@ -74,6 +81,7 @@ jobs:
         run: |
           node ../../../dist/index.js agent eval agent-evals/routing-taxonomy.agent-evals.yml \
             --via runtime --runtime-url http://127.0.0.1:3479 \
+            --max-false-refusal 0.05 --min-refusal-recall 1 \
             --format json > "$GITHUB_WORKSPACE/routing-report.json"
           cat "$GITHUB_WORKSPACE/routing-report.json"
 
