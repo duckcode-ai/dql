@@ -589,6 +589,32 @@ export {
   type CompiledSemanticRecord,
 } from "./agentic/answer-contract.js";
 export {
+  IdentifierLedger,
+  editDistance,
+  type AdmittedIdentifier,
+  type IdentifierSource,
+  type LedgerAdjudication,
+} from "./agentic/identifier-ledger.js";
+export {
+  AGENTIC_LANES,
+  DEFAULT_MAX_ITERATIONS,
+  LEGACY_ORCHESTRATOR_POLICY,
+  laneRunsShadowComparison,
+  laneUsesAgenticOrchestrator,
+  resolveOrchestratorPolicy,
+  type AgenticLane,
+  type OrchestratorMode,
+  type OrchestratorPolicy,
+} from "./agentic/orchestrator-policy.js";
+export {
+  ASSUMPTION_DOMINANCE_RATIO,
+  assumeDominantCandidate,
+  renderAssumptionPreamble,
+  type AnswerAssumption,
+  type AssumptionAbout,
+  type AssumptionCandidate,
+} from "./agentic/assumptions.js";
+export {
   composeSemanticQueryForQuestion,
   composeSemanticQueryFromCompiledMembers,
   composeSemanticQueryFromMembers,
