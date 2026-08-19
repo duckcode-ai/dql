@@ -379,7 +379,7 @@ function agenticLaneForRequest(req: AgentRunRequest): AgenticLane {
   return req.analysisDepth === 'deep' ? 'research' : 'generated';
 }
 
-function applyEvalCassette(provider: AgentProvider): AgentProvider {
+export function applyEvalCassette(provider: AgentProvider): AgentProvider {
   const dir = process.env.DQL_EVAL_CASSETTE_DIR;
   if (!dir) return provider;
   return withCassette(provider, new CassetteStore(dir), resolveCassetteModeFromEnv(process.env));

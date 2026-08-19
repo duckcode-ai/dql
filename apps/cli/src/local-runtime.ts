@@ -161,7 +161,7 @@ import { getRunner as getLLMRunner } from './llm/index.js';
 import { rethrowIfCancelled } from './llm/cancellation.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from './version-status.js';
 import { resolveRetrievalHealthStatus } from './retrieval-health.js';
-import { createDqlAgentProviderRunner, resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
+import { applyEvalCassette, createDqlAgentProviderRunner, resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
 import type {
   AgentConversationContext,
   AgentRunner as LLMAgentRunner,
@@ -29279,7 +29279,13 @@ async function createBlockStudioAssistProvider(
     default:
       return null;
   }
-  return await provider.available() ? provider : null;
+  // Route through the eval cassette too. This constructor serves the MEANING
+  // call and narration — the two dispatches that decide routing and wording —
+  // so leaving it unwrapped meant a recorded suite still hit a live model for
+  // exactly the calls whose non-determinism it was recorded to remove. A local
+  // baseline reproduced that: the same question blocked on one run and answered
+  // on the next, and zero cassettes were written.
+  return await provider.available() ? applyEvalCassette(provider) : null;
 }
 
 /** Convert a governed answer's result payload into a bounded synthesis preview. */
