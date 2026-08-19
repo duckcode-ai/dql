@@ -623,6 +623,19 @@ export {
   withLedgerHarvest,
 } from "./agentic/ledger-tools.js";
 export {
+  DEFAULT_RESEARCH_LIMITS,
+  applyFinding,
+  concludeResearch,
+  createResearchState,
+  nextHypothesis,
+  type Hypothesis,
+  type HypothesisFinding,
+  type HypothesisStatus,
+  type ResearchConclusion,
+  type ResearchLimits,
+  type ResearchState,
+} from "./agentic/research/hypothesis.js";
+export {
   ASSUMPTION_DOMINANCE_RATIO,
   assumeDominantCandidate,
   renderAssumptionPreamble,
