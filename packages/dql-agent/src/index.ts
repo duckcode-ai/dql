@@ -636,6 +636,12 @@ export {
   type ResearchState,
 } from "./agentic/research/hypothesis.js";
 export {
+  composeBusinessExplanation,
+  explainObject,
+  type BusinessExplanation,
+  type ExplainableObject,
+} from "./agentic/business-explanation.js";
+export {
   ASSUMPTION_DOMINANCE_RATIO,
   assumeDominantCandidate,
   renderAssumptionPreamble,
