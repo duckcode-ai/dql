@@ -50,7 +50,16 @@ jobs:
           cp -r apps/cli/test/fixtures/jaffle-supply-chain "$PROJ"
           node scripts/seed-eval-warehouse.mjs --out "$PROJ/jaffle.duckdb"
           # Point the ephemeral runtime's connection at the seeded DuckDB file.
-          node -e "const fs=require('fs');const p=process.env.PROJ+'/dql.config.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.defaultConnection={driver:'duckdb',filepath:process.env.PROJ+'/jaffle.duckdb'};fs.writeFileSync(p,JSON.stringify(c,null,2));"
+          # The project reads `connections.default`, not `defaultConnection`.
+          # Writing the wrong key left the runtime on the fixture's `:memory:`
+          # connection, so this job has been executing against an EMPTY database
+          # — every table lookup failing rather than the wrong-number traps it
+          # exists to catch. Found by hitting the identical error while setting
+          # up a local baseline.
+          node -e "const fs=require('fs');const p=process.env.PROJ+'/dql.config.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.connections={...(c.connections||{}),default:{driver:'duckdb',filepath:process.env.PROJ+'/jaffle.duckdb'}};fs.writeFileSync(p,JSON.stringify(c,null,2));"
+          # Fail loudly if the seed did not land, rather than reporting a green
+          # run over a database with no tables in it.
+          node -e "const fs=require('fs');const f=process.env.PROJ+'/jaffle.duckdb';if(!fs.existsSync(f)||fs.statSync(f).size<1000){console.error('Seeded warehouse missing or empty: '+f);process.exit(1);}console.log('seeded warehouse OK:',fs.statSync(f).size,'bytes');"
         env:
           PROJ: ${{ runner.temp }}/classb-proj
       - name: dql agent eval --execute (class-B, min-execution-match 1)

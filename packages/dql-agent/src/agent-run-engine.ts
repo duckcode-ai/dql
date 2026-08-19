@@ -651,10 +651,38 @@ export function agentRouteDeadlineMs(route: AgentRunRoute): number | undefined {
   return undefined;
 }
 
+/** Default request-ingress deadlines. */
+const DEFAULT_ASK_DEADLINE_MS = 45_000;
+const DEFAULT_RESEARCH_DEADLINE_MS = 120_000;
+/** Ceiling on any override, so a typo cannot hang a run indefinitely. */
+const MAX_DEADLINE_MS = 600_000;
+
+/**
+ * A deadline multiplier for slow providers.
+ *
+ * The 45s Ask budget assumes a hosted model. A local Ollama model needs ~7s for
+ * a one-word reply, so the meaning call alone can exhaust the whole window and
+ * every question comes back "The discovery window ended before an exact plan was
+ * frozen" — which makes a local model unusable at the default, and DQL is
+ * local-first by design.
+ *
+ * Deliberately a MULTIPLIER rather than an absolute: the relationship between
+ * the Ask and Research budgets, and between each and its soft targets, is
+ * load-bearing, so scaling keeps them proportional instead of letting one
+ * setting invert them.
+ */
+export function deadlineScale(env: Record<string, string | undefined> = process.env): number {
+  const raw = Number(env.DQL_AGENT_DEADLINE_SCALE);
+  if (!Number.isFinite(raw) || raw <= 0) return 1;
+  // Bounded: below 1 would tighten a safety deadline someone is relying on.
+  return Math.min(Math.max(raw, 1), 20);
+}
+
 /** The request envelope starts before retrieval/routing, so a stuck router can
  * never evade the route-specific deadline that is selected later. */
 export function agentRequestDeadlineMs(requestedMode: AgentRunRequestedMode): number {
-  return requestedMode === 'research' ? 120_000 : 45_000;
+  const base = requestedMode === 'research' ? DEFAULT_RESEARCH_DEADLINE_MS : DEFAULT_ASK_DEADLINE_MS;
+  return Math.min(base * deadlineScale(), MAX_DEADLINE_MS);
 }
 
 /** Create the one request-ingress deadline authority used by every stage. */
@@ -669,19 +697,29 @@ export function createAgentRunBudget(input: {
   const nowMs = input.nowMs ?? Date.now;
   const startedAtMs = input.startedAtMs ?? nowMs();
   const mode = input.requestedMode === 'research' ? 'research' as const : 'ask' as const;
-  const hardDeadlineMs = mode === 'research' ? 120_000 : 45_000;
+  const scale = deadlineScale();
+  const hardDeadlineMs = Math.min(
+    (mode === 'research' ? DEFAULT_RESEARCH_DEADLINE_MS : DEFAULT_ASK_DEADLINE_MS) * scale,
+    MAX_DEADLINE_MS,
+  );
   const timeout = (input.timeoutSignal ?? AbortSignal.timeout)(hardDeadlineMs);
   const hardSignal = input.inheritedSignal
     ? AbortSignal.any([input.inheritedSignal, timeout])
     : timeout;
   const elapsedMs = () => Math.max(0, nowMs() - startedAtMs);
   const softTargetMs = (route: AgentRunRoute): number => {
-    if (mode === 'research') return 90_000;
-    return agentRouteDeadlineMs(route) ?? 15_000;
+    const base = mode === 'research' ? 90_000 : (agentRouteDeadlineMs(route) ?? 15_000);
+    // Scaled with the hard deadline: a soft target that stayed fixed while the
+    // ceiling moved would stop new work long before the run was actually out of
+    // time, which is the same dead end by a different route.
+    return Math.min(base * scale, hardDeadlineMs);
   };
   // Narration must still be reachable after a full generation window, and must
   // leave the hard deadline (45s ask / 120s research) room to land.
-  const narrationSoftTargetMs = () => (mode === 'research' ? 100_000 : 38_000);
+  const narrationSoftTargetMs = () => Math.min(
+    (mode === 'research' ? 100_000 : 38_000) * scale,
+    hardDeadlineMs,
+  );
   return Object.freeze({
     startedAtMs,
     hardDeadlineMs,

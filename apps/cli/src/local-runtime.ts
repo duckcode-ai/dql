@@ -312,6 +312,7 @@ import {
   createCascadeTrace,
   routeReasoningEffort,
   createAgentRunBudget,
+  deadlineScale,
   routeForCascadeAnswerTier,
   clampReasoningEffort,
   bumpReasoningEffort,
@@ -32437,7 +32438,22 @@ async function buildAgentSchemaContextFromCatalog(
 const RUNTIME_SNAPSHOT_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
 // A resolver compares at most 12 compact cards and never performs tool calls;
 // ten seconds is the full allowance, not the start of another planning loop.
-const AGENT_MEANING_TIMEOUT_MS = 10_000;
+/**
+ * Ceiling on the one bounded meaning-resolution call.
+ *
+ * 10s assumes a hosted model. A local Ollama model needs ~7s for a ONE-WORD
+ * reply, so a 600-token resolution over a dozen candidates never lands: it
+ * aborts, the router falls back to its evidence-only decision, and
+ * `mayAssumeInterpretation` goes false — which sends every ambiguous question to
+ * the clarification gate (AGT-017). The effect is that a local model cannot
+ * answer anything ambiguous, in a product whose whole positioning is local-first.
+ *
+ * Scaled by the same `DQL_AGENT_DEADLINE_SCALE` as the run budget, so one
+ * setting moves the provider's whole time envelope together rather than leaving
+ * an inner bound to silently cap an outer one.
+ */
+const AGENT_MEANING_TIMEOUT_BASE_MS = 10_000;
+const AGENT_MEANING_TIMEOUT_MS = AGENT_MEANING_TIMEOUT_BASE_MS * deadlineScale();
 
 export function boundedAgentMeaningSignal(
   signal?: AbortSignal,

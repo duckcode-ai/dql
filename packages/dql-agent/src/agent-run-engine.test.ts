@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  deadlineScale,
   AgentRunEngine,
   FileAgentRunStore,
   InMemoryAgentRunStore,
@@ -2740,3 +2741,21 @@ function fixedRoutePlanner(route: AgentRunRoute): AgentRunPlanner {
     },
   };
 }
+
+describe('deadline scaling for slow providers', () => {
+  it('defaults to 1x, so nothing changes without the env var', () => {
+    expect(deadlineScale({})).toBe(1);
+    expect(deadlineScale({ DQL_AGENT_DEADLINE_SCALE: 'abc' })).toBe(1);
+    expect(deadlineScale({ DQL_AGENT_DEADLINE_SCALE: '0' })).toBe(1);
+  });
+
+  it('never TIGHTENS a deadline someone is relying on', () => {
+    // Below 1x would shorten a safety budget rather than extend it.
+    expect(deadlineScale({ DQL_AGENT_DEADLINE_SCALE: '0.25' })).toBe(1);
+  });
+
+  it('scales up but stays bounded, so a typo cannot hang a run', () => {
+    expect(deadlineScale({ DQL_AGENT_DEADLINE_SCALE: '8' })).toBe(8);
+    expect(deadlineScale({ DQL_AGENT_DEADLINE_SCALE: '1000' })).toBe(20);
+  });
+});

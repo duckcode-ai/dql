@@ -275,6 +275,7 @@ export {
   agentRouteDeadlineMs,
   agentRequestDeadlineMs,
   createAgentRunBudget,
+  deadlineScale,
   AGENT_RUN_USER_CANCEL_CODE,
   createAgentRunCancellationError,
   isAgentRunUserCancellation,
