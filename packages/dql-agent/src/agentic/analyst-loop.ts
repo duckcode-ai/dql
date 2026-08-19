@@ -15,6 +15,7 @@
  */
 import type { AgentAnswer, AnswerLoopInput } from '../answer-loop.js';
 import type { AgentToolDefinition } from '../providers/types.js';
+import type { AnalystTurnPlan } from './turn-plan.js';
 import { runAgenticToolLoop } from './tool-loop.js';
 import { IdentifierLedger } from './identifier-ledger.js';
 import { ANALYST_TOOL_POLICY, adjudicateProposedSql, withLedgerHarvest } from './ledger-tools.js';
@@ -46,6 +47,11 @@ export interface AnalystLoopDeps {
    */
   verifySql?: (sql: string) => string | undefined;
   maxIterations: number;
+  /**
+   * Optional structured planning call. Absent, the loop runs exactly as before
+   * and the trace falls back to a fixed label.
+   */
+  planTurn?: (question: string, toolNames: string[]) => Promise<AnalystTurnPlan | undefined>;
   onStep?: (step: AnalystStep) => void;
 }
 
@@ -88,12 +94,35 @@ export async function runAnalystLoop(
     });
   });
 
-  const messages = [
-    { role: 'system' as const, content: ANALYST_TOOL_POLICY },
-    { role: 'user' as const, content: input.question },
+  const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
+    { role: 'system', content: ANALYST_TOOL_POLICY },
+    { role: 'user', content: input.question },
   ];
 
-  deps.onStep?.({ kind: 'plan', label: 'Establishing what exists before writing SQL' });
+  // One structured planning call before acting. It is optional by design:
+  // `planAnalystTurn` swallows its own failures, so a slow or unparseable plan
+  // costs a bounded wait and nothing else. What it buys is a trace that names
+  // what the agent is about to verify instead of a fixed string.
+  const turnPlan = deps.planTurn
+    ? await deps.planTurn(input.question, tools.map((tool) => tool.name))
+    : undefined;
+  if (turnPlan) {
+    deps.onStep?.({ kind: 'plan', label: turnPlan.restatement });
+    for (const item of turnPlan.mustEstablish) {
+      deps.onStep?.({ kind: 'plan', label: `Must establish: ${item}` });
+    }
+    // Carry the plan into the loop so it steers the run rather than only
+    // describing it — otherwise the trace would promise work the model never
+    // agreed to do.
+    messages.push({
+      role: 'assistant' as const,
+      content: `Before answering I must establish, using tools:\n${
+        turnPlan.mustEstablish.map((item) => `- ${item}`).join('\n')
+      }${turnPlan.openingTool ? `\nStarting with ${turnPlan.openingTool}.` : ''}`,
+    });
+  } else {
+    deps.onStep?.({ kind: 'plan', label: 'Establishing what exists before writing SQL' });
+  }
 
   let raw = await runAgenticToolLoop(input.provider, messages, tools, {
     ...(input.signal ? { signal: input.signal } : {}),

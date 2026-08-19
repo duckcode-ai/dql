@@ -1,3 +1,4 @@
+import { deadlineScale, planAnalystTurn } from '@duckcodeailabs/dql-agent';
 import { buildAnalystLoopTools } from '../analyst-loop-tools.js';
 import {
   ClaudeProvider,
@@ -814,6 +815,26 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
                     maxIterations: resolveOrchestratorPolicy({
                       config: readOrchestratorConfig(req.projectRoot),
                     }).maxIterations,
+                    // Scaled by the same knob as every other agent deadline, so
+                    // a local model that needs seconds per call is not planned
+                    // out of existence by a budget calibrated for a hosted one.
+                    planTurn: async (question, toolNames) => {
+                      const plan = await planAnalystTurn(
+                        loopInput.provider,
+                        question,
+                        toolNames,
+                        {
+                          timeoutMs: Math.round(2_500 * deadlineScale()),
+                          ...(loopInput.signal ? { signal: loopInput.signal } : {}),
+                        },
+                      );
+                      if (process.env.DQL_ORCHESTRATOR_TRACE) {
+                        console.warn(plan
+                          ? `[dql] analyst turn plan: "${plan.restatement}" establish=${plan.mustEstablish.length} opening=${plan.openingTool ?? 'unset'}`
+                          : '[dql] analyst turn plan: unavailable (loop proceeds unplanned)');
+                      }
+                      return plan;
+                    },
                     // Reuse the legacy parser and validator rather than forking
                     // a second SQL front end that would drift from the first.
                     parseSql: (raw) => parseProposal(raw).sql,

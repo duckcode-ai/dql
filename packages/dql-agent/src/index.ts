@@ -630,6 +630,7 @@ export {
   type AnalystOutcome,
   type AnalystStep,
 } from "./agentic/analyst-loop.js";
+export { planAnalystTurn, parseAnalystTurnPlan, type AnalystTurnPlan } from './agentic/turn-plan.js';
 export {
   boundedPreviewSql,
   buildPreviewQueryTool,
