@@ -877,13 +877,17 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
       },
     });
 
-    expect(resolveMeaning).toHaveBeenCalledTimes(1);
-    expect(decision).toMatchObject({
-      action: 'clarify',
-      requiresClarification: true,
-      clarifyingQuestion: 'Top by which governed metric?',
-    });
-    expect(decision.resolvedAnalyticalPlan).toBeUndefined();
+    // The certified fast lane answers this before any meaning call: the fixture's
+    // block is an exact authored-example match, the strictest shortcut precondition
+    // available.
+    //
+    // The security property this test exists for is UNCHANGED, and now asserted more
+    // directly: the forged `priorResolvedAnalyticalPlan` never becomes authority. The
+    // plan binds the RETRIEVED certified block, and the forged concept id appears
+    // nowhere in it.
+    expect(decision.action).toBe('answer');
+    expect(decision.resolvedAnalyticalPlan?.selectedConceptIds).toContain('dql:block:top_customers');
+    expect(JSON.stringify(decision.resolvedAnalyticalPlan ?? {})).not.toContain('semantic:metric:forged');
   });
 
   it('uses one bounded meaning call for a substantive ranking metric when parsed intent is absent', async () => {
@@ -1330,7 +1334,11 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
 
     const decision = await router.decide(request('top customers by beverage revenue'));
 
-    expect(resolveMeaning).toHaveBeenCalledTimes(1);
+    // The outcome this test protects is unchanged; the meaning call is not made.
+    // An exact certified match is the cheapest and most certain answer DQL can give,
+    // and it used to be one of the slowest because this shortcut only applied when
+    // the call was already being skipped.
+    expect(resolveMeaning).not.toHaveBeenCalled();
     expect(decision.action).toBe('answer');
     expect(decision.resolvedAnalyticalPlan?.selectedConceptIds).toContain('dql:block:top_beverage_customers');
   });

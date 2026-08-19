@@ -2246,9 +2246,20 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
           }
 
 
-          const authoredExample = !shouldUseMeaningCall
-            ? authoritativeExactCertifiedExample(candidates)
-            : undefined;
+          // THE FAST LANE. Evaluated regardless of `shouldUseMeaningCall`, so an
+          // exact certified hit short-circuits BEFORE the ~10s meaning call
+          // rather than paying for it. Previously this shortcut only applied
+          // when the call was already being skipped, which meant a perfect
+          // certified match — the cheapest, most certain answer DQL can give —
+          // was also one of the slowest.
+          //
+          // The precondition is deliberately the strictest one available:
+          // exactly one certified block, compatible, whose AUTHORED EXAMPLE the
+          // question matches. `meaning-evidence.ts` sets that flag only for an
+          // authored-example fit and explicitly notes it is the one signal that
+          // may grant this shortcut — lexical equality to a block name does not
+          // qualify.
+          const authoredExample = authoritativeExactCertifiedExample(candidates);
           if (authoredExample) {
             return routeDecisionForResolution(
               base,

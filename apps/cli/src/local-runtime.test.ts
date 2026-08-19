@@ -4493,7 +4493,11 @@ LIMIT \${top_n}
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          question: 'who are the top customers',
+          // Deliberately NOT the block's authored example. That phrasing is now an
+          // exact certified match and takes the fast lane, which would answer it
+          // legitimately and do real SQL work — masking the property under test.
+          // A near-miss keeps the forged-plan guard the only thing being exercised.
+          question: 'rank our customers by how much they have spent overall',
           requestedMode: 'ask',
           conversationContext: {
             priorResolvedAnalyticalPlan: {
