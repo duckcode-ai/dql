@@ -171,6 +171,7 @@ import type {
 } from './llm/types.js';
 import { listRemoteMcpSettings, saveRemoteMcpSettings } from './llm/mcp-config.js';
 import {
+  composeBusinessExplanation,
   ClaudeProvider,
   ConversationStore,
   advanceThreadState,
@@ -4430,6 +4431,14 @@ function analyticalFailureSummary(
     let text = kind === 'answer_explanation'
       ? buildPriorAnswerExplanation(request.question, request.conversationContext)
       : undefined;
+    // A definitional question that NAMES a governed artifact is answerable from
+    // the catalog: the description, domain, and dimensions are already recorded.
+    // Reaching for a provider to paraphrase facts we hold can only add drift, and
+    // the generic conversational reply this replaces used none of them.
+    //
+    // Returns undefined unless the question names something real, so a turn that
+    // does not match keeps today's behaviour exactly.
+    if (!text) text = buildGovernedObjectExplanation(request.question);
     if (text) {
       emitAnswerDelta?.(text);
     } else {
@@ -5738,6 +5747,41 @@ function analyticalFailureSummary(
 
   // Compact fallback used only for plain conversational replies. Analytical
   // turns use the structured, question-ranked evidence path above.
+  /**
+   * Explain a governed artifact the question names, from catalog metadata alone.
+   *
+   * Certified blocks are offered first: when a concept exists both as a
+   * certified block and a raw model, the certified one is the authored
+   * definition and the other is an implementation detail.
+   */
+  const buildGovernedObjectExplanation = (question: string): string | undefined => {
+    try {
+      const blocks = collectPlanBlocks(projectRoot, { certifiedOnly: true });
+      const certifiedNames = new Set(blocks.map((block) => block.name));
+      const all = [
+        ...blocks.map((block) => ({ block, status: 'certified' })),
+        ...collectPlanBlocks(projectRoot, { certifiedOnly: false })
+          .filter((block) => !certifiedNames.has(block.name))
+          .map((block) => ({ block, status: 'draft' })),
+      ];
+      const explanation = composeBusinessExplanation(question, all.map(({ block, status }) => ({
+        objectKey: `dql:block:${block.name}`,
+        objectType: 'dql_block',
+        name: block.name,
+        ...(block.description ? { description: block.description } : {}),
+        ...(block.domain ? { domain: block.domain } : {}),
+        status,
+        payload: {
+          ...(block.dimensions?.length ? { dimensions: block.dimensions } : {}),
+        },
+      })));
+      return explanation?.text;
+    } catch {
+      // Never let an explanation attempt break a conversational turn.
+      return undefined;
+    }
+  };
+
   const buildAgentRunCatalogContext = (): string => {
     try {
       const blocks = collectPlanBlocks(projectRoot, { certifiedOnly: true });

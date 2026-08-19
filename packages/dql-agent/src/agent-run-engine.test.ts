@@ -2367,6 +2367,67 @@ describe("AgentRunEngine — conversation route", () => {
     expect(run.summary).not.toBe('Agent run is blocked.');
   });
 
+  it('answers a definitional question about a named artifact instead of asking which meaning to bind', async () => {
+    // Reported shape: "what is food_vs_drink_revenue?" came back as "Which
+    // governed meaning should DQL bind: food_vs_drink_revenue or …?" — asking the
+    // user to disambiguate the single artifact they just named.
+    //
+    // This must be caught BEFORE the terminal guard: the ambiguity gate has
+    // already set action 'clarify' by the time the boundary runs, so a check
+    // placed after it is unreachable.
+    let conversationCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-definitional',
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: 'clarify', confidence: 1, followsUp: false, source: 'heuristic',
+          requiresClarification: true,
+          reason: 'Bounded retrieval found multiple governed meanings.',
+          clarifyingQuestion: 'Which governed meaning should DQL bind?',
+          retrievalEvidence: {
+            snapshotId: 's', candidateCount: 2,
+            candidateIds: ['dql:block:food_vs_drink_revenue', 'dbt:model:order_items'],
+          },
+        }),
+      },
+      executors: {
+        conversation: () => {
+          conversationCalls += 1;
+          return { answer: 'definition', answerKind: 'conversational', status: 'completed', trustState: 'not_applicable', evaluations: [] };
+        },
+      },
+    });
+    const run = await engine.run({ question: 'what is food_vs_drink_revenue?', requestedMode: 'ask' });
+    expect(conversationCalls).toBe(1);
+    expect(run.route).toBe('conversation');
+  });
+
+  it('still clarifies an analytical question that merely names an artifact', async () => {
+    // The other half: "top_customers by region" names a block but asks for a
+    // grouping, so it is an execution request and the gate must stand.
+    let conversationCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-named-but-analytical',
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: 'clarify', confidence: 1, followsUp: false, source: 'heuristic',
+          requiresClarification: true,
+          reason: 'Bounded retrieval found multiple governed meanings.',
+          clarifyingQuestion: 'Which governed meaning should DQL bind?',
+          retrievalEvidence: { snapshotId: 's', candidateCount: 2, candidateIds: ['dql:block:top_customers'] },
+        }),
+      },
+      executors: {
+        conversation: () => { conversationCalls += 1; return { answer: 'x', answerKind: 'conversational' }; },
+      },
+    });
+    const run = await engine.run({ question: 'top_customers by region', requestedMode: 'ask' });
+    expect(conversationCalls).toBe(0);
+    expect(run.route).toBe('clarify');
+  });
+
   it('rescues the block it synthesizes itself, not just one the router reported (AGT-028)', async () => {
     // The reported production dead end. `enforceOrdinaryAnalyticalPlanBoundary`
     // already converted a ROUTER-reported modeling gap into an answer, but then

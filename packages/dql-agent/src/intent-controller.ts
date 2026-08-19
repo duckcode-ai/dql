@@ -274,6 +274,48 @@ export function classifyConversationalTurn(
   return undefined;
 }
 
+/**
+ * A question in DEFINITIONAL form about a governed artifact it names.
+ *
+ * `buildAnalysisQuestionPlan` reads the ARTIFACT'S OWN NAME as analytical intent:
+ * `food_vs_drink_revenue` contains "vs" so the plan comes back `comparison`, and
+ * `top_customers` contains "top" so it comes back `ranking`. Neither is ever
+ * `definition`, so "what is food_vs_drink_revenue?" is routed as an analytical
+ * question, hits the ambiguity gate, and is answered with "Which governed meaning
+ * should DQL bind…" — about the single artifact the user just named.
+ *
+ * Both conditions are required, and deliberately so. The definitional FORM alone
+ * would swallow "what is our revenue"; a named artifact alone would swallow
+ * "top_customers by region", which is a real query. Together they identify a
+ * question that wants an explanation, not an execution.
+ */
+const DEFINITIONAL_FORM_RE =
+  /\b(?:what\s+(?:is|are|does|do)\b|define\b|definition\s+of\b|explain\b|describe\b|tell\s+me\s+about\b|meaning\s+of\b)/i;
+
+/** Trailing verbs that turn a definitional opener back into a data request. */
+const DEFINITIONAL_EXECUTION_RE =
+  /\b(?:by\s+[a-z_]|for\s+(?:the\s+)?(?:last|next|this|past)\b|group(?:ed)?\s+by\b|filter(?:ed)?\s+by\b|top\s+\d|show\s+me\b|list\b|compare\b)/i;
+
+export function looksLikeDefinitionalAboutNamedObject(
+  question: string,
+  objectNames: readonly string[],
+): boolean {
+  const trimmed = question.trim();
+  if (!trimmed || !DEFINITIONAL_FORM_RE.test(trimmed)) return false;
+  // "what is revenue by region" is a query wearing a definitional opener.
+  if (DEFINITIONAL_EXECUTION_RE.test(trimmed)) return false;
+  const lower = trimmed.toLowerCase();
+  return objectNames.some((raw) => {
+    // Names arrive qualified (`dql:block:top_customers`); the leaf is what a
+    // person types.
+    const leaf = String(raw).split(':').pop()?.trim().toLowerCase() ?? '';
+    if (leaf.length < 3) return false;
+    if (lower.includes(leaf)) return true;
+    const spaced = leaf.replace(/[_.]+/g, ' ');
+    return spaced.length > 3 && lower.includes(spaced);
+  });
+}
+
 /** Heuristic: does the question explicitly ask to build a dashboard/app? */
 export function looksLikeComposeApp(question: string): boolean {
   return COMPOSE_APP_RE.test(question) || MONITOR_RE.test(question);

@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 import {
   classifyConversationalTurn,
+  looksLikeDefinitionalAboutNamedObject,
   decideAgentAction,
   looksLikeComposeApp,
   type IntentDecision,
@@ -2063,6 +2064,38 @@ function enforceOrdinaryAnalyticalPlanBoundary(
     || Boolean(decision.terminalOutcome);
   const inboundRescue = rescueModelingGapForOrdinaryAsk(request, decision);
   if (inboundRescue) return inboundRescue;
+
+  // A DEFINITIONAL question about an artifact it names is not an analytical
+  // request, and must be caught before the `terminal` guard below — the
+  // ambiguity gate has already set `action: 'clarify'` by this point, so any
+  // check placed after it is unreachable.
+  //
+  // Without this, "what is food_vs_drink_revenue?" is answered with "Which
+  // governed meaning should DQL bind: food_vs_drink_revenue or …?" — asking the
+  // user to disambiguate the one artifact they just named. The plan cannot see
+  // it because it reads the artifact's OWN NAME as analytical intent: that name
+  // contains "vs", so the mode comes back `comparison`.
+  if (
+    ordinaryAsk
+    && !request.selectedEvidenceId
+    && looksLikeDefinitionalAboutNamedObject(
+      request.question,
+      decision.retrievalEvidence?.candidateIds ?? [],
+    )
+  ) {
+    return {
+      ...decision,
+      action: 'converse',
+      category: 'conversational',
+      confidence: 1,
+      reason: 'This asks what a governed artifact means, so it is answered from its definition rather than by running a query.',
+      requiresClarification: false,
+      clarifyingQuestion: undefined,
+      clarificationOptions: undefined,
+      terminalOutcome: undefined,
+      resolvedAnalyticalPlan: undefined,
+    };
+  }
   const exactSemanticContinuation = Boolean(
     request.selectedEvidenceId
     && decision.meaningResolution?.recommendedRoute === 'semantic'

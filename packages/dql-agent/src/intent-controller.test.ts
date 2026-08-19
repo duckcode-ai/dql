@@ -1,11 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  classifyConversationalTurn,
-  decideAgentAction,
-  looksLikeComposeApp,
-  looksLikeFollowUp,
-  looksLikePriorAnswerExplanation,
-} from './intent-controller.js';
+import { classifyConversationalTurn, decideAgentAction, looksLikeComposeApp, looksLikeFollowUp, looksLikePriorAnswerExplanation, looksLikeDefinitionalAboutNamedObject } from './intent-controller.js';
 
 describe('decideAgentAction', () => {
   it('composes an app when asked to build a dashboard, regardless of match', () => {
@@ -194,5 +188,39 @@ describe('follow-up + compose-app detection', () => {
     expect(looksLikePriorAnswerExplanation('is it monthly or daily revenue?', false)).toBe(false);
     expect(looksLikePriorAnswerExplanation('show it monthly', true)).toBe(false);
     expect(looksLikePriorAnswerExplanation('break this down by day', true)).toBe(false);
+  });
+});
+
+describe('looksLikeDefinitionalAboutNamedObject', () => {
+  const ids = ['dql:block:food_vs_drink_revenue', 'dql:block:top_customers', 'semantic:metric:revenue'];
+
+  it('recognises a definitional question about an artifact it names', () => {
+    // The plan cannot: it reads the artifact's OWN NAME as analytical intent —
+    // `food_vs_drink_revenue` contains "vs" so the mode comes back `comparison`,
+    // and `top_customers` contains "top" so it comes back `ranking`.
+    expect(looksLikeDefinitionalAboutNamedObject('what is food_vs_drink_revenue?', ids)).toBe(true);
+    expect(looksLikeDefinitionalAboutNamedObject('explain top_customers', ids)).toBe(true);
+    expect(looksLikeDefinitionalAboutNamedObject('what does top_customers mean?', ids)).toBe(true);
+    expect(looksLikeDefinitionalAboutNamedObject('define food_vs_drink_revenue', ids)).toBe(true);
+    expect(looksLikeDefinitionalAboutNamedObject('tell me about top customers', ids)).toBe(true);
+  });
+
+  it('requires BOTH a definitional form and a named artifact', () => {
+    // The form alone would swallow a real query; the name alone would swallow
+    // "top_customers by region", which is an execution request.
+    expect(looksLikeDefinitionalAboutNamedObject('what is our revenue', ['dql:block:top_customers'])).toBe(false);
+    expect(looksLikeDefinitionalAboutNamedObject('top_customers', ids)).toBe(false);
+    expect(looksLikeDefinitionalAboutNamedObject('what are the top products by revenue?', ids)).toBe(false);
+  });
+
+  it('vetoes a definitional opener that turns into a data request', () => {
+    expect(looksLikeDefinitionalAboutNamedObject('what is top_customers by region', ids)).toBe(false);
+    expect(looksLikeDefinitionalAboutNamedObject('explain top_customers for the last quarter', ids)).toBe(false);
+    expect(looksLikeDefinitionalAboutNamedObject('what is top_customers grouped by city', ids)).toBe(false);
+  });
+
+  it('handles no candidates and short names without false positives', () => {
+    expect(looksLikeDefinitionalAboutNamedObject('what is food_vs_drink_revenue?', [])).toBe(false);
+    expect(looksLikeDefinitionalAboutNamedObject('what is it', ['dql:block:it'])).toBe(false);
   });
 });
