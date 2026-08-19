@@ -151,6 +151,7 @@ const HELP = `
       --min-answer-rate <0..1>        For "eval": fail below non-refusal rate on answerable cases
       --min-tool-requirement <0..1>    For "agent eval": fail below required tool-call pass rate
       --via runtime|loop               For "agent eval": drive a running server (routing + gates) or the answer loop only
+      --cassette record|replay         For "agent eval": record provider responses once, then replay offline
       --max-false-refusal <0..1>       For "agent eval": fail above this share of ANSWERABLE cases refused
       --min-refusal-recall <0..1>      For "agent eval": fail below this share of must-refuse cases that refused
       --thread <id>                   For "agent ask": continue a persisted conversation thread

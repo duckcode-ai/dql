@@ -81,6 +81,8 @@ export interface CLIFlags {
   maxWrongCertified?: number;
   /** `dql agent eval --via runtime|loop` — drive the full runtime, or the answer loop in-process. */
   via?: string;
+  /** `dql agent eval --cassette record|replay` — record provider responses, or replay them offline. */
+  cassette?: string;
   /** `dql agent eval --max-false-refusal <0..1>` — fail above this share of answerable cases refused. */
   maxFalseRefusal?: number;
   /** `dql agent eval --min-refusal-recall <0..1>` — fail below this share of must-refuse cases that refused. */
@@ -251,6 +253,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
     } else if (arg === '--max-wrong-certified' && i + 1 < argv.length) {
       const value = Number(argv[++i]);
       if (Number.isFinite(value) && value >= 0) flags.maxWrongCertified = value;
+    } else if (arg === '--cassette' && i + 1 < argv.length) {
+      const value = String(argv[++i]);
+      if (value === 'record' || value === 'replay' || value === 'live') flags.cassette = value;
     } else if (arg === '--via' && i + 1 < argv.length) {
       const value = String(argv[++i]);
       if (value === 'runtime' || value === 'loop') flags.via = value;

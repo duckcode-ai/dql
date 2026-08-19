@@ -23,6 +23,7 @@
  */
 
 import { answerFromRuntimeRun, driveViaRuntime, evalRouteForRun } from './agent-eval-runtime.js';
+import { CassetteStore, cassetteDirFor, withCassette } from './agent-eval-cassette.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
@@ -717,7 +718,14 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
   if (!existsSync(kgPath)) await reindexProject(projectRoot, { kgPath });
 
   const providerName = (flags as { provider?: string }).provider as ProviderName | undefined;
-  const provider = await pickProvider(providerName);
+  const rawProvider = await pickProvider(providerName);
+  // Cassettes make a provider-backed suite repeatable and free to re-run. They
+  // apply to the in-process driver here; `--via runtime` needs the SERVER
+  // started with DQL_EVAL_CASSETTE_DIR, since it owns its own provider.
+  const cassetteMode = (flags as { cassette?: string }).cassette;
+  const provider = cassetteMode === 'record' || cassetteMode === 'replay'
+    ? withCassette(rawProvider, new CassetteStore(cassetteDirFor(projectRoot, rest[0] ?? 'agent-evals')), cassetteMode)
+    : rawProvider;
   const reasoningEffort = cliReasoningEffort(flags);
   const requestedDepth = cliAnalysisDepth(flags);
   const kg = new KGStore(kgPath);

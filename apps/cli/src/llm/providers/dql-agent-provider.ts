@@ -37,6 +37,7 @@ import {
   prepareServerOwnedProviderSchemaContext,
   projectEmbeddingProvider,
 } from '@duckcodeailabs/dql-agent';
+import { CassetteStore, resolveCassetteModeFromEnv, withCassette } from '../../commands/agent-eval-cassette.js';
 import { buildManifest, normalizeDqlArtifactReference, resolveDbtManifestPath, type ProviderEgressReceiptV1 } from '@duckcodeailabs/dql-core';
 import { existsSync } from 'node:fs';
 import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal, ProviderId } from '../types.js';
@@ -315,11 +316,28 @@ function emitProposalFromText(text: string, emit: (turn: AgentTurn) => void): vo
   }
 }
 
+/**
+ * Route the runtime's own provider through an eval cassette when the host asks.
+ *
+ * The client-side cassette in `dql agent eval` only covers `--via loop`: with
+ * `--via runtime` the SERVER owns the provider, so without this hook the one
+ * driver that actually exercises routing and gates could never be made
+ * deterministic — and a suite that cannot be deterministic cannot gate a PR.
+ *
+ * Opt-in through the environment, never through a request field: a caller must
+ * not be able to redirect a production run onto recorded responses.
+ */
+function applyEvalCassette(provider: AgentProvider): AgentProvider {
+  const dir = process.env.DQL_EVAL_CASSETTE_DIR;
+  if (!dir) return provider;
+  return withCassette(provider, new CassetteStore(dir), resolveCassetteModeFromEnv(process.env));
+}
+
 export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverride?: AgentProvider): AgentRunner {
   return {
     async run(req, emit, signal) {
       const spec = SPECS[id];
-      const rawProvider = providerOverride ?? spec.create(req.projectRoot);
+      const rawProvider = applyEvalCassette(providerOverride ?? spec.create(req.projectRoot));
       const isResearch = req.analysisDepth === 'deep';
       const researchRowsOptIn = isResearch && req.researchResultRowsOptIn === true;
       const sharedDispatchEvidence = req.providerDispatchEvidenceSink;
