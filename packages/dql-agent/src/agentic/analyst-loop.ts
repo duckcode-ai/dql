@@ -33,6 +33,18 @@ export interface AnalystLoopDeps {
   parseSql: (raw: string) => string | undefined;
   /** Tools the model may call. Already surface-filtered by the host. */
   tools: AgentToolDefinition[];
+  /**
+   * Run the deterministic safety verifiers over candidate SQL and return a
+   * correction, or `undefined` when it passes.
+   *
+   * The verifiers keep their logic — aggregation safety, grain, relationship
+   * proof — but a failure becomes an OBSERVATION the loop can act on instead of
+   * a terminal refusal. That inversion is the point: the legacy path turned
+   * "this would double-count" into "nothing was executed", which is true and
+   * useless. Telling the model that joining those tables fans out is something
+   * it can fix.
+   */
+  verifySql?: (sql: string) => string | undefined;
   maxIterations: number;
   onStep?: (step: AnalystStep) => void;
 }
@@ -96,20 +108,24 @@ export async function runAnalystLoop(
   for (let attempt = 0; attempt < 2; attempt += 1) {
     deps.onStep?.({ kind: 'verify', label: 'Checking every identifier was actually observed' });
     const verdict = adjudicateProposedSql(ledger, deps.extractReferences(sql));
-    if (verdict.ok) {
+    // Identifiers first: a safety verdict over SQL naming a column that does not
+    // exist is noise, and would send the model chasing the wrong correction.
+    const safety = verdict.ok ? deps.verifySql?.(sql) : undefined;
+    if (verdict.ok && !safety) {
       deps.onStep?.({ kind: 'answer', label: 'Verified — every name came from a tool result' });
       return { sql, admitted: ledger.entries().map((e) => e.identifier), corrections, stop: 'composed' };
     }
-    corrections.push(verdict.correction);
+    const correction = verdict.ok ? safety! : verdict.correction;
+    corrections.push(correction);
     if (attempt === 1) break;
     deps.onStep?.({
       kind: 'tool',
-      label: 'Correcting an unobserved identifier',
-      detail: verdict.unadmitted.join(', '),
+      label: verdict.ok ? 'Correcting an unsafe aggregation' : 'Correcting an unobserved identifier',
+      detail: verdict.ok ? safety : verdict.unadmitted.join(', '),
     });
     raw = await runAgenticToolLoop(
       input.provider,
-      [...messages, { role: 'assistant' as const, content: raw }, { role: 'user' as const, content: verdict.correction }],
+      [...messages, { role: 'assistant' as const, content: raw }, { role: 'user' as const, content: correction }],
       tools,
       {
         ...(input.signal ? { signal: input.signal } : {}),

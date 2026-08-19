@@ -41,6 +41,7 @@ import {
   buildSearchValuesTool,
   createAnalystLaneHandler,
   parseProposal,
+  renderContextValidationRefusalForUser,
   validateSqlAgainstLocalContext,
   resolveOrchestratorPolicy,
   type AgenticLane,
@@ -851,6 +852,21 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
                         relations: validation.referencedRelations ?? [],
                         columns: (validation.referencedColumns ?? []).map((column) => column.column),
                       };
+                    },
+                    // The safety verifiers keep their logic; only what happens on
+                    // failure changes. Instead of ending the turn, the specific
+                    // check that fired comes back as something the model can act
+                    // on — "joining those tables multiplies rows" rather than
+                    // "nothing was executed".
+                    verifySql: (sql) => {
+                      const validation = validateSqlAgainstLocalContext(sql, loopInput.contextPack);
+                      if (validation.ok) return undefined;
+                      return renderContextValidationRefusalForUser(
+                        validation.code,
+                        validation.error,
+                        loopInput.followUp?.memberBindings,
+                        validation.aggregationSafetyProof?.issueCodes,
+                      );
                     },
                   };
                 },

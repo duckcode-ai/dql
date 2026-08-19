@@ -170,3 +170,42 @@ describe('analyst evidence when the host has not initialised it yet', () => {
     expect(result.evidence?.route?.find((s) => s.tool === 'identifier_ledger')).toMatchObject({ status: 'checked' });
   });
 });
+
+describe('safety verifiers feed back as corrections, not refusals', () => {
+  it('sends the specific failing check to the model and accepts the repair', async () => {
+    // The inversion this is for: the legacy path turned "this would double-count"
+    // into "nothing was executed" — true and useless. Telling the model that
+    // joining those tables fans out is something it can act on.
+    let calls = 0;
+    const provider = scripted([
+      '```sql\nSELECT product_name FROM order_items\n```',
+      '```sql\nSELECT product_name FROM order_items\n```',
+    ]);
+    const outcome = await runAnalystLoop(input(provider), deps({
+      verifySql: () => (calls++ === 0 ? 'joining those tables multiplies rows, so the total would be inflated' : undefined),
+    }));
+    expect(outcome.stop).toBe('composed');
+    expect(outcome.corrections).toEqual(['joining those tables multiplies rows, so the total would be inflated']);
+  });
+
+  it('reports unverified when the safety check never clears', async () => {
+    const provider = scripted(['```sql\nSELECT product_name FROM order_items\n```']);
+    const outcome = await runAnalystLoop(input(provider), deps({ verifySql: () => 'still unsafe' }));
+    expect(outcome.stop).toBe('unverified');
+  });
+
+  it('checks identifiers BEFORE safety', async () => {
+    // A safety verdict over SQL naming a column that does not exist is noise,
+    // and would send the model chasing the wrong correction.
+    const verifySql = vi.fn(() => 'unsafe aggregation');
+    const provider = scripted(['```sql\nSELECT invented_col FROM order_items\n```']);
+    const outcome = await runAnalystLoop(input(provider), deps({ verifySql }));
+    expect(outcome.corrections[0]).toContain('never returned by a tool');
+    expect(verifySql).not.toHaveBeenCalled();
+  });
+
+  it('is optional — a host that supplies no verifier still composes', async () => {
+    const provider = scripted(['```sql\nSELECT product_name FROM order_items\n```']);
+    expect((await runAnalystLoop(input(provider), deps())).stop).toBe('composed');
+  });
+});

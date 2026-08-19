@@ -643,6 +643,7 @@ export {
   type ProbeRelation,
   type SearchValuesOptions,
 } from "./agentic/value-probe.js";
+export { renderContextValidationRefusalForUser } from "./answer-loop.js";
 export {
   DEFAULT_RESEARCH_LIMITS,
   applyFinding,
