@@ -2051,6 +2051,41 @@ function rescueModelingGapForOrdinaryAsk(
   };
 }
 
+/**
+ * Has this exact clarification already been asked in this thread?
+ *
+ * The reported loop: "who are the top customers for BCM" returned "Top by which
+ * governed metric?", the user answered in prose, and the IDENTICAL question came
+ * back. Their reply reads as a complete new question — which is a defensible
+ * classification — so it re-entered the cascade fresh, retrieved the same
+ * evidence, and produced the same clarification. Nothing in the loop noticed it
+ * had already been there.
+ *
+ * Asking twice is proof the question does not work: the user has already seen it
+ * and responded, and a third identical prompt cannot produce a different reply.
+ * Whatever the best available interpretation is, committing to it and saying so
+ * beats asking again.
+ */
+function clarificationAlreadyAsked(
+  clarifyingQuestion: string | undefined,
+  history: AgentRunRequest['history'],
+): boolean {
+  const asking = clarifyingQuestion?.replace(/\s+/g, ' ').trim().toLowerCase();
+  if (!asking || !history?.length) return false;
+  let sawAssistantAsk = false;
+  for (const turn of history) {
+    if (turn.role !== 'assistant') continue;
+    if (turn.text.replace(/\s+/g, ' ').trim().toLowerCase().includes(asking)) sawAssistantAsk = true;
+  }
+  if (!sawAssistantAsk) return false;
+  // Only a loop once the user has actually replied to it. A clarification still
+  // waiting for its first answer is not a repeat.
+  const lastAsk = [...history].reverse().findIndex(
+    (turn) => turn.role === 'assistant' && turn.text.replace(/\s+/g, ' ').trim().toLowerCase().includes(asking),
+  );
+  return lastAsk > 0;
+}
+
 function enforceOrdinaryAnalyticalPlanBoundary(
   request: AgentRunRequest,
   decision: IntentDecision,
@@ -2064,6 +2099,29 @@ function enforceOrdinaryAnalyticalPlanBoundary(
     || Boolean(decision.terminalOutcome);
   const inboundRescue = rescueModelingGapForOrdinaryAsk(request, decision);
   if (inboundRescue) return inboundRescue;
+
+  // A clarification the user has already seen and answered cannot be asked
+  // again. Checked before the `terminal` guard for the same reason as the
+  // definitional case: the gate has already set `action: 'clarify'` by here.
+  if (
+    ordinaryAsk
+    && decision.action === 'clarify'
+    && clarificationAlreadyAsked(
+      decision.clarifyingQuestion,
+      request.history?.length ? request.history : conversationHistoryFromContext(request.conversationContext),
+    )
+  ) {
+    return {
+      ...decision,
+      action: 'answer',
+      confidence: Math.min(decision.confidence, 0.6),
+      reason: `This clarification was already asked and answered in this thread, so DQL proceeded with the best supported interpretation instead of repeating it: ${decision.clarifyingQuestion ?? ''}`.trim(),
+      requiresClarification: false,
+      clarifyingQuestion: undefined,
+      terminalOutcome: undefined,
+      resolvedAnalyticalPlan: undefined,
+    };
+  }
 
   // A DEFINITIONAL question about an artifact it names is not an analytical
   // request, and must be caught before the `terminal` guard below — the

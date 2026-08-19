@@ -2367,6 +2367,65 @@ describe("AgentRunEngine — conversation route", () => {
     expect(run.summary).not.toBe('Agent run is blocked.');
   });
 
+  it('does not ask a clarification the user has already answered', async () => {
+    // The reported loop: "who are the top customers for BCM" returned "Top by
+    // which governed metric?", the user answered in prose, and the IDENTICAL
+    // question came back. Their reply reads as a complete new question, so it
+    // re-entered the cascade fresh and produced the same clarification.
+    let generatedCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-repeat-clarify',
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: 'clarify', confidence: 1, followsUp: false, source: 'heuristic',
+          requiresClarification: true,
+          reason: 'A ranking needs a governed metric.',
+          clarifyingQuestion: 'Top by which governed metric?',
+          retrievalEvidence: { snapshotId: 's', candidateCount: 2, candidateIds: ['semantic:metric:bcm'] },
+        }),
+      },
+      executors: {
+        generated_answer: () => { generatedCalls += 1; return { answer: 'ranked' }; },
+      },
+    });
+    const run = await engine.run({
+      question: 'I need a top 10 BCM customers who have top revenue',
+      requestedMode: 'ask',
+      history: [
+        { role: 'user', text: 'who are the top customers for BCM' },
+        { role: 'assistant', text: 'Top by which governed metric?' },
+        { role: 'user', text: 'I need a top 10 BCM customers who have top revenue' },
+      ],
+    });
+    expect(run.route).not.toBe('clarify');
+    expect(generatedCalls).toBe(1);
+  });
+
+  it('still asks a clarification that is waiting for its first answer', async () => {
+    // A pending question is not a repeat — suppressing it would skip the one
+    // clarification that legitimately needed asking.
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-first-clarify',
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: 'clarify', confidence: 1, followsUp: false, source: 'heuristic',
+          requiresClarification: true,
+          reason: 'A ranking needs a governed metric.',
+          clarifyingQuestion: 'Top by which governed metric?',
+          retrievalEvidence: { snapshotId: 's', candidateCount: 2, candidateIds: ['semantic:metric:bcm'] },
+        }),
+      },
+    });
+    const run = await engine.run({
+      question: 'who are the top customers for BCM',
+      requestedMode: 'ask',
+      history: [{ role: 'user', text: 'who are the top customers for BCM' }],
+    });
+    expect(run.route).toBe('clarify');
+  });
+
   it('answers a definitional question about a named artifact instead of asking which meaning to bind', async () => {
     // Reported shape: "what is food_vs_drink_revenue?" came back as "Which
     // governed meaning should DQL bind: food_vs_drink_revenue or …?" — asking the
