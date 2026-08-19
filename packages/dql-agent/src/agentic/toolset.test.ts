@@ -60,3 +60,45 @@ describe('search_semantic_layer composition contract', () => {
     ]);
   });
 });
+
+describe('check_compatibility', () => {
+  const layer = new SemanticLayer({
+    metrics: [
+      { name: 'revenue', label: 'Revenue', description: '', domain: 'orders', sql: 'SUM(amount)', type: 'sum', table: 'orders' },
+      { name: 'headcount', label: 'Headcount', description: '', domain: 'hr', sql: 'COUNT(*)', type: 'count', table: 'employees' },
+    ],
+    dimensions: [
+      { name: 'order_status', label: 'Order status', description: '', domain: 'orders', sql: 'status', type: 'string', table: 'orders' },
+      { name: 'department', label: 'Department', description: '', domain: 'hr', sql: 'dept', type: 'string', table: 'employees' },
+    ],
+  });
+  const tool = () => buildSemanticStageTools({ semanticLayer: layer, kg: undefined as never })
+    .find((entry) => entry.name === 'check_compatibility')!;
+
+  it('is exposed alongside the other governed semantic tools', () => {
+    expect(tool()).toBeDefined();
+  });
+
+  it('reports what a metric CAN be sliced by', async () => {
+    const result = await tool().run({ metrics: ['revenue'] }) as Record<string, unknown>;
+    expect(result.metrics).toEqual(['revenue']);
+    expect(Array.isArray(result.compatibleDimensions)).toBe(true);
+  });
+
+  it('answers about the dimension actually asked about, with a typed reason', async () => {
+    // The whole point: a modeling gap becomes a fact the agent can route around
+    // instead of a terminal "nothing was executed" refusal.
+    const result = await tool().run({ metrics: ['revenue'], dimensions: ['department'] }) as {
+      requested: Array<{ dimension: string; compatible: boolean; reason?: string; explanation?: string }>;
+    };
+    const verdict = result.requested.find((entry) => entry.dimension === 'department')!;
+    expect(verdict.compatible).toBe(false);
+    expect(verdict.reason).toBeDefined();
+    expect(verdict.explanation).toMatch(/join path|not modeled|cannot/i);
+  });
+
+  it('refuses an empty metric list with an actionable message, not a crash', async () => {
+    const result = await tool().run({ metrics: [] }) as { error?: string };
+    expect(result.error).toMatch(/at least one governed metric/i);
+  });
+});

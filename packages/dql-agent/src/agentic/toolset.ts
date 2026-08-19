@@ -62,8 +62,97 @@ export function buildSemanticStageTools(input: SemanticStageToolsInput): AgentTo
   if (input.semanticLayer) {
     tools.unshift(searchSemanticLayerTool(input.semanticLayer));
     tools.push(compileSemanticQueryTool(input));
+    tools.push(checkCompatibilityTool(input.semanticLayer));
   }
   return tools;
+}
+
+/**
+ * Ask whether a metric can actually be sliced by the requested dimensions —
+ * BEFORE composing a query that cannot compile.
+ *
+ * This is the tool that turns a modeling gap from a terminal state into a fact
+ * the agent can route around. Today an unreachable dimension surfaces as a
+ * `modeling_gap` refusal ("the semantic models don't declare a join path…
+ * Nothing was executed"), which is true and useless: it ends the turn instead of
+ * offering the dimensions that ARE reachable. `explainCompatibleDimensions`
+ * already computes both halves with typed reasons — it was simply never exposed
+ * where the agent could ask.
+ */
+function checkCompatibilityTool(layer: SemanticLayer): AgentToolDefinition {
+  return {
+    name: 'check_compatibility',
+    description:
+      'Check whether governed metrics can be grouped by the requested dimensions. Returns the compatible dimensions and, for each incompatible one, WHY (no_join_path, not_shared_across_metrics, metric_unresolved). Call this before compile_semantic_query when a question asks for a breakdown, and use the compatible list to pick an alternative instead of giving up.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['metrics'],
+      properties: {
+        metrics: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Governed metric names, exactly as returned by search_semantic_layer.',
+        },
+        dimensions: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional dimensions to check. Omit to list everything the metric set can be sliced by.',
+        },
+        limit: { type: 'number', description: 'Max compatible dimensions to return. Default 25.' },
+      },
+    },
+    run: async (args) => {
+      const { metrics, dimensions, limit } = objectArg(args);
+      const metricNames = Array.isArray(metrics) ? metrics.filter((m): m is string => typeof m === 'string') : [];
+      if (metricNames.length === 0) {
+        return { error: 'Pass at least one governed metric name from search_semantic_layer.' };
+      }
+      const max = typeof limit === 'number' && limit > 0 ? Math.min(limit, 100) : 25;
+      const explained = layer.explainCompatibleDimensions(metricNames);
+      const requested = Array.isArray(dimensions)
+        ? dimensions.filter((d): d is string => typeof d === 'string')
+        : [];
+      const matches = (candidate: string, name: string): boolean => {
+        const left = candidate.toLowerCase();
+        const right = name.toLowerCase();
+        return left === right || left.endsWith(`.${right}`) || right.endsWith(`.${left}`);
+      };
+      const compatible = explained.compatible.map((dimension) => ({
+        name: dimension.qualifiedName ?? dimension.name,
+        label: dimension.label,
+        ...(dimension.entityPath?.length ? { via: dimension.entityPath } : {}),
+      }));
+      // When the caller named dimensions, answer about THOSE first — a verdict on
+      // the question actually asked, with the alternatives kept alongside.
+      const verdicts = requested.map((name) => {
+        const ok = explained.compatible.find((d) => matches(d.qualifiedName ?? d.name, name));
+        if (ok) {
+          return { dimension: name, compatible: true as const, resolvedName: ok.qualifiedName ?? ok.name };
+        }
+        const blocked = explained.incompatible.find((d) => matches(d.qualifiedName ?? d.name, name));
+        return {
+          dimension: name,
+          compatible: false as const,
+          reason: blocked?.reason ?? 'not_modeled',
+          explanation: blocked?.reason === 'no_join_path'
+            ? 'No declared join path reaches this dimension from the metric. Pick one of the compatible dimensions, or the modeling has to change.'
+            : blocked?.reason === 'not_shared_across_metrics'
+              ? 'One metric in the set cannot reach this dimension. Ask about the metrics separately, or drop the one that cannot.'
+              : blocked?.reason === 'metric_unresolved'
+                ? 'A named metric does not exist in the semantic layer. Re-check the name with search_semantic_layer.'
+                : 'This dimension is not modeled for these metrics.',
+        };
+      });
+      return {
+        metrics: metricNames,
+        ...(verdicts.length > 0 ? { requested: verdicts } : {}),
+        compatibleDimensions: compatible.slice(0, max),
+        compatibleCount: compatible.length,
+        incompatibleCount: explained.incompatible.length,
+      };
+    },
+  };
 }
 
 function searchSemanticLayerTool(layer: SemanticLayer): AgentToolDefinition {
