@@ -607,6 +607,15 @@ export {
   type OrchestratorPolicy,
 } from "./agentic/orchestrator-policy.js";
 export {
+  ORCHESTRATOR_FALLBACK_STEP,
+  answerAgentic,
+  withFallbackEvidence,
+  type AgenticLaneHandler,
+  type AnswerAgenticOptions,
+  type LegacyAnswerFn,
+  type OrchestratorDiagnostic,
+} from "./agentic/orchestrator.js";
+export {
   ASSUMPTION_DOMINANCE_RATIO,
   assumeDominantCandidate,
   renderAssumptionPreamble,

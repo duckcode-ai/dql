@@ -572,6 +572,22 @@ export interface ProjectConfig {
       /** Clamped to 0..20. Zero is treated as the kill-switch. */
       maxNarrationRows?: number;
     };
+    /**
+     * Which orchestrator answers a turn, migrated one lane at a time.
+     *
+     * `legacy` (the default) is the 10k-line answer loop. `agentic` routes the
+     * listed lanes through the new loop with the old one as fallback. `shadow`
+     * runs the new path for comparison only and never serves its answer.
+     *
+     * Defaults to legacy with no lanes on purpose: a flag that defaults on is
+     * not a migration control, it is a release.
+     */
+    orchestrator?: {
+      mode?: 'legacy' | 'shadow' | 'agentic';
+      lanes?: string[];
+      maxIterations?: number;
+      fallbackOnError?: boolean;
+    };
   };
   metadataScopes?: Record<string, ConnectionMetadataScopeInput>;
   /** Optional `dql propose` conventions (classifier + bounded selection). */

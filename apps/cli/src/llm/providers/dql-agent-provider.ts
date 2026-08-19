@@ -36,10 +36,14 @@ import {
   prepareProviderWireEnvelopeForDispatch,
   prepareServerOwnedProviderSchemaContext,
   projectEmbeddingProvider,
+  answerAgentic,
+  resolveOrchestratorPolicy,
+  type AgenticLane,
 } from '@duckcodeailabs/dql-agent';
 import { CassetteStore, resolveCassetteModeFromEnv, withCassette } from '../../commands/agent-eval-cassette.js';
 import { buildManifest, normalizeDqlArtifactReference, resolveDbtManifestPath, type ProviderEgressReceiptV1 } from '@duckcodeailabs/dql-core';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal, ProviderId } from '../types.js';
 import { buildAnswerLoopTools, createGroundingContextExpander } from '../answer-loop-tools.js';
 import { getSemanticRuntimeStatus } from '../../semantic-runtime.js';
@@ -327,6 +331,54 @@ function emitProposalFromText(text: string, emit: (turn: AgentTurn) => void): vo
  * Opt-in through the environment, never through a request field: a caller must
  * not be able to redirect a production run onto recorded responses.
  */
+/**
+ * Read `agent.orchestrator` straight from dql.config.json.
+ *
+ * Deliberately NOT `loadProjectConfig` from local-runtime: that module imports
+ * this one (local-runtime.ts:164), so reaching back would close an import cycle
+ * through a 34k-line file. A few lines of JSON reading is the cheaper trade.
+ *
+ * Cached per project root because this runs on every turn and the answer is a
+ * migration setting, not live state. A malformed file resolves to `null`, which
+ * `resolveOrchestratorPolicy` turns into `legacy` — a broken config must not
+ * route real questions onto an unproven path.
+ */
+const orchestratorConfigCache = new Map<string, Record<string, unknown> | null>();
+
+function readOrchestratorConfig(projectRoot: string): Record<string, unknown> | null {
+  const cached = orchestratorConfigCache.get(projectRoot);
+  if (cached !== undefined) return cached;
+  let resolved: Record<string, unknown> | null = null;
+  try {
+    const raw = readFileSync(join(projectRoot, 'dql.config.json'), 'utf-8');
+    const parsed = JSON.parse(raw) as { agent?: { orchestrator?: unknown } };
+    const orchestrator = parsed?.agent?.orchestrator;
+    resolved = orchestrator && typeof orchestrator === 'object'
+      ? orchestrator as Record<string, unknown>
+      : null;
+  } catch {
+    resolved = null;
+  }
+  orchestratorConfigCache.set(projectRoot, resolved);
+  return resolved;
+}
+
+/**
+ * Which migration lane this turn belongs to.
+ *
+ * Research is identified by `analysisDepth === 'deep'`, matching how `isResearch`
+ * is already derived a few lines below — this request type carries no
+ * `requestedMode` (that lives on the engine's own request).
+ *
+ * Deliberately coarse: the seam only needs to know which bucket a turn falls in
+ * so a lane can be enabled independently. The fine-grained triage between
+ * certified, semantic, and generated stays inside the answer path, where the
+ * retrieval evidence lives.
+ */
+function agenticLaneForRequest(req: AgentRunRequest): AgenticLane {
+  return req.analysisDepth === 'deep' ? 'research' : 'generated';
+}
+
 function applyEvalCassette(provider: AgentProvider): AgentProvider {
   const dir = process.env.DQL_EVAL_CASSETTE_DIR;
   if (!dir) return provider;
@@ -611,7 +663,10 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             maxResultRows: 0,
             purpose: 'answer_generation',
           });
-          const result = await answer({
+          // The strangler seam. `answerAgentic` and `answer` are interchangeable
+          // here; which runs is a per-lane config decision that defaults to
+          // legacy, so this is a no-op until a lane is explicitly enabled.
+          const answerLoopInput: Parameters<typeof answer>[0] = {
             question,
             ...(req.resolvedAnalyticalPlan
               ? { resolvedAnalyticalPlan: req.resolvedAnalyticalPlan }
@@ -707,6 +762,21 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             // NOTE: no captureGeneratedDraft here — a plain answer/research question must NOT
             // auto-write a draft into the blocks space. A draft is created only when the user
             // explicitly acts (the "Create DQL draft" action → the dql_block_draft route).
+          };
+          const result = await answerAgentic(answerLoopInput, {
+            policy: resolveOrchestratorPolicy({
+              config: readOrchestratorConfig(req.projectRoot),
+            }),
+            lane: agenticLaneForRequest(req),
+            legacy: answer,
+            // Handlers land lane by lane. Until one is registered every lane
+            // falls through, which is why enabling a lane early is safe.
+            handlers: {},
+            onDiagnostic: (event) => {
+              if (event.kind === 'fallback') {
+                console.warn(`[dql] agentic orchestrator fell back on ${event.lane}: ${event.reason}`);
+              }
+            },
           });
           const answerDurationMs = Date.now() - answerStartedAt;
           // CTX-002: an answer built from one snapshot must never be published
