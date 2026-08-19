@@ -624,6 +624,13 @@ export {
   withLedgerHarvest,
 } from "./agentic/ledger-tools.js";
 export {
+  createAnalystLaneHandler,
+  runAnalystLoop,
+  type AnalystLoopDeps,
+  type AnalystOutcome,
+  type AnalystStep,
+} from "./agentic/analyst-loop.js";
+export {
   DEFAULT_RESEARCH_LIMITS,
   applyFinding,
   concludeResearch,

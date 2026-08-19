@@ -37,6 +37,9 @@ import {
   prepareServerOwnedProviderSchemaContext,
   projectEmbeddingProvider,
   answerAgentic,
+  createAnalystLaneHandler,
+  parseProposal,
+  validateSqlAgainstLocalContext,
   resolveOrchestratorPolicy,
   type AgenticLane,
 } from '@duckcodeailabs/dql-agent';
@@ -769,12 +772,48 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             }),
             lane: agenticLaneForRequest(req),
             legacy: answer,
-            // Handlers land lane by lane. Until one is registered every lane
-            // falls through, which is why enabling a lane early is safe.
-            handlers: {},
+            // The generated lane runs the analyst loop: it verifies every
+            // identifier against a tool observation before the SQL is executed.
+            // Certified and semantic lanes are deliberately NOT registered —
+            // their answers already come from a governed contract, so a
+            // verification pass would add latency and no safety.
+            handlers: {
+              generated: createAnalystLaneHandler({
+                legacy: answer,
+                buildDeps: (loopInput) => {
+                  const tools = loopInput.answerLoopTools ?? [];
+                  if (process.env.DQL_ORCHESTRATOR_TRACE) {
+                    console.warn(`[dql] analyst loop deps: tools=${tools.length}`);
+                  }
+                  if (tools.length === 0) return undefined;
+                  return {
+                    tools,
+                    maxIterations: resolveOrchestratorPolicy({
+                      config: readOrchestratorConfig(req.projectRoot),
+                    }).maxIterations,
+                    // Reuse the legacy parser and validator rather than forking
+                    // a second SQL front end that would drift from the first.
+                    parseSql: (raw) => parseProposal(raw).sql,
+                    extractReferences: (sql) => {
+                      const validation = validateSqlAgainstLocalContext(sql, loopInput.contextPack);
+                      return {
+                        relations: validation.referencedRelations ?? [],
+                        columns: (validation.referencedColumns ?? []).map((column) => column.column),
+                      };
+                    },
+                  };
+                },
+              }),
+            },
             onDiagnostic: (event) => {
               if (event.kind === 'fallback') {
                 console.warn(`[dql] agentic orchestrator fell back on ${event.lane}: ${event.reason}`);
+              } else if (process.env.DQL_ORCHESTRATOR_TRACE) {
+                // Opt-in dispatch trace. A migration where the new path silently
+                // never runs looks identical to one where it runs and agrees,
+                // and that ambiguity costs more to debug than the log costs to
+                // carry.
+                console.warn(`[dql] agentic orchestrator dispatched lane=${event.lane} mode=${event.mode}`);
               }
             },
           });
