@@ -615,6 +615,16 @@ export {
   type AssumptionCandidate,
 } from "./agentic/assumptions.js";
 export {
+  PROMPT_TOKEN_BUDGETS,
+  estimateTokens,
+  packContext,
+  type PackItem,
+  type PackOptions,
+  type PackResult,
+  type PromptTokenBudget,
+  type TokenEstimator,
+} from "./cascade/packer.js";
+export {
   composeSemanticQueryForQuestion,
   composeSemanticQueryFromCompiledMembers,
   composeSemanticQueryFromMembers,
