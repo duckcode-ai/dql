@@ -1,0 +1,107 @@
+import { describe, it, expect, vi } from 'vitest';
+import type { AgentRun } from '@duckcodeailabs/dql-agent';
+import {
+  driveViaRuntime,
+  evalKindForRun,
+  evalRouteForRun,
+  projectRuntimeRun,
+  runtimeRunOutputs,
+  runtimeRunRefused,
+} from './agent-eval-runtime.js';
+
+const run = (over: Partial<AgentRun>): AgentRun => ({
+  id: 'run-1',
+  question: 'q',
+  requestedMode: 'ask',
+  route: 'generated_answer',
+  status: 'needs_review',
+  trustState: 'review_required',
+  stopReason: 'completed',
+  startedAt: '2026-01-01T00:00:00Z',
+  completedAt: '2026-01-01T00:00:01Z',
+  steps: [],
+  summary: '',
+  artifacts: [],
+  evaluations: [],
+  events: [],
+  nextActions: [],
+  repairAttempts: 0,
+  ...over,
+} as AgentRun);
+
+describe('runtime driver run projection', () => {
+  it('counts a blocked or clarifying run as a refusal', () => {
+    expect(runtimeRunRefused(run({ route: 'blocked', status: 'blocked' }))).toBe(true);
+    expect(runtimeRunRefused(run({ route: 'clarify', status: 'needs_clarification' }))).toBe(true);
+  });
+
+  it('does NOT count a review-required generated answer as a refusal', () => {
+    // The load-bearing distinction. When no governed plan freezes, a
+    // review-required generated answer is the intended outcome of the cascade.
+    // Scoring it as a refusal would make false_refusal_rate punish exactly the
+    // behaviour the cascade is supposed to produce.
+    const reviewRequired = run({ route: 'generated_answer', status: 'needs_review', trustState: 'review_required' });
+    expect(runtimeRunRefused(reviewRequired)).toBe(false);
+    expect(evalKindForRun(reviewRequired)).toBe('uncertified');
+  });
+
+  it('derives certification from TRUST, not from the route name', () => {
+    // A certified ROUTE that degraded to review-required must not score certified,
+    // or the harness would bless the exact mislabelling it should catch.
+    expect(evalKindForRun(run({ route: 'certified_answer', status: 'completed', trustState: 'certified' }))).toBe('certified');
+    expect(evalKindForRun(run({ route: 'certified_answer', status: 'needs_review', trustState: 'review_required' }))).toBe('uncertified');
+  });
+
+  it('maps engine routes onto the vocabulary the case files already use', () => {
+    expect(evalRouteForRun('certified_answer')).toBe('certified');
+    expect(evalRouteForRun('semantic_answer')).toBe('certified');
+    expect(evalRouteForRun('generated_answer')).toBe('generated_sql');
+    expect(evalRouteForRun('blocked')).toBe('clarify');
+    expect(evalRouteForRun('conversation')).toBeUndefined();
+  });
+
+  it('extracts SQL and rows from run artifacts', () => {
+    const withArtifact = run({
+      artifacts: [{
+        id: 'a1', kind: 'sql_cell', title: 'SQL', trustState: 'review_required',
+        payload: { sql: 'SELECT 1', result: { rows: [{ a: 1 }] } },
+      }],
+    } as Partial<AgentRun>);
+    expect(runtimeRunOutputs(withArtifact)).toEqual({ proposedSql: 'SELECT 1', rows: [{ a: 1 }] });
+    expect(runtimeRunOutputs(run({}))).toEqual({});
+  });
+
+  it('projects a blocked run with its failing evaluation id', () => {
+    const projected = projectRuntimeRun(run({
+      route: 'blocked', status: 'blocked', trustState: 'blocked',
+      evaluations: [{ id: 'grounding', label: 'Answer grounding', passed: false, severity: 'warning', message: 'no' }],
+    } as Partial<AgentRun>));
+    expect(projected).toMatchObject({ kind: 'no_answer', route: 'clarify', refusalCode: 'grounding' });
+  });
+});
+
+describe('driveViaRuntime', () => {
+  it('posts the question the Ask panel would post and returns the run', async () => {
+    const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
+      expect(url).toBe('http://127.0.0.1:3474/api/agent-runs');
+      expect(JSON.parse(String(init.body))).toMatchObject({ question: 'who are the top customers', requestedMode: 'ask' });
+      return { ok: true, status: 201, json: async () => ({ run: run({ id: 'run-42' }) }), text: async () => '' };
+    }) as unknown as typeof fetch;
+    const result = await driveViaRuntime({ runtimeBase: 'http://127.0.0.1:3474/', question: 'who are the top customers', fetchImpl });
+    expect(result.id).toBe('run-42');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts a bare run body as well as the wrapped one', async () => {
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 201, json: async () => run({ id: 'bare' }), text: async () => '' })) as unknown as typeof fetch;
+    await expect(driveViaRuntime({ runtimeBase: 'http://x', question: 'q', fetchImpl })).resolves.toMatchObject({ id: 'bare' });
+  });
+
+  it('throws on a transport failure instead of scoring it as a refusal', async () => {
+    // A harness that swallows this would report a false-refusal spike no code
+    // change caused, and send someone hunting a regression that does not exist.
+    const fetchImpl = vi.fn(async () => ({ ok: false, status: 500, text: async () => 'boom', json: async () => ({}) })) as unknown as typeof fetch;
+    await expect(driveViaRuntime({ runtimeBase: 'http://127.0.0.1:3474', question: 'q', fetchImpl }))
+      .rejects.toThrow(/Runtime returned 500/);
+  });
+});

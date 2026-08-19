@@ -444,4 +444,34 @@ describe('agent eval answer harness', () => {
     expect(metrics.refusal_recall).toBe(1);
   });
 
+  it('separates a dead end from an answerable clarification and a conversational decline', () => {
+    // Three outcomes, learned from a live runtime run against the jaffle fixture:
+    //   - no options            → dead end (the reported BCM loop)
+    //   - options offered       → answerable next turn; a cost, not a defect
+    //   - conversational reply  → asserts nothing about the data, so for an
+    //                             out-of-scope question it is the CORRECT outcome
+    // Collapsing any two of these misreports the product.
+    const base = {
+      failures: [] as string[], durationMs: 10, contextObjects: 1, followUp: false,
+      draftSaved: false, toolCalls: 0, trace: [] as never[],
+    };
+    const metrics = __test__.computeEvalMetrics([
+      { ...base, name: 'dead-end', passed: false, kind: 'no_answer', route: 'clarify',
+        clarificationOptionCount: 0, expected: { answerable: true } },
+      { ...base, name: 'asked-well', passed: true, kind: 'no_answer', route: 'clarify',
+        clarificationOptionCount: 2, expected: { answerable: true } },
+      { ...base, name: 'answered', passed: true, kind: 'uncertified', route: 'generated_sql',
+        expected: { answerable: true } },
+      { ...base, name: 'weather', passed: true, kind: 'uncertified', route: undefined,
+        conversational: true, expected: { answerable: false } },
+    ] as unknown as Parameters<typeof __test__.computeEvalMetrics>[0]);
+
+    expect(metrics.answerable_case_count).toBe(3);
+    expect(metrics.false_refusal_count).toBe(1);          // only the zero-option one
+    expect(metrics.false_refusal_rate).toBeCloseTo(1 / 3);
+    expect(metrics.clarification_rate).toBeCloseTo(1 / 3); // only the option-bearing one
+    // A conversational decline counts as correctly refusing an out-of-scope ask.
+    expect(metrics.refusal_recall).toBe(1);
+  });
+
 });

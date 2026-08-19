@@ -1,0 +1,203 @@
+/**
+ * Runtime driver for `dql agent eval`.
+ *
+ * The in-process driver calls `answer()` directly, which skips
+ * `createHybridRouter`, `AgentRunEngine`, `enforceOrdinaryAnalyticalPlanBoundary`
+ * and `defaultAgentRunGates`. Every dead-end this harness exists to measure lives
+ * in that skipped half — the router can block before the cascade runs, the engine
+ * synthesizes its own modeling-gap block, and the gates declare refusal codes
+ * terminal. Measuring the answer loop alone reports a cleaner picture than users
+ * experience.
+ *
+ * This driver posts the same body the Ask panel posts and scores the persisted
+ * `AgentRun`, so the suite exercises routing, gates, and the transport projection
+ * as a real end-to-end contract.
+ */
+import type { AgentAnswer, AgentRun, AgentRunRoute, AgentRunStatus, AgentRunTrustState } from '@duckcodeailabs/dql-agent';
+
+/** Eval-facing view of a run, shaped like the fields the scorer already reads. */
+export interface RuntimeDrivenRun {
+  kind: 'certified' | 'uncertified' | 'no_answer';
+  route?: 'certified' | 'generated_sql' | 'research' | 'clarify';
+  runRoute: AgentRunRoute;
+  status: AgentRunStatus;
+  trustState: AgentRunTrustState;
+  answer?: string;
+  proposedSql?: string;
+  rows?: unknown[];
+  clarificationOptionCount: number;
+  refusalCode?: string;
+  runId: string;
+  /**
+   * A conversational reply (greeting, capability, polite redirect). It asserts
+   * nothing about the data, so it is neither an answer nor a refusal — scoring it
+   * as either misreads the correct outcome for an out-of-scope question.
+   */
+  conversational: boolean;
+}
+
+/**
+ * Did this run decline to produce a usable answer?
+ *
+ * `needs_review` is deliberately NOT a refusal: a review-required generated
+ * answer is the intended outcome when no governed plan froze, and counting it as
+ * a refusal would make the false-refusal metric punish the very behaviour the
+ * cascade is supposed to produce.
+ */
+export function runtimeRunRefused(run: Pick<AgentRun, 'route' | 'status'>): boolean {
+  return run.route === 'blocked'
+    || run.route === 'clarify'
+    || run.status === 'blocked'
+    || run.status === 'needs_clarification';
+}
+
+/** Map an engine route onto the vocabulary the eval cases already use. */
+export function evalRouteForRun(route: AgentRunRoute): RuntimeDrivenRun['route'] {
+  switch (route) {
+    case 'certified_answer': return 'certified';
+    case 'semantic_answer': return 'certified';
+    case 'generated_answer': return 'generated_sql';
+    case 'research': return 'research';
+    case 'clarify':
+    case 'blocked': return 'clarify';
+    default: return undefined;
+  }
+}
+
+/**
+ * Collapse a run into the coarse `kind` the existing expectations assert.
+ * Certification follows TRUST, not route: a certified route that degraded to a
+ * review-required answer must not be scored as certified.
+ */
+export function evalKindForRun(run: Pick<AgentRun, 'route' | 'status' | 'trustState'>): RuntimeDrivenRun['kind'] {
+  if (runtimeRunRefused(run)) return 'no_answer';
+  if (run.trustState === 'certified') return 'certified';
+  return 'uncertified';
+}
+
+function firstArtifactPayload(run: AgentRun, kinds: string[]): Record<string, unknown> | undefined {
+  for (const artifact of run.artifacts ?? []) {
+    if (!kinds.includes(String(artifact.kind))) continue;
+    if (artifact.payload && typeof artifact.payload === 'object') {
+      return artifact.payload as Record<string, unknown>;
+    }
+  }
+  return undefined;
+}
+
+/** Pull SQL and result rows out of the run's artifacts, when it produced any. */
+export function runtimeRunOutputs(run: AgentRun): { proposedSql?: string; rows?: unknown[] } {
+  const payload = firstArtifactPayload(run, ['sql_cell', 'dql_block', 'generated_answer', 'answer', 'result']);
+  const sql = typeof payload?.sql === 'string'
+    ? payload.sql
+    : typeof payload?.compiledSql === 'string' ? payload.compiledSql : undefined;
+  const resultRecord = payload?.result && typeof payload.result === 'object'
+    ? payload.result as Record<string, unknown>
+    : undefined;
+  const rows = Array.isArray(resultRecord?.rows)
+    ? resultRecord.rows as unknown[]
+    : Array.isArray(payload?.rows) ? payload.rows as unknown[] : undefined;
+  return {
+    ...(sql ? { proposedSql: sql } : {}),
+    ...(rows ? { rows } : {}),
+  };
+}
+
+export function projectRuntimeRun(run: AgentRun): RuntimeDrivenRun {
+  const refusalEvaluation = (run.evaluations ?? []).find((evaluation) => !evaluation.passed);
+  return {
+    kind: evalKindForRun(run),
+    route: evalRouteForRun(run.route),
+    runRoute: run.route,
+    status: run.status,
+    trustState: run.trustState,
+    clarificationOptionCount: run.clarificationOptions?.length ?? 0,
+    runId: run.id,
+    conversational: run.route === 'conversation' || run.answerKind === 'conversational',
+    ...(run.answer ? { answer: run.answer } : {}),
+    ...(refusalEvaluation?.id ? { refusalCode: refusalEvaluation.id } : {}),
+    ...runtimeRunOutputs(run),
+  };
+}
+
+export interface RuntimeDriverOptions {
+  runtimeBase: string;
+  question: string;
+  requestedMode?: 'ask' | 'auto' | 'research';
+  threadId?: string;
+  timeoutMs?: number;
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Post one question to a running `dql serve` and return the persisted run.
+ *
+ * Failures are surfaced rather than swallowed: a harness that silently scores a
+ * transport error as a refusal would report a false-refusal spike that no code
+ * change caused.
+ */
+export async function driveViaRuntime(options: RuntimeDriverOptions): Promise<AgentRun> {
+  const base = options.runtimeBase.replace(/\/$/, '');
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 120_000);
+  try {
+    const response = await fetchImpl(`${base}/api/agent-runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: options.question,
+        requestedMode: options.requestedMode ?? 'ask',
+        ...(options.threadId ? { threadId: options.threadId } : {}),
+      }),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`Runtime returned ${response.status}: ${(await response.text()).slice(0, 400)}`);
+    }
+    // The endpoint wraps the record (`{ run }`); older/streamed paths return it
+    // bare. Accept both rather than guessing one and failing the whole suite.
+    const body = await response.json() as { run?: AgentRun } | AgentRun;
+    const run = (body as { run?: AgentRun }).run ?? body as AgentRun;
+    if (!run || typeof run.id !== 'string') {
+      throw new Error(`Runtime response was not an agent run: ${JSON.stringify(body).slice(0, 200)}`);
+    }
+    return run;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Adapt a persisted run into the `AgentAnswer` shape the existing scorer reads,
+ * so both drivers share one set of assertions.
+ *
+ * Fields the run genuinely does not carry are left UNDEFINED rather than
+ * defaulted. An expectation that references one then fails loudly instead of
+ * passing against a fabricated value — a harness that quietly invents
+ * `sourceTier` would report agreement it never observed.
+ */
+export function answerFromRuntimeRun(run: AgentRun): AgentAnswer {
+  const projected = projectRuntimeRun(run);
+  const certification = projected.kind === 'no_answer'
+    ? 'analyst_review_required'
+    : run.trustState === 'certified'
+      ? 'certified'
+      : run.trustState === 'review_required'
+        ? 'analyst_review_required'
+        : 'ai_generated';
+  return {
+    kind: projected.kind,
+    certification,
+    reviewStatus: run.trustState === 'review_required' ? 'analyst_review_required' : 'none',
+    text: run.answer ?? run.summary,
+    citations: [],
+    considered: [],
+    ...(projected.proposedSql ? { proposedSql: projected.proposedSql } : {}),
+    ...(projected.rows ? { result: { columns: [], rows: projected.rows, rowCount: projected.rows.length } } : {}),
+    ...(projected.refusalCode ? { refusalCode: projected.refusalCode } : {}),
+    // Carried so the scorer can tell an answerable clarification from a dead end.
+    ...(run.clarificationOptions?.length ? { clarificationOptions: run.clarificationOptions } : {}),
+    ...(projected.conversational ? { answerKind: 'conversational' } : {}),
+  } as unknown as AgentAnswer;
+}

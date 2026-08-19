@@ -22,6 +22,7 @@
  *     Records feedback into the KG. Used by clients without MCP access.
  */
 
+import { answerFromRuntimeRun, driveViaRuntime, evalRouteForRun } from './agent-eval-runtime.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
@@ -673,6 +674,14 @@ interface AgentEvalResult {
   toolCalls: number;
   judgeScore?: number;
   judgePass?: boolean;
+  /**
+   * Selectable options offered with a clarification. A clarification that offers
+   * real choices is answerable in one more turn; one that offers none is the
+   * dead end this suite exists to catch.
+   */
+  clarificationOptionCount?: number;
+  /** True when the run replied conversationally instead of asserting data. */
+  conversational?: boolean;
 }
 
 type AgentEvalTraceStageName =
@@ -718,10 +727,24 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
   const judge = Boolean((flags as { judge?: boolean }).judge);
   const judgeComplete: JudgeCompletion = async ({ system, user }) =>
     provider.generate([{ role: 'system', content: system }, { role: 'user', content: user }], {});
+  // Which half of the stack is under test. `loop` preserves today's behaviour;
+  // `runtime` is the one that exercises routing and gates end to end.
+  const via = (flags as { via?: string }).via === 'runtime' ? 'runtime' : 'loop';
   const runtimeBase = (flags as { runtimeUrl?: string; runtime?: string }).runtimeUrl
     ?? (flags as { runtime?: string }).runtime
     ?? process.env.DQL_RUNTIME_URL
     ?? 'http://127.0.0.1:3474';
+  if (via === 'runtime') {
+    // Fail fast and loudly. Without this, an unreachable server turns every case
+    // into a transport error and the report reads as a false-refusal spike that
+    // no code change caused.
+    const probe = await fetch(`${runtimeBase.replace(/\/$/, '')}/api/health`).catch(() => null);
+    if (!probe?.ok) {
+      throw new Error(
+        `--via runtime needs a running server at ${runtimeBase}. Start one with \`dql serve\`, or use --via loop to score the answer loop in-process.`,
+      );
+    }
+  }
   const semanticLayer = loadAgentSemanticLayer(projectRoot);
   const expandGroundingContext = createGroundingContextExpander(projectRoot);
   const answerLoopTools = buildAnswerLoopTools(projectRoot);
@@ -762,7 +785,16 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
             }
           : undefined,
       }).catch(() => undefined);
-      const result = await answer({
+      // `--via runtime` posts to a running `dql serve` so the case exercises the
+      // router, engine, plan boundary, and gates. The in-process driver below
+      // calls the answer loop directly and cannot observe any of them, which is
+      // why a refusal metric taken from it reads cleaner than users experience.
+      const runtimeRun = via === 'runtime'
+        ? await driveViaRuntime({ runtimeBase, question: testCase.question })
+        : undefined;
+      const result = runtimeRun
+        ? answerFromRuntimeRun(runtimeRun)
+        : await answer({
         question: testCase.question,
         domain: testCase.domain,
         domainContext: testCase.domain && manifest
@@ -861,7 +893,15 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
         executionMatched: evaluation.executionMatched,
         ...(judgeVerdict ? { judgeScore: judgeVerdict.score, judgePass: judgeVerdict.pass } : {}),
         kind: result.kind,
-        route: result.contextPack?.routeDecision.route,
+        route: runtimeRun ? evalRouteForRun(runtimeRun.route) : result.contextPack?.routeDecision.route,
+        // Only the runtime driver can see the router's clarification options.
+        // In-process runs leave this undefined, so a clarify there scores as a
+        // dead end — the conservative reading, and another reason `--via runtime`
+        // is the truthful one.
+        ...(runtimeRun ? {
+          clarificationOptionCount: runtimeRun.clarificationOptions?.length ?? 0,
+          conversational: runtimeRun.route === 'conversation' || runtimeRun.answerKind === 'conversational',
+        } : {}),
         intent: result.contextPack?.routeDecision.intent,
         reviewStatus: result.reviewStatus,
         contextObjects: result.contextPack?.objects.length ?? 0,
@@ -910,6 +950,7 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
   console.log(`Generated follow-up pass rate: ${formatRate(metrics.generated_followup_pass_rate)}`);
   console.log(`Safe refusal rate: ${formatRate(metrics.safe_refusal_rate)}`);
   console.log(`False refusal rate: ${formatRate(metrics.false_refusal_rate)} (${metrics.false_refusal_count}/${metrics.answerable_case_count} answerable cases refused)`);
+  console.log(`Clarification rate: ${formatRate(metrics.clarification_rate)} (answerable cases asked instead of answered)`);
   console.log(`Refusal recall: ${formatRate(metrics.refusal_recall)} (${metrics.refusal_required_case_count} case(s) that must refuse)`);
   console.log(`Execution match rate: ${formatRate(metrics.execution_match_rate)}`);
   console.log(`Tool requirement pass rate: ${formatRate(metrics.tool_requirement_pass_rate)}`);
@@ -964,12 +1005,22 @@ function evaluateCase(testCase: AgentEvalCase, result: Awaited<ReturnType<typeof
   // false_refusal_rate, so a single dead-end fails its own case instead of only
   // nudging a rate someone has to notice.
   const answerable = evalCaseIsAnswerable(expected);
-  const refused = result.kind === 'no_answer';
-  if (answerable === true && refused) {
-    failures.push(`FALSE REFUSAL: this question is answerable, but the run returned no_answer${
+  // Three distinct outcomes, not two. An option-bearing clarification neither
+  // answers nor dead-ends: it must not fail an answerable case (its cost is
+  // tracked by `clarification_rate`), and it must not fail a must-refuse case
+  // either, because it did not assert anything about the data.
+  const clarifiedWithOptions = (result.clarificationOptions?.length ?? 0) > 0;
+  // A conversational reply ("I'm here to help you explore your data…") asserts
+  // nothing about the warehouse. For an out-of-scope question that is the CORRECT
+  // outcome — declining politely — so it must not be scored as an answer.
+  const conversational = (result as { answerKind?: string }).answerKind === 'conversational';
+  const producedDataAnswer = result.kind !== 'no_answer' && !conversational;
+  const deadEnded = !producedDataAnswer && !clarifiedWithOptions;
+  if (answerable === true && deadEnded) {
+    failures.push(`FALSE REFUSAL: this question is answerable, but the run dead-ended with no answer and no options${
       result.refusalCode ? ` (${result.refusalCode})` : ''}`);
   }
-  if (answerable === false && !refused) {
+  if (answerable === false && producedDataAnswer) {
     failures.push(`expected a refusal (question is out of scope / unanswerable), but the run answered with kind ${result.kind}`);
   }
   if (expected.kind && result.kind !== expected.kind) failures.push(`kind expected ${expected.kind}, got ${result.kind}`);
@@ -1034,9 +1085,30 @@ export function evalCaseIsAnswerable(expected: AgentEvalCase['expected']): boole
   return true;
 }
 
-/** Did the run decline to produce a user-facing answer? */
-export function evalResultRefused(result: Pick<AgentEvalResult, 'kind' | 'route'>): boolean {
+/**
+ * Did the run leave the user with NO way forward?
+ *
+ * Deliberately narrower than "did not answer". A clarification that offers
+ * selectable options is answerable on the next turn — worth minimising, tracked
+ * separately as `clarification_rate`, but not the defect. A clarification with
+ * ZERO options is a true dead end: the reported production loop was exactly
+ * this, and a free-text reply to it reproduced the same question forever.
+ */
+export function evalResultRefused(
+  result: Pick<AgentEvalResult, 'kind' | 'route' | 'clarificationOptionCount'>,
+): boolean {
+  // Order matters: the drivers collapse every clarification to `no_answer`
+  // (it is not an answer), so the option check has to run FIRST or an
+  // option-bearing clarification is miscounted as a dead end.
+  if (result.route === 'clarify' && (result.clarificationOptionCount ?? 0) > 0) return false;
   return result.kind === 'no_answer' || result.route === 'clarify';
+}
+
+/** Did the run ask an answerable clarification rather than answering outright? */
+export function evalResultClarified(
+  result: Pick<AgentEvalResult, 'route' | 'clarificationOptionCount'>,
+): boolean {
+  return result.route === 'clarify' && (result.clarificationOptionCount ?? 0) > 0;
 }
 
 function computeEvalMetrics(results: AgentEvalResult[]) {
@@ -1088,8 +1160,22 @@ function computeEvalMetrics(results: AgentEvalResult[]) {
     false_refusal_rate: ratio(answerableCases.filter(evalResultRefused).length, answerableCases.length),
     false_refusal_count: answerableCases.filter(evalResultRefused).length,
     answerable_case_count: answerableCases.length,
-    /** The guard on the above: refusals that must STAY refusals. */
-    refusal_recall: ratio(refusalRequiredCases.filter(evalResultRefused).length, refusalRequiredCases.length),
+    /**
+     * Answerable cases that asked an option-bearing clarification instead of
+     * answering. Not a defect, but a direct cost in turns — read it next to
+     * false_refusal_rate so a fall in refusals is not just a rise in questions.
+     */
+    clarification_rate: ratio(answerableCases.filter(evalResultClarified).length, answerableCases.length),
+    /**
+     * The guard on the above: cases that must NOT produce a data answer.
+     * Scored on "did not answer" rather than "dead-ended", because declining via
+     * a clarification is still declining — what would be wrong is asserting
+     * something about data the project does not have.
+     */
+    refusal_recall: ratio(
+      refusalRequiredCases.filter((result) => result.kind === 'no_answer' || result.conversational === true).length,
+      refusalRequiredCases.length,
+    ),
     refusal_required_case_count: refusalRequiredCases.length,
     draft_saved_count: results.filter((result) => result.draftSaved).length,
     tool_observed_case_count: results.filter((result) => result.toolCalls > 0).length,
