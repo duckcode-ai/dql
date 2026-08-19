@@ -1394,10 +1394,40 @@ const MANIFEST_KINDS: KGNodeKind[] = ['dbt_model', 'dbt_source'];
  * surface shows THIS; the validator's machine message (relation ids, repair
  * tool guidance) belongs in refusalDetails/validationWarnings only.
  */
-function renderContextValidationRefusalForUser(
+/**
+ * Name the ONE aggregation check that actually fired.
+ *
+ * The refusal used to list all four possible causes — "rounding too early,
+ * losing decimal precision, summing a non-additive value, or multiplying rows
+ * across a join" — because the specific one was never plumbed into the message.
+ * The system knows: `aggregationIntegrityIssuesForSql` classifies each issue and
+ * the proof carries the codes. A menu of four causes reads as "something is
+ * wrong somewhere", which is exactly the report a user cannot act on.
+ */
+function aggregationRefusalReason(issueCodes: readonly string[] = []): string | undefined {
+  const codes = new Set(issueCodes.map((code) => code.toUpperCase()));
+  // Ordered by how badly each distorts the number, so a query tripping several
+  // leads with the one that matters most.
+  if (codes.has('FANOUT')) {
+    return 'joining those tables multiplies rows, so the total would be inflated. Aggregate at the row-level grain first, then join';
+  }
+  if (codes.has('NON_ADDITIVE_MEASURE')) {
+    return 'it sums a measure that is not additive (an average or a ratio cannot be added up). Ask for the governed metric, which carries the right rule';
+  }
+  if (codes.has('PREMATURE_ROUNDING')) {
+    return 'it rounds each value before adding them, which loses money at scale. Rounding belongs on the final total';
+  }
+  if (codes.has('LOSSY_NUMERIC_CAST')) {
+    return 'it converts amounts to floating point before adding them, which drifts on decimal currency';
+  }
+  return undefined;
+}
+
+export function renderContextValidationRefusalForUser(
   code: SqlContextValidationCode | undefined,
   machineError: string,
   memberBindings?: Array<{ dimension: string; values: string[] }>,
+  aggregationIssueCodes?: readonly string[],
 ): string {
   switch (code) {
     case 'unknown_relation':
@@ -1415,8 +1445,15 @@ function renderContextValidationRefusalForUser(
       return 'This comparison needs a baseline period or value that the drafted query did not include. Say what to compare against (for example, the prior month) and I will run it.';
     case 'unsafe_sql':
       return 'The drafted query used a statement type that is not allowed in this governed preview, so I did not run it.';
-    case 'unsafe_aggregation':
-      return 'I drafted a query, but it could change the metric meaning by rounding too early, losing decimal precision, summing a non-additive value, or multiplying rows across a join. I did not run it. Use the governed semantic metric, or review the native grain and join keys before retrying.';
+    case 'unsafe_aggregation': {
+      const reason = aggregationRefusalReason(aggregationIssueCodes);
+      if (reason) {
+        return `I drafted a query but did not run it, because ${reason}. Ask for the governed metric and I will use the safe version.`;
+      }
+      // No classified code reached us — say that plainly rather than listing
+      // every cause as if one of them were known to apply.
+      return 'I drafted a query, but it would change how the metric is calculated, so I did not run it. Ask for the governed semantic metric and I will use the safe version.';
+    }
     case 'insufficient_context':
       if (/could not be parsed|parse error|syntax/i.test(machineError)) {
         return 'I drafted a query, but its SQL syntax did not match the connected warehouse, so I did not run it. The failed draft is available in Inspect; retrying will generate a warehouse-specific query.';
@@ -4156,7 +4193,12 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     // Business-language chat text; the validator's machine message (with
     // relation ids and tool guidance for the repair prompt) stays in
     // refusalDetails + validationWarnings for the Inspect surface.
-    const text = renderContextValidationRefusalForUser(contextValidation.code, contextValidation.error, input.followUp?.memberBindings);
+    const text = renderContextValidationRefusalForUser(
+      contextValidation.code,
+      contextValidation.error,
+      input.followUp?.memberBindings,
+      contextValidation.aggregationSafetyProof?.issueCodes,
+    );
     const analysisPlan = buildAnalysisPlan({
       question,
       intent,

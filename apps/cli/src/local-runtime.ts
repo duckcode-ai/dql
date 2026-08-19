@@ -4226,7 +4226,10 @@ function analyticalFailureSummary(
       artifacts: isTerminalFailure
         ? [agentRunArtifact(
             'answer',
-            'Failed governed analytical run',
+            // Was 'Failed governed analytical run' — internal orchestration state
+            // used as the card heading a user reads. It names our pipeline, not
+            // what happened to their question.
+            terminalFailureTitle(governedAnswer),
             governedAnswer,
             governedAnswer.sourceCertifiedBlock ?? governedAnswer.block?.name,
             'blocked',
@@ -4412,6 +4415,25 @@ function analyticalFailureSummary(
       providerEgressReceipts: finalProviderEgressReceipts,
       telemetry: finalTelemetry,
     };
+  };
+
+  /**
+   * A heading for a run that ended without an answer, in the user's terms.
+   *
+   * Says WHICH stage stopped, because "it failed" and "it was stopped before
+   * running" call for different next moves: one is worth retrying, the other
+   * needs the question or the model changed.
+   */
+  const terminalFailureTitle = (answer: { refusalCode?: string }): string => {
+    switch (answer.refusalCode) {
+      case 'policy_blocked': return 'Blocked by a governance policy';
+      case 'modeling_gap': return 'Not modeled yet';
+      case 'grounding_gap': return 'Not enough context to answer safely';
+      case 'model_declined': return 'The assistant declined to answer';
+      case 'provider_error': return 'The AI provider did not respond';
+      case 'ambiguous': return 'Needs one detail before running';
+      default: return 'No answer was produced';
+    }
   };
 
   const conversationRunExecutor: AgentRouteExecutor = async ({ request, routeDecision, emitAnswerDelta }) => {
@@ -7392,7 +7414,10 @@ function analyticalFailureSummary(
     let invocation: ReturnType<typeof prepareBlockInvocation>;
     let plan: ReturnType<typeof buildExecutionPlan>;
     try {
-      const program = new Parser(repairedSource, '<bounded-dql-repair>').parse();
+      // The source label is echoed into parse errors, which reach the user.
+      // `<bounded-dql-repair>` is an internal artifact id and tells them nothing;
+      // it appeared verbatim in a reported failure card.
+      const program = new Parser(repairedSource, 'repaired query').parse();
       const blocks = program.statements.filter((statement) => statement.kind === NodeKind.BlockDecl);
       if (blocks.length !== 1 || program.statements.length !== 1) {
         throw new Error('The repaired source must contain exactly one DQL block.');

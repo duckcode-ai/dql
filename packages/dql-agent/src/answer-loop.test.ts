@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse, SemanticLayer, type DQLManifest } from "@duckcodeailabs/dql-core";
 import { KGStore } from "./kg/sqlite-fts.js";
-import { answer as answerBase, inferAnalyticalEntityIds, missingRankedGrainOutput, parseProposal, probeSemanticJoinFanout, compactSemanticRuntimeFailure, normalizeWarehouseSqlFailure, repairAmbiguousColumn, semanticTraceAfterExecution, tightenSourceTargetFlowProjection } from "./answer-loop.js";
+import { answer as answerBase, inferAnalyticalEntityIds, renderContextValidationRefusalForUser, missingRankedGrainOutput, parseProposal, probeSemanticJoinFanout, compactSemanticRuntimeFailure, normalizeWarehouseSqlFailure, repairAmbiguousColumn, semanticTraceAfterExecution, tightenSourceTargetFlowProjection } from "./answer-loop.js";
 import { analyticalError } from "./analytical-error.js";
 import { buildLocalContextPack } from "./metadata/catalog.js";
 import type { KGNode } from "./kg/types.js";
@@ -9070,5 +9070,37 @@ describe("repairAmbiguousColumn (generated SQL)", () => {
 
   it("returns undefined when the error is not an ambiguous-column error", () => {
     expect(repairAmbiguousColumn("SELECT 1", "connection reset", schema)).toBeUndefined();
+  });
+});
+
+describe('aggregation refusal names the one check that fired', () => {
+  const render = (codes?: string[]) =>
+    renderContextValidationRefusalForUser('unsafe_aggregation', 'machine detail', undefined, codes);
+
+  it('names a fan-out and what to do, not a menu of four causes', () => {
+    // Reported shape: "rounding too early, losing decimal precision, summing a
+    // non-additive value, or multiplying rows across a join" — a list of every
+    // possible cause reads as "something is wrong somewhere".
+    const text = render(['FANOUT']);
+    expect(text).toContain('multiplies rows');
+    expect(text).not.toContain('rounding too early');
+    expect(text).toContain('Aggregate at the row-level grain first');
+  });
+
+  it('distinguishes the other three causes', () => {
+    expect(render(['NON_ADDITIVE_MEASURE'])).toContain('not additive');
+    expect(render(['PREMATURE_ROUNDING'])).toContain('rounds each value before adding');
+    expect(render(['LOSSY_NUMERIC_CAST'])).toContain('floating point');
+  });
+
+  it('leads with the worst distortion when several fired', () => {
+    expect(render(['PREMATURE_ROUNDING', 'FANOUT'])).toContain('multiplies rows');
+  });
+
+  it('says so plainly when no code reached it, rather than listing every cause', () => {
+    const text = render([]);
+    expect(text).toContain('would change how the metric is calculated');
+    expect(text).not.toContain('rounding too early');
+    expect(render(undefined)).toBe(text);
   });
 });
