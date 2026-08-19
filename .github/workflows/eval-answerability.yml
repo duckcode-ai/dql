@@ -1,0 +1,113 @@
+name: Answerability (false-refusal baseline)
+
+# Publishes the false-refusal / refusal-recall / clarification numbers on every
+# PR, driving the REAL runtime so routing, the plan boundary, and the run gates
+# are all exercised. `dql agent eval --via loop` calls the answer loop directly
+# and skips every one of those — the half where the reported dead ends actually
+# live — so a refusal rate measured there reads cleaner than users experience.
+#
+# NON-BLOCKING ON PURPOSE, for now.
+# The plan is a ratchet, not a guess: publish the baseline for a couple of weeks,
+# then make this required with thresholds set at MEASURED performance minus a
+# small margin, and tighten the number in the same PR that improves it. A
+# threshold invented before the first run is either permanently red or quietly
+# disabled, and neither protects anything.
+#
+# Needs no API key and no cloud warehouse: the runtime starts against the
+# committed jaffle fixture. Note that WITHOUT a provider `mayAssumeInterpretation`
+# is false (AGT-017) and every ambiguous question clarifies by design, so the
+# clarification rate here is an artifact — the report says so itself. Recording
+# cassettes (DQL_EVAL_CASSETTE_DIR) is what makes that number meaningful, and
+# what will let this job gate on it.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  answerability:
+    name: answerability (runtime-driven, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - name: Start the runtime against the fixture
+        run: |
+          # The project path is REQUIRED: `dql notebook` resolves a project from
+          # it, and starting from the workspace root fails with "No DQL project
+          # was found". Verified by running this exact sequence locally.
+          #
+          # Replay mode with no cassettes committed yet: this can never reach a
+          # live model, which is exactly the property that makes it PR-safe.
+          mkdir -p "$RUNNER_TEMP/cassettes"
+          DQL_EVAL_CASSETTE_DIR="$RUNNER_TEMP/cassettes" \
+            node apps/cli/dist/index.js notebook apps/cli/test/fixtures/jaffle-supply-chain \
+              --port 3479 > runtime.log 2>&1 &
+          echo $! > runtime.pid
+          for i in $(seq 1 60); do
+            curl -sf -m 2 http://127.0.0.1:3479/api/health >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          echo "Runtime did not become healthy:" >&2
+          cat runtime.log >&2
+          exit 1
+
+      - name: Answerability suite
+        working-directory: apps/cli/test/fixtures/jaffle-supply-chain
+        run: |
+          node ../../../dist/index.js agent eval agent-evals/answerability.agent-evals.yml \
+            --via runtime --runtime-url http://127.0.0.1:3479 \
+            --format json > "$GITHUB_WORKSPACE/answerability-report.json"
+          cat "$GITHUB_WORKSPACE/answerability-report.json"
+
+      - name: Routing taxonomy suite
+        working-directory: apps/cli/test/fixtures/jaffle-supply-chain
+        run: |
+          node ../../../dist/index.js agent eval agent-evals/routing-taxonomy.agent-evals.yml \
+            --via runtime --runtime-url http://127.0.0.1:3479 \
+            --format json > "$GITHUB_WORKSPACE/routing-report.json"
+          cat "$GITHUB_WORKSPACE/routing-report.json"
+
+      - name: Summarise the headline numbers
+        if: always()
+        run: |
+          node -e "
+            const fs = require('fs');
+            for (const file of ['answerability-report.json', 'routing-report.json']) {
+              if (!fs.existsSync(file)) continue;
+              const report = JSON.parse(fs.readFileSync(file, 'utf8'));
+              const m = report.metrics ?? {};
+              const pct = (v) => (v === null || v === undefined ? 'n/a' : Math.round(v * 100) + '%');
+              console.log('## ' + file);
+              console.log('  passed:            ' + report.passed + '/' + report.total);
+              console.log('  false refusal:     ' + pct(m.false_refusal_rate) + '  (' + m.false_refusal_count + '/' + m.answerable_case_count + ')');
+              console.log('  refusal recall:    ' + pct(m.refusal_recall));
+              console.log('  clarification:     ' + pct(m.clarification_rate));
+              console.log('  meaning resolved:  ' + pct(m.meaning_resolved_rate) + (m.meaning_resolved_rate ? '' : '  <- clarification rate is an artifact without a provider'));
+            }
+          " >> "$GITHUB_STEP_SUMMARY"
+          cat "$GITHUB_STEP_SUMMARY"
+
+      - name: Stop the runtime
+        if: always()
+        run: kill "$(cat runtime.pid)" 2>/dev/null || true
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: answerability-reports
+          path: |
+            answerability-report.json
+            routing-report.json
+            runtime.log
+          if-no-files-found: ignore
