@@ -2300,6 +2300,52 @@ describe("AgentRunEngine — conversation route", () => {
     expect(run.answer).toContain('discovery window ended');
   });
 
+  it('returns findings already validated when the soft target elapses mid-plan, instead of blocking', async () => {
+    // Step 1 lands a finding, then the clock passes the 30s generated-answer
+    // soft target. Admission control stops step 2 from starting — but the run
+    // has something true to say, and throwing it away would make the user
+    // re-run the same investigation from zero.
+    let nowMs = 1_000;
+    const budget = createAgentRunBudget({
+      requestedMode: 'ask', startedAtMs: 0, nowMs: () => nowMs,
+      timeoutSignal: () => new AbortController().signal,
+    });
+    const twoStep: AgentRunPlanner = {
+      plan: ({ request }) => ({
+        source: 'deterministic',
+        rationale: 'two-step plan',
+        steps: [
+          { id: 's1', route: 'generated_answer', goal: request.question, successCriteria: [] },
+          { id: 's2', route: 'generated_answer', goal: 'second pass', successCriteria: [] },
+        ],
+      }),
+      replan: () => ({ decision: 'accept' }),
+    };
+    let executions = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-soft-partial', now: () => new Date(nowMs),
+      router: { decide: async () => ({ action: 'answer', confidence: 0.5, reason: 'no frozen plan', followsUp: false }) },
+      planner: twoStep,
+      executors: { generated_answer: () => {
+        executions += 1;
+        nowMs = 31_000; // step 2 will be refused admission
+        return {
+          answer: 'Revenue by month.',
+          status: 'needs_review' as const,
+          trustState: 'review_required' as const,
+          artifacts: [{ id: 'a1', kind: 'answer' as const, title: 'Revenue by month', trustState: 'review_required' as const, payload: {} }],
+        };
+      } },
+    });
+    const run = await engine.run({ question: 'revenue then margin', requestedMode: 'ask', runBudget: budget });
+
+    expect(executions).toBe(1);
+    expect(budget.mayStartDiscovery('generated_answer')).toBe(false);
+    expect(run.status).not.toBe('blocked');
+    expect(run.trustState).not.toBe('blocked');
+    expect(run.artifacts).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'a1' })]));
+  });
+
   it('stops new Research branches at 90s while retaining a validated partial executor result', async () => {
     let nowMs = 89_000;
     const budget = createAgentRunBudget({

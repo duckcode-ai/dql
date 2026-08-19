@@ -502,6 +502,11 @@ export interface AgentRouteExecutionContext {
   stepGoal?: string;
   /** Evaluations from the previous attempt (so executors can target the repair). */
   priorEvaluations?: AgentRunEvaluation[];
+  /**
+   * Artifacts this run has already validated. Read when the discovery budget
+   * elapses, so partial findings can be returned instead of thrown away.
+   */
+  priorArtifacts?: AgentRunArtifact[];
   /** The repair hint the loop wants this re-run to act on. */
   repairHint?: string;
   emit: (event: Omit<AgentRunEvent, "id" | "runId" | "at">) => void;
@@ -1414,6 +1419,7 @@ export class AgentRunEngine {
             attempt,
             stepGoal: planned.goal,
             priorEvaluations,
+            priorArtifacts: progress.artifacts,
             repairHint,
             emit,
             emitAnswerDelta: onAnswerDelta,
@@ -1983,7 +1989,7 @@ export class AgentRunEngine {
         && context.request.runBudget
         && !context.request.runBudget.mayStartDiscovery(context.route)
       ) {
-        return softBoundaryResult(context.route, context.request.runBudget);
+        return softBoundaryResult(context.route, context.request.runBudget, context.priorArtifacts);
       }
       const signal = context.request.runBudget?.hardSignal ?? context.request.signal;
       if (signal?.aborted) throw signal.reason ?? routeTimeoutError();
@@ -2284,8 +2290,39 @@ function enforceOrdinaryAnalyticalPlanBoundary(
   return rescueModelingGapForOrdinaryAsk(request, blocked, { requireGovernedEvidence: true }) ?? blocked;
 }
 
-function softBoundaryResult(route: AgentRunRoute, budget: AgentRunBudget): AgentRouteExecutorResult {
+function softBoundaryResult(
+  route: AgentRunRoute,
+  budget: AgentRunBudget,
+  priorArtifacts: readonly AgentRunArtifact[] = [],
+): AgentRouteExecutorResult {
   const seconds = Math.round(budget.softTargetMs(route) / 1_000);
+  // Admission control must never turn work that already validated into a
+  // refusal. A run that established findings and then ran out of clock has
+  // something true to say; answering `blocked` discards it and asks the user
+  // to start the same investigation over. Partial and labelled beats nothing.
+  const established = priorArtifacts.filter(
+    (artifact) => artifact.trustState !== "blocked" && artifact.trustState !== "not_applicable",
+  );
+  if (established.length > 0) {
+    const titles = established.map((artifact) => artifact.title).filter((title) => Boolean(title));
+    const named = titles.length === 1
+      ? titles[0]
+      : `${titles.slice(0, -1).join(", ")} and ${titles[titles.length - 1]}`;
+    const plural = established.length === 1;
+    return {
+      resolvedRoute: route,
+      status: "needs_review",
+      trustState: "review_required",
+      stopReason: "human_review_required",
+      summary: `The ${seconds}-second discovery target elapsed. Returning what was established rather than discarding it.`,
+      answer: titles.length > 0
+        ? `The discovery window ended before the whole question was covered, so this is partial: ${named}. ${plural ? "It was" : "They were"} validated before the clock ran out; nothing beyond ${plural ? "it" : "them"} was investigated. Continue to pick up from here.`
+        : `The discovery window ended before the whole question was covered. ${established.length} validated finding${plural ? "" : "s"} from this run ${plural ? "is" : "are"} attached; nothing beyond ${plural ? "it" : "them"} was investigated.`,
+      artifacts: [...established],
+      evaluations: [],
+      nextActions: [{ id: "continue-after-soft-target", label: "Continue the investigation" }],
+    };
+  }
   return {
     resolvedRoute: 'clarify',
     status: 'needs_clarification',
