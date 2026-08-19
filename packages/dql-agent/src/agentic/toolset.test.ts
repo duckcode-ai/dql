@@ -102,3 +102,53 @@ describe('check_compatibility', () => {
     expect(result.error).toMatch(/at least one governed metric/i);
   });
 });
+
+describe('explain_metric', () => {
+  const layer = new SemanticLayer({
+    metrics: [
+      { name: 'booked_revenue', label: 'Booked revenue', description: 'Revenue at contract signature.',
+        domain: 'finance', sql: 'SUM(amount)', type: 'sum', table: 'orders', owner: 'fin@example.com',
+        filters: { stage: "= 'booked'" } },
+      { name: 'billed_revenue', label: 'Billed revenue', description: 'Revenue at invoice.',
+        domain: 'finance', sql: 'SUM(amount)', type: 'sum', table: 'invoices' },
+    ],
+    dimensions: [],
+  });
+  const tool = () => buildSemanticStageTools({ semanticLayer: layer, kg: undefined as never })
+    .find((entry) => entry.name === 'explain_metric')!;
+
+  it('is exposed with the other governed semantic tools', () => {
+    expect(tool()).toBeDefined();
+  });
+
+  it('reads a definition without running anything', async () => {
+    const result = await tool().run({ metric: 'booked_revenue' }) as Record<string, unknown>;
+    expect(result).toMatchObject({
+      found: true, name: 'booked_revenue', expression: 'SUM(amount)',
+      table: 'orders', owner: 'fin@example.com',
+    });
+  });
+
+  it('surfaces the definition filter that makes two similar metrics disagree', async () => {
+    // booked vs billed revenue share an expression; the filter is the difference,
+    // and it is the whole reason the numbers differ.
+    const booked = await tool().run({ metric: 'booked_revenue' }) as Record<string, unknown>;
+    expect(booked.definitionFilters).toEqual({ stage: "= 'booked'" });
+  });
+
+  it('matches on the leaf so a qualified name resolves', async () => {
+    expect(await tool().run({ metric: 'finance.billed_revenue' })).toMatchObject({ name: 'billed_revenue' });
+  });
+
+  it('names near misses instead of only failing', async () => {
+    // A wrong metric name is usually a near miss, and the alternatives ARE the
+    // correction the loop needs.
+    const result = await tool().run({ metric: 'revenue' }) as { found: boolean; didYouMean?: string[] };
+    expect(result.found).toBe(false);
+    expect(result.didYouMean).toEqual(expect.arrayContaining(['booked_revenue', 'billed_revenue']));
+  });
+
+  it('refuses an empty request with a message', async () => {
+    expect(await tool().run({ metric: '  ' })).toMatchObject({ error: expect.stringMatching(/governed metric name/i) });
+  });
+});

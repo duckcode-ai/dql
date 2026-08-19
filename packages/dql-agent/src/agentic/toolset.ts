@@ -63,6 +63,7 @@ export function buildSemanticStageTools(input: SemanticStageToolsInput): AgentTo
     tools.unshift(searchSemanticLayerTool(input.semanticLayer));
     tools.push(compileSemanticQueryTool(input));
     tools.push(checkCompatibilityTool(input.semanticLayer));
+    tools.push(explainMetricTool(input.semanticLayer));
   }
   return tools;
 }
@@ -79,6 +80,74 @@ export function buildSemanticStageTools(input: SemanticStageToolsInput): AgentTo
  * already computes both halves with typed reasons — it was simply never exposed
  * where the agent could ask.
  */
+/**
+ * Explain what a governed metric MEANS, without computing it.
+ *
+ * The loop can find a metric and compile it, but it could not read its
+ * definition — so a question about meaning ("what counts as revenue here?", "why
+ * is this different from bookings?") had to be answered by running the number
+ * and describing the output, which answers a different question.
+ *
+ * Everything here is already in the semantic layer. Surfacing it also gives the
+ * loop a cheap way to DISAMBIGUATE: two similarly named metrics are usually
+ * distinguishable from their expression and filters alone, with no execution.
+ */
+function explainMetricTool(layer: SemanticLayer): AgentToolDefinition {
+  return {
+    name: 'explain_metric',
+    description:
+      'Read a governed metric\'s definition: its expression, aggregation, backing table, filters, owner, and description. Use it to answer what a metric MEANS, and to tell two similarly named metrics apart, without running a query.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['metric'],
+      properties: {
+        metric: { type: 'string', description: 'Metric name exactly as returned by search_semantic_layer.' },
+      },
+    },
+    run: async (args) => {
+      const { metric } = objectArg(args);
+      const name = typeof metric === 'string' ? metric.trim() : '';
+      if (!name) return { error: 'Pass a governed metric name from search_semantic_layer.' };
+      const all = layer.listMetrics(undefined, { includeMeasures: true });
+      const found = all.find((entry) => entry.name === name)
+        ?? all.find((entry) => entry.name.toLowerCase() === name.toLowerCase())
+        // A leaf match, so `orders.revenue` finds `revenue` and vice versa.
+        ?? all.find((entry) => entry.name.toLowerCase().split('.').pop() === name.toLowerCase().split('.').pop());
+      if (!found) {
+        // Name the near misses rather than just failing: a wrong metric name is
+        // usually a near miss, and the alternatives are the correction.
+        const nearby = all
+          .filter((entry) => entry.name.toLowerCase().includes(name.toLowerCase().split('.').pop() ?? ''))
+          .slice(0, 5)
+          .map((entry) => entry.name);
+        return {
+          found: false,
+          error: `No governed metric named "${name}".`,
+          ...(nearby.length > 0 ? { didYouMean: nearby } : {}),
+        };
+      }
+      return {
+        found: true,
+        name: found.name,
+        label: found.label,
+        description: found.description,
+        expression: found.sql,
+        aggregation: found.aggregation ?? found.type,
+        table: found.table,
+        domain: found.domain,
+        ...(found.owner ? { owner: found.owner } : {}),
+        ...(found.status ? { status: found.status } : {}),
+        // Filters baked into the definition are the usual reason two similar
+        // metrics disagree, so they are reported explicitly.
+        ...(found.filters && Object.keys(found.filters).length > 0 ? { definitionFilters: found.filters } : {}),
+        ...(typeof found.filter === 'string' && found.filter ? { definitionFilter: found.filter } : {}),
+        ...(found.semanticModelIds?.length ? { semanticModels: found.semanticModelIds } : {}),
+      };
+    },
+  };
+}
+
 function checkCompatibilityTool(layer: SemanticLayer): AgentToolDefinition {
   return {
     name: 'check_compatibility',

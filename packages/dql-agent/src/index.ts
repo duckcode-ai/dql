@@ -636,6 +636,14 @@ export {
   type PreviewExecutor,
 } from "./agentic/preview-tool.js";
 export {
+  buildSearchValuesTool,
+  buildValueProbeSql,
+  isProbeSafeColumn,
+  type ProbeColumn,
+  type ProbeRelation,
+  type SearchValuesOptions,
+} from "./agentic/value-probe.js";
+export {
   DEFAULT_RESEARCH_LIMITS,
   applyFinding,
   concludeResearch,

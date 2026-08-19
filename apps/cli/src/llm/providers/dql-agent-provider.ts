@@ -38,6 +38,7 @@ import {
   projectEmbeddingProvider,
   answerAgentic,
   buildPreviewQueryTool,
+  buildSearchValuesTool,
   createAnalystLaneHandler,
   parseProposal,
   validateSqlAgainstLocalContext,
@@ -347,24 +348,43 @@ function emitProposalFromText(text: string, emit: (turn: AgentTurn) => void): vo
  * `resolveOrchestratorPolicy` turns into `legacy` — a broken config must not
  * route real questions onto an unproven path.
  */
-const orchestratorConfigCache = new Map<string, Record<string, unknown> | null>();
+const agentConfigCache = new Map<string, Record<string, unknown> | null>();
 
-function readOrchestratorConfig(projectRoot: string): Record<string, unknown> | null {
-  const cached = orchestratorConfigCache.get(projectRoot);
+function readAgentConfig(projectRoot: string): Record<string, unknown> | null {
+  const cached = agentConfigCache.get(projectRoot);
   if (cached !== undefined) return cached;
   let resolved: Record<string, unknown> | null = null;
   try {
     const raw = readFileSync(join(projectRoot, 'dql.config.json'), 'utf-8');
-    const parsed = JSON.parse(raw) as { agent?: { orchestrator?: unknown } };
-    const orchestrator = parsed?.agent?.orchestrator;
-    resolved = orchestrator && typeof orchestrator === 'object'
-      ? orchestrator as Record<string, unknown>
+    const parsed = JSON.parse(raw) as { agent?: unknown };
+    resolved = parsed?.agent && typeof parsed.agent === 'object'
+      ? parsed.agent as Record<string, unknown>
       : null;
   } catch {
     resolved = null;
   }
-  orchestratorConfigCache.set(projectRoot, resolved);
+  agentConfigCache.set(projectRoot, resolved);
   return resolved;
+}
+
+function readOrchestratorConfig(projectRoot: string): Record<string, unknown> | null {
+  const orchestrator = readAgentConfig(projectRoot)?.orchestrator;
+  return orchestrator && typeof orchestrator === 'object' ? orchestrator as Record<string, unknown> : null;
+}
+
+/**
+ * Is on-demand value lookup permitted for this project?
+ *
+ * Mirrors `resolveAgentRuntimeValueGrounding`, read locally rather than imported
+ * — local-runtime imports this module, so reaching back would close a cycle
+ * through a 34k-line file. Anything other than an explicit `safe_automatic`
+ * resolves to disabled: value lookup touches warehouse cell values, so a
+ * malformed setting must fail closed.
+ */
+function valueLookupEnabled(projectRoot: string): boolean {
+  const grounding = readAgentConfig(projectRoot)?.runtimeValueGrounding;
+  if (!grounding || typeof grounding !== 'object') return false;
+  return (grounding as { mode?: unknown }).mode === 'safe_automatic';
 }
 
 /**
@@ -787,14 +807,34 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
                   // surface: the warehouse resolving a name is the strongest
                   // evidence it exists. Only offered when an executor is
                   // present — without one the tool could only ever fail.
+                  const execute = loopInput.executeGeneratedSql;
+                  // `search_values` is the antidote to the recorded false-absence
+                  // defect: without it a named member can never become a filter,
+                  // the plan freezes filterless, and a truncated result gets
+                  // narrated as absence. Probing is opt-in per project, and the
+                  // tool says so rather than returning a silent empty result —
+                  // "did not look" and "looked and found nothing" are different
+                  // facts, and only one of them licenses an absence claim.
+                  const valuesEnabled = valueLookupEnabled(req.projectRoot);
                   const tools = [
                     ...(loopInput.answerLoopTools ?? []),
-                    ...(loopInput.executeGeneratedSql
-                      ? [buildPreviewQueryTool((sql) => loopInput.executeGeneratedSql!(sql))]
+                    ...(execute ? [buildPreviewQueryTool((sql) => execute(sql))] : []),
+                    ...(execute
+                      ? [buildSearchValuesTool({
+                          execute: async (sql) => execute(sql),
+                          relations: (loopInput.schemaContext ?? []).map((table) => ({
+                            relation: table.relation,
+                            columns: (table.columns ?? []).map((column) => ({
+                              name: column.name,
+                              ...(column.type ? { type: column.type } : {}),
+                            })),
+                          })),
+                          enabled: valuesEnabled,
+                        })]
                       : []),
                   ];
                   if (process.env.DQL_ORCHESTRATOR_TRACE) {
-                    console.warn(`[dql] analyst loop deps: tools=${tools.length} preview=${Boolean(loopInput.executeGeneratedSql)}`);
+                    console.warn(`[dql] analyst loop deps: tools=${tools.length} preview=${Boolean(execute)} values=${valuesEnabled}`);
                   }
                   if (tools.length === 0) return undefined;
                   return {

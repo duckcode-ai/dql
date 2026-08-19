@@ -312,6 +312,7 @@ import {
   createCascadeTrace,
   routeReasoningEffort,
   createAgentRunBudget,
+  isProbeSafeColumn,
   deadlineScale,
   routeForCascadeAnswerTier,
   clampReasoningEffort,
@@ -1889,11 +1890,7 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
    * from what it already has.
    */
   private expectedDispatchMs(): number {
-    if (this.observedDispatchDurations.length === 0) return ASSUMED_PROVIDER_DISPATCH_MS;
-    const sorted = [...this.observedDispatchDurations].sort((left, right) => left - right);
-    // The slowest observed call is the honest predictor: an optimistic median
-    // still admits a dispatch that the deadline then kills.
-    return sorted[sorted.length - 1]!;
+    return predictDispatchMs(this.observedDispatchDurations);
   }
 
   /** True when the remaining wall clock cannot fit another provider call. */
@@ -32458,6 +32455,31 @@ const RUNTIME_SNAPSHOT_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
  * setting moves the provider's whole time envelope together rather than leaving
  * an inner bound to silently cap an outer one.
  */
+/**
+ * Predict how long the next provider call will take, for admission control.
+ *
+ * With fewer than three samples the MAX is the only honest predictor: there is
+ * no distribution yet, and admitting a call the deadline then kills wastes the
+ * whole remaining budget.
+ *
+ * With a real sample, p75 rather than the max. One slow response — a cold model
+ * load, a retried connection — otherwise poisons admission control for the rest
+ * of the run: every later call is refused against a worst case that already
+ * passed. A recorded run tripped RUN_DEADLINE_INSUFFICIENT 6.4s into a 45s
+ * budget for exactly that reason. p75 still errs slow, so a genuinely slow
+ * provider is still respected.
+ */
+export function predictDispatchMs(
+  observed: readonly number[],
+  assumedMs: number = ASSUMED_PROVIDER_DISPATCH_MS,
+): number {
+  if (observed.length === 0) return assumedMs;
+  const sorted = [...observed].sort((left, right) => left - right);
+  if (sorted.length < 3) return sorted[sorted.length - 1]!;
+  const index = Math.max(0, Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.75) - 1));
+  return sorted[index]!;
+}
+
 const AGENT_MEANING_TIMEOUT_BASE_MS = 10_000;
 const AGENT_MEANING_TIMEOUT_MS = AGENT_MEANING_TIMEOUT_BASE_MS * deadlineScale();
 
@@ -33999,46 +34021,9 @@ function scoreAgentValueProbeColumn(table: AgentSchemaTable, column: AgentSchema
 }
 
 export function isAgentValueProbeColumn(column: AgentSchemaTable['columns'][number]): boolean {
-  const name = column.name.toLowerCase();
-  // Tokenize underscore/camel names before applying the hard deny-list. This is
-  // intentionally independent of an allowlist: secrets and free-text payloads
-  // can never be probed through automatic grounding.
-  const normalizedName = column.name
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/[_-]+/g, ' ')
-    .toLowerCase();
-  if (/\b(password|secret|token|credential|hash|salt|notes?|comments?|description|message|body|payload|content)\b/.test(normalizedName)) return false;
-  if (/\bemail\b/.test(normalizedName)) return false;
-  if (!hasAgentSchemaToken(name, [
-    'account',
-    'category',
-    'channel',
-    'city',
-    'code',
-    'country',
-    'customer',
-    'email',
-    'full',
-    'id',
-    'key',
-    'member',
-    'name',
-    'number',
-    'product',
-    'region',
-    'segment',
-    'sku',
-    'state',
-    'status',
-    'subscriber',
-    'type',
-    'user',
-  ])) {
-    return false;
-  }
-  const type = column.type?.toLowerCase() ?? '';
-  if (!type) return true;
-  return /\b(char|character|clob|email|string|text|uuid|varchar)\b/.test(type);
+  // Delegates to the canonical predicate in dql-agent. Two copies of a security
+  // rule drift, and the one that drifts is the one nobody is looking at.
+  return isProbeSafeColumn({ name: column.name, ...(column.type ? { type: column.type } : {}) });
 }
 
 export function buildAgentValueProbeSql(
