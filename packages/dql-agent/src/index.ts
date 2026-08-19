@@ -631,6 +631,11 @@ export {
   type AnalystStep,
 } from "./agentic/analyst-loop.js";
 export {
+  boundedPreviewSql,
+  buildPreviewQueryTool,
+  type PreviewExecutor,
+} from "./agentic/preview-tool.js";
+export {
   DEFAULT_RESEARCH_LIMITS,
   applyFinding,
   concludeResearch,

@@ -37,6 +37,7 @@ import {
   prepareServerOwnedProviderSchemaContext,
   projectEmbeddingProvider,
   answerAgentic,
+  buildPreviewQueryTool,
   createAnalystLaneHandler,
   parseProposal,
   validateSqlAgainstLocalContext,
@@ -781,9 +782,19 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
               generated: createAnalystLaneHandler({
                 legacy: answer,
                 buildDeps: (loopInput) => {
-                  const tools = loopInput.answerLoopTools ?? [];
+                  // `preview_query` is what lets the loop ESTABLISH identifiers
+                  // rather than only verify ones another tool happened to
+                  // surface: the warehouse resolving a name is the strongest
+                  // evidence it exists. Only offered when an executor is
+                  // present — without one the tool could only ever fail.
+                  const tools = [
+                    ...(loopInput.answerLoopTools ?? []),
+                    ...(loopInput.executeGeneratedSql
+                      ? [buildPreviewQueryTool((sql) => loopInput.executeGeneratedSql!(sql))]
+                      : []),
+                  ];
                   if (process.env.DQL_ORCHESTRATOR_TRACE) {
-                    console.warn(`[dql] analyst loop deps: tools=${tools.length}`);
+                    console.warn(`[dql] analyst loop deps: tools=${tools.length} preview=${Boolean(loopInput.executeGeneratedSql)}`);
                   }
                   if (tools.length === 0) return undefined;
                   return {
