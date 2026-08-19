@@ -1,0 +1,66 @@
+# Routing taxonomy cases — where a question SHOULD land, and what it must not do.
+#
+# Complements answerability.agent-evals.yml: that file asks "did the turn leave
+# the user somewhere?", this one asks "did it land in the right lane?". Both are
+# needed. A suite that only measures refusals can be satisfied by answering
+# everything from raw SQL, which would quietly discard the governed layer the
+# product is built on.
+#
+# Certified assets: top_customers (customer grain), top_products (product grain),
+# food_vs_drink_revenue (category grain).
+# Raw: order_items, fct_orders, dim_customers, supplies.
+#
+# HOW TO RUN (needs a running server; no provider needed for the routing half):
+#   dql agent eval apps/cli/test/fixtures/jaffle-supply-chain/agent-evals/routing-taxonomy.agent-evals.yml \
+#     --via runtime --format json
+
+cases:
+  # ── certified: an exact-fit block should be reached, not regenerated ─────────
+  - name: "certified: the exact example question reaches its block"
+    question: "What is revenue by food and drink?"
+    expected:
+      answerable: true
+
+  - name: "certified: product revenue ranking reaches the product block"
+    question: "What are the top products by revenue?"
+    expected:
+      answerable: true
+
+  # ── conversational: no data routing at all ──────────────────────────────────
+  - name: "conversational: a greeting must not enter the data cascade"
+    question: "hi"
+    expected:
+      answerable: false
+
+  - name: "conversational: a capability question is answered, not queried"
+    question: "what can you do?"
+    expected:
+      answerable: false
+
+  # ── business explanation: definitional, no SQL required ──────────────────────
+  - name: "business: asking what a certified block means is answerable"
+    # Today this routes definitionally rather than to SQL. It is answerable
+    # either way — the case exists so a regression into a refusal is visible.
+    question: "what does the top_customers block measure?"
+    expected:
+      answerable: true
+
+  # ── generated: no governed coverage, must not dead-end ──────────────────────
+  - name: "generated: supply cost detail has no block and must still answer"
+    question: "what is the total supply cost per product?"
+    expected:
+      answerable: true
+
+  - name: "generated: a cross-table question with no certified path must answer"
+    question: "how many distinct products did each customer order?"
+    expected:
+      answerable: true
+
+  # ── grain traps: the question is answerable but must not be silently wrong ───
+  - name: "grain: a category question must not be answered at product grain"
+    # food_vs_drink_revenue answers a food/drink split; product_type is a
+    # different grain. Answerable either way; the trap is scored by the class-B
+    # execution suite, not here.
+    question: "show revenue by product category"
+    expected:
+      answerable: true

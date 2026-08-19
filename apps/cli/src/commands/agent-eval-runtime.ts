@@ -34,6 +34,17 @@ export interface RuntimeDrivenRun {
    * as either misreads the correct outcome for an out-of-scope question.
    */
   conversational: boolean;
+  /**
+   * Did the meaning resolver actually run for this turn?
+   *
+   * With no provider configured it cannot, and `mayAssumeInterpretation` goes
+   * false (AGT-017) — DQL deliberately refuses to settle `booked_revenue` vs
+   * `billed_revenue` by lexical rank with semantic judgment switched off. Every
+   * ambiguous question then clarifies. That is correct behaviour, but it makes a
+   * clarification rate measured without a provider meaningless, so the harness
+   * has to be able to say so.
+   */
+  meaningResolved: boolean;
 }
 
 /**
@@ -114,6 +125,7 @@ export function projectRuntimeRun(run: AgentRun): RuntimeDrivenRun {
     clarificationOptionCount: run.clarificationOptions?.length ?? 0,
     runId: run.id,
     conversational: run.route === 'conversation' || run.answerKind === 'conversational',
+    meaningResolved: Boolean(run.routeDecision?.meaningResolution),
     ...(run.answer ? { answer: run.answer } : {}),
     ...(refusalEvaluation?.id ? { refusalCode: refusalEvaluation.id } : {}),
     ...runtimeRunOutputs(run),

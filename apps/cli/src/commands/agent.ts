@@ -682,6 +682,8 @@ interface AgentEvalResult {
   clarificationOptionCount?: number;
   /** True when the run replied conversationally instead of asserting data. */
   conversational?: boolean;
+  /** True when the meaning resolver ran (a provider was reachable). */
+  meaningResolved?: boolean;
 }
 
 type AgentEvalTraceStageName =
@@ -901,6 +903,7 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
         ...(runtimeRun ? {
           clarificationOptionCount: runtimeRun.clarificationOptions?.length ?? 0,
           conversational: runtimeRun.route === 'conversation' || runtimeRun.answerKind === 'conversational',
+          meaningResolved: Boolean(runtimeRun.routeDecision?.meaningResolution),
         } : {}),
         intent: result.contextPack?.routeDecision.intent,
         reviewStatus: result.reviewStatus,
@@ -951,6 +954,13 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
   console.log(`Safe refusal rate: ${formatRate(metrics.safe_refusal_rate)}`);
   console.log(`False refusal rate: ${formatRate(metrics.false_refusal_rate)} (${metrics.false_refusal_count}/${metrics.answerable_case_count} answerable cases refused)`);
   console.log(`Clarification rate: ${formatRate(metrics.clarification_rate)} (answerable cases asked instead of answered)`);
+  if (metrics.meaning_resolved_rate !== null && metrics.meaning_resolved_rate < 1) {
+    console.log(
+      `  ! Semantic judgment ran for only ${formatRate(metrics.meaning_resolved_rate)} of cases. `
+      + 'Without a reachable provider DQL will not settle a reading by lexical rank (AGT-017), so ambiguous '
+      + 'questions clarify by design — treat the clarification rate above as an artifact, not a product signal.',
+    );
+  }
   console.log(`Refusal recall: ${formatRate(metrics.refusal_recall)} (${metrics.refusal_required_case_count} case(s) that must refuse)`);
   console.log(`Execution match rate: ${formatRate(metrics.execution_match_rate)}`);
   console.log(`Tool requirement pass rate: ${formatRate(metrics.tool_requirement_pass_rate)}`);
@@ -1166,6 +1176,12 @@ function computeEvalMetrics(results: AgentEvalResult[]) {
      * false_refusal_rate so a fall in refusals is not just a rise in questions.
      */
     clarification_rate: ratio(answerableCases.filter(evalResultClarified).length, answerableCases.length),
+    /**
+     * Cases where semantic judgment ran. Without a provider `mayAssumeInterpretation`
+     * is false (AGT-017), so every ambiguous question clarifies by design and
+     * `clarification_rate` says nothing about product quality.
+     */
+    meaning_resolved_rate: ratio(results.filter((result) => result.meaningResolved === true).length, results.length),
     /**
      * The guard on the above: cases that must NOT produce a data answer.
      * Scored on "did not answer" rather than "dead-ended", because declining via
