@@ -7,6 +7,7 @@
  * Approved-only is enforced at the retrieval boundary (`searchApprovedHints`).
  */
 
+import { isRealEmbeddingProvider } from '../metadata/metric-match.js';
 import { dirname } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -44,6 +45,9 @@ function loadDatabase(): typeof Database {
   databaseCtor ??= require('better-sqlite3') as typeof Database;
   return databaseCtor;
 }
+
+/** Vector weight for hint retrieval once a real embedder is configured. */
+const HINT_EMBEDDING_ALPHA = 0.35;
 
 export interface SearchApprovedHintsOptions {
   questionScope: QuestionScope;
@@ -369,7 +373,11 @@ export class HintStore {
 
     if (scoped.length === 0) return [];
 
-    // Hybrid rank (Part B). alpha defaults to 0 → pure FTS5 ordering.
+    // Hybrid rank (Part B). With the offline hashed provider the "vector" score is
+    // token-hash overlap — a noisier copy of the lexical score it would be blended
+    // with — so alpha stays 0 and `hybridRank` short-circuits without embedding.
+    // A project-configured embedder carries real meaning, which is exactly the
+    // signal lexical ranking cannot produce, so it earns a real weight.
     const ranked = await hybridRank(
       questionScope.text,
       scoped.map((entry) => ({
@@ -377,10 +385,13 @@ export class HintStore {
         text: `${entry.hint.title} ${hintLessonSearchText(entry.hint)} ${(entry.hint.tags ?? []).join(' ')}`,
         ftsScore: entry.retrievalScore,
       })),
-      {
-        alpha: options.alpha ?? 0,
-        provider: options.embeddingProvider ?? envEmbeddingProvider(),
-      },
+      (() => {
+        const provider = options.embeddingProvider ?? envEmbeddingProvider();
+        return {
+          alpha: options.alpha ?? (isRealEmbeddingProvider(provider) ? HINT_EMBEDDING_ALPHA : 0),
+          provider,
+        };
+      })(),
     );
 
     return ranked.slice(0, limit).map((entry) => ({
