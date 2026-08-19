@@ -1300,6 +1300,67 @@ Use the finance model area.
     );
   });
 
+  it('gives a DOCUMENTED column a vector, and leaves undocumented ones to the lexical lane', async () => {
+    // A question phrased in column vocabulary ("which field holds the customer's
+    // tier?") had NO semantic recall path: columns were excluded from the vector
+    // index as a class. That is exactly the case where the user's words and the
+    // schema's words differ, so the lexical lane cannot help either.
+    //
+    // A description is the bound. It means someone documented the column on
+    // purpose — a quality signal and a small fraction of any real warehouse —
+    // while an undocumented column has nothing to embed but its name, which
+    // lexical matching already handles better than a vector would.
+    const manifestPath = join(projectRoot, 'target', 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as {
+      nodes: Record<string, Record<string, unknown>>;
+    };
+    manifest.nodes['model.analytics.dim_accounts'] = {
+      resource_type: 'model',
+      name: 'dim_accounts',
+      alias: 'dim_accounts',
+      database: 'ANALYTICS',
+      schema: 'PUBLIC',
+      description: 'One row per account.',
+      depends_on: { nodes: [] },
+      original_file_path: 'models/dim_accounts.sql',
+      config: { materialized: 'table' },
+      columns: {
+        service_tier: {
+          name: 'service_tier',
+          data_type: 'text',
+          description: 'Contracted support level for the account: bronze, silver, or gold.',
+        },
+        internal_flag: { name: 'internal_flag', data_type: 'boolean' },
+      },
+    };
+    writeFileSync(manifestPath, JSON.stringify(manifest), 'utf-8');
+
+    // Uniform vectors: every similarity is 1, so the search returns exactly what
+    // is INDEXED. That makes this a membership test through the real consumer
+    // rather than a peek at storage.
+    const remote = {
+      id: 'test-remote-v1',
+      dimensions: 8,
+      async embed(texts: string[]): Promise<number[][]> {
+        return texts.map(() => Array.from({ length: 8 }, () => 0.5));
+      },
+    };
+    await ensureMetadataCatalogFresh(projectRoot, { force: true, embeddingProvider: remote });
+
+    const catalog = openActiveKnowledgeSnapshot(projectRoot);
+    try {
+      const hit = await catalog.searchVectorObjects({
+        query: 'support level for the account',
+        objectTypes: ['dbt_column'],
+        provider: remote,
+        limit: 500,
+      });
+      const keys = hit.candidates.map((candidate) => candidate.objectKey);
+      expect(keys).toContain('dbt:column:dim_accounts.service_tier');
+      expect(keys).not.toContain('dbt:column:dim_accounts.internal_flag');
+    } finally { catalog.close(); }
+  });
+
   it('indexes dbt compiled SQL column lineage as traversable metadata edges', async () => {
     const manifestPath = join(projectRoot, 'target', 'manifest.json');
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as {

@@ -8290,12 +8290,45 @@ const VECTOR_EXCLUDED_OBJECT_TYPES = new Set([
   'runtime_value',
 ]);
 
+/**
+ * A DOCUMENTED column earns a vector, even though columns are excluded as a class.
+ *
+ * Excluding every column left a question phrased in column vocabulary ("which
+ * field holds the customer's tier?") with no semantic recall path at all — the
+ * lexical lane is the only thing that could ever find it, and that is exactly
+ * the case where the user's words and the schema's words differ.
+ *
+ * The exclusion existed for volume, and that concern is real: columns outnumber
+ * models by 10-50x and `searchVectorObjects` is an O(n) scan in JS. A DESCRIPTION
+ * is the natural bound — it means someone documented the column on purpose, which
+ * is both a quality signal and a small fraction of any real warehouse. An
+ * undocumented column has nothing to embed but its name, which the lexical lane
+ * already matches better than a vector would.
+ */
+function isDocumentedColumnObject(object: MetadataObject): boolean {
+  return COLUMN_OBJECT_TYPES.has(object.objectType)
+    && object.objectType !== 'runtime_value'
+    && (object.description?.trim().length ?? 0) > 0;
+}
+
 function isVectorIndexObject(object: MetadataObject): boolean {
+  if (isDocumentedColumnObject(object)) return true;
   return !VECTOR_EXCLUDED_OBJECT_TYPES.has(object.objectType);
 }
 
 function metadataVectorText(object: MetadataObject): string {
+  // A bare column name is a naked token: `status` on its own is equally close to
+  // every status-ish thing in the warehouse. Lead with the parent-qualified name
+  // and the type so the vector carries WHICH table's status this is.
+  const columnPrefix = isDocumentedColumnObject(object)
+    ? [
+        `${object.fullName ?? object.name} column`,
+        stringValue((object.payload ?? {}).type) ?? '',
+        stringValue((object.payload ?? {}).relation) ?? '',
+      ].filter(Boolean).join(' ')
+    : '';
   return [
+    columnPrefix,
     object.name,
     object.fullName ?? '',
     object.description ?? '',
