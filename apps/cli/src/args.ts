@@ -79,6 +79,10 @@ export interface CLIFlags {
   minJudgePass?: number;
   /** `dql agent eval --max-wrong-certified <n>` — fail if more than n answers were wrongly stamped certified. */
   maxWrongCertified?: number;
+  /** `dql agent eval --max-false-refusal <0..1>` — fail above this share of answerable cases refused. */
+  maxFalseRefusal?: number;
+  /** `dql agent eval --min-refusal-recall <0..1>` — fail below this share of must-refuse cases that refused. */
+  minRefusalRecall?: number;
   /** `dql eval --no-examples` — skip manifest block examples, score yaml cases only. */
   noExamples?: boolean;
   /** `dql eval --init` — write a starter eval/golden.yaml template into the project. */
@@ -245,6 +249,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
     } else if (arg === '--max-wrong-certified' && i + 1 < argv.length) {
       const value = Number(argv[++i]);
       if (Number.isFinite(value) && value >= 0) flags.maxWrongCertified = value;
+    } else if (arg === '--max-false-refusal' && i + 1 < argv.length) {
+      const value = Number(argv[++i]);
+      if (Number.isFinite(value) && value >= 0 && value <= 1) flags.maxFalseRefusal = value;
+    } else if (arg === '--min-refusal-recall' && i + 1 < argv.length) {
+      const value = Number(argv[++i]);
+      if (Number.isFinite(value) && value >= 0 && value <= 1) flags.minRefusalRecall = value;
     } else if (arg === '--no-examples') {
       flags.noExamples = true;
     } else if (arg === '--init') {

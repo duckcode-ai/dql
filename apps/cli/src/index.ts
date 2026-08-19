@@ -150,6 +150,8 @@ const HELP = `
       --execute                       For "agent eval": run bounded SQL previews
       --min-answer-rate <0..1>        For "eval": fail below non-refusal rate on answerable cases
       --min-tool-requirement <0..1>    For "agent eval": fail below required tool-call pass rate
+      --max-false-refusal <0..1>       For "agent eval": fail above this share of ANSWERABLE cases refused
+      --min-refusal-recall <0..1>      For "agent eval": fail below this share of must-refuse cases that refused
       --thread <id>                   For "agent ask": continue a persisted conversation thread
       --ai                            For "doctor": include AI, MCP, and metadata checks
   `;

@@ -391,4 +391,57 @@ describe('agent eval answer harness', () => {
       },
     });
   });
+  it('scores false refusals on answerable cases, and keeps genuine refusals honest', () => {
+    const base = {
+      failures: [] as string[], durationMs: 10, contextObjects: 1, followUp: false,
+      draftSaved: false, toolCalls: 0, trace: [] as never[],
+    };
+    const metrics = __test__.computeEvalMetrics([
+      // Answerable by inference (a real expectation, not a refusal expectation),
+      // but the run refused → FALSE REFUSAL. This is the reported BCM shape.
+      { ...base, name: 'bcm-ranking', passed: false, kind: 'no_answer', route: 'clarify',
+        expected: { kind: 'certified' } },
+      // Answerable and answered.
+      { ...base, name: 'answered', passed: true, kind: 'uncertified', route: 'generated_sql',
+        expected: { kind: 'uncertified' } },
+      // Explicitly answerable, answered.
+      { ...base, name: 'explicit-answerable', passed: true, kind: 'uncertified', route: 'generated_sql',
+        expected: { answerable: true } },
+      // Must refuse, and did → protects against "never dead-end" becoming hallucination.
+      { ...base, name: 'weather', passed: true, kind: 'no_answer', route: 'clarify',
+        expected: { kind: 'no_answer' } },
+      // No expectations at all → excluded from both denominators.
+      { ...base, name: 'unscored', passed: true, kind: 'uncertified', route: 'generated_sql' },
+    ] as unknown as Parameters<typeof __test__.computeEvalMetrics>[0]);
+
+    expect(metrics.answerable_case_count).toBe(3);
+    expect(metrics.false_refusal_count).toBe(1);
+    expect(metrics.false_refusal_rate).toBeCloseTo(1 / 3);
+    expect(metrics.refusal_required_case_count).toBe(1);
+    expect(metrics.refusal_recall).toBe(1);
+
+    // Ceiling gates on the measured value.
+    expect(__test__.agentEvalThresholdsPass(metrics, { minToolRequirement: null, maxFalseRefusal: 0.5 })).toBe(true);
+    expect(__test__.agentEvalThresholdsPass(metrics, { minToolRequirement: null, maxFalseRefusal: 0.1 })).toBe(false);
+    expect(__test__.agentEvalThresholdsPass(metrics, { minToolRequirement: null, minRefusalRecall: 1 })).toBe(true);
+    // No answerable case scored means "unknown", never "perfect".
+    expect(__test__.agentEvalThresholdsPass(
+      { ...metrics, false_refusal_rate: null }, { minToolRequirement: null, maxFalseRefusal: 0 },
+    )).toBe(true);
+  });
+
+  it('treats an explicit answerable:false as a genuine-refusal case even with other expectations', () => {
+    const base = {
+      failures: [] as string[], durationMs: 10, contextObjects: 1, followUp: false,
+      draftSaved: false, toolCalls: 0, trace: [] as never[],
+    };
+    const metrics = __test__.computeEvalMetrics([
+      { ...base, name: 'policy-blocked', passed: true, kind: 'no_answer', route: 'clarify',
+        expected: { answerable: false, certification: 'analyst_review_required' } },
+    ] as unknown as Parameters<typeof __test__.computeEvalMetrics>[0]);
+    expect(metrics.answerable_case_count).toBe(0);
+    expect(metrics.false_refusal_rate).toBeNull();
+    expect(metrics.refusal_recall).toBe(1);
+  });
+
 });

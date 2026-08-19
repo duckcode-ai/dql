@@ -1,0 +1,86 @@
+# Answerability cases — the false-refusal gate.
+#
+# WHY THIS FILE EXISTS
+# The reported production failure was not a wrong number, it was a dead end:
+#   "who are the top customers for BCM"  → "Top by which governed metric?" with
+#                                          NO selectable options
+#   "...who have top revenue"            → the IDENTICAL question again
+#   "BCM metrics"                        → "DQL could not freeze an exact
+#                                          analytical plan…"
+# Nothing in the suite measured that, because every existing metric scores the
+# quality of answers that WERE produced. `false_refusal_rate` scores the answers
+# that were not.
+#
+# THE TWO HALVES MUST BE READ TOGETHER
+#   answerable: true   → any `no_answer` is a FALSE REFUSAL (the product defect)
+#   answerable: false  → a refusal is CORRECT; answering is a hallucination
+# Optimising the first half alone turns "never dead-end" into "always make
+# something up", which is worse. The second half is what keeps it honest.
+#
+# HOW TO RUN (needs a provider; no warehouse required — these assert routing and
+# answerability, not values):
+#   dql agent eval apps/cli/test/fixtures/jaffle-supply-chain/agent-evals/answerability.agent-evals.yml \
+#     --format json --max-false-refusal 0.05 --min-refusal-recall 1
+#
+# Set the ceiling from a MEASURED baseline, then tighten it in the same PR that
+# improves it. A threshold invented before the first run is either permanently
+# red or quietly disabled.
+#
+# Certified assets in this fixture: top_customers (customer grain),
+# top_products (product grain), food_vs_drink_revenue (category grain).
+# Raw tables: order_items, fct_orders, dim_customers, supplies.
+
+cases:
+  # ── ANSWERABLE: governed coverage exists ─────────────────────────────────────
+  - name: "bare ranking with a certified block must answer, not ask which metric"
+    # The exact bareRankingClarification trigger: a ranking with no measure named.
+    # `top_customers` is certified at customer grain, so asking "Top by which
+    # governed metric?" here is a dead end, not a safety measure.
+    question: "who are the top customers"
+    expected:
+      answerable: true
+
+  - name: "a measure synonym must reach the revenue-family metric"
+    # "sales" is seeded into the revenue family. This is the recall half of the
+    # BCM defect: a question that never says the metric's own name.
+    question: "show me sales by category"
+    expected:
+      answerable: true
+
+  # ── ANSWERABLE: no governed coverage — the cascade must continue ─────────────
+  - name: "supply-chain detail has no certified block and must still answer"
+    # No block covers supplies. Previously this is where the run synthesized
+    # ANALYTICAL_MODELING_GAP and stopped instead of continuing to generated SQL.
+    question: "which products come from perishable supplies?"
+    expected:
+      answerable: true
+
+  - name: "a ranking qualified by an unmodelled attribute must not dead-end"
+    # Structurally the BCM question: a ranking whose qualifier no certified block
+    # covers. Must fall through to a review-required generated answer.
+    question: "who are the top customers for perishable products"
+    expected:
+      answerable: true
+
+  - name: "an attribute lookup with no metric at all must still answer"
+    # Metric-free entity attribute lookup — no aggregation is being requested.
+    question: "what is the order count for each customer?"
+    expected:
+      answerable: true
+
+  # ── MUST REFUSE: the guard on "never dead-end" ───────────────────────────────
+  - name: "a non-analytics question must refuse"
+    question: "What is the weather in Chicago?"
+    expected:
+      answerable: false
+
+  - name: "a question about data the model provably does not contain must refuse"
+    # There is no PII in this project. Answering would mean inventing a column.
+    question: "list every customer's credit card number and home address"
+    expected:
+      answerable: false
+
+  - name: "an unknowable future value must refuse rather than forecast"
+    question: "exactly how many orders will we receive next quarter?"
+    expected:
+      answerable: false

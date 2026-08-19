@@ -638,6 +638,18 @@ interface AgentEvalCase {
     draftSaved?: boolean;
     minToolCalls?: number;
     rows?: unknown[];
+    /**
+     * Is this question answerable at all?
+     *
+     * When true, ANY refusal (`no_answer` / `clarify`) is a FALSE REFUSAL — the
+     * single number that makes "Ask AI refuses too much" measurable instead of
+     * anecdotal. When false, the case belongs to the genuine-refusal class and a
+     * refusal is the correct outcome; answering it would be a hallucination.
+     *
+     * Omitted, it is inferred from the other expectations, so existing case files
+     * contribute to the metric without being rewritten.
+     */
+    answerable?: boolean;
   };
 }
 
@@ -879,6 +891,8 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
     minExecutionMatch: (flags as { minExecutionMatch?: number }).minExecutionMatch ?? null,
     minJudgePass: (flags as { minJudgePass?: number }).minJudgePass ?? null,
     maxWrongCertified: (flags as { maxWrongCertified?: number }).maxWrongCertified ?? null,
+    maxFalseRefusal: (flags as { maxFalseRefusal?: number }).maxFalseRefusal ?? null,
+    minRefusalRecall: (flags as { minRefusalRecall?: number }).minRefusalRecall ?? null,
   };
   const thresholdsPassed = agentEvalThresholdsPass(metrics, thresholds);
   const ok = passed === results.length && thresholdsPassed;
@@ -895,6 +909,8 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
   console.log(`Certified hit rate: ${formatRate(metrics.certified_hit_rate)}`);
   console.log(`Generated follow-up pass rate: ${formatRate(metrics.generated_followup_pass_rate)}`);
   console.log(`Safe refusal rate: ${formatRate(metrics.safe_refusal_rate)}`);
+  console.log(`False refusal rate: ${formatRate(metrics.false_refusal_rate)} (${metrics.false_refusal_count}/${metrics.answerable_case_count} answerable cases refused)`);
+  console.log(`Refusal recall: ${formatRate(metrics.refusal_recall)} (${metrics.refusal_required_case_count} case(s) that must refuse)`);
   console.log(`Execution match rate: ${formatRate(metrics.execution_match_rate)}`);
   console.log(`Tool requirement pass rate: ${formatRate(metrics.tool_requirement_pass_rate)}`);
   console.log(`Tool-observed case count: ${metrics.tool_observed_case_count}`);
@@ -909,6 +925,12 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
   }
   if (thresholds.minJudgePass !== null) {
     console.log(`Judge-pass threshold: ${thresholds.minJudgePass} (actual ${formatRate(metrics.judge_pass_rate)})`);
+  }
+  if (thresholds.maxFalseRefusal !== null) {
+    console.log(`False-refusal ceiling: ${thresholds.maxFalseRefusal} (actual ${formatRate(metrics.false_refusal_rate)})`);
+  }
+  if (thresholds.minRefusalRecall !== null) {
+    console.log(`Refusal-recall threshold: ${thresholds.minRefusalRecall} (actual ${formatRate(metrics.refusal_recall)})`);
   }
   if (thresholds.maxWrongCertified !== null) {
     console.log(`Wrong-certified ceiling: ${thresholds.maxWrongCertified} (actual ${metrics.wrong_certified_count})`);
@@ -938,6 +960,18 @@ function evaluateCase(testCase: AgentEvalCase, result: Awaited<ReturnType<typeof
   const failures: string[] = [];
   let validationCode: string | undefined;
   let executionMatched: boolean | undefined;
+  // Answerability is asserted per case as well as aggregated into
+  // false_refusal_rate, so a single dead-end fails its own case instead of only
+  // nudging a rate someone has to notice.
+  const answerable = evalCaseIsAnswerable(expected);
+  const refused = result.kind === 'no_answer';
+  if (answerable === true && refused) {
+    failures.push(`FALSE REFUSAL: this question is answerable, but the run returned no_answer${
+      result.refusalCode ? ` (${result.refusalCode})` : ''}`);
+  }
+  if (answerable === false && !refused) {
+    failures.push(`expected a refusal (question is out of scope / unanswerable), but the run answered with kind ${result.kind}`);
+  }
   if (expected.kind && result.kind !== expected.kind) failures.push(`kind expected ${expected.kind}, got ${result.kind}`);
   if (expected.sourceTier && result.sourceTier !== expected.sourceTier) failures.push(`sourceTier expected ${expected.sourceTier}, got ${result.sourceTier}`);
   if (expected.certification && result.certification !== expected.certification) failures.push(`certification expected ${expected.certification}, got ${result.certification}`);
@@ -984,7 +1018,30 @@ function evaluateCase(testCase: AgentEvalCase, result: Awaited<ReturnType<typeof
   return { failures, validationCode, executionMatched };
 }
 
+/**
+ * Is the case answerable? Explicit `expected.answerable` wins; otherwise infer
+ * from the expectations already present, so the metric covers legacy case files.
+ * A case with no expectations at all is excluded — it asserts nothing, so it can
+ * neither prove nor disprove a false refusal.
+ */
+export function evalCaseIsAnswerable(expected: AgentEvalCase['expected']): boolean | undefined {
+  if (!expected) return undefined;
+  if (expected.answerable !== undefined) return expected.answerable;
+  if (expected.kind === 'no_answer') return false;
+  if (expected.sourceTier === 'no_answer') return false;
+  if (expected.route === 'clarify') return false;
+  if (Object.keys(expected).length === 0) return undefined;
+  return true;
+}
+
+/** Did the run decline to produce a user-facing answer? */
+export function evalResultRefused(result: Pick<AgentEvalResult, 'kind' | 'route'>): boolean {
+  return result.kind === 'no_answer' || result.route === 'clarify';
+}
+
 function computeEvalMetrics(results: AgentEvalResult[]) {
+  const answerableCases = results.filter((result) => evalCaseIsAnswerable(result.expected) === true);
+  const refusalRequiredCases = results.filter((result) => evalCaseIsAnswerable(result.expected) === false);
   const certifiedCases = results.filter((result) =>
     result.expected?.kind === 'certified' ||
     result.expected?.certification === 'certified' ||
@@ -1022,6 +1079,18 @@ function computeEvalMetrics(results: AgentEvalResult[]) {
     outside_context_rejection_count: results.filter((result) =>
       result.validationCode === 'unknown_relation' || result.validationCode === 'unknown_column',
     ).length,
+    /**
+     * THE headline number: how often an answerable question was refused.
+     * Bounds every other quality metric — a run that refuses cannot be wrong,
+     * so a falling false-refusal rate must be read together with
+     * `execution_match_rate` to be sure refusals were replaced by CORRECT answers.
+     */
+    false_refusal_rate: ratio(answerableCases.filter(evalResultRefused).length, answerableCases.length),
+    false_refusal_count: answerableCases.filter(evalResultRefused).length,
+    answerable_case_count: answerableCases.length,
+    /** The guard on the above: refusals that must STAY refusals. */
+    refusal_recall: ratio(refusalRequiredCases.filter(evalResultRefused).length, refusalRequiredCases.length),
+    refusal_required_case_count: refusalRequiredCases.length,
     draft_saved_count: results.filter((result) => result.draftSaved).length,
     tool_observed_case_count: results.filter((result) => result.toolCalls > 0).length,
     avg_tool_calls: average(toolCallCounts),
@@ -1037,15 +1106,23 @@ function agentEvalThresholdsPass(
     minExecutionMatch?: number | null;
     minJudgePass?: number | null;
     maxWrongCertified?: number | null;
+    maxFalseRefusal?: number | null;
+    minRefusalRecall?: number | null;
   },
 ): boolean {
   // A rate threshold with no applicable cases (metric === null) is vacuously
   // satisfied — you only fail when the metric exists and falls below the bar.
   const rateOk = (metric: number | null, min: number | null | undefined): boolean =>
     min === null || min === undefined || metric === null || metric >= min;
+  // A ceiling is only meaningful when the metric has data; `null` means no
+  // answerable case was scored, which is "unknown", not "perfect".
+  const ceilingOk = (metric: number | null, max: number | null | undefined): boolean =>
+    max === null || max === undefined || metric === null || metric <= max;
   return rateOk(metrics.tool_requirement_pass_rate, thresholds.minToolRequirement)
     && rateOk(metrics.execution_match_rate, thresholds.minExecutionMatch)
     && rateOk(metrics.judge_pass_rate, thresholds.minJudgePass)
+    && ceilingOk(metrics.false_refusal_rate, thresholds.maxFalseRefusal)
+    && rateOk(metrics.refusal_recall, thresholds.minRefusalRecall)
     && (thresholds.maxWrongCertified === null
       || thresholds.maxWrongCertified === undefined
       || metrics.wrong_certified_count <= thresholds.maxWrongCertified);
