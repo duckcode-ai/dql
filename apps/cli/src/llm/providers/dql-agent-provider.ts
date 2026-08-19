@@ -1,3 +1,4 @@
+import { buildAnalystLoopTools } from '../analyst-loop-tools.js';
 import {
   ClaudeProvider,
   KGStore,
@@ -37,8 +38,6 @@ import {
   prepareServerOwnedProviderSchemaContext,
   projectEmbeddingProvider,
   answerAgentic,
-  buildPreviewQueryTool,
-  buildSearchValuesTool,
   createAnalystLaneHandler,
   parseProposal,
   renderContextValidationRefusalForUser,
@@ -803,37 +802,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
               generated: createAnalystLaneHandler({
                 legacy: answer,
                 buildDeps: (loopInput) => {
-                  // `preview_query` is what lets the loop ESTABLISH identifiers
-                  // rather than only verify ones another tool happened to
-                  // surface: the warehouse resolving a name is the strongest
-                  // evidence it exists. Only offered when an executor is
-                  // present — without one the tool could only ever fail.
                   const execute = loopInput.executeGeneratedSql;
-                  // `search_values` is the antidote to the recorded false-absence
-                  // defect: without it a named member can never become a filter,
-                  // the plan freezes filterless, and a truncated result gets
-                  // narrated as absence. Probing is opt-in per project, and the
-                  // tool says so rather than returning a silent empty result —
-                  // "did not look" and "looked and found nothing" are different
-                  // facts, and only one of them licenses an absence claim.
                   const valuesEnabled = valueLookupEnabled(req.projectRoot);
-                  const tools = [
-                    ...(loopInput.answerLoopTools ?? []),
-                    ...(execute ? [buildPreviewQueryTool((sql) => execute(sql))] : []),
-                    ...(execute
-                      ? [buildSearchValuesTool({
-                          execute: async (sql) => execute(sql),
-                          relations: (loopInput.schemaContext ?? []).map((table) => ({
-                            relation: table.relation,
-                            columns: (table.columns ?? []).map((column) => ({
-                              name: column.name,
-                              ...(column.type ? { type: column.type } : {}),
-                            })),
-                          })),
-                          enabled: valuesEnabled,
-                        })]
-                      : []),
-                  ];
+                  const tools = buildAnalystLoopTools(loopInput, { valuesEnabled });
                   if (process.env.DQL_ORCHESTRATOR_TRACE) {
                     console.warn(`[dql] analyst loop deps: tools=${tools.length} preview=${Boolean(execute)} values=${valuesEnabled}`);
                   }
