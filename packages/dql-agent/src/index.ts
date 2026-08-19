@@ -616,6 +616,13 @@ export {
   type OrchestratorDiagnostic,
 } from "./agentic/orchestrator.js";
 export {
+  ANALYST_TOOL_POLICY,
+  adjudicateProposedSql,
+  evidenceSourceForTool,
+  harvestIdentifiers,
+  withLedgerHarvest,
+} from "./agentic/ledger-tools.js";
+export {
   ASSUMPTION_DOMINANCE_RATIO,
   assumeDominantCandidate,
   renderAssumptionPreamble,
