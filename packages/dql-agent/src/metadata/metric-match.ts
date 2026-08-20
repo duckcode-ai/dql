@@ -421,12 +421,31 @@ export async function matchSemanticMetric(
       ? { ...entry, ftsScore: Math.max(entry.ftsScore, top.ftsScore * 1.01) }
       : entry);
   })();
-  const rankedCandidates = executabilityAdjusted
+  // P1.1 — ADMIT A BOUNDED VECTOR SHORTLIST.
+  //
+  // This filter used to be `grounded || ftsScore > 0`, which removed every
+  // zero-lexical-overlap candidate BEFORE embeddings ran. That is backwards:
+  // no shared keyword is precisely the case embeddings exist to solve, so a
+  // domain acronym or a synonym ("sales" for revenue) was discarded before the
+  // lane that could recognise it ever saw it. Measured on the fixture catalog:
+  // FTS `customers` returns no metrics at all, while the vector lane carries
+  // every one of them.
+  //
+  // The 96 bound is unchanged — lexical hits keep priority, and the remainder
+  // of the window is filled with zero-overlap candidates for the vector lane
+  // to rank. Nothing else about admission moves: authorization, domain,
+  // lifecycle, and privacy filters have already run above.
+  const lexical = executabilityAdjusted
     .filter((entry) => entry.grounded || entry.ftsScore > 0)
-    .sort((left, right) => right.ftsScore - left.ftsScore || left.metric.name.localeCompare(right.metric.name))
-    .slice(0, 96);
+    .sort((left, right) => right.ftsScore - left.ftsScore || left.metric.name.localeCompare(right.metric.name));
+  const vectorOnly = executabilityAdjusted
+    .filter((entry) => !entry.grounded && entry.ftsScore <= 0)
+    .sort((left, right) => left.metric.name.localeCompare(right.metric.name));
+  const rankedCandidates = [
+    ...lexical.slice(0, 96),
+    ...vectorOnly.slice(0, Math.max(0, 96 - Math.min(lexical.length, 96))),
+  ];
   if (rankedCandidates.length === 0) return null;
-  const hasLexicalSignal = rankedCandidates.some((entry) => entry.ftsScore > 0);
   // Retrieval must not silently send enterprise metric definitions to a remote
   // provider merely because an ambient API key exists. Hosts may opt into an
   // explicit provider; the default remains local and deterministic.
@@ -435,7 +454,11 @@ export async function matchSemanticMetric(
     question,
     rankedCandidates.map((entry) => ({ item: entry, text: entry.text, ftsScore: entry.ftsScore })),
     {
-      alpha: hasLexicalSignal ? options.alpha ?? DEFAULT_METRIC_MATCH_EMBEDDING_ALPHA : 0,
+      // Embedding weight is no longer gated on a lexical hit. Zeroing alpha
+      // when nothing matched lexically meant embeddings could only REFINE a
+      // keyword hit and could never CREATE a match, which made the vector lane
+      // useless in the one case it exists for.
+      alpha: options.alpha ?? DEFAULT_METRIC_MATCH_EMBEDDING_ALPHA,
       provider,
     },
   );
