@@ -428,6 +428,26 @@ export function applyEvalCassette(provider: AgentProvider): AgentProvider {
   return withCassette(provider, new CassetteStore(dir), resolveCassetteModeFromEnv(process.env));
 }
 
+/**
+ * A raw text provider for planning calls that are not the answer itself.
+ *
+ * Research hypothesis planning needs `generate`, not the full agent runner —
+ * and the runner cannot be reused for it, because the runner IS the governed
+ * answer path. Cassettes apply, so a recorded run stays hermetic.
+ */
+export function createGovernedTextProvider(
+  id: SimpleProviderId,
+  projectRoot: string,
+): AgentProvider | undefined {
+  const spec = SPECS[id];
+  if (!spec) return undefined;
+  try {
+    return applyEvalCassette(spec.create(projectRoot));
+  } catch {
+    return undefined;
+  }
+}
+
 export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverride?: AgentProvider): AgentRunner {
   return {
     async run(req, emit, signal) {

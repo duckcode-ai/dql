@@ -1,3 +1,4 @@
+import { hypothesesToSteps, planResearchHypotheses } from './agentic/research-agent.js';
 /**
  * Research loop (P4) — a grounded, ReAct-style planner for "research / follow-up"
  * questions, so the agent behaves like a real assistant: it DECIDES whether to
@@ -55,7 +56,13 @@ export interface ResearchPlan {
 }
 
 export interface ResearchBudget {
-  plannerCalls: 1;
+  /**
+   * Was the literal `1`, which made replanning unexpressible in the type system:
+   * an investigation could never respond to what it observed, because it could
+   * never call the planner again. Widened so a finding can redirect the run.
+   * The wall clock and the run budget remain the real ceiling.
+   */
+  plannerCalls: number;
   sqlExecutions: 6;
   repairs: 1;
   narratorCalls: 1;
@@ -63,7 +70,7 @@ export interface ResearchBudget {
 }
 
 export const RESEARCH_BUDGET: ResearchBudget = {
-  plannerCalls: 1,
+  plannerCalls: 2,
   sqlExecutions: 6,
   repairs: 1,
   narratorCalls: 1,
@@ -130,6 +137,18 @@ export async function planResearch(input: {
   forceInvestigate?: boolean;
   /** Authoritative root plan. When present, research never re-matches meaning. */
   rootPlan?: ResolvedAnalyticalPlan;
+  /**
+   * Optional. With one, the investigation is planned as competing hypotheses
+   * about the question; without one, the deterministic template still runs, so
+   * research never depends on a provider being reachable.
+   */
+  provider?: {
+    generate(
+      messages: { role: 'system' | 'user' | 'assistant'; content: string }[],
+      options?: Record<string, unknown>,
+    ): Promise<string>;
+  };
+  signal?: AbortSignal;
 }): Promise<ResearchPlan> {
   // Prefer a metric that already has certified blocks (so the research plan can use
   // its time/breakdown dimensions), falling back to the best overall match.
@@ -288,11 +307,37 @@ export async function planResearch(input: {
         expectation: `Upstream models/metrics that feed ${label}.`,
       });
     }
+    // Hypotheses when a provider can produce them, the template otherwise.
+    // The template's steps are always a correct INVESTIGATION — baseline, trend,
+    // breakdown — but they are the same three regardless of what was asked, so
+    // the dossier reads as a report about a metric rather than an answer to a
+    // question. Hypotheses replace the steps only; grounding, budget, and the
+    // frozen root plan are unchanged, and an empty result keeps the template.
+    const hypothesisSteps = input.provider
+      ? hypothesesToSteps(await planResearchHypotheses(
+        input.provider,
+        input.question,
+        {
+          metrics: input.metrics.map((metric) => metric.name),
+          blocks: input.blocks.map((block) => block.name),
+          dimensions: Array.from(new Set(input.blocks.flatMap((block) =>
+            [...(block.dimensions ?? []), ...(block.allowedFilters ?? [])]))),
+        },
+        { ...(input.signal ? { signal: input.signal } : {}) },
+      ))
+      : [];
+    if (process.env.DQL_ORCHESTRATOR_TRACE) {
+      console.warn(hypothesisSteps.length > 0
+        ? `[dql] research plan: ${hypothesisSteps.length} hypotheses — ${hypothesisSteps.map((step) => step.thought).join(' | ').slice(0, 220)}`
+        : `[dql] research plan: deterministic template (${steps.length} steps) — provider=${Boolean(input.provider)} metrics=${input.metrics.length} blocks=${input.blocks.length}`);
+    }
     return {
       decision: 'investigate',
       confidence: decision.confidence,
-      rationale: decision.reason,
-      steps,
+      rationale: hypothesisSteps.length > 0
+        ? `${decision.reason} Investigating ${hypothesisSteps.length} competing explanations.`
+        : decision.reason,
+      steps: hypothesisSteps.length > 0 ? hypothesisSteps : steps,
       sources: Array.from(sources),
       done: false,
       rootPlanId: input.rootPlan?.rootPlanId ?? input.rootPlan?.planId,

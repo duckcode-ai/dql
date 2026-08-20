@@ -161,7 +161,7 @@ import { getRunner as getLLMRunner } from './llm/index.js';
 import { rethrowIfCancelled } from './llm/cancellation.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from './version-status.js';
 import { resolveRetrievalHealthStatus } from './retrieval-health.js';
-import { applyEvalCassette, createDqlAgentProviderRunner, resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
+import { applyEvalCassette, createDqlAgentProviderRunner, createGovernedTextProvider, resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
 import type {
   AgentConversationContext,
   AgentRunner as LLMAgentRunner,
@@ -4923,10 +4923,18 @@ function analyticalFailureSummary(
       const conversationHistory = request.history?.length
         ? request.history
         : conversationHistoryFromContext(request.conversationContext);
+      // The provider that will plan the investigation as hypotheses. Absent or
+      // unreachable, `planResearch` keeps its deterministic template, so
+      // research never depends on a model being available.
+      const researchPlanner = resolveGovernedAnswerRunner(projectRoot);
+      const researchPlannerProvider = researchPlanner
+        ? createGovernedTextProvider(researchPlanner.provider as never, projectRoot)
+        : undefined;
       const plan = await planResearch({
         question: request.question,
         metrics,
         blocks,
+        ...(researchPlannerProvider ? { provider: researchPlannerProvider } : {}),
         intent: request.intent,
         isFollowUp: conversationHistory.length > 0,
         history: conversationHistory,
