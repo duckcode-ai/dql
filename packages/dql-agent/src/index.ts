@@ -1806,3 +1806,15 @@ export { planResearchHypotheses, parseResearchHypotheses, hypothesesToSteps, typ
 export { synthesizeResearchNarrative, type ResearchBranchOutcome } from './agentic/research/synthesis.js';
 export { narrationMaxTokensForFacts } from './analytical-result-facts.js';
 export { rerankCandidates, applyRerank, parseRerankReply, type RerankOutcome, type RerankCandidate } from './agentic/rerank.js';
+export {
+  mintFinalSqlAuthorization,
+  verifyFinalSql,
+  // `fingerprintSql` / `normalizeSqlForFingerprint` already exist in this
+  // barrel from another module; the authorization variants are aliased rather
+  // than shadowing them, so neither caller silently gets the other's semantics.
+  fingerprintSql as fingerprintAuthorizedSql,
+  normalizeSqlForFingerprint as normalizeAuthorizedSql,
+  type FinalSqlAuthorizationV1,
+  type SqlAuthorizationVerdict,
+  type IdentifierEvidence,
+} from './agentic/sql-authorization.js';

@@ -161,7 +161,7 @@ import { getRunner as getLLMRunner } from './llm/index.js';
 import { rethrowIfCancelled } from './llm/cancellation.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from './version-status.js';
 import { resolveRetrievalHealthStatus } from './retrieval-health.js';
-import { applyFinding, createResearchState, narrationMaxTokensForFacts, nextHypothesis, rerankCandidates, synthesizeResearchNarrative } from '@duckcodeailabs/dql-agent';
+import { applyFinding, createResearchState, narrationMaxTokensForFacts, nextHypothesis, rerankCandidates, synthesizeResearchNarrative, validateSqlAgainstLocalContext as validateAuthorizedSqlReferences, verifyFinalSql, type FinalSqlAuthorizationV1 } from '@duckcodeailabs/dql-agent';
 import { applyEvalCassette, createDqlAgentProviderRunner, createGovernedTextProvider, resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
 import type {
   AgentConversationContext,
@@ -5773,6 +5773,11 @@ function analyticalFailureSummary(
   // both positional catalog truncation and the previous duplicate retrieval pass.
   const preparedAgentContextPacks = new WeakMap<AgentRunRequest, LocalContextPack>();
   /**
+   * Authorizations minted for the current turn, keyed by question. Populated
+   * only by the analyst lane, which is the path that can prove identifiers.
+   */
+  const activeSqlAuthorizations = new Map<string, FinalSqlAuthorizationV1>();
+  /**
    * Cross-encoder pass over the fused candidates, when a provider is available.
    * Advisory throughout: it may only reorder ids retrieval returned, and any
    * failure leaves retrieval's own ordering in place.
@@ -6717,6 +6722,27 @@ function analyticalFailureSummary(
           if (semanticExecution) {
             semanticExecutionHolder.value = semanticExecution;
             return semanticExecution.result;
+          }
+        }
+        // P0.2 — the exact-execution guard. This is the only place the
+        // identifier ledger can actually govern: it verified a string upstream
+        // and the legacy loop is free to execute a different one. When a run
+        // carries an authorization, the statement about to reach the warehouse
+        // must reference only what this run PROVED. Catalog presence is not
+        // proof. Absent an authorization (legacy path) nothing changes here,
+        // and that absence is recorded rather than assumed safe.
+        const authorization = activeSqlAuthorizations.get(question);
+        if (authorization) {
+          const validation = validateAuthorizedSqlReferences(preparation.executedSql, undefined);
+          const verdict = verifyFinalSql(authorization, preparation.executedSql, [
+            ...(validation.referencedRelations ?? []),
+            ...(validation.referencedColumns ?? []).map((column: { column: string }) => column.column),
+          ]);
+          if (!verdict.ok) {
+            throw analyticalError(
+              verdict.reason ?? 'The statement was not authorized for execution.',
+              { origin: 'governance_gate', stage: 'execute', code: 'unauthorized_sql' },
+            );
           }
         }
         return executor.executeQuery(
