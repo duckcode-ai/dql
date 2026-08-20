@@ -86,6 +86,33 @@ describe("defaultAgentRunGates", () => {
     expect(grounding?.repairAction).toBeUndefined();
   });
 
+  it("escalates a governed lane that found nothing to the generated lane once", () => {
+    // certified -> semantic -> generated is the intended cascade. A certified
+    // lane returning no answer has not exhausted it, and ending there is the
+    // dead end the cascade exists to avoid. Bounded by maxRepairAttempts, which
+    // is the run's single budget authority, so this cannot loop.
+    // Only `certified_answer` has a registered gate today; `semantic_answer`
+    // has none, so its branch in the ledger is unreachable until one exists.
+    const evaluations = gateFor("certified_answer", {
+      answer: "I could not compose a governed query for this from the available tables and metrics.",
+      answerRefusalCode: "model_declined",
+      artifacts: [],
+    });
+    const grounding = evaluations.find((evaluation) => evaluation.id === "grounding");
+    expect(grounding?.passed).toBe(false);
+    expect(grounding?.repairAction).toEqual({ kind: "escalate", route: "generated_answer" });
+  });
+
+  it("keeps the generated lane terminal, because it has no next rung", () => {
+    const evaluations = gateFor("generated_answer", {
+      answer: "I could not compose a governed query.",
+      answerRefusalCode: "grounding_gap",
+      artifacts: [],
+    });
+    expect(evaluations.find((evaluation) => evaluation.id === "grounding")?.repairAction)
+      .toBeUndefined();
+  });
+
   it("answer gate does not duplicate a terminal grounding evaluation from the executor", () => {
     const evaluations = gateFor("generated_answer", {
       answer: "I could not compose a governed query.",

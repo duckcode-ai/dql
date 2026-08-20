@@ -232,12 +232,25 @@ const answerGate: AgentRunGate = (context: AgentRunGateContext): AgentRunEvaluat
       && (evaluation.id === "grounding" || evaluation.id === "grounding-gap" || evaluation.id === "declined-despite-context"),
   );
   if (!hasAnswer && !hasGroundingFailure && result.status !== "blocked") {
+    // A certified or semantic lane that found nothing has NOT exhausted the
+    // cascade — the generated lane is the next rung, and it is the one the
+    // intended certified -> semantic -> generated order calls for. Escalating
+    // once through the existing replan machinery keeps a single budget
+    // authority: `maxRepairAttempts` bounds it, so this can never loop.
+    // Generated itself has no next rung, so it stays terminal.
+    const nextLane = context.route === "certified_answer" || context.route === "semantic_answer"
+      ? "generated_answer" as const
+      : undefined;
     evaluations = upsert(evaluations, {
       id: "grounding",
       label: "Answer grounding",
       passed: false,
       severity: "warning",
       message: "No governed answer could be produced within the bounded lookup path. Refine the business meaning or explicitly start Research for a deeper investigation.",
+      ...(nextLane ? {
+        suggestedRepair: "The governed lane found no answer; try review-required generated analysis before giving up.",
+        repairAction: { kind: "escalate" as const, route: nextLane },
+      } : {}),
     });
   }
   const shape = routeAwareAnswerShapeEvaluation(context, payload);
