@@ -855,6 +855,20 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
                       return plan;
                     },
                     } : {}),
+                    // The loop's trace, on the channel the provider already uses
+                    // for progress. `thinking` turns become `onProgress`, which
+                    // the run engine emits as `executor.started` over SSE — so
+                    // this needs no new event type, no contract change, and no
+                    // UI work. Without it the loop does real work (tool calls,
+                    // identifier checks, a bounded repair) behind a silent
+                    // spinner, which reads as a hang rather than as an analyst
+                    // establishing facts.
+                    onStep: (step) => {
+                      emit({
+                        kind: 'thinking',
+                        text: step.detail ? `${step.label} — ${step.detail}` : step.label,
+                      });
+                    },
                     // Reuse the legacy parser and validator rather than forking
                     // a second SQL front end that would drift from the first.
                     parseSql: (raw) => parseProposal(raw).sql,
