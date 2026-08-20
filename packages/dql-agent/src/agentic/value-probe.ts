@@ -33,7 +33,23 @@ export interface ProbeRelation {
 }
 
 /** Values that must never be probed, whatever the configuration says. */
-const DENY_RE = /\b(password|secret|token|credential|hash|salt|notes?|comments?|description|message|body|payload|content|ssn|dob)\b/;
+/**
+ * Hard deny. No configuration overrides this.
+ *
+ * Three groups, and the reason each is here:
+ *   SECRETS — a probe returns literal values, so one match leaks the secret.
+ *   FREE TEXT — a note or description can contain anything, including all of
+ *     the above, so its shape gives no safety.
+ *   DIRECT AND REGULATED IDENTIFIERS — payment, government, contact, health,
+ *     and compensation fields. A probe over these is a data-protection
+ *     incident even when the query is otherwise correct, and "the model asked
+ *     for it" is not a defence. Added after a live run answered a request for
+ *     credit-card numbers and home addresses from the nearest certified block.
+ *
+ * Deliberately broad. A false deny costs one value lookup; a false allow
+ * cannot be undone once the values have left the warehouse.
+ */
+const DENY_RE = /\b(password|passwd|secret|token|credential|apikey|api key|private key|hash|salt|signature|session|cookie|auth|otp|pin)\b|\b(notes?|comments?|description|message|body|payload|content|remarks?|feedback|reason)\b|\b(ssn|dob|date of birth|birth date|birthdate|national id|tax id|ein|passport|license|licence|driver license|visa|nric|aadhaar)\b|\b(card|cardnumber|card number|credit card|debit card|cvv|cvc|iban|swift|bic|routing|account number|acct|sort code|bank)\b|\b(address|street|postal|postcode|zip|zipcode|latitude|longitude|geo|coordinates?)\b|\b(phone|mobile|telephone|fax|contact number)\b|\b(salary|compensation|wage|payroll|bonus|income|net pay|gross pay)\b|\b(medical|diagnosis|patient|health|insurance|prescription|disability|biometric|fingerprint|race|ethnicity|religion|gender|sexual)\b/;
 /** Email is denied separately: it is an identifier, but also direct PII. */
 const EMAIL_RE = /\bemail\b/;
 
