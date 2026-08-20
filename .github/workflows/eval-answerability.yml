@@ -71,10 +71,12 @@ jobs:
           # it, and starting from the workspace root fails with "No DQL project
           # was found". Verified by running this exact sequence locally.
           #
-          # Replay mode with no cassettes committed yet: this can never reach a
-          # live model, which is exactly the property that makes it PR-safe.
-          mkdir -p "$RUNNER_TEMP/cassettes"
-          DQL_EVAL_CASSETTE_DIR="$RUNNER_TEMP/cassettes" \
+          # Replay against the COMMITTED cassettes, recorded from claude-sonnet-5.
+          # A miss is a failure and never reaches a live model, so this stays
+          # PR-safe while actually exercising the model path — which is what the
+          # gate was missing when it ran over an empty cassette dir and could not
+          # catch a narration truncation that failed for every ten-row answer.
+          DQL_EVAL_CASSETTE_DIR="$PROJ/test-cassettes/answerability" \
             node apps/cli/dist/index.js notebook "$PROJ" \
               --port 3479 > runtime.log 2>&1 &
           echo $! > runtime.pid

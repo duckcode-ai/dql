@@ -413,6 +413,22 @@ export function renderAnalyticalFactBrief(input: {
  * verified — the validator resolves every id against the fact map — so a strict
  * JSON contract is the only shape that can be checked rather than trusted.
  */
+/**
+ * How many output tokens the verified-facts narrator needs for a result.
+ *
+ * The contract makes every claim echo the fact ids it rests on, and a fact id
+ * is a long hex string that tokenizes badly — so the ceiling has to grow with
+ * the result. At a flat 350 a ten-row answer was cut off mid-word
+ * ("...Elizabeth Shea (875), and Dyl"), the JSON never closed, BOTH attempts
+ * failed as UNPARSEABLE_CLAIMS, and the reader got the deterministic row dump
+ * under "Verified narration was unavailable". Nothing in CI caught it because
+ * the gate never reaches a model; this function exists so the arithmetic is
+ * testable without one.
+ */
+export function narrationMaxTokensForFacts(factCount: number): number {
+  return Math.min(1600, 350 + Math.max(0, factCount) * 45);
+}
+
 export function parseAnalyticalNarrativeClaims(raw: string): AnalyticalNarrativeClaimV1[] | undefined {
   const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
   const candidate = (fenced ? fenced[1] : raw).trim();

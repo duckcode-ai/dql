@@ -1,0 +1,7 @@
+{
+  "key": "a4c5004c886d2f5821c29b9275484f95",
+  "operation": "generate",
+  "text": "{\"interpretedQuestion\":\"List the products that are supplied via perishable supply items (i.e., products linked to supplies where is_perishable_supply = true).\",\"questionType\":\"value\",\"selectedConceptIds\":[\"dbt:model:supplies\",\"dbt:column:supplies.is_perishable_supply\",\"dbt:column:supplies.product_id\"],\"queryIntent\":{\"measures\":[],\"dimensions\":[\"product\"],\"filters\":[{\"field\":\"is_perishable_supply\",\"value\":\"true\"}]},\"rejectedCandidates\":[{\"id\":\"dql:block:top_products\",\"reason\":\"Certified block ranks products by revenue/units sold; unrelated to perishable-supply filtering.\"},{\"id\":\"dbt:model:order_items\",\"reason\":\"Order item data has no perishable-supply attribute; not relevant to the supply-chain filter requested.\"},{\"id\":\"dql:block:food_vs_drink_revenue\",\"reason\":\"Certified block aggregates revenue by food/drink category, incompatible grain and unrelated to perishable supply status.\"}],\"confidence\":\"medium\",\"missingInformation\":[\"Compatibility facts (join keys, grain) for supplies model and its columns are marked 'unknown', so exact SQL join between supplies.product_id and product name/table isn't confirmed.\"],\"recommendedRoute\":\"exploratory\"}",
+  "providerName": "claude",
+  "recordedAt": "2026-08-20T13:31:46.522Z"
+}

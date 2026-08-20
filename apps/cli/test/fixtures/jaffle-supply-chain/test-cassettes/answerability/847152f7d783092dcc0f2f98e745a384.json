@@ -1,0 +1,7 @@
+{
+  "key": "847152f7d783092dcc0f2f98e745a384",
+  "operation": "generate",
+  "text": "Order counts range from 1 to 2 per customer, totaling 4 orders across all 3 customers. One customer placed 2 orders (with $150.00 in lifetime spend), while the other two each placed 1 order.",
+  "providerName": "claude",
+  "recordedAt": "2026-08-20T13:33:03.510Z"
+}

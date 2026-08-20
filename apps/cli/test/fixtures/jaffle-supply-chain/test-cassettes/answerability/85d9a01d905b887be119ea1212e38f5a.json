@@ -1,0 +1,7 @@
+{
+  "key": "85d9a01d905b887be119ea1212e38f5a",
+  "operation": "generate",
+  "text": "```json\n{\n  \"summary\": \"QUERY PLAN: grain = one row per distinct (product, perishable supply) pair. No aggregation, this is a filtered lookup. Join supplies (s) to order_items (oi) on shared key product_id to resolve the product's display name, then filter to s.is_perishable_supply = true. DISTINCT prevents fan-out duplication since order_items has multiple rows per product_id (one per order item). Outcome: Review SQL preview — this is an ad hoc filtered lookup, not an exact match for the certified top_products or food_vs_drink_revenue blocks (neither exposes supply/perishable data), so a review-required DQL artifact is prepared using the supplies and order_items relations and their product_id join key.\",\n  \"sql\": \"SELECT DISTINCT oi.product_name AS product_name, s.supply_name AS supply_name FROM jaffle_shop.dev.supplies s JOIN jaffle_shop.dev.order_items oi ON s.product_id = oi.product_id WHERE s.is_perishable_supply = true ORDER BY oi.product_name LIMIT 100\",\n  \"viz\": \"table\",\n  \"outputs\": [\"product_name\", \"supply_name\"],\n  \"dql\": {\n    \"entity\": \"supplies\",\n    \"dimensions\": [\"product_name\", \"supply_name\"],\n    \"filters\": [\"is_perishable_supply = true\"]\n  }\n}\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-08-20T13:32:01.538Z"
+}

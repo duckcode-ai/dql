@@ -161,7 +161,7 @@ import { getRunner as getLLMRunner } from './llm/index.js';
 import { rethrowIfCancelled } from './llm/cancellation.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from './version-status.js';
 import { resolveRetrievalHealthStatus } from './retrieval-health.js';
-import { synthesizeResearchNarrative } from '@duckcodeailabs/dql-agent';
+import { narrationMaxTokensForFacts, synthesizeResearchNarrative } from '@duckcodeailabs/dql-agent';
 import { applyEvalCassette, createDqlAgentProviderRunner, createGovernedTextProvider, resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
 import type {
   AgentConversationContext,
@@ -4019,7 +4019,7 @@ function analyticalFailureSummary(
         // JSON never closed, BOTH attempts failed as UNPARSEABLE_CLAIMS, and
         // the reader got "Verified narration was unavailable" above a robot
         // dump of the very rows the model had just described correctly.
-        maxTokens: Math.min(1600, 350 + Math.max(0, factCount) * 45),
+        maxTokens: narrationMaxTokensForFacts(factCount),
         temperature: 0.3,
         maxProviderDispatches: 2,
         ...(agentRunProviderEvidenceContext.getStore()
