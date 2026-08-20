@@ -161,7 +161,7 @@ import { getRunner as getLLMRunner } from './llm/index.js';
 import { rethrowIfCancelled } from './llm/cancellation.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from './version-status.js';
 import { resolveRetrievalHealthStatus } from './retrieval-health.js';
-import { narrationMaxTokensForFacts, synthesizeResearchNarrative } from '@duckcodeailabs/dql-agent';
+import { applyFinding, createResearchState, narrationMaxTokensForFacts, nextHypothesis, synthesizeResearchNarrative } from '@duckcodeailabs/dql-agent';
 import { applyEvalCassette, createDqlAgentProviderRunner, createGovernedTextProvider, resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
 import type {
   AgentConversationContext,
@@ -5035,9 +5035,34 @@ function analyticalFailureSummary(
               plan.steps.length > 0 ? plan.steps : [fallbackBranch],
               6,
             );
+            // The replan edge. Each branch tests one hypothesis; folding its
+            // outcome back into the state is what lets the investigation stop
+            // when the question is settled instead of grinding through a plan
+            // frozen before any observation. `nextHypothesis` returning
+            // undefined is how the loop learns to stop — it enforces the hop
+            // budget and reports when nothing is open.
+            let researchState = createResearchState(
+              request.question,
+              branches.map((branch, position) => ({
+                id: `h${position + 1}`,
+                statement: branch.thought,
+                priorConfidence: 1 - position / (branches.length + 1),
+              })),
+            );
             for (let index = 0; index < branches.length; index += 1) {
               const step = branches[index];
               if (request.signal?.aborted) rethrowIfCancelled(request.signal.reason, request.signal);
+              // A hypothesis an earlier finding already closed is not
+              // re-investigated, and an exhausted hop budget stops the run.
+              const stillOpen = nextHypothesis(researchState);
+              if (!stillOpen) {
+                emit({
+                  type: 'executor.started',
+                  message: `Stopping early: ${researchState.hopsUsed} of ${branches.length} branches settled what could be settled.`,
+                  route: 'research',
+                });
+                break;
+              }
               const branchId = `${step.action.kind}:${step.action.target}`;
               const branchQuestion = `${request.question}\nResearch branch ${index + 1} (${branchId}): ${step.expectation}`;
               const childId = `${created.id}:research:${index + 1}`;
@@ -5092,7 +5117,20 @@ function analyticalFailureSummary(
                   baselineDqlArtifact: researchSource?.dqlArtifact as NotebookResearchDqlArtifact | undefined,
                   baselineRunId: agentRunString(researchSource?.runId),
                 });
-                researchRuns.push(withNotebookResearchChecklist(executed));
+                const branchRun = withNotebookResearchChecklist(executed);
+                researchRuns.push(branchRun);
+                // Observe, then decide. A branch that produced rows is evidence
+                // for its hypothesis; one that did not is inconclusive, which is
+                // a real outcome and not a failure.
+                researchState = applyFinding(researchState, {
+                  id: `f${index + 1}`,
+                  hypothesisId: `h${index + 1}`,
+                  verdict: ((branchRun.resultPreview as { rows?: unknown[] } | undefined)?.rows?.length ?? 0) > 0
+                    ? 'supports'
+                    : 'inconclusive',
+                  summary: branchRun.summary ?? '',
+                  strength: 0.5,
+                });
               } catch (error) {
                 // A child is a real durable run even when cancellation stops the
                 // shared branch budget. Persist the truthful stop before
@@ -5106,6 +5144,13 @@ function analyticalFailureSummary(
                 });
                 const stopped = storage.getRun(child.id);
                 if (stopped) researchRuns.push(withNotebookResearchChecklist(stopped));
+                researchState = applyFinding(researchState, {
+                  id: `f${index + 1}`,
+                  hypothesisId: `h${index + 1}`,
+                  verdict: 'inconclusive',
+                  summary: message,
+                  strength: 0,
+                });
                 rethrowIfCancelled(error, request.signal);
               }
             }

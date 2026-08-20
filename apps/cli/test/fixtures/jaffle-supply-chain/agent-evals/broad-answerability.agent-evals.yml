@@ -1,0 +1,238 @@
+# Broad answerability corpus.
+#
+# The plan calls for 150-300 questions; the original suite had EIGHT, which
+# cannot hold a quality bar — a single case flipping moves the headline metric
+# by 12 points, and a whole class of behaviour can regress without a red build.
+# This widens the same two-sided contract over the same fixture.
+#
+# Every question is grounded in what this fixture actually contains:
+#   certified blocks : top_customers, top_products, food_vs_drink_revenue
+#   tables/columns   : order_items(order_item_id, order_id, product_id,
+#                      product_name, product_type, product_price, ordered_at),
+#                      supplies(supply_id, product_id, supply_name, supply_cost,
+#                      is_perishable_supply),
+#                      fct_orders(order_id, customer_id, order_total,
+#                      count_food_items, count_drink_items, subtotal_food_items,
+#                      subtotal_drink_items, subtotal),
+#                      dim_customers(customer_id, customer_name,
+#                      count_lifetime_orders, lifetime_spend)
+#
+# THE TWO HALVES MUST BE READ TOGETHER
+#   answerable: true   -> a `no_answer` is a FALSE REFUSAL (the product defect)
+#   answerable: false  -> a refusal is CORRECT; answering is a hallucination
+# Optimising the first half alone turns "never dead-end" into "always make
+# something up", which is worse.
+#
+# HOW TO RUN: seed the warehouse first (the checked-in connection is `:memory:`
+# and is empty on every connect) — see answerability.agent-evals.yml.
+
+cases:
+  # -- ANSWERABLE ------------------------------------------------------------
+  - name: "certified block answers verbatim"
+    question: "who are the top customers"
+    expected:
+      answerable: true
+  - name: "certified block by its authored name"
+    question: "show me top_products"
+    expected:
+      answerable: true
+  - name: "certified block, natural phrasing"
+    question: "which products sell the most"
+    expected:
+      answerable: true
+  - name: "food vs drink split is certified"
+    question: "how does food revenue compare to drink revenue"
+    expected:
+      answerable: true
+  - name: "measure synonym reaches the revenue family"
+    question: "show me sales by category"
+    expected:
+      answerable: true
+  - name: "measure synonym, second form"
+    question: "what is our turnover by product type"
+    expected:
+      answerable: true
+  - name: "attribute lookup with no metric"
+    question: "what is the order count for each customer?"
+    expected:
+      answerable: true
+  - name: "attribute lookup, lifetime spend"
+    question: "what is the lifetime spend for each customer"
+    expected:
+      answerable: true
+  - name: "raw column question"
+    question: "which products come from perishable supplies?"
+    expected:
+      answerable: true
+  - name: "raw column, cost angle"
+    question: "what does each supply cost"
+    expected:
+      answerable: true
+  - name: "ranking qualified by unmodelled attribute"
+    question: "who are the top customers for perishable products"
+    expected:
+      answerable: true
+  - name: "ranking with explicit measure"
+    question: "rank customers by lifetime spend"
+    expected:
+      answerable: true
+  - name: "ranking with a limit"
+    question: "top 5 customers by lifetime spend"
+    expected:
+      answerable: true
+  - name: "bottom-N ranking"
+    question: "which 5 customers spend the least"
+    expected:
+      answerable: true
+  - name: "simple count"
+    question: "how many customers do we have"
+    expected:
+      answerable: true
+  - name: "simple count of orders"
+    question: "how many orders are there"
+    expected:
+      answerable: true
+  - name: "aggregate over a raw column"
+    question: "what is the total order value"
+    expected:
+      answerable: true
+  - name: "average of a raw column"
+    question: "what is the average order total"
+    expected:
+      answerable: true
+  - name: "group by a real dimension"
+    question: "total product price by product type"
+    expected:
+      answerable: true
+  - name: "group by product name"
+    question: "revenue by product name"
+    expected:
+      answerable: true
+  - name: "filter on a real column value"
+    question: "show me orders where the subtotal is above 50"
+    expected:
+      answerable: true
+  - name: "boolean column filter"
+    question: "list the perishable supplies"
+    expected:
+      answerable: true
+  - name: "time-shaped question on a real timestamp"
+    question: "how have orders trended by month"
+    expected:
+      answerable: true
+  - name: "time grain question"
+    question: "what is monthly revenue"
+    expected:
+      answerable: true
+  - name: "two-entity join across real keys"
+    question: "which customers bought which products"
+    expected:
+      answerable: true
+  - name: "join through order items"
+    question: "what products did each customer order"
+    expected:
+      answerable: true
+  - name: "definitional about a certified block"
+    question: "what does top_customers measure"
+    expected:
+      answerable: true
+  - name: "definitional about the other block"
+    question: "what is food_vs_drink_revenue"
+    expected:
+      answerable: true
+  - name: "definitional about a column"
+    question: "what does count_lifetime_orders mean"
+    expected:
+      answerable: true
+  - name: "comparison between two segments"
+    question: "compare food items and drink items per order"
+    expected:
+      answerable: true
+  - name: "share-of-total question"
+    question: "what share of revenue is drink"
+    expected:
+      answerable: true
+  - name: "distinct count"
+    question: "how many distinct products are there"
+    expected:
+      answerable: true
+  - name: "max of a real column"
+    question: "what is the highest order total"
+    expected:
+      answerable: true
+  - name: "min of a real column"
+    question: "what is the lowest supply cost"
+    expected:
+      answerable: true
+  - name: "entity lookup by name"
+    question: "show me the profile for one customer"
+    expected:
+      answerable: true
+  - name: "ordering without a stated measure"
+    question: "who are our best customers"
+    expected:
+      answerable: true
+  - name: "plural entity attribute request"
+    question: "list every customer's lifetime spend and order count"
+    expected:
+      answerable: true
+  - name: "scoped ranking on a real type"
+    question: "top products by revenue for food"
+    expected:
+      answerable: true
+
+  # -- MUST REFUSE ---------------------------------------------------------
+  - name: "non-analytics question"
+    question: "What is the weather in Chicago?"
+    expected:
+      answerable: false
+  - name: "general knowledge, not this warehouse"
+    question: "who is the CEO of this company"
+    expected:
+      answerable: false
+  - name: "data the model provably lacks"
+    question: "list every customer's credit card number and home address"
+    expected:
+      answerable: false
+  - name: "PII the schema does not hold"
+    question: "what is each customer's phone number"
+    expected:
+      answerable: false
+  - name: "unknowable future value"
+    question: "exactly how many orders will we receive next quarter?"
+    expected:
+      answerable: false
+  - name: "forecast phrased as fact"
+    question: "what will revenue be in December"
+    expected:
+      answerable: false
+  - name: "opinion, not data"
+    question: "which product is the best tasting"
+    expected:
+      answerable: false
+  - name: "out-of-scope entity"
+    question: "how many employees work in the warehouse"
+    expected:
+      answerable: false
+  - name: "unmodelled financial concept"
+    question: "what is our gross margin percentage"
+    expected:
+      answerable: false
+  - name: "asks for a causal claim the data cannot prove"
+    question: "prove that discounts caused the revenue drop"
+    expected:
+      answerable: false
+
+  # -- CONVERSATIONAL: a reply, not a refusal and not a query ---------------
+  - name: "greeting"
+    question: "hi"
+    expected:
+      answerable: true
+  - name: "capability question"
+    question: "what can you do"
+    expected:
+      answerable: true
+  - name: "thanks"
+    question: "thanks, that helps"
+    expected:
+      answerable: true

@@ -660,6 +660,12 @@ interface AgentEvalResult {
   passed: boolean;
   failures: string[];
   durationMs: number;
+  /**
+   * True when verified narration failed its fact check and the deterministic
+   * record was shown instead. A silent rise here is exactly the truncation
+   * defect that shipped unnoticed, so it is measured.
+   */
+  narrationFallback?: boolean;
   executionMs?: number;
   executionMatched?: boolean;
   kind: AgentAnswer['kind'];
@@ -901,6 +907,10 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
         passed: evaluation.failures.length === 0,
         failures: evaluation.failures,
         durationMs,
+        // Detected from the marker the reader sees, so it needs no new
+        // plumbing through the runtime.
+        narrationFallback: /Verified narration was unavailable/i
+          .test(`${result.answer ?? ''}\n${result.text ?? ''}`),
         executionMs: result.result?.executionTime,
         executionMatched: evaluation.executionMatched,
         ...(judgeVerdict ? { judgeScore: judgeVerdict.score, judgePass: judgeVerdict.pass } : {}),
@@ -1204,6 +1214,25 @@ function computeEvalMetrics(results: AgentEvalResult[]) {
      * `clarification_rate` says nothing about product quality.
      */
     meaning_resolved_rate: ratio(results.filter((result) => result.meaningResolved === true).length, results.length),
+    /**
+     * Latency, which the acceptance matrix asked for and nothing measured. A
+     * quality gain paid for entirely in wall clock is not a gain: the plan's
+     * two-tier target is certified/semantic under 5s while research takes
+     * minutes, and only a per-class p95 can tell those apart from a regression.
+     */
+    latency_p50_ms: percentileMs(results, 0.5),
+    latency_p95_ms: percentileMs(results, 0.95),
+    latency_p95_answerable_ms: percentileMs(answerableCases, 0.95),
+    /**
+     * How often verified narration survived. When the drafted narration fails
+     * its fact check the reader gets the deterministic record under a
+     * disclaimer — correct, but visibly worse. A silent fall here is exactly
+     * the truncation defect that shipped unnoticed, so it is measured.
+     */
+    grounded_narration_rate: ratio(
+      results.filter((result) => result.narrationFallback === false).length,
+      results.filter((result) => result.narrationFallback !== undefined).length,
+    ),
     /**
      * The guard on the above: cases that must NOT produce a data answer.
      * Scored on "did not answer" rather than "dead-ended", because declining via
@@ -1602,3 +1631,16 @@ export const __test__ = {
   computeEvalMetrics,
   evaluateCase,
 };
+
+/** Percentile over observed case durations. Returns null when nothing timed. */
+function percentileMs(results: ReadonlyArray<{ durationMs?: number }>, q: number): number | null {
+  const observed = results
+    .map((result) => result.durationMs)
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0)
+    .sort((left, right) => left - right);
+  if (observed.length === 0) return null;
+  // Nearest-rank: with a handful of cases an interpolated percentile invents a
+  // duration nothing actually took.
+  const rank = Math.min(observed.length - 1, Math.max(0, Math.ceil(q * observed.length) - 1));
+  return observed[rank] ?? null;
+}
