@@ -22,6 +22,23 @@ describe('bare-ranking assumption fit', () => {
     }
   });
 
+  it('matches across singular/plural, which is morphology and not scope', () => {
+    // `customers.customer_value` was rejected against "who are the top
+    // customers" because the singular `customer` is neither a question word nor
+    // generic measure vocabulary. That silently refused a good assumption.
+    expect(rankingCandidateFitsBareQuestion(
+      'who are the top customers',
+      { ...candidate('customer_value'), qualifiedId: 'semantic:metric:customers.customer_value' },
+    )).toBe(true);
+    expect(rankingCandidateFitsBareQuestion('who are the top customer', candidate('customers_value')))
+      .toBe(true);
+  });
+
+  it('still rejects an unrequested scope that only looks like a plural', () => {
+    expect(rankingCandidateFitsBareQuestion('who are the top customers', candidate('beverages_revenue')))
+      .toBe(false);
+  });
+
   it('rejects a measure carrying an unrequested filter', () => {
     // This is the case that makes silent assumption dangerous: answering "who
     // are the top customers" from `top_beverage_customers` returns a confident

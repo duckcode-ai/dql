@@ -1,4 +1,4 @@
-import { assumeDominantCandidate } from './agentic/assumptions.js';
+import { assumeDominantCandidate, type AnswerAssumption } from './agentic/assumptions.js';
 /**
  * Hybrid router — deterministic-first, LLM-assisted for the ambiguous middle.
  *
@@ -1287,6 +1287,27 @@ function routeWithoutMeaningModel(
     : candidates.filter((candidate) => !isDegenerateRankingMetric(request.question, evidence, candidate));
   if (questionTypeFromText(request.question) === 'ranking'
     && !hasExplicitRankingMeasure(request.question, evidence)) {
+    // Assume the measure where one is clearly indicated, and BIND it through the
+    // same resolution path an explicit selection takes — an assumption that
+    // cannot freeze a plan is refused downstream and surfaces as `blocked` with
+    // no options, which is worse than the question it replaced.
+    const assumed = mayAssumeInterpretation
+      ? assumableRankingMeasure(request.question, rankingCandidates)
+      : undefined;
+    if (assumed) {
+      return {
+        ...routeDecisionForResolution(
+          base,
+          evidence,
+          candidates,
+          directResolution(request, evidence, assumed.candidate, candidates),
+          'heuristic',
+          request.question,
+          planMode,
+        ),
+        assumptions: [assumed.assumption],
+      };
+    }
     return bareRankingClarification(
       base,
       retrievalTrace(evidence, candidates),
@@ -1729,12 +1750,66 @@ function unanswerableClarificationFallback(
  * A candidate built only from these adds no scope the asker did not state.
  */
 const GENERIC_MEASURE_TOKENS = new Set([
-  'revenue', 'spend', 'spending', 'sales', 'sale', 'amount', 'value', 'total', 'sum',
-  'count', 'number', 'orders', 'order', 'quantity', 'qty', 'price', 'cost', 'profit',
+  'revenue', 'spend', 'spending', 'sale', 'amount', 'value', 'total', 'sum',
+  'count', 'number', 'order', 'quantity', 'qty', 'price', 'cost', 'profit',
   'margin', 'gross', 'net', 'lifetime', 'avg', 'average', 'mean', 'median', 'score',
-  'rate', 'ratio', 'percent', 'share', 'volume', 'units', 'balance', 'pretax', 'ltv',
+  'rate', 'ratio', 'percent', 'share', 'volume', 'unit', 'balance', 'pretax', 'ltv',
   'top', 'rank', 'ranking', 'by', 'per', 'the', 'of', 'and',
 ]);
+
+/**
+ * Crude, symmetric singularization. Applied to BOTH sides, so the only thing
+ * that matters is that it agrees with itself — `address` becoming `addres` is
+ * harmless when the question's `address` becomes `addres` too. Without it a
+ * candidate named `customers.customer_value` is rejected against the question
+ * "who are the top customers", because the singular `customer` is neither a
+ * question word nor generic measure vocabulary. That is a morphology accident,
+ * not an unrequested scope, and it silently refused good assumptions.
+ */
+function singularize(token: string): string {
+  if (token.length > 3 && token.endsWith('ies')) return `${token.slice(0, -3)}y`;
+  if (token.length > 3 && (token.endsWith('ses') || token.endsWith('xes') || token.endsWith('zes'))) {
+    return token.slice(0, -2);
+  }
+  if (token.length > 2 && token.endsWith('s') && !token.endsWith('ss')) return token.slice(0, -1);
+  return token;
+}
+
+/**
+ * Pick the measure a bare ranking should assume, or nothing.
+ *
+ * Returns the CANDIDATE, not a decision, because the assumption is only useful
+ * where it can be bound: an `action: 'answer'` with no frozen analytical plan is
+ * refused by the plan boundary and reaches the user as `blocked` with no
+ * options, which is strictly worse than the clarification it replaced. Measured
+ * exactly that way before this was moved to a caller that can bind it.
+ */
+export function assumableRankingMeasure(
+  question: string,
+  candidates: AgentEvidenceCandidate[],
+): { candidate: AgentEvidenceCandidate; assumption: AnswerAssumption } | undefined {
+  // Only a MEASURE can be assumed. A certified block is a whole authored query,
+  // not a ranking measure, so treating one as the answer to "by which metric?"
+  // silently selects someone else's entire analysis.
+  const assumable = candidates.filter((candidate) =>
+    (candidate.kind === 'semantic_metric' || candidate.kind === 'semantic_member')
+    && candidate.compatibility !== 'incompatible'
+    && rankingCandidateFitsBareQuestion(question, candidate));
+  if (assumable.length === 0) return undefined;
+  const assumption = assumeDominantCandidate({
+    about: 'metric',
+    candidates: assumable.map((candidate) => ({
+      id: candidate.qualifiedId ?? candidate.id,
+      label: candidate.name,
+      score: candidate.relevanceScore,
+    })),
+    because: (chosen) => `"${chosen.label ?? chosen.id}" was the highest-ranked governed measure that can rank this entity, and it adds no filter the question did not ask for.`,
+  });
+  if (!assumption) return undefined;
+  const chosen = assumable.find((candidate) =>
+    (candidate.qualifiedId ?? candidate.id) === assumption.chose);
+  return chosen ? { candidate: chosen, assumption } : undefined;
+}
 
 /**
  * Does this ranking measure fit a question that named no measure?
@@ -1750,14 +1825,14 @@ const GENERIC_MEASURE_TOKENS = new Set([
  * leftover token is an unrequested qualifier, and the turn keeps asking.
  */
 export function rankingCandidateFitsBareQuestion(question: string, candidate: AgentEvidenceCandidate): boolean {
-  const questionTokens = new Set(substantiveLexicalTokens(question));
+  const questionTokens = new Set(substantiveLexicalTokens(question).map(singularize));
   // Identities arrive source-qualified (`semantic:metric:orders.revenue`). The
   // `semantic`/`metric` prefix is plumbing, not vocabulary — tokenizing it would
   // make every candidate look scoped and refuse every assumption.
   const identity = (candidate.qualifiedId ?? candidate.id ?? '').split(':').at(-1) ?? '';
   const nameTokens = substantiveLexicalTokens([candidate.name, identity].join(' '));
   if (nameTokens.length === 0) return false;
-  return nameTokens.every((token) =>
+  return nameTokens.map(singularize).every((token) =>
     questionTokens.has(token) || GENERIC_MEASURE_TOKENS.has(token));
 }
 
@@ -1809,41 +1884,6 @@ function bareRankingClarification(
       retrievalEvidence,
       'No retrieved governed measure can rank this entity, so DQL continued into the review-required generated lane instead of asking a question with no selectable answer.',
     );
-  }
-  // A bare ranking whose measure is not in doubt should be answered, not asked
-  // about. Only candidates that add no unrequested scope are eligible, so the
-  // assumption can never quietly change the question.
-  const assumable = question && mayAssume
-    ? rankingChoices.filter((candidate) =>
-      // Only a MEASURE can be assumed. A certified block is a whole authored
-      // query, not a ranking measure, so treating one as the answer to "by
-      // which metric?" silently selects someone else's entire analysis — a
-      // different act from picking the obvious measure. Blocks stay on the
-      // options list where the user can choose them deliberately.
-      (candidate.kind === 'semantic_metric' || candidate.kind === 'semantic_member')
-      && rankingCandidateFitsBareQuestion(question, candidate))
-    : [];
-  const assumption = assumable.length > 0
-    ? assumeDominantCandidate({
-      about: 'metric',
-      candidates: assumable.map((candidate) => ({
-        id: candidate.qualifiedId ?? candidate.id,
-        label: candidate.name,
-        score: candidate.relevanceScore,
-      })),
-      because: (chosen) => `"${chosen.label ?? chosen.id}" was the highest-ranked governed measure that can rank this entity, and it adds no filter the question did not ask for.`,
-    })
-    : undefined;
-  if (assumption) {
-    return {
-      ...unanswerableClarificationFallback(
-        base,
-        retrievalEvidence,
-        `No measure was named, so DQL assumed ${assumption.choseLabel ?? assumption.chose} and answered instead of asking. The alternatives stay available for one-click revision.`,
-      ),
-      assumptions: [assumption],
-      clarificationOptions: buildClarificationOptions(rankingChoices),
-    };
   }
   return {
     ...base,
