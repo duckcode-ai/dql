@@ -161,7 +161,7 @@ import { getRunner as getLLMRunner } from './llm/index.js';
 import { rethrowIfCancelled } from './llm/cancellation.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from './version-status.js';
 import { resolveRetrievalHealthStatus } from './retrieval-health.js';
-import { applyFinding, createResearchState, narrationMaxTokensForFacts, nextHypothesis, synthesizeResearchNarrative } from '@duckcodeailabs/dql-agent';
+import { applyFinding, createResearchState, narrationMaxTokensForFacts, nextHypothesis, rerankCandidates, synthesizeResearchNarrative } from '@duckcodeailabs/dql-agent';
 import { applyEvalCassette, createDqlAgentProviderRunner, createGovernedTextProvider, resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
 import type {
   AgentConversationContext,
@@ -5718,6 +5718,22 @@ function analyticalFailureSummary(
   // lookup, and governed execution for the lifetime of a request. This removes
   // both positional catalog truncation and the previous duplicate retrieval pass.
   const preparedAgentContextPacks = new WeakMap<AgentRunRequest, LocalContextPack>();
+  /**
+   * Cross-encoder pass over the fused candidates, when a provider is available.
+   * Advisory throughout: it may only reorder ids retrieval returned, and any
+   * failure leaves retrieval's own ordering in place.
+   */
+  const agentRerankCandidates = (() => {
+    const governed = resolveGovernedAnswerRunner(projectRoot);
+    const provider = governed
+      ? createGovernedTextProvider(governed.provider as never, projectRoot)
+      : undefined;
+    if (!provider) return undefined;
+    return (question: string, candidates: ReadonlyArray<{ id: string; summary: string }>) =>
+      rerankCandidates(provider, question, candidates, {
+        timeoutMs: Math.round(2_500 * deadlineScale()),
+      });
+  })();
   const pendingAgentContextPacks = new WeakMap<AgentRunRequest, Promise<LocalContextPack>>();
 
   const buildAgentRunContextPack = async (request: AgentRunRequest): Promise<LocalContextPack> => {
@@ -5797,6 +5813,10 @@ function analyticalFailureSummary(
       },
       strictness: request.analysisDepth === 'deep' ? 'exploratory' : 'balanced',
       limit: request.analysisDepth === 'deep' ? 120 : 80,
+      // The runtime PRE-BUILDS this pack, so wiring the reranker only at the
+      // provider's own `buildLocalContextPack` left it unreachable on the
+      // common path — the prepared pack is used and that call never happens.
+      ...(agentRerankCandidates ? { rerankCandidates: agentRerankCandidates } : {}),
       domainContext: requestedDomain
         ? resolveUiDomainContext({
             manifest: snapshot.manifest,

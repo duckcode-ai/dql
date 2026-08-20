@@ -1805,3 +1805,4 @@ function stripUndefinedDeep(value: unknown): unknown {
 export { planResearchHypotheses, parseResearchHypotheses, hypothesesToSteps, type ResearchHypothesis, type ResearchAssets } from './agentic/research-agent.js';
 export { synthesizeResearchNarrative, type ResearchBranchOutcome } from './agentic/research/synthesis.js';
 export { narrationMaxTokensForFacts } from './analytical-result-facts.js';
+export { rerankCandidates, applyRerank, parseRerankReply, type RerankOutcome, type RerankCandidate } from './agentic/rerank.js';

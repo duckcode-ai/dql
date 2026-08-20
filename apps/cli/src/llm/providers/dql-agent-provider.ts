@@ -1,4 +1,4 @@
-import { deadlineScale, planAnalystTurn } from '@duckcodeailabs/dql-agent';
+import { deadlineScale, planAnalystTurn, rerankCandidates } from '@duckcodeailabs/dql-agent';
 import { buildAnalystLoopTools } from '../analyst-loop-tools.js';
 import {
   ClaudeProvider,
@@ -633,6 +633,19 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             strictness: contextBudget.strictness,
             limit: contextBudget.limit,
             confirmCertifiedFit: createCertifiedFitConfirmation(provider, signal),
+            // A cross-encoder pass over the fused candidates. Advisory: it may
+            // only reorder what retrieval returned, and a failure or timeout
+            // leaves retrieval's ordering untouched — so it can improve the
+            // pack and cannot break it.
+            rerankCandidates: (rerankQuestion, candidates) => rerankCandidates(
+              provider,
+              rerankQuestion,
+              candidates,
+              {
+                ...(signal ? { signal } : {}),
+                timeoutMs: Math.round(2_500 * deadlineScale()),
+              },
+            ),
             // Conversation-aware reuse: same-topic follow-ups seed (or, for
             // filter-only refinements, re-stamp) the prior turn's context pack.
             priorContextPackId: priorContextPackIdFromSnapshot(conversationSnapshot),

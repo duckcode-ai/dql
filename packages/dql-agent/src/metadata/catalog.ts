@@ -1,3 +1,4 @@
+import { applyRerank, type RerankOutcome } from '../agentic/rerank.js';
 /**
  * Project-local metadata catalog for OSS agentic analytics.
  *
@@ -301,6 +302,15 @@ export interface BuildLocalContextPackRequest {
   runtimeSchemaSnapshot?: RuntimeSchemaSnapshot;
   strictness?: 'safe' | 'balanced' | 'exploratory';
   confirmCertifiedFit?: CertifiedFitConfirmation;
+  /**
+   * Optional cross-encoder pass over the fused candidates. Absent, or on any
+   * failure, retrieval's own ordering is used unchanged — so this can improve
+   * the pack but never break it.
+   */
+  rerankCandidates?: (
+    question: string,
+    candidates: ReadonlyArray<{ id: string; summary: string }>,
+  ) => Promise<RerankOutcome | undefined>;
   /** Prior turn's context pack — reuse fuel for same-topic follow-ups. */
   priorContextPackId?: string;
   /**
@@ -1688,8 +1698,36 @@ export async function buildLocalContextPack(
       modelAreaId: focusedArea?.id,
       limit: request.limit ?? 120,
     }).selected;
+    // Reorder by what the QUESTION needs. RRF and the additive score rank by
+    // overlap, distance, and type weight — none of which read the question — so
+    // the object that answers it can sit behind ten near-synonyms and be cut by
+    // a top-N that never considered the ask. Advisory: the reranker may only
+    // reorder ids retrieval already returned, and any failure leaves this list
+    // exactly as it was.
+    const rerankedObjects = request.rerankCandidates
+      ? applyRerank(
+        rankedObjects,
+        (object) => object.objectKey,
+        await request.rerankCandidates(
+          searchQueries.join(' '),
+          rankedObjects.slice(0, 40).map((object) => ({
+            id: object.objectKey,
+            summary: [
+              object.name,
+              object.objectType,
+              object.description?.slice(0, 160),
+            ].filter(Boolean).join(' — '),
+          })),
+        ).catch(() => undefined),
+      )
+      : rankedObjects;
+    if (process.env.DQL_ORCHESTRATOR_TRACE && request.rerankCandidates) {
+      const moved = rerankedObjects.findIndex((object, position) =>
+        object.objectKey !== rankedObjects[position]?.objectKey);
+      console.warn(`[dql] rerank: ${moved < 0 ? 'no change' : `reordered from position ${moved}`} over ${Math.min(40, rankedObjects.length)} candidates`);
+    }
     const sqlParentObjects = sqlParentObjectsForSelectedColumns(
-      rankedObjects,
+      rerankedObjects,
       mergeObjects([...graphObjects, ...runtimeObjects]),
       questionPlan,
     );
@@ -1721,8 +1759,8 @@ export async function buildLocalContextPack(
       limit: 8,
     }).selected;
     const objects = fullCatalogObjects
-      ? mergeObjects([...rankedObjects, ...sqlParentObjects, ...fullCatalogObjects, ...selectedSkillObjects, ...routeObjects])
-      : mergeObjects([...rankedObjects, ...sqlParentObjects, ...selectedSkillObjects, ...routeObjects]);
+      ? mergeObjects([...rerankedObjects, ...sqlParentObjects, ...fullCatalogObjects, ...selectedSkillObjects, ...routeObjects])
+      : mergeObjects([...rerankedObjects, ...sqlParentObjects, ...selectedSkillObjects, ...routeObjects]);
     const objectKeys = objects.map((row) => row.objectKey);
     const allowedObjectKeys = new Set(objectKeys);
     let contextEdges = mergeMetadataEdges(edgeWalk)
