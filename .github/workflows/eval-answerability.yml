@@ -46,6 +46,25 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
 
+      - name: Seed the eval warehouse
+        run: |
+          # The fixture's checked-in connection is `:memory:`, which is EMPTY on
+          # every connect. This suite was therefore scoring questions against a
+          # warehouse with zero tables — every lookup failing as "table does not
+          # exist" and being counted as a false refusal. Measured locally: the
+          # false-refusal rate reads 0.4 unseeded and 0.0 seeded, on the same
+          # eight cases and the same model. The unseeded number was fiction.
+          #
+          # Copy the fixture so the checked-in `:memory:` config is never mutated.
+          cp -R apps/cli/test/fixtures/jaffle-supply-chain "$PROJ"
+          node scripts/seed-eval-warehouse.mjs --out "$PROJ/jaffle.duckdb"
+          # The project reads `connections.default`, not `defaultConnection`.
+          node -e "const fs=require('fs');const p=process.env.PROJ+'/dql.config.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.connections={...(c.connections||{}),default:{driver:'duckdb',filepath:process.env.PROJ+'/jaffle.duckdb'}};fs.writeFileSync(p,JSON.stringify(c,null,2));"
+          # Fail loudly rather than reporting a green run over an empty database.
+          node -e "const fs=require('fs');const f=process.env.PROJ+'/jaffle.duckdb';if(!fs.existsSync(f)||fs.statSync(f).size<1000){console.error('Seeded warehouse missing or empty: '+f);process.exit(1);}console.log('seeded warehouse OK:',fs.statSync(f).size,'bytes');"
+        env:
+          PROJ: ${{ runner.temp }}/answerability-proj
+
       - name: Start the runtime against the fixture
         run: |
           # The project path is REQUIRED: `dql notebook` resolves a project from
@@ -56,7 +75,7 @@ jobs:
           # live model, which is exactly the property that makes it PR-safe.
           mkdir -p "$RUNNER_TEMP/cassettes"
           DQL_EVAL_CASSETTE_DIR="$RUNNER_TEMP/cassettes" \
-            node apps/cli/dist/index.js notebook apps/cli/test/fixtures/jaffle-supply-chain \
+            node apps/cli/dist/index.js notebook "$PROJ" \
               --port 3479 > runtime.log 2>&1 &
           echo $! > runtime.pid
           for i in $(seq 1 60); do
@@ -66,20 +85,22 @@ jobs:
           echo "Runtime did not become healthy:" >&2
           cat runtime.log >&2
           exit 1
+        env:
+          PROJ: ${{ runner.temp }}/answerability-proj
 
       - name: Answerability suite
-        working-directory: apps/cli/test/fixtures/jaffle-supply-chain
+        working-directory: ${{ runner.temp }}/answerability-proj
         run: |
-          node ../../../dist/index.js agent eval agent-evals/answerability.agent-evals.yml \
+          node "$GITHUB_WORKSPACE/apps/cli/dist/index.js" agent eval agent-evals/answerability.agent-evals.yml \
             --via runtime --runtime-url http://127.0.0.1:3479 \
             --max-false-refusal 0.05 --min-refusal-recall 1 \
             --format json > "$GITHUB_WORKSPACE/answerability-report.json"
           cat "$GITHUB_WORKSPACE/answerability-report.json"
 
       - name: Routing taxonomy suite
-        working-directory: apps/cli/test/fixtures/jaffle-supply-chain
+        working-directory: ${{ runner.temp }}/answerability-proj
         run: |
-          node ../../../dist/index.js agent eval agent-evals/routing-taxonomy.agent-evals.yml \
+          node "$GITHUB_WORKSPACE/apps/cli/dist/index.js" agent eval agent-evals/routing-taxonomy.agent-evals.yml \
             --via runtime --runtime-url http://127.0.0.1:3479 \
             --max-false-refusal 0.05 --min-refusal-recall 1 \
             --format json > "$GITHUB_WORKSPACE/routing-report.json"

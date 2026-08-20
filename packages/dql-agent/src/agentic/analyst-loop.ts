@@ -188,6 +188,9 @@ export function createAnalystLaneHandler(deps: {
     if (!loopDeps || loopDeps.tools.length === 0) return deps.legacy(input);
 
     const outcome = await runAnalystLoop(input, loopDeps);
+    if (process.env.DQL_ORCHESTRATOR_TRACE) {
+      console.warn(`[dql] analyst loop outcome: stop=${outcome.stop} sql=${outcome.sql ? 'yes' : 'no'} admitted=${outcome.admitted.length} corrections=${outcome.corrections.length}`);
+    }
     const answer = await deps.legacy(
       outcome.stop === 'composed' && outcome.sql
         ? { ...input, extraContext: [input.extraContext, analystContext(outcome)].filter(Boolean).join('\n\n') }
