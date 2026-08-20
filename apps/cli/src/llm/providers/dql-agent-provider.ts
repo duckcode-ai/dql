@@ -382,6 +382,24 @@ function readOrchestratorConfig(projectRoot: string): Record<string, unknown> | 
  * resolves to disabled: value lookup touches warehouse cell values, so a
  * malformed setting must fail closed.
  */
+/**
+ * Structured turn planning is OFF by default.
+ *
+ * It costs one provider dispatch before the loop makes any tool call, and on a
+ * slow provider that dispatch can consume enough of the discovery window that
+ * the loop is then refused admission and falls back to the legacy path —
+ * measured on ollama, where all three agentic dispatches planned successfully
+ * and then died at "soft target elapsed before this provider dispatch could
+ * start". Its payoff is a legible trace, and `onStep` is not wired to SSE yet,
+ * so today it buys nothing a user can see. Opt in with
+ * `agent.orchestrator.turnPlanning: true` once streaming lands.
+ */
+function turnPlanningEnabled(projectRoot: string): boolean {
+  const orchestrator = readAgentConfig(projectRoot)?.orchestrator;
+  if (!orchestrator || typeof orchestrator !== 'object') return false;
+  return (orchestrator as { turnPlanning?: unknown }).turnPlanning === true;
+}
+
 function valueLookupEnabled(projectRoot: string): boolean {
   const grounding = readAgentConfig(projectRoot)?.runtimeValueGrounding;
   if (!grounding || typeof grounding !== 'object') return false;
@@ -818,7 +836,8 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
                     // Scaled by the same knob as every other agent deadline, so
                     // a local model that needs seconds per call is not planned
                     // out of existence by a budget calibrated for a hosted one.
-                    planTurn: async (question, toolNames) => {
+                    ...(turnPlanningEnabled(req.projectRoot) ? {
+                    planTurn: async (question: string, toolNames: string[]) => {
                       const plan = await planAnalystTurn(
                         loopInput.provider,
                         question,
@@ -835,6 +854,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
                       }
                       return plan;
                     },
+                    } : {}),
                     // Reuse the legacy parser and validator rather than forking
                     // a second SQL front end that would drift from the first.
                     parseSql: (raw) => parseProposal(raw).sql,
