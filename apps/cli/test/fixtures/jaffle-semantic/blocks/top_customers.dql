@@ -1,0 +1,22 @@
+// dql-format: 1
+
+block "top_customers" {
+  domain = "orders"
+  type = "custom"
+  status = "certified"
+  description = "Top 10 customers by lifetime spend, with order counts."
+  tags = ["customers", "revenue", "ranking"]
+  owner = "analytics@example.com"
+  grain = "customer"
+  entities = ["Customer"]
+  outputs = ["customer_name", "lifetime_spend", "order_count"]
+  dimensions = ["customer"]
+  llmContext = "Use for global lifetime customer spend only, not category-scoped customer drilldowns."
+  examples = [{ question = "Who are the top customers by lifetime spend?" }]
+  query = """
+    SELECT customer_name, lifetime_spend, count_lifetime_orders AS order_count
+    FROM dim_customers
+    ORDER BY lifetime_spend DESC
+    LIMIT 10
+  """
+}

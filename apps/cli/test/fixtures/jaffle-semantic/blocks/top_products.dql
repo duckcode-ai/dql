@@ -1,0 +1,23 @@
+// dql-format: 1
+
+block "top_products" {
+  domain = "orders"
+  type = "custom"
+  status = "certified"
+  description = "Top 10 products by revenue, with units sold."
+  tags = ["products", "revenue", "ranking"]
+  owner = "analytics@example.com"
+  grain = "product"
+  entities = ["Product"]
+  outputs = ["product_name", "revenue", "units"]
+  dimensions = ["product"]
+  llmContext = "Use for product-level revenue rankings only, not product supply, customer, or order-detail questions."
+  examples = [{ question = "What are the top products by revenue?" }]
+  query = """
+    SELECT product_name, SUM(product_price) AS revenue, COUNT(*) AS units
+    FROM order_items
+    GROUP BY product_name
+    ORDER BY revenue DESC
+    LIMIT 10
+  """
+}

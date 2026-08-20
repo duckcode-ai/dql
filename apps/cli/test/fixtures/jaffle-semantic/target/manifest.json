@@ -1,0 +1,819 @@
+{
+ "metadata": {
+  "project_name": "jaffle_shop"
+ },
+ "nodes": {
+  "model.jaffle_shop.order_items": {
+   "resource_type": "model",
+   "name": "order_items",
+   "alias": "order_items",
+   "database": "jaffle_shop",
+   "schema": "dev",
+   "description": "Order item rows with product name, product category, order id, and item revenue.",
+   "depends_on": {
+    "nodes": []
+   },
+   "tags": [
+    "orders",
+    "products",
+    "revenue"
+   ],
+   "original_file_path": "models/order_items.sql",
+   "config": {
+    "materialized": "table"
+   },
+   "columns": {
+    "order_item_id": {
+     "name": "order_item_id",
+     "data_type": "number",
+     "description": "Order item identifier."
+    },
+    "order_id": {
+     "name": "order_id",
+     "data_type": "number",
+     "description": "Order identifier."
+    },
+    "product_id": {
+     "name": "product_id",
+     "data_type": "text",
+     "description": "Product SKU."
+    },
+    "product_name": {
+     "name": "product_name",
+     "data_type": "text",
+     "description": "Product display name."
+    },
+    "product_type": {
+     "name": "product_type",
+     "data_type": "text",
+     "description": "Product category such as jaffle or beverage."
+    },
+    "product_price": {
+     "name": "product_price",
+     "data_type": "number",
+     "description": "Product revenue amount."
+    },
+    "ordered_at": {
+     "name": "ordered_at",
+     "data_type": "timestamp",
+     "description": "Order timestamp."
+    }
+   }
+  },
+  "model.jaffle_shop.supplies": {
+   "resource_type": "model",
+   "name": "supplies",
+   "alias": "supplies",
+   "database": "jaffle_shop",
+   "schema": "dev",
+   "description": "Supply rows linked to products for supply-chain analysis.",
+   "depends_on": {
+    "nodes": []
+   },
+   "tags": [
+    "products",
+    "supplies",
+    "supply-chain"
+   ],
+   "original_file_path": "models/supplies.sql",
+   "config": {
+    "materialized": "table"
+   },
+   "columns": {
+    "supply_id": {
+     "name": "supply_id",
+     "data_type": "text",
+     "description": "Supply identifier."
+    },
+    "product_id": {
+     "name": "product_id",
+     "data_type": "text",
+     "description": "Product SKU."
+    },
+    "supply_name": {
+     "name": "supply_name",
+     "data_type": "text",
+     "description": "Supply display name."
+    },
+    "supply_cost": {
+     "name": "supply_cost",
+     "data_type": "number",
+     "description": "Unit supply cost."
+    },
+    "is_perishable_supply": {
+     "name": "is_perishable_supply",
+     "data_type": "boolean",
+     "description": "Whether the supply is perishable."
+    }
+   }
+  },
+  "model.jaffle_shop.fct_orders": {
+   "resource_type": "model",
+   "name": "fct_orders",
+   "alias": "fct_orders",
+   "database": "jaffle_shop",
+   "schema": "dev",
+   "description": "Order fact rows with customer ids and subtotal revenue.",
+   "depends_on": {
+    "nodes": []
+   },
+   "tags": [
+    "orders",
+    "customers",
+    "revenue"
+   ],
+   "original_file_path": "models/fct_orders.sql",
+   "config": {
+    "materialized": "table"
+   },
+   "columns": {
+    "order_id": {
+     "name": "order_id",
+     "data_type": "number",
+     "description": "Order identifier."
+    },
+    "customer_id": {
+     "name": "customer_id",
+     "data_type": "number",
+     "description": "Customer identifier."
+    },
+    "order_total": {
+     "name": "order_total",
+     "data_type": "number",
+     "description": "Order total."
+    },
+    "count_food_items": {
+     "name": "count_food_items",
+     "data_type": "number",
+     "description": "Food item count."
+    },
+    "count_drink_items": {
+     "name": "count_drink_items",
+     "data_type": "number",
+     "description": "Drink item count."
+    },
+    "subtotal_food_items": {
+     "name": "subtotal_food_items",
+     "data_type": "number",
+     "description": "Food revenue."
+    },
+    "subtotal_drink_items": {
+     "name": "subtotal_drink_items",
+     "data_type": "number",
+     "description": "Drink revenue."
+    },
+    "subtotal": {
+     "name": "subtotal",
+     "data_type": "number",
+     "description": "Subtotal revenue."
+    }
+   }
+  },
+  "model.jaffle_shop.dim_customers": {
+   "resource_type": "model",
+   "name": "dim_customers",
+   "alias": "dim_customers",
+   "database": "jaffle_shop",
+   "schema": "dev",
+   "description": "Customer dimension with names and lifetime spend.",
+   "depends_on": {
+    "nodes": []
+   },
+   "tags": [
+    "customers"
+   ],
+   "original_file_path": "models/dim_customers.sql",
+   "config": {
+    "materialized": "table"
+   },
+   "columns": {
+    "customer_id": {
+     "name": "customer_id",
+     "data_type": "number",
+     "description": "Customer identifier."
+    },
+    "customer_name": {
+     "name": "customer_name",
+     "data_type": "text",
+     "description": "Customer display name."
+    },
+    "count_lifetime_orders": {
+     "name": "count_lifetime_orders",
+     "data_type": "number",
+     "description": "Lifetime order count."
+    },
+    "lifetime_spend": {
+     "name": "lifetime_spend",
+     "data_type": "number",
+     "description": "Lifetime customer spend."
+    }
+   }
+  }
+ },
+ "sources": {},
+ "semantic_models": {
+  "semantic_model.jaffle_shop.customers": {
+   "name": "customers",
+   "resource_type": "semantic_model",
+   "package_name": "jaffle_shop",
+   "path": "metrics/dim_customers.yml",
+   "original_file_path": "models/metrics/dim_customers.yml",
+   "unique_id": "semantic_model.jaffle_shop.customers",
+   "fqn": [
+    "jaffle_shop",
+    "metrics",
+    "customers"
+   ],
+   "model": "ref('dim_customers')",
+   "node_relation": {
+    "alias": "dim_customers",
+    "schema_name": "main",
+    "database": "jaffle_shop",
+    "relation_name": "\"jaffle_shop\".\"main\".\"dim_customers\""
+   },
+   "description": "Customer grain mart.\n",
+   "label": null,
+   "defaults": {
+    "agg_time_dimension": null
+   },
+   "entities": [
+    {
+     "name": "customer",
+     "type": "primary",
+     "description": null,
+     "label": null,
+     "role": null,
+     "expr": "customer_id",
+     "config": {
+      "meta": {}
+     }
+    }
+   ],
+   "measures": [
+    {
+     "name": "lifetime_spend",
+     "agg": "sum",
+     "description": "Customer lifetime spend.",
+     "label": null,
+     "create_metric": false,
+     "expr": null,
+     "agg_params": null,
+     "non_additive_dimension": null,
+     "agg_time_dimension": null,
+     "config": {
+      "meta": {}
+     }
+    },
+    {
+     "name": "count_lifetime_orders",
+     "agg": "sum",
+     "description": "Total orders per customer.",
+     "label": null,
+     "create_metric": false,
+     "expr": null,
+     "agg_params": null,
+     "non_additive_dimension": null,
+     "agg_time_dimension": null,
+     "config": {
+      "meta": {}
+     }
+    }
+   ],
+   "dimensions": [
+    {
+     "name": "customer_name",
+     "type": "categorical",
+     "description": null,
+     "label": null,
+     "is_partition": false,
+     "type_params": null,
+     "expr": null,
+     "metadata": null,
+     "config": {
+      "meta": {}
+     }
+    }
+   ],
+   "metadata": null,
+   "depends_on": {
+    "macros": [],
+    "nodes": [
+     "model.jaffle_shop.dim_customers"
+    ]
+   },
+   "refs": [
+    {
+     "name": "dim_customers",
+     "package": null,
+     "version": null
+    }
+   ],
+   "created_at": 0,
+   "config": {
+    "enabled": true,
+    "group": null,
+    "meta": {}
+   },
+   "unrendered_config": {},
+   "primary_entity": "customer",
+   "group": null
+  },
+  "semantic_model.jaffle_shop.orders": {
+   "name": "orders",
+   "resource_type": "semantic_model",
+   "package_name": "jaffle_shop",
+   "path": "metrics/fct_orders.yml",
+   "original_file_path": "models/metrics/fct_orders.yml",
+   "unique_id": "semantic_model.jaffle_shop.orders",
+   "fqn": [
+    "jaffle_shop",
+    "metrics",
+    "orders"
+   ],
+   "model": "ref('fct_orders')",
+   "node_relation": {
+    "alias": "fct_orders",
+    "schema_name": "main",
+    "database": "jaffle_shop",
+    "relation_name": "\"jaffle_shop\".\"main\".\"fct_orders\""
+   },
+   "description": "Order grain fact.\n",
+   "label": null,
+   "defaults": {
+    "agg_time_dimension": null
+   },
+   "entities": [
+    {
+     "name": "order",
+     "type": "primary",
+     "description": null,
+     "label": null,
+     "role": null,
+     "expr": "order_id",
+     "config": {
+      "meta": {}
+     }
+    },
+    {
+     "name": "customer",
+     "type": "foreign",
+     "description": null,
+     "label": null,
+     "role": null,
+     "expr": "customer_id",
+     "config": {
+      "meta": {}
+     }
+    }
+   ],
+   "measures": [
+    {
+     "name": "order_total",
+     "agg": "sum",
+     "description": "Sum of order value.",
+     "label": null,
+     "create_metric": false,
+     "expr": null,
+     "agg_params": null,
+     "non_additive_dimension": null,
+     "agg_time_dimension": null,
+     "config": {
+      "meta": {}
+     }
+    },
+    {
+     "name": "subtotal",
+     "agg": "sum",
+     "description": "Order subtotal before tax.",
+     "label": null,
+     "create_metric": false,
+     "expr": null,
+     "agg_params": null,
+     "non_additive_dimension": null,
+     "agg_time_dimension": null,
+     "config": {
+      "meta": {}
+     }
+    }
+   ],
+   "dimensions": [],
+   "metadata": null,
+   "depends_on": {
+    "macros": [],
+    "nodes": [
+     "model.jaffle_shop.fct_orders"
+    ]
+   },
+   "refs": [
+    {
+     "name": "fct_orders",
+     "package": null,
+     "version": null
+    }
+   ],
+   "created_at": 0,
+   "config": {
+    "enabled": true,
+    "group": null,
+    "meta": {}
+   },
+   "unrendered_config": {},
+   "primary_entity": "order",
+   "group": null
+  },
+  "semantic_model.jaffle_shop.order_items": {
+   "name": "order_items",
+   "resource_type": "semantic_model",
+   "package_name": "jaffle_shop",
+   "path": "metrics/order_items.yml",
+   "original_file_path": "models/metrics/order_items.yml",
+   "unique_id": "semantic_model.jaffle_shop.order_items",
+   "fqn": [
+    "jaffle_shop",
+    "metrics",
+    "order_items"
+   ],
+   "model": "ref('order_items')",
+   "node_relation": {
+    "alias": "order_items",
+    "schema_name": "main",
+    "database": "jaffle_shop",
+    "relation_name": "\"jaffle_shop\".\"main\".\"order_items\""
+   },
+   "description": "Order item grain fact.\n",
+   "label": null,
+   "defaults": {
+    "agg_time_dimension": "ordered_at"
+   },
+   "entities": [
+    {
+     "name": "order_item",
+     "type": "primary",
+     "description": null,
+     "label": null,
+     "role": null,
+     "expr": "order_item_id",
+     "config": {
+      "meta": {}
+     }
+    },
+    {
+     "name": "order",
+     "type": "foreign",
+     "description": null,
+     "label": null,
+     "role": null,
+     "expr": "order_id",
+     "config": {
+      "meta": {}
+     }
+    }
+   ],
+   "measures": [
+    {
+     "name": "product_price",
+     "agg": "sum",
+     "description": "Summed product price for items sold.",
+     "label": null,
+     "create_metric": false,
+     "expr": null,
+     "agg_params": null,
+     "non_additive_dimension": null,
+     "agg_time_dimension": null,
+     "config": {
+      "meta": {}
+     }
+    }
+   ],
+   "dimensions": [
+    {
+     "name": "product_name",
+     "type": "categorical",
+     "description": null,
+     "label": null,
+     "is_partition": false,
+     "type_params": null,
+     "expr": null,
+     "metadata": null,
+     "config": {
+      "meta": {}
+     }
+    },
+    {
+     "name": "product_type",
+     "type": "categorical",
+     "description": null,
+     "label": null,
+     "is_partition": false,
+     "type_params": null,
+     "expr": null,
+     "metadata": null,
+     "config": {
+      "meta": {}
+     }
+    },
+    {
+     "name": "ordered_at",
+     "type": "time",
+     "description": null,
+     "label": null,
+     "is_partition": false,
+     "type_params": {
+      "time_granularity": "day",
+      "validity_params": null
+     },
+     "expr": null,
+     "metadata": null,
+     "config": {
+      "meta": {}
+     }
+    }
+   ],
+   "metadata": null,
+   "depends_on": {
+    "macros": [],
+    "nodes": [
+     "model.jaffle_shop.order_items"
+    ]
+   },
+   "refs": [
+    {
+     "name": "order_items",
+     "package": null,
+     "version": null
+    }
+   ],
+   "created_at": 0,
+   "config": {
+    "enabled": true,
+    "group": null,
+    "meta": {}
+   },
+   "unrendered_config": {},
+   "primary_entity": "order_item",
+   "group": null
+  }
+ },
+ "metrics": {
+  "metric.jaffle_shop.revenue": {
+   "name": "revenue",
+   "resource_type": "metric",
+   "package_name": "jaffle_shop",
+   "path": "metrics/metrics.yml",
+   "original_file_path": "models/metrics/metrics.yml",
+   "unique_id": "metric.jaffle_shop.revenue",
+   "fqn": [
+    "jaffle_shop",
+    "metrics",
+    "revenue"
+   ],
+   "description": "Total revenue from orders.",
+   "label": "Revenue",
+   "type": "simple",
+   "type_params": {
+    "measure": {
+     "name": "order_total",
+     "filter": null,
+     "alias": null,
+     "join_to_timespine": false,
+     "fill_nulls_with": null
+    },
+    "input_measures": [
+     {
+      "name": "order_total",
+      "filter": null,
+      "alias": null,
+      "join_to_timespine": false,
+      "fill_nulls_with": null
+     }
+    ],
+    "numerator": null,
+    "denominator": null,
+    "expr": null,
+    "window": null,
+    "grain_to_date": null,
+    "metrics": [],
+    "conversion_type_params": null,
+    "cumulative_type_params": null,
+    "metric_aggregation_params": null
+   },
+   "filter": null,
+   "metadata": null,
+   "time_granularity": null,
+   "meta": {},
+   "tags": [],
+   "config": {
+    "enabled": true,
+    "group": null,
+    "meta": {}
+   },
+   "unrendered_config": {},
+   "sources": [],
+   "depends_on": {
+    "macros": [],
+    "nodes": [
+     "semantic_model.jaffle_shop.customers"
+    ]
+   },
+   "refs": [],
+   "metrics": [],
+   "created_at": 0,
+   "group": null
+  },
+  "metric.jaffle_shop.lifetime_spend": {
+   "name": "lifetime_spend",
+   "resource_type": "metric",
+   "package_name": "jaffle_shop",
+   "path": "metrics/metrics.yml",
+   "original_file_path": "models/metrics/metrics.yml",
+   "unique_id": "metric.jaffle_shop.lifetime_spend",
+   "fqn": [
+    "jaffle_shop",
+    "metrics",
+    "lifetime_spend"
+   ],
+   "description": "Customer lifetime spend.",
+   "label": "Lifetime spend",
+   "type": "simple",
+   "type_params": {
+    "measure": {
+     "name": "lifetime_spend",
+     "filter": null,
+     "alias": null,
+     "join_to_timespine": false,
+     "fill_nulls_with": null
+    },
+    "input_measures": [
+     {
+      "name": "lifetime_spend",
+      "filter": null,
+      "alias": null,
+      "join_to_timespine": false,
+      "fill_nulls_with": null
+     }
+    ],
+    "numerator": null,
+    "denominator": null,
+    "expr": null,
+    "window": null,
+    "grain_to_date": null,
+    "metrics": [],
+    "conversion_type_params": null,
+    "cumulative_type_params": null,
+    "metric_aggregation_params": null
+   },
+   "filter": null,
+   "metadata": null,
+   "time_granularity": null,
+   "meta": {},
+   "tags": [],
+   "config": {
+    "enabled": true,
+    "group": null,
+    "meta": {}
+   },
+   "unrendered_config": {},
+   "sources": [],
+   "depends_on": {
+    "macros": [],
+    "nodes": [
+     "semantic_model.jaffle_shop.customers"
+    ]
+   },
+   "refs": [],
+   "metrics": [],
+   "created_at": 0,
+   "group": null
+  },
+  "metric.jaffle_shop.order_count": {
+   "name": "order_count",
+   "resource_type": "metric",
+   "package_name": "jaffle_shop",
+   "path": "metrics/metrics.yml",
+   "original_file_path": "models/metrics/metrics.yml",
+   "unique_id": "metric.jaffle_shop.order_count",
+   "fqn": [
+    "jaffle_shop",
+    "metrics",
+    "order_count"
+   ],
+   "description": "Number of orders placed.",
+   "label": "Order count",
+   "type": "simple",
+   "type_params": {
+    "measure": {
+     "name": "count_lifetime_orders",
+     "filter": null,
+     "alias": null,
+     "join_to_timespine": false,
+     "fill_nulls_with": null
+    },
+    "input_measures": [
+     {
+      "name": "count_lifetime_orders",
+      "filter": null,
+      "alias": null,
+      "join_to_timespine": false,
+      "fill_nulls_with": null
+     }
+    ],
+    "numerator": null,
+    "denominator": null,
+    "expr": null,
+    "window": null,
+    "grain_to_date": null,
+    "metrics": [],
+    "conversion_type_params": null,
+    "cumulative_type_params": null,
+    "metric_aggregation_params": null
+   },
+   "filter": null,
+   "metadata": null,
+   "time_granularity": null,
+   "meta": {},
+   "tags": [],
+   "config": {
+    "enabled": true,
+    "group": null,
+    "meta": {}
+   },
+   "unrendered_config": {},
+   "sources": [],
+   "depends_on": {
+    "macros": [],
+    "nodes": [
+     "semantic_model.jaffle_shop.customers"
+    ]
+   },
+   "refs": [],
+   "metrics": [],
+   "created_at": 0,
+   "group": null
+  },
+  "metric.jaffle_shop.product_revenue": {
+   "name": "product_revenue",
+   "resource_type": "metric",
+   "package_name": "jaffle_shop",
+   "path": "metrics/metrics.yml",
+   "original_file_path": "models/metrics/metrics.yml",
+   "unique_id": "metric.jaffle_shop.product_revenue",
+   "fqn": [
+    "jaffle_shop",
+    "metrics",
+    "product_revenue"
+   ],
+   "description": "Revenue attributed to products sold.",
+   "label": "Product revenue",
+   "type": "simple",
+   "type_params": {
+    "measure": {
+     "name": "product_price",
+     "filter": null,
+     "alias": null,
+     "join_to_timespine": false,
+     "fill_nulls_with": null
+    },
+    "input_measures": [
+     {
+      "name": "product_price",
+      "filter": null,
+      "alias": null,
+      "join_to_timespine": false,
+      "fill_nulls_with": null
+     }
+    ],
+    "numerator": null,
+    "denominator": null,
+    "expr": null,
+    "window": null,
+    "grain_to_date": null,
+    "metrics": [],
+    "conversion_type_params": null,
+    "cumulative_type_params": null,
+    "metric_aggregation_params": null
+   },
+   "filter": null,
+   "metadata": null,
+   "time_granularity": null,
+   "meta": {},
+   "tags": [],
+   "config": {
+    "enabled": true,
+    "group": null,
+    "meta": {}
+   },
+   "unrendered_config": {},
+   "sources": [],
+   "depends_on": {
+    "macros": [],
+    "nodes": [
+     "semantic_model.jaffle_shop.customers"
+    ]
+   },
+   "refs": [],
+   "metrics": [],
+   "created_at": 0,
+   "group": null
+  }
+ }
+}

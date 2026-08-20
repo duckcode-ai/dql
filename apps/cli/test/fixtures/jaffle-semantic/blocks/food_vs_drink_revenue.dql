@@ -1,0 +1,28 @@
+// dql-format: 1
+
+block "food_vs_drink_revenue" {
+  domain = "orders"
+  type = "custom"
+  status = "certified"
+  description = "Revenue split between food and drinks, from order items."
+  tags = ["revenue", "food", "drink", "category"]
+  owner = "analytics@example.com"
+  grain = "category"
+  entities = ["Category"]
+  outputs = ["category", "revenue"]
+  dimensions = ["category"]
+  llmContext = "Use only for food vs drink category revenue, not product-level revenue or supply-chain detail."
+  examples = [{ question = "What is revenue by food and drink?" }]
+  query = """
+    SELECT
+      CASE
+        WHEN product_type = 'jaffle' THEN 'Food'
+        WHEN product_type = 'beverage' THEN 'Drink'
+        ELSE product_type
+      END AS category,
+      SUM(product_price) AS revenue
+    FROM order_items
+    GROUP BY 1
+    ORDER BY revenue DESC
+  """
+}

@@ -1,0 +1,80 @@
+# Governed-ranking cases — the lane the other fixtures cannot reach.
+#
+# WHY THIS FIXTURE EXISTS
+# `jaffle-supply-chain` has THREE certified blocks and ZERO semantic metrics, so
+# every ranking question there resolves against a block. That makes a whole class
+# of behaviour unmeasurable:
+#   · the bare-ranking assumption only considers MEASURES (a certified block is a
+#     whole authored query, not a ranking measure, so assuming one silently picks
+#     someone else's entire analysis)
+#   · `compile_semantic_query`, `check_compatibility`, and `explain_metric` are
+#     only offered to the analyst loop when a semantic layer exists
+# Both shipped without an end-to-end test because no fixture could exercise them.
+# This one carries the same four tables plus a real dbt semantic layer:
+#   semantic models : customers, orders, order_items
+#   metrics         : revenue, lifetime_spend, order_count, product_revenue
+#
+# HOW TO RUN (needs a provider AND a seeded warehouse — the checked-in
+# connection is `:memory:`, which is empty on every connect):
+#   P=/tmp/sem-proj
+#   cp -R apps/cli/test/fixtures/jaffle-semantic $P
+#   node scripts/seed-eval-warehouse.mjs --out $P/jaffle.duckdb
+#   # point connections.default at $P/jaffle.duckdb and semanticLayer.projectPath at $P
+#   node apps/cli/dist/index.js notebook $P --port 3479 &
+#   cd $P && node <repo>/apps/cli/dist/index.js agent eval \
+#     agent-evals/governed-ranking.agent-evals.yml --via runtime \
+#     --runtime-url http://127.0.0.1:3479 --format json
+#
+# STATUS: the full suite has NOT been baselined. The eval driver aborts partway
+# through on this fixture with a local model — the semantic compile adds enough
+# time per case to exceed its internal timeout. Run it against a hosted model, or
+# fix the driver timeout, before quoting a number from it.
+#
+# What WAS measured, one question at a time (ollama muse-glimmer, scale 8):
+# "who are the top customers" clarifies with three options — `top_customers`
+# (a block, correctly not assumable), `customers.order_count`, and
+# `customers.count_lifetime_orders` (two near-identical counts, so neither
+# dominates and the assumption correctly declines to fire). `lifetime_spend` and
+# `revenue` — the natural ranking measures for this question — were NOT
+# retrieved at all. That is a retrieval-recall gap upstream of routing, and it is
+# the finding these cases exist to keep visible.
+
+cases:
+  - name: "a bare ranking should settle on a measure rather than ask"
+    # Three metrics can rank a customer. If one dominates and adds no filter the
+    # question did not ask for, the turn should assume it, say so, and answer.
+    question: "who are the top customers"
+    expected:
+      answerable: true
+
+  - name: "a named governed metric must answer without asking which measure"
+    # `revenue` is a real metric here. Naming it leaves nothing to clarify.
+    question: "show me revenue by product type"
+    expected:
+      answerable: true
+
+  - name: "a metric-by-dimension breakdown must reach the semantic layer"
+    # order_items carries product_name and product_type; product_revenue is
+    # compiled from its product_price measure.
+    question: "what is product revenue by product name"
+    expected:
+      answerable: true
+
+  - name: "a scoped ranking must not be answered from an unscoped metric"
+    # The question asks for perishable supplies, which no metric covers. The
+    # answer may be review-required generated SQL, but it must not silently
+    # report total revenue as though the filter had been applied.
+    question: "who are the top customers for perishable products"
+    expected:
+      answerable: true
+
+  # ── The refusal half. Without it "never dead-end" becomes "always guess". ────
+  - name: "data the semantic layer provably does not contain must refuse"
+    question: "list every customer's credit card number and home address"
+    expected:
+      answerable: false
+
+  - name: "an unknowable future value must refuse rather than forecast"
+    question: "exactly how many orders will we receive next quarter?"
+    expected:
+      answerable: false

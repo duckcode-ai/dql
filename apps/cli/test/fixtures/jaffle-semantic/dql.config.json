@@ -1,0 +1,20 @@
+{
+  "project": "jaffle-semantic",
+  "connections": {
+    "default": {
+      "driver": "duckdb",
+      "filepath": ":memory:"
+    }
+  },
+  "governance": {
+    "required_fields": [
+      "domain",
+      "owner",
+      "description"
+    ]
+  },
+  "semanticLayer": {
+    "provider": "dbt",
+    "projectPath": "."
+  }
+}
