@@ -171,6 +171,11 @@ export interface AgentRunRequest {
   /** Explicit Research-only permission for bounded semantic-member selection. */
   allowProviderSemanticMemberSelection?: boolean;
   projectRoot: string;
+  /**
+   * The agent run this turn belongs to. Used to key the execution
+   * authorization, so proofs cannot cross turns.
+   */
+  agentRunId?: string;
   /** Server-resolved domain and purpose scope; clients never supply imports. */
   domainContext?: DomainContextEnvelope;
   /** Immutable server-owned manifest used for the entire governed answer. */

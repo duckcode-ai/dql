@@ -853,6 +853,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             handlers: {
               generated: createAnalystLaneHandler({
                 legacy: answer,
+                // Keyed by the RUN, not the question: two turns asking the same
+                // thing must not inherit each other's proofs.
+                runKey: () => req.agentRunId,
                 buildDeps: (loopInput) => {
                   const execute = loopInput.executeGeneratedSql;
                   const valuesEnabled = valueLookupEnabled(req.projectRoot);

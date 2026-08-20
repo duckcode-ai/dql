@@ -161,7 +161,7 @@ import { getRunner as getLLMRunner } from './llm/index.js';
 import { rethrowIfCancelled } from './llm/cancellation.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from './version-status.js';
 import { resolveRetrievalHealthStatus } from './retrieval-health.js';
-import { applyFinding, createResearchState, narrationMaxTokensForFacts, nextHypothesis, rerankCandidates, synthesizeResearchNarrative, validateSqlAgainstLocalContext as validateAuthorizedSqlReferences, verifyFinalSql, type FinalSqlAuthorizationV1 } from '@duckcodeailabs/dql-agent';
+import { applyFinding, createResearchState, narrationMaxTokensForFacts, nextHypothesis, rerankCandidates, synthesizeResearchNarrative, clearSqlAuthorization, consumeSqlAuthorization, validateSqlAgainstLocalContext as validateAuthorizedSqlReferences, verifyFinalSql } from '@duckcodeailabs/dql-agent';
 import { applyEvalCassette, createDqlAgentProviderRunner, createGovernedTextProvider, resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
 import type {
   AgentConversationContext,
@@ -2945,6 +2945,25 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     onProgress?: (message: string) => void,
     routeDecision?: IntentDecision,
   ): Promise<AgentAnswer> {
+    // Scope the authorization to THIS run for the duration of the answer, and
+    // clear it afterwards so a later execution cannot ride a stale proof.
+    const previousRunIdForExecution = activeRunIdForExecution;
+    activeRunIdForExecution = request.runId ?? undefined;
+    try {
+      return await runGovernedAgentAnswerForRunInner(request, repair, route, onProgress, routeDecision);
+    } finally {
+      if (activeRunIdForExecution) clearSqlAuthorization(activeRunIdForExecution);
+      activeRunIdForExecution = previousRunIdForExecution;
+    }
+  }
+
+  async function runGovernedAgentAnswerForRunInner(
+    request: AgentRunRequest,
+    repair?: { attempt: number; repairHint?: string },
+    route: AgentRunRoute = 'generated_answer',
+    onProgress?: (message: string) => void,
+    routeDecision?: IntentDecision,
+  ): Promise<AgentAnswer> {
     const governed = resolveGovernedAnswerRunner(projectRoot);
     let resolvedProvider = governed?.provider ?? null;
     let runner = governed?.runner ?? null;
@@ -3079,6 +3098,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         allowProviderSemanticMemberSelection: route === 'research',
         researchResultRowsOptIn: route === 'research' && request.researchResultRowsOptIn === true,
         projectRoot,
+        // Keys the execution authorization, so the proofs the analyst loop
+        // gathers can be checked against the statement this run executes.
+        ...(request.runId ? { agentRunId: request.runId } : {}),
         preparedContextPack: preparedAgentContextPacks.get(request),
         domainContext,
         projectSnapshot: { snapshotId: runProjectSnapshot.snapshotId, manifest: runProjectSnapshot.manifest },
@@ -5783,7 +5805,12 @@ function analyticalFailureSummary(
    * Authorizations minted for the current turn, keyed by question. Populated
    * only by the analyst lane, which is the path that can prove identifiers.
    */
-  const activeSqlAuthorizations = new Map<string, FinalSqlAuthorizationV1>();
+  /**
+   * The run whose authorization the next physical execution may consume. Set
+   * for the duration of a governed answer; the registry itself is turn-scoped
+   * and self-evicting, so a crashed run leaks nothing.
+   */
+  let activeRunIdForExecution: string | undefined;
   /**
    * Cross-encoder pass over the fused candidates, when a provider is available.
    * Advisory throughout: it may only reorder ids retrieval returned, and any
@@ -6738,13 +6765,21 @@ function analyticalFailureSummary(
         // must reference only what this run PROVED. Catalog presence is not
         // proof. Absent an authorization (legacy path) nothing changes here,
         // and that absence is recorded rather than assumed safe.
-        const authorization = activeSqlAuthorizations.get(question);
+        // Read and REMOVE: one authorization licenses exactly one execution,
+        // so a retry has to prove itself again rather than riding the previous
+        // turn's proofs.
+        const authorization = activeRunIdForExecution
+          ? consumeSqlAuthorization(activeRunIdForExecution)
+          : undefined;
         if (authorization) {
           const validation = validateAuthorizedSqlReferences(preparation.executedSql, undefined);
           const verdict = verifyFinalSql(authorization, preparation.executedSql, [
             ...(validation.referencedRelations ?? []),
             ...(validation.referencedColumns ?? []).map((column: { column: string }) => column.column),
           ]);
+          if (process.env.DQL_ORCHESTRATOR_TRACE) {
+            console.warn(`[dql] execution authorization: ${verdict.ok ? 'admitted' : 'REFUSED'} proven=${authorization.provenIdentifiers.length}${verdict.ok ? '' : ` reason=${verdict.reason}`}`);
+          }
           if (!verdict.ok) {
             throw analyticalError(
               verdict.reason ?? 'The statement was not authorized for execution.',

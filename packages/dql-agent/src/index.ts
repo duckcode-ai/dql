@@ -1818,3 +1818,4 @@ export {
   type SqlAuthorizationVerdict,
   type IdentifierEvidence,
 } from './agentic/sql-authorization.js';
+export { registerSqlAuthorization, consumeSqlAuthorization, clearSqlAuthorization, pendingAuthorizationCount } from './agentic/authorization-registry.js';

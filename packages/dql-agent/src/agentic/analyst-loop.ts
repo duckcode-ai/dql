@@ -1,3 +1,6 @@
+import type { AdmittedIdentifier } from './identifier-ledger.js';
+import { registerSqlAuthorization } from './authorization-registry.js';
+import { mintFinalSqlAuthorization } from './sql-authorization.js';
 /**
  * The analyst loop — explore, then compose, with provenance enforced.
  *
@@ -59,6 +62,8 @@ export interface AnalystOutcome {
   sql?: string;
   /** Identifiers the run proved, for the audit trail. */
   admitted: string[];
+  /** The same admissions with their evidence, for minting an authorization. */
+  admittedEntries: AdmittedIdentifier[];
   /** Corrections fed back to the model, in order. */
   corrections: string[];
   /** Why the loop stopped. */
@@ -129,7 +134,7 @@ export async function runAnalystLoop(
     maxToolCalls: deps.maxIterations,
   });
   let sql = deps.parseSql(raw);
-  if (!sql) return { admitted: ledger.entries().map((e) => e.identifier), corrections, stop: 'no_sql' };
+  if (!sql) return { admitted: ledger.entries().map((e) => e.identifier), admittedEntries: ledger.entries(), corrections, stop: 'no_sql' };
 
   // One bounded repair. A second would mostly re-spend the budget: if the first
   // correction — which names the exact identifier that was observed — does not
@@ -142,7 +147,7 @@ export async function runAnalystLoop(
     const safety = verdict.ok ? deps.verifySql?.(sql) : undefined;
     if (verdict.ok && !safety) {
       deps.onStep?.({ kind: 'answer', label: 'Verified — every name came from a tool result' });
-      return { sql, admitted: ledger.entries().map((e) => e.identifier), corrections, stop: 'composed' };
+      return { sql, admitted: ledger.entries().map((e) => e.identifier), admittedEntries: ledger.entries(), corrections, stop: 'composed' };
     }
     const correction = verdict.ok ? safety! : verdict.correction;
     corrections.push(correction);
@@ -166,7 +171,7 @@ export async function runAnalystLoop(
     sql = repaired;
   }
 
-  return { sql, admitted: ledger.entries().map((e) => e.identifier), corrections, stop: 'unverified' };
+  return { sql, admitted: ledger.entries().map((e) => e.identifier), admittedEntries: ledger.entries(), corrections, stop: 'unverified' };
 }
 
 /**
@@ -180,6 +185,11 @@ export async function runAnalystLoop(
 export function createAnalystLaneHandler(deps: {
   legacy: (input: AnswerLoopInput) => Promise<AgentAnswer>;
   buildDeps: (input: AnswerLoopInput) => AnalystLoopDeps | undefined;
+  /**
+   * Identity for this turn's execution authorization. Absent, nothing is
+   * registered and the warehouse guard stays inert — the legacy behaviour.
+   */
+  runKey?: (input: AnswerLoopInput) => string | undefined;
 }) {
   return async (input: AnswerLoopInput): Promise<AgentAnswer> => {
     const loopDeps = deps.buildDeps(input);
@@ -190,6 +200,21 @@ export function createAnalystLaneHandler(deps: {
     const outcome = await runAnalystLoop(input, loopDeps);
     if (process.env.DQL_ORCHESTRATOR_TRACE) {
       console.warn(`[dql] analyst loop outcome: stop=${outcome.stop} sql=${outcome.sql ? 'yes' : 'no'} admitted=${outcome.admitted.length} corrections=${outcome.corrections.length}`);
+    }
+    // Mint the execution authorization from what this turn actually PROVED.
+    // Without this the guard at the warehouse has nothing to check against and
+    // the ledger governs a string rather than the execution — which is the gap
+    // the review identified. Registered before the legacy loop runs, because
+    // the legacy loop is what executes.
+    const runKey = deps.runKey?.(input);
+    if (runKey && outcome.stop === 'composed' && outcome.sql) {
+      registerSqlAuthorization(runKey, mintFinalSqlAuthorization({
+        sql: outcome.sql,
+        proven: outcome.admittedEntries.map((entry) => ({
+          identifier: entry.identifier,
+          evidence: entry.source,
+        })),
+      }));
     }
     const answer = await deps.legacy(
       outcome.stop === 'composed' && outcome.sql
