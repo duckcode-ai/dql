@@ -8,9 +8,14 @@
 
 import type { ConversationTurn } from './session-store.js';
 
-const MAX_SUMMARY_CHARS = 600;
+/**
+ * 600 characters could not hold a session's established facts once a few
+ * metrics, filters, and entities had been agreed — the oldest were evicted
+ * silently, so the agent "forgot" a binding the reader had already given it.
+ */
+const MAX_SUMMARY_CHARS = 1800;
 const MAX_LINE_CHARS = 200;
-const MAX_STRUCTURED_ENTRIES = 12;
+const MAX_STRUCTURED_ENTRIES = 24;
 const MAX_STRUCTURED_TEXT = 320;
 
 export type ConversationSummaryEntryState =

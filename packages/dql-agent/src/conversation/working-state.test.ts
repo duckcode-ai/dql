@@ -102,15 +102,19 @@ describe('reduceWorkingState — topic relation matrix', () => {
 
 describe('updateRollingSummary', () => {
   it('is bounded and keeps the newest lines', () => {
-    const turns = Array.from({ length: 20 }, (_, i) => turn({
+    // The bound moved from 600 to 1800: at 600 a session's established facts
+    // were evicted once a few metrics, filters, and entities had been agreed,
+    // so the agent "forgot" a binding the reader had already given it. The
+    // property under test is unchanged — bounded, newest retained.
+    const turns = Array.from({ length: 60 }, (_, i) => turn({
       question: `question number ${i} about revenue and categories with some padding text`,
       answerSummary: `answer ${i} with details`,
       seq: i + 1,
     }));
     const summary = updateRollingSummary({ compactedTurns: turns });
     expect(summary).toBeDefined();
-    expect(summary!.length).toBeLessThanOrEqual(600);
-    expect(summary).toContain('question number 19');
+    expect(summary!.length).toBeLessThanOrEqual(1800);
+    expect(summary).toContain('question number 59');
     expect(summary).not.toContain('question number 0 ');
   });
 

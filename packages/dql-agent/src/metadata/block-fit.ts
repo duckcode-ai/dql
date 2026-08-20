@@ -77,6 +77,34 @@ export function certifiedTerminationVerdict(input: {
   return { allow: false, fit, reason: fit.reasons[0] ?? 'fit below the Tier-1 threshold' };
 }
 
+/**
+ * Did the question enumerate attributes the planner could not map?
+ *
+ * "list every customer's credit card number and home address" reduces to
+ * `requiredOutputs: ['customer']` — IDENTICAL to the plan for "who are the top
+ * customers" — because the extraction chain silently drops phrases it cannot
+ * resolve. A certified block then fits perfectly, and the reader is handed
+ * `top_customers` stamped `certified` for a question about data the project
+ * does not have.
+ *
+ * The signal is the deficit, not the words: a possessive or of-phrase that
+ * enumerates N attributes must leave N mapped outputs behind the entity. When
+ * it does not, content was dropped, and a block cannot claim to answer what was
+ * never understood. Measured to separate the case above (asked 2, mapped 1)
+ * from the legitimate "customer's lifetime spend and order count" (asked 2,
+ * mapped 3) without touching questions that use no possessive at all.
+ */
+export function droppedAttributeRequest(question: string, mappedOutputs: number): boolean {
+  const match = /(?:\b\w+'s|\bof\s+(?:each|every|the)\s+\w+)\s+(.+)$/i.exec(question);
+  if (!match) return false;
+  const asked = match[1]!.split(/,|\band\b/i)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 2).length;
+  if (asked < 2) return false;
+  // One mapped output is the entity itself; the rest are the attributes.
+  return Math.max(0, mappedOutputs - 1) < asked;
+}
+
 export function evaluateCertifiedBlockFit(input: {
   question: string;
   plan: AnalysisQuestionPlan;
@@ -126,9 +154,15 @@ export function evaluateCertifiedBlockFit(input: {
       ? `certified block returns rows at ${block.grain ?? block.dimensions[0]} grain but the question requests one aggregate value`
       : undefined;
   const topNAction = topNFitAction(requested, block);
+  // Content the planner dropped cannot be checked against the block, so a fit
+  // computed over what survived is not evidence that the question is covered.
+  const droppedRequest = droppedAttributeRequest(input.question, requiredOutputs.length);
 
-  if (grainMismatch || missingDimensions.length > 0 || missingOutputs.length > 0 || unsupportedFilters.length > 0 || unentailedScope.length > 0 || !measureMatch || topNAction === 'generate') {
+  if (droppedRequest || grainMismatch || missingDimensions.length > 0 || missingOutputs.length > 0 || unsupportedFilters.length > 0 || unentailedScope.length > 0 || !measureMatch || topNAction === 'generate') {
     const reasons = [
+      droppedRequest
+        ? 'the question asks for attributes that could not be resolved against the model'
+        : '',
       grainMismatch,
       missingDimensions.length ? `missing requested dimensions: ${missingDimensions.join(', ')}` : '',
       missingOutputs.length ? `missing requested outputs: ${missingOutputs.join(', ')}` : '',

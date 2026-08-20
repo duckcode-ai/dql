@@ -24,7 +24,16 @@ import { isTrustedConversationTurn } from './turn-trust.js';
 import { buildAnalysisQuestionPlan } from '../metadata/analysis-planner.js';
 import { envEmbeddingProvider, hybridRank } from '../embeddings/provider.js';
 
-const RECENT_TURNS = 4;
+/**
+ * Verbatim turns carried into the prompt.
+ *
+ * Four was too shallow for the way people actually work: three follow-ups on a
+ * result and the question that started it has already fallen out of the window,
+ * so a deictic reference resolves against the wrong turn or not at all. The
+ * rolling summary below still covers everything older, and it stays the
+ * fallback — this only widens what is carried word for word.
+ */
+const RECENT_TURNS = 8;
 
 export interface ConversationSnapshotTurn {
   id: string;

@@ -5827,17 +5827,32 @@ function analyticalFailureSummary(
           .filter((block) => !certifiedNames.has(block.name))
           .map((block) => ({ block, status: 'draft' })),
       ];
-      const explanation = composeBusinessExplanation(question, all.map(({ block, status }) => ({
-        objectKey: `dql:block:${block.name}`,
-        objectType: 'dql_block',
-        name: block.name,
-        ...(block.description ? { description: block.description } : {}),
-        ...(block.domain ? { domain: block.domain } : {}),
-        status,
-        payload: {
-          ...(block.dimensions?.length ? { dimensions: block.dimensions } : {}),
-        },
-      })));
+      // Metrics as well as blocks. "How is revenue defined here?" names a
+      // semantic metric, not a block, and answering it from the metric's own
+      // description is the whole point of holding one.
+      const metricObjects = loadSemanticMetrics(projectRoot).map((metric) => ({
+        objectKey: `semantic:metric:${metric.name}`,
+        objectType: 'semantic_metric',
+        name: metric.name,
+        ...(metric.description ? { description: metric.description } : {}),
+        ...(metric.domain ? { domain: metric.domain } : {}),
+        status: 'governed',
+        payload: {},
+      }));
+      const explanation = composeBusinessExplanation(question, [
+        ...all.map(({ block, status }) => ({
+          objectKey: `dql:block:${block.name}`,
+          objectType: 'dql_block',
+          name: block.name,
+          ...(block.description ? { description: block.description } : {}),
+          ...(block.domain ? { domain: block.domain } : {}),
+          status,
+          payload: {
+            ...(block.dimensions?.length ? { dimensions: block.dimensions } : {}),
+          },
+        })),
+        ...metricObjects,
+      ]);
       return explanation?.text;
     } catch {
       // Never let an explanation attempt break a conversational turn.

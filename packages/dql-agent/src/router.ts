@@ -2519,6 +2519,31 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
                   && !resolutionResolvedRanking
                   && !explicitRankingSelection
                 ) {
+                  // Meaning resolution ran here. If it named the ranking
+                  // measure as the missing piece, that is its judgment and the
+                  // turn asks rather than guessing past it. Otherwise a clearly
+                  // indicated measure is assumed and BOUND through the same
+                  // resolution path an explicit selection takes — an assumption
+                  // that cannot freeze a plan is refused downstream and reaches
+                  // the reader as `blocked` with no options.
+                  const resolverFlagged = (safeResolution.missingInformation ?? [])
+                    .some((item) => /measure|metric/i.test(item));
+                  const assumedRanking = resolverFlagged
+                    ? undefined
+                    : assumableRankingMeasure(request.question, clarificationCandidates);
+                  if (assumedRanking) {
+                    return {
+                      ...routeDecisionForResolution(
+                        base,
+                        evidence,
+                        candidates,
+                        directResolution(request, evidence, assumedRanking.candidate, candidates),
+                        'heuristic',
+                        request.question,
+                      ),
+                      assumptions: [assumedRanking.assumption],
+                    };
+                  }
                   return bareRankingClarification(
                     base,
                     retrievalTrace(evidence, candidates),
@@ -2528,11 +2553,7 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
                     // measures for the requested entity, which the execution
                     // candidate set deliberately does not.
                     clarificationCandidates,
-                    // Meaning resolution ran here. If it named the ranking
-                    // measure as the missing piece, that is its judgment, and
-                    // the turn asks rather than guessing past it.
-                    !(safeResolution.missingInformation ?? [])
-                      .some((item) => /measure|metric/i.test(item)),
+                    !resolverFlagged,
                   );
                 }
                 const deterministicGap = deterministicPrePlanClarification(

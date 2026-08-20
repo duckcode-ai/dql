@@ -8311,8 +8311,20 @@ function isDocumentedColumnObject(object: MetadataObject): boolean {
     && (object.description?.trim().length ?? 0) > 0;
 }
 
+/**
+ * A skill is written vocabulary — the words a team uses for a task — which is
+ * exactly what a vector is for. Excluding the type wholesale meant a question
+ * phrased in the team's language could only ever be found by keyword. Bounded
+ * the same way as columns: it must actually be documented, so an empty skill
+ * stub does not earn an embedding.
+ */
+function isDocumentedSkillObject(object: MetadataObject): boolean {
+  return object.objectType === 'skill' && (object.description?.trim().length ?? 0) > 0;
+}
+
 function isVectorIndexObject(object: MetadataObject): boolean {
   if (isDocumentedColumnObject(object)) return true;
+  if (isDocumentedSkillObject(object)) return true;
   return !VECTOR_EXCLUDED_OBJECT_TYPES.has(object.objectType);
 }
 
