@@ -4036,6 +4036,12 @@ function analyticalFailureSummary(
           });
           narrationSource = composed.source;
           narrationValidationFailures = composed.validationFailures;
+          if (process.env.DQL_ORCHESTRATOR_TRACE) {
+            console.warn(`[dql] narration: source=${composed.source}${
+              composed.validationFailures.length > 0
+                ? ` rejected=${composed.validationFailures.join(' | ').slice(0, 300)}`
+                : ''}`);
+          }
           synthesizedAnswer = composed.source === 'llm'
             ? composed.narrative.text
             // A verification failure is not silent: the deterministic join is a

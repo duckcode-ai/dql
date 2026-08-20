@@ -1,3 +1,4 @@
+import { deadlineScale } from './agent-run-engine.js';
 import { hypothesesToSteps, planResearchHypotheses } from './agentic/research-agent.js';
 /**
  * Research loop (P4) — a grounded, ReAct-style planner for "research / follow-up"
@@ -66,7 +67,23 @@ export interface ResearchBudget {
   sqlExecutions: 6;
   repairs: 1;
   narratorCalls: 1;
-  wallClockMs: 120_000;
+  /**
+   * Scaled by `DQL_AGENT_DEADLINE_SCALE`, like every other agent deadline. Was
+   * the literal `120_000`, which a local model exceeds during planning alone.
+   */
+  wallClockMs: number;
+}
+
+/**
+ * The research wall clock, scaled.
+ *
+ * 120s assumes a hosted model. A local 27B needs ~2 minutes for the planning
+ * call alone, so an unscaled budget is exceeded before the first branch runs —
+ * the same reason `DQL_AGENT_DEADLINE_SCALE` exists for the Ask path. Scaling
+ * here keeps ONE knob rather than adding a second authority.
+ */
+export function researchWallClockMs(): number {
+  return Math.round(120_000 * deadlineScale());
 }
 
 export const RESEARCH_BUDGET: ResearchBudget = {
@@ -74,7 +91,7 @@ export const RESEARCH_BUDGET: ResearchBudget = {
   sqlExecutions: 6,
   repairs: 1,
   narratorCalls: 1,
-  wallClockMs: 120_000,
+  get wallClockMs() { return researchWallClockMs(); },
 };
 
 const TIME_DIM_RE = /(_at$|_date$|_time$|_ts$|^date$|^month$|^week$|^day$|ordered_at|created)/i;
@@ -323,7 +340,14 @@ export async function planResearch(input: {
           dimensions: Array.from(new Set(input.blocks.flatMap((block) =>
             [...(block.dimensions ?? []), ...(block.allowedFilters ?? [])]))),
         },
-        { ...(input.signal ? { signal: input.signal } : {}) },
+        {
+          ...(input.signal ? { signal: input.signal } : {}),
+          // Rides the same multiplier as every other agent deadline. Measured
+          // on a local 27B model: a four-hypothesis plan takes 122-149s WARM,
+          // so the 20s default guarantees a fallback to the template and the
+          // feature never runs at all on local hardware.
+          timeoutMs: Math.round(20_000 * deadlineScale()),
+        },
       ))
       : [];
     if (process.env.DQL_ORCHESTRATOR_TRACE) {

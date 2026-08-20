@@ -580,7 +580,26 @@ function isExactZero(value: unknown): boolean {
 }
 
 function numericTokens(value: string): string[] {
-  return value.match(/-?\d+(?:,\d{3})*(?:\.\d+)?%?/g)?.map((token) => token.replace(/,/g, '').replace(/%$/, '')) ?? [];
+  return value.match(/-?\d+(?:,\d{3})*(?:\.\d+)?%?/g)
+    ?.map((token) => normalizeNumericToken(token.replace(/,/g, '').replace(/%$/, ''))) ?? [];
+}
+
+/**
+ * Compare numbers by VALUE, not by spelling.
+ *
+ * `2004` and `2004.00` are the same number, but string equality called the
+ * second one unsupported — so a narration written as "$2,004.00", which is
+ * exactly how the results table renders it, was rejected against a fact stored
+ * as `2004`. Two such rejections and the reader gets the deterministic row dump
+ * with "Verified narration was unavailable" on top, for a sentence whose
+ * numbers were all correct.
+ *
+ * This does not weaken the check: 2004 still fails against 2005. It only stops
+ * formatting from masquerading as a factual error.
+ */
+function normalizeNumericToken(token: string): string {
+  const parsed = Number(token);
+  return Number.isFinite(parsed) ? String(parsed) : token;
 }
 
 function hash(value: string): string {
