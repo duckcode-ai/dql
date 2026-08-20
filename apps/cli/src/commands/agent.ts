@@ -666,6 +666,14 @@ interface AgentEvalResult {
    * defect that shipped unnoticed, so it is measured.
    */
   narrationFallback?: boolean;
+  /**
+   * Was verified-fact narration ATTEMPTED at all? Undefined on cases that never
+   * reach the narrator (refusals, conversational replies). Without this the
+   * grounded-narration denominator counted every case, diluting real failures
+   * with runs that were never at risk — a metric that masks the defect it was
+   * added to catch.
+   */
+  narrationAttempted?: boolean;
   executionMs?: number;
   executionMatched?: boolean;
   kind: AgentAnswer['kind'];
@@ -909,6 +917,9 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
         durationMs,
         // Detected from the marker the reader sees, so it needs no new
         // plumbing through the runtime.
+        // Only a case that produced an executed analytical result reaches the
+        // verified-fact narrator; the rest never had narration to lose.
+        narrationAttempted: Boolean(result.result?.rows?.length),
         narrationFallback: /Verified narration was unavailable/i
           .test(`${result.answer ?? ''}\n${result.text ?? ''}`),
         executionMs: result.result?.executionTime,
@@ -958,6 +969,7 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
     maxWrongCertified: (flags as { maxWrongCertified?: number }).maxWrongCertified ?? null,
     maxFalseRefusal: (flags as { maxFalseRefusal?: number }).maxFalseRefusal ?? null,
     minRefusalRecall: (flags as { minRefusalRecall?: number }).minRefusalRecall ?? null,
+    minGroundedNarration: (flags as { minGroundedNarration?: number }).minGroundedNarration ?? null,
   };
   const thresholdsPassed = agentEvalThresholdsPass(metrics, thresholds);
   const ok = passed === results.length && thresholdsPassed;
@@ -1004,6 +1016,9 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
   }
   if (thresholds.minRefusalRecall !== null) {
     console.log(`Refusal-recall threshold: ${thresholds.minRefusalRecall} (actual ${formatRate(metrics.refusal_recall)})`);
+  }
+  if (thresholds.minGroundedNarration !== null && thresholds.minGroundedNarration !== undefined) {
+    console.log(`Grounded-narration threshold: ${thresholds.minGroundedNarration} (actual ${formatRate(metrics.grounded_narration_rate)} over ${metrics.grounded_narration_attempted} attempted)`);
   }
   if (thresholds.maxWrongCertified !== null) {
     console.log(`Wrong-certified ceiling: ${thresholds.maxWrongCertified} (actual ${metrics.wrong_certified_count})`);
@@ -1230,9 +1245,10 @@ function computeEvalMetrics(results: AgentEvalResult[]) {
      * the truncation defect that shipped unnoticed, so it is measured.
      */
     grounded_narration_rate: ratio(
-      results.filter((result) => result.narrationFallback === false).length,
-      results.filter((result) => result.narrationFallback !== undefined).length,
+      results.filter((result) => result.narrationAttempted && result.narrationFallback === false).length,
+      results.filter((result) => result.narrationAttempted).length,
     ),
+    grounded_narration_attempted: results.filter((result) => result.narrationAttempted).length,
     /**
      * The guard on the above: cases that must NOT produce a data answer.
      * Scored on "did not answer" rather than "dead-ended", because declining via
@@ -1261,6 +1277,7 @@ function agentEvalThresholdsPass(
     maxWrongCertified?: number | null;
     maxFalseRefusal?: number | null;
     minRefusalRecall?: number | null;
+    minGroundedNarration?: number | null;
   },
 ): boolean {
   // A rate threshold with no applicable cases (metric === null) is vacuously
@@ -1271,7 +1288,8 @@ function agentEvalThresholdsPass(
   // answerable case was scored, which is "unknown", not "perfect".
   const ceilingOk = (metric: number | null, max: number | null | undefined): boolean =>
     max === null || max === undefined || metric === null || metric <= max;
-  return rateOk(metrics.tool_requirement_pass_rate, thresholds.minToolRequirement)
+  return rateOk(metrics.grounded_narration_rate, thresholds.minGroundedNarration)
+    && rateOk(metrics.tool_requirement_pass_rate, thresholds.minToolRequirement)
     && rateOk(metrics.execution_match_rate, thresholds.minExecutionMatch)
     && rateOk(metrics.judge_pass_rate, thresholds.minJudgePass)
     && ceilingOk(metrics.false_refusal_rate, thresholds.maxFalseRefusal)

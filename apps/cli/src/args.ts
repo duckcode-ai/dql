@@ -85,6 +85,13 @@ export interface CLIFlags {
   cassette?: string;
   /** `dql agent eval --max-false-refusal <0..1>` — fail above this share of answerable cases refused. */
   maxFalseRefusal?: number;
+  /**
+   * `dql agent eval --min-grounded-narration <0..1>` — fail BELOW this share of
+   * attempted verified-fact narrations that survived their fact check. Exists
+   * because a narration truncation broke every ten-row answer deterministically
+   * and no gate could fail on it.
+   */
+  minGroundedNarration?: number;
   /** `dql agent eval --min-refusal-recall <0..1>` — fail below this share of must-refuse cases that refused. */
   minRefusalRecall?: number;
   /** `dql eval --no-examples` — skip manifest block examples, score yaml cases only. */
@@ -259,6 +266,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
     } else if (arg === '--via' && i + 1 < argv.length) {
       const value = String(argv[++i]);
       if (value === 'runtime' || value === 'loop') flags.via = value;
+    } else if (arg === '--min-grounded-narration' && i + 1 < argv.length) {
+      const value = Number.parseFloat(argv[++i]!);
+      if (Number.isFinite(value) && value >= 0 && value <= 1) flags.minGroundedNarration = value;
     } else if (arg === '--max-false-refusal' && i + 1 < argv.length) {
       const value = Number(argv[++i]);
       if (Number.isFinite(value) && value >= 0 && value <= 1) flags.maxFalseRefusal = value;
