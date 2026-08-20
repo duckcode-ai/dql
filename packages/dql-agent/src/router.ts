@@ -1,3 +1,4 @@
+import { assumeDominantCandidate } from './agentic/assumptions.js';
 /**
  * Hybrid router — deterministic-first, LLM-assisted for the ambiguous middle.
  *
@@ -1723,12 +1724,57 @@ function unanswerableClarificationFallback(
  *
  * Acceptance: AGT-030.
  */
+/**
+ * Generic measure vocabulary: words that say HOW MUCH, never WHICH SUBSET.
+ * A candidate built only from these adds no scope the asker did not state.
+ */
+const GENERIC_MEASURE_TOKENS = new Set([
+  'revenue', 'spend', 'spending', 'sales', 'sale', 'amount', 'value', 'total', 'sum',
+  'count', 'number', 'orders', 'order', 'quantity', 'qty', 'price', 'cost', 'profit',
+  'margin', 'gross', 'net', 'lifetime', 'avg', 'average', 'mean', 'median', 'score',
+  'rate', 'ratio', 'percent', 'share', 'volume', 'units', 'balance', 'pretax', 'ltv',
+  'top', 'rank', 'ranking', 'by', 'per', 'the', 'of', 'and',
+]);
+
+/**
+ * Does this ranking measure fit a question that named no measure?
+ *
+ * "Top customers" must not be silently answered by `top_beverage_customers`:
+ * that candidate carries a scope — beverages — the asker never asked for, and
+ * answering with it returns a confidently wrong list under a different question
+ * than the one posed. `assumeDominantCandidate` deliberately leaves this check
+ * to the caller, because dominance is about ranking and this is about meaning.
+ *
+ * The rule: every substantive token in the candidate's name must be either
+ * something the question already said, or generic measure vocabulary. Any
+ * leftover token is an unrequested qualifier, and the turn keeps asking.
+ */
+export function rankingCandidateFitsBareQuestion(question: string, candidate: AgentEvidenceCandidate): boolean {
+  const questionTokens = new Set(substantiveLexicalTokens(question));
+  // Identities arrive source-qualified (`semantic:metric:orders.revenue`). The
+  // `semantic`/`metric` prefix is plumbing, not vocabulary — tokenizing it would
+  // make every candidate look scoped and refuse every assumption.
+  const identity = (candidate.qualifiedId ?? candidate.id ?? '').split(':').at(-1) ?? '';
+  const nameTokens = substantiveLexicalTokens([candidate.name, identity].join(' '));
+  if (nameTokens.length === 0) return false;
+  return nameTokens.every((token) =>
+    questionTokens.has(token) || GENERIC_MEASURE_TOKENS.has(token));
+}
+
 function bareRankingClarification(
   base: IntentDecision,
   retrievalEvidence: NonNullable<IntentDecision['retrievalEvidence']>,
   question?: string,
   evidence?: AgentRetrievalEvidence,
   candidates?: AgentEvidenceCandidate[],
+  /**
+   * May this turn settle the measure by assumption rather than by asking?
+   * False wherever the step whose job is to judge ambiguity has positively
+   * reported some — assuming past a finding overrides it rather than filling a
+   * gap, and AGT-017 already establishes that lexical rank alone must not
+   * settle meaning when semantic judgment is unavailable.
+   */
+  mayAssume = true,
 ): IntentDecision {
   const rankingChoices = (candidates ?? []).filter((candidate) => {
     if (candidate.compatibility === 'incompatible') return false;
@@ -1763,6 +1809,41 @@ function bareRankingClarification(
       retrievalEvidence,
       'No retrieved governed measure can rank this entity, so DQL continued into the review-required generated lane instead of asking a question with no selectable answer.',
     );
+  }
+  // A bare ranking whose measure is not in doubt should be answered, not asked
+  // about. Only candidates that add no unrequested scope are eligible, so the
+  // assumption can never quietly change the question.
+  const assumable = question && mayAssume
+    ? rankingChoices.filter((candidate) =>
+      // Only a MEASURE can be assumed. A certified block is a whole authored
+      // query, not a ranking measure, so treating one as the answer to "by
+      // which metric?" silently selects someone else's entire analysis — a
+      // different act from picking the obvious measure. Blocks stay on the
+      // options list where the user can choose them deliberately.
+      (candidate.kind === 'semantic_metric' || candidate.kind === 'semantic_member')
+      && rankingCandidateFitsBareQuestion(question, candidate))
+    : [];
+  const assumption = assumable.length > 0
+    ? assumeDominantCandidate({
+      about: 'metric',
+      candidates: assumable.map((candidate) => ({
+        id: candidate.qualifiedId ?? candidate.id,
+        label: candidate.name,
+        score: candidate.relevanceScore,
+      })),
+      because: (chosen) => `"${chosen.label ?? chosen.id}" was the highest-ranked governed measure that can rank this entity, and it adds no filter the question did not ask for.`,
+    })
+    : undefined;
+  if (assumption) {
+    return {
+      ...unanswerableClarificationFallback(
+        base,
+        retrievalEvidence,
+        `No measure was named, so DQL assumed ${assumption.choseLabel ?? assumption.chose} and answered instead of asking. The alternatives stay available for one-click revision.`,
+      ),
+      assumptions: [assumption],
+      clarificationOptions: buildClarificationOptions(rankingChoices),
+    };
   }
   return {
     ...base,
@@ -2407,6 +2488,11 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
                     // measures for the requested entity, which the execution
                     // candidate set deliberately does not.
                     clarificationCandidates,
+                    // Meaning resolution ran here. If it named the ranking
+                    // measure as the missing piece, that is its judgment, and
+                    // the turn asks rather than guessing past it.
+                    !(safeResolution.missingInformation ?? [])
+                      .some((item) => /measure|metric/i.test(item)),
                   );
                 }
                 const deterministicGap = deterministicPrePlanClarification(
