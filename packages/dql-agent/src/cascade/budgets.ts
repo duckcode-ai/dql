@@ -112,7 +112,14 @@ export const QUICK_PROMPT_CONTEXT_BUDGET: PromptContextBudget = {
   otherRelationLimit: 24,
   sourceSqlLimit: 5,
   sourceSqlColumnLimit: 24,
-  edgeLimit: 0,
+  /**
+   * Was 0, which blacked out every non-`proves_join` edge on exactly the
+   * single-metric lookups that most need lineage — CTX-008 had to add
+   * `GOVERNED_JOIN_EDGE_FLOOR` to claw back the join proofs alone. A small
+   * allowance removes the blackout without reopening the token cost the zero
+   * was defending: the quick path is still the one that must answer in seconds.
+   */
+  edgeLimit: 8,
 };
 
 export const DEEP_PROMPT_CONTEXT_BUDGET: PromptContextBudget = {

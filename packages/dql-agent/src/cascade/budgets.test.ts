@@ -104,7 +104,11 @@ describe('cascade budgets', () => {
       relationCardLimit: 12,
       relationColumnLimit: 32,
       otherRelationStart: 12,
-      edgeLimit: 0,
+      // Was 0, which blacked out every non-`proves_join` edge on exactly the
+      // lookups that most need lineage — CTX-008 had to claw the join proofs
+      // back with a floor. The property under test is unchanged: one quick
+      // policy, still tight enough to answer in seconds.
+      edgeLimit: 8,
     });
   });
 
