@@ -7127,6 +7127,29 @@ function normalizeFlowField(value: string): string {
 }
 
 /**
+ * Remove the model's QUERY PLAN scaffolding from user-facing prose.
+ *
+ * Rule 4 of the SQL prompt tells the model to state its grain, measures, join
+ * path, and join keys BEFORE writing SQL. That instruction is load-bearing —
+ * it is what prevents wrong-grain answers and fan-out joins — but it is
+ * reasoning, not an answer, and it was reaching the reader verbatim:
+ *
+ *   "QUERY PLAN: grain = one row per customer, filtered to the named customer
+ *    (Matthew Meyer, honorific stripped) ... FROM dev.customers c, filtered on
+ *    c.customer_name ILIKE '%Matthew Meyer%'."
+ *
+ * Someone who asked why a customer tops a list should not be handed a join
+ * plan. The plan stays in the artifact and the trace; it leaves the prose.
+ */
+export function stripQueryPlanScaffolding(text: string): string {
+  return text
+    // A QUERY PLAN section runs to the next blank line or the end of the prose.
+    .replace(/(?:^|\n)\s*(?:\*\*)?QUERY PLAN(?:\*\*)?\s*[::][\s\S]*?(?=\n\s*\n|$)/gi, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
  * Public for tests. Prefer the structured W2.7 JSON proposal contract, then
  * fall back to the legacy prose + ```sql block + Viz line format.
  */
@@ -7138,11 +7161,11 @@ export function parseProposal(raw: string): ParsedProposal {
   const vizMatch = raw.match(/^Viz:\s*([a-z_]+)/im);
   const viz = vizMatch ? vizMatch[1].trim().toLowerCase() : undefined;
   // Strip the SQL block + Viz line from the prose to keep the summary clean.
-  const text = raw
+  const text = stripQueryPlanScaffolding(raw
     .replace(/```json[\s\S]*?```/gi, '')
     .replace(/```sql[\s\S]*?```/gi, '')
     .replace(/^Viz:.*$/gim, '')
-    .trim();
+    .trim());
   return { text, sql, viz };
 }
 
@@ -7169,7 +7192,9 @@ function parsedProposalFromJson(value: unknown): ParsedProposal | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
   const sql = firstJsonString(record.sql, record.query)?.trim();
-  const text = firstJsonString(record.summary, record.text, record.answer, record.description)?.trim() ?? '';
+  const text = stripQueryPlanScaffolding(
+    firstJsonString(record.summary, record.text, record.answer, record.description)?.trim() ?? '',
+  );
   const viz = firstJsonString(record.viz, record.visualization, record.chartType)
     ?.trim()
     .toLowerCase()
