@@ -4009,8 +4009,16 @@ function analyticalFailureSummary(
             columnCount: providerPreview?.columns.length ?? 0,
           },
         });
-      const narrationDispatchOptions = () => ({
-        maxTokens: 350,
+      const narrationDispatchOptions = (factCount = 0) => ({
+        // The ceiling has to grow with the result. Every claim must echo the
+        // fact ids it rests on, and a fact id is a long hex string that
+        // tokenizes badly — ten of them consume most of the budget before a
+        // word of prose is written. At a flat 350 a ten-row answer was
+        // truncated mid-sentence ("...Elizabeth Shea (875), and Dyl"), so the
+        // JSON never closed, BOTH attempts failed as UNPARSEABLE_CLAIMS, and
+        // the reader got "Verified narration was unavailable" above a robot
+        // dump of the very rows the model had just described correctly.
+        maxTokens: Math.min(1600, 350 + Math.max(0, factCount) * 45),
         temperature: 0.3,
         maxProviderDispatches: 2,
         ...(agentRunProviderEvidenceContext.getStore()
@@ -4030,7 +4038,7 @@ function analyticalFailureSummary(
             complete: async ({ system, user }) => streamOrGenerate(
               narrationProvider,
               [{ role: 'system', content: system }, { role: 'user', content: user }],
-              narrationDispatchOptions(),
+              narrationDispatchOptions(governedAnswer.analyticalFacts?.facts.length ?? 0),
               () => {},
             ),
           });
