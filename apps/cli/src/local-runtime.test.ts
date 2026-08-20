@@ -25,6 +25,7 @@ import {
   repairExploratorySqlBeforeExecution,
   buildAgentSchemaContext,
   reconcileAgentSchemaContextWithLive,
+  executePreparedAgenticSqlBoundary,
   buildRuntimeSchemaSearchSql,
   buildNamedRelationProbeSql,
   prepareAnalyticalExecutionSql,
@@ -130,6 +131,7 @@ import { createWarehouseTargetIdentity, loadSemanticLayerFromDir, SemanticLayer 
 import type { AggregationSafetyProofV1 } from '@duckcodeailabs/dql-core';
 import {
   createAnalyticalFailure,
+  createAgenticSqlExecutionCapability,
   defaultAgentRunSqlitePath,
   latestRuntimeSchemaSnapshotForProject,
   recordRuntimeSchemaSnapshot,
@@ -188,6 +190,57 @@ describe('repair target generation identity (API-007)', () => {
     }, 'lakehouse')).not.toBe(databricks);
     expect(`${snowflake}${databricks}`).not.toContain('rotated-secret');
     expect(`${snowflake}${databricks}`).not.toContain('token-a');
+  });
+});
+
+describe('generated SQL physical authorization boundary', () => {
+  const sql = 'SELECT customer_name FROM dim_customers';
+  const bindings = { sqlParams: [], variables: {} };
+  const scope = {
+    runId: 'run-boundary',
+    executionId: 'child-boundary',
+    snapshotId: 'snapshot-boundary',
+    planId: 'plan-boundary',
+    targetFingerprint: 'target-boundary',
+  };
+
+  it('calls the physical executor once for a proven capability and zero times for an unproven prepared reference', async () => {
+    const proven = createAgenticSqlExecutionCapability({
+      sql,
+      proven: [
+        { identifier: 'dim_customers', evidence: 'schema_tool' },
+        { identifier: 'dim_customers.customer_name', evidence: 'schema_tool' },
+      ],
+      ...scope,
+      bindings,
+    })!;
+    const executor = vi.fn(async () => ({ rows: [] }));
+
+    await expect(executePreparedAgenticSqlBoundary({
+      capability: proven,
+      preparedSql: sql,
+      bindings,
+      scope,
+      execute: executor,
+    })).resolves.toEqual({ rows: [] });
+    expect(executor).toHaveBeenCalledTimes(1);
+
+    const unproven = createAgenticSqlExecutionCapability({
+      sql,
+      proven: [{ identifier: 'dim_customers', evidence: 'schema_tool' }],
+      ...scope,
+      bindings,
+    })!;
+    const refusedExecutor = vi.fn(async () => ({ rows: [] }));
+
+    await expect(executePreparedAgenticSqlBoundary({
+      capability: unproven,
+      preparedSql: sql,
+      bindings,
+      scope,
+      execute: refusedExecutor,
+    })).rejects.toMatchObject({ dqlAnalyticalError: { code: 'unauthorized_sql' } });
+    expect(refusedExecutor).not.toHaveBeenCalled();
   });
 });
 

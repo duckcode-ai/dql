@@ -54,6 +54,7 @@ import {
   type AgentResultPayload,
   type AgentSchemaTable,
   type AnalysisDepth,
+  type NarrationIntegrityReceiptV1,
   type ReasoningEffort,
 } from '@duckcodeailabs/dql-agent';
 import { buildManifest, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
@@ -901,6 +902,7 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
       const evaluation = evaluateCase(testCase, result);
       const durationMs = Date.now() - startedAt;
       const draftSaved = Boolean(result.draftBlock?.path ?? result.draftBlockId);
+      const narration = narrationOutcomeForEval(runtimeRun?.narrationIntegrityReceipt);
       const judgeVerdict = judge
         ? await judgeAnswer({
             question: testCase.question,
@@ -915,13 +917,11 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
         passed: evaluation.failures.length === 0,
         failures: evaluation.failures,
         durationMs,
-        // Detected from the marker the reader sees, so it needs no new
-        // plumbing through the runtime.
-        // Only a case that produced an executed analytical result reaches the
-        // verified-fact narrator; the rest never had narration to lose.
-        narrationAttempted: Boolean(result.result?.rows?.length),
-        narrationFallback: /Verified narration was unavailable/i
-          .test(`${result.answer ?? ''}\n${result.text ?? ''}`),
+        // The persisted receipt is the only evidence for this metric. Rows and
+        // reader prose are intentionally ignored: a row-bearing answer can be
+        // skipped, while a deterministic fallback can render different wording.
+        narrationAttempted: narration.narrationAttempted,
+        narrationFallback: narration.narrationFallback,
         executionMs: result.result?.executionTime,
         executionMatched: evaluation.executionMatched,
         ...(judgeVerdict ? { judgeScore: judgeVerdict.score, judgePass: judgeVerdict.pass } : {}),
@@ -1166,6 +1166,26 @@ export function evalResultClarified(
   result: Pick<AgentEvalResult, 'route' | 'clarificationOptionCount'>,
 ): boolean {
   return result.route === 'clarify' && (result.clarificationOptionCount ?? 0) > 0;
+}
+
+/**
+ * Translate only the durable narration receipt into evaluation fields.
+ *
+ * Reader prose, row count, and result shape are deliberately absent: a skipped
+ * narration can have rows, and a deterministic fallback can use any wording.
+ */
+export function narrationOutcomeForEval(
+  receipt: NarrationIntegrityReceiptV1 | undefined,
+): Pick<AgentEvalResult, 'narrationAttempted' | 'narrationFallback'> {
+  if (receipt?.mode !== 'verified_facts' || !receipt.attempted) return {};
+  return {
+    // A durable receipt is the only source of this metric.  An infrastructure
+    // error started a verified narration but did not produce a grounded answer,
+    // so it belongs in the denominator just like the deterministic floor.  The
+    // old mapping treated it as a success because only fallback was negative.
+    narrationAttempted: true,
+    narrationFallback: receipt.outcome !== 'success',
+  };
 }
 
 function computeEvalMetrics(results: AgentEvalResult[]) {
@@ -1647,6 +1667,7 @@ export const __test__ = {
   cliAnalysisDepth,
   cliReasoningEffort,
   computeEvalMetrics,
+  narrationOutcomeForEval,
   evaluateCase,
 };
 

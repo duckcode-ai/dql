@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
-import { buildSearchValuesTool, buildValueProbeSql, isProbeSafeColumn } from './value-probe.js';
+import {
+  MAX_VALUE_PROBE_COLUMN_QUERIES,
+  buildSearchValuesTool,
+  buildValueProbeSql,
+  isProbeSafeColumn,
+} from './value-probe.js';
 
 describe('isProbeSafeColumn — two gates, deny first', () => {
   it('allows identifier-shaped textual columns', () => {
@@ -18,6 +23,38 @@ describe('isProbeSafeColumn — two gates, deny first', () => {
 
   it('denies email even though it is an identifier', () => {
     expect(isProbeSafeColumn({ name: 'user_email', type: 'varchar' })).toBe(false);
+  });
+
+  it('hard-denies government and social-insurance identifiers while retaining business names', () => {
+    for (const name of [
+      'social_security_number', 'social_insurance_number', 'ssn', 'sin',
+      'medicare_id', 'medicaid_id', 'taxpayer_id', 'taxpayer_identification_number', 'tin', 'itin',
+    ]) {
+      expect(isProbeSafeColumn({ name, type: 'varchar' }), name).toBe(false);
+    }
+    expect(isProbeSafeColumn({ name: 'customer_name', type: 'varchar' })).toBe(true);
+    expect(isProbeSafeColumn({ name: 'product_name', type: 'varchar' })).toBe(true);
+  });
+
+  it('hard-denies normalized tax, government, and birth-date aliases before identifier allow-listing', () => {
+    // These are adversarial because all contain otherwise approved identifier
+    // words such as `customer`, `id`, or `number`. The hard deny must survive
+    // connector naming conventions, not only human-readable phrase spelling.
+    for (const name of [
+      'tax_number', 'taxNo', 'taxIdentifier',
+      'government_id', 'governmentNumber', 'govt_identifier',
+      'customer_birth_dt', 'birth_date', 'date_of_birth', 'customerDOB',
+      // Compact connector aliases must remain denied even when an approved
+      // entity token precedes them.
+      'customer_taxnumber', 'customer_birthdt', 'customer_birth_on',
+      'taxno', 'birthon', 'customerTaxNumber', 'customerBirthOn',
+    ]) {
+      expect(isProbeSafeColumn({ name, type: 'varchar' }), name).toBe(false);
+    }
+    // Keep the business keys that runtime member grounding needs.
+    expect(isProbeSafeColumn({ name: 'customer_id', type: 'varchar' })).toBe(true);
+    expect(isProbeSafeColumn({ name: 'product_number', type: 'varchar' })).toBe(true);
+    expect(isProbeSafeColumn({ name: 'category_id', type: 'varchar' })).toBe(true);
   });
 
   it('denies a column whose name suggests nothing identifying', () => {
@@ -104,6 +141,8 @@ describe('search_values', () => {
     expect(result.searched).toBe(true);
     expect(result.matches).toEqual([]);
     expect(String(result.note)).toMatch(/found no match/i);
+    expect(result.coverage).toMatchObject({ status: 'complete' });
+    expect(result.absence).toBe('not_found');
   });
 
   it('survives an unreadable relation rather than failing the whole probe', async () => {
@@ -112,6 +151,70 @@ describe('search_values', () => {
     const result = await buildSearchValuesTool({ execute, relations, enabled: true }).run({ terms: ['x'] }) as Record<string, unknown>;
     expect(result.searched).toBe(true);
     expect(result.matches).toEqual([]);
+    expect(result.coverage).toMatchObject({ status: 'partial', failedRelations: ['dim_customers'] });
+    expect(result.absence).toBeUndefined();
+  });
+
+  it('does not claim absence when coverage is partial or requests an unknown relation', async () => {
+    const noSearchable = [{ relation: 'private_notes', columns: [{ name: 'customer_notes', type: 'varchar' }] }];
+    const partial = await buildSearchValuesTool({ execute: async () => ({ rows: [] }), relations: noSearchable, enabled: true })
+      .run({ terms: ['nobody'] }) as Record<string, unknown>;
+    expect(partial.coverage).toMatchObject({ status: 'partial', relationsWithNoSearchableColumn: ['private_notes'] });
+    expect(partial.absence).toBeUndefined();
+
+    const unknown = await buildSearchValuesTool({ execute: async () => ({ rows: [] }), relations, enabled: true })
+      .run({ terms: ['nobody'], relations: ['not_a_relation'] }) as Record<string, unknown>;
+    expect(unknown.coverage).toMatchObject({ status: 'unknown_relation', unknownRelations: ['not_a_relation'] });
+    expect(unknown.absence).toBeUndefined();
+  });
+
+  it('never turns an unbuildable schema identifier into a zero-query absence claim', async () => {
+    // These names can arrive from a connector's metadata. They pass the
+    // business-identifier policy, but they cannot be encoded in the deliberately
+    // strict ANSI identifier builder, so coverage must remain incomplete.
+    const execute = vi.fn(async () => ({ rows: [] }));
+    const result = await buildSearchValuesTool({
+      execute,
+      relations: [{
+        relation: 'customer-data',
+        columns: [{ name: 'customer-name', type: 'varchar' }],
+      }],
+      enabled: true,
+    }).run({ terms: ['nobody'] }) as Record<string, unknown>;
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(result.searched).toBe(false);
+    expect(result.coverage).toMatchObject({
+      status: 'partial',
+      queriesAttempted: 0,
+      relationsSearched: [],
+      relationsWithUnbuildableIdentifier: ['customer-data'],
+    });
+    expect(result.absence).toBeUndefined();
+  });
+
+  it('caps all column probes at twelve and never turns a budget stop into absence', async () => {
+    const wide = [{
+      relation: 'wide_dimension',
+      columns: Array.from({ length: MAX_VALUE_PROBE_COLUMN_QUERIES + 1 }, (_, index) => ({
+        name: `customer_name_${index}`,
+        type: 'varchar',
+      })),
+    }];
+    const execute = vi.fn(async () => ({ rows: [] }));
+    const result = await buildSearchValuesTool({
+      execute,
+      relations: wide,
+      enabled: true,
+      maxColumnQueries: 100,
+    }).run({ terms: ['nobody'] }) as Record<string, unknown>;
+    expect(execute).toHaveBeenCalledTimes(MAX_VALUE_PROBE_COLUMN_QUERIES);
+    expect(result.coverage).toMatchObject({
+      status: 'budget_exhausted',
+      queryLimit: MAX_VALUE_PROBE_COLUMN_QUERIES,
+      queriesAttempted: MAX_VALUE_PROBE_COLUMN_QUERIES,
+    });
+    expect(result.absence).toBeUndefined();
   });
 
   it('bounds how many relations one question can touch', async () => {

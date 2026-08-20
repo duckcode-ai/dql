@@ -161,7 +161,22 @@ import { getRunner as getLLMRunner } from './llm/index.js';
 import { rethrowIfCancelled } from './llm/cancellation.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from './version-status.js';
 import { resolveRetrievalHealthStatus } from './retrieval-health.js';
-import { applyFinding, createResearchState, narrationMaxTokensForFacts, nextHypothesis, rerankCandidates, synthesizeResearchNarrative, clearSqlAuthorization, consumeSqlAuthorization, validateSqlAgainstLocalContext as validateAuthorizedSqlReferences, verifyFinalSql } from '@duckcodeailabs/dql-agent';
+import {
+  applyFinding,
+  createResearchState,
+  narrationMaxTokensForFacts,
+  nextHypothesis,
+  rerankCandidates,
+  synthesizeResearchNarrative,
+  AgenticExecutionCapabilityGate,
+  mintFinalSqlAuthorization,
+  verifyAgenticSqlExecutionCapability,
+  qualifyAuthorizationReferences,
+  validateSqlAgainstLocalContext as validateAuthorizedSqlReferences,
+  verifyFinalSql,
+  type AgenticSqlExecutionCapabilityV1,
+  type SqlAuthorizationCheck,
+} from '@duckcodeailabs/dql-agent';
 import { applyEvalCassette, createDqlAgentProviderRunner, createGovernedTextProvider, resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
 import type {
   AgentConversationContext,
@@ -335,6 +350,7 @@ import {
   type AgentRunStatus,
   type AgentRunStopReason,
   type AgentRunTrustState,
+  type NarrationIntegrityReceiptV1,
   type AgentRouteExecutorResult,
   type AgentRouteExecutor,
   type AgentEvidenceCandidate,
@@ -1105,6 +1121,19 @@ export function shouldSynthesizeAgentRunAnswer(
 }
 
 /**
+ * A receipt may be rendered in the local inspector and exported into evaluation
+ * output. Keep only stable validation codes there; provider error messages can
+ * contain a prompt excerpt, result value, or connector detail and must not
+ * become user-visible durable data.
+ */
+function narrationIntegrityFailureCodes(failures: readonly string[]): string[] {
+  return [...new Set(failures.map((failure) => {
+    const match = failure.trim().match(/^([A-Z][A-Z0-9_]{1,80})/);
+    return match?.[1] ?? 'NARRATION_VALIDATION_FAILED';
+  }).filter(Boolean))].slice(0, 8);
+}
+
+/**
  * AGT-010 — the semantic route label is descriptive, while the exact
  * route-specific aggregation proof is authoritative for governed trust.
  * Missing proof remains blocked for legacy or malformed results.
@@ -1148,6 +1177,17 @@ export function compoundTrustState(
   const weakest = childTrust.reduce((low, current) =>
     (TRUST_RANK[current] ?? 0) < (TRUST_RANK[low] ?? 0) ? current : low);
   return weakest === 'certified' ? 'governed' : weakest;
+}
+
+/** Neutral parent outcome: governed only when every child completed governed. */
+export function compoundStopReason(
+  completedCount: number,
+  childCount: number,
+  trustState: AgentRunTrustState,
+): AgentRunStopReason {
+  return completedCount === childCount && childCount > 0 && trustState === 'governed'
+    ? 'governed_compound_answer'
+    : 'human_review_required';
 }
 
 export function semanticAnswerHasPassedAggregationProof(
@@ -1778,6 +1818,7 @@ export function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInp
     sql: agentRunString(payload?.proposedSql) ?? agentRunString(payload?.sql),
     dqlArtifact: agentRunRecord(payload?.dqlArtifact) as ConversationTurnInput['dqlArtifact'],
     cascade: agentRunRecord(payload?.cascade) as CascadeAnswerResult | undefined,
+    narrationIntegrityReceipt: run.narrationIntegrityReceipt,
     result: columns.length > 0 || rows.length > 0
       ? {
           columns,
@@ -2168,6 +2209,60 @@ function mergeRunScopedProviderDispatchEvidence(
     ...(diagnosticReceipt ? { diagnosticReceipt } : {}),
     diagnosticReceiptV2,
   };
+}
+
+/**
+ * Final physical generated-SQL boundary.
+ *
+ * This receives the exact prepared statement immediately before the connector
+ * callback.  It intentionally validates before invoking `execute`: a bad
+ * capability or unproven prepared reference must result in zero warehouse
+ * calls, not a post-execution warning.  It is module-exported only for the
+ * local-runtime boundary harness; it is never an HTTP API or durable artifact.
+ *
+ * @internal
+ */
+export async function executePreparedAgenticSqlBoundary<T>(input: {
+  capability?: AgenticSqlExecutionCapabilityV1;
+  preparedSql: string;
+  bindings: unknown;
+  scope?: SqlAuthorizationCheck;
+  execute: () => Promise<T>;
+}): Promise<T> {
+  const capability = input.capability;
+  if (capability) {
+    const authorization = mintFinalSqlAuthorization({
+      sql: input.preparedSql,
+      proven: capability.provenIdentifiers.map((identifier) => ({
+        identifier,
+        evidence: capability.evidence[identifier] ?? 'catalog',
+      })),
+      runId: capability.runId,
+      executionId: capability.executionId,
+      snapshotId: capability.snapshotId,
+      planId: capability.planId,
+      targetFingerprint: capability.targetFingerprint,
+      bindings: input.bindings,
+    });
+    const validation = validateAuthorizedSqlReferences(input.preparedSql, undefined);
+    const verdict = verifyFinalSql(authorization, input.preparedSql, qualifyAuthorizationReferences(input.preparedSql, {
+      relations: validation.referencedRelations ?? [],
+      columns: validation.referencedColumns ?? [],
+    }), {
+      ...input.scope,
+      bindings: input.bindings,
+    });
+    if (process.env.DQL_ORCHESTRATOR_TRACE) {
+      console.warn(`[dql] execution authorization: ${verdict.ok ? 'admitted' : 'REFUSED'} proven=${authorization.provenIdentifiers.length}${verdict.ok ? '' : ` reason=${verdict.reason}`}`);
+    }
+    if (!verdict.ok) {
+      throw analyticalError(
+        verdict.reason ?? 'The statement was not authorized for execution.',
+        { origin: 'governance_gate', stage: 'execute', code: 'unauthorized_sql' },
+      );
+    }
+  }
+  return input.execute();
 }
 
 export async function startLocalServer(opts: LocalServerOptions): Promise<number> {
@@ -2945,16 +3040,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     onProgress?: (message: string) => void,
     routeDecision?: IntentDecision,
   ): Promise<AgentAnswer> {
-    // Scope the authorization to THIS run for the duration of the answer, and
-    // clear it afterwards so a later execution cannot ride a stale proof.
-    const previousRunIdForExecution = activeRunIdForExecution;
-    activeRunIdForExecution = request.runId ?? undefined;
-    try {
-      return await runGovernedAgentAnswerForRunInner(request, repair, route, onProgress, routeDecision);
-    } finally {
-      if (activeRunIdForExecution) clearSqlAuthorization(activeRunIdForExecution);
-      activeRunIdForExecution = previousRunIdForExecution;
-    }
+    return runGovernedAgentAnswerForRunInner(request, repair, route, onProgress, routeDecision);
   }
 
   async function runGovernedAgentAnswerForRunInner(
@@ -3070,6 +3156,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           snapshotId: runProjectSnapshot.snapshotId,
         })
       : undefined;
+    // Local to this exact answer invocation. Compound children each enter this
+    // function separately, so no child can consume another child's capability.
+    const agenticExecutionCapabilityGate = new AgenticExecutionCapabilityGate();
     await runner.run(
       {
         provider: resolvedProvider,
@@ -3295,6 +3384,28 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           semanticConnection,
           semanticConnectionName,
         ),
+        executeAgenticGeneratedSql: async (capability, sql, artifact) => {
+          if (!agenticExecutionCapabilityGate.consume(capability)) {
+            throw analyticalError('This analyst execution capability was already consumed; DQL did not retry it with stale proof.', {
+              origin: 'governance_gate', stage: 'execute', code: 'unauthorized_sql',
+            });
+          }
+          return executeGeneratedArtifactForAgent(
+            request.question,
+            sql,
+            artifact,
+            semanticConnection,
+            semanticConnectionName,
+            capability,
+            {
+              runId: request.runId,
+              executionId: capability.executionId,
+              snapshotId: runProjectSnapshot.snapshotId,
+              planId: routeDecision?.resolvedAnalyticalPlan?.planId,
+              targetFingerprint: generatedProposalTargetIdentity?.identityFingerprint,
+            },
+          );
+        },
         executeDqlArtifact: (artifact) => executeArtifactReferenceForAgent(
           artifact,
           request.question,
@@ -3681,11 +3792,9 @@ function analyticalFailureSummary(
         // parent assembled from review-required generated SQL.
         trustState: compoundTrust,
         // The stop reason has to agree with the trust it reports. Claiming a
-        // governed semantic answer over generated children misrepresents the
-        // route as much as the trust label does.
-        stopReason: completedCount === outcomes.length && compoundTrust === 'governed'
-          ? 'governed_semantic_answer'
-          : 'human_review_required',
+        // governed semantic answer over generated/certified children
+        // misrepresents provenance as much as the trust label does.
+        stopReason: compoundStopReason(completedCount, outcomes.length, compoundTrust),
         artifacts: childResults.map(({ task, answer, error }) => agentRunArtifact('answer', `Task: ${task.question}`, {
           taskId: task.id,
           question: task.question,
@@ -4072,7 +4181,34 @@ function analyticalFailureSummary(
       ? { ...preview, rows: redactProviderResultRows(preview.rows, narrationMaxRows) }
       : undefined;
     let narrationSource: 'llm' | 'deterministic' | undefined;
-    let narrationValidationFailures: string[] = [];
+    // The receipt is the durable source of truth for evaluation and inspector
+    // display. Do not reconstruct this later from rows or the reader-facing
+    // fallback sentence: both are presentation artifacts, not evidence that a
+    // fact-grounded narrator actually ran.
+    const verifiedFactNarration = narrationPlan.mode === 'verified_facts'
+      && Boolean(governedAnswer.analyticalFacts && governedAnswer.resolvedAnalyticalPlan?.analyticalFrame);
+    let narrationIntegrityReceipt: NarrationIntegrityReceiptV1 = narrationPlan.mode === 'skip'
+      ? {
+          version: 1,
+          mode: 'skip',
+          outcome: 'skipped',
+          attempted: false,
+          factCount: 0,
+          maxRows: 0,
+          validationFailures: [],
+          skipReason: narrationPlan.reason,
+        }
+      : {
+          version: 1,
+          mode: verifiedFactNarration ? 'verified_facts' : 'preview_grounded',
+          // This is deliberately pessimistic until a narration outcome is
+          // observed, so an exception cannot be persisted as a silent skip.
+          outcome: 'error',
+          attempted: true,
+          factCount: verifiedFactNarration ? governedAnswer.analyticalFacts?.facts.length ?? 0 : 0,
+          maxRows: narrationPlan.maxRows,
+          validationFailures: [],
+        };
     if (narrationPlan.mode !== 'skip' && narrationProvider) {
       const narrationStartedAtMs = Date.now();
       const draft = governedAnswer.answer ?? governedAnswer.text;
@@ -4120,11 +4256,15 @@ function analyticalFailureSummary(
             ),
           });
           narrationSource = composed.source;
-          narrationValidationFailures = composed.validationFailures;
+          narrationIntegrityReceipt = {
+            ...narrationIntegrityReceipt,
+            outcome: composed.source === 'llm' ? 'success' : 'deterministic_fallback',
+            validationFailures: narrationIntegrityFailureCodes(composed.validationFailures),
+          };
           if (process.env.DQL_ORCHESTRATOR_TRACE) {
             console.warn(`[dql] narration: source=${composed.source}${
-              composed.validationFailures.length > 0
-                ? ` rejected=${composed.validationFailures.join(' | ').slice(0, 300)}`
+              narrationIntegrityReceipt.validationFailures.length > 0
+                ? ` rejected=${narrationIntegrityReceipt.validationFailures.join(',')}`
                 : ''}`);
           }
           synthesizedAnswer = composed.source === 'llm'
@@ -4163,10 +4303,21 @@ function analyticalFailureSummary(
           );
           narrationSource = result.source;
           if (result.text) synthesizedAnswer = result.text;
+          narrationIntegrityReceipt = {
+            ...narrationIntegrityReceipt,
+            outcome: result.source === 'llm' ? 'success' : 'deterministic_fallback',
+            validationFailures: [],
+          };
         }
       } catch {
         // Keep the governed draft on any narration failure.
         synthesizedAnswer = undefined;
+        narrationIntegrityReceipt = {
+          ...narrationIntegrityReceipt,
+          outcome: 'error',
+          validationFailures: [],
+          errorCode: 'narration_error',
+        };
       } finally {
         narrationDurationMs = Date.now() - narrationStartedAtMs;
       }
@@ -4484,25 +4635,25 @@ function analyticalFailureSummary(
         ...(governedAnswer.executionError ? [
           agentRunEvaluation('execution-error', 'Execution error', false, 'warning', governedAnswer.executionError),
         ] : []),
-        // A rejected narration must say WHY it was rejected. The failures were
-        // computed and then dropped, so a reader saw "Verified narration was
-        // unavailable" with no way to tell whether the model invented a number,
-        // cited a fact id that does not exist, or the provider simply failed.
-        // The fallback itself stays: this only makes its reason inspectable.
-        ...(narrationSource === 'deterministic' && narrationValidationFailures.length > 0 ? [
+        // Keep only the content-free receipt codes in the durable inspection
+        // record. Raw verifier prose can contain a result value, prompt excerpt,
+        // or provider error and is not safe evidence to surface or persist.
+        ...(narrationIntegrityReceipt.outcome === 'deterministic_fallback'
+          && narrationIntegrityReceipt.validationFailures.length > 0 ? [
           agentRunEvaluation(
             'narration-verification',
             'Narration verification',
             false,
             'warning',
-            `The drafted narration was rejected against the result fact set, so the deterministic record was shown instead: ${narrationValidationFailures.join('; ')}`,
-            { narrationSource, validationFailures: narrationValidationFailures },
+            `The drafted narration was rejected against the result fact set, so the deterministic record was shown instead: ${narrationIntegrityReceipt.validationFailures.join(', ')}.`,
+            { narrationSource, validationFailures: narrationIntegrityReceipt.validationFailures },
           ),
         ] : []),
       ],
       nextActions,
       providerEgressReceipts: finalProviderEgressReceipts,
       telemetry: finalTelemetry,
+      narrationIntegrityReceipt,
     };
   };
 
@@ -5802,16 +5953,6 @@ function analyticalFailureSummary(
   // both positional catalog truncation and the previous duplicate retrieval pass.
   const preparedAgentContextPacks = new WeakMap<AgentRunRequest, LocalContextPack>();
   /**
-   * Authorizations minted for the current turn, keyed by question. Populated
-   * only by the analyst lane, which is the path that can prove identifiers.
-   */
-  /**
-   * The run whose authorization the next physical execution may consume. Set
-   * for the duration of a governed answer; the registry itself is turn-scoped
-   * and self-evicting, so a crashed run leaks nothing.
-   */
-  let activeRunIdForExecution: string | undefined;
-  /**
    * Cross-encoder pass over the fused candidates, when a provider is available.
    * Advisory throughout: it may only reorder ids retrieval returned, and any
    * failure leaves retrieval's own ordering in place.
@@ -6689,11 +6830,43 @@ function analyticalFailureSummary(
       variables?: Record<string, unknown>;
     },
     executionConnectionName?: string,
+    agenticCapability?: AgenticSqlExecutionCapabilityV1,
+    agenticScope?: SqlAuthorizationCheck,
   ): Promise<AgentResultPayload> => {
     const activeConnection = requireActiveConnection(executionConnection);
     const rowBound = clampAnalyticalRowBound(seed?.limit ?? 200);
     const trimmed = sql.trim().replace(/;\s*$/, '').trim();
     if (!trimmed) throw analyticalError('The generated SQL was empty.', { origin: 'host', stage: 'execute' });
+    const bindingValue = {
+      sqlParams: bindings?.sqlParams ?? [],
+      variables: bindings?.variables ?? {},
+    };
+    if (agenticCapability) {
+      // The proposal itself is immutable. A changed literal, comment, or
+      // whitespace is drift here rather than a benign formatting change.
+      const currentSnapshotId = projectSnapshot().snapshotId;
+      let targetFingerprint: string | undefined;
+      if (agenticCapability.targetFingerprint) {
+        try {
+          targetFingerprint = (await observeWarehouseTargetIdentity(executor, activeConnection)).identityFingerprint;
+        } catch {
+          throw analyticalError('DQL could not re-confirm the selected execution target, so the analyst-approved query was not run.', {
+            origin: 'governance_gate', stage: 'execute', code: 'unauthorized_sql',
+          });
+        }
+      }
+      const capabilityVerdict = verifyAgenticSqlExecutionCapability(agenticCapability, sql, {
+        ...agenticScope,
+        bindings: bindingValue,
+        snapshotId: currentSnapshotId,
+        ...(targetFingerprint ? { targetFingerprint } : {}),
+      });
+      if (!capabilityVerdict.ok) {
+        throw analyticalError(capabilityVerdict.reason ?? 'The analyst-approved SQL no longer matches this execution.', {
+          origin: 'governance_gate', stage: 'execute', code: 'unauthorized_sql',
+        });
+      }
+    }
 
     // RESOLVE FIRST, VALIDATE SECOND. Executing verbatim means executing the
     // statement the notebook would execute — and the notebook resolves
@@ -6723,8 +6896,6 @@ function analyticalFailureSummary(
     const sourceDomain = seed?.source?.match(/\bdomain\s*=\s*"([^"]+)"/i)?.[1] ?? 'uncategorized';
     assertAppAccess({ app, domain: sourceDomain, level: 'execute' });
 
-    // A semantic query the loop already compiled (MetricFlow / dbt Cloud) must
-    // execute through its pinned target binding, not as loose SQL.
     const semanticExecutionHolder: {
       value: Awaited<ReturnType<typeof executeTargetBoundSemanticQuery>> | null;
     } = { value: null };
@@ -6738,61 +6909,51 @@ function analyticalFailureSummary(
       variables: bindings?.variables,
       semanticRefs: semantic.semanticRefs,
       executePrepared: async (preparation) => {
-        const pinnedSemanticCompile = compiledSemanticQueries.get(executionFingerprint(preparation.preparedSql))
-          ?? compiledSemanticQueries.get(executionFingerprint(trimmed));
-        if (pinnedSemanticCompile) {
-          const semanticExecution = await executeTargetBoundSemanticQuery({
-            executor,
-            connection: activeConnection,
-            projectRoot,
-            plannedAdapter: pinnedSemanticCompile.engine,
-            metricFlow: pinnedSemanticCompile.engine === 'metricflow-cli'
-              ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
-              : undefined,
-            compile: async () => pinnedSemanticCompile,
-            prepareSql: () => ({ sql: preparation.executedSql, connection: preparation.connection }),
-            rowBound,
-          });
-          if (semanticExecution) {
-            semanticExecutionHolder.value = semanticExecution;
-            return semanticExecution.result;
-          }
-        }
-        // P0.2 — the exact-execution guard. This is the only place the
-        // identifier ledger can actually govern: it verified a string upstream
-        // and the legacy loop is free to execute a different one. When a run
-        // carries an authorization, the statement about to reach the warehouse
-        // must reference only what this run PROVED. Catalog presence is not
-        // proof. Absent an authorization (legacy path) nothing changes here,
-        // and that absence is recorded rather than assumed safe.
-        // Read and REMOVE: one authorization licenses exactly one execution,
-        // so a retry has to prove itself again rather than riding the previous
-        // turn's proofs.
-        const authorization = activeRunIdForExecution
-          ? consumeSqlAuthorization(activeRunIdForExecution)
-          : undefined;
-        if (authorization) {
-          const validation = validateAuthorizedSqlReferences(preparation.executedSql, undefined);
-          const verdict = verifyFinalSql(authorization, preparation.executedSql, [
-            ...(validation.referencedRelations ?? []),
-            ...(validation.referencedColumns ?? []).map((column: { column: string }) => column.column),
-          ]);
-          if (process.env.DQL_ORCHESTRATOR_TRACE) {
-            console.warn(`[dql] execution authorization: ${verdict.ok ? 'admitted' : 'REFUSED'} proven=${authorization.provenIdentifiers.length}${verdict.ok ? '' : ` reason=${verdict.reason}`}`);
-          }
-          if (!verdict.ok) {
-            throw analyticalError(
-              verdict.reason ?? 'The statement was not authorized for execution.',
-              { origin: 'governance_gate', stage: 'execute', code: 'unauthorized_sql' },
+        // Both the native executor and the target-bound semantic adapter can
+        // reach the warehouse from this callback. Admit the exact prepared
+        // bytes before either path so a matching cached semantic compile cannot
+        // bypass the generated proposal's capability.
+        return executePreparedAgenticSqlBoundary({
+          capability: agenticCapability,
+          preparedSql: preparation.executedSql,
+          bindings: bindingValue,
+          scope: {
+            ...agenticScope,
+            snapshotId: projectSnapshot().snapshotId,
+            ...(agenticCapability ? { targetFingerprint: agenticCapability.targetFingerprint } : {}),
+          },
+          execute: async () => {
+            // A semantic query the loop already compiled (MetricFlow / dbt
+            // Cloud) must execute through its pinned target binding, not as
+            // loose SQL.
+            const pinnedSemanticCompile = compiledSemanticQueries.get(executionFingerprint(preparation.preparedSql))
+              ?? compiledSemanticQueries.get(executionFingerprint(trimmed));
+            if (pinnedSemanticCompile) {
+              const semanticExecution = await executeTargetBoundSemanticQuery({
+                executor,
+                connection: activeConnection,
+                projectRoot,
+                plannedAdapter: pinnedSemanticCompile.engine,
+                metricFlow: pinnedSemanticCompile.engine === 'metricflow-cli'
+                  ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
+                  : undefined,
+                compile: async () => pinnedSemanticCompile,
+                prepareSql: () => ({ sql: preparation.executedSql, connection: preparation.connection }),
+                rowBound,
+              });
+              if (semanticExecution) {
+                semanticExecutionHolder.value = semanticExecution;
+                return semanticExecution.result;
+              }
+            }
+            return executor.executeQuery(
+              preparation.executedSql,
+              bindings?.sqlParams ?? [],
+              runtimeVariables(bindings?.variables ?? {}),
+              preparation.connection,
             );
           }
-        }
-        return executor.executeQuery(
-          preparation.executedSql,
-          bindings?.sqlParams ?? [],
-          runtimeVariables(bindings?.variables ?? {}),
-          preparation.connection,
-        );
+        });
       },
     });
     const semanticExecution = semanticExecutionHolder.value;
@@ -6865,11 +7026,18 @@ function analyticalFailureSummary(
     seed?: DqlArtifactReference,
     executionConnection?: ConnectionConfig,
     executionConnectionName?: string,
+    agenticCapability?: AgenticSqlExecutionCapabilityV1,
+    agenticScope?: SqlAuthorizationCheck,
   ): Promise<AgentResultPayload> => {
     // A seed that is already a certified/saved artifact keeps the DQL-first
     // path: there the `.dql` source IS the contract, and its parameters and
     // semantic refs must be compiled, not bypassed.
     if (seed && seed.kind !== 'sql_block') {
+      if (agenticCapability) {
+        throw analyticalError('The analyst-approved SQL cannot be redirected through a saved artifact.', {
+          origin: 'governance_gate', stage: 'execute', code: 'unauthorized_sql',
+        });
+      }
       return executeArtifactReferenceForAgent(
         { ...seed, limit: seed.limit ?? 200 },
         question,
@@ -6877,7 +7045,7 @@ function analyticalFailureSummary(
         executionConnectionName,
       );
     }
-    return executeGeneratedSqlDirect(question, sql, seed, executionConnection, undefined, executionConnectionName);
+    return executeGeneratedSqlDirect(question, sql, seed, executionConnection, undefined, executionConnectionName, agenticCapability, agenticScope);
   };
 
   /**

@@ -1,6 +1,5 @@
 import type { AdmittedIdentifier } from './identifier-ledger.js';
-import { registerSqlAuthorization } from './authorization-registry.js';
-import { mintFinalSqlAuthorization } from './sql-authorization.js';
+import { createAgenticSqlExecutionCapability } from './sql-authorization.js';
 /**
  * The analyst loop — explore, then compose, with provenance enforced.
  *
@@ -19,7 +18,7 @@ import { mintFinalSqlAuthorization } from './sql-authorization.js';
 import type { AgentAnswer, AnswerLoopInput } from '../answer-loop.js';
 import type { AgentToolDefinition } from '../providers/types.js';
 import type { AnalystTurnPlan } from './turn-plan.js';
-import { runAgenticToolLoop } from './tool-loop.js';
+import { runAgenticToolLoopDetailed, type TextToolLoopResult } from './tool-loop.js';
 import { IdentifierLedger } from './identifier-ledger.js';
 import { ANALYST_TOOL_POLICY, adjudicateProposedSql, withLedgerHarvest } from './ledger-tools.js';
 
@@ -50,6 +49,8 @@ export interface AnalystLoopDeps {
    */
   verifySql?: (sql: string) => string | undefined;
   maxIterations: number;
+  /** Physical provider sends available to this text/native tool loop. */
+  maxProviderDispatches?: number;
   /**
    * Optional structured planning call. Absent, the loop runs exactly as before
    * and the trace falls back to a fixed label.
@@ -67,7 +68,23 @@ export interface AnalystOutcome {
   /** Corrections fed back to the model, in order. */
   corrections: string[];
   /** Why the loop stopped. */
-  stop: 'composed' | 'no_sql' | 'unverified';
+  stop: 'composed' | 'no_sql' | 'unverified' | 'budget_exhausted';
+  /** Typed terminal detail: this never grants an execution fallback. */
+  terminal?: 'no_final_sql'
+    | 'tool_budget_exhausted'
+    | 'provider_dispatch_budget_exhausted'
+    | 'unverified_identifiers'
+    | 'missing_execution_binding'
+    | 'tool_loop_error';
+}
+
+type AnalystBudgetTerminal = Extract<AnalystOutcome['terminal'],
+  'tool_budget_exhausted' | 'provider_dispatch_budget_exhausted'>;
+
+function budgetTerminalForToolLoop(stop: TextToolLoopResult['stop']): AnalystBudgetTerminal | undefined {
+  return stop === 'tool_budget_exhausted' || stop === 'provider_dispatch_budget_exhausted'
+    ? stop
+    : undefined;
 }
 
 /**
@@ -129,12 +146,32 @@ export async function runAnalystLoop(
     deps.onStep?.({ kind: 'plan', label: 'Establishing what exists before writing SQL' });
   }
 
-  let raw = await runAgenticToolLoop(input.provider, messages, tools, {
+  const initial = await runAgenticToolLoopDetailed(input.provider, messages, tools, {
     ...(input.signal ? { signal: input.signal } : {}),
     maxToolCalls: deps.maxIterations,
+    ...(deps.maxProviderDispatches !== undefined ? { maxProviderDispatches: deps.maxProviderDispatches } : {}),
   });
+  let raw = initial.text;
+  const initialBudgetTerminal = budgetTerminalForToolLoop(initial.stop);
+  if (initialBudgetTerminal) {
+    return {
+      admitted: ledger.entries().map((e) => e.identifier),
+      admittedEntries: ledger.entries(),
+      corrections,
+      stop: 'budget_exhausted',
+      terminal: initialBudgetTerminal,
+    };
+  }
   let sql = deps.parseSql(raw);
-  if (!sql) return { admitted: ledger.entries().map((e) => e.identifier), admittedEntries: ledger.entries(), corrections, stop: 'no_sql' };
+  if (!sql) {
+    return {
+      admitted: ledger.entries().map((e) => e.identifier),
+      admittedEntries: ledger.entries(),
+      corrections,
+      stop: 'no_sql',
+      terminal: 'no_final_sql',
+    };
+  }
 
   // One bounded repair. A second would mostly re-spend the budget: if the first
   // correction — which names the exact identifier that was observed — does not
@@ -157,21 +194,40 @@ export async function runAnalystLoop(
       label: verdict.ok ? 'Correcting an unsafe aggregation' : 'Correcting an unobserved identifier',
       detail: verdict.ok ? safety : verdict.unadmitted.join(', '),
     });
-    raw = await runAgenticToolLoop(
+    const repair = await runAgenticToolLoopDetailed(
       input.provider,
       [...messages, { role: 'assistant' as const, content: raw }, { role: 'user' as const, content: correction }],
       tools,
       {
         ...(input.signal ? { signal: input.signal } : {}),
         maxToolCalls: deps.maxIterations,
+        ...(deps.maxProviderDispatches !== undefined ? { maxProviderDispatches: deps.maxProviderDispatches } : {}),
       },
     );
+    raw = repair.text;
+    const repairBudgetTerminal = budgetTerminalForToolLoop(repair.stop);
+    if (repairBudgetTerminal) {
+      return {
+        admitted: ledger.entries().map((e) => e.identifier),
+        admittedEntries: ledger.entries(),
+        corrections,
+        stop: 'budget_exhausted',
+        terminal: repairBudgetTerminal,
+      };
+    }
     const repaired = deps.parseSql(raw);
     if (!repaired) break;
     sql = repaired;
   }
 
-  return { sql, admitted: ledger.entries().map((e) => e.identifier), admittedEntries: ledger.entries(), corrections, stop: 'unverified' };
+  return {
+    sql,
+    admitted: ledger.entries().map((e) => e.identifier),
+    admittedEntries: ledger.entries(),
+    corrections,
+    stop: 'unverified',
+    terminal: 'unverified_identifiers',
+  };
 }
 
 /**
@@ -185,42 +241,101 @@ export async function runAnalystLoop(
 export function createAnalystLaneHandler(deps: {
   legacy: (input: AnswerLoopInput) => Promise<AgentAnswer>;
   buildDeps: (input: AnswerLoopInput) => AnalystLoopDeps | undefined;
-  /**
-   * Identity for this turn's execution authorization. Absent, nothing is
-   * registered and the warehouse guard stays inert — the legacy behaviour.
-   */
-  runKey?: (input: AnswerLoopInput) => string | undefined;
 }) {
   return async (input: AnswerLoopInput): Promise<AgentAnswer> => {
+    const noGeneratedExecution = {
+      ...input,
+      forcedGeneratedProposal: undefined,
+      agenticSqlExecutionCapability: undefined,
+      executeGeneratedSql: undefined,
+      executeAgenticGeneratedSql: undefined,
+    } satisfies AnswerLoopInput;
+    const safeLegacy = async (outcome: AnalystOutcome): Promise<AgentAnswer> => {
+      try {
+        return await deps.legacy(noGeneratedExecution);
+      } catch {
+        // Never let `answerAgentic` turn a failure in the guarded path into an
+        // ambient legacy retry. This explicit no-answer retains the truthful
+        // non-executing terminal rather than emitting a second, unproved SQL.
+        return analystNonExecutingAnswer(input, outcome);
+      }
+    };
     const loopDeps = deps.buildDeps(input);
-    // No tools, no provider, or a host that cannot parse SQL: there is nothing
-    // this loop can add, so do not pay for it.
-    if (!loopDeps || loopDeps.tools.length === 0) return deps.legacy(input);
+    // A generated agentic route may never fall through to an ambient generated
+    // executor when its proof tools are unavailable. Certified/semantic routes
+    // remain host-owned, but this lane has no generated SQL authority.
+    if (!loopDeps || loopDeps.tools.length === 0) {
+      return safeLegacy({ admitted: [], admittedEntries: [], corrections: [], stop: 'no_sql', terminal: 'no_final_sql' });
+    }
 
-    const outcome = await runAnalystLoop(input, loopDeps);
+    let outcome: AnalystOutcome;
+    try {
+      outcome = await runAnalystLoop(input, loopDeps);
+    } catch {
+      outcome = {
+        admitted: [],
+        admittedEntries: [],
+        corrections: [],
+        stop: 'no_sql',
+        terminal: 'tool_loop_error',
+      };
+    }
     if (process.env.DQL_ORCHESTRATOR_TRACE) {
       console.warn(`[dql] analyst loop outcome: stop=${outcome.stop} sql=${outcome.sql ? 'yes' : 'no'} admitted=${outcome.admitted.length} corrections=${outcome.corrections.length}`);
     }
-    // Mint the execution authorization from what this turn actually PROVED.
-    // Without this the guard at the warehouse has nothing to check against and
-    // the ledger governs a string rather than the execution — which is the gap
-    // the review identified. Registered before the legacy loop runs, because
-    // the legacy loop is what executes.
-    const runKey = deps.runKey?.(input);
-    if (runKey && outcome.stop === 'composed' && outcome.sql) {
-      registerSqlAuthorization(runKey, mintFinalSqlAuthorization({
-        sql: outcome.sql,
-        proven: outcome.admittedEntries.map((entry) => ({
-          identifier: entry.identifier,
-          evidence: entry.source,
-        })),
-      }));
+    const scope = input.agenticExecutionScope;
+    const composedSql = outcome.stop === 'composed' ? outcome.sql : undefined;
+    const capability = composedSql
+      ? createAgenticSqlExecutionCapability({
+          sql: composedSql,
+          // Retrieval catalog rows cannot mint execution authority. Preserve
+          // them in the audit ledger, but pass only observed evidence to the
+          // server-only capability.
+          proven: outcome.admittedEntries
+            .filter((entry) => entry.source !== 'catalog')
+            .map((entry) => ({ identifier: entry.identifier, evidence: entry.source })),
+          runId: scope?.runId,
+          executionId: scope?.executionId,
+          snapshotId: scope?.snapshotId ?? input.resolvedAnalyticalPlan?.snapshotId,
+          planId: scope?.planId ?? input.resolvedAnalyticalPlan?.planId,
+          targetFingerprint: scope?.targetFingerprint ?? input.generatedProposalTargetFingerprint,
+          bindings: scope?.bindings ?? {},
+        })
+      : undefined;
+    if (outcome.stop === 'composed' && composedSql && !capability) {
+      outcome = { ...outcome, stop: 'unverified', terminal: 'missing_execution_binding' };
     }
-    const answer = await deps.legacy(
-      outcome.stop === 'composed' && outcome.sql
-        ? { ...input, extraContext: [input.extraContext, analystContext(outcome)].filter(Boolean).join('\n\n') }
-        : input,
-    );
+    const answer = outcome.stop === 'budget_exhausted'
+      // A terminal budget is not a recoverable model answer. Do not ask the
+      // legacy path to take another generation turn: it would conceal the
+      // terminal reason and could turn an explicit bounded stop into an
+      // unrelated answer. This remains deliberately non-executing.
+      ? analystNonExecutingAnswer(input, outcome)
+      : outcome.stop === 'composed' && composedSql && capability
+        ? await (async (): Promise<AgentAnswer> => {
+            try {
+              return await deps.legacy({
+                ...input,
+                // This is a hard handoff, not prompt context. The legacy answer loop
+                // keeps its validation/narration/artifact behavior but cannot ask a
+                // second model to replace the analyst SQL.
+                forcedGeneratedProposal: {
+                  sql: composedSql,
+                  summary: 'Prepared from identifiers observed during this bounded analyst run. Review-required until an analyst promotes it.',
+                },
+                agenticSqlExecutionCapability: capability,
+              });
+            } catch {
+              // Do not rethrow into `answerAgentic`: its compatibility fallback
+              // executes the original legacy input, which lacks this capability.
+              return analystNonExecutingAnswer(input, {
+                ...outcome,
+                stop: 'unverified',
+                terminal: 'tool_loop_error',
+              });
+            }
+          })()
+        : await safeLegacy(outcome);
     // ALWAYS record the verdict, not only when a correction was needed. A
     // verification that passed is precisely what an audit wants to see, and a
     // loop that is invisible when it works cannot be told apart from one that
@@ -229,16 +344,29 @@ export function createAnalystLaneHandler(deps: {
   };
 }
 
-/** Hand the verified SQL to the legacy loop as context, never as an instruction. */
-function analystContext(outcome: AnalystOutcome): string {
-  return [
-    'A bounded analyst loop verified the following SQL: every table and column in it',
-    'was returned by a compile, preview, or schema tool during this turn.',
-    '',
-    '```sql',
-    outcome.sql ?? '',
-    '```',
-  ].join('\n');
+function analystNonExecutingAnswer(input: AnswerLoopInput, outcome: AnalystOutcome): AgentAnswer {
+  const reason = outcome.terminal === 'missing_execution_binding'
+    ? 'DQL established the query identifiers but could not bind this run to its frozen plan and execution target, so it did not run generated SQL.'
+    : outcome.terminal === 'tool_loop_error'
+      ? 'DQL could not complete the bounded evidence check, so it did not run generated SQL.'
+      : outcome.terminal === 'tool_budget_exhausted'
+        ? 'DQL reached its bounded tool budget before it received final SQL, so no generated warehouse query was run.'
+        : outcome.terminal === 'provider_dispatch_budget_exhausted'
+          ? 'DQL reached its bounded AI dispatch budget before it received final SQL, so no generated warehouse query was run.'
+      : outcome.terminal === 'no_final_sql'
+        ? 'DQL did not receive final SQL from the bounded analyst loop, so no generated warehouse query was run.'
+        : 'DQL could not verify every generated identifier against a tool observation, so no generated warehouse query was run.';
+  return {
+    kind: 'no_answer',
+    certification: 'analyst_review_required',
+    reviewStatus: 'analyst_review_required',
+    refusalCode: 'grounding_gap',
+    text: reason,
+    answer: reason,
+    citations: [],
+    considered: [],
+    ...(input.contextPack ? { contextPack: input.contextPack } : {}),
+  };
 }
 
 function withAnalystEvidence(answer: AgentAnswer, outcome: AnalystOutcome): AgentAnswer {
@@ -263,8 +391,14 @@ function withAnalystEvidence(answer: AgentAnswer, outcome: AnalystOutcome): Agen
           status: outcome.stop === 'composed' ? ('checked' as const) : ('failed' as const),
           label: outcome.stop === 'composed'
             ? `Verified ${outcome.admitted.length} identifier(s) against tool observations`
-            : outcome.stop === 'no_sql'
-              ? 'The analyst loop proposed no SQL; the governed cascade answered instead'
+            : outcome.terminal === 'no_final_sql'
+              ? 'The analyst loop did not produce final SQL; no generated warehouse query was run'
+              : outcome.terminal === 'tool_budget_exhausted'
+                ? 'The analyst loop reached its bounded tool budget before final SQL; no generated warehouse query was run'
+                : outcome.terminal === 'provider_dispatch_budget_exhausted'
+                  ? 'The analyst loop reached its bounded provider-dispatch budget before final SQL; no generated warehouse query was run'
+              : outcome.terminal === 'missing_execution_binding'
+                ? 'The analyst proposal had no complete run/plan/target execution binding; no generated warehouse query was run'
               : 'Could not verify every identifier against a tool observation',
           ...(outcome.corrections.length > 0 ? { detail: outcome.corrections.join(' ') } : {}),
         },

@@ -39,6 +39,7 @@ import {
   prepareServerOwnedProviderSchemaContext,
   projectEmbeddingProvider,
   answerAgentic,
+  qualifyAuthorizationReferences,
   createAnalystLaneHandler,
   parseProposal,
   renderContextValidationRefusalForUser,
@@ -454,6 +455,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
       const spec = SPECS[id];
       const rawProvider = applyEvalCassette(providerOverride ?? spec.create(req.projectRoot));
       const isResearch = req.analysisDepth === 'deep';
+      const maxProviderDispatches = isResearch ? 8 : 4;
       const researchRowsOptIn = isResearch && req.researchResultRowsOptIn === true;
       const sharedDispatchEvidence = req.providerDispatchEvidenceSink;
       let providerRoundTrips = 0;
@@ -487,7 +489,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
         // A tool-calling loop capped at two physical sends can make exactly one
         // tool call before it must answer, which is not enough to look something
         // up and then use it. The run-scoped ledger is the real guardrail.
-        maxProviderDispatches: isResearch ? 8 : 4,
+        maxProviderDispatches,
         ...(sharedDispatchEvidence?.mayStartToolCall
           ? { mayStartToolCall: () => sharedDispatchEvidence.mayStartToolCall!() }
           : {}),
@@ -747,6 +749,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             ...(req.resolvedAnalyticalPlan
               ? { resolvedAnalyticalPlan: req.resolvedAnalyticalPlan }
               : {}),
+            ...(req.generatedProposalTargetFingerprint
+              ? { generatedProposalTargetFingerprint: req.generatedProposalTargetFingerprint }
+              : {}),
             ...(req.analyticalReferenceInstant
               ? { analyticalReferenceInstant: req.analyticalReferenceInstant }
               : {}),
@@ -799,6 +804,19 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             executeGeneratedSql: req.executeGeneratedSql
               ? async (...args) => { guardSnapshot(); sqlExecutions += 1; return req.executeGeneratedSql!(...args); }
               : undefined,
+            executeAgenticGeneratedSql: req.executeAgenticGeneratedSql
+              ? async (capability, sql, artifact) => {
+                  guardSnapshot();
+                  sqlExecutions += 1;
+                  return req.executeAgenticGeneratedSql!(capability, sql, artifact);
+                }
+              : undefined,
+            agenticExecutionScope: {
+              runId: req.agentRunId,
+              snapshotId: req.projectSnapshot?.snapshotId,
+              planId: req.resolvedAnalyticalPlan?.planId,
+              targetFingerprint: req.generatedProposalTargetFingerprint,
+            },
             executeDqlArtifact: req.executeDqlArtifact
               ? async (...args) => { guardSnapshot(); sqlExecutions += 1; return req.executeDqlArtifact!(...args); }
               : undefined,
@@ -853,9 +871,6 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             handlers: {
               generated: createAnalystLaneHandler({
                 legacy: answer,
-                // Keyed by the RUN, not the question: two turns asking the same
-                // thing must not inherit each other's proofs.
-                runKey: () => req.agentRunId,
                 buildDeps: (loopInput) => {
                   const execute = loopInput.executeGeneratedSql;
                   const valuesEnabled = valueLookupEnabled(req.projectRoot);
@@ -869,6 +884,10 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
                     maxIterations: resolveOrchestratorPolicy({
                       config: readOrchestratorConfig(req.projectRoot),
                     }).maxIterations,
+                    // Match the physical wrapper cap and reserve the final
+                    // composition dispatch: an ordinary cap of four permits
+                    // at most three text-protocol tool observations.
+                    maxProviderDispatches,
                     // Scaled by the same knob as every other agent deadline, so
                     // a local model that needs seconds per call is not planned
                     // out of existence by a budget calibrated for a hosted one.
@@ -910,9 +929,13 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
                     parseSql: (raw) => parseProposal(raw).sql,
                     extractReferences: (sql) => {
                       const validation = validateSqlAgainstLocalContext(sql, loopInput.contextPack);
+                      const qualified = qualifyAuthorizationReferences(sql, {
+                        relations: validation.referencedRelations ?? [],
+                        columns: validation.referencedColumns ?? [],
+                      });
                       return {
                         relations: validation.referencedRelations ?? [],
-                        columns: (validation.referencedColumns ?? []).map((column) => column.column),
+                        columns: qualified.filter((reference) => !validation.referencedRelations?.includes(reference)),
                       };
                     },
                     // The safety verifiers keep their logic; only what happens on

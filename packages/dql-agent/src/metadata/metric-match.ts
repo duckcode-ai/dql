@@ -228,9 +228,29 @@ export interface MatchSemanticMetricOptions {
    * content tokens when empty, preserving the old behavior for bare callers.
    */
   measureTerms?: string[];
+  /**
+   * Ordered metric identities returned by the immutable snapshot's vector lane.
+   * This is a retrieval shortlist, not a model guess: callers supply only IDs
+   * from their already-frozen catalog snapshot.  Names are accepted for legacy
+   * KG callers that do not expose a stable node id.
+   */
+  vectorMetricShortlist?: readonly string[];
 }
 
 export const DEFAULT_METRIC_MATCH_EMBEDDING_ALPHA = 0.18;
+/** Vector-only metric grounding must clear this similarity floor. */
+export const VECTOR_ONLY_METRIC_SCORE_FLOOR = 0.86;
+/** Vector-only leader must exceed the runner-up by this separation margin. */
+export const VECTOR_ONLY_METRIC_SEPARATION_MARGIN = 0.06;
+
+/** Hybrid ranking stays bounded even for enterprise catalogs. */
+const MAX_HYBRID_METRIC_CANDIDATES = 96;
+/**
+ * Reserve a quarter of the bounded window for the caller's snapshot vector
+ * lane.  Without this, 96 weak lexical candidates can starve a strongly
+ * ranked vector target before embeddings are even evaluated.
+ */
+const VECTOR_SHORTLIST_RESERVED_CANDIDATES = 24;
 
 /**
  * Embedding weight once a REAL (project-configured) embedder is supplied.
@@ -431,20 +451,49 @@ export async function matchSemanticMetric(
   // FTS `customers` returns no metrics at all, while the vector lane carries
   // every one of them.
   //
-  // The 96 bound is unchanged — lexical hits keep priority, and the remainder
-  // of the window is filled with zero-overlap candidates for the vector lane
-  // to rank. Nothing else about admission moves: authorization, domain,
-  // lifecycle, and privacy filters have already run above.
+  // The bounded window retains lexical priority, but it reserves capacity for
+  // the request-scoped vector shortlist before the lexical slice is applied.
+  // Nothing else about admission moves: authorization, domain, lifecycle, and
+  // privacy filters have already run above.
   const lexical = executabilityAdjusted
     .filter((entry) => entry.grounded || entry.ftsScore > 0)
     .sort((left, right) => right.ftsScore - left.ftsScore || left.metric.name.localeCompare(right.metric.name));
-  const vectorOnly = executabilityAdjusted
-    .filter((entry) => !entry.grounded && entry.ftsScore <= 0)
-    .sort((left, right) => left.metric.name.localeCompare(right.metric.name));
-  const rankedCandidates = [
-    ...lexical.slice(0, 96),
-    ...vectorOnly.slice(0, Math.max(0, 96 - Math.min(lexical.length, 96))),
-  ];
+  const vectorOnlyPool = executabilityAdjusted
+    .filter((entry) => !entry.grounded && entry.ftsScore <= 0);
+  const directCatalogBound = candidates.length <= MAX_HYBRID_METRIC_CANDIDATES;
+  const requestedVectorOrder = new Map(
+    (options.vectorMetricShortlist ?? []).map((identity, index) => [identity.trim().toLowerCase(), index]),
+  );
+  // A catalog larger than the direct bound must use the snapshot vector lane.
+  // Alphabetical admission was a hidden recall cliff: candidate #97 could be
+  // semantically perfect yet never reach embeddings.  No compatible snapshot
+  // shortlist means vector-only grounding is unresolved, not guessed.
+  const vectorShortlist = directCatalogBound
+    ? []
+    : executabilityAdjusted
+        .filter((entry) => metricVectorRank(entry.metric, requestedVectorOrder) !== undefined)
+        .sort((left, right) =>
+          (metricVectorRank(left.metric, requestedVectorOrder) ?? Number.MAX_SAFE_INTEGER)
+          - (metricVectorRank(right.metric, requestedVectorOrder) ?? Number.MAX_SAFE_INTEGER)
+          || left.metric.name.localeCompare(right.metric.name));
+  const rankedCandidates = directCatalogBound
+    ? [...lexical, ...vectorOnlyPool]
+    : (() => {
+        // Allocate the vector lane FIRST.  A shortlisted item may have a weak
+        // lexical score too, so reserve against the full shortlist rather than
+        // only zero-lexical entries; otherwise a weak keyword hit can still
+        // fall behind an alphabetically ordered 96-item lexical window.
+        const reservedVector = vectorShortlist.slice(0, VECTOR_SHORTLIST_RESERVED_CANDIDATES);
+        const reservedIds = new Set(reservedVector.map((entry) => metricVectorIdentity(entry.metric)));
+        const lexicalCapacity = Math.max(0, MAX_HYBRID_METRIC_CANDIDATES - reservedVector.length);
+        const selectedLexical = lexical
+          .filter((entry) => !reservedIds.has(metricVectorIdentity(entry.metric)))
+          .slice(0, lexicalCapacity);
+        const remaining = Math.max(0, MAX_HYBRID_METRIC_CANDIDATES - reservedVector.length - selectedLexical.length);
+        const additionalVector = vectorShortlist
+          .slice(reservedVector.length, reservedVector.length + remaining);
+        return [...selectedLexical, ...reservedVector, ...additionalVector];
+      })();
   if (rankedCandidates.length === 0) return null;
   // Retrieval must not silently send enterprise metric definitions to a remote
   // provider merely because an ambient API key exists. Hosts may opt into an
@@ -515,8 +564,8 @@ export async function matchSemanticMetric(
   const realEmbeddingProvider = !provider.id.includes('hashed-token');
   const embeddingGrounded = !best.item.grounded
     && realEmbeddingProvider
-    && best.vectorScore >= 0.86
-    && best.vectorScore - (second?.vectorScore ?? 0) >= 0.06;
+    && best.vectorScore >= VECTOR_ONLY_METRIC_SCORE_FLOOR
+    && best.vectorScore - (second?.vectorScore ?? 0) >= VECTOR_ONLY_METRIC_SEPARATION_MARGIN;
   if ((!best.item.grounded || best.score < threshold) && !embeddingGrounded) return null;
   return {
     metric: best.item.metric,
@@ -524,6 +573,14 @@ export async function matchSemanticMetric(
     family: best.item.family,
     basis: embeddingGrounded ? 'embedding' : best.item.basis,
   };
+}
+
+function metricVectorIdentity(metric: KGNode): string {
+  return (metric.nodeId || metric.name).trim().toLowerCase();
+}
+
+function metricVectorRank(metric: KGNode, order: Map<string, number>): number | undefined {
+  return order.get(metricVectorIdentity(metric)) ?? order.get(metric.name.trim().toLowerCase());
 }
 
 function clamp01(value: number): number {

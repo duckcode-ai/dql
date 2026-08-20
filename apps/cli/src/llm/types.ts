@@ -17,6 +17,8 @@ import type {
   DomainContextEnvelope,
   ProviderDispatchEvent,
   ProviderPayloadRowShape,
+  AgenticSqlExecutionCapabilityV1,
+  NarrationIntegrityReceiptV1,
 } from '@duckcodeailabs/dql-agent';
 import type { DQLManifest, ProviderDispatchPhaseV1, ProviderEgressPurpose, ProviderEgressReceiptV1 } from '@duckcodeailabs/dql-core';
 
@@ -80,6 +82,7 @@ export interface AgentConversationTurn {
   contextPackId?: string;
   dqlArtifact?: AgentDqlArtifactReference;
   cascade?: CascadeAnswerResult;
+  narrationIntegrityReceipt?: NarrationIntegrityReceiptV1;
   requestedFilters?: string[];
   requestedDimensions?: string[];
   requestedMeasures?: string[];
@@ -184,6 +187,12 @@ export interface AgentRunRequest {
   assertProjectSnapshot?: (snapshotId: string) => void;
   executeCertifiedBlock?: (block: KGNode, invocation?: CertifiedBlockInvocationInput) => Promise<AgentResultPayload>;
   executeGeneratedSql?: (sql: string, artifact?: AgentDqlArtifactReference) => Promise<AgentResultPayload>;
+  /** Server-only generated execution capability; never accepted from a client payload. */
+  executeAgenticGeneratedSql?: (
+    capability: AgenticSqlExecutionCapabilityV1,
+    sql: string,
+    artifact?: AgentDqlArtifactReference,
+  ) => Promise<AgentResultPayload>;
   executeDqlArtifact?: (artifact: AgentDqlArtifactReference) => Promise<AgentResultPayload>;
   getSchemaContext?: (question: string, contextPack?: LocalContextPack) => Promise<AgentSchemaTable[]>;
   /**
@@ -208,6 +217,8 @@ export interface AgentRunRequest {
   preferredExecutionId?: string;
   /** Router-owned immutable v2 plan. Provider adapters must pass it through unchanged. */
   resolvedAnalyticalPlan?: ResolvedAnalyticalPlan;
+  /** Server-observed identity for a generated proposal's execution target. */
+  generatedProposalTargetFingerprint?: string;
   /** Server-captured instant used to bind relative periods deterministically. */
   analyticalReferenceInstant?: string;
   /** Route-locked, snapshot-bound freshness lookup prepared by the execution host. */

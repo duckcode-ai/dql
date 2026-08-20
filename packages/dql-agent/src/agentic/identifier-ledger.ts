@@ -44,9 +44,14 @@ export interface LedgerAdjudication {
   nearest: Record<string, string>;
 }
 
-/** Case- and qualifier-insensitive key, so `DB.Schema.Orders` ≡ `orders`. */
+/** Case-insensitive qualified identity. Qualifiers remain part of authority. */
 function normalizeIdentifier(value: string): string {
-  return value.trim().toLowerCase().replace(/^["`\[]|["`\]]$/g, '');
+  return value
+    .trim()
+    .split('.')
+    .map((part) => part.trim().replace(/^["`\[]|["`\]]$/g, '').toLowerCase())
+    .filter(Boolean)
+    .join('.');
 }
 
 /** Last segment of a dotted identifier (`db.schema.orders` → `orders`). */
@@ -79,8 +84,6 @@ export function editDistance(left: string, right: string): number {
 
 export class IdentifierLedger {
   private readonly admitted = new Map<string, AdmittedIdentifier>();
-  /** Leaf → full identifier, so a bare `orders` matches an admitted `db.s.orders`. */
-  private readonly byLeaf = new Map<string, string>();
 
   /**
    * Record identifiers proven by one observation.
@@ -98,21 +101,13 @@ export class IdentifierLedger {
       if (!existing || sourceRank(source) > sourceRank(existing.source)) {
         this.admitted.set(key, { identifier: raw, source, receiptId });
       }
-      const leaf = leafOf(raw);
-      if (leaf && !this.byLeaf.has(leaf)) this.byLeaf.set(leaf, key);
     }
   }
 
-  isAdmitted(identifier: string): boolean {
+  isAdmitted(identifier: string, options: { requireObserved?: boolean } = {}): boolean {
     const key = normalizeIdentifier(identifier);
-    if (this.admitted.has(key)) return true;
-    // A bare name matches a qualified admission, and vice versa: the compiler
-    // emits `db.schema.orders` while the model writes `orders`, and rejecting
-    // that would be a false alarm on identical objects.
-    const leaf = leafOf(identifier);
-    const viaLeaf = this.byLeaf.get(leaf);
-    if (viaLeaf) return true;
-    return [...this.admitted.keys()].some((admitted) => leafOf(admitted) === leaf);
+    const entry = this.admitted.get(key);
+    return Boolean(entry && (!options.requireObserved || entry.source !== 'catalog'));
   }
 
   size(): number {
@@ -146,11 +141,14 @@ export class IdentifierLedger {
    * distinction is the whole point — the old pipeline turned this into a
    * `grounding_gap` and stopped.
    */
-  adjudicate(references: { relations?: readonly string[]; columns?: readonly string[] }): LedgerAdjudication {
+  adjudicate(
+    references: { relations?: readonly string[]; columns?: readonly string[] },
+    options: { requireObserved?: boolean } = {},
+  ): LedgerAdjudication {
     const unadmitted: string[] = [];
     const nearest: Record<string, string> = {};
     for (const reference of [...(references.relations ?? []), ...(references.columns ?? [])]) {
-      if (!reference || this.isAdmitted(reference)) continue;
+      if (!reference || this.isAdmitted(reference, options)) continue;
       if (unadmitted.includes(reference)) continue;
       unadmitted.push(reference);
       const suggestion = this.nearestAdmitted(reference);

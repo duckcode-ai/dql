@@ -137,6 +137,7 @@ export type AgentRunStopReason =
   | "conversational_reply"
   | "certified_answer_found"
   | "governed_semantic_answer"
+  | "governed_compound_answer"
   | "generated_review_required"
   | "artifact_created"
   | "needs_clarification"
@@ -247,6 +248,31 @@ export interface AgentRunDiagnosticReceiptV2 {
   telemetry: AgentRunTelemetryV1;
   providerEgressReceiptFingerprints: string[];
   repairCapabilityFingerprint?: string;
+}
+
+/**
+ * Durable, content-free outcome of the answer narration stage.
+ *
+ * This receipt is deliberately independent of the rendered prose and result
+ * rows: an evaluator must never infer that narration was attempted from either
+ * of those presentation details. It lets the host distinguish a verified
+ * narrative, a clearly labelled deterministic floor, an intentional skip, and
+ * an infrastructure failure after the run is persisted.
+ */
+export interface NarrationIntegrityReceiptV1 {
+  version: 1;
+  mode: "skip" | "verified_facts" | "preview_grounded";
+  outcome: "skipped" | "success" | "deterministic_fallback" | "error";
+  /** A provider-backed narration invocation actually began. */
+  attempted: boolean;
+  /** Count only for fact-verified narration; never contains result values. */
+  factCount: number;
+  maxRows: number;
+  /** Stable verifier codes, not provider prose or raw result values. */
+  validationFailures: string[];
+  skipReason?: "no_answer" | "no_provider" | "nothing_to_narrate";
+  /** Stable host code only; raw provider errors are intentionally not persisted. */
+  errorCode?: "narration_error";
 }
 
 export interface AgentRunNextAction {
@@ -452,6 +478,7 @@ export interface AgentRun {
   lifecycle?: AgentRunLifecycleV1;
   diagnosticReceipt?: AgentRunDiagnosticReceiptV1;
   diagnosticReceiptV2?: AgentRunDiagnosticReceiptV2;
+  narrationIntegrityReceipt?: NarrationIntegrityReceiptV1;
   telemetry?: AgentRunTelemetryV1;
   /** Server-owned automatic repair authority. Legacy runs omit it and fail closed. */
   repairCapability?: AnalyticalRepairCapabilityV1;
@@ -553,6 +580,8 @@ export interface AgentRouteExecutorResult {
   repairAttempts?: number;
   providerEgressReceipts?: ProviderEgressReceiptV1[];
   telemetry?: AgentRunTelemetryV1;
+  /** Content-free narration outcome; persisted by the run engine. */
+  narrationIntegrityReceipt?: NarrationIntegrityReceiptV1;
   analyticalTurnPlan?: AnalyticalTurnPlanV1;
   analyticalTaskOutcomes?: AnalyticalTaskOutcomeV1[];
 }
@@ -1959,6 +1988,9 @@ export class AgentRunEngine {
         : {}),
       ...(finalResult.telemetry ? {
         telemetry: withTotalDuration(finalResult.telemetry, durationBetweenMs(input.startedAt, completedAt)),
+      } : {}),
+      ...(finalResult.narrationIntegrityReceipt ? {
+        narrationIntegrityReceipt: finalResult.narrationIntegrityReceipt,
       } : {}),
       escalationAttempts,
       budgetUsage: input.budgetUsage,

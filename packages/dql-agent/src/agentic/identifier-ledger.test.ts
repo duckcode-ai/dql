@@ -10,16 +10,14 @@ describe('IdentifierLedger', () => {
     expect(ledger.isAdmitted('customers')).toBe(false);
   });
 
-  it('matches a bare name against a qualified admission, and the reverse', () => {
-    // The compiler emits `db.schema.orders`; the model writes `orders`. Treating
-    // those as different identifiers would reject correct SQL for the same table.
+  it('does not let a bare name cross a qualified identity boundary', () => {
     const ledger = new IdentifierLedger();
     ledger.admit('compiler', ['analytics.public.orders'], 'compile-1');
-    expect(ledger.isAdmitted('orders')).toBe(true);
+    expect(ledger.isAdmitted('orders')).toBe(false);
 
     const reverse = new IdentifierLedger();
     reverse.admit('schema_tool', ['orders'], 'schema-1');
-    expect(reverse.isAdmitted('analytics.public.orders')).toBe(true);
+    expect(reverse.isAdmitted('analytics.public.orders')).toBe(false);
   });
 
   it('keeps the strongest provenance rather than the most recent', () => {
@@ -51,9 +49,21 @@ describe('IdentifierLedger', () => {
   it('passes clean SQL through', () => {
     const ledger = new IdentifierLedger();
     ledger.admit('compiler', ['analytics.public.orders'], 'c1');
-    ledger.admit('preview', ['order_total'], 'p1');
-    expect(ledger.adjudicate({ relations: ['orders'], columns: ['order_total'] }))
+    ledger.admit('preview', ['analytics.public.orders.order_total'], 'p1');
+    expect(ledger.adjudicate({
+      relations: ['analytics.public.orders'],
+      columns: ['analytics.public.orders.order_total'],
+    }))
       .toEqual({ ok: true, unadmitted: [], nearest: {} });
+  });
+
+  it('keeps same-named columns isolated by their fully qualified relation', () => {
+    const ledger = new IdentifierLedger();
+    ledger.admit('schema_tool', ['analytics.orders.id'], 'orders-schema');
+    ledger.admit('schema_tool', ['analytics.customers.id'], 'customers-schema');
+    expect(ledger.adjudicate({ columns: ['analytics.orders.id'] }, { requireObserved: true }).ok).toBe(true);
+    expect(ledger.adjudicate({ columns: ['warehouse.orders.id'] }, { requireObserved: true }))
+      .toMatchObject({ ok: false, unadmitted: ['warehouse.orders.id'] });
   });
 
   it('renders a correction the model can act on, and nothing when clean', () => {

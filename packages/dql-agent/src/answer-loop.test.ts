@@ -6376,6 +6376,77 @@ describe("answer (block-first loop)", () => {
     expect(result.proposedSql).toContain("analytics.fct_orders");
     expect(provider.calls.length).toBeLessThanOrEqual(1);
   });
+
+  it('executes an analyst-bound proposal verbatim through its capability and never falls back to ambient generated SQL', async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider('THIS_PROVIDER_MUST_NOT_BE_CALLED');
+    const forcedSql = "SELECT customer_name FROM dev.orders /* exact analyst bytes: 'Ada' */";
+    const capability = {
+      version: 1 as const,
+      runId: 'run-a',
+      executionId: 'child-a',
+      snapshotId: 'snapshot-a',
+      planId: 'plan-a',
+      targetFingerprint: 'target-a',
+      bindingsFingerprint: 'bindings-a',
+      candidateSqlFingerprint: 'candidate-a',
+      provenIdentifiers: ['dev.orders', 'dev.orders.customer_name'],
+      evidence: { 'dev.orders': 'schema_tool' as const, 'dev.orders.customer_name': 'schema_tool' as const },
+    };
+    const executeAgentic = vi.fn(async (_capability: unknown, sql: string) => ({
+      columns: ['customer_name'], rows: [{ customer_name: 'Ada' }], rowCount: 1, sql,
+    }));
+    const executeAmbient = vi.fn(async () => {
+      throw new Error('ambient generated SQL must not run');
+    });
+    const relations = [{
+      relation: 'dev.orders', name: 'orders', source: 'dbt manifest',
+      columns: [{ name: 'customer_name', type: 'VARCHAR' }], rank: 1, score: 1, reason: 'fixture',
+    }];
+    const result = await answer({
+      question: 'show customer names',
+      provider,
+      kg,
+      forcedGeneratedProposal: { sql: forcedSql },
+      agenticSqlExecutionCapability: capability,
+      executeAgenticGeneratedSql: executeAgentic,
+      executeGeneratedSql: executeAmbient,
+      contextPack: contextPackForRankedRelations('show customer names', relations, {
+        metricTerms: [], dimensionTerms: ['customer'], mode: 'entity_drilldown', routeIntent: 'entity_drilldown',
+      }),
+      schemaContext: relations,
+    });
+    expect(provider.calls).toHaveLength(0);
+    expect(executeAgentic).toHaveBeenCalledTimes(1);
+    expect(executeAgentic.mock.calls[0]?.[0]).toBe(capability);
+    expect(executeAgentic.mock.calls[0]?.[1]).toBe(forcedSql);
+    expect(executeAmbient).not.toHaveBeenCalled();
+    expect(result.proposedSql).toBe(forcedSql);
+  });
+
+  it('refuses a forced analyst proposal with no capability before any generated warehouse call', async () => {
+    kg.rebuild([], []);
+    const executeAmbient = vi.fn(async () => ({ columns: [], rows: [], rowCount: 0 }));
+    const forcedSql = 'SELECT customer_name FROM dev.orders';
+    const relations = [{
+      relation: 'dev.orders', name: 'orders', source: 'dbt manifest',
+      columns: [{ name: 'customer_name', type: 'VARCHAR' }], rank: 1, score: 1, reason: 'fixture',
+    }];
+    const result = await answer({
+      question: 'show customer names',
+      provider: new StubProvider('THIS_PROVIDER_MUST_NOT_BE_CALLED'),
+      kg,
+      forcedGeneratedProposal: { sql: forcedSql },
+      executeGeneratedSql: executeAmbient,
+      contextPack: contextPackForRankedRelations('show customer names', relations, {
+        metricTerms: [], dimensionTerms: ['customer'], mode: 'entity_drilldown', routeIntent: 'entity_drilldown',
+      }),
+      schemaContext: relations,
+    });
+    expect(executeAmbient).not.toHaveBeenCalled();
+    expect(result.executionError).toContain('no live execution capability');
+    expect(result.proposedSql).toBe(forcedSql);
+  });
 });
 
 function contextPackForRankedRelations(

@@ -49,7 +49,7 @@ export interface ProbeRelation {
  * Deliberately broad. A false deny costs one value lookup; a false allow
  * cannot be undone once the values have left the warehouse.
  */
-const DENY_RE = /\b(password|passwd|secret|token|credential|apikey|api key|private key|hash|salt|signature|session|cookie|auth|otp|pin)\b|\b(notes?|comments?|description|message|body|payload|content|remarks?|feedback|reason)\b|\b(ssn|dob|date of birth|birth date|birthdate|national id|tax id|ein|passport|license|licence|driver license|visa|nric|aadhaar)\b|\b(card|cardnumber|card number|credit card|debit card|cvv|cvc|iban|swift|bic|routing|account number|acct|sort code|bank)\b|\b(address|street|postal|postcode|zip|zipcode|latitude|longitude|geo|coordinates?)\b|\b(phone|mobile|telephone|fax|contact number)\b|\b(salary|compensation|wage|payroll|bonus|income|net pay|gross pay)\b|\b(medical|diagnosis|patient|health|insurance|prescription|disability|biometric|fingerprint|race|ethnicity|religion|gender|sexual)\b/;
+const DENY_RE = /\b(password|passwd|secret|token|credential|apikey|api key|private key|hash|salt|signature|session|cookie|auth|otp|pin)\b|\b(notes?|comments?|description|message|body|payload|content|remarks?|feedback|reason)\b|\b(ssn|social security|social insurance|sin\b|dob|date of birth|birth date|birthdate|national id|government id|government identifier|tax id|taxpayer id|taxpayer identification|tin\b|itin\b|ein\b|medicare|medicaid|passport|license|licence|driver license|visa|nric|aadhaar)\b|\b(card|cardnumber|card number|credit card|debit card|cvv|cvc|iban|swift|bic|routing|account number|acct|sort code|bank)\b|\b(address|street|postal|postcode|zip|zipcode|latitude|longitude|geo|coordinates?)\b|\b(phone|mobile|telephone|fax|contact number)\b|\b(salary|compensation|wage|payroll|bonus|income|net pay|gross pay)\b|\b(medical|diagnosis|patient|health|insurance|prescription|disability|biometric|fingerprint|race|ethnicity|religion|gender|sexual)\b/;
 /** Email is denied separately: it is an identifier, but also direct PII. */
 const EMAIL_RE = /\bemail\b/;
 
@@ -59,6 +59,28 @@ const IDENTIFIER_TOKENS = new Set([
   'full', 'id', 'key', 'member', 'name', 'number', 'product', 'region',
   'segment', 'sku', 'state', 'status', 'subscriber', 'tier', 'type', 'user',
 ]);
+
+/**
+ * Token-level aliases that must remain denied even when a connector exposes
+ * them with underscores, dashes, or camel case rather than the prose phrases
+ * above.  The phrase regex is intentionally broad, but `tax_number` and
+ * `customerBirthDt` never contain the literal phrase "tax id" or "birth
+ * date".  Normalise the identifier into tokens before the allow-list gets a
+ * chance to treat its `number` / `customer` part as a business key.
+ */
+const SENSITIVE_IDENTIFIER_PREFIXES = new Set([
+  'government', 'govt', 'national', 'tax', 'taxpayer',
+]);
+const SENSITIVE_IDENTIFIER_SUFFIXES = new Set([
+  'id', 'identifier', 'number', 'no', 'num',
+]);
+// Connector metadata often elides separators inside an otherwise ordinary
+// entity identifier (for example `customer_taxnumber`). Match only a
+// sensitive alias at the end of the compact identifier: this catches the
+// sensitive suffix without turning `customer_id` or `product_number` into a
+// false positive.
+const COMPACT_SENSITIVE_IDENTIFIER_ALIAS_RE = /(?:taxpayer|tax|government|govt|national)(?:id|identifier|number|no|num)$/;
+const COMPACT_BIRTH_DATE_ALIAS_RE = /(?:birth(?:date|dt|day|dob|on)|dateofbirth|birthday)$/;
 
 /** Types that can hold a searchable literal. */
 const TEXTUAL_TYPE_RE = /\b(char|character|clob|string|text|uuid|varchar|nvarchar)\b/;
@@ -74,6 +96,22 @@ function tokenize(name: string): Set<string> {
   );
 }
 
+function isSensitiveIdentifierAlias(tokens: ReadonlySet<string>): boolean {
+  const has = (...values: string[]) => values.some((value) => tokens.has(value));
+  const compact = [...tokens].join('');
+  if (COMPACT_SENSITIVE_IDENTIFIER_ALIAS_RE.test(compact) || COMPACT_BIRTH_DATE_ALIAS_RE.test(compact)) {
+    return true;
+  }
+  // `date_of_birth`, `customer_birth_dt`, and `customerDOB` are all direct
+  // personal identifiers despite their otherwise identifier-shaped names.
+  if (has('dob') || (has('birth') && has('date', 'dt', 'day', 'on'))) return true;
+  // Treat a government/tax qualifier plus an identifier suffix as sensitive.
+  // This intentionally does not deny ordinary business identifiers such as
+  // `customer_id`, `product_number`, or `order_code`.
+  return has(...SENSITIVE_IDENTIFIER_PREFIXES)
+    && has(...SENSITIVE_IDENTIFIER_SUFFIXES);
+}
+
 /**
  * May this column be probed for a literal?
  *
@@ -86,6 +124,7 @@ export function isProbeSafeColumn(column: ProbeColumn): boolean {
   if (DENY_RE.test(normalized)) return false;
   if (EMAIL_RE.test(normalized)) return false;
   const tokens = tokenize(column.name);
+  if (isSensitiveIdentifierAlias(tokens)) return false;
   if (![...tokens].some((token) => IDENTIFIER_TOKENS.has(token))) return false;
   const type = column.type?.toLowerCase() ?? '';
   // An unknown type is allowed: many drivers omit it, and the name gates already
@@ -149,7 +188,33 @@ export interface SearchValuesOptions {
   enabled: boolean;
   /** Max relations probed per call, so one question cannot scan the warehouse. */
   maxRelations?: number;
+  /** Hard ceiling across columns, not per relation. Never expose more than this many queries. */
+  maxColumnQueries?: number;
 }
+
+export type ValueProbeCoverageStatus = 'complete' | 'partial' | 'disabled' | 'budget_exhausted' | 'unknown_relation';
+
+/**
+ * Redacted coverage is the evidence contract for a value lookup.  It says what
+ * was attempted without leaking query text, warehouse errors, or values that
+ * were not already supplied by the caller.
+ */
+export interface ValueProbeCoverageV1 {
+  version: 1;
+  status: ValueProbeCoverageStatus;
+  queryLimit: number;
+  queriesAttempted: number;
+  relationsRequested: string[];
+  relationsSearched: string[];
+  relationsWithNoSearchableColumn: string[];
+  /** Approved relation/column identifiers that could not form ANSI probe SQL. */
+  relationsWithUnbuildableIdentifier: string[];
+  failedRelations: string[];
+  unknownRelations: string[];
+}
+
+/** The total maximum value-probe queries a single tool call may issue. */
+export const MAX_VALUE_PROBE_COLUMN_QUERIES = 12;
 
 /**
  * A tool that answers "does this literal exist, and in which column?".
@@ -160,6 +225,7 @@ export interface SearchValuesOptions {
  */
 export function buildSearchValuesTool(options: SearchValuesOptions): AgentToolDefinition {
   const maxRelations = options.maxRelations ?? 6;
+  const maxColumnQueries = Math.max(1, Math.min(options.maxColumnQueries ?? MAX_VALUE_PROBE_COLUMN_QUERIES, MAX_VALUE_PROBE_COLUMN_QUERIES));
   return {
     name: 'search_values',
     description:
@@ -187,23 +253,61 @@ export function buildSearchValuesTool(options: SearchValuesOptions): AgentToolDe
           searched: false,
           reason: 'Value lookup is disabled for this project. Enable agent.runtimeValueGrounding in dql.config.json to let DQL confirm a named value before filtering on it.',
           matches: [],
+          coverage: {
+            version: 1,
+            status: 'disabled',
+            queryLimit: maxColumnQueries,
+            queriesAttempted: 0,
+            relationsRequested: [],
+            relationsSearched: [],
+            relationsWithNoSearchableColumn: [],
+            relationsWithUnbuildableIdentifier: [],
+            failedRelations: [],
+            unknownRelations: [],
+          } satisfies ValueProbeCoverageV1,
         };
       }
-      const wanted = Array.isArray(input.relations)
-        ? new Set(input.relations.filter((r): r is string => typeof r === 'string').map((r) => r.toLowerCase()))
+      const requestedRelations = Array.isArray(input.relations)
+        ? [...new Set(input.relations.filter((r): r is string => typeof r === 'string' && r.trim().length > 0).map((r) => r.trim()))]
+        : [];
+      const wanted = requestedRelations.length > 0
+        ? new Set(requestedRelations.map((relation) => relation.toLowerCase()))
         : undefined;
+      const knownRelations = new Set(options.relations.map((relation) => relation.relation.toLowerCase()));
+      const unknownRelations = requestedRelations.filter((relation) => !knownRelations.has(relation.toLowerCase()));
       const matches: Array<{ relation: string; column: string; values: string[] }> = [];
       const searched: string[] = [];
       const skipped: string[] = [];
+      const unbuildableRelations = new Set<string>();
+      const failedRelations = new Set<string>();
+      let queriesAttempted = 0;
+      let relationBudgetExceeded = false;
+      let queryBudgetExceeded = false;
+      let relationsConsidered = 0;
       for (const relation of options.relations) {
         if (wanted && !wanted.has(relation.relation.toLowerCase())) continue;
-        if (searched.length >= maxRelations) break;
+        if (relationsConsidered >= maxRelations) {
+          relationBudgetExceeded = true;
+          break;
+        }
+        relationsConsidered += 1;
         const safe = relation.columns.filter(isProbeSafeColumn);
         if (safe.length === 0) { skipped.push(relation.relation); continue; }
-        searched.push(relation.relation);
-        for (const column of safe.slice(0, 8)) {
+        for (const column of safe) {
+          if (queriesAttempted >= maxColumnQueries) {
+            queryBudgetExceeded = true;
+            break;
+          }
           const sql = buildValueProbeSql(relation.relation, column.name, terms);
-          if (!sql) continue;
+          if (!sql) {
+            // Metadata identifiers are not automatically executable SQL
+            // identifiers.  Never turn an unquotable schema name into a
+            // zero-query "not found" claim.
+            unbuildableRelations.add(relation.relation);
+            continue;
+          }
+          if (!searched.includes(relation.relation)) searched.push(relation.relation);
+          queriesAttempted += 1;
           try {
             const result = await options.execute(sql);
             const values = (result.rows ?? [])
@@ -213,19 +317,48 @@ export function buildSearchValuesTool(options: SearchValuesOptions): AgentToolDe
           } catch {
             // One unreadable relation must not fail the whole probe; a permission
             // error on a single table is normal in a governed warehouse.
+            failedRelations.add(relation.relation);
           }
         }
+        if (queryBudgetExceeded) break;
       }
+      const complete = unknownRelations.length === 0
+        && failedRelations.size === 0
+        && skipped.length === 0
+        && unbuildableRelations.size === 0
+        && !relationBudgetExceeded
+        && !queryBudgetExceeded;
+      const status: ValueProbeCoverageStatus = unknownRelations.length > 0
+        ? 'unknown_relation'
+        : queryBudgetExceeded || relationBudgetExceeded
+          ? 'budget_exhausted'
+          : complete
+            ? 'complete'
+            : 'partial';
+      const coverage: ValueProbeCoverageV1 = {
+        version: 1,
+        status,
+        queryLimit: maxColumnQueries,
+        queriesAttempted,
+        relationsRequested: requestedRelations,
+        relationsSearched: searched,
+        relationsWithNoSearchableColumn: skipped,
+        relationsWithUnbuildableIdentifier: [...unbuildableRelations],
+        failedRelations: [...failedRelations],
+        unknownRelations,
+      };
       return {
-        searched: true,
+        searched: searched.length > 0,
         terms,
         matches,
         relationsSearched: searched,
         ...(skipped.length > 0 ? { relationsWithNoSearchableColumn: skipped } : {}),
-        // An explicit "looked and found nothing" is not the same as "did not
-        // look", and the difference is what the narration verifier needs to
-        // decide whether absence can be claimed at all.
-        ...(matches.length === 0 ? { note: 'Searched the approved columns and found no match for these literals.' } : {}),
+        coverage,
+        // Absence is a claim, not a default for an empty array.  Only an
+        // exhaustive, error-free scan of the approved scope may support it.
+        ...(matches.length === 0 && complete
+          ? { absence: 'not_found', note: 'Searched the approved columns and found no match for these literals.' }
+          : {}),
       };
     },
   };

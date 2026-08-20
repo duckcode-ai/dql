@@ -3,6 +3,8 @@ import { SemanticLayer } from '@duckcodeailabs/dql-core';
 import {
   DEFAULT_METRIC_MATCH_EMBEDDING_ALPHA,
   REAL_PROVIDER_METRIC_MATCH_ALPHA,
+  VECTOR_ONLY_METRIC_SCORE_FLOOR,
+  VECTOR_ONLY_METRIC_SEPARATION_MARGIN,
   matchSemanticMetric,
   parseMetricDefinition,
   semanticMetricEmbeddingOptions,
@@ -65,6 +67,24 @@ function metric(name: string, description = '', tags: string[] = []): KGNode {
     tags,
     llmContext: `sql: SUM(amount)\ntable: dev.order_items`,
     sourceTier: 'semantic_layer',
+  };
+}
+
+function vectorProvider(scores: Record<string, number>) {
+  const vectorForScore = (score: number): number[] => {
+    const cosine = score * 2 - 1;
+    return [cosine, Math.sqrt(Math.max(0, 1 - cosine * cosine))];
+  };
+  return {
+    id: 'fixture:real-vector-lane',
+    dimensions: 2,
+    async embed(texts: string[]): Promise<number[][]> {
+      return texts.map((text, index) => {
+        if (index === 0) return [1, 0];
+        const key = Object.keys(scores).find((name) => text.includes(name));
+        return vectorForScore(key ? scores[key]! : 0.5);
+      });
+    },
   };
 }
 
@@ -227,6 +247,74 @@ describe('name-proximity tie-breaker (BCM sibling metrics)', () => {
       measureTerms: ['percent mom bcm'],
     });
     expect(match?.metric.name).toBe('percent_mom_bcm');
+  });
+});
+
+describe('P1.1 vector-only admission', () => {
+  const question = 'quasar nebula';
+  const ungroundedCatalog = (count: number): KGNode[] =>
+    Array.from({ length: count }, (_, index) => metric(`metric_${String(index).padStart(3, '0')}`, 'opaque catalog signal'));
+
+  it('finds a snapshot-shortlisted target beyond the former alphabetical 96-candidate cutoff', async () => {
+    const metrics = ungroundedCatalog(120);
+    metrics[119] = metric('zz_vector_target', 'opaque catalog signal');
+    const match = await matchSemanticMetric(question, metrics, {
+      provider: vectorProvider({ zz_vector_target: 0.96 }),
+      alpha: REAL_PROVIDER_METRIC_MATCH_ALPHA,
+      vectorMetricShortlist: ['metric:zz_vector_target'],
+    });
+    expect(match).toMatchObject({ metric: { name: 'zz_vector_target' }, basis: 'embedding' });
+  });
+
+  it('reserves admission for a snapshot vector target when ninety-six weak lexical candidates exist', async () => {
+    // Every weak entry has one description-token overlap, enough to enter the
+    // lexical pool but not enough to be grounded.  Before the vector quota was
+    // reserved, those 96 rows filled the whole hybrid window and the target was
+    // never embedded at all.
+    const weakLexical = Array.from({ length: 96 }, (_, index) =>
+      metric(`weak_lexical_${String(index).padStart(3, '0')}`, 'quasar catalog signal'));
+    const metrics = [...weakLexical, metric('zz_vector_target', 'opaque catalog signal')];
+    const match = await matchSemanticMetric(question, metrics, {
+      provider: vectorProvider({ zz_vector_target: 0.96 }),
+      alpha: REAL_PROVIDER_METRIC_MATCH_ALPHA,
+      vectorMetricShortlist: ['metric:zz_vector_target'],
+    });
+    expect(match).toMatchObject({ metric: { name: 'zz_vector_target' }, basis: 'embedding' });
+  });
+
+  it('leaves a large catalog unresolved when the caller supplied no compatible vector shortlist', async () => {
+    const metrics = ungroundedCatalog(120);
+    metrics[119] = metric('zz_vector_target', 'opaque catalog signal');
+    const match = await matchSemanticMetric(question, metrics, {
+      provider: vectorProvider({ zz_vector_target: 1 }),
+      alpha: REAL_PROVIDER_METRIC_MATCH_ALPHA,
+      vectorMetricShortlist: ['metric:not_in_this_catalog'],
+    });
+    expect(match).toBeNull();
+  });
+
+  it('requires both the exported vector floor and separation margin before vector-only grounding', async () => {
+    expect(VECTOR_ONLY_METRIC_SCORE_FLOOR).toBe(0.86);
+    expect(VECTOR_ONLY_METRIC_SEPARATION_MARGIN).toBe(0.06);
+    const metrics = [metric('vector_winner', 'opaque catalog signal'), metric('vector_runner', 'opaque catalog signal')];
+
+    const admitted = await matchSemanticMetric(question, metrics, {
+      provider: vectorProvider({ vector_winner: 0.861, vector_runner: 0.8 }),
+      alpha: REAL_PROVIDER_METRIC_MATCH_ALPHA,
+    });
+    expect(admitted).toMatchObject({ metric: { name: 'vector_winner' }, basis: 'embedding' });
+
+    const belowFloor = await matchSemanticMetric(question, metrics, {
+      provider: vectorProvider({ vector_winner: 0.859, vector_runner: 0.7 }),
+      alpha: REAL_PROVIDER_METRIC_MATCH_ALPHA,
+    });
+    expect(belowFloor).toBeNull();
+
+    const nearTie = await matchSemanticMetric(question, metrics, {
+      provider: vectorProvider({ vector_winner: 0.9, vector_runner: 0.845 }),
+      alpha: REAL_PROVIDER_METRIC_MATCH_ALPHA,
+    });
+    expect(nearTie).toBeNull();
   });
 });
 

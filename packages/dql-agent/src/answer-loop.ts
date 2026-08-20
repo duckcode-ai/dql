@@ -115,6 +115,7 @@ import {
   type SemanticMemberSelection,
 } from './semantic-bridge/compose.js';
 import { runAgenticToolLoop } from './agentic/tool-loop.js';
+import type { AgenticSqlExecutionCapabilityV1 } from './agentic/sql-authorization.js';
 import { buildSemanticStageTools } from './agentic/toolset.js';
 import { deriveAgenticTrust, type CompiledSemanticRecord } from './agentic/answer-contract.js';
 import { selectSemanticMembersViaLlm } from './semantic-bridge/member-select.js';
@@ -1312,6 +1313,34 @@ export interface AnswerLoopInput {
    * data evidence before an analyst promotes the query into a certified block.
    */
   executeGeneratedSql?: (sql: string, artifact?: DqlArtifactReference) => Promise<AgentResultPayload>;
+  /**
+   * Server-only exact analyst proposal. When present, the ordinary generated
+   * lane must execute this SQL through `executeAgenticGeneratedSql`, not ask a
+   * second model to regenerate a replacement. It is intentionally excluded
+   * from persisted answer/run/artifact contracts.
+   */
+  forcedGeneratedProposal?: {
+    sql: string;
+    summary?: string;
+    suggestedViz?: string;
+  };
+  /** Opaque, request-scoped authority paired with forcedGeneratedProposal. */
+  agenticSqlExecutionCapability?: AgenticSqlExecutionCapabilityV1;
+  /** Server-owned identity used only to bind the in-memory capability. */
+  agenticExecutionScope?: {
+    runId?: string;
+    executionId?: string;
+    snapshotId?: string;
+    planId?: string;
+    targetFingerprint?: string;
+    bindings?: unknown;
+  };
+  /** Host-only execution closure that consumes the capability immediately. */
+  executeAgenticGeneratedSql?: (
+    capability: AgenticSqlExecutionCapabilityV1,
+    sql: string,
+    artifact?: DqlArtifactReference,
+  ) => Promise<AgentResultPayload>;
   /** Execute an already-finalized governed artifact without translating it back through generated SQL. */
   executeDqlArtifact?: (artifact: DqlArtifactReference) => Promise<AgentResultPayload>;
   captureGeneratedDraft?: (proposal: {
@@ -1725,6 +1754,9 @@ async function freezeLegacySemanticSelection(input: AnswerLoopInput): Promise<Re
   const match = await matchSemanticMetric(input.question, metricNodes, {
     measureTerms: [...questionPlan.requestedShape.measures, ...questionPlan.metricTerms],
     ...(semanticLayer ? { canExecute: (name: string) => semanticLayer.canComposeMetric(name) } : {}),
+    ...(snapshotVectorMetricShortlist(input.contextPack).length
+      ? { vectorMetricShortlist: snapshotVectorMetricShortlist(input.contextPack) }
+      : {}),
     ...semanticMetricEmbeddingOptions(input.embeddingProvider),
   }).catch(() => null);
   if (!match) return undefined;
@@ -1837,6 +1869,25 @@ async function freezeLegacySemanticSelection(input: AnswerLoopInput): Promise<Re
     candidates,
     mode: 'authoritative',
   });
+}
+
+/**
+ * Reuse the immutable context pack's independent vector lane.  Metric matching
+ * never opens the catalog or runs a second metadata retrieval pass; it only
+ * narrows its vector-only candidate admission to IDs already retrieved for this
+ * request snapshot.
+ */
+function snapshotVectorMetricShortlist(contextPack: LocalContextPack | undefined): string[] {
+  const lane = contextPack?.retrievalDiagnostics.lanes?.find((item) => item.lane === 'vector');
+  if (!lane?.candidates.length || !contextPack) return [];
+  const objects = new Map(contextPack.objects.map((object) => [object.objectKey, object] as const));
+  const result: string[] = [];
+  for (const candidate of lane.candidates) {
+    const object = objects.get(candidate.objectKey);
+    if (!object || (object.objectType !== 'semantic_metric' && object.objectType !== 'semantic_measure')) continue;
+    result.push(candidate.objectKey, object.name);
+  }
+  return [...new Set(result)];
 }
 
 export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
@@ -2599,6 +2650,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       : await matchSemanticMetric(semanticQuestion, semanticMetricNodes, {
           measureTerms: [...questionPlan.requestedShape.measures, ...questionPlan.metricTerms],
           ...(canExecuteSemanticMetricForMatch ? { canExecute: canExecuteSemanticMetricForMatch } : {}),
+          ...(snapshotVectorMetricShortlist(input.contextPack).length
+            ? { vectorMetricShortlist: snapshotVectorMetricShortlist(input.contextPack) }
+            : {}),
           ...semanticMetricEmbeddingOptions(input.embeddingProvider),
         }).catch(() => null);
 
@@ -3399,7 +3453,17 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       onCompiled: (record) => compiledSemanticRecords.push(record),
     }),
   ];
-  if (semanticBridgeAnswer) {
+  if (input.forcedGeneratedProposal) {
+    // The analyst loop already did its provider/tool work. Re-entering ordinary
+    // generation here would create a second proposal whose SQL is not covered
+    // by the request-scoped execution capability.
+    parsed = {
+      sql: input.forcedGeneratedProposal.sql,
+      text: input.forcedGeneratedProposal.summary
+        ?? 'Prepared from identifiers observed during this bounded analyst run. Review-required until an analyst promotes it.',
+      ...(input.forcedGeneratedProposal.suggestedViz ? { viz: input.forcedGeneratedProposal.suggestedViz } : {}),
+    };
+  } else if (semanticBridgeAnswer) {
     governedMetricAnswer = true;
     parsed = {
       sql: semanticBridgeAnswer.sql,
@@ -3580,7 +3644,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   let deepCandidateResult: AgentResultPayload | undefined;
   let deepCandidateExecutionError: string | undefined;
   let deepCandidateNotes: string[] = [];
-  if (!governedMetricAnswer && input.analysisDepth === 'deep' && parsed.sql) {
+  if (!input.forcedGeneratedProposal && !governedMetricAnswer && input.analysisDepth === 'deep' && parsed.sql) {
     const selection = await selectDeepGeneratedProposalCandidate({
       provider,
       messages,
@@ -3783,7 +3847,12 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         };
       }
     }
-    const tightenedFlow = tightenSourceTargetFlowProjection(parsed.sql, question, questionPlan);
+    // The analyst capability binds the exact composed bytes. Any projection
+    // tightening is a new SQL proposal and therefore must wait for a fresh
+    // analyst pass/capability rather than silently rewriting this one.
+    const tightenedFlow = input.forcedGeneratedProposal
+      ? undefined
+      : tightenSourceTargetFlowProjection(parsed.sql, question, questionPlan);
     if (tightenedFlow && tightenedFlow.sql !== parsed.sql) {
       parsed.sql = tightenedFlow.sql;
       parsed.outputs = tightenedFlow.outputs;
@@ -3802,7 +3871,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // model emitted to its real warehouse relation from the runtime schema BEFORE
   // governance validation. Same resolver the build path uses — one grounding,
   // no weak path. `allowedSqlContext` relations are already qualified.
-  if (parsed.sql) {
+  if (parsed.sql && !input.forcedGeneratedProposal) {
     parsed.sql = contextLedger.qualifySql(parsed.sql).sql;
   }
 
@@ -3941,7 +4010,8 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // that predicate entirely, inject it deterministically before spending the
   // bounded AI validation repair. Misbound or ambiguous predicates are never
   // rewritten here; they continue through the guarded correction/refusal path.
-  if (!contextValidation.ok
+  if (!input.forcedGeneratedProposal
+    && !contextValidation.ok
     && contextValidation.code === 'misbound_filter'
     && !contextValidation.offending?.relation
     && !contextValidation.offending?.column
@@ -3993,7 +4063,8 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   //      stands instead of guessing a measure.
   //   2) Otherwise fall back to a CLEAN governed-metric definition (direct or exact
   //      leaf-measure; no fuzzy family guess that could answer the wrong measure).
-  if (!contextValidation.ok && contextValidation.code !== 'unsafe_aggregation' && semanticMetricRoute && semanticMetricMatch && !rankedGrainGap) {
+  if (!input.forcedGeneratedProposal
+    && !contextValidation.ok && contextValidation.code !== 'unsafe_aggregation' && semanticMetricRoute && semanticMetricMatch && !rankedGrainGap) {
     const grounded = contextLedger.validateRuntimeGrounding(parsed.sql);
     // Runtime grounding proves that relations and columns exist; it cannot prove
     // that a resolved business member was bound to the right dimension. Never
@@ -4023,7 +4094,8 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // nothing, or found the table and something else rejected the SQL — which are
   // three different fixes.
   let regroundDiagnostic: string | undefined;
-  if (!contextValidation.ok && contextValidation.code !== 'unsafe_aggregation' && !governedMetricAnswer && input.expandGroundingContext && canUseLaneRepair(repairBudgetState, 'reground')) {
+  if (!input.forcedGeneratedProposal
+    && !contextValidation.ok && contextValidation.code !== 'unsafe_aggregation' && !governedMetricAnswer && input.expandGroundingContext && canUseLaneRepair(repairBudgetState, 'reground')) {
     recordLaneRepair(repairBudgetState, 'reground');
     try {
       const expansion = await input.expandGroundingContext({
@@ -4118,6 +4190,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     && input.resolvedAnalyticalPlan?.mode !== 'authoritative'
     && !semanticAggregationAuthorityBlocked
     && !governedMetricAnswer
+    && !input.forcedGeneratedProposal
     && canUseLaneRepair(repairBudgetState, 'validation')
   ) {
     recordLaneRepair(repairBudgetState, 'validation');
@@ -4394,7 +4467,6 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     ) {
       return input.executeDqlArtifact({ ...semanticArtifact, limit: requestedLimit });
     }
-    if (!input.executeGeneratedSql) throw new Error('No generated SQL executor is configured.');
     const artifact = buildGeneratedSqlDqlArtifact({
       question,
       sql: parsed.sql,
@@ -4410,9 +4482,19 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       validationWarnings: [...contextValidation.warnings, ...deepCandidateNotes],
       outputs: parsed.outputs,
     });
-    return input.executeGeneratedSql(parsed.sql!, artifact ? { ...artifact, limit: requestedLimit } : undefined);
+    const boundedArtifact = artifact ? { ...artifact, limit: requestedLimit } : undefined;
+    if (input.forcedGeneratedProposal) {
+      if (!input.agenticSqlExecutionCapability || !input.executeAgenticGeneratedSql) {
+        throw Object.assign(new Error('The analyst-approved SQL has no live execution capability, so DQL did not execute it.'), {
+          code: 'AGENTIC_EXECUTION_CAPABILITY_REQUIRED',
+        });
+      }
+      return input.executeAgenticGeneratedSql(input.agenticSqlExecutionCapability, parsed.sql!, boundedArtifact);
+    }
+    if (!input.executeGeneratedSql) throw new Error('No generated SQL executor is configured.');
+    return input.executeGeneratedSql(parsed.sql!, boundedArtifact);
   };
-  if (input.executeGeneratedSql && !result) {
+  if ((input.executeGeneratedSql || (input.forcedGeneratedProposal && input.executeAgenticGeneratedSql)) && !result) {
     // Fanout gate for native semantic direct-joins: a duplicate join-key row on
     // the joined side multiplies fact rows BEFORE aggregation, so every summed
     // value inflates silently (seen in the field as trillions-scale "governed"
@@ -4422,6 +4504,8 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     let fanoutContradiction = false;
     if (
       !executionError
+      && !input.forcedGeneratedProposal
+      && input.executeGeneratedSql
       && semanticBridgeAnswer?.composeResult?.fanoutProbeSql
       && semanticBridgeAnswer.sql.trim() === parsed.sql?.trim()
     ) {
@@ -4441,7 +4525,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       warehouseFailure = normalizeWarehouseSqlFailure(err, input.semanticDriver);
       executionError = warehouseFailure.redactedMessage;
     }
-    if (executionError && !fanoutContradiction && !authoritativeSemanticBinding) {
+    if (executionError && !input.forcedGeneratedProposal && !fanoutContradiction && !authoritativeSemanticBinding) {
       warehouseFailure ??= normalizeWarehouseSqlFailure(executionError, input.semanticDriver);
       if (isRetryableGeneratedSqlError(warehouseFailure)) {
         const localRepairSql = repairGeneratedSqlLocally(parsed.sql, executionError, schemaContext);

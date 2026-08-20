@@ -310,6 +310,7 @@ export type {
   AgentRunDiagnosticFailureV1,
   AgentRunDiagnosticReceiptV1,
   AgentRunDiagnosticReceiptV2,
+  NarrationIntegrityReceiptV1,
   AgentRunEvent,
   AgentRunExecutionTarget,
   AgentRunExecutors,
@@ -562,7 +563,11 @@ export type {
   SemanticGraphExecutionBinding,
   SemanticGraphInvocation,
 } from './plan-execution-adapter.js';
-export { matchSemanticMetric } from "./metadata/metric-match.js";
+export {
+  matchSemanticMetric,
+  VECTOR_ONLY_METRIC_SCORE_FLOOR,
+  VECTOR_ONLY_METRIC_SEPARATION_MARGIN,
+} from "./metadata/metric-match.js";
 export {
   aggregationIntegrityIssuesForSql,
   buildGrainLedger,
@@ -576,8 +581,11 @@ export {
 } from "./metadata/grain-ledger.js";
 export {
   runAgenticToolLoop,
+  runAgenticToolLoopDetailed,
+  runTextProtocolToolLoopDetailed,
   parseTextToolCall,
   type AgenticToolLoopOptions,
+  type TextToolLoopResult,
 } from "./agentic/tool-loop.js";
 export {
   buildSemanticStageTools,
@@ -637,12 +645,15 @@ export {
   type PreviewExecutor,
 } from "./agentic/preview-tool.js";
 export {
+  MAX_VALUE_PROBE_COLUMN_QUERIES,
   buildSearchValuesTool,
   buildValueProbeSql,
   isProbeSafeColumn,
   type ProbeColumn,
   type ProbeRelation,
   type SearchValuesOptions,
+  type ValueProbeCoverageStatus,
+  type ValueProbeCoverageV1,
 } from "./agentic/value-probe.js";
 export { renderContextValidationRefusalForUser } from "./answer-loop.js";
 export {
@@ -1807,15 +1818,23 @@ export { synthesizeResearchNarrative, type ResearchBranchOutcome } from './agent
 export { narrationMaxTokensForFacts } from './analytical-result-facts.js';
 export { rerankCandidates, applyRerank, parseRerankReply, type RerankOutcome, type RerankCandidate } from './agentic/rerank.js';
 export {
+  AgenticExecutionCapabilityGate,
   mintFinalSqlAuthorization,
   verifyFinalSql,
+  createAgenticSqlExecutionCapability,
+  verifyAgenticSqlExecutionCapability,
+  qualifyAuthorizationReferences,
+  fingerprintSqlBindings,
   // `fingerprintSql` / `normalizeSqlForFingerprint` already exist in this
   // barrel from another module; the authorization variants are aliased rather
   // than shadowing them, so neither caller silently gets the other's semantics.
   fingerprintSql as fingerprintAuthorizedSql,
   normalizeSqlForFingerprint as normalizeAuthorizedSql,
   type FinalSqlAuthorizationV1,
+  type AgenticSqlExecutionCapabilityV1,
+  type ExecutionAuthorizationBindingV1,
   type SqlAuthorizationVerdict,
+  type SqlAuthorizationCheck,
+  type SqlAuthorizationReferences,
   type IdentifierEvidence,
 } from './agentic/sql-authorization.js';
-export { registerSqlAuthorization, consumeSqlAuthorization, clearSqlAuthorization, pendingAuthorizationCount } from './agentic/authorization-registry.js';

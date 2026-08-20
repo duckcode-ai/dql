@@ -887,6 +887,7 @@ export type AgentRunStopReason =
   | 'conversational_reply'
   | 'certified_answer_found'
   | 'governed_semantic_answer'
+  | 'governed_compound_answer'
   | 'generated_review_required'
   | 'artifact_created'
   | 'needs_clarification'
@@ -1108,6 +1109,19 @@ export interface AgentRunDiagnosticReceiptV2 {
   repairCapabilityFingerprint?: string;
 }
 
+/** Content-free persisted outcome of the answer narration stage. */
+export interface NarrationIntegrityReceiptV1 {
+  version: 1;
+  mode: 'skip' | 'verified_facts' | 'preview_grounded';
+  outcome: 'skipped' | 'success' | 'deterministic_fallback' | 'error';
+  attempted: boolean;
+  factCount: number;
+  maxRows: number;
+  validationFailures: string[];
+  skipReason?: 'no_answer' | 'no_provider' | 'nothing_to_narrate';
+  errorCode?: 'narration_error';
+}
+
 export interface AgentRunProgressV1 {
   version: 1;
   id: string;
@@ -1154,6 +1168,7 @@ export interface AgentRun {
   lifecycle?: AgentRunLifecycleV1;
   diagnosticReceipt?: AgentRunDiagnosticReceiptV1;
   diagnosticReceiptV2?: AgentRunDiagnosticReceiptV2;
+  narrationIntegrityReceipt?: NarrationIntegrityReceiptV1;
   telemetry?: AgentRunTelemetryV1;
   repairCapability?: AnalyticalRepairCapabilityV1;
   providerEgressReceipts?: ProviderEgressReceiptV1[];
@@ -1460,6 +1475,7 @@ export interface AgentConversationTurn {
   sql?: string;
   dqlArtifact?: AgentConversationDqlArtifact;
   cascade?: AgentAnswerCascade;
+  narrationIntegrityReceipt?: NarrationIntegrityReceiptV1;
   result?: AgentConversationTurnResult;
   contract?: Record<string, unknown>;
   createdAt: string;

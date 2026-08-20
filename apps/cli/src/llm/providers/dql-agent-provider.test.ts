@@ -1,11 +1,16 @@
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { __test__, renderAppContextForPrompt, renderExtraContext, resolveEffectiveQuestion } from './dql-agent-provider.js';
+import { buildManifest } from '@duckcodeailabs/dql-core';
+import { __test__, createDqlAgentProviderRunner, renderAppContextForPrompt, renderExtraContext, resolveEffectiveQuestion } from './dql-agent-provider.js';
 import type { AgentRunRequest } from '../types.js';
 import {
   buildAnalysisQuestionPlan,
   dqlToolNamesForSurface,
   type AgentMessage,
   type AgentProvider,
+  type ProviderToolLoopOptions,
 } from '@duckcodeailabs/dql-agent';
 
 function req(messages: Array<{ role: 'user' | 'assistant'; content: string }>): AgentRunRequest {
@@ -119,6 +124,105 @@ describe('answer-loop tool surface', () => {
     expect(__test__.researchDispatchPurposeForTool('execute_local_analysis')).toBe('research_tool');
     expect(__test__.researchDispatchPurposeForTool('sample_notebook_dataset')).toBe('research_narration');
     expect(__test__.researchDispatchPurposeForTool('search_project_files')).toBe('research_narration');
+  });
+});
+
+describe('provider runner — analyst physical dispatch budget', () => {
+  it('allows three text tools and a final SQL response under the ordinary four-dispatch wrapper cap', async () => {
+    // This exercises the actual provider-runner wrapper, not just the generic
+    // text loop: historically the runner silently replaced the loop options
+    // with maxProviderDispatches=4 while the analyst was allowed to schedule
+    // four tools plus a final response.
+    const root = mkdtempSync(join(tmpdir(), 'dql-provider-runner-budget-'));
+    try {
+      cpSync(join(process.cwd(), 'test', 'fixtures', 'jaffle-supply-chain'), root, { recursive: true });
+      const configPath = join(root, 'dql.config.json');
+      const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+      config.agent = { orchestrator: { mode: 'agentic', lanes: ['generated'], maxIterations: 8 } };
+      writeFileSync(configPath, `${JSON.stringify(config)}\n`);
+
+      const replies = [
+        '```json\n{"tool":"get_table_schema","input":{"table":"order_items"}}\n```',
+        '```json\n{"tool":"get_table_schema","input":{"table":"order_items"}}\n```',
+        '```json\n{"tool":"get_table_schema","input":{"table":"order_items"}}\n```',
+        '```json\n{"summary":"final SQL after three observations","sql":"SELECT 1 FROM order_items","outputs":["value"]}\n```',
+      ];
+      const calls: AgentMessage[][] = [];
+      const provider: AgentProvider = {
+        name: 'ollama',
+        available: async () => true,
+        generate: async (messages, options?: ProviderToolLoopOptions) => {
+          calls.push(messages);
+          options?.onProviderDispatch?.({
+            provider: 'ollama', operation: 'generate', attemptIndex: 1, envelope: { messages },
+          });
+          const reply = replies[calls.length - 1];
+          if (!reply) throw new Error('unexpected provider dispatch after reserved final response');
+          return reply;
+        },
+      };
+      const manifest = buildManifest({ projectRoot: root, dbtManifestPath: join(root, 'target', 'manifest.json') });
+      const turns: Array<{ kind: string; [key: string]: unknown }> = [];
+      await createDqlAgentProviderRunner('ollama', provider).run({
+        provider: 'ollama',
+        projectRoot: root,
+        agentRunId: 'budget-run',
+        projectSnapshot: { snapshotId: 'snapshot-budget', manifest },
+        // The runner normally receives this frozen server plan from the host.
+        // The test only needs its stable IDs so the analyst handoff remains
+        // capability-bound and never falls back to a second provider call.
+        resolvedAnalyticalPlan: { planId: 'plan-budget', snapshotId: 'snapshot-budget' } as never,
+        generatedProposalTargetFingerprint: 'target-budget',
+        // Skip retrieval/reranking so this isolates the runner's answer-stage
+        // physical dispatch allowance. The prebuilt pack is server-owned in
+        // production too, when route planning already prepared one.
+        preparedContextPack: {
+          id: 'pack-budget',
+          question: 'show order items',
+          focusObjectKey: null,
+          mode: 'question',
+          questionPlan: buildAnalysisQuestionPlan('show order items'),
+          objects: [],
+          skills: [],
+          knowledgeLens: { snapshotId: 'snapshot-budget' },
+          edges: [],
+          queryRuns: [],
+          citations: [],
+          evidenceSummaries: [],
+          warnings: [],
+          routeDecision: { route: 'generated_sql' },
+          evidenceRoles: [],
+          allowedSqlContext: {
+            relations: [{
+              relation: 'order_items', name: 'order_items', columns: [],
+              source: 'test', columnCompleteness: 'complete',
+            }],
+            sourceBlockSql: [],
+          },
+          missingContext: [],
+          conflicts: [],
+          appliedHints: [],
+          retrievalDiagnostics: { strategy: 'sqlite_fts', lanes: [], selectedObjects: 0, selectedEvidence: [] },
+        } as never,
+        messages: [{ role: 'user', content: 'show order items' }],
+      }, (turn) => turns.push(turn as typeof turns[number]), new AbortController().signal);
+
+      expect(calls).toHaveLength(4);
+      expect(calls[0]!.map((message) => message.content).join('\n')).toContain('at most 3 tool call');
+      expect(calls[3]!.map((message) => message.content).join('\n')).toContain('Tool budget reached');
+      expect(turns.find((turn) => turn.kind === 'error')).toBeUndefined();
+      const governed = turns.find((turn) => turn.kind === 'tool_result' && turn.id === 'governed_answer');
+      // The minimal frozen-plan fixture deliberately has no executable plan
+      // body, but the checked ledger receipt proves the fourth reply's SQL was
+      // parsed and accepted by the analyst rather than being lost to the
+      // wrapper cap before final composition.
+      expect((governed?.output as { evidence?: { route?: unknown[] } } | undefined)?.evidence?.route)
+        .toEqual(expect.arrayContaining([
+          expect.objectContaining({ tool: 'identifier_ledger', status: 'checked' }),
+        ]));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

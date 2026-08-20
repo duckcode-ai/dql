@@ -203,6 +203,67 @@ describe('agent eval answer harness', () => {
     expect(__test__.agentEvalThresholdsPass({ ...metrics, wrong_certified_count: 1 }, { minToolRequirement: null, maxWrongCertified: 0 })).toBe(false);
   });
 
+  it('derives grounded-narration metrics only from durable receipts, never rows or fallback prose', () => {
+    const success = __test__.narrationOutcomeForEval({
+      version: 1,
+      mode: 'verified_facts',
+      outcome: 'success',
+      attempted: true,
+      factCount: 3,
+      maxRows: 10,
+      validationFailures: [],
+    });
+    const fallback = __test__.narrationOutcomeForEval({
+      version: 1,
+      mode: 'verified_facts',
+      outcome: 'deterministic_fallback',
+      attempted: true,
+      factCount: 3,
+      maxRows: 10,
+      validationFailures: ['UNPARSEABLE_CLAIMS'],
+    });
+    const errored = __test__.narrationOutcomeForEval({
+      version: 1,
+      mode: 'verified_facts',
+      outcome: 'error',
+      attempted: true,
+      factCount: 3,
+      maxRows: 10,
+      validationFailures: [],
+      errorCode: 'narration_error',
+    });
+    // A row-bearing skipped result must not silently enter the denominator.
+    const skipped = __test__.narrationOutcomeForEval({
+      version: 1,
+      mode: 'skip',
+      outcome: 'skipped',
+      attempted: false,
+      factCount: 0,
+      maxRows: 0,
+      validationFailures: [],
+      skipReason: 'no_provider',
+    });
+    expect(success).toEqual({ narrationAttempted: true, narrationFallback: false });
+    expect(fallback).toEqual({ narrationAttempted: true, narrationFallback: true });
+    // A provider error is an attempted but ungrounded narration.  Counting it
+    // as a success would mask a hot-path failure behind a healthy-looking rate.
+    expect(errored).toEqual({ narrationAttempted: true, narrationFallback: true });
+    expect(skipped).toEqual({});
+
+    const base = {
+      passed: true, failures: [] as string[], durationMs: 1, kind: 'uncertified' as const,
+      contextObjects: 1, followUp: false, draftSaved: false, toolCalls: 0, trace: [] as never[],
+    };
+    const metrics = __test__.computeEvalMetrics([
+      { ...base, name: 'success with arbitrary prose', ...success },
+      { ...base, name: 'fallback without reader marker', ...fallback },
+      { ...base, name: 'error without reader marker', ...errored },
+      { ...base, name: 'skipped despite rows', ...skipped },
+    ] as unknown as Parameters<typeof __test__.computeEvalMetrics>[0]);
+    expect(metrics.grounded_narration_attempted).toBe(3);
+    expect(metrics.grounded_narration_rate).toBeCloseTo(1 / 3);
+  });
+
   it('builds structured trace stages for offline analysis', () => {
     const result = answerResult({
       draftBlock: {

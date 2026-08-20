@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compoundTrustState, trustStateForAgentAnswer } from './local-runtime.js';
+import { compoundStopReason, compoundTrustState, trustStateForAgentAnswer } from './local-runtime.js';
 
 const certified = { certification: 'certified', kind: 'certified' } as never;
 const semanticProven = {
@@ -48,6 +48,12 @@ describe('compound trust is the weakest successful child', () => {
 
   it('reports governed when every successful child is governed', () => {
     expect(compoundTrustState(['governed', 'governed'])).toBe('governed');
+    expect(compoundStopReason(2, 2, 'governed')).toBe('governed_compound_answer');
+  });
+
+  it('uses neutral review vocabulary for partial or review-required compound results', () => {
+    expect(compoundStopReason(1, 2, 'governed')).toBe('human_review_required');
+    expect(compoundStopReason(2, 2, 'review_required')).toBe('human_review_required');
   });
 
   it('takes the weakest regardless of order', () => {

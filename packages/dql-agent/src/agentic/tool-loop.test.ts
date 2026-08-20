@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { runAgenticToolLoop, parseTextToolCall } from './tool-loop.js';
+import { runAgenticToolLoop, parseTextToolCall, runTextProtocolToolLoopDetailed } from './tool-loop.js';
 import { deriveAgenticTrust, normalizeSql, type CompiledSemanticRecord } from './answer-contract.js';
 import type { AgentMessage, AgentProvider, AgentToolDefinition, ProviderToolLoopOptions } from '../providers/types.js';
 
@@ -99,11 +99,57 @@ describe('runAgenticToolLoop — text protocol (no native tools)', () => {
       '```json\n{"tool":"t","input":{}}\n```',
       '```json\n{"summary":"forced final"}\n```',
     ]);
-    const text = await runAgenticToolLoop(provider, [{ role: 'user', content: 'q' }], [echoTool('t', { ok: true })], { maxToolCalls: 2 });
+    const text = await runAgenticToolLoop(provider, [{ role: 'user', content: 'q' }], [echoTool('t', { ok: true })], { maxToolCalls: 1 });
     expect(text).toContain('forced final');
     // One tool proposal + one forced final is the complete provider budget.
     expect(provider.calls).toHaveLength(2);
     expect(provider.calls[1].some((m) => m.content.includes('Tool budget reached'))).toBe(true);
+  });
+
+  it('executes three sequential tool calls and reserves a fourth dispatch for final composition', async () => {
+    const provider = new ScriptedTextProvider([
+      '```json\n{"tool":"first","input":{}}\n```',
+      '```json\n{"tool":"second","input":{}}\n```',
+      '```json\n{"tool":"third","input":{}}\n```',
+      '```json\n{"summary":"final after three observations","sql":"SELECT 1"}\n```',
+    ]);
+    const observed: string[] = [];
+    const text = await runAgenticToolLoop(provider, [{ role: 'user', content: 'q' }], [
+      echoTool('first', { first: true }),
+      echoTool('second', { second: true }),
+      echoTool('third', { third: true }),
+    ], {
+      maxToolCalls: 3,
+      onToolCall: (event) => observed.push(event.name),
+    });
+    expect(text).toContain('final after three observations');
+    expect(observed).toEqual(['first', 'second', 'third']);
+    expect(provider.calls).toHaveLength(4);
+    expect(provider.calls[3]!.map((message) => message.content).join('\n')).toContain('Observation from third');
+  });
+
+  it('uses the physical dispatch cap to permit three tools plus final SQL, even when the policy tool cap is higher', async () => {
+    const provider = new ScriptedTextProvider([
+      '```json\n{"tool":"first","input":{}}\n```',
+      '```json\n{"tool":"second","input":{}}\n```',
+      '```json\n{"tool":"third","input":{}}\n```',
+      '```json\n{"summary":"final SQL after physical cap","sql":"SELECT 1"}\n```',
+    ]);
+    const observed: string[] = [];
+    const text = await runAgenticToolLoop(provider, [{ role: 'user', content: 'q' }], [
+      echoTool('first', { first: true }),
+      echoTool('second', { second: true }),
+      echoTool('third', { third: true }),
+    ], {
+      // The policy allows more discovery, but the wrapper has only four sends.
+      maxToolCalls: 8,
+      maxProviderDispatches: 4,
+      onToolCall: (event) => observed.push(event.name),
+    });
+    expect(observed).toEqual(['first', 'second', 'third']);
+    expect(text).toContain('final SQL after physical cap');
+    expect(provider.calls).toHaveLength(4);
+    expect(provider.calls[0]!.map((message) => message.content).join('\n')).toContain('at most 3 tool call');
   });
 
   it('preserves the physical observer and blocks a second subscription/Ollama text dispatch at cap one', async () => {
@@ -114,7 +160,7 @@ describe('runAgenticToolLoop — text protocol (no native tools)', () => {
     const observed: string[] = [];
     const tool = echoTool('t', { rows: [{ secret: 'ROW_CANARY_TOOL' }] });
 
-    await expect(runAgenticToolLoop(
+    const result = await runTextProtocolToolLoopDetailed(
       provider,
       [{ role: 'user', content: 'q' }],
       [tool],
@@ -127,9 +173,10 @@ describe('runAgenticToolLoop — text protocol (no native tools)', () => {
         },
         providerPayloadGuard: { purpose: 'answer_generation', allowedResultRowTools: {} },
       },
-    )).rejects.toMatchObject({ code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' });
+    );
 
-    expect(provider.calls).toHaveLength(2);
+    expect(result).toMatchObject({ stop: 'tool_budget_exhausted', toolCalls: 0 });
+    expect(provider.calls).toHaveLength(1);
     expect(observed).toHaveLength(1);
     expect(observed.join('\n')).not.toContain('ROW_CANARY_TOOL');
     expect(observed.join('\n')).not.toContain('ROW_CANARY_MUST_NOT_ESCAPE');

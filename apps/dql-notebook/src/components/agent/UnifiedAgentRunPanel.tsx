@@ -1323,6 +1323,7 @@ const AGENT_RUN_STOP_REASONS = new Set<AgentRunStopReason>([
   'conversational_reply',
   'certified_answer_found',
   'governed_semantic_answer',
+  'governed_compound_answer',
   'generated_review_required',
   'artifact_created',
   'needs_clarification',
@@ -1431,6 +1432,7 @@ function runFromConversationTurn(turn: AgentConversationTurn): AgentRun {
     summary: turn.answerSummary ?? turn.question,
     answer: turn.answerText ?? turn.answerSummary,
     answerKind: route === 'conversation' ? 'conversational' : undefined,
+    narrationIntegrityReceipt: turn.narrationIntegrityReceipt,
     steps: [],
     artifacts: artifact ? [artifact] : [],
     evaluations: [],
@@ -2610,10 +2612,27 @@ export function agentRunPerformanceRows(run: AgentRun): Array<[string, string]> 
     ['Provider rows', egressRowCount === 0
       ? `0 result rows sent to providers (${telemetry.egressReceipts} content-free receipt${telemetry.egressReceipts === 1 ? '' : 's'})`
       : `${egressRowCount} bounded, redacted Research result row${egressRowCount === 1 ? '' : 's'} sent with explicit run consent`],
+    ...(run.narrationIntegrityReceipt ? [['Narration', narrationIntegritySummary(run.narrationIntegrityReceipt)] as [string, string]] : []),
     ['Plan ID', planIds.length > 0 ? planIds.join(', ') : 'Not recorded'],
     ['Artifact IDs', artifactIds.length > 0 ? artifactIds.join(', ') : 'None'],
     ['Fallback', telemetry.fallbackReason ?? 'None'],
   ];
+}
+
+function narrationIntegritySummary(receipt: NonNullable<AgentRun['narrationIntegrityReceipt']>): string {
+  if (receipt.outcome === 'skipped') {
+    return `Skipped${receipt.skipReason ? ` (${receipt.skipReason.replace(/_/g, ' ')})` : ''}`;
+  }
+  if (receipt.outcome === 'success') {
+    return receipt.mode === 'verified_facts'
+      ? `Fact-verified (${receipt.factCount} facts)`
+      : 'Preview-grounded';
+  }
+  if (receipt.outcome === 'deterministic_fallback') {
+    const codes = receipt.validationFailures.length > 0 ? ` (${receipt.validationFailures.join(', ')})` : '';
+    return `Deterministic fallback${codes}`;
+  }
+  return 'Narration unavailable; the retained answer was not replaced.';
 }
 
 function AnalyticalHowAnswered({

@@ -22,18 +22,57 @@ function scripted(replies: string[], callTools = true): AgentProvider {
   } as AgentProvider;
 }
 
+/** Text-only transport: exercise the loop that has to reserve its final send. */
+function textOnly(replies: string[]): AgentProvider {
+  let index = 0;
+  return {
+    name: 'ollama' as AgentProvider['name'],
+    available: async () => true,
+    generate: async () => replies[Math.min(index++, replies.length - 1)]!,
+  } as AgentProvider;
+}
+
+function dispatchExhausted(): AgentProvider {
+  return {
+    name: 'ollama' as AgentProvider['name'],
+    available: async () => true,
+    generate: async () => {
+      throw Object.assign(new Error('RAW_PROVIDER_CANARY_MUST_NOT_ESCAPE'), {
+        code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED',
+      });
+    },
+  } as AgentProvider;
+}
+
 const input = (provider: AgentProvider): AnswerLoopInput =>
   ({ question: 'top products by revenue', provider } as unknown as AnswerLoopInput);
 
 const deps = (over: Partial<Parameters<typeof runAnalystLoop>[1]> = {}) => ({
-  extractReferences: (sql: string) => ({
-    relations: [...sql.matchAll(/from\s+([a-z_.]+)/gi)].map((m) => m[1]!),
-    columns: [...sql.matchAll(/select\s+([a-z_]+)/gi)].map((m) => m[1]!),
-  }),
+  extractReferences: (sql: string) => {
+    const relations = [...sql.matchAll(/from\s+([a-z_.]+)/gi)].map((m) => m[1]!);
+    const relation = relations[0];
+    return {
+      relations,
+      columns: [...sql.matchAll(/select\s+([a-z_]+)/gi)]
+        .map((m) => relation ? `${relation}.${m[1]!}` : m[1]!),
+    };
+  },
   parseSql: (raw: string) => raw.match(/```sql\s*([\s\S]*?)```/i)?.[1]?.trim(),
   tools: [tool('get_table_schema', { relation: 'order_items', columns: ['product_name', 'product_price'] })],
   maxIterations: 6,
   ...over,
+});
+
+const scopedInput = (provider: AgentProvider): AnswerLoopInput => ({
+  ...input(provider),
+  agenticExecutionScope: {
+    runId: 'run-a',
+    executionId: 'child-a',
+    snapshotId: 'snapshot-a',
+    planId: 'plan-a',
+    targetFingerprint: 'target-a',
+    bindings: { limit: 10 },
+  },
 });
 
 describe('runAnalystLoop', () => {
@@ -42,7 +81,7 @@ describe('runAnalystLoop', () => {
     const outcome = await runAnalystLoop(input(provider), deps());
     expect(outcome.stop).toBe('composed');
     expect(outcome.corrections).toEqual([]);
-    expect(outcome.admitted).toEqual(expect.arrayContaining(['order_items', 'product_name']));
+    expect(outcome.admitted).toEqual(expect.arrayContaining(['order_items', 'order_items.product_name']));
   });
 
   it('corrects an invented column and accepts the repair', async () => {
@@ -55,7 +94,7 @@ describe('runAnalystLoop', () => {
     const outcome = await runAnalystLoop(input(provider), deps());
     expect(outcome.stop).toBe('composed');
     expect(outcome.corrections).toHaveLength(1);
-    expect(outcome.corrections[0]).toContain('did you mean product_name?');
+    expect(outcome.corrections[0]).toContain('did you mean order_items.product_name?');
   });
 
   it('stops after ONE repair rather than re-spending the budget', async () => {
@@ -74,6 +113,29 @@ describe('runAnalystLoop', () => {
     expect(outcome.sql).toBeUndefined();
   });
 
+  it('keeps a text-provider tool-budget terminal distinct from no final SQL', async () => {
+    const provider = textOnly([
+      '```json\n{"tool":"get_table_schema","input":{"canary":"RAW_PROVIDER_CANARY_MUST_NOT_ESCAPE"}}\n```',
+    ]);
+    const outcome = await runAnalystLoop(input(provider), deps({ maxIterations: 0 }));
+    expect(outcome).toMatchObject({
+      stop: 'budget_exhausted',
+      terminal: 'tool_budget_exhausted',
+    });
+    expect(outcome.sql).toBeUndefined();
+    expect(JSON.stringify(outcome)).not.toContain('RAW_PROVIDER_CANARY_MUST_NOT_ESCAPE');
+  });
+
+  it('keeps a provider-dispatch budget terminal distinct from no final SQL', async () => {
+    const outcome = await runAnalystLoop(input(dispatchExhausted()), deps());
+    expect(outcome).toMatchObject({
+      stop: 'budget_exhausted',
+      terminal: 'provider_dispatch_budget_exhausted',
+    });
+    expect(outcome.sql).toBeUndefined();
+    expect(JSON.stringify(outcome)).not.toContain('RAW_PROVIDER_CANARY_MUST_NOT_ESCAPE');
+  });
+
   it('emits steps so the wait is legible rather than a spinner', async () => {
     const steps: AnalystStep[] = [];
     const provider = scripted(['```sql\nSELECT product_name FROM order_items\n```']);
@@ -81,9 +143,9 @@ describe('runAnalystLoop', () => {
     expect(steps.map((s) => s.kind)).toEqual(expect.arrayContaining(['plan', 'observe', 'verify', 'answer']));
   });
 
-  it('seeds the context pack at the WEAKEST tier, not as proof', async () => {
+  it('does not let a catalog-only context pack authorize generated SQL', async () => {
     // A catalog row says something was indexed under a name; it does not prove a
-    // column exists in the warehouse. It still must not false-alarm correct SQL.
+    // column exists in the warehouse or mint generated execution authority.
     const provider = scripted(['```sql\nSELECT lifetime_spend FROM dim_customers\n```']);
     const withPack = {
       ...input(provider),
@@ -92,7 +154,8 @@ describe('runAnalystLoop', () => {
       ] } },
     } as unknown as AnswerLoopInput;
     const outcome = await runAnalystLoop(withPack, deps({ tools: [tool('noop', {})] }));
-    expect(outcome.stop).toBe('composed');
+    expect(outcome.stop).toBe('unverified');
+    expect(outcome.terminal).toBe('unverified_identifiers');
   });
 });
 
@@ -116,17 +179,74 @@ describe('createAnalystLaneHandler', () => {
     expect(legacy).toHaveBeenCalledTimes(1);
   });
 
-  it('hands verified SQL to legacy as CONTEXT, not as an instruction', async () => {
+  it('hands exact verified SQL to legacy only as a server-only forced proposal', async () => {
     // The legacy loop still owns trust labels, citations, narration, and
-    // execution. This only decides whether the SQL it sees was built from
-    // observed identifiers.
+    // execution, but it cannot regenerate a replacement for analyst SQL.
     const legacy = vi.fn(async () => answer);
     const provider = scripted(['```sql\nSELECT product_name FROM order_items\n```']);
     const handler = createAnalystLaneHandler({ legacy, buildDeps: () => deps() });
-    await handler(input(provider));
-    const passed = legacy.mock.calls[0]![0] as { extraContext?: string };
-    expect(passed.extraContext).toContain('verified the following SQL');
-    expect(passed.extraContext).toContain('SELECT product_name FROM order_items');
+    await handler(scopedInput(provider));
+    const passed = legacy.mock.calls[0]![0] as AnswerLoopInput;
+    expect(passed.extraContext).toBeUndefined();
+    expect(passed.forcedGeneratedProposal?.sql).toBe('SELECT product_name FROM order_items');
+    expect(passed.agenticSqlExecutionCapability).toMatchObject({
+      runId: 'run-a', executionId: 'child-a', snapshotId: 'snapshot-a', planId: 'plan-a', targetFingerprint: 'target-a',
+    });
+  });
+
+  it('does not invoke an ambient generated executor when scope is missing', async () => {
+    const executeGeneratedSql = vi.fn(async () => ({ rows: [] }));
+    const legacy = vi.fn(async (received: AnswerLoopInput) => {
+      expect(received.executeGeneratedSql).toBeUndefined();
+      return answer;
+    });
+    const provider = scripted(['```sql\nSELECT product_name FROM order_items\n```']);
+    const handler = createAnalystLaneHandler({ legacy, buildDeps: () => deps() });
+    await handler({ ...input(provider), executeGeneratedSql });
+    expect(executeGeneratedSql).not.toHaveBeenCalled();
+    expect(legacy).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns a safe, non-executing diagnostic when the text loop exhausts its tool budget', async () => {
+    const executeGeneratedSql = vi.fn(async () => ({ rows: [] }));
+    const legacy = vi.fn(async () => answer);
+    const provider = textOnly([
+      '```json\n{"tool":"get_table_schema","input":{"canary":"RAW_PROVIDER_CANARY_MUST_NOT_ESCAPE"}}\n```',
+    ]);
+    const handler = createAnalystLaneHandler({ legacy, buildDeps: () => deps({ maxIterations: 0 }) });
+    const result = await handler({ ...input(provider), executeGeneratedSql });
+
+    expect(executeGeneratedSql).not.toHaveBeenCalled();
+    expect(legacy).not.toHaveBeenCalled();
+    expect(result.text).toContain('bounded tool budget');
+    expect(result.text).toContain('no generated warehouse query was run');
+    expect(result.text).not.toContain('RAW_PROVIDER_CANARY_MUST_NOT_ESCAPE');
+    expect(result.evidence?.route).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'identifier_ledger',
+        status: 'failed',
+        label: expect.stringContaining('bounded tool budget'),
+      }),
+    ]));
+  });
+
+  it('returns a safe, non-executing diagnostic when the provider dispatch budget is exhausted', async () => {
+    const executeGeneratedSql = vi.fn(async () => ({ rows: [] }));
+    const legacy = vi.fn(async () => answer);
+    const handler = createAnalystLaneHandler({ legacy, buildDeps: () => deps() });
+    const result = await handler({ ...input(dispatchExhausted()), executeGeneratedSql });
+
+    expect(executeGeneratedSql).not.toHaveBeenCalled();
+    expect(legacy).not.toHaveBeenCalled();
+    expect(result.text).toContain('bounded AI dispatch budget');
+    expect(result.text).not.toContain('RAW_PROVIDER_CANARY_MUST_NOT_ESCAPE');
+    expect(result.evidence?.route).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'identifier_ledger',
+        status: 'failed',
+        label: expect.stringContaining('provider-dispatch budget'),
+      }),
+    ]));
   });
 
   it('records the ledger verdict even on a clean run', async () => {
@@ -135,7 +255,7 @@ describe('createAnalystLaneHandler', () => {
     const legacy = vi.fn(async () => answer);
     const provider = scripted(['```sql\nSELECT product_name FROM order_items\n```']);
     const handler = createAnalystLaneHandler({ legacy, buildDeps: () => deps() });
-    const result = await handler(input(provider));
+    const result = await handler(scopedInput(provider));
     const step = result.evidence?.route?.find((s) => s.tool === 'identifier_ledger');
     expect(step).toMatchObject({ status: 'checked' });
     expect(step?.label).toMatch(/Verified \d+ identifier/);
@@ -149,10 +269,10 @@ describe('createAnalystLaneHandler', () => {
       '```sql\nSELECT product_name FROM order_items\n```',
     ]);
     const handler = createAnalystLaneHandler({ legacy, buildDeps: () => deps() });
-    const result = await handler(input(provider));
+    const result = await handler(scopedInput(provider));
     const step = result.evidence?.route?.find((s) => s.tool === 'identifier_ledger');
     expect(step).toMatchObject({ status: 'checked' });
-    expect(step?.detail).toContain('did you mean product_name?');
+    expect(step?.detail).toContain('did you mean order_items.product_name?');
   });
 });
 
@@ -166,7 +286,7 @@ describe('analyst evidence when the host has not initialised it yet', () => {
     const legacy = vi.fn(async () => bare);
     const provider = scripted(['```sql\nSELECT product_name FROM order_items\n```']);
     const handler = createAnalystLaneHandler({ legacy, buildDeps: () => deps() });
-    const result = await handler(input(provider));
+    const result = await handler(scopedInput(provider));
     expect(result.evidence?.route?.find((s) => s.tool === 'identifier_ledger')).toMatchObject({ status: 'checked' });
   });
 });

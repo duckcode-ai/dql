@@ -43,6 +43,21 @@ describe('ConversationStore', () => {
     expect(defaultConversationPath(root)).toBe(join(root, '.dql', 'local', 'agent-conversations.sqlite'));
   });
 
+  it('persists a content-free narration integrity receipt with the conversation turn', () => {
+    const thread = store.createThread({ surface: 'ask' });
+    const receipt = {
+      version: 1 as const,
+      mode: 'verified_facts' as const,
+      outcome: 'deterministic_fallback' as const,
+      attempted: true,
+      factCount: 2,
+      maxRows: 10,
+      validationFailures: ['UNPARSEABLE_CLAIMS'],
+    };
+    store.appendTurn(thread.id, { question: 'revenue by region', narrationIntegrityReceipt: receipt });
+    expect(store.recentTurns(thread.id)[0]?.narrationIntegrityReceipt).toEqual(receipt);
+  });
+
   it('migrates the legacy cache database including committed WAL state', async () => {
     store.close();
     rmSync(defaultConversationPath(root), { force: true });

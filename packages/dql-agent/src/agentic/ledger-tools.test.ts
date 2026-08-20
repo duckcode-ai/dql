@@ -22,7 +22,8 @@ describe('harvestIdentifiers', () => {
       compatibleDimensions: ['customer_name'],
     });
     expect(found).toEqual(expect.arrayContaining([
-      'analytics.public.orders', 'order_total', 'ordered_at', 'customer_name',
+      'analytics.public.orders', 'analytics.public.orders.order_total',
+      'analytics.public.orders.ordered_at', 'customer_name',
     ]));
   });
 
@@ -91,7 +92,7 @@ describe('withLedgerHarvest', () => {
     const output = await wrapped!.run({});
     expect(output).toEqual({ relation: 'orders', columns: [{ name: 'order_total' }] });
     expect(ledger.isAdmitted('orders')).toBe(true);
-    expect(ledger.isAdmitted('order_total')).toBe(true);
+    expect(ledger.isAdmitted('orders.order_total')).toBe(true);
     expect(events).toEqual([{ tool: 'get_table_schema', admitted: 2 }]);
   });
 
@@ -123,7 +124,9 @@ describe('adjudicateProposedSql', () => {
       ledger,
     );
     await wrapped!.run({});
-    expect(adjudicateProposedSql(ledger, { relations: ['orders'], columns: ['order_total'] }))
+    expect(adjudicateProposedSql(ledger, {
+      relations: ['analytics.orders'], columns: ['analytics.orders.order_total'],
+    }))
       .toEqual({ ok: true });
   });
 
@@ -136,11 +139,13 @@ describe('adjudicateProposedSql', () => {
       ledger,
     );
     await wrapped!.run({});
-    const verdict = adjudicateProposedSql(ledger, { columns: ['service_tier', 'servce_tier'] });
+    const verdict = adjudicateProposedSql(ledger, {
+      columns: ['dim_accounts.service_tier', 'dim_accounts.servce_tier'],
+    });
     expect(verdict.ok).toBe(false);
     if (verdict.ok) return;
-    expect(verdict.unadmitted).toEqual(['servce_tier']);
-    expect(verdict.correction).toContain('did you mean service_tier?');
+    expect(verdict.unadmitted).toEqual(['dim_accounts.servce_tier']);
+    expect(verdict.correction).toContain('did you mean dim_accounts.service_tier?');
   });
 });
 

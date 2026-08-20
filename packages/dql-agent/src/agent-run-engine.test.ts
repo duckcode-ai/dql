@@ -442,6 +442,38 @@ describe("AgentRunEngine", () => {
     });
   });
 
+  it.each([
+    ['success', {
+      version: 1, mode: 'verified_facts', outcome: 'success', attempted: true,
+      factCount: 2, maxRows: 10, validationFailures: [],
+    }],
+    ['deterministic fallback', {
+      version: 1, mode: 'verified_facts', outcome: 'deterministic_fallback', attempted: true,
+      factCount: 2, maxRows: 10, validationFailures: ['UNPARSEABLE_CLAIMS'],
+    }],
+    ['intentional skip', {
+      version: 1, mode: 'skip', outcome: 'skipped', attempted: false,
+      factCount: 0, maxRows: 0, validationFailures: [], skipReason: 'no_provider',
+    }],
+  ] as const)('persists narration integrity receipt for %s through the durable run store', async (_name, receipt) => {
+    const store = new InMemoryAgentRunStore();
+    const engine = new AgentRunEngine({
+      store,
+      idGenerator: () => `run-narration-${receipt.outcome}`,
+      now: fixedClock(),
+      planner: fixedRoutePlanner('certified_answer'),
+      executors: {
+        certified_answer: () => ({
+          answer: 'Answer retained independently of narration presentation.',
+          narrationIntegrityReceipt: receipt,
+        }),
+      },
+    });
+    const run = await engine.run({ question: 'total revenue', intent: 'exact_certified_lookup' });
+    expect(run.narrationIntegrityReceipt).toEqual(receipt);
+    expect(store.get(run.id)?.narrationIntegrityReceipt).toEqual(receipt);
+  });
+
   it("API-007 records blocked outcomes as run.failed with the precise failure class", async () => {
     const events: AgentRunEvent[] = [];
     const engine = new AgentRunEngine({

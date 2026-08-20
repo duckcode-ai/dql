@@ -47,6 +47,21 @@ export async function runAgenticToolLoop(
   tools: AgentToolDefinition[],
   options: AgenticToolLoopOptions = {},
 ): Promise<string> {
+  return (await runAgenticToolLoopDetailed(provider, messages, tools, options)).text;
+}
+
+/**
+ * Run the agentic loop while retaining its terminal reason for internal
+ * callers. The public `runAgenticToolLoop` compatibility API remains a string,
+ * but an analytical caller must not mistake a budget-stopped tool request for
+ * final SQL.
+ */
+export async function runAgenticToolLoopDetailed(
+  provider: AgentProvider,
+  messages: AgentMessage[],
+  tools: AgentToolDefinition[],
+  options: AgenticToolLoopOptions = {},
+): Promise<TextToolLoopResult> {
   const resultRowBudgetUsage = new Map<string, number>();
   const usable = tools
     .filter((tool) => tool.name && tool.description)
@@ -56,15 +71,55 @@ export async function runAgenticToolLoop(
     : [];
 
   if (usable.length === 0) {
-    return provider.generate([...messages, ...policyMessages], options);
+    try {
+      return { text: await provider.generate([...messages, ...policyMessages], options), stop: 'final', toolCalls: 0 };
+    } catch (error) {
+      const terminal = providerDispatchTerminal(error);
+      if (terminal) return terminal;
+      throw error;
+    }
   }
 
   // Native tool use owns its own loop; hand it the same policy + tools.
   if (provider.generateWithTools) {
-    return provider.generateWithTools([...messages, ...policyMessages], usable, options);
+    try {
+      return {
+        text: await provider.generateWithTools([...messages, ...policyMessages], usable, options),
+        stop: 'final',
+        toolCalls: 0,
+      };
+    } catch (error) {
+      const terminal = providerDispatchTerminal(error);
+      if (terminal) return terminal;
+      throw error;
+    }
   }
 
-  return runTextProtocolToolLoop(provider, [...messages, ...policyMessages], usable, options);
+  return runTextProtocolToolLoopDetailed(provider, [...messages, ...policyMessages], usable, options);
+}
+
+/**
+ * Internal terminal state for the text transport.
+ *
+ * The public compatibility API above intentionally remains `Promise<string>`:
+ * callers outside the analyst lane use it as a normal completion helper.  The
+ * text transport itself must not, however, confuse "the model asked for a
+ * tool after its budget" with a normal final answer.  Keeping that distinction
+ * here makes a caller able to turn it into a typed, non-executing outcome.
+ */
+export interface TextToolLoopResult {
+  text: string;
+  stop: 'final' | 'tool_budget_exhausted' | 'provider_dispatch_budget_exhausted';
+  toolCalls: number;
+}
+
+function providerDispatchTerminal(error: unknown): TextToolLoopResult | undefined {
+  const code = error && typeof error === 'object' && 'code' in error
+    ? (error as { code?: unknown }).code
+    : undefined;
+  return code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED'
+    ? { text: '', stop: 'provider_dispatch_budget_exhausted', toolCalls: 0 }
+    : undefined;
 }
 
 function guardToolOutput(
@@ -104,24 +159,30 @@ function guardToolOutput(
 }
 
 /**
- * Text-protocol ReAct loop for providers without native tool use. The model
- * chooses ONE action per turn: call a tool, or emit the final answer. We parse its
- * JSON, execute, feed back an observation, and repeat until it answers or the tool
- * budget is spent.
+ * Text-only providers do not have a server-side tool protocol, so DQL drives a
+ * real bounded conversation: model -> one tool -> observation -> model.  One
+ * physical dispatch is always reserved for a final answer.  This mirrors native
+ * tool use and prevents the old one-tool implementation from collecting schema
+ * evidence and then forcing a premature, SQL-less completion.
  */
-async function runTextProtocolToolLoop(
+export async function runTextProtocolToolLoopDetailed(
   provider: AgentProvider,
   baseMessages: AgentMessage[],
   tools: AgentToolDefinition[],
   options: AgenticToolLoopOptions,
-): Promise<string> {
+): Promise<TextToolLoopResult> {
   const maxToolCalls = Math.max(0, Math.min(30, options.maxToolCalls ?? 8));
   const toolMap = new Map(tools.map((tool) => [tool.name, tool]));
   // Preserve the complete transport contract across both text-protocol turns.
   // Reconstructing a small options subset silently dropped the physical-send
   // observer, dispatch cap, redaction guard, and egress accounting for CLI and
   // Ollama providers.
-  const dispatchLimit = Math.max(1, Math.min(30, options.maxProviderDispatches ?? 2));
+  // A tool turn without a following answer is not useful.  When callers do
+  // not set a dispatch cap, make room for every permitted tool plus the final
+  // composition turn.  When they do set one, reserve its last slot for that
+  // composition instead of silently spending it on another observation.
+  const dispatchLimit = Math.max(1, Math.min(30, options.maxProviderDispatches ?? (maxToolCalls + 1)));
+  const effectiveToolBudget = Math.min(maxToolCalls, Math.max(0, dispatchLimit - 1));
   let physicalDispatches = 0;
   const outerObserver = options.onProviderDispatch;
   const runOptions: ProviderToolLoopOptions = {
@@ -139,54 +200,87 @@ async function runTextProtocolToolLoop(
 
   const messages: AgentMessage[] = [
     ...baseMessages,
-    { role: 'system', content: buildTextToolContract(tools, maxToolCalls) },
+    // Tell the model the *effective* ceiling, not a larger policy cap that
+    // cannot physically leave room for its final response.
+    { role: 'system', content: buildTextToolContract(tools, effectiveToolBudget) },
   ];
 
   let lastText = '';
-  const text = await provider.generate(messages, runOptions);
-  if (text.trim()) lastText = text;
-  const call = maxToolCalls > 0 ? parseTextToolCall(text) : undefined;
-  if (!call) return text || lastText;
-
-  const tool = toolMap.get(call.name);
-  let output: unknown;
-  let isError = false;
-  const startedAt = Date.now();
-  if (!tool) {
-    output = { error: `Unknown tool: ${call.name}. Available: ${tools.map((t) => t.name).join(', ')}` };
-    isError = true;
-  } else {
+  let toolCalls = 0;
+  while (true) {
+    let text: string;
     try {
-      assertMayStartToolCall(options);
-      output = await tool.run(call.input ?? {});
-    } catch (err) {
-      output = { error: err instanceof Error ? err.message : String(err) };
+      text = await provider.generate(messages, runOptions);
+    } catch (error: unknown) {
+      const code = error && typeof error === 'object' && 'code' in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+      if (code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED') {
+        return { text: lastText, stop: 'provider_dispatch_budget_exhausted', toolCalls };
+      }
+      throw error;
+    }
+    if (text.trim()) lastText = text;
+    const requestedCall = parseTextToolCall(text);
+    if (!requestedCall) return { text: text || lastText, stop: 'final', toolCalls };
+    // A tool-shaped reply is not a final answer merely because the host has no
+    // dispatch left for another observation. Keep this typed distinction so a
+    // caller cannot mistake it for executable SQL or prose.
+    if (toolCalls >= effectiveToolBudget) {
+      return { text: text || lastText, stop: 'tool_budget_exhausted', toolCalls };
+    }
+    const call = requestedCall;
+
+    const tool = toolMap.get(call.name);
+    let output: unknown;
+    let isError = false;
+    const startedAt = Date.now();
+    if (!tool) {
+      output = { error: `Unknown tool: ${call.name}. Available: ${tools.map((t) => t.name).join(', ')}` };
       isError = true;
+    } else {
+      try {
+        assertMayStartToolCall(options);
+        output = await tool.run(call.input ?? {});
+      } catch (err) {
+        output = { error: err instanceof Error ? err.message : String(err) };
+        isError = true;
+      }
+    }
+    toolCalls += 1;
+    options.onToolCall?.({ name: call.name, input: call.input, output, isError, durationMs: Date.now() - startedAt });
+    messages.push({ role: 'assistant', content: text });
+    messages.push({ role: 'user', content: renderObservation(call.name, output) });
+
+    if (toolCalls >= effectiveToolBudget) {
+      messages.push({
+        role: 'user',
+        content: 'Tool budget reached — do not call any more tools. Answer now using only the tool results above, as a single ```json fenced object with summary, sql, viz, outputs.',
+      });
+      // The next iteration is the reserved final dispatch.  If the model
+      // nevertheless emits a tool shape, `call` is deliberately disabled and
+      // the caller receives that text as a typed terminal, not an execution.
+      const finalText = await provider.generate(messages, runOptions).catch((error: unknown) => {
+        const code = error && typeof error === 'object' && 'code' in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+        if (code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED') return '';
+        throw error;
+      });
+      if (!finalText.trim()) {
+        return {
+          text: lastText,
+          stop: 'provider_dispatch_budget_exhausted',
+          toolCalls,
+        };
+      }
+      return {
+        text: finalText,
+        stop: parseTextToolCall(finalText) ? 'tool_budget_exhausted' : 'final',
+        toolCalls,
+      };
     }
   }
-  options.onToolCall?.({ name: call.name, input: call.input, output, isError, durationMs: Date.now() - startedAt });
-
-  messages.push({ role: 'assistant', content: text });
-  messages.push({ role: 'user', content: renderObservation(call.name, output) });
-
-  // One provider proposal plus one final generation is the complete ordinary
-  // tool round. The final instruction prohibits a second tool proposal.
-  messages.push({
-    role: 'user',
-    content: 'Tool budget reached — do not call any more tools. Answer now using only the tool results above, as a single ```json fenced object with summary, sql, viz, outputs.',
-  });
-  const finalText = await provider.generate(messages, runOptions).catch((error: unknown) => {
-    const code = error && typeof error === 'object' && 'code' in error
-      ? (error as { code?: unknown }).code
-      : undefined;
-    // Running out of wall clock is not a reason to discard a usable draft: the
-    // model already produced text and a tool observation. Fall back to that
-    // instead of failing the whole run with nothing.
-    if (code === 'RUN_DEADLINE_INSUFFICIENT' && lastText.trim()) return '';
-    if (code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED') throw error;
-    return '';
-  });
-  return finalText.trim() ? finalText : lastText;
 }
 
 function assertMayStartToolCall(options: ProviderToolLoopOptions): void {

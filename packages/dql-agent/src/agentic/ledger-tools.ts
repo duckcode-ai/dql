@@ -91,9 +91,39 @@ export function harvestIdentifiers(output: unknown, limit = 500): string[] {
       return;
     }
     if (typeof node !== 'object') return;
-    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    const record = node as Record<string, unknown>;
+    // Schema/preview tools commonly return `{ relation, columns: [{ name }] }`.
+    // Preserve that ownership in the ledger.  A bare `id` is not an execution
+    // identity: it could belong to any relation in the same result.
+    const relation = [record.relation, record.table, record.fullName, record.qualifiedName]
+      .find((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      ?.trim();
+    const ownedColumnKeys = new Set(['columns', 'selectedColumns', 'outputs']);
+    if (relation) {
+      for (const key of ['columns', 'selectedColumns', 'outputs']) {
+        const values = record[key];
+        if (!Array.isArray(values)) continue;
+        for (const entry of values) {
+          const column = typeof entry === 'string'
+            ? entry
+            : entry && typeof entry === 'object'
+              ? [
+                  (entry as Record<string, unknown>).column,
+                  (entry as Record<string, unknown>).name,
+                  (entry as Record<string, unknown>).columnName,
+                ].find((value): value is string => typeof value === 'string')
+              : undefined;
+          if (column && !/\s/.test(column)) push(`${relation}.${column}`);
+        }
+      }
+    }
+    for (const [key, value] of Object.entries(record)) {
       if (IDENTIFIER_KEYS.has(key)) push(value);
       if (IDENTIFIER_LIST_KEYS.has(key) && Array.isArray(value)) {
+        // Relation-shaped schema and preview payloads were already harvested
+        // above as `relation.column`. Re-admitting their bare column leaves
+        // would let one table authorize the same leaf on another table.
+        if (relation && ownedColumnKeys.has(key)) continue;
         for (const entry of value) {
           if (typeof entry === 'string') push(entry);
           else walk(entry, depth + 1);
@@ -155,7 +185,8 @@ export const ANALYST_TOOL_POLICY = [
   '',
   'COMPOSE — assemble the final query using ONLY names a tool returned to you.',
   'Every table and column in executed SQL must have appeared in a compile, preview,',
-  'or schema result. A name that merely looks plausible is the single most common',
+  'or schema result. Preserve the qualified relation.column identity returned by the tool;',
+  'a bare leaf is not enough when multiple relations can contain the same name. A name that merely looks plausible is the single most common',
   'way these queries go wrong: if you need a column you have not seen, inspect it',
   'first rather than guessing its spelling.',
 ].join('\n');
@@ -172,7 +203,10 @@ export function adjudicateProposedSql(
   ledger: IdentifierLedger,
   references: { relations?: readonly string[]; columns?: readonly string[] },
 ): { ok: true } | { ok: false; correction: string; unadmitted: string[] } {
-  const verdict = ledger.adjudicate(references);
+  // Catalog retrieval narrows tool search but is never execution evidence. A
+  // generated statement must name identifiers a compiler, preview, or schema
+  // observation actually returned during this invocation.
+  const verdict = ledger.adjudicate(references, { requireObserved: true });
   if (verdict.ok) return { ok: true };
   return {
     ok: false,

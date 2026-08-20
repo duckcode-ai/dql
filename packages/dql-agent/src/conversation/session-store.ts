@@ -19,6 +19,7 @@ import type { AgentDqlArtifactReference } from '../answer-loop.js';
 import type { CascadeAnswerResult } from '../cascade/cascade.js';
 import type { KnowledgeLens } from '../domain-context.js';
 import type { ConversationSummaryV1 } from './rolling-summary.js';
+import type { NarrationIntegrityReceiptV1 } from '../agent-run-engine.js';
 
 const require = createRequire(import.meta.url);
 let databaseCtor: typeof Database | null = null;
@@ -95,6 +96,8 @@ export interface ConversationTurnInput {
   sql?: string;
   dqlArtifact?: AgentDqlArtifactReference;
   cascade?: CascadeAnswerResult;
+  /** Content-free narration result retained with the conversational history. */
+  narrationIntegrityReceipt?: NarrationIntegrityReceiptV1;
   result?: ConversationTurnResult;
   /** The turn's answer contract / requested shape, for working-state reduction. */
   contract?: Record<string, unknown>;
@@ -208,6 +211,7 @@ export class ConversationStore {
         sql                    TEXT,
         dql_artifact_json      TEXT NOT NULL DEFAULT '{}',
         cascade_json           TEXT NOT NULL DEFAULT '{}',
+        narration_integrity_json TEXT NOT NULL DEFAULT '{}',
         result_json            TEXT NOT NULL DEFAULT '{}',
         contract_json          TEXT NOT NULL DEFAULT '{}',
         created_at             TEXT NOT NULL,
@@ -234,6 +238,7 @@ export class ConversationStore {
     this.ensureColumn('conversation_turns', 'stop_reason', 'TEXT');
     this.ensureColumn('conversation_turns', 'refusal_code', 'TEXT');
     this.ensureColumn('conversation_turns', 'execution_error', 'TEXT');
+    this.ensureColumn('conversation_turns', 'narration_integrity_json', "TEXT NOT NULL DEFAULT '{}'");
     this.ensureColumn('conversation_threads', 'summary_json', "TEXT NOT NULL DEFAULT '{}'");
     this.ensureColumn('conversation_threads', 'favorite', 'INTEGER NOT NULL DEFAULT 0');
   }
@@ -360,9 +365,9 @@ export class ConversationStore {
           id, thread_id, agent_run_id, seq, question, answer_summary, answer_text, route,
           trust_label, run_status, stop_reason, refusal_code, execution_error,
           certification, source_certified_block, context_pack_id,
-          knowledge_lens_json, sql, dql_artifact_json, cascade_json, result_json,
-          contract_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          knowledge_lens_json, sql, dql_artifact_json, cascade_json, narration_integrity_json,
+          result_json, contract_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         turn.id,
         threadId,
@@ -384,6 +389,7 @@ export class ConversationStore {
         turn.sql ?? null,
         JSON.stringify(turn.dqlArtifact ?? {}),
         JSON.stringify(turn.cascade ?? {}),
+        JSON.stringify(turn.narrationIntegrityReceipt ?? {}),
         JSON.stringify(turn.result ?? {}),
         JSON.stringify(turn.contract ?? {}),
         now,
@@ -663,6 +669,7 @@ type TurnRow = {
   sql: string | null;
   dql_artifact_json: string;
   cascade_json: string;
+  narration_integrity_json?: string | null;
   result_json: string;
   contract_json: string;
   created_at: string;
@@ -689,6 +696,10 @@ function rowToTurn(row: TurnRow): ConversationTurn {
   const result = safeJSON(row.result_json, {} as ConversationTurnResult);
   const dqlArtifact = safeJSON(row.dql_artifact_json, {} as AgentDqlArtifactReference);
   const cascade = safeJSON(row.cascade_json, {} as CascadeAnswerResult);
+  const narrationIntegrityReceipt = safeJSON(
+    row.narration_integrity_json,
+    {} as NarrationIntegrityReceiptV1,
+  );
   const contract = safeJSON(row.contract_json, {} as Record<string, unknown>);
   const knowledgeLens = safeJSON(row.knowledge_lens_json, {} as KnowledgeLens);
   return {
@@ -712,6 +723,7 @@ function rowToTurn(row: TurnRow): ConversationTurn {
     sql: row.sql ?? undefined,
     dqlArtifact: Object.keys(dqlArtifact).length > 0 ? capDqlArtifact(dqlArtifact) : undefined,
     cascade: Object.keys(cascade).length > 0 ? cascade : undefined,
+    narrationIntegrityReceipt: narrationIntegrityReceipt.version === 1 ? narrationIntegrityReceipt : undefined,
     result: Object.keys(result).length > 0 ? result : undefined,
     contract: Object.keys(contract).length > 0 ? contract : undefined,
     createdAt: row.created_at,
