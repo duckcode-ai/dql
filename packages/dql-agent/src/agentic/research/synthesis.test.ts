@@ -45,6 +45,24 @@ describe('cross-branch research synthesis', () => {
     expect(out.toLowerCase()).not.toContain('because churn');
   });
 
+  it('NEVER records a branch as supporting its hypothesis', () => {
+    // Rows are observation, not confirmation. Deciding whether what came back
+    // matches what the hypothesis predicted needs the expectation, and nothing
+    // at this layer can judge it — so the dossier may say "investigated" and
+    // must never say "confirmed".
+    const out = synthesizeResearchNarrative({
+      question: QUESTION,
+      branches: [
+        { statement: 'Churn drove it', produced: true, summary: 'returned 40 rows' },
+        { statement: 'Pricing drove it', produced: true, summary: 'returned 12 rows' },
+      ],
+    }) ?? '';
+    expect(out).toContain('Investigated (2)');
+    for (const word of ['supported', 'confirmed', 'proves', 'because churn', 'driven by']) {
+      expect(out.toLowerCase()).not.toContain(word);
+    }
+  });
+
   it('returns nothing when there are no hypotheses to report', () => {
     expect(synthesizeResearchNarrative({ question: QUESTION, branches: [] })).toBeUndefined();
     expect(synthesizeResearchNarrative({ question: QUESTION, branches: [{ statement: '  ', produced: true }] }))

@@ -5176,14 +5176,21 @@ function analyticalFailureSummary(
                 // Observe, then decide. A branch that produced rows is evidence
                 // for its hypothesis; one that did not is inconclusive, which is
                 // a real outcome and not a failure.
+                // Rows are not support. A branch that returned data has been
+                // OBSERVED, not confirmed — deciding whether the observation
+                // matches what the hypothesis predicted needs the expectation,
+                // and nothing available at this layer can judge it. Recording
+                // rows as `supports` would let the dossier report a driver the
+                // evidence never established, which is the failure mode the
+                // whole verified-fact chain exists to prevent.
                 researchState = applyFinding(researchState, {
                   id: `f${index + 1}`,
                   hypothesisId: `h${index + 1}`,
-                  verdict: ((branchRun.resultPreview as { rows?: unknown[] } | undefined)?.rows?.length ?? 0) > 0
-                    ? 'supports'
-                    : 'inconclusive',
+                  verdict: 'inconclusive',
                   summary: branchRun.summary ?? '',
-                  strength: 0.5,
+                  strength: ((branchRun.resultPreview as { rows?: unknown[] } | undefined)?.rows?.length ?? 0) > 0
+                    ? 0.5
+                    : 0.1,
                 });
               } catch (error) {
                 // A child is a real durable run even when cancellation stops the

@@ -73,17 +73,23 @@ export function synthesizeResearchNarrative(input: {
     state = applyFinding(state, {
       id: `f${index + 1}`,
       hypothesisId: `h${index + 1}`,
-      // `supports` here means EVIDENCE WAS GATHERED, never that the explanation
-      // is true. Nothing available at this layer can judge that.
-      verdict: branch.produced ? 'supports' : 'inconclusive',
+      // `supports` would claim the observation MATCHED what the hypothesis
+      // predicted, and only the expectation can decide that. Producing rows
+      // means the branch was observed, so it is recorded as inconclusive with
+      // higher strength — the narrative below reports "investigated", never
+      // "confirmed", and the distinction has to hold in the data too.
+      verdict: 'inconclusive',
       summary: branch.summary ?? '',
       strength: branch.produced ? 0.6 : 0.1,
     }, input.limits);
   });
 
   const conclusion = concludeResearch(state, input.limits);
-  const investigated = conclusion.supported;
-  const blocked = conclusion.unresolved;
+  // Everything lands in `unresolved` now that no branch claims support, so the
+  // split is by whether the branch produced observable evidence at all.
+  const producedBy = new Map(branches.map((branch) => [branch.statement.trim(), branch.produced]));
+  const investigated = conclusion.unresolved.filter((h) => producedBy.get(h.statement) === true);
+  const blocked = conclusion.unresolved.filter((h) => producedBy.get(h.statement) !== true);
 
   const lines: string[] = [
     `I tested ${branches.length} competing explanation${branches.length === 1 ? '' : 's'} for this question.`,
