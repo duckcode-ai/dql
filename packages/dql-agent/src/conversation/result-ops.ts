@@ -134,12 +134,23 @@ const AGGREGATE_PATTERNS: Array<{ re: RegExp; aggregate: ResultSetAggregate }> =
  * Detect a cross-result operation. Returns null unless the question both refers
  * back to the prior result AND names an aggregate or a re-rank.
  */
+/** Asks for a reason or a mechanism, not a number. */
+const EXPLANATION_QUESTION =
+  /\b(?:why|how come|how did|how does|how is|explain|reason|caused?|drove|driving|because)\b/i;
+
 export function detectResultSetOperation(
   question: string,
   prior?: PriorResultShape,
 ): ResultSetOperation | null {
   const q = question.trim();
   if (!q) return null;
+  // An explanation question is never arithmetic over the prior result.
+  // "why he is top most in the list?" matched the max-family pattern on the
+  // words "top most" and was answered "The maximum of count_lifetime_orders is
+  // 156" — a different column, about a different customer, computed over the 50
+  // rows that happened to be on screen. A reason is not in a result's cells, so
+  // this path declines and lets the real planner run.
+  if (EXPLANATION_QUESTION.test(q)) return null;
   if (!refersToPriorResult(q, prior)) return null;
 
   // Re-rank: "top 3 of these", "bottom 5 of those", "highest 3 above".

@@ -1803,3 +1803,4 @@ function stripUndefinedDeep(value: unknown): unknown {
   return out;
 }
 export { planResearchHypotheses, parseResearchHypotheses, hypothesesToSteps, type ResearchHypothesis, type ResearchAssets } from './agentic/research-agent.js';
+export { synthesizeResearchNarrative, type ResearchBranchOutcome } from './agentic/research/synthesis.js';

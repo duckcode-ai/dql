@@ -161,6 +161,7 @@ import { getRunner as getLLMRunner } from './llm/index.js';
 import { rethrowIfCancelled } from './llm/cancellation.js';
 import { fetchLatestPublishedDqlVersion, resolveDqlRuntimeVersionStatus } from './version-status.js';
 import { resolveRetrievalHealthStatus } from './retrieval-health.js';
+import { synthesizeResearchNarrative } from '@duckcodeailabs/dql-agent';
 import { applyEvalCassette, createDqlAgentProviderRunner, createGovernedTextProvider, resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
 import type {
   AgentConversationContext,
@@ -5201,8 +5202,28 @@ function analyticalFailureSummary(
           reviewRequired: true,
           }, request.researchResultRowsOptIn === true)
         : undefined;
+      // The cross-branch story. Every branch tested a hypothesis and produced a
+      // finding; narrating only the one result the executor happened to carry
+      // reported a single fact and discarded the rest, which is the visible
+      // half of "research answers one question instead of telling a story".
+      const researchStory = !needsClarification && plan.steps.length > 0
+        ? synthesizeResearchNarrative({
+          question: request.question,
+          branches: researchRuns.map((branch, index) => ({
+            statement: plan.steps[index]?.thought ?? branch.question ?? '',
+            produced: branch.status === 'ready'
+              && ((branch.resultPreview as { rows?: unknown[] } | undefined)?.rows?.length ?? 0) > 0,
+            ...(branch.summary ? { summary: branch.summary } : {}),
+            ...(branch.status ? { status: branch.status } : {}),
+          })),
+        })
+        : undefined;
       const summary = needsClarification
         ? 'Needs clarification before running deeper research.'
+        // The story leads; the verified-fact narration follows it, so the
+        // numbers still come from the narrator that checks them.
+        : researchStory
+          ? `${researchStory}${narration?.summary ? `\n\n${narration.summary}` : ''}`
         : narration?.summary
           ?? (researchZeroRows
           ? 'The query executed cleanly against real data and matched 0 rows.'
