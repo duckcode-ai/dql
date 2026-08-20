@@ -1,3 +1,4 @@
+import { packContext } from './cascade/packer.js';
 /**
  * Dynamic-first governed answer loop.
  *
@@ -6571,15 +6572,29 @@ function renderContextPackForPrompt(contextPack: LocalContextPack, budget: Promp
   const warnings = contextPack.warnings.length
     ? `Warnings:\n${contextPack.warnings.slice(0, budget.warningLimit).map((warning) => `- ${warning}`).join('\n')}\n`
     : '';
-  const objects = contextPack.objects.slice(0, budget.contextObjectLimit).map((object) => {
-    const detail = [
-      object.objectType,
-      object.domain ? `domain: ${object.domain}` : '',
-      object.status ? `status: ${object.status}` : '',
-      object.description ? `description: ${object.description}` : '',
-    ].filter(Boolean).join('; ');
-    return `- ${object.objectKey} (${detail})`;
-  }).join('\n');
+  // Pack by value per token instead of truncating at a fixed position. The
+  // objects arrive already ranked, so position IS the value — but cost is not
+  // uniform: one object with a long description can crowd out several cheap
+  // ones that rank just below it, and the old `slice` cut by rank alone. This
+  // keeps the same ordering pressure while letting an inexpensive object that
+  // ranked 19th still fit. The budget is derived from the existing item limit
+  // so the window stays the size the caller already tuned for.
+  const objects = packContext(
+    contextPack.objects.map((object, index) => ({
+      id: object.objectKey,
+      score: contextPack.objects.length - index,
+      render: () => {
+        const detail = [
+          object.objectType,
+          object.domain ? `domain: ${object.domain}` : '',
+          object.status ? `status: ${object.status}` : '',
+          object.description ? `description: ${object.description}` : '',
+        ].filter(Boolean).join('; ');
+        return `- ${object.objectKey} (${detail})`;
+      },
+    })),
+    Math.max(1, budget.contextObjectLimit) * 45,
+  ).text;
   const conflicts = contextPack.retrievalDiagnostics.candidateConflicts.length
     ? `\nCandidate conflicts:\n${contextPack.retrievalDiagnostics.candidateConflicts.slice(0, 4).map((conflict) => `- ${conflict.reason} ${conflict.prompt}`).join('\n')}`
     : '';
