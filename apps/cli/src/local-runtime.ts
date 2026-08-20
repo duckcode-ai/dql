@@ -1109,6 +1109,47 @@ export function shouldSynthesizeAgentRunAnswer(
  * route-specific aggregation proof is authoritative for governed trust.
  * Missing proof remains blocked for legacy or malformed results.
  */
+/**
+ * Trust for ONE answer, by the same rule the single-answer path uses: a route
+ * label is not authority, and a semantic route earns `governed` only when its
+ * aggregation proof actually passed.
+ */
+export function trustStateForAgentAnswer(
+  answer: Pick<AgentAnswer, 'certification' | 'kind' | 'route' | 'aggregationSafetyProof'>,
+): AgentRunTrustState {
+  if (answer.certification === 'certified' || answer.kind === 'certified') return 'certified';
+  return semanticAnswerHasPassedAggregationProof(answer) ? 'governed' : 'review_required';
+}
+
+const TRUST_RANK: Record<string, number> = {
+  certified: 3,
+  governed: 2,
+  grounded: 1,
+  review_required: 0,
+};
+
+/**
+ * A compound answer is exactly as trustworthy as its WEAKEST successful child.
+ *
+ * The previous rule was `every child completed ? 'governed' : 'review_required'`,
+ * which stamped `governed` on a parent whose children were review-required
+ * generated SQL — completion is not proof. That is a governance violation and
+ * the worst possible failure for this product: the reader is told a number
+ * carries governed authority when nothing proved it.
+ *
+ * `certified` is deliberately NOT reachable here. Certified trust is granted
+ * only by executing the exact certified artifact; a parent that merely
+ * assembled certified children did not execute one, so it caps at `governed`.
+ */
+export function compoundTrustState(
+  childTrust: readonly AgentRunTrustState[],
+): AgentRunTrustState {
+  if (childTrust.length === 0) return 'review_required';
+  const weakest = childTrust.reduce((low, current) =>
+    (TRUST_RANK[current] ?? 0) < (TRUST_RANK[low] ?? 0) ? current : low);
+  return weakest === 'certified' ? 'governed' : weakest;
+}
+
 export function semanticAnswerHasPassedAggregationProof(
   governedAnswer: Pick<AgentAnswer, 'route' | 'aggregationSafetyProof'>,
 ): boolean {
@@ -3602,14 +3643,27 @@ function analyticalFailureSummary(
       const answerText = childResults.map(({ task, answer, error }) =>
         `${task.question}: ${error ?? answer?.answer ?? answer?.text ?? 'No accepted result was produced.'}`,
       ).join('\n\n');
+      const compoundTrust = compoundTrustState(
+        childResults
+          .filter(({ answer, error }) => !error && answer && answer.kind !== 'no_answer')
+          .map(({ answer }) => trustStateForAgentAnswer(answer!)),
+      );
       return {
         summary: completedCount === outcomes.length
           ? `Answered ${completedCount} independent analytical clauses.`
           : `Answered ${completedCount} of ${outcomes.length} analytical clauses; the remaining clauses need review.`,
         answer: answerText,
         status: completedCount === outcomes.length ? 'completed' : completedCount > 0 ? 'needs_review' : 'needs_clarification',
-        trustState: completedCount === outcomes.length ? 'governed' : 'review_required',
-        stopReason: completedCount === outcomes.length ? 'governed_semantic_answer' : 'human_review_required',
+        // The parent is only as trustworthy as its weakest SUCCESSFUL child.
+        // Completion is not proof: the previous rule stamped `governed` on a
+        // parent assembled from review-required generated SQL.
+        trustState: compoundTrust,
+        // The stop reason has to agree with the trust it reports. Claiming a
+        // governed semantic answer over generated children misrepresents the
+        // route as much as the trust label does.
+        stopReason: completedCount === outcomes.length && compoundTrust === 'governed'
+          ? 'governed_semantic_answer'
+          : 'human_review_required',
         artifacts: childResults.map(({ task, answer, error }) => agentRunArtifact('answer', `Task: ${task.question}`, {
           taskId: task.id,
           question: task.question,
