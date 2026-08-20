@@ -164,6 +164,14 @@ export function inferAnalyticalTurnKind(question: string): AnalyticalTurnKind {
   return 'aggregation';
 }
 
+/**
+ * `Regarding: "Mr. Matthew Meyer"` and friends — a short label, a colon, and a
+ * quoted value, with nothing else in the clause. Deliberately narrow: it must
+ * be the WHOLE clause and the value must be quoted, so an ordinary question
+ * that happens to contain a colon is untouched.
+ */
+const ANNOTATION_CLAUSE = /^\s*[A-Za-z][A-Za-z ]{0,24}:\s*["“'‘][^"”'’]*["”'’]\s*$/;
+
 export function splitAnalyticalTasks(question: string): string[] {
   // The separator belongs to the SPLIT, not to the clause. Carrying it through
   // produced a child task whose question was literally
@@ -172,9 +180,18 @@ export function splitAnalyticalTasks(question: string): string[] {
   // the task title.
   const leadingJunk = /^(?:[\s"'“”‘’,:;.\-]+|\b(?:then|and|also)\b)+/i;
   const trailingJunk = /[\s"'“”‘’,:;.\-]+$/;
-  const parts = question
+  const raw = question
     .split(/\s*(?:\?|;|\band then\b|\balso\b)\s*/i)
-    .flatMap((part) => part.split(/\s+\band\s+(?=(?:what|who|which|show|list|tell|give|how|why)\b)/i))
+    .flatMap((part) => part.split(/\s+\band\s+(?=(?:what|who|which|show|list|tell|give|how|why)\b)/i));
+  // A `Label: "value"` clause is an ANNOTATION, not a question. The composer
+  // appends `Regarding: "<selected row>"` when the reader follows up on
+  // something they clicked, and splitting on the `?` before it turned that
+  // referent into a task of its own — titled `Regarding: "Mr. Matthew Meyer`,
+  // which then "answered" by computing an unrelated maximum over the rows still
+  // on screen. Context says WHO the real task is about; it is never a task.
+  // Filtered before the junk strip, which would unbalance the quotes.
+  const asked = raw.filter((part) => !ANNOTATION_CLAUSE.test(part));
+  const parts = (asked.length > 0 ? asked : raw)
     .map((part) => part.replace(leadingJunk, '').replace(trailingJunk, '').trim())
     .filter(Boolean);
   return parts.length > 0 ? parts : [question.trim()];
