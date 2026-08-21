@@ -18,6 +18,7 @@ import type {
   ProviderDispatchEvent,
   ProviderPayloadRowShape,
   AgenticSqlExecutionCapabilityV1,
+  AnalyticalTaskDependencyBindingV1,
   NarrationIntegrityReceiptV1,
 } from '@duckcodeailabs/dql-agent';
 import type { DQLManifest, ProviderDispatchPhaseV1, ProviderEgressPurpose, ProviderEgressReceiptV1 } from '@duckcodeailabs/dql-core';
@@ -65,6 +66,8 @@ export interface AgentConversationContext {
   cascade?: CascadeAnswerResult;
   selectedEvidence?: unknown[];
   sourceSql?: string;
+  /** Server-derived compound parent binding; HTTP ingress strips client copies. */
+  analyticalTaskDependencyBinding?: AnalyticalTaskDependencyBindingV1;
   updatedAt?: string;
 }
 
@@ -169,6 +172,12 @@ export interface AgentRunRequest {
   reasoningEffort?: ReasoningEffort;
   /** Context/prompt depth for governed Ask AI. Research routes pass deep. */
   analysisDepth?: AnalysisDepth;
+  /**
+   * Server-resolved workflow mode. This is deliberately distinct from
+   * `analysisDepth`: choosing more thinking must not silently grant Research
+   * tools, Research dispatch budget, or result-row consent semantics.
+   */
+  orchestrationMode?: 'ask' | 'research';
   /** Explicit per-run Research consent; absent/false for every ordinary Ask and repair. */
   researchResultRowsOptIn?: boolean;
   /** Explicit Research-only permission for bounded semantic-member selection. */

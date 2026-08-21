@@ -36,6 +36,8 @@ let askRunCaptureWarning: typeof UnifiedAgentRunPanelModule.askRunCaptureWarning
 let askFailureOriginTyped: typeof UnifiedAgentRunPanelModule.askFailureOrigin;
 let askFailurePresentation: typeof UnifiedAgentRunPanelModule.ASK_FAILURE_PRESENTATION;
 let extractResult: typeof UnifiedAgentRunPanelModule.extractResult;
+let resolveComposerRequestedMode: typeof UnifiedAgentRunPanelModule.resolveComposerRequestedMode;
+let researchToolRowsConsentTitle: typeof UnifiedAgentRunPanelModule.RESEARCH_TOOL_ROWS_CONSENT_TITLE;
 
 beforeAll(async () => {
     vi.stubGlobal('window', { location: { origin: 'http://localhost' } });
@@ -73,9 +75,26 @@ beforeAll(async () => {
     askFailureOriginTyped = module.askFailureOrigin;
     askFailurePresentation = module.ASK_FAILURE_PRESENTATION;
     extractResult = module.extractResult;
+    resolveComposerRequestedMode = module.resolveComposerRequestedMode;
+    researchToolRowsConsentTitle = module.RESEARCH_TOOL_ROWS_CONSENT_TITLE;
 });
 
 describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
+
+  it('keeps explicit Research separate from high thinking and preserves one-shot actions', () => {
+    expect(resolveComposerRequestedMode({ initialMode: 'auto', researchMode: false })).toBe('auto');
+    expect(resolveComposerRequestedMode({ initialMode: 'auto', researchMode: true })).toBe('research');
+    expect(resolveComposerRequestedMode({ initialMode: 'research', researchMode: false })).toBe('ask');
+    expect(resolveComposerRequestedMode({
+      initialMode: 'auto', researchMode: true, pendingMode: 'block',
+    })).toBe('block');
+  });
+
+  it('describes Research tool-row consent separately from ordinary Ask narration rows', () => {
+    expect(researchToolRowsConsentTitle).toContain('200 redacted local-analysis tool rows');
+    expect(researchToolRowsConsentTitle).toContain('Ordinary Ask and Research narration may each use up to 20 redacted rows');
+    expect(researchToolRowsConsentTitle).toContain('Ask never sends result rows to tools');
+  });
 
   it('names the exact App page used by the added-result confirmation', () => {
     expect(appPinDestinationLabel('Customer Health', 'Executive overview')).toBe('Customer Health › Executive overview');

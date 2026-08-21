@@ -289,8 +289,23 @@ export function classifyConversationalTurn(
  * "top_customers by region", which is a real query. Together they identify a
  * question that wants an explanation, not an execution.
  */
-const DEFINITIONAL_FORM_RE =
-  /\b(?:what\s+(?:is|are|does|do)\b|define\b|definition\s+of\b|explain\b|describe\b|tell\s+me\s+about\b|meaning\s+of\b)/i;
+/**
+ * Wording that expressly asks for an explanation of a concept rather than its
+ * current analytical value.  A bare "what is" is intentionally excluded: in
+ * ordinary analytics language, "What is monthly revenue?" asks for the value
+ * of a metric and can have a compatible certified execution contract.
+ */
+const EXPLICIT_DEFINITIONAL_FORM_RE =
+  /\b(?:what\s+does\b[^?.!]{1,160}\bmean\b|define\b|definition(?:\s+of)?\b|explain\b|describe\b|tell\s+me\s+about\b|meaning\s+of\b|how\s+is\b[^?.!]{1,160}\bdefined\b)/i;
+
+/**
+ * A literal DQL/dbt-style identifier is still a reasonable definition request
+ * with a bare "what is" opener.  Keep this separate from natural-language
+ * metric wording so `what is monthly_revenue?` may explain an artifact while
+ * `What is monthly revenue?` reaches its certified execution path.
+ */
+const BARE_WHAT_IS_RE = /^\s*what\s+(?:is|are)\b/i;
+const FULLY_QUALIFIED_OBJECT_ID_RE = /^(?:[a-z][a-z0-9_-]*:){2,}[a-z0-9_./-]+$/i;
 
 /** Trailing verbs that turn a definitional opener back into a data request. */
 const DEFINITIONAL_EXECUTION_RE =
@@ -301,18 +316,30 @@ export function looksLikeDefinitionalAboutNamedObject(
   objectNames: readonly string[],
 ): boolean {
   const trimmed = question.trim();
-  if (!trimmed || !DEFINITIONAL_FORM_RE.test(trimmed)) return false;
+  const explicitDefinition = EXPLICIT_DEFINITIONAL_FORM_RE.test(trimmed);
+  const bareWhatIs = BARE_WHAT_IS_RE.test(trimmed);
+  if (!trimmed || (!explicitDefinition && !bareWhatIs)) return false;
   // "what is revenue by region" is a query wearing a definitional opener.
   if (DEFINITIONAL_EXECUTION_RE.test(trimmed)) return false;
   const lower = trimmed.toLowerCase();
   return objectNames.some((raw) => {
+    const rawId = String(raw).trim().toLowerCase();
     // Names arrive qualified (`dql:block:top_customers`); the leaf is what a
     // person types.
-    const leaf = String(raw).split(':').pop()?.trim().toLowerCase() ?? '';
+    const leaf = rawId.split(':').pop()?.trim() ?? '';
     if (leaf.length < 3) return false;
-    if (lower.includes(leaf)) return true;
     const spaced = leaf.replace(/[_.]+/g, ' ');
-    return spaced.length > 3 && lower.includes(spaced);
+    if (explicitDefinition) return lower.includes(leaf) || (spaced.length > 3 && lower.includes(spaced));
+    // A raw, fully-qualified object ID is unambiguously a request about the
+    // object, even when its leaf is a plain metric name such as `revenue`.
+    // This stays narrow: ordinary wording like "monthly revenue" does not
+    // contain the qualified identifier and remains eligible for execution.
+    if (FULLY_QUALIFIED_OBJECT_ID_RE.test(rawId) && lower.includes(rawId)) return true;
+    // A bare "what is" only takes the definition lane when the user wrote the
+    // identifier itself (rather than its words as an analytical metric). This
+    // preserves direct execution for a complete certified metric block while
+    // retaining the technical-artifact explanation path.
+    return /[_./-]/.test(leaf) && lower.includes(leaf);
   });
 }
 

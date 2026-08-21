@@ -78,6 +78,25 @@ export type ThreadItem =
   | { kind: 'user'; id: string; text: string }
   | { kind: 'run'; id: string; run: AgentRun };
 
+/**
+ * Research is an explicit workflow decision. Thinking depth remains an
+ * independent request setting, so selecting high effort cannot accidentally
+ * turn a normal Ask into a research run.
+ */
+export function resolveComposerRequestedMode(input: {
+  initialMode: AgentRunRequestedMode;
+  researchMode: boolean;
+  modeOverride?: AgentRunRequestedMode;
+  pendingMode?: AgentRunRequestedMode;
+}): AgentRunRequestedMode {
+  if (input.modeOverride) return input.modeOverride;
+  if (input.pendingMode) return input.pendingMode;
+  if (input.researchMode) return 'research';
+  // A dedicated Research surface starts selected, but can intentionally be
+  // changed back to ordinary Ask by its visible mode control.
+  return input.initialMode === 'research' ? 'ask' : input.initialMode;
+}
+
 /** Replace only the failed presentation; the immutable source remains in the run store. */
 export function replacePresentedAgentRun(items: ThreadItem[], sourceRunId: string, repairedRun: AgentRun): ThreadItem[] {
   return items.map((item) => item.kind === 'run' && item.run.id === sourceRunId
@@ -292,12 +311,19 @@ export function UnifiedAgentRunPanel({
   // The composer "thinking" selection, sticky across refreshes. `auto` defers to
   // the engine's shape-adaptive routing; the user can change it mid-conversation.
   const [thinkingMode, setThinkingMode] = useState<AgentThinkingMode>(() => readStoredThinkingMode());
+  const [researchMode, setResearchMode] = useState(initialMode === 'research');
   const [researchResultRowsOptIn, setResearchResultRowsOptIn] = useState(false);
   const [executionConnectionNames, setExecutionConnectionNames] = useState<string[]>([]);
   const [executionConnectionName, setExecutionConnectionName] = useState<string>();
   const changeThinkingMode = useCallback((mode: AgentThinkingMode) => {
     setThinkingMode(mode);
     try { window.localStorage.setItem(THINKING_MODE_STORAGE_KEY, mode); } catch { /* best-effort */ }
+  }, []);
+  const changeResearchMode = useCallback((enabled: boolean) => {
+    setResearchMode(enabled);
+    // Result rows are a one-run consent under Research only. Never retain it
+    // after the reader returns to Ask.
+    if (!enabled) setResearchResultRowsOptIn(false);
   }, []);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const lastInitialInputRef = useRef(initialInput);
@@ -558,7 +584,12 @@ export function UnifiedAgentRunPanel({
   ) => {
     const text = (textOverride ?? input).trim();
     if (!text || running) return;
-    const activeMode = modeOverride ?? pendingModeRef.current ?? initialMode;
+    const activeMode = resolveComposerRequestedMode({
+      initialMode,
+      researchMode,
+      modeOverride,
+      pendingMode: pendingModeRef.current,
+    });
     const resultRowsOptInForRun = activeMode === 'research' && researchResultRowsOptIn;
     // Consent is intentionally one-shot and never inherited by the next run.
     setResearchResultRowsOptIn(false);
@@ -929,11 +960,12 @@ export function UnifiedAgentRunPanel({
                 />
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px 10px 12px' }}>
                   <ThinkingModeControl t={t} value={thinkingMode} onChange={changeThinkingMode} />
-                  <ResearchRowsConsent
+                  <ResearchModeControl checked={researchMode} onChange={changeResearchMode} t={t} />
+                  {researchMode ? <ResearchRowsConsent
                     checked={researchResultRowsOptIn}
                     onChange={setResearchResultRowsOptIn}
                     t={t}
-                  />
+                  /> : null}
                   <AgentExecutionConnectionControl
                     names={executionConnectionNames}
                     value={executionConnectionName}
@@ -1105,11 +1137,12 @@ export function UnifiedAgentRunPanel({
               t={t}
             />
             <ThinkingModeControl t={t} value={thinkingMode} onChange={changeThinkingMode} />
-            <ResearchRowsConsent
+            <ResearchModeControl checked={researchMode} onChange={changeResearchMode} t={t} />
+            {researchMode ? <ResearchRowsConsent
               checked={researchResultRowsOptIn}
               onChange={setResearchResultRowsOptIn}
               t={t}
-            />
+            /> : null}
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
@@ -1204,6 +1237,8 @@ function findActiveAgentRun(threadId?: string): PendingAgentRun | undefined {
 }
 
 const THINKING_MODE_STORAGE_KEY = 'dql.agent.thinkingMode';
+/** Visible consent copy mirrors the provider egress boundary exactly. */
+export const RESEARCH_TOOL_ROWS_CONSENT_TITLE = 'One-run consent: enables up to 200 redacted local-analysis tool rows during explicit Research. Ordinary Ask and Research narration may each use up to 20 redacted rows under their separate bounded narration policy; Ask never sends result rows to tools.';
 export function selectAgentExecutionConnection(
   names: string[],
   defaultName?: string,
@@ -1212,6 +1247,41 @@ export function selectAgentExecutionConnection(
   if (preferredName && names.includes(preferredName)) return preferredName;
   if (defaultName && names.includes(defaultName)) return defaultName;
   return names[0];
+}
+
+function ResearchModeControl({
+  checked,
+  onChange,
+  t,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  t: Theme;
+}): JSX.Element {
+  return (
+    <button
+      type="button"
+      aria-pressed={checked}
+      aria-label="Research mode"
+      title="Research mode plans a bounded investigation and synthesizes the surrounding business context. Thinking effort is separate."
+      onClick={() => onChange(!checked)}
+      style={{
+        minHeight: 30,
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 5,
+        padding: '0 8px',
+        border: checked ? '1px solid var(--accent)' : '1px solid var(--border-default)',
+        borderRadius: 8,
+        background: checked ? 'var(--accent-dim)' : 'var(--bg-2)',
+        color: checked ? 'var(--accent-fg)' : t.textMuted,
+        fontSize: 10.5,
+        cursor: 'pointer',
+      }}
+    >
+      <FileSearch size={13} /> Research
+    </button>
+  );
 }
 
 function ResearchRowsConsent({
@@ -1225,7 +1295,7 @@ function ResearchRowsConsent({
 }): JSX.Element {
   return (
     <label
-      title="One-run consent: Research may send at most 20 redacted narration rows and 200 redacted local-analysis rows. Ask and repair always send zero rows."
+      title={RESEARCH_TOOL_ROWS_CONSENT_TITLE}
       style={{
         minHeight: 30,
         display: 'inline-flex',
@@ -1242,11 +1312,11 @@ function ResearchRowsConsent({
     >
       <input
         type="checkbox"
-        aria-label="Allow redacted result rows for this Research run"
+        aria-label="Allow redacted local-analysis tool rows for this Research run"
         checked={checked}
         onChange={(event) => onChange(event.target.checked)}
       />
-      Research rows (this run)
+      Research tool rows (this run)
     </label>
   );
 }

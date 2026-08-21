@@ -648,6 +648,10 @@ function canonicalToken(value: string): string {
 }
 
 function singularize(token: string): string {
+  // `gross` is an uninflected measure modifier, not a plural. Treating it as
+  // `gros` made a `gross_revenue` output look like an unexplained static scope
+  // and incorrectly demoted a complete certified monthly-revenue block.
+  if (token === 'gross') return token;
   if (token.endsWith('ies') && token.length > 4) return `${token.slice(0, -3)}y`;
   if (token.endsWith('ses') && token.length > 4) return token.slice(0, -2);
   if (token.endsWith('s') && token.length > 3) return token.slice(0, -1);

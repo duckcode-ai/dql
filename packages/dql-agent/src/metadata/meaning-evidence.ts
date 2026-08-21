@@ -785,16 +785,24 @@ export function applyContextPackCompatibility(
         const fit = certifiedFits.get(candidate.id);
         const unrequestedStaticScope = fit?.fit.reasons.some((reason) =>
           reason.startsWith('certified static scope is not requested:')) ?? false;
-        const exactAuthoredExample = fit?.action === 'certified_answer'
-          && pack.routeDecision.exactObjectKey === candidate.id
-          && fit.fit.reasons.includes('question matches a certified example');
+        // `certified_answer` is already the catalog's termination verdict: it
+        // binds the exact artifact to a high-confidence complete shape fit.
+        // An authored example remains one way to reach it, but it is not the
+        // only safe way.  Requiring literal example wording made a compatible
+        // `monthly_revenue` artifact lose to a semantic metric for the ordinary
+        // paraphrase "What is monthly revenue?".  Do not promote lexical
+        // relevance alone; require the catalog's executable fit verdict.
+        const completeCertifiedFit = fit?.action === 'certified_answer'
+          && (fit.fit.kind === 'exact' || fit.fit.kind === 'trim_safe')
+          && fit.fit.confidence === 'high';
         return {
           ...candidate,
           // Lexical equality to a block name/alias is useful retrieval signal,
-          // but it is not exact analytical authority. Only the selected block's
-          // authored exact-example fit may grant the router shortcut.
-          exactMatch: exactAuthoredExample,
-          ...(exactAuthoredExample
+          // but it is not exact analytical authority. The catalog's complete
+          // certified fit is the one host-owned exception and is still checked
+          // again when the immutable plan freezes.
+          exactMatch: completeCertifiedFit,
+          ...(completeCertifiedFit
             ? { analyticalFitClass: 'exact' as const }
             : { analyticalFitClass: undefined }),
           // A statically scoped certified artifact is not an alternative for a

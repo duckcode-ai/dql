@@ -23,6 +23,37 @@ function ranked(row: MetadataObject, rank: number, score: number): MeaningEviden
 }
 
 describe('AGT-010 metadata meaning evidence lanes', () => {
+  it('marks a catalog-proven complete certified fit as exact without requiring literal example wording', () => {
+    const evidence = {
+      candidates: [{
+        id: 'dql:block:monthly_revenue', kind: 'certified_block' as const,
+        trustTier: 'certified' as const, name: 'monthly_revenue', aliases: ['monthly revenue'],
+        relevanceScore: 0.91, matchReasons: ['monthly revenue'], compatibility: 'partial' as const,
+      }],
+    };
+    const pack = {
+      routeDecision: { exactObjectKey: 'dql:block:monthly_revenue' },
+      questionPlan: { timeTerms: ['month'], requestedShape: { measures: ['revenue'], dimensions: ['month'] } },
+      retrievalDiagnostics: { certifiedCandidateFits: [{
+        objectKey: 'dql:block:monthly_revenue', name: 'monthly_revenue',
+        applicabilityKind: 'safe_parameterized', applicabilityScore: 0.88, action: 'certified_answer',
+        fit: {
+          kind: 'exact', confidence: 'high', reasons: ['exact or trim-safe fit at high confidence'],
+          missingOutputs: [], missingDimensions: [], unsupportedFilters: [], topNAction: 'none', inferredContract: false,
+        },
+      }] },
+    };
+
+    const candidate = applyContextPackCompatibility(evidence, pack as never).candidates[0]!;
+
+    expect(candidate).toMatchObject({
+      id: 'dql:block:monthly_revenue',
+      compatibility: 'compatible',
+      exactMatch: true,
+      analyticalFitClass: 'exact',
+    });
+  });
+
   it('excludes unrequested certified static scope before resolution and canonicalizes a metric backing measure', () => {
     const revenueCapability = {
       metricId: 'semantic:metric:order_item.revenue',

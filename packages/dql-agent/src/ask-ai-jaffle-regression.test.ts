@@ -16,12 +16,14 @@ import type { AgentMessage, AgentProvider } from './providers/types.js';
 
 class ThrowingProvider implements AgentProvider {
   readonly name = 'openai' as const;
+  readonly calls: AgentMessage[][] = [];
 
   async available(): Promise<boolean> {
     return true;
   }
 
-  async generate(_messages: AgentMessage[]): Promise<string> {
+  async generate(messages: AgentMessage[]): Promise<string> {
+    this.calls.push(messages);
     throw new Error('Unexpected provider call in deterministic Ask AI regression');
   }
 }
@@ -596,6 +598,74 @@ describe('Ask AI jaffle-shop regression', () => {
       expect(result.sourceCertifiedBlock).toBe('top_customers');
       expect(result.kind).toBe('certified');
       expect(result.result?.columns).toEqual(['customer_name', 'lifetime_spend', 'order_count']);
+    } finally {
+      kg.close();
+    }
+  });
+
+  it('executes the complete Jaffle monthly-revenue block before a semantic fallback can freeze time (AGT-027)', async () => {
+    // This mirrors the Jaffle fixture's certified contract: the block answers
+    // monthly revenue directly, while `gross_revenue` is a generic output
+    // modifier rather than a business scope such as beverage or priority.
+    writeFileSync(join(projectRoot, 'blocks', 'monthly_revenue.dql'), `block "monthly_revenue" {
+  domain = "orders"
+  type = "custom"
+  status = "certified"
+  owner = "analytics@example.com"
+  description = "Monthly gross order revenue and order count. One row per calendar month."
+  tags = ["revenue", "trend", "growth"]
+  grain = "one row per calendar month"
+  entities = ["order"]
+  outputs = ["month", "gross_revenue", "order_count"]
+  dimensions = ["month"]
+  query = """
+    SELECT
+      strftime('%Y-%m-01', ordered_at) AS month,
+      SUM(product_price) AS gross_revenue,
+      COUNT(*) AS order_count
+    FROM order_items
+    GROUP BY 1
+    ORDER BY 1
+  """
+}`,'utf-8');
+    await reindexProject(projectRoot, { loadSkills: false });
+
+    const kg = new KGStore(defaultKgPath(projectRoot));
+    try {
+      const provider = new ThrowingProvider();
+      const question = 'What is monthly revenue?';
+      const contextPack = await buildLocalContextPack(projectRoot, { question, limit: 40 });
+
+      expect(contextPack.routeDecision).toMatchObject({
+        route: 'certified',
+        exactObjectKey: 'dql:block:monthly_revenue',
+        blockFit: { kind: 'exact', confidence: 'high' },
+      });
+      expect(contextPack.retrievalDiagnostics.certifiedCandidateFits).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          objectKey: 'dql:block:monthly_revenue',
+          action: 'certified_answer',
+          fit: expect.objectContaining({ kind: 'exact', confidence: 'high' }),
+        }),
+      ]));
+
+      const result = await answerBase({
+        question,
+        kg,
+        provider,
+        contextPack,
+        executeCertifiedBlock,
+        executeGeneratedSql,
+      });
+
+      expect(provider.calls).toHaveLength(0);
+      expect(result).toMatchObject({
+        kind: 'certified',
+        sourceCertifiedBlock: 'monthly_revenue',
+        certification: 'certified',
+      });
+      expect(result.result?.columns).toEqual(['month', 'gross_revenue', 'order_count']);
+      expect(result.result?.sql).toContain("strftime('%Y-%m-01', ordered_at)");
     } finally {
       kg.close();
     }

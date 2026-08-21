@@ -1520,8 +1520,12 @@ Use the finance model area.
     ), plan.contextPack);
     expect(evidence.candidates.find((candidate) => candidate.id === 'dql:block:Top 10 Goal Scorers')).toMatchObject({
       compatibility: 'compatible',
-      exactMatch: false,
-      analyticalFitClass: undefined,
+      // A named certified artifact routes directly only after the catalog has
+      // proved its complete certified fit. Keep this exactness contract beside
+      // the route assertion so a future lexical-name shortcut cannot silently
+      // regain certified execution authority.
+      exactMatch: true,
+      analyticalFitClass: 'exact',
     });
   });
 

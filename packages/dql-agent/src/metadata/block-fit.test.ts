@@ -104,6 +104,21 @@ describe('certified block fit', () => {
     expect(result.reasons).not.toEqual(expect.arrayContaining([expect.stringMatching(/scope is not requested/i)]));
   });
 
+  it('keeps gross as a generic revenue modifier, not an unrequested static scope', () => {
+    const block = certifiedBlock('monthly_revenue', {
+      grain: 'one row per calendar month',
+      declaredOutputs: ['month', 'gross_revenue', 'order_count'],
+      dimensions: ['month'],
+      description: 'Monthly gross order revenue and order count. One row per calendar month.',
+      sql: 'select date_trunc(\'month\', ordered_at) as month, sum(order_total) as gross_revenue, count(*) as order_count from orders group by 1',
+    });
+
+    const result = fit('What is monthly revenue?', block);
+
+    expect(result).toMatchObject({ kind: 'exact', confidence: 'high' });
+    expect(result.reasons).not.toEqual(expect.arrayContaining([expect.stringMatching(/static scope/i)]));
+  });
+
   it('rejects a high-overlap customer block for a product flow with different required outputs', () => {
     const block = certifiedBlock('top_beverage_customers', {
       grain: 'customer',

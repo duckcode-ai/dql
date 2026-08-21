@@ -735,16 +735,26 @@ function continueCascadeAfterIncompleteSelection(
   candidates: AgentEvidenceCandidate[],
   selected: AgentEvidenceCandidate,
 ): IntentDecision {
+  const selectedId = selected.qualifiedId ?? selected.id;
+  const message = `The selected governed meaning ${selectedId} does not prove the complete requested metric, dimension, filter, and grain tuple. DQL did not substitute a correlated metric or execute a different artifact.`;
   return {
     ...base,
-    action: 'answer',
-    confidence: 0.78,
-    reason: `The user selected ${selected.name}, but that evidence does not prove the complete requested metric, dimension, filter, and grain tuple. The selection is consumed once; continue through the governed semantic/SQL cascade without dropping any requested part.`,
+    action: 'block',
+    confidence: 1,
+    reason: message,
     source: 'heuristic',
     category: 'data_lookup',
     depth: 'quick',
     retrievalEvidence: retrievalTrace(evidence, candidates),
     requiresClarification: false,
+    terminalOutcome: {
+      kind: 'modeling_gap',
+      code: 'ANALYTICAL_MODELING_GAP',
+      message,
+      candidateIds: [selectedId],
+    },
+    resolvedAnalyticalPlan: undefined,
+    meaningResolution: undefined,
   };
 }
 
@@ -1662,8 +1672,59 @@ function deterministicPrePlanClarification(
         right.relevanceScore - left.relevanceScore || left.id.localeCompare(right.id))
       .slice(0, 3);
     if (alternatives.length === 0) {
-      if (!asksForRanking || hasExplicitRankingMetric) return undefined;
-      return bareRankingClarification(base, retrievalEvidence, request.question, evidence, candidates);
+      // Bare rankings need a measure choice, not a dimension gap. Retain the
+      // no-options escape hatch for BCM-like retrieval failures.
+      if (asksForRanking && !hasExplicitRankingMetric) {
+        return bareRankingClarification(base, retrievalEvidence, request.question, evidence, candidates);
+      }
+      // Parsed-intent hints can include inherited/default dimensions that the
+      // user never asked for. Only turn a missing field into a product-facing
+      // modeling gap when its wording is present in this turn; otherwise let
+      // bounded meaning resolution preserve its own ambiguity contract.
+      const normalizedQuestion = normalizeMetricPhrase(request.question);
+      if (!missingDimensions.every((dimension) => normalizedQuestion.includes(dimension))) return undefined;
+      const requestedLabel = missingDimensions.map((term) => `“${term}”`).join(' and ');
+      const message = `The requested dimension ${requestedLabel} is not modeled in the certified blocks, semantic model, dbt manifest, or runtime schema searched for this question. Add or map ${requestedLabel} before retrying.`;
+      return {
+        ...base,
+        action: 'block',
+        confidence: 1,
+        reason: message,
+        source: 'heuristic',
+        category: 'data_lookup',
+        depth: 'quick',
+        requiresClarification: false,
+        retrievalEvidence,
+        terminalOutcome: {
+          kind: 'modeling_gap',
+          code: 'ANALYTICAL_MODELING_GAP',
+          message,
+          candidateIds: [],
+        },
+        meaningResolution: {
+          interpretedQuestion: request.question,
+          questionType: questionTypeFromText(request.question),
+          selectedConceptIds: [],
+          queryIntent: {
+            ...defaultQueryIntent(evidence),
+            measures: evidence.parsedIntent?.measures ?? [],
+            dimensions: evidence.parsedIntent?.dimensions ?? [],
+            filters: evidence.parsedIntent?.filters ?? [],
+          },
+          rejectedCandidates: [],
+          confidence: 'low',
+          missingInformation: [message],
+          recommendedRoute: 'clarify',
+          compatibilityOutcome: 'modeling_gap',
+          compatibilityFailures: missingDimensions.map((dimension) => ({
+            code: 'MISSING_DIMENSION',
+            field: dimension,
+            message: `${dimension} is not modeled.`,
+            candidateIds: [],
+          })),
+        },
+        resolvedAnalyticalPlan: undefined,
+      };
     }
     const requestedLabel = missingDimensions.map((term) => `“${term}”`).join(' and ');
     const alternativeLabels = alternatives.map(renderCandidateChoice);

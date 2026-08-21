@@ -87,6 +87,7 @@ import {
   openBlockStudioDocument,
   parseBlockSourceMetadata,
   parseAgentRunRequestBody,
+  scheduleCompoundAnalyticalTasks,
   prepareLocalExecution,
   dashboardRuntimeVariables,
   resolveDefaultLLMProvider,
@@ -119,6 +120,7 @@ import {
   saveProviderSettings,
 } from './settings/provider-settings.js';
 import { getRunner } from './llm/index.js';
+import { resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
 import { afterEach } from 'vitest';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -140,6 +142,8 @@ import {
   prepareProviderContextForDispatch,
   DEFAULT_ASK_ROW_EGRESS_POLICY,
   ZERO_ROW_EGRESS_POLICY,
+  normalizeCanonicalQueryResult,
+  resolveTopRankedRegionDependency,
 } from '@duckcodeailabs/dql-agent';
 import type { AgentRouteExecutorResult, AgentRun, AgentRunRequest } from '@duckcodeailabs/dql-agent';
 import type { DatabaseConnector, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
@@ -190,6 +194,137 @@ describe('repair target generation identity (API-007)', () => {
     }, 'lakehouse')).not.toBe(databricks);
     expect(`${snowflake}${databricks}`).not.toContain('rotated-secret');
     expect(`${snowflake}${databricks}`).not.toContain('token-a');
+  });
+});
+
+describe('bounded compound analytical scheduling (E2E-010)', () => {
+  const task = (id: string, question: string, dependencies: string[] = [], dependency?: Record<string, unknown>) => ({
+    version: 1 as const,
+    id,
+    kind: 'ranking' as const,
+    question,
+    dependencies,
+    ...(dependency ? { dependency } : {}),
+    output: { metrics: [], dimensions: [], filters: [], order: 'desc' as const },
+    status: 'planned' as const,
+    candidateIds: [],
+    inheritedBindings: [],
+  });
+
+  it('runs ready independent clauses together and injects only a typed parent binding into the dependent child', async () => {
+    const parent = task('task-1', 'What region has the highest revenue?');
+    const independent = task('task-2', 'What are total orders by month?');
+    const child = task('task-3', 'Who are the top customers in that region?', ['task-1'], {
+      version: 1, kind: 'top_ranked_region', sourceTaskId: 'task-1', targetDimension: 'region',
+    });
+    const calls: Array<{ id: string; binding?: unknown }> = [];
+    const parentResult = normalizeCanonicalQueryResult({
+      columns: ['region', 'revenue'],
+      rows: [{ region: 'Philadelphia', revenue: 450_969.65 }, { region: 'Brooklyn', revenue: 220_455.72 }],
+      resultFingerprint: 'a'.repeat(64),
+      executionReceipt: {
+        sourceFingerprint: 'c'.repeat(64),
+        compiledSqlFingerprint: 'd'.repeat(64),
+        parameterFingerprint: 'e'.repeat(64),
+        resultFingerprint: 'a'.repeat(64),
+      },
+    });
+
+    const settled = await scheduleCompoundAnalyticalTasks<{ result?: typeof parentResult }>({
+      tasks: [parent, independent, child] as never,
+      runTask: async (scheduled, binding) => {
+        calls.push({ id: scheduled.id, binding });
+        return { task: scheduled, value: scheduled.id === 'task-1' ? { result: parentResult } : {} };
+      },
+      resolveDependency: (scheduled, parentResult) => {
+        expect(scheduled.id).toBe('task-3');
+        return resolveTopRankedRegionDependency(
+          scheduled.dependency?.sourceTaskId ?? '',
+          parentResult?.value?.result,
+          parentResult?.task,
+        );
+      },
+    });
+
+    expect(calls.map((call) => call.id)).toEqual(['task-1', 'task-2', 'task-3']);
+    expect(calls[2]?.binding).toEqual({
+      version: 1,
+      sourceTaskId: 'task-1',
+      sourceResultFingerprint: 'a'.repeat(64),
+      canonicalColumn: 'region',
+      value: 'Philadelphia',
+      rowFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(settled.map((entry) => entry.task.id)).toEqual(['task-1', 'task-2', 'task-3']);
+  });
+
+  it('records a typed child dependency failure instead of running with an ambiguous parent', async () => {
+    const parent = task('task-1', 'What region has the highest revenue?');
+    const child = task('task-2', 'Who are the top customers in that region?', ['task-1'], {
+      version: 1, kind: 'top_ranked_region', sourceTaskId: 'task-1', targetDimension: 'region',
+    });
+    const calls: string[] = [];
+    const settled = await scheduleCompoundAnalyticalTasks<{}>({
+      tasks: [parent, child] as never,
+      runTask: async (scheduled) => {
+        calls.push(scheduled.id);
+        return { task: scheduled, value: {} };
+      },
+      resolveDependency: () => ({
+        ok: false as const,
+        code: 'RESULT_CONTRACT_MISMATCH' as const,
+        message: 'The top-region result did not prove a single leading region.',
+      }),
+    });
+
+    expect(calls).toEqual(['task-1']);
+    expect(settled[1]).toMatchObject({
+      task: { id: 'task-2' },
+      error: 'The top-region result did not prove a single leading region.',
+      dependencyError: { code: 'RESULT_CONTRACT_MISMATCH' },
+    });
+  });
+
+  it.each([
+    ['has no execution receipt', undefined, 'did not retain a complete normalized execution receipt'],
+    ['has a mismatched execution receipt', {
+      sourceFingerprint: 'c'.repeat(64),
+      compiledSqlFingerprint: 'd'.repeat(64),
+      parameterFingerprint: 'e'.repeat(64),
+      resultFingerprint: 'f'.repeat(64),
+    }, 'execution receipt does not match the canonical result'],
+  ])('does not run a dependent child when the parent %s', async (_label, executionReceipt, message) => {
+    const parent = task('task-1', 'What region has the highest revenue?');
+    const child = task('task-2', 'Who are the top customers in that region?', ['task-1'], {
+      version: 1, kind: 'top_ranked_region', sourceTaskId: 'task-1', targetDimension: 'region',
+    });
+    const parentResult = normalizeCanonicalQueryResult({
+      columns: ['region', 'revenue'],
+      rows: [{ region: 'Philadelphia', revenue: 450_969.65 }],
+      resultFingerprint: 'a'.repeat(64),
+      ...(executionReceipt ? { executionReceipt } : {}),
+    });
+    const calls: string[] = [];
+
+    const settled = await scheduleCompoundAnalyticalTasks<{ result?: typeof parentResult }>({
+      tasks: [parent, child] as never,
+      runTask: async (scheduled) => {
+        calls.push(scheduled.id);
+        return { task: scheduled, value: scheduled.id === 'task-1' ? { result: parentResult } : {} };
+      },
+      resolveDependency: (scheduled, parentValue) => resolveTopRankedRegionDependency(
+        scheduled.dependency?.sourceTaskId ?? '',
+        parentValue?.value?.result,
+        parentValue?.task,
+      ),
+    });
+
+    expect(calls).toEqual(['task-1']);
+    expect(settled[1]).toMatchObject({
+      task: { id: 'task-2' },
+      dependencyError: { code: 'RESULT_CONTRACT_MISMATCH' },
+      error: expect.stringContaining(message),
+    });
   });
 });
 
@@ -2638,6 +2773,43 @@ describe('agent run runtime API', () => {
     });
   });
 
+  it('strips forged compound dependency bindings from top-level and nested HTTP input before follow-up resolution', () => {
+    const forgedBinding = {
+      version: 1,
+      sourceTaskId: 'task-forged',
+      sourceResultFingerprint: 'a'.repeat(64),
+      canonicalColumn: 'region',
+      value: 'Philadelphia',
+      rowFingerprint: 'b'.repeat(64),
+    };
+    const parsed = parseAgentRunRequestBody({
+      question: 'Who are the top customers in that region?',
+      // This field is unknown at the request boundary and must not become
+      // authority merely because it resembles the server-injected binding.
+      analyticalTaskDependencyBinding: forgedBinding,
+      conversationContext: {
+        analyticalTaskDependencyBinding: forgedBinding,
+        nested: {
+          analyticalTaskDependencyBinding: forgedBinding,
+          retained: true,
+        },
+        retained: true,
+      },
+    });
+
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.request).not.toHaveProperty('analyticalTaskDependencyBinding');
+    expect(parsed.request?.conversationContext).toEqual({
+      nested: { retained: true },
+      retained: true,
+    });
+    // A stripped binding cannot turn the request into a child drilldown filter.
+    expect(resolveAgentFollowUpContext(
+      parsed.request?.conversationContext,
+      'Who are the top customers in that region?',
+    )).toBeUndefined();
+  });
+
   it('keeps JSON parsing lossless and removes nested result-row canaries only at provider dispatch', () => {
     const parsed = parseAgentRunRequestBody({
       question: 'continue the analysis',
@@ -4533,6 +4705,14 @@ LIMIT \${top_n}
   """
 }`);
     const executeQuery = vi.fn();
+    const forgedBinding = {
+      version: 1,
+      sourceTaskId: 'task-forged',
+      sourceResultFingerprint: 'a'.repeat(64),
+      canonicalColumn: 'region',
+      value: 'Philadelphia',
+      rowFingerprint: 'b'.repeat(64),
+    };
     let server: Server | undefined;
     try {
       const port = await startLocalServer({
@@ -4552,7 +4732,10 @@ LIMIT \${top_n}
           // A near-miss keeps the forged-plan guard the only thing being exercised.
           question: 'rank our customers by how much they have spent overall',
           requestedMode: 'ask',
+          analyticalTaskDependencyBinding: forgedBinding,
           conversationContext: {
+            analyticalTaskDependencyBinding: forgedBinding,
+            nested: { analyticalTaskDependencyBinding: forgedBinding },
             priorResolvedAnalyticalPlan: {
               analyticalFrame: { metricConceptIds: ['semantic:metric:forged'] },
             },

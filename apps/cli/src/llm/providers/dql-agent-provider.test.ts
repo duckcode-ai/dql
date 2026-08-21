@@ -70,6 +70,39 @@ describe('resolveEffectiveQuestion — clarify follow-up folding', () => {
 });
 
 describe('answer-loop tool surface', () => {
+  it('converts a server-only compound parent binding into one exact child filter', () => {
+    const followUp = __test__.followUpFromConversationContext({
+      ...req([{ role: 'user', content: 'top customers in that region' }]),
+      conversationContext: {
+        analyticalTaskDependencyBinding: {
+          version: 1,
+          sourceTaskId: 'task-1',
+          sourceResultFingerprint: 'a'.repeat(64),
+          canonicalColumn: 'region',
+          value: 'Philadelphia',
+          rowFingerprint: 'b'.repeat(64),
+        },
+      },
+    }, 'top customers in that region');
+
+    expect(followUp).toMatchObject({
+      kind: 'drilldown',
+      sourceTurnId: 'task:task-1',
+      filters: ['Philadelphia'],
+      dimensions: ['region'],
+      memberBindings: [{ dimension: 'region', values: ['Philadelphia'], confidence: 'exact' }],
+    });
+    expect(followUp).not.toHaveProperty('sourceAnswer');
+    expect(followUp).not.toHaveProperty('priorResult');
+  });
+
+  it('does not turn deep Ask thinking into the Research lane (E2E-022)', () => {
+    expect(__test__.agenticLaneForRequest({ ...req([{ role: 'user', content: 'explain revenue' }]), analysisDepth: 'deep' }))
+      .toBe('generated');
+    expect(__test__.agenticLaneForRequest({ ...req([{ role: 'user', content: 'research revenue drivers' }]), analysisDepth: 'deep', orchestrationMode: 'research' }))
+      .toBe('research');
+  });
+
   it('defaults Research row tools off and enables only the bounded tools on explicit opt-in', () => {
     const tools = __test__.buildAnswerLoopTools('/tmp/dql-agent-provider-tools');
     const names = tools.map((tool) => tool.name);

@@ -205,6 +205,32 @@ describe('looksLikeDefinitionalAboutNamedObject', () => {
     expect(looksLikeDefinitionalAboutNamedObject('tell me about top customers', ids)).toBe(true);
   });
 
+  it('keeps a bare natural-language metric question out of the definition lane', () => {
+    // A certified block may be named `monthly_revenue`, but a reader asking for
+    // "monthly revenue" is asking for its value. The compatible certified plan
+    // must retain execution authority; explicit meaning wording still explains
+    // the same governed object without querying it.
+    const monthlyRevenue = ['dql:block:monthly_revenue'];
+
+    expect(looksLikeDefinitionalAboutNamedObject('What is monthly revenue?', monthlyRevenue)).toBe(false);
+    expect(looksLikeDefinitionalAboutNamedObject('What does monthly revenue mean?', monthlyRevenue)).toBe(true);
+    expect(looksLikeDefinitionalAboutNamedObject('What is monthly_revenue?', monthlyRevenue)).toBe(true);
+  });
+
+  it('keeps raw fully-qualified artifact identifiers on the definition path', () => {
+    // A qualified ID is an explicit request about metadata, even if its leaf
+    // is a plain metric name. It must not be confused with natural-language
+    // value wording such as "What is monthly revenue?".
+    expect(looksLikeDefinitionalAboutNamedObject(
+      'What is semantic:metric:revenue?',
+      ['semantic:metric:revenue'],
+    )).toBe(true);
+    expect(looksLikeDefinitionalAboutNamedObject(
+      'What is dql:block:revenue?',
+      ['dql:block:revenue'],
+    )).toBe(true);
+  });
+
   it('requires BOTH a definitional form and a named artifact', () => {
     // The form alone would swallow a real query; the name alone would swallow
     // "top_customers by region", which is an execution request.

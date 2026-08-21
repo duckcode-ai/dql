@@ -410,9 +410,9 @@ function valueLookupEnabled(projectRoot: string): boolean {
 /**
  * Which migration lane this turn belongs to.
  *
- * Research is identified by `analysisDepth === 'deep'`, matching how `isResearch`
- * is already derived a few lines below — this request type carries no
- * `requestedMode` (that lives on the engine's own request).
+ * Research is identified by the server-resolved `orchestrationMode`, not by
+ * `analysisDepth`. A reader can ask Ask AI to think deeply without opting into
+ * the Research workflow, its wider dispatch budget, or any row-bearing tools.
  *
  * Deliberately coarse: the seam only needs to know which bucket a turn falls in
  * so a lane can be enabled independently. The fine-grained triage between
@@ -420,7 +420,7 @@ function valueLookupEnabled(projectRoot: string): boolean {
  * retrieval evidence lives.
  */
 function agenticLaneForRequest(req: AgentRunRequest): AgenticLane {
-  return req.analysisDepth === 'deep' ? 'research' : 'generated';
+  return req.orchestrationMode === 'research' ? 'research' : 'generated';
 }
 
 export function applyEvalCassette(provider: AgentProvider): AgentProvider {
@@ -454,7 +454,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
     async run(req, emit, signal) {
       const spec = SPECS[id];
       const rawProvider = applyEvalCassette(providerOverride ?? spec.create(req.projectRoot));
-      const isResearch = req.analysisDepth === 'deep';
+      const isResearch = req.orchestrationMode === 'research';
       const maxProviderDispatches = isResearch ? 8 : 4;
       const researchRowsOptIn = isResearch && req.researchResultRowsOptIn === true;
       const sharedDispatchEvidence = req.providerDispatchEvidenceSink;
@@ -997,7 +997,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             sqlExecutions,
             repairs: result.analysisPlan?.repairAttempts ?? 0,
           };
-          if (req.analysisDepth === 'deep' && !providerEgressReceipts.some((receipt) => receipt.purpose === 'research_tool')) {
+          if (isResearch && !providerEgressReceipts.some((receipt) => receipt.purpose === 'research_tool')) {
             providerEgressReceipts.push(createProviderEgressReceipt({
               purpose: 'research_tool',
               provider: provider.name,
@@ -1466,6 +1466,28 @@ function resolveAgentFollowUpContextRaw(
 ): AgentFollowUpContext | undefined {
   const context = rawContext as AgentRunRequest['conversationContext'];
   if (!context) return undefined;
+  const taskDependency = analyticalTaskDependencyBindingFromContext(context);
+  // A compound child receives exactly one server-computed parent value plus
+  // result/row proofs. Do not replay parent prose, SQL, or result rows into the
+  // child; its normal governed retrieval and immutable-plan checks still run.
+  if (taskDependency) {
+    return {
+      kind: 'drilldown',
+      sourceTurnId: `task:${taskDependency.sourceTaskId}`,
+      filters: [taskDependency.value],
+      dimensions: [taskDependency.canonicalColumn],
+      priorResultColumns: [taskDependency.canonicalColumn],
+      priorResultValues: { [taskDependency.canonicalColumn]: [taskDependency.value] },
+      memberBindings: [{
+        dimension: taskDependency.canonicalColumn,
+        values: [taskDependency.value],
+        source: 'prior_result',
+        confidence: 'exact',
+        sourceTurnId: `task:${taskDependency.sourceTaskId}`,
+      }],
+      resolvedReferences: [`${taskDependency.canonicalColumn}: ${taskDependency.value}`],
+    };
+  }
   const turns = conversationTurnsFromContext(context);
   const activeTurn = activeConversationTurn(context, turns, question);
   const activeResult = activeTurn?.result && typeof activeTurn.result === 'object' && !Array.isArray(activeTurn.result)
@@ -1581,6 +1603,26 @@ function resolveAgentFollowUpContextRaw(
     // comparison deliberately drops the prior contract, so skip it there too.
     priorResult: relativeComparison ? undefined : priorResultDataFromTurn(activeResult, priorResultColumns),
   };
+}
+
+function analyticalTaskDependencyBindingFromContext(context: AgentRunRequest['conversationContext']): {
+  sourceTaskId: string;
+  sourceResultFingerprint: string;
+  canonicalColumn: string;
+  value: string;
+  rowFingerprint: string;
+} | undefined {
+  const raw = cleanRecord((context as Record<string, unknown>).analyticalTaskDependencyBinding);
+  if (!raw || raw.version !== 1) return undefined;
+  const sourceTaskId = cleanOptionalString(raw.sourceTaskId);
+  const sourceResultFingerprint = cleanOptionalString(raw.sourceResultFingerprint)?.toLowerCase();
+  const canonicalColumn = cleanOptionalString(raw.canonicalColumn);
+  const value = cleanOptionalString(raw.value);
+  const rowFingerprint = cleanOptionalString(raw.rowFingerprint)?.toLowerCase();
+  if (!sourceTaskId || !canonicalColumn || !value
+    || !/^[a-f0-9]{64}$/.test(sourceResultFingerprint ?? '')
+    || !/^[a-f0-9]{64}$/.test(rowFingerprint ?? '')) return undefined;
+  return { sourceTaskId, sourceResultFingerprint: sourceResultFingerprint!, canonicalColumn, value, rowFingerprint: rowFingerprint! };
 }
 
 /** Build the bounded prior-result rows (aligned to columns) for cross-result
@@ -2213,6 +2255,7 @@ function normalizePriorValueDimension(value: string): string {
 }
 
 export const __test__ = {
+  agenticLaneForRequest,
   applyTopicShiftGuard,
   isDrilldownFollowUp,
   buildAnswerLoopTools,

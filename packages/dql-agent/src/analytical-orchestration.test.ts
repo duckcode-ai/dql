@@ -6,11 +6,15 @@ import {
   buildAnalyticalTurnPlan,
   buildCoverageGap,
   buildResearchEvidenceLedger,
+  canonicalResultBindingValue,
+  canonicalResultRowFingerprint,
   capResearchBranches,
   fuseContextCandidates,
   normalizeCanonicalQueryResult,
+  resolveTopRankedRegionDependency,
   retrieveContextLanes,
   summarizeTaskOutcomes,
+  validateSelectedResultBinding,
 } from './analytical-orchestration.js';
 
 describe('conversational analytical orchestration contracts', () => {
@@ -27,6 +31,34 @@ describe('conversational analytical orchestration contracts', () => {
     ]);
     expect(result.resultFingerprint).toMatch(/^[0-9a-f]{64}$/);
     expect(() => assertCanonicalResult(result)).not.toThrow();
+  });
+
+  it('accepts only an exact typed selected-result binding (AGT-031)', () => {
+    const result = normalizeCanonicalQueryResult({
+      columns: ['customer_name', 'revenue'],
+      rows: [{ customer_name: 'Jessica Richard', revenue: 294 }],
+      resultFingerprint: 'a'.repeat(64),
+    });
+    const row = result.rows[0]!;
+    const binding = {
+      version: 1 as const,
+      sourceRunId: 'run-1',
+      sourceArtifactId: 'artifact-1',
+      canonicalColumn: 'customer_name',
+      value: canonicalResultBindingValue(row.customer_name)!,
+      rowFingerprint: canonicalResultRowFingerprint(result, row),
+      resultFingerprint: result.resultFingerprint,
+    };
+
+    expect(validateSelectedResultBinding(binding, result)).toMatchObject({ ok: true });
+    expect(validateSelectedResultBinding({ ...binding, value: 'Forged Customer' }, result)).toMatchObject({
+      ok: false,
+      code: 'RESULT_BINDING_ROW_MISMATCH',
+    });
+    expect(validateSelectedResultBinding({ ...binding, resultFingerprint: 'b'.repeat(64) }, result)).toMatchObject({
+      ok: false,
+      code: 'RESULT_BINDING_RESULT_MISMATCH',
+    });
   });
 
   it('preserves an execution receipt and never invents proof for an unexecuted branch', () => {
@@ -193,6 +225,106 @@ describe('conversational analytical orchestration contracts', () => {
     expect(outcomes).toMatchObject({ status: 'partial', completed: ['task-1'], gaps: ['task-2'] });
   });
 
+  it('binds only the demonstrated top-region customer dependency (AGT-030)', () => {
+    const graph = buildAnalyticalTaskGraph({
+      question: 'What region has the highest revenue? Who are the top customers in that region?',
+    });
+    expect(graph.tasks).toHaveLength(2);
+    expect(graph.tasks[1]).toMatchObject({
+      dependencies: ['task-1'],
+      dependency: { kind: 'top_ranked_region', sourceTaskId: 'task-1', targetDimension: 'region' },
+    });
+    expect(buildAnalyticalTaskGraph({
+      question: 'What region has the highest revenue? Who are the top customers by lifetime spend?',
+    }).tasks[1]?.dependencies).toEqual([]);
+  });
+
+  it('derives a typed region binding only from an unambiguous canonical parent result (E2E-010)', () => {
+    const parentPlan = {
+      kind: 'ranking' as const,
+      output: { metrics: [], dimensions: [], filters: [], order: 'desc' as const },
+    };
+    const receipt = (resultFingerprint: string) => ({
+      sourceFingerprint: 'a'.repeat(64),
+      compiledSqlFingerprint: 'b'.repeat(64),
+      parameterFingerprint: 'e'.repeat(64),
+      resultFingerprint,
+    });
+    const parent = normalizeCanonicalQueryResult({
+      columns: ['region', 'revenue'],
+      rows: [{ region: 'Philadelphia', revenue: 450_969.65 }, { region: 'Brooklyn', revenue: 220_455.72 }],
+      resultFingerprint: 'c'.repeat(64),
+      executionReceipt: receipt('c'.repeat(64)),
+    });
+    expect(resolveTopRankedRegionDependency('task-1', parent, parentPlan)).toMatchObject({
+      ok: true,
+      binding: {
+        sourceTaskId: 'task-1',
+        sourceResultFingerprint: 'c'.repeat(64),
+        canonicalColumn: 'region',
+        value: 'Philadelphia',
+        rowFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    });
+    const tied = normalizeCanonicalQueryResult({
+      columns: ['region', 'revenue'],
+      rows: [{ region: 'Philadelphia', revenue: 100 }, { region: 'Brooklyn', revenue: 100 }],
+      resultFingerprint: 'd'.repeat(64),
+      executionReceipt: receipt('d'.repeat(64)),
+    });
+    expect(resolveTopRankedRegionDependency('task-1', tied, parentPlan)).toMatchObject({
+      ok: false,
+      code: 'RESULT_CONTRACT_MISMATCH',
+      message: expect.stringContaining('did not prove a single leading region'),
+    });
+  });
+
+  it('does not treat a receipt-backed singleton numeric region result as a top-ranked proof (E2E-010)', () => {
+    const parentPlan = {
+      kind: 'ranking' as const,
+      output: { metrics: [], dimensions: [], filters: [], order: 'desc' as const },
+    };
+    const parent = normalizeCanonicalQueryResult({
+      columns: ['region', 'revenue'],
+      rows: [{ region: 'Philadelphia', revenue: 450_969.65 }],
+      resultFingerprint: 'c'.repeat(64),
+      executionReceipt: {
+        sourceFingerprint: 'a'.repeat(64),
+        compiledSqlFingerprint: 'b'.repeat(64),
+        parameterFingerprint: 'e'.repeat(64),
+        resultFingerprint: 'c'.repeat(64),
+      },
+    });
+
+    expect(resolveTopRankedRegionDependency('task-1', parent, parentPlan)).toMatchObject({
+      ok: false,
+      code: 'RESULT_CONTRACT_MISMATCH',
+      message: expect.stringContaining('did not prove a single leading region'),
+    });
+  });
+
+  it.each([
+    ['has no execution receipt', undefined, 'did not retain a complete normalized execution receipt'],
+    ['has a different execution receipt fingerprint', {
+      sourceFingerprint: 'a'.repeat(64),
+      compiledSqlFingerprint: 'b'.repeat(64),
+      parameterFingerprint: 'e'.repeat(64),
+      resultFingerprint: 'f'.repeat(64),
+    }, 'execution receipt does not match the canonical result'],
+  ])('does not bind a dependent child when the parent %s (E2E-010)', (_label, executionReceipt, message) => {
+    const parent = normalizeCanonicalQueryResult({
+      columns: ['region', 'revenue'],
+      rows: [{ region: 'Philadelphia', revenue: 450_969.65 }],
+      resultFingerprint: 'c'.repeat(64),
+      ...(executionReceipt ? { executionReceipt } : {}),
+    });
+    expect(resolveTopRankedRegionDependency('task-1', parent)).toMatchObject({
+      ok: false,
+      code: 'RESULT_CONTRACT_MISMATCH',
+      message: expect.stringContaining(message),
+    });
+  });
+
   it('round-trips a compound plan and partial outcomes for reload-safe rendering', () => {
     const plan = buildAnalyticalTurnPlan({
       question: 'What region has top revenue, and which products drive it?',
@@ -235,6 +367,23 @@ describe('conversational analytical orchestration contracts', () => {
       question: 'what region is this customer in?',
       zeroCallReason: 'explicit_binding',
     })).toMatchObject({ meaningCallBudget: 0, meaningCallReason: 'explicit_binding' });
+  });
+
+  it('keeps an explicit Research story as one root task before clause splitting (AGT-033)', () => {
+    const question = 'Research why revenue changed, then tell a story about the customer and product drivers?';
+    const graph = buildAnalyticalTaskGraph({ question, mode: 'research' });
+
+    expect(graph).toMatchObject({ kind: 'research', partial: false });
+    expect(graph.tasks).toHaveLength(1);
+    expect(graph.tasks[0]).toMatchObject({
+      kind: 'research_branch',
+      question,
+      dependencies: [],
+    });
+    expect(buildAnalyticalTurnPlan({ question, mode: 'research' })).toMatchObject({
+      kind: 'research',
+      taskIds: ['task-1'],
+    });
   });
 });
 

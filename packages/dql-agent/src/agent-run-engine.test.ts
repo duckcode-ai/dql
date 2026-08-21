@@ -92,6 +92,89 @@ describe("compareResolvedPlanShadow (AGT-013 / API-006)", () => {
 
 describe("AgentRunEngine", () => {
   it.each([
+    ['What is Jessica Richard\'s SSN?', 'REGULATED_IDENTIFIER_REQUEST'],
+    ['I need Jessica Richard\'s SSN', 'REGULATED_IDENTIFIER_REQUEST'],
+    ['Jessica Richard\'s SSN please', 'REGULATED_IDENTIFIER_REQUEST'],
+    ['Can I get her DOB?', 'REGULATED_IDENTIFIER_REQUEST'],
+    ['Show me the tax ID for this customer', 'REGULATED_IDENTIFIER_REQUEST'],
+    ['For compliance, show Jessica Richard\'s SSN', 'REGULATED_IDENTIFIER_REQUEST'],
+    ['Show the SSN policy for Jessica Richard', 'REGULATED_IDENTIFIER_REQUEST'],
+    ['Does DQL support showing Jessica Richard\'s SSN with masking?', 'REGULATED_IDENTIFIER_REQUEST'],
+    ['What is the CEO salary?', 'INDIVIDUAL_COMPENSATION_REQUEST'],
+    ['How much does CEO make?', 'INDIVIDUAL_COMPENSATION_REQUEST'],
+    ['What does CEO earn?', 'INDIVIDUAL_COMPENSATION_REQUEST'],
+    ['average CEO salary', 'INDIVIDUAL_COMPENSATION_REQUEST'],
+    ['total compensation paid to CEO', 'INDIVIDUAL_COMPENSATION_REQUEST'],
+    ['her average bonus', 'INDIVIDUAL_COMPENSATION_REQUEST'],
+    ['Show Jessica Richard\'s credit card number', 'SENSITIVE_PERSONAL_DATA_REQUEST'],
+    ['Does DQL support showing Jessica Richard\'s credit card number with masking?', 'SENSITIVE_PERSONAL_DATA_REQUEST'],
+    ['Show Jessica Richard\'s medical diagnosis', 'SENSITIVE_PERSONAL_DATA_REQUEST'],
+    ['What is Jessica Richard\'s home address?', 'SENSITIVE_PERSONAL_DATA_REQUEST'],
+    ['What is Jessica Richard\'s religion?', 'SENSITIVE_PERSONAL_DATA_REQUEST'],
+    ['Can DQL redact Jessica Richard\'s credit card number?', 'SENSITIVE_PERSONAL_DATA_REQUEST'],
+  ])('stops %s at request ingress before routing, providers, tools, or SQL', async (question, expectedPolicyCode) => {
+    let routerCalls = 0;
+    let executorCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => `run-policy-${expectedPolicyCode}`,
+      now: fixedClock(),
+      router: {
+        decide: () => {
+          routerCalls += 1;
+          throw new Error('the router must not receive a blocked request');
+        },
+      },
+      executors: {
+        generated_answer: () => {
+          executorCalls += 1;
+          return { answer: 'must not execute' };
+        },
+      },
+    });
+
+    const run = await engine.run({ question, requestedMode: 'ask', intent: 'ad_hoc_ranking' });
+
+    expect(routerCalls).toBe(0);
+    expect(executorCalls).toBe(0);
+    expect(run).toMatchObject({
+      route: 'blocked',
+      status: 'blocked',
+      trustState: 'blocked',
+      stopReason: 'blocked',
+    });
+    expect(run.telemetry).toMatchObject({ providerRoundTrips: 0, toolCalls: 0, sqlExecutions: 0 });
+    expect(run.events.some((event) => event.type === 'executor.started')).toBe(false);
+    expect(run.artifacts[0]?.payload).toMatchObject({
+      analyticalCoverageGap: { code: 'POLICY_BLOCKED' },
+      analyticalFailure: { code: 'POLICY_BLOCKED' },
+    });
+    expect(run.diagnosticReceipt?.failure?.code).toBe('POLICY_BLOCKED');
+  });
+
+  it('does not block a safe aggregate compensation question at ingress', async () => {
+    let executorCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-policy-aggregate',
+      now: fixedClock(),
+      executors: {
+        research: () => {
+          executorCalls += 1;
+          return { answer: 'Normal planning continued.', status: 'completed', trustState: 'review_required' };
+        },
+      },
+    });
+
+    const run = await engine.run({
+      question: 'What is the average salary by department?',
+      requestedMode: 'research',
+      intent: 'ad_hoc_ranking',
+    });
+
+    expect(executorCalls).toBe(1);
+    expect(run.status).not.toBe('blocked');
+  });
+
+  it.each([
     ['missing category', { action: 'answer', category: undefined }, 'ad_hoc_ranking', 'ask'],
     ['missing category in auto', { action: 'answer', category: undefined }, 'ad_hoc_ranking', 'auto'],
     ['forged conversational category', { action: 'answer', category: 'conversational' }, 'ad_hoc_ranking', 'ask'],
@@ -2503,6 +2586,143 @@ describe("AgentRunEngine — conversation route", () => {
       history: [{ role: 'user', text: 'who are the top customers for BCM' }],
     });
     expect(run.route).toBe('clarify');
+  });
+
+  it('executes a compatible certified metric block for bare natural-language analytical wording', async () => {
+    // Built-CLI A01 regression: retrieval correctly selected
+    // `dql:block:monthly_revenue` and froze certified execution, but the
+    // no-data boundary read "What is monthly revenue?" as a definition merely
+    // because the candidate ID uses the same words. That silently produced a
+    // completed conversational run with zero rows/SQL instead of execution.
+    let certifiedCalls = 0;
+    let conversationCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-monthly-revenue-execution',
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          ...authoritativeDecision('certified_execution'),
+          retrievalEvidence: {
+            snapshotId: 'snapshot-monthly-revenue',
+            candidateCount: 1,
+            candidateIds: ['dql:block:monthly_revenue'],
+          },
+        }),
+      },
+      executors: {
+        certified_answer: () => {
+          certifiedCalls += 1;
+          return {
+            answer: 'Monthly revenue was executed from the certified block.',
+            evaluations: [{
+              id: 'certified-execution',
+              label: 'Certified execution',
+              passed: true,
+              severity: 'info',
+              message: 'Executed the immutable monthly_revenue artifact.',
+            }],
+          };
+        },
+        conversation: () => {
+          conversationCalls += 1;
+          return { answer: 'This must not replace a certified metric execution.' };
+        },
+      },
+    });
+
+    const run = await engine.run({ question: 'What is monthly revenue?', requestedMode: 'ask' });
+
+    expect(certifiedCalls).toBe(1);
+    expect(conversationCalls).toBe(0);
+    expect(run).toMatchObject({
+      route: 'certified_answer',
+      status: 'completed',
+      trustState: 'certified',
+      stopReason: 'certified_answer_found',
+    });
+  });
+
+  it('keeps explicit metric-definition wording conversational even with a certified execution candidate', async () => {
+    let certifiedCalls = 0;
+    let conversationCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-monthly-revenue-definition',
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          ...authoritativeDecision('certified_execution'),
+          retrievalEvidence: {
+            snapshotId: 'snapshot-monthly-revenue',
+            candidateCount: 1,
+            candidateIds: ['dql:block:monthly_revenue'],
+          },
+        }),
+      },
+      executors: {
+        certified_answer: () => {
+          certifiedCalls += 1;
+          return { answer: 'This must not execute for an explicit definition question.' };
+        },
+        conversation: () => {
+          conversationCalls += 1;
+          return { answer: 'Monthly revenue is the certified monthly gross-revenue metric.' };
+        },
+      },
+    });
+
+    const run = await engine.run({ question: 'What does monthly revenue mean?', requestedMode: 'ask' });
+
+    expect(certifiedCalls).toBe(0);
+    expect(conversationCalls).toBe(1);
+    expect(run).toMatchObject({
+      route: 'conversation',
+      status: 'completed',
+      trustState: 'not_applicable',
+      stopReason: 'conversational_reply',
+    });
+  });
+
+  it.each([
+    ['What is semantic:metric:revenue?', 'semantic:metric:revenue'],
+    ['What is dql:block:revenue?', 'dql:block:revenue'],
+  ])('keeps a raw qualified object identifier in the definition lane: %s', async (question, candidateId) => {
+    let certifiedCalls = 0;
+    let conversationCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => `run-qualified-definition-${candidateId.replaceAll(':', '-')}`,
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          ...authoritativeDecision('certified_execution'),
+          retrievalEvidence: {
+            snapshotId: 'snapshot-qualified-definition',
+            candidateCount: 1,
+            candidateIds: [candidateId],
+          },
+        }),
+      },
+      executors: {
+        certified_answer: () => {
+          certifiedCalls += 1;
+          return { answer: 'This must not execute for a raw qualified identifier.' };
+        },
+        conversation: () => {
+          conversationCalls += 1;
+          return { answer: `Definition for ${candidateId}.` };
+        },
+      },
+    });
+
+    const run = await engine.run({ question, requestedMode: 'ask' });
+
+    expect(certifiedCalls).toBe(0);
+    expect(conversationCalls).toBe(1);
+    expect(run).toMatchObject({
+      route: 'conversation',
+      status: 'completed',
+      trustState: 'not_applicable',
+      stopReason: 'conversational_reply',
+    });
   });
 
   it('answers a definitional question about a named artifact instead of asking which meaning to bind', async () => {

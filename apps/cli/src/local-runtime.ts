@@ -385,11 +385,15 @@ import {
   capResearchBranches,
   buildResearchEvidenceLedger,
   buildAnalyticalTurnPlan,
+  resolveTopRankedRegionDependency,
   DEFAULT_ASK_ROW_EGRESS_POLICY,
   ZERO_ROW_EGRESS_POLICY,
   resolveProviderResultRowEgressPolicy,
   type ProviderResultRowEgressPolicy,
   type AnalyticalTaskOutcomeV1,
+  type AnalyticalTaskV1,
+  type AnalyticalTaskDependencyBindingV1,
+  type AnalyticalTaskDependencyResolution,
   type AnalyticalTurnPlanV1,
   normalizeCanonicalQueryResult,
   normalizeAnalyticalExecutionFingerprint,
@@ -998,6 +1002,10 @@ const CLIENT_PLAN_AUTHORITY_KEYS = new Set([
   'priorResolvedAnalyticalPlan',
   'resolvedAnalyticalPlan',
   'analyticalFrame',
+  // Only the local compound executor may inject this after it has derived a
+  // canonical parent result binding. A browser-provided lookalike cannot become
+  // a child filter or skip ordinary member validation.
+  'analyticalTaskDependencyBinding',
 ]);
 
 /**
@@ -1052,6 +1060,64 @@ export function agentRunDeadlineMs(
   return request.requestedMode === 'research'
     ? AGENT_RESEARCH_DEADLINE_MS
     : AGENT_LOOKUP_DEADLINE_MS;
+}
+
+/** Result shape retained by the bounded compound scheduler. */
+type CompoundDependencyFailure = Extract<AnalyticalTaskDependencyResolution, { ok: false }>;
+
+export interface ScheduledCompoundAnalyticalTask<T> {
+  task: AnalyticalTaskV1;
+  value?: T;
+  error?: string;
+  dependencyError?: CompoundDependencyFailure;
+}
+
+/**
+ * Run ready independent compound clauses concurrently, but wait for a typed
+ * parent result before executing a declared dependent clause. The scheduler
+ * itself has no authority to query or filter; callers supply both execution and
+ * a dependency resolver so immutable-plan and SQL guards remain unchanged.
+ */
+export async function scheduleCompoundAnalyticalTasks<T>(input: {
+  tasks: AnalyticalTaskV1[];
+  runTask: (task: AnalyticalTaskV1, binding?: AnalyticalTaskDependencyBindingV1) => Promise<ScheduledCompoundAnalyticalTask<T>>;
+  resolveDependency: (task: AnalyticalTaskV1, parent?: ScheduledCompoundAnalyticalTask<T>) => AnalyticalTaskDependencyResolution;
+}): Promise<Array<ScheduledCompoundAnalyticalTask<T>>> {
+  const pending = [...input.tasks];
+  const settled = new Map<string, ScheduledCompoundAnalyticalTask<T>>();
+  while (pending.length > 0) {
+    const ready = pending.filter((task) => task.dependencies.every((dependencyId) => settled.has(dependencyId)));
+    if (ready.length === 0) {
+      for (const task of pending.splice(0)) {
+        settled.set(task.id, {
+          task,
+          error: 'The compound task dependency graph could not be resolved.',
+          dependencyError: {
+            ok: false,
+            code: 'RESULT_CONTRACT_MISMATCH',
+            message: 'The dependent task could not run because its parent dependency was unresolved.',
+          },
+        });
+      }
+      break;
+    }
+    for (const task of ready) pending.splice(pending.indexOf(task), 1);
+    const batch = await Promise.all(ready.map(async (task) => {
+      if (!task.dependency || task.dependency.kind !== 'top_ranked_region') return input.runTask(task);
+      const parent = settled.get(task.dependency.sourceTaskId);
+      const resolution = input.resolveDependency(task, parent);
+      if (!resolution.ok) {
+        const dependencyError: CompoundDependencyFailure = resolution;
+        return { task, error: dependencyError.message, dependencyError };
+      }
+      return input.runTask(task, resolution.binding);
+    }));
+    for (const result of batch) settled.set(result.task.id, result);
+  }
+  return input.tasks.map((task) => settled.get(task.id) ?? {
+    task,
+    error: 'The compound task did not produce an outcome.',
+  });
 }
 
 /** What kind of narration a settled run has earned, and how many rows may ground it. */
@@ -3184,6 +3250,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         },
         reasoningEffort,
         ...(analysisDepth ? { analysisDepth } : {}),
+        orchestrationMode: route === 'research' ? 'research' : 'ask',
         allowProviderSemanticMemberSelection: route === 'research',
         researchResultRowsOptIn: route === 'research' && request.researchResultRowsOptIn === true,
         projectRoot,
@@ -3693,6 +3760,7 @@ function analyticalFailureSummary(
     const runStartedAtMs = Date.now();
     const turnPlan = buildAnalyticalTurnPlan({
       question: request.question,
+      mode: route === 'research' ? 'research' : 'ask',
       turnId: request.runId,
       candidateIds: routeDecision?.retrievalEvidence?.candidateIds ?? [],
       frozen: routeDecision?.resolvedAnalyticalPlan?.mode === 'authoritative',
@@ -3705,17 +3773,35 @@ function analyticalFailureSummary(
     // is copied into several labels. Independent children share the parent's
     // signal/deadline and return truthful partial success.
     if (turnPlan.tasks.length > 1 && !childTurn && (attempt ?? 0) === 0) {
-      const childResults = await Promise.all(turnPlan.tasks.slice(0, 6).map(async (task) => {
+      type CompoundChildResult = {
+        task: typeof turnPlan.tasks[number];
+        answer?: AgentAnswer;
+        error?: string;
+        dependencyGap?: ReturnType<typeof buildCoverageGap>;
+      };
+      const runChildTask = async (
+        task: typeof turnPlan.tasks[number],
+        dependencyBinding?: AnalyticalTaskDependencyBindingV1,
+      ): Promise<CompoundChildResult> => {
         if (request.signal?.aborted) rethrowIfCancelled(request.signal.reason, request.signal);
         try {
           const childRequest: AgentRunRequest = {
             ...request,
             question: task.question,
+            ...(dependencyBinding ? {
+              conversationContext: {
+                ...(request.conversationContext ?? {}),
+                // This is the complete parent-to-child data boundary: no
+                // parent prose, SQL, or rows cross into a dependent clause.
+                analyticalTaskDependencyBinding: dependencyBinding,
+              },
+            } : {}),
             workspaceContext: {
               ...(request.workspaceContext && typeof request.workspaceContext === 'object' ? request.workspaceContext : {}),
               analyticalTaskChild: true,
               analyticalParentRunId: request.runId,
               analyticalTaskId: task.id,
+              ...(dependencyBinding ? { analyticalTaskDependencyBinding: dependencyBinding } : {}),
             },
           };
           const answer = await runGovernedAgentAnswerForRun(
@@ -3747,6 +3833,43 @@ function analyticalFailureSummary(
           rethrowIfCancelled(error, request.signal);
           return { task, error: error instanceof Error ? error.message : String(error) };
         }
+      };
+
+      const scheduledChildren = await scheduleCompoundAnalyticalTasks<AgentAnswer>({
+        tasks: turnPlan.tasks.slice(0, 6),
+        runTask: async (task, binding) => {
+          const child = await runChildTask(task, binding);
+          return { task, value: child.answer, error: child.error };
+        },
+        resolveDependency: (task, parent) => {
+          const sourceTaskId = task.dependency?.sourceTaskId ?? '';
+          return resolveTopRankedRegionDependency(sourceTaskId, parent?.value?.result
+            ? normalizeCanonicalQueryResult({
+                ...parent.value.result,
+                resultFingerprint: parent.value.result.resultFingerprint ?? parent.value.result.executionReceipt?.resultFingerprint,
+                executionReceipt: parent.value.result.executionReceipt,
+                answerTier: parent.value.route?.tier ?? parent.value.sourceTier,
+              })
+            : undefined, parent?.task);
+        },
+      });
+      const childResults = scheduledChildren.map(({ task, value, error, dependencyError }): CompoundChildResult => ({
+        task,
+        answer: value,
+        error,
+        ...(dependencyError ? {
+          dependencyGap: buildCoverageGap({
+            code: dependencyError.code,
+            phase: 'planning',
+            message: dependencyError.message,
+            searchedSources: routeDecision?.retrievalEvidence?.candidateIds ?? [],
+            attemptedRoutes: ['certified', 'semantic', 'governed_relational', 'generated'],
+            missing: ['unambiguous_top_region'],
+            recoverable: true,
+            planFrozen: turnPlan.frozen,
+            nextActions: ['Ask for a single top region or review the parent result before retrying the customer task.'],
+          }),
+        } : {}),
       }));
       const outcomes: AnalyticalTaskOutcomeV1[] = childResults.map(({ task, answer, error }) => ({
         version: 1,
@@ -3755,7 +3878,7 @@ function analyticalFailureSummary(
         ...(answer?.answer || answer?.text ? { summary: answer.answer ?? answer.text } : {}),
         ...(answer?.result?.resultFingerprint ? { resultFingerprint: answer.result.resultFingerprint } : {}),
         ...(error || answer?.kind === 'no_answer' ? {
-          gap: buildCoverageGap({
+          gap: childResults.find((candidate) => candidate.task.id === task.id)?.dependencyGap ?? buildCoverageGap({
             code: answer?.refusalCode === 'ambiguous' ? 'AMBIGUOUS_MEANING' : 'EXECUTION_FAILED',
             phase: answer?.executionError ? 'execution' : 'meaning',
             message: error ?? answer?.answer ?? answer?.text ?? 'The task did not produce an accepted analytical result.',
@@ -3783,7 +3906,7 @@ function analyticalFailureSummary(
       );
       return {
         summary: completedCount === outcomes.length
-          ? `Answered ${completedCount} independent analytical clauses.`
+          ? `Answered ${completedCount} analytical clauses.`
           : `Answered ${completedCount} of ${outcomes.length} analytical clauses; the remaining clauses need review.`,
         answer: answerText,
         status: completedCount === outcomes.length ? 'completed' : completedCount > 0 ? 'needs_review' : 'needs_clarification',

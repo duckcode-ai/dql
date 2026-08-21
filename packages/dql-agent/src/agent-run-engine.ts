@@ -34,7 +34,8 @@ import {
   conversationHistoryFromContext,
   isLikelyClarificationReply,
 } from "./conversation/snapshot.js";
-import type { AnalyticalTaskOutcomeV1, AnalyticalTurnPlanV1 } from './analytical-orchestration.js';
+import { buildCoverageGap, type AgentSelectedResultBindingV1, type AnalyticalTaskOutcomeV1, type AnalyticalTurnPlanV1 } from './analytical-orchestration.js';
+import { evaluateAnalyticalRequestPolicy } from './analytical-request-policy.js';
 
 export type AgentRunRequestedMode = "auto" | "ask" | "research" | "sql" | "block" | "app" | "modeling" | "skill";
 
@@ -307,6 +308,14 @@ export interface AgentRunRequest {
   question: string;
   /** Exact candidate selected from a prior structured clarification. */
   selectedEvidenceId?: string;
+  /**
+   * Server-validated reference to a row/value in a persisted prior result.
+   * It is additive to ordinary conversation context and never an execution
+   * authority by itself.
+   */
+  selectedResultBinding?: AgentSelectedResultBindingV1;
+  /** Host-only terminal diagnostic when a selected result cannot be re-bound. */
+  selectedResultBindingGap?: { code: string; message: string };
   /**
    * When `question` is a clarification continuation, the user's ORIGINAL
    * analytical question. Used for artifact naming and planning so the
@@ -1329,6 +1338,120 @@ export class AgentRunEngine {
       },
     });
 
+    // This check is intentionally before route selection.  A restricted direct
+    // disclosure must not be embedded, retrieved, sent to a provider, value
+    // probed, or compiled merely to explain why it cannot be answered.
+    const ingressPolicy = evaluateAnalyticalRequestPolicy(submittedQuestion);
+    if (!ingressPolicy.allowed) {
+      const routeDecision: IntentDecision = {
+        action: 'answer',
+        confidence: 1,
+        reason: 'The request is unavailable under the Ask data-safety policy.',
+        followsUp: false,
+        source: 'heuristic',
+        terminalOutcome: {
+          kind: 'policy_blocked',
+          code: 'ANALYTICAL_POLICY_BLOCKED',
+          message: ingressPolicy.message,
+          candidateIds: [],
+        },
+      };
+      const coverageGap = buildCoverageGap({
+        code: 'POLICY_BLOCKED',
+        phase: 'retrieval',
+        message: ingressPolicy.message,
+        searchedSources: [],
+        attemptedRoutes: [],
+        missing: [],
+        recoverable: false,
+        planFrozen: false,
+        nextActions: ingressPolicy.nextActions,
+      });
+      const evaluation: AgentRunEvaluation = {
+        id: 'request-policy',
+        label: 'Ask request policy',
+        passed: false,
+        severity: 'blocking',
+        message: ingressPolicy.message,
+      };
+      const artifact: AgentRunArtifact = {
+        id: `${runId}:policy`,
+        kind: 'answer',
+        title: 'Ask request unavailable',
+        trustState: 'blocked',
+        payload: {
+          analyticalCoverageGap: coverageGap,
+          analyticalFailure: {
+            code: 'POLICY_BLOCKED',
+            phase: 'request_policy',
+            message: ingressPolicy.message,
+            recoverable: false,
+            safeActions: ingressPolicy.nextActions,
+          },
+        },
+      };
+      emit({
+        type: 'route.decided',
+        message: routeDecision.reason,
+        route: 'blocked',
+        payload: routeDecision,
+      });
+      emit({
+        type: 'evaluation.recorded',
+        message: evaluation.message,
+        route: 'blocked',
+        payload: evaluation,
+      });
+      emit({
+        type: 'artifact.created',
+        message: 'Created answer artifact.',
+        route: 'blocked',
+        trustState: 'blocked',
+        payload: artifact,
+      });
+      emit({
+        type: 'run.failed',
+        message: ingressPolicy.message,
+        route: 'blocked',
+        status: 'blocked',
+        trustState: 'blocked',
+      });
+      const completedAt = this.timestamp();
+      const run: AgentRun = {
+        id: runId,
+        question: submittedQuestion,
+        requestedMode,
+        route: 'blocked',
+        status: 'blocked',
+        trustState: 'blocked',
+        stopReason: 'blocked',
+        startedAt,
+        completedAt,
+        selectedObject: request.selectedObject,
+        executionTarget: request.executionTarget,
+        routeDecision,
+        steps: [],
+        summary: ingressPolicy.message,
+        answer: ingressPolicy.message,
+        answerKind: 'governed',
+        artifacts: [artifact],
+        evaluations: [evaluation],
+        events,
+        nextActions: ingressPolicy.nextActions.map((id) => ({ id, label: id === 'ask_for_an_approved_aggregate' ? 'Ask for an approved aggregate' : 'Inspect data policy' })),
+        repairAttempts: 0,
+        escalationAttempts: 0,
+        budgetUsage: cascadeBudgetTrace(createCascadeBudgetState(this.budgetModel)),
+        telemetry: emptyRunTelemetry(durationBetweenMs(startedAt, completedAt), 'policy_blocked'),
+        lifecycle: terminalLifecycle(progress.lifecycle, 'run.failed', completedAt, events.length),
+      };
+      run.diagnosticReceipt = diagnosticReceiptForRun(run);
+      run.diagnosticReceiptV2 = diagnosticReceiptV2ForRun(run);
+      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2);
+      await checkpointQueue;
+      await this.store?.save(run);
+      return run;
+    }
+
     const audience = resolveAudience(request);
     // Initialize a deterministic decision so router/provider timeouts can still
     // be persisted as a complete blocked run with an inspectable trace. The old
@@ -2095,6 +2218,12 @@ function rescueModelingGapForOrdinaryAsk(
 ): IntentDecision | undefined {
   if (!isOrdinaryAskRequest(request)) return undefined;
   if (decision.terminalOutcome?.kind !== 'modeling_gap') return undefined;
+  // A missing modeled dimension is a factual coverage result, not an invitation
+  // to retry the same question through generated SQL or Research.  The router
+  // already searched the governed sources and attached the exact field; keep it
+  // terminal so the UI can render the typed modeling action.
+  if (decision.meaningResolution?.compatibilityFailures?.some((failure) =>
+    failure.code === 'MISSING_DIMENSION')) return undefined;
   // Genuine user-facing ambiguity and an explicit evidence pick stay terminal.
   if (decision.requiresClarification === true) return undefined;
   if (request.selectedEvidenceId) return undefined;

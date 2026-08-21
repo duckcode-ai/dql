@@ -75,6 +75,8 @@ export {
   buildAnalyticalTurnPlan,
   buildCoverageGap,
   buildResearchEvidenceLedger,
+  canonicalResultBindingValue,
+  canonicalResultRowFingerprint,
   canonicalResultRows,
   capResearchBranches,
   fuseContextCandidates,
@@ -83,13 +85,22 @@ export {
   normalizeAnalyticalExecutionFingerprint,
   normalizeAnalyticalExecutionReceipt,
   retrieveContextLanes,
+  resolveTopRankedRegionDependency,
   splitAnalyticalTasks,
   summarizeTaskOutcomes,
+  validateSelectedResultBinding,
 } from './analytical-orchestration.js';
+export { evaluateAnalyticalRequestPolicy } from './analytical-request-policy.js';
+export type { AnalyticalRequestPolicyDecision } from './analytical-request-policy.js';
 export type {
   AnalyticalAnswerSectionV1,
   AnalyticalCoverageGapV1,
+  AgentSelectedResultBindingV1,
+  AgentSelectedResultBindingValidation,
   AnalyticalTaskKind,
+  AnalyticalTaskDependencyBindingV1,
+  AnalyticalTaskDependencyResolution,
+  AnalyticalTaskDependencyV1,
   AnalyticalTaskOutputContractV1,
   AnalyticalTaskStatus,
   AnalyticalTaskV1,

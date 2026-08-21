@@ -1343,6 +1343,46 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     expect(decision.resolvedAnalyticalPlan?.selectedConceptIds).toContain('dql:block:top_beverage_customers');
   });
 
+  it('routes a complete monthly certified fit before a compatible semantic competitor without relying on an authored example string', async () => {
+    const completeCertified = candidate({
+      id: 'dql:block:monthly_revenue',
+      kind: 'certified_block',
+      trustTier: 'certified',
+      name: 'monthly_revenue',
+      aliases: ['monthly revenue'],
+      dimensions: ['month'],
+      relevanceScore: 0.91,
+      compatibility: 'compatible',
+      exactMatch: true,
+      analyticalFitClass: 'exact',
+    });
+    const semanticCompetitor = jaffleMetric(
+      'semantic:metric:orders.revenue',
+      'orders.revenue',
+      ['revenue'],
+      true,
+    );
+    const resolveMeaning = vi.fn(async () => {
+      throw new Error('A catalog-proven complete certified artifact must route before the meaning call.');
+    });
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-monthly-certification',
+        sourceFingerprint: 'sha256:monthly-certification',
+        parsedIntent: { measures: ['revenue'], dimensions: ['month'], filters: [], timeGrain: 'month' },
+        candidates: [completeCertified, semanticCompetitor],
+      }),
+    });
+    const ask = request('What is monthly revenue?');
+
+    const decision = await router.decide(ask);
+
+    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(selectRoute(ask, decision)).toBe('certified_answer');
+    expect(decision.resolvedAnalyticalPlan?.selectedConceptIds).toEqual(['dql:block:monthly_revenue']);
+  });
+
   it.each([
     'who are the top customers by region',
     'what is the region by each customer',
@@ -1376,6 +1416,38 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     expect(decision.clarifyingQuestion).toContain('“region” is not modeled');
     expect(decision.clarifyingQuestion).toContain('location_name');
     expect(decision.resolvedAnalyticalPlan).toBeUndefined();
+  });
+
+  it('returns a typed missing-dimension gap for sales_channel instead of a generic repair or research prompt', async () => {
+    const revenue = jaffleMetric(
+      'semantic:metric:orders.revenue',
+      'orders.revenue',
+      ['revenue'],
+      true,
+    );
+    const router = createHybridRouter({
+      requireMeaningCallForNaturalLanguage: false,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-missing-sales-channel',
+        sourceFingerprint: 'sha256:missing-sales-channel',
+        parsedIntent: { measures: ['revenue'], dimensions: ['sales_channel'], filters: [] },
+        candidates: [revenue],
+      }),
+    });
+
+    const decision = await router.decide(request('Show revenue by sales channel'));
+
+    expect(decision).toMatchObject({
+      action: 'block',
+      terminalOutcome: { kind: 'modeling_gap' },
+      meaningResolution: {
+        compatibilityOutcome: 'modeling_gap',
+        compatibilityFailures: [expect.objectContaining({ code: 'MISSING_DIMENSION', field: 'sales channel' })],
+      },
+    });
+    expect(decision.reason).toContain('sales channel');
+    expect(decision.reason).toContain('Add or map');
+    expect(decision.reason).not.toMatch(/research|repair/i);
   });
 
   it('AGT-012-014 keeps the typed member filter while asking for a qualified dimension', async () => {
@@ -1927,7 +1999,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     expect(selectRoute({ question: "Total CCU Count", selectedEvidenceId: selected.id }, decision)).toBe("semantic_answer");
   });
 
-  it("consumes an incomplete structured choice once and continues through the governed cascade", async () => {
+  it("keeps an incomplete structured choice terminal rather than substituting a different governed metric", async () => {
     const selected = candidate({
       id: "semantic:sales:lost_opportunities_count",
       name: "Lost Opportunities Count",
@@ -1951,12 +2023,16 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
 
     const decision = await router.decide(ask);
 
-    expect(decision.action).toBe("answer");
+    expect(decision.action).toBe("block");
     expect(decision.requiresClarification).toBe(false);
     expect(decision.clarificationOptions).toBeUndefined();
     expect(decision.meaningResolution).toBeUndefined();
-    expect(decision.reason).toContain("selection is consumed once");
-    expect(selectRoute(ask, decision)).toBe("generated_answer");
+    expect(decision.reason).toContain("did not substitute");
+    expect(decision.terminalOutcome).toMatchObject({
+      kind: 'modeling_gap',
+      candidateIds: [selected.id],
+    });
+    expect(selectRoute(ask, decision)).toBe("blocked");
   });
 
   it("uses the recommended compatible certified executor only after meaning resolution", async () => {

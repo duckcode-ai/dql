@@ -57,12 +57,39 @@ export interface AnalyticalTaskOutputContractV1 {
   requestedColumns?: string[];
 }
 
+/** A bounded, server-computed dependency between two compound tasks. */
+export interface AnalyticalTaskDependencyV1 {
+  version: 1;
+  kind: 'top_ranked_region';
+  sourceTaskId: string;
+  targetDimension: 'region';
+}
+
+/**
+ * The only parent-result material a dependent child may receive. It carries
+ * one selected canonical value and its row/result proofs, never parent prose,
+ * SQL, or arbitrary rows.
+ */
+export interface AnalyticalTaskDependencyBindingV1 {
+  version: 1;
+  sourceTaskId: string;
+  sourceResultFingerprint: string;
+  canonicalColumn: string;
+  value: string;
+  rowFingerprint: string;
+}
+
+export type AnalyticalTaskDependencyResolution =
+  | { ok: true; binding: AnalyticalTaskDependencyBindingV1 }
+  | { ok: false; code: 'RESULT_CONTRACT_MISMATCH'; message: string };
+
 export interface AnalyticalTaskV1 {
   version: 1;
   id: string;
   kind: AnalyticalTaskKind;
   question: string;
   dependencies: string[];
+  dependency?: AnalyticalTaskDependencyV1;
   output: AnalyticalTaskOutputContractV1;
   status: AnalyticalTaskStatus;
   /** Only qualified catalog IDs may be placed in this list. */
@@ -199,6 +226,12 @@ export function splitAnalyticalTasks(question: string): string[] {
 
 export function buildAnalyticalTaskGraph(input: {
   question: string;
+  /**
+   * Explicit user-selected mode. Research is a root workflow, not merely a
+   * higher reasoning effort: its evidence ledger and synthesis must retain the
+   * whole question rather than treating story clauses as independent asks.
+   */
+  mode?: 'ask' | 'research';
   candidateIds?: string[];
   metrics?: string[];
   dimensions?: string[];
@@ -206,14 +239,19 @@ export function buildAnalyticalTaskGraph(input: {
   inheritedBindings?: Array<{ id: string; value: string; source: 'conversation' | 'result' | 'user' }>;
   maxTasks?: number;
 }): { kind: AnalyticalTurnKind; tasks: AnalyticalTaskV1[]; partial: boolean } {
-  const clauses = splitAnalyticalTasks(input.question).slice(0, Math.max(1, Math.min(6, input.maxTasks ?? 6)));
+  const rootKind = input.mode === 'research' ? 'research' : inferAnalyticalTurnKind(input.question);
+  // A research turn may later create bounded evidence branches, but that is a
+  // research planner's job. Splitting at ingress loses the surrounding story
+  // before it has an opportunity to reason about it.
+  const clauses = (rootKind === 'research' ? [input.question.trim()] : splitAnalyticalTasks(input.question))
+    .slice(0, Math.max(1, Math.min(6, input.maxTasks ?? 6)));
   const candidateIds = [...new Set((input.candidateIds ?? []).filter((id) => id.trim()))];
   const metrics = [...new Set((input.metrics ?? []).filter((metric) => metric.trim()))];
   const dimensions = [...new Set((input.dimensions ?? []).filter((dimension) => dimension.trim()))];
   const filters = input.filters ?? [];
   const inheritedBindings = input.inheritedBindings ?? [];
-  const tasks = clauses.map((clause, index): AnalyticalTaskV1 => {
-    const kind = inferAnalyticalTurnKind(clause);
+  const unboundTasks = clauses.map((clause, index): AnalyticalTaskV1 => {
+    const kind = rootKind === 'research' ? 'research' : inferAnalyticalTurnKind(clause);
     const research = kind === 'research' || kind === 'diagnosis';
     const taskKind: AnalyticalTaskKind = research
       ? 'research_branch'
@@ -245,15 +283,40 @@ export function buildAnalyticalTaskGraph(input: {
       inheritedBindings,
     };
   });
+  const tasks = bindTopRankedRegionDependencies(unboundTasks);
   return {
-    kind: tasks.length > 1 ? 'compound' : inferAnalyticalTurnKind(input.question),
+    kind: rootKind === 'research' ? 'research' : tasks.length > 1 ? 'compound' : rootKind,
     tasks,
     partial: false,
   };
 }
 
+const TOP_RANKED_REGION_RE = /(?:\b(?:top|highest|most)\b[^?.!]{0,72}\bregions?\b|\bregions?\b[^?.!]{0,72}\b(?:top|highest|most)\b)/i;
+const DEPENDENT_REGION_CUSTOMERS_RE = /\b(?:that|this|same)\s+region\b/i;
+
+/**
+ * Recognise only the demonstrated two-step dependency. Broader pronoun
+ * resolution belongs to the normal conversation layer; turning every compound
+ * question into a dependency would serialise unrelated work and invent filters.
+ */
+function bindTopRankedRegionDependencies(tasks: AnalyticalTaskV1[]): AnalyticalTaskV1[] {
+  return tasks.map((task, index) => {
+    if (!DEPENDENT_REGION_CUSTOMERS_RE.test(task.question) || !/\bcustomers?\b/i.test(task.question)) return task;
+    const parent = tasks.slice(0, index).reverse().find((candidate) => TOP_RANKED_REGION_RE.test(candidate.question));
+    if (!parent) return task;
+    const dependency: AnalyticalTaskDependencyV1 = {
+      version: 1,
+      kind: 'top_ranked_region',
+      sourceTaskId: parent.id,
+      targetDimension: 'region',
+    };
+    return { ...task, dependencies: [parent.id], dependency };
+  });
+}
+
 export function buildAnalyticalTurnPlan(input: {
   question: string;
+  mode?: 'ask' | 'research';
   turnId?: string;
   candidateIds?: string[];
   metrics?: string[];
@@ -315,6 +378,206 @@ export interface CanonicalQueryResultV1 {
   trustState?: 'certified' | 'governed' | 'review_required' | 'not_applicable' | 'blocked';
   answerTier?: string;
   resultFingerprint: string;
+}
+
+/**
+ * A reader-selected value from a previously rendered canonical result.
+ *
+ * This is intentionally a reference, not copied conversational prose. The
+ * host must resolve `sourceRunId` from its durable run store and validate every
+ * field against the persisted result before the binding may influence routing,
+ * value lookup, or SQL planning.
+ */
+export interface AgentSelectedResultBindingV1 {
+  version: 1;
+  sourceRunId: string;
+  sourceArtifactId: string;
+  canonicalColumn: string;
+  value: string;
+  rowFingerprint: string;
+  resultFingerprint: string;
+}
+
+export type AgentSelectedResultBindingValidation =
+  | { ok: true; binding: AgentSelectedResultBindingV1 }
+  | {
+      ok: false;
+      code: 'RESULT_BINDING_INVALID' | 'RESULT_BINDING_RESULT_MISMATCH' | 'RESULT_BINDING_ROW_MISMATCH';
+      message: string;
+    };
+
+/** Stable scalar transport for a selected canonical result cell. */
+export function canonicalResultBindingValue(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'boolean') return String(value);
+  return undefined;
+}
+
+/** A row proof includes all canonical columns, not just the selected cell. */
+export function canonicalResultRowFingerprint(result: Pick<CanonicalQueryResultV1, 'columns'>, row: Record<string, unknown>): string {
+  return stableFingerprint({
+    columns: result.columns,
+    row: Object.fromEntries(result.columns.map((column) => [column, row[column]])),
+  });
+}
+
+/**
+ * Validate an untrusted selected-result reference against a persisted
+ * canonical result. The source run/artifact identities are checked by the
+ * host before calling this pure result-level validator.
+ */
+export function validateSelectedResultBinding(
+  binding: AgentSelectedResultBindingV1 | undefined,
+  result: CanonicalQueryResultV1 | undefined,
+): AgentSelectedResultBindingValidation {
+  if (!binding
+    || binding.version !== 1
+    || !binding.sourceRunId.trim()
+    || !binding.sourceArtifactId.trim()
+    || !binding.canonicalColumn.trim()
+    || !binding.value.trim()
+    || !normalizeAnalyticalExecutionFingerprint(binding.rowFingerprint)
+    || !normalizeAnalyticalExecutionFingerprint(binding.resultFingerprint)) {
+    return {
+      ok: false,
+      code: 'RESULT_BINDING_INVALID',
+      message: 'The selected result reference is incomplete or malformed.',
+    };
+  }
+  if (!result || binding.resultFingerprint !== result.resultFingerprint) {
+    return {
+      ok: false,
+      code: 'RESULT_BINDING_RESULT_MISMATCH',
+      message: 'The selected result is no longer the persisted result for this run.',
+    };
+  }
+  if (!result.columns.includes(binding.canonicalColumn)) {
+    return {
+      ok: false,
+      code: 'RESULT_BINDING_ROW_MISMATCH',
+      message: `The selected column ${binding.canonicalColumn} is not present in the persisted result.`,
+    };
+  }
+  const matched = result.rows.some((row) =>
+    canonicalResultRowFingerprint(result, row) === binding.rowFingerprint
+    && canonicalResultBindingValue(row[binding.canonicalColumn]) === binding.value);
+  if (!matched) {
+    return {
+      ok: false,
+      code: 'RESULT_BINDING_ROW_MISMATCH',
+      message: 'The selected row/value does not match the persisted result.',
+    };
+  }
+  return { ok: true, binding: { ...binding, resultFingerprint: result.resultFingerprint } };
+}
+
+/**
+ * Derive the one value a `top region -> customers in that region` child may
+ * consume. A first row alone is never proof. The parent must either return an
+ * explicit rank, or be the server-computed descending ranking task and return
+ * at least two rows with one strictly-leading numeric measure. `rowCount` is
+ * the returned-row contract, not proof that a singleton is the complete group
+ * set. Ties and ambiguous result shapes remain a typed child gap.
+ */
+export function resolveTopRankedRegionDependency(
+  sourceTaskId: string,
+  result: CanonicalQueryResultV1 | undefined,
+  parentTask?: Pick<AnalyticalTaskV1, 'kind' | 'output'>,
+): AnalyticalTaskDependencyResolution {
+  if (!result || result.rows.length === 0) {
+    return {
+      ok: false,
+      code: 'RESULT_CONTRACT_MISMATCH',
+      message: 'The top-region task did not produce a canonical result that can bind the dependent customer task.',
+    };
+  }
+  const canonicalResultFingerprint = normalizeAnalyticalExecutionFingerprint(result.resultFingerprint);
+  const executionReceipt = normalizeAnalyticalExecutionReceipt(result.executionReceipt);
+  if (!executionReceipt) {
+    return {
+      ok: false,
+      code: 'RESULT_CONTRACT_MISMATCH',
+      message: 'The top-region result did not retain a complete normalized execution receipt, so the dependent customer task was not run.',
+    };
+  }
+  if (!canonicalResultFingerprint
+    || result.resultFingerprint !== canonicalResultFingerprint
+    || executionReceipt.resultFingerprint !== canonicalResultFingerprint) {
+    return {
+      ok: false,
+      code: 'RESULT_CONTRACT_MISMATCH',
+      message: 'The top-region execution receipt does not match the canonical result, so the dependent customer task was not run.',
+    };
+  }
+  const regionColumns = result.columns.filter((column) => /(?:^|_)region(?:_name)?$/i.test(column));
+  if (regionColumns.length !== 1) {
+    return {
+      ok: false,
+      code: 'RESULT_CONTRACT_MISMATCH',
+      message: 'The top-region result did not contain exactly one canonical region column.',
+    };
+  }
+  const canonicalColumn = regionColumns[0]!;
+  const first = result.rows[0]!;
+  const value = canonicalResultBindingValue(first[canonicalColumn]);
+  if (!value) {
+    return {
+      ok: false,
+      code: 'RESULT_CONTRACT_MISMATCH',
+      message: 'The leading top-region row did not contain a usable region value.',
+    };
+  }
+  if (!hasUnambiguousTopRow(result, parentTask)) {
+    return {
+      ok: false,
+      code: 'RESULT_CONTRACT_MISMATCH',
+      message: 'The top-region result did not prove a single leading region, so the dependent customer task was not run.',
+    };
+  }
+  return {
+    ok: true,
+    binding: {
+      version: 1,
+      sourceTaskId,
+      sourceResultFingerprint: canonicalResultFingerprint,
+      canonicalColumn,
+      value,
+      rowFingerprint: canonicalResultRowFingerprint(result, first),
+    },
+  };
+}
+
+function hasUnambiguousTopRow(
+  result: CanonicalQueryResultV1,
+  parentTask?: Pick<AnalyticalTaskV1, 'kind' | 'output'>,
+): boolean {
+  const rankColumn = result.columns.find((column) => /(?:^|_)(?:rank|row_number)$/i.test(column));
+  if (rankColumn) {
+    const ranks = result.rows.map((row) => numericCell(row[rankColumn]));
+    if (ranks[0] === 1 && ranks.slice(1).every((rank) => rank === undefined || rank > 1)) return true;
+  }
+  // A plain numerical result column does not say that its first row was ranked.
+  // It becomes a ranking proof only when the server's own parent task explicitly
+  // asked for a descending ranking AND the returned rows demonstrate a strictly
+  // leading value. A singleton needs an explicit rank = 1: it cannot establish
+  // that unreturned groups are lower.
+  if (parentTask?.kind !== 'ranking' || parentTask.output.order !== 'desc') return false;
+  if (result.rows.length < 2) return false;
+  const measures = result.columns.filter((column) => {
+    if (column === rankColumn) return false;
+    const values = result.rows.map((row) => numericCell(row[column]));
+    return values.every((value) => value !== undefined);
+  });
+  if (measures.length !== 1) return false;
+  const values = result.rows.map((row) => numericCell(row[measures[0]!])!);
+  return values.slice(1).every((value) => values[0]! > value);
+}
+
+function numericCell(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  return undefined;
 }
 
 /**
