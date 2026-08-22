@@ -7,6 +7,16 @@ export interface CertifiedBlockFit {
   kind: 'exact' | 'trim_safe' | 'context_only' | 'not_applicable';
   confidence: 'high' | 'medium' | 'low';
   reasons: string[];
+  /**
+   * Requested measures the block itself does not declare as metric outputs.
+   *
+   * This is deliberately distinct from `missingOutputs`: a block can be
+   * broadly relevant to revenue while returning a different metric such as
+   * `lifetime_spend`.  Tags, descriptions, examples, and pooled retrieval
+   * candidates never fill this list.  A non-empty list is a hard Tier-1 stop,
+   * including for an otherwise exact authored example or directly named block.
+   */
+  missingMeasures?: string[];
   missingOutputs: string[];
   missingDimensions: string[];
   unsupportedFilters: string[];
@@ -20,7 +30,9 @@ export function requestedShapeFromPlan(plan: AnalysisQuestionPlan): RequestedAns
 }
 
 export function certifiedFitAllowsTier1(fit: CertifiedBlockFit): boolean {
-  return (fit.kind === 'exact' || fit.kind === 'trim_safe') && fit.confidence === 'high';
+  return (fit.kind === 'exact' || fit.kind === 'trim_safe')
+    && fit.confidence === 'high'
+    && (fit.missingMeasures?.length ?? 0) === 0;
 }
 
 export type CertifiedTerminationBypass = 'named_block' | 'exact_example' | 'definition_lookup';
@@ -53,6 +65,18 @@ export function certifiedTerminationVerdict(input: {
   allowInferredContract?: boolean;
 }): CertifiedTerminationVerdict {
   const { fit } = input;
+  // A Tier-1 block executes its authored SQL verbatim.  It cannot claim a
+  // requested metric that is absent from its own output contract merely
+  // because the block is tagged/retrieved near that metric.  Keep this before
+  // every bypass: an example or a named block can accept grain, never replace
+  // `revenue` with `lifetime_spend`.
+  if ((fit.missingMeasures?.length ?? 0) > 0) {
+    return {
+      allow: false,
+      fit,
+      reason: `the block does not declare required measure output(s): ${fit.missingMeasures!.join(', ')}`,
+    };
+  }
   if (fit.unsupportedFilters.length > 0) {
     return {
       allow: false,
@@ -115,21 +139,13 @@ export function evaluateCertifiedBlockFit(input: {
   const requested = requestedShapeFromPlan(input.plan);
   const block = blockShape(input.block);
 
-  if (input.definitionLookup || input.exactExampleMatch) {
-    return {
-      kind: 'exact',
-      confidence: 'high',
-      reasons: [input.definitionLookup ? 'definition lookup bypasses shape fit' : 'question matches a certified example'],
-      missingOutputs: [],
-      missingDimensions: [],
-      unsupportedFilters: [],
-      topNAction: 'none',
-      inferredContract: block.inferredContract,
-    };
-  }
-
   const requestedDimensions = requested.dimensions.map(canonicalToken).filter(Boolean);
-  const requestedMeasures = requested.measures.map(canonicalToken).filter(Boolean);
+  // Preserve the authored measure identity rather than collapsing it into a
+  // broad analytical family (`lifetime_spend` and `revenue` used to both
+  // become `revenue`).  The helper below admits only conservative, role-safe
+  // aliases such as total/gross/net/monthly revenue; it never accepts tags,
+  // examples, or descriptive prose as output authority.
+  const requestedMeasures = requestedMetricOutputIdentities(requested.measures);
   const requiredOutputs = requested.requiredOutputs.map(canonicalColumn).filter(Boolean);
   const blockDimensions = new Set(block.dimensions);
   const blockMeasures = new Set(block.measures);
@@ -139,10 +155,25 @@ export function evaluateCertifiedBlockFit(input: {
     !blockDimensions.has(dimension) && !outputHasEntity(blockOutputs, dimension)
   ));
   const missingOutputs = uniqueStrings(requiredOutputs.filter((output) =>
-    !outputRequirementCovered(output, block)
+    // A directly named artifact is an execution request, not a request for a
+    // column that happens to resemble the artifact's snake_case name.  For
+    // example, `run top_customers` requires the block's declared customer
+    // output contract; it does not require a fabricated `top_customer` column.
+    !artifactNameRequirement(output, input.block)
+    && !outputRequirementCovered(output, block)
+    // A planner may retain the spoken measure phrase in requiredOutputs as
+    // well as measures (for example "spent"). It is not an additional
+    // projected field once the same declared metric output has already proved
+    // coverage. The strict missingMeasures gate below remains authoritative.
+    && !(requestedMeasures.includes(canonicalMetricOutputIdentity(output))
+      && declaredQualifiedOutputCoversMeasure(block, canonicalMetricOutputIdentity(output), input.question, input.plan, requested))
+  ));
+  const missingMeasures = uniqueStrings(requestedMeasures.filter((measure) =>
+    !blockMeasures.has(measure)
+    && !declaredQualifiedOutputCoversMeasure(block, measure, input.question, input.plan, requested)
   ));
   const measureMatch = requestedMeasures.length === 0
-    || requestedMeasures.some((measure) => blockMeasures.has(measure) || block.textTokens.has(measure) || outputHasEntity(blockOutputs, measure));
+    || missingMeasures.length === 0;
 
   const unsupportedFilters = unsupportedRequestedFilters(requested, block, input.question);
   const unentailedScope = [...block.staticScopeTokens]
@@ -158,13 +189,14 @@ export function evaluateCertifiedBlockFit(input: {
   // computed over what survived is not evidence that the question is covered.
   const droppedRequest = droppedAttributeRequest(input.question, requiredOutputs.length);
 
-  if (droppedRequest || grainMismatch || missingDimensions.length > 0 || missingOutputs.length > 0 || unsupportedFilters.length > 0 || unentailedScope.length > 0 || !measureMatch || topNAction === 'generate') {
+  if (droppedRequest || grainMismatch || missingDimensions.length > 0 || missingMeasures.length > 0 || missingOutputs.length > 0 || unsupportedFilters.length > 0 || unentailedScope.length > 0 || !measureMatch || topNAction === 'generate') {
     const reasons = [
       droppedRequest
         ? 'the question asks for attributes that could not be resolved against the model'
         : '',
       grainMismatch,
       missingDimensions.length ? `missing requested dimensions: ${missingDimensions.join(', ')}` : '',
+      missingMeasures.length ? `missing declared measure outputs: ${missingMeasures.join(', ')}` : '',
       missingOutputs.length ? `missing requested outputs: ${missingOutputs.join(', ')}` : '',
       unsupportedFilters.length ? `unsupported requested filters: ${unsupportedFilters.join(', ')}` : '',
       unentailedScope.length ? `certified static scope is not requested: ${unentailedScope.join(', ')}` : '',
@@ -175,6 +207,7 @@ export function evaluateCertifiedBlockFit(input: {
       kind: block.relevance > 0 ? 'context_only' : 'not_applicable',
       confidence: 'high',
       reasons,
+      ...(missingMeasures.length > 0 ? { missingMeasures } : {}),
       missingOutputs,
       missingDimensions,
       unsupportedFilters,
@@ -209,6 +242,8 @@ export function evaluateCertifiedBlockFit(input: {
     reasons: [
       'certified block covers requested metric, grain, dimensions, filters, and outputs',
       topNAction === 'trim' ? 'certified result can be trimmed to requested top-N' : '',
+      input.exactExampleMatch ? 'question matches a certified example after declared-output validation' : '',
+      input.definitionLookup ? 'definition lookup remains within the declared-output contract' : '',
       block.inferredContract ? 'block contract was safely inferred from available metadata' : '',
     ].filter(Boolean),
     missingOutputs: [],
@@ -246,7 +281,6 @@ interface BlockShape {
   /** Scope that must be entailed before the block may terminate. */
   staticScopeTokens: Set<string>;
   limit?: number;
-  textTokens: Set<string>;
   relevance: number;
   inferredContract: boolean;
 }
@@ -254,7 +288,13 @@ interface BlockShape {
 function blockShape(block: MetadataObject | KGNode): BlockShape {
   const record = block as unknown as Record<string, unknown>;
   const payload = isMetadataObject(block) ? block.payload ?? {} : record;
-  const sql = stringValue(payload.sql) ?? stringValue(record.sql);
+  // DQL parser payloads retain authored block SQL as `query`; older catalog
+  // paths call it `sql`. Both are an artifact-owned output contract, unlike
+  // a description or retrieval tag.
+  const sql = stringValue(payload.sql)
+    ?? stringValue(payload.query)
+    ?? stringValue(record.sql)
+    ?? stringValue(record.query);
   const descriptiveText = [
     stringValue(record.name),
     stringValue(record.description),
@@ -283,12 +323,7 @@ function blockShape(block: MetadataObject | KGNode): BlockShape {
   ]);
   const measures = uniqueStrings([
     ...outputs.filter(isMeasureLike),
-    ...tokensFromValue(descriptiveText).filter(isMeasureLike),
-  ].map(canonicalToken).filter(Boolean));
-  const textTokens = new Set(tokensFromValue([
-    descriptiveText,
-    JSON.stringify(payload),
-  ].filter(Boolean).join(' ')).map(canonicalToken));
+  ].map(canonicalMetricOutputIdentity).filter(Boolean));
   const filters = uniqueStrings([
     ...stringArray(payload.allowedFilters),
     ...stringArray(record.allowedFilters),
@@ -327,7 +362,6 @@ function blockShape(block: MetadataObject | KGNode): BlockShape {
     scopeTokens,
     staticScopeTokens,
     limit: sql ? parseSqlLimit(sql) : undefined,
-    textTokens,
     relevance,
     inferredContract: stringArray(payload.declaredOutputs).length === 0 && stringArray(record.declaredOutputs).length === 0,
   };
@@ -500,23 +534,38 @@ function outputCoversRequired(outputs: string[], required: string): boolean {
 }
 
 function outputRequirementCovered(required: string, block: BlockShape): boolean {
+  const roleRequirement = analyticalRoleOutput(required);
   // Compound dimension outputs are contracts, not loose keyword hints.
   // `beverage_product_types` (a count) must not satisfy `product_type`, and a
   // block that merely touches products must not satisfy `product_name`.
   // Requiring the concrete projected output here prevents a high-overlap block
   // at the wrong grain from being promoted to an exact certified answer.
-  if (isStructuredDimensionOutput(required)) {
-    const directDimension = required.replace(/_(?:name|title)$/, '');
-    return block.outputs.includes(required)
-      || (directDimension !== required && block.outputs.includes(directDimension));
+  if (isStructuredDimensionOutput(roleRequirement)) {
+    const directDimension = roleRequirement.replace(/_(?:name|title)$/, '');
+    return block.outputs.includes(roleRequirement)
+      || (directDimension !== roleRequirement && block.outputs.includes(directDimension));
   }
-  if (outputCoversRequired(block.outputs, required)) return true;
-  const token = canonicalToken(required);
+  if (outputCoversRequired(block.outputs, roleRequirement)) return true;
+  const token = canonicalToken(roleRequirement);
   if (block.dimensions.includes(token)) return true;
-  if (isMeasureLike(required) || block.measures.includes(token)) {
-    return block.measures.includes(token) || block.textTokens.has(token) || outputHasEntity(new Set(block.outputs), token);
+  if (isMeasureLike(roleRequirement) || block.measures.includes(canonicalMetricOutputIdentity(roleRequirement))) {
+    return block.measures.includes(canonicalMetricOutputIdentity(roleRequirement));
   }
   return false;
+}
+
+/**
+ * Ranking words describe the result ordering, not an extra projected field.
+ * `top_customer` is therefore covered by a declared `customer_name` output
+ * only after the independent ranking/limit checks have accepted the block.
+ */
+function analyticalRoleOutput(value: string): string {
+  return value.replace(/^(?:top|bottom|highest|lowest|best|worst|leading)_/, '');
+}
+
+function artifactNameRequirement(required: string, block: MetadataObject | KGNode): boolean {
+  const name = canonicalColumn((block as { name?: unknown }).name as string ?? '');
+  return Boolean(name && name === required);
 }
 
 function isStructuredDimensionOutput(value: string): boolean {
@@ -533,9 +582,21 @@ function outputHasEntity(outputs: Set<string>, entity: string): boolean {
 
 function extractSqlOutputs(sql: string): string[] {
   const shape = extractSimpleSelectShape(sql);
-  if (!shape) return [];
-  return shape.selectExpressions
-    .map(selectExpressionOutputName)
+  if (shape) {
+    return shape.selectExpressions
+      .map(selectExpressionOutputName)
+      .filter((value): value is string => Boolean(value));
+  }
+
+  // A scalar certified KPI may intentionally be a source-free SELECT, for
+  // example `SELECT 42500 AS revenue_total`. It is still an authored output
+  // contract, so recognize explicit aliases without falling back to prose,
+  // tags, examples, or pooled retrieval evidence. Keep this deliberately
+  // narrow: complex/ambiguous SQL remains unavailable for Tier-1 proof.
+  const scalar = sql.trim().replace(/;\s*$/, '');
+  if (!/^select\s+/i.test(scalar) || /\bfrom\b/i.test(scalar)) return [];
+  return [...scalar.matchAll(/\bas\s+(["`]?\w+["`]?)\b/gi)]
+    .map((match) => match[1]?.replace(/^["`]|["`]$/g, '').trim())
     .filter((value): value is string => Boolean(value));
 }
 
@@ -605,7 +666,14 @@ function isDimensionLike(value: string): boolean {
 }
 
 function isMeasureLike(value: string): boolean {
-  return /\b(amount|arr|average|avg|balance|booking|churn|conversion|cost|count|duration|expense|growth|kpi|margin|metric|mrr|number|order|point|profit|quantity|rate|revenue|sale|score|spend|stat|total|usage|value|volume)\b/.test(value);
+  const measureTerms = new Set([
+    'amount', 'arr', 'average', 'avg', 'balance', 'booking', 'churn',
+    'conversion', 'cost', 'count', 'duration', 'expense', 'growth', 'kpi',
+    'margin', 'metric', 'mrr', 'number', 'order', 'point', 'profit',
+    'quantity', 'rate', 'revenue', 'sale', 'score', 'spend', 'stat', 'total',
+    'usage', 'value', 'volume',
+  ]);
+  return tokensFromValue(value).some((token) => measureTerms.has(token));
 }
 
 function tokensFromValue(value: string): string[] {
@@ -622,6 +690,127 @@ function tokensFromValue(value: string): string[] {
 
 function canonicalColumn(value: string): string {
   return tokensFromValue(value).join('_');
+}
+
+/**
+ * Canonical identity for a declared metric OUTPUT, not a retrieval synonym.
+ *
+ * `gross_revenue`, `net_revenue`, `total_revenue`, and `monthly_revenue` are
+ * ordinary authored aliases for the same revenue output family.  By contrast,
+ * `product_revenue`, `beverage_revenue`, and `lifetime_spend` retain their
+ * business qualifiers and cannot silently answer a generic `revenue` request.
+ */
+function canonicalMetricOutputIdentity(value: string): string {
+  const aliases: Record<string, string> = {
+    avg: 'average',
+    beverage: 'beverage',
+    drink: 'beverage',
+    score: 'point',
+    scorer: 'point',
+    scoring: 'point',
+    sale: 'revenue',
+    sales: 'revenue',
+    spend: 'revenue',
+    spent: 'revenue',
+    spending: 'revenue',
+    sum: 'total',
+  };
+  const genericModifiers = new Set([
+    'annual', 'average', 'current', 'daily', 'gross', 'monthly', 'net',
+    'quarterly', 'total', 'yearly',
+  ]);
+  const tokens = tokensFromValue(value)
+    .map((token) => aliases[token] ?? token)
+    .filter(Boolean);
+  while (tokens.length > 1 && genericModifiers.has(tokens[0]!)) tokens.shift();
+  while (tokens.length > 1 && genericModifiers.has(tokens.at(-1)!)) tokens.pop();
+  return tokens.join('_');
+}
+
+/**
+ * Planner extraction may retain both a complete phrase (`total points`) and
+ * its presentation modifier (`total`). The latter is not an independently
+ * requested metric; requiring an output literally named `total` would reject
+ * the artifact that explicitly projects `total_points`. Retain a bare generic
+ * request only when it is all the reader supplied.
+ */
+function requestedMetricOutputIdentities(values: string[]): string[] {
+  const identities = uniqueStrings(values.map(canonicalMetricOutputIdentity).filter(Boolean));
+  if (identities.length <= 1) return identities;
+  return identities.filter((identity) => identity !== 'total' && identity !== 'average');
+}
+
+/**
+ * A scoped declared output can satisfy the metric root only when every
+ * business qualifier is explicitly present in the request.  This keeps
+ * `beverage_revenue` valid for a beverage request while preventing the
+ * unrelated `lifetime_spend` output from standing in for bare revenue.
+ *
+ * This is still output-contract evidence: descriptions, tags, examples, and
+ * neighbouring candidates never participate in the match.
+ */
+function declaredQualifiedOutputCoversMeasure(
+  block: BlockShape,
+  requestedMeasure: string,
+  question: string,
+  plan: AnalysisQuestionPlan,
+  requested: RequestedAnswerShape,
+): boolean {
+  const requestedRoot = metricOutputRoot(requestedMeasure);
+  if (!requestedRoot) return false;
+  return block.measures.some((declaredMeasure) => {
+    // A count that is explicitly named after the requested entity is a
+    // role-correct authored metric identity: `customer_count` answers "how
+    // many customers", and `order_count` answers "total orders".  Require
+    // the count/total language in the question so a generic entity reference
+    // cannot become a count merely through retrieval proximity.
+    if (declaredMeasure === `${requestedMeasure}_count`
+      && /\b(?:how\s+many|count|number\s+of|total)\b/i.test(question)) {
+      return true;
+    }
+    if (metricOutputRoot(declaredMeasure) !== requestedRoot) return false;
+    const qualifiers = metricOutputQualifiers(declaredMeasure);
+    if (qualifiers.length > 0 && qualifiers.every((qualifier) =>
+      questionEntailsOutputQualifier(question, plan, requested, qualifier))) return true;
+    // Conversely, a generic output becomes a qualified answer only when the
+    // block itself declares every qualifier as a dimension/output at the
+    // requested grain.  This admits an authored `{ product_name, revenue }`
+    // block for product revenue, while never allowing a lifetime-spend block
+    // to impersonate generic revenue.
+    const requestedQualifiers = metricOutputQualifiers(requestedMeasure);
+    return declaredMeasure === requestedRoot
+      && requestedQualifiers.length > 0
+      && requestedQualifiers.every((qualifier) =>
+        block.dimensions.includes(canonicalToken(qualifier))
+        || outputHasEntity(new Set(block.outputs), canonicalToken(qualifier)))
+      && requestedQualifiers.every((qualifier) =>
+        questionEntailsOutputQualifier(question, plan, requested, qualifier));
+  });
+}
+
+function metricOutputRoot(identity: string): string | undefined {
+  return identity.split('_').filter(Boolean).at(-1);
+}
+
+function metricOutputQualifiers(identity: string): string[] {
+  const tokens = identity.split('_').filter(Boolean);
+  return tokens.slice(0, -1);
+}
+
+function questionEntailsOutputQualifier(
+  question: string,
+  plan: AnalysisQuestionPlan,
+  requested: RequestedAnswerShape,
+  qualifier: string,
+): boolean {
+  if (questionEntailsScopeToken(question, plan, requested, qualifier)) return true;
+  // This is a role-safe authored alias pair, not a broad retrieval synonym.
+  // It is deliberately limited to the fixture/domain-neutral vocabulary that
+  // the planner itself treats as the same category restriction.
+  if (qualifier === 'beverage') {
+    return /\b(?:beverage|drink)\b/i.test(question);
+  }
+  return false;
 }
 
 function canonicalToken(value: string): string {

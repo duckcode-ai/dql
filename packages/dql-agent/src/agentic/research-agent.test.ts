@@ -47,7 +47,7 @@ describe('research hypotheses', () => {
       priorConfidence: 0.5, target: 'orders.revenue', action: 'breakdown', expectation: 'x',
     })) });
     const out = parseResearchHypotheses(many, ASSETS);
-    expect(out.length).toBeLessThanOrEqual(5);
+    expect(out.length).toBeLessThanOrEqual(6);
     expect(new Set(out.map((h) => h.statement)).size).toBe(out.length);
   });
 

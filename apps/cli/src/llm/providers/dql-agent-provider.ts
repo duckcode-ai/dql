@@ -1,4 +1,10 @@
-import { deadlineScale, planAnalystTurn, rerankCandidates } from '@duckcodeailabs/dql-agent';
+import {
+  classifyProviderFailure,
+  deadlineScale,
+  planAnalystTurn,
+  rerankCandidates,
+  type ProviderFailureDiagnosticV1,
+} from '@duckcodeailabs/dql-agent';
 import { buildAnalystLoopTools } from '../analyst-loop-tools.js';
 import {
   ClaudeProvider,
@@ -49,7 +55,8 @@ import {
 } from '@duckcodeailabs/dql-agent';
 import { CassetteStore, resolveCassetteModeFromEnv, withCassette } from '../../commands/agent-eval-cassette.js';
 import { buildManifest, normalizeDqlArtifactReference, resolveDbtManifestPath, type ProviderEgressReceiptV1 } from '@duckcodeailabs/dql-core';
-import { existsSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentRunRequest, AgentRunner, AgentTurn, BlockProposal, ProviderId } from '../types.js';
 import { buildAnswerLoopTools, createGroundingContextExpander } from '../answer-loop-tools.js';
@@ -139,6 +146,45 @@ const SPECS: Record<SimpleProviderId, ProviderSpec> = {
     },
   },
 };
+
+/**
+ * Capture a content-free provider failure at the closest boundary. Local
+ * runtime may later choose a user-facing headline, but must not need raw
+ * provider errors or URLs to reconstruct the cause.
+ */
+function providerBoundaryDiagnostic(input: {
+  providerId: SimpleProviderId;
+  projectRoot: string;
+  phase: ProviderFailureDiagnosticV1['phase'];
+  error?: unknown;
+  code?: string;
+}): ProviderFailureDiagnosticV1 {
+  const config = getEffectiveProviderConfig(input.projectRoot, input.providerId);
+  const message = input.error instanceof Error ? input.error.message : String(input.error ?? 'provider readiness failed');
+  const code = input.code
+    ?? (input.error && typeof input.error === 'object' ? String((input.error as { code?: unknown }).code ?? '') : '');
+  const fingerprint = (value: string | undefined): string | undefined => value?.trim()
+    ? `sha256:${createHash('sha256').update(value.trim()).digest('hex')}`
+    : undefined;
+  let origin: string | undefined;
+  if (config.baseUrl) {
+    try {
+      origin = new URL(config.baseUrl).origin;
+    } catch {
+      // The full malformed URL never leaves this function; its fingerprint is
+      // still a useful support correlation key without disclosing content.
+      origin = config.baseUrl;
+    }
+  }
+  return classifyProviderFailure({
+    code,
+    message,
+    phase: input.phase,
+    providerFingerprint: fingerprint(input.providerId),
+    modelFingerprint: fingerprint(config.model),
+    baseOriginFingerprint: fingerprint(origin),
+  });
+}
 
 function createCertifiedFitConfirmation(provider: AgentProvider, signal?: AbortSignal): CertifiedFitConfirmation {
   return async ({ question, questionPlan, block, fit }) => {
@@ -345,16 +391,30 @@ function emitProposalFromText(text: string, emit: (turn: AgentTurn) => void): vo
  * this one (local-runtime.ts:164), so reaching back would close an import cycle
  * through a 34k-line file. A few lines of JSON reading is the cheaper trade.
  *
- * Cached per project root because this runs on every turn and the answer is a
- * migration setting, not live state. A malformed file resolves to `null`, which
- * `resolveOrchestratorPolicy` turns into `legacy` — a broken config must not
- * route real questions onto an unproven path.
+ * Cached by a lightweight file fingerprint, not forever. Settings writes must
+ * take effect for the next Ask without requiring a notebook-server restart.
+ * A malformed file resolves to `null`, which `resolveOrchestratorPolicy` turns
+ * into `legacy` — a broken config must not route real questions onto an
+ * unproven path.
  */
-const agentConfigCache = new Map<string, Record<string, unknown> | null>();
+const agentConfigCache = new Map<string, {
+  fingerprint: string;
+  value: Record<string, unknown> | null;
+}>();
+
+function agentConfigFingerprint(projectRoot: string): string {
+  try {
+    const stats = statSync(join(projectRoot, 'dql.config.json'));
+    return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeMs}`;
+  } catch {
+    return 'missing';
+  }
+}
 
 function readAgentConfig(projectRoot: string): Record<string, unknown> | null {
+  const fingerprint = agentConfigFingerprint(projectRoot);
   const cached = agentConfigCache.get(projectRoot);
-  if (cached !== undefined) return cached;
+  if (cached && cached.fingerprint === fingerprint) return cached.value;
   let resolved: Record<string, unknown> | null = null;
   try {
     const raw = readFileSync(join(projectRoot, 'dql.config.json'), 'utf-8');
@@ -365,7 +425,7 @@ function readAgentConfig(projectRoot: string): Record<string, unknown> | null {
   } catch {
     resolved = null;
   }
-  agentConfigCache.set(projectRoot, resolved);
+  agentConfigCache.set(projectRoot, { fingerprint, value: resolved });
   return resolved;
 }
 
@@ -553,15 +613,38 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           return envelope;
         },
       });
+      // One retry only, on the SAME configured provider and only for failures
+      // that are normally transient. The physical-dispatch observer remains in
+      // the path for both attempts, so a retry cannot exceed the run-wide
+      // dispatch budget or silently fail over to another provider.
+      let transientRetryUsed = false;
+      const mayRetrySameProvider = (error: unknown): boolean => {
+        if (signal.aborted || transientRetryUsed) return false;
+        const code = error && typeof error === 'object' ? String((error as { code?: unknown }).code ?? '') : '';
+        const message = error instanceof Error ? error.message : String(error ?? '');
+        const diagnostic = `${code} ${message}`;
+        return !/PROVIDER_DISPATCH_BUDGET|RUN_SOFT_TARGET|RUN_DEADLINE|PROJECT_SNAPSHOT|abort|cancel/i.test(diagnostic)
+          && /(?:429|rate limit|too many requests|502|503|504|gateway|econn|network|fetch failed|connection refused|timeout|timed out)/i.test(diagnostic);
+      };
+      const retrySameProviderOnce = async <T>(operation: () => Promise<T>): Promise<T> => {
+        try {
+          return await operation();
+        } catch (error) {
+          if (!mayRetrySameProvider(error)) throw error;
+          transientRetryUsed = true;
+          emit({ kind: 'thinking', text: 'The configured AI provider had a transient error; retrying it once within this run budget.' });
+          return operation();
+        }
+      };
       const provider: AgentProvider = {
         name: rawProvider.name,
         available: () => rawProvider.available(),
         generate: (...args) => {
-          return rawProvider.generate(args[0], withPhysicalDispatchObserver(args[1]));
+          return retrySameProviderOnce(() => rawProvider.generate(args[0], withPhysicalDispatchObserver(args[1])));
         },
         ...(rawProvider.generateWithTools ? {
           generateWithTools: (...args: Parameters<NonNullable<AgentProvider['generateWithTools']>>) => {
-            return rawProvider.generateWithTools!(args[0], args[1], withPhysicalDispatchObserver(args[2]));
+            return retrySameProviderOnce(() => rawProvider.generateWithTools!(args[0], args[1], withPhysicalDispatchObserver(args[2])));
           },
         } : {}),
         ...(rawProvider.generateStream ? {
@@ -572,7 +655,20 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
       };
       const available = await provider.available().catch(() => false);
       if (!available) {
-        emit({ kind: 'error', message: `${spec.label} is not configured or reachable. ${spec.setup}` });
+        const message = `${spec.label} is not configured or reachable. ${spec.setup}`;
+        emit({
+          kind: 'error',
+          message,
+          providerDiagnostic: providerBoundaryDiagnostic({
+            providerId: id,
+            projectRoot: req.projectRoot,
+            phase: 'preflight',
+            error: message,
+            // Local Ollama readiness is a reachability concern; configured
+            // remote providers missing credentials are authentication issues.
+            code: id === 'ollama' ? 'NETWORK_FAILURE' : 'AUTHENTICATION_FAILED',
+          }),
+        });
         return;
       }
 
@@ -1068,6 +1164,19 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
               : snapshotDrift ? 'project_snapshot_mismatch'
               : 'provider_error',
           ),
+          providerDiagnostic: providerBoundaryDiagnostic({
+            providerId: id,
+            projectRoot: req.projectRoot,
+            phase: orchestrationBudgetExhausted
+              ? 'planning'
+              : 'generation',
+            error: err,
+            code: orchestrationBudgetExhausted
+              ? 'PROVIDER_DISPATCH_BUDGET'
+              : snapshotDrift
+                ? 'ADMISSION_DENIED'
+                : budgetCode,
+          }),
         });
       }
     },
@@ -2269,6 +2378,8 @@ export const __test__ = {
   shouldSearchProjectFiles,
   renderProjectSourceSearch,
   researchDispatchPurposeForTool,
+  readAgentConfig,
+  providerBoundaryDiagnostic,
 };
 
 function researchDispatchPurposeForTool(toolName: string): 'research_narration' | 'research_tool' {

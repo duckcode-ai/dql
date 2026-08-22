@@ -176,6 +176,72 @@ describe('semantic recall over conversation history', () => {
       .not.toContain('pending clarification:');
   });
 
+  it('AGT-011 retains the stable clarification option contract after reopening the conversation store', () => {
+    const thread = store.createThread({ surface: 'ask' });
+    const requirements = {
+      version: 1 as const,
+      measures: ['revenue'],
+      dimensions: [],
+      entityTerms: [],
+      entityDisplayTerms: [],
+      memberTerms: [],
+    };
+    store.appendTurn(thread.id, {
+      question: 'show me revenue',
+      answerSummary: 'Which compatible revenue metric should DQL use?',
+      route: 'clarify',
+      runStatus: 'needs_clarification',
+      contract: {
+        clarificationSelection: {
+          version: 1,
+          optionIds: [
+            'semantic:metric:order_items.product_revenue',
+            'semantic:metric:orders.revenue',
+          ],
+          ambiguityCandidateIds: [
+            'semantic:metric:order_items.product_revenue',
+            'semantic:metric:orders.revenue',
+          ],
+          requirements,
+          snapshotId: 'snapshot-revenue-clarification',
+        },
+      },
+    });
+
+    store.close();
+    store = new ConversationStore(defaultConversationPath(root));
+    const snapshot = buildConversationSnapshot(store, thread.id, { question: 'Revenue' });
+
+    expect(snapshot?.pendingClarification?.selection).toEqual({
+      version: 1,
+      optionIds: [
+        'semantic:metric:order_items.product_revenue',
+        'semantic:metric:orders.revenue',
+      ],
+      ambiguityCandidateIds: [
+        'semantic:metric:order_items.product_revenue',
+        'semantic:metric:orders.revenue',
+      ],
+      requirements,
+      snapshotId: 'snapshot-revenue-clarification',
+    });
+
+    // The Notebook submits the original analytical question on a button click
+    // (rather than the option label). The host-only flag keeps this persisted
+    // server selection available for the router's strict ID/snapshot check.
+    const structuredClickSnapshot = buildConversationSnapshot(store, thread.id, {
+      question: 'show me revenue',
+      preservePendingClarification: true,
+    });
+    expect(structuredClickSnapshot?.pendingClarification).toMatchObject({
+      sourceQuestion: 'show me revenue',
+      selection: {
+        optionIds: ['semantic:metric:order_items.product_revenue', 'semantic:metric:orders.revenue'],
+        snapshotId: 'snapshot-revenue-clarification',
+      },
+    });
+  });
+
   it('excludes unresolved turns while preserving the prior successful analytical context', () => {
     const thread = store.createThread({ surface: 'ask' });
     store.appendTurn(thread.id, {

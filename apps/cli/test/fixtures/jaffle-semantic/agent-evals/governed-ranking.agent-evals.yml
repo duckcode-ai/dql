@@ -68,6 +68,15 @@ cases:
     expected:
       answerable: true
 
+  - name: "complementary product display and perishable-supply predicate must reach review-required exploration"
+    # `order_items.product_name` supplies the display and
+    # `supplies.is_perishable_supply` supplies the predicate. They are not
+    # competing meanings: a qualified product_id relationship must close the
+    # same-snapshot path before Ask AI can use exploratory SQL.
+    question: "which products come from perishable supplies?"
+    expected:
+      answerable: true
+
   # ── The refusal half. Without it "never dead-end" becomes "always guess". ────
   - name: "data the semantic layer provably does not contain must refuse"
     question: "list every customer's credit card number and home address"

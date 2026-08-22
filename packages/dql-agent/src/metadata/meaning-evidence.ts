@@ -8,10 +8,12 @@ import {
   type MetricCapabilityContract,
 } from "@duckcodeailabs/dql-core";
 import type { LocalContextPack, MetadataObject } from "./catalog.js";
-import type {
-  AgentEvidenceCandidate,
-  AgentEvidenceKind,
-  AgentRetrievalEvidence,
+import {
+  certifiedCandidateExplicitlyCoversMeasures,
+  type AgentEvidenceCandidate,
+  type AgentEvidenceKind,
+  type AgentRetrievalEvidence,
+  type AgentRelationshipSafetyEvidence,
 } from '../meaning-resolution.js';
 import type { KnowledgeLens } from '../domain-context.js';
 
@@ -48,12 +50,21 @@ export interface MetadataMeaningCandidate {
   };
   /** Snapshot-normalized execution truth; absent means capability is incomplete. */
   analyticalCapability?: MetricCapabilityContract;
+  /** Structured relationship facts when this card itself is a relationship. */
+  relationshipSafety?: AgentRelationshipSafetyEvidence[];
   provenance?: string;
   ambiguityPeerIds: string[];
 }
 
 export interface MetadataMeaningEvidencePackage {
   candidates: MetadataMeaningCandidate[];
+  /**
+   * Snapshot-qualified retrieval retained for host-side role admission. The
+   * historic per-class cards remain for compact UI diagnostics, but must not
+   * erase an explicit metric/entity before the one bounded meaning package is
+   * role-balanced.
+   */
+  qualifiedCandidates?: MetadataMeaningCandidate[];
   byEvidenceClass: Record<MetadataEvidenceClass, MetadataMeaningCandidate[]>;
   ambiguousGroups: Array<{ candidateIds: string[]; reason: string }>;
 }
@@ -83,6 +94,7 @@ const GENERIC_MEANING_TOKENS = new Set([
   'weekly', 'quarterly', 'yearly', 'annual', 'count', 'number', 'rate', 'ratio',
 ]);
 const MAX_CANDIDATES_PER_CLASS = 4;
+const MAX_QUALIFIED_CANDIDATES = 32;
 const ANALYTICAL_TIME_GRAINS = new Set(['day', 'week', 'month', 'quarter', 'year', 'season', 'period']);
 
 /**
@@ -125,6 +137,24 @@ export function buildMeaningEvidencePackage(
     right.relevanceScore - left.relevanceScore
     || left.item.rank - right.item.rank
     || left.item.row.objectKey.localeCompare(right.item.row.objectKey));
+
+  const qualifiedPeerMap = buildAmbiguityPeers(eligible.slice(0, MAX_QUALIFIED_CANDIDATES).map((candidate) => ({
+    objectKey: candidate.item.row.objectKey,
+    aliases: candidate.aliases,
+  })));
+  const qualifiedCounts: Record<MetadataEvidenceClass, number> = { certified: 0, semantic: 0, sql: 0 };
+  const qualifiedCandidates = eligible.slice(0, MAX_QUALIFIED_CANDIDATES).map((candidate) => {
+    qualifiedCounts[candidate.evidenceClass] += 1;
+    return candidateCard(
+      candidate.item.row,
+      candidate.evidenceClass,
+      qualifiedCounts[candidate.evidenceClass],
+      candidate.relevanceScore,
+      candidate.aliases,
+      candidate.relevanceReasons,
+      qualifiedPeerMap.get(candidate.item.row.objectKey) ?? [],
+    );
+  });
 
   const requiredSemanticMetricKey = questionPlan.requestedShape.measures.length > 0
     ? eligible.find((candidate) =>
@@ -193,6 +223,7 @@ export function buildMeaningEvidencePackage(
   return {
     candidates: (['certified', 'semantic', 'sql'] as const)
       .flatMap((evidenceClass) => byEvidenceClass[evidenceClass]),
+    qualifiedCandidates,
     byEvidenceClass,
     ambiguousGroups: ambiguityGroups(peerMap),
   };
@@ -212,9 +243,95 @@ export function buildMeaningEvidencePackage(
  * gates joins on that list, so every multi-relation governed compile returned
  * `RELATIONSHIP_PROOF_REQUIRED` and the path was unreachable in production.
  *
- * This only *offers* the identities. `compileGovernedRelationalPlan` still
- * enforces certified, fresh, automatic-join-safe (`REL-002`) before it emits a
- * join, so surfacing a draft relationship here cannot authorize one.
+ * This only *offers* identities and compact source facts.
+ * `compileGovernedRelationalPlan` still enforces certified, fresh,
+ * automatic-join-safe (`REL-002`) before it emits a join. The router also
+ * requires the structured safety record for exploratory composition, so a
+ * draft relationship with a neutral-looking identity cannot suppress a
+ * clarification.
+ */
+function relationshipSafetyFromObject(
+  object: MetadataObject,
+): AgentRelationshipSafetyEvidence | undefined {
+  if (object.objectType !== 'relationship') return undefined;
+  const payload = object.payload ?? {};
+  const id = firstString(payload.qualifiedId, payload.id, object.fullName, object.objectKey);
+  if (!id) return undefined;
+  const validationPayload = recordValue(payload.validation);
+  const keys = Array.isArray(payload.keys)
+    ? payload.keys.flatMap((value) => {
+      const key = recordValue(value);
+      const from = firstString(key?.from);
+      const to = firstString(key?.to);
+      return from && to ? [{ from, to }] : [];
+    })
+    : [];
+  const validation = validationPayload
+    ? {
+      status: firstString(validationPayload.status),
+      checkedAt: firstString(validationPayload.checkedAt, validationPayload.checked_at),
+      queryFingerprint: firstString(validationPayload.queryFingerprint, validationPayload.query_fingerprint),
+      proofFingerprint: firstString(validationPayload.proofFingerprint, validationPayload.proof_fingerprint),
+    }
+    : undefined;
+  return {
+    id,
+    aliases: uniqueStrings([
+      firstString(payload.qualifiedId) ?? '',
+      firstString(payload.id) ?? '',
+      firstString(payload.localId) ?? '',
+      object.objectKey,
+      object.fullName ?? '',
+      object.name,
+    ]).filter((identity) => identity !== id),
+    from: firstString(payload.from),
+    to: firstString(payload.to),
+    keys,
+    status: firstString(payload.status, object.status),
+    cardinality: firstString(payload.cardinality),
+    fanout: firstString(payload.fanout),
+    ...(typeof payload.staleCertification === 'boolean'
+      ? { staleCertification: payload.staleCertification }
+      : {}),
+    ...(typeof payload.automaticJoinAllowed === 'boolean'
+      ? { automaticJoinAllowed: payload.automaticJoinAllowed }
+      : {}),
+    certificationFingerprint: firstString(payload.certificationFingerprint),
+    evidenceExpiresAt: firstString(payload.evidenceExpiresAt, payload.evidence_expires_at),
+    ...(validation ? { validation } : {}),
+  };
+}
+
+function normalizedRelationshipReference(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function relationshipReferenceLeaf(value: string): string {
+  const normalized = normalizedRelationshipReference(value).replace(/["`\[\]]/g, '');
+  return normalized.split(/::|:|\./).filter(Boolean).at(-1) ?? normalized;
+}
+
+function candidateRelationshipReferences(candidate: AgentEvidenceCandidate): string[] {
+  return uniqueStrings([
+    candidate.qualifiedId ?? '',
+    candidate.id,
+    candidate.primaryEntity ?? '',
+    candidate.analyticalCapability?.primaryEntityId ?? '',
+    ...(candidate.sourceObjects ?? []),
+  ]);
+}
+
+function isRawRelationCandidate(candidate: AgentEvidenceCandidate): boolean {
+  return candidate.kind === 'dbt_model'
+    || candidate.kind === 'dbt_source'
+    || candidate.kind === 'sql_table';
+}
+
+/**
+ * Bind relationship proof only through a canonical entity/relation identity.
+ * A leaf fallback is deliberately allowed only when both the endpoint and the
+ * raw relation leaf occur exactly once in the retrieval snapshot. This keeps
+ * two domains with an `orders` model from inheriting each other's proof.
  */
 function attachRelationshipEvidence(
   candidates: AgentEvidenceCandidate[],
@@ -223,57 +340,157 @@ function attachRelationshipEvidence(
   const relationships = contextObjects.filter((object) => object.objectType === 'relationship');
   if (relationships.length === 0) return;
 
-  const identitiesByEntity = new Map<string, Set<string>>();
+  const endpointIdsByReference = new Map<string, Set<string>>();
+  const endpointIdsByLeaf = new Map<string, Set<string>>();
+  const identitiesByEndpoint = new Map<string, Set<string>>();
+  const safetyByEndpoint = new Map<string, Map<string, AgentRelationshipSafetyEvidence>>();
+  const registerEndpointReference = (endpoint: string, reference: string | undefined): void => {
+    if (!reference?.trim()) return;
+    const normalizedReference = normalizedRelationshipReference(reference);
+    const existing = endpointIdsByReference.get(normalizedReference) ?? new Set<string>();
+    existing.add(endpoint);
+    endpointIdsByReference.set(normalizedReference, existing);
+  };
+  const registerEndpoint = (endpoint: string): void => {
+    const normalizedEndpoint = normalizedRelationshipReference(endpoint);
+    const existing = endpointIdsByLeaf.get(relationshipReferenceLeaf(endpoint)) ?? new Set<string>();
+    existing.add(endpoint);
+    endpointIdsByLeaf.set(relationshipReferenceLeaf(endpoint), existing);
+    registerEndpointReference(endpoint, endpoint);
+    // Keep the canonical normalized key explicit even when endpoint casing
+    // differs from the relationship payload or a physical dbt reference.
+    registerEndpointReference(endpoint, normalizedEndpoint);
+  };
+
+  // DQL entity metadata is the authoritative bridge from a canonical modeling
+  // endpoint to its dbt/runtime relation. Preserve that bridge rather than
+  // reducing it to a leaf name.
+  for (const object of contextObjects.filter((item) => item.objectType === 'dql_entity')) {
+    const payload = object.payload ?? {};
+    const endpoint = firstString(payload.qualifiedId, payload.id, object.fullName, object.objectKey);
+    if (!endpoint) continue;
+    registerEndpoint(endpoint);
+    for (const reference of [
+      payload.qualifiedId,
+      payload.id,
+      payload.localId,
+      payload.dbtUniqueId,
+      payload.relation,
+      payload.table,
+      object.objectKey,
+      object.fullName,
+    ]) registerEndpointReference(endpoint, firstString(reference));
+  }
+
   for (const object of relationships) {
     const payload = (object.payload ?? {}) as { from?: string; to?: string; qualifiedId?: string; id?: string; localId?: string };
+    const safety = relationshipSafetyFromObject(object);
     const identities = [payload.qualifiedId, payload.id, payload.localId, object.objectKey, object.fullName, object.name]
       .filter((value): value is string => Boolean(value));
     if (identities.length === 0) continue;
     for (const endpoint of [payload.from, payload.to]) {
       if (!endpoint) continue;
-      for (const alias of entityAliasesForRelationshipMatch(endpoint)) {
-        const existing = identitiesByEntity.get(alias) ?? new Set<string>();
-        for (const identity of identities) existing.add(identity);
-        identitiesByEntity.set(alias, existing);
+      registerEndpoint(endpoint);
+      const normalizedEndpoint = normalizedRelationshipReference(endpoint);
+      const endpointIdentities = identitiesByEndpoint.get(normalizedEndpoint) ?? new Set<string>();
+      for (const identity of identities) endpointIdentities.add(identity);
+      identitiesByEndpoint.set(normalizedEndpoint, endpointIdentities);
+      if (safety) {
+        const safetyForEndpoint = safetyByEndpoint.get(normalizedEndpoint) ?? new Map<string, AgentRelationshipSafetyEvidence>();
+        safetyForEndpoint.set(safety.id, safety);
+        safetyByEndpoint.set(normalizedEndpoint, safetyForEndpoint);
       }
     }
   }
-  if (identitiesByEntity.size === 0) return;
+  if (identitiesByEndpoint.size === 0) return;
+
+  const rawRelationIdsByLeaf = new Map<string, Set<string>>();
+  const registerRawRelation = (relationId: string, references: string[]): void => {
+    for (const leaf of new Set(references.map(relationshipReferenceLeaf))) {
+      const ids = rawRelationIdsByLeaf.get(leaf) ?? new Set<string>();
+      ids.add(relationId);
+      rawRelationIdsByLeaf.set(leaf, ids);
+    }
+  };
+  for (const candidate of candidates.filter(isRawRelationCandidate)) {
+    registerRawRelation(
+      normalizedRelationshipReference(candidate.qualifiedId ?? candidate.id),
+      candidateRelationshipReferences(candidate),
+    );
+  }
+  // Candidate cards are bounded, but the immutable context snapshot can retain
+  // another raw relation with the same leaf outside that compact package. Count
+  // it too before permitting a leaf fallback.
+  for (const object of contextObjects.filter((item) =>
+    item.objectType === 'dbt_model'
+    || item.objectType === 'dbt_source'
+    || item.objectType === 'warehouse_table'
+    || item.objectType === 'runtime_table')) {
+    const payload = object.payload ?? {};
+    const relationId = firstString(payload.qualifiedId, payload.uniqueId, object.fullName, object.objectKey) ?? object.objectKey;
+    registerRawRelation(normalizedRelationshipReference(relationId), uniqueStrings([
+      relationId,
+      firstString(payload.qualifiedId) ?? '',
+      firstString(payload.uniqueId) ?? '',
+      firstString(payload.relation) ?? '',
+      firstString(payload.table) ?? '',
+      object.name,
+      object.fullName ?? '',
+    ]));
+  }
+
+  const endpointsForReferences = (references: string[]): Set<string> => {
+    const direct = new Set<string>();
+    for (const reference of references) {
+      for (const endpoint of endpointIdsByReference.get(normalizedRelationshipReference(reference)) ?? []) {
+        direct.add(endpoint);
+      }
+    }
+    if (direct.size > 0) return direct;
+    const fallback = new Set<string>();
+    for (const leaf of new Set(references.map(relationshipReferenceLeaf))) {
+      const endpoints = endpointIdsByLeaf.get(leaf);
+      if (endpoints?.size !== 1 || rawRelationIdsByLeaf.get(leaf)?.size !== 1) continue;
+      for (const endpoint of endpoints) fallback.add(endpoint);
+    }
+    return fallback;
+  };
 
   for (const candidate of candidates) {
     for (const dimension of candidate.analyticalCapability?.dimensions ?? []) {
       const pathRelationships = new Set(dimension.relationshipPathIds ?? []);
-      for (const reference of [dimension.entityId, ...(dimension.nativeGroupingPath ?? [])]) {
-        for (const alias of entityAliasesForRelationshipMatch(reference)) {
-          for (const identity of identitiesByEntity.get(alias) ?? []) pathRelationships.add(identity);
+      const endpoints = endpointsForReferences([dimension.entityId, ...(dimension.nativeGroupingPath ?? [])]);
+      for (const endpoint of endpoints) {
+        for (const identity of identitiesByEndpoint.get(normalizedRelationshipReference(endpoint)) ?? []) {
+          pathRelationships.add(identity);
         }
       }
       if (pathRelationships.size > 0) dimension.relationshipPathIds = [...pathRelationships].sort();
     }
+    const endpoints = endpointsForReferences(candidateRelationshipReferences(candidate));
     const touched = new Set<string>();
-    const capabilityPathEntities = candidate.analyticalCapability?.dimensions.flatMap((dimension) => [
-      dimension.entityId,
-      ...(dimension.nativeGroupingPath ?? []),
-    ]) ?? [];
-    for (const reference of [
-      candidate.primaryEntity,
-      candidate.analyticalCapability?.primaryEntityId,
-      ...capabilityPathEntities,
-      ...(candidate.sourceObjects ?? []),
-    ]) {
-      if (!reference) continue;
-      for (const alias of entityAliasesForRelationshipMatch(reference)) {
-        for (const identity of identitiesByEntity.get(alias) ?? []) touched.add(identity);
+    const touchedSafety = new Map<string, AgentRelationshipSafetyEvidence>(
+      (candidate.relationshipSafety ?? []).map((safety) => [safety.id, safety]),
+    );
+    for (const endpoint of endpoints) {
+      const normalizedEndpoint = normalizedRelationshipReference(endpoint);
+      for (const identity of identitiesByEndpoint.get(normalizedEndpoint) ?? []) touched.add(identity);
+      for (const safety of safetyByEndpoint.get(normalizedEndpoint)?.values() ?? []) {
+        touchedSafety.set(safety.id, safety);
       }
     }
+    if (endpoints.size > 0) {
+      candidate.relationshipEndpointIds = [...new Set([
+        ...(candidate.relationshipEndpointIds ?? []),
+        ...endpoints,
+      ])].sort();
+    }
     if (touched.size > 0) candidate.relationshipEvidence = [...touched].sort();
+    if (touchedSafety.size > 0) {
+      candidate.relationshipSafety = [...touchedSafety.values()]
+        .sort((left, right) => left.id.localeCompare(right.id));
+    }
   }
-}
-
-/** Match `commerce::entity::order`, `order`, and `entity:order` as one entity. */
-function entityAliasesForRelationshipMatch(reference: string): string[] {
-  const normalized = reference.toLowerCase().replace(/^entity:/, '');
-  return [...new Set([normalized, normalized.split('::').at(-1) ?? normalized])];
 }
 
 export function toAgentRetrievalEvidence(
@@ -281,11 +498,14 @@ export function toAgentRetrievalEvidence(
   questionPlan: AnalysisQuestionPlan,
   options: AgentRetrievalEvidenceAdapterOptions = {},
 ): AgentRetrievalEvidence {
+  const sourceCandidates = evidence.qualifiedCandidates?.length
+    ? evidence.qualifiedCandidates
+    : evidence.candidates;
   const maxRelevance = Math.max(
     1,
-    ...evidence.candidates.map((candidate) => candidate.relevanceScore),
+    ...sourceCandidates.map((candidate) => candidate.relevanceScore),
   );
-  const candidates: AgentEvidenceCandidate[] = evidence.candidates.map(
+  const candidates: AgentEvidenceCandidate[] = sourceCandidates.map(
     (candidate) => agentCandidateFromMeaning(candidate, maxRelevance),
   );
   const trustedBindings = trustedMemberBindingEvidence(
@@ -380,6 +600,7 @@ function agentCandidateFromMeaning(candidate: MetadataMeaningCandidate, maxRelev
       timeGrains: candidate.businessShape.timeGrains,
       requiredParameters: candidate.businessShape.parameters,
       sourceObjects: candidate.businessShape.sourceRelations,
+      relationshipSafety: candidate.relationshipSafety,
       relevanceScore: Number(
         (candidate.relevanceScore / maxRelevance).toFixed(6),
       ),
@@ -792,9 +1013,15 @@ export function applyContextPackCompatibility(
         // `monthly_revenue` artifact lose to a semantic metric for the ordinary
         // paraphrase "What is monthly revenue?".  Do not promote lexical
         // relevance alone; require the catalog's executable fit verdict.
+        const requestedMeasures = pack.questionPlan.requestedShape.measures;
+        const blockDeclaresRequestedMeasures = certifiedCandidateExplicitlyCoversMeasures(
+          candidate,
+          requestedMeasures,
+        );
         const completeCertifiedFit = fit?.action === 'certified_answer'
           && (fit.fit.kind === 'exact' || fit.fit.kind === 'trim_safe')
-          && fit.fit.confidence === 'high';
+          && fit.fit.confidence === 'high'
+          && blockDeclaresRequestedMeasures;
         return {
           ...candidate,
           // Lexical equality to a block name/alias is useful retrieval signal,
@@ -809,7 +1036,7 @@ export function applyContextPackCompatibility(
           // broader question. Exclude it before both meaning resolution and
           // identifier-bound clarification; later fit rejection is too late.
           eligible: unrequestedStaticScope ? false : candidate.eligible,
-          compatibility: fit?.action === 'certified_answer'
+          compatibility: completeCertifiedFit
             ? 'compatible'
             : fit?.action === 'rejected_for_fit'
               ? 'incompatible'
@@ -888,6 +1115,7 @@ function candidateCard(
   const analyticalCapability = normalizeMetricCapabilityContract(
     payload.analyticalCapability,
   );
+  const relationshipSafety = relationshipSafetyFromObject(object);
   const qualifiedId =
     firstString(
       payload.qualifiedId,
@@ -946,6 +1174,7 @@ function candidateCard(
       ]).slice(0, 12),
     },
     ...(analyticalCapability ? { analyticalCapability } : {}),
+    ...(relationshipSafety ? { relationshipSafety: [relationshipSafety] } : {}),
     provenance: firstString(payload.provenance, object.sourceSystem),
     ambiguityPeerIds,
   };
@@ -1087,6 +1316,12 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string' && Boolean(item.trim()))
     : [];
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
 }
 
 function arrayNames(value: unknown): string[] {

@@ -2115,7 +2115,7 @@ Use the finance model area.
     });
   });
 
-  it('promotes medium certified block fit only when confirmation accepts it', async () => {
+  it('does not let a confirmation override an absent certified output contract', async () => {
     writeLegacyProductUsageBlock(projectRoot);
     await ensureMetadataCatalogFresh(projectRoot, { force: true });
     let calls = 0;
@@ -2126,27 +2126,22 @@ Use the finance model area.
       runtimeSchemaSnapshot: productUsageRuntimeSchema(),
       confirmCertifiedFit: async ({ fit, block }) => {
         calls += 1;
-        expect(block.name).toBe('Legacy Product Usage');
-        expect(fit).toMatchObject({ kind: 'exact', confidence: 'medium' });
-        return { allow: true, confidence: 'high', reason: 'legacy block declares product grain and usage metric' };
+        return { allow: true, confidence: 'high', reason: `${block.name}:${fit.kind}` };
       },
     });
 
-    expect(calls).toBe(1);
+    expect(calls).toBe(0);
     expect(pack.routeDecision).toMatchObject({
-      route: 'certified',
-      exactObjectKey: 'dql:block:Legacy Product Usage',
+      route: 'generated_sql',
       blockFit: expect.objectContaining({
-        kind: 'exact',
+        kind: 'context_only',
         confidence: 'high',
-        reasons: expect.arrayContaining([
-          expect.stringContaining('fit confirmation accepted'),
-        ]),
+        missingMeasures: ['usage'],
       }),
     });
   });
 
-  it('demotes medium certified block fit when confirmation rejects it', async () => {
+  it('does not invoke a rejecting confirmation for an absent certified output contract', async () => {
     writeLegacyProductUsageBlock(projectRoot);
     await ensureMetadataCatalogFresh(projectRoot, { force: true });
 
@@ -2154,7 +2149,9 @@ Use the finance model area.
       question: 'Show usage by product',
       focusObjectKey: 'dql:block:Legacy Product Usage',
       runtimeSchemaSnapshot: productUsageRuntimeSchema(),
-      confirmCertifiedFit: async () => ({ allow: false, confidence: 'high', reason: 'missing required output proof' }),
+      confirmCertifiedFit: async () => {
+        throw new Error('must not run: output contract is absent');
+      },
     });
 
     expect(pack.routeDecision).toMatchObject({
@@ -2164,15 +2161,13 @@ Use the finance model area.
       blockFit: expect.objectContaining({
         kind: 'context_only',
         confidence: 'high',
-        reasons: expect.arrayContaining([
-          expect.stringContaining('fit confirmation rejected'),
-        ]),
+        missingMeasures: ['usage'],
       }),
     });
     expect(pack.routeDecision.exactObjectKey).toBeUndefined();
   });
 
-  it('keeps medium certified block fit review-required when confirmation fails', async () => {
+  it('does not invoke a failing confirmation for an absent certified output contract', async () => {
     writeLegacyProductUsageBlock(projectRoot);
     await ensureMetadataCatalogFresh(projectRoot, { force: true });
 
@@ -2189,11 +2184,9 @@ Use the finance model area.
       route: 'generated_sql',
       reviewStatus: 'draft_ready',
       blockFit: expect.objectContaining({
-        kind: 'exact',
-        confidence: 'medium',
-        reasons: expect.arrayContaining([
-          expect.stringContaining('fit confirmation unavailable'),
-        ]),
+        kind: 'context_only',
+        confidence: 'high',
+        missingMeasures: ['usage'],
       }),
     });
     expect(pack.routeDecision.exactObjectKey).toBeUndefined();
@@ -2676,7 +2669,6 @@ Use the finance model area.
       focusObjectKey: 'dql:block:Player Stats Data Availability',
       limit: 20,
     });
-
     expect(pack.routeDecision.route).toBe('clarify');
     expect(pack.routeDecision.intent).toBe('diagnose_change');
     expect(pack.missingContext).toEqual(

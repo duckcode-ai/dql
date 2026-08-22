@@ -25,6 +25,8 @@ interface EvalCandidateFixture {
   domain?: string;
   dimensions?: string[];
   aggregation?: string;
+  /** Authored certified output identities; prose and tags are not a contract. */
+  outputs?: string[];
   exactMatch?: boolean;
   analyticalRoute?: 'certified' | 'semantic';
 }
@@ -122,6 +124,7 @@ function materializeCandidates(fixtures: EvalCandidateFixture[]): AgentEvidenceC
     dimensions: fixture.dimensions,
     aggregation: fixture.aggregation,
     exactMatch: fixture.exactMatch,
+    compatibilityFacts: fixture.outputs?.map((output) => `output: ${output}`),
     analyticalCapability: fixtureCapability(fixture),
   }));
 }
@@ -220,7 +223,46 @@ describe('Ask AI orchestration YAML evaluation harness (AGT-027..033 / E2E-022)'
         expect(decision.requiresClarification).toBe(true);
         const selectedId = 'semantic:metric:revenue';
         expect(candidates.some((candidate) => candidate.id === selectedId)).toBe(true);
-        const continued = await router.decide({ ...request, selectedEvidenceId: selectedId });
+        const selectionThreadId = `thread:${testCase.id}`;
+        const selectionTurnId = `turn:${testCase.id}`;
+        const continued = await router.decide({
+          ...request,
+          selectedEvidenceId: selectedId,
+          clarificationSourceQuestion: testCase.question,
+          threadId: selectionThreadId,
+          conversationContext: {
+            conversationEnvelope: {
+              version: 1,
+              threadId: selectionThreadId,
+              recentTurns: [],
+              pendingClarification: {
+                sourceTurnId: selectionTurnId,
+                sourceQuestion: testCase.question,
+                question: 'Which compatible metric should DQL use?',
+                selection: {
+                  version: 1,
+                  optionIds: [selectedId],
+                  ambiguityCandidateIds: [selectedId],
+                  requirements: {
+                    version: 1,
+                    measures: testCase.resolution?.measures ?? [],
+                    dimensions: testCase.resolution?.dimensions ?? [],
+                    entityTerms: [],
+                    entityDisplayTerms: [],
+                    memberTerms: [],
+                  },
+                  snapshotId: evidence.snapshotId,
+                },
+              },
+            },
+            serverIssuedClarificationSelection: {
+              version: 1,
+              threadId: selectionThreadId,
+              sourceTurnId: selectionTurnId,
+              snapshotId: evidence.snapshotId,
+            },
+          },
+        });
         expect(meaningCalls).toBe(1);
         expect(continued.action).toBe('answer');
         expect(continued.resolvedAnalyticalPlan?.mode).toBe('authoritative');

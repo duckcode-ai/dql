@@ -255,6 +255,44 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
         failure: { code: 'EXECUTOR_FAILURE' },
       },
     })).toBe(true);
+    const cascadeV3 = analyticalInspectorContract({
+      diagnosticReceiptV3: {
+        version: 3,
+        runId: 'run-v3',
+        planFrozen: false,
+        finalStopReason: 'human_review_required',
+        sourceCoverage: [{ source: 'semantic', status: 'available', candidateIds: ['semantic:metric:revenue'] }],
+        cascade: {
+          selectedTier: 'exploratory_sql',
+          attempts: [{ tier: 'semantic', outcome: 'ineligible', reason: 'Incomplete dimensions.' }],
+        },
+        provider: { phase: 'generation', cause: 'gateway', safeAction: 'retry_same_provider' },
+      },
+    });
+    expect(cascadeV3?.diagnostic).toMatchObject({
+      version: 3,
+      sourceCoverage: [{ source: 'semantic', status: 'available' }],
+      provider: { cause: 'gateway' },
+    });
+    const mergedReceipts = analyticalInspectorContract({
+      diagnosticReceipt: { version: 1, phase: 'run.completed', failure: { code: 'LEGACY_FAILURE' } },
+      diagnosticReceiptV3: {
+        version: 3,
+        runId: 'run-both',
+        planFrozen: false,
+        finalStopReason: 'human_review_required',
+        sourceCoverage: [{ source: 'runtime_schema', status: 'errored', candidateIds: [] }],
+        cascade: { stopReason: 'coverage_gap', attempts: [{ tier: 'exploratory_sql', outcome: 'unavailable', reason: 'runtime schema failed' }] },
+        provider: { phase: 'preflight', cause: 'model_not_found', safeAction: 'fix_provider_configuration' },
+      },
+    });
+    expect(mergedReceipts?.diagnostic).toMatchObject({
+      version: 3,
+      sourceCoverage: [{ source: 'runtime_schema', status: 'errored' }],
+      cascade: { attempts: [{ tier: 'exploratory_sql', outcome: 'unavailable' }] },
+      provider: { phase: 'preflight', cause: 'model_not_found' },
+      failure: { code: 'LEGACY_FAILURE' },
+    });
     expect(analyticalInspectorSections()).toEqual([
       'Performance & provider egress',
       'Plan',

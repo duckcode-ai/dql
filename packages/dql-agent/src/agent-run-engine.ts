@@ -34,7 +34,14 @@ import {
   conversationHistoryFromContext,
   isLikelyClarificationReply,
 } from "./conversation/snapshot.js";
-import { buildCoverageGap, type AgentSelectedResultBindingV1, type AnalyticalTaskOutcomeV1, type AnalyticalTurnPlanV1 } from './analytical-orchestration.js';
+import {
+  buildCoverageGap,
+  classifyProviderFailure,
+  type AgentRunDiagnosticReceiptV3,
+  type AgentSelectedResultBindingV1,
+  type AnalyticalTaskOutcomeV1,
+  type AnalyticalTurnPlanV1,
+} from './analytical-orchestration.js';
 import { evaluateAnalyticalRequestPolicy } from './analytical-request-policy.js';
 
 export type AgentRunRequestedMode = "auto" | "ask" | "research" | "sql" | "block" | "app" | "modeling" | "skill";
@@ -487,6 +494,8 @@ export interface AgentRun {
   lifecycle?: AgentRunLifecycleV1;
   diagnosticReceipt?: AgentRunDiagnosticReceiptV1;
   diagnosticReceiptV2?: AgentRunDiagnosticReceiptV2;
+  /** Additive content-free cascade/provider receipt; V1/V2 remain readable. */
+  diagnosticReceiptV3?: AgentRunDiagnosticReceiptV3;
   narrationIntegrityReceipt?: NarrationIntegrityReceiptV1;
   telemetry?: AgentRunTelemetryV1;
   /** Server-owned automatic repair authority. Legacy runs omit it and fail closed. */
@@ -1446,7 +1455,8 @@ export class AgentRunEngine {
       };
       run.diagnosticReceipt = diagnosticReceiptForRun(run);
       run.diagnosticReceiptV2 = diagnosticReceiptV2ForRun(run);
-      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2);
+      run.diagnosticReceiptV3 = diagnosticReceiptV3ForRun(run);
+      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3);
       await checkpointQueue;
       await this.store?.save(run);
       return run;
@@ -1830,7 +1840,8 @@ export class AgentRunEngine {
       );
       run.diagnosticReceipt = diagnosticReceiptForRun(run);
       run.diagnosticReceiptV2 = diagnosticReceiptV2ForRun(run);
-      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2);
+      run.diagnosticReceiptV3 = diagnosticReceiptV3ForRun(run);
+      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3);
       await checkpointQueue;
       await this.store?.save(run);
       return run;
@@ -1915,6 +1926,7 @@ export class AgentRunEngine {
           lifecycle: terminalLifecycle(progress.lifecycle, "run.cancelled", completedAt, events.length),
         };
         run.diagnosticReceiptV2 = diagnosticReceiptV2ForRun(run);
+        run.diagnosticReceiptV3 = diagnosticReceiptV3ForRun(run);
         await checkpointQueue;
         await this.store?.save(run);
         return run;
@@ -1998,7 +2010,8 @@ export class AgentRunEngine {
         lifecycle: terminalLifecycle(progress.lifecycle, "run.failed", completedAt, events.length),
       };
       run.diagnosticReceiptV2 = diagnosticReceiptV2ForRun(run);
-      run.artifacts = attachDiagnosticReceipt(retainedArtifacts, receipt, run.diagnosticReceiptV2);
+      run.diagnosticReceiptV3 = diagnosticReceiptV3ForRun(run);
+      run.artifacts = attachDiagnosticReceipt(retainedArtifacts, receipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3);
       await checkpointQueue;
       await this.store?.save(run);
       return run;
@@ -2218,15 +2231,28 @@ function rescueModelingGapForOrdinaryAsk(
 ): IntentDecision | undefined {
   if (!isOrdinaryAskRequest(request)) return undefined;
   if (decision.terminalOutcome?.kind !== 'modeling_gap') return undefined;
-  // A missing modeled dimension is a factual coverage result, not an invitation
-  // to retry the same question through generated SQL or Research.  The router
-  // already searched the governed sources and attached the exact field; keep it
-  // terminal so the UI can render the typed modeling action.
-  if (decision.meaningResolution?.compatibilityFailures?.some((failure) =>
-    failure.code === 'MISSING_DIMENSION')) return undefined;
+  // A frozen plan is authoritative. Only a PRE-FREEZE coverage observation may
+  // advance through the later governed-relational/exploratory tiers. This keeps
+  // compiler, policy, validation, and warehouse failures terminal after a plan
+  // has been accepted while restoring the required certified → semantic →
+  // relational → review-required exploration cascade for missing dimensions.
+  if (decision.resolvedAnalyticalPlan?.mode === 'authoritative') return undefined;
   // Genuine user-facing ambiguity and an explicit evidence pick stay terminal.
   if (decision.requiresClarification === true) return undefined;
   if (request.selectedEvidenceId) return undefined;
+  // The router, not this host boundary, owns cascade eligibility. A typed
+  // pre-freeze coverage gap advances only when the same snapshot recorded an
+  // executable exploratory tier. This prevents a semantic-only candidate or a
+  // forged/old terminal decision from quietly becoming generated SQL.
+  const exploratoryAttempt = decision.analyticalCascadeDecision?.attempts.find(
+    (attempt) => attempt.tier === 'exploratory_sql',
+  );
+  if (
+    decision.analyticalCascadeDecision?.selectedTier !== 'exploratory_sql'
+    || decision.analyticalCascadeDecision.planFrozen
+    || exploratoryAttempt?.outcome !== 'executable'
+    || exploratoryAttempt.candidateIds.length === 0
+  ) return undefined;
   if (options.requireGovernedEvidence) {
     const governedEvidence = (decision.retrievalEvidence?.candidateCount ?? 0) > 0
       || (decision.meaningResolution?.selectedConceptIds.length ?? 0) > 0;
@@ -2254,6 +2280,32 @@ function rescueModelingGapForOrdinaryAsk(
         }
       : {}),
   };
+}
+
+/**
+ * Consume the router's immutable cascade decision without reparsing the
+ * question or reconstructing a tier from route/identifier text. The selected
+ * tier is intentionally sufficient for dispatch; compilation and execution
+ * still validate the frozen plan or review-required exploratory SQL.
+ */
+function routeFromAnalyticalCascade(decision: IntentDecision): AgentRunRoute | undefined {
+  const cascade = decision.analyticalCascadeDecision;
+  if (!cascade) return undefined;
+  if (cascade.stopReason === 'denied' || cascade.stopReason === 'coverage_gap' || cascade.stopReason === 'post_freeze_failure') {
+    return 'blocked';
+  }
+  if (cascade.stopReason === 'ambiguous') return 'clarify';
+  switch (cascade.selectedTier) {
+    case 'certified':
+      return cascade.planFrozen ? 'certified_answer' : undefined;
+    case 'semantic':
+      return cascade.planFrozen ? 'semantic_answer' : undefined;
+    case 'governed_relational':
+    case 'exploratory_sql':
+      return 'generated_answer';
+    default:
+      return undefined;
+  }
 }
 
 /**
@@ -2717,6 +2769,43 @@ function diagnosticReceiptV2ForRun(run: AgentRun): AgentRunDiagnosticReceiptV2 {
   };
 }
 
+/**
+ * Build a compact V3 receipt from existing durable run state. It intentionally
+ * records identifiers and outcomes, never raw metadata, result rows, provider
+ * payloads, or secret-bearing URLs.
+ */
+function diagnosticReceiptV3ForRun(run: AgentRun): AgentRunDiagnosticReceiptV3 {
+  // The router is the sole cascade authority. Do not reconstruct a tier from
+  // route names or identifier text here: that erased stale/error lane states
+  // and falsely reported governed-relational success for pure exploration.
+  const cascade = run.routeDecision?.analyticalCascadeDecision;
+  const sourceCoverage = cascade?.sourceCoverage ?? [];
+  const planFrozen = cascade?.planFrozen ?? false;
+  const artifactProviderDiagnostic = run.artifacts
+    .map((artifact) => artifact.payload)
+    .filter((payload): payload is Record<string, unknown> => Boolean(payload) && typeof payload === 'object' && !Array.isArray(payload))
+    .map((payload) => payload.providerFailure)
+    .find((failure): failure is Record<string, unknown> => Boolean(failure) && typeof failure === 'object' && !Array.isArray(failure));
+  const persistedProviderDiagnostic = artifactProviderDiagnostic?.diagnostic;
+  const provider = persistedProviderDiagnostic && typeof persistedProviderDiagnostic === 'object'
+    ? persistedProviderDiagnostic as AgentRunDiagnosticReceiptV3['provider']
+    : (() => {
+        const failure = run.diagnosticReceipt?.failure;
+        return failure && (failure.code === 'AI_PROVIDER_FAILURE' || /provider/i.test(failure.code))
+          ? classifyProviderFailure({ message: failure.message, code: failure.code, phase: 'generation' })
+          : undefined;
+      })();
+  return {
+    version: 3,
+    runId: run.id,
+    sourceCoverage,
+    ...(cascade ? { cascade } : {}),
+    planFrozen,
+    ...(provider ? { provider } : {}),
+    finalStopReason: run.stopReason,
+  };
+}
+
 function emptyRunTelemetry(total: number, fallbackReason: string): AgentRunTelemetryV1 {
   return {
     version: 1,
@@ -2750,6 +2839,7 @@ function attachDiagnosticReceipt(
   artifacts: AgentRunArtifact[],
   receipt: AgentRunDiagnosticReceiptV1,
   receiptV2?: AgentRunDiagnosticReceiptV2,
+  receiptV3?: AgentRunDiagnosticReceiptV3,
 ): AgentRunArtifact[] {
   if (artifacts.length === 0) {
     if (!receipt.failure) return artifacts;
@@ -2758,7 +2848,7 @@ function attachDiagnosticReceipt(
       kind: "answer",
       title: "Agent run diagnostics",
       trustState: "blocked",
-      payload: { diagnosticReceipt: receipt, ...(receiptV2 ? { diagnosticReceiptV2: receiptV2 } : {}) },
+      payload: { diagnosticReceipt: receipt, ...(receiptV2 ? { diagnosticReceiptV2: receiptV2 } : {}), ...(receiptV3 ? { diagnosticReceiptV3: receiptV3 } : {}) },
     }];
   }
   const preferredIndex = Math.max(0, artifacts.findIndex((artifact) => artifact.kind === "answer"));
@@ -2773,6 +2863,7 @@ function attachDiagnosticReceipt(
         ...payload,
         diagnosticReceipt: receipt,
         ...(receiptV2 ? { diagnosticReceiptV2: receiptV2 } : {}),
+        ...(receiptV3 ? { diagnosticReceiptV3: receiptV3 } : {}),
       },
     };
   });
@@ -3023,6 +3114,8 @@ export function selectRoute(request: AgentRunRequest, decision: IntentDecision):
     if (decision.requiresClarification === true) return 'clarify';
     return 'blocked';
   }
+  const cascadeRoute = routeFromAnalyticalCascade(decision);
+  if (cascadeRoute) return cascadeRoute;
   const explicitMode = request.requestedMode;
   if (explicitMode === 'modeling') return 'modeling_draft';
   if (explicitMode === 'skill') return 'skill_draft';

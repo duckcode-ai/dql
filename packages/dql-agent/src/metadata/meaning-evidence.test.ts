@@ -29,6 +29,7 @@ describe('AGT-010 metadata meaning evidence lanes', () => {
         id: 'dql:block:monthly_revenue', kind: 'certified_block' as const,
         trustTier: 'certified' as const, name: 'monthly_revenue', aliases: ['monthly revenue'],
         relevanceScore: 0.91, matchReasons: ['monthly revenue'], compatibility: 'partial' as const,
+        compatibilityFacts: ['output: month', 'output: revenue'],
       }],
     };
     const pack = {
@@ -52,6 +53,33 @@ describe('AGT-010 metadata meaning evidence lanes', () => {
       exactMatch: true,
       analyticalFitClass: 'exact',
     });
+  });
+
+  it('AGT-009 never upgrades a tagged top-customers block to a certified revenue answer without its own output', () => {
+    const evidence = {
+      candidates: [{
+        id: 'dql:block:top_customers', kind: 'certified_block' as const,
+        trustTier: 'certified' as const, name: 'top_customers', aliases: ['top customers'],
+        relevanceScore: 0.99, matchReasons: ['revenue tag'], compatibility: 'partial' as const,
+        compatibilityFacts: ['output: customer_name', 'output: lifetime_spend', 'output: order_count'],
+      }],
+    };
+    const pack = {
+      routeDecision: { exactObjectKey: 'dql:block:top_customers' },
+      questionPlan: { timeTerms: [], requestedShape: { measures: ['revenue'], dimensions: [] } },
+      retrievalDiagnostics: { certifiedCandidateFits: [{
+        objectKey: 'dql:block:top_customers', name: 'top_customers',
+        applicabilityKind: 'exact_answer', applicabilityScore: 1, action: 'certified_answer',
+        fit: {
+          kind: 'exact', confidence: 'high', reasons: ['legacy relevance assertion'],
+          missingOutputs: [], missingDimensions: [], unsupportedFilters: [], topNAction: 'none', inferredContract: false,
+        },
+      }] },
+    };
+
+    const candidate = applyContextPackCompatibility(evidence, pack as never).candidates[0]!;
+
+    expect(candidate).toMatchObject({ compatibility: 'partial', exactMatch: false, analyticalFitClass: undefined });
   });
 
   it('excludes unrequested certified static scope before resolution and canonicalizes a metric backing measure', () => {
@@ -168,6 +196,154 @@ describe('AGT-010 metadata meaning evidence lanes', () => {
     expect(evidence.byEvidenceClass.semantic.map((candidate) => candidate.objectKey)).toContain(
       metric.row.objectKey,
     );
+  });
+
+  it('CTX-005 retains role-critical candidates beyond the compact same-class cards before provider admission', () => {
+    const question = 'Which top accounts have highest revenue?';
+    const decoys = Array.from({ length: 12 }, (_, index) => ranked({
+      objectKey: `semantic:dimension:account.decoy_${index}`,
+      objectType: 'semantic_dimension',
+      name: index % 2 === 0 ? `Account Owner Email ${index}` : `Account Sentiment Rating ${index}`,
+      fullName: `semantic:dimension:account.decoy_${index}`,
+      payload: { qualifiedId: `semantic:dimension:account.decoy_${index}` },
+      score: 1,
+    }, index + 1, 1 - index / 100));
+    const revenue = ranked({
+      objectKey: 'semantic:metric:revenue', objectType: 'semantic_metric', name: 'Revenue',
+      fullName: 'semantic:metric:revenue', payload: { qualifiedId: 'semantic:metric:revenue' }, score: 0.7,
+    }, 13, 0.7);
+    const accountName = ranked({
+      objectKey: 'semantic:dimension:account.name', objectType: 'semantic_dimension', name: 'Account Name',
+      fullName: 'semantic:dimension:account.name', payload: { qualifiedId: 'semantic:dimension:account.name' }, score: 0.69,
+    }, 14, 0.69);
+
+    const pack = buildMeaningEvidencePackage(question, buildAnalysisQuestionPlan(question), [...decoys, revenue, accountName]);
+    expect(pack.byEvidenceClass.semantic).toHaveLength(4);
+    expect(pack.qualifiedCandidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ objectKey: revenue.row.objectKey }),
+      expect.objectContaining({ objectKey: accountName.row.objectKey }),
+    ]));
+    const admitted = buildProviderMeaningEvidencePackage(toAgentRetrievalEvidence(pack, buildAnalysisQuestionPlan(question)), 8, question);
+    expect(admitted.map((candidate) => candidate.id)).toEqual(expect.arrayContaining([revenue.row.objectKey, accountName.row.objectKey]));
+    expect(admitted.some((candidate) => /owner|sentiment/i.test(candidate.name))).toBe(false);
+  });
+
+  it('AGT-029 carries structured safety through a canonical endpoint despite a duplicate leaf', () => {
+    const relationshipId = 'dql:relationship:order_items_to_supplies';
+    const evidence = toAgentRetrievalEvidence({
+      candidates: [{
+        objectKey: 'dbt:model:order_items',
+        qualifiedId: 'dbt:model:order_items',
+        evidenceClass: 'sql',
+        trustTier: 'exploratory',
+        classRank: 1,
+        relevanceScore: 1,
+        name: 'order_items',
+        aliases: ['order_items'],
+        objectType: 'dbt_model',
+        relevanceReasons: ['exact model'],
+        compatibilityFacts: [],
+        businessShape: {
+          entities: [], dimensions: [], timeGrains: [], parameters: [], filters: [], outputs: [],
+          sourceRelations: ['runtime:relation:order_items'],
+        },
+        ambiguityPeerIds: [],
+      }],
+      byEvidenceClass: { certified: [], semantic: [], sql: [] },
+      ambiguousGroups: [],
+    }, buildAnalysisQuestionPlan('which products come from perishable supplies?'), {
+      contextObjects: [{
+        objectKey: 'commerce::entity::order_items',
+        objectType: 'dql_entity',
+        name: 'order_items',
+        fullName: 'commerce::entity::order_items',
+        payload: {
+          qualifiedId: 'commerce::entity::order_items',
+          dbtUniqueId: 'dbt:model:order_items',
+          relation: 'runtime:relation:order_items',
+        },
+      }, {
+        // A separate domain has a same-leaf physical relation. The canonical
+        // entity-to-dbt binding above, not the leaf, must select the proof.
+        objectKey: 'dbt:model:sales.order_items',
+        objectType: 'dbt_model',
+        name: 'order_items',
+        fullName: 'dbt:model:sales.order_items',
+        payload: { qualifiedId: 'dbt:model:sales.order_items' },
+      }, {
+        objectKey: relationshipId,
+        objectType: 'relationship',
+        name: 'order_items_to_supplies',
+        fullName: relationshipId,
+        status: 'certified',
+        payload: {
+          qualifiedId: relationshipId,
+          from: 'commerce::entity::order_items',
+          to: 'commerce::entity::supplies',
+          keys: [{ from: 'product_id', to: 'product_id' }],
+          status: 'certified',
+          cardinality: 'many_to_one',
+          fanout: 'safe',
+          staleCertification: false,
+          automaticJoinAllowed: true,
+          certificationFingerprint: 'sha256:certified-product-supply',
+          validation: {
+            status: 'passed',
+            checkedAt: '2026-08-20T00:00:00.000Z',
+            queryFingerprint: 'sha256:query',
+            proofFingerprint: 'sha256:proof',
+          },
+        },
+      }],
+    });
+
+    expect(evidence.candidates[0]).toMatchObject({
+      relationshipEvidence: expect.arrayContaining([relationshipId]),
+      relationshipEndpointIds: ['commerce::entity::order_items'],
+      relationshipSafety: [expect.objectContaining({
+        id: relationshipId,
+        status: 'certified',
+        cardinality: 'many_to_one',
+        fanout: 'safe',
+        automaticJoinAllowed: true,
+        validation: expect.objectContaining({ status: 'passed' }),
+      })],
+    });
+  });
+
+  it('AGT-029 does not attach a cross-domain proof through a duplicate raw-relation leaf', () => {
+    const relationshipId = 'dql:relationship:commerce_orders_to_supplies';
+    const evidence = toAgentRetrievalEvidence({
+      candidates: [{
+        objectKey: 'dbt:model:commerce.orders',
+        qualifiedId: 'dbt:model:commerce.orders',
+        evidenceClass: 'sql', trustTier: 'exploratory', classRank: 1, relevanceScore: 1,
+        name: 'orders', aliases: ['orders'], objectType: 'dbt_model', relevanceReasons: ['exact model'], compatibilityFacts: [],
+        businessShape: { entities: [], dimensions: [], timeGrains: [], parameters: [], filters: [], outputs: [], sourceRelations: ['runtime:relation:commerce.orders'] },
+        ambiguityPeerIds: [],
+      }],
+      byEvidenceClass: { certified: [], semantic: [], sql: [] },
+      ambiguousGroups: [],
+    }, buildAnalysisQuestionPlan('which orders have perishable supplies?'), {
+      contextObjects: [{
+        objectKey: 'dbt:model:sales.orders', objectType: 'dbt_model', name: 'orders',
+        fullName: 'dbt:model:sales.orders', payload: { qualifiedId: 'dbt:model:sales.orders' },
+      }, {
+        objectKey: relationshipId, objectType: 'relationship', name: 'commerce_orders_to_supplies', fullName: relationshipId,
+        status: 'certified',
+        payload: {
+          qualifiedId: relationshipId,
+          from: 'commerce::entity::orders', to: 'commerce::entity::supplies',
+          keys: [{ from: 'supply_id', to: 'supply_id' }], status: 'certified', cardinality: 'many_to_one', fanout: 'safe',
+          staleCertification: false, automaticJoinAllowed: true, certificationFingerprint: 'sha256:commerce-orders',
+          validation: { status: 'passed', checkedAt: '2026-08-20T00:00:00.000Z', queryFingerprint: 'sha256:query', proofFingerprint: 'sha256:proof' },
+        },
+      }],
+    });
+
+    expect(evidence.candidates[0]?.relationshipEvidence).toBeUndefined();
+    expect(evidence.candidates[0]?.relationshipEndpointIds).toBeUndefined();
+    expect(evidence.candidates[0]?.relationshipSafety).toBeUndefined();
   });
 
   it('keeps qualified metric/geography alternatives host-only and binds only trusted prior members', () => {

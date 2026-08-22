@@ -666,6 +666,42 @@ describe('ResolvedAnalyticalPlan (AGT-013 / API-006)', () => {
     expect(plan.capability).toBe('blocked');
   });
 
+  it('AGT-009 never binds requested revenue to a certified block that returns only lifetime_spend', () => {
+    const topCustomers: AgentEvidenceCandidate = {
+      id: 'dql:block:top_customers',
+      qualifiedId: 'orders::block::top_customers',
+      kind: 'certified_block',
+      trustTier: 'certified',
+      name: 'top_customers',
+      relevanceScore: 1,
+      matchReasons: ['tag: revenue'],
+      compatibility: 'compatible',
+      compatibilityFacts: ['output: customer_name', 'output: lifetime_spend', 'output: order_count'],
+    };
+    const plan = buildResolvedAnalyticalPlan({
+      question: 'show me revenue',
+      resolution: {
+        interpretedQuestion: 'show me revenue',
+        questionType: 'value',
+        selectedConceptIds: [topCustomers.id],
+        recommendedExecutionId: topCustomers.id,
+        queryIntent: { measures: ['revenue'], dimensions: [], filters: [] },
+        rejectedCandidates: [],
+        confidence: 'high',
+        missingInformation: [],
+        recommendedRoute: 'certified',
+      },
+      evidence: { ...evidence, candidates: [topCustomers] },
+      candidates: [topCustomers],
+    });
+
+    expect(plan.capability).toBe('blocked');
+    expect(plan.query.measures).toEqual([
+      expect.objectContaining({ requested: 'revenue', status: 'unresolved' }),
+    ]);
+    expect(plan.query.measures[0]).not.toHaveProperty('qualifiedId');
+  });
+
   it('applies a typed follow-up delta without reading prior prose or SQL', () => {
     const root = buildResolvedAnalyticalPlan({
       question: 'Show rollover balance by customer.',

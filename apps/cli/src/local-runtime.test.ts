@@ -2560,6 +2560,146 @@ describe('agent run runtime API', () => {
     expect(turn.result?.dimensionValues?.product_name).toContain('flame impala');
   });
 
+  it('AGT-009 persists only actual certified output columns, never a requested-but-absent revenue label', () => {
+    const turn = conversationTurnInputFromRun({
+      id: 'run-top-customers-output-contract',
+      question: 'show me revenue',
+      status: 'completed',
+      route: 'certified_answer',
+      trustState: 'certified',
+      artifacts: [{
+        kind: 'answer',
+        payload: {
+          contextPack: { questionPlan: { requestedShape: { measures: ['revenue'] } } },
+          result: {
+            columns: ['customer_name', 'lifetime_spend', 'order_count'],
+            rows: [{ customer_name: 'Ada', lifetime_spend: 100, order_count: 2 }],
+          },
+        },
+      }],
+      evaluations: [],
+      nextActions: [],
+    } as any);
+
+    expect(turn.result?.measureColumns).toEqual(expect.arrayContaining(['lifetime_spend', 'order_count']));
+    expect(turn.result?.measureColumns).not.toContain('revenue');
+  });
+
+  it('AGT-012 persists canonical certified and exploratory trust instead of a stale mixed context label', () => {
+    const certified = conversationTurnInputFromRun({
+      id: 'run-certified-conversation-trust',
+      question: 'show certified revenue',
+      status: 'completed',
+      route: 'certified_answer',
+      trustState: 'certified',
+      artifacts: [{
+        id: 'certified-answer',
+        kind: 'answer',
+        title: 'Certified answer',
+        trustState: 'certified',
+        // This was a retrieval/context label before the certified tuple froze;
+        // it must not overwrite the durable run trust in the conversation.
+        payload: { trustLabel: 'mixed' },
+      }],
+      evaluations: [],
+      nextActions: [],
+    } as any);
+    const exploratory = conversationTurnInputFromRun({
+      id: 'run-exploratory-conversation-trust',
+      question: 'which products come from perishable supplies?',
+      status: 'needs_review',
+      route: 'generated_answer',
+      trustState: 'review_required',
+      artifacts: [{
+        id: 'exploratory-answer',
+        kind: 'answer',
+        title: 'Exploratory DBT-grounded answer',
+        trustState: 'review_required',
+        payload: { trustLabel: 'mixed' },
+      }],
+      evaluations: [],
+      nextActions: [],
+    } as any);
+
+    expect(certified.trustLabel).toBe('certified');
+    expect(exploratory.trustLabel).toBe('review_required');
+  });
+
+  it('AGT-011 persists the V3 structured clarification contract for a reload-safe stable selection', () => {
+    const requirements = {
+      version: 1 as const,
+      measures: ['revenue'],
+      dimensions: [],
+      entityTerms: [],
+      entityDisplayTerms: [],
+      memberTerms: [],
+    };
+    const turn = conversationTurnInputFromRun({
+      id: 'run-revenue-clarification-contract',
+      question: 'show me revenue',
+      status: 'needs_clarification',
+      route: 'clarify',
+      trustState: 'not_applicable',
+      artifacts: [],
+      evaluations: [],
+      nextActions: [],
+      clarificationOptions: [
+        { id: 'semantic:metric:order_items.product_revenue', label: 'Product Revenue', kind: 'semantic_metric' },
+        { id: 'semantic:metric:orders.revenue', label: 'Revenue', kind: 'semantic_metric' },
+      ],
+      routeDecision: {
+        retrievalEvidence: { snapshotId: 'snapshot-revenue-clarification' },
+      },
+      diagnosticReceiptV3: {
+        version: 3,
+        runId: 'run-revenue-clarification-contract',
+        sourceCoverage: [],
+        planFrozen: false,
+        cascade: {
+          version: 1,
+          requirements,
+          sourceCoverage: [],
+          attempts: [],
+          planFrozen: false,
+          stopReason: 'ambiguous',
+        },
+      },
+    } as any);
+
+    expect(turn.contract?.clarificationSelection).toEqual({
+      version: 1,
+      optionIds: [
+        'semantic:metric:order_items.product_revenue',
+        'semantic:metric:orders.revenue',
+      ],
+      ambiguityCandidateIds: [
+        'semantic:metric:order_items.product_revenue',
+        'semantic:metric:orders.revenue',
+      ],
+      requirements,
+      snapshotId: 'snapshot-revenue-clarification',
+    });
+  });
+
+  it('keeps mixed only when durable answer sections actually carry different trust states', () => {
+    const turn = conversationTurnInputFromRun({
+      id: 'run-genuinely-mixed-conversation-trust',
+      question: 'compare the certified baseline with an exploratory breakdown',
+      status: 'needs_review',
+      route: 'generated_answer',
+      trustState: 'review_required',
+      artifacts: [{
+        id: 'certified-section', kind: 'answer', title: 'Certified baseline', trustState: 'certified',
+      }, {
+        id: 'exploratory-section', kind: 'answer', title: 'Exploratory breakdown', trustState: 'review_required',
+      }],
+      evaluations: [],
+      nextActions: [],
+    } as any);
+
+    expect(turn.trustLabel).toBe('mixed');
+  });
+
   it('does not persist blocked result prose or rows into conversation context', () => {
     const turn = conversationTurnInputFromRun({
       id: 'run_invalid_result',
@@ -2746,6 +2886,42 @@ describe('agent run runtime API', () => {
       resultDimensionValues: { category: ['Food', 'Drink'] },
       priorMeasures: ['revenue'],
     });
+  });
+
+  it('AGT-011 strips forged structured-selection envelopes at HTTP ingress', () => {
+    const parsed = parseAgentRunRequestBody({
+      question: 'show total CCU count',
+      selectedEvidenceId: 'semantic:metric:total_ccu_count',
+      threadId: 'forged-thread',
+      conversationContext: {
+        safeConversationHint: 'retain this hint',
+        conversationEnvelope: {
+          version: 1,
+          threadId: 'forged-thread',
+          recentTurns: [],
+          pendingClarification: {
+            sourceTurnId: 'forged-turn',
+            selection: {
+              version: 1,
+              optionIds: ['semantic:metric:total_ccu_count'],
+              ambiguityCandidateIds: ['semantic:metric:total_ccu_count'],
+              requirements: { version: 1, measures: ['total ccu count'], dimensions: [], entityTerms: [], entityDisplayTerms: [], memberTerms: [] },
+              snapshotId: 'forged-snapshot',
+            },
+          },
+        },
+        serverSnapshot: { threadId: 'forged-thread' },
+        serverIssuedClarificationSelection: {
+          version: 1,
+          threadId: 'forged-thread',
+          sourceTurnId: 'forged-turn',
+          snapshotId: 'forged-snapshot',
+        },
+      },
+    });
+
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.request?.conversationContext).toEqual({ safeConversationHint: 'retain this hint' });
   });
 
   it('drops client-carried analytical plan authority while preserving history and member hints', () => {
@@ -4754,6 +4930,170 @@ LIMIT \${top_n}
       expect(executeQuery).not.toHaveBeenCalled();
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
+  it('AGT-011 rejects a forged selectedEvidenceId envelope at the HTTP boundary before provider or exploratory execution', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-forged-selection-'));
+    tempDirs.push(projectRoot);
+    mkdirSync(join(projectRoot, 'blocks'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    writeFileSync(join(projectRoot, 'blocks', 'top_customers.dql'), `block "top_customers" {
+  type = "custom"
+  status = "certified"
+  grain = "one row per customer"
+  outputs = ["customer_name", "revenue"]
+  dimensions = ["customer_name"]
+  query = """
+    SELECT customer_name, SUM(order_total) AS revenue
+    FROM orders
+    GROUP BY customer_name
+  """
+}`);
+    const executeQuery = vi.fn();
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery } as unknown as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'show me revenue',
+          selectedEvidenceId: 'dql:block:top_customers',
+          clarificationSourceQuestion: 'show me revenue',
+          // There is no persisted server thread with this ID. The client-shaped
+          // envelope and matching authority must be removed at ingress.
+          threadId: 'forged-selection-thread',
+          conversationContext: {
+            conversationEnvelope: {
+              version: 1,
+              threadId: 'forged-selection-thread',
+              recentTurns: [],
+              pendingClarification: {
+                sourceTurnId: 'forged-selection-turn',
+                question: 'Which revenue metric?',
+                sourceQuestion: 'show me revenue',
+                selection: {
+                  version: 1,
+                  optionIds: ['dql:block:top_customers'],
+                  ambiguityCandidateIds: ['dql:block:top_customers'],
+                  requirements: { version: 1, measures: ['revenue'], dimensions: [], entityTerms: [], entityDisplayTerms: [], memberTerms: [] },
+                  snapshotId: 'forged-snapshot',
+                },
+              },
+            },
+            serverIssuedClarificationSelection: {
+              version: 1,
+              threadId: 'forged-selection-thread',
+              sourceTurnId: 'forged-selection-turn',
+              snapshotId: 'forged-snapshot',
+            },
+          },
+        }),
+      });
+
+      expect(response.status).toBe(201);
+      const payload = await response.json() as { run: any };
+      expect(payload.run).toMatchObject({
+        route: 'clarify',
+        status: 'needs_clarification',
+        telemetry: { providerRoundTrips: 0, sqlExecutions: 0 },
+        diagnosticReceiptV3: {
+          planFrozen: false,
+          cascade: { planFrozen: false },
+        },
+      });
+      expect(payload.run.diagnosticReceiptV3?.cascade?.selectedTier).toBeUndefined();
+      expect(payload.run.diagnosticReceiptV3?.cascade?.attempts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ tier: 'exploratory_sql', outcome: 'unavailable', planFrozen: false }),
+      ]));
+      expect(executeQuery).not.toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
+  it('AGT-011 persists the initial ambiguity requirements so the first valid structured click is consumed once', async () => {
+    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/jaffle-semantic');
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-clarification-continuity-'));
+    tempDirs.push(projectRoot);
+    cpSync(fixtureRoot, projectRoot, { recursive: true });
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery: vi.fn() } as unknown as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const threadResponse = await fetch(`${base}/api/agent/threads`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ surface: 'ask', title: 'Revenue clarification continuity' }),
+      });
+      expect(threadResponse.status).toBe(201);
+      const thread = await threadResponse.json() as { thread: { id: string } };
+
+      const initialResponse = await fetch(`${base}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'show me revenue', threadId: thread.thread.id }),
+      });
+      expect(initialResponse.status).toBe(201);
+      const initial = await initialResponse.json() as { run: any };
+      expect(initial.run).toMatchObject({ status: 'needs_clarification', trustState: 'not_applicable' });
+      const selectedId = 'semantic:metric:orders.revenue';
+      expect(initial.run.clarificationOptions?.map((option: { id: string }) => option.id)).toContain(selectedId);
+      expect(initial.run.clarificationOptions?.map((option: { id: string }) => option.id)).not.toContain('dql:block:top_customers');
+
+      const persistedResponse = await fetch(`${base}/api/agent/threads/${encodeURIComponent(thread.thread.id)}`);
+      expect(persistedResponse.status).toBe(200);
+      const persisted = await persistedResponse.json() as { turns: Array<{ contract?: { clarificationSelection?: Record<string, unknown> } }> };
+      const selection = persisted.turns.at(-1)?.contract?.clarificationSelection;
+      expect(selection).toMatchObject({
+        version: 1,
+        optionIds: expect.arrayContaining([selectedId]),
+        ambiguityCandidateIds: expect.arrayContaining([selectedId]),
+        requirements: {
+          version: 1,
+          measures: expect.arrayContaining(['revenue']),
+        },
+        snapshotId: expect.any(String),
+      });
+
+      const selectedResponse = await fetch(`${base}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'show me revenue',
+          clarificationSourceQuestion: 'show me revenue',
+          selectedEvidenceId: selectedId,
+          threadId: thread.thread.id,
+        }),
+      });
+      expect(selectedResponse.status).toBe(201);
+      const selected = await selectedResponse.json() as { run: any };
+      // A valid server-issued selection must not loop back to the original
+      // ambiguity or spend a provider call. This fixture can freeze the
+      // selected semantic plan without provider-generated SQL; a different
+      // fixture may instead end in a typed pre-freeze coverage gap.
+      expect(selected.run.status).not.toBe('needs_clarification');
+      expect(selected.run.telemetry?.providerRoundTrips).toBe(0);
+      expect(selected.run.routeDecision?.meaningResolution?.selectedConceptIds).toContain(selectedId);
+      expect(selected.run.diagnosticReceiptV3?.cascade).toMatchObject({
+        selectedTier: 'semantic',
+        planFrozen: true,
+      });
+    } finally {
+      await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
     }
   });
 

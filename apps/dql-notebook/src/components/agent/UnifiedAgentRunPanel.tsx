@@ -2607,13 +2607,21 @@ export function hasAnalyticalInspectorContract(payload: Record<string, unknown>)
     || recordOf(payload.analyticalFailure)
     || recordOf(payload.semanticExecutionTrace)
     || recordOf(payload.diagnosticReceipt)
+    || recordOf(payload.diagnosticReceiptV3)
     || fallbackAnalyticalFailure(payload),
   );
 }
 
 export function analyticalInspectorContract(payload: Record<string, unknown>): AnalyticalInspectorContract | undefined {
   if (!hasAnalyticalInspectorContract(payload)) return undefined;
-  const diagnostic = recordOf(payload.diagnosticReceipt);
+  // V3 is additive, but it is the newer source of cascade/source/provider
+  // truth. Merge legacy fields only when V3 intentionally does not carry one;
+  // preferring V1 hid the diagnostic users needed on normal answer artifacts.
+  const legacyDiagnostic = recordOf(payload.diagnosticReceipt);
+  const v3Diagnostic = recordOf(payload.diagnosticReceiptV3);
+  const diagnostic = v3Diagnostic
+    ? { ...legacyDiagnostic, ...v3Diagnostic, failure: v3Diagnostic.failure ?? legacyDiagnostic?.failure }
+    : legacyDiagnostic;
   // `diagnostic.plan` is the orchestration step plan, not the analytical plan.
   // Treating it as a ResolvedAnalyticalPlan made a pre-planning failure claim
   // "Ranking: Not requested" even for "top customers". Only the explicit,
@@ -2745,6 +2753,10 @@ function AnalyticalHowAnswered({
   const semanticCompileTarget = recordOf(semanticTargetBinding?.compileTarget);
   const semanticReceipt = recordOf(semantic?.executionReceipt);
   const semanticCandidates = recordList(semanticFailure?.candidates);
+  const cascade = recordOf(contract.diagnostic?.cascade);
+  const sourceCoverage = recordList(contract.diagnostic?.sourceCoverage);
+  const cascadeAttempts = recordList(cascade?.attempts);
+  const providerDiagnostic = recordOf(contract.diagnostic?.provider);
   const timeContext = recordOf(frame?.timeContext);
   const comparison = recordOf(frame?.comparison);
   const ranking = recordOf(frame?.ranking);
@@ -2939,6 +2951,11 @@ function AnalyticalHowAnswered({
             `${displayValue(binding.authoringReference)} → ${displayValue(binding.runtimeReference)}`
             + `${stringList(binding.entityPath).length ? ` via ${stringList(binding.entityPath).join(' → ')}` : ''}`
             + ` (${displayValue(binding.status)})`).join('\n')],
+          ['Cascade', displayValue(cascade?.selectedTier) || displayValue(cascade?.stopReason)],
+          ['Plan frozen', displayValue(contract.diagnostic?.planFrozen)],
+          ['Provider phase/cause', [displayValue(providerDiagnostic?.phase), displayValue(providerDiagnostic?.cause)].filter(Boolean).join(' · ')],
+          ['Provider recovery', displayValue(providerDiagnostic?.safeAction)],
+          ['Source coverage', sourceCoverage.map((entry) => `${displayValue(entry.source)}: ${displayValue(entry.status)}`).join('\n')],
         ]} t={t} mono />
       </AnalyticalInspectorSection>
 
@@ -2963,7 +2980,13 @@ function AnalyticalHowAnswered({
               {' '}· {displayValue(node.id)}
             </div>
           ))}
-          {semanticSteps.length === 0 && run.steps.length === 0 && graphNodes.length === 0 ? <InspectorEmpty t={t}>No executable steps were recorded.</InspectorEmpty> : null}
+          {cascadeAttempts.map((attempt, index) => (
+            <div key={`cascade:${displayValue(attempt.tier)}:${index}`} style={{ fontSize: 11.5, color: t.textSecondary }}>
+              <span style={{ color: t.accent, fontFamily: t.fontMono }}>{index + 1}. {displayValue(attempt.tier)}</span>
+              {' '}— {displayValue(attempt.outcome)} · {displayValue(attempt.reason)}
+            </div>
+          ))}
+          {semanticSteps.length === 0 && run.steps.length === 0 && graphNodes.length === 0 && cascadeAttempts.length === 0 ? <InspectorEmpty t={t}>No executable steps were recorded.</InspectorEmpty> : null}
         </div>
       </AnalyticalInspectorSection>
 

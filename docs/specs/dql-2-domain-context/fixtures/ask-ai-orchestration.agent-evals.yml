@@ -28,6 +28,7 @@ cases:
         compatibility: compatible
         domain: commerce
         dimensions: [customer, product]
+        outputs: [customer, product, revenue]
         exactMatch: true
         analyticalRoute: certified
       - id: semantic:metric:revenue

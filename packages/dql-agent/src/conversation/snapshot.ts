@@ -8,6 +8,7 @@ import type { ConversationStore, ConversationTurn } from './session-store.js';
 import type { AgentDqlArtifactReference } from '../answer-loop.js';
 import type { CascadeAnswerResult } from '../cascade/cascade.js';
 import type { KnowledgeLens } from '../domain-context.js';
+import type { AnalyticalRequirementSetV1 } from '../analytical-orchestration.js';
 import {
   parseWorkingState,
   reduceWorkingState,
@@ -85,6 +86,18 @@ export interface ConversationEnvelopeV1 {
     question: string;
     /** The user's original analytical question that triggered it. */
     sourceQuestion?: string;
+    /**
+     * Server-persisted continuation contract. These identifiers and typed
+     * requirements are reject-only on a later request; the router still checks
+     * current snapshot eligibility before allowing a plan to freeze.
+     */
+    selection?: {
+      version: 1;
+      optionIds: string[];
+      ambiguityCandidateIds: string[];
+      requirements?: AnalyticalRequirementSetV1;
+      snapshotId?: string;
+    };
   };
 }
 
@@ -132,7 +145,17 @@ export function isLikelyClarificationReply(value: string): boolean {
 export function buildConversationSnapshot(
   store: ConversationStore,
   threadId: string,
-  options: { question?: string; recent?: number } = {},
+  options: {
+    question?: string;
+    recent?: number;
+    /**
+     * Host-only structured-choice continuation. The Notebook replays the
+     * original analytical question when an option is clicked, so that complete
+     * wording must not clear the persisted server selection before the router
+     * can validate it.
+     */
+    preservePendingClarification?: boolean;
+  } = {},
 ): ConversationSnapshot | null {
   const thread = store.getThread(threadId);
   if (!thread) return null;
@@ -169,7 +192,7 @@ export function buildConversationSnapshot(
     latest && (latest.route === 'clarify' || latest.runStatus === 'needs_clarification'),
   );
   const carryPendingClarification = latestNeedsClarification
-    && (!options.question || isLikelyClarificationReply(options.question));
+    && (!options.question || isLikelyClarificationReply(options.question) || options.preservePendingClarification === true);
   return {
     version: 1,
     threadId,
@@ -187,8 +210,38 @@ export function buildConversationSnapshot(
           // analytical question, so a repeated clarify chain still recovers the
           // request rather than a terse "yes".
           sourceQuestion: analyticalQuestionBefore(recent, recent.length - 1),
+          ...(pendingClarificationSelection(latest)
+            ? { selection: pendingClarificationSelection(latest) }
+            : {}),
         }
       : undefined,
+  };
+}
+
+function pendingClarificationSelection(
+  turn: ConversationTurn,
+): NonNullable<ConversationEnvelopeV1['pendingClarification']>['selection'] | undefined {
+  const raw = turn.contract?.clarificationSelection;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  const ids = (value: unknown): string[] => Array.isArray(value)
+    ? [...new Set(value.filter((item): item is string => typeof item === 'string' && Boolean(item.trim())).map((item) => item.trim()))].slice(0, 16)
+    : [];
+  const optionIds = ids(record.optionIds);
+  const ambiguityCandidateIds = ids(record.ambiguityCandidateIds);
+  if (optionIds.length === 0 && ambiguityCandidateIds.length === 0) return undefined;
+  const requirements = record.requirements && typeof record.requirements === 'object' && !Array.isArray(record.requirements)
+    ? record.requirements as AnalyticalRequirementSetV1
+    : undefined;
+  const snapshotId = typeof record.snapshotId === 'string' && record.snapshotId.trim()
+    ? record.snapshotId.trim()
+    : undefined;
+  return {
+    version: 1,
+    optionIds,
+    ambiguityCandidateIds,
+    ...(requirements ? { requirements } : {}),
+    ...(snapshotId ? { snapshotId } : {}),
   };
 }
 

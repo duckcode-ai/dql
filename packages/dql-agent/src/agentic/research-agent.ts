@@ -70,7 +70,8 @@ Reply with ONLY a JSON object:
 {"hypotheses":[{"statement":"...","priorConfidence":0.6,"target":"<asset>",
   "action":"lookup_metric|lookup_block|breakdown|compare_time|check_lineage",
   "expectation":"..."}]}
-Between two and five hypotheses.`;
+Between three and six hypotheses when the catalog has enough distinct grounded
+assets. If it does not, return only the grounded hypotheses; do not invent one.`;
 
 function extractJsonObject(raw: string): unknown {
   const trimmed = raw.trim();
@@ -138,7 +139,7 @@ export function parseResearchHypotheses(raw: string, assets: ResearchAssets): Re
       ? Math.max(0, Math.min(1, record.priorConfidence))
       : 0.5;
     out.push({ statement, priorConfidence: prior, target, action, expectation });
-    if (out.length >= 5) break;
+    if (out.length >= 6) break;
   }
   return out.sort((left, right) => right.priorConfidence - left.priorConfidence);
 }

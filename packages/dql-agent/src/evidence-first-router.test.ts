@@ -1,8 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
+import { cpSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { answerAnywayRoute, selectRoute, type AgentRunRequest } from "./agent-run-engine.js";
-import type { AgentEvidenceCandidate, AgentRetrievalEvidence, MeaningResolution } from "./meaning-resolution.js";
+import type {
+  AgentEvidenceCandidate,
+  AgentRelationshipSafetyEvidence,
+  AgentRetrievalEvidence,
+  MeaningResolution,
+} from "./meaning-resolution.js";
 import { collapseRedundantGovernedCandidates, createHybridRouter } from "./router.js";
 import { buildAnalysisQuestionPlan } from './metadata/analysis-planner.js';
+import { buildLocalContextPack, toAgentRetrievalEvidence } from './metadata/catalog.js';
+import type { AnalyticalRequirementSetV1 } from './analytical-orchestration.js';
+
+const jaffleSemanticFixture = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '../../../apps/cli/test/fixtures/jaffle-semantic',
+);
 
 const request = (question: string): AgentRunRequest => ({ question });
 
@@ -29,6 +45,67 @@ function evidence(candidates: AgentEvidenceCandidate[]): AgentRetrievalEvidence 
     sourceFingerprint: "fingerprint-1",
     candidates,
     parsedIntent: { measures: ["rollover balance amount"], dimensions: ["customer"], timeGrain: "month", order: "desc", limit: 10 },
+  };
+}
+
+/**
+ * A real clarification click is a server-issued continuation, not arbitrary
+ * client identity input. Keep direct-router tests on the same bound envelope
+ * that local-runtime reconstructs from the conversation store.
+ */
+function serverIssuedSelectionRequest(input: {
+  question: string;
+  selectedEvidenceId: string;
+  snapshotId?: string;
+  optionIds?: string[];
+  requirements?: AnalyticalRequirementSetV1;
+  threadId?: string;
+  sourceTurnId?: string;
+}): AgentRunRequest {
+  const threadId = input.threadId ?? 'thread-router-selection';
+  const sourceTurnId = input.sourceTurnId ?? 'turn-router-clarification';
+  const snapshotId = input.snapshotId ?? 'snapshot-1';
+  const optionIds = input.optionIds ?? [input.selectedEvidenceId];
+  const requirements = input.requirements ?? {
+    version: 1 as const,
+    measures: [],
+    dimensions: [],
+    entityTerms: [],
+    entityDisplayTerms: [],
+    memberTerms: [],
+  };
+  return {
+    question: input.question,
+    selectedEvidenceId: input.selectedEvidenceId,
+    clarificationSourceQuestion: input.question,
+    threadId,
+    conversationContext: {
+      conversationEnvelope: {
+        version: 1,
+        threadId,
+        recentTurns: [],
+        pendingClarification: {
+          sourceTurnId,
+          sourceQuestion: input.question,
+          question: 'Which compatible governed meaning should DQL use?',
+          selection: {
+            version: 1,
+            optionIds,
+            ambiguityCandidateIds: optionIds,
+            requirements,
+            snapshotId,
+          },
+        },
+      },
+      // Local-runtime injects this after loading the persisted thread. A
+      // direct router test must model that host-only boundary explicitly.
+      serverIssuedClarificationSelection: {
+        version: 1,
+        threadId,
+        sourceTurnId,
+        snapshotId,
+      },
+    },
   };
 }
 
@@ -103,6 +180,84 @@ function clarifyingRanking(overrides: Partial<MeaningResolution> = {}): MeaningR
   });
 }
 
+function automaticRelationshipProof(
+  id: string,
+  overrides: Partial<AgentRelationshipSafetyEvidence> = {},
+): AgentRelationshipSafetyEvidence {
+  return {
+    id,
+    from: 'commerce::entity::order_items',
+    to: 'commerce::entity::supplies',
+    keys: [{ from: 'product_id', to: 'product_id' }],
+    status: 'certified',
+    cardinality: 'many_to_one',
+    fanout: 'safe',
+    staleCertification: false,
+    automaticJoinAllowed: true,
+    certificationFingerprint: 'sha256:certified-product-supply-proof',
+    validation: {
+      status: 'passed',
+      checkedAt: '2026-08-20T00:00:00.000Z',
+      queryFingerprint: 'sha256:product-supply-query',
+      proofFingerprint: 'sha256:product-supply-validation',
+    },
+    ...overrides,
+  };
+}
+
+function perishableSuppliesCompositionCandidates(
+  relationship: AgentRelationshipSafetyEvidence | undefined,
+  endpoints: {
+    display: string;
+    predicate: string;
+  } = {
+    display: 'commerce::entity::order_items',
+    predicate: 'commerce::entity::supplies',
+  },
+): AgentEvidenceCandidate[] {
+  const relationshipId = relationship?.id ?? 'dql:relationship:product_supply_lookup';
+  const raw = (
+    id: string,
+    name: string,
+    kind: AgentEvidenceCandidate['kind'],
+    sourceObjects: string[],
+    relationshipEvidence?: string[],
+    relationshipSafety?: AgentRelationshipSafetyEvidence[],
+  ): AgentEvidenceCandidate => candidate({
+    id,
+    qualifiedId: id,
+    kind,
+    trustTier: kind === 'dql_modeling' ? 'governed_sql' : 'exploratory',
+    name,
+    aliases: [name],
+    sourceObjects,
+    relationshipEvidence,
+    relationshipSafety,
+    dimensions: [],
+    timeGrains: [],
+    relevanceScore: 0.95,
+    compatibility: 'unknown',
+  });
+  const relationshipEvidence = relationship ? [relationshipId] : undefined;
+  const relationshipSafety = relationship ? [relationship] : undefined;
+  return [
+    {
+      ...raw('dbt:model:order_items', 'order_items', 'dbt_model', ['runtime:relation:order_items'], relationshipEvidence, relationshipSafety),
+      relationshipEndpointIds: [endpoints.display],
+    },
+    {
+      ...raw('dbt:model:supplies', 'supplies', 'dbt_model', ['runtime:relation:supplies'], relationshipEvidence, relationshipSafety),
+      relationshipEndpointIds: [endpoints.predicate],
+    },
+    raw('dbt:column:order_items.product_id', 'product_id', 'sql_column', ['runtime:relation:order_items']),
+    raw('dbt:column:supplies.product_id', 'product_id', 'sql_column', ['runtime:relation:supplies']),
+    raw('dbt:column:order_items.product_name', 'product_name', 'sql_column', ['runtime:relation:order_items']),
+    raw('dbt:column:supplies.is_perishable_supply', 'is_perishable_supply', 'sql_column', ['runtime:relation:supplies']),
+    raw(relationshipId, 'order_items product_id to supplies product_id', 'dql_modeling', [], relationshipEvidence, relationshipSafety),
+    { ...raw('block:top_products', 'top_products', 'certified_block', [], undefined), compatibility: 'partial' },
+  ];
+}
+
 describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
   it.each([
     {
@@ -166,7 +321,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
         candidate({
           id: 'block:top_beverage_customers', kind: 'certified_block', trustTier: 'certified', name: 'top_beverage_customers',
           aliases: ['highest beverage revenue'], dimensions: ['customer', 'category'], exactMatch: true,
-          relevanceScore: 1, compatibility: 'compatible', compatibilityFacts: ['measure, customer grain, beverage filter, and ranking all match'],
+          relevanceScore: 1, compatibility: 'compatible', compatibilityFacts: ['output: customer_name', 'output: beverage_revenue'],
         }),
         jaffleMetric('semantic:metric:order.total_revenue', 'order.total_revenue', ['total revenue'], false, 'incompatible'),
       ],
@@ -456,6 +611,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
           aliases: ['top customers by drink revenue'],
           dimensions: ['customer_name'],
           compatibility: 'compatible',
+          compatibilityFacts: ['output: customer_name', 'output: beverage_revenue'],
           exactMatch: true,
           relevanceScore: 1,
         })],
@@ -1317,6 +1473,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
           aliases: ['top customers by beverage revenue', 'top customers by drink revenue'],
           dimensions: ['customer_name'],
           compatibility: 'compatible',
+          compatibilityFacts: ['output: customer_name', 'output: beverage_revenue'],
           exactMatch: true,
           analyticalFitClass: 'exact',
           relevanceScore: 1,
@@ -1353,6 +1510,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
       dimensions: ['month'],
       relevanceScore: 0.91,
       compatibility: 'compatible',
+      compatibilityFacts: ['output: month', 'output: revenue'],
       exactMatch: true,
       analyticalFitClass: 'exact',
     });
@@ -1381,6 +1539,62 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     expect(resolveMeaning).not.toHaveBeenCalled();
     expect(selectRoute(ask, decision)).toBe('certified_answer');
     expect(decision.resolvedAnalyticalPlan?.selectedConceptIds).toEqual(['dql:block:monthly_revenue']);
+  });
+
+  it('AGT-013 asks exactly once for a declared fiscal calendar before any plan freeze', async () => {
+    const resolveMeaning = vi.fn(async () => resolved());
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-fiscal-unbound',
+        sourceFingerprint: 'sha256:fiscal-unbound',
+        parsedIntent: { measures: ['revenue'], dimensions: ['month'], filters: [], timeGrain: 'month' },
+        candidates: [jaffleMetric('semantic:metric:revenue', 'Revenue', ['revenue'], true)],
+      }),
+    });
+    const decision = await router.decide(request('Show revenue by month for FY26'));
+
+    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(decision).toMatchObject({ action: 'clarify', requiresClarification: true, analyticalCascadeDecision: { planFrozen: false, stopReason: 'ambiguous' } });
+    expect(decision.clarifyingQuestion).toMatch(/declared fiscal calendar.*FY26/i);
+  });
+
+  it('AGT-013 binds FY26 to an explicitly declared fiscal field without guessing a calendar', async () => {
+    const metric = jaffleMetric('semantic:metric:revenue', 'Revenue', ['revenue'], true);
+    const fiscalField = candidate({
+      id: 'semantic:dimension:date.fiscal_period', qualifiedId: 'semantic:dimension:date.fiscal_period',
+      kind: 'semantic_member', trustTier: 'semantic', name: 'Fiscal Period', aliases: ['fy'], compatibility: 'compatible',
+    });
+    const calendar = candidate({
+      id: 'semantic:calendar:corporate', qualifiedId: 'semantic:calendar:corporate', kind: 'dql_modeling', trustTier: 'governed_sql', name: 'Corporate Fiscal Calendar', compatibility: 'compatible',
+    });
+    const dateRole = candidate({
+      id: 'semantic:dimension:date.order_date', qualifiedId: 'semantic:dimension:date.order_date',
+      kind: 'semantic_member', trustTier: 'semantic', name: 'Order Date', compatibility: 'compatible', timeGrains: ['month'],
+    });
+    const resolveMeaning = vi.fn(async () => resolved({
+      selectedConceptIds: [metric.id], recommendedExecutionId: metric.id,
+      queryIntent: { measures: ['revenue'], dimensions: [], filters: [], order: 'desc' },
+      recommendedRoute: 'governed_sql',
+    }));
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-fiscal-declared', sourceFingerprint: 'sha256:fiscal-declared',
+        parsedIntent: { measures: ['revenue'], dimensions: [], filters: [], timeGrain: 'month' },
+        fiscalCalendar: { id: calendar.id, fiscalPeriodFieldId: fiscalField.id, dateRoleId: 'semantic:dimension:date.order_date' },
+        candidates: [metric, fiscalField, dateRole, calendar],
+      }),
+    });
+    const decision = await router.decide(request('Show revenue by month for FY26'));
+
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
+    expect(decision.meaningResolution?.queryIntent).toMatchObject({
+      fiscalCalendarId: calendar.id,
+      fiscalDateRoleId: dateRole.id,
+      timeGrain: 'month',
+      filters: expect.arrayContaining([{ field: fiscalField.id, value: 'FY26' }]),
+    });
   });
 
   it.each([
@@ -1418,7 +1632,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     expect(decision.resolvedAnalyticalPlan).toBeUndefined();
   });
 
-  it('returns a typed missing-dimension gap for sales_channel instead of a generic repair or research prompt', async () => {
+  it('AGT-029 keeps a pre-freeze missing dimension recoverable only with qualified physical coverage', async () => {
     const revenue = jaffleMetric(
       'semantic:metric:orders.revenue',
       'orders.revenue',
@@ -1431,6 +1645,83 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
         snapshotId: 'snapshot-missing-sales-channel',
         sourceFingerprint: 'sha256:missing-sales-channel',
         parsedIntent: { measures: ['revenue'], dimensions: ['sales_channel'], filters: [] },
+        candidates: [
+          revenue,
+          candidate({ id: 'runtime:table:analytics.opportunities', qualifiedId: 'runtime:table:analytics.opportunities', kind: 'sql_table', trustTier: 'governed_sql', name: 'analytics.opportunities', sourceObjects: ['analytics.opportunities'], relevanceScore: 0.8 }),
+          candidate({ id: 'runtime:column:analytics.opportunities.revenue', qualifiedId: 'runtime:column:analytics.opportunities.revenue', kind: 'sql_column', trustTier: 'governed_sql', name: 'revenue', sourceObjects: ['analytics.opportunities'], relevanceScore: 0.8 }),
+          candidate({ id: 'runtime:column:analytics.opportunities.sales_channel', qualifiedId: 'runtime:column:analytics.opportunities.sales_channel', kind: 'sql_column', trustTier: 'governed_sql', name: 'sales_channel', sourceObjects: ['analytics.opportunities'], relevanceScore: 0.8 }),
+        ],
+      }),
+    });
+
+    const decision = await router.decide(request('Show revenue by sales channel'));
+
+    expect(decision).toMatchObject({
+      action: 'answer',
+      meaningResolution: {
+        compatibilityOutcome: 'modeling_gap',
+        recommendedRoute: 'exploratory',
+        compatibilityFailures: [expect.objectContaining({ code: 'MISSING_DIMENSION', field: 'sales channel' })],
+      },
+    });
+    expect(decision.reason).toContain('sales channel');
+    expect(decision.reason).toMatch(/relational|exploratory/i);
+    expect(decision.terminalOutcome).toBeUndefined();
+    expect(decision.analyticalCascadeDecision).toMatchObject({
+      selectedTier: 'exploratory_sql',
+      planFrozen: false,
+      attempts: expect.arrayContaining([expect.objectContaining({ tier: 'exploratory_sql', outcome: 'executable' })]),
+    });
+    expect(selectRoute(request('Show revenue by sales channel'), decision)).toBe('generated_answer');
+  });
+
+  it('CTX-007 preserves real stale/error/skipped lane coverage and distinguishes exploratory from governed relational', async () => {
+    const revenue = jaffleMetric('semantic:metric:orders.revenue', 'orders.revenue', ['revenue'], true);
+    const router = createHybridRouter({
+      requireMeaningCallForNaturalLanguage: false,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-exploratory-only', sourceFingerprint: 'sha256:exploratory-only',
+        parsedIntent: { measures: ['revenue'], dimensions: ['sales_channel'], filters: [] },
+        diagnostics: {
+          sourceCoverage: [
+            { version: 1, source: 'certified', status: 'stale', candidateIds: ['dql:block:stale'] },
+            { version: 1, source: 'semantic', status: 'errored', candidateIds: ['semantic:metric:orders.revenue'] },
+            { version: 1, source: 'governed_relational', status: 'skipped', candidateIds: [] },
+            { version: 1, source: 'exploratory', status: 'available', candidateIds: ['runtime:table:analytics.opportunities'] },
+            { version: 1, source: 'runtime_schema', status: 'available', candidateIds: ['runtime:column:analytics.opportunities.sales_channel'] },
+          ],
+        },
+        candidates: [
+          revenue,
+          candidate({ id: 'runtime:table:analytics.opportunities', qualifiedId: 'runtime:table:analytics.opportunities', kind: 'sql_table', trustTier: 'governed_sql', name: 'analytics.opportunities', sourceObjects: ['analytics.opportunities'] }),
+          candidate({ id: 'runtime:column:analytics.opportunities.revenue', qualifiedId: 'runtime:column:analytics.opportunities.revenue', kind: 'sql_column', trustTier: 'governed_sql', name: 'revenue', sourceObjects: ['analytics.opportunities'] }),
+          candidate({ id: 'runtime:column:analytics.opportunities.sales_channel', qualifiedId: 'runtime:column:analytics.opportunities.sales_channel', kind: 'sql_column', trustTier: 'governed_sql', name: 'sales_channel', sourceObjects: ['analytics.opportunities'] }),
+        ],
+      }),
+    });
+
+    const decision = await router.decide(request('Show revenue by sales channel'));
+    const cascade = decision.analyticalCascadeDecision!;
+    expect(cascade.sourceCoverage).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'certified', status: 'stale' }),
+      expect.objectContaining({ source: 'semantic', status: 'errored' }),
+      expect.objectContaining({ source: 'governed_relational', status: 'skipped' }),
+      expect.objectContaining({ source: 'exploratory', status: 'available' }),
+    ]));
+    expect(cascade.attempts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tier: 'governed_relational', outcome: 'unavailable' }),
+      expect.objectContaining({ tier: 'exploratory_sql', outcome: 'executable' }),
+    ]));
+  });
+
+  it('AGT-029 leaves a missing dimension terminal when semantic evidence has no safe raw relation and column path', async () => {
+    const revenue = jaffleMetric('semantic:metric:orders.revenue', 'orders.revenue', ['revenue'], true);
+    const router = createHybridRouter({
+      requireMeaningCallForNaturalLanguage: false,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-no-physical-path',
+        sourceFingerprint: 'sha256:no-physical-path',
+        parsedIntent: { measures: ['revenue'], dimensions: ['sales_channel'], filters: [] },
         candidates: [revenue],
       }),
     });
@@ -1439,15 +1730,11 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
 
     expect(decision).toMatchObject({
       action: 'block',
-      terminalOutcome: { kind: 'modeling_gap' },
-      meaningResolution: {
-        compatibilityOutcome: 'modeling_gap',
-        compatibilityFailures: [expect.objectContaining({ code: 'MISSING_DIMENSION', field: 'sales channel' })],
-      },
+      terminalOutcome: { kind: 'modeling_gap', code: 'ANALYTICAL_MODELING_GAP' },
+      analyticalCascadeDecision: { planFrozen: false, stopReason: 'coverage_gap' },
     });
-    expect(decision.reason).toContain('sales channel');
-    expect(decision.reason).toContain('Add or map');
-    expect(decision.reason).not.toMatch(/research|repair/i);
+    expect(decision.reason).toMatch(/qualified raw relation|physical path/i);
+    expect(selectRoute(request('Show revenue by sales channel'), decision)).toBe('blocked');
   });
 
   it('AGT-012-014 keeps the typed member filter while asking for a qualified dimension', async () => {
@@ -1889,6 +2176,409 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     expect(decision.retrievalEvidence?.candidateIds).toHaveLength(2);
   });
 
+  it('AGT-029/EXP-001 composes the jaffle-semantic perishable-supplies fixture only after qualified relationship closure', async () => {
+    const relationshipId = 'dql:relationship:product_supply_lookup';
+    const relationship = automaticRelationshipProof(relationshipId);
+    // These identifiers and columns are the checked-in jaffle-semantic fixture
+    // shape: `order_items.product_name` is the requested display, while
+    // `supplies.is_perishable_supply` is the predicate. Neither table is an
+    // alternative answer to the other.
+    const candidates = perishableSuppliesCompositionCandidates(relationship);
+    const ask = request('which products come from perishable supplies?');
+    const router = createHybridRouter({
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-jaffle-semantic-perishable-products',
+        sourceFingerprint: 'sha256:jaffle-semantic-perishable-products',
+        parsedIntent: { measures: [], dimensions: [], filters: [] },
+        candidates,
+        diagnostics: {
+          sourceCoverage: [
+            { version: 1, source: 'certified', status: 'available', candidateIds: ['block:top_products'] },
+            { version: 1, source: 'semantic', status: 'empty', candidateIds: [] },
+            { version: 1, source: 'governed_relational', status: 'available', candidateIds: [relationshipId] },
+            { version: 1, source: 'exploratory', status: 'available', candidateIds: candidates.filter((item) => item.trustTier === 'exploratory').map((item) => item.id) },
+            { version: 1, source: 'dbt_manifest', status: 'available', candidateIds: ['dbt:model:order_items', 'dbt:model:supplies'] },
+            { version: 1, source: 'runtime_schema', status: 'available', candidateIds: candidates.filter((item) => item.kind === 'sql_column').map((item) => item.id) },
+          ],
+        },
+      }),
+    });
+
+    const decision = await router.decide(ask);
+
+    expect(decision.action).toBe('answer');
+    expect(decision.requiresClarification).toBe(false);
+    expect(selectRoute(ask, decision)).toBe('generated_answer');
+    expect(decision.analyticalCascadeDecision).toMatchObject({
+      selectedTier: 'exploratory_sql',
+      planFrozen: false,
+      stopReason: 'selected',
+    });
+    expect(decision.analyticalCascadeDecision?.attempts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tier: 'governed_relational', outcome: 'ineligible' }),
+      expect.objectContaining({
+        tier: 'exploratory_sql',
+        outcome: 'executable',
+        candidateIds: expect.arrayContaining([
+          'dbt:model:order_items',
+          'dbt:model:supplies',
+          'dbt:column:order_items.product_name',
+          'dbt:column:supplies.is_perishable_supply',
+          relationshipId,
+        ]),
+      }),
+    ]));
+    expect(decision.analyticalCascadeDecision?.sourceCoverage).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'exploratory', status: 'available' }),
+      expect.objectContaining({ source: 'governed_relational', status: 'available' }),
+    ]));
+  });
+
+  it('AGT-029/EXP-001 indexes the checked-in jaffle-semantic proof before routing the eval question to review-required exploration', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-jaffle-semantic-router-'));
+    cpSync(jaffleSemanticFixture, projectRoot, { recursive: true });
+    try {
+      const question = 'which products come from perishable supplies?';
+      const pack = await buildLocalContextPack(projectRoot, { question, limit: 40 });
+      const retrieval = toAgentRetrievalEvidence(
+        pack.retrievalDiagnostics.meaningEvidence!,
+        pack.questionPlan,
+        {
+          snapshotId: pack.freshness.fingerprint,
+          sourceFingerprint: pack.freshness.fingerprint,
+          contextObjects: pack.objects,
+          sourceCoverage: pack.retrievalDiagnostics.sourceCoverage,
+        },
+      );
+      const relationshipId = 'commerce::relationship::supplies_to_order_items_by_product';
+      expect(retrieval.candidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          relationshipSafety: expect.arrayContaining([
+            expect.objectContaining({
+              id: relationshipId,
+              from: 'commerce::entity::supplies',
+              to: 'commerce::entity::order_items',
+              keys: [{ from: 'product_id', to: 'product_id' }],
+              status: 'certified',
+              cardinality: 'one_to_many',
+              fanout: 'safe',
+              automaticJoinAllowed: true,
+              staleCertification: false,
+              validation: expect.objectContaining({ status: 'passed' }),
+            }),
+          ]),
+        }),
+      ]));
+
+      const router = createHybridRouter({ getEvidence: async () => retrieval });
+      const decision = await router.decide(request(question));
+
+      // The router's selected `exploratory_sql` tier is deliberately mapped by
+      // the engine to generated_answer/review_required; it is never presented
+      // as a governed automatic answer.
+      expect(decision.action).toBe('answer');
+      expect(decision.requiresClarification).toBe(false);
+      expect(selectRoute(request(question), decision)).toBe('generated_answer');
+      expect(decision.analyticalCascadeDecision).toMatchObject({
+        selectedTier: 'exploratory_sql',
+        planFrozen: true,
+        stopReason: 'selected',
+      });
+      expect(decision.analyticalCascadeDecision?.attempts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ tier: 'governed_relational', outcome: 'ineligible' }),
+        expect.objectContaining({ tier: 'exploratory_sql', outcome: 'executable', planFrozen: true }),
+      ]));
+      expect(decision.analyticalCascadeDecision?.sourceCoverage).toEqual(expect.arrayContaining([
+        expect.objectContaining({ source: 'governed_relational', status: 'available' }),
+        expect.objectContaining({ source: 'exploratory', status: 'available' }),
+      ]));
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('AGT-009 uses the fixture block output contract instead of falsely certifying top_customers for bare revenue', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-jaffle-semantic-certified-output-'));
+    cpSync(jaffleSemanticFixture, projectRoot, { recursive: true });
+    try {
+      const question = 'show me revenue';
+      const pack = await buildLocalContextPack(projectRoot, { question, limit: 40 });
+      const retrieval = toAgentRetrievalEvidence(
+        pack.retrievalDiagnostics.meaningEvidence!,
+        pack.questionPlan,
+        {
+          snapshotId: pack.freshness.fingerprint,
+          sourceFingerprint: pack.freshness.fingerprint,
+          contextObjects: pack.objects,
+          sourceCoverage: pack.retrievalDiagnostics.sourceCoverage,
+        },
+      );
+      const topCustomers = retrieval.candidates.find((candidate) => candidate.id === 'dql:block:top_customers');
+      const topCustomersCanonicalId = topCustomers?.qualifiedId ?? topCustomers?.id;
+      expect(topCustomers?.compatibilityFacts).toEqual(expect.arrayContaining([
+        'output: customer_name',
+        'output: lifetime_spend',
+        'output: order_count',
+      ]));
+      expect(topCustomers?.compatibilityFacts).not.toContain('output: revenue');
+
+      // Simulate a stale/incorrect resolver nomination. The router must repair
+      // it from the same snapshot, never borrow a neighbouring revenue metric
+      // to certify the block.
+      const router = createHybridRouter({
+        getEvidence: async () => retrieval,
+        resolveMeaning: async () => resolved({
+          interpretedQuestion: question,
+          questionType: 'value',
+          selectedConceptIds: ['dql:block:top_customers'],
+          recommendedExecutionId: 'dql:block:top_customers',
+          queryIntent: { measures: ['revenue'], dimensions: [], filters: [] },
+          recommendedRoute: 'certified',
+        }),
+      });
+      const decision = await router.decide(request(question));
+
+      expect(decision.meaningResolution?.recommendedExecutionId).not.toBe('dql:block:top_customers');
+      expect(decision.resolvedAnalyticalPlan?.selectedConceptIds).not.toContain('dql:block:top_customers');
+      expect(decision.resolvedAnalyticalPlan?.query.measures).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ requested: 'revenue', qualifiedId: 'dql:block:top_customers' }),
+      ]));
+      expect(selectRoute(request(question), decision)).not.toBe('certified_answer');
+      expect(decision.analyticalCascadeDecision?.selectedTier).not.toBe('certified');
+      expect(decision.analyticalCascadeDecision?.attempts).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          tier: 'certified',
+          outcome: 'ineligible',
+          candidateIds: expect.arrayContaining([topCustomersCanonicalId]),
+        }),
+      ]));
+      if (decision.action === 'clarify') {
+        expect(decision.clarificationOptions?.map((option) => option.id)).not.toContain('dql:block:top_customers');
+        expect(decision.clarificationOptions?.map((option) => option.id)).toEqual([
+          'semantic:metric:order_items.product_revenue',
+          'semantic:metric:orders.revenue',
+        ]);
+        expect(decision.clarificationOptions?.every((option) => option.id.startsWith('semantic:'))).toBe(true);
+      } else {
+        expect(decision.resolvedAnalyticalPlan?.recommendedRoute).toBe('semantic');
+      }
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('AGT-009/AGT-011 rejects an incompatible persisted revenue choice before plan freeze or provider dispatch', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-jaffle-semantic-structured-revenue-'));
+    cpSync(jaffleSemanticFixture, projectRoot, { recursive: true });
+    try {
+      const question = 'show me revenue';
+      const pack = await buildLocalContextPack(projectRoot, { question, limit: 40 });
+      const retrieval = toAgentRetrievalEvidence(
+        pack.retrievalDiagnostics.meaningEvidence!,
+        pack.questionPlan,
+        {
+          snapshotId: pack.freshness.fingerprint,
+          sourceFingerprint: pack.freshness.fingerprint,
+          contextObjects: pack.objects,
+          sourceCoverage: pack.retrievalDiagnostics.sourceCoverage,
+        },
+      );
+      const revenueOptionIds = [
+        'semantic:metric:order_items.product_revenue',
+        'semantic:metric:orders.revenue',
+      ];
+      const clarificationSelection = {
+        version: 1 as const,
+        optionIds: revenueOptionIds,
+        ambiguityCandidateIds: revenueOptionIds,
+        requirements: {
+          version: 1 as const,
+          measures: ['revenue'],
+          dimensions: [],
+          entityTerms: [],
+          entityDisplayTerms: [],
+          memberTerms: [],
+        },
+        snapshotId: retrieval.snapshotId,
+      };
+      const resolveMeaning = vi.fn(async () => resolved());
+      const router = createHybridRouter({ getEvidence: async () => retrieval, resolveMeaning });
+
+      const rejected = await router.decide(serverIssuedSelectionRequest({
+        question,
+        selectedEvidenceId: 'dql:block:top_customers',
+        snapshotId: retrieval.snapshotId,
+        optionIds: revenueOptionIds,
+        requirements: clarificationSelection.requirements,
+      }));
+
+      expect(resolveMeaning).not.toHaveBeenCalled();
+      expect(rejected).toMatchObject({
+        action: 'clarify',
+        requiresClarification: true,
+        resolvedAnalyticalPlan: undefined,
+        analyticalCascadeDecision: {
+          planFrozen: false,
+          stopReason: 'ambiguous',
+        },
+        meaningResolution: {
+          selectedConceptIds: [],
+          compatibilityFailures: [expect.objectContaining({ code: 'INVALID_STRUCTURED_SELECTION' })],
+        },
+      });
+      expect(rejected.analyticalCascadeDecision?.selectedTier).toBeUndefined();
+      expect(rejected.clarificationOptions?.map((option) => option.id)).toEqual(revenueOptionIds);
+      expect(rejected.clarificationOptions?.map((option) => option.id)).not.toContain('dql:block:top_customers');
+      expect(rejected.analyticalCascadeDecision?.attempts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ tier: 'exploratory_sql', outcome: 'unavailable', planFrozen: false }),
+      ]));
+
+      const accepted = await router.decide(serverIssuedSelectionRequest({
+        question,
+        selectedEvidenceId: 'semantic:metric:orders.revenue',
+        snapshotId: retrieval.snapshotId,
+        optionIds: revenueOptionIds,
+        requirements: clarificationSelection.requirements,
+      }));
+
+      expect(resolveMeaning).not.toHaveBeenCalled();
+      expect(accepted).toMatchObject({
+        action: 'block',
+        requiresClarification: false,
+        resolvedAnalyticalPlan: undefined,
+        meaningResolution: {
+          selectedConceptIds: ['semantic:metric:orders.revenue'],
+          recommendedRoute: 'clarify',
+        },
+        analyticalCascadeDecision: {
+          planFrozen: false,
+          stopReason: 'coverage_gap',
+        },
+      });
+      expect(accepted.analyticalCascadeDecision?.selectedTier).toBeUndefined();
+      expect(accepted.terminalOutcome).toMatchObject({
+        kind: 'modeling_gap',
+        code: 'ANALYTICAL_MODELING_GAP',
+      });
+      expect(accepted.analyticalCascadeDecision?.attempts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ tier: 'semantic', outcome: 'ineligible', planFrozen: false }),
+        expect.objectContaining({ tier: 'exploratory_sql', outcome: 'unavailable', planFrozen: false }),
+      ]));
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('AGT-010 keeps genuinely competing raw meanings as a clarification without a shared safe relationship proof', async () => {
+    const raw = (id: string, name: string, kind: AgentEvidenceCandidate['kind'], sourceObjects: string[]): AgentEvidenceCandidate => candidate({
+      id,
+      qualifiedId: id,
+      kind,
+      trustTier: 'exploratory',
+      name,
+      aliases: [name],
+      sourceObjects,
+      dimensions: [],
+      timeGrains: [],
+      relevanceScore: 0.95,
+      compatibility: 'unknown',
+    });
+    const candidates = [
+      raw('dbt:model:order_items', 'order_items', 'dbt_model', ['runtime:relation:order_items']),
+      raw('dbt:model:supplies', 'supplies', 'dbt_model', ['runtime:relation:supplies']),
+      raw('dbt:column:order_items.product_id', 'product_id', 'sql_column', ['runtime:relation:order_items']),
+      raw('dbt:column:supplies.product_id', 'product_id', 'sql_column', ['runtime:relation:supplies']),
+      raw('dbt:column:order_items.product_name', 'product_name', 'sql_column', ['runtime:relation:order_items']),
+      raw('dbt:column:supplies.is_perishable_supply', 'is_perishable_supply', 'sql_column', ['runtime:relation:supplies']),
+    ];
+    const ask = request('which products come from perishable supplies?');
+    const router = createHybridRouter({
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-no-relationship-proof',
+        sourceFingerprint: 'sha256:no-relationship-proof',
+        parsedIntent: { measures: [], dimensions: [], filters: [] },
+        candidates,
+      }),
+    });
+
+    const decision = await router.decide(ask);
+
+    expect(decision.action).toBe('clarify');
+    expect(decision.requiresClarification).toBe(true);
+    expect(decision.analyticalCascadeDecision).toBeUndefined();
+    expect(selectRoute(ask, decision)).toBe('clarify');
+  });
+
+  it('AGT-029 keeps a neutral-ID many-to-many relationship as a clarification', async () => {
+    const relationship = automaticRelationshipProof('dql:relationship:product_supply_association', {
+      cardinality: 'many_to_many',
+    });
+    const ask = request('which products come from perishable supplies?');
+    const router = createHybridRouter({
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-neutral-many-to-many',
+        sourceFingerprint: 'sha256:neutral-many-to-many',
+        parsedIntent: { measures: [], dimensions: [], filters: [] },
+        candidates: perishableSuppliesCompositionCandidates(relationship),
+      }),
+    });
+
+    const decision = await router.decide(ask);
+
+    expect(decision.action).toBe('clarify');
+    expect(decision.requiresClarification).toBe(true);
+    expect(decision.analyticalCascadeDecision).toBeUndefined();
+    expect(selectRoute(ask, decision)).toBe('clarify');
+  });
+
+  it('AGT-029 keeps a neutral-ID attribution-required relationship as a clarification', async () => {
+    const relationship = automaticRelationshipProof('dql:relationship:product_supply_link', {
+      fanout: 'attribution_required',
+    });
+    const ask = request('which products come from perishable supplies?');
+    const router = createHybridRouter({
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-neutral-attribution-required',
+        sourceFingerprint: 'sha256:neutral-attribution-required',
+        parsedIntent: { measures: [], dimensions: [], filters: [] },
+        candidates: perishableSuppliesCompositionCandidates(relationship),
+      }),
+    });
+
+    const decision = await router.decide(ask);
+
+    expect(decision.action).toBe('clarify');
+    expect(decision.requiresClarification).toBe(true);
+    expect(decision.analyticalCascadeDecision).toBeUndefined();
+    expect(selectRoute(ask, decision)).toBe('clarify');
+  });
+
+  it('AGT-029 keeps cross-domain duplicate-leaf relationship evidence as a clarification', async () => {
+    const relationship = automaticRelationshipProof('dql:relationship:commerce_product_supply');
+    const ask = request('which products come from perishable supplies?');
+    const router = createHybridRouter({
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-cross-domain-duplicate-leaf',
+        sourceFingerprint: 'sha256:cross-domain-duplicate-leaf',
+        parsedIntent: { measures: [], dimensions: [], filters: [] },
+        // The proof is for commerce::entity::*; the physical candidates are
+        // equally named sales::entity::* endpoints. Leaf names are therefore
+        // not a relationship binding and must not suppress clarification.
+        candidates: perishableSuppliesCompositionCandidates(relationship, {
+          display: 'sales::entity::order_items',
+          predicate: 'sales::entity::supplies',
+        }),
+      }),
+    });
+
+    const decision = await router.decide(ask);
+
+    expect(decision.action).toBe('clarify');
+    expect(decision.requiresClarification).toBe(true);
+    expect(decision.analyticalCascadeDecision).toBeUndefined();
+    expect(selectRoute(ask, decision)).toBe('clarify');
+  });
+
   it("rejects invented resolver IDs as a stable system block", async () => {
     const candidates = [candidate(), candidate({
       id: "semantic:billing:monthly_rollover_amount",
@@ -1984,10 +2674,11 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
       ]),
     });
 
-    const decision = await router.decide({
+    const structuredRequest = serverIssuedSelectionRequest({
       question: "Total CCU Count",
       selectedEvidenceId: selected.id,
     });
+    const decision = await router.decide(structuredRequest);
 
     expect(resolveMeaning).not.toHaveBeenCalled();
     expect(decision.action).toBe("answer");
@@ -1996,10 +2687,100 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
       selectedConceptIds: [selected.id],
       confidence: "high",
     });
-    expect(selectRoute({ question: "Total CCU Count", selectedEvidenceId: selected.id }, decision)).toBe("semantic_answer");
+    expect(selectRoute(structuredRequest, decision)).toBe("semantic_answer");
   });
 
-  it("keeps an incomplete structured choice terminal rather than substituting a different governed metric", async () => {
+  it('AGT-011 fails closed for no-thread, malformed, and stale structured selections before meaning or execution', async () => {
+    const selected = candidate({
+      id: 'semantic:metric:total_ccu_count',
+      qualifiedId: 'semantic:metric:total_ccu_count',
+      name: 'Total CCU Count',
+      aliases: ['total ccu count'],
+    });
+    const resolveMeaning = vi.fn(async () => resolved());
+    const router = createHybridRouter({
+      getEvidence: async () => evidence([selected]),
+      resolveMeaning,
+    });
+    const requirements = {
+      version: 1 as const,
+      measures: ['total ccu count'],
+      dimensions: [],
+      entityTerms: [],
+      entityDisplayTerms: [],
+      memberTerms: [],
+    };
+    const noThread = await router.decide({
+      question: 'show total CCU count',
+      selectedEvidenceId: selected.id,
+    });
+    const malformed = await router.decide({
+      question: 'show total CCU count',
+      selectedEvidenceId: selected.id,
+      threadId: 'thread-structured-selection',
+      conversationContext: {
+        conversationEnvelope: {
+          version: 1,
+          threadId: 'thread-structured-selection',
+          recentTurns: [],
+          pendingClarification: {
+            sourceTurnId: 'turn-structured-selection',
+            question: 'Which CCU metric?',
+            selection: {
+              version: 1,
+              optionIds: [selected.id],
+              ambiguityCandidateIds: [selected.id],
+              // Deliberately no requirements/snapshot/host authority.
+            },
+          },
+        },
+      },
+    });
+    const forged = await router.decide({
+      ...serverIssuedSelectionRequest({
+        question: 'show total CCU count',
+        selectedEvidenceId: selected.id,
+        requirements,
+      }),
+      conversationContext: {
+        ...serverIssuedSelectionRequest({
+          question: 'show total CCU count',
+          selectedEvidenceId: selected.id,
+          requirements,
+        }).conversationContext,
+        serverIssuedClarificationSelection: {
+          version: 1,
+          threadId: 'thread-router-selection',
+          // A client can write JSON shaped like an authority record, but it
+          // cannot bind it to the server's persisted clarification turn.
+          sourceTurnId: 'forged-turn',
+          snapshotId: 'snapshot-1',
+        },
+      },
+    });
+    const stale = await router.decide({
+      ...serverIssuedSelectionRequest({
+        question: 'show total CCU count',
+        selectedEvidenceId: selected.id,
+        snapshotId: 'snapshot-stale',
+        requirements,
+      }),
+    });
+
+    for (const decision of [noThread, malformed, forged, stale]) {
+      expect(decision.action).toBe('clarify');
+      expect(decision.requiresClarification).toBe(true);
+      expect(decision.analyticalCascadeDecision).toMatchObject({ planFrozen: false });
+      expect(decision.analyticalCascadeDecision?.selectedTier).toBeUndefined();
+      expect(decision.analyticalCascadeDecision?.attempts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ tier: 'exploratory_sql', outcome: 'unavailable', planFrozen: false }),
+      ]));
+      expect(selectRoute({ question: 'show total CCU count' }, decision)).not.toBe('generated_answer');
+    }
+    expect(resolveMeaning).not.toHaveBeenCalled();
+  });
+
+  it("keeps an incomplete structured choice bound but blocks without a qualified physical path", async () => {
     const selected = candidate({
       id: "semantic:sales:lost_opportunities_count",
       name: "Lost Opportunities Count",
@@ -2016,23 +2797,71 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
         },
       }),
     });
-    const ask = {
+    const ask = serverIssuedSelectionRequest({
       question: "Lost opportunities count and lost amount by fiscal month where competitor is Splunk",
       selectedEvidenceId: selected.id,
-    };
+    });
 
     const decision = await router.decide(ask);
 
     expect(decision.action).toBe("block");
     expect(decision.requiresClarification).toBe(false);
     expect(decision.clarificationOptions).toBeUndefined();
-    expect(decision.meaningResolution).toBeUndefined();
-    expect(decision.reason).toContain("did not substitute");
-    expect(decision.terminalOutcome).toMatchObject({
-      kind: 'modeling_gap',
-      candidateIds: [selected.id],
+    expect(decision.meaningResolution).toMatchObject({
+      selectedConceptIds: [selected.id],
+      compatibilityOutcome: 'modeling_gap',
+    });
+    expect(decision.reason).toMatch(/will not substitute|qualified raw relation/i);
+    expect(decision.terminalOutcome).toMatchObject({ kind: 'modeling_gap', code: 'ANALYTICAL_MODELING_GAP' });
+    expect(decision.analyticalCascadeDecision).toMatchObject({
+      stopReason: 'coverage_gap',
+      attempts: expect.arrayContaining([expect.objectContaining({ tier: 'exploratory_sql', outcome: 'unavailable' })]),
     });
     expect(selectRoute(ask, decision)).toBe("blocked");
+  });
+
+  it("continues an incomplete structured choice only through a qualified review-required exploratory cascade", async () => {
+    const selected = candidate({
+      id: "semantic:sales:lost_opportunities_count",
+      name: "Lost Opportunities Count",
+      aliases: ["lost_opportunities_count"],
+      dimensions: ["fiscal_month"],
+    });
+    const raw = [
+      candidate({ id: 'runtime:table:analytics.opportunities', qualifiedId: 'runtime:table:analytics.opportunities', kind: 'sql_table', trustTier: 'governed_sql', name: 'analytics.opportunities', sourceObjects: ['analytics.opportunities'] }),
+      candidate({ id: 'runtime:column:analytics.opportunities.lost_opportunities_count', qualifiedId: 'runtime:column:analytics.opportunities.lost_opportunities_count', kind: 'sql_column', trustTier: 'governed_sql', name: 'lost_opportunities_count', sourceObjects: ['analytics.opportunities'] }),
+      candidate({ id: 'runtime:column:analytics.opportunities.lost_amount', qualifiedId: 'runtime:column:analytics.opportunities.lost_amount', kind: 'sql_column', trustTier: 'governed_sql', name: 'lost_amount', sourceObjects: ['analytics.opportunities'] }),
+      candidate({ id: 'runtime:column:analytics.opportunities.fiscal_month', qualifiedId: 'runtime:column:analytics.opportunities.fiscal_month', kind: 'sql_column', trustTier: 'governed_sql', name: 'fiscal_month', sourceObjects: ['analytics.opportunities'] }),
+      candidate({ id: 'runtime:column:analytics.opportunities.competitor', qualifiedId: 'runtime:column:analytics.opportunities.competitor', kind: 'sql_column', trustTier: 'governed_sql', name: 'competitor', sourceObjects: ['analytics.opportunities'] }),
+    ];
+    const router = createHybridRouter({
+      getEvidence: async () => ({
+        ...evidence([selected, ...raw]),
+        parsedIntent: {
+          measures: ["lost opportunities count", "lost amount"],
+          dimensions: ["fiscal month"],
+          filters: [{ field: "competitor", value: "Splunk" }],
+        },
+      }),
+    });
+    const ask = serverIssuedSelectionRequest({
+      question: "Lost opportunities count and lost amount by fiscal month where competitor is Splunk",
+      selectedEvidenceId: selected.id,
+    });
+
+    const decision = await router.decide(ask);
+
+    expect(decision).toMatchObject({
+      action: 'answer',
+      requiresClarification: false,
+      meaningResolution: { selectedConceptIds: [selected.id], recommendedRoute: 'exploratory', compatibilityOutcome: 'modeling_gap' },
+      analyticalCascadeDecision: { selectedTier: 'exploratory_sql', planFrozen: false },
+    });
+    expect(decision.analyticalCascadeDecision?.attempts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tier: 'semantic', outcome: 'ineligible', candidateIds: expect.arrayContaining([selected.id]) }),
+      expect.objectContaining({ tier: 'exploratory_sql', outcome: 'executable', candidateIds: expect.arrayContaining(raw.map((item) => item.id)) }),
+    ]));
+    expect(selectRoute(ask, decision)).toBe("generated_answer");
   });
 
   it("uses the recommended compatible certified executor only after meaning resolution", async () => {
@@ -2042,6 +2871,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
       trustTier: "certified",
       name: "Customer Rollover Report",
       relevanceScore: 0.93,
+      compatibilityFacts: ['output: rollover_balance_amount'],
     });
     const router = createHybridRouter({
       getEvidence: async () => evidence([candidate(), block]),
@@ -2068,6 +2898,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
       ],
       relevanceScore: 1,
       compatibility: "compatible",
+      compatibilityFacts: ['output: customer_name', 'output: beverage_revenue'],
       exactMatch: false,
     });
     const productRanking = candidate({
@@ -2103,7 +2934,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
       getEvidence: async () => ({
         ...evidence([topCustomers, productRanking, rawProducts]),
         parsedIntent: {
-          measures: ["spend"],
+          measures: ["beverage_revenue"],
           dimensions: ["customer"],
           filters: [{ field: "category", value: "beverage" }],
           order: "desc",

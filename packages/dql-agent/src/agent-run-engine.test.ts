@@ -24,6 +24,34 @@ import {
 import { defaultAgentRunGates } from "./agent-run-gates.js";
 import { decideAgentAction, type IntentDecision } from "./intent-controller.js";
 
+/** Router-owned proof used by engine-boundary tests; do not synthesize routes from IDs. */
+function safeExploratoryCascade() {
+  return {
+    version: 1 as const,
+    requirements: {
+      version: 1 as const,
+      measures: ['revenue'],
+      dimensions: ['customer'],
+      entityTerms: ['customer'],
+      entityDisplayTerms: ['customer name'],
+      memberTerms: [],
+    },
+    sourceCoverage: [
+      { version: 1 as const, source: 'semantic' as const, status: 'available' as const, candidateIds: ['semantic:metric:revenue'] },
+      { version: 1 as const, source: 'exploratory' as const, status: 'available' as const, candidateIds: ['dbt:model:orders', 'runtime:column:revenue', 'runtime:column:customer_name'] },
+    ],
+    attempts: [
+      { version: 1 as const, tier: 'certified' as const, outcome: 'unavailable' as const, candidateIds: [], reason: 'No certified complete tuple.', planFrozen: false },
+      { version: 1 as const, tier: 'semantic' as const, outcome: 'ineligible' as const, candidateIds: ['semantic:metric:revenue'], reason: 'Semantic tuple is incomplete.', planFrozen: false },
+      { version: 1 as const, tier: 'governed_relational' as const, outcome: 'unavailable' as const, candidateIds: [], reason: 'No certified relationship path.', planFrozen: false },
+      { version: 1 as const, tier: 'exploratory_sql' as const, outcome: 'executable' as const, candidateIds: ['dbt:model:orders', 'runtime:column:revenue', 'runtime:column:customer_name'], reason: 'One same-snapshot qualified physical relation covers the requested fields.', planFrozen: false },
+    ],
+    selectedTier: 'exploratory_sql' as const,
+    planFrozen: false,
+    stopReason: 'selected' as const,
+  };
+}
+
 describe("routeReasoningEffort", () => {
   it("runs cheap/mechanical routes at low effort", () => {
     expect(routeReasoningEffort("conversation")).toBe("low");
@@ -280,6 +308,7 @@ describe("AgentRunEngine", () => {
             candidateCount: 2,
             candidateIds: ['semantic:metric:orders.revenue', 'dql:block:top_beverage_customers'],
           },
+          analyticalCascadeDecision: safeExploratoryCascade(),
         }),
       },
       executors: {
@@ -303,6 +332,35 @@ describe("AgentRunEngine", () => {
     expect(run.trustState).toBe('review_required');
     expect(run.summary).toBe('Created review-required agent output.');
     expect(run.events.some((event) => event.type === 'executor.started' && event.route === 'generated_answer')).toBe(true);
+  });
+
+  it('CTX-007 persists the router-owned cascade unchanged in the V3 receipt', async () => {
+    const cascade = {
+      ...safeExploratoryCascade(),
+      sourceCoverage: [
+        { version: 1 as const, source: 'certified' as const, status: 'stale' as const, candidateIds: ['dql:block:stale'] },
+        { version: 1 as const, source: 'semantic' as const, status: 'errored' as const, candidateIds: ['semantic:metric:revenue'] },
+        { version: 1 as const, source: 'governed_relational' as const, status: 'skipped' as const, candidateIds: [] },
+        { version: 1 as const, source: 'exploratory' as const, status: 'available' as const, candidateIds: ['runtime:table:orders'] },
+      ],
+    };
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-v3-cascade',
+      now: fixedClock(),
+      router: { decide: () => ({
+        action: 'answer', confidence: 0.6, followsUp: false, source: 'heuristic',
+        reason: 'The router selected bounded exploration.', analyticalCascadeDecision: cascade,
+      }) },
+      executors: { generated_answer: () => ({ answer: 'Review-required result.' }) },
+    });
+
+    const run = await engine.run({ question: 'revenue by sales channel', requestedMode: 'ask' });
+    expect(run.diagnosticReceiptV3).toMatchObject({
+      sourceCoverage: cascade.sourceCoverage,
+      cascade,
+      planFrozen: false,
+    });
+    expect(run.diagnosticReceiptV3?.cascade?.attempts).toEqual(cascade.attempts);
   });
 
   it('allows one bounded same-route repair after an ordinary generated Ask attempt fails', async () => {
@@ -2163,10 +2221,11 @@ describe("AgentRunEngine — conversation route", () => {
     // Still the point of this test: a high-confidence semantic RECOMMENDATION is
     // not a frozen plan, so the semantic executor must not run.
     expect(semanticCalls).toBe(0);
-    // But the turn no longer dead-ends — it falls through to the review-required
-    // generated lane instead of blocking (AGT-028).
-    expect(run.route).toBe("generated_answer");
-    expect(run.trustState).toBe("review_required");
+    // A semantic recommendation alone is not an executable physical fallback.
+    // The engine must not manufacture generated SQL without the router's
+    // same-snapshot qualified exploratory decision.
+    expect(run.route).toBe("blocked");
+    expect(run.trustState).toBe("blocked");
   });
 
   it("falls back to deterministic routing when the router throws", async () => {
@@ -2517,6 +2576,7 @@ describe("AgentRunEngine — conversation route", () => {
             message: 'The selected metric does not model a reachable workspace grouping.',
             candidateIds: [],
           },
+          analyticalCascadeDecision: safeExploratoryCascade(),
         }),
       },
     });
@@ -2786,7 +2846,7 @@ describe("AgentRunEngine — conversation route", () => {
     expect(run.route).toBe('clarify');
   });
 
-  it('rescues the block it synthesizes itself, not just one the router reported (AGT-028)', async () => {
+  it('does not rescue a block it synthesizes without qualified physical-path proof (AGT-029)', async () => {
     // The reported production dead end. `enforceOrdinaryAnalyticalPlanBoundary`
     // already converted a ROUTER-reported modeling gap into an answer, but then
     // synthesized its OWN ANALYTICAL_MODELING_GAP block further down and never
@@ -2818,9 +2878,9 @@ describe("AgentRunEngine — conversation route", () => {
       },
     });
     const run = await engine.run({ question: 'who are the top customers for BCM', requestedMode: 'ask' });
-    expect(generatedCalls).toBe(1);
-    expect(run.route).toBe('generated_answer');
-    expect(run.trustState).toBe('review_required');
+    expect(generatedCalls).toBe(0);
+    expect(run.route).toBe('blocked');
+    expect(run.trustState).toBe('blocked');
   });
 
   it('still fails closed when nothing was retrieved, so a forged decision cannot bypass the boundary', async () => {

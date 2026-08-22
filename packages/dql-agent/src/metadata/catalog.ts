@@ -5815,6 +5815,15 @@ async function planContextPackRoute(input: {
   const missingContext = buildMissingContext(input.request, intent, input.objects, input.allowedSqlContext);
   const selectedEvidence = input.evidenceRoles.slice(0, 16);
 
+  // A blocking context gap belongs to the question, not to whichever
+  // certified artifact happened to rank first.  Evaluate it before a
+  // wrong-grain/block-fit demotion can send a diagnose request into generated
+  // SQL.  In particular, a current-only tile plus a nearby raw table with a
+  // date column must ask for a baseline rather than invent one.
+  if (intent === 'clarify' || missingContext.some((item) => item.severity === 'blocking')) {
+    return clarifyDecision(intent, input.trustLabel, selectedEvidence, missingContext);
+  }
+
   // Grain / contract gate (refinement of the existing certified→generated
   // demotion). The candidate certified block is only served at Tier 1 when its
   // declared grain actually satisfies the question's requested grain. An
@@ -5948,10 +5957,6 @@ async function planContextPackRoute(input: {
       missingContext,
       followUps: buildMetadataFollowUps(intent, input.allowedSqlContext),
     };
-  }
-
-  if (intent === 'clarify' || missingContext.some((item) => item.severity === 'blocking')) {
-    return clarifyDecision(intent, input.trustLabel, selectedEvidence, missingContext);
   }
 
   const canGenerate =
@@ -6140,7 +6145,15 @@ function certifiedCandidateFitAction(
   fit: CertifiedBlockFit,
   routeDecision: MetadataRouteDecision,
 ): LocalContextPack['retrievalDiagnostics']['certifiedCandidateFits'][number]['action'] {
-  if (routeDecision.route === 'certified' && routeDecision.exactObjectKey === objectKey) return 'certified_answer';
+  // A catalog route is useful retrieval guidance, not independent evidence
+  // that the selected block exposes every requested metric.  Do not stamp a
+  // candidate as a certified answer when its own output-contract fit contains
+  // a missing measure: doing so let a `lifetime_spend` ranking inherit the
+  // generic `revenue` tag and freeze as a false certified result.
+  if (routeDecision.route === 'certified'
+    && routeDecision.exactObjectKey === objectKey
+    && certifiedFitAllowsTier1(fit)
+    && (fit.missingMeasures?.length ?? 0) === 0) return 'certified_answer';
   if (routeDecision.certifiedApplicability?.objectKey === objectKey && routeDecision.route !== 'certified') return 'context_only';
   if (!certifiedFitAllowsTier1(fit) || applicability.kind === 'context_only') return 'rejected_for_fit';
   return 'eligible_not_selected';
@@ -6380,6 +6393,7 @@ function hasComparableBaselineContext(
   objects: MetadataObject[],
   allowedSqlContext: MetadataAllowedSqlContext,
 ): boolean {
+  const observedBaseline = hasObservedBaselineRows(request.selectedContext);
   if (request.focusObjectKey) {
     const focus = objects.find((object) => object.objectKey === request.focusObjectKey);
     if (focus) {
@@ -6390,16 +6404,30 @@ function hasComparableBaselineContext(
       const focusedRelations = dependencyKeys.size > 0
         ? allowedSqlContext.relations.filter((relation) => relationLookupKeysForCatalog(relation.relation).some((key) => dependencyKeys.has(key)))
         : [];
-      const focusTextHasBaseline = /\b(date|time|day|week|month|quarter|year|season|period|baseline|history|snapshot)\b/i.test([
-        focus.name,
-        focus.description ?? '',
-        String(focus.payload?.sql ?? ''),
-      ].join(' '));
-      return focusTextHasBaseline || focusedRelations.some((relation) => relation.columns.some((column) => isTimeLikeColumn(column.name)));
+      // A time-like column somewhere in the dependency graph is potential
+      // exploration context, not proof that the focused artifact contains a
+      // comparable baseline.  Treating it as proof made a current-only
+      // availability tile answer “what changed?” from an unrelated raw table.
+      // Require either observed selected rows spanning two values, or an
+      // authored comparison expression that uses a declared focused time
+      // column.  Names/descriptions/LLM prose remain retrieval context only.
+      if (observedBaseline) return true;
+      const focusSql = String(focus.payload?.sql ?? focus.payload?.query ?? '');
+      const timeColumns = focusedRelations.flatMap((relation) => relation.columns
+        .map((column) => column.name)
+        .filter(isTimeLikeColumn));
+      const usesFocusedTimeColumn = timeColumns.some((column) =>
+        new RegExp(`\\b${escapeRegExp(column)}\\b`, 'i').test(focusSql));
+      const declaresComparison = /\b(?:baseline|history|prior|previous|compare|comparison|versus|\bvs\.?|lag|lead)\b/i.test(focusSql);
+      return usesFocusedTimeColumn && declaresComparison;
     }
   }
   if (allowedSqlContext.relations.some((relation) => relation.columns.some((column) => isTimeLikeColumn(column.name)))) return true;
-  const rows = selectedRows(request.selectedContext);
+  return observedBaseline;
+}
+
+function hasObservedBaselineRows(value: unknown): boolean {
+  const rows = selectedRows(value);
   if (rows.length < 2) return false;
   const columns = new Set(rows.flatMap((row) => Object.keys(row)));
   for (const column of columns) {
@@ -6422,6 +6450,10 @@ function relationLookupKeysForCatalog(relation: string): string[] {
 
 function isTimeLikeColumn(name: string): boolean {
   return /\b(date|time|day|week|month|quarter|year|season|period|created_at|updated_at)\b/i.test(name);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function selectedRows(value: unknown): Array<Record<string, unknown>> {

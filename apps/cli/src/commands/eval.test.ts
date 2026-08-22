@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 // passes whether vitest runs from the repo root or the apps/cli package dir.
 const FIXTURES_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../test/fixtures');
 import type { DQLManifest } from '@duckcodeailabs/dql-core';
-import type { PlanAgentAnswerResult } from '@duckcodeailabs/dql-agent';
+import { planAgentAnswer, type PlanAgentAnswerResult } from '@duckcodeailabs/dql-agent';
 import {
   collectEvalCases,
   computeDistributions,
@@ -530,6 +530,34 @@ describe('runEval (end-to-end against the real router)', () => {
     expect(report.scores.answerRate).toBe(1);
     expect(report.scores.routeAccuracy).toBe(1);
     expect(report.scores.refusalRecall).toBe(1);
+
+    // The four authored approval-rate prompts are a Tier-1 contract: each
+    // route must stop at the block that owns the SQL `rate` output.  A
+    // generated route here would mean an otherwise retrieved block lost its
+    // own output contract and Ask AI would unnecessarily invoke generation.
+    const approvalRateCases = report.results.filter((result) =>
+      result.expectBlock === 'card_approval_rate');
+    expect(approvalRateCases).toHaveLength(4);
+    for (const result of approvalRateCases) {
+      expect(result.actualRoute).toBe('certified');
+      expect(result.actualBlock).toBe('card_approval_rate');
+      expect(result.failures).toEqual([]);
+    }
+  });
+
+  it('keeps the lineage approval-rate block from certifying an unrelated measure', async () => {
+    const plan = await planAgentAnswer(join(FIXTURES_ROOT, 'lineage-app'), {
+      question: 'What is our card revenue?',
+      surface: 'cli',
+    });
+
+    // AGT-009: exact block retrieval cannot borrow a role from its tags,
+    // description, or a neighbouring candidate. The SQL contract owns `rate`,
+    // not revenue, so this can continue to a later lane but never certify the
+    // approval-rate block.
+    expect(plan.routeDecision.route).not.toBe('certified');
+    expect(plan.routeDecision.exactObjectKey).not.toBe('dql:block:card_approval_rate');
+    expect(plan.routeDecision.blockFit?.missingMeasures).toContain('revenue');
   });
 
   it('passes the checked-in jaffle supply-chain golden eval fixture at strict thresholds', async () => {

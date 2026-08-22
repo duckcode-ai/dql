@@ -30,6 +30,10 @@ export interface ResearchBranchOutcome {
   /** The branch's own summary, used to explain a blocked branch. */
   summary?: string;
   status?: string;
+  /** Only receipt-bound deterministic validation may set supported/contradicted. */
+  verdict?: 'supported' | 'contradicted' | 'inconclusive' | 'failed' | 'skipped';
+  /** Fact IDs already retained by the branch receipt, never free-form prose. */
+  counterEvidenceFactIds?: string[];
 }
 
 /** Why a branch produced nothing, in the reader's language. */
@@ -73,20 +77,23 @@ export function synthesizeResearchNarrative(input: {
     state = applyFinding(state, {
       id: `f${index + 1}`,
       hypothesisId: `h${index + 1}`,
-      // `supports` would claim the observation MATCHED what the hypothesis
-      // predicted, and only the expectation can decide that. Producing rows
-      // means the branch was observed, so it is recorded as inconclusive with
-      // higher strength — the narrative below reports "investigated", never
-      // "confirmed", and the distinction has to hold in the data too.
-      verdict: 'inconclusive',
+      // Callers may provide a verdict only after deterministic receipt-bound
+      // validation. Plain returned rows remain inconclusive and can never
+      // become a causal conclusion in this synthesis layer.
+      verdict: branch.verdict === 'supported' || branch.verdict === 'contradicted'
+        ? branch.verdict === 'supported' ? 'supports' : 'refutes'
+        : 'inconclusive',
       summary: branch.summary ?? '',
       strength: branch.produced ? 0.6 : 0.1,
     }, input.limits);
   });
 
   const conclusion = concludeResearch(state, input.limits);
-  // Everything lands in `unresolved` now that no branch claims support, so the
-  // split is by whether the branch produced observable evidence at all.
+  const supported = conclusion.supported;
+  const contradicted = conclusion.refuted;
+  // Ordinary rows land in `unresolved`; split that set by whether the branch
+  // produced an observable result. This remains a surrounding-context report,
+  // not a causal claim.
   const producedBy = new Map(branches.map((branch) => [branch.statement.trim(), branch.produced]));
   const investigated = conclusion.unresolved.filter((h) => producedBy.get(h.statement) === true);
   const blocked = conclusion.unresolved.filter((h) => producedBy.get(h.statement) !== true);
@@ -100,6 +107,22 @@ export function synthesizeResearchNarrative(input: {
       '',
       `**Investigated (${investigated.length}):**`,
       ...investigated.map((hypothesis) => `- ${hypothesis.statement}`),
+    );
+  }
+
+  if (supported.length > 0) {
+    lines.push(
+      '',
+      `**Supported observations (${supported.length}):**`,
+      ...supported.map((hypothesis) => `- ${hypothesis.statement}`),
+    );
+  }
+
+  if (contradicted.length > 0) {
+    lines.push(
+      '',
+      `**Counter-evidence (${contradicted.length}):**`,
+      ...contradicted.map((hypothesis) => `- ${hypothesis.statement}`),
     );
   }
 
@@ -126,6 +149,13 @@ export function synthesizeResearchNarrative(input: {
     // The honest headline when nothing could be established: say so first,
     // rather than leading with a number from the one branch that ran.
     lines.splice(1, 0, '', 'None of them could be settled with the governed model as it stands.');
+  }
+
+  const counterEvidenceFacts = branches
+    .flatMap((branch) => branch.counterEvidenceFactIds ?? [])
+    .filter(Boolean);
+  if (counterEvidenceFacts.length > 0) {
+    lines.push('', `Counter-evidence is retained in ${new Set(counterEvidenceFacts).size} receipt-bound fact${new Set(counterEvidenceFacts).size === 1 ? '' : 's'}.`);
   }
 
   return lines.join('\n');

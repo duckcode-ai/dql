@@ -324,6 +324,25 @@ export async function planResearch(input: {
         expectation: `Upstream models/metrics that feed ${label}.`,
       });
     }
+    // A multifaceted investigation needs at least three independently useful
+    // observations when the catalog exposes them. Fill only with a real
+    // certified block/lineage asset; never pad the plan with a guessed join or
+    // fabricated business explanation. If those assets do not exist the V2
+    // ledger declares limited scope instead.
+    if (steps.length < 3 && metricBlocks[0]) {
+      steps.push({
+        thought: `Check the certified definition and limitations for ${label}.`,
+        action: { kind: 'lookup_block', target: metricBlocks[0].name },
+        expectation: `Whether the certified block's scope, filters, and grain qualify the observation.`,
+      });
+    }
+    if (steps.length < 3 && metricName && !steps.some((step) => step.action.kind === 'check_lineage')) {
+      steps.push({
+        thought: `Inspect lineage evidence for limits around ${label}.`,
+        action: { kind: 'check_lineage', target: metricTarget! },
+        expectation: `Which modeled inputs can support or limit the requested comparison.`,
+      });
+    }
     // Hypotheses when a provider can produce them, the template otherwise.
     // The template's steps are always a correct INVESTIGATION — baseline, trend,
     // breakdown — but they are the same three regardless of what was asked, so
@@ -361,7 +380,10 @@ export async function planResearch(input: {
       rationale: hypothesisSteps.length > 0
         ? `${decision.reason} Investigating ${hypothesisSteps.length} competing explanations.`
         : decision.reason,
-      steps: hypothesisSteps.length > 0 ? hypothesisSteps : steps,
+      // A two-item model response does not meet the multi-branch research
+      // contract when the deterministic catalog plan can ground more. Keep it
+      // as limited scope only if the catalog itself cannot supply three paths.
+      steps: hypothesisSteps.length >= 3 ? hypothesisSteps : steps,
       sources: Array.from(sources),
       done: false,
       rootPlanId: input.rootPlan?.rootPlanId ?? input.rootPlan?.planId,

@@ -12,6 +12,12 @@ import type {
   MetricCapabilityContract,
 } from '@duckcodeailabs/dql-core';
 import type { KnowledgeLens } from './domain-context.js';
+import {
+  buildAnalyticalRequirementSet,
+  evidenceCandidateRoles,
+  selectRoleBalancedMeaningCandidates,
+  type ContextSourceCoverageV1,
+} from './analytical-orchestration.js';
 
 export type AgentEvidenceKind =
   | "certified_block"
@@ -25,6 +31,38 @@ export type AgentEvidenceKind =
 
 export type AgentEvidenceTrustTier = "certified" | "semantic" | "governed_sql" | "exploratory";
 export type AgentEvidenceCompatibility = "compatible" | "partial" | "incompatible" | "unknown";
+
+/**
+ * Compact, snapshot-bound relationship proof carried beside raw evidence.
+ *
+ * Relationship IDs are identities, not safety claims.  Hosts may only use this
+ * record to permit an automatic exploratory composition after the router has
+ * checked its lifecycle, validation, fanout, cardinality, and join authority.
+ * Keeping the proof structured prevents a friendly-looking relationship name
+ * from accidentally authorizing a join.
+ */
+export interface AgentRelationshipSafetyEvidence {
+  /** Canonical, qualified relationship identity. */
+  id: string;
+  /** Other snapshot identities for the same relationship; never safety facts. */
+  aliases?: string[];
+  from?: string;
+  to?: string;
+  keys: Array<{ from: string; to: string }>;
+  status?: string;
+  cardinality?: string;
+  fanout?: string;
+  staleCertification?: boolean;
+  automaticJoinAllowed?: boolean;
+  certificationFingerprint?: string;
+  evidenceExpiresAt?: string;
+  validation?: {
+    status?: string;
+    checkedAt?: string;
+    queryFingerprint?: string;
+    proofFingerprint?: string;
+  };
+}
 
 export interface AgentEvidenceCandidate {
   /** Stable, source-qualified ID. Leaf names are not valid identities. */
@@ -50,6 +88,10 @@ export interface AgentEvidenceCandidate {
   requiredParameters?: string[];
   sourceObjects?: string[];
   relationshipEvidence?: string[];
+  /** Canonical modeling entity IDs proven to bind this physical relation. */
+  relationshipEndpointIds?: string[];
+  /** Structured relationship proof; IDs alone can never authorize a join. */
+  relationshipSafety?: AgentRelationshipSafetyEvidence[];
   /** Cross-source relevance score normalized to 0..1 by the retriever. */
   relevanceScore: number;
   matchReasons: string[];
@@ -63,6 +105,91 @@ export interface AgentEvidenceCandidate {
   eligible?: boolean;
   /** True only for an exact qualified/name/approved-alias match. */
   exactMatch?: boolean;
+}
+
+/**
+ * Return the authored output identity that proves a certified block can answer
+ * one requested measure.  This reads only the block's own `output:` facts,
+ * which are populated from declared/output-contract fields at indexing time.
+ * Block names, tags, examples, definitions, and unrelated retrieved metrics
+ * are intentionally absent: none of those is an executable output contract.
+ */
+export function certifiedCandidateDeclaredMeasureOutput(
+  candidate: AgentEvidenceCandidate,
+  requested: string,
+): string | undefined {
+  if (candidate.kind !== 'certified_block') return undefined;
+  const requestedIdentity = canonicalCertifiedOutputMetricIdentity(requested);
+  if (!requestedIdentity) return undefined;
+  const declared = (candidate.compatibilityFacts ?? [])
+    .flatMap((fact) => /^output:\s*(.+)$/i.exec(fact)?.[1] ?? [])
+    .map((output) => output.trim())
+    .filter(Boolean);
+  return declared.find((output) =>
+    canonicalCertifiedOutputMetricIdentity(output) === requestedIdentity,
+  );
+}
+
+/**
+ * A certified tier can freeze only when the selected block itself declares
+ * every requested measure.  This is deliberately stricter than retrieval
+ * relevance: `top_customers` tagged with revenue but outputting only
+ * `lifetime_spend` is context, never a certified revenue answer.
+ */
+export function certifiedCandidateExplicitlyCoversMeasures(
+  candidate: AgentEvidenceCandidate,
+  requestedMeasures: string[] | undefined,
+): boolean {
+  if (candidate.kind !== 'certified_block') return false;
+  const requested = [...new Set((requestedMeasures ?? [])
+    .map(canonicalCertifiedOutputMetricIdentity)
+    .filter(Boolean))];
+  const effectiveRequested = requested.length > 1
+    ? requested.filter((measure) => measure !== 'total' && measure !== 'average')
+    : requested;
+  return effectiveRequested.every((measure) =>
+    Boolean(certifiedCandidateDeclaredMeasureOutput(candidate, measure)),
+  );
+}
+
+/**
+ * Output identity deliberately has a much smaller alias surface than retrieval
+ * matching. Generic presentation modifiers are safe (gross/total/monthly
+ * revenue); business qualifiers are not (product revenue, beverage revenue,
+ * lifetime spend). This mirrors the certified fit gate and prevents a loosely
+ * correlated output from borrowing another metric's authority.
+ */
+function canonicalCertifiedOutputMetricIdentity(value: string): string {
+  const aliases: Record<string, string> = {
+    avg: 'average',
+    drink: 'beverage',
+    score: 'point',
+    scorer: 'point',
+    scoring: 'point',
+    sum: 'total',
+  };
+  const genericModifiers = new Set([
+    'annual', 'average', 'current', 'daily', 'gross', 'monthly', 'net',
+    'quarterly', 'total', 'yearly',
+  ]);
+  // A typed resolver may retain a qualified metric selection in
+  // queryIntent. Only its leaf is comparable to a block output; the namespace
+  // is authority metadata, not part of the returned column identity.
+  const outputLeaf = value.includes(':')
+    ? value.split(':').filter(Boolean).at(-1) ?? value
+    : value;
+  const tokens = outputLeaf
+    .toLowerCase()
+    .replace(/%/g, ' percentage ')
+    .replace(/[_./:-]+/g, ' ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .split(/\s+/)
+    .map((token) => aliases[token] ?? token)
+    .map((token) => token.endsWith('s') && token.length > 3 ? token.slice(0, -1) : token)
+    .filter(Boolean);
+  while (tokens.length > 1 && genericModifiers.has(tokens[0]!)) tokens.shift();
+  while (tokens.length > 1 && genericModifiers.has(tokens.at(-1)!)) tokens.pop();
+  return tokens.join('_');
 }
 
 export interface AgentRetrievalEvidence {
@@ -85,10 +212,19 @@ export interface AgentRetrievalEvidence {
   unboundMemberTerms?: string[];
   /** Snapshot-compiled policy only; Skill prose never enters route authority. */
   analyticalPolicies?: AnalyticalPolicyContract[];
+  /** A snapshot-declared fiscal calendar; absence is never guessed from FY text. */
+  fiscalCalendar?: {
+    id: string;
+    fiscalPeriodFieldId: string;
+    /** Required at execution time; optional here preserves older snapshots. */
+    dateRoleId?: string;
+  };
   diagnostics?: {
     searchedKinds?: AgentEvidenceKind[];
     durationMs?: number;
     truncated?: boolean;
+    /** Actual retrieval-lane/source state captured with this snapshot. */
+    sourceCoverage?: ContextSourceCoverageV1[];
   };
 }
 
@@ -100,6 +236,10 @@ export interface MeaningQueryIntent {
   timeGrain?: string;
   order?: "asc" | "desc";
   limit?: number;
+  /** Snapshot-bound fiscal binding injected only after a declared calendar is found. */
+  fiscalCalendarId?: string;
+  /** Declared date role paired with the fiscal calendar; never inferred from text. */
+  fiscalDateRoleId?: string;
 }
 
 export type MeaningQuestionType =
@@ -171,14 +311,37 @@ const COMPATIBILITY_ORDER: Record<AgentEvidenceCompatibility, number> = {
  */
 export function buildMeaningEvidencePackage(
   evidence: AgentRetrievalEvidence,
-  maxCandidates = 12,
+  maxCandidates = 16,
+  question = '',
 ): AgentEvidenceCandidate[] {
-  const limit = Math.max(1, Math.min(20, Math.floor(maxCandidates)));
+  const limit = Math.max(1, Math.min(16, Math.floor(maxCandidates)));
   const perKindLimit = Math.max(2, Math.ceil(limit / 2));
-  const kindCounts = new Map<AgentEvidenceKind, number>();
-  return canonicalizeMetricMeasureCandidates(evidence.candidates)
+  const requirements = buildAnalyticalRequirementSet({ question, parsedIntent: evidence.parsedIntent });
+  // First reserve exact and required-role candidates from the FULL canonical
+  // set. Applying the same-kind cap first let eight high-scoring owner/sentiment
+  // dimensions erase the explicit revenue metric and Account Name before the
+  // role-aware admission code ever saw them.
+  const canonicalEligible = canonicalizeMetricMeasureCandidates(evidence.candidates)
     .filter((candidate) => candidate.eligible !== false)
-    .sort(compareCandidates)
+    .sort(compareCandidates);
+  const rawPinned = selectRoleBalancedMeaningCandidates({
+    candidates: canonicalEligible,
+    requirements,
+    maxCandidates: limit,
+    pinOnly: true,
+  });
+  // Guard the fill and the pins themselves. A terse request for "accounts"
+  // must not retain Account Owner / Sentiment merely because a generic
+  // categorical-dimension parser also saw the token "account". An explicit
+  // attribute request remains eligible.
+  const requestedEntityDisplay = requirements.entityDisplayTerms.length > 0;
+  const explicitlyRequestsAttribute = /\b(?:owner|sentiment|email)\b/i.test(question);
+  const hasRawPinnedEntityLabel = rawPinned.some((candidate) => evidenceCandidateRoles(candidate).includes('entity_label'));
+  const pinned = requestedEntityDisplay && hasRawPinnedEntityLabel && !explicitlyRequestsAttribute
+    ? rawPinned.filter((candidate) => !/\b(?:owner|sentiment|email)\b/i.test(candidate.name))
+    : rawPinned;
+  const kindCounts = new Map<AgentEvidenceKind, number>();
+  const perKindQualified = canonicalEligible
     .filter((candidate) => {
       // Metric and member evidence share the semantic trust tier but serve
       // different binding lanes. Counting only by trust let several exact
@@ -189,7 +352,18 @@ export function buildMeaningEvidencePackage(
       if (count >= perKindLimit) return false;
       kindCounts.set(candidate.kind, count + 1);
       return true;
-    })
+    });
+  // Fill the remaining package under the kind cap without evicting a pin. The
+  // resolver still receives at most 16 cards and exactly one meaning call.
+  const hasPinnedEntityLabel = pinned.some((candidate) => evidenceCandidateRoles(candidate).includes('entity_label'));
+  const safeFill = perKindQualified.filter((candidate) => {
+    if (pinned.some((pin) => pin.id === candidate.id)) return false;
+    // An account owner/e-mail/sentiment is an attribute, never a substitute
+    // for the requested account/customer display entity. Do not let it consume
+    // the remaining meaning cards after that display role was successfully pinned.
+    return !hasPinnedEntityLabel || !/\b(?:owner|sentiment|email)\b/i.test(candidate.name);
+  });
+  return [...pinned, ...safeFill]
     .slice(0, limit);
 }
 
@@ -255,6 +429,7 @@ function normalizeRef(value: string): string {
 export function validateMeaningResolution(
   value: MeaningResolution,
   candidates: AgentEvidenceCandidate[],
+  requestedMeasures: string[] = value.queryIntent.measures,
 ): { ok: true; resolution: MeaningResolution } | { ok: false; reason: string } {
   const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
   const selectedConceptIds = value.selectedConceptIds.length > 0
@@ -291,6 +466,13 @@ export function validateMeaningResolution(
     }
     if (value.recommendedRoute === "certified" && execution.compatibility !== "compatible") {
       return { ok: false, reason: "A certified route requires a deterministically compatible block fit." };
+    }
+    if (value.recommendedRoute === 'certified'
+      && !certifiedCandidateExplicitlyCoversMeasures(execution, requestedMeasures)) {
+      return {
+        ok: false,
+        reason: 'A certified route must declare every requested measure in the selected block output contract.',
+      };
     }
     if (value.recommendedRoute === "semantic" && execution.kind !== "semantic_metric" && execution.kind !== "semantic_member") {
       return { ok: false, reason: "A semantic route must reference semantic evidence." };

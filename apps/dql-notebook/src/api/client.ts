@@ -1109,6 +1109,42 @@ export interface AgentRunDiagnosticReceiptV2 {
   repairCapabilityFingerprint?: string;
 }
 
+export interface AgentRunDiagnosticReceiptV3 {
+  version: 3;
+  runId: string;
+  sourceCoverage: Array<{
+    version: 1;
+    source: 'certified' | 'semantic' | 'governed_relational' | 'exploratory' | 'dbt_manifest' | 'runtime_schema' | 'vector' | 'conversation';
+    status: 'available' | 'empty' | 'stale' | 'unavailable' | 'errored' | 'skipped';
+    candidateIds: string[];
+    reason?: string;
+  }>;
+  cascade?: {
+    version: 1;
+    planFrozen: boolean;
+    selectedTier?: 'certified' | 'semantic' | 'governed_relational' | 'exploratory_sql';
+    stopReason: 'selected' | 'ambiguous' | 'coverage_gap' | 'denied' | 'post_freeze_failure';
+    attempts: Array<{
+      version: 1;
+      tier: 'certified' | 'semantic' | 'governed_relational' | 'exploratory_sql' | 'clarify_or_gap';
+      outcome: 'executable' | 'ineligible' | 'unavailable' | 'ambiguous' | 'denied';
+      candidateIds: string[];
+      reason: string;
+      planFrozen: boolean;
+    }>;
+  };
+  planFrozen: boolean;
+  orchestrationMode?: 'legacy' | 'shadow' | 'agentic';
+  provider?: {
+    version: 1;
+    cause: 'authentication' | 'model_not_found' | 'rate_limited' | 'gateway' | 'network' | 'provider_timeout' | 'run_deadline' | 'admission_denied' | 'dispatch_budget' | 'cancelled' | 'unknown';
+    phase: 'preflight' | 'meaning_resolution' | 'planning' | 'generation' | 'repair' | 'narration' | 'unknown';
+    retryable: boolean;
+    safeAction: 'retry_same_provider' | 'fix_provider_configuration' | 'wait_and_retry' | 'inspect_run' | 'none';
+  };
+  finalStopReason: string;
+}
+
 /** Content-free persisted outcome of the answer narration stage. */
 export interface NarrationIntegrityReceiptV1 {
   version: 1;
@@ -1168,6 +1204,7 @@ export interface AgentRun {
   lifecycle?: AgentRunLifecycleV1;
   diagnosticReceipt?: AgentRunDiagnosticReceiptV1;
   diagnosticReceiptV2?: AgentRunDiagnosticReceiptV2;
+  diagnosticReceiptV3?: AgentRunDiagnosticReceiptV3;
   narrationIntegrityReceipt?: NarrationIntegrityReceiptV1;
   telemetry?: AgentRunTelemetryV1;
   repairCapability?: AnalyticalRepairCapabilityV1;

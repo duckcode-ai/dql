@@ -131,6 +131,135 @@ export interface AnalyticalCoverageGapV1 {
   nextActions: string[];
 }
 
+/**
+ * Roles are deliberately independent of a source's trust tier.  A semantic
+ * dimension can be an entity label, a categorical breakdown, or a time axis;
+ * treating all members as interchangeable is what made an Account question
+ * offer owner e-mail and sentiment as substitutes for the account itself.
+ *
+ * Acceptance: CTX-005, CTX-007, AGT-009, AGT-010.
+ */
+export type EvidenceCandidateRoleV1 =
+  | 'metric'
+  | 'entity_key'
+  | 'entity_label'
+  | 'categorical_dimension'
+  | 'time_dimension'
+  | 'member'
+  | 'relationship'
+  | 'context';
+
+/**
+ * A typed, content-safe reading of the analytical requirements in a question.
+ * It is advisory for retrieval/ranking only: the compatibility solver and the
+ * immutable resolved plan still own authorization and execution.
+ */
+export interface AnalyticalRequirementSetV1 {
+  version: 1;
+  measures: string[];
+  dimensions: string[];
+  entityTerms: string[];
+  entityDisplayTerms: string[];
+  memberTerms: string[];
+  ranking?: {
+    metricTerms: string[];
+    entityTerms: string[];
+    direction: 'top' | 'bottom';
+    limit: number;
+    /** True means the reader did not specify a count and DQL assumed 10. */
+    defaultedLimit: boolean;
+  };
+  time?: {
+    role: 'time_axis' | 'time_filter';
+    grain?: 'day' | 'week' | 'month' | 'quarter' | 'year';
+    fiscalPeriod?: string;
+    /** A fiscal token is not executable until a declared calendar binds it. */
+    requiresDeclaredFiscalCalendar: boolean;
+  };
+}
+
+export type ContextSourceCoverageStatusV1 = 'available' | 'empty' | 'stale' | 'unavailable' | 'errored' | 'skipped';
+
+/** Source coverage is distinct from a missing capability.  A bounded package
+ * may omit a relevant candidate; that is not proof that the source lacks it. */
+export interface ContextSourceCoverageV1 {
+  version: 1;
+  source: 'certified' | 'semantic' | 'governed_relational' | 'exploratory' | 'dbt_manifest' | 'runtime_schema' | 'vector' | 'conversation';
+  status: ContextSourceCoverageStatusV1;
+  candidateIds: string[];
+  reason?: string;
+}
+
+export type AnalyticalCascadeTierV1 = 'certified' | 'semantic' | 'governed_relational' | 'exploratory_sql' | 'clarify_or_gap';
+export type AnalyticalCascadeTierOutcomeV1 = 'executable' | 'ineligible' | 'unavailable' | 'ambiguous' | 'denied';
+
+/** One immutable, inspectable decision per ordered authority tier. */
+export interface CascadeTierAttemptV1 {
+  version: 1;
+  tier: AnalyticalCascadeTierV1;
+  outcome: AnalyticalCascadeTierOutcomeV1;
+  candidateIds: string[];
+  reason: string;
+  /** A denied or frozen tier must never silently fall through to another one. */
+  planFrozen: boolean;
+}
+
+/**
+ * The shared cascade receipt.  This does not itself compile SQL; it prevents
+ * downstream presentation/execution layers from silently reinterpreting a
+ * question after route selection.
+ */
+export interface AnalyticalCascadeDecisionV1 {
+  version: 1;
+  requirements: AnalyticalRequirementSetV1;
+  sourceCoverage: ContextSourceCoverageV1[];
+  attempts: CascadeTierAttemptV1[];
+  selectedTier?: Exclude<AnalyticalCascadeTierV1, 'clarify_or_gap'>;
+  planFrozen: boolean;
+  stopReason: 'selected' | 'ambiguous' | 'coverage_gap' | 'denied' | 'post_freeze_failure';
+}
+
+export type ProviderFailureCauseV1 =
+  | 'authentication'
+  | 'model_not_found'
+  | 'rate_limited'
+  | 'gateway'
+  | 'network'
+  | 'provider_timeout'
+  | 'run_deadline'
+  | 'admission_denied'
+  | 'dispatch_budget'
+  | 'cancelled'
+  | 'unknown';
+
+/** Content-free, redacted provider diagnostics safe to persist in a run. */
+export interface ProviderFailureDiagnosticV1 {
+  version: 1;
+  cause: ProviderFailureCauseV1;
+  phase: 'preflight' | 'meaning_resolution' | 'planning' | 'generation' | 'repair' | 'narration' | 'unknown';
+  retryable: boolean;
+  safeAction: 'retry_same_provider' | 'fix_provider_configuration' | 'wait_and_retry' | 'inspect_run' | 'none';
+  httpStatusClass?: '4xx' | '5xx';
+  providerFingerprint?: string;
+  modelFingerprint?: string;
+  baseOriginFingerprint?: string;
+}
+
+/**
+ * Additive durable diagnostics. V1 and V2 intentionally remain the compact
+ * compatibility envelopes used by older persisted runs.
+ */
+export interface AgentRunDiagnosticReceiptV3 {
+  version: 3;
+  runId: string;
+  sourceCoverage: ContextSourceCoverageV1[];
+  cascade?: AnalyticalCascadeDecisionV1;
+  planFrozen: boolean;
+  orchestrationMode?: 'legacy' | 'shadow' | 'agentic';
+  provider?: ProviderFailureDiagnosticV1;
+  finalStopReason: string;
+}
+
 export interface AnalyticalTurnPlanV1 {
   version: 1;
   turnId?: string;
@@ -189,6 +318,326 @@ export function inferAnalyticalTurnKind(question: string): AnalyticalTurnKind {
   if (/\b(region|country|state|city|name|label|email|category|product|customer)\b/.test(text)
     && /\b(where|which|what|who)\b/.test(text)) return 'lookup';
   return 'aggregation';
+}
+
+type RoleBalancedEvidenceCandidate = {
+  id: string;
+  qualifiedId?: string;
+  kind?: string;
+  semanticObjectType?: string;
+  name?: string;
+  aliases?: string[];
+  dimensions?: string[];
+  timeGrains?: string[];
+  relationshipEvidence?: string[];
+  relevanceScore?: number;
+  exactMatch?: boolean;
+  compatibility?: string;
+  analyticalCapability?: {
+    dimensions?: Array<{ dimensionId?: string }>;
+    timeDimensions?: Array<{ dimensionId?: string }>;
+  };
+};
+
+function normalizeRequirementTerm(value: string): string {
+  return value.toLowerCase()
+    .replace(/[_./:-]+/g, ' ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function uniqueRequirementTerms(values: Array<string | undefined>): string[] {
+  return [...new Set(values
+    .filter((value): value is string => typeof value === 'string')
+    .map(normalizeRequirementTerm)
+    .filter(Boolean))];
+}
+
+function isTemporalTerm(term: string): boolean {
+  return /^(?:date|day|week|month|quarter|year|fy\d{2,4}|fiscal year|fiscal quarter)$/.test(term);
+}
+
+/**
+ * Parse only stable analytical roles. This is purposefully narrower than an
+ * LLM interpretation: unknown business phrases remain available to the normal
+ * bounded meaning resolver instead of being guessed here.
+ */
+export function buildAnalyticalRequirementSet(input: {
+  question: string;
+  parsedIntent?: Partial<{
+    measures: string[];
+    dimensions: string[];
+    filters: Array<{ field: string; value: string }>;
+    timeGrain: string;
+    limit: number;
+  }>;
+}): AnalyticalRequirementSetV1 {
+  const question = input.question;
+  const lower = question.toLowerCase();
+  const parsed = input.parsedIntent;
+  const grainMatch = lower.match(/\b(?:by|per|each)\s+(day|week|month|quarter|year)\b|\b(monthly|weekly|quarterly|yearly|daily)\b/i);
+  const grainWord = (grainMatch?.[1] ?? grainMatch?.[0]?.replace(/ly\b/i, '') ?? '').toLowerCase();
+  const grain = grainWord === 'daily' ? 'day'
+    : grainWord === 'weekly' ? 'week'
+      : grainWord === 'monthly' ? 'month'
+        : grainWord === 'quarterly' ? 'quarter'
+          : grainWord === 'yearly' ? 'year'
+            : /^(day|week|month|quarter|year)$/.test(grainWord) ? grainWord as AnalyticalRequirementSetV1['time'] extends { grain?: infer G } ? G : never
+              : undefined;
+  const fiscal = lower.match(/\bfy\s?(\d{2,4})\b|\bfiscal\s+year\s+(\d{2,4})\b/i);
+  const fiscalPeriod = fiscal ? `FY${fiscal[1] ?? fiscal[2]}`.toUpperCase() : undefined;
+  const ranking = lower.match(/\b(top|bottom|highest|lowest)\s*(\d+)?\b/i);
+  const requestedDimensions = uniqueRequirementTerms(parsed?.dimensions ?? []);
+  const dimensions = requestedDimensions.filter((term) => !isTemporalTerm(term));
+  const entityTerms = uniqueRequirementTerms([
+    ...((lower.match(/\b(?:account|accounts|customer|customers|client|clients|company|companies)\b/g) ?? [])),
+  ]).map((term) => term.replace(/s$/, ''));
+  const entityDisplayTerms = /\b(?:who|which)\b/i.test(question)
+    ? uniqueRequirementTerms(entityTerms.map((term) => `${term} name`))
+    : [];
+  // "this amount" is a deictic reference to a prior result, not a request to
+  // choose an `amount` metric. Treating it as a new explicit measure made a
+  // compositional follow-up reject every otherwise-valid display/predicate
+  // option. Concrete metric words remain typed requirements, including the
+  // common revenue/refunds pair used by multi-metric requests.
+  const deicticAmount = /\b(?:this|that|the|such)\s+amount\b/i.test(question);
+  const measures = uniqueRequirementTerms([
+    ...(parsed?.measures ?? []),
+    ...(['revenue', 'refund', 'refunds', 'bcm', 'run rate', 'count']
+      .filter((term) => new RegExp(`\\b${term.replace(' ', '\\s+')}\\b`, 'i').test(question))),
+    ...(!deicticAmount && /\bamount\b/i.test(question) ? ['amount'] : []),
+  ]);
+  const rankingMetricTerms = ranking ? measures : [];
+  const parsedLimit = typeof parsed?.limit === 'number' && Number.isFinite(parsed.limit) && parsed.limit > 0
+    ? Math.floor(parsed.limit)
+    : undefined;
+  const explicitLimit = ranking?.[2] ? Number(ranking[2]) : parsedLimit;
+  const time = grain || fiscalPeriod
+    ? {
+        role: grain ? 'time_axis' as const : 'time_filter' as const,
+        ...(grain ? { grain: grain as NonNullable<AnalyticalRequirementSetV1['time']>['grain'] } : {}),
+        ...(fiscalPeriod ? { fiscalPeriod } : {}),
+        requiresDeclaredFiscalCalendar: Boolean(fiscalPeriod),
+      }
+    : undefined;
+  return {
+    version: 1,
+    measures,
+    dimensions,
+    entityTerms,
+    entityDisplayTerms,
+    memberTerms: uniqueRequirementTerms((parsed?.filters ?? []).map((filter) => filter.value)),
+    ...(ranking
+      ? {
+          ranking: {
+            metricTerms: rankingMetricTerms,
+            entityTerms,
+            direction: /bottom|lowest/i.test(ranking[1] ?? '') ? 'bottom' : 'top',
+            limit: explicitLimit ?? 10,
+            defaultedLimit: explicitLimit === undefined,
+          },
+        }
+      : {}),
+    ...(time ? { time } : {}),
+  };
+}
+
+/** Classify the role an already-qualified candidate may fill. */
+export function evidenceCandidateRoles(candidate: RoleBalancedEvidenceCandidate): EvidenceCandidateRoleV1[] {
+  const identity = uniqueRequirementTerms([
+    candidate.id,
+    candidate.qualifiedId,
+    candidate.name,
+    ...(candidate.aliases ?? []),
+    ...(candidate.dimensions ?? []),
+    ...(candidate.analyticalCapability?.dimensions ?? []).map((dimension) => dimension.dimensionId),
+    ...(candidate.analyticalCapability?.timeDimensions ?? []).map((dimension) => dimension.dimensionId),
+  ]).join(' ');
+  const roles = new Set<EvidenceCandidateRoleV1>();
+  if (candidate.kind === 'semantic_metric' || candidate.semanticObjectType === 'metric' || /\bmetric\b/.test(identity)) roles.add('metric');
+  if (candidate.semanticObjectType === 'entity' || /(?:^| )(?:account|customer|client|company) id\b/.test(identity) || /\bentity\b/.test(identity)) roles.add('entity_key');
+  if (/\b(?:account|customer|client|company)(?: name)?\b/.test(identity)
+    && /\b(?:name|label|display|account|customer|client|company)\b/.test(identity)
+    && !/\b(?:owner|sentiment|email)\b/.test(identity)) roles.add('entity_label');
+  if (/(?:\bdate\b|\btime\b|\bmonth\b|\bquarter\b|\byear\b)/.test(identity)
+    || (candidate.timeGrains?.length ?? 0) > 0
+    || (candidate.analyticalCapability?.timeDimensions?.length ?? 0) > 0) roles.add('time_dimension');
+  if ((candidate.relationshipEvidence?.length ?? 0) > 0 || /\b(?:relationship|join|bridge)\b/.test(identity)) roles.add('relationship');
+  if (candidate.kind === 'semantic_member' || candidate.semanticObjectType === 'dimension') roles.add('categorical_dimension');
+  if (candidate.kind === 'sql_column' || candidate.kind === 'dbt_model' || candidate.kind === 'sql_table') roles.add('context');
+  if (roles.size === 0) roles.add('context');
+  return [...roles];
+}
+
+function candidateMatchesTerms(candidate: RoleBalancedEvidenceCandidate, terms: string[]): boolean {
+  if (terms.length === 0) return false;
+  const identity = uniqueRequirementTerms([
+    candidate.id,
+    candidate.qualifiedId,
+    candidate.name,
+    ...(candidate.aliases ?? []),
+    ...(candidate.dimensions ?? []),
+  ]).join(' ');
+  return terms.some((term) => identity.includes(term) || term.includes(identity));
+}
+
+/**
+ * Keep an internal retrieval result broad while making the provider package
+ * role-balanced. Exact/alias matches stay pinned; each requested role gets up
+ * to two candidates before relevance fills remaining cards.
+ */
+export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEvidenceCandidate>(input: {
+  candidates: T[];
+  requirements: AnalyticalRequirementSetV1;
+  maxCandidates?: number;
+  /** Use before any kind cap to reserve exact/required-role cards. */
+  pinOnly?: boolean;
+}): T[] {
+  const max = Math.max(1, Math.min(16, Math.floor(input.maxCandidates ?? 16)));
+  const ranked = [...new Map(input.candidates
+    .filter((candidate) => candidate.id.trim() && candidate.compatibility !== 'incompatible')
+    .map((candidate) => [candidate.id, candidate] as const)).values()]
+    .sort((left, right) => Number(Boolean(right.exactMatch)) - Number(Boolean(left.exactMatch))
+      || (right.relevanceScore ?? 0) - (left.relevanceScore ?? 0)
+      || left.id.localeCompare(right.id));
+  const selected: T[] = [];
+  const add = (candidate: T | undefined): void => {
+    if (candidate && selected.length < max && !selected.some((item) => item.id === candidate.id)) selected.push(candidate);
+  };
+  const servesRequestedRole = (candidate: T): boolean => {
+    const roles = evidenceCandidateRoles(candidate);
+    const metricTerms = input.requirements.ranking?.metricTerms.length
+      ? input.requirements.ranking.metricTerms
+      : input.requirements.measures;
+    if (roles.includes('metric') && candidateMatchesTerms(candidate, metricTerms)) return true;
+    // An entity term such as "account" is deliberately insufficient for an
+    // attribute (Account Owner Email) to displace the requested display key.
+    // Only an actual entity-label candidate may satisfy this binding.
+    if (roles.includes('entity_label') && candidateMatchesTerms(candidate, [
+      ...input.requirements.entityTerms,
+      ...input.requirements.entityDisplayTerms,
+    ])) return true;
+    if (roles.includes('time_dimension') && Boolean(input.requirements.time)) return true;
+    if (roles.includes('categorical_dimension')
+      && input.requirements.dimensions.length > 0
+      && candidateMatchesTerms(candidate, input.requirements.dimensions)) return true;
+    if (roles.includes('relationship')
+      && (input.requirements.dimensions.length > 1 || input.requirements.entityTerms.length > 0)) return true;
+    return false;
+  };
+  for (const candidate of ranked.filter((candidate) => candidate.exactMatch)) {
+    // In a pin-only prepass, an exact match is only a pin when it serves a
+    // requested analytical role. Otherwise a pile of exact members consumes
+    // the whole package before the requested metric/entity can be reserved.
+    if (input.pinOnly && !servesRequestedRole(candidate)) continue;
+    add(candidate);
+  }
+  const required: Array<[EvidenceCandidateRoleV1, string[]]> = [
+    ['metric', input.requirements.ranking?.metricTerms.length ? input.requirements.ranking.metricTerms : input.requirements.measures],
+    ['entity_label', [...input.requirements.entityTerms, ...input.requirements.entityDisplayTerms]],
+    ['time_dimension', input.requirements.time ? [input.requirements.time.grain ?? 'time'] : []],
+    ['categorical_dimension', input.requirements.dimensions],
+    ['relationship', input.requirements.dimensions.length > 1 || input.requirements.entityTerms.length > 0 ? ['relationship'] : []],
+  ];
+  for (const [role, terms] of required) {
+    // No requested categorical dimension means that high-scoring arbitrary
+    // members are noise, not a role reservation. This is the subtle path that
+    // used to admit Account Owner and Sentiment immediately after Account Name.
+    if (terms.length === 0) continue;
+    let admitted = 0;
+    for (const candidate of ranked) {
+      if (admitted >= 2 || selected.length >= max) break;
+      const roles = evidenceCandidateRoles(candidate);
+      if (!roles.includes(role)) continue;
+      // "top accounts" needs the account display key, not any field whose
+      // label happens to contain account. Once a display candidate is
+      // available, owner/e-mail/sentiment attributes are neither the entity
+      // role nor a useful categorical reservation unless the user explicitly
+      // named that attribute. This runs during the pre-cap pin pass so noisy
+      // same-kind cards cannot enter through the categorical role.
+      const explicitlyRequestsAttribute = /\b(?:owner|sentiment|email)\b/i.test([
+        ...input.requirements.dimensions,
+        ...input.requirements.entityTerms,
+        ...input.requirements.entityDisplayTerms,
+      ].join(' '));
+      const hasRequestedEntityLabel = ranked.some((item) =>
+        evidenceCandidateRoles(item).includes('entity_label')
+        && candidateMatchesTerms(item, [
+          ...input.requirements.entityTerms,
+          ...input.requirements.entityDisplayTerms,
+        ]));
+      if (role === 'categorical_dimension'
+        && hasRequestedEntityLabel
+        && !explicitlyRequestsAttribute
+        && /\b(?:owner|sentiment|email)\b/i.test(candidate.name ?? candidate.id)) continue;
+      // For entity labels, role is more important than a lexical owner/email
+      // hit. For all other roles, prefer an identity matching the requested
+      // business term but retain a role candidate when the request is terse.
+      if (terms.length > 0 && !candidateMatchesTerms(candidate, terms)
+        && role !== 'time_dimension' && role !== 'relationship' && role !== 'entity_label') continue;
+      add(candidate);
+      admitted += 1;
+    }
+  }
+  if (!input.pinOnly) {
+    for (const candidate of ranked) add(candidate);
+  }
+  return selected;
+}
+
+export function classifyProviderFailure(input: {
+  message?: string;
+  code?: string;
+  phase?: ProviderFailureDiagnosticV1['phase'];
+  providerFingerprint?: string;
+  modelFingerprint?: string;
+  baseOriginFingerprint?: string;
+}): ProviderFailureDiagnosticV1 {
+  const text = `${input.code ?? ''} ${input.message ?? ''}`.toLowerCase();
+  const cause: ProviderFailureCauseV1 = /cancel/.test(text) ? 'cancelled'
+    : /dispatch.?budget|provider_dispatch_budget/.test(text) ? 'dispatch_budget'
+      : /deadline.?insufficient|admission|soft.?target/.test(text) ? 'admission_denied'
+        : /run.?deadline|time limit/.test(text) ? 'run_deadline'
+          : /timeout|timed out/.test(text) ? 'provider_timeout'
+            : /401|403|api key|unauthori[sz]ed|auth(?:entication)?/.test(text) ? 'authentication'
+              : /model(?:[ _-]+|\s+).*not[ _-]?found|unknown model|model_not_found|404/.test(text) ? 'model_not_found'
+                : /429|rate[ _-]?limit|too many requests/.test(text) ? 'rate_limited'
+                  : /502|503|504|gateway/.test(text) ? 'gateway'
+                    : /econn|network|fetch failed|not reachable|connection refused/.test(text) ? 'network'
+                      : 'unknown';
+  const retryable = cause === 'rate_limited' || cause === 'gateway' || cause === 'network' || cause === 'provider_timeout';
+  const safeAction: ProviderFailureDiagnosticV1['safeAction'] = retryable ? (cause === 'rate_limited' ? 'wait_and_retry' : 'retry_same_provider')
+    : cause === 'authentication' || cause === 'model_not_found' ? 'fix_provider_configuration'
+      : cause === 'cancelled' ? 'none'
+        : 'inspect_run';
+  const httpStatusClass = /\b(?:401|403|404|429)\b/.test(text) ? '4xx' as const
+    : /\b(?:502|503|504)\b/.test(text) ? '5xx' as const
+      : undefined;
+  return {
+    version: 1,
+    cause,
+    phase: input.phase ?? 'unknown',
+    retryable,
+    safeAction,
+    ...(httpStatusClass ? { httpStatusClass } : {}),
+    ...(input.providerFingerprint ? { providerFingerprint: input.providerFingerprint } : {}),
+    ...(input.modelFingerprint ? { modelFingerprint: input.modelFingerprint } : {}),
+    ...(input.baseOriginFingerprint ? { baseOriginFingerprint: input.baseOriginFingerprint } : {}),
+  };
+}
+
+export function buildAnalyticalCascadeDecision(input: Omit<AnalyticalCascadeDecisionV1, 'version'>): AnalyticalCascadeDecisionV1 {
+  return {
+    version: 1,
+    ...input,
+    sourceCoverage: input.sourceCoverage.map((coverage) => ({
+      ...coverage,
+      version: 1,
+      candidateIds: [...new Set(coverage.candidateIds)].slice(0, 32),
+    })),
+    attempts: input.attempts.map((attempt) => ({ ...attempt, version: 1, candidateIds: [...new Set(attempt.candidateIds)].slice(0, 32) })),
+  };
 }
 
 /**
@@ -807,6 +1256,59 @@ export interface ResearchEvidenceLedgerV1 {
   stoppingReason: 'completed' | 'budget' | 'insufficient_evidence' | 'blocked' | 'not_started';
 }
 
+export type ResearchEvidenceVerdictV2 = 'supported' | 'contradicted' | 'inconclusive' | 'failed' | 'skipped';
+
+/** Deterministic observation classes; none infer causality from returned rows. */
+export type ResearchEvidenceValidatorKindV2 = 'trend' | 'comparison' | 'contributor' | 'anomaly' | 'freshness' | 'counter_evidence';
+
+export interface ResearchEvidenceValidatorV2 {
+  version: 1;
+  kind: ResearchEvidenceValidatorKindV2;
+  /** True only when a deterministic, receipt-bound predicate was evaluated. */
+  evaluated: boolean;
+  /** Optional non-causal observation result. Absent means inconclusive. */
+  outcome?: 'supports_observation' | 'contradicts_observation';
+  receiptFingerprints: string[];
+}
+
+export interface ResearchHypothesisPlanEntryV2 {
+  id: string;
+  statement: string;
+  expectation: string;
+  targetId: string;
+  validatorKind: ResearchEvidenceValidatorKindV2;
+}
+
+export interface ResearchHypothesisPlanV2 {
+  version: 2;
+  hypotheses: ResearchHypothesisPlanEntryV2[];
+  limitedScope: boolean;
+}
+
+/**
+ * V2 makes the difference between a returned row and an evaluated hypothesis
+ * explicit. A branch may be observed yet inconclusive; it is never promoted to
+ * a causal claim merely because it executed.
+ */
+export interface ResearchEvidenceLedgerEntryV2 extends ResearchLedgerEntryV1 {
+  verdict: ResearchEvidenceVerdictV2;
+  hypothesis?: string;
+  validator?: ResearchEvidenceValidatorV2;
+  counterEvidenceFactIds: string[];
+}
+
+export interface ResearchEvidenceLedgerV2 {
+  version: 2;
+  rootQuestion: string;
+  planId?: string;
+  snapshotId?: string;
+  entries: ResearchEvidenceLedgerEntryV2[];
+  factIds: string[];
+  groundableBranchCount: number;
+  limitedScope: boolean;
+  stoppingReason: ResearchEvidenceLedgerV1['stoppingReason'];
+}
+
 export function capResearchBranches<T>(branches: T[], max = 6): T[] {
   return branches.slice(0, Math.max(1, Math.min(6, Math.trunc(max))));
 }
@@ -864,6 +1366,144 @@ export function buildResearchEvidenceLedger(input: {
     entries,
     factIds: [...new Set(entries.flatMap((entry) => entry.facts))],
     stoppingReason: input.stoppingReason ?? (entries.length > 0 ? 'completed' : 'not_started'),
+  };
+}
+
+export function buildResearchEvidenceLedgerV2(input: {
+  rootQuestion: string;
+  planId?: string;
+  snapshotId?: string;
+  /** Number of catalog-grounded branches admitted before execution. A runtime
+   * failure must not be misreported as if the catalog had fewer hypotheses. */
+  groundableBranchCount?: number;
+  entries: Array<ResearchLedgerEntryV1 & {
+    verdict?: ResearchEvidenceVerdictV2;
+    hypothesis?: string;
+    validator?: ResearchEvidenceValidatorV2;
+    counterEvidenceFactIds?: string[];
+  }>;
+  stoppingReason?: ResearchEvidenceLedgerV1['stoppingReason'];
+}): ResearchEvidenceLedgerV2 {
+  const v1 = buildResearchEvidenceLedger(input);
+  const entries = v1.entries.map((entry, index) => {
+    const source = input.entries[index];
+    const validator = normalizeResearchEvidenceValidator(source?.validator, entry);
+    const requestedVerdict = /\b(?:because|caused?|driven by|due to)\b/i.test(source?.hypothesis ?? '')
+      ? undefined
+      : source?.verdict;
+    const verdict = researchVerdictFromValidatedObservation({
+      status: entry.status,
+      requestedVerdict,
+      validator,
+    });
+    const validFactIds = new Set(entry.facts);
+    const counterEvidenceFactIds = [...new Set(source?.counterEvidenceFactIds ?? [])]
+      .filter((factId) => validFactIds.has(factId));
+    return {
+      ...entry,
+      verdict,
+      ...(source?.hypothesis?.trim() ? { hypothesis: source.hypothesis.trim() } : {}),
+      ...(validator ? { validator } : {}),
+      counterEvidenceFactIds,
+    };
+  });
+  const observedGroundableBranchCount = entries.filter((entry) => entry.status === 'observed' && entry.verdict !== 'failed' && entry.verdict !== 'skipped').length;
+  const plannedGroundableBranchCount = Math.max(0, Math.min(6, Math.trunc(input.groundableBranchCount ?? 0)));
+  const groundableBranchCount = Math.max(observedGroundableBranchCount, plannedGroundableBranchCount);
+  return {
+    version: 2,
+    rootQuestion: v1.rootQuestion,
+    ...(v1.planId ? { planId: v1.planId } : {}),
+    ...(v1.snapshotId ? { snapshotId: v1.snapshotId } : {}),
+    entries,
+    factIds: [...new Set(entries.flatMap((entry) => [...entry.facts, ...entry.counterEvidenceFactIds]))],
+    groundableBranchCount,
+    limitedScope: groundableBranchCount < 3,
+    stoppingReason: v1.stoppingReason,
+  };
+}
+
+/**
+ * Normalise a hypothesis plan into the bounded research contract. The caller
+ * may supply fewer than three grounded hypotheses; that is retained honestly as
+ * limited scope rather than padded with invented joins or explanations.
+ */
+export function buildResearchHypothesisPlanV2(input: {
+  hypotheses: Array<{
+    id?: string;
+    statement: string;
+    expectation: string;
+    targetId: string;
+    validatorKind?: ResearchEvidenceValidatorKindV2;
+  }>;
+}): ResearchHypothesisPlanV2 {
+  const seen = new Set<string>();
+  const hypotheses: ResearchHypothesisPlanEntryV2[] = [];
+  for (const candidate of input.hypotheses) {
+    const statement = candidate.statement.trim();
+    const expectation = candidate.expectation.trim();
+    const targetId = candidate.targetId.trim();
+    if (!statement || !expectation || !targetId) continue;
+    const key = `${statement.toLowerCase()}\u0000${targetId.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    hypotheses.push({
+      id: candidate.id?.trim() || `hypothesis:${hypotheses.length + 1}`,
+      statement,
+      expectation,
+      targetId,
+      validatorKind: candidate.validatorKind ?? inferResearchValidatorKind(statement, expectation),
+    });
+    if (hypotheses.length >= 6) break;
+  }
+  return { version: 2, hypotheses, limitedScope: hypotheses.length < 3 };
+}
+
+/** Map an action/expectation to a deterministic observation class only. */
+export function inferResearchValidatorKind(statement: string, expectation = ''): ResearchEvidenceValidatorKindV2 {
+  const text = `${statement} ${expectation}`.toLowerCase();
+  if (/fresh|updated|stale|as of|recency/.test(text)) return 'freshness';
+  if (/contribut|driver|segment|breakdown|dominant/.test(text)) return 'contributor';
+  if (/trend|time|month|week|quarter|year|shift|change/.test(text)) return 'trend';
+  if (/compare|versus|vs\.?|difference/.test(text)) return 'comparison';
+  if (/anomal|outlier|spike|drop/.test(text)) return 'anomaly';
+  return 'counter_evidence';
+}
+
+/**
+ * A verdict is promoted only from a validator that evaluated a deterministic
+ * observation against a branch receipt. Rows by themselves stay inconclusive;
+ * causal statements are never supported by this helper.
+ */
+export function researchVerdictFromValidatedObservation(input: {
+  status: ResearchLedgerEntryV1['status'];
+  requestedVerdict?: ResearchEvidenceVerdictV2;
+  validator?: ResearchEvidenceValidatorV2;
+}): ResearchEvidenceVerdictV2 {
+  if (input.status === 'failed') return 'failed';
+  if (input.status === 'skipped') return 'skipped';
+  if (!input.validator?.evaluated || input.validator.receiptFingerprints.length === 0) return 'inconclusive';
+  if (input.requestedVerdict === 'supported' && input.validator.outcome === 'supports_observation') return 'supported';
+  if (input.requestedVerdict === 'contradicted' && input.validator.outcome === 'contradicts_observation') return 'contradicted';
+  return 'inconclusive';
+}
+
+function normalizeResearchEvidenceValidator(
+  validator: ResearchEvidenceValidatorV2 | undefined,
+  entry: ResearchLedgerEntryV1,
+): ResearchEvidenceValidatorV2 | undefined {
+  if (!validator || validator.version !== 1) return undefined;
+  const knownReceipt = entry.resultFingerprint;
+  const receiptFingerprints = [...new Set(validator.receiptFingerprints)]
+    .map(normalizeAnalyticalExecutionFingerprint)
+    .filter((fingerprint): fingerprint is string => Boolean(fingerprint))
+    .filter((fingerprint) => !knownReceipt || fingerprint === knownReceipt);
+  return {
+    version: 1,
+    kind: validator.kind,
+    evaluated: validator.evaluated === true && receiptFingerprints.length > 0,
+    ...(validator.outcome ? { outcome: validator.outcome } : {}),
+    receiptFingerprints,
   };
 }
 

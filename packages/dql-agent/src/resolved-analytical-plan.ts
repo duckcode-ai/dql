@@ -23,6 +23,10 @@ import type {
   MeaningQuestionType,
   MeaningResolution,
 } from './meaning-resolution.js';
+import {
+  certifiedCandidateDeclaredMeasureOutput,
+  certifiedCandidateExplicitlyCoversMeasures,
+} from './meaning-resolution.js';
 import { buildResolvedRelationshipProofsV1 } from './relationship-proof.js';
 
 export type ResolvedPlanCapability =
@@ -35,6 +39,13 @@ export type ResolvedPlanCapability =
 export interface ResolvedPlanMemberBinding {
   requested: string;
   qualifiedId?: string;
+  /**
+   * The declared field returned by a certified execution authority.  The
+   * qualified ID remains the block execution ID; this field prevents a
+   * requested phrase from being represented as though it were an output when
+   * the block returns a differently named column.
+   */
+  outputName?: string;
   aggregation?: string;
   status: 'resolved' | 'ambiguous' | 'unresolved';
   candidateIds: string[];
@@ -178,11 +189,11 @@ export function buildResolvedAnalyticalPlan(
   const canonicalId = (candidate: AgentEvidenceCandidate): string => candidate.qualifiedId ?? candidate.id;
   const selectedConceptIds = selectedCandidates.map(canonicalId);
   const executionId = executionCandidate ? canonicalId(executionCandidate) : undefined;
-  const measures = input.resolution.queryIntent.measures.length > 0
+  const measures: ResolvedPlanMemberBinding[] = input.resolution.queryIntent.measures.length > 0
     ? input.resolution.queryIntent.measures.map((requested) => bindRequestedMember(requested, bindingCandidates, 'measure', input.question))
     : selectedCandidates
       .filter((candidate) => candidate.kind === 'semantic_metric')
-      .map((candidate) => ({
+      .map((candidate): ResolvedPlanMemberBinding => ({
         requested: candidate.name,
         qualifiedId: canonicalId(candidate),
         status: 'resolved' as const,
@@ -367,8 +378,8 @@ export function buildResolvedAnalyticalPlan(
     compatibilityProof,
     outputContract: {
       measures: uniqueSorted(
-        measures.flatMap((binding) =>
-          binding.qualifiedId ? [binding.qualifiedId] : [binding.requested],
+      measures.flatMap((binding) =>
+          binding.outputName ? [binding.outputName] : binding.qualifiedId ? [binding.qualifiedId] : [binding.requested],
         ),
       ),
       dimensions: uniqueSorted(
@@ -801,8 +812,8 @@ export function deriveResolvedAnalyticalPlan(
     },
     outputContract: {
       measures: uniqueSorted(
-        measures.flatMap((binding) =>
-          binding.qualifiedId ? [binding.qualifiedId] : [binding.requested],
+      measures.flatMap((binding) =>
+          binding.outputName ? [binding.outputName] : binding.qualifiedId ? [binding.qualifiedId] : [binding.requested],
         ),
       ),
       dimensions: uniqueSorted(
@@ -938,11 +949,16 @@ function bindRequestedMember(
   });
   if (ids.length === 0 && kind === 'measure' && eligibleCandidates.length === 1) {
     const certified = eligibleCandidates[0]!;
-    if (certified.kind === 'certified_block' && certified.compatibility === 'compatible') {
+    const outputName = certifiedCandidateDeclaredMeasureOutput(certified, requested);
+    if (certified.kind === 'certified_block'
+      && certified.compatibility === 'compatible'
+      && certifiedCandidateExplicitlyCoversMeasures(certified, [requested])
+      && outputName) {
       const id = certified.qualifiedId ?? certified.id;
       return {
         requested,
         qualifiedId: id,
+        outputName,
         status: 'resolved',
         candidateIds: [id],
       };
@@ -1028,7 +1044,11 @@ function resolveCapability(
   if (
     resolution.recommendedRoute === "certified" &&
     execution.kind === "certified_block" &&
-    execution.compatibility === "compatible"
+    execution.compatibility === "compatible" &&
+    certifiedCandidateExplicitlyCoversMeasures(
+      execution,
+      measures.map((binding) => binding.requested),
+    )
   ) {
     return "certified_execution";
   }

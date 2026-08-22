@@ -20,6 +20,7 @@ import type {
   AgenticSqlExecutionCapabilityV1,
   AnalyticalTaskDependencyBindingV1,
   NarrationIntegrityReceiptV1,
+  ProviderFailureDiagnosticV1,
 } from '@duckcodeailabs/dql-agent';
 import type { DQLManifest, ProviderDispatchPhaseV1, ProviderEgressPurpose, ProviderEgressReceiptV1 } from '@duckcodeailabs/dql-core';
 
@@ -129,7 +130,13 @@ export type AgentTurn =
   | { kind: 'tool_call'; id: string; name: string; input: unknown }
   | { kind: 'tool_result'; id: string; output: unknown; isError?: boolean }
   | { kind: 'proposal'; proposal: BlockProposal; governance: { certified: boolean; errors: string[]; warnings: string[] } }
-  | { kind: 'error'; message: string; dispatchEvidence?: ProviderDispatchTerminalEvidence }
+  | {
+      kind: 'error';
+      message: string;
+      dispatchEvidence?: ProviderDispatchTerminalEvidence;
+      /** Redacted classification captured at the provider boundary. */
+      providerDiagnostic?: ProviderFailureDiagnosticV1;
+    }
   | { kind: 'done'; stopReason?: string };
 
 export interface ProviderDispatchTerminalEvidence {

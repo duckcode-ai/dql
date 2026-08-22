@@ -3,21 +3,178 @@ import {
   splitAnalyticalTasks,
   assertCanonicalResult,
   buildAnalyticalTaskGraph,
+  buildAnalyticalCascadeDecision,
+  buildAnalyticalRequirementSet,
   buildAnalyticalTurnPlan,
   buildCoverageGap,
   buildResearchEvidenceLedger,
+  buildResearchEvidenceLedgerV2,
+  buildResearchHypothesisPlanV2,
   canonicalResultBindingValue,
   canonicalResultRowFingerprint,
   capResearchBranches,
+  classifyProviderFailure,
+  evidenceCandidateRoles,
   fuseContextCandidates,
   normalizeCanonicalQueryResult,
   resolveTopRankedRegionDependency,
+  selectRoleBalancedMeaningCandidates,
   retrieveContextLanes,
   summarizeTaskOutcomes,
   validateSelectedResultBinding,
 } from './analytical-orchestration.js';
+import { OFFICE_ASK_AI_GOLD_CASES, OFFICE_ASK_AI_SANITIZED_FIXTURE } from './fixtures/ask-ai-office-shaped.js';
 
 describe('conversational analytical orchestration contracts', () => {
+  it('uses a sanitized semantic/dbt/runtime fixture with withheld office gold results', () => {
+    expect(OFFICE_ASK_AI_SANITIZED_FIXTURE.semantic.metrics.map((metric) => metric.name)).toEqual(expect.arrayContaining([
+      'Lost Opportunities Count', 'Lost Amount', 'Revenue', 'BCM Run Rate',
+    ]));
+    expect(OFFICE_ASK_AI_SANITIZED_FIXTURE.runtimeSchema.relations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ relation: 'analytics.opportunities', columns: expect.arrayContaining(['close_date', 'competitor']) }),
+      expect.objectContaining({ relation: 'analytics.account_revenue', columns: expect.arrayContaining(['account_name', 'revenue']) }),
+    ]));
+    expect(OFFICE_ASK_AI_SANITIZED_FIXTURE.evals.every((entry) => entry.goldSqlWithheld && entry.goldResultWithheld)).toBe(true);
+  });
+
+  it('AGT-009/AGT-029 normalizes fiscal monthly requirements without inventing month/year columns', () => {
+    const officeCase = OFFICE_ASK_AI_GOLD_CASES[0];
+    const requirements = buildAnalyticalRequirementSet({
+      question: officeCase.question,
+      parsedIntent: {
+        measures: ['lost opportunities count', 'lost amount'],
+        dimensions: ['month', 'year', 'competitor'],
+        filters: [{ field: 'competitor', value: 'Datadog' }],
+      },
+    });
+    expect(requirements.dimensions).toEqual(['competitor']);
+    expect(requirements.time).toMatchObject({ grain: 'month', fiscalPeriod: 'FY26', requiresDeclaredFiscalCalendar: true });
+    expect(requirements.measures).toEqual(expect.arrayContaining(['lost opportunities count', 'lost amount']));
+  });
+
+  it('CTX-005/AGT-010 role-balances explicit revenue and account display evidence over owner/sentiment decoys', () => {
+    const officeCase = OFFICE_ASK_AI_GOLD_CASES[1];
+    const requirements = buildAnalyticalRequirementSet({
+      question: officeCase.question,
+      parsedIntent: { measures: ['BCM', 'revenue'], dimensions: ['customer'], filters: [] },
+    });
+    const cards = selectRoleBalancedMeaningCandidates({
+      requirements,
+      maxCandidates: 4,
+      candidates: [
+        { id: 'semantic:dimension:account.owner_email', kind: 'semantic_member', semanticObjectType: 'dimension', name: 'Account Owner Email', relevanceScore: 0.99, compatibility: 'compatible' },
+        { id: 'semantic:dimension:account.sentiment', kind: 'semantic_member', semanticObjectType: 'dimension', name: 'Account Sentiment Rating', relevanceScore: 0.98, compatibility: 'compatible' },
+        { id: 'semantic:dimension:account.name', kind: 'semantic_member', semanticObjectType: 'dimension', name: 'Account Name', relevanceScore: 0.8, compatibility: 'compatible' },
+        { id: 'semantic:metric:revenue', kind: 'semantic_metric', semanticObjectType: 'metric', name: 'Revenue', relevanceScore: 0.78, compatibility: 'compatible' },
+        { id: 'semantic:metric:bcm', kind: 'semantic_metric', semanticObjectType: 'metric', name: 'BCM', relevanceScore: 0.77, compatibility: 'compatible' },
+      ],
+    });
+    expect(cards.map((card) => card.id)).toEqual(expect.arrayContaining([
+      'semantic:dimension:account.name',
+      'semantic:metric:revenue',
+    ]));
+    expect(evidenceCandidateRoles(cards.find((card) => card.id === 'semantic:dimension:account.name')!)).toContain('entity_label');
+  });
+
+  it('AGT-010 defaults an unspecified top-account request to ten without substituting owner or sentiment', () => {
+    const officeCase = OFFICE_ASK_AI_GOLD_CASES[2];
+    const requirements = buildAnalyticalRequirementSet({ question: officeCase.question });
+    expect(requirements.ranking).toMatchObject({ metricTerms: expect.arrayContaining(['bcm']), limit: 10 });
+    const cards = selectRoleBalancedMeaningCandidates({
+      requirements,
+      maxCandidates: 3,
+      candidates: [
+        { id: 'semantic:dimension:account.owner_email', kind: 'semantic_member', semanticObjectType: 'dimension', name: 'Account Owner Email', relevanceScore: 0.99, compatibility: 'compatible' },
+        { id: 'semantic:dimension:account.sentiment', kind: 'semantic_member', semanticObjectType: 'dimension', name: 'Account Sentiment Rating', relevanceScore: 0.98, compatibility: 'compatible' },
+        { id: 'semantic:dimension:account.name', kind: 'semantic_member', semanticObjectType: 'dimension', name: 'Account Name', relevanceScore: 0.72, compatibility: 'compatible' },
+        { id: 'semantic:metric:bcm_run_rate', kind: 'semantic_metric', semanticObjectType: 'metric', name: 'BCM Run Rate', relevanceScore: 0.71, compatibility: 'compatible' },
+      ],
+    });
+    expect(cards.map((card) => card.id)).toEqual(expect.arrayContaining([
+      'semantic:dimension:account.name',
+      'semantic:metric:bcm_run_rate',
+    ]));
+  });
+
+  it('API-007/API-008 records compact cascade and phase-specific provider diagnostics', () => {
+    const diagnostic = classifyProviderFailure({ message: 'HTTP 429 rate limit', phase: 'generation' });
+    expect(diagnostic).toMatchObject({ cause: 'rate_limited', retryable: true, safeAction: 'wait_and_retry' });
+    const cascade = buildAnalyticalCascadeDecision({
+      requirements: buildAnalyticalRequirementSet({ question: 'top customers by revenue' }),
+      sourceCoverage: [{ version: 1, source: 'semantic', status: 'available', candidateIds: ['semantic:metric:revenue'] }],
+      attempts: [{ version: 1, tier: 'semantic', outcome: 'ineligible', candidateIds: ['semantic:metric:revenue'], reason: 'missing customer display role', planFrozen: false }],
+      planFrozen: false,
+      stopReason: 'coverage_gap',
+    });
+    expect(cascade).toMatchObject({ version: 1, sourceCoverage: [{ source: 'semantic' }], attempts: [{ tier: 'semantic' }] });
+  });
+
+  it.each([
+    ['AUTHENTICATION_FAILED', 'authentication'],
+    ['MODEL_NOT_FOUND', 'model_not_found'],
+    ['RATE_LIMITED', 'rate_limited'],
+    ['GATEWAY_503', 'gateway'],
+    ['NETWORK_FAILURE', 'network'],
+    ['PROVIDER_TIMEOUT', 'provider_timeout'],
+    ['RUN_DEADLINE', 'run_deadline'],
+    ['ADMISSION_DENIED', 'admission_denied'],
+    ['DISPATCH_BUDGET', 'dispatch_budget'],
+    ['CANCELLED', 'cancelled'],
+  ])('API-007 classifies the %s provider cause without persisting provider content', (code, cause) => {
+    expect(classifyProviderFailure({ code, message: 'redacted provider failure' }).cause).toBe(cause);
+  });
+
+  it('AGT-016/033 only promotes a research verdict after a receipt-bound deterministic validator', () => {
+    const fingerprint = 'a'.repeat(64);
+    const promoted = buildResearchEvidenceLedgerV2({
+      rootQuestion: 'Why did revenue change?',
+      entries: [{
+        id: 'branch:trend', branchId: 'trend', question: 'Trend', status: 'observed',
+        resultFingerprint: fingerprint, receipts: [fingerprint], facts: ['fact:trend'],
+        verdict: 'supported',
+        validator: {
+          version: 1, kind: 'trend', evaluated: true,
+          outcome: 'supports_observation', receiptFingerprints: [fingerprint],
+        },
+        counterEvidenceFactIds: ['fact:trend', 'invented:counter-evidence'],
+      }],
+    });
+    expect(promoted.entries[0]).toMatchObject({ verdict: 'supported', counterEvidenceFactIds: ['fact:trend'] });
+
+    const rowsOnly = buildResearchEvidenceLedgerV2({
+      rootQuestion: 'Why did revenue change?',
+      entries: [{
+        id: 'branch:rows', branchId: 'rows', question: 'Rows', status: 'observed',
+        resultFingerprint: fingerprint, receipts: [fingerprint], facts: ['fact:rows'], verdict: 'supported',
+      }],
+    });
+    expect(rowsOnly.entries[0]?.verdict).toBe('inconclusive');
+    expect(rowsOnly.limitedScope).toBe(true);
+
+    const plannedButFailed = buildResearchEvidenceLedgerV2({
+      rootQuestion: 'Why did revenue change?',
+      groundableBranchCount: 3,
+      entries: [{
+        id: 'branch:failed', branchId: 'failed', question: 'Trend', status: 'failed',
+        facts: [], receipts: [], error: 'warehouse timeout',
+      }],
+    });
+    expect(plannedButFailed).toMatchObject({ groundableBranchCount: 3, limitedScope: false });
+  });
+
+  it('AGT-020 bounds typed research hypotheses without inventing missing branches', () => {
+    const plan = buildResearchHypothesisPlanV2({
+      hypotheses: [
+        { statement: 'Revenue shifted by segment.', expectation: 'Compare segment totals.', targetId: 'semantic:metric:revenue' },
+        { statement: 'Revenue shifted by segment.', expectation: 'Compare segment totals.', targetId: 'semantic:metric:revenue' },
+        { statement: 'Revenue changed over time.', expectation: 'Compare monthly values.', targetId: 'semantic:dimension:order_month' },
+      ],
+    });
+    expect(plan.hypotheses).toHaveLength(2);
+    expect(plan.limitedScope).toBe(true);
+    expect(plan.hypotheses.map((hypothesis) => hypothesis.validatorKind)).toEqual(expect.arrayContaining(['contributor', 'trend']));
+  });
+
   it('normalizes connector array rows and object rows into one result contract', () => {
     const result = normalizeCanonicalQueryResult({
       columns: [{ name: 'customer' }, { name: 'revenue' }],
@@ -128,6 +285,24 @@ describe('conversational analytical orchestration contracts', () => {
     expect(failedCancelled).not.toHaveProperty('executionReceipt');
     expect(failedCancelled).not.toHaveProperty('resultFingerprint');
     expect(ledger.entries.find((entry) => entry.id === 'branch-2')?.receipts).toEqual([]);
+    const ledgerV2 = buildResearchEvidenceLedgerV2({
+      rootQuestion: 'Explain revenue drivers',
+      entries: [
+        {
+          id: 'branch-1', branchId: 'revenue', question: 'Revenue by region',
+          status: 'observed', resultFingerprint: receipt.resultFingerprint,
+          executionReceipt: receipt, facts: ['fact-1'], receipts: [receipt.resultFingerprint],
+          verdict: 'supported', counterEvidenceFactIds: ['fact-1'],
+          validator: {
+            version: 1, kind: 'comparison', evaluated: true,
+            outcome: 'supports_observation', receiptFingerprints: [receipt.resultFingerprint],
+          },
+        },
+        { id: 'branch-2', branchId: 'customers', question: 'Customers', status: 'skipped', facts: [], receipts: [] },
+      ],
+    });
+    expect(ledgerV2).toMatchObject({ limitedScope: true, groundableBranchCount: 1 });
+    expect(ledgerV2.entries[0]).toMatchObject({ verdict: 'supported', counterEvidenceFactIds: ['fact-1'] });
   });
 
   it('fuses lanes by reciprocal rank while retaining evidence from different lanes', () => {

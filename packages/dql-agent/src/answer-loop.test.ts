@@ -83,6 +83,19 @@ function revenueSegmentBlock(): KGNode {
     sourceTier: "certified_artifact",
     certification: "certified",
     provenance: "DQL block",
+    grain: "segment",
+    dimensions: ["segment"],
+    declaredOutputs: ["segment", "revenue"],
+    allowedFilters: ["segment"],
+    parameters: [{
+      name: "segment",
+      type: "string",
+      required: true,
+      policy: "dynamic",
+      binding: { kind: "sql_value" },
+    }],
+    filterBindings: [{ filter: "segment", binding: "segment" }],
+    sql: "SELECT segment, SUM(revenue) AS revenue FROM customer_revenue WHERE segment = ${segment} GROUP BY segment",
   };
 }
 
@@ -176,6 +189,11 @@ beforeEach(() => {
         sourceTier: "certified_artifact",
         certification: "certified",
         provenance: "DQL block",
+        // Synthetic fixture: the block is intended to answer the revenue
+        // tests below, so declare its real output instead of borrowing proof
+        // from its description/tag text.
+        declaredOutputs: ["revenue"],
+        sql: "SELECT SUM(revenue) AS revenue FROM revenue_fact",
         businessOutcome: "Revenue leadership can monitor quarterly growth.",
         businessOwner: "revenue-ops",
         decisionUse: "Quarterly planning and forecast review",
@@ -845,7 +863,11 @@ describe("answer (block-first loop)", () => {
           sourceTier: "certified_artifact",
           certification: "certified",
           provenance: "DQL block",
-          declaredOutputs: ["revenue"],
+          // The artifact promises both columns; the executor intentionally
+          // omits customer_name so this test exercises post-execution result
+          // validation rather than a pre-freeze output-contract gap.
+          declaredOutputs: ["customer_name", "revenue"],
+          sql: "SELECT customer_name, SUM(revenue) AS revenue FROM orders GROUP BY customer_name",
         },
       ],
       [],
@@ -1191,6 +1213,8 @@ describe("answer (block-first loop)", () => {
       sourceTier: 'certified_artifact',
       certification: 'certified',
       provenance: 'DQL block',
+      declaredOutputs: ['customer_name', 'revenue'],
+      sql: 'SELECT customer_name, SUM(revenue) AS revenue FROM orders GROUP BY customer_name ORDER BY revenue ASC LIMIT 10',
     }], []);
     const provider = new StubProvider(
       '```json\n{"summary":"Revenue fallback.","sql":"SELECT customer_name, SUM(revenue) AS revenue FROM orders GROUP BY customer_name ORDER BY revenue ASC LIMIT 10","viz":"bar","outputs":["customer_name","revenue"]}\n```',
@@ -1686,6 +1710,8 @@ describe("answer (block-first loop)", () => {
           sourceTier: "certified_artifact",
           certification: "certified",
           provenance: "DQL block",
+          declaredOutputs: ["customer_count"],
+          sql: "SELECT COUNT(*) AS customer_count FROM customers",
         },
         {
           nodeId: "dbt_model:supplies",
@@ -1944,6 +1970,8 @@ describe("answer (block-first loop)", () => {
           sourceTier: "certified_artifact",
           certification: "certified",
           provenance: "DQL block",
+          declaredOutputs: ["customer_count"],
+          sql: "SELECT COUNT(*) AS customer_count FROM customers",
         },
       ],
       [],
@@ -1954,8 +1982,8 @@ describe("answer (block-first loop)", () => {
       provider,
       kg,
       executeCertifiedBlock: async () => ({
-        columns: ["total_customers"],
-        rows: [{ total_customers: 100 }],
+        columns: ["customer_count"],
+        rows: [{ customer_count: 100 }],
         rowCount: 1,
       }),
     });
@@ -1979,6 +2007,8 @@ describe("answer (block-first loop)", () => {
           sourceTier: "certified_artifact",
           certification: "certified",
           provenance: "DQL block",
+          declaredOutputs: ["month", "revenue"],
+          sql: "SELECT month, SUM(revenue) AS revenue FROM orders GROUP BY month",
         },
         {
           nodeId: "block:revenue_total",
@@ -1991,6 +2021,8 @@ describe("answer (block-first loop)", () => {
           sourceTier: "certified_artifact",
           certification: "certified",
           provenance: "DQL block",
+          declaredOutputs: ["revenue"],
+          sql: "SELECT SUM(revenue) AS revenue FROM orders",
         },
       ],
       [],
@@ -2079,6 +2111,8 @@ describe("answer (block-first loop)", () => {
           sourceTier: "certified_artifact",
           certification: "certified",
           provenance: "DQL block",
+          declaredOutputs: ["customer_count"],
+          sql: "SELECT COUNT(*) AS customer_count FROM customers",
         },
         {
           nodeId: "dbt_model:customers",
@@ -3183,6 +3217,8 @@ describe("answer (block-first loop)", () => {
           sourceTier: "certified_artifact",
           certification: "certified",
           provenance: "DQL block",
+          declaredOutputs: ["customer_name", "lifetime_spend"],
+          sql: "SELECT customer_name, lifetime_spend FROM customers ORDER BY lifetime_spend DESC LIMIT 10",
         },
       ],
       [],
@@ -3280,6 +3316,8 @@ describe("answer (block-first loop)", () => {
           sourceTier: "certified_artifact",
           certification: "certified",
           provenance: "DQL block",
+          declaredOutputs: ["player_name", "season", "total_points"],
+          sql: "SELECT player_name, season, total_points FROM NBA_GAMES.RAW.fct_player_performance ORDER BY total_points DESC LIMIT 10",
         },
       ],
       [],
@@ -5200,6 +5238,12 @@ describe("answer (block-first loop)", () => {
         sourceBlockName: "revenue_total",
         filters: ["Enterprise"],
         dimensions: ["segment"],
+        memberBindings: [{
+          dimension: "segment",
+          values: ["Enterprise"],
+          source: "prior_result",
+          confidence: "exact",
+        }],
       },
     });
     expect(result.kind).toBe("certified");
@@ -6766,6 +6810,8 @@ describe("answer — freshness-aware trust", () => {
       sourceTier: "certified_artifact",
       certification: "certified",
       provenance: "DQL block",
+      declaredOutputs: ["order_count"],
+      sql: "SELECT COUNT(*) AS order_count FROM orders",
       dataState,
       dataStateDetail:
         dataState === "failed"

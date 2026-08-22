@@ -1,5 +1,13 @@
 {
   "project": "jaffle-semantic",
+  "manifestVersion": 3,
+  "modeling": {
+    "mode": "dbt-first"
+  },
+  "dbt": {
+    "projectDir": ".",
+    "manifestPath": "target/manifest.json"
+  },
   "connections": {
     "default": {
       "driver": "duckdb",

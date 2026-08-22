@@ -1,0 +1,42 @@
+# This is fixture source, not a test-only relationship injection.  The dbt
+# manifest remains the physical source of truth; this DQL overlay declares the
+# product-level analytical identity and records the warehouse validation bound
+# to the exact relation/key/cardinality/fanout policy below.
+entities:
+  - id: supplies
+    dbt_model: model.jaffle_shop.supplies
+    business_name: Product supply profile
+    business_context: Product-level supply eligibility used to filter product analysis.
+    analytical_role: dimension
+    grain: product_id
+    keys: [product_id]
+    status: certified
+    owner: commerce@fixture.test
+  - id: order_items
+    dbt_model: model.jaffle_shop.order_items
+    business_name: Ordered product
+    business_context: An order item carrying the product display value.
+    analytical_role: event
+    grain: order_item_id
+    keys: [order_item_id]
+    status: certified
+    owner: commerce@fixture.test
+relationships:
+  - id: supplies_to_order_items_by_product
+    from: supplies
+    to: order_items
+    verb: identifies products ordered with a supply profile
+    description: A product-level supply eligibility profile can filter ordered-product rows by product id.
+    keys: [{ from: product_id, to: product_id }]
+    cardinality: one_to_many
+    fanout: safe
+    status: certified
+    owner: commerce@fixture.test
+    certifiedAgainst:
+      from: { grain: product_id, keys: [product_id] }
+      to: { grain: order_item_id, keys: [order_item_id] }
+    validation:
+      status: passed
+      checked_at: "2026-08-20T00:00:00.000Z"
+      query_fingerprint: jaffle-semantic-supplies-order-items-product-proof-v1
+      proof_fingerprint: c36604ebc9f6edd4f5051cb0dead622a24f36bbff6d641f3a7730b17199bcd8d

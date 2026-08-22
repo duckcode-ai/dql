@@ -19,6 +19,7 @@ import type { AnswerAssumption } from './agentic/assumptions.js';
 import type { MetadataAgentIntent } from './metadata/catalog.js';
 import type { MeaningResolution } from './meaning-resolution.js';
 import type { ResolvedAnalyticalPlan } from './resolved-analytical-plan.js';
+import type { AnalyticalCascadeDecisionV1 } from './analytical-orchestration.js';
 
 /** The high-level action the agent will take for a turn. */
 export type AgentAction = 'answer' | 'clarify' | 'investigate' | 'compose_app' | 'converse' | 'block';
@@ -103,6 +104,8 @@ export interface IntentDecision {
   meaningResolution?: MeaningResolution;
   /** R3 shadow plan; R4 promotes this exact fingerprint to execution authority. */
   resolvedAnalyticalPlan?: ResolvedAnalyticalPlan;
+  /** The router's immutable authority order; executors consume rather than rebuild it. */
+  analyticalCascadeDecision?: AnalyticalCascadeDecisionV1;
   /** Stable system failure from qualified meaning validation; never a user ambiguity. */
   meaningResolutionErrorCode?: 'invalid_evidence_reference';
   /** Redacted retrieval trace; deliberately excludes definitions and raw values. */

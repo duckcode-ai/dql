@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildMeaningEvidencePackage,
+  certifiedCandidateExplicitlyCoversMeasures,
   findExplicitEvidenceReference,
   questionTypeFromText,
   validateMeaningResolution,
@@ -95,6 +96,26 @@ describe("AGT-010 meaning-resolution evidence boundary", () => {
     expect(candidates.filter((item) => item.kind === "semantic_member")).toHaveLength(3);
   });
 
+  it('pins explicit revenue and the Account Name display role before more than eight same-kind decoys', () => {
+    const decoys = Array.from({ length: 12 }, (_, index) => candidate({
+      id: `semantic:dimension:account.owner_or_sentiment_${index}`,
+      kind: 'semantic_member',
+      name: index % 2 === 0 ? `Account Owner Email ${index}` : `Account Sentiment Rating ${index}`,
+      relevanceScore: 0.99 - index / 100,
+    }));
+    const revenue = candidate({
+      id: 'semantic:metric:revenue', kind: 'semantic_metric', name: 'Revenue', relevanceScore: 0.72,
+    });
+    const accountName = candidate({
+      id: 'semantic:dimension:account.name', kind: 'semantic_member', name: 'Account Name', relevanceScore: 0.71,
+    });
+
+    const cards = buildMeaningEvidencePackage({ candidates: [...decoys, revenue, accountName] }, 8, 'Which top accounts have highest revenue?');
+
+    expect(cards.map((item) => item.id)).toEqual(expect.arrayContaining([revenue.id, accountName.id]));
+    expect(cards.filter((item) => /owner|sentiment/i.test(item.name)).map((item) => item.name)).toEqual([]);
+  });
+
   it("recognizes a unique explicit reference without fuzzy guessing", () => {
     const found = findExplicitEvidenceReference(
       "show @metric(rollover_balance_amount) by customer",
@@ -113,6 +134,44 @@ describe("AGT-010 meaning-resolution evidence boundary", () => {
       resolution(),
       [candidate({ compatibility: "incompatible" })],
     )).toMatchObject({ ok: false });
+  });
+
+  it('AGT-009 rejects a certified execution whose own declared outputs omit the requested revenue', () => {
+    const topCustomers = candidate({
+      id: 'dql:block:top_customers',
+      kind: 'certified_block',
+      trustTier: 'certified',
+      name: 'top_customers',
+      compatibilityFacts: ['output: customer_name', 'output: lifetime_spend', 'output: order_count'],
+    });
+    const selected = resolution({
+      selectedConceptIds: [topCustomers.id],
+      recommendedExecutionId: topCustomers.id,
+      recommendedRoute: 'certified',
+      queryIntent: { measures: ['revenue'], dimensions: [], filters: [] },
+    });
+
+    expect(certifiedCandidateExplicitlyCoversMeasures(topCustomers, ['revenue'])).toBe(false);
+    expect(validateMeaningResolution(selected, [topCustomers])).toMatchObject({ ok: false });
+  });
+
+  it('AGT-009 accepts a certified execution only when its own output contract declares revenue', () => {
+    const revenueBlock = candidate({
+      id: 'dql:block:revenue_summary',
+      kind: 'certified_block',
+      trustTier: 'certified',
+      name: 'revenue_summary',
+      compatibilityFacts: ['output: revenue'],
+    });
+    const selected = resolution({
+      selectedConceptIds: [revenueBlock.id],
+      recommendedExecutionId: revenueBlock.id,
+      recommendedRoute: 'certified',
+      queryIntent: { measures: ['revenue'], dimensions: [], filters: [] },
+    });
+
+    expect(certifiedCandidateExplicitlyCoversMeasures(revenueBlock, ['revenue'])).toBe(true);
+    expect(validateMeaningResolution(selected, [revenueBlock])).toMatchObject({ ok: true });
   });
 
   it("normalizes a compatible recommended execution into the selected plan scope", () => {

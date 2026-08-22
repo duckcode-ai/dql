@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildAnalysisQuestionPlan } from './analysis-planner.js';
-import { certifiedTerminationVerdict, evaluateCertifiedBlockFit } from './block-fit.js';
+import { certifiedFitAllowsTier1, certifiedTerminationVerdict, evaluateCertifiedBlockFit } from './block-fit.js';
 import type { MetadataObject } from './catalog.js';
 
 function certifiedBlock(name: string, payload: Record<string, unknown>): MetadataObject {
@@ -20,6 +20,40 @@ function fit(question: string, block: MetadataObject) {
 }
 
 describe('certified block fit', () => {
+  it('AGT-009 treats tags, examples, and correlated lifetime spend as context when revenue is not a declared output', () => {
+    const block = certifiedBlock('top_customers', {
+      grain: 'customer',
+      declaredOutputs: ['customer_name', 'lifetime_spend', 'order_count'],
+      dimensions: ['customer'],
+      tags: ['revenue', 'top customers'],
+      examples: ['show me revenue'],
+      sql: 'select customer_name, lifetime_spend, order_count from customers order by lifetime_spend desc limit 10',
+    });
+
+    const result = evaluateCertifiedBlockFit({
+      question: 'show me revenue',
+      plan: buildAnalysisQuestionPlan('show me revenue'),
+      block,
+      exactExampleMatch: true,
+    });
+
+    expect(result).toMatchObject({ kind: 'context_only', missingMeasures: ['revenue'] });
+    expect(certifiedTerminationVerdict({ fit: result, bypass: 'exact_example' })).toMatchObject({ allow: false });
+    expect(certifiedFitAllowsTier1({ ...result, kind: 'exact', confidence: 'high' })).toBe(false);
+  });
+
+  it('AGT-009 keeps a block with an own revenue output eligible for zero-call termination', () => {
+    const block = certifiedBlock('revenue_summary', {
+      grain: 'scalar',
+      declaredOutputs: ['revenue'],
+      sql: 'select sum(order_total) as revenue from orders',
+    });
+    const result = fit('show me revenue', block);
+
+    expect(result.kind).toBe('exact');
+    expect(certifiedTerminationVerdict({ fit: result })).toMatchObject({ allow: true });
+  });
+
   it('AGT-006 rejects an unfiltered lifetime-spend block for beverage-scoped ranking', () => {
     const block = certifiedBlock('top_customers', {
       grain: 'customer',
@@ -58,7 +92,6 @@ describe('certified block fit', () => {
     });
 
     const result = fit(question, block);
-
     expect(result.kind).toBe('exact');
     expect(result.confidence).toBe('high');
     expect(result.missingDimensions).toEqual([]);
@@ -214,7 +247,7 @@ describe('certified block fit', () => {
     expect(result.missingDimensions).toEqual([]);
   });
 
-  it('marks dimension-covered inferred contracts as medium confidence', () => {
+  it('keeps description-only legacy contracts as context until they declare an output identity', () => {
     const block = certifiedBlock('legacy_product_revenue', {
       grain: 'product',
       entities: ['Product'],
@@ -224,10 +257,7 @@ describe('certified block fit', () => {
 
     const result = fit('Show revenue by product', block);
 
-    expect(result.kind).toBe('exact');
-    expect(result.confidence).toBe('medium');
-    expect(result.missingOutputs).toEqual([]);
-    expect(result.missingDimensions).toEqual([]);
+    expect(result).toMatchObject({ kind: 'context_only', missingMeasures: ['revenue'] });
   });
 
   it('treats top-N mismatch as trim-safe when the block otherwise fits', () => {

@@ -259,6 +259,60 @@ describe('provider runner — analyst physical dispatch budget', () => {
   });
 });
 
+describe('agent configuration freshness', () => {
+  it('invalidates the local agent config cache after a settings write', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dql-agent-config-freshness-'));
+    try {
+      const configPath = join(root, 'dql.config.json');
+      writeFileSync(configPath, JSON.stringify({ agent: { orchestrator: { mode: 'legacy' } } }));
+      expect(__test__.readAgentConfig(root)).toMatchObject({ orchestrator: { mode: 'legacy' } });
+
+      // Different content length makes this deterministic even on filesystems
+      // whose mtime resolution is coarser than one millisecond.
+      writeFileSync(configPath, JSON.stringify({ agent: { orchestrator: { mode: 'agentic', lanes: ['generated'] } } }));
+      expect(__test__.readAgentConfig(root)).toMatchObject({
+        orchestrator: { mode: 'agentic', lanes: ['generated'] },
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('provider boundary diagnostics', () => {
+  it.each([
+    ['AUTHENTICATION_FAILED', 'missing API key', 'authentication'],
+    ['MODEL_NOT_FOUND', 'requested model not found', 'model_not_found'],
+    ['GATEWAY_503', 'gateway returned 503', 'gateway'],
+    ['PROVIDER_TIMEOUT', 'provider timed out', 'provider_timeout'],
+    ['ADMISSION_DENIED', 'dispatch admission denied', 'admission_denied'],
+    ['PROVIDER_DISPATCH_BUDGET', 'provider dispatch budget exhausted', 'dispatch_budget'],
+  ])('captures %s at the provider boundary as a redacted diagnostic', (code, message, cause) => {
+    const diagnostic = __test__.providerBoundaryDiagnostic({
+      providerId: 'openai',
+      projectRoot: '/tmp/dql-provider-diagnostic',
+      phase: 'generation',
+      error: Object.assign(new Error(message), { code }),
+    });
+    expect(diagnostic).toMatchObject({ version: 1, cause, phase: 'generation' });
+    expect(diagnostic.providerFingerprint).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(JSON.stringify(diagnostic)).not.toContain('openai');
+    expect(JSON.stringify(diagnostic)).not.toContain(message);
+  });
+
+  it('records preflight readiness without retaining the endpoint or model', () => {
+    const diagnostic = __test__.providerBoundaryDiagnostic({
+      providerId: 'ollama',
+      projectRoot: '/tmp/dql-provider-diagnostic',
+      phase: 'preflight',
+      error: new Error('connection refused http://localhost:11434'),
+      code: 'NETWORK_FAILURE',
+    });
+    expect(diagnostic).toMatchObject({ cause: 'network', phase: 'preflight', retryable: true });
+    expect(JSON.stringify(diagnostic)).not.toContain('localhost');
+  });
+});
+
 describe('lazy schema loading', () => {
   const pack = (overrides: Record<string, unknown> = {}) => ({
     routeDecision: { route: 'generated_sql' },

@@ -355,6 +355,8 @@ import {
   type AgentRouteExecutor,
   type AgentEvidenceCandidate,
   type AgentRetrievalEvidence,
+  type ContextSourceCoverageV1,
+  type ProviderFailureDiagnosticV1,
   type IntentDecision,
   type AnalysisDepth,
   type CascadeAnswerResult,
@@ -381,10 +383,15 @@ import {
   createProviderEgressReceipt,
   redactProviderResultRows,
   composeVerifiedAnalyticalNarrative,
+  classifyProviderFailure,
   buildCoverageGap,
   capResearchBranches,
   buildResearchEvidenceLedger,
+  buildResearchEvidenceLedgerV2,
+  buildResearchHypothesisPlanV2,
+  inferResearchValidatorKind,
   buildAnalyticalTurnPlan,
+  buildAnalyticalRequirementSet,
   resolveTopRankedRegionDependency,
   DEFAULT_ASK_ROW_EGRESS_POLICY,
   ZERO_ROW_EGRESS_POLICY,
@@ -986,7 +993,9 @@ export function parseAgentRunRequestBody(body: unknown): { request?: AgentRunReq
       selectedObject,
       executionTarget,
       workspaceContext,
-      conversationContext: sanitizeClientConversationContext(agentRunRecord(record.conversationContext)),
+      conversationContext: sanitizeClientConversationContext(agentRunRecord(record.conversationContext), {
+        stripStructuredSelectionEnvelope: Boolean(agentRunString(record.selectedEvidenceId)),
+      }),
       history: parseAgentRunHistory(record.history),
       threadId: agentRunString(record.threadId),
       runId: agentRunString(record.runId),
@@ -1008,6 +1017,16 @@ const CLIENT_PLAN_AUTHORITY_KEYS = new Set([
   'analyticalTaskDependencyBinding',
 ]);
 
+// A no-thread embedding may retain ordinary conversation context, but a
+// selectedEvidenceId is a structured server continuation—not a client plan
+// hint. Strip this state only for that selection path, while always stripping
+// the host-only authority marker below.
+const CLIENT_STRUCTURED_SELECTION_AUTHORITY_KEYS = new Set([
+  'conversationEnvelope',
+  'serverSnapshot',
+  'serverIssuedClarificationSelection',
+]);
+
 /**
  * Browser/embedding context is useful retrieval and history input, but it is
  * not a plan-authority channel. Remove plan-shaped fields recursively at HTTP
@@ -1015,14 +1034,21 @@ const CLIENT_PLAN_AUTHORITY_KEYS = new Set([
  */
 function sanitizeClientConversationContext(
   context: Record<string, unknown> | undefined,
+  options: { stripStructuredSelectionEnvelope?: boolean } = {},
 ): Record<string, unknown> | undefined {
   if (!context) return undefined;
   const sanitize = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(sanitize);
     const record = agentRunRecord(value);
     if (!record) return value;
-    return Object.fromEntries(Object.entries(record).flatMap(([key, nested]) =>
-      CLIENT_PLAN_AUTHORITY_KEYS.has(key) ? [] : [[key, sanitize(nested)]]));
+    return Object.fromEntries(Object.entries(record).flatMap(([key, nested]) => {
+      const isHostOnlySelectionAuthority = key === 'serverIssuedClarificationSelection';
+      const isUntrustedSelectionEnvelope = options.stripStructuredSelectionEnvelope
+        && CLIENT_STRUCTURED_SELECTION_AUTHORITY_KEYS.has(key);
+      return CLIENT_PLAN_AUTHORITY_KEYS.has(key) || isHostOnlySelectionAuthority || isUntrustedSelectionEnvelope
+        ? []
+        : [[key, sanitize(nested)]];
+    }));
   };
   return sanitize(context) as Record<string, unknown>;
 }
@@ -1633,6 +1659,7 @@ async function conversationContextFromThread(
   threadId: string,
   clientContext: Record<string, unknown> | undefined,
   question?: string,
+  preservePendingClarification = false,
 ): Promise<Record<string, unknown>> {
   // Token-budget backstop: six verbatim turns with per-field caps. Older turns
   // remain reachable through the rolling summary + semantic recall below —
@@ -1682,7 +1709,10 @@ async function conversationContextFromThread(
   const thread = store.getThread(threadId);
   // Bounded structured snapshot (working state + rolling summary + topic relation)
   // for the answer loop's conversation-state prompt section.
-  const serverSnapshot = buildConversationSnapshot(store, threadId, { question });
+  const serverSnapshot = buildConversationSnapshot(store, threadId, {
+    question,
+    preservePendingClarification,
+  });
   if (serverSnapshot && question) {
     // Semantic recall over OLDER turns (the recent window is already verbatim).
     serverSnapshot.recalledTurns = await recallRelevantTurns(store, threadId, question, {
@@ -1690,12 +1720,26 @@ async function conversationContextFromThread(
       excludeTurnIds: serverSnapshot.recentTurns.map((turn) => turn.id),
     });
   }
+  const pendingSelection = serverSnapshot?.pendingClarification?.selection;
+  const pendingSourceTurnId = serverSnapshot?.pendingClarification?.sourceTurnId;
+  // This value never crosses the HTTP boundary from a client. It is rebuilt
+  // only after the local conversation store has resolved the requested thread,
+  // and the router requires it for every selectedEvidenceId continuation.
+  const serverIssuedClarificationSelection = pendingSelection?.snapshotId && pendingSourceTurnId
+    ? {
+        version: 1 as const,
+        threadId,
+        sourceTurnId: pendingSourceTurnId,
+        snapshotId: pendingSelection.snapshotId,
+      }
+    : undefined;
   return {
     ...(sanitizeClientConversationContext(clientContext) ?? {}),
     conversationStateVersion: 1,
     threadId,
     ...(serverSnapshot ? { conversationEnvelope: serverSnapshot } : {}),
     ...(serverSnapshot ? { serverSnapshot } : {}),
+    ...(serverIssuedClarificationSelection ? { serverIssuedClarificationSelection } : {}),
     ...(thread?.rollingSummary ? { conversationSummary: thread.rollingSummary } : {}),
     // `activeTurnId` is the FOLLOW-UP ANCHOR: the turn whose filters, prior DQL
     // artifact, and source SQL the next question builds on. Anchoring it to the
@@ -1860,6 +1904,40 @@ export function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInp
   const contextPack = agentRunRecord(payload?.contextPack);
   const questionPlan = agentRunRecord(contextPack?.questionPlan);
   const requestedShape = agentRunRecord(questionPlan?.requestedShape);
+  // A structured clarification choice must survive reload/restart with the
+  // exact option IDs and typed requirements that rendered it. This is stored
+  // inside the existing JSON contract envelope so older conversation rows stay
+  // readable; the router treats it as reject-only continuity evidence and
+  // always rechecks the current snapshot before it can freeze a plan.
+  // Most analytical clarifications retain the router-owned cascade requirement
+  // set. Evidence-only ambiguity deliberately has no frozen cascade, however,
+  // and its first rendered options still need a typed, reload-safe contract.
+  // Derive that narrow fallback from the immutable original question and the
+  // already-resolved intent—not from a later click or client context—so the
+  // first valid structured selection can be revalidated without weakening the
+  // server-issued-envelope requirement.
+  const clarificationRequirements = run.diagnosticReceiptV3?.cascade?.requirements
+    ?? run.routeDecision?.analyticalCascadeDecision?.requirements
+    ?? (run.status === 'needs_clarification' && (run.clarificationOptions?.length ?? 0) > 0
+      ? buildAnalyticalRequirementSet({
+          question: run.question,
+          parsedIntent: run.routeDecision?.meaningResolution?.queryIntent,
+        })
+      : undefined);
+  const clarificationSelection = run.status === 'needs_clarification'
+    && (run.clarificationOptions?.length ?? 0) > 0
+    ? {
+        version: 1 as const,
+        optionIds: [...new Set(run.clarificationOptions!.map((option) => option.id).filter(Boolean))].slice(0, 16),
+        ambiguityCandidateIds: [...new Set(run.clarificationOptions!.map((option) => option.id).filter(Boolean))].slice(0, 16),
+        ...(clarificationRequirements
+          ? { requirements: clarificationRequirements }
+          : {}),
+        ...(run.routeDecision?.retrievalEvidence?.snapshotId
+          ? { snapshotId: run.routeDecision.retrievalEvidence.snapshotId }
+          : {}),
+      }
+    : undefined;
   const rowCountRaw = result?.rowCount;
   const measureColumns = conversationMeasureColumns(columns, requestedShape, rows);
   return {
@@ -1868,7 +1946,13 @@ export function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInp
     answerSummary: run.answer ?? run.summary,
     answerText: run.answer,
     route: run.route,
-    trustLabel: agentRunString(payload?.trustLabel) ?? run.trustState,
+    // A route/context label is presentation metadata, not the terminal trust
+    // authority. In particular, a certified run can retain a `mixed` context
+    // label from candidates considered before the certified tuple froze. Using
+    // that label here made the persisted conversation contradict the immutable
+    // run. Persist the canonical run state unless the answer itself has
+    // multiple materially different answer sections.
+    trustLabel: conversationTrustLabelFromRun(run, payload),
     runStatus: run.status,
     stopReason: run.stopReason,
     // Persisted so a later turn can tell a refusal from an answer. `runStatus`
@@ -1894,8 +1978,46 @@ export function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInp
           rowCount: typeof rowCountRaw === 'number' ? rowCountRaw : rows.length || undefined,
         }
       : undefined,
-    contract: requestedShape,
+    contract: {
+      ...(requestedShape ?? {}),
+      ...(clarificationSelection ? { clarificationSelection } : {}),
+    },
   };
+}
+
+function conversationTrustLabelFromRun(
+  run: Pick<AgentRun, 'trustState' | 'artifacts'>,
+  payload: Record<string, unknown> | undefined,
+): string | undefined {
+  if (!isCanonicalConversationTrustState(run.trustState)) {
+    return agentRunString(payload?.trustLabel);
+  }
+  return hasMixedAnswerSectionTrust(run.artifacts) ? 'mixed' : run.trustState;
+}
+
+function isCanonicalConversationTrustState(value: unknown): value is AgentRunTrustState {
+  return value === 'certified'
+    || value === 'governed'
+    || value === 'grounded'
+    || value === 'review_required'
+    || value === 'blocked'
+    || value === 'not_applicable';
+}
+
+/**
+ * `mixed` is meaningful only when the durable answer contains sections with
+ * materially different trust states. Supporting artifacts such as a DQL draft
+ * or a diagnostics receipt do not turn one certified answer into mixed trust.
+ */
+function hasMixedAnswerSectionTrust(artifacts: readonly AgentRun['artifacts'][number][]): boolean {
+  const states = new Set(artifacts
+    .filter((artifact) => artifact.kind === 'answer' || artifact.kind === 'research_run')
+    .map((artifact) => artifact.trustState)
+    .filter((state) => state === 'certified'
+      || state === 'governed'
+      || state === 'grounded'
+      || state === 'review_required'));
+  return states.size > 1;
 }
 
 function conversationResultColumns(value: unknown): string[] {
@@ -1913,7 +2035,21 @@ function conversationMeasureColumns(
   requestedShape: Record<string, unknown> | undefined,
   rows: Array<Record<string, unknown>>,
 ): string[] | undefined {
+  // A requested phrase is not evidence that the execution returned that
+  // measure.  In particular, an incomplete certified block used to persist
+  // `revenue` beside its actual `lifetime_spend` output merely because the
+  // request said revenue.  Retain an exact requested column only when it is
+  // actually present in the result contract.
   const requested = conversationStringArray(requestedShape?.measures) ?? [];
+  const canonical = (value: string) => value.toLowerCase()
+    .replace(/[_./:-]+/g, ' ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const actualRequestedColumns = columns.filter((column) => {
+    const identity = canonical(column);
+    return identity.length > 0 && requested.some((measure) => canonical(measure) === identity);
+  });
   const numericColumns = columns.filter((column) =>
     rows.some((row) => typeof row[column] === 'number' && Number.isFinite(row[column] as number))
   );
@@ -1922,7 +2058,7 @@ function conversationMeasureColumns(
       column.replace(/_/g, ' '),
     )
   );
-  const unique = Array.from(new Set([...requested, ...numericColumns, ...metricNamedColumns]
+  const unique = Array.from(new Set([...actualRequestedColumns, ...numericColumns, ...metricNamedColumns]
     .map((value) => value.trim())
     .filter(Boolean)));
   return unique.length > 0 ? unique.slice(0, 24) : undefined;
@@ -3136,11 +3272,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       runner = createDqlAgentProviderRunner('ollama', deterministicProvider);
     }
     if (!resolvedProvider || !runner) {
-      throw new Error('No AI provider is configured. Configure a subscription (Claude Code / Codex), OpenAI, Gemini, Ollama, or a custom OpenAI-compatible endpoint in Settings.');
+      throw Object.assign(
+        new Error('No AI provider is configured. Configure a subscription (Claude Code / Codex), OpenAI, Gemini, Ollama, or a custom OpenAI-compatible endpoint in Settings.'),
+        { code: 'AUTHENTICATION_FAILED', providerPhase: 'preflight' },
+      );
     }
     let governedAnswer: AgentAnswer | undefined;
     let providerError: string | undefined;
     let providerDispatchEvidence: ProviderDispatchTerminalEvidence | undefined;
+    let providerBoundaryDiagnostic: ProviderFailureDiagnosticV1 | undefined;
     const isRepair = (repair?.attempt ?? 0) > 0 && Boolean(repair?.repairHint);
     // The chat composer sends a `thinkingMode` (auto/low/medium/high); resolve it
     // into the effort+depth bundle it stands for. An explicit `reasoningEffort` /
@@ -3497,6 +3637,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         if (turn.kind === 'error') {
           providerError = turn.message;
           providerDispatchEvidence = turn.dispatchEvidence;
+          providerBoundaryDiagnostic = turn.providerDiagnostic;
         }
       },
       runSignal,
@@ -3504,7 +3645,10 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     if (!governedAnswer) {
       throw Object.assign(
         new Error(providerError ?? 'The AI provider did not return a governed answer.'),
-        ...(providerDispatchEvidence ? [{ providerDispatchEvidence }] : []),
+        {
+          ...(providerDispatchEvidence ? { providerDispatchEvidence } : {}),
+          ...(providerBoundaryDiagnostic ? { providerDiagnostic: providerBoundaryDiagnostic } : {}),
+        },
       );
     }
     return governedAnswer;
@@ -4127,6 +4271,33 @@ function analyticalFailureSummary(
       const message = dispatchBudgetExhausted
         ? 'Ask reached its internal provider-dispatch limit before it froze one executable analytical plan. Nothing was run. Narrow the metric or dimension and retry; this is an orchestration-budget diagnostic, not a provider outage.'
         : formatAgentRunInfrastructureError(error, 'AI answer provider');
+      const providerCode = error && typeof error === 'object'
+        ? String((error as { code?: unknown }).code ?? '')
+        : '';
+      const boundaryProviderDiagnostic = error && typeof error === 'object'
+        ? (error as { providerDiagnostic?: unknown }).providerDiagnostic
+        : undefined;
+      const providerDiagnostic = boundaryProviderDiagnostic
+        && typeof boundaryProviderDiagnostic === 'object'
+        && (boundaryProviderDiagnostic as { version?: unknown }).version === 1
+        ? boundaryProviderDiagnostic as ProviderFailureDiagnosticV1
+        : classifyProviderFailure({
+        code: dispatchBudgetExhausted ? 'PROVIDER_DISPATCH_BUDGET' : providerCode,
+        // Classification happens at the provider boundary before this error is
+        // coalesced into the friendly headline. Persist the classifier output,
+        // never this possibly sensitive raw message.
+        message: error instanceof Error ? error.message : String(error ?? ''),
+        phase: /no ai provider configured|not configured or reachable/i.test(message) ? 'preflight' : 'generation',
+        providerFingerprint: agentRunWorkspaceValue(request, 'provider')
+          ? `sha256:${createHash('sha256').update(agentRunWorkspaceValue(request, 'provider')!).digest('hex')}`
+          : undefined,
+        modelFingerprint: agentRunWorkspaceValue(request, 'model')
+          ? `sha256:${createHash('sha256').update(agentRunWorkspaceValue(request, 'model')!).digest('hex')}`
+          : undefined,
+        baseOriginFingerprint: agentRunWorkspaceValue(request, 'providerBaseOrigin')
+          ? `sha256:${createHash('sha256').update(agentRunWorkspaceValue(request, 'providerBaseOrigin')!).digest('hex')}`
+          : undefined,
+      });
       return {
         summary: message,
         status: 'blocked',
@@ -4147,6 +4318,7 @@ function analyticalFailureSummary(
               code: dispatchBudgetExhausted ? 'orchestration_budget_exhausted' : 'AI_PROVIDER_FAILURE',
               message,
               recoverable: !dispatchBudgetExhausted,
+              diagnostic: providerDiagnostic,
             },
           },
           undefined,
@@ -4160,7 +4332,7 @@ function analyticalFailureSummary(
             false,
             'blocking',
             message,
-            { originalErrorType: error instanceof Error ? error.name : typeof error },
+            { originalErrorType: error instanceof Error ? error.name : typeof error, providerDiagnostic },
           ),
         ],
         nextActions: [
@@ -5314,6 +5486,37 @@ function analyticalFailureSummary(
       if (plan.done && !plan.followUp && request.requestedMode !== 'research') {
         return answerRunExecutor(researchContext);
       }
+      // This is the executable, receipt-bound research plan. It carries the
+      // branch hypothesis/expectation/validator kind into every child rather
+      // than treating V2 as a presentation-only wrapper after the work ends.
+      const typedResearchPlan = buildResearchHypothesisPlanV2({
+        hypotheses: plan.steps.map((step, index) => ({
+          id: `h${index + 1}`,
+          statement: step.thought,
+          expectation: step.expectation,
+          targetId: step.action.target,
+          validatorKind: inferResearchValidatorKind(step.thought, step.expectation),
+        })),
+      });
+      // The V2 contract is the executable branch authority: retain its stable
+      // hypothesis ID, wording, expectation, target, and validator kind while
+      // borrowing only the already-grounded action kind from the planner. This
+      // prevents a presentation-only V2 ledger from drifting away from the
+      // child runs that actually produced the receipts.
+      const executableResearchBranches = typedResearchPlan.hypotheses.flatMap((hypothesis) => {
+        const planned = plan.steps.find((step) => step.thought.trim() === hypothesis.statement
+          && step.action.target === hypothesis.targetId)
+          ?? plan.steps.find((step) => step.action.target === hypothesis.targetId);
+        if (!planned) return [];
+        return [{
+          hypothesisId: hypothesis.id,
+          validatorKind: hypothesis.validatorKind,
+          thought: hypothesis.statement,
+          expectation: hypothesis.expectation,
+          action: { ...planned.action, target: hypothesis.targetId },
+        }];
+      });
+      const typedHypothesesById = new Map(typedResearchPlan.hypotheses.map((hypothesis) => [hypothesis.id, hypothesis]));
       const needsClarification = Boolean(plan.followUp);
       const notebookPath = agentRunNotebookPath(request, runId);
       const researchIntent = agentRunResearchIntent(request);
@@ -5374,6 +5577,8 @@ function analyticalFailureSummary(
             // attempt, not a fabricated successful finding; its durable status
             // and receipt determine the ledger entry.
             const fallbackBranch = {
+              hypothesisId: 'fallback:context',
+              validatorKind: 'counter_evidence' as const,
               thought: 'Inspect the requested analytical question against the frozen root context.',
               action: {
                 kind: 'lookup_metric' as const,
@@ -5382,7 +5587,7 @@ function analyticalFailureSummary(
               expectation: 'Whether the frozen context contains enough evidence for a bounded answer.',
             };
             const branches = capResearchBranches(
-              plan.steps.length > 0 ? plan.steps : [fallbackBranch],
+              executableResearchBranches.length > 0 ? executableResearchBranches : [fallbackBranch],
               6,
             );
             // The replan edge. Each branch tests one hypothesis; folding its
@@ -5413,7 +5618,7 @@ function analyticalFailureSummary(
                 });
                 break;
               }
-              const branchId = `${step.action.kind}:${step.action.target}`;
+              const branchId = step.hypothesisId;
               const branchQuestion = `${request.question}\nResearch branch ${index + 1} (${branchId}): ${step.expectation}`;
               const childId = `${created.id}:research:${index + 1}`;
               const child = storage.createRun({
@@ -5434,6 +5639,9 @@ function analyticalFailureSummary(
                   rootPlanId: plan.rootPlanId,
                   branch: {
                     id: branchId,
+                    hypothesisId: step.hypothesisId,
+                    hypothesis: step.thought,
+                    validatorKind: step.validatorKind,
                     index: index + 1,
                     expectation: step.expectation,
                     action: step.action,
@@ -5458,7 +5666,15 @@ function analyticalFailureSummary(
                     ...researchContextEnvelope,
                     rootRunId: created.id,
                     rootPlanId: plan.rootPlanId,
-                    branch: { id: branchId, index: index + 1, expectation: step.expectation, action: step.action },
+                    branch: {
+                      id: branchId,
+                      hypothesisId: step.hypothesisId,
+                      hypothesis: step.thought,
+                      validatorKind: step.validatorKind,
+                      index: index + 1,
+                      expectation: step.expectation,
+                      action: step.action,
+                    },
                   },
                   executionConnection: researchExecutionConnection,
                   executionConnectionName: researchExecutionConnectionName,
@@ -5582,9 +5798,49 @@ function analyticalFailureSummary(
           ? 'not_started'
           : researchRuns.some((run) => run.status === 'error')
             ? 'insufficient_evidence'
-            : plan.steps.length > 6
+            : executableResearchBranches.length > 6
               ? 'budget'
               : 'completed',
+      });
+      // V2 carries a verdict per bounded hypothesis and makes a deliberately
+      // small investigation visible to the caller. A returned row is still
+      // only an observation: without a deterministic expectation validator it
+      // remains inconclusive rather than being promoted to causal support.
+      const researchLedgerV2 = buildResearchEvidenceLedgerV2({
+        rootQuestion: request.question,
+        planId: plan.rootPlanId,
+        snapshotId: routeDecision?.resolvedAnalyticalPlan?.snapshotId,
+        groundableBranchCount: typedResearchPlan.hypotheses.length,
+        entries: researchLedger.entries.map((entry, index) => ({
+          ...entry,
+          hypothesis: typedHypothesesById.get(entry.branchId)?.statement ?? plan.steps[index]?.thought,
+          verdict: entry.status === 'failed'
+            ? 'failed' as const
+            : entry.status === 'skipped'
+              ? 'skipped' as const
+              : entry.rowCount === 0
+                ? 'contradicted' as const
+              : 'inconclusive' as const,
+          ...(entry.status === 'observed' && entry.resultFingerprint
+            ? {
+                validator: {
+                  version: 1 as const,
+                  kind: typedHypothesesById.get(entry.branchId)?.validatorKind
+                    ?? inferResearchValidatorKind(plan.steps[index]?.thought ?? '', plan.steps[index]?.expectation ?? ''),
+                  // This proves that the branch completed the deterministic
+                  // receipt-bound observation. It deliberately does not claim
+                  // the hypothesis was true: rows/correlation alone remain
+                  // inconclusive until a stronger domain-specific predicate is
+                  // supplied by a future validator.
+                  evaluated: true,
+                  ...(entry.rowCount === 0 ? { outcome: 'contradicts_observation' as const } : {}),
+                  receiptFingerprints: [entry.resultFingerprint],
+                },
+              }
+            : {}),
+          counterEvidenceFactIds: entry.rowCount === 0 ? entry.facts.slice(0, 1) : [],
+        })),
+        stoppingReason: researchLedger.stoppingReason,
       });
       // A query that ran and matched 0 rows STILL executed — treat it as a clean,
       // grounded execution (not "no result"), so an empty answer is surfaced as
@@ -5608,15 +5864,16 @@ function analyticalFailureSummary(
       // finding; narrating only the one result the executor happened to carry
       // reported a single fact and discarded the rest, which is the visible
       // half of "research answers one question instead of telling a story".
-      const researchStory = !needsClarification && plan.steps.length > 0
+      const researchStory = !needsClarification && researchLedgerV2.entries.length > 0
         ? synthesizeResearchNarrative({
           question: request.question,
-          branches: researchRuns.map((branch, index) => ({
-            statement: plan.steps[index]?.thought ?? branch.question ?? '',
-            produced: branch.status === 'ready'
-              && ((branch.resultPreview as { rows?: unknown[] } | undefined)?.rows?.length ?? 0) > 0,
-            ...(branch.summary ? { summary: branch.summary } : {}),
-            ...(branch.status ? { status: branch.status } : {}),
+          branches: researchLedgerV2.entries.map((entry) => ({
+            statement: entry.hypothesis ?? entry.question,
+            produced: entry.status === 'observed',
+            verdict: entry.verdict,
+            counterEvidenceFactIds: entry.counterEvidenceFactIds,
+            ...(entry.error ? { summary: entry.error } : {}),
+            status: entry.status,
           })),
         })
         : undefined;
@@ -5638,8 +5895,11 @@ function analyticalFailureSummary(
             : plan.done
               ? 'Prepared a direct grounded-answer plan.'
               : 'Prepared a grounded research plan over real DQL assets.');
+      const scopedSummary = !needsClarification && researchLedgerV2.limitedScope
+        ? `Limited research scope: fewer than three groundable branches were available. ${summary}`
+        : summary;
       return {
-        summary,
+        summary: scopedSummary,
         answer: plan.followUp?.question ?? narration?.summary
           ?? (researchZeroRows ? 'The query executed cleanly and matched 0 rows.' : undefined)
           ?? researchRun?.summary,
@@ -5650,7 +5910,9 @@ function analyticalFailureSummary(
           ? []
           : [agentRunArtifact('research_run', 'Research plan', {
               plan,
+              typedResearchPlan,
               researchLedger,
+              researchLedgerV2,
               researchRun,
               researchRuns,
               researchRunId: researchRun?.id,
@@ -5699,6 +5961,16 @@ function analyticalFailureSummary(
                   : 'The query executed cleanly against real data and returned rows.')
               : 'No executed result was available; the output stays exploratory pending review.',
             { rowCount: Array.isArray(researchResultRecord?.rows) ? researchResultRecord.rows.length : 0 },
+          ),
+          agentRunEvaluation(
+            'research-scope',
+            'Research scope',
+            !researchLedgerV2.limitedScope,
+            researchLedgerV2.limitedScope ? 'warning' : 'info',
+            researchLedgerV2.limitedScope
+              ? `Limited research scope: ${researchLedgerV2.groundableBranchCount} of at least 3 branches produced groundable evidence.`
+              : `${researchLedgerV2.groundableBranchCount} groundable branches were retained with verdicts and counter-evidence slots.`,
+            { groundableBranchCount: researchLedgerV2.groundableBranchCount, limitedScope: researchLedgerV2.limitedScope },
           ),
         ],
         nextActions: needsClarification
@@ -6219,7 +6491,73 @@ function analyticalFailureSummary(
       durationMs: Date.now() - startedAt,
       truncated: pack.retrievalDiagnostics.topRejected.length > 0,
     });
-    return applyContextPackCompatibility(evidence, pack, request.selectedEvidenceId);
+    // Preserve real snapshot/lane outcomes for the router receipt. These are
+    // not reconstructed later from candidate IDs: a source with no selected
+    // card can be empty, stale, errored, or intentionally skipped.
+    const sourceCoverage: ContextSourceCoverageV1[] = [];
+    const fusionLanes = pack.retrievalDiagnostics.fusion?.lanes;
+    const retrievalLaneStates = Object.values(fusionLanes ?? {});
+    const retrievalErrored = retrievalLaneStates.length > 0
+      && retrievalLaneStates.every((item) => item.status === 'error');
+    const retrievalSkipped = retrievalLaneStates.length > 0
+      && retrievalLaneStates.every((item) => item.status === 'skipped');
+    const snapshotStale = /\bstale\b|out[- ]of[- ]date/i.test(pack.warnings.join(' '));
+    const coverageStatus = (hasCandidate: boolean): 'available' | 'empty' | 'stale' | 'errored' | 'skipped' => {
+      if (snapshotStale) return 'stale';
+      if (hasCandidate) return 'available';
+      if (retrievalErrored) return 'errored';
+      if (retrievalSkipped) return 'skipped';
+      return 'empty';
+    };
+    const sourceDescriptors: Array<{
+      source: ContextSourceCoverageV1['source'];
+      matches: (candidate: AgentRetrievalEvidence['candidates'][number]) => boolean;
+    }> = [
+      { source: 'certified', matches: (candidate) => candidate.kind === 'certified_block' },
+      { source: 'semantic', matches: (candidate) => candidate.kind === 'semantic_metric' || candidate.kind === 'semantic_member' || candidate.trustTier === 'semantic' },
+      { source: 'governed_relational', matches: (candidate) => candidate.kind === 'dql_modeling' || (candidate.relationshipEvidence?.length ?? 0) > 0 },
+      { source: 'exploratory', matches: (candidate) => candidate.kind === 'dbt_model' || candidate.kind === 'dbt_source' || candidate.kind === 'sql_table' || candidate.kind === 'sql_column' },
+      { source: 'dbt_manifest', matches: (candidate) => candidate.kind === 'dbt_model' || candidate.kind === 'dbt_source' },
+      { source: 'runtime_schema', matches: (candidate) => candidate.kind === 'sql_table' || candidate.kind === 'sql_column' },
+    ];
+    // `compatible` is declared immediately below. Build IDs from the adapter
+    // output first, then retain them unchanged through compatibility filtering.
+    const compatible = applyContextPackCompatibility(evidence, pack, request.selectedEvidenceId);
+    for (const descriptor of sourceDescriptors) {
+      const ids = compatible.candidates
+        .filter(descriptor.matches)
+        .map((candidate) => candidate.qualifiedId ?? candidate.id)
+        .slice(0, 32);
+      sourceCoverage.push({
+        version: 1,
+        source: descriptor.source,
+        status: coverageStatus(ids.length > 0),
+        candidateIds: ids,
+        ...(snapshotStale ? { reason: 'The snapshot freshness warning marked this source stale.' } : {}),
+      });
+    }
+    const lane = pack.retrievalDiagnostics.fusion?.lanes?.vector;
+    if (lane) {
+      sourceCoverage.push({
+        version: 1,
+        source: 'vector',
+        status: lane.status === 'ok' ? 'available' : lane.status === 'error' ? 'errored' : lane.status === 'empty' ? 'empty' : 'skipped',
+        candidateIds: [],
+        ...(lane.error ? { reason: lane.error } : lane.skippedReason ? { reason: lane.skippedReason } : {}),
+      });
+    }
+    const hasConversation = Boolean(request.conversationContext && Object.keys(request.conversationContext).length > 0);
+    sourceCoverage.push({
+      version: 1,
+      source: 'conversation',
+      status: hasConversation ? 'available' : 'skipped',
+      candidateIds: [],
+      reason: hasConversation ? 'Persisted conversation context was supplied for this turn.' : 'No persisted conversation context was supplied for this turn.',
+    });
+    return {
+      ...compatible,
+      diagnostics: { ...compatible.diagnostics, sourceCoverage },
+    };
   };
 
   const buildRankedAgentRunCatalogContext = async (request: AgentRunRequest): Promise<string> => {
@@ -11335,6 +11673,7 @@ function analyticalFailureSummary(
             parsed.request.threadId,
             parsed.request.conversationContext,
             parsed.request.question,
+            Boolean(parsed.request.selectedEvidenceId),
           );
           // The persisted thread is authoritative for prior turns. Raw client
           // history would duplicate the same conversation into the prompt a

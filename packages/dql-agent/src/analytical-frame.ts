@@ -31,8 +31,18 @@ export function projectResolvedAnalyticalFrame(input: {
         ...sourceFrame.metricConceptIds.filter((metricId) => metricId !== sourceFrame.metricConceptIds[0]),
       ])
     : unique(resolvedMeasureIds);
+  const sourceTimeDimensionId = sourceFrame.timeContext?.timeDimensionId;
+  const sourceTimeIsGrouped = Boolean(sourceTimeDimensionId && sourceFrame.dimensions.some((binding) =>
+    binding.dimensionId === sourceTimeDimensionId && binding.role === 'group_by'));
   const groupedDimensionIds = unique(plan.query.dimensions.flatMap((binding) =>
-    binding.status === 'resolved' && binding.qualifiedId ? [binding.qualifiedId] : []));
+    binding.status === 'resolved' && binding.qualifiedId
+      // The ordinary RAP query list intentionally carries the time phrase for
+      // binding/audit.  It must not silently turn a V2 time_axis into a
+      // group_by role when the source frame did not request a time-series
+      // output; that changes a current-vs-prior ranking into per-day rows.
+      && (binding.qualifiedId !== sourceTimeDimensionId || sourceTimeIsGrouped)
+      ? [binding.qualifiedId]
+      : []));
   const rankingRequested = Boolean(sourceFrame.ranking || plan.query.order || plan.query.limit !== undefined);
   const dimensions: AnalyticalDimensionBindingV2[] = groupedDimensionIds.flatMap((dimensionId, index) => [
     { dimensionId, role: 'group_by' as const },
