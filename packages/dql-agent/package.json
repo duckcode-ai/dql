@@ -14,7 +14,7 @@
   },
   "scripts": {
     "build": "rm -rf dist tsconfig.tsbuildinfo && tsc -b",
-    "test": "vitest run --passWithNoTests",
+    "test": "node ./scripts/test-lanes.mjs",
     "clean": "rm -rf dist tsconfig.tsbuildinfo",
     "prepublishOnly": "pnpm run build"
   },
