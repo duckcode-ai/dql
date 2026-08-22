@@ -56,7 +56,7 @@ describe('runtime driver run projection', () => {
     expect(evalRouteForRun('certified_answer')).toBe('certified');
     expect(evalRouteForRun('semantic_answer')).toBe('certified');
     expect(evalRouteForRun('generated_answer')).toBe('generated_sql');
-    expect(evalRouteForRun('blocked')).toBe('clarify');
+    expect(evalRouteForRun('blocked')).toBe('blocked');
     expect(evalRouteForRun('conversation')).toBeUndefined();
   });
 
@@ -76,7 +76,45 @@ describe('runtime driver run projection', () => {
       route: 'blocked', status: 'blocked', trustState: 'blocked',
       evaluations: [{ id: 'grounding', label: 'Answer grounding', passed: false, severity: 'warning', message: 'no' }],
     } as Partial<AgentRun>));
-    expect(projected).toMatchObject({ kind: 'no_answer', route: 'clarify', refusalCode: 'grounding' });
+    expect(projected).toMatchObject({ kind: 'no_answer', route: 'blocked', refusalCode: 'grounding' });
+  });
+
+  it('projects persisted route, retrieval coverage, and telemetry without fabricating a context pack', () => {
+    const persisted = run({
+      route: 'generated_answer',
+      trustState: 'review_required',
+      telemetry: {
+        version: 1,
+        stageDurationsMs: { total: 25 },
+        providerRoundTrips: 1,
+        toolCalls: 3,
+        sqlExecutions: 1,
+        repairs: 0,
+        egressReceipts: 1,
+        fallbackReason: 'none',
+      },
+      routeDecision: {
+        action: 'answer', confidence: 0.8, followsUp: false, reason: 'Qualified generated path.',
+        retrievalEvidence: { snapshotId: 'snapshot-1', candidateCount: 4, candidateIds: ['dbt:model:orders'] },
+        terminalOutcome: { kind: 'modeling_gap', code: 'ANALYTICAL_MODELING_GAP', message: 'No safe customer relationship.', candidateIds: [] },
+        analyticalCascadeDecision: {
+          version: 1,
+          requirements: { version: 1, measures: ['revenue'], dimensions: [], entityTerms: [], entityDisplayTerms: [], memberTerms: [] },
+          sourceCoverage: [{ version: 1, source: 'exploratory', status: 'available', candidateIds: ['dbt:model:orders'] }],
+          attempts: [],
+          planFrozen: false,
+          stopReason: 'coverage_gap',
+        },
+      },
+    } as Partial<AgentRun>);
+
+    expect(projectRuntimeRun(persisted)).toMatchObject({
+      route: 'generated_sql',
+      retrievalCandidateCount: 4,
+      toolCallCount: 3,
+      terminalOutcome: { kind: 'modeling_gap', code: 'ANALYTICAL_MODELING_GAP' },
+      sourceCoverage: [{ source: 'exploratory', status: 'available' }],
+    });
   });
 });
 

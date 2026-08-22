@@ -46,6 +46,7 @@ import {
   projectEmbeddingProvider,
   answerAgentic,
   qualifyAuthorizationReferences,
+  scopeContextPackToExploratoryCandidateClosure,
   createAnalystLaneHandler,
   parseProposal,
   renderContextValidationRefusalForUser,
@@ -53,7 +54,12 @@ import {
   resolveOrchestratorPolicy,
   type AgenticLane,
 } from '@duckcodeailabs/dql-agent';
-import { CassetteStore, resolveCassetteModeFromEnv, withCassette } from '../../commands/agent-eval-cassette.js';
+import {
+  CassetteStore,
+  evalCassetteCanonicalizationV2,
+  resolveCassetteModeFromEnv,
+  withCassette,
+} from '../../commands/agent-eval-cassette.js';
 import { buildManifest, normalizeDqlArtifactReference, resolveDbtManifestPath, type ProviderEgressReceiptV1 } from '@duckcodeailabs/dql-core';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
@@ -342,6 +348,39 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
 }
 
+/**
+ * A precomputed exploratory pack is an optimization/witness only. The runner
+ * independently derives the pack from the immutable router-selected IDs and
+ * accepts the witness only when its snapshot, source fingerprint, physical
+ * relations, and metadata object set are exactly the same. This prevents a
+ * caller from replacing a safe same-snapshot closure with a broader one.
+ */
+function exploratoryClosureMatches(
+  derived: LocalContextPack | undefined,
+  witness: LocalContextPack,
+): boolean {
+  if (!derived) return false;
+  if (derived.knowledgeLens.snapshotId !== witness.knowledgeLens.snapshotId) return false;
+  if (derived.freshness.fingerprint !== witness.freshness.fingerprint) return false;
+  const normalize = (value: string): string => value
+    .trim()
+    .split('.')
+    .map((part) => part.trim().replace(/^["`\[]|["`\]]$/g, '').toLowerCase())
+    .filter(Boolean)
+    .join('.');
+  const sameSet = (left: readonly string[], right: readonly string[]): boolean => {
+    if (left.length !== right.length) return false;
+    const rightSet = new Set(right);
+    return left.every((value) => rightSet.has(value));
+  };
+  const derivedRelations = [...new Set(derived.allowedSqlContext.relations.map((relation) => normalize(relation.relation)))].sort();
+  const witnessRelations = [...new Set(witness.allowedSqlContext.relations.map((relation) => normalize(relation.relation)))].sort();
+  if (!sameSet(derivedRelations, witnessRelations)) return false;
+  const derivedObjects = [...new Set(derived.objects.map((object) => object.objectKey))].sort();
+  const witnessObjects = [...new Set(witness.objects.map((object) => object.objectKey))].sort();
+  return sameSet(derivedObjects, witnessObjects);
+}
+
 function truncateForFitPrompt(value: string | undefined, max: number): string | undefined {
   if (!value) return undefined;
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
@@ -483,10 +522,49 @@ function agenticLaneForRequest(req: AgentRunRequest): AgenticLane {
   return req.orchestrationMode === 'research' ? 'research' : 'generated';
 }
 
-export function applyEvalCassette(provider: AgentProvider): AgentProvider {
+export function applyEvalCassette(provider: AgentProvider, projectRoot: string): AgentProvider {
   const dir = process.env.DQL_EVAL_CASSETTE_DIR;
   if (!dir) return provider;
-  return withCassette(provider, new CassetteStore(dir), resolveCassetteModeFromEnv(process.env));
+  return withCassette(
+    provider,
+    new CassetteStore(dir),
+    resolveCassetteModeFromEnv(process.env),
+    evalCassetteCanonicalizationV2(projectRoot),
+  );
+}
+
+/**
+ * Create a replay-only provider when the runtime is launched for an offline
+ * evaluation. This is intentionally unavailable outside explicit cassette
+ * replay: recording and live modes still require a configured real provider.
+ *
+ * The cassette's recorded provider identity is part of its key. Recover it
+ * from a single-provider cassette directory instead of borrowing a user's
+ * active provider or guessing from an API setting. The base provider cannot
+ * make a network call; replay misses remain CassetteMissError failures.
+ */
+export function createEvalCassetteReplayProvider(projectRoot: string): AgentProvider | undefined {
+  const dir = process.env.DQL_EVAL_CASSETTE_DIR;
+  if (!dir || resolveCassetteModeFromEnv(process.env) !== 'replay') return undefined;
+
+  const store = new CassetteStore(dir);
+  const providerNames = store.providerNames();
+  const providerName = providerNames.length === 1 ? asAgentProviderName(providerNames[0]!) : undefined;
+  if (!providerName) return undefined;
+
+  return withCassette({
+    name: providerName,
+    available: async () => true,
+    generate: async () => {
+      throw new Error('Eval cassette replay miss: no live provider is available.');
+    },
+  }, store, 'replay', evalCassetteCanonicalizationV2(projectRoot));
+}
+
+function asAgentProviderName(value: string): AgentProvider['name'] | undefined {
+  return value === 'claude' || value === 'openai' || value === 'gemini' || value === 'ollama'
+    ? value
+    : undefined;
 }
 
 /**
@@ -503,7 +581,7 @@ export function createGovernedTextProvider(
   const spec = SPECS[id];
   if (!spec) return undefined;
   try {
-    return applyEvalCassette(spec.create(projectRoot));
+    return applyEvalCassette(spec.create(projectRoot), projectRoot);
   } catch {
     return undefined;
   }
@@ -513,7 +591,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
   return {
     async run(req, emit, signal) {
       const spec = SPECS[id];
-      const rawProvider = applyEvalCassette(providerOverride ?? spec.create(req.projectRoot));
+      const rawProvider = applyEvalCassette(providerOverride ?? spec.create(req.projectRoot), req.projectRoot);
       const isResearch = req.orchestrationMode === 'research';
       const maxProviderDispatches = isResearch ? 8 : 4;
       const researchRowsOptIn = isResearch && req.researchResultRowsOptIn === true;
@@ -807,6 +885,68 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           const schemaContext = req.getSchemaContext && shouldLoadSchemaContext(contextPack, Boolean(semanticLayer))
             ? await req.getSchemaContext(question, contextPack).catch(() => [])
             : [];
+          // The router's exploratory candidate IDs are server-owned execution
+          // authority. Once that tier is selected, provider prompt/schema
+          // context must be the candidate closure rather than the broad
+          // retrieval pack. The latter remains available to the host for
+          // receipts only and cannot be used to introduce another relation.
+          const forcedExploratoryTier = req.selectedCascadeTier === 'exploratory_sql';
+          // Re-derive the closure from the broad immutable pack and the
+          // router-selected IDs. `preparedExploratoryContextPack` is only a
+          // server-side consistency witness; it cannot override or widen the
+          // derivation even if a future caller constructs an AgentRunner
+          // request directly.
+          const derivedExploratoryContextPack = forcedExploratoryTier
+            ? scopeContextPackToExploratoryCandidateClosure(contextPack, req.exploratoryCandidateIds)
+            : undefined;
+          const closureWitnessMatches = !req.preparedExploratoryContextPack
+            || exploratoryClosureMatches(
+              derivedExploratoryContextPack,
+              req.preparedExploratoryContextPack,
+            );
+          const exploratoryContextPack = closureWitnessMatches
+            ? derivedExploratoryContextPack
+            : undefined;
+          if (forcedExploratoryTier && (!exploratoryContextPack || !req.exploratoryCandidateIds?.length)) {
+            const text = 'The router-selected exploratory path no longer has a complete same-snapshot physical closure, so DQL did not send SQL generation or execute a query.';
+            emit({
+              kind: 'tool_result',
+              id: 'governed_answer',
+              output: {
+                kind: 'no_answer',
+                sourceTier: 'no_answer',
+                certification: 'analyst_review_required',
+                reviewStatus: 'none',
+                confidence: 0,
+                text,
+                answer: text,
+                refusalCode: 'grounding_gap',
+                refusalDetails: {
+                  code: closureWitnessMatches ? 'EXPLORATORY_CLOSURE_UNAVAILABLE' : 'EXPLORATORY_CLOSURE_MISMATCH',
+                  message: text,
+                },
+                contextPack,
+                providerUsed: provider.name,
+              },
+            });
+            return;
+          }
+          const answerContextPack = forcedExploratoryTier
+            ? exploratoryContextPack ?? contextPack
+            : contextPack;
+          const normalizeQualifiedRelation = (value: string): string => value
+            .trim()
+            .split('.')
+            .map((part) => part.trim().replace(/^["`\[]|["`\]]$/g, '').toLowerCase())
+            .filter(Boolean)
+            .join('.');
+          const closureRelations = new Set(
+            (exploratoryContextPack?.allowedSqlContext.relations ?? [])
+              .map((relation) => normalizeQualifiedRelation(relation.relation)),
+          );
+          const answerSchemaContext = forcedExploratoryTier && closureRelations.size > 0
+            ? schemaContext.filter((table) => closureRelations.has(normalizeQualifiedRelation(table.relation)))
+            : schemaContext;
           const schemaDurationMs = Date.now() - schemaStartedAt;
           const selectedBlockHints = shouldUseSelectedBlockHint(req, question, followUp)
             ? extractSelectedBlockHints(req)
@@ -828,8 +968,8 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             question,
             ...(conversationSnapshot ? { conversationSnapshot } : {}),
             ...(memoryContext ? { memoryContext } : {}),
-            schemaContext: prepareServerOwnedProviderSchemaContext(schemaContext),
-            ...(contextPack ? { contextPack } : {}),
+            schemaContext: prepareServerOwnedProviderSchemaContext(answerSchemaContext),
+            ...(answerContextPack ? { contextPack: answerContextPack } : {}),
             skills,
             ...(followUp ? { followUp } : {}),
           }), {
@@ -844,6 +984,12 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             question,
             ...(req.resolvedAnalyticalPlan
               ? { resolvedAnalyticalPlan: req.resolvedAnalyticalPlan }
+              : {}),
+            ...(req.selectedCascadeTier
+              ? { selectedCascadeTier: req.selectedCascadeTier }
+              : {}),
+            ...(req.exploratoryCandidateIds?.length
+              ? { exploratoryCandidateIds: [...req.exploratoryCandidateIds] }
               : {}),
             ...(req.generatedProposalTargetFingerprint
               ? { generatedProposalTargetFingerprint: req.generatedProposalTargetFingerprint }
@@ -865,7 +1011,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             followUp,
             conversationSnapshot,
             memoryContext,
-            schemaContext,
+            schemaContext: answerSchemaContext,
             semanticLayer,
             // Runtime-aware executability for metric SELECTION: with a full
             // semantic runtime active (dbt Cloud / MetricFlow CLI) every
@@ -878,7 +1024,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
                     semanticRuntimeActive !== 'native' || semanticLayer.canComposeMetric(metricName),
                 }
               : {}),
-            contextPack,
+            contextPack: answerContextPack,
             // The project's configured embedder (dql.config.json ai.embeddings).
             // Without it, matchSemanticMetric falls back to the offline hashed
             // provider, whose vectors can never ground a match on similarity
@@ -899,6 +1045,33 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
               : undefined,
             executeGeneratedSql: req.executeGeneratedSql
               ? async (...args) => { guardSnapshot(); sqlExecutions += 1; return req.executeGeneratedSql!(...args); }
+              : undefined,
+            prepareExploratorySqlExecution: req.prepareExploratorySqlExecution
+              ? async (sql, ...args) => {
+                  guardSnapshot();
+                  // The execution host repeats this validation immediately
+                  // before capability minting. Keep the same exact-qualified
+                  // closure check here as well, before the provider runner can
+                  // even invoke that host boundary. A provider response cannot
+                  // use another same-snapshot relation merely because it was
+                  // present in broad retrieval diagnostics.
+                  if (forcedExploratoryTier && exploratoryContextPack) {
+                    const proposalValidation = validateSqlAgainstLocalContext(sql, exploratoryContextPack, {
+                      runtimeSchema: answerSchemaContext,
+                    });
+                    const outsideClosure = !proposalValidation.ok
+                      || proposalValidation.referencedRelations.some((relation) =>
+                        !closureRelations.has(normalizeQualifiedRelation(relation)),
+                      );
+                    if (outsideClosure) {
+                      throw Object.assign(
+                        new Error('The generated SQL references a relation outside the router-selected physical closure, so it was not executed.'),
+                        { code: 'UNAUTHORIZED_SQL' },
+                      );
+                    }
+                  }
+                  return req.prepareExploratorySqlExecution!(sql, ...args);
+                }
               : undefined,
             executeAgenticGeneratedSql: req.executeAgenticGeneratedSql
               ? async (capability, sql, artifact) => {

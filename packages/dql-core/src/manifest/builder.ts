@@ -131,6 +131,10 @@ export interface ManifestBuildOptions {
 export function collectInputFiles(options: ManifestBuildOptions): string[] {
   const { projectRoot } = options;
   const files = new Set<string>();
+  // Cache overlapping directory walks here as well. `sync dbt` asks for these
+  // tracked files before a cache lookup, so repeated block/domain roots must
+  // not turn a warm-cache check into several 4k-file traversals.
+  const scanCache = createManifestScanCache();
 
   const configPath = join(projectRoot, 'dql.config.json');
   if (existsSync(configPath)) files.add(configPath);
@@ -143,27 +147,27 @@ export function collectInputFiles(options: ManifestBuildOptions): string[] {
 
   const blockDirs = ['blocks', 'domains', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
   for (const dir of blockDirs) {
-    for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dql'])) files.add(f);
+    for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dql'], scanCache)) files.add(f);
   }
 
   const businessViewDirs = ['blocks', 'business-views', 'domains', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
   for (const dir of businessViewDirs) {
-    for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dql'])) files.add(f);
+    for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dql'], scanCache)) files.add(f);
   }
 
   const termDirs = ['terms', 'blocks', 'business-views', 'domains', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
   for (const dir of termDirs) {
-    for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dql'])) files.add(f);
+    for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dql'], scanCache)) files.add(f);
   }
 
   const notebookDirs = ['notebooks', 'domains', 'blocks', 'dashboards', 'workbooks', ...(options.extraNotebookDirs ?? [])];
   for (const dir of notebookDirs) {
-    for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dqlnb'])) files.add(f);
+    for (const f of scanFilesRecursive(join(projectRoot, dir), ['.dqlnb'], scanCache)) files.add(f);
   }
 
   const semanticDir = resolveSemanticPath(projectRoot, config);
   if (existsSync(semanticDir)) {
-    for (const f of scanFilesRecursive(semanticDir, ['.yaml', '.yml'])) files.add(f);
+    for (const f of scanFilesRecursive(semanticDir, ['.yaml', '.yml'], scanCache)) files.add(f);
   }
 
   if (options.dbtManifestPath && existsSync(options.dbtManifestPath)) {
@@ -175,7 +179,7 @@ export function collectInputFiles(options: ManifestBuildOptions): string[] {
   }
 
   if (config.manifestVersion === 3 && config.modeling?.mode === 'dbt-first') {
-    for (const f of scanFilesRecursive(join(projectRoot, 'domains'), ['.yaml', '.yml'])) files.add(f);
+    for (const f of scanFilesRecursive(join(projectRoot, 'domains'), ['.yaml', '.yml'], scanCache)) files.add(f);
     const registry = loadDomainPackageRegistry(projectRoot);
     for (const f of manifestKnowledgeSkillInputFiles(projectRoot, registry)) files.add(f);
   }
@@ -195,6 +199,12 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   const { projectRoot, dqlVersion = '0.6.0' } = options;
 
   const diagnostics: ManifestDiagnostic[] = [];
+  // A large project commonly stores blocks, terms, and domains under the same
+  // directory tree. The manifest scanner needs distinct declaration passes,
+  // but it must not re-walk that tree or re-read the same source three times
+  // during one build. Source text is always read freshly; unchanged text can
+  // reuse a bounded parsed AST across adjacent builds.
+  const scanCache = createManifestScanCache(projectRoot);
 
   // Load project config
   const config = loadProjectConfig(projectRoot);
@@ -225,22 +235,22 @@ export function buildManifest(options: ManifestBuildOptions): DQLManifest {
   const packageRegistry = dbtFirstV3 ? loadDomainPackageRegistry(projectRoot) : undefined;
   const domains = packageRegistry
     ? Object.fromEntries(packageRegistry.values().map((pkg) => [pkg.id, pkg.domain]))
-    : scanDomains(projectRoot, domainDirs, diagnostics);
+    : scanDomains(projectRoot, domainDirs, diagnostics, scanCache);
   if (!packageRegistry) validateDomainHierarchy(domains, diagnostics);
 
   // Scan blocks
   const blockDirs = ['blocks', 'domains', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
-  const blockScan = scanBlocks(projectRoot, blockDirs, diagnostics, datalexRegistry);
+  const blockScan = scanBlocks(projectRoot, blockDirs, diagnostics, datalexRegistry, scanCache);
   const blocks = blockScan.blocks;
   const knowledgeBlocks = blockScan.all;
 
   // Scan business composition views
   const businessViewDirs = ['blocks', 'business-views', 'domains', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
-  const businessViews = scanBusinessViews(projectRoot, businessViewDirs, diagnostics);
+  const businessViews = scanBusinessViews(projectRoot, businessViewDirs, diagnostics, scanCache);
 
   // Scan business glossary terms
   const termDirs = ['terms', 'blocks', 'business-views', 'domains', 'dashboards', 'workbooks', ...(options.extraBlockDirs ?? [])];
-  const terms = scanTerms(projectRoot, termDirs, diagnostics);
+  const terms = scanTerms(projectRoot, termDirs, diagnostics, scanCache);
 
   if (packageRegistry) {
     applyDomainPackageOwnership(projectRoot, packageRegistry, blocks, businessViews, terms, diagnostics);
@@ -647,9 +657,58 @@ function resolveSemanticPath(projectRoot: string, config: ProjectConfig): string
 
 // ---- Recursive File Scanner ----
 
-function scanFilesRecursive(dir: string, extensions: string[]): string[] {
+interface ManifestScanCache {
+  filesByDirectory: Map<string, string[]>;
+  sources: Map<string, string>;
+  parsedSources?: Map<string, CachedManifestSource>;
+}
+
+interface CachedManifestSource {
+  source: string;
+  ast: ReturnType<Parser['parse']>;
+}
+
+// Keep only the most recently compiled project roots. Source text is compared
+// before any AST reuse, so this is a parser cache rather than a stale-source
+// cache; it makes watcher-triggered one-file edits avoid reparsing the other
+// thousands of unchanged DQL declarations.
+const MAX_MANIFEST_PARSE_CACHE_PROJECTS = 4;
+const manifestParseCaches = new Map<string, Map<string, CachedManifestSource>>();
+
+function createManifestScanCache(projectRoot?: string): ManifestScanCache {
+  let parsedSources: Map<string, CachedManifestSource> | undefined;
+  if (projectRoot) {
+    parsedSources = manifestParseCaches.get(projectRoot);
+    if (parsedSources) {
+      // Map insertion order doubles as a tiny LRU.
+      manifestParseCaches.delete(projectRoot);
+      manifestParseCaches.set(projectRoot, parsedSources);
+    } else {
+      parsedSources = new Map();
+      manifestParseCaches.set(projectRoot, parsedSources);
+      while (manifestParseCaches.size > MAX_MANIFEST_PARSE_CACHE_PROJECTS) {
+        const oldest = manifestParseCaches.keys().next().value;
+        if (!oldest) break;
+        manifestParseCaches.delete(oldest);
+      }
+    }
+  }
+  return { filesByDirectory: new Map(), sources: new Map(), parsedSources };
+}
+
+function scanFilesRecursive(
+  dir: string,
+  extensions: string[],
+  cache?: ManifestScanCache,
+): string[] {
+  const cacheKey = `${dir}\u0000${[...extensions].sort().join(',')}`;
+  const cached = cache?.filesByDirectory.get(cacheKey);
+  if (cached) return cached;
   const results: string[] = [];
-  if (!existsSync(dir)) return results;
+  if (!existsSync(dir)) {
+    cache?.filesByDirectory.set(cacheKey, results);
+    return results;
+  }
 
   const entries = readdirSync(dir, { withFileTypes: true });
   for (const entry of entries) {
@@ -657,12 +716,34 @@ function scanFilesRecursive(dir: string, extensions: string[]): string[] {
     if (entry.isDirectory()) {
       // Skip hidden dirs and node_modules
       if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
-      results.push(...scanFilesRecursive(fullPath, extensions));
+      results.push(...scanFilesRecursive(fullPath, extensions, cache));
     } else if (entry.isFile() && extensions.includes(extname(entry.name))) {
       results.push(fullPath);
     }
   }
+  cache?.filesByDirectory.set(cacheKey, results);
   return results;
+}
+
+function readManifestSource(filePath: string, cache?: ManifestScanCache): string {
+  const cached = cache?.sources.get(filePath);
+  if (cached !== undefined) return cached;
+  const source = readFileSync(filePath, 'utf-8');
+  cache?.sources.set(filePath, source);
+  return source;
+}
+
+function parseManifestSource(
+  source: string,
+  relPath: string,
+  filePath: string,
+  cache?: ManifestScanCache,
+): ReturnType<Parser['parse']> {
+  const cached = cache?.parsedSources?.get(filePath);
+  if (cached?.source === source) return cached.ast;
+  const ast = new Parser(source, relPath).parse();
+  cache?.parsedSources?.set(filePath, { source, ast });
+  return ast;
 }
 
 // ---- Block Scanning ----
@@ -671,23 +752,23 @@ function scanDomains(
   projectRoot: string,
   dirs: string[],
   diagnostics?: ManifestDiagnostic[],
+  scanCache?: ManifestScanCache,
 ): Record<string, ManifestDomain> {
   const domains: Record<string, ManifestDomain> = {};
   const seenFiles = new Set<string>();
 
   for (const dir of dirs) {
     const dirPath = join(projectRoot, dir);
-    const files = scanFilesRecursive(dirPath, ['.dql']);
+    const files = scanFilesRecursive(dirPath, ['.dql'], scanCache);
 
     for (const filePath of files) {
       if (seenFiles.has(filePath)) continue;
       seenFiles.add(filePath);
       const relPath = relative(projectRoot, filePath);
       try {
-        const source = readFileSync(filePath, 'utf-8');
+        const source = readManifestSource(filePath, scanCache);
         if (!/(^|\n)\s*domain\s+"/.test(source)) continue;
-        const parser = new Parser(source, relPath);
-        const ast = parser.parse();
+        const ast = parseManifestSource(source, relPath, filePath, scanCache);
 
         for (const stmt of ast.statements) {
           const domain = stmt as any;
@@ -763,6 +844,7 @@ function scanBlocks(
   dirs: string[],
   diagnostics?: ManifestDiagnostic[],
   datalexRegistry?: DataLexContractRegistry,
+  scanCache?: ManifestScanCache,
 ): { blocks: Record<string, ManifestBlock>; all: ManifestBlock[] } {
   const blocks: Record<string, ManifestBlock> = {};
   const all: ManifestBlock[] = [];
@@ -770,16 +852,15 @@ function scanBlocks(
 
   for (const dir of dirs) {
     const dirPath = join(projectRoot, dir);
-    const files = scanFilesRecursive(dirPath, ['.dql']);
+    const files = scanFilesRecursive(dirPath, ['.dql'], scanCache);
 
     for (const filePath of files) {
       if (seenFiles.has(filePath)) continue;
       seenFiles.add(filePath);
       const relPath = relative(projectRoot, filePath);
       try {
-        const source = readFileSync(filePath, 'utf-8');
-        const parser = new Parser(source, relPath);
-        const ast = parser.parse();
+        const source = readManifestSource(filePath, scanCache);
+        const ast = parseManifestSource(source, relPath, filePath, scanCache);
         collectContractDiagnostics(ast, relPath, diagnostics, datalexRegistry);
 
         for (const stmt of ast.statements) {
@@ -839,23 +920,23 @@ function scanBusinessViews(
   projectRoot: string,
   dirs: string[],
   diagnostics?: ManifestDiagnostic[],
+  scanCache?: ManifestScanCache,
 ): Record<string, ManifestBusinessView> {
   const views: Record<string, ManifestBusinessView> = {};
   const seenFiles = new Set<string>();
 
   for (const dir of dirs) {
     const dirPath = join(projectRoot, dir);
-    const files = scanFilesRecursive(dirPath, ['.dql']);
+    const files = scanFilesRecursive(dirPath, ['.dql'], scanCache);
 
     for (const filePath of files) {
       if (seenFiles.has(filePath)) continue;
       seenFiles.add(filePath);
       const relPath = relative(projectRoot, filePath);
       try {
-        const source = readFileSync(filePath, 'utf-8');
+        const source = readManifestSource(filePath, scanCache);
         if (!source.includes('business_view')) continue;
-        const parser = new Parser(source, relPath);
-        const ast = parser.parse();
+        const ast = parseManifestSource(source, relPath, filePath, scanCache);
 
         for (const stmt of ast.statements) {
           const view = stmt as any;
@@ -894,23 +975,23 @@ function scanTerms(
   projectRoot: string,
   dirs: string[],
   diagnostics?: ManifestDiagnostic[],
+  scanCache?: ManifestScanCache,
 ): Record<string, ManifestTerm> {
   const terms: Record<string, ManifestTerm> = {};
   const seenFiles = new Set<string>();
 
   for (const dir of dirs) {
     const dirPath = join(projectRoot, dir);
-    const files = scanFilesRecursive(dirPath, ['.dql']);
+    const files = scanFilesRecursive(dirPath, ['.dql'], scanCache);
 
     for (const filePath of files) {
       if (seenFiles.has(filePath)) continue;
       seenFiles.add(filePath);
       const relPath = relative(projectRoot, filePath);
       try {
-        const source = readFileSync(filePath, 'utf-8');
+        const source = readManifestSource(filePath, scanCache);
         if (!source.includes('term')) continue;
-        const parser = new Parser(source, relPath);
-        const ast = parser.parse();
+        const ast = parseManifestSource(source, relPath, filePath, scanCache);
 
         for (const stmt of ast.statements) {
           const term = stmt as any;

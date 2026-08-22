@@ -55,13 +55,29 @@ jobs:
           # false-refusal rate reads 0.4 unseeded and 0.0 seeded, on the same
           # eight cases and the same model. The unseeded number was fiction.
           #
+          # DuckDB is an intentionally optional connector dependency. Install it
+          # only for this disposable seed step, matching the execution-eval
+          # workflow; the workspace's frozen pnpm install must stay connector-
+          # optional for normal DQL users.
+          # npm 10 reads workspace:* dependencies when invoked from the repo
+          # root, which makes this optional install fail before it downloads
+          # DuckDB. Give npm a disposable non-workspace prefix instead.
+          SEED_CONNECTOR_ROOT="$RUNNER_TEMP/answerability-seed-connectors"
+          mkdir -p "$SEED_CONNECTOR_ROOT"
+          printf '%s\n' '{"private":true}' > "$SEED_CONNECTOR_ROOT/package.json"
+          npm --prefix "$SEED_CONNECTOR_ROOT" install --no-save --no-package-lock --workspaces=false duckdb@1.1.3
           # Copy the fixture so the checked-in `:memory:` config is never mutated.
           cp -R apps/cli/test/fixtures/jaffle-supply-chain "$PROJ"
-          node scripts/seed-eval-warehouse.mjs --out "$PROJ/jaffle.duckdb"
+          # The dbt manifest qualifies physical relations as
+          # jaffle_shop.dev.<table>. DuckDB derives the catalog from the file
+          # name, so use that catalog and seed the matching schema rather than
+          # weakening production relation qualification for this disposable DB.
+          node scripts/seed-eval-warehouse.mjs --connector-root "$SEED_CONNECTOR_ROOT" --out "$PROJ/jaffle_shop.duckdb" --schema dev
+          DQL_TEST_DUCKDB_CONNECTOR_ROOT="$SEED_CONNECTOR_ROOT" node --test scripts/seed-eval-warehouse.test.mjs
           # The project reads `connections.default`, not `defaultConnection`.
-          node -e "const fs=require('fs');const p=process.env.PROJ+'/dql.config.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.connections={...(c.connections||{}),default:{driver:'duckdb',filepath:process.env.PROJ+'/jaffle.duckdb'}};fs.writeFileSync(p,JSON.stringify(c,null,2));"
+          node -e "const fs=require('fs');const p=process.env.PROJ+'/dql.config.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.connections={...(c.connections||{}),default:{driver:'duckdb',filepath:process.env.PROJ+'/jaffle_shop.duckdb'}};fs.writeFileSync(p,JSON.stringify(c,null,2));"
           # Fail loudly rather than reporting a green run over an empty database.
-          node -e "const fs=require('fs');const f=process.env.PROJ+'/jaffle.duckdb';if(!fs.existsSync(f)||fs.statSync(f).size<1000){console.error('Seeded warehouse missing or empty: '+f);process.exit(1);}console.log('seeded warehouse OK:',fs.statSync(f).size,'bytes');"
+          node -e "const fs=require('fs');const f=process.env.PROJ+'/jaffle_shop.duckdb';if(!fs.existsSync(f)||fs.statSync(f).size<1000){console.error('Seeded warehouse missing or empty: '+f);process.exit(1);}console.log('seeded warehouse OK:',fs.statSync(f).size,'bytes');"
         env:
           PROJ: ${{ runner.temp }}/answerability-proj
 
@@ -71,11 +87,11 @@ jobs:
           # it, and starting from the workspace root fails with "No DQL project
           # was found". Verified by running this exact sequence locally.
           #
-          # Replay against the COMMITTED cassettes, recorded from claude-sonnet-5.
-          # A miss is a failure and never reaches a live model, so this stays
-          # PR-safe while actually exercising the model path — which is what the
-          # gate was missing when it ran over an empty cassette dir and could not
-          # catch a narration truncation that failed for every ten-row answer.
+          # Replay against the committed cassettes. A miss is a failure and
+          # never reaches a live model, so this stays PR-safe while exercising
+          # the provider-dispatch path. The report separately classifies
+          # deterministic legacy migrations as orchestration replay only; they
+          # are never presented as current-provider quality evidence.
           DQL_EVAL_CASSETTE_DIR="$PROJ/test-cassettes/answerability" \
             node apps/cli/dist/index.js notebook "$PROJ" \
               --port 3479 > runtime.log 2>&1 &
@@ -92,6 +108,10 @@ jobs:
 
       - name: Answerability suite
         working-directory: ${{ runner.temp }}/answerability-proj
+        env:
+          # The runtime owns replay; the eval process receives this only to
+          # report cassette provenance without inspecting provider payloads.
+          DQL_EVAL_CASSETTE_DIR: ${{ runner.temp }}/answerability-proj/test-cassettes/answerability
         run: |
           node "$GITHUB_WORKSPACE/apps/cli/dist/index.js" agent eval agent-evals/answerability.agent-evals.yml \
             --via runtime --runtime-url http://127.0.0.1:3479 \
@@ -101,6 +121,8 @@ jobs:
 
       - name: Routing taxonomy suite
         working-directory: ${{ runner.temp }}/answerability-proj
+        env:
+          DQL_EVAL_CASSETTE_DIR: ${{ runner.temp }}/answerability-proj/test-cassettes/answerability
         run: |
           node "$GITHUB_WORKSPACE/apps/cli/dist/index.js" agent eval agent-evals/routing-taxonomy.agent-evals.yml \
             --via runtime --runtime-url http://127.0.0.1:3479 \
@@ -124,6 +146,13 @@ jobs:
               console.log('  refusal recall:    ' + pct(m.refusal_recall));
               console.log('  clarification:     ' + pct(m.clarification_rate));
               console.log('  meaning resolved:  ' + pct(m.meaning_resolved_rate) + (m.meaning_resolved_rate ? '' : '  <- clarification rate is an artifact without a provider'));
+              const cassette = report.cassetteEvidence;
+              if (cassette) {
+                console.log('  cassette replay:    ' + cassette.totalEntries + ' entry(s), ' + cassette.migratedLegacyDeterministicFixtureEntries + ' migrated legacy deterministic fixture(s), ' + cassette.syntheticDeterministicOrchestrationFixtureEntries + ' synthetic deterministic orchestration fixture(s)');
+                console.log('  provider quality:   ' + (cassette.realProviderQualityEligible
+                  ? 'eligible recorded-provider evidence'
+                  : 'excluded from provider-quality evidence (' + cassette.realProviderQualityExclusionReasons.join(', ') + ')'));
+              }
             }
           " >> "$GITHUB_STEP_SUMMARY"
           cat "$GITHUB_STEP_SUMMARY"

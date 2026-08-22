@@ -374,7 +374,10 @@ describe('AGT-010 metadata meaning evidence lanes', () => {
         objectKey: 'semantic:dimension:locations.location_name', objectType: 'semantic_dimension',
         name: 'location_name', fullName: 'semantic:locations:dimension:location_name',
         description: 'Modeled order fulfillment location.',
-        payload: { qualifiedId: 'semantic:locations:dimension:location_name' },
+        payload: {
+          qualifiedId: 'semantic:locations:dimension:location_name',
+          compatibilityFacts: ['alternative-for:region'],
+        },
       },
     ];
     const plan = buildAnalysisQuestionPlan(question, {
@@ -485,7 +488,22 @@ describe('AGT-010 metadata meaning evidence lanes', () => {
       },
       {
         objectKey: 'semantic:dimension:locations.location_name', objectType: 'semantic_dimension', name: 'location_name',
-        fullName: 'semantic:locations:dimension:location_name', payload: { qualifiedId: 'semantic:locations:dimension:location_name' },
+        fullName: 'semantic:locations:dimension:location_name', payload: {
+          qualifiedId: 'semantic:locations:dimension:location_name',
+          compatibilityFacts: ['alternative-for:region'],
+        },
+      },
+      {
+        objectKey: 'semantic:dimension:accounts.owner_email', objectType: 'semantic_dimension', name: 'account_owner_email',
+        fullName: 'semantic:accounts:dimension:owner_email', payload: { qualifiedId: 'semantic:accounts:dimension:owner_email' },
+      },
+      {
+        objectKey: 'semantic:dimension:accounts.sentiment', objectType: 'semantic_dimension', name: 'account_sentiment_rating',
+        fullName: 'semantic:accounts:dimension:sentiment', payload: { qualifiedId: 'semantic:accounts:dimension:sentiment' },
+      },
+      {
+        objectKey: 'semantic:dimension:stores.location_name', objectType: 'semantic_dimension', name: 'location_name',
+        fullName: 'semantic:stores:dimension:location_name', payload: { qualifiedId: 'semantic:stores:dimension:location_name' },
       },
     ] });
 
@@ -495,6 +513,11 @@ describe('AGT-010 metadata meaning evidence lanes', () => {
       expect.objectContaining({ id: 'semantic:dimension:locations.location_name' }),
     ]));
     expect(evidence.clarificationCandidates?.length).toBeLessThanOrEqual(12);
+    expect(evidence.clarificationCandidates?.map((candidate) => candidate.id)).not.toEqual(expect.arrayContaining([
+      'semantic:dimension:accounts.owner_email',
+      'semantic:dimension:accounts.sentiment',
+      'semantic:dimension:stores.location_name',
+    ]));
     expect(buildProviderMeaningEvidencePackage(evidence)).toEqual([]);
   });
 });

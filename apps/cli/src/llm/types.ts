@@ -5,6 +5,7 @@ import type {
   CertifiedBlockInvocationInput,
   AgentSchemaTable,
   AnalysisDepth,
+  AnalyticalCascadeTierV1,
   AnalyticalFreshnessObservationV1,
   AnalyticalFreshnessRequestV1,
   ConversationSnapshot,
@@ -18,6 +19,7 @@ import type {
   ProviderDispatchEvent,
   ProviderPayloadRowShape,
   AgenticSqlExecutionCapabilityV1,
+  ExploratoryExecutionFreezeV1,
   AnalyticalTaskDependencyBindingV1,
   NarrationIntegrityReceiptV1,
   ProviderFailureDiagnosticV1,
@@ -203,6 +205,17 @@ export interface AgentRunRequest {
   assertProjectSnapshot?: (snapshotId: string) => void;
   executeCertifiedBlock?: (block: KGNode, invocation?: CertifiedBlockInvocationInput) => Promise<AgentResultPayload>;
   executeGeneratedSql?: (sql: string, artifact?: AgentDqlArtifactReference) => Promise<AgentResultPayload>;
+  /**
+   * Server-only freeze for a router-selected exploratory proposal. The client
+   * never supplies this callback or the returned opaque capability.
+   */
+  prepareExploratorySqlExecution?: (
+    sql: string,
+    artifact?: AgentDqlArtifactReference,
+  ) => Promise<{
+    capability: AgenticSqlExecutionCapabilityV1;
+    freeze: ExploratoryExecutionFreezeV1;
+  }>;
   /** Server-only generated execution capability; never accepted from a client payload. */
   executeAgenticGeneratedSql?: (
     capability: AgenticSqlExecutionCapabilityV1,
@@ -233,6 +246,24 @@ export interface AgentRunRequest {
   preferredExecutionId?: string;
   /** Router-owned immutable v2 plan. Provider adapters must pass it through unchanged. */
   resolvedAnalyticalPlan?: ResolvedAnalyticalPlan;
+  /**
+   * Router-owned pre-freeze cascade choice. The provider adapter forwards this
+   * unchanged to the answer loop so an eligible exploratory plan cannot reopen
+   * certified or semantic selection after meaning has been resolved.
+   */
+  selectedCascadeTier?: Exclude<AnalyticalCascadeTierV1, 'clarify_or_gap'>;
+  /**
+   * Immutable physical evidence selected by the router for a pre-freeze
+   * exploratory tier. This is an execution authority, not a relevance hint:
+   * provider prompts and SQL validation may use only this candidate closure.
+   */
+  exploratoryCandidateIds?: string[];
+  /**
+   * Candidate-ID-scoped physical prompt/execution pack for `exploratory_sql`.
+   * The broad prepared pack remains host diagnostics and is never provider
+   * authority once the router has selected this tier.
+   */
+  preparedExploratoryContextPack?: LocalContextPack;
   /** Server-observed identity for a generated proposal's execution target. */
   generatedProposalTargetFingerprint?: string;
   /** Server-captured instant used to bind relative periods deterministically. */

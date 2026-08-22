@@ -175,6 +175,18 @@ function routeAwareAnswerShapeEvaluation(
 ): AgentRunEvaluation | undefined {
   const shape = answerShapeEvaluation(context.request.question, payload);
   if (!shape || context.route !== "certified_answer") return shape;
+  // The router already froze this certified execution authority.  A returned
+  // result that violates its own output contract is terminal at that same
+  // tier; treating it as a repair/escalation hint would silently reselect
+  // generated SQL after freeze.
+  if (payload?.certifiedResultShapeFailure === true) {
+    return {
+      ...shape,
+      severity: "blocking",
+      suggestedRepair: "The selected certified block did not return the complete declared output shape. Choose or author a compatible governed artifact before retrying.",
+      repairAction: undefined,
+    };
+  }
   const hint = shape.repairAction?.hint ?? shape.suggestedRepair ?? "Regenerate the answer at the requested shape.";
   return {
     ...shape,

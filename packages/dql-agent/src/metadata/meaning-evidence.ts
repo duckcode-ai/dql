@@ -7,6 +7,7 @@ import {
   type AnalyticalPolicyContract,
   type MetricCapabilityContract,
 } from "@duckcodeailabs/dql-core";
+import { candidateMatchesCategoricalDimensionRequirement } from '../analytical-orchestration.js';
 import type { LocalContextPack, MetadataObject } from "./catalog.js";
 import {
   certifiedCandidateExplicitlyCoversMeasures,
@@ -693,22 +694,30 @@ function supplementalClarificationEvidence(
     if (existingIds.has(object.objectKey)) return [];
     if (!['semantic_metric', 'semantic_measure', 'semantic_dimension'].includes(object.objectType)) return [];
     const names = aliasesFor(object).map(normalizeText);
-    const role = normalizeDimensionRole(object.name);
+    const candidate = agentCandidateFromMeaning(candidateCard(
+      object,
+      'semantic',
+      1,
+      1,
+      aliasesFor(object),
+      ['requested clarification capability'],
+      [],
+    ));
     const relevant = object.objectType === 'semantic_metric' || object.objectType === 'semantic_measure'
       ? requestedMeasures.some((term) => names.some((name) => phraseTermsMatch(term, name)))
       : requestedDimensions.some((term) =>
         names.some((name) => phraseTermsMatch(term, name))
-        || (isGeographicRole(term) && isGeographicRole(role)));
+        || candidateMatchesCategoricalDimensionRequirement(candidate, [term]));
     if (!relevant) return [];
-    const card = candidateCard(object, 'semantic', 1, 1, aliasesFor(object), ['requested clarification capability'], []);
-    return [agentCandidateFromMeaning(card)];
+    return [candidate];
   });
   const declaredDimensionCards: AgentEvidenceCandidate[] = existing.flatMap((candidate) =>
     (candidate.dimensions ?? []).flatMap((dimensionId) => {
       if (!/[:./]/.test(dimensionId) || existingIds.has(dimensionId)) return [];
       const role = normalizeDimensionRole(dimensionId);
       const relevant = requestedDimensions.some((term) =>
-        phraseTermsMatch(term, role) || (isGeographicRole(term) && isGeographicRole(role)));
+        phraseTermsMatch(term, role)
+        || candidateMatchesCategoricalDimensionRequirement(candidate, [term]));
       if (!relevant) return [];
       return [{
         id: dimensionId,
@@ -720,6 +729,7 @@ function supplementalClarificationEvidence(
         definition: `Modeled ${role} dimension available through ${candidate.name}.`,
         primaryEntity: candidate.primaryEntity,
         dimensions: [dimensionId],
+        compatibilityFacts: candidate.compatibilityFacts,
         relevanceScore: candidate.relevanceScore,
         matchReasons: ['requested clarification capability role'],
         compatibility: 'partial' as const,
@@ -796,7 +806,7 @@ function supplementalClarificationEvidence(
       }
       if (candidate.kind !== 'semantic_member') return false;
       return candidateTerms.some((term) => phraseTermsMatch(lane.term, term))
-        || (isGeographicRole(lane.term) && candidateTerms.some(isGeographicRole));
+        || candidateMatchesCategoricalDimensionRequirement(candidate, [lane.term]);
     }).sort((left, right) => right.relevanceScore - left.relevanceScore || left.id.localeCompare(right.id));
     for (const candidate of matches.slice(0, MAX_PER_REQUESTED_ROLE)) {
       if (!selected.some((item) => (item.qualifiedId ?? item.id) === (candidate.qualifiedId ?? candidate.id))) {
@@ -865,10 +875,6 @@ function dimensionLookupAliases(dimensions: string[]): string[] {
     const role = leaf.replace(/(?:_name|_id|_key|_label)$/i, '');
     return role && role !== leaf ? [dimension, role] : [dimension];
   }));
-}
-
-function isGeographicRole(value: string): boolean {
-  return /^(?:region|location|geography|territory|market|site|store)$/.test(normalizeDimensionRole(value));
 }
 
 /**
@@ -1129,7 +1135,20 @@ function candidateCard(
     ...arrayNames(payload.outputContract),
     ...arrayNames(payload.outputs),
   ]);
+  const declaredSemanticGeography = [
+    ...stringArray(payload.semanticRoles),
+    ...stringArray(payload.semantic_roles),
+    firstString(payload.semanticRole, payload.semantic_role) ?? '',
+  ].some((role) => {
+    const normalized = normalizeText(role);
+    return normalized === 'geography' || normalized === 'geographic';
+  });
   const compatibilityFacts = uniqueStrings([
+    // Carry only authored, snapshot-local compatibility facts. Consumers use
+    // these as typed declarations, never as fuzzy lexical aliases.
+    ...stringArray(payload.compatibilityFacts),
+    ...stringArray(payload.compatibility_facts),
+    ...(declaredSemanticGeography ? ['semantic-role: geography'] : []),
     firstString(payload.grain) ? `grain: ${firstString(payload.grain)}` : '',
     ...stringArray(payload.dimensions).slice(0, 8).map((value) => `dimension: ${value}`),
     ...parameters.slice(0, 8).map((value) => `parameter: ${value}`),

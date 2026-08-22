@@ -1,13 +1,24 @@
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { buildManifest } from '@duckcodeailabs/dql-core';
-import { __test__, createDqlAgentProviderRunner, renderAppContextForPrompt, renderExtraContext, resolveEffectiveQuestion } from './dql-agent-provider.js';
+import { __test__, createDqlAgentProviderRunner, createEvalCassetteReplayProvider, renderAppContextForPrompt, renderExtraContext, resolveEffectiveQuestion } from './dql-agent-provider.js';
+import {
+  CassetteStore,
+  cassetteEvidenceSummary,
+  cassetteFingerprint,
+  cassetteKey,
+  evalCassetteCanonicalizationV2,
+  withCassette,
+} from '../../commands/agent-eval-cassette.js';
 import type { AgentRunRequest } from '../types.js';
 import {
   buildAnalysisQuestionPlan,
+  buildLocalContextPack,
+  createAgenticSqlExecutionCapability,
   dqlToolNamesForSurface,
+  scopeContextPackToExploratoryCandidateClosure,
   type AgentMessage,
   type AgentProvider,
   type ProviderToolLoopOptions,
@@ -16,6 +27,65 @@ import {
 function req(messages: Array<{ role: 'user' | 'assistant'; content: string }>): AgentRunRequest {
   return { provider: 'ollama', messages, projectRoot: '/tmp/x' } as AgentRunRequest;
 }
+
+async function customerExploratoryClosure(projectRoot: string, question: string) {
+  const contextPack = await buildLocalContextPack(projectRoot, {
+    question,
+    surface: 'notebook',
+    limit: 80,
+  });
+  const candidateIds = contextPack.objects
+    .filter((object) => object.objectType === 'dbt_model' && object.name === 'dim_customers')
+    .map((object) => object.objectKey);
+  const closure = scopeContextPackToExploratoryCandidateClosure(contextPack, candidateIds);
+  if (!closure) throw new Error('Expected the router-selected dim_customers closure.');
+  return { contextPack, candidateIds, closure };
+}
+
+describe('eval cassette provider bootstrap', () => {
+  it('replays a labelled deterministic migration without configured provider settings', async () => {
+    const cassetteDir = mkdtempSync(join(tmpdir(), 'dql-runtime-cassette-provider-'));
+    const messages: AgentMessage[] = [{ role: 'user', content: 'show revenue' }];
+    const projectRoot = '/tmp/dql-runtime-cassette-project';
+    const key = cassetteKey({
+      providerName: 'claude',
+      operation: 'generate',
+      messages,
+      canonicalization: evalCassetteCanonicalizationV2(projectRoot),
+    });
+    const oldDir = process.env.DQL_EVAL_CASSETTE_DIR;
+    const oldMode = process.env.DQL_EVAL_CASSETTE_MODE;
+    try {
+      new CassetteStore(cassetteDir).put({
+        key,
+        operation: 'generate',
+        text: 'recorded governed interpretation',
+        providerName: 'claude',
+        recordedAt: '2026-08-22T00:00:00.000Z',
+        provenance: {
+          kind: 'migrated_legacy_deterministic_fixture',
+          sourceLegacyKey: 'legacy-order-count-v1',
+          replayClassification: 'orchestration_replay_only',
+          providerQuality: 'excluded',
+        },
+      });
+      process.env.DQL_EVAL_CASSETTE_DIR = cassetteDir;
+      delete process.env.DQL_EVAL_CASSETTE_MODE;
+
+      const provider = createEvalCassetteReplayProvider(projectRoot);
+      expect(provider).toBeDefined();
+      expect(provider!.name).toBe('claude');
+      await expect(provider!.available()).resolves.toBe(true);
+      await expect(provider!.generate(messages)).resolves.toBe('recorded governed interpretation');
+    } finally {
+      if (oldDir === undefined) delete process.env.DQL_EVAL_CASSETTE_DIR;
+      else process.env.DQL_EVAL_CASSETTE_DIR = oldDir;
+      if (oldMode === undefined) delete process.env.DQL_EVAL_CASSETTE_MODE;
+      else process.env.DQL_EVAL_CASSETTE_MODE = oldMode;
+      rmSync(cassetteDir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('resolveEffectiveQuestion — clarify follow-up folding', () => {
   it('folds the original question with the clarification answer', () => {
@@ -161,6 +231,334 @@ describe('answer-loop tool surface', () => {
 });
 
 describe('provider runner — analyst physical dispatch budget', () => {
+  it('records production exploratory messages and replays them across fresh roots', async () => {
+    const rootA = mkdtempSync(join(tmpdir(), 'dql-provider-exploratory-a-'));
+    const rootB = mkdtempSync(join(tmpdir(), 'dql-provider-exploratory-b-'));
+    const cassetteDir = mkdtempSync(join(tmpdir(), 'dql-provider-exploratory-cassette-'));
+    const question = 'what is the order count for each customer?';
+    const proposal = '```json\n{"summary":"Order count by customer.","sql":"SELECT customer_name AS customer_name, count_lifetime_orders AS count_lifetime_orders FROM jaffle_shop.dev.dim_customers ORDER BY customer_name","outputs":["customer_name","count_lifetime_orders"]}\n```';
+    const copiedFixture = join(process.cwd(), 'test', 'fixtures', 'jaffle-supply-chain');
+    const run = async (
+      projectRoot: string,
+      provider: AgentProvider,
+      captures: AgentMessage[][],
+    ) => {
+      const manifest = buildManifest({ projectRoot, dbtManifestPath: join(projectRoot, 'target', 'manifest.json') });
+      const {
+        contextPack,
+        candidateIds: exploratoryCandidateIds,
+        closure: exploratoryContextPack,
+      } = await customerExploratoryClosure(projectRoot, question);
+      const turns: Array<{ kind: string; [key: string]: unknown }> = [];
+      let certifiedCalls = 0;
+      let sqlCalls = 0;
+      let prepareCalls = 0;
+      const runId = `order-count-${projectRoot.split('-').at(-1)}`;
+      let executedCapability: ReturnType<typeof createAgenticSqlExecutionCapability> | undefined;
+      await createDqlAgentProviderRunner('ollama', provider).run({
+        provider: 'ollama',
+        projectRoot,
+        agentRunId: runId,
+        projectSnapshot: { snapshotId: contextPack.knowledgeLens.snapshotId, manifest },
+        preparedContextPack: contextPack,
+        preparedExploratoryContextPack: exploratoryContextPack,
+        selectedCascadeTier: 'exploratory_sql',
+        exploratoryCandidateIds,
+        messages: [{ role: 'user', content: question }],
+        executeCertifiedBlock: async () => {
+          certifiedCalls += 1;
+          throw new Error('Router-selected exploratory execution must not reopen certified execution.');
+        },
+        // Router-selected exploratory SQL is no longer permitted to use the
+        // legacy raw callback. Model text must first cross the host-owned,
+        // exact-SQL capability handoff that production uses before the one
+        // physical execution callback runs.
+        prepareExploratorySqlExecution: async (sql) => {
+          prepareCalls += 1;
+          const targetFingerprint = `target-${projectRoot.split('-').at(-1)}`;
+          const capability = createAgenticSqlExecutionCapability({
+            sql,
+            runId,
+            executionId: `${runId}:exploratory`,
+            snapshotId: contextPack.knowledgeLens.snapshotId,
+            planId: `exploratory-${projectRoot.split('-').at(-1)}`,
+            targetFingerprint,
+            bindings: { sqlParams: [], variables: {} },
+            proven: [
+              { identifier: 'jaffle_shop.dev.dim_customers', evidence: 'schema_tool' },
+              { identifier: 'jaffle_shop.dev.dim_customers.customer_name', evidence: 'schema_tool' },
+              { identifier: 'jaffle_shop.dev.dim_customers.count_lifetime_orders', evidence: 'schema_tool' },
+            ],
+          });
+          if (!capability) throw new Error('Expected a server-scoped exploratory capability.');
+          return {
+            capability,
+            freeze: {
+              version: 1,
+              selectedTier: 'exploratory_sql',
+              planId: capability.planId,
+              planFingerprint: 'a'.repeat(64),
+              snapshotId: contextPack.knowledgeLens.snapshotId,
+              targetFingerprint,
+              sqlFingerprint: capability.candidateSqlFingerprint,
+              candidateIds: ['model.jaffle_shop.dim_customers'],
+              authorization: 'capability_minted',
+            },
+          };
+        },
+        executeAgenticGeneratedSql: async (capability, sql) => {
+          executedCapability = capability;
+          sqlCalls += 1;
+          return {
+            columns: ['customer_name', 'count_lifetime_orders'],
+            rows: [{ customer_name: 'Ada', count_lifetime_orders: 3 }],
+            rowCount: 1,
+            sql,
+          };
+        },
+      }, (turn) => turns.push(turn as typeof turns[number]), new AbortController().signal);
+      return {
+        contextPack,
+        exploratoryContextPack,
+        exploratoryCandidateIds,
+        turns,
+        certifiedCalls,
+        sqlCalls,
+        prepareCalls,
+        executedCapability,
+        captures,
+      };
+    };
+    try {
+      cpSync(copiedFixture, rootA, { recursive: true });
+      cpSync(copiedFixture, rootB, { recursive: true });
+      const messagesA: AgentMessage[][] = [];
+      const liveA: AgentProvider = {
+        name: 'claude',
+        available: async () => true,
+        generate: async (messages) => {
+          messagesA.push(messages);
+          return proposal;
+        },
+      };
+      const recorded = withCassette(
+        liveA,
+        new CassetteStore(cassetteDir),
+        'record',
+        evalCassetteCanonicalizationV2(rootA),
+      );
+      const first = await run(rootA, recorded, messagesA);
+      expect(messagesA).toHaveLength(1);
+      const firstPrompt = messagesA[0]!.map((message) => message.content).join('\n');
+      expect(first.exploratoryContextPack.allowedSqlContext.relations.map((relation) => relation.relation))
+        .toEqual(['jaffle_shop.dev.dim_customers']);
+      expect(firstPrompt).toContain('jaffle_shop.dev.dim_customers');
+      expect(firstPrompt).not.toContain('jaffle_shop.dev.order_items');
+      expect(firstPrompt).not.toContain('jaffle_shop.dev.supplies');
+      expect(first.certifiedCalls).toBe(0);
+      expect(first.prepareCalls).toBe(1);
+      expect(first.sqlCalls).toBe(1);
+      const firstAnswer = first.turns.find((turn) => turn.kind === 'tool_result' && turn.id === 'governed_answer')?.output as {
+        sourceTier?: string;
+        certification?: string;
+        exploratoryExecutionFreeze?: { selectedTier?: string; authorization?: string; planId?: string };
+      } | undefined;
+      expect(firstAnswer).toMatchObject({
+        sourceTier: 'dbt_manifest',
+        certification: 'ai_generated',
+        exploratoryExecutionFreeze: {
+          selectedTier: 'exploratory_sql',
+          authorization: 'capability_minted',
+        },
+      });
+      expect(first.executedCapability).toMatchObject({
+        runId: `order-count-${rootA.split('-').at(-1)}`,
+        planId: `exploratory-${rootA.split('-').at(-1)}`,
+      });
+
+      const messagesB: AgentMessage[][] = [];
+      let rawReplayCalls = 0;
+      const replay = withCassette({
+        name: 'claude',
+        available: async () => true,
+        generate: async () => {
+          rawReplayCalls += 1;
+          throw new Error('The fresh-root replay must not call a live provider.');
+        },
+      }, new CassetteStore(cassetteDir), 'replay', evalCassetteCanonicalizationV2(rootB));
+      const observingReplay: AgentProvider = {
+        name: 'claude',
+        available: () => replay.available(),
+        generate: async (messages, options) => {
+          messagesB.push(messages);
+          return replay.generate(messages, options);
+        },
+      };
+      const second = await run(rootB, observingReplay, messagesB);
+      expect(messagesB).toHaveLength(1);
+      expect(rawReplayCalls).toBe(0);
+      expect(second.certifiedCalls).toBe(0);
+      expect(second.prepareCalls).toBe(1);
+      expect(second.sqlCalls).toBe(1);
+      expect(second.executedCapability).toMatchObject({
+        runId: `order-count-${rootB.split('-').at(-1)}`,
+        planId: `exploratory-${rootB.split('-').at(-1)}`,
+      });
+
+      const firstFingerprint = cassetteFingerprint({
+        providerName: 'claude', operation: 'generate', messages: messagesA[0]!,
+        canonicalization: evalCassetteCanonicalizationV2(rootA),
+      });
+      const secondFingerprint = cassetteFingerprint({
+        providerName: 'claude', operation: 'generate', messages: messagesB[0]!,
+        canonicalization: evalCassetteCanonicalizationV2(rootB),
+      });
+      expect(secondFingerprint.key).toBe(firstFingerprint.key);
+      expect(firstFingerprint.diagnostics).toMatchObject({
+        version: 2,
+        messageCount: messagesA[0]!.length,
+        messageRoles: messagesA[0]!.map((message) => message.role),
+      });
+      expect(new CassetteStore(cassetteDir).get(firstFingerprint.key)?.fingerprintDiagnostics)
+        .toEqual(firstFingerprint.diagnostics);
+      expect(new CassetteStore(cassetteDir).get(firstFingerprint.key)?.provenance)
+        .toEqual({
+          kind: 'recorded_provider',
+          replayClassification: 'recorded_provider',
+          providerQuality: 'eligible',
+        });
+      expect(cassetteEvidenceSummary(new CassetteStore(cassetteDir))).toMatchObject({
+        totalEntries: 1,
+        recordedProviderEntries: 1,
+        migratedLegacyDeterministicFixtureEntries: 0,
+        realProviderQualityEligible: true,
+      });
+    } finally {
+      rmSync(rootA, { recursive: true, force: true });
+      rmSync(rootB, { recursive: true, force: true });
+      rmSync(cassetteDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a same-snapshot provider proposal outside the router-selected exploratory relation closure before capability minting', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-provider-exploratory-outside-closure-'));
+    try {
+      cpSync(join(process.cwd(), 'test', 'fixtures', 'jaffle-supply-chain'), projectRoot, { recursive: true });
+      const question = 'what is the order count for each customer?';
+      const { contextPack, candidateIds, closure } = await customerExploratoryClosure(projectRoot, question);
+      const manifest = buildManifest({ projectRoot, dbtManifestPath: join(projectRoot, 'target', 'manifest.json') });
+      const calls: AgentMessage[][] = [];
+      const provider: AgentProvider = {
+        name: 'claude',
+        available: async () => true,
+        generate: async (messages) => {
+          calls.push(messages);
+          return '```json\n{"summary":"Wrong relation.","sql":"SELECT product_name FROM jaffle_shop.dev.order_items","outputs":["product_name"]}\n```';
+        },
+      };
+      const prepare = vi.fn(async () => {
+        throw new Error('An out-of-closure proposal must not reach the host capability boundary.');
+      });
+      const execute = vi.fn(async () => {
+        throw new Error('An out-of-closure proposal must not execute.');
+      });
+      const turns: Array<{ kind: string; [key: string]: unknown }> = [];
+      await createDqlAgentProviderRunner('ollama', provider).run({
+        provider: 'ollama',
+        projectRoot,
+        agentRunId: 'outside-closure-run',
+        projectSnapshot: { snapshotId: contextPack.knowledgeLens.snapshotId, manifest },
+        preparedContextPack: contextPack,
+        preparedExploratoryContextPack: closure,
+        selectedCascadeTier: 'exploratory_sql',
+        exploratoryCandidateIds: candidateIds,
+        messages: [{ role: 'user', content: question }],
+        prepareExploratorySqlExecution: prepare,
+        executeAgenticGeneratedSql: execute,
+      }, (turn) => turns.push(turn as typeof turns[number]), new AbortController().signal);
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.map((message) => message.content).join('\n')).not.toContain('jaffle_shop.dev.order_items');
+      expect(prepare).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+      const answer = turns.find((turn) => turn.kind === 'tool_result' && turn.id === 'governed_answer')?.output as {
+        kind?: string;
+        executionError?: string;
+        refusalCode?: string;
+        proposedSql?: string;
+        sql?: string;
+        dqlArtifact?: unknown;
+      } | undefined;
+      expect(answer?.kind).toBe('no_answer');
+      expect(`${answer?.executionError ?? ''} ${answer?.refusalCode ?? ''}`).toMatch(/outside|context|grounding/i);
+      expect(answer?.proposedSql).toBeUndefined();
+      expect(answer?.sql).toBeUndefined();
+      expect(answer?.dqlArtifact).toBeUndefined();
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed before provider dispatch when a supplied exploratory closure has another snapshot', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-provider-exploratory-other-snapshot-'));
+    try {
+      cpSync(join(process.cwd(), 'test', 'fixtures', 'jaffle-supply-chain'), projectRoot, { recursive: true });
+      const question = 'what is the order count for each customer?';
+      const { contextPack, candidateIds, closure } = await customerExploratoryClosure(projectRoot, question);
+      const manifest = buildManifest({ projectRoot, dbtManifestPath: join(projectRoot, 'target', 'manifest.json') });
+      const provider = {
+        name: 'claude' as const,
+        available: async () => true,
+        generate: vi.fn(async () => {
+          throw new Error('A mismatched closure must not reach the provider.');
+        }),
+      } satisfies AgentProvider;
+      const prepare = vi.fn(async () => {
+        throw new Error('A mismatched closure must not mint a capability.');
+      });
+      const execute = vi.fn(async () => {
+        throw new Error('A mismatched closure must not execute SQL.');
+      });
+      const turns: Array<{ kind: string; [key: string]: unknown }> = [];
+      await createDqlAgentProviderRunner('ollama', provider).run({
+        provider: 'ollama',
+        projectRoot,
+        agentRunId: 'other-snapshot-run',
+        projectSnapshot: { snapshotId: contextPack.knowledgeLens.snapshotId, manifest },
+        preparedContextPack: contextPack,
+        preparedExploratoryContextPack: {
+          ...closure,
+          knowledgeLens: { ...closure.knowledgeLens, snapshotId: 'another-snapshot' },
+        },
+        selectedCascadeTier: 'exploratory_sql',
+        exploratoryCandidateIds: candidateIds,
+        messages: [{ role: 'user', content: question }],
+        prepareExploratorySqlExecution: prepare,
+        executeAgenticGeneratedSql: execute,
+      }, (turn) => turns.push(turn as typeof turns[number]), new AbortController().signal);
+
+      expect(provider.generate).not.toHaveBeenCalled();
+      expect(prepare).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+      const answer = turns.find((turn) => turn.kind === 'tool_result' && turn.id === 'governed_answer')?.output as {
+        kind?: string;
+        refusalDetails?: { code?: string };
+        proposedSql?: string;
+        sql?: string;
+        dqlArtifact?: unknown;
+      } | undefined;
+      expect(answer).toMatchObject({
+        kind: 'no_answer',
+        refusalDetails: { code: 'EXPLORATORY_CLOSURE_MISMATCH' },
+      });
+      expect(answer?.proposedSql).toBeUndefined();
+      expect(answer?.sql).toBeUndefined();
+      expect(answer?.dqlArtifact).toBeUndefined();
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   it('allows three text tools and a final SQL response under the ordinary four-dispatch wrapper cap', async () => {
     // This exercises the actual provider-runner wrapper, not just the generic
     // text loop: historically the runner silently replaced the loop options

@@ -134,6 +134,14 @@ export function evaluateCertifiedBlockFit(input: {
   plan: AnalysisQuestionPlan;
   block: MetadataObject | KGNode;
   exactExampleMatch?: boolean;
+  /**
+   * The catalog proved that this is the only certified block whose authored
+   * example normalizes exactly to the question.  This is deliberately more
+   * restrictive than `exactExampleMatch`: two blocks may share an example, in
+   * which case neither gets to reinterpret a parser token through its own
+   * contract.
+   */
+  uniqueExactExampleContract?: boolean;
   definitionLookup?: boolean;
 }): CertifiedBlockFit {
   const requested = requestedShapeFromPlan(input.plan);
@@ -152,7 +160,9 @@ export function evaluateCertifiedBlockFit(input: {
   const blockOutputs = new Set(block.outputs);
 
   const missingDimensions = uniqueStrings(requestedDimensions.filter((dimension) =>
-    !blockDimensions.has(dimension) && !outputHasEntity(blockOutputs, dimension)
+    !blockDimensions.has(dimension)
+    && !outputHasEntity(blockOutputs, dimension)
+    && !uniqueExactExampleMemberToken(input, dimension, block)
   ));
   const missingOutputs = uniqueStrings(requiredOutputs.filter((output) =>
     // A directly named artifact is an execution request, not a request for a
@@ -167,6 +177,13 @@ export function evaluateCertifiedBlockFit(input: {
     // coverage. The strict missingMeasures gate below remains authoritative.
     && !(requestedMeasures.includes(canonicalMetricOutputIdentity(output))
       && declaredQualifiedOutputCoversMeasure(block, canonicalMetricOutputIdentity(output), input.question, input.plan, requested))
+    // An exact authored example may contain member words (for example
+    // "food" and "drink") which the parser retains as output requests even
+    // though the block's declared `category` output is the actual role.  Only
+    // the unique exact-example contract may consume those unstructured member
+    // tokens.  Measures, structural role outputs, filters, grain, ranking and
+    // static scope remain independently validated below.
+    && !uniqueExactExampleMemberToken(input, output, block)
   ));
   const missingMeasures = uniqueStrings(requestedMeasures.filter((measure) =>
     !blockMeasures.has(measure)
@@ -178,8 +195,16 @@ export function evaluateCertifiedBlockFit(input: {
   const unsupportedFilters = unsupportedRequestedFilters(requested, block, input.question);
   const unentailedScope = [...block.staticScopeTokens]
     .filter((token) => !questionEntailsScopeToken(input.question, input.plan, requested, token));
+  const requestedGrainIsExactExampleMemberNoise = requested.grain
+    && uniqueExactExampleMemberToken(input, requested.grain, block);
   const grainMismatch = requested.grain && block.grain && canonicalToken(requested.grain) !== block.grain
     && !blockDimensions.has(canonicalToken(requested.grain))
+    // The only allowed grain reinterpretation is a unique, exact authored
+    // example whose parser retained a member value (food) in `grain` rather
+    // than its declared role (category). The block still has to declare its
+    // actual grain, and all measure/output/filter/ranking checks below remain
+    // in force. This is not a general exact-example grain bypass.
+    && !requestedGrainIsExactExampleMemberNoise
     ? `certified block grain=${block.grain} does not cover requested grain=${canonicalToken(requested.grain)}`
     : scalarRequestCannotUseRowGrainBlock(input.plan, requestedDimensions, block)
       ? `certified block returns rows at ${block.grain ?? block.dimensions[0]} grain but the question requests one aggregate value`
@@ -553,6 +578,39 @@ function outputRequirementCovered(required: string, block: BlockShape): boolean 
   }
   return false;
 }
+
+/**
+ * Exact authored examples are executable contract evidence, but only after
+ * their own block has proved the requested measure and every structural answer
+ * role.  A natural-language parser can retain a member value as a dimension or
+ * output requirement: in the authored example "revenue by food and drink",
+ * `food` and `drink` are values of the declared `category` role, not physical
+ * dimensions.  Do not use this escape hatch for a named block, a merely
+ * lexical example, or a shared example.  That would make descriptions/tags or
+ * pooled candidates silently redefine the answer shape again.
+ */
+function uniqueExactExampleMemberToken(
+  input: Parameters<typeof evaluateCertifiedBlockFit>[0],
+  token: string,
+  block: BlockShape,
+): boolean {
+  if (!input.exactExampleMatch || !input.uniqueExactExampleContract) return false;
+  if (block.dimensions.length === 0 && block.outputs.length === 0) return false;
+  const canonical = canonicalToken(token);
+  if (!canonical || block.dimensions.includes(canonical) || block.outputs.includes(canonical)) return false;
+  // Never reinterpret a measure, a concrete output role, a time role, or a
+  // common entity/dimension role as a member value.  Those are requirements the
+  // block must declare locally even for an exact authored example.
+  if (isMeasureLike(canonical)
+    || isStructuredDimensionOutput(canonical)
+    || EXACT_EXAMPLE_STRUCTURAL_ROLES.has(canonical)) return false;
+  return true;
+}
+
+const EXACT_EXAMPLE_STRUCTURAL_ROLES = new Set([
+  'product', 'customer', 'account', 'user', 'member', 'category', 'segment',
+  'region', 'channel', 'order', 'day', 'week', 'month', 'quarter', 'year',
+]);
 
 /**
  * Ranking words describe the result ordering, not an extra projected field.

@@ -8,6 +8,21 @@ import {
 import type { MetadataAllowedSqlContext, MetadataObject } from './catalog.js';
 
 describe('analysis planner', () => {
+  it('AGT-029 keeps grouped order-count grammar as count at customer grain', () => {
+    const plan = buildAnalysisQuestionPlan('what is the order count for each customer?');
+
+    expect(plan.metricTerms).toEqual(['count']);
+    expect(plan.requestedShape.measures).toEqual(['count']);
+    expect(plan.dimensionTerms).toEqual(['customer']);
+    expect(plan.requestedShape.dimensions).toEqual(['customer']);
+    expect(plan.requestedShape.requiredOutputs).toEqual(expect.arrayContaining(['customer', 'count']));
+    expect(plan.requestedShape.measures).not.toEqual(expect.arrayContaining([
+      'count_for_each_customer',
+      'for_each_customer',
+      'order',
+    ]));
+  });
+
   it('AGT-001 parses coordinated Jaffle revenue intent without inventing along metrics', () => {
     const plan = buildAnalysisQuestionPlan(
       'what is the region for Joy lam customer? what is total revenue along with beverage revenue',
@@ -299,6 +314,42 @@ describe('analysis planner', () => {
 
     expect(plan.mode).toBe('definition');
     expect(plan.routeIntent).toBe('definition_lookup');
+  });
+
+  it('recognizes a named artifact definition without making its ID a query output', () => {
+    for (const question of [
+      'what does the top_customers block measure?',
+      'what does top_customers mean?',
+      'what does top_customers define?',
+      'what does top_customers represent?',
+    ]) {
+      const plan = buildAnalysisQuestionPlan(question);
+
+      expect(plan.mode).toBe('definition');
+      expect(plan.routeIntent).toBe('definition_lookup');
+      expect(plan.metricTerms).toEqual([]);
+      expect(plan.dimensionTerms).toEqual([]);
+      expect(plan.requestedShape.requiredOutputs).not.toContain('top_customers');
+    }
+  });
+
+  it('normalizes a longest aggregation and grouping span without duplicate component roles', () => {
+    const plan = buildAnalysisQuestionPlan('what is the total supply cost per product?');
+
+    expect(plan.metricTerms).toEqual(['supply_cost']);
+    expect(plan.dimensionTerms).toEqual(['product']);
+    expect(plan.requestedShape.measures).toEqual(['supply_cost']);
+    expect(plan.requestedShape.dimensions).toEqual(['product']);
+    expect(plan.metricTerms).not.toContain('total');
+    expect(plan.dimensionTerms).not.toContain('supply');
+  });
+
+  it('keeps a compound product category role ahead of generic product/category tokens', () => {
+    const plan = buildAnalysisQuestionPlan('show revenue by product category');
+
+    expect(plan.metricTerms).toContain('revenue');
+    expect(plan.dimensionTerms).toEqual(['product_category']);
+    expect(plan.requestedShape.dimensions).toEqual(['product_category']);
   });
 
   it('extracts top-N and follow-up references', () => {
@@ -624,6 +675,9 @@ describe('follow-up measure carry (sticky-metric fix)', () => {
       kind: 'drilldown',
       priorMeasures: ['total_consumption_units'],
     });
-    expect(plan.metricTerms).toContain('total_consumption_units');
+    // This is a stable metric identity, not display prose. The planner must
+    // pass it intact into meaning resolution while lexical search normalizes
+    // independently.
+    expect(plan.metricTerms).toEqual(['total_consumption_units']);
   });
 });

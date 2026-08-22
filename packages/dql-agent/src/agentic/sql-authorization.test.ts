@@ -153,4 +153,72 @@ describe('exact-execution authorization', () => {
       { relations: ['analytics.orders', 'analytics.customers'], columns: [{ column: 'id' }] },
     )).toContain('id');
   });
+
+  it('replaces an exact ORDER BY output alias with its parser-proven source columns', () => {
+    const supplySql = `SELECT product_id, SUM(supply_cost) AS total_supply_cost
+FROM jaffle_shop.dev.supplies
+GROUP BY product_id
+ORDER BY total_supply_cost DESC`;
+    expect(qualifyAuthorizationReferences(supplySql, {
+      relations: ['jaffle_shop.dev.supplies'],
+      columns: [
+        { relation: 'jaffle_shop.dev.supplies', column: 'product_id' },
+        { relation: 'jaffle_shop.dev.supplies', column: 'supply_cost' },
+        { relation: 'jaffle_shop.dev.supplies', column: 'total_supply_cost' },
+      ],
+    })).toEqual([
+      'jaffle_shop.dev.supplies',
+      'jaffle_shop.dev.supplies.product_id',
+      'jaffle_shop.dev.supplies.supply_cost',
+    ]);
+
+    const revenueSql = `SELECT product_type, SUM(product_price) AS revenue
+FROM jaffle_shop.dev.order_items
+GROUP BY product_type
+ORDER BY revenue DESC`;
+    expect(qualifyAuthorizationReferences(revenueSql, {
+      relations: ['jaffle_shop.dev.order_items'],
+      columns: [
+        { column: 'product_type' },
+        { column: 'product_price' },
+        { column: 'revenue' },
+      ],
+    })).toEqual([
+      'jaffle_shop.dev.order_items',
+      'jaffle_shop.dev.order_items.product_type',
+      'jaffle_shop.dev.order_items.product_price',
+    ]);
+
+    const customerSql = `SELECT customer_name, SUM(lifetime_spend) AS total_spend
+FROM dim_customers
+GROUP BY customer_name
+ORDER BY total_spend DESC`;
+    expect(qualifyAuthorizationReferences(customerSql, {
+      relations: ['dim_customers'],
+      columns: [
+        { relation: 'dim_customers', column: 'customer_name' },
+        { relation: 'dim_customers', column: 'lifetime_spend' },
+        { relation: 'dim_customers', column: 'total_spend' },
+      ],
+    })).toEqual([
+      'dim_customers',
+      'dim_customers.customer_name',
+      'dim_customers.lifetime_spend',
+    ]);
+  });
+
+  it('keeps an unknown ORDER BY identifier physical and therefore unproven', () => {
+    const sql = `SELECT product_id, SUM(supply_cost) AS total_supply_cost
+FROM jaffle_shop.dev.supplies
+GROUP BY product_id
+ORDER BY unbound_alias DESC`;
+    expect(qualifyAuthorizationReferences(sql, {
+      relations: ['jaffle_shop.dev.supplies'],
+      columns: [
+        { column: 'product_id' },
+        { column: 'supply_cost' },
+        { column: 'unbound_alias' },
+      ],
+    })).toContain('jaffle_shop.dev.supplies.unbound_alias');
+  });
 });

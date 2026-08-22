@@ -1314,7 +1314,6 @@ export interface CreateAgentRunInput {
    * client-built conversationContext stays the no-threadId fallback.
    */
   threadId?: string;
-  runId?: string;
   /** The composer's thinking selection for this run (auto/low/medium/high). */
   thinkingMode?: AgentThinkingMode;
   /** Explicit consent for this Research run only; defaults false and is never inherited. */
@@ -1456,6 +1455,11 @@ export interface AgentRunListResponse {
 }
 
 export type AgentRunStreamMessage =
+  /**
+   * The runtime has accepted the request and minted the only run identity that
+   * may be used for cancellation, reload, or capability-scoped execution.
+   */
+  | { kind: 'accepted'; runId: string; operationId?: string }
   | { kind: 'event'; event: AgentRunEvent }
   | { kind: 'answer-delta'; delta: string }
   | { kind: 'complete'; run: AgentRun };
@@ -2795,7 +2799,14 @@ async function streamAgentRunResponse(
     }
     if (dataLines.length === 0) return;
     const payload = JSON.parse(dataLines.join('\n'));
-    if (eventName === 'agent-run-event') {
+    if (eventName === 'agent-run-accepted') {
+      // A browser has no authority to select a run identity.  The accepted
+      // SSE frame is the first safe point at which the UI may persist, reload,
+      // or cancel a background run.
+      const runId = typeof payload?.runId === 'string' ? payload.runId : undefined;
+      const operationId = typeof payload?.operationId === 'string' ? payload.operationId : undefined;
+      if (runId) onMessage({ kind: 'accepted', runId, ...(operationId ? { operationId } : {}) });
+    } else if (eventName === 'agent-run-event') {
       onMessage({ kind: 'event', event: payload as AgentRunEvent });
     } else if (eventName === 'agent-run-answer-delta') {
       const delta = typeof payload?.delta === 'string' ? payload.delta : '';
@@ -2825,6 +2836,18 @@ async function streamAgentRunResponse(
   if (buffer.trim()) consumeBlock(buffer);
   if (!completed) throw new Error('Agent run stream ended before completion.');
   return completed;
+}
+
+/**
+ * `runId` used to be a browser-generated correlation field.  It now scopes
+ * server capabilities and is intentionally server-owned, so retain no
+ * compatibility path that can place an arbitrary value on the public wire.
+ * The runtime also rejects it at ingress; this client-side omission protects
+ * callers that construct an untyped payload.
+ */
+function serializeCreateAgentRunInput(input: CreateAgentRunInput): string {
+  const { runId: _discardedRunId, ...safeInput } = input as CreateAgentRunInput & { runId?: unknown };
+  return JSON.stringify(safeInput);
 }
 
 /**
@@ -3738,7 +3761,7 @@ export const api = {
   async createAgentRun(input: CreateAgentRunInput): Promise<AgentRun> {
     const raw = await request<{ run: AgentRun }>('/api/agent-runs', {
       method: 'POST',
-      body: JSON.stringify(input),
+      body: serializeCreateAgentRunInput(input),
     });
     return raw.run;
   },
@@ -3753,7 +3776,7 @@ export const api = {
       res = await fetch(`${BASE}/api/agent-runs?stream=1`, {
         method: 'POST',
         headers: withServerAuthorization({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify(input),
+        body: serializeCreateAgentRunInput(input),
         signal,
       });
     } catch (error) {

@@ -603,13 +603,17 @@ export function UnifiedAgentRunPanel({
     resetStreamingAnswer();
     const controller = new AbortController();
     abortRef.current = controller;
-    const runId = makeId('run');
-    let pending: PendingAgentRun = { id: runId, question: text, threadId: threadIdRef.current, startedAt: new Date().toISOString() };
-    activeRunIdRef.current = runId;
+    // This is a browser-local pending key only.  It is never sent to the
+    // runtime and never used for cancellation, reload, or a SQL capability.
+    // Those paths begin only after `agent-run-accepted` supplies the canonical
+    // server-owned run id.
+    const provisionalRunId = makeId('pending');
+    let pending: PendingAgentRun = { id: provisionalRunId, question: text, threadId: threadIdRef.current, startedAt: new Date().toISOString() };
+    activeRunIdRef.current = null;
     pendingRunRef.current = pending;
     setBackgroundRun(pending);
-    saveActiveAgentRun(pending);
     let receivedStreamMessage = false;
+    let acceptedServerRun = false;
     let recovering = false;
     try {
       // Thread-scoped persistence: make sure a server thread exists so this run is
@@ -633,7 +637,6 @@ export function UnifiedAgentRunPanel({
           pending = { ...pending, threadId: thread.id };
           pendingRunRef.current = pending;
           setBackgroundRun(pending);
-          saveActiveAgentRun(pending);
         } catch {
           // Conversation store unavailable — proceed without a threadId.
         }
@@ -670,12 +673,23 @@ export function UnifiedAgentRunPanel({
         history,
         thinkingMode,
         researchResultRowsOptIn: resultRowsOptInForRun,
-        runId,
         ...(threadIdRef.current ? { threadId: threadIdRef.current } : {}),
       };
       const run = await api.createAgentRunStream(runInput, (message) => {
         receivedStreamMessage = true;
-        if (message.kind === 'event') {
+        if (message.kind === 'accepted') {
+          // Replace the local-only placeholder before any progress, recovery,
+          // or Stop action can observe the run.  Persisting only this canonical
+          // ID makes a reload reconnect to the run the server actually owns.
+          const previousPendingId = pending.id;
+          pending = { ...pending, id: message.runId };
+          activeRunIdRef.current = message.runId;
+          pendingRunRef.current = pending;
+          setBackgroundRun(pending);
+          clearActiveAgentRun(previousPendingId);
+          saveActiveAgentRun(pending);
+          acceptedServerRun = true;
+        } else if (message.kind === 'event') {
           setRunningEvents((current) => [...current, message.event].slice(-8));
         } else if (message.kind === 'answer-delta') {
           appendStreamingDelta(message.delta);
@@ -683,6 +697,17 @@ export function UnifiedAgentRunPanel({
           setRunningEvents(message.run.events.slice(-8));
         }
       }, controller.signal);
+      // A compliant runtime emits `accepted` first.  Keep the completion path
+      // defensive for an interrupted/older transport so it cannot leave a
+      // provisional ID in browser state.
+      if (pending.id !== run.id) {
+        const previousPendingId = pending.id;
+        pending = { ...pending, id: run.id };
+        activeRunIdRef.current = run.id;
+        pendingRunRef.current = pending;
+        clearActiveAgentRun(previousPendingId);
+        saveActiveAgentRun(pending);
+      }
       appendFinishedRun(run, pending);
     } catch (err) {
       if (!controller.signal.aborted) {
@@ -690,12 +715,12 @@ export function UnifiedAgentRunPanel({
         setInput(text);
         // If streaming disconnected after the server began reporting progress,
         // let the persisted run finish and quietly reconnect to its final answer.
-        if (receivedStreamMessage) {
+        if (receivedStreamMessage && acceptedServerRun) {
           recovering = true;
           recoverPendingRun(pending);
         } else {
-          clearActiveAgentRun(runId);
-          if (activeRunIdRef.current === runId) activeRunIdRef.current = null;
+          clearActiveAgentRun(pending.id);
+          if (activeRunIdRef.current === pending.id) activeRunIdRef.current = null;
           pendingRunRef.current = null;
           setBackgroundRun(null);
         }

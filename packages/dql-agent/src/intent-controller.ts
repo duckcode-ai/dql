@@ -19,10 +19,35 @@ import type { AnswerAssumption } from './agentic/assumptions.js';
 import type { MetadataAgentIntent } from './metadata/catalog.js';
 import type { MeaningResolution } from './meaning-resolution.js';
 import type { ResolvedAnalyticalPlan } from './resolved-analytical-plan.js';
-import type { AnalyticalCascadeDecisionV1 } from './analytical-orchestration.js';
+import type { AnalyticalCascadeDecisionV1, AnalyticalCoverageGapV1 } from './analytical-orchestration.js';
 
 /** The high-level action the agent will take for a turn. */
 export type AgentAction = 'answer' | 'clarify' | 'investigate' | 'compose_app' | 'converse' | 'block';
+
+/**
+ * A narrow, producer-owned witness for a terminal analytical coverage gap.
+ *
+ * The high-level terminal kind remains intentionally small (`modeling_gap` or
+ * `policy_blocked`) for backwards-compatible route handling.  This nested
+ * receipt is the only authority for showing a more specific repair such as a
+ * missing relationship.  Callers must not infer it from prose or from the
+ * broad `modeling_gap` kind.
+ */
+export interface AnalyticalTerminalGapWitness {
+  code: Extract<
+    AnalyticalCoverageGapV1['code'],
+    | 'MISSING_MEASURE'
+    | 'MISSING_DIMENSION'
+    | 'MISSING_ATTRIBUTE'
+    | 'MISSING_RELATIONSHIP'
+    | 'MISSING_RUNTIME_CAPABILITY'
+    | 'RESULT_CONTRACT_MISMATCH'
+  >;
+  /** Reader-safe description of the missing analytical role or proof. */
+  missing: string[];
+  /** Qualified evidence IDs that caused this category; never inferred by consumers. */
+  witnessCandidateIds: string[];
+}
 
 /**
  * Conversational turn kinds that deserve a plain, warm reply instead of the data
@@ -130,6 +155,8 @@ export interface IntentDecision {
     code: 'ANALYTICAL_MODELING_GAP' | 'ANALYTICAL_POLICY_BLOCKED';
     message: string;
     candidateIds: string[];
+    /** Exact analytical coverage category, when the router/producer proved one. */
+    gap?: AnalyticalTerminalGapWitness;
   };
 }
 
@@ -343,6 +370,36 @@ export function looksLikeDefinitionalAboutNamedObject(
     // preserves direct execution for a complete certified metric block while
     // retaining the technical-artifact explanation path.
     return /[_./-]/.test(leaf) && lower.includes(leaf);
+  });
+}
+
+/**
+ * A selected certified block can answer its own explicit definition grammar
+ * from authored metadata. Keep this narrower than the broad definition lane:
+ * a natural-language metric definition remains conversational unless the user
+ * names the selected block/artifact itself.
+ */
+export function looksLikeNamedCertifiedArtifactMetadataRequest(
+  question: string,
+  objectNames: readonly string[],
+): boolean {
+  const match = /^\s*what\s+does\s+(?:the\s+)?(.+?)\s+(?:measure|mean|define|represent)\s*[?.!]*\s*$/i.exec(question);
+  if (!match?.[1]) return false;
+  // Require the artifact noun in natural-language form. Without it, a phrase
+  // such as "what does monthly revenue mean?" is a metric definition, not a
+  // request to stamp a similarly named block's metadata as certified.
+  if (!/\b(?:certified\s+)?(?:block|artifact)\b/i.test(match[1])) return false;
+  const subject = match[1]
+    .replace(/\b(?:certified\s+)?(?:block|artifact)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!subject) return false;
+  return objectNames.some((raw) => {
+    const id = String(raw).trim().toLowerCase();
+    if (!/^(?:dql:)?block:/.test(id)) return false;
+    const leaf = id.split(':').pop()?.trim() ?? '';
+    return leaf.length > 0 && (subject === leaf || subject === leaf.replace(/[_.]+/g, ' '));
   });
 }
 

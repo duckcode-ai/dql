@@ -285,7 +285,13 @@ export function createAnalystLaneHandler(deps: {
     }
     const scope = input.agenticExecutionScope;
     const composedSql = outcome.stop === 'composed' ? outcome.sql : undefined;
-    const capability = composedSql
+    // A router-selected exploratory tier has a stricter handoff than the
+    // analyst loop's ordinary generated lane: only the host may mint its
+    // execution capability after it rechecks the selected snapshot, target,
+    // and qualified physical evidence.  Do not pre-mint a generic capability
+    // here, or the router-owned freeze/authorization receipt would be skipped.
+    const routerSelectedExploratory = input.selectedCascadeTier === 'exploratory_sql';
+    const capability = composedSql && !routerSelectedExploratory
       ? createAgenticSqlExecutionCapability({
           sql: composedSql,
           // Retrieval catalog rows cannot mint execution authority. Preserve
@@ -302,7 +308,7 @@ export function createAnalystLaneHandler(deps: {
           bindings: scope?.bindings ?? {},
         })
       : undefined;
-    if (outcome.stop === 'composed' && composedSql && !capability) {
+    if (outcome.stop === 'composed' && composedSql && !capability && !routerSelectedExploratory) {
       outcome = { ...outcome, stop: 'unverified', terminal: 'missing_execution_binding' };
     }
     const answer = outcome.stop === 'budget_exhausted'
@@ -311,7 +317,15 @@ export function createAnalystLaneHandler(deps: {
       // terminal reason and could turn an explicit bounded stop into an
       // unrelated answer. This remains deliberately non-executing.
       ? analystNonExecutingAnswer(input, outcome)
-      : outcome.stop === 'composed' && composedSql && capability
+      // A router-owned exploratory closure is an execution boundary, not a
+      // retrieval hint. If the analyst loop cannot compose SQL that passes
+      // that closure's identifiers and relationship proof, returning through
+      // the broad legacy answer path would let it prepare an unrelated draft.
+      // Keep this pre-capability failure terminal and preserve the router's
+      // frozen tier rather than retrying meaning or generating new SQL.
+      : routerSelectedExploratory && (outcome.stop !== 'composed' || !composedSql)
+        ? analystNonExecutingAnswer(input, outcome)
+      : outcome.stop === 'composed' && composedSql && (capability || routerSelectedExploratory)
         ? await (async (): Promise<AgentAnswer> => {
             try {
               return await deps.legacy({
@@ -323,7 +337,13 @@ export function createAnalystLaneHandler(deps: {
                   sql: composedSql,
                   summary: 'Prepared from identifiers observed during this bounded analyst run. Review-required until an analyst promotes it.',
                 },
-                agenticSqlExecutionCapability: capability,
+                // The router-selected exploratory path intentionally reaches
+                // the answer loop without a capability.  That loop invokes
+                // the host-owned preparation callback after validating these
+                // exact SQL bytes, then immediately consumes its one-shot
+                // capability.  Other analyst lanes retain the existing
+                // pre-bound capability handoff.
+                ...(capability ? { agenticSqlExecutionCapability: capability } : {}),
               });
             } catch {
               // Do not rethrow into `answerAgentic`: its compatibility fallback

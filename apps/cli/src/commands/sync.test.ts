@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runCompile } from './compile.js';
@@ -93,6 +93,28 @@ describe('runSync dbt', () => {
       await runSync('dbt', [root], baseFlags);
       const output = log.mock.calls.flat().join('\n');
       expect(output).toMatch(/HIT/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a prepared agent snapshot warm when dbt inputs are unchanged', async () => {
+    const root = seedProject();
+    try {
+      // The first sync compiles and prepares the manifest, metadata, and KG.
+      await runSync('dbt', [root], baseFlags);
+      const manifestPath = join(root, 'dql-manifest.json');
+      const firstMtime = statSync(manifestPath).mtimeMs;
+
+      log.mockClear();
+      await runSync('dbt', [root], baseFlags);
+      const output = log.mock.calls.flat().join('\n');
+
+      expect(output).toMatch(/Cache: HIT/);
+      expect(output).toMatch(/reused the matching manifest, metadata catalog, and agent index/i);
+      // The unchanged compile must not invalidate source-versioned readiness by
+      // rewriting identical generated JSON.
+      expect(statSync(manifestPath).mtimeMs).toBe(firstMtime);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

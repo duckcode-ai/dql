@@ -116,6 +116,68 @@ describe("AGT-010 meaning-resolution evidence boundary", () => {
     expect(cards.filter((item) => /owner|sentiment/i.test(item.name)).map((item) => item.name)).toEqual([]);
   });
 
+  it('reserves a declared region alternative before the meaning-card cap without treating location as a lexical synonym', () => {
+    const revenueDecoys = Array.from({ length: 20 }, (_, index) => candidate({
+      id: `semantic:metric:orders.revenue_${index}`,
+      kind: 'semantic_metric',
+      name: `Revenue ${index}`,
+      relevanceScore: 0.99 - index / 100,
+    }));
+    const totalRevenue = candidate({
+      id: 'semantic:metric:orders.order_total', kind: 'semantic_metric', name: 'Order Total',
+      aliases: ['total revenue'], relevanceScore: 0.74,
+    });
+    const beverageRevenue = candidate({
+      id: 'semantic:metric:order_items.drink_revenue', kind: 'semantic_metric', name: 'Drink Revenue',
+      aliases: ['beverage revenue'], relevanceScore: 0.73,
+    });
+    const declaredRegionAlternative = candidate({
+      id: 'semantic:dimension:locations.location_name', kind: 'semantic_member', semanticObjectType: 'dimension',
+      name: 'Location Name', relevanceScore: 0.72, compatibilityFacts: ['alternative-for:region'],
+    });
+    const untypedLocation = candidate({
+      id: 'semantic:dimension:stores.location_name', kind: 'semantic_member', semanticObjectType: 'dimension',
+      name: 'Location Name', relevanceScore: 0.98,
+    });
+    const owner = candidate({
+      id: 'semantic:dimension:accounts.owner_email', kind: 'semantic_member', semanticObjectType: 'dimension',
+      name: 'Account Owner Email', relevanceScore: 0.97,
+    });
+    const sentiment = candidate({
+      id: 'semantic:dimension:accounts.sentiment', kind: 'semantic_member', semanticObjectType: 'dimension',
+      name: 'Account Sentiment Rating', relevanceScore: 0.96,
+    });
+
+    const cards = buildMeaningEvidencePackage({
+      candidates: [
+        ...revenueDecoys,
+        totalRevenue,
+        beverageRevenue,
+        declaredRegionAlternative,
+        untypedLocation,
+        owner,
+        sentiment,
+      ],
+      parsedIntent: {
+        measures: ['total revenue', 'beverage revenue'],
+        dimensions: ['customer region'],
+        filters: [],
+      },
+    }, 3, 'show total revenue and beverage revenue by customer region');
+
+    expect(cards.map((item) => item.id)).toEqual(expect.arrayContaining([
+      totalRevenue.id,
+      beverageRevenue.id,
+      declaredRegionAlternative.id,
+    ]));
+    expect(cards.map((item) => item.id)).not.toEqual(expect.arrayContaining([
+      untypedLocation.id,
+      owner.id,
+      sentiment.id,
+    ]));
+    expect(cards).toHaveLength(3);
+  });
+
   it("recognizes a unique explicit reference without fuzzy guessing", () => {
     const found = findExplicitEvidenceReference(
       "show @metric(rollover_balance_amount) by customer",

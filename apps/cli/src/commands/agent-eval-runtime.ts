@@ -18,7 +18,7 @@ import type { AgentAnswer, AgentRun, AgentRunRoute, AgentRunStatus, AgentRunTrus
 /** Eval-facing view of a run, shaped like the fields the scorer already reads. */
 export interface RuntimeDrivenRun {
   kind: 'certified' | 'uncertified' | 'no_answer';
-  route?: 'certified' | 'generated_sql' | 'research' | 'clarify';
+  route?: 'certified' | 'generated_sql' | 'research' | 'clarify' | 'blocked';
   runRoute: AgentRunRoute;
   status: AgentRunStatus;
   trustState: AgentRunTrustState;
@@ -43,8 +43,20 @@ export interface RuntimeDrivenRun {
    * ambiguous question then clarifies. That is correct behaviour, but it makes a
    * clarification rate measured without a provider meaningless, so the harness
    * has to be able to say so.
-   */
+  */
   meaningResolved: boolean;
+  /**
+   * Count captured by the persisted router retrieval receipt. This is not a
+   * synthetic context-pack size: runtime runs do not return an AgentAnswer
+   * context pack through the transport projection.
+   */
+  retrievalCandidateCount?: number;
+  /** Source-lane coverage retained by the router-owned cascade receipt. */
+  sourceCoverage?: NonNullable<AgentRun['diagnosticReceiptV3']>['sourceCoverage'];
+  /** Typed terminal authority, distinct from a user-facing clarification. */
+  terminalOutcome?: NonNullable<AgentRun['routeDecision']>['terminalOutcome'];
+  /** Provider/tool count recorded by persisted runtime telemetry. */
+  toolCallCount: number;
 }
 
 /**
@@ -69,8 +81,11 @@ export function evalRouteForRun(route: AgentRunRoute): RuntimeDrivenRun['route']
     case 'semantic_answer': return 'certified';
     case 'generated_answer': return 'generated_sql';
     case 'research': return 'research';
-    case 'clarify':
-    case 'blocked': return 'clarify';
+    case 'clarify': return 'clarify';
+    // A typed terminal modeling/policy gap is not a clarification. Collapsing
+    // it to `clarify` made eval reports claim the user had a choice when the
+    // persisted run explicitly recorded a blocked no-answer.
+    case 'blocked': return 'blocked';
     default: return undefined;
   }
 }
@@ -116,6 +131,9 @@ export function runtimeRunOutputs(run: AgentRun): { proposedSql?: string; rows?:
 
 export function projectRuntimeRun(run: AgentRun): RuntimeDrivenRun {
   const refusalEvaluation = (run.evaluations ?? []).find((evaluation) => !evaluation.passed);
+  const sourceCoverage = run.diagnosticReceiptV3?.sourceCoverage
+    ?? run.routeDecision?.analyticalCascadeDecision?.sourceCoverage;
+  const retrievalCandidateCount = run.routeDecision?.retrievalEvidence?.candidateCount;
   return {
     kind: evalKindForRun(run),
     route: evalRouteForRun(run.route),
@@ -126,6 +144,10 @@ export function projectRuntimeRun(run: AgentRun): RuntimeDrivenRun {
     runId: run.id,
     conversational: run.route === 'conversation' || run.answerKind === 'conversational',
     meaningResolved: Boolean(run.routeDecision?.meaningResolution),
+    toolCallCount: run.telemetry?.toolCalls ?? 0,
+    ...(typeof retrievalCandidateCount === 'number' ? { retrievalCandidateCount } : {}),
+    ...(sourceCoverage ? { sourceCoverage } : {}),
+    ...(run.routeDecision?.terminalOutcome ? { terminalOutcome: run.routeDecision.terminalOutcome } : {}),
     ...(run.answer ? { answer: run.answer } : {}),
     ...(refusalEvaluation?.id ? { refusalCode: refusalEvaluation.id } : {}),
     ...runtimeRunOutputs(run),

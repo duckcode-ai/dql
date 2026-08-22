@@ -20,6 +20,9 @@ cases:
     question: "What is revenue by food and drink?"
     expected:
       answerable: true
+      kind: certified
+      route: certified
+      certification: certified
 
   - name: "certified: product revenue ranking reaches the product block"
     question: "What are the top products by revenue?"
@@ -39,22 +42,39 @@ cases:
 
   # ── business explanation: definitional, no SQL required ──────────────────────
   - name: "business: asking what a certified block means is answerable"
-    # Today this routes definitionally rather than to SQL. It is answerable
-    # either way — the case exists so a regression into a refusal is visible.
+    # This is artifact metadata, not an executed query result. The named block
+    # and explicit definition grammar make it deterministic and zero-call.
     question: "what does the top_customers block measure?"
     expected:
       answerable: true
+      kind: certified
+      route: certified
+      certification: certified
+      sqlNotContains: "SELECT"
 
   # ── generated: no governed coverage, must not dead-end ──────────────────────
   - name: "generated: supply cost detail has no block and must still answer"
     question: "what is the total supply cost per product?"
     expected:
       answerable: true
+      kind: uncertified
+      route: generated_sql
+      certification: analyst_review_required
+      sqlContains:
+        - "jaffle_shop.dev.supplies"
+        - "SUM(supply_cost)"
 
-  - name: "generated: a cross-table question with no certified path must answer"
+  - name: "relationship gap: distinct products per customer remains blocked without a safe closure"
     question: "how many distinct products did each customer order?"
     expected:
-      answerable: true
+      # The fixture has the needed columns, but no structured, certified,
+      # validated, fanout-safe customer -> order -> item closure. Exploration
+      # must not infer a join from similarly named IDs.
+      answerable: false
+      kind: no_answer
+      route: blocked
+      terminalOutcomeKind: modeling_gap
+      missingContextKind: relationship
 
   # ── grain traps: the question is answerable but must not be silently wrong ───
   - name: "grain: a category question must not be answered at product grain"
@@ -64,3 +84,9 @@ cases:
     question: "show revenue by product category"
     expected:
       answerable: true
+      kind: uncertified
+      route: generated_sql
+      certification: analyst_review_required
+      sqlContains:
+        - "jaffle_shop.dev.order_items"
+        - "SUM(product_price)"

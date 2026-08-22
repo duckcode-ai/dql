@@ -205,6 +205,26 @@ export interface CascadeTierAttemptV1 {
 }
 
 /**
+ * A server-owned freeze made after a generated exploratory proposal has passed
+ * the selected snapshot's SQL/context checks and has been bound to one live
+ * execution target. It intentionally contains fingerprints and qualified
+ * candidate identities only: the opaque execution capability and SQL text
+ * never leave the in-memory host boundary.
+ */
+export interface ExploratoryExecutionFreezeV1 {
+  version: 1;
+  selectedTier: 'exploratory_sql';
+  planId: string;
+  planFingerprint: string;
+  snapshotId: string;
+  targetFingerprint: string;
+  sqlFingerprint: string;
+  candidateIds: string[];
+  /** The host minted one single-use capability before connector execution. */
+  authorization: 'capability_minted';
+}
+
+/**
  * The shared cascade receipt.  This does not itself compile SQL; it prevents
  * downstream presentation/execution layers from silently reinterpreting a
  * question after route selection.
@@ -216,6 +236,8 @@ export interface AnalyticalCascadeDecisionV1 {
   attempts: CascadeTierAttemptV1[];
   selectedTier?: Exclude<AnalyticalCascadeTierV1, 'clarify_or_gap'>;
   planFrozen: boolean;
+  /** Present only after a selected exploratory proposal is host-authorized. */
+  exploratoryExecutionFreeze?: ExploratoryExecutionFreezeV1;
   stopReason: 'selected' | 'ambiguous' | 'coverage_gap' | 'denied' | 'post_freeze_failure';
 }
 
@@ -333,6 +355,12 @@ type RoleBalancedEvidenceCandidate = {
   relevanceScore?: number;
   exactMatch?: boolean;
   compatibility?: string;
+  /**
+   * Snapshot-authored compatibility declarations. These are deliberately not
+   * folded into general lexical identity: only the categorical-dimension lane
+   * may use the narrowly typed declarations below.
+   */
+  compatibilityFacts?: string[];
   analyticalCapability?: {
     dimensions?: Array<{ dimensionId?: string }>;
     timeDimensions?: Array<{ dimensionId?: string }>;
@@ -356,6 +384,142 @@ function uniqueRequirementTerms(values: Array<string | undefined>): string[] {
 
 function isTemporalTerm(term: string): boolean {
   return /^(?:date|day|week|month|quarter|year|fy\d{2,4}|fiscal year|fiscal quarter)$/.test(term);
+}
+
+/**
+ * Parser output occasionally retains the grammatical wrapper around an
+ * aggregation (for example "count for each customer") as though it were a
+ * second metric.  The stable requirement is `count`; the rest describes the
+ * requested grain and is already represented by the entity/dimension roles.
+ * Keeping the wrapper makes a physically complete customer table look
+ * incomplete and prematurely terminates the pre-freeze cascade.
+ */
+function isStructuralMeasurePhrase(value: string): boolean {
+  const term = normalizeRequirementTerm(value);
+  return /^(?:count|sum|total|average|avg)?\s*for\s+(?:each|every)\s+(?:account|customer|client|company|product|order|item|row)s?$/.test(term)
+    || /^for\s+(?:each|every)\s+(?:account|customer|client|company|product|order|item|row)s?$/.test(term);
+}
+
+const AGGREGATION_REQUIREMENT_OPERATORS = new Set([
+  'total', 'sum', 'average', 'avg', 'minimum', 'min', 'maximum', 'max',
+]);
+
+/**
+ * A parsed intent may preserve every grammatical fragment of an aggregate
+ * request ("total", "total supply cost", "supply", and "product").  Those
+ * fragments are useful while retrieving, but they are not independent
+ * physical requirements. Normalize only the explicit aggregation + grouping
+ * construction so ordinary named metrics such as `total_revenue` keep their
+ * authored identity.
+ */
+function typedAggregationRequirementRoles(question: string): {
+  measure: string;
+  dimension: string;
+} | undefined {
+  const match = /\b(?:total|sum|average|avg|minimum|min|maximum|max)\s+([a-z][a-z0-9_ -]{1,60}?)\s+(?:per|by|for\s+each)\s+([a-z][a-z0-9_-]*)\b/i.exec(question);
+  const measure = match?.[1] ? normalizeRequirementTerm(match[1]) : '';
+  const dimension = match?.[2] ? normalizeRequirementTerm(match[2]) : '';
+  return measure && dimension ? { measure, dimension } : undefined;
+}
+
+function normalizedTypedAggregationRequirements(input: {
+  question: string;
+  measures: string[];
+  dimensions: string[];
+}): { measures: string[]; dimensions: string[] } {
+  const typed = typedAggregationRequirementRoles(input.question);
+  if (!typed) return input;
+  const measureParts = new Set(typed.measure.split(' ').filter(Boolean));
+  const measures = uniqueRequirementTerms([
+    typed.measure,
+    ...input.measures.filter((value) => {
+      const normalized = normalizeRequirementTerm(value);
+      return normalized !== typed.measure
+        && !AGGREGATION_REQUIREMENT_OPERATORS.has(normalized)
+        && normalized !== `total ${typed.measure}`
+        && !(normalized.split(' ').length === 1 && measureParts.has(normalized));
+    }),
+  ]);
+  const dimensions = uniqueRequirementTerms([
+    typed.dimension,
+    ...input.dimensions.filter((value) => {
+      const normalized = normalizeRequirementTerm(value);
+      return normalized !== typed.dimension
+        && !(normalized.split(' ').length === 1 && measureParts.has(normalized));
+    }),
+  ]);
+  return { measures, dimensions };
+}
+
+/**
+ * Normalize grammatical aggregation wrappers before they become a plan
+ * requirement.  Retrieval/parser output is allowed to retain useful search
+ * phrases, but an immutable plan must never treat "count for each customer"
+ * or "for each customer" as separate physical measures.  The grouping entity
+ * is represented by the dimension/entity roles instead.
+ *
+ * `order count for each customer` is the common prose form for a count
+ * aggregation at customer grain.  Keep the aggregation (`count`) and remove
+ * the object noun (`order`) only for that exact grouped construction; a named
+ * metric such as `order_value` remains untouched.
+ */
+export function normalizeAnalyticalMeasureTerms(
+  question: string,
+  values: readonly string[],
+  options: { preserveIdentity?: boolean } = {},
+): string[] {
+  const normalizedQuestion = normalizeRequirementTerm(question);
+  const groupedOrderCount = /\borders?\s+count\s+(?:for|per)\s+(?:each|every)\s+(?:the\s+)?(?:account|customer|client|company|product|order|item|row)s?\b/.test(normalizedQuestion);
+  const terms = values
+    .filter((value) => !isStructuralMeasurePhrase(value))
+    .filter((value) => !(groupedOrderCount && /^(?:order|orders)$/i.test(normalizeRequirementTerm(value))));
+  if (groupedOrderCount && !terms.some((value) => normalizeRequirementTerm(value) === 'count')) {
+    terms.push('count');
+  }
+  // An inherited measure can already be a stable semantic/dbt identity. Keep
+  // that identity intact for the planner/meaning handoff; matching and display
+  // have their own normalizers. Rewriting `total_consumption_units` to prose
+  // here lost the only sticky reference a measure-less refinement carried.
+  if (options.preserveIdentity) {
+    const seen = new Set<string>();
+    return terms.flatMap((value) => {
+      const exact = value.replace(/\s+/g, ' ').trim();
+      const normalized = normalizeRequirementTerm(exact);
+      if (!exact || !normalized || seen.has(normalized)) return [];
+      seen.add(normalized);
+      return [exact];
+    });
+  }
+  return uniqueRequirementTerms(terms);
+}
+
+/**
+ * Parsed measure phrases are the most specific typed evidence available before
+ * meaning resolution. A lexical root is useful only when the parser found no
+ * phrase that already owns it: adding both `beverage revenue` and `revenue`
+ * turns one requested metric into two and incorrectly rejects a block whose
+ * own declared output is `beverage_revenue`. The same holds for `order count`
+ * and its generic `count` root; grouped prose is normalized to `count` before
+ * this helper runs, so retaining both is neither necessary nor correct.
+ */
+function nonRedundantLexicalMeasureTerms(
+  parsedMeasures: readonly string[],
+  question: string,
+): string[] {
+  const lexical = ['revenue', 'refund', 'refunds', 'bcm', 'run rate', 'count']
+    .filter((term) => new RegExp(`\\b${term.replace(' ', '\\s+')}\\b`, 'i').test(question));
+  return lexical.filter((term) => {
+    if (term === 'count') {
+      return !parsedMeasures.some((measure) =>
+        normalizeRequirementTerm(measure).split(' ').includes('count'));
+    }
+    const token = term === 'refunds' ? 'refund' : term;
+    return !parsedMeasures.some((measure) =>
+      normalizeRequirementTerm(measure)
+        .split(' ')
+        .some((word) => word === token || (token === 'refund' && word === 'refunds')),
+    );
+  });
 }
 
 /**
@@ -389,7 +553,6 @@ export function buildAnalyticalRequirementSet(input: {
   const fiscalPeriod = fiscal ? `FY${fiscal[1] ?? fiscal[2]}`.toUpperCase() : undefined;
   const ranking = lower.match(/\b(top|bottom|highest|lowest)\s*(\d+)?\b/i);
   const requestedDimensions = uniqueRequirementTerms(parsed?.dimensions ?? []);
-  const dimensions = requestedDimensions.filter((term) => !isTemporalTerm(term));
   const entityTerms = uniqueRequirementTerms([
     ...((lower.match(/\b(?:account|accounts|customer|customers|client|clients|company|companies)\b/g) ?? [])),
   ]).map((term) => term.replace(/s$/, ''));
@@ -402,12 +565,23 @@ export function buildAnalyticalRequirementSet(input: {
   // option. Concrete metric words remain typed requirements, including the
   // common revenue/refunds pair used by multi-metric requests.
   const deicticAmount = /\b(?:this|that|the|such)\s+amount\b/i.test(question);
-  const measures = uniqueRequirementTerms([
-    ...(parsed?.measures ?? []),
-    ...(['revenue', 'refund', 'refunds', 'bcm', 'run rate', 'count']
-      .filter((term) => new RegExp(`\\b${term.replace(' ', '\\s+')}\\b`, 'i').test(question))),
-    ...(!deicticAmount && /\bamount\b/i.test(question) ? ['amount'] : []),
+  const parsedMeasures = normalizeAnalyticalMeasureTerms(question, parsed?.measures ?? []);
+  const parsedMeasuresWithLexicalTerms = uniqueRequirementTerms([
+    ...parsedMeasures,
+    ...nonRedundantLexicalMeasureTerms(parsedMeasures, question),
+    ...(!deicticAmount
+      && /\bamount\b/i.test(question)
+      && !parsedMeasures.some((measure) => normalizeRequirementTerm(measure).split(' ').includes('amount'))
+      ? ['amount']
+      : []),
   ]);
+  const typedRequirements = normalizedTypedAggregationRequirements({
+    question,
+    measures: parsedMeasuresWithLexicalTerms,
+    dimensions: requestedDimensions.filter((term) => !isTemporalTerm(term)),
+  });
+  const measures = typedRequirements.measures;
+  const dimensions = typedRequirements.dimensions;
   const rankingMetricTerms = ranking ? measures : [];
   const parsedLimit = typeof parsed?.limit === 'number' && Number.isFinite(parsed.limit) && parsed.limit > 0
     ? Math.floor(parsed.limit)
@@ -470,7 +644,11 @@ export function evidenceCandidateRoles(candidate: RoleBalancedEvidenceCandidate)
   return [...roles];
 }
 
-function candidateMatchesTerms(candidate: RoleBalancedEvidenceCandidate, terms: string[]): boolean {
+function candidateMatchesTerms(
+  candidate: RoleBalancedEvidenceCandidate,
+  terms: string[],
+  options: { categoricalDimension?: boolean } = {},
+): boolean {
   if (terms.length === 0) return false;
   const identity = uniqueRequirementTerms([
     candidate.id,
@@ -479,7 +657,42 @@ function candidateMatchesTerms(candidate: RoleBalancedEvidenceCandidate, terms: 
     ...(candidate.aliases ?? []),
     ...(candidate.dimensions ?? []),
   ]).join(' ');
-  return terms.some((term) => identity.includes(term) || term.includes(identity));
+  if (terms.some((term) => identity.includes(term) || term.includes(identity))) return true;
+  return options.categoricalDimension === true
+    && candidateMatchesCategoricalDimensionRequirement(candidate, terms);
+}
+
+/**
+ * A categorical dimension may satisfy a requested business role only through
+ * its own snapshot-authored declaration. In particular, `location_name` is
+ * not a synonym for `region`: it can fill a region lane only when metadata
+ * explicitly says `alternative-for:region`, or when the dimension itself is
+ * declared with the semantic geography role. This protects admission from
+ * broad lexical geography expansion while retaining role-balanced recall.
+ */
+export function candidateMatchesCategoricalDimensionRequirement(
+  candidate: Pick<RoleBalancedEvidenceCandidate, 'compatibilityFacts'>,
+  terms: readonly string[],
+): boolean {
+  const facts = new Set((candidate.compatibilityFacts ?? [])
+    .map(normalizeRequirementTerm)
+    .filter(Boolean));
+  if (facts.size === 0) return false;
+
+  const requestedRoles = [...new Set(terms.flatMap((term) => {
+    const normalized = normalizeRequirementTerm(term);
+    const terminal = normalized.split(' ').at(-1) ?? '';
+    return [normalized, terminal].filter(Boolean);
+  }))];
+  const hasDeclaredAlternative = requestedRoles.some((role) =>
+    facts.has(`alternative for ${role}`)
+    || facts.has(`dimension alternative for ${role}`));
+  if (hasDeclaredAlternative) return true;
+
+  const declaredGeography = facts.has('semantic role geography')
+    || facts.has('semantic geography role');
+  return declaredGeography && requestedRoles.some((role) =>
+    role === 'region' || role === 'geography' || role === 'geographic');
 }
 
 /**
@@ -521,7 +734,7 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
     if (roles.includes('time_dimension') && Boolean(input.requirements.time)) return true;
     if (roles.includes('categorical_dimension')
       && input.requirements.dimensions.length > 0
-      && candidateMatchesTerms(candidate, input.requirements.dimensions)) return true;
+      && candidateMatchesTerms(candidate, input.requirements.dimensions, { categoricalDimension: true })) return true;
     if (roles.includes('relationship')
       && (input.requirements.dimensions.length > 1 || input.requirements.entityTerms.length > 0)) return true;
     return false;
@@ -574,7 +787,7 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
       // For entity labels, role is more important than a lexical owner/email
       // hit. For all other roles, prefer an identity matching the requested
       // business term but retain a role candidate when the request is terse.
-      if (terms.length > 0 && !candidateMatchesTerms(candidate, terms)
+      if (terms.length > 0 && !candidateMatchesTerms(candidate, terms, { categoricalDimension: role === 'categorical_dimension' })
         && role !== 'time_dimension' && role !== 'relationship' && role !== 'entity_label') continue;
       add(candidate);
       admitted += 1;

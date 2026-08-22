@@ -15,15 +15,56 @@ export interface AnswerShapeValidation {
   topNReturned?: number;
 }
 
+/**
+ * An artifact-owned mapping from a requested analytical role to the exact
+ * output alias emitted by a frozen execution authority.
+ *
+ * These bindings are intentionally narrow.  They are not retrieval aliases:
+ * callers may only supply them from the selected certified artifact or the
+ * immutable resolved plan that selected it.  In particular, a nearby metric,
+ * block tag, or description can never make a returned column satisfy a
+ * requested output here.
+ */
+export interface AnswerShapeOutputBinding {
+  /** The role/term the frozen plan resolved (for example `customer`). */
+  requested: string;
+  /** The declared output name the selected artifact actually returns. */
+  output: string;
+  /** `measure` remains strict; dimensions and entity labels are role bindings. */
+  role: 'measure' | 'dimension' | 'entity_label';
+  /** Explicit authored aliases for a dimension/entity role, if any. */
+  aliases?: string[];
+}
+
+export interface AnswerShapeValidationOptions {
+  /** Artifact-local aliases from the frozen execution authority only. */
+  outputBindings?: readonly AnswerShapeOutputBinding[];
+  /**
+   * A frozen certified plan must prove requested measures through its own
+   * binding. This is deliberately off for semantic/generated results, where a
+   * governed projection such as `beverage_revenue` legitimately answers a
+   * plain-English spend request.
+   */
+  requireBoundMeasures?: boolean;
+}
+
 export function validateAnswerResultShape(
   plan: AnalysisQuestionPlan,
   result: AnswerShapeResultLike,
+  options: AnswerShapeValidationOptions = {},
 ): AnswerShapeValidation {
   const columns = resultColumnsForShape(result);
   const rowCount = resultRowCount(result);
-  const missingOutputs = plan.requestedShape.requiredOutputs.filter((output) =>
-    !columns.some((column) => columnCoversRequestedOutput(column, output))
-  );
+  const missingOutputs = plan.requestedShape.requiredOutputs.filter((output) => {
+    const bindingMatches = columns.some((column) => outputBindingCoversRequestedOutput(
+      column,
+      output,
+      options.outputBindings ?? [],
+    ));
+    if (bindingMatches) return false;
+    if (options.requireBoundMeasures && isRequestedMeasureOutput(plan, output)) return true;
+    return !columns.some((column) => columnCoversRequestedOutput(column, output));
+  });
   const warnings: string[] = [];
   if (missingOutputs.length > 0) {
     warnings.push(`The answer is missing requested output column(s): ${missingOutputs.join(', ')}.`);
@@ -92,12 +133,52 @@ function columnCoversRequestedOutput(column: string, requiredOutput: string): bo
   return requiredTokens.every((token) => columnTokens.some((columnToken) => outputTokensEquivalent(token, columnToken)));
 }
 
+function isRequestedMeasureOutput(plan: AnalysisQuestionPlan, output: string): boolean {
+  const required = canonicalResultColumn(output);
+  return plan.requestedShape.measures.some((measure) => {
+    const candidate = canonicalResultColumn(measure);
+    if (!candidate || !required) return false;
+    if (candidate === required) return true;
+    const candidateTokens = candidate.split('_').filter(Boolean);
+    const requiredTokens = required.split('_').filter(Boolean);
+    return candidateTokens.length === 1
+      && requiredTokens.length === 1
+      && outputTokensEquivalent(candidateTokens[0]!, requiredTokens[0]!);
+  });
+}
+
+function outputBindingCoversRequestedOutput(
+  column: string,
+  requiredOutput: string,
+  bindings: readonly AnswerShapeOutputBinding[],
+): boolean {
+  const required = canonicalResultColumn(requiredOutput);
+  if (!required) return true;
+  return bindings.some((binding) => {
+    if (canonicalResultColumn(binding.output) !== column) return false;
+    const requested = canonicalResultColumn(binding.requested);
+    const aliases = (binding.aliases ?? []).map(canonicalResultColumn);
+    const requestedRoleMatches = requested === required || aliases.includes(required);
+    if (!requestedRoleMatches) return false;
+    // A measure binding must have been created from the frozen plan's strict
+    // declared measure proof.  We therefore require its exact requested role,
+    // rather than applying broad column similarity a second time.
+    return binding.role === 'measure' || binding.role === 'dimension' || binding.role === 'entity_label';
+  });
+}
+
 // Keep this deliberately small and business-semantic. These are common measure
 // words that users interchange in plain English; matching them prevents a
 // correctly selected certified contract from being rejected merely because its
 // governed output uses `revenue` while the question says `spend`.
 const OUTPUT_TOKEN_EQUIVALENCE: ReadonlyArray<ReadonlySet<string>> = [
-  new Set(['spend', 'spending', 'revenue', 'sales']),
+  // `canonicalResultColumn` singularizes ordinary English plurals before this
+  // comparison. Keep the singular form here as well: otherwise a certified
+  // `revenue` output is incorrectly rejected for "sales by category" after
+  // `sales` becomes `sale`, and a frozen certified plan is misreported as a
+  // generated-route mismatch. This is deliberately limited to the revenue
+  // family; unrelated business measures (for example BCM) remain distinct.
+  new Set(['spend', 'spending', 'revenue', 'sales', 'sale']),
   new Set(['count', 'number', 'num', 'quantity', 'qty']),
 ];
 

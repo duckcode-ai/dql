@@ -20,6 +20,7 @@ import {
   classifyConversationalTurn,
   decideAgentAction,
   type IntentDecision,
+  type AnalyticalTerminalGapWitness,
 } from "./intent-controller.js";
 import type { AgentRunRequest, AgentRouter } from "./agent-run-engine.js";
 import type { MetadataAgentIntent } from "./metadata/catalog.js";
@@ -651,6 +652,29 @@ function normalizedRelationshipIdentity(value: string): string {
   return value.trim().toLowerCase();
 }
 
+/**
+ * The retrieval parser is intentionally generous because its terms also seed
+ * search.  Before the router turns those terms into a resolved plan, replace
+ * grammatical aggregation wrappers with the shared typed requirement set.
+ * This keeps all router paths (fast certified, no-meaning, structured
+ * continuation, and one-call meaning) on the same count/customer contract.
+ */
+function withNormalizedAnalyticalRequirements(
+  evidence: AgentRetrievalEvidence,
+  question: string,
+): AgentRetrievalEvidence {
+  if (!evidence.parsedIntent) return evidence;
+  const requirements = buildAnalyticalRequirementSet({ question, parsedIntent: evidence.parsedIntent });
+  return {
+    ...evidence,
+    parsedIntent: {
+      ...evidence.parsedIntent,
+      measures: requirements.measures,
+      dimensions: requirements.dimensions,
+    },
+  };
+}
+
 function relationshipSafetyIdentities(safety: AgentRelationshipSafetyEvidence): string[] {
   return [...new Set([safety.id, ...(safety.aliases ?? [])]
     .map(normalizedRelationshipIdentity)
@@ -754,75 +778,476 @@ function safeRelationshipProofsForPair(
   return shared;
 }
 
+type ExploratoryPhysicalPath = {
+  ok: boolean;
+  candidateIds: string[];
+  reason: string;
+  /** Present only when structured physical/relationship evidence proves the gap category. */
+  gap?: AnalyticalTerminalGapWitness;
+};
+
 function hasSafeExploratoryPhysicalPath(
   requirements: ReturnType<typeof buildAnalyticalRequirementSet>,
   candidates: AgentEvidenceCandidate[],
   missingDimensions: string[],
-  requiredPhysicalTerms: string[] = [],
-): { ok: boolean; candidateIds: string[]; reason: string } {
-  const physical = candidates.filter((candidate) => candidate.compatibility !== 'incompatible'
+  requiredPhysicalFieldTerms: string[] = [],
+): ExploratoryPhysicalPath {
+  const physical = candidates.filter((candidate) => candidate.eligible !== false
+    && candidate.compatibility !== 'incompatible'
     && (candidate.kind === 'dbt_model' || candidate.kind === 'dbt_source' || candidate.kind === 'sql_table' || candidate.kind === 'sql_column'));
   const relations = physical.filter((candidate) => candidate.kind !== 'sql_column');
   const columns = physical.filter((candidate) => candidate.kind === 'sql_column');
   if (relations.length === 0 || columns.length === 0) {
     return { ok: false, candidateIds: [], reason: 'No qualified raw relation plus column coverage was retrieved from this snapshot.' };
   }
-  const relationIds = new Set(relations.flatMap((candidate) => candidate.sourceObjects?.length ? candidate.sourceObjects : [candidate.qualifiedId ?? candidate.id]));
-  // A column from another table is not physical proof for this plan. When a
-  // source does not retain a column-to-relation edge, it is usable only for a
-  // one-relation plan; multi-relation exploration requires an explicit edge.
-  const reachableColumns = columns.filter((candidate) =>
-    !candidate.sourceObjects?.length
-      ? relationIds.size === 1
-      : candidate.sourceObjects.some((source) => relationIds.has(source)));
-  const terms = [...new Set([...missingDimensions, ...requirements.measures, ...requiredPhysicalTerms]
+  // This list is intentionally field/role-only.  Filter values such as
+  // `Datadog`, `FY26`, or `true` are member constraints, not column names;
+  // their safe-value validation happens independently from proving the raw
+  // physical closure.  Treating them as fields made a valid relation appear
+  // unmodeled and produced a false absence diagnostic.
+  const terms = [...new Set([...missingDimensions, ...requirements.measures, ...requiredPhysicalFieldTerms]
     .map(normalizeMetricPhrase)
     .filter(Boolean))];
-  const uncovered = terms.filter((term) => !reachableColumns.some((candidate) =>
-    candidateIdentityTerms(candidate).some((identity) => metricTermsMatch(identity, term))));
+  if (terms.length === 0) {
+    return { ok: false, candidateIds: [], reason: 'No typed physical fields were available to prove an exploratory plan.' };
+  }
+
+  const relationSources = (relation: AgentEvidenceCandidate): string[] =>
+    relation.sourceObjects?.length ? relation.sourceObjects : [relation.qualifiedId ?? relation.id];
+  const columnTouchesRelation = (column: AgentEvidenceCandidate, relation: AgentEvidenceCandidate): boolean =>
+    column.sourceObjects?.length
+      ? column.sourceObjects.some((source) => relationSources(relation).includes(source))
+      // A source that omitted its column edge cannot substantiate a multi-table
+      // plan. It remains usable only when a single relation is selected.
+      : relations.length === 1;
+  const columnFieldIdentityTerms = (column: AgentEvidenceCandidate): string[] => uniqueNormalizedTerms([
+    column.name,
+    ...(column.aliases ?? []),
+    ...(column.dimensions ?? []),
+  ]);
+  // These are intentionally a tiny, role-only bridge for raw physical
+  // evidence. They are evaluated against a column's own name/aliases in this
+  // immutable snapshot; they neither infer a relation nor turn a member value
+  // into a column. The aliases cover common authored field terminology in the
+  // supplied dbt/runtime schema (`product category` -> `product_type`, and a
+  // product-level revenue ask -> `product_price`).
+  const hasProductCategoryRequirement = [
+    ...requirements.dimensions,
+    ...missingDimensions,
+    ...requiredPhysicalFieldTerms,
+  ].some((term) => ['product category', 'category'].includes(normalizeMetricPhrase(term)));
+  const physicalRoleAliases: Readonly<Record<string, readonly string[]>> = {
+    'product category': ['product type'],
+    category: ['product type'],
+    // `product_price` is a local revenue witness only when the same request
+    // also requires product-category grain. It must not let a bare selected
+    // revenue metric bypass its semantic contract through an unrelated raw
+    // price column.
+    ...(hasProductCategoryRequirement ? { revenue: ['product price'] } : {}),
+  };
+  const physicalRoleTerms = (term: string): string[] => uniqueNormalizedTerms([
+    term,
+    ...(physicalRoleAliases[normalizeMetricPhrase(term)] ?? []),
+  ]);
+  const columnMatchesTerm = (column: AgentEvidenceCandidate, term: string): boolean =>
+    // A relation-qualified ID can contain a metric word even when the column
+    // itself does not.  Raw `fact_revenue.competitor` is not revenue evidence.
+    // Physical role proof therefore starts with field-local name/alias facts,
+    // never a parent relation token.
+    columnFieldIdentityTerms(column).some((identity) =>
+      physicalRoleTerms(term).some((role) => metricTermsMatch(identity, role)));
+  const matchingColumns = new Map<string, AgentEvidenceCandidate[]>(terms.map((term) => [
+    term,
+    columns.filter((column) => columnMatchesTerm(column, term)),
+  ]));
+  const uncovered = terms.filter((term) => (matchingColumns.get(term) ?? []).length === 0);
   if (uncovered.length > 0) {
     return { ok: false, candidateIds: [], reason: `Qualified physical columns did not cover ${uncovered.join(', ')}.` };
   }
 
-  const safeRelationshipProofIds = new Set<string>();
-  if (relationIds.size > 1) {
-    const adjacent = relations.map(() => new Set<number>());
-    for (let left = 0; left < relations.length; left += 1) {
-      for (let right = left + 1; right < relations.length; right += 1) {
-        const shared = [...safeRelationshipProofsForPair(relations[left]!, relations[right]!).keys()];
-        if (shared.length === 0) continue;
-        adjacent[left]!.add(right);
-        adjacent[right]!.add(left);
-        for (const id of shared) safeRelationshipProofIds.add(id);
-      }
+  const stableCandidateId = (candidate: AgentEvidenceCandidate): string => candidate.qualifiedId ?? candidate.id;
+  const stableCandidates = (values: AgentEvidenceCandidate[]): AgentEvidenceCandidate[] =>
+    [...values].sort((left, right) =>
+      Number(right.exactMatch === true) - Number(left.exactMatch === true)
+      || right.relevanceScore - left.relevanceScore
+      || stableCandidateId(left).localeCompare(stableCandidateId(right)));
+  const stableColumnsForTerm = (
+    values: AgentEvidenceCandidate[],
+    term: string,
+  ): AgentEvidenceCandidate[] =>
+    [...values].sort((left, right) => {
+      const rank = (column: AgentEvidenceCandidate): number => {
+        const identities = columnFieldIdentityTerms(column);
+        if (identities.some((identity) => identity === term)) return 0;
+        if (identities.some((identity) => metricTermsMatch(identity, term))) return 1;
+        return 2;
+      };
+      return rank(left) - rank(right)
+        || Number(right.exactMatch === true) - Number(left.exactMatch === true)
+        || right.relevanceScore - left.relevanceScore
+        || stableCandidateId(left).localeCompare(stableCandidateId(right));
+    });
+  const relationCoverage = relations.map((relation) => new Set(
+    terms.filter((term) => (matchingColumns.get(term) ?? []).some((column) => columnTouchesRelation(column, relation))),
+  ));
+  const selectRequiredColumns = (
+    selectedRelations: AgentEvidenceCandidate[],
+  ): AgentEvidenceCandidate[] | undefined => {
+    const selected = new Map<string, AgentEvidenceCandidate>();
+    for (const term of [...terms].sort()) {
+      const alreadySelected = [...selected.values()].some((column) => columnMatchesTerm(column, term));
+      if (alreadySelected) continue;
+      const matches = stableColumnsForTerm((matchingColumns.get(term) ?? []).filter((column) =>
+        selectedRelations.some((relation) => columnTouchesRelation(column, relation))), term);
+      const selectedColumn = matches[0];
+      if (!selectedColumn) return undefined;
+      selected.set(stableCandidateId(selectedColumn), selectedColumn);
     }
-    const reachable = new Set<number>([0]);
-    const pending = [0];
-    while (pending.length > 0) {
-      const current = pending.shift()!;
-      for (const neighbor of adjacent[current] ?? []) {
-        if (reachable.has(neighbor)) continue;
-        reachable.add(neighbor);
-        pending.push(neighbor);
-      }
-    }
-    if (reachable.size !== relations.length) {
+    return [...selected.values()];
+  };
+  const physicalEvidence = (
+    selectedRelations: AgentEvidenceCandidate[],
+    requiredColumns: AgentEvidenceCandidate[],
+    joinColumns: AgentEvidenceCandidate[],
+    relationshipProofIds: string[],
+    reason: string,
+  ): { ok: boolean; candidateIds: string[]; reason: string } => {
+    // Keep one deterministic witness for every requested role, then the
+    // necessary join-key witnesses and proof identities.  Do not add an
+    // entire table schema: that used to hide required columns behind a broad
+    // 32-card truncation.  If the minimal evidence itself exceeds the cap,
+    // decline the path rather than silently dropping a required witness.
+    const ids = [...new Set([
+      ...stableCandidates(selectedRelations).map(stableCandidateId),
+      ...stableCandidates(requiredColumns).map(stableCandidateId),
+      ...stableCandidates(joinColumns).map(stableCandidateId),
+      ...[...relationshipProofIds].sort(),
+    ])];
+    if (ids.length > 32) {
       return {
         ok: false,
         candidateIds: [],
-        reason: 'Multiple physical relations lacked one connected, certified, validated, fanout-safe automatic-join path.',
+        reason: `The minimal qualified exploratory closure needs ${ids.length} required relation, field, join-key, or proof witnesses, exceeding the 32-card safety cap; no required evidence was dropped.`,
       };
     }
+    return { ok: true, candidateIds: ids, reason };
+  };
+  const completeRelation = relationCoverage
+    .map((coverage, index) => ({ coverage, index }))
+    .filter(({ coverage }) => coverage.size === terms.length)
+    .sort((left, right) => stableCandidateId(relations[left.index]!).localeCompare(stableCandidateId(relations[right.index]!)))[0];
+  if (completeRelation) {
+    const relation = relations[completeRelation.index]!;
+    const requiredColumns = selectRequiredColumns([relation]);
+    if (!requiredColumns) {
+      return { ok: false, candidateIds: [], reason: 'Qualified physical columns did not cover the requested fields on the selected relation.' };
+    }
+    return physicalEvidence(
+      [relation],
+      requiredColumns,
+      [],
+      [],
+      'One qualified physical relation covers the requested fields without a join.',
+    );
+  }
+
+  // Build only from structured relationship proofs. A large retrieval snapshot
+  // routinely contains unrelated raw tables; requiring every one to join made
+  // a complete local path appear unavailable. Conversely, never infer a join
+  // from names or shared column strings: the proof must retain the structured
+  // certified, validated, fanout-safe disposition above.
+  const adjacent = relations.map(() => new Set<number>());
+  type SafeJoinWitness = {
+    proof: AgentRelationshipSafetyEvidence;
+    columns: AgentEvidenceCandidate[];
+  };
+  const joinColumnsForProof = (
+    proof: AgentRelationshipSafetyEvidence,
+    left: AgentEvidenceCandidate,
+    right: AgentEvidenceCandidate,
+  ): AgentEvidenceCandidate[] | undefined => {
+    const leftEndpoints = candidateRelationshipEndpoints(left);
+    const rightEndpoints = candidateRelationshipEndpoints(right);
+    const from = normalizedRelationshipIdentity(proof.from ?? '');
+    const to = normalizedRelationshipIdentity(proof.to ?? '');
+    const direct = leftEndpoints.has(from) && rightEndpoints.has(to);
+    const reverse = leftEndpoints.has(to) && rightEndpoints.has(from);
+    if (!direct && !reverse) return undefined;
+    const witnesses = new Map<string, AgentEvidenceCandidate>();
+    for (const key of proof.keys) {
+      const leftKey = normalizeMetricPhrase(direct ? key.from : key.to);
+      const rightKey = normalizeMetricPhrase(direct ? key.to : key.from);
+      const leftColumn = stableColumnsForTerm(columns.filter((column) =>
+        columnTouchesRelation(column, left)
+        && columnMatchesTerm(column, leftKey)), leftKey)[0];
+      const rightColumn = stableColumnsForTerm(columns.filter((column) =>
+        columnTouchesRelation(column, right)
+        && columnMatchesTerm(column, rightKey)), rightKey)[0];
+      // A relationship record alone cannot prove a compilable raw join.  Both
+      // canonical endpoint columns must be present in this same snapshot.
+      if (!leftColumn || !rightColumn) return undefined;
+      witnesses.set(stableCandidateId(leftColumn), leftColumn);
+      witnesses.set(stableCandidateId(rightColumn), rightColumn);
+    }
+    return [...witnesses.values()];
+  };
+  const witnessesForEdge = new Map<string, SafeJoinWitness[]>();
+  for (let left = 0; left < relations.length; left += 1) {
+    for (let right = left + 1; right < relations.length; right += 1) {
+      const shared = [...safeRelationshipProofsForPair(relations[left]!, relations[right]!).values()]
+        .sort((first, second) => first.id.localeCompare(second.id))
+        .flatMap((proof) => {
+          const joinColumns = joinColumnsForProof(proof, relations[left]!, relations[right]!);
+          return joinColumns ? [{ proof, columns: joinColumns }] : [];
+        });
+      if (shared.length === 0) continue;
+      adjacent[left]!.add(right);
+      adjacent[right]!.add(left);
+      witnessesForEdge.set(`${Math.min(left, right)}:${Math.max(left, right)}`, shared);
+    }
+  }
+
+  type SafeClosure = { nodes: Set<number>; edges: Array<[number, number]>; covered: Set<string> };
+  const closures: SafeClosure[] = [];
+  for (let root = 0; root < relations.length; root += 1) {
+    const nodes = new Set<number>([root]);
+    const edges: Array<[number, number]> = [];
+    const covered = new Set(relationCoverage[root]);
+    while (covered.size < terms.length) {
+      let best: { path: number[]; gain: number; distance: number } | undefined;
+      const pending: Array<{ node: number; path: number[] }> = [{ node: root, path: [root] }];
+      const seen = new Set<number>([root]);
+      while (pending.length > 0) {
+        const current = pending.shift()!;
+        const gain = [...relationCoverage[current.node]!].filter((term) => !covered.has(term)).length;
+        if (gain > 0 && (!best || gain > best.gain || (gain === best.gain && current.path.length < best.distance))) {
+          best = { path: current.path, gain, distance: current.path.length };
+        }
+        for (const neighbor of adjacent[current.node] ?? []) {
+          if (seen.has(neighbor)) continue;
+          seen.add(neighbor);
+          pending.push({ node: neighbor, path: [...current.path, neighbor] });
+        }
+      }
+      if (!best) break;
+      for (const node of best.path) {
+        nodes.add(node);
+        for (const term of relationCoverage[node]!) covered.add(term);
+      }
+      for (let index = 1; index < best.path.length; index += 1) {
+        const left = best.path[index - 1]!;
+        const right = best.path[index]!;
+        if (!edges.some(([edgeLeft, edgeRight]) => edgeLeft === left && edgeRight === right || edgeLeft === right && edgeRight === left)) {
+          edges.push([left, right]);
+        }
+      }
+    }
+    if (covered.size === terms.length) closures.push({ nodes, edges, covered });
+  }
+  const selected = closures.sort((left, right) =>
+    left.nodes.size - right.nodes.size
+    || left.edges.length - right.edges.length
+    || [...left.nodes].join(',').localeCompare([...right.nodes].join(',')),
+  )[0];
+  if (!selected) {
+    return {
+      ok: false,
+      candidateIds: [],
+      reason: 'Multiple physical relations lacked one connected, certified, validated, fanout-safe automatic-join path.',
+      // This is not a lexical conclusion. Every requested physical field was
+      // found above, no one relation covered the tuple, and the structured
+      // relationship/fanout proof graph could not connect the required
+      // relations. Preserve that proof-specific category for downstream
+      // receipts and repair guidance.
+      gap: {
+        code: 'MISSING_RELATIONSHIP',
+        missing: ['a connected certified, validated, fanout-safe relationship proof'],
+        witnessCandidateIds: stableCandidates(relations).map(stableCandidateId),
+      },
+    };
+  }
+  const selectedRelations = [...selected.nodes].map((index) => relations[index]!);
+  const requiredColumns = selectRequiredColumns(selectedRelations);
+  if (!requiredColumns) {
+    return { ok: false, candidateIds: [], reason: 'Qualified physical columns did not cover the requested fields on the selected relationship closure.' };
+  }
+  const selectedWitnesses = selected.edges.map(([left, right]) =>
+    witnessesForEdge.get(`${Math.min(left, right)}:${Math.max(left, right)}`)?.[0]).filter((witness): witness is SafeJoinWitness => Boolean(witness));
+  if (selectedWitnesses.length !== selected.edges.length) {
+    return { ok: false, candidateIds: [], reason: 'The selected relationship closure lacked qualified join-key witnesses for every automatic join.' };
+  }
+  return physicalEvidence(
+    selectedRelations,
+    requiredColumns,
+    selectedWitnesses.flatMap((witness) => witness.columns),
+    selectedWitnesses.map((witness) => witness.proof.id),
+    'Qualified physical relations and structured relationship safety proofs support a bounded exploratory plan.',
+  );
+}
+
+/**
+ * The pre-freeze cascade is router authority, including when the bounded
+ * meaning call could not run.  A missing role in a compact meaning package is
+ * not terminal proof of absence: eligible certified/semantic tiers are marked
+ * ineligible, then the same immutable snapshot may prove a review-required
+ * physical path.  Policy, fiscal, and relationship safety gates run before
+ * this helper and remain terminal where appropriate.
+ */
+function preFreezePhysicalCascadeDecision(input: {
+  base: IntentDecision;
+  evidence: AgentRetrievalEvidence;
+  candidates: AgentEvidenceCandidate[];
+  question: string;
+  requirements: AnalyticalRequirementSetV1;
+  missingTerms: string[];
+  requiredPhysicalFieldTerms?: string[];
+  messagePrefix: string;
+  terminalCandidateIds?: string[];
+  /** A bare ranking can inspect physical safety, but cannot invent its measure. */
+  requireRankingMetric?: boolean;
+}): IntentDecision {
+  // `candidates` can be the capped meaning package. Physical eligibility is
+  // allowed one same-snapshot extension, never a new retrieval/domain scope.
+  const snapshotCandidates = input.evidence.candidates.length > 0
+    ? input.evidence.candidates
+    : input.candidates;
+  const physicalPath = hasSafeExploratoryPhysicalPath(
+    input.requirements,
+    snapshotCandidates,
+    input.missingTerms,
+    input.requiredPhysicalFieldTerms ?? [],
+  );
+  const missingRankingMetric = Boolean(physicalPath.ok
+    && input.requireRankingMetric
+    && input.requirements.ranking
+    && input.requirements.ranking.metricTerms.length === 0);
+  const exploratoryExecutable = physicalPath.ok && !missingRankingMetric;
+  const coverage = sourceCoverageFromEvidence(input.evidence, snapshotCandidates);
+  const coverageFor = (source: ContextSourceCoverageV1['source']) => coverage.find((item) => item.source === source);
+  const skippedAttempt = (
+    tier: Extract<CascadeTierAttemptV1['tier'], 'certified' | 'semantic'>,
+    source: Extract<ContextSourceCoverageV1['source'], 'certified' | 'semantic'>,
+  ): CascadeTierAttemptV1 => {
+    const item = coverageFor(source);
+    return {
+      version: 1,
+      tier,
+      outcome: item?.status === 'available' ? 'ineligible' : 'unavailable',
+      candidateIds: item?.candidateIds ?? [],
+      reason: item?.status === 'available'
+        ? `The ${tier} tier did not prove the complete requested tuple before plan freeze.`
+        : `The ${tier} source was ${item?.status ?? 'unavailable'} in this snapshot.`,
+      planFrozen: false,
+    };
+  };
+  const governedCoverage = coverageFor('governed_relational');
+  const attempts: CascadeTierAttemptV1[] = [
+    skippedAttempt('certified', 'certified'),
+    skippedAttempt('semantic', 'semantic'),
+    {
+      version: 1,
+      tier: 'governed_relational',
+      outcome: governedCoverage?.status === 'available' ? 'ineligible' : 'unavailable',
+      candidateIds: governedCoverage?.candidateIds ?? [],
+      reason: governedCoverage?.status === 'available'
+        ? 'Retrieved governed relationship evidence did not prove a complete relational execution tuple.'
+        : `The governed relational source was ${governedCoverage?.status ?? 'unavailable'}; exploratory eligibility is evaluated independently.`,
+      planFrozen: false,
+    },
+    {
+      version: 1,
+      tier: 'exploratory_sql',
+      outcome: exploratoryExecutable ? 'executable' : missingRankingMetric ? 'ambiguous' : 'unavailable',
+      candidateIds: physicalPath.candidateIds,
+      reason: missingRankingMetric
+        ? `${physicalPath.reason} A ranking measure remains unbound, so exploration cannot be selected.`
+        : physicalPath.reason,
+      planFrozen: false,
+    },
+  ];
+  const message = exploratoryExecutable
+    ? `${input.messagePrefix} A same-snapshot qualified physical path is available for review-required exploratory SQL.`
+    : missingRankingMetric
+      ? `${input.messagePrefix} ${physicalPath.reason} A ranking measure must be selected before DQL can freeze or explore this plan.`
+      : `${input.messagePrefix} ${physicalPath.reason}`;
+  const analyticalCascadeDecision = buildAnalyticalCascadeDecision({
+    requirements: input.requirements,
+    sourceCoverage: coverage,
+    attempts: exploratoryExecutable
+      ? attempts
+      : [...attempts, {
+          version: 1,
+          tier: 'clarify_or_gap',
+          outcome: 'unavailable',
+          candidateIds: [],
+          reason: message,
+          planFrozen: false,
+        }],
+    ...(exploratoryExecutable ? { selectedTier: 'exploratory_sql' as const } : {}),
+    planFrozen: false,
+    stopReason: exploratoryExecutable ? 'selected' : missingRankingMetric ? 'ambiguous' : 'coverage_gap',
+  });
+  if (!exploratoryExecutable) {
+    return {
+      ...input.base,
+      action: 'block',
+      confidence: 1,
+      reason: message,
+      source: 'heuristic',
+      category: 'data_lookup',
+      depth: 'quick',
+      requiresClarification: false,
+      clarifyingQuestion: undefined,
+      clarificationOptions: undefined,
+      retrievalEvidence: retrievalTrace(input.evidence, snapshotCandidates),
+      terminalOutcome: {
+        kind: 'modeling_gap',
+        code: 'ANALYTICAL_MODELING_GAP',
+        message,
+        candidateIds: input.terminalCandidateIds ?? [],
+        ...(physicalPath.gap ? { gap: physicalPath.gap } : {}),
+      },
+      analyticalCascadeDecision,
+      resolvedAnalyticalPlan: undefined,
+      meaningResolution: undefined,
+    };
   }
   return {
-    ok: true,
-    candidateIds: [...new Set([
-      ...relations,
-      ...reachableColumns,
-    ].map((candidate) => candidate.qualifiedId ?? candidate.id).concat([...safeRelationshipProofIds]))].slice(0, 32),
-    reason: relationIds.size > 1
-      ? 'Qualified physical relations and structured relationship safety proofs support a bounded exploratory plan.'
-      : 'One qualified physical relation covers the requested fields without a join.',
+    ...input.base,
+    action: 'answer',
+    confidence: 0.55,
+    reason: message,
+    source: 'heuristic',
+    category: 'data_lookup',
+    depth: 'quick',
+    requiresClarification: false,
+    clarifyingQuestion: undefined,
+    clarificationOptions: undefined,
+    retrievalEvidence: retrievalTrace(input.evidence, snapshotCandidates),
+    analyticalCascadeDecision,
+    meaningResolution: {
+      interpretedQuestion: input.question,
+      questionType: questionTypeFromText(input.question),
+      selectedConceptIds: physicalPath.candidateIds,
+      queryIntent: {
+        ...defaultQueryIntent(input.evidence),
+        measures: input.requirements.measures,
+        dimensions: input.requirements.dimensions,
+        filters: input.evidence.parsedIntent?.filters ?? [],
+      },
+      rejectedCandidates: [],
+      confidence: 'low',
+      missingInformation: [message],
+      recommendedRoute: 'exploratory',
+      compatibilityOutcome: 'modeling_gap',
+      compatibilityFailures: input.missingTerms.map((term) => ({
+        code: 'MISSING_DIMENSION' as const,
+        field: term,
+        message: `${term} was not complete in the earlier governed tiers.`,
+        candidateIds: [],
+      })),
+    },
+    resolvedAnalyticalPlan: undefined,
   };
 }
 
@@ -1176,6 +1601,9 @@ function routeDecisionForResolution(
     reconciliation,
     question,
   });
+  const terminalGap = reconciliation.outcome === 'modeling_gap'
+    ? terminalGapWitnessForResolutionFailure(resolvedAnalyticalPlan)
+    : undefined;
   return {
     ...base,
     action: needsClarification
@@ -1211,6 +1639,7 @@ function routeDecisionForResolution(
               : 'ANALYTICAL_MODELING_GAP' as const,
             message: reconciliation.reason,
             candidateIds: resolvedAnalyticalPlan.resolutionFailure?.candidateIds ?? [],
+            ...(terminalGap ? { gap: terminalGap } : {}),
           },
         }
       : {}),
@@ -1490,6 +1919,68 @@ function reconcileResolvedPlanOutcome(
   };
 }
 
+/**
+ * Keep a specific terminal gap only when its producer supplied a typed reason.
+ * A generic modeling gap must never become a relationship-gap claim because a
+ * later renderer happened to mention joins in its repair copy.
+ */
+function terminalGapWitnessForResolutionFailure(
+  plan: ResolvedAnalyticalPlan,
+): AnalyticalTerminalGapWitness | undefined {
+  const failure = plan.resolutionFailure;
+  if (!failure || failure.outcome !== 'modeling_gap') return undefined;
+  const codes = new Set(failure.codes);
+  const unresolved = [...new Set(failure.bindings
+    .filter((binding) => binding.status !== 'resolved')
+    .map((binding) => binding.requested)
+    .filter(Boolean))];
+  const witnessCandidateIds = [...new Set([
+    ...failure.candidateIds,
+    ...(failure.selectedCapabilityId ? [failure.selectedCapabilityId] : []),
+    ...(failure.selectedExecutionId ? [failure.selectedExecutionId] : []),
+  ])].sort();
+  if (codes.has('RELATIONSHIP_PROOF_MISSING')) {
+    return {
+      code: 'MISSING_RELATIONSHIP',
+      missing: ['a certified, validated, fanout-safe relationship proof'],
+      witnessCandidateIds,
+    };
+  }
+  if (codes.has('METRIC_CAPABILITY_MISSING') || codes.has('MISSING_MEASURE')) {
+    return {
+      code: 'MISSING_MEASURE',
+      missing: unresolved.length > 0 ? unresolved : ['the requested governed measure'],
+      witnessCandidateIds,
+    };
+  }
+  if (codes.has('MEMBER_FILTER_UNSUPPORTED') || codes.has('MISSING_ATTRIBUTE')) {
+    return {
+      code: 'MISSING_ATTRIBUTE',
+      missing: unresolved.length > 0 ? unresolved : ['the requested governed attribute or member filter'],
+      witnessCandidateIds,
+    };
+  }
+  if ([
+    'DIMENSION_ROLE_UNSUPPORTED',
+    'TIME_DIMENSION_REQUIRED',
+    'TIME_DIMENSION_AMBIGUOUS',
+    'TIME_ROLE_UNSUPPORTED',
+    'TIME_GRAIN_UNSUPPORTED',
+    'MISSING_DIMENSION',
+  ].some((code) => codes.has(code))) {
+    return {
+      code: 'MISSING_DIMENSION',
+      missing: unresolved.length > 0 ? unresolved : ['the requested governed dimension or time role'],
+      witnessCandidateIds,
+    };
+  }
+  return {
+    code: 'MISSING_RUNTIME_CAPABILITY',
+    missing: unresolved.length > 0 ? unresolved : ['the complete requested analytical tuple'],
+    witnessCandidateIds,
+  };
+}
+
 function clarificationOptionsForQualifiedIds(
   ids: string[],
   candidates: AgentEvidenceCandidate[],
@@ -1555,7 +2046,7 @@ function continueCascadeAfterIncompleteSelection(
   // diagnostic receipt disagree even though the user chose a legitimate item.
   const selectedId = selected.id;
   const requirements = buildAnalyticalRequirementSet({ question, parsedIntent: evidence.parsedIntent });
-  const requiredPhysicalTerms = [
+  const requiredPhysicalFieldTerms = [
     ...(evidence.parsedIntent?.dimensions ?? []),
     ...(evidence.parsedIntent?.filters ?? []).map((filter) => filter.field),
   ];
@@ -1563,7 +2054,7 @@ function continueCascadeAfterIncompleteSelection(
     requirements,
     candidates,
     requirements.dimensions,
-    requiredPhysicalTerms,
+    requiredPhysicalFieldTerms,
   );
   const coverage = sourceCoverageFromEvidence(evidence, candidates);
   const governedCoverage = coverage.find((item) => item.source === 'governed_relational');
@@ -1647,7 +2138,13 @@ function continueCascadeAfterIncompleteSelection(
       resolvedAnalyticalPlan: undefined,
       meaningResolution,
       analyticalCascadeDecision,
-      terminalOutcome: { kind: 'modeling_gap', code: 'ANALYTICAL_MODELING_GAP', message, candidateIds: [selectedId] },
+      terminalOutcome: {
+        kind: 'modeling_gap',
+        code: 'ANALYTICAL_MODELING_GAP',
+        message,
+        candidateIds: [selectedId],
+        ...(physicalPath.gap ? { gap: physicalPath.gap } : {}),
+      },
     };
   }
   return {
@@ -2395,7 +2892,22 @@ function directResolution(
     metricCandidates,
     candidates,
   });
-  const queryIntent = defaultQueryIntent(evidence);
+  const defaultIntent = defaultQueryIntent(evidence);
+  // An exact authored certified example has already proved this block's own
+  // output contract. Parser wording such as "food and drink" describes the
+  // values of the block's declared `category` output; it must not manufacture
+  // two literal dimensions and overrule that local contract. Only replace
+  // dimensions when the selected block explicitly declares them, while the
+  // strict requested-measure check remains unchanged.
+  const exactCertifiedExample = candidate.kind === 'certified_block'
+    && candidate.exactMatch
+    && candidate.compatibility === 'compatible'
+    && candidate.analyticalFitClass === 'exact'
+    && certifiedCandidateExplicitlyCoversMeasures(candidate, defaultIntent.measures)
+    && (candidate.dimensions?.length ?? 0) > 0;
+  const queryIntent = exactCertifiedExample
+    ? { ...defaultIntent, dimensions: candidate.dimensions ?? [] }
+    : defaultIntent;
   const memberCandidates = candidates.filter((item) => {
     if (item.kind !== 'semantic_member' || item.compatibility === 'incompatible') return false;
     const identities = [item.name, ...(item.aliases ?? [])].map(normalizeMetricPhrase).filter(Boolean);
@@ -2844,6 +3356,30 @@ function unresolvedAnalyticalPlanDecision(
   // hints can still guide later plan construction but must not hide every
   // valid compositional or dimension choice.
   const clarificationRequirements = buildAnalyticalRequirementSet({ question });
+  const physicalRequirements = buildAnalyticalRequirementSet({
+    question,
+    parsedIntent: evidence?.parsedIntent,
+  });
+  const fallbackToPhysicalCascade = (): IntentDecision | undefined => {
+    if (!evidence) return undefined;
+    const requiredPhysicalFieldTerms = [
+      ...physicalRequirements.dimensions,
+      ...physicalRequirements.entityTerms,
+      ...physicalRequirements.entityDisplayTerms,
+      ...(evidence.parsedIntent?.filters ?? []).map((filter) => filter.field),
+    ];
+    return preFreezePhysicalCascadeDecision({
+      base,
+      evidence,
+      candidates,
+      question,
+      requirements: physicalRequirements,
+      missingTerms: physicalRequirements.dimensions,
+      requiredPhysicalFieldTerms,
+      messagePrefix: 'No certified, semantic, or governed relational candidate proved the complete requested tuple before plan freeze.',
+      terminalCandidateIds: eligible.map((candidate) => candidate.qualifiedId ?? candidate.id),
+    });
+  };
   if (eligible.length > 1) {
     // Raw candidates can be complementary rather than competing. Do not ask a
     // person to pick between the table that supplies the display value and the
@@ -2858,21 +3394,23 @@ function unresolvedAnalyticalPlanDecision(
     if (composition) return composition;
     const choices = compatibleClarificationCandidates(eligible, clarificationRequirements).slice(0, 3);
     if (choices.length === 0) {
-      const message = 'No retrieved artifact owns every explicitly requested analytical role, so DQL did not offer an incompatible structured selection.';
-      return {
-        ...base,
-        action: 'block',
-        confidence: 1,
-        source: 'heuristic',
-        category: 'data_lookup',
-        depth: 'quick',
-        reason: message,
-        requiresClarification: false,
-        retrievalEvidence: trace,
-        terminalOutcome: { kind: 'modeling_gap', code: 'ANALYTICAL_MODELING_GAP', message, candidateIds: eligible.map((candidate) => candidate.qualifiedId ?? candidate.id) },
-        resolvedAnalyticalPlan: undefined,
-        meaningResolution: undefined,
-      };
+      return fallbackToPhysicalCascade() ?? (() => {
+        const message = 'No retrieved artifact owns every explicitly requested analytical role, so DQL did not offer an incompatible structured selection.';
+        return {
+          ...base,
+          action: 'block' as const,
+          confidence: 1,
+          source: 'heuristic' as const,
+          category: 'data_lookup' as const,
+          depth: 'quick' as const,
+          reason: message,
+          requiresClarification: false,
+          retrievalEvidence: trace,
+          terminalOutcome: { kind: 'modeling_gap' as const, code: 'ANALYTICAL_MODELING_GAP' as const, message, candidateIds: eligible.map((candidate) => candidate.qualifiedId ?? candidate.id) },
+          resolvedAnalyticalPlan: undefined,
+          meaningResolution: undefined,
+        };
+      })();
     }
     return {
       ...base,
@@ -2895,6 +3433,8 @@ function unresolvedAnalyticalPlanDecision(
   const message = candidateIds.length === 1
     ? `The retrieved governed candidate ${candidateIds[0]} did not prove the complete requested metric, grain, filters, ordering, and outputs. Model the missing capability before retrying.`
     : 'No governed candidate proved the complete requested metric, grain, filters, ordering, and outputs. Model the missing capability or choose a governed identifier before retrying.';
+  const physicalFallback = fallbackToPhysicalCascade();
+  if (physicalFallback) return physicalFallback;
   return {
     ...base,
     action: 'block',
@@ -2976,9 +3516,35 @@ function deterministicPrePlanClarification(
       .slice(0, 3);
     if (alternatives.length === 0) {
       // Bare rankings need a measure choice, not a dimension gap. Retain the
-      // no-options escape hatch for BCM-like retrieval failures.
+      // no-options escape hatch only when the snapshot does not also expose a
+      // typed structural request. For "top customers for perishable products",
+      // a no-option ranking response previously hid the missing safe
+      // customer→order→item→supply closure behind an answer-shaped dead end.
+      // Record that pre-freeze gap instead; this still never invents a ranking
+      // measure or a relationship.
       if (asksForRanking && !hasExplicitRankingMetric) {
-        return bareRankingClarification(base, retrievalEvidence, request.question, evidence, candidates);
+        const rankingClarification = bareRankingClarification(
+          base,
+          retrievalEvidence,
+          request.question,
+          evidence,
+          candidates,
+        );
+        if (rankingClarification.action === 'clarify'
+          && (rankingClarification.clarificationOptions?.length ?? 0) > 0) {
+          return rankingClarification;
+        }
+        return preFreezePhysicalCascadeDecision({
+          base,
+          evidence,
+          candidates,
+          question: request.question,
+          requirements,
+          missingTerms: missingDimensions,
+          requiredPhysicalFieldTerms: (evidence.parsedIntent?.filters ?? []).map((filter) => filter.field),
+          messagePrefix: `No governed ranking measure and no complete governed tuple proved ${missingDimensions.map((term) => `“${term}”`).join(' and ')} before plan freeze.`,
+          requireRankingMetric: true,
+        });
       }
       // Parsed-intent hints can include inherited/default dimensions that the
       // user never asked for. Only turn a missing field into a product-facing
@@ -2987,95 +3553,19 @@ function deterministicPrePlanClarification(
       const normalizedQuestion = normalizeMetricPhrase(request.question);
       if (!missingDimensions.every((dimension) => normalizedQuestion.includes(dimension))) return undefined;
       const requestedLabel = missingDimensions.map((term) => `“${term}”`).join(' and ');
-      const physicalPath = hasSafeExploratoryPhysicalPath(requirements, candidates, missingDimensions);
       const temporalNote = requirements.time?.fiscalPeriod
         ? ` ${requirements.time.fiscalPeriod} remains an unbound fiscal-period token until a declared calendar is available; DQL will not guess one.`
         : '';
-      const coverage = sourceCoverageFromEvidence(evidence, candidates);
-      const governedCoverage = coverage.find((item) => item.source === 'governed_relational');
-      const cascadeAttempts: CascadeTierAttemptV1[] = [
-        { version: 1, tier: 'certified', outcome: 'ineligible', candidateIds: coverage.find((item) => item.source === 'certified')?.candidateIds ?? [], reason: 'Certified candidates did not prove the requested dimension.', planFrozen: false },
-        { version: 1, tier: 'semantic', outcome: 'ineligible', candidateIds: coverage.find((item) => item.source === 'semantic')?.candidateIds ?? [], reason: 'Semantic candidates did not prove the requested dimension.', planFrozen: false },
-        {
-          version: 1,
-          tier: 'governed_relational',
-          outcome: governedCoverage?.status === 'available' ? 'ineligible' : 'unavailable',
-          candidateIds: governedCoverage?.candidateIds ?? [],
-          reason: governedCoverage?.status === 'available'
-            ? 'Retrieved governed relationship evidence did not prove a complete relational plan.'
-            : `The governed relational source was ${governedCoverage?.status ?? 'unavailable'}; exploratory eligibility is evaluated independently.`,
-          planFrozen: false,
-        },
-        { version: 1, tier: 'exploratory_sql', outcome: physicalPath.ok ? 'executable' : 'unavailable', candidateIds: physicalPath.candidateIds, reason: physicalPath.reason, planFrozen: false },
-      ];
-      const message = physicalPath.ok
-        ? `The certified and semantic candidates did not prove ${requestedLabel}.${temporalNote} A same-snapshot qualified physical path is available for review-required exploratory SQL.`
-        : `The requested dimension ${requestedLabel} is not covered by a safe qualified physical path. ${physicalPath.reason}${temporalNote}`;
-      const analyticalCascadeDecision = buildAnalyticalCascadeDecision({
+      return preFreezePhysicalCascadeDecision({
+        base,
+        evidence,
+        candidates,
+        question: request.question,
         requirements,
-        sourceCoverage: coverage,
-        attempts: physicalPath.ok
-          ? cascadeAttempts
-          : [...cascadeAttempts, { version: 1, tier: 'clarify_or_gap', outcome: 'unavailable', candidateIds: [], reason: message, planFrozen: false }],
-        ...(physicalPath.ok ? { selectedTier: 'exploratory_sql' as const } : {}),
-        planFrozen: false,
-        stopReason: physicalPath.ok ? 'selected' : 'coverage_gap',
+        missingTerms: missingDimensions,
+        requiredPhysicalFieldTerms: (evidence.parsedIntent?.filters ?? []).map((filter) => filter.field),
+        messagePrefix: `The certified and semantic candidates did not prove ${requestedLabel}.${temporalNote}`,
       });
-      if (!physicalPath.ok) {
-        return {
-          ...base,
-          action: 'block',
-          confidence: 1,
-          reason: message,
-          source: 'heuristic',
-          category: 'data_lookup',
-          depth: 'quick',
-          requiresClarification: false,
-          retrievalEvidence,
-          terminalOutcome: { kind: 'modeling_gap', code: 'ANALYTICAL_MODELING_GAP', message, candidateIds: [] },
-          analyticalCascadeDecision,
-          resolvedAnalyticalPlan: undefined,
-          meaningResolution: undefined,
-        };
-      }
-      return {
-        ...base,
-        // This is a PRE-FREEZE coverage observation. It must be retained for
-        // inspection without turning absence from a bounded package into proof
-        // that generated SQL is forbidden (AGT-029 / EXP-001).
-        action: 'answer',
-        confidence: 0.55,
-        reason: message,
-        source: 'heuristic',
-        category: 'data_lookup',
-        depth: 'quick',
-        requiresClarification: false,
-        retrievalEvidence,
-        analyticalCascadeDecision,
-        meaningResolution: {
-          interpretedQuestion: request.question,
-          questionType: questionTypeFromText(request.question),
-          selectedConceptIds: [],
-          queryIntent: {
-            ...defaultQueryIntent(evidence),
-            measures: evidence.parsedIntent?.measures ?? [],
-            dimensions: evidence.parsedIntent?.dimensions ?? [],
-            filters: evidence.parsedIntent?.filters ?? [],
-          },
-          rejectedCandidates: [],
-          confidence: 'low',
-          missingInformation: [message],
-          recommendedRoute: 'exploratory',
-          compatibilityOutcome: 'modeling_gap',
-          compatibilityFailures: missingDimensions.map((dimension) => ({
-            code: 'MISSING_DIMENSION',
-            field: dimension,
-            message: `${dimension} is not modeled.`,
-            candidateIds: [],
-          })),
-        },
-        resolvedAnalyticalPlan: undefined,
-      };
     }
     const requestedLabel = missingDimensions.map((term) => `“${term}”`).join(' and ');
     const alternativeLabels = alternatives.map(renderCandidateChoice);
@@ -3692,6 +4182,12 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
       }
 
       if (evidence) {
+        // The retrieval parser may carry broad search phrases such as
+        // `count_for_each_customer`. They are useful before retrieval, but
+        // they are not executable measures. Normalize once at the router
+        // boundary so every downstream plan/meaning path consumes the same
+        // typed measure + entity/dimension requirements.
+        evidence = withNormalizedAnalyticalRequirements(evidence, request.question);
         evidence = {
           ...evidence,
           candidates: canonicalizeMetricMeasureCandidates(evidence.candidates),
@@ -3744,6 +4240,31 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
         if (selectedEvidence && !candidates.some((candidate) => candidate.id === selectedEvidence.id)) {
           candidates = [selectedEvidence, ...candidates.filter((candidate) => candidate.id !== selectedEvidence.id)]
             .slice(0, options.maxMeaningCandidates ?? 16);
+        }
+        // The compact meaning package can be empty when every ranked card was
+        // reserved for a role that the parser marked missing. A unique authored
+        // certified example is still an authoritative snapshot fact, so it
+        // must be considered before the package-length guard and before any
+        // deterministic missing-dimension cascade.
+        if (!request.selectedEvidenceId) {
+          const authoredExample = authoritativeExactCertifiedExample(
+            clarificationCandidates,
+            evidence?.parsedIntent?.measures ?? [],
+          );
+          if (authoredExample) {
+            const candidatesForResolution = candidates.some((candidate) => candidate.id === authoredExample.id)
+              ? candidates
+              : [authoredExample, ...candidates];
+            return routeDecisionForResolution(
+              base,
+              evidence,
+              candidatesForResolution,
+              directResolution(request, evidence, authoredExample, candidatesForResolution),
+              'heuristic',
+              request.question,
+              options.resolvedPlanMode ?? 'authoritative',
+            );
+          }
         }
         if (candidates.length > 0) {
           // Fiscal tokens are execution requirements, not a semantic guess.
@@ -3829,35 +4350,6 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
             );
           }
 
-
-          // THE FAST LANE. Evaluated regardless of `shouldUseMeaningCall`, so an
-          // exact certified hit short-circuits BEFORE the ~10s meaning call
-          // rather than paying for it. Previously this shortcut only applied
-          // when the call was already being skipped, which meant a perfect
-          // certified match — the cheapest, most certain answer DQL can give —
-          // was also one of the slowest.
-          //
-          // The precondition is deliberately the strictest one available:
-          // exactly one certified block, compatible, whose AUTHORED EXAMPLE the
-          // question matches. `meaning-evidence.ts` sets that flag only for an
-          // authored-example fit and explicitly notes it is the one signal that
-          // may grant this shortcut — lexical equality to a block name does not
-          // qualify.
-          const authoredExample = authoritativeExactCertifiedExample(
-            candidates,
-            evidence?.parsedIntent?.measures ?? [],
-          );
-          if (authoredExample) {
-            return routeDecisionForResolution(
-              base,
-              evidence,
-              candidates,
-              directResolution(request, evidence, authoredExample, candidates),
-              'heuristic',
-              request.question,
-              options.resolvedPlanMode ?? 'authoritative',
-            );
-          }
 
           const exactCompatible = !shouldUseMeaningCall ? candidates.filter((candidate) =>
             candidate.exactMatch

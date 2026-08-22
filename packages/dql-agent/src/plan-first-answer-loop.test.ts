@@ -26,6 +26,17 @@ class NeverProvider implements AgentProvider {
   }
 }
 
+class SqlProvider implements AgentProvider {
+  readonly name = 'claude' as const;
+  calls = 0;
+  constructor(private readonly response: string) {}
+  async available(): Promise<boolean> { return true; }
+  async generate(_messages: AgentMessage[]): Promise<string> {
+    this.calls += 1;
+    return this.response;
+  }
+}
+
 let root: string;
 let kg: KGStore;
 
@@ -50,6 +61,130 @@ function planFor(candidate: AgentEvidenceCandidate, resolution: MeaningResolutio
 }
 
 describe('authoritative plan answer loop (AGT-013 / AGT-014)', () => {
+  it('executes only the router-selected exploratory tier without reopening certified or semantic lanes', async () => {
+    kg.rebuild([{
+      nodeId: 'block:top_customers',
+      kind: 'block',
+      name: 'top_customers',
+      status: 'certified',
+      declaredOutputs: ['customer_name', 'lifetime_spend'],
+    }, {
+      nodeId: 'metric:revenue',
+      kind: 'metric',
+      name: 'revenue',
+      status: 'certified',
+    }], []);
+    const provider = new SqlProvider('```json\n{"summary":"Order count by customer.","sql":"SELECT customer_name, count_lifetime_orders AS order_count FROM analytics.dim_customers ORDER BY customer_name","outputs":["customer_name","order_count"]}\n```');
+    let certifiedCalls = 0;
+    let generatedCalls = 0;
+    let hostFreezeCalls = 0;
+    const capability = {
+      version: 1 as const,
+      runId: 'run-plan-first-exploratory',
+      executionId: 'run-plan-first-exploratory:generated',
+      snapshotId: 'snapshot-plan-first',
+      planId: 'plan-first-exploratory',
+      targetFingerprint: 'target-plan-first',
+      bindingsFingerprint: 'bindings-plan-first',
+      candidateSqlFingerprint: 'candidate-plan-first',
+      provenIdentifiers: ['analytics.dim_customers', 'analytics.dim_customers.customer_name', 'analytics.dim_customers.count_lifetime_orders'],
+      evidence: {
+        'analytics.dim_customers': 'schema_tool' as const,
+        'analytics.dim_customers.customer_name': 'schema_tool' as const,
+        'analytics.dim_customers.count_lifetime_orders': 'schema_tool' as const,
+      },
+    };
+    const result = await answer({
+      question: 'what is the order count for each customer?',
+      provider,
+      kg,
+      selectedCascadeTier: 'exploratory_sql',
+      schemaContext: [{
+        relation: 'analytics.dim_customers',
+        name: 'dim_customers',
+        columns: [
+          { name: 'customer_name', type: 'string' },
+          { name: 'count_lifetime_orders', type: 'number' },
+        ],
+      }],
+      executeCertifiedBlock: async () => {
+        certifiedCalls += 1;
+        throw new Error('A router-selected exploratory plan must not reopen a certified block.');
+      },
+      prepareExploratorySqlExecution: async (sql) => {
+        hostFreezeCalls += 1;
+        expect(sql).toContain('FROM analytics.dim_customers');
+        return {
+          capability,
+          freeze: {
+            version: 1 as const,
+            selectedTier: 'exploratory_sql' as const,
+            planId: capability.planId,
+            planFingerprint: 'a'.repeat(64),
+            snapshotId: capability.snapshotId,
+            targetFingerprint: capability.targetFingerprint,
+            sqlFingerprint: 'b'.repeat(32),
+            candidateIds: ['dbt:model:dim_customers', 'dbt:column:dim_customers.customer_name', 'dbt:column:dim_customers.count_lifetime_orders'],
+            authorization: 'capability_minted' as const,
+          },
+        };
+      },
+      executeAgenticGeneratedSql: async (receivedCapability, sql) => {
+        generatedCalls += 1;
+        expect(receivedCapability).toBe(capability);
+        return {
+          columns: ['customer_name', 'order_count'],
+          rows: [{ customer_name: 'Ada', order_count: 3 }],
+          rowCount: 1,
+          sql,
+        };
+      },
+    });
+
+    expect(certifiedCalls).toBe(0);
+    expect(provider.calls).toBe(1);
+    expect(hostFreezeCalls).toBe(1);
+    expect(generatedCalls).toBe(1);
+    expect(result).toMatchObject({
+      kind: 'uncertified',
+      certification: 'ai_generated',
+      reviewStatus: 'draft_ready',
+      sourceTier: 'dbt_manifest',
+      exploratoryExecutionFreeze: {
+        selectedTier: 'exploratory_sql',
+        planId: capability.planId,
+        authorization: 'capability_minted',
+      },
+    });
+
+    const unavailableProvider = new NeverProvider();
+    const unavailable = await answer({
+      question: 'what is the order count for each customer?',
+      provider: unavailableProvider,
+      kg,
+      selectedCascadeTier: 'exploratory_sql',
+      schemaContext: [{
+        relation: 'analytics.dim_customers',
+        name: 'dim_customers',
+        columns: [
+          { name: 'customer_name', type: 'string' },
+          { name: 'count_lifetime_orders', type: 'number' },
+        ],
+      }],
+      executeCertifiedBlock: async () => {
+        certifiedCalls += 1;
+        throw new Error('not reached');
+      },
+      executeAgenticGeneratedSql: async () => {
+        generatedCalls += 1;
+        throw new Error('not reached');
+      },
+    });
+    expect(unavailable).toMatchObject({ kind: 'no_answer', refusalCode: 'provider_error' });
+    expect(certifiedCalls).toBe(0);
+    expect(generatedCalls).toBe(1);
+  });
+
   it('compiles and executes a single-relation governed AST without asking the provider for SQL', async () => {
     kg.rebuild([], []);
     const measure: AgentEvidenceCandidate = {
@@ -188,9 +323,188 @@ describe('authoritative plan answer loop (AGT-013 / AGT-014)', () => {
     });
     expect(failedProvider.calls).toBe(0);
     expect(failed.kind).toBe('no_answer');
-    expect(failed.route?.tier).toBe('no_answer');
+    // The frozen artifact remains the route provenance even though its own
+    // execution failed. `kind` remains no_answer and trust is not certified;
+    // the engine must not recast this as generated/no_answer after freeze.
+    expect(failed.route?.tier).toBe('certified_block');
+    expect(failed.certification).toBe('analyst_review_required');
     expect(failed.executionError).toMatch(/referenced column/i);
     expect(failed.resolvedAnalyticalPlan?.fingerprint).toBe(plan.fingerprint);
+  });
+
+  it('keeps frozen certified output-role aliases on the certified route', async () => {
+    kg.rebuild([{
+      nodeId: 'block:top_customers',
+      kind: 'block',
+      name: 'top_customers',
+      status: 'certified',
+      entities: ['customer'],
+      dimensions: ['customer'],
+      declaredOutputs: ['customer_name', 'lifetime_spend', 'order_count'],
+      outputContract: [
+        { name: 'customer_name', role: 'entity_label' },
+        { name: 'lifetime_spend', role: 'metric' },
+        { name: 'order_count', role: 'metric' },
+      ],
+    }, {
+      nodeId: 'block:food_vs_drink_revenue',
+      kind: 'block',
+      name: 'food_vs_drink_revenue',
+      status: 'certified',
+      entities: ['category'],
+      dimensions: ['category'],
+      // Mirrors a pre-role certified block: the authored dimension and
+      // projected alias are both `category`, while the measure remains an
+      // explicit artifact-local metric output.
+      declaredOutputs: ['category', 'revenue'],
+      outputContract: [
+        { name: 'category' },
+        { name: 'revenue', role: 'metric' },
+      ],
+    }], []);
+    const topCustomers: AgentEvidenceCandidate = {
+      id: 'block:top_customers',
+      qualifiedId: 'block:top_customers',
+      kind: 'certified_block',
+      trustTier: 'certified',
+      name: 'top_customers',
+      dimensions: ['customer'],
+      relevanceScore: 1,
+      matchReasons: ['selected certified block'],
+      compatibility: 'compatible',
+    };
+    const foodVsDrink: AgentEvidenceCandidate = {
+      id: 'block:food_vs_drink_revenue',
+      qualifiedId: 'block:food_vs_drink_revenue',
+      kind: 'certified_block',
+      trustTier: 'certified',
+      name: 'food_vs_drink_revenue',
+      dimensions: ['category'],
+      compatibilityFacts: ['output: revenue'],
+      relevanceScore: 1,
+      matchReasons: ['selected certified block'],
+      compatibility: 'compatible',
+    };
+    const topPlan = planFor(topCustomers, {
+      interpretedQuestion: 'who are the top customers',
+      questionType: 'ranking',
+      selectedConceptIds: [topCustomers.id],
+      recommendedExecutionId: topCustomers.id,
+      queryIntent: { measures: [], dimensions: ['customer'], filters: [], order: 'desc', limit: 10 },
+      rejectedCandidates: [],
+      confidence: 'high',
+      missingInformation: [],
+      recommendedRoute: 'certified',
+    });
+    const categoryPlan = planFor(foodVsDrink, {
+      interpretedQuestion: 'show me sales by category',
+      questionType: 'value',
+      selectedConceptIds: [foodVsDrink.id],
+      recommendedExecutionId: foodVsDrink.id,
+      queryIntent: { measures: ['sales'], dimensions: ['category'], filters: [] },
+      rejectedCandidates: [],
+      confidence: 'high',
+      missingInformation: [],
+      recommendedRoute: 'certified',
+    });
+
+    const provider = new NeverProvider();
+    const top = await answer({
+      question: 'who are the top customers',
+      provider,
+      kg,
+      resolvedAnalyticalPlan: topPlan,
+      executeCertifiedBlock: async () => ({
+        columns: ['customer_name', 'lifetime_spend', 'order_count'],
+        rows: [{ customer_name: 'Ada', lifetime_spend: 100, order_count: 3 }],
+        rowCount: 1,
+      }),
+    });
+    const category = await answer({
+      question: 'show me sales by category',
+      provider,
+      kg,
+      resolvedAnalyticalPlan: categoryPlan,
+      executeCertifiedBlock: async () => ({
+        columns: ['category', 'revenue'],
+        rows: [{ category: 'Food', revenue: 100 }],
+        rowCount: 1,
+      }),
+    });
+
+    expect(provider.calls).toBe(0);
+    expect(top).toMatchObject({
+      kind: 'certified', certification: 'certified', route: { tier: 'certified_block' },
+      sourceCertifiedBlock: 'top_customers',
+    });
+    expect(category).toMatchObject({
+      kind: 'certified', certification: 'certified', route: { tier: 'certified_block' },
+      sourceCertifiedBlock: 'food_vs_drink_revenue',
+    });
+  });
+
+  it('returns a same-tier terminal failure when a frozen certified block omits its declared measure output', async () => {
+    kg.rebuild([{
+      nodeId: 'block:incomplete_revenue',
+      kind: 'block',
+      name: 'incomplete_revenue',
+      status: 'certified',
+      entities: ['customer'],
+      dimensions: ['customer'],
+      declaredOutputs: ['customer_name', 'lifetime_spend'],
+      outputContract: [
+        { name: 'customer_name', role: 'entity_label' },
+        { name: 'lifetime_spend', role: 'metric' },
+      ],
+    }], []);
+    const selected: AgentEvidenceCandidate = {
+      id: 'block:incomplete_revenue',
+      qualifiedId: 'block:incomplete_revenue',
+      kind: 'certified_block',
+      trustTier: 'certified',
+      name: 'incomplete_revenue',
+      compatibilityFacts: ['output: revenue'],
+      relevanceScore: 1,
+      matchReasons: ['selected certified block'],
+      compatibility: 'compatible',
+    };
+    const plan = planFor(selected, {
+      interpretedQuestion: 'show me sales',
+      questionType: 'value',
+      selectedConceptIds: [selected.id],
+      recommendedExecutionId: selected.id,
+      queryIntent: { measures: ['sales'], dimensions: [], filters: [] },
+      rejectedCandidates: [],
+      confidence: 'high',
+      missingInformation: [],
+      recommendedRoute: 'certified',
+    });
+    const provider = new NeverProvider();
+    const result = await answer({
+      question: 'show me sales',
+      provider,
+      kg,
+      resolvedAnalyticalPlan: plan,
+      executeCertifiedBlock: async () => ({
+        columns: ['customer_name', 'lifetime_spend'],
+        rows: [{ customer_name: 'Ada', lifetime_spend: 100 }],
+        rowCount: 1,
+      }),
+    });
+
+    expect(provider.calls).toBe(0);
+    expect(result).toMatchObject({
+      kind: 'no_answer',
+      certification: 'analyst_review_required',
+      reviewStatus: 'none',
+      sourceTier: 'certified_artifact',
+      certifiedResultShapeFailure: true,
+      route: { tier: 'certified_block' },
+    });
+    expect(result.validationWarnings).toEqual(expect.arrayContaining([
+      expect.stringContaining('sale'),
+    ]));
+    expect(result.dqlArtifact?.kind).not.toBe('sql_block');
   });
 
   it('compiles the exact metric and dimension from the plan with zero member-selection calls', async () => {

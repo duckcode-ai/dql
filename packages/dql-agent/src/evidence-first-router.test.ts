@@ -12,12 +12,19 @@ import type {
 } from "./meaning-resolution.js";
 import { collapseRedundantGovernedCandidates, createHybridRouter } from "./router.js";
 import { buildAnalysisQuestionPlan } from './metadata/analysis-planner.js';
-import { buildLocalContextPack, toAgentRetrievalEvidence } from './metadata/catalog.js';
-import type { AnalyticalRequirementSetV1 } from './analytical-orchestration.js';
+import { applyContextPackCompatibility, buildLocalContextPack, toAgentRetrievalEvidence } from './metadata/catalog.js';
+import {
+  buildAnalyticalRequirementSet,
+  type AnalyticalRequirementSetV1,
+} from './analytical-orchestration.js';
 
 const jaffleSemanticFixture = resolve(
   dirname(fileURLToPath(import.meta.url)),
   '../../../apps/cli/test/fixtures/jaffle-semantic',
+);
+const jaffleSupplyChainFixture = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '../../../apps/cli/test/fixtures/jaffle-supply-chain',
 );
 
 const request = (question: string): AgentRunRequest => ({ question });
@@ -1714,7 +1721,7 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     ]));
   });
 
-  it('AGT-029 leaves a missing dimension terminal when semantic evidence has no safe raw relation and column path', async () => {
+  it('AGT-029 leaves a generic coverage terminal when semantic evidence has no safe raw relation and column path', async () => {
     const revenue = jaffleMetric('semantic:metric:orders.revenue', 'orders.revenue', ['revenue'], true);
     const router = createHybridRouter({
       requireMeaningCallForNaturalLanguage: false,
@@ -1730,11 +1737,450 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
 
     expect(decision).toMatchObject({
       action: 'block',
+      terminalOutcome: {
+        kind: 'modeling_gap',
+        code: 'ANALYTICAL_MODELING_GAP',
+      },
+      analyticalCascadeDecision: { planFrozen: false, stopReason: 'coverage_gap' },
+    });
+    // This fixture has only semantic revenue evidence. It never reached a
+    // physical relationship-closure attempt, so it must not manufacture a
+    // relationship-specific producer witness.
+    expect(decision.terminalOutcome?.gap).toBeUndefined();
+    expect(decision.reason).toMatch(/qualified raw relation|physical path/i);
+    expect(selectRoute(request('Show revenue by sales channel'), decision)).toBe('blocked');
+  });
+
+  it('AGT-009/AGT-029 binds sales to the certified category-revenue output without a meaning call', async () => {
+    const block = candidate({
+      id: 'dql:block:food_vs_drink_revenue',
+      qualifiedId: 'dql:block:food_vs_drink_revenue',
+      kind: 'certified_block',
+      trustTier: 'certified',
+      name: 'food_vs_drink_revenue',
+      aliases: ['sales by category', 'food versus drink revenue'],
+      dimensions: ['category'],
+      compatibility: 'compatible',
+      compatibilityFacts: ['output: category', 'output: revenue'],
+      exactMatch: true,
+      analyticalFitClass: 'exact',
+      relevanceScore: 1,
+    });
+    const resolveMeaning = vi.fn(async () => {
+      throw new Error('The complete certified sales output must not require a meaning call.');
+    });
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-sales-category',
+        sourceFingerprint: 'sha256:sales-category',
+        parsedIntent: { measures: ['sales'], dimensions: ['category'], filters: [] },
+        candidates: [block],
+      }),
+    });
+    const ask = request('show me sales by category');
+    const decision = await router.decide(ask);
+
+    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(selectRoute(ask, decision)).toBe('certified_answer');
+    expect(decision.resolvedAnalyticalPlan?.selectedConceptIds).toEqual([block.id]);
+    expect(decision.analyticalCascadeDecision).toMatchObject({
+      selectedTier: 'certified',
+      planFrozen: true,
+    });
+  });
+
+  it('routes one authored food-and-drink revenue example before a compact missing-dimension cascade', async () => {
+    const block = candidate({
+      id: 'dql:block:food_vs_drink_revenue',
+      qualifiedId: 'dql:block:food_vs_drink_revenue',
+      kind: 'certified_block',
+      trustTier: 'certified',
+      name: 'food_vs_drink_revenue',
+      aliases: ['revenue by food and drink'],
+      dimensions: ['category'],
+      compatibility: 'compatible',
+      compatibilityFacts: ['output: category', 'output: revenue'],
+      exactMatch: true,
+      analyticalFitClass: 'exact',
+      relevanceScore: 1,
+    });
+    const resolveMeaning = vi.fn(async () => {
+      throw new Error('An authored exact certified example must be resolved before missing-dimension handling.');
+    });
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-food-drink-authored-example',
+        sourceFingerprint: 'sha256:food-drink-authored-example',
+        // The retrieval package has literal food/drink role terms rather than
+        // a physical category card. That absence is not allowed to overrule a
+        // complete authored certified answer.
+        parsedIntent: { measures: ['revenue'], dimensions: ['food', 'drink'], filters: [] },
+        candidates: [block],
+      }),
+    });
+    const ask = request('What is revenue by food and drink?');
+
+    const decision = await router.decide(ask);
+
+    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(selectRoute(ask, decision)).toBe('certified_answer');
+    expect(decision.resolvedAnalyticalPlan?.selectedConceptIds).toEqual([block.id]);
+    expect(decision.analyticalCascadeDecision).toMatchObject({
+      selectedTier: 'certified',
+      planFrozen: true,
+    });
+  });
+
+  it('AGT-009 carries one exact authored food-and-drink block contract from the local context pack through catalog evidence and router freeze', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-food-drink-catalog-router-'));
+    cpSync(jaffleSupplyChainFixture, projectRoot, { recursive: true });
+    try {
+      const question = 'What is revenue by food and drink?';
+      const pack = await buildLocalContextPack(projectRoot, { question, limit: 40 });
+      expect(pack.routeDecision).toMatchObject({
+        route: 'certified',
+        exactObjectKey: 'dql:block:food_vs_drink_revenue',
+      });
+      const fit = pack.retrievalDiagnostics.certifiedCandidateFits.find(
+        (candidate) => candidate.objectKey === 'dql:block:food_vs_drink_revenue',
+      );
+      expect(fit).toMatchObject({
+        action: 'certified_answer',
+        fit: expect.objectContaining({ kind: 'exact', missingDimensions: [] }),
+      });
+      expect(fit?.fit.missingMeasures).toBeUndefined();
+
+      const retrieval = applyContextPackCompatibility(
+        toAgentRetrievalEvidence(
+          pack.retrievalDiagnostics.meaningEvidence!,
+          pack.questionPlan,
+          {
+            snapshotId: pack.freshness.fingerprint,
+            sourceFingerprint: pack.freshness.fingerprint,
+            contextObjects: pack.objects,
+            sourceCoverage: pack.retrievalDiagnostics.sourceCoverage,
+          },
+        ),
+        pack,
+      );
+      expect(retrieval.candidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          id: 'dql:block:food_vs_drink_revenue',
+          compatibility: 'compatible',
+          compatibilityFacts: expect.arrayContaining(['output: category', 'output: revenue']),
+        }),
+      ]));
+      const resolveMeaning = vi.fn(async () => {
+        throw new Error('A unique authored exact certified example must use zero meaning calls.');
+      });
+      const router = createHybridRouter({ getEvidence: async () => retrieval, resolveMeaning });
+      const ask = request(question);
+      const decision = await router.decide(ask);
+
+      expect(resolveMeaning).not.toHaveBeenCalled();
+      expect(selectRoute(ask, decision)).toBe('certified_answer');
+      expect(decision.resolvedAnalyticalPlan?.selectedConceptIds).toEqual([
+        'orders::block::food_vs_drink_revenue',
+      ]);
+      expect(decision.analyticalCascadeDecision).toMatchObject({
+        selectedTier: 'certified',
+        planFrozen: true,
+      });
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('AGT-029 normalizes customer-count grammar and selects the one-relation exploratory closure', async () => {
+    const requirements = buildAnalyticalRequirementSet({
+      question: 'what is the order count for each customer?',
+      parsedIntent: {
+        measures: ['count', 'count for each customer', 'for each customer'],
+        dimensions: ['customer'],
+        filters: [],
+      },
+    });
+    expect(requirements.measures).toEqual(['count']);
+
+    const physical = [
+      candidate({
+        id: 'dbt:model:dim_customers', qualifiedId: 'dbt:model:dim_customers', kind: 'dbt_model', trustTier: 'exploratory',
+        name: 'dim_customers', aliases: ['customers'], dimensions: [], timeGrains: [], sourceObjects: ['runtime:relation:dim_customers'],
+      }),
+      candidate({
+        id: 'dbt:column:dim_customers.customer_name', qualifiedId: 'dbt:column:dim_customers.customer_name', kind: 'sql_column', trustTier: 'exploratory',
+        name: 'customer_name', aliases: ['customer'], dimensions: [], timeGrains: [], sourceObjects: ['runtime:relation:dim_customers'],
+      }),
+      candidate({
+        id: 'dbt:column:dim_customers.count_lifetime_orders', qualifiedId: 'dbt:column:dim_customers.count_lifetime_orders', kind: 'sql_column', trustTier: 'exploratory',
+        name: 'count_lifetime_orders', aliases: ['order count', 'count'], dimensions: [], timeGrains: [], sourceObjects: ['runtime:relation:dim_customers'],
+      }),
+      candidate({
+        id: 'dql:block:top_customers', qualifiedId: 'dql:block:top_customers', kind: 'certified_block', trustTier: 'certified',
+        name: 'top_customers', compatibility: 'partial', compatibilityFacts: ['output: customer_name', 'output: lifetime_spend', 'output: order_count'],
+      }),
+    ];
+    const router = createHybridRouter({
+      requireMeaningCallForNaturalLanguage: false,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-order-count-each-customer',
+        sourceFingerprint: 'sha256:order-count-each-customer',
+        parsedIntent: {
+          measures: ['count', 'count for each customer', 'for each customer'],
+          dimensions: ['customer'],
+          filters: [],
+        },
+        candidates: physical,
+      }),
+    });
+    const ask = request('what is the order count for each customer?');
+    const decision = await router.decide(ask);
+
+    expect(selectRoute(ask, decision)).toBe('generated_answer');
+    expect(decision.requiresClarification).toBe(false);
+    expect(decision.clarificationOptions).toBeUndefined();
+    expect(decision.analyticalCascadeDecision).toMatchObject({
+      selectedTier: 'exploratory_sql',
+      planFrozen: false,
+      attempts: expect.arrayContaining([
+        expect.objectContaining({
+          tier: 'exploratory_sql',
+          outcome: 'executable',
+          candidateIds: expect.arrayContaining([
+            'dbt:model:dim_customers',
+            'dbt:column:dim_customers.customer_name',
+            'dbt:column:dim_customers.count_lifetime_orders',
+          ]),
+        }),
+      ]),
+    });
+    expect(decision.analyticalCascadeDecision?.attempts.find((attempt) => attempt.tier === 'exploratory_sql')?.candidateIds)
+      .not.toContain('dql:block:top_customers');
+  });
+
+  it('AGT-029 selects one supplies relation for total supply cost per product without duplicate component roles', async () => {
+    const source = 'runtime:relation:supplies';
+    const raw = [
+      candidate({ id: 'dbt:model:supplies', qualifiedId: 'dbt:model:supplies', kind: 'dbt_model', trustTier: 'exploratory', name: 'supplies', dimensions: [], timeGrains: [], sourceObjects: [source] }),
+      candidate({ id: 'dbt:column:supplies.product_id', qualifiedId: 'dbt:column:supplies.product_id', kind: 'sql_column', trustTier: 'exploratory', name: 'product_id', aliases: ['product'], dimensions: [], timeGrains: [], sourceObjects: [source] }),
+      candidate({ id: 'dbt:column:supplies.supply_cost', qualifiedId: 'dbt:column:supplies.supply_cost', kind: 'sql_column', trustTier: 'exploratory', name: 'supply_cost', aliases: ['supply cost'], dimensions: [], timeGrains: [], sourceObjects: [source] }),
+    ];
+    const router = createHybridRouter({
+      requireMeaningCallForNaturalLanguage: false,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-supply-cost-product',
+        sourceFingerprint: 'sha256:supply-cost-product',
+        parsedIntent: { measures: ['total', 'total supply cost', 'supply cost'], dimensions: ['supply', 'product'], filters: [] },
+        candidates: raw,
+      }),
+    });
+    const ask = request('what is the total supply cost per product?');
+
+    const decision = await router.decide(ask);
+    const exploratory = decision.analyticalCascadeDecision?.attempts.find((attempt) => attempt.tier === 'exploratory_sql');
+
+    expect(selectRoute(ask, decision)).toBe('generated_answer');
+    expect(decision.requiresClarification).toBe(false);
+    expect(exploratory).toMatchObject({
+      outcome: 'executable',
+      candidateIds: [
+        'dbt:model:supplies',
+        'dbt:column:supplies.product_id',
+        'dbt:column:supplies.supply_cost',
+      ],
+    });
+    expect(exploratory?.candidateIds).not.toContain('dbt:column:supplies.supply');
+  });
+
+  it('AGT-029 uses the same-snapshot product-category and revenue role aliases on one order_items relation', async () => {
+    const source = 'runtime:relation:order_items';
+    const raw = [
+      candidate({ id: 'dbt:model:order_items', qualifiedId: 'dbt:model:order_items', kind: 'dbt_model', trustTier: 'exploratory', name: 'order_items', dimensions: [], timeGrains: [], sourceObjects: [source] }),
+      candidate({ id: 'dbt:column:order_items.product_type', qualifiedId: 'dbt:column:order_items.product_type', kind: 'sql_column', trustTier: 'exploratory', name: 'product_type', aliases: ['product type'], dimensions: [], timeGrains: [], sourceObjects: [source] }),
+      candidate({ id: 'dbt:column:order_items.product_price', qualifiedId: 'dbt:column:order_items.product_price', kind: 'sql_column', trustTier: 'exploratory', name: 'product_price', aliases: ['product price'], dimensions: [], timeGrains: [], sourceObjects: [source] }),
+    ];
+    const router = createHybridRouter({
+      requireMeaningCallForNaturalLanguage: false,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-revenue-product-category',
+        sourceFingerprint: 'sha256:revenue-product-category',
+        parsedIntent: { measures: ['revenue'], dimensions: ['product category', 'product', 'category'], filters: [] },
+        candidates: raw,
+      }),
+    });
+    const ask = request('show revenue by product category');
+
+    const decision = await router.decide(ask);
+    const exploratory = decision.analyticalCascadeDecision?.attempts.find((attempt) => attempt.tier === 'exploratory_sql');
+
+    expect(selectRoute(ask, decision)).toBe('generated_answer');
+    expect(decision.requiresClarification).toBe(false);
+    expect(exploratory).toMatchObject({
+      outcome: 'executable',
+      candidateIds: [
+        'dbt:model:order_items',
+        'dbt:column:order_items.product_price',
+        'dbt:column:order_items.product_type',
+      ],
+    });
+  });
+
+  it('AGT-029 proves filter fields without treating Datadog, FY26, or true as physical columns', async () => {
+    const raw = [
+      candidate({
+        id: 'dbt:model:fact_revenue', qualifiedId: 'dbt:model:fact_revenue', kind: 'dbt_model', trustTier: 'exploratory',
+        name: 'fact_revenue', dimensions: [], timeGrains: [], sourceObjects: ['runtime:relation:fact_revenue'],
+      }),
+      candidate({
+        id: 'dbt:column:fact_revenue.revenue_amount', qualifiedId: 'dbt:column:fact_revenue.revenue_amount', kind: 'sql_column', trustTier: 'exploratory',
+        name: 'revenue_amount', dimensions: [], timeGrains: [], sourceObjects: ['runtime:relation:fact_revenue'],
+      }),
+      candidate({
+        id: 'dbt:column:fact_revenue.competitor', qualifiedId: 'dbt:column:fact_revenue.competitor', kind: 'sql_column', trustTier: 'exploratory',
+        name: 'competitor', dimensions: [], timeGrains: [], sourceObjects: ['runtime:relation:fact_revenue'],
+      }),
+      candidate({
+        id: 'dbt:column:fact_revenue.fiscal_period', qualifiedId: 'dbt:column:fact_revenue.fiscal_period', kind: 'sql_column', trustTier: 'exploratory',
+        name: 'fiscal_period', dimensions: [], timeGrains: [], sourceObjects: ['runtime:relation:fact_revenue'],
+      }),
+      candidate({
+        id: 'dbt:column:fact_revenue.is_active', qualifiedId: 'dbt:column:fact_revenue.is_active', kind: 'sql_column', trustTier: 'exploratory',
+        name: 'is_active', dimensions: [], timeGrains: [], sourceObjects: ['runtime:relation:fact_revenue'],
+      }),
+      candidate({
+        id: 'dbt:column:fact_revenue.order_date', qualifiedId: 'dbt:column:fact_revenue.order_date', kind: 'sql_column', trustTier: 'exploratory',
+        name: 'order_date', dimensions: [], timeGrains: [], sourceObjects: ['runtime:relation:fact_revenue'],
+      }),
+      candidate({
+        id: 'dql:calendar:corporate', qualifiedId: 'dql:calendar:corporate', kind: 'dql_modeling', trustTier: 'governed_sql',
+        name: 'Corporate Fiscal Calendar', dimensions: [], timeGrains: [],
+      }),
+    ];
+    const router = createHybridRouter({
+      requireMeaningCallForNaturalLanguage: false,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-member-values-are-not-fields',
+        sourceFingerprint: 'sha256:member-values-are-not-fields',
+        parsedIntent: {
+          measures: ['revenue'],
+          dimensions: ['competitor'],
+          filters: [
+            { field: 'competitor', value: 'Datadog' },
+            { field: 'fiscal_period', value: 'FY26' },
+            { field: 'is_active', value: 'true' },
+          ],
+        },
+        fiscalCalendar: {
+          id: 'dql:calendar:corporate',
+          fiscalPeriodFieldId: 'dbt:column:fact_revenue.fiscal_period',
+          dateRoleId: 'dbt:column:fact_revenue.order_date',
+        },
+        candidates: raw,
+      }),
+    });
+    const ask = request('show revenue by competitor where competitor is Datadog in FY26 and active is true');
+    const decision = await router.decide(ask);
+    const exploratory = decision.analyticalCascadeDecision?.attempts.find((attempt) => attempt.tier === 'exploratory_sql');
+
+    expect(selectRoute(ask, decision)).toBe('generated_answer');
+    expect(exploratory).toMatchObject({ outcome: 'executable' });
+    expect(exploratory?.candidateIds).toEqual(expect.arrayContaining([
+      'dbt:model:fact_revenue',
+      'dbt:column:fact_revenue.revenue_amount',
+      'dbt:column:fact_revenue.competitor',
+      'dbt:column:fact_revenue.fiscal_period',
+      'dbt:column:fact_revenue.is_active',
+    ]));
+    expect(decision.reason).not.toMatch(/physical columns did not cover.*(?:datadog|fy26|true)/i);
+  });
+
+  it('AGT-029 keeps a wide one-relation closure minimal so required fields survive the evidence cap', async () => {
+    const source = 'runtime:relation:fact_metrics';
+    const noise = Array.from({ length: 36 }, (_, index) => candidate({
+      id: `dbt:column:fact_metrics.noise_${index}`,
+      qualifiedId: `dbt:column:fact_metrics.noise_${index}`,
+      kind: 'sql_column',
+      trustTier: 'exploratory',
+      name: `noise_${index}`,
+      dimensions: [],
+      timeGrains: [],
+      sourceObjects: [source],
+    }));
+    const raw = [
+      candidate({
+        id: 'dbt:model:fact_metrics', qualifiedId: 'dbt:model:fact_metrics', kind: 'dbt_model', trustTier: 'exploratory',
+        name: 'fact_metrics', dimensions: [], timeGrains: [], sourceObjects: [source],
+      }),
+      ...noise,
+      candidate({
+        id: 'dbt:column:fact_metrics.revenue_amount', qualifiedId: 'dbt:column:fact_metrics.revenue_amount', kind: 'sql_column', trustTier: 'exploratory',
+        name: 'revenue_amount', dimensions: [], timeGrains: [], sourceObjects: [source],
+      }),
+      candidate({
+        id: 'dbt:column:fact_metrics.customer_name', qualifiedId: 'dbt:column:fact_metrics.customer_name', kind: 'sql_column', trustTier: 'exploratory',
+        name: 'customer_name', aliases: ['customer'], dimensions: [], timeGrains: [], sourceObjects: [source],
+      }),
+    ];
+    const router = createHybridRouter({
+      requireMeaningCallForNaturalLanguage: false,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-wide-physical-closure',
+        sourceFingerprint: 'sha256:wide-physical-closure',
+        parsedIntent: { measures: ['revenue'], dimensions: ['customer'], filters: [] },
+        candidates: raw,
+      }),
+    });
+    const ask = request('show revenue by customer');
+    const decision = await router.decide(ask);
+    const candidateIds = decision.analyticalCascadeDecision?.attempts
+      .find((attempt) => attempt.tier === 'exploratory_sql')?.candidateIds ?? [];
+
+    expect(selectRoute(ask, decision)).toBe('generated_answer');
+    expect(candidateIds).toEqual([
+      'dbt:model:fact_metrics',
+      'dbt:column:fact_metrics.customer_name',
+      'dbt:column:fact_metrics.revenue_amount',
+    ]);
+    expect(candidateIds).toHaveLength(3);
+    expect(candidateIds.some((id) => id.includes('noise_'))).toBe(false);
+  });
+
+  it('AGT-029 records the missing structured customer-to-perishable relationship closure as a pre-freeze gap', async () => {
+    const physical = [
+      candidate({ id: 'dbt:model:dim_customers', qualifiedId: 'dbt:model:dim_customers', kind: 'dbt_model', trustTier: 'exploratory', name: 'dim_customers', dimensions: [], timeGrains: [], sourceObjects: ['runtime:relation:dim_customers'] }),
+      candidate({ id: 'dbt:model:order_items', qualifiedId: 'dbt:model:order_items', kind: 'dbt_model', trustTier: 'exploratory', name: 'order_items', dimensions: [], timeGrains: [], sourceObjects: ['runtime:relation:order_items'] }),
+      candidate({ id: 'dbt:model:supplies', qualifiedId: 'dbt:model:supplies', kind: 'dbt_model', trustTier: 'exploratory', name: 'supplies', dimensions: [], timeGrains: [], sourceObjects: ['runtime:relation:supplies'] }),
+      candidate({ id: 'dbt:column:dim_customers.customer_name', qualifiedId: 'dbt:column:dim_customers.customer_name', kind: 'sql_column', trustTier: 'exploratory', name: 'customer_name', aliases: ['customer'], dimensions: [], timeGrains: [], sourceObjects: ['runtime:relation:dim_customers'] }),
+      candidate({ id: 'dbt:column:order_items.product_name', qualifiedId: 'dbt:column:order_items.product_name', kind: 'sql_column', trustTier: 'exploratory', name: 'product_name', aliases: ['product'], dimensions: [], timeGrains: [], sourceObjects: ['runtime:relation:order_items'] }),
+      candidate({ id: 'dbt:column:supplies.is_perishable_supply', qualifiedId: 'dbt:column:supplies.is_perishable_supply', kind: 'sql_column', trustTier: 'exploratory', name: 'is_perishable_supply', aliases: ['perishable'], dimensions: [], timeGrains: [], sourceObjects: ['runtime:relation:supplies'] }),
+    ];
+    const router = createHybridRouter({
+      requireMeaningCallForNaturalLanguage: false,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-perishable-customer-gap',
+        sourceFingerprint: 'sha256:perishable-customer-gap',
+        parsedIntent: { measures: [], dimensions: ['customer', 'product'], filters: [] },
+        candidates: physical,
+      }),
+    });
+    const ask = request('who are the top customers for perishable products');
+    const decision = await router.decide(ask);
+
+    expect(decision).toMatchObject({
+      action: 'block',
       terminalOutcome: { kind: 'modeling_gap', code: 'ANALYTICAL_MODELING_GAP' },
       analyticalCascadeDecision: { planFrozen: false, stopReason: 'coverage_gap' },
     });
-    expect(decision.reason).toMatch(/qualified raw relation|physical path/i);
-    expect(selectRoute(request('Show revenue by sales channel'), decision)).toBe('blocked');
+    expect(decision.reason).toMatch(/certified, validated, fanout-safe automatic-join path/i);
+    expect(decision.analyticalCascadeDecision?.attempts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tier: 'certified', planFrozen: false }),
+      expect.objectContaining({ tier: 'semantic', planFrozen: false }),
+      expect.objectContaining({ tier: 'governed_relational', planFrozen: false }),
+      expect.objectContaining({ tier: 'exploratory_sql', outcome: 'unavailable', planFrozen: false }),
+    ]));
+    expect(selectRoute(ask, decision)).toBe('blocked');
   });
 
   it('AGT-012-014 keeps the typed member filter while asking for a qualified dimension', async () => {
@@ -2859,7 +3305,18 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     });
     expect(decision.analyticalCascadeDecision?.attempts).toEqual(expect.arrayContaining([
       expect.objectContaining({ tier: 'semantic', outcome: 'ineligible', candidateIds: expect.arrayContaining([selected.id]) }),
-      expect.objectContaining({ tier: 'exploratory_sql', outcome: 'executable', candidateIds: expect.arrayContaining(raw.map((item) => item.id)) }),
+      expect.objectContaining({
+        tier: 'exploratory_sql',
+        outcome: 'executable',
+        // The closure is intentionally its relation plus exact required field
+        // witnesses; unrelated schema columns are not compiler authority.
+        candidateIds: [
+          'runtime:table:analytics.opportunities',
+          'runtime:column:analytics.opportunities.competitor',
+          'runtime:column:analytics.opportunities.lost_amount',
+          'runtime:column:analytics.opportunities.lost_opportunities_count',
+        ],
+      }),
     ]));
     expect(selectRoute(ask, decision)).toBe("generated_answer");
   });

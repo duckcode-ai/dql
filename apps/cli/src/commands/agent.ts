@@ -22,8 +22,19 @@
  *     Records feedback into the KG. Used by clients without MCP access.
  */
 
-import { answerFromRuntimeRun, driveViaRuntime, evalRouteForRun } from './agent-eval-runtime.js';
-import { CassetteStore, cassetteDirFor, withCassette } from './agent-eval-cassette.js';
+import {
+  answerFromRuntimeRun,
+  driveViaRuntime,
+  projectRuntimeRun,
+  type RuntimeDrivenRun,
+} from './agent-eval-runtime.js';
+import {
+  CassetteStore,
+  cassetteEvidenceSummary,
+  cassetteDirFor,
+  evalCassetteCanonicalizationV2,
+  withCassette,
+} from './agent-eval-cassette.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
@@ -632,10 +643,12 @@ interface AgentEvalCase {
     sqlNotContains?: string | string[];
     citationKind?: string;
     noHallucinatedColumns?: string[];
-    route?: 'certified' | 'generated_sql' | 'research' | 'clarify';
+    route?: 'certified' | 'generated_sql' | 'research' | 'clarify' | 'blocked';
     intent?: string;
     reviewStatus?: 'none' | 'draft_ready' | 'analyst_review_required' | 'certified';
     missingContextKind?: string;
+    /** Persisted router terminal outcome required for runtime-driven gap cases. */
+    terminalOutcomeKind?: 'modeling_gap' | 'policy_blocked';
     allowedRelationsOnly?: boolean;
     allowedColumnsOnly?: boolean;
     draftSaved?: boolean;
@@ -681,7 +694,8 @@ interface AgentEvalResult {
   route?: string;
   intent?: string;
   reviewStatus?: string;
-  contextObjects: number;
+  /** Undefined when the runtime did not persist a retrieval count. */
+  contextObjects?: number;
   followUp: boolean;
   draftSaved: boolean;
   expected?: AgentEvalCase['expected'];
@@ -741,7 +755,12 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
   // started with DQL_EVAL_CASSETTE_DIR, since it owns its own provider.
   const cassetteMode = (flags as { cassette?: string }).cassette;
   const provider = cassetteMode === 'record' || cassetteMode === 'replay'
-    ? withCassette(rawProvider, new CassetteStore(cassetteDirFor(projectRoot, rest[0] ?? 'agent-evals')), cassetteMode)
+    ? withCassette(
+      rawProvider,
+      new CassetteStore(cassetteDirFor(projectRoot, rest[0] ?? 'agent-evals')),
+      cassetteMode,
+      evalCassetteCanonicalizationV2(projectRoot),
+    )
     : rawProvider;
   const reasoningEffort = cliReasoningEffort(flags);
   const requestedDepth = cliAnalysisDepth(flags);
@@ -819,6 +838,11 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
       const runtimeRun = via === 'runtime'
         ? await driveViaRuntime({ runtimeBase, question: testCase.question })
         : undefined;
+      // Runtime mode is scored from the persisted AgentRun. The transport
+      // adapter intentionally has no AgentAnswer.contextPack, so borrowing the
+      // local preflight pack here would fabricate retrieval/route evidence for a
+      // different execution path.
+      const runtimeProjection = runtimeRun ? projectRuntimeRun(runtimeRun) : undefined;
       const result = runtimeRun
         ? answerFromRuntimeRun(runtimeRun)
         : await answer({
@@ -899,7 +923,7 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
           });
         },
       });
-      const evaluation = evaluateCase(testCase, result);
+      const evaluation = evaluateCase(testCase, result, runtimeProjection);
       const durationMs = Date.now() - startedAt;
       const draftSaved = Boolean(result.draftBlock?.path ?? result.draftBlockId);
       const narration = narrationOutcomeForEval(runtimeRun?.narrationIntegrityReceipt);
@@ -926,7 +950,7 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
         executionMatched: evaluation.executionMatched,
         ...(judgeVerdict ? { judgeScore: judgeVerdict.score, judgePass: judgeVerdict.pass } : {}),
         kind: result.kind,
-        route: runtimeRun ? evalRouteForRun(runtimeRun.route) : result.contextPack?.routeDecision.route,
+        route: runtimeProjection?.route ?? result.contextPack?.routeDecision.route,
         // Only the runtime driver can see the router's clarification options.
         // In-process runs leave this undefined, so a clarify there scores as a
         // dead end — the conservative reading, and another reason `--via runtime`
@@ -938,12 +962,12 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
             && Boolean(runtimeRun.answer?.trim()),
           meaningResolved: Boolean(runtimeRun.routeDecision?.meaningResolution),
         } : {}),
-        intent: result.contextPack?.routeDecision.intent,
+        intent: runtimeRun?.routeDecision?.category ?? result.contextPack?.routeDecision.intent,
         reviewStatus: result.reviewStatus,
-        contextObjects: result.contextPack?.objects.length ?? 0,
+        contextObjects: runtimeProjection?.retrievalCandidateCount ?? result.contextPack?.objects.length,
         followUp: Boolean(testCase.followUp),
         draftSaved,
-        toolCalls: result.evidence?.toolCalls?.length ?? 0,
+        toolCalls: runtimeProjection?.toolCallCount ?? result.evidence?.toolCalls?.length ?? 0,
         expected: testCase.expected,
         validationCode: evaluation.validationCode,
         trace: buildEvalTrace({
@@ -952,6 +976,7 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
           evaluation,
           durationMs,
           draftSaved,
+          runtime: runtimeProjection,
         }),
       });
     }
@@ -962,6 +987,18 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
 
   const passed = results.filter((r) => r.passed).length;
   const metrics = computeEvalMetrics(results);
+  // Runtime evals execute in a separate host, so its cassette directory is
+  // supplied explicitly by the eval workflow for reporting. The summary does
+  // not inspect prompts or provider credentials; it only classifies the
+  // checked-in response provenance.
+  const cassetteDirectory = via === 'runtime'
+    ? process.env.DQL_EVAL_CASSETTE_DIR
+    : cassetteMode === 'record' || cassetteMode === 'replay'
+      ? cassetteDirFor(projectRoot, rest[0] ?? 'agent-evals')
+      : undefined;
+  const cassetteEvidence = cassetteDirectory
+    ? cassetteEvidenceSummary(new CassetteStore(cassetteDirectory))
+    : undefined;
   const thresholds = {
     minToolRequirement: (flags as { minToolRequirement?: number }).minToolRequirement ?? null,
     minExecutionMatch: (flags as { minExecutionMatch?: number }).minExecutionMatch ?? null,
@@ -974,7 +1011,15 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
   const thresholdsPassed = agentEvalThresholdsPass(metrics, thresholds);
   const ok = passed === results.length && thresholdsPassed;
   if ((flags as { format?: string }).format === 'json') {
-    console.log(JSON.stringify({ ok, passed, total: results.length, thresholds, metrics, results }, null, 2));
+    console.log(JSON.stringify({
+      ok,
+      passed,
+      total: results.length,
+      thresholds,
+      metrics,
+      ...(cassetteEvidence ? { cassetteEvidence } : {}),
+      results,
+    }, null, 2));
     if (!ok) process.exitCode = 1;
     return;
   }
@@ -986,6 +1031,16 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
   console.log(`Certified hit rate: ${formatRate(metrics.certified_hit_rate)}`);
   console.log(`Generated follow-up pass rate: ${formatRate(metrics.generated_followup_pass_rate)}`);
   console.log(`Safe refusal rate: ${formatRate(metrics.safe_refusal_rate)}`);
+  if (cassetteEvidence) {
+    console.log(
+      `Cassette replay entries: ${cassetteEvidence.totalEntries} `
+      + `(${cassetteEvidence.migratedLegacyDeterministicFixtureEntries} migrated legacy deterministic fixture, `
+      + `${cassetteEvidence.syntheticDeterministicOrchestrationFixtureEntries} synthetic deterministic orchestration fixture).`,
+    );
+    console.log(cassetteEvidence.realProviderQualityEligible
+      ? 'Real-provider quality evidence: eligible.'
+      : `Real-provider quality evidence: excluded (${cassetteEvidence.realProviderQualityExclusionReasons.join(', ')}).`);
+  }
   console.log(`False refusal rate: ${formatRate(metrics.false_refusal_rate)} (${metrics.false_refusal_count}/${metrics.answerable_case_count} answerable cases refused)`);
   console.log(`Clarification rate: ${formatRate(metrics.clarification_rate)} (answerable cases asked instead of answered)`);
   if (metrics.meaning_resolved_rate !== null && metrics.meaning_resolved_rate < 1) {
@@ -1038,7 +1093,11 @@ function previewGeneratedDraftPath(projectRoot: string, domain: string, slug: st
   return `blocks/_drafts/${slug}.dql`;
 }
 
-function evaluateCase(testCase: AgentEvalCase, result: Awaited<ReturnType<typeof answer>>): {
+function evaluateCase(
+  testCase: AgentEvalCase,
+  result: Awaited<ReturnType<typeof answer>>,
+  runtime?: RuntimeDrivenRun,
+): {
   failures: string[];
   validationCode?: string;
   executionMatched?: boolean;
@@ -1079,9 +1138,25 @@ function evaluateCase(testCase: AgentEvalCase, result: Awaited<ReturnType<typeof
   if (expected.sourceTier && result.sourceTier !== expected.sourceTier) failures.push(`sourceTier expected ${expected.sourceTier}, got ${result.sourceTier}`);
   if (expected.certification && result.certification !== expected.certification) failures.push(`certification expected ${expected.certification}, got ${result.certification}`);
   if (expected.reviewStatus && result.reviewStatus !== expected.reviewStatus) failures.push(`reviewStatus expected ${expected.reviewStatus}, got ${result.reviewStatus}`);
-  if (expected.route && result.contextPack?.routeDecision.route !== expected.route) failures.push(`route expected ${expected.route}, got ${result.contextPack?.routeDecision.route ?? 'none'}`);
+  const observedRoute = runtime?.route ?? result.contextPack?.routeDecision.route;
+  if (expected.route && observedRoute !== expected.route) failures.push(`route expected ${expected.route}, got ${observedRoute ?? 'none'}`);
   if (expected.intent && result.contextPack?.routeDecision.intent !== expected.intent) failures.push(`intent expected ${expected.intent}, got ${result.contextPack?.routeDecision.intent ?? 'none'}`);
-  if (expected.missingContextKind && !result.contextPack?.missingContext.some((item) => item.kind === expected.missingContextKind)) failures.push(`missing context kind ${expected.missingContextKind} was not reported`);
+  // `modeling_gap` is a broad terminal kind. A relationship expectation is
+  // satisfied only by the router's persisted relationship-specific witness;
+  // otherwise a missing metric/dimension tuple would be misreported as a
+  // relationship repair opportunity.
+  const runtimeReportsMissingContext = expected.missingContextKind === 'relationship'
+    ? runtime?.terminalOutcome?.gap?.code === 'MISSING_RELATIONSHIP'
+    : runtime?.terminalOutcome?.kind === 'modeling_gap'
+      && expected.missingContextKind === 'modeling_gap';
+  if (expected.missingContextKind
+    && !runtimeReportsMissingContext
+    && !result.contextPack?.missingContext.some((item) => item.kind === expected.missingContextKind)) {
+    failures.push(`missing context kind ${expected.missingContextKind} was not reported`);
+  }
+  if (expected.terminalOutcomeKind && runtime?.terminalOutcome?.kind !== expected.terminalOutcomeKind) {
+    failures.push(`terminal outcome expected ${expected.terminalOutcomeKind}, got ${runtime?.terminalOutcome?.kind ?? 'none'}`);
+  }
   for (const token of stringList(expected.sqlContains)) {
     if (!result.proposedSql?.toLowerCase().includes(token.toLowerCase())) failures.push(`SQL did not contain "${token}"`);
   }
@@ -1097,7 +1172,7 @@ function evaluateCase(testCase: AgentEvalCase, result: Awaited<ReturnType<typeof
     if (saved !== expected.draftSaved) failures.push(`draftSaved expected ${expected.draftSaved}, got ${saved}`);
   }
   if (typeof expected.minToolCalls === 'number') {
-    const actualToolCalls = result.evidence?.toolCalls?.length ?? 0;
+    const actualToolCalls = runtime?.toolCallCount ?? result.evidence?.toolCalls?.length ?? 0;
     if (actualToolCalls < expected.minToolCalls) {
       failures.push(`toolCalls expected at least ${expected.minToolCalls}, got ${actualToolCalls}`);
     }
@@ -1132,7 +1207,7 @@ export function evalCaseIsAnswerable(expected: AgentEvalCase['expected']): boole
   if (expected.answerable !== undefined) return expected.answerable;
   if (expected.kind === 'no_answer') return false;
   if (expected.sourceTier === 'no_answer') return false;
-  if (expected.route === 'clarify') return false;
+  if (expected.route === 'clarify' || expected.route === 'blocked') return false;
   if (Object.keys(expected).length === 0) return undefined;
   return true;
 }
@@ -1283,7 +1358,12 @@ function computeEvalMetrics(results: AgentEvalResult[]) {
     draft_saved_count: results.filter((result) => result.draftSaved).length,
     tool_observed_case_count: results.filter((result) => result.toolCalls > 0).length,
     avg_tool_calls: average(toolCallCounts),
-    avg_context_objects: average(results.map((result) => result.contextObjects)),
+    // Runtime runs only report this when the persisted router recorded an
+    // explicit retrieval count. Treat absent evidence as unknown, not as an
+    // invented empty context pack.
+    avg_context_objects: average(results
+      .map((result) => result.contextObjects)
+      .filter((count): count is number => typeof count === 'number')),
     avg_execution_ms: executionTimes.length ? average(executionTimes) : null,
   };
 }
@@ -1325,13 +1405,16 @@ function buildEvalTrace(input: {
   evaluation: ReturnType<typeof evaluateCase>;
   durationMs: number;
   draftSaved: boolean;
+  /** Persisted runtime evidence; never projected into a synthetic context pack. */
+  runtime?: RuntimeDrivenRun;
 }): AgentEvalTraceStage[] {
-  const { testCase, result, evaluation, durationMs, draftSaved } = input;
+  const { testCase, result, evaluation, durationMs, draftSaved, runtime } = input;
   const routeDecision = result.contextPack?.routeDecision;
   const selectedRelations = result.contextPack?.retrievalDiagnostics.selectedRelations ?? [];
   const allowedRelations = result.contextPack?.allowedSqlContext?.relations ?? [];
   const followUp = testCase.followUp;
   const toolCalls = result.evidence?.toolCalls ?? [];
+  const observedToolCallCount = runtime?.toolCallCount ?? toolCalls.length;
   const routeEvidence = result.evidence?.route ?? [];
   const executionStatus = result.executionError
     ? 'failed'
@@ -1347,14 +1430,14 @@ function buildEvalTrace(input: {
   const rowsExpected = testCase.expected?.rows !== undefined;
   const expectedMinToolCalls = testCase.expected?.minToolCalls;
   const toolStatus = typeof expectedMinToolCalls === 'number'
-    ? toolCalls.length >= expectedMinToolCalls ? 'passed' : 'failed'
-    : toolCalls.length > 0 ? 'passed' : routeEvidence.length > 0 ? 'info' : 'not_run';
+    ? observedToolCallCount >= expectedMinToolCalls ? 'passed' : 'failed'
+    : observedToolCallCount > 0 ? 'passed' : routeEvidence.length > 0 ? 'info' : 'not_run';
   const toolMessage = typeof expectedMinToolCalls === 'number'
-    ? toolCalls.length >= expectedMinToolCalls
-      ? `Observed ${toolCalls.length} provider tool call(s), meeting the minimum of ${expectedMinToolCalls}.`
-      : `Observed ${toolCalls.length} provider tool call(s), below the minimum of ${expectedMinToolCalls}.`
-    : toolCalls.length > 0
-      ? `Observed ${toolCalls.length} provider tool call(s).`
+    ? observedToolCallCount >= expectedMinToolCalls
+      ? `Observed ${observedToolCallCount} provider tool call(s), meeting the minimum of ${expectedMinToolCalls}.`
+      : `Observed ${observedToolCallCount} provider tool call(s), below the minimum of ${expectedMinToolCalls}.`
+    : observedToolCallCount > 0
+      ? `Observed ${observedToolCallCount} provider tool call(s).`
       : routeEvidence.length > 0
         ? `Captured ${routeEvidence.length} deterministic route evidence step(s).`
         : 'No provider tool calls were observed for this answer.';
@@ -1362,11 +1445,22 @@ function buildEvalTrace(input: {
   return [
     {
       stage: 'context',
-      status: result.contextPack ? 'passed' : 'not_run',
-      message: result.contextPack
+      status: runtime && (runtime.retrievalCandidateCount !== undefined || runtime.sourceCoverage?.length || runtime.terminalOutcome)
+        ? 'passed'
+        : result.contextPack ? 'passed' : 'not_run',
+      message: runtime && (runtime.retrievalCandidateCount !== undefined || runtime.sourceCoverage?.length || runtime.terminalOutcome)
+        ? `Persisted route evidence recorded ${runtime.retrievalCandidateCount ?? 'an unspecified number of'} retrieved candidate(s).`
+        : result.contextPack
         ? `Context pack ${result.contextPack.id} selected ${result.contextPack.objects.length} object(s).`
         : 'No context pack was attached to the answer.',
-      payload: result.contextPack
+      payload: runtime && (runtime.retrievalCandidateCount !== undefined || runtime.sourceCoverage?.length || runtime.terminalOutcome)
+        ? {
+            evidenceSource: 'persisted_agent_run',
+            retrievalCandidateCount: runtime.retrievalCandidateCount,
+            sourceCoverage: runtime.sourceCoverage,
+            terminalOutcome: runtime.terminalOutcome,
+          }
+        : result.contextPack
         ? {
             contextPackId: result.contextPack.id,
             selectedObjectCount: result.contextPack.objects.length,
@@ -1386,11 +1480,21 @@ function buildEvalTrace(input: {
     },
     {
       stage: 'lane',
-      status: routeDecision ? 'passed' : 'not_run',
-      message: routeDecision
+      status: runtime ? 'passed' : routeDecision ? 'passed' : 'not_run',
+      message: runtime
+        ? `Persisted engine route ${runtime.runRoute}${runtime.route ? ` evaluated as ${runtime.route}` : ''}.`
+        : routeDecision
         ? `Lane ${routeDecision.route} / ${routeDecision.intent}.`
         : 'No lane decision was attached to the answer.',
-      payload: routeDecision
+      payload: runtime
+        ? {
+            engineRoute: runtime.runRoute,
+            evalRoute: runtime.route,
+            status: runtime.status,
+            trustState: runtime.trustState,
+            terminalOutcome: runtime.terminalOutcome,
+          }
+        : routeDecision
         ? {
             route: routeDecision.route,
             intent: routeDecision.intent,
@@ -1406,9 +1510,10 @@ function buildEvalTrace(input: {
       status: toolStatus,
       message: toolMessage,
       payload: {
-        observedToolCalls: toolCalls.length,
+        observedToolCalls: observedToolCallCount,
         expectedMinToolCalls,
-        providerToolCalls: toolCalls.slice(0, 12).map((call) => ({
+        ...(runtime ? { evidenceSource: 'persisted_agent_run.telemetry' } : {}),
+        providerToolCalls: runtime ? [] : toolCalls.slice(0, 12).map((call) => ({
           order: call.order,
           name: call.name,
           status: call.status,

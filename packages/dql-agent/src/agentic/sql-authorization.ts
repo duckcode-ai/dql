@@ -227,13 +227,235 @@ export function qualifyAuthorizationReferences(
     }
     return relations.length === 1 ? relations[0] : undefined;
   };
-  return [
+  // SQL parsers quite correctly report an unqualified `ORDER BY total` as a
+  // column reference.  `total` can instead be a SELECT output alias, which is
+  // not a physical warehouse column and therefore must not be minted as one
+  // into the execution capability.  Only replace an exact alias with the
+  // source references which the same parser already found in that alias's
+  // expression.  This keeps the physical proof load-bearing: a scalar alias,
+  // an arbitrary/unbound alias, or an alias over an unknown source remains a
+  // denied reference rather than becoming an authorization bypass.
+  const outputAliasSources = selectOutputAliasSourceReferences(sql, references, resolveRelation);
+  return Array.from(new Set([
     ...relations,
     ...(references.columns ?? []).map((column) => {
+      const outputSources = outputAliasSources.get(normalizeQualifiedIdentifier(column.column));
+      // Some parsers attach the only FROM relation to an otherwise bare
+      // `ORDER BY total` reference.  Syntax, not that parser convenience, is
+      // the authority here: a qualified `ORDER BY t.total` remains physical.
+      if (outputSources && isBareTopLevelOrderByAlias(sql, column.column)) return outputSources;
       const relation = resolveRelation(column.relation);
       return relation ? `${relation}.${column.column}` : column.column;
     }),
-  ];
+  ].flat()));
+}
+
+/**
+ * Return physical source identities for exact SELECT aliases.  This is a
+ * deliberately narrow companion to the established SQL parser: it does not
+ * parse SQL, infer joins, or resolve a leaf against another relation.  It only
+ * recognizes an alias when an existing parser-reported source column occurs in
+ * that same SELECT expression.  The caller subsequently proves each returned
+ * identity against the router-owned runtime closure.
+ */
+function selectOutputAliasSourceReferences(
+  sql: string,
+  references: SqlAuthorizationReferences,
+  resolveRelation: (relation: string | undefined) => string | undefined,
+): Map<string, string[]> {
+  const result = new Map<string, string[]>();
+  const columns = references.columns ?? [];
+  for (const item of splitTopLevelSelectItems(topLevelSelectList(sql))) {
+    const output = selectOutputAlias(item);
+    if (!output) continue;
+    const alias = normalizeQualifiedIdentifier(output.alias);
+    if (!alias) continue;
+    const sources = columns.flatMap((column) => {
+      // An output alias cannot prove itself.  It must be backed by an existing
+      // parser-reported source reference from its own expression.
+      if (!column.relation && normalizeQualifiedIdentifier(column.column) === alias) return [];
+      if (!expressionReferencesColumn(output.expression, column.column)) return [];
+      const relation = resolveRelation(column.relation);
+      return relation ? [`${relation}.${column.column}`] : [];
+    });
+    if (sources.length > 0) result.set(alias, Array.from(new Set(sources)));
+  }
+  return result;
+}
+
+function topLevelSelectList(sql: string): string {
+  let depth = 0;
+  let quote: '"' | "'" | '`' | undefined;
+  let selectStart = -1;
+  for (let index = 0; index < sql.length; index += 1) {
+    const char = sql[index]!;
+    const next = sql[index + 1];
+    if (quote) {
+      if (char === quote) {
+        if (quote === "'" && next === "'") {
+          index += 1;
+          continue;
+        }
+        quote = undefined;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      quote = char;
+      continue;
+    }
+    if (char === '(') {
+      depth += 1;
+      continue;
+    }
+    if (char === ')') {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (depth !== 0 || !/[A-Za-z_]/.test(char)) continue;
+    const match = /^[A-Za-z_][A-Za-z0-9_$]*/.exec(sql.slice(index));
+    if (!match) continue;
+    const token = match[0].toLowerCase();
+    if (token === 'select') selectStart = index + match[0].length;
+    if (token === 'from' && selectStart >= 0) return sql.slice(selectStart, index);
+    index += match[0].length - 1;
+  }
+  return '';
+}
+
+function isBareTopLevelOrderByAlias(sql: string, alias: string): boolean {
+  const list = topLevelOrderByList(sql);
+  const normalizedAlias = normalizeQualifiedIdentifier(alias);
+  if (!list || !normalizedAlias) return false;
+  return splitTopLevelSelectItems(list).some((item) => {
+    const withoutDirection = item
+      .trim()
+      .replace(/\s+(?:asc|desc)(?:\s+nulls\s+(?:first|last))?\s*$/i, '')
+      .trim();
+    return !withoutDirection.includes('.')
+      && normalizeQualifiedIdentifier(withoutDirection) === normalizedAlias;
+  });
+}
+
+function topLevelOrderByList(sql: string): string {
+  let depth = 0;
+  let quote: '"' | "'" | '`' | undefined;
+  let orderByStart = -1;
+  for (let index = 0; index < sql.length; index += 1) {
+    const char = sql[index]!;
+    const next = sql[index + 1];
+    if (quote) {
+      if (char === quote) {
+        if (quote === "'" && next === "'") {
+          index += 1;
+          continue;
+        }
+        quote = undefined;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      quote = char;
+      continue;
+    }
+    if (char === '(') {
+      depth += 1;
+      continue;
+    }
+    if (char === ')') {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (depth !== 0 || !/[A-Za-z_]/.test(char)) continue;
+    const match = /^[A-Za-z_][A-Za-z0-9_$]*/.exec(sql.slice(index));
+    if (!match) continue;
+    const token = match[0].toLowerCase();
+    if (orderByStart < 0 && token === 'order') {
+      const by = /^\s+by\b/i.exec(sql.slice(index + match[0].length));
+      if (by) {
+        orderByStart = index + match[0].length + by[0].length;
+        index = orderByStart - 1;
+        continue;
+      }
+    } else if (orderByStart >= 0 && ['limit', 'offset', 'fetch', 'union', 'intersect', 'except', 'qualify'].includes(token)) {
+      return sql.slice(orderByStart, index);
+    }
+    index += match[0].length - 1;
+  }
+  return orderByStart >= 0 ? sql.slice(orderByStart) : '';
+}
+
+function splitTopLevelSelectItems(section: string): string[] {
+  const items: string[] = [];
+  let current = '';
+  let depth = 0;
+  let quote: '"' | "'" | '`' | undefined;
+  for (let index = 0; index < section.length; index += 1) {
+    const char = section[index]!;
+    const next = section[index + 1];
+    if (quote) {
+      current += char;
+      if (char === quote) {
+        if (quote === "'" && next === "'") {
+          current += next;
+          index += 1;
+          continue;
+        }
+        quote = undefined;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === '(') {
+      depth += 1;
+      current += char;
+      continue;
+    }
+    if (char === ')') {
+      depth = Math.max(0, depth - 1);
+      current += char;
+      continue;
+    }
+    if (char === ',' && depth === 0) {
+      if (current.trim()) items.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) items.push(current.trim());
+  return items;
+}
+
+function selectOutputAlias(item: string): { alias: string; expression: string } | undefined {
+  const identifier = '(?:"[^"]+"|`[^`]+`|[A-Za-z_][A-Za-z0-9_$]*)';
+  const explicit = new RegExp(`\\bAS\\s+(${identifier})\\s*$`, 'i').exec(item);
+  if (explicit?.[1]) {
+    return { alias: cleanSqlIdentifier(explicit[1]), expression: item.slice(0, explicit.index).trim() };
+  }
+  const implicit = new RegExp(`(?:\\bEND|\\)|\\])\\s+(${identifier})\\s*$`, 'i').exec(item);
+  if (!implicit?.[1]) return undefined;
+  const alias = cleanSqlIdentifier(implicit[1]);
+  if (!alias || SQL_OUTPUT_ALIAS_STOPWORDS.has(alias.toLowerCase())) return undefined;
+  return { alias, expression: item.slice(0, implicit.index).trim() };
+}
+
+const SQL_OUTPUT_ALIAS_STOPWORDS = new Set(['asc', 'desc', 'from', 'group', 'having', 'limit', 'order', 'where']);
+
+function cleanSqlIdentifier(value: string): string {
+  return value.trim().replace(/^(["`])|(["`])$/g, '');
+}
+
+function expressionReferencesColumn(expression: string, column: string): boolean {
+  const normalized = cleanSqlIdentifier(column);
+  if (!normalized || !/^[A-Za-z_][A-Za-z0-9_$]*$/.test(normalized)) return false;
+  const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[^A-Za-z0-9_$])(?:[A-Za-z_][A-Za-z0-9_$]*\\s*\\.\\s*)?${escaped}(?=$|[^A-Za-z0-9_$])`, 'i')
+    .test(expression);
 }
 
 function normalizeProof(proven: ReadonlyArray<{ identifier: string; evidence: IdentifierEvidence }>): Pick<FinalSqlAuthorizationV1, 'provenIdentifiers' | 'evidence'> {

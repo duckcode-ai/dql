@@ -67,19 +67,25 @@ export async function selectSemanticMembersViaLlm(input: {
   const candidateMetricNames = visibleMetrics.map((metric) => metric.name);
   const compatibleByName = new Map<string, string | undefined>();
   const compatibleByMetric = new Map<string, string[]>();
-  for (const metricName of candidateMetricNames) {
-    try {
-      const references: string[] = [];
-      for (const dim of input.semanticLayer.explainCompatibleDimensions([metricName]).compatible) {
-        const reference = semanticDimensionReference(dim);
-        if (!compatibleByName.has(reference)) compatibleByName.set(reference, dim.qualifiedName);
-        references.push(reference);
+  // A metric-only catalog has no possible group-by card. Avoid calculating
+  // compatibility for all 60 prompt candidates in that common large-catalog
+  // case; the result is observably the same empty compatibility set.
+  const hasDimensionCandidates = dimensions.length > 0 || timeDimensions.length > 0;
+  if (hasDimensionCandidates) {
+    for (const metricName of candidateMetricNames) {
+      try {
+        const references: string[] = [];
+        for (const dim of input.semanticLayer.explainCompatibleDimensions([metricName]).compatible) {
+          const reference = semanticDimensionReference(dim);
+          if (!compatibleByName.has(reference)) compatibleByName.set(reference, dim.qualifiedName);
+          references.push(reference);
+        }
+        compatibleByMetric.set(metricName, references);
+      } catch {
+        // No compatibility proof means no dimension card for this metric. Never
+        // replace a failed governed check with the complete global catalog.
+        compatibleByMetric.set(metricName, []);
       }
-      compatibleByMetric.set(metricName, references);
-    } catch {
-      // No compatibility proof means no dimension card for this metric. Never
-      // replace a failed governed check with the complete global catalog.
-      compatibleByMetric.set(metricName, []);
     }
   }
   const keepDimension = (name: string): boolean => compatibleByName.has(name);
@@ -157,13 +163,15 @@ export async function selectSemanticMembersViaLlm(input: {
     ...modelSelectedMetrics,
   ]));
   if (selectedMetrics.length === 0) return undefined;
-  let compatibleForSelection: Set<string>;
-  try {
-    compatibleForSelection = new Set(
-      input.semanticLayer.explainCompatibleDimensions(selectedMetrics).compatible.map(semanticDimensionReference),
-    );
-  } catch {
-    return undefined;
+  let compatibleForSelection = new Set<string>();
+  if (hasDimensionCandidates) {
+    try {
+      compatibleForSelection = new Set(
+        input.semanticLayer.explainCompatibleDimensions(selectedMetrics).compatible.map(semanticDimensionReference),
+      );
+    } catch {
+      return undefined;
+    }
   }
   const selection: SemanticMemberSelection = { metrics: selectedMetrics };
   if (Array.isArray(record.dimensions)) {
@@ -241,8 +249,16 @@ function normalizeMemberPhrase(value: string): string {
 }
 
 function uniqueMembers<T extends { name: string }>(members: T[]): T[] {
-  return members.filter((member, index, all) =>
-    all.findIndex((candidate) => candidate.name === member.name) === index);
+  // The semantic selection lane deliberately considers thousands of metrics
+  // before bounding its prompt. `findIndex` made this de-duplication O(n²),
+  // so a 7k-member catalog could consume the whole selection budget under a
+  // concurrent Node 20 test run. Preserve first-member-wins semantics in O(n).
+  const seen = new Set<string>();
+  return members.filter((member) => {
+    if (seen.has(member.name)) return false;
+    seen.add(member.name);
+    return true;
+  });
 }
 
 function rankMembersForQuestion<T extends { name: string; label?: string; description?: string }>(

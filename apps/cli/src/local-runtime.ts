@@ -1,7 +1,7 @@
 import type { ProviderDispatchPhaseV1, ProviderEgressPurpose, SemanticAggregationCompilerReceiptV1, SemanticDisplayFormat } from '@duckcodeailabs/dql-core';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { execFileSync, execSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { gzip } from "node:zlib";
 import { createServer } from "node:http";
 import {
@@ -169,15 +169,18 @@ import {
   rerankCandidates,
   synthesizeResearchNarrative,
   AgenticExecutionCapabilityGate,
+  createAgenticSqlExecutionCapability,
   mintFinalSqlAuthorization,
   verifyAgenticSqlExecutionCapability,
   qualifyAuthorizationReferences,
+  scopeContextPackToExploratoryCandidateClosure,
   validateSqlAgainstLocalContext as validateAuthorizedSqlReferences,
   verifyFinalSql,
   type AgenticSqlExecutionCapabilityV1,
+  type ExploratoryExecutionFreezeV1,
   type SqlAuthorizationCheck,
 } from '@duckcodeailabs/dql-agent';
-import { applyEvalCassette, createDqlAgentProviderRunner, createGovernedTextProvider, resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
+import { applyEvalCassette, createDqlAgentProviderRunner, createEvalCassetteReplayProvider, createGovernedTextProvider, resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
 import type {
   AgentConversationContext,
   AgentRunner as LLMAgentRunner,
@@ -998,7 +1001,9 @@ export function parseAgentRunRequestBody(body: unknown): { request?: AgentRunReq
       }),
       history: parseAgentRunHistory(record.history),
       threadId: agentRunString(record.threadId),
-      runId: agentRunString(record.runId),
+      // `runId` is deliberately absent at public ingress. It scopes the
+      // controller, persisted run, SSE operation, and one-shot SQL capability,
+      // so a browser-supplied value must never become execution authority.
       reasoningEffort: parseAgentRunReasoningEffort(record.reasoningEffort),
       analysisDepth: parseAgentRunAnalysisDepth(record.analysisDepth) ?? parseAgentRunAnalysisDepth(record.depth),
       thinkingMode: coerceThinkingMode(record.thinkingMode),
@@ -1294,6 +1299,21 @@ export function agentAnswerHasExecutionFailure(
 ): boolean {
   return typeof governedAnswer.executionError === 'string'
     && governedAnswer.executionError.trim().length > 0;
+}
+
+/**
+ * Return only a router/producer-issued analytical gap witness.
+ *
+ * `terminalOutcome.kind === 'modeling_gap'` is deliberately insufficient to
+ * claim a relationship problem. Older receipts and generic tuple failures
+ * return `undefined`; callers render generic coverage guidance for those.
+ */
+export function persistedAnalyticalGapWitness(
+  routeDecision: IntentDecision | undefined,
+): NonNullable<NonNullable<IntentDecision['terminalOutcome']>['gap']> | undefined {
+  return routeDecision?.terminalOutcome?.kind === 'modeling_gap'
+    ? routeDecision.terminalOutcome.gap
+    : undefined;
 }
 
 /** Rebuild the immutable failed-run input from the artifact retained by API-007. */
@@ -3351,6 +3371,39 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const requestedPurpose = agentRunWorkspaceValue(request, 'purpose');
     const requestedModelAreaId = agentRunWorkspaceValue(request, 'modelAreaId');
     const runProjectSnapshot = projectSnapshot();
+    // Keep the execution callback on the exact ranked context pack that the
+    // router used.  The engine can invoke the executor after the router's
+    // asynchronous evidence phase, so looking the pack up lazily inside the
+    // callback occasionally observed an empty WeakMap entry and sent an
+    // authored leaf relation straight to the connector.  That bypassed the
+    // same-snapshot qualified relation binding despite retrieval having proved
+    // (for example) `jaffle_shop.dev.dim_customers`.
+    //
+    // Building only when this request has no prepared entry retains the normal
+    // single-retrieval path.  A frozen certified plan below rejects a pack whose
+    // snapshot/fingerprint does not match the router decision rather than
+    // borrowing a newer catalog to make an old plan executable.
+    const preparedContextPack = preparedAgentContextPacks.get(request)
+      ?? await buildAgentRunContextPack(request).catch(() => undefined);
+    const preparedQualifiedSchemaContext = preparedContextPack
+      ? buildAgentSchemaContextFromContextPack(request.question, preparedContextPack)
+      : [];
+    const selectedExploratoryAttempt = routeDecision?.analyticalCascadeDecision?.attempts.find(
+      (attempt) => attempt.tier === 'exploratory_sql',
+    );
+    // The exploratory candidate set belongs to the router's immutable
+    // same-snapshot cascade decision.  Build its physical prompt/execution
+    // closure once here; the broad retrieved pack remains receipt-only and is
+    // never handed to SQL validation for this selected tier.
+    const exploratoryCandidateIds = routeDecision?.analyticalCascadeDecision?.selectedTier === 'exploratory_sql'
+      ? selectedExploratoryAttempt?.candidateIds ?? []
+      : [];
+    const preparedExploratoryContextPack = exploratoryCandidateIds.length > 0
+      ? scopeContextPackToExploratoryCandidateClosure(preparedContextPack, exploratoryCandidateIds)
+      : undefined;
+    const preparedExploratoryQualifiedSchemaContext = preparedExploratoryContextPack
+      ? buildAgentSchemaContextFromContextPack(request.question, preparedExploratoryContextPack, { includeUnscored: true, limit: 80 })
+      : [];
     const domainContext = requestedDomain
       ? resolveUiDomainContext({
           manifest: runProjectSnapshot.manifest,
@@ -3365,6 +3418,161 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // Local to this exact answer invocation. Compound children each enter this
     // function separately, so no child can consume another child's capability.
     const agenticExecutionCapabilityGate = new AgenticExecutionCapabilityGate();
+    const prepareExploratorySqlExecution = async (
+      sql: string,
+    ): Promise<{
+      capability: AgenticSqlExecutionCapabilityV1;
+      freeze: ExploratoryExecutionFreezeV1;
+    }> => {
+      const cascade = routeDecision?.analyticalCascadeDecision;
+      const selectedAttempt = selectedExploratoryAttempt;
+      if (
+        !cascade
+        || cascade.selectedTier !== 'exploratory_sql'
+        || cascade.planFrozen
+        || !selectedAttempt
+        || selectedAttempt.outcome !== 'executable'
+        || selectedAttempt.candidateIds.length === 0
+      ) {
+        throw analyticalError('The generated SQL no longer matches the router-selected exploratory path, so DQL did not authorize execution.', {
+          origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+        });
+      }
+      if (!request.runId || !semanticConnection || !preparedContextPack || !preparedExploratoryContextPack) {
+        throw analyticalError('DQL could not bind the selected exploratory query to this run, target, and metadata snapshot, so it was not executed.', {
+          origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+        });
+      }
+      const retrievalSnapshotId = routeDecision?.retrievalEvidence?.snapshotId;
+      const retrievalSourceFingerprint = routeDecision?.retrievalEvidence?.sourceFingerprint;
+      const retrievalFreezeSnapshotId = retrievalSnapshotId ?? preparedContextPack.knowledgeLens.snapshotId;
+      if (
+        (retrievalSnapshotId && retrievalSnapshotId !== preparedContextPack.knowledgeLens.snapshotId)
+        || (retrievalSourceFingerprint
+          && preparedContextPack.freshness.fingerprint
+          && retrievalSourceFingerprint !== preparedContextPack.freshness.fingerprint)
+      ) {
+        throw analyticalError('The selected exploratory query no longer matches its retrieval snapshot or source fingerprint, so it was not executed.', {
+          origin: 'governance_gate', stage: 'validation', code: 'snapshot_drift',
+        });
+      }
+      projectSnapshot();
+      projectSnapshots.assertCurrent(runProjectSnapshot.snapshotId);
+      const target = await observeWarehouseTargetIdentity(executor, semanticConnection);
+      if (
+        generatedProposalTargetIdentity?.identityFingerprint
+        && target.identityFingerprint !== generatedProposalTargetIdentity.identityFingerprint
+      ) {
+        throw analyticalError('The selected exploratory query no longer matches the observed execution target, so it was not executed.', {
+          origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+        });
+      }
+      const validation = validateAuthorizedSqlReferences(sql, preparedExploratoryContextPack, {
+        ...(semanticDriver ? { dialect: semanticDriver } : {}),
+        runtimeSchema: preparedExploratoryQualifiedSchemaContext,
+      });
+      if (!validation.ok) {
+        throw analyticalError('The selected exploratory query did not pass the host SQL/context validation, so it was not executed.', {
+          origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+        });
+      }
+      const normalizeIdentifier = (value: string): string => value
+        .trim()
+        .split('.')
+        .map((part) => part.trim().replace(/^["`\[]|["`\]]$/g, '').toLowerCase())
+        .filter(Boolean)
+        .join('.');
+      const allowedExploratoryRelations = new Set(
+        preparedExploratoryQualifiedSchemaContext.map((table) => normalizeIdentifier(table.relation)),
+      );
+      const outsideClosure = validation.referencedRelations.filter((relation) =>
+        !allowedExploratoryRelations.has(normalizeIdentifier(relation)),
+      );
+      if (outsideClosure.length > 0) {
+        throw analyticalError('The generated SQL references a relation outside the router-selected physical closure, so it was not executed.', {
+          origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+        });
+      }
+      const runtimeByRelation = new Map(
+        preparedExploratoryQualifiedSchemaContext.map((table) => [normalizeIdentifier(table.relation), table]),
+      );
+      const qualifiedReferences = qualifyAuthorizationReferences(sql, {
+        relations: validation.referencedRelations,
+        columns: validation.referencedColumns,
+      });
+      const proofs = new Map<string, 'schema_tool'>();
+      for (const relation of validation.referencedRelations) {
+        const table = runtimeByRelation.get(normalizeIdentifier(relation));
+        if (!table) {
+          throw analyticalError('The selected exploratory query references a relation that was not proven by the live runtime schema, so it was not executed.', {
+            origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+          });
+        }
+        proofs.set(table.relation, 'schema_tool');
+      }
+      for (const reference of qualifiedReferences) {
+        const normalizedReference = normalizeIdentifier(reference);
+        const table = [...runtimeByRelation.entries()].find(([relation]) =>
+          normalizedReference.startsWith(`${relation}.`),
+        );
+        if (!table) continue;
+        const [, runtimeTable] = table;
+        const column = normalizedReference.slice(`${table[0]}.`.length);
+        if (!column || !runtimeTable.columns.some((candidate) => normalizeIdentifier(candidate.name) === column)) {
+          throw analyticalError('The selected exploratory query references a column that was not proven by the live runtime schema, so it was not executed.', {
+            origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+          });
+        }
+        proofs.set(`${runtimeTable.relation}.${column}`, 'schema_tool');
+      }
+      const candidateIds = [...selectedAttempt.candidateIds];
+      const sqlFingerprint = executionFingerprint(sql);
+      const planFingerprint = executionFingerprint(stableExecutionValue({
+        version: 1,
+        tier: 'exploratory_sql',
+        snapshotId: retrievalFreezeSnapshotId,
+        executionSnapshotId: runProjectSnapshot.snapshotId,
+        sourceFingerprint: preparedContextPack.freshness.fingerprint,
+        targetFingerprint: target.identityFingerprint,
+        candidateIds,
+        sqlFingerprint,
+      }));
+      const planId = `exploratory-${planFingerprint.slice(0, 24)}`;
+      const capability = createAgenticSqlExecutionCapability({
+        sql,
+        proven: [...proofs.entries()].map(([identifier, evidence]) => ({ identifier, evidence })),
+        runId: request.runId,
+        executionId: `${request.runId}:exploratory:${sqlFingerprint.slice(0, 16)}`,
+        snapshotId: runProjectSnapshot.snapshotId,
+        planId,
+        targetFingerprint: target.identityFingerprint,
+        // Keep the capability binding shape identical to the direct execution
+        // boundary below. An omitted generated-artifact binding is represented
+        // there as `{ sqlParams: [], variables: {} }`, not `{}`; minting the
+        // latter made a fully validated immutable proposal fail only after its
+        // exploratory plan had frozen.
+        bindings: { sqlParams: [], variables: {} },
+      });
+      if (!capability) {
+        throw analyticalError('DQL could not mint a request-scoped exploratory execution capability, so it was not executed.', {
+          origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+        });
+      }
+      return {
+        capability,
+        freeze: {
+          version: 1,
+          selectedTier: 'exploratory_sql',
+          planId,
+          planFingerprint,
+          snapshotId: retrievalFreezeSnapshotId,
+          targetFingerprint: target.identityFingerprint,
+          sqlFingerprint: capability.candidateSqlFingerprint,
+          candidateIds,
+          authorization: 'capability_minted',
+        },
+      };
+    };
     await runner.run(
       {
         provider: resolvedProvider,
@@ -3397,7 +3605,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         // Keys the execution authorization, so the proofs the analyst loop
         // gathers can be checked against the statement this run executes.
         ...(request.runId ? { agentRunId: request.runId } : {}),
-        preparedContextPack: preparedAgentContextPacks.get(request),
+        preparedContextPack,
+        // This closure is derived only from the router-owned cascade attempt
+        // above. It is intentionally not sourced from the HTTP request: a
+        // client or provider cannot widen the relations the exploratory prompt
+        // or capability may use.
+        ...(preparedExploratoryContextPack
+          ? { preparedExploratoryContextPack }
+          : {}),
         domainContext,
         projectSnapshot: { snapshotId: runProjectSnapshot.snapshotId, manifest: runProjectSnapshot.manifest },
         assertProjectSnapshot: (snapshotId) => {
@@ -3574,16 +3789,76 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ...(routeDecision?.resolvedAnalyticalPlan
           ? { resolvedAnalyticalPlan: routeDecision.resolvedAnalyticalPlan }
           : {}),
+        ...(routeDecision?.analyticalCascadeDecision?.selectedTier
+          ? { selectedCascadeTier: routeDecision.analyticalCascadeDecision.selectedTier }
+          : {}),
+        ...(exploratoryCandidateIds.length > 0
+          ? { exploratoryCandidateIds }
+          : {}),
         ...(generatedProposalTargetIdentity?.identityFingerprint
           ? { generatedProposalTargetFingerprint: generatedProposalTargetIdentity.identityFingerprint }
           : {}),
         analyticalReferenceInstant: new Date().toISOString(),
-        executeCertifiedBlock: (node, invocation) => executeCertifiedBlockForAgent(
-          node,
-          invocation,
-          semanticConnection,
-          semanticConnectionName,
-        ),
+        // A frozen certified artifact may use the human-friendly leaf relation
+        // authored in its DQL.  Its execution must still bind to the exact
+        // same-snapshot physical relation that retrieval inspected.  This is
+        // deliberately narrower than exploratory preflight: it only qualifies
+        // an unambiguous FROM/JOIN leaf already present in the artifact and it
+        // never supplies a missing table, join, or column.
+        executeCertifiedBlock: (node, invocation) => {
+          const frozenCertifiedPlan = routeDecision?.analyticalCascadeDecision?.planFrozen === true
+            && routeDecision.analyticalCascadeDecision.selectedTier === 'certified'
+            && routeDecision.resolvedAnalyticalPlan?.capability === 'certified_execution';
+          if (frozenCertifiedPlan) {
+            const plan = routeDecision.resolvedAnalyticalPlan!;
+            const retrievedSourceFingerprint = routeDecision.retrievalEvidence?.sourceFingerprint;
+            const retrievedSnapshotId = routeDecision.retrievalEvidence?.snapshotId;
+            // A certified stamp is valid only for the exact router snapshot
+            // and retrieval source that selected this block. The runner's
+            // standard guard separately confirms the current host snapshot
+            // immediately before this callback. Do not re-fingerprint the
+            // mutable local cache here: cache refresh is not a source edit.
+            if (retrievedSnapshotId && plan.snapshotId !== retrievedSnapshotId) {
+              throw analyticalError(
+                'The selected certified plan no longer matches the retrieval snapshot that froze it. Refresh the answer before retrying.',
+                { origin: 'governance_gate', stage: 'validation', code: 'snapshot_drift' },
+              );
+            }
+            if (plan.sourceFingerprint && retrievedSourceFingerprint
+              && plan.sourceFingerprint !== retrievedSourceFingerprint) {
+              throw analyticalError(
+                'The selected certified plan no longer matches the retrieval source that froze it. Refresh the answer before retrying.',
+                { origin: 'governance_gate', stage: 'validation', code: 'snapshot_drift' },
+              );
+            }
+            if (!preparedContextPack
+              || plan.snapshotId !== preparedContextPack.knowledgeLens.snapshotId) {
+              throw analyticalError(
+                'The selected certified plan no longer matches the retrieved metadata snapshot. Refresh the answer before retrying.',
+                { origin: 'governance_gate', stage: 'validation', code: 'snapshot_drift' },
+              );
+            }
+            const preparedSourceFingerprint = preparedContextPack.freshness.fingerprint;
+            if (plan.sourceFingerprint && preparedSourceFingerprint
+              && plan.sourceFingerprint !== preparedSourceFingerprint) {
+              throw analyticalError(
+                'The selected certified plan no longer matches the retrieved metadata source. Refresh the answer before retrying.',
+                { origin: 'governance_gate', stage: 'validation', code: 'snapshot_drift' },
+              );
+            }
+          }
+          const certifiedSchemaContext = frozenCertifiedPlan
+            ? buildFrozenCertifiedSchemaContext(preparedContextPack, runProjectSnapshot.manifest)
+            : preparedQualifiedSchemaContext;
+          return executeCertifiedBlockForAgent(
+            node,
+            invocation,
+            semanticConnection,
+            semanticConnectionName,
+            certifiedSchemaContext,
+            frozenCertifiedPlan,
+          );
+        },
         executeGeneratedSql: (sql, artifact) => executeGeneratedArtifactForAgent(
           request.question,
           sql,
@@ -3591,6 +3866,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           semanticConnection,
           semanticConnectionName,
         ),
+        prepareExploratorySqlExecution,
         executeAgenticGeneratedSql: async (capability, sql, artifact) => {
           if (!agenticExecutionCapabilityGate.consume(capability)) {
             throw analyticalError('This analyst execution capability was already consumed; DQL did not retry it with stale proof.', {
@@ -3608,8 +3884,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               runId: request.runId,
               executionId: capability.executionId,
               snapshotId: runProjectSnapshot.snapshotId,
-              planId: routeDecision?.resolvedAnalyticalPlan?.planId,
-              targetFingerprint: generatedProposalTargetIdentity?.identityFingerprint,
+              planId: capability.planId,
+              targetFingerprint: capability.targetFingerprint,
             },
           );
         },
@@ -3686,6 +3962,85 @@ function analyticalFailureSummary(
 
   function resolvedRunRouteFromAnswer(governedAnswer: AgentAnswer): AgentRunRoute | undefined {
     return routeForCascadeAnswerTier(governedAnswer.route?.tier as CascadeAnswerRouteTier | undefined);
+  }
+
+  /**
+   * Return the route the router already froze. This is intentionally derived
+   * from the typed cascade/plan, never from an answer-loop route label.
+   */
+  function frozenAnalyticalRoute(routeDecision: IntentDecision | undefined): AgentRunRoute | undefined {
+    if (!routeDecision) return undefined;
+    const cascade = routeDecision.analyticalCascadeDecision;
+    if (cascade?.planFrozen) {
+      switch (cascade.selectedTier) {
+        case 'certified': return 'certified_answer';
+        case 'semantic': return 'semantic_answer';
+        case 'governed_relational':
+        case 'exploratory_sql': return 'generated_answer';
+        default: return undefined;
+      }
+    }
+    const plan = routeDecision.resolvedAnalyticalPlan;
+    if (plan?.mode !== 'authoritative') return undefined;
+    switch (plan.capability) {
+      case 'certified_execution': return 'certified_answer';
+      case 'semantic_execution': return 'semantic_answer';
+      case 'governed_relational':
+      case 'bounded_exploration': return 'generated_answer';
+      default: return undefined;
+    }
+  }
+
+  /**
+   * A frozen tier may fail, but cannot silently substitute a result selected by
+   * a different answer-loop lane. The engine repeats this guard so host-injected
+   * executors receive the same protection.
+   */
+  function frozenPlanRouteFailure(
+    route: AgentRunRoute,
+    routeDecision: IntentDecision | undefined,
+    reportedRoute: AgentRunRoute | undefined,
+  ): AgentRouteExecutorResult {
+    const message = `The frozen ${route.replaceAll('_', ' ')} plan could not execute as selected. DQL did not substitute another analytical tier.`;
+    return {
+      resolvedRoute: route,
+      status: 'blocked',
+      trustState: 'blocked',
+      stopReason: 'blocked',
+      // Keep the public refusal vocabulary stable; the artifact/evaluation
+      // below retains the precise route-integrity diagnostic.
+      answerRefusalCode: 'grounding_gap',
+      summary: message,
+      answer: message,
+      artifacts: [agentRunArtifact(
+        'answer',
+        'Frozen analytical plan could not execute',
+        {
+          kind: 'no_answer',
+          refusalCode: 'grounding_gap',
+          frozenPlanFailureCode: 'frozen_plan_route_mismatch',
+          text: message,
+          selectedTier: routeDecision?.analyticalCascadeDecision?.selectedTier,
+          selectedConceptIds: routeDecision?.meaningResolution?.selectedConceptIds ?? [],
+          ...(reportedRoute ? { reportedRoute } : {}),
+        },
+        undefined,
+        'blocked',
+      )],
+      evaluations: [agentRunEvaluation(
+        'frozen-plan-route-mismatch',
+        'Frozen analytical route',
+        false,
+        'blocking',
+        `The router froze ${route.replaceAll('_', ' ')}, but the answer executor reported ${reportedRoute?.replaceAll('_', ' ') ?? 'no matching route'}.`,
+        {
+          selectedRoute: route,
+          reportedRoute,
+          selectedTier: routeDecision?.analyticalCascadeDecision?.selectedTier,
+          planId: routeDecision?.resolvedAnalyticalPlan?.planId,
+        },
+      )],
+    };
   }
 
   function groundingGapRepairHint(governedAnswer: AgentAnswer): string {
@@ -3900,7 +4255,15 @@ function analyticalFailureSummary(
     if (governedAnswer.result) delete governedAnswer.result.dqlArtifact;
   }
 
-  const answerRunExecutor: AgentRouteExecutor = async ({ request, route, routeDecision, attempt, repairHint, emit }) => {
+  const answerRunExecutor: AgentRouteExecutor = async ({ runId, request, route, routeDecision, attempt, repairHint, emit }) => {
+    // `AgentRunEngine` owns the canonical run ID when HTTP callers omit one.
+    // Bind that server-issued value to the same request object before the
+    // provider/SQL handoff: the prepared context pack is keyed by this object,
+    // while the exploratory capability must be scoped to the persisted run.
+    // Cloning here would lose the exact retrieval pack; accepting a missing ID
+    // would mint an unbound capability. This is server-side bookkeeping only,
+    // never client-provided execution authority.
+    if (!request.runId) request.runId = runId;
     const runStartedAtMs = Date.now();
     const turnPlan = buildAnalyticalTurnPlan({
       question: request.question,
@@ -4090,6 +4453,15 @@ function analyticalFailureSummary(
         (message) => emit({ type: 'executor.started', message, route }),
         routeDecision,
       );
+      const frozenRoute = frozenAnalyticalRoute(routeDecision);
+      const reportedRoute = resolvedRunRouteFromAnswer(governedAnswer);
+      // Do not let the legacy answer loop reselect meaning and overwrite the
+      // router's immutable tier through `resolvedRunRouteFromAnswer`. A frozen
+      // plan either executes on its selected route or returns a same-tier,
+      // inspectable terminal failure; it never downgrades to generated SQL.
+      if (frozenRoute && (frozenRoute !== route || (reportedRoute && reportedRoute !== frozenRoute))) {
+        return frozenPlanRouteFailure(frozenRoute, routeDecision, reportedRoute);
+      }
       // Keep the canonical result contract on the answer itself, not only on
       // the narration preview. Conversation persistence, follow-up member
       // resolution, Apply, and the notebook table all read this payload; if a
@@ -4360,7 +4732,10 @@ function analyticalFailureSummary(
         },
       };
     }
-    const answeredRoute = resolvedRunRouteFromAnswer(governedAnswer) ?? route;
+    // For an unfrozen legacy route, the answer loop can still describe which
+    // tier actually produced the answer. Once the router froze a cascade tier,
+    // that immutable route is the only durable provenance authority.
+    const answeredRoute = frozenAnalyticalRoute(routeDecision) ?? resolvedRunRouteFromAnswer(governedAnswer) ?? route;
     const isCertified = governedAnswer.certification === 'certified' || governedAnswer.kind === 'certified';
     const semanticRouteClaimed = governedAnswer.route?.tier === 'semantic_metric';
     const semanticAggregationProofPassed = semanticAnswerHasPassedAggregationProof(governedAnswer);
@@ -4404,9 +4779,14 @@ function analyticalFailureSummary(
       && route === 'generated_answer'
       && (request.requestedMode === undefined || request.requestedMode === 'auto' || request.requestedMode === 'ask')
       && routeDecision?.resolvedAnalyticalPlan?.mode !== 'authoritative';
+    // A generic `modeling_gap` says only that the complete analytical tuple did
+    // not prove out. Relationship-specific repair language is allowed solely
+    // when the router retained a structured coverage witness.
+    const persistedGapWitness = persistedAnalyticalGapWitness(routeDecision);
+    const relationshipSpecificGap = persistedGapWitness?.code === 'MISSING_RELATIONSHIP';
     const typedCoverageGap = (isGroundingGap || isModelDeclined)
       ? buildCoverageGap({
-          code: governedAnswer.refusalCode === 'modeling_gap' ? 'MISSING_RELATIONSHIP' : 'MISSING_RUNTIME_CAPABILITY',
+          code: persistedGapWitness?.code ?? 'MISSING_RUNTIME_CAPABILITY',
           phase: 'planning',
           message: governedAnswer.refusalDetails?.message
             ?? (isModelDeclined
@@ -4414,17 +4794,21 @@ function analyticalFailureSummary(
               : 'The retrieved context did not prove the metadata required for this analytical question.'),
           searchedSources: ['certified_blocks', 'semantic_metrics', 'dbt_manifest', 'relationship_graph', 'warehouse_metadata'],
           attemptedRoutes: ['certified', 'semantic', 'governed_relational', 'generated'],
-          missing: governedAnswer.refusalDetails?.offending
+          missing: persistedGapWitness?.missing.length
+            ? persistedGapWitness.missing
+            : governedAnswer.refusalDetails?.offending
             ? [
                 governedAnswer.refusalDetails.offending.relation,
                 governedAnswer.refusalDetails.offending.column,
               ].filter((value): value is string => Boolean(value))
-            : ['an executable metric/dimension/relationship tuple'],
+            : ['the complete requested analytical tuple'],
           recoverable: canRecoverPreFreezeGap,
           planFrozen: routeDecision?.resolvedAnalyticalPlan?.mode === 'authoritative',
           nextActions: canRecoverPreFreezeGap
             ? ['continue through DBT-grounded relational context', 'run review-required generated SQL', 'start bounded Research if coverage remains incomplete']
-            : ['review the retained metadata gap', 'select a governed metric or dimension', 'repair modeling if the relationship is missing'],
+            : relationshipSpecificGap
+              ? ['review the retained relationship proof', 'repair the certified relationship in Modeling', 'retry after relationship validation']
+              : ['review the retained metadata gap', 'select a governed metric or dimension', 'repair the missing metric, dimension, or output contract'],
         })
       : undefined;
     // Only a genuinely AMBIGUOUS question is surfaced as "needs clarification".
@@ -4704,12 +5088,15 @@ function analyticalFailureSummary(
       : isTerminalFailure
         ? terminalFailureActions
       : isGroundingGap
-        ? governedAnswer.refusalCode === 'modeling_gap'
+        ? relationshipSpecificGap
           ? [
-              { id: 'fix-modeling-gap', label: 'Fix with Modeling AI', route: 'modeling_draft', artifactKind: 'modeling_change_proposal' },
+              { id: 'repair-relationship-proof', label: 'Repair relationship proof in Modeling', route: 'modeling_draft', artifactKind: 'modeling_change_proposal' },
               { id: 'research-gap', label: 'Research missing metadata coverage', route: 'research', artifactKind: 'research_run' },
             ]
-          : [{ id: 'research-gap', label: 'Research missing metadata coverage', route: 'research', artifactKind: 'research_run' }]
+          : [
+              { id: 'review-metadata-gap', label: 'Review missing metadata coverage', route: 'blocked' },
+              { id: 'research-gap', label: 'Research missing metadata coverage', route: 'research', artifactKind: 'research_run' },
+            ]
       : [
           { id: 'create-block', label: governedAnswer.dqlArtifact ? 'Review DQL draft' : 'Create DQL draft', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
           { id: 'research-gap', label: 'Research deeper', route: 'research' },
@@ -4949,6 +5336,9 @@ function analyticalFailureSummary(
       providerEgressReceipts: finalProviderEgressReceipts,
       telemetry: finalTelemetry,
       narrationIntegrityReceipt,
+      ...(governedAnswer.exploratoryExecutionFreeze
+        ? { analyticalExecutionFreeze: governedAnswer.exploratoryExecutionFreeze }
+        : {}),
     };
   };
 
@@ -6897,7 +7287,14 @@ function analyticalFailureSummary(
 
   const executeDqlArtifactSourceForAgent = async (
     source: string,
-    metadata: { name?: string; path?: string; domain?: string; chartType?: string } = {},
+    metadata: {
+      name?: string;
+      path?: string;
+      domain?: string;
+      chartType?: string;
+      /** Same-snapshot physical relations admitted by the frozen Ask plan. */
+      qualifiedSchemaContext?: AgentSchemaTable[];
+    } = {},
     invocationInput?: {
       question?: string;
       parameters?: Record<string, unknown>;
@@ -6976,6 +7373,22 @@ function analyticalFailureSummary(
       );
     }
 
+    // A certified block is authored as DQL rather than warehouse-specific SQL.
+    // When its source uses an unqualified leaf relation, bind it only if the
+    // immutable context snapshot proves one unique physical relation.  Do not
+    // reuse broad exploratory repairs here: certified execution may not alter
+    // joins, aggregation, aliases, or any other frozen artifact semantics.
+    const compiledSql = semanticCompose?.sql ?? plan!.sql;
+    const qualificationRepairs: string[] = [];
+    const executableSql = !semanticCompose?.sql && metadata.qualifiedSchemaContext?.length
+      ? qualifyUnambiguousSqlRelationsFromSchema(
+          compiledSql,
+          metadata.qualifiedSchemaContext,
+          qualificationRepairs,
+          activeConnection.driver,
+        )
+      : compiledSql;
+
     const app = loadRuntimeApp(projectRoot, activePersonaAppId());
     const sourceDomain = metadata.domain ?? source.match(/\bdomain\s*=\s*"([^"]+)"/i)?.[1];
     assertAppAccess({ app, domain: sourceDomain ?? app?.domain, level: 'execute' });
@@ -6986,7 +7399,7 @@ function analyticalFailureSummary(
       value: Awaited<ReturnType<typeof executeTargetBoundSemanticQuery>> | null;
     } = { value: null };
     const execution = await analyticalExecutionService.execute({
-      sql: semanticCompose?.sql ?? plan!.sql,
+      sql: executableSql,
       subject: 'DQL artifact query',
       connection: activeConnection,
       // Preserve the existing contract: previewed Ask artifacts are explicitly
@@ -7041,7 +7454,7 @@ function analyticalFailureSummary(
         path: metadata.path ?? null,
         domain: sourceDomain ?? null,
       })),
-      compiledSqlFingerprint: executionFingerprint(semanticCompose?.sql ?? plan?.sql ?? preparation.sourceSql),
+      compiledSqlFingerprint: executionFingerprint(executableSql ?? preparation.sourceSql),
       normalizedSqlFingerprint: executionFingerprint(preparation.decodedSql),
       parameterFingerprint: executionReceipt.parameterFingerprint,
       provenanceFingerprint: executionFingerprint(stableExecutionValue(invocation.resolvedParameters.map((parameter) => ({
@@ -7051,7 +7464,7 @@ function analyticalFailureSummary(
       targetFingerprint: targetGenerationFingerprint(activeConnection, executionConnectionName),
       snapshotFingerprint: executionFingerprint(projectSnapshot().snapshotId),
       planFingerprint: executionFingerprint(stableExecutionValue({
-        sqlFingerprint: executionFingerprint(semanticCompose?.sql ?? plan?.sql ?? preparation.sourceSql),
+        sqlFingerprint: executionFingerprint(executableSql ?? preparation.sourceSql),
         parameterCount: plan?.sqlParams?.length ?? 0,
         variableNames: Object.keys(plan?.variables ?? {}).sort(),
         chartConfig: plan?.chartConfig ?? null,
@@ -7090,6 +7503,7 @@ function analyticalFailureSummary(
     requireCertified = false,
     executionConnection?: ConnectionConfig,
     executionConnectionName?: string,
+    qualifiedSchemaContext?: AgentSchemaTable[],
   ): Promise<AgentResultPayload> => {
     const manifest = buildManifest({ projectRoot });
     const block = manifest.blocks[blockName];
@@ -7105,6 +7519,7 @@ function analyticalFailureSummary(
       path: block.filePath,
       domain: block.domain,
       chartType: block.chartType,
+      ...(qualifiedSchemaContext?.length ? { qualifiedSchemaContext } : {}),
     }, invocationInput, executionConnection, executionConnectionName);
     return {
       ...result,
@@ -7133,6 +7548,8 @@ function analyticalFailureSummary(
     invocationInput?: CertifiedBlockInvocationInput,
     executionConnection?: ConnectionConfig,
     executionConnectionName?: string,
+    qualifiedSchemaContext?: AgentSchemaTable[],
+    requireCertified = false,
   ): Promise<AgentResultPayload> => {
     if (node.kind !== 'block') {
       throw new Error(`Certified ${node.kind} "${node.name}" is a navigation artifact and cannot be executed as a block.`);
@@ -7140,9 +7557,10 @@ function analyticalFailureSummary(
     return executeCertifiedBlockByNameForAgent(
       node.name || node.nodeId.replace(/^block:/, ''),
       invocationInput,
-      false,
+      requireCertified,
       executionConnection,
       executionConnectionName,
+      qualifiedSchemaContext,
     );
   };
 
@@ -11681,9 +12099,13 @@ function analyticalFailureSummary(
           if (parsed.request.history?.length) parsed.request.history = [];
         }
         const wantsStream = url.searchParams.get('stream') === '1' || url.searchParams.get('stream') === 'true';
-        const runId = parsed.request.runId;
+        // The public body may carry UI correlation data, but the run identity
+        // is server-owned. Mint it before every controller/SSE/engine handoff
+        // so no client-provided string can bind a SQL capability or operation.
+        const runId = randomUUID();
+        parsed.request.runId = runId;
         const runController = new AbortController();
-        if (runId) activeAgentRunControllers.set(runId, runController);
+        activeAgentRunControllers.set(runId, runController);
         let streamConnected = true;
         res.on('close', () => { streamConnected = false; });
         const writeStream = (
@@ -11701,13 +12123,13 @@ function analyticalFailureSummary(
             'X-Accel-Buffering': 'no',
           });
         }
-        const operation = runId ? operationCoordinator.create({
+        const operation = operationCoordinator.create({
           type: 'agent_run',
           scope: `agent-run:${runId}`,
           resourceRevision: parsed.request.threadId,
           message: 'AI request accepted. You can change pages while it runs.',
           cancellable: true,
-        }) : null;
+        });
         if (wantsStream) writeStream('agent-run-accepted', { runId, operationId: operation?.id });
         let completedRun: AgentRun | undefined;
         let runError: unknown;
@@ -11802,7 +12224,7 @@ function analyticalFailureSummary(
           // completed Ask a 4.66 MB reply.
           res.end(serializeJSON({ run: slimAgentRunForTransport(completedRun) }));
         } finally {
-          if (runId) activeAgentRunControllers.delete(runId);
+        activeAgentRunControllers.delete(runId);
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -20985,6 +21407,15 @@ export function resolveDefaultLLMProvider(projectRoot: string): ProviderId | nul
  * answer envelope. Everything else uses the Settings-resolved default runner.
  */
 export function resolveGovernedAnswerRunner(projectRoot: string): { provider: ProviderId; runner: LLMAgentRunner } | null {
+  // Runtime eval cassettes are an explicit, offline provider source. Resolve
+  // them before Settings because the CI fixture intentionally has no user
+  // provider configuration; otherwise Ask exits at this earlier gate and never
+  // reaches the cassette-wrapped provider used by the answer loop.
+  const cassetteProvider = createEvalCassetteReplayProvider(projectRoot);
+  if (cassetteProvider) {
+    const provider = governedRunnerProviderForCassette(cassetteProvider.name);
+    if (provider) return { provider, runner: createDqlAgentProviderRunner(provider, cassetteProvider) };
+  }
   const active = getActiveProvider(projectRoot);
   if (isGovernedAnswerProviderId(active)) {
     return { provider: active, runner: createDqlAgentProviderRunner(active) };
@@ -20995,6 +21426,17 @@ export function resolveGovernedAnswerRunner(projectRoot: string): { provider: Pr
     return { provider: resolved, runner: createDqlAgentProviderRunner(resolved) };
   }
   return null;
+}
+
+function governedRunnerProviderForCassette(
+  name: AgentProvider['name'],
+): 'anthropic' | 'openai' | 'gemini' | 'ollama' | undefined {
+  switch (name) {
+    case 'claude': return 'anthropic';
+    case 'openai': return 'openai';
+    case 'gemini': return 'gemini';
+    case 'ollama': return 'ollama';
+  }
 }
 
 function isGovernedAnswerProviderId(value: unknown): value is ProviderSettingsId {
@@ -25300,7 +25742,7 @@ export function repairExploratorySqlBeforeExecution(
   dialect = 'duckdb',
 ): ExploratorySqlPreflightResult {
   const repairs: string[] = [];
-  let repairedSql = qualifyExploratoryRelationsFromSchema(sql, schemaContext, repairs, dialect);
+  let repairedSql = qualifyUnambiguousSqlRelationsFromSchema(sql, schemaContext, repairs, dialect);
   repairedSql = repairExploratoryRelationQualifiers(repairedSql, repairs, dialect);
   repairedSql = repairExploratoryLifetimeMeasureSelection(repairedSql, schemaContext, question, repairs, dialect);
   repairedSql = repairExploratoryMisleadingPercentAliases(repairedSql, question, repairs);
@@ -25364,7 +25806,13 @@ export function applyRequestedTopNToExploratorySql(sql: string, requestedTopN?: 
   return `${withoutTerminator}\nLIMIT ${requestedTopN}`;
 }
 
-function qualifyExploratoryRelationsFromSchema(
+/**
+ * Bind an already-authored unqualified relation to a unique inspected physical
+ * relation.  The caller owns whether that binding is permitted (exploratory
+ * preflight or a frozen certified artifact); this helper itself never adds a
+ * relation, key, join, predicate, or column.
+ */
+export function qualifyUnambiguousSqlRelationsFromSchema(
   sql: string,
   schemaContext: AgentSchemaTable[],
   repairs: string[],
@@ -30108,6 +30556,13 @@ async function createBlockStudioAssistProvider(
   projectRoot: string,
   requestedProvider?: ProviderSettingsId,
 ): Promise<AgentProvider | null> {
+  // Runtime-driven evals intentionally start from a clean fixture with no user
+  // provider settings. When replay cassettes are explicitly enabled, their
+  // recorded identity is the authoritative provider and never performs network
+  // readiness checks. Normal product startup has no cassette env and follows
+  // the unchanged configured-provider path below.
+  const cassetteProvider = createEvalCassetteReplayProvider(projectRoot);
+  if (cassetteProvider) return cassetteProvider;
   const settings = listProviderSettings(projectRoot);
   const activeProvider = getActiveProvider(projectRoot);
   // Subscription CLI providers (Claude Code / Codex) carry no API key — they're
@@ -30157,7 +30612,7 @@ async function createBlockStudioAssistProvider(
   // exactly the calls whose non-determinism it was recorded to remove. A local
   // baseline reproduced that: the same question blocked on one run and answered
   // on the next, and zero cassettes were written.
-  return await provider.available() ? applyEvalCassette(provider) : null;
+  return await provider.available() ? applyEvalCassette(provider, projectRoot) : null;
 }
 
 /** Convert a governed answer's result payload into a bounded synthesis preview. */
@@ -34209,7 +34664,11 @@ function compactSqlForRunHistory(sql: string): string {
   return clean.length > 1200 ? `${clean.slice(0, 1197)}...` : clean;
 }
 
-function buildAgentSchemaContextFromContextPack(question: string, contextPack: LocalContextPack): AgentSchemaTable[] {
+function buildAgentSchemaContextFromContextPack(
+  question: string,
+  contextPack: LocalContextPack,
+  options: { includeUnscored?: boolean; limit?: number } = {},
+): AgentSchemaTable[] {
   const byRelation = new Map<string, AgentSchemaTable>();
   const objectsByKey = new Map(contextPack.objects.map((object) => [object.objectKey, object]));
 
@@ -34262,10 +34721,78 @@ function buildAgentSchemaContextFromContextPack(question: string, contextPack: L
       table,
       score: scoreAgentSchemaTable(table, tokens) + (shouldProbeValues ? scoreAgentValueProbeTable(table) : 0),
     }))
-    .filter((entry) => entry.table.columns.length > 0 && entry.score > 0)
+    .filter((entry) => entry.table.columns.length > 0 && (options.includeUnscored || entry.score > 0))
     .sort((a, b) => b.score - a.score || a.table.relation.localeCompare(b.table.relation))
-    .slice(0, 12)
+    .slice(0, Math.max(1, options.limit ?? 12))
     .map((entry) => entry.table);
+}
+
+/**
+ * Exact frozen certified execution needs the physical relation closure from
+ * the same source snapshot, not only the twelve tables that happened to rank
+ * for the natural-language prompt.  An artifact may project `category` while
+ * its authored SQL says `FROM order_items`, so prompt relevance alone is not
+ * a safe authority to remove that relation from the execution handoff.
+ *
+ * This remains deliberately narrower than an exploratory repair: it exposes
+ * only snapshot-indexed dbt models plus the already retrieved local objects.
+ * `qualifyUnambiguousSqlRelationsFromSchema` still changes a leaf only when
+ * exactly one physical relation in that closure owns it.  Duplicate leaves
+ * therefore remain a same-tier certified failure rather than a guessed bind.
+ */
+function buildFrozenCertifiedSchemaContext(
+  contextPack: LocalContextPack | undefined,
+  manifest: DQLManifest,
+): AgentSchemaTable[] {
+  const byRelation = new Map<string, AgentSchemaTable>();
+  const upsert = (table: AgentSchemaTable) => {
+    if (!table.relation || !table.name) return;
+    const key = table.relation.toLowerCase();
+    const existing = byRelation.get(key);
+    if (!existing) {
+      byRelation.set(key, {
+        ...table,
+        columns: dedupeAgentSchemaColumns(table.columns).slice(0, 80),
+      });
+      return;
+    }
+    byRelation.set(key, {
+      ...existing,
+      description: existing.description ?? table.description,
+      source: existing.source === table.source ? existing.source : 'local metadata catalog',
+      columns: dedupeAgentSchemaColumns([...existing.columns, ...table.columns]).slice(0, 80),
+    });
+  };
+
+  if (contextPack) {
+    for (const object of contextPack.objects) {
+      const table = metadataObjectToAgentSchemaTable(object);
+      if (table) upsert(table);
+    }
+  }
+
+  for (const model of manifest.dbtImport?.dbtDag?.models ?? []) {
+    const relation = [model.database, model.schema, model.name].filter(Boolean).join('.');
+    // A bare dbt identity does not prove a physical catalog/schema and must
+    // not be promoted into a qualifier. It remains harmless context only.
+    if (!relation || relation === model.name) continue;
+    upsert({
+      relation,
+      schema: model.schema,
+      name: model.name,
+      description: model.description,
+      columns: (model.columns ?? []).map((column) => ({
+        name: column.name,
+        type: column.type,
+        description: column.description,
+      })),
+      source: 'local metadata catalog',
+    });
+  }
+
+  return Array.from(byRelation.values())
+    .filter((table) => table.columns.length > 0)
+    .sort((left, right) => left.relation.localeCompare(right.relation));
 }
 
 function metadataObjectToAgentSchemaTable(object: MetadataObject): AgentSchemaTable | null {

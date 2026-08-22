@@ -10,6 +10,7 @@ import { dirname, join } from "node:path";
 import {
   classifyConversationalTurn,
   looksLikeDefinitionalAboutNamedObject,
+  looksLikeNamedCertifiedArtifactMetadataRequest,
   decideAgentAction,
   looksLikeComposeApp,
   type IntentDecision,
@@ -38,6 +39,7 @@ import {
   buildCoverageGap,
   classifyProviderFailure,
   type AgentRunDiagnosticReceiptV3,
+  type ExploratoryExecutionFreezeV1,
   type AgentSelectedResultBindingV1,
   type AnalyticalTaskOutcomeV1,
   type AnalyticalTurnPlanV1,
@@ -600,6 +602,12 @@ export interface AgentRouteExecutorResult {
   telemetry?: AgentRunTelemetryV1;
   /** Content-free narration outcome; persisted by the run engine. */
   narrationIntegrityReceipt?: NarrationIntegrityReceiptV1;
+  /**
+   * Explicit host-owned evidence that a router-selected exploratory proposal
+   * was validated and bound to one immutable execution capability. The engine
+   * consumes this receipt; it never infers a freeze from a route label or ID.
+   */
+  analyticalExecutionFreeze?: ExploratoryExecutionFreezeV1;
   analyticalTurnPlan?: AnalyticalTurnPlanV1;
   analyticalTaskOutcomes?: AnalyticalTaskOutcomeV1[];
 }
@@ -1586,6 +1594,13 @@ export class AgentRunEngine {
             emit,
             emitAnswerDelta: onAnswerDelta,
           });
+          // The router owns a frozen analytical tier. An executor may report a
+          // same-tier execution failure, but it cannot turn a certified or
+          // semantic plan into generated work (or vice versa) after execution
+          // has started. Keep this guard in the engine as well as host adapters
+          // so an injected/legacy executor cannot redefine durable provenance.
+          routeDecision = applyExploratoryExecutionFreeze(routeDecision, result.analyticalExecutionFreeze);
+          result = preserveFrozenAnalyticalRoute(route, routeDecision, result);
           result = consumeRepeatedClarificationSelection(request, routeDecision, result);
           if (result.analyticalTurnPlan) progress.analyticalTurnPlan = result.analyticalTurnPlan;
           if (result.analyticalTaskOutcomes) progress.analyticalTaskOutcomes = result.analyticalTaskOutcomes;
@@ -1616,7 +1631,7 @@ export class AgentRunEngine {
           // A frozen analytical plan has one route and no downstream planner,
           // rematch, route escalation, or whole-answer regeneration authority.
           // Typed server-issued repair is a separate derived run.
-          if (authoritativeAsk) {
+          if (authoritativeAsk || routeDecision.analyticalCascadeDecision?.planFrozen === true) {
             stepStatus = 'needs_review';
             break;
           }
@@ -2309,6 +2324,103 @@ function routeFromAnalyticalCascade(decision: IntentDecision): AgentRunRoute | u
 }
 
 /**
+ * A frozen router decision is an immutable execution contract, not a hint that
+ * a downstream answer loop may replace with another meaning/tier. The executor
+ * is still free to return a terminal compilation, provider, adapter, or result
+ * failure, but it must retain the selected route while doing so.
+ */
+function preserveFrozenAnalyticalRoute(
+  route: AgentRunRoute,
+  decision: IntentDecision,
+  result: AgentRouteExecutorResult,
+): AgentRouteExecutorResult {
+  const frozen = decision.analyticalCascadeDecision?.planFrozen === true
+    || decision.resolvedAnalyticalPlan?.mode === 'authoritative';
+  if (!frozen || !result.resolvedRoute || result.resolvedRoute === route) return result;
+
+  return {
+    resolvedRoute: route,
+    status: 'blocked',
+    trustState: 'blocked',
+    stopReason: 'blocked',
+    summary: `The frozen ${route.replaceAll('_', ' ')} plan could not execute as selected. DQL did not substitute another analytical tier.`,
+    answer: 'The selected analytical plan could not be executed as selected. No fallback answer was returned.',
+    artifacts: [],
+    evaluations: [{
+      id: 'frozen-plan-route-mismatch',
+      label: 'Frozen analytical route',
+      passed: false,
+      severity: 'blocking',
+      message: `The executor reported ${result.resolvedRoute.replaceAll('_', ' ')} after the router froze ${route.replaceAll('_', ' ')}.`,
+      evidence: {
+        selectedRoute: route,
+        reportedRoute: result.resolvedRoute,
+        selectedTier: decision.analyticalCascadeDecision?.selectedTier,
+        planId: decision.resolvedAnalyticalPlan?.planId,
+      },
+    }],
+  };
+}
+
+/**
+ * Promote only an explicit host-issued exploratory freeze into the router
+ * decision that will be persisted. This deliberately does not inspect route
+ * names, SQL strings, or identifier patterns: a selected tier is immutable
+ * only when its own candidate set, snapshot, target, and capability receipt
+ * all agree.
+ */
+function applyExploratoryExecutionFreeze(
+  decision: IntentDecision,
+  freeze: ExploratoryExecutionFreezeV1 | undefined,
+): IntentDecision {
+  if (!freeze) return decision;
+  const cascade = decision.analyticalCascadeDecision;
+  const attempt = cascade?.attempts.find((candidate) => candidate.tier === 'exploratory_sql');
+  const sameCandidates = Boolean(
+    attempt
+    && attempt.candidateIds.length === freeze.candidateIds.length
+    && attempt.candidateIds.every((candidate, index) => candidate === freeze.candidateIds[index]),
+  );
+  const retrievalSnapshotId = decision.retrievalEvidence?.snapshotId;
+  const valid = Boolean(
+    cascade
+    && cascade.selectedTier === 'exploratory_sql'
+    && cascade.planFrozen === false
+    && attempt?.outcome === 'executable'
+    && sameCandidates
+    && freeze.version === 1
+    && freeze.selectedTier === 'exploratory_sql'
+    && freeze.authorization === 'capability_minted'
+    && freeze.planId.trim()
+    && freeze.planFingerprint.trim()
+    && freeze.snapshotId.trim()
+    && freeze.targetFingerprint.trim()
+    && freeze.sqlFingerprint.trim()
+    && (!retrievalSnapshotId || retrievalSnapshotId === freeze.snapshotId),
+  );
+  if (!valid) {
+    throw Object.assign(new Error('The exploratory execution receipt did not match the router-selected candidate set and was not accepted.'), {
+      code: 'EXPLORATORY_FREEZE_RECEIPT_MISMATCH',
+    });
+  }
+  return {
+    ...decision,
+    analyticalCascadeDecision: {
+      ...cascade!,
+      planFrozen: true,
+      exploratoryExecutionFreeze: freeze,
+      attempts: cascade!.attempts.map((candidate) => candidate.tier === 'exploratory_sql'
+        ? {
+            ...candidate,
+            planFrozen: true,
+            reason: `${candidate.reason} Host-authorized immutable exploratory execution plan ${freeze.planId}.`,
+          }
+        : candidate),
+    },
+  };
+}
+
+/**
  * Has this exact clarification already been asked in this thread?
  *
  * The reported loop: "who are the top customers for BCM" returned "Top by which
@@ -2390,20 +2502,33 @@ function enforceOrdinaryAnalyticalPlanBoundary(
   // user to disambiguate the one artifact they just named. The plan cannot see
   // it because it reads the artifact's OWN NAME as analytical intent: that name
   // contains "vs", so the mode comes back `comparison`.
+  const namedCertifiedArtifactMetadata = looksLikeNamedCertifiedArtifactMetadataRequest(
+    request.question,
+    decision.retrievalEvidence?.candidateIds ?? [],
+  );
   if (
     ordinaryAsk
     && !request.selectedEvidenceId
-    && looksLikeDefinitionalAboutNamedObject(
-      request.question,
-      decision.retrievalEvidence?.candidateIds ?? [],
+    && (
+      namedCertifiedArtifactMetadata
+      || looksLikeDefinitionalAboutNamedObject(
+        request.question,
+        decision.retrievalEvidence?.candidateIds ?? [],
+      )
     )
   ) {
     return {
       ...decision,
-      action: 'converse',
-      category: 'conversational',
+      // Only this explicit selected-block grammar has an artifact-local,
+      // deterministic metadata result. Broader definition wording remains
+      // conversational so a metric phrase cannot acquire certified trust just
+      // because a similarly named block was retrieved.
+      action: namedCertifiedArtifactMetadata ? 'answer' : 'converse',
+      category: namedCertifiedArtifactMetadata ? 'data_lookup' : 'conversational',
       confidence: 1,
-      reason: 'This asks what a governed artifact means, so it is answered from its definition rather than by running a query.',
+      reason: namedCertifiedArtifactMetadata
+        ? 'This asks what one selected certified artifact means, so its artifact metadata is returned without running a query.'
+        : 'This asks what a governed artifact means, so it is answered from its definition rather than by running a query.',
       requiresClarification: false,
       clarifyingQuestion: undefined,
       clarificationOptions: undefined,

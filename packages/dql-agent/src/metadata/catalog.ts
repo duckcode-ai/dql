@@ -5735,6 +5735,7 @@ async function planContextPackRoute(input: {
         plan: input.questionPlan,
         block: object,
         exactExampleMatch: hasExactExampleQuestion(input.request.question, object),
+        uniqueExactExampleContract: hasUniqueExactCertifiedExample(input.request.question, input.objects, object),
         definitionLookup: intent === 'definition_lookup' && objectNameInQuestion(input.request.question, object),
       }),
       applicabilityScore: applicabilityByKey.get(object.objectKey)?.score ?? 0,
@@ -5799,6 +5800,11 @@ async function planContextPackRoute(input: {
         plan: input.questionPlan,
         block: blockFitObject,
         exactExampleMatch: exact ? exactExampleMatch : false,
+        uniqueExactExampleContract: Boolean(exact && hasUniqueExactCertifiedExample(
+          input.request.question,
+          input.objects,
+          blockFitObject,
+        )),
         definitionLookup: Boolean(exact && intent === 'definition_lookup'
           && objectNameInQuestion(input.request.question, blockFitObject)),
       })
@@ -6115,6 +6121,7 @@ function buildCertifiedCandidateFitDiagnostics(input: {
         plan: input.questionPlan,
         block: object,
         exactExampleMatch: hasExactExampleQuestion(input.request.question, object),
+        uniqueExactExampleContract: hasUniqueExactCertifiedExample(input.request.question, input.objects, object),
         definitionLookup: input.routeDecision.intent === 'definition_lookup',
       });
       return {
@@ -6304,6 +6311,25 @@ function hasExactExampleQuestion(question: string, object: MetadataObject): bool
     typeof example === 'object' &&
     normalizeSearchText(String((example as { question?: unknown }).question ?? '')) === q,
   );
+}
+
+/**
+ * An authored example is a block-local contract only when it identifies one
+ * certified block in this snapshot.  Shared examples are ambiguous evidence:
+ * neither block may reinterpret parser member tokens through its own shape.
+ */
+function hasUniqueExactCertifiedExample(
+  question: string,
+  objects: MetadataObject[],
+  object: MetadataObject,
+): boolean {
+  if (!hasExactExampleQuestion(question, object)) return false;
+  const matches = objects.filter((candidate) =>
+    candidate.objectType === 'dql_block'
+    && isCertifiedMetadataObject(candidate)
+    && hasExactExampleQuestion(question, candidate),
+  );
+  return matches.length === 1 && matches[0]?.objectKey === object.objectKey;
 }
 
 function hasMeaningfulObjectOverlap(question: string, object: MetadataObject): boolean {

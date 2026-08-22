@@ -69,6 +69,92 @@ describe('validateAnswerResultShape', () => {
     expect(validation.warnings).toEqual([]);
   });
 
+  it('accepts singularized sales for revenue without conflating an unrelated BCM measure', () => {
+    const sales = validateAnswerResultShape(
+      buildAnalysisQuestionPlan('show me sales by category'),
+      {
+        columns: ['category', 'revenue'],
+        rows: [{ category: 'food', revenue: 40 }],
+        rowCount: 1,
+      },
+    );
+    const salePlan = buildAnalysisQuestionPlan('show me sales');
+    const bcm = validateAnswerResultShape(
+      {
+        ...salePlan,
+        requestedShape: { ...salePlan.requestedShape, requiredOutputs: ['bcm'] },
+      },
+      {
+        columns: ['revenue'],
+        rows: [{ revenue: 40 }],
+        rowCount: 1,
+      },
+    );
+
+    expect(sales.warnings).toEqual([]);
+    expect(sales.missingOutputs).toEqual([]);
+    expect(bcm.missingOutputs).toEqual(expect.arrayContaining(['bcm']));
+  });
+
+  it('uses only artifact-local role bindings for frozen entity labels and typed dimension aliases', () => {
+    const customerPlan = buildAnalysisQuestionPlan('who are the top customers');
+    const customer = validateAnswerResultShape(
+      customerPlan,
+      {
+        columns: ['customer_name', 'lifetime_spend'],
+        rows: [{ customer_name: 'Ada', lifetime_spend: 100 }],
+        rowCount: 1,
+      },
+      {
+        outputBindings: [{
+          requested: 'customer',
+          output: 'customer_name',
+          role: 'entity_label',
+        }],
+      },
+    );
+    const categoryPlan = buildAnalysisQuestionPlan('show me sales by category');
+    const category = validateAnswerResultShape(
+      categoryPlan,
+      {
+        columns: ['product_type', 'revenue'],
+        rows: [{ product_type: 'Food', revenue: 100 }],
+        rowCount: 1,
+      },
+      {
+        outputBindings: [{
+          requested: 'category',
+          output: 'product_type',
+          role: 'dimension',
+        }, {
+          requested: 'sales',
+          output: 'revenue',
+          role: 'measure',
+        }],
+      },
+    );
+    const noBorrowedMetric = validateAnswerResultShape(
+      buildAnalysisQuestionPlan('show me revenue'),
+      {
+        columns: ['customer_name', 'lifetime_spend'],
+        rows: [{ customer_name: 'Ada', lifetime_spend: 100 }],
+        rowCount: 1,
+      },
+      {
+        outputBindings: [{
+          requested: 'customer',
+          output: 'customer_name',
+          role: 'entity_label',
+        }],
+        requireBoundMeasures: true,
+      },
+    );
+
+    expect(customer.missingOutputs).toEqual([]);
+    expect(category.missingOutputs).toEqual([]);
+    expect(noBorrowedMetric.missingOutputs).toEqual(expect.arrayContaining(['revenue']));
+  });
+
   it('warns when a global top-N answer returns too many rows', () => {
     const validation = validateAnswerResultShape(
       buildAnalysisQuestionPlan('Show the top 2 customers by revenue'),
@@ -88,5 +174,31 @@ describe('validateAnswerResultShape', () => {
     expect(validation.warnings).toEqual(expect.arrayContaining([
       'The user asked for top 2, but the answer returned 3 rows.',
     ]));
+  });
+
+  it('accepts an exact-example member token only through the selected block-owned dimension binding', () => {
+    const plan = buildAnalysisQuestionPlan('What is revenue by food and drink?');
+    const result = {
+      columns: ['category', 'revenue'],
+      rows: [{ category: 'Food', revenue: 100 }],
+      rowCount: 1,
+    };
+
+    const withoutExactExampleBinding = validateAnswerResultShape(plan, result, {
+      outputBindings: [{ requested: 'revenue', output: 'revenue', role: 'measure' }],
+      requireBoundMeasures: true,
+    });
+    const withExactExampleBinding = validateAnswerResultShape(plan, result, {
+      outputBindings: [{ requested: 'revenue', output: 'revenue', role: 'measure' }, {
+        requested: 'category',
+        output: 'category',
+        role: 'dimension',
+        aliases: ['food'],
+      }],
+      requireBoundMeasures: true,
+    });
+
+    expect(withoutExactExampleBinding.missingOutputs).toContain('food');
+    expect(withExactExampleBinding.missingOutputs).toEqual([]);
   });
 });

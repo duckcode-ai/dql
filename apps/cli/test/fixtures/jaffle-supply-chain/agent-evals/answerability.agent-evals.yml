@@ -40,12 +40,15 @@ cases:
     expected:
       answerable: true
 
-  - name: "a measure synonym must reach the revenue-family metric"
+  - name: "a measure synonym must freeze the certified category-revenue block"
     # "sales" is seeded into the revenue family. This is the recall half of the
     # BCM defect: a question that never says the metric's own name.
     question: "show me sales by category"
     expected:
       answerable: true
+      kind: certified
+      certification: certified
+      route: certified
 
   # ── ANSWERABLE: no governed coverage — the cascade must continue ─────────────
   - name: "supply-chain detail has no certified block and must still answer"
@@ -55,18 +58,27 @@ cases:
     expected:
       answerable: true
 
-  - name: "a ranking qualified by an unmodelled attribute must not dead-end"
-    # Structurally the BCM question: a ranking whose qualifier no certified block
-    # covers. Must fall through to a review-required generated answer.
+  - name: "a ranking without a certified customer-to-perishable closure must refuse"
+    # `supplies.is_perishable_supply` exists, but this fixture deliberately has
+    # no structured, validated, fanout-safe customer -> order -> item -> supply
+    # relationship closure. Do not invent a join or report the column absent.
     question: "who are the top customers for perishable products"
     expected:
-      answerable: true
+      answerable: false
+      kind: no_answer
+      route: blocked
+      terminalOutcomeKind: modeling_gap
+      missingContextKind: relationship
 
-  - name: "an attribute lookup with no metric at all must still answer"
+  - name: "an attribute lookup uses the one-relation review-required path"
     # Metric-free entity attribute lookup — no aggregation is being requested.
     question: "what is the order count for each customer?"
     expected:
       answerable: true
+      kind: uncertified
+      certification: analyst_review_required
+      reviewStatus: analyst_review_required
+      route: generated_sql
 
   # ── MUST REFUSE: the guard on "never dead-end" ───────────────────────────────
   - name: "a non-analytics question must refuse"

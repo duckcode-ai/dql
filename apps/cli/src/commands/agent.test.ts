@@ -4,8 +4,10 @@ import {
   contextRetrievalBudgetForQuestion,
   type AgentAnswer,
   type AgentFollowUpContext,
+  type AgentRun,
 } from '@duckcodeailabs/dql-agent';
 import { __test__ } from './agent.js';
+import { answerFromRuntimeRun, projectRuntimeRun } from './agent-eval-runtime.js';
 
 function answerResult(overrides: Partial<AgentAnswer> = {}): AgentAnswer {
   return {
@@ -76,7 +78,149 @@ function answerResult(overrides: Partial<AgentAnswer> = {}): AgentAnswer {
   };
 }
 
+function runtimeRun(overrides: Partial<AgentRun>): AgentRun {
+  return {
+    id: 'runtime-eval-run',
+    question: 'question',
+    requestedMode: 'ask',
+    route: 'generated_answer',
+    status: 'needs_review',
+    trustState: 'review_required',
+    stopReason: 'human_review_required',
+    startedAt: '2026-01-01T00:00:00.000Z',
+    completedAt: '2026-01-01T00:00:01.000Z',
+    steps: [],
+    summary: 'Persisted runtime answer.',
+    artifacts: [],
+    evaluations: [],
+    events: [],
+    nextActions: [],
+    repairAttempts: 0,
+    ...overrides,
+  } as AgentRun;
+}
+
 describe('agent eval answer harness', () => {
+  it('scores the persisted certified runtime route rather than an absent AgentAnswer context pack', () => {
+    const persisted = runtimeRun({
+      route: 'certified_answer',
+      status: 'completed',
+      trustState: 'certified',
+      telemetry: {
+        version: 1, stageDurationsMs: { total: 12 }, providerRoundTrips: 0,
+        toolCalls: 0, sqlExecutions: 1, repairs: 0, egressReceipts: 0, fallbackReason: 'none',
+      },
+      routeDecision: {
+        action: 'answer', confidence: 1, followsUp: false, reason: 'Exact certified block.',
+        retrievalEvidence: { snapshotId: 'snapshot-certified', candidateCount: 1, candidateIds: ['dql:block:top_customers'] },
+      },
+    });
+
+    const evaluation = __test__.evaluateCase(
+      { question: 'who are the top customers', expected: { route: 'certified', kind: 'certified', certification: 'certified' } },
+      answerFromRuntimeRun(persisted),
+      projectRuntimeRun(persisted),
+    );
+
+    expect(evaluation.failures).toEqual([]);
+  });
+
+  it('uses persisted telemetry for generated route/report counts', () => {
+    const persisted = runtimeRun({
+      telemetry: {
+        version: 1, stageDurationsMs: { total: 12 }, providerRoundTrips: 1,
+        toolCalls: 2, sqlExecutions: 1, repairs: 0, egressReceipts: 1, fallbackReason: 'none',
+      },
+      routeDecision: {
+        action: 'answer', confidence: 0.8, followsUp: false, reason: 'Qualified exploration.',
+        retrievalEvidence: { snapshotId: 'snapshot-generated', candidateCount: 3, candidateIds: ['dbt:model:orders'] },
+      },
+    });
+    const projection = projectRuntimeRun(persisted);
+    const evaluation = __test__.evaluateCase(
+      { question: 'show orders', expected: { route: 'generated_sql', kind: 'uncertified', minToolCalls: 2 } },
+      answerFromRuntimeRun(persisted),
+      projection,
+    );
+    const trace = __test__.buildEvalTrace({
+      testCase: { question: 'show orders', expected: { minToolCalls: 2 } },
+      result: answerFromRuntimeRun(persisted),
+      evaluation,
+      durationMs: 12,
+      draftSaved: false,
+      runtime: projection,
+    });
+
+    expect(evaluation.failures).toEqual([]);
+    expect(projection).toMatchObject({ retrievalCandidateCount: 3, toolCallCount: 2 });
+    expect(trace.find((stage) => stage.stage === 'tools')?.payload).toMatchObject({
+      evidenceSource: 'persisted_agent_run.telemetry', observedToolCalls: 2,
+    });
+  });
+
+  it('scores a persisted relationship gap as typed modeling-gap/no_answer, not a fake clarification', () => {
+    const persisted = runtimeRun({
+      route: 'blocked', status: 'blocked', trustState: 'blocked',
+      routeDecision: {
+        action: 'block', confidence: 1, followsUp: false, reason: 'No safe relationship closure.',
+        terminalOutcome: {
+          kind: 'modeling_gap', code: 'ANALYTICAL_MODELING_GAP',
+          message: 'No certified fanout-safe relationship closure exists.',
+          candidateIds: ['dbt:model:customers'],
+          gap: {
+            code: 'MISSING_RELATIONSHIP',
+            missing: ['a certified, validated, fanout-safe relationship proof'],
+            witnessCandidateIds: ['dbt:model:customers', 'dbt:model:order_items'],
+          },
+        },
+      },
+    });
+    const projection = projectRuntimeRun(persisted);
+    const evaluation = __test__.evaluateCase(
+      {
+        question: 'who are the top customers for perishable products',
+        expected: { answerable: false, kind: 'no_answer', route: 'blocked', terminalOutcomeKind: 'modeling_gap', missingContextKind: 'relationship' },
+      },
+      answerFromRuntimeRun(persisted),
+      projection,
+    );
+
+    expect(projection).toMatchObject({
+      route: 'blocked',
+      terminalOutcome: { kind: 'modeling_gap', gap: { code: 'MISSING_RELATIONSHIP' } },
+      clarificationOptionCount: 0,
+    });
+    expect(evaluation.failures).toEqual([]);
+  });
+
+  it('does not score a generic metric/dimension modeling gap as a missing relationship', () => {
+    const persisted = runtimeRun({
+      route: 'blocked', status: 'blocked', trustState: 'blocked',
+      routeDecision: {
+        action: 'block', confidence: 1, followsUp: false, reason: 'Revenue is not modeled.',
+        terminalOutcome: {
+          kind: 'modeling_gap', code: 'ANALYTICAL_MODELING_GAP',
+          message: 'The requested revenue measure is not modeled.', candidateIds: ['semantic:metric:orders.revenue'],
+          gap: {
+            code: 'MISSING_MEASURE',
+            missing: ['revenue'],
+            witnessCandidateIds: ['semantic:metric:orders.revenue'],
+          },
+        },
+      },
+    });
+    const evaluation = __test__.evaluateCase(
+      {
+        question: 'show me revenue by customer',
+        expected: { answerable: false, kind: 'no_answer', route: 'blocked', terminalOutcomeKind: 'modeling_gap', missingContextKind: 'relationship' },
+      },
+      answerFromRuntimeRun(persisted),
+      projectRuntimeRun(persisted),
+    );
+
+    expect(evaluation.failures).toContain('missing context kind relationship was not reported');
+  });
+
   it('scores expected rows as an execution match', () => {
     const evaluation = __test__.evaluateCase(
       {

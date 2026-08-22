@@ -1034,6 +1034,53 @@ describe("answer (block-first loop)", () => {
     expect(result.dqlArtifact?.executionReceipt).toEqual(executionReceipt);
   });
 
+  it('answers a named certified artifact definition from metadata without SQL or provider calls', async () => {
+    kg.rebuild([{
+      nodeId: 'block:top_customers',
+      kind: 'block',
+      name: 'top_customers',
+      domain: 'commerce',
+      status: 'certified',
+      description: 'Ranks customers by their lifetime spend.',
+      sourceTier: 'certified_artifact',
+      certification: 'certified',
+      provenance: 'DQL block',
+      grain: 'customer',
+      owner: 'Revenue Operations',
+      outputContract: [
+        { name: 'customer_name', role: 'entity_label' },
+        { name: 'lifetime_spend', role: 'metric' },
+      ],
+      declaredOutputs: ['customer_name', 'lifetime_spend'],
+    }], []);
+    const provider = new StubProvider('must not be called');
+    const executeCertifiedBlock = vi.fn(async () => ({
+      columns: ['customer_name', 'lifetime_spend'],
+      rows: [],
+      rowCount: 0,
+    }));
+
+    const result = await answer({
+      question: 'what does the top_customers block measure?',
+      provider,
+      kg,
+      blockHints: ['top_customers'],
+      executeCertifiedBlock,
+    });
+
+    expect(result.kind).toBe('certified');
+    expect(result.route?.tier).toBe('certified_block');
+    expect(result.certification).toBe('certified');
+    expect(result.text).toContain('Ranks customers by their lifetime spend.');
+    expect(result.text).toContain('Declared outputs: customer_name, lifetime_spend.');
+    expect(result.text).toContain('Grain: customer.');
+    expect(result.text).toContain('Owner: Revenue Operations.');
+    expect(result.text).toContain('not a query result');
+    expect(result.result).toBeUndefined();
+    expect(executeCertifiedBlock).not.toHaveBeenCalled();
+    expect(provider.calls).toHaveLength(0);
+  });
+
   it("AGT-005/AGT-012 binds a question member to a certified block parameter and preserves the artifact contract", async () => {
     kg.rebuild([{
       nodeId: "block:product_revenue_for_product",
@@ -6466,6 +6513,157 @@ describe("answer (block-first loop)", () => {
     expect(executeAgentic.mock.calls[0]?.[1]).toBe(forcedSql);
     expect(executeAmbient).not.toHaveBeenCalled();
     expect(result.proposedSql).toBe(forcedSql);
+  });
+
+  it('uses the host freeze handoff for a router-selected exploratory analyst proposal', async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider('THIS_PROVIDER_MUST_NOT_BE_CALLED');
+    const forcedSql = 'SELECT customer_name FROM dev.orders';
+    const capability = {
+      version: 1 as const,
+      runId: 'run-router-exploratory',
+      executionId: 'run-router-exploratory:exploratory',
+      snapshotId: 'snapshot-router-exploratory',
+      planId: 'exploratory-router-plan',
+      targetFingerprint: 'target-router-exploratory',
+      bindingsFingerprint: 'bindings-router-exploratory',
+      candidateSqlFingerprint: 'candidate-router-exploratory',
+      provenIdentifiers: ['dev.orders', 'dev.orders.customer_name'],
+      evidence: { 'dev.orders': 'schema_tool' as const, 'dev.orders.customer_name': 'schema_tool' as const },
+    };
+    const prepare = vi.fn(async () => ({
+      capability,
+      freeze: {
+        version: 1 as const,
+        selectedTier: 'exploratory_sql' as const,
+        planId: capability.planId,
+        planFingerprint: 'a'.repeat(64),
+        snapshotId: capability.snapshotId,
+        targetFingerprint: capability.targetFingerprint,
+        sqlFingerprint: 'b'.repeat(32),
+        candidateIds: ['dbt:model:orders'],
+        authorization: 'capability_minted' as const,
+      },
+    }));
+    const executeAgentic = vi.fn(async (_capability: unknown, sql: string) => ({
+      columns: ['customer_name'], rows: [{ customer_name: 'Ada' }], rowCount: 1, sql,
+    }));
+    const executeAmbient = vi.fn(async () => {
+      throw new Error('ambient generated SQL must not run');
+    });
+    const relations = [{
+      relation: 'dev.orders', name: 'orders', source: 'dbt manifest',
+      columns: [{ name: 'customer_name', type: 'VARCHAR' }], rank: 1, score: 1, reason: 'fixture',
+    }];
+    // This mirrors the router-owned physical closure passed by the host: the
+    // candidate is a canonical dbt model identity, and its payload proves the
+    // exact relation that may be rendered, validated, frozen, and executed.
+    // Do not use a bare relation ID here; that would bypass the production
+    // identity-to-relation closure derivation this test is intended to cover.
+    const exploratoryCandidateIds = ['dbt:model:orders'];
+    const exploratoryContextPack = contextPackForRankedRelations('show customer names', relations, {
+      metricTerms: [], dimensionTerms: ['customer'], mode: 'entity_drilldown', routeIntent: 'entity_drilldown',
+      objects: [{
+        objectKey: 'dbt:model:orders',
+        objectType: 'dbt_model',
+        name: 'orders',
+        fullName: 'dev.orders',
+        status: 'dbt_imported',
+        sourcePath: 'models/orders.sql',
+        sourceSystem: 'fixture',
+        payload: {
+          relation: 'dev.orders',
+          sourceRelations: ['dev.orders'],
+          uniqueId: 'model.fixture.orders',
+        },
+      }],
+    });
+    exploratoryContextPack.allowedSqlContext.relations[0]!.objectKey = exploratoryCandidateIds[0];
+    const result = await answer({
+      question: 'show customer names',
+      provider,
+      kg,
+      selectedCascadeTier: 'exploratory_sql',
+      exploratoryCandidateIds,
+      forcedGeneratedProposal: { sql: forcedSql },
+      prepareExploratorySqlExecution: prepare,
+      executeAgenticGeneratedSql: executeAgentic,
+      executeGeneratedSql: executeAmbient,
+      contextPack: exploratoryContextPack,
+      schemaContext: relations,
+    });
+
+    expect(provider.calls).toHaveLength(0);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(prepare.mock.calls[0]?.[0]).toBe(forcedSql);
+    expect(executeAgentic).toHaveBeenCalledTimes(1);
+    expect(executeAgentic.mock.calls[0]?.[0]).toBe(capability);
+    expect(executeAgentic.mock.calls[0]?.[1]).toBe(forcedSql);
+    expect(executeAmbient).not.toHaveBeenCalled();
+    expect(result.certification).toBe('ai_generated');
+    expect(result.exploratoryExecutionFreeze).toMatchObject({
+      selectedTier: 'exploratory_sql',
+      authorization: 'capability_minted',
+      planId: capability.planId,
+      candidateIds: exploratoryCandidateIds,
+    });
+  });
+
+  it('does not expose a SQL preview when the host denies a router-selected exploratory closure', async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider('THIS_PROVIDER_MUST_NOT_BE_CALLED');
+    const relations = [{
+      relation: 'dev.orders', name: 'orders', source: 'dbt manifest',
+      columns: [{ name: 'customer_name', type: 'VARCHAR' }], rank: 1, score: 1, reason: 'fixture',
+    }];
+    const exploratoryCandidateIds = ['dbt:model:orders'];
+    const closureContextPack = contextPackForRankedRelations('show customer names', relations, {
+      metricTerms: [], dimensionTerms: ['customer'], mode: 'entity_drilldown', routeIntent: 'entity_drilldown',
+      objects: [{
+        objectKey: 'dbt:model:orders',
+        objectType: 'dbt_model',
+        name: 'orders',
+        fullName: 'dev.orders',
+        status: 'dbt_imported',
+        sourcePath: 'models/orders.sql',
+        sourceSystem: 'fixture',
+        payload: { relation: 'dev.orders', sourceRelations: ['dev.orders'], uniqueId: 'model.fixture.orders' },
+      }],
+    });
+    closureContextPack.allowedSqlContext.relations[0]!.objectKey = exploratoryCandidateIds[0];
+    const prepare = vi.fn(async () => {
+      throw Object.assign(
+        new Error('The generated SQL references a relation outside the router-selected physical closure, so it was not executed.'),
+        { code: 'UNAUTHORIZED_SQL' },
+      );
+    });
+    const execute = vi.fn(async () => {
+      throw new Error('A closure-denied proposal must not execute.');
+    });
+
+    const result = await answer({
+      question: 'show customer names',
+      provider,
+      kg,
+      selectedCascadeTier: 'exploratory_sql',
+      exploratoryCandidateIds,
+      forcedGeneratedProposal: { sql: 'SELECT customer_name FROM dev.orders' },
+      prepareExploratorySqlExecution: prepare,
+      executeAgenticGeneratedSql: execute,
+      contextPack: closureContextPack,
+      schemaContext: relations,
+    });
+
+    expect(provider.calls).toHaveLength(0);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(execute).not.toHaveBeenCalled();
+    expect(result.kind).toBe('no_answer');
+    expect(result.refusalCode).toBe('grounding_gap');
+    expect(result.proposedSql).toBeUndefined();
+    expect(result.sql).toBeUndefined();
+    expect(result.dqlArtifact).toBeUndefined();
+    expect(result.draftBlock).toBeUndefined();
+    expect(result.analysisPlan?.sql).toBeUndefined();
   });
 
   it('refuses a forced analyst proposal with no capability before any generated warehouse call', async () => {

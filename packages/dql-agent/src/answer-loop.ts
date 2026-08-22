@@ -70,7 +70,10 @@ import type {
 } from './metadata/sql-context-validation.js';
 import type { GroundingContextExpander } from './grounding/regrounding.js';
 import { createContextLedger, type ContextLedger } from './grounding/context-ledger.js';
-import { validateAnswerResultShape } from './answer-shape.js';
+import {
+  validateAnswerResultShape,
+  type AnswerShapeOutputBinding,
+} from './answer-shape.js';
 import {
   analyticalErrorDetail,
   type AnalyticalErrorDetailV1,
@@ -129,6 +132,10 @@ import {
   type CascadeAnswerResult,
   type CascadeLane,
 } from './cascade/cascade.js';
+import type {
+  AnalyticalCascadeTierV1,
+  ExploratoryExecutionFreezeV1,
+} from './analytical-orchestration.js';
 import { shouldClarifyBeforeGeneration } from './cascade/triage.js';
 import { stampTrustLabel } from './trust/stamp.js';
 import { buildResolvedAnalyticalPlan, deriveResolvedAnalyticalPlan, type ResolvedAnalyticalPlan, type ResolvedAnalyticalPlanDelta } from './resolved-analytical-plan.js';
@@ -783,6 +790,152 @@ function certifiedInvocationInputs(
   return Object.keys(parameters).length > 0 ? { parameters, parameterSources } : {};
 }
 
+/**
+ * Return only output aliases that the selected certified artifact itself
+ * declares.  This is deliberately built after the router has frozen the plan:
+ * retrieval context, tags, examples, and sibling metrics never enter the
+ * result-shape proof.
+ *
+ * A block may express an entity role (`customer`) through a readable label
+ * column (`customer_name`), or a declared dimension role through a physical
+ * projection alias (`product_type`).  Those are valid execution contracts only
+ * when the selected block owns both sides of the binding.
+ */
+function frozenCertifiedResultShapeBindings(
+  plan: ResolvedAnalyticalPlan | undefined,
+  block: KGNode,
+  questionPlan: AnalysisQuestionPlan,
+  options: { uniqueExactExampleContract?: boolean } = {},
+): AnswerShapeOutputBinding[] {
+  if (!plan || block.kind !== 'block') return [];
+  const canonical = (value: string): string => value
+    .toLowerCase()
+    .replace(/[_\-./]+/g, ' ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((token) => token.endsWith('ies') && token.length > 4
+      ? `${token.slice(0, -3)}y`
+      : token.endsWith('s') && token.length > 3
+        ? token.slice(0, -1)
+        : token)
+    .join('_');
+  const declared = (block.outputContract?.length
+    ? block.outputContract.map((output) => ({ name: output.name, role: output.role }))
+    : (block.declaredOutputs ?? []).map((name) => ({ name })))
+    .filter((output): output is { name: string; role?: string } => Boolean(output.name?.trim()));
+  const declaredByCanonical = new Map(declared.map((output) => [canonical(output.name), output]));
+  const bindings: AnswerShapeOutputBinding[] = [];
+  const add = (binding: AnswerShapeOutputBinding): void => {
+    const key = `${binding.role}\0${canonical(binding.requested)}\0${canonical(binding.output)}`;
+    const existing = bindings.find((candidate) =>
+      `${candidate.role}\0${canonical(candidate.requested)}\0${canonical(candidate.output)}` === key);
+    if (existing) {
+      const aliases = [...(existing.aliases ?? []), ...(binding.aliases ?? [])]
+        .map((alias) => alias.trim())
+        .filter(Boolean);
+      if (aliases.length > 0) existing.aliases = Array.from(new Set(aliases));
+      return;
+    }
+    bindings.push(binding);
+  };
+
+  // Measures are only admitted when the frozen plan retained the block's
+  // strict, artifact-local declared output identity.  Do not infer an alias
+  // from output role here: that would reintroduce lifetime_spend -> revenue.
+  for (const measure of plan.query.measures) {
+    if (!measure.outputName) continue;
+    const output = declaredByCanonical.get(canonical(measure.outputName));
+    if (output) add({ requested: measure.requested, output: output.name, role: 'measure' });
+  }
+
+  const requestedDimensions = Array.from(new Set([
+    ...plan.query.dimensions.map((binding) => binding.requested),
+    ...questionPlan.requestedShape.dimensions,
+  ].map((value) => canonical(value)).filter(Boolean)));
+  const declaredEntities = new Set((block.entities ?? []).map(canonical).filter(Boolean));
+  const declaredDimensions = new Set((block.dimensions ?? []).map(canonical).filter(Boolean));
+  const typedDimensionOutputs = declared.filter((output) => output.role === 'dimension');
+
+  for (const requested of requestedDimensions) {
+    // The declared entity role can be rendered as a standard display label,
+    // e.g. `customer` -> `customer_name`.  Require both the authored entity
+    // declaration and the output's explicit entity-label shape.
+    if (declaredEntities.has(requested)) {
+      const entityLabel = declared.find((output) => {
+        const outputName = canonical(output.name);
+        return output.role === 'entity_label'
+          || outputName === `${requested}_name`
+          || outputName === `${requested}_label`;
+      });
+      if (entityLabel) add({ requested, output: entityLabel.name, role: 'entity_label' });
+    }
+
+    // An exact declared output is an artifact-local business-dimension binding
+    // even when an older authored block predates explicit `role = dimension`.
+    // This is not a pooled or lexical alias: both the requested business
+    // dimension and the selected artifact's own projection must agree.
+    const exactDeclaredDimension = declaredByCanonical.get(requested);
+    if (declaredDimensions.has(requested) && exactDeclaredDimension) {
+      add({ requested, output: exactDeclaredDimension.name, role: 'dimension' });
+    // Otherwise a physical output can stand for a business dimension only when
+    // the block declares that dimension and has one unambiguous typed
+    // dimension projection. Multiple physical outputs require an authored
+    // alias rather than a guess.
+    } else if (declaredDimensions.has(requested) && typedDimensionOutputs.length === 1) {
+      add({ requested, output: typedDimensionOutputs[0]!.name, role: 'dimension' });
+    }
+  }
+
+  // An exact *unique* authored example can prove that a parser token is a
+  // member value of the selected block's already-declared dimension.  For
+  // example, the block-owned example "revenue by food and drink" returns the
+  // declared `category` output; `food` is not an independently requested
+  // physical column.  Keep this binding intentionally local to the frozen
+  // block and its resolved dimension: no tags, descriptions, sibling evidence,
+  // or general lexical aliases are admitted here.  Measures remain strict.
+  if (options.uniqueExactExampleContract === true) {
+    const plannedDimensions = new Set(plan.query.dimensions.map((binding) => canonical(binding.requested)));
+    const resolvedDimensionBindings = bindings.filter((binding) =>
+      binding.role === 'dimension'
+      && plannedDimensions.has(canonical(binding.requested))
+      && declaredByCanonical.has(canonical(binding.output)),
+    );
+    if (resolvedDimensionBindings.length === 1) {
+      const dimensionBinding = resolvedDimensionBindings[0]!;
+      const protectedTerms = new Set([
+        ...questionPlan.requestedShape.measures,
+        ...plan.query.measures.map((binding) => binding.requested),
+        ...questionPlan.requestedShape.filters,
+      ].map(canonical).filter(Boolean));
+      const structuralRoles = new Set([
+        'product', 'customer', 'account', 'user', 'member', 'category', 'segment',
+        'region', 'channel', 'order', 'day', 'week', 'month', 'quarter', 'year',
+      ]);
+      const memberNoise = Array.from(new Set([
+        ...questionPlan.requestedShape.dimensions,
+        ...questionPlan.requestedShape.requiredOutputs,
+      ].map(canonical).filter(Boolean))).filter((token) =>
+        token !== canonical(dimensionBinding.requested)
+        && !declaredByCanonical.has(token)
+        && !declaredEntities.has(token)
+        && !declaredDimensions.has(token)
+        && !protectedTerms.has(token)
+        && !structuralRoles.has(token),
+      );
+      if (memberNoise.length > 0) {
+        add({
+          requested: dimensionBinding.requested,
+          output: dimensionBinding.output,
+          role: 'dimension',
+          aliases: memberNoise,
+        });
+      }
+    }
+  }
+  return bindings;
+}
+
 function damerauLevenshteinDistance(left: string, right: string): number {
   const rows = left.length + 1;
   const columns = right.length + 1;
@@ -982,6 +1135,12 @@ export interface AgentAnswer {
   executablePlan?: PlanExecutionBinding;
   /** Immutable multi-period graph compiled from the v2 plan. */
   analyticalExecutionGraph?: AnalyticalExecutionGraphV1;
+  /**
+   * Server-owned exploratory execution freeze. This is emitted only after the
+   * selected proposal passed context validation and the host minted one
+   * request-scoped capability, before the connector receives SQL.
+   */
+  exploratoryExecutionFreeze?: ExploratoryExecutionFreezeV1;
   /** Terminal receipt binding every source execution and validated output. */
   analyticalExecutionReceipt?: AnalyticalExecutionReceiptV1;
   /** Deterministic facts copied from validated result columns and bound to the receipt. */
@@ -1021,6 +1180,13 @@ export interface AgentAnswer {
   result?: AgentResultPayload;
   /** Certified path execution failure, if the block matched but execution failed. */
   executionError?: string;
+  /**
+   * The router froze a certified block, but its actual returned columns did
+   * not prove the requested tuple. This retains certified-tier provenance for
+   * a terminal failure without granting the result certified trust or allowing
+   * the engine to substitute generated SQL.
+   */
+  certifiedResultShapeFailure?: boolean;
   /** Structured, redacted warehouse failure used by bounded repair and Inspect UI. */
   warehouseFailure?: WarehouseSqlFailureV1;
   /** Uncertified path: the LLM-proposed SQL the analyst should review. */
@@ -1205,8 +1371,21 @@ export interface AnswerLoopInput {
   question: string;
   /** Immutable interpretation selected by the evidence-first router. */
   resolvedAnalyticalPlan?: ResolvedAnalyticalPlan;
+  /**
+   * Router-owned cascade selection.  An exploratory selection is a dispatch
+   * constraint, not a ranking hint: downstream legacy lanes may not reopen a
+   * certified or semantic route before the bounded proposal is generated.
+   */
+  selectedCascadeTier?: Exclude<AnalyticalCascadeTierV1, 'clarify_or_gap'>;
   /** Exact host-selected target authority for a bounded generated proposal. */
   generatedProposalTargetFingerprint?: string;
+  /**
+   * Router-owned physical closure for a selected exploratory tier.  These are
+   * candidate identities from the same retrieval snapshot, never model-supplied
+   * relation names.  The loop renders and validates only this closure before a
+   * provider can propose executable SQL.
+   */
+  exploratoryCandidateIds?: string[];
   /** Internal: the single adapter result prepared once at the answer boundary. */
   resolvedPlanExecutionBinding?: PlanExecutionBinding;
   /** Internal: immutable route-neutral graph prepared once at the answer boundary. */
@@ -1313,6 +1492,19 @@ export interface AnswerLoopInput {
    * data evidence before an analyst promotes the query into a certified block.
    */
   executeGeneratedSql?: (sql: string, artifact?: DqlArtifactReference) => Promise<AgentResultPayload>;
+  /**
+   * Host-only capability minting for a router-selected exploratory proposal.
+   * The loop calls this only after its own SQL/context validation has passed;
+   * the returned opaque capability is consumed immediately by the execution
+   * closure and is never persisted.
+   */
+  prepareExploratorySqlExecution?: (
+    sql: string,
+    artifact?: DqlArtifactReference,
+  ) => Promise<{
+    capability: AgenticSqlExecutionCapabilityV1;
+    freeze: ExploratoryExecutionFreezeV1;
+  }>;
   /**
    * Server-only exact analyst proposal. When present, the ordinary generated
    * lane must execute this SQL through `executeAgenticGeneratedSql`, not ask a
@@ -2224,6 +2416,20 @@ function cascadeExecutionStatus(result: AgentAnswer): 'executed' | 'failed' | 'n
  */
 function deriveAiRoute(result: AgentAnswer, metricMatch?: MetricMatch): AiRoute {
   if (result.kind === 'no_answer') {
+    // Preserve the frozen certified tier as provenance when that exact block
+    // executed but failed its own result contract. The route is not a trust
+    // badge: `certification` remains review-required and no generated fallback
+    // may be selected after freeze.
+    if (result.certifiedResultShapeFailure && result.sourceTier === 'certified_artifact') {
+      const ref = result.sourceCertifiedBlock ?? result.block?.name ?? result.citations[0]?.name;
+      return {
+        tier: 'certified_block',
+        label: ref
+          ? `Certified block ${ref} did not return the complete requested output shape.`
+          : 'The selected certified block did not return the complete requested output shape.',
+        ref,
+      };
+    }
     if (result.exploratoryCandidate) {
       return {
         tier: 'no_answer',
@@ -2289,6 +2495,17 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   const scopedContextPack = questionDomainScope.length > 0
     ? scopeContextPackToQuestionDomains(input.contextPack, questionDomainScope, input.manifest)
     : input.contextPack;
+  // The router has already chosen the physical exploratory closure.  Treat it
+  // as an execution authority boundary here, before any prompt is constructed
+  // or provider is dispatched.  Full retrieval stays on `input.contextPack`
+  // for receipts and diagnostics only.
+  const forcedExploratoryTier = input.selectedCascadeTier === 'exploratory_sql';
+  const exploratoryClosureContextPack = forcedExploratoryTier
+    ? scopeContextPackToExploratoryCandidateClosure(scopedContextPack, input.exploratoryCandidateIds)
+    : undefined;
+  const executionContextPack = forcedExploratoryTier
+    ? exploratoryClosureContextPack
+    : scopedContextPack;
   // Select the RELEVANT skills (not all) for this question; keep pinned project
   // skills (SQL conventions). Block hints still come from the full set so a
   // preferred-block mapping is never lost.
@@ -2337,8 +2554,8 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     kg.search({ query: question, domain, limit: 10 }),
   ).slice(0, 30);
   const schemaContext = schemaContextWithAllowedSqlContext(
-    schemaContextWithinQuestionScope(input.schemaContext ?? [], input.contextPack, scopedContextPack),
-    scopedContextPack,
+    schemaContextWithinQuestionScope(input.schemaContext ?? [], input.contextPack, executionContextPack),
+    executionContextPack,
   );
   const catalogRoute = input.contextPack?.routeDecision;
   const baseQuestionPlan = input.contextPack?.questionPlan?.requestedShape
@@ -2356,16 +2573,39 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // from compatible certified evidence, semantic members, and dbt/runtime
   // columns—not copy a customer-grain worked example into a product-grain ask.
   const promptContextPack = contextPackForRequestedShape(
-    scopedContextPack,
+    executionContextPack,
     question,
     questionPlan,
     kg,
   );
   const repairBudgetState = createCascadeBudgetState(input.cascadeBudgetModel);
-  const authoritativePlanBinding = input.resolvedAnalyticalPlan?.mode === 'authoritative'
+  // A pre-freeze exploratory selection is already the router's result of
+  // evaluating certified → semantic → relational eligibility.  Do not let the
+  // legacy answer loop independently rediscover a broad block or metric and
+  // replace that decision before it has attempted the selected bounded SQL
+  // path.  Frozen tiers retain their existing plan binding behavior.
+  if (forcedExploratoryTier && input.contextPack && !exploratoryClosureContextPack) {
+    const text = 'The router-selected exploratory path no longer has a complete same-snapshot physical relation closure, so DQL did not send SQL generation or execute a query.';
+    return {
+      kind: 'no_answer',
+      sourceTier: 'no_answer',
+      certification: 'analyst_review_required',
+      reviewStatus: 'none',
+      confidence: 0,
+      text,
+      answer: text,
+      refusalCode: 'grounding_gap',
+      refusalDetails: { code: 'grounding_gap', message: text },
+      citations: contextPackCitations(input.contextPack, 8),
+      contextPack: input.contextPack,
+      considered,
+      providerUsed: provider.name,
+    };
+  }
+  const authoritativePlanBinding = !forcedExploratoryTier && input.resolvedAnalyticalPlan?.mode === 'authoritative'
     ? input.resolvedPlanExecutionBinding
     : undefined;
-  if (input.analyticalPeriodResolutionFailure) {
+  if (!forcedExploratoryTier && input.analyticalPeriodResolutionFailure) {
     const failure = input.analyticalPeriodResolutionFailure;
     const structuredFailureCode = failure.error && typeof failure.error === 'object'
       && typeof (failure.error as { code?: unknown }).code === 'string'
@@ -2401,7 +2641,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       providerUsed: provider.name,
     };
   }
-  if (input.analyticalExecutionGraphFailure) {
+  if (!forcedExploratoryTier && input.analyticalExecutionGraphFailure) {
     const failure = input.analyticalExecutionGraphFailure;
     const analyticalFailure = analyticalFailureForInput(input, {
       error: { code: failure.code, message: failure.reason },
@@ -2426,7 +2666,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       providerUsed: provider.name,
     };
   }
-  if (input.semanticGraphExecutionBinding?.status === 'blocked') {
+  if (!forcedExploratoryTier && input.semanticGraphExecutionBinding?.status === 'blocked') {
     const failure = input.semanticGraphExecutionBinding;
     const analyticalFailure = analyticalFailureForInput(input, {
       error: { code: failure.code, message: failure.reason },
@@ -2451,7 +2691,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       providerUsed: provider.name,
     };
   }
-  if (input.semanticGraphExecutionBinding?.status === 'ready' && input.analyticalExecutionGraph) {
+  if (!forcedExploratoryTier && input.semanticGraphExecutionBinding?.status === 'ready' && input.analyticalExecutionGraph) {
     return executeSemanticAnalyticalGraph({
       input,
       binding: input.semanticGraphExecutionBinding,
@@ -2463,7 +2703,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       providerName: provider.name,
     });
   }
-  if (input.governedAnalyticalGraphCompilation?.status === 'blocked') {
+  if (!forcedExploratoryTier && input.governedAnalyticalGraphCompilation?.status === 'blocked') {
     const failure = input.governedAnalyticalGraphCompilation;
     const analyticalFailure = analyticalFailureForInput(input, {
       error: { code: failure.code, message: failure.reason },
@@ -2488,7 +2728,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       providerUsed: provider.name,
     };
   }
-  if (input.governedAnalyticalGraphCompilation?.status === 'compiled' && input.analyticalExecutionGraph) {
+  if (!forcedExploratoryTier && input.governedAnalyticalGraphCompilation?.status === 'compiled' && input.analyticalExecutionGraph) {
     return executeGovernedRelationalAnalyticalGraph({
       input,
       compilation: input.governedAnalyticalGraphCompilation,
@@ -2499,7 +2739,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     });
   }
   const governedRelationalCompilation = input.governedRelationalCompilation;
-  if (governedRelationalCompilation?.status === 'blocked') {
+  if (!forcedExploratoryTier && governedRelationalCompilation?.status === 'blocked') {
     const analyticalFailure = analyticalFailureForInput(input, {
       error: { code: governedRelationalCompilation.code, message: governedRelationalCompilation.reason },
       phase: 'compilation',
@@ -2526,7 +2766,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       providerUsed: provider.name,
     };
   }
-  if (governedRelationalCompilation?.status === 'compiled') {
+  if (!forcedExploratoryTier && governedRelationalCompilation?.status === 'compiled') {
     const dqlArtifact = renderGovernedRelationalDqlArtifact(governedRelationalCompilation);
     let result: AgentResultPayload | undefined;
     let executionError: string | undefined;
@@ -2589,9 +2829,15 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     const text = clarificationOptions?.length
       ? `The previous answer listed ${choices!.values.length} ${humanizeDeicticDimension(choices!.dimension)}. Which one did you mean?`
       : `The resolved analytical plan cannot execute safely: ${authoritativePlanBinding.reason}`;
+    const frozenCertifiedPlan = input.resolvedAnalyticalPlan?.mode === 'authoritative'
+      && input.resolvedAnalyticalPlan.capability === 'certified_execution';
+    const frozenCertifiedRef = input.resolvedAnalyticalPlan?.executionId;
     return {
       kind: 'no_answer',
-      sourceTier: 'no_answer',
+      // A binding/adapter failure after the router selected a certified
+      // execution authority is still a certified-tier terminal.  It must not
+      // be relabelled as generated merely because no rows were produced.
+      sourceTier: frozenCertifiedPlan ? 'certified_artifact' : 'no_answer',
       certification: 'analyst_review_required',
       reviewStatus: 'none',
       confidence: 0,
@@ -2603,6 +2849,15 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         : 'grounding_gap',
       refusalDetails: { code: authoritativePlanBinding.code, message: authoritativePlanBinding.reason },
       ...(clarificationOptions?.length ? { clarificationOptions } : {}),
+      ...(frozenCertifiedPlan ? {
+        route: {
+          tier: 'certified_block' as const,
+          label: frozenCertifiedRef
+            ? `The selected certified block ${frozenCertifiedRef} could not execute its frozen plan.`
+            : 'The selected certified block could not execute its frozen plan.',
+          ...(frozenCertifiedRef ? { ref: frozenCertifiedRef } : {}),
+        },
+      } : {}),
       citations: contextPackCitations(input.contextPack, 8),
       considered,
       contextPack: input.contextPack,
@@ -2643,7 +2898,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   const semanticLayerForExec = input.semanticLayer;
   const canExecuteSemanticMetricForMatch = input.canExecuteSemanticMetric
     ?? (semanticLayerForExec ? (name: string) => semanticLayerForExec.canComposeMetric(name) : undefined);
-  let semanticMetricMatch = preferredSemanticMetric
+  let semanticMetricMatch = forcedExploratoryTier
+    ? null
+    : preferredSemanticMetric
     ? { metric: preferredSemanticMetric, score: 1, basis: 'name' as const }
     : input.resolvedAnalyticalPlan?.mode === 'authoritative'
       ? null
@@ -2675,8 +2932,10 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       && objectNameInQuestion(question, node)
       && /\b(run|use|open|show|execute|certified|saved|block)\b/i.test(question));
   });
-  const shouldTryCertifiedRoute = shouldUseCertifiedRoute(catalogRoute, intent)
-    || explicitlyRequestedCertifiedBlock;
+  const shouldTryCertifiedRoute = !forcedExploratoryTier
+    && (shouldUseCertifiedRoute(catalogRoute, intent)
+      || questionPlan.mode === 'definition'
+      || explicitlyRequestedCertifiedBlock);
   const catalogCertifiedHit = shouldTryCertifiedRoute
     ? certifiedHitFromContextPack(input.contextPack, kg)
     : null;
@@ -2686,7 +2945,13 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // metric, so a high-scoring `top_beverage_customers` catalog hit could answer a
   // product-type → product-name flow request with customer rows.
   const unsafeCatalogCertifiedHit = catalogCertifiedHit?.node.kind === 'block'
-    && !hasCertifiedNodeFit(question, questionPlan, catalogCertifiedHit.node)
+    && !hasCertifiedNodeFit(question, questionPlan, catalogCertifiedHit.node, {
+      uniqueExactExampleContract: hasUniqueExactCatalogExample(
+        question,
+        input.contextPack,
+        catalogCertifiedHit.node,
+      ),
+    })
     ? null
     : catalogCertifiedHit;
   const fallbackCertifiedHit = shouldTryCertifiedRoute ? pickCertifiedArtifact({
@@ -2703,13 +2968,85 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     && authoritativePlanBinding.kind === 'certified'
     ? authoritativePlanBinding
     : undefined;
+  const namedDefinitionArtifact = input.resolvedAnalyticalPlan?.mode === 'authoritative'
+    ? null
+    : uniqueNamedCertifiedDefinitionArtifact(question, kg, authorizedDomains);
   let artifactHit = authoritativeCertifiedBinding
     ? { node: authoritativeCertifiedBinding.node, score: 1 }
     : input.resolvedAnalyticalPlan?.mode === 'authoritative'
       ? null
-      : drilldownCertifiedHit ?? unsafeCatalogCertifiedHit
+      : namedDefinitionArtifact ?? drilldownCertifiedHit ?? unsafeCatalogCertifiedHit
         ?? (catalogCertifiedHit ? null : fallbackCertifiedHit);
   let certifiedExecutionFallback: { node: KGNode; error: string } | undefined;
+  // A named certified artifact-definition request is documentation about that
+  // artifact, not a request to execute its SQL.  The planner strips the
+  // artifact identifier from its output contract, and this deterministic path
+  // returns only authored metadata.  It is deliberately narrower than a bare
+  // "what is revenue" question: the user must name the certified block and use
+  // an explicit definition form before execution is bypassed.
+  if (artifactHit?.node.kind === 'block'
+    && artifactHit.node.status === 'certified'
+    && isUniqueNamedCertifiedDefinitionQuestion(question, artifactHit.node, kg, authorizedDomains)) {
+    const artifact = artifactHit.node;
+    const outputs = [...new Set([
+      ...(artifact.outputContract ?? []).map((output) => output.name),
+      ...(artifact.declaredOutputs ?? []),
+      ...(artifact.outputs ?? []).map((output) => output.name),
+    ].map((output) => output.trim()).filter(Boolean))].slice(0, 16);
+    const metadataLines = [
+      artifact.description ?? artifact.llmContext ?? 'No authored description is available for this certified artifact.',
+      outputs.length > 0 ? `Declared outputs: ${outputs.join(', ')}.` : undefined,
+      artifact.grain ? `Grain: ${artifact.grain}.` : undefined,
+      artifact.owner ? `Owner: ${artifact.owner}.` : undefined,
+      'This is certified artifact metadata, not a query result.',
+    ].filter((line): line is string => Boolean(line));
+    const citations: AgentCitation[] = [{
+      nodeId: artifact.nodeId,
+      kind: artifact.kind,
+      name: artifact.name,
+      gitSha: artifact.gitSha,
+      sourceTier: 'certified_artifact',
+      provenance: artifact.provenance,
+    }];
+    const analysisPlan = buildAnalysisPlan({
+      question,
+      intent: 'definition_lookup',
+      routeReason: 'The question explicitly requested the meaning of one named certified artifact; no SQL execution was requested.',
+      selectedNodes: [artifact],
+      schemaContext,
+    });
+    const text = `Certified artifact **${artifact.name}**\n\n${metadataLines.join('\n\n')}`;
+    return {
+      kind: 'certified',
+      sourceTier: 'certified_artifact',
+      certification: 'certified',
+      reviewStatus: 'certified',
+      confidence: 0.99,
+      text,
+      answer: text,
+      block: artifact,
+      sourceCertifiedBlock: artifact.name,
+      trustLabel: 'certified',
+      citations,
+      memoryContext: input.memoryContext,
+      analysisPlan,
+      evidence: buildCertifiedEvidence({
+        question,
+        artifact,
+        businessHits,
+        semanticHits,
+        manifestHits,
+        considered,
+        executorWasAvailable: false,
+        citations,
+        memoryContext: input.memoryContext ?? [],
+        analysisPlan,
+      }),
+      contextPack: input.contextPack,
+      considered,
+      providerUsed: provider.name,
+    };
+  }
   // Certified remains first when it actually covers the question. If the
   // retrieved block does not fit but a governed semantic metric does, never
   // let the broad catalog match pre-empt Lane 2.
@@ -2815,7 +3152,25 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         providerUsed: provider.name,
       };
     }
-    const resultShapeWarnings = result ? validateAnswerResultShape(questionPlan, result).warnings : [];
+    const resultShapeWarnings = result
+      ? validateAnswerResultShape(questionPlan, result, {
+          outputBindings: authoritativeCertifiedBinding
+            ? frozenCertifiedResultShapeBindings(
+                input.resolvedAnalyticalPlan,
+                artifactHit.node,
+                questionPlan,
+                {
+                  uniqueExactExampleContract: hasUniqueExactCatalogExample(
+                    question,
+                    input.contextPack,
+                    artifactHit.node,
+                  ),
+                },
+              )
+            : [],
+          requireBoundMeasures: Boolean(authoritativeCertifiedBinding),
+        }).warnings
+      : [];
     // When a certified block's execution was ATTEMPTED and FAILED, the answer
     // cannot wear the certified badge — a failed run has no data to stand behind.
     // Downgrade to analyst_review_required (the error is surfaced in the text).
@@ -2858,6 +3213,12 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         : questionPlan.requestedShape.topN?.n,
     );
     const authoritativeCertifiedFailure = Boolean(authoritativeCertifiedBinding && executionError);
+    // A selected certified block which returns an incomplete tuple is a
+    // same-tier terminal failure. It is not a reason to reinterpret meaning,
+    // label the partial rows generated, or retry another route after freeze.
+    const authoritativeCertifiedShapeFailure = Boolean(
+      authoritativeCertifiedBinding && !executionError && resultShapeWarnings.length > 0,
+    );
     const recoverableCertifiedFailure = artifactHit.node.kind === 'block'
       && executionError !== undefined
       && !authoritativeCertifiedFailure
@@ -2871,18 +3232,38 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       certifiedExecutionFallback = { node: artifactHit.node, error: executionError! };
       artifactHit = null;
     } else {
+      const frozenCertifiedRoute = authoritativeCertifiedBinding
+        ? {
+            tier: 'certified_block' as const,
+            label: certifiedShapePassed
+              ? `Answered from certified block ${artifactHit.node.name}`
+              : `The selected certified block ${artifactHit.node.name} could not complete its frozen output contract.`,
+            ref: artifactHit.node.name,
+          }
+        : undefined;
       return {
-        kind: authoritativeCertifiedFailure ? 'no_answer' : certifiedShapePassed ? 'certified' : 'uncertified',
-        sourceTier: authoritativeCertifiedFailure ? 'no_answer' : sourceTier,
+        kind: authoritativeCertifiedFailure || authoritativeCertifiedShapeFailure
+          ? 'no_answer'
+          : certifiedShapePassed ? 'certified' : 'uncertified',
+        // Preserve the selected certified authority even when its own
+        // execution/result contract fails. The failure is terminal and has
+        // review-required trust, but it is not generated SQL.
+        sourceTier,
         certification: certifiedShapePassed ? 'certified' : 'analyst_review_required',
-        reviewStatus: authoritativeCertifiedFailure ? 'none' : certifiedShapePassed ? 'certified' : 'analyst_review_required',
+        reviewStatus: authoritativeCertifiedFailure || authoritativeCertifiedShapeFailure
+          ? 'none'
+          : certifiedShapePassed ? 'certified' : 'analyst_review_required',
         confidence: certifiedShapePassed ? 0.95 : 0.45,
         text,
         answer: text,
         block: artifactHit.node.kind === 'block' ? artifactHit.node : undefined,
         result,
         executionError,
-        ...(authoritativeCertifiedFailure ? { refusalCode: 'grounding_gap' as const } : {}),
+        ...(authoritativeCertifiedFailure || authoritativeCertifiedShapeFailure
+          ? { refusalCode: 'grounding_gap' as const }
+          : {}),
+        ...(authoritativeCertifiedShapeFailure ? { certifiedResultShapeFailure: true } : {}),
+        ...(frozenCertifiedRoute ? { route: frozenCertifiedRoute } : {}),
         sql: result?.sql,
         dqlArtifact,
         trustLabel: certifiedShapePassed ? input.contextPack?.trustLabel ?? 'certified' : 'mixed',
@@ -2921,7 +3302,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // a governed metric can answer. Match by name + synonyms + measure family + hybrid
   // rank over the FTS semantic hits, then ALL metric KG nodes (revenue ⇄
   // cumulative_revenue). Certified-first is still preserved (checked above).
-  const clarifyBeforeGeneration = shouldClarifyBeforeGeneration({
+  const clarifyBeforeGeneration = !forcedExploratoryTier && shouldClarifyBeforeGeneration({
     intent,
     routeDecision: catalogRoute,
     hasSemanticMetricMatch: Boolean(semanticMetricMatch),
@@ -2980,7 +3361,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // wins over raw dbt manifest context; memory is appended last as advisory.
   // A confident metric match forces the semantic tier even when FTS returned no
   // semantic hits, so the governed metric (not refusal) answers the question.
-  const activeTier: AnswerSourceTier = sourceTierFromContextPack(input.contextPack)
+  const activeTier: AnswerSourceTier = forcedExploratoryTier
+    ? 'dbt_manifest'
+    : sourceTierFromContextPack(input.contextPack)
     ?? (semanticHits.length > 0 || semanticMetricMatch
       ? 'semantic_layer'
       : manifestHits.length > 0
@@ -3022,10 +3405,16 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         { hits: businessHits.slice(0, 4), reserve: 3 },
         { hits: manifestHits, reserve: 3 },
       ], 14);
-  const contextNodes = mergeNodes(
-    followUpSourceBlock && input.followUp?.kind === 'drilldown' ? [followUpSourceBlock] : [],
-    (contextHits.length > 0 ? contextHits : considered.slice(0, 6)).map((h) => h.node),
-  ).filter((node) => questionDomainScope.length === 0 || !node.domain || questionDomainScope.includes(node.domain));
+  // A frozen exploratory selection gets its relation/column/proof context only
+  // from `executionContextPack`.  KG hit prose is useful diagnostics, but it
+  // is not execution authority and must not tell a provider about another
+  // same-snapshot relation it could then attempt to query.
+  const contextNodes = forcedExploratoryTier
+    ? []
+    : mergeNodes(
+        followUpSourceBlock && input.followUp?.kind === 'drilldown' ? [followUpSourceBlock] : [],
+        (contextHits.length > 0 ? contextHits : considered.slice(0, 6)).map((h) => h.node),
+      ).filter((node) => questionDomainScope.length === 0 || !node.domain || questionDomainScope.includes(node.domain));
   const kgJoinPathHints = buildKgJoinPathHints(kg, contextNodes, questionPlan);
   const contextBlocks = contextNodes.filter((node) => {
     if (node.kind !== 'block') return false;
@@ -3044,9 +3433,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   const messages: AgentMessage[] = [
     { role: 'system', content: SYSTEM_PROMPT },
   ];
-  const skillsPrompt = buildSkillsPrompt(selectedSkills, userId ?? null);
+  const skillsPrompt = forcedExploratoryTier ? '' : buildSkillsPrompt(selectedSkills, userId ?? null);
   if (skillsPrompt) messages.push({ role: 'system', content: skillsPrompt });
-  const analyticalPlan = input.manifest
+  const analyticalPlan = !forcedExploratoryTier && input.manifest
     ? planAnalyticalPath(input.manifest, {
         entityIds: inferAnalyticalEntityIds(question, contextNodes, input.manifest),
         ownerDomain: input.domainContext?.activeDomain ?? input.domain,
@@ -3414,7 +3803,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // (pre-validated, since the wrapper only restricts an already-certified result)
   // and is labeled BELOW certified. Falls through to generation on any miss.
   let certifiedAdaptation: CertifiedAdaptation | undefined;
-  if (!semanticBridgeAnswer && !metricFirst && input.executeGeneratedSql) {
+  if (!forcedExploratoryTier && !semanticBridgeAnswer && !metricFirst && input.executeGeneratedSql) {
     const fit = input.contextPack?.routeDecision?.blockFit;
     const sourceBlock = input.contextPack?.allowedSqlContext?.sourceBlockSql?.[0];
     if (fit && sourceBlock?.sql) {
@@ -4440,7 +4829,16 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   let result: AgentResultPayload | undefined;
   let executionError: string | undefined;
   let warehouseFailure: WarehouseSqlFailureV1 | undefined;
+  let exploratoryClosureDenied = false;
   let repairAttempts = 0;
+  // A forced proposal may originate from the bounded analyst loop, but it
+  // cannot bypass a router-owned exploratory decision.  In that case the host
+  // still prepares and freezes the exact validated SQL before execution.
+  const exploratoryExecutionSelected = input.selectedCascadeTier === 'exploratory_sql';
+  let preparedExploratoryExecution: {
+    capability: AgenticSqlExecutionCapabilityV1;
+    freeze: ExploratoryExecutionFreezeV1;
+  } | undefined;
   // Repair candidates that were generated but rejected before execution. These
   // are diagnostics ABOUT the recovery attempt, not the reason the run failed,
   // so they are reported alongside the original error rather than replacing it.
@@ -4455,7 +4853,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     executionError = deepCandidateExecutionError;
     warehouseFailure = normalizeWarehouseSqlFailure(deepCandidateExecutionError, input.semanticDriver);
   }
-  const executeCurrentSql = (): Promise<AgentResultPayload> => {
+  const executeCurrentSql = async (): Promise<AgentResultPayload> => {
     const requestedLimit = questionPlan.requestedShape.topN?.scope === 'per_group'
       ? 200
       : questionPlan.requestedShape.topN?.n ?? 200;
@@ -4483,7 +4881,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       outputs: parsed.outputs,
     });
     const boundedArtifact = artifact ? { ...artifact, limit: requestedLimit } : undefined;
-    if (input.forcedGeneratedProposal) {
+    if (input.forcedGeneratedProposal && !exploratoryExecutionSelected) {
       if (!input.agenticSqlExecutionCapability || !input.executeAgenticGeneratedSql) {
         throw Object.assign(new Error('The analyst-approved SQL has no live execution capability, so DQL did not execute it.'), {
           code: 'AGENTIC_EXECUTION_CAPABILITY_REQUIRED',
@@ -4491,10 +4889,29 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       }
       return input.executeAgenticGeneratedSql(input.agenticSqlExecutionCapability, parsed.sql!, boundedArtifact);
     }
+    if (exploratoryExecutionSelected) {
+      if (!input.prepareExploratorySqlExecution || !input.executeAgenticGeneratedSql) {
+        throw Object.assign(new Error('The selected exploratory SQL has no host-authorized execution capability, so DQL did not execute it.'), {
+          code: 'EXPLORATORY_EXECUTION_CAPABILITY_REQUIRED',
+        });
+      }
+      // This is the only point at which a router-selected exploratory proposal
+      // crosses from validated text into executable authority. The callback
+      // rechecks the snapshot, physical target, and qualified runtime columns,
+      // then returns a one-shot capability bound to these exact SQL bytes.
+      preparedExploratoryExecution ??= await input.prepareExploratorySqlExecution(parsed.sql!, boundedArtifact);
+      return input.executeAgenticGeneratedSql(
+        preparedExploratoryExecution.capability,
+        parsed.sql!,
+        boundedArtifact,
+      );
+    }
     if (!input.executeGeneratedSql) throw new Error('No generated SQL executor is configured.');
     return input.executeGeneratedSql(parsed.sql!, boundedArtifact);
   };
-  if ((input.executeGeneratedSql || (input.forcedGeneratedProposal && input.executeAgenticGeneratedSql)) && !result) {
+  if ((input.executeGeneratedSql
+    || (input.forcedGeneratedProposal && input.executeAgenticGeneratedSql)
+    || exploratoryExecutionSelected) && !result) {
     // Fanout gate for native semantic direct-joins: a duplicate join-key row on
     // the joined side multiplies fact rows BEFORE aggregation, so every summed
     // value inflates silently (seen in the field as trillions-scale "governed"
@@ -4505,6 +4922,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     if (
       !executionError
       && !input.forcedGeneratedProposal
+      && !exploratoryExecutionSelected
       && input.executeGeneratedSql
       && semanticBridgeAnswer?.composeResult?.fanoutProbeSql
       && semanticBridgeAnswer.sql.trim() === parsed.sql?.trim()
@@ -4522,10 +4940,24 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     try {
       if (!executionError) result = await executeCurrentSql();
     } catch (err) {
+      const executionCode = err && typeof err === 'object'
+        && typeof (err as { code?: unknown }).code === 'string'
+        ? (err as { code: string }).code
+        : undefined;
+      // A router-selected exploratory proposal that leaves its candidate
+      // closure is not an executable draft. It is a pre-capability safety
+      // denial: do not present its SQL/artifact as review-required work after
+      // the host rejected it.
+      exploratoryClosureDenied = exploratoryExecutionSelected
+        && executionCode === 'UNAUTHORIZED_SQL';
       warehouseFailure = normalizeWarehouseSqlFailure(err, input.semanticDriver);
       executionError = warehouseFailure.redactedMessage;
     }
-    if (executionError && !input.forcedGeneratedProposal && !fanoutContradiction && !authoritativeSemanticBinding) {
+    if (executionError
+      && !input.forcedGeneratedProposal
+      && !exploratoryExecutionSelected
+      && !fanoutContradiction
+      && !authoritativeSemanticBinding) {
       warehouseFailure ??= normalizeWarehouseSqlFailure(executionError, input.semanticDriver);
       if (isRetryableGeneratedSqlError(warehouseFailure)) {
         const localRepairSql = repairGeneratedSqlLocally(parsed.sql, executionError, schemaContext);
@@ -4634,10 +5066,15 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       : 'The question asks for a custom analysis, ranking, breakdown, comparison, or grain that should not be answered by a loose certified block match.'),
     selectedNodes: contextNodes,
     schemaContext,
-    sql: parsed.sql,
+    // A router-selected physical-closure denial happens before a capability
+    // exists. Its rejected bytes are diagnostics for the host, never a SQL
+    // preview that a user can review, copy, or turn into a draft.
+    sql: exploratoryClosureDenied ? undefined : parsed.sql,
     suggestedViz: parsed.viz ?? 'table',
     assumptions: [
-      'The SQL preview is uncertified until an analyst reviews and promotes the DQL artifact.',
+      ...(exploratoryClosureDenied
+        ? ['The router-selected physical closure rejected the generated SQL before capability minting.']
+        : ['The SQL preview is uncertified until an analyst reviews and promotes the DQL artifact.']),
       ...(certifiedExecutionFallback
         ? [`Certified block ${certifiedExecutionFallback.node.name} failed execution and was bypassed: ${certifiedExecutionFallback.error}`]
         : []),
@@ -4689,7 +5126,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     const generatedOutputs = parsed.outputs?.length ? parsed.outputs : resultColumnNames(result);
     const generatedRequestedFilters = mergeProposalStringLists(input.followUp?.filters, parsed.requestedFilters);
     const generatedRequestedDimensions = mergeProposalStringLists(input.followUp?.dimensions, parsed.requestedDimensions);
-    const baseDqlArtifact = result?.dqlArtifact ?? semanticBridgeAnswer?.dqlArtifact ?? buildGeneratedSqlDqlArtifact({
+    const baseDqlArtifact = exploratoryClosureDenied
+      ? undefined
+      : result?.dqlArtifact ?? semanticBridgeAnswer?.dqlArtifact ?? buildGeneratedSqlDqlArtifact({
       question,
       sql: parsed.sql,
       intent,
@@ -4703,7 +5142,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       requestedDimensions: generatedRequestedDimensions,
       validationWarnings,
       outputs: generatedOutputs,
-    });
+      });
     const requestedTopN = questionPlan.requestedShape.topN?.scope === 'per_group'
       ? undefined
       : questionPlan.requestedShape.topN?.n;
@@ -4716,7 +5155,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       : undefined;
     let draftBlock: GeneratedDraftBlock | undefined;
     let draftCaptureError: string | undefined;
-    if (input.captureGeneratedDraft && parsed.sql) {
+    if (!exploratoryClosureDenied && input.captureGeneratedDraft && parsed.sql) {
       try {
         draftBlock = await input.captureGeneratedDraft({
           question,
@@ -4762,32 +5201,38 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       : undefined;
     const certifiedMetricAnswer = semanticMetricCertification === 'certified' || semanticMetricCertification === 'reviewed';
     const governedMetricExecutionFailure = governedMetricAnswer && Boolean(executionError);
+    const terminalExecutionFailure = governedMetricExecutionFailure || exploratoryClosureDenied;
     const finalSemanticExecutionTrace = semanticTraceAfterExecution(semanticExecutionTrace, {
       executed: Boolean(result),
       ...(executionError ? { error: executionError } : {}),
       ...(result ? { result } : {}),
     });
     return {
-      kind: governedMetricExecutionFailure ? 'no_answer' : 'uncertified',
-      sourceTier: governedMetricExecutionFailure ? 'no_answer' : governedMetricAnswer ? 'semantic_layer' : activeTier,
-      certification: governedMetricExecutionFailure ? 'analyst_review_required' : governedMetricAnswer ? 'governed' : 'ai_generated',
-      reviewStatus: governedMetricExecutionFailure ? 'none' : governedMetricAnswer ? 'governed' : 'draft_ready',
+      kind: terminalExecutionFailure ? 'no_answer' : 'uncertified',
+      sourceTier: terminalExecutionFailure ? 'no_answer' : governedMetricAnswer ? 'semantic_layer' : activeTier,
+      certification: terminalExecutionFailure ? 'analyst_review_required' : governedMetricAnswer ? 'governed' : 'ai_generated',
+      reviewStatus: terminalExecutionFailure ? 'none' : governedMetricAnswer ? 'governed' : 'draft_ready',
       semanticMetricCertification,
-      confidence: governedMetricExecutionFailure ? 0 : certifiedMetricAnswer ? 0.8 : governedMetricAnswer ? 0.72 : 0.55,
-      text: generatedText,
-      answer: generatedText,
-      proposedSql: parsed.sql,
-      sql: parsed.sql,
+      confidence: terminalExecutionFailure ? 0 : certifiedMetricAnswer ? 0.8 : governedMetricAnswer ? 0.72 : 0.55,
+      text: exploratoryClosureDenied
+        ? 'The generated SQL referenced a relation outside the router-selected physical closure, so DQL did not execute it.'
+        : generatedText,
+      answer: exploratoryClosureDenied
+        ? 'The generated SQL referenced a relation outside the router-selected physical closure, so DQL did not execute it.'
+        : generatedText,
+      ...(exploratoryClosureDenied ? {} : { proposedSql: parsed.sql, sql: parsed.sql }),
       result,
       executionError,
       ...(warehouseFailure ? { warehouseFailure } : {}),
       ...(finalSemanticExecutionTrace ? { semanticExecutionTrace: finalSemanticExecutionTrace } : {}),
-      ...(governedMetricExecutionFailure ? { refusalCode: 'grounding_gap' as const } : {}),
+      ...(terminalExecutionFailure ? { refusalCode: 'grounding_gap' as const } : {}),
       suggestedViz: parsed.viz ?? 'table',
-      dqlArtifact: answerDqlArtifact,
-      draftBlock,
-      draftBlockId: draftBlock?.path,
-      promoteCommand: draftBlock ? `dql certify --from-draft ${draftBlock.path}` : undefined,
+      ...(exploratoryClosureDenied ? {} : { dqlArtifact: answerDqlArtifact }),
+      ...(exploratoryClosureDenied ? {} : {
+        draftBlock,
+        draftBlockId: draftBlock?.path,
+        promoteCommand: draftBlock ? `dql certify --from-draft ${draftBlock.path}` : undefined,
+      }),
       trustLabel: input.contextPack?.trustLabel,
       sourceCertifiedBlock,
       contextPackId: input.contextPack?.id,
@@ -4825,6 +5270,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       considered,
       providerUsed: provider.name,
       aggregationSafetyProof,
+      ...(preparedExploratoryExecution ? { exploratoryExecutionFreeze: preparedExploratoryExecution.freeze } : {}),
       // Carry the governed metric match so the exit point can name a
       // `semantic_metric` route (spec 17, part C).
       _semanticMetricMatch: governedMetricAnswer ? semanticMetricMatch ?? undefined : undefined,
@@ -6083,6 +6529,149 @@ function scopeContextPackToQuestionDomains(
 }
 
 /**
+ * Make the router-selected exploratory physical closure the only SQL authority
+ * visible to generation and execution.  The broad context pack remains on the
+ * run as diagnostics, but must not make a same-snapshot neighbouring relation
+ * executable merely because it ranked well for the surrounding question.
+ *
+ * Matching is canonical-ID only.  In particular this deliberately does not
+ * fall back to relation/model leaf names: duplicate `orders` relations across
+ * schemas/domains must not inherit each other's proof.
+ */
+export function scopeContextPackToExploratoryCandidateClosure(
+  contextPack: LocalContextPack | undefined,
+  candidateIds: readonly string[] | undefined,
+): LocalContextPack | undefined {
+  if (!contextPack || !candidateIds?.length) return undefined;
+  const requestedIds = new Set(candidateIds.map(normalizeExploratoryCandidateIdentity).filter(Boolean));
+  if (requestedIds.size === 0) return undefined;
+
+  const intersects = (values: Iterable<string | undefined>): boolean => {
+    for (const value of values) {
+      const normalized = normalizeExploratoryCandidateIdentity(value ?? '');
+      if (normalized && requestedIds.has(normalized)) return true;
+    }
+    return false;
+  };
+  const objectIdentities = (object: MetadataObject): string[] => {
+    const payload = object.payload ?? {};
+    return [
+      object.objectKey,
+      object.fullName,
+      payload.qualifiedId,
+      payload.uniqueId,
+      payload.id,
+      payload.localId,
+      payload.relation,
+      payload.table,
+      payload.model,
+      ...metadataStringValues(payload.sourceObjects),
+      ...metadataStringValues(payload.sourceRelations),
+      ...metadataStringValues(payload.tableDependencies),
+    ].filter((value): value is string => typeof value === 'string');
+  };
+  const objectRelationReferences = (object: MetadataObject): string[] => {
+    const payload = object.payload ?? {};
+    return [
+      payload.relation,
+      payload.table,
+      payload.model,
+      ...metadataStringValues(payload.sourceObjects),
+      ...metadataStringValues(payload.sourceRelations),
+      ...metadataStringValues(payload.tableDependencies),
+    ].filter((value): value is string => typeof value === 'string');
+  };
+  const directObjects = contextPack.objects.filter((object) => intersects(objectIdentities(object)));
+  const requestedRelations = new Set<string>();
+  for (const object of directObjects) {
+    for (const relation of objectRelationReferences(object)) {
+      const normalized = normalizeExploratoryCandidateIdentity(relation);
+      if (normalized) requestedRelations.add(normalized);
+    }
+  }
+  for (const relation of contextPack.allowedSqlContext.relations) {
+    if (intersects([relation.objectKey, relation.relation])) {
+      requestedRelations.add(normalizeExploratoryCandidateIdentity(relation.relation));
+    }
+  }
+  const relations = contextPack.allowedSqlContext.relations.filter((relation) => {
+    const normalized = normalizeExploratoryCandidateIdentity(relation.relation);
+    return requestedIds.has(normalized)
+      || requestedRelations.has(normalized)
+      || Boolean(relation.objectKey && directObjects.some((object) => object.objectKey === relation.objectKey));
+  });
+  // A router-selected exploratory attempt without a physical relation is not
+  // executable. Returning undefined is intentionally fail-closed; callers may
+  // preserve the full pack for receipts but may not use it as SQL authority.
+  if (relations.length === 0) return undefined;
+
+  const relationIds = new Set(relations.map((relation) => normalizeExploratoryCandidateIdentity(relation.relation)));
+  const relationshipEndpointIds = new Set<string>();
+  for (const object of directObjects.filter((object) => object.objectType === 'relationship')) {
+    const payload = object.payload ?? {};
+    for (const endpoint of [payload.from, payload.to]) {
+      if (typeof endpoint === 'string') {
+        const normalized = normalizeExploratoryCandidateIdentity(endpoint);
+        if (normalized) relationshipEndpointIds.add(normalized);
+      }
+    }
+  }
+  const objects = contextPack.objects.filter((object) => {
+    if (directObjects.includes(object)) return true;
+    const identities = objectIdentities(object).map(normalizeExploratoryCandidateIdentity);
+    if (identities.some((identity) => relationIds.has(identity) || relationshipEndpointIds.has(identity))) return true;
+    return objectRelationReferences(object)
+      .map(normalizeExploratoryCandidateIdentity)
+      .some((identity) => relationIds.has(identity));
+  });
+  const objectKeys = new Set(objects.map((object) => object.objectKey));
+  const relationKeys = new Set(relations.map((relation) => normalizeRelationKey(relation.relation)));
+  const selectedRelations = contextPack.retrievalDiagnostics.selectedRelations?.filter((relation) =>
+    relationKeys.has(normalizeRelationKey(relation.relation)));
+  const selectedJoinPaths = contextPack.retrievalDiagnostics.selectedJoinPaths?.filter((path) =>
+    relationKeys.has(normalizeRelationKey(path.leftRelation))
+    && relationKeys.has(normalizeRelationKey(path.rightRelation)));
+  return {
+    ...contextPack,
+    focusObjectKey: contextPack.focusObjectKey && objectKeys.has(contextPack.focusObjectKey)
+      ? contextPack.focusObjectKey
+      : objects[0]?.objectKey ?? null,
+    objects,
+    skills: [],
+    edges: contextPack.edges.filter((edge) => objectKeys.has(edge.fromKey) && objectKeys.has(edge.toKey)),
+    citations: contextPack.citations.filter((citation) => objectKeys.has(citation.objectKey)),
+    evidenceSummaries: contextPack.evidenceSummaries.filter((summary) => !summary.objectKey || objectKeys.has(summary.objectKey)),
+    evidenceRoles: contextPack.evidenceRoles.filter((role) => objectKeys.has(role.objectKey)),
+    allowedSqlContext: {
+      relations,
+      // Authored block SQL is not a physical exploratory authority.  The
+      // selected dbt/runtime relation closure above is the whole prompt/SQL
+      // boundary for this tier.
+      sourceBlockSql: [],
+    },
+    retrievalDiagnostics: {
+      ...contextPack.retrievalDiagnostics,
+      selectedObjects: objects.length,
+      selectedEvidence: contextPack.retrievalDiagnostics.selectedEvidence.filter((evidence) => objectKeys.has(evidence.objectKey)),
+      selectedRelations,
+      selectedJoinPaths,
+      schemaShapeCandidates: contextPack.retrievalDiagnostics.schemaShapeCandidates?.filter((candidate) => objectKeys.has(candidate.objectKey)),
+      certifiedCandidateFits: contextPack.retrievalDiagnostics.certifiedCandidateFits.filter((candidate) => objectKeys.has(candidate.objectKey)),
+    },
+  };
+}
+
+function metadataStringValues(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : [];
+}
+
+function normalizeExploratoryCandidateIdentity(value: string): string {
+  return value.trim().replace(/["`\[\]]/g, '').replace(/\s*\.\s*/g, '.').toLowerCase();
+}
+
+/**
  * Build the prompt-facing evidence pack after enforcing the certified output
  * contract. Incompatible blocks remain in the returned answer's `considered`
  * evidence for inspection, but their prose/SQL cannot steer generation.
@@ -6100,7 +6689,13 @@ function contextPackForRequestedShape(
     const blockName = object.name || object.objectKey.replace(/^dql:block:/, '');
     const node = kg.getNode(`block:${blockName}`);
     if (node?.kind === 'block') {
-      const fit = evaluateCertifiedBlockFit({ question, plan: questionPlan, block: node });
+      const fit = evaluateCertifiedBlockFit({
+        question,
+        plan: questionPlan,
+        block: node,
+        exactExampleMatch: hasUniqueExactCatalogExample(question, contextPack, node),
+        uniqueExactExampleContract: hasUniqueExactCatalogExample(question, contextPack, node),
+      });
       if (fit.kind === 'context_only' || fit.kind === 'not_applicable') {
         incompatibleBlockKeys.add(object.objectKey);
       }
@@ -6694,7 +7289,6 @@ function renderContextPackForPrompt(contextPack: LocalContextPack, budget: Promp
     : '';
   const sourceSql = renderSourceBlockSqlContext(contextPack, budget);
   return [
-    `context_pack_id: ${contextPack.id}`,
     `trust_label: ${contextPack.trustLabel}`,
     contextPack.trustLabelInfo ? `trust_label_canonical: ${contextPack.trustLabelInfo.display}` : '',
     renderDomainBriefingForPrompt(contextPack).trim(),
@@ -6991,6 +7585,83 @@ function certifiedHitFromContextPack(contextPack: LocalContextPack | undefined, 
         : undefined;
   const node = nodeId ? kg.getNode(nodeId) : null;
   return node ? { node, score: 1, snippet: object.snippet } : null;
+}
+
+/**
+ * Preserve the catalog's unique exact-example proof when the answer boundary
+ * rechecks the frozen block.  The context pack is the same retrieval snapshot
+ * that produced `exactObjectKey`; broad KG search is intentionally not used to
+ * manufacture example uniqueness.
+ */
+function hasUniqueExactCatalogExample(
+  question: string,
+  contextPack: LocalContextPack | undefined,
+  node: KGNode,
+): boolean {
+  const normalizedQuestion = normalizeQuestion(question);
+  if (!normalizedQuestion || !contextPack) return false;
+  const matches = contextPack.objects.filter((object) => {
+    if (object.objectType !== 'dql_block') return false;
+    if (object.status !== 'certified' && object.status !== 'approved' && object.payload?.certification !== 'certified') return false;
+    const examples = Array.isArray(object.payload?.examples) ? object.payload.examples : [];
+    return examples.some((example) => example
+      && typeof example === 'object'
+      && normalizeQuestion(String((example as { question?: unknown }).question ?? '')) === normalizedQuestion);
+  });
+  return matches.length === 1 && normalizeQuestion(matches[0]!.name) === normalizeQuestion(node.name);
+}
+
+/**
+ * A metadata-only definition answer is safe only for one certified artifact
+ * named exactly by the user.  Do not let FTS ranking decide this: a generic
+ * definition phrase must never select a neighbouring block.  Payload aliases
+ * are authored block aliases; descriptions and tags are deliberately excluded.
+ */
+function uniqueNamedCertifiedDefinitionArtifact(
+  question: string,
+  kg: KGStore,
+  authorizedDomains: string[],
+): KGSearchHit | null {
+  const subject = namedArtifactDefinitionSubject(question);
+  if (!subject) return null;
+  const matches = kg.getNodesByKind('block', 1000).filter((node) => {
+    if (node.status !== 'certified') return false;
+    if (authorizedDomains.length > 0 && node.domain && !authorizedDomains.includes(node.domain)) return false;
+    return certifiedArtifactNames(node).some((name) => normalizeQuestion(name) === subject);
+  });
+  return matches.length === 1 ? { node: matches[0]!, score: 1, snippet: undefined } : null;
+}
+
+function isUniqueNamedCertifiedDefinitionQuestion(
+  question: string,
+  node: KGNode,
+  kg: KGStore,
+  authorizedDomains: string[],
+): boolean {
+  const selected = uniqueNamedCertifiedDefinitionArtifact(question, kg, authorizedDomains);
+  return selected?.node.nodeId === node.nodeId;
+}
+
+function namedArtifactDefinitionSubject(question: string): string | undefined {
+  const match = /^\s*what\s+does\s+(?:the\s+)?(.+?)\s+(?:measure|mean|define|represent)\s*[?.!]*\s*$/i.exec(question);
+  if (!match?.[1]) return undefined;
+  // Remove an optional explicit artifact noun while preserving the exact
+  // authored identifier. `top_customers block` and `top_customers` therefore
+  // resolve identically, while arbitrary definition questions have no subject
+  // match and remain on the normal route.
+  const subject = match[1]
+    .replace(/\b(?:certified\s+)?(?:block|artifact|model|metric)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const normalized = normalizeQuestion(subject);
+  return normalized || undefined;
+}
+
+function certifiedArtifactNames(node: KGNode): string[] {
+  const aliases = Array.isArray(node.payload?.aliases)
+    ? node.payload.aliases.filter((alias): alias is string => typeof alias === 'string')
+    : [];
+  return [node.name, ...aliases];
 }
 
 /**
@@ -8170,7 +8841,12 @@ function isBusinessDefinitionQuestion(question: string): boolean {
 
 /** Definition that may terminate with documentation instead of executing data. */
 function isPureBusinessDefinitionQuestion(question: string): boolean {
-  return questionTypeFromText(question) === 'definition';
+  return questionTypeFromText(question) === 'definition'
+    // `questionTypeFromText` intentionally recognizes ranking before generic
+    // definitions, so a named artifact such as `top_customers` would otherwise
+    // look like a ranking request even in the explicit "what does … measure?"
+    // form. Object-name matching remains mandatory at the terminal site.
+    || /^\s*what\s+does\s+(?:the\s+)?[^?.!]{1,160}\s+(?:measure|mean|define|represent)\s*[?.!]*\s*$/i.test(question);
 }
 
 function isBreakdownOrDrilldownQuestion(question: string): boolean {
@@ -8228,7 +8904,7 @@ function hasCertifiedNodeFit(
   question: string,
   plan: AnalysisQuestionPlan,
   node: KGNode,
-  options: { allowInferredContract?: boolean } = {},
+  options: { allowInferredContract?: boolean; uniqueExactExampleContract?: boolean } = {},
 ): boolean {
   if (!hasCompatibleRankingDirection(question, node)) return false;
   const definitionLookup = isPureBusinessDefinitionQuestion(question) && objectNameInQuestion(question, node);
@@ -8243,12 +8919,21 @@ function hasCertifiedNodeFit(
     plan,
     block: node,
     exactExampleMatch: exactExampleMatch || exactObjectRequest,
+    uniqueExactExampleContract: options.uniqueExactExampleContract === true,
     definitionLookup,
   });
   // Delegate the termination decision to THE single authority instead of a
   // loop-local re-derivation (the seams between such copies produced certified
   // answers that ignored member-scoped follow-ups).
-  return certifiedTerminationVerdict({ fit, allowInferredContract: options.allowInferredContract }).allow;
+  return certifiedTerminationVerdict({
+    fit,
+    // A named `what does <artifact> measure?` request is an artifact metadata
+    // lookup, not a query-result claim. The termination authority still
+    // rejects missing declared measures and unsupported filters before this
+    // narrow bypass is considered.
+    ...(definitionLookup ? { bypass: 'definition_lookup' as const } : {}),
+    allowInferredContract: options.allowInferredContract,
+  }).allow;
 }
 
 function objectNameInQuestion(question: string, node: Pick<KGNode, 'name'>): boolean {

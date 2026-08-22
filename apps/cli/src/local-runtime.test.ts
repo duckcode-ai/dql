@@ -7,6 +7,7 @@ import {
   exploratoryProbeContradiction,
   probeableExploratoryJoins,
   agentAnswerHasExecutionFailure,
+  persistedAnalyticalGapWitness,
   analyticalFreshnessObservedThrough,
   analyticalFailedRunFromAgentRun,
   boundedAgentMeaningSignal,
@@ -23,6 +24,7 @@ import {
   parseBlockStudioStringField,
   buildExploratoryJoinProbeSql,
   repairExploratorySqlBeforeExecution,
+  qualifyUnambiguousSqlRelationsFromSchema,
   buildAgentSchemaContext,
   reconcileAgentSchemaContextWithLive,
   executePreparedAgenticSqlBoundary,
@@ -121,6 +123,7 @@ import {
 } from './settings/provider-settings.js';
 import { getRunner } from './llm/index.js';
 import { resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
+import { CassetteStore } from './commands/agent-eval-cassette.js';
 import { afterEach } from 'vitest';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -143,7 +146,9 @@ import {
   DEFAULT_ASK_ROW_EGRESS_POLICY,
   ZERO_ROW_EGRESS_POLICY,
   normalizeCanonicalQueryResult,
+  qualifyAuthorizationReferences,
   resolveTopRankedRegionDependency,
+  validateSqlAgainstLocalContext,
 } from '@duckcodeailabs/dql-agent';
 import type { AgentRouteExecutorResult, AgentRun, AgentRunRequest } from '@duckcodeailabs/dql-agent';
 import type { DatabaseConnector, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
@@ -376,6 +381,61 @@ describe('generated SQL physical authorization boundary', () => {
       execute: refusedExecutor,
     })).rejects.toMatchObject({ dqlAnalyticalError: { code: 'unauthorized_sql' } });
     expect(refusedExecutor).not.toHaveBeenCalled();
+  });
+
+  it('proves ORDER BY output aliases through their selected physical source columns only', async () => {
+    const aggregateSql = `SELECT customer_name, SUM(lifetime_spend) AS total_spend
+FROM dim_customers
+GROUP BY customer_name
+ORDER BY total_spend DESC`;
+    const aggregateCapability = createAgenticSqlExecutionCapability({
+      sql: aggregateSql,
+      proven: [
+        { identifier: 'dim_customers', evidence: 'schema_tool' },
+        { identifier: 'dim_customers.customer_name', evidence: 'schema_tool' },
+        { identifier: 'dim_customers.lifetime_spend', evidence: 'schema_tool' },
+      ],
+      ...scope,
+      bindings,
+    })!;
+    const parserValidation = validateSqlAgainstLocalContext(aggregateSql, undefined);
+    expect(qualifyAuthorizationReferences(aggregateSql, {
+      relations: parserValidation.referencedRelations,
+      columns: parserValidation.referencedColumns,
+    })).toEqual([
+      'dim_customers',
+      'dim_customers.customer_name',
+      'dim_customers.lifetime_spend',
+    ]);
+    const aggregateExecutor = vi.fn(async () => ({ rows: [] }));
+    await expect(executePreparedAgenticSqlBoundary({
+      capability: aggregateCapability,
+      preparedSql: aggregateSql,
+      bindings,
+      scope,
+      execute: aggregateExecutor,
+    })).resolves.toEqual({ rows: [] });
+    expect(aggregateExecutor).toHaveBeenCalledTimes(1);
+
+    const unknownAliasSql = aggregateSql.replace('total_spend DESC', 'unbound_alias DESC');
+    const unknownAliasCapability = createAgenticSqlExecutionCapability({
+      sql: unknownAliasSql,
+      proven: aggregateCapability.provenIdentifiers.map((identifier) => ({
+        identifier,
+        evidence: aggregateCapability.evidence[identifier]!,
+      })),
+      ...scope,
+      bindings,
+    })!;
+    const unknownAliasExecutor = vi.fn(async () => ({ rows: [] }));
+    await expect(executePreparedAgenticSqlBoundary({
+      capability: unknownAliasCapability,
+      preparedSql: unknownAliasSql,
+      bindings,
+      scope,
+      execute: unknownAliasExecutor,
+    })).rejects.toMatchObject({ dqlAnalyticalError: { code: 'unauthorized_sql' } });
+    expect(unknownAliasExecutor).not.toHaveBeenCalled();
   });
 });
 
@@ -2739,6 +2799,33 @@ describe('agent run runtime API', () => {
     expect(agentAnswerHasExecutionFailure({})).toBe(false);
   });
 
+  it('retains relationship repair authority only from a persisted router witness', () => {
+    expect(persistedAnalyticalGapWitness({
+      action: 'block', confidence: 1, followsUp: false, reason: 'Generic tuple gap.',
+      terminalOutcome: {
+        kind: 'modeling_gap', code: 'ANALYTICAL_MODELING_GAP',
+        message: 'The metric and dimension tuple is incomplete.', candidateIds: [],
+      },
+    })).toBeUndefined();
+
+    expect(persistedAnalyticalGapWitness({
+      action: 'block', confidence: 1, followsUp: false, reason: 'Missing safe relationship proof.',
+      terminalOutcome: {
+        kind: 'modeling_gap', code: 'ANALYTICAL_MODELING_GAP',
+        message: 'No safe relationship closure exists.', candidateIds: ['dbt:model:orders'],
+        gap: {
+          code: 'MISSING_RELATIONSHIP',
+          missing: ['a certified, validated, fanout-safe relationship proof'],
+          witnessCandidateIds: ['dbt:model:orders', 'dbt:model:customers'],
+        },
+      },
+    })).toEqual({
+      code: 'MISSING_RELATIONSHIP',
+      missing: ['a certified, validated, fanout-safe relationship proof'],
+      witnessCandidateIds: ['dbt:model:orders', 'dbt:model:customers'],
+    });
+  });
+
   it('AGT-010 derives governed semantic trust only from a passed exact aggregation proof', () => {
     const semanticRoute = { tier: 'semantic_metric' } as any;
     const proof: Omit<AggregationSafetyProofV1, 'status'> = {
@@ -2886,6 +2973,17 @@ describe('agent run runtime API', () => {
       resultDimensionValues: { category: ['Food', 'Drink'] },
       priorMeasures: ['revenue'],
     });
+  });
+
+  it('does not accept a browser-supplied run ID as agent execution authority', () => {
+    const parsed = parseAgentRunRequestBody({
+      question: 'what is revenue?',
+      runId: 'browser-controlled-run-id',
+      requestedMode: 'ask',
+    });
+
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.request?.runId).toBeUndefined();
   });
 
   it('AGT-011 strips forged structured-selection envelopes at HTTP ingress', () => {
@@ -4859,6 +4957,218 @@ LIMIT \${top_n}
     }
   });
 
+  it('keeps frozen certified blocks certified when their authored output roles use display or physical aliases', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-certified-output-bindings-'));
+    tempDirs.push(projectRoot);
+    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/jaffle-supply-chain');
+    // The manifest deliberately records the physical three-part relations while
+    // the certified blocks retain their authored leaf SQL. This is the real
+    // handoff the local runtime must bind before it calls the connector.
+    cpSync(join(fixtureRoot, 'blocks'), join(projectRoot, 'blocks'), { recursive: true });
+    cpSync(join(fixtureRoot, 'target'), join(projectRoot, 'target'), { recursive: true });
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'jaffle-shop',
+      connections: { default: { driver: 'file' } },
+    }, null, 2));
+    const executeQuery = vi.fn(async (sql: string) => sql.includes('product_type')
+      ? ({ columns: ['category', 'revenue'], rows: [{ category: 'Food', revenue: 100 }], rowCount: 1, sql })
+      : ({ columns: ['customer_name', 'lifetime_spend', 'order_count'], rows: [{ customer_name: 'Ada', lifetime_spend: 100, order_count: 3 }], rowCount: 1, sql }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery } as unknown as QueryExecutor,
+        connection: { driver: 'file' },
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const topResponse = await fetch(`${base}/api/agent-runs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'who are the top customers', requestedMode: 'ask' }),
+      });
+      const categoryResponse = await fetch(`${base}/api/agent-runs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'show me sales by category', requestedMode: 'ask' }),
+      });
+      const top = await topResponse.json() as { run: any };
+      const category = await categoryResponse.json() as { run: any };
+
+      expect(topResponse.status, JSON.stringify(top)).toBe(201);
+      expect(categoryResponse.status, JSON.stringify(category)).toBe(201);
+      expect(top.run).toMatchObject({
+        route: 'certified_answer', trustState: 'certified', stopReason: 'certified_answer_found',
+      });
+      expect(category.run).toMatchObject({
+        route: 'certified_answer', trustState: 'certified', stopReason: 'certified_answer_found',
+      });
+      expect(top.run.diagnosticReceiptV3?.cascade).toMatchObject({ selectedTier: 'certified', planFrozen: true });
+      expect(category.run.diagnosticReceiptV3?.cascade).toMatchObject({ selectedTier: 'certified', planFrozen: true });
+      expect(executeQuery).toHaveBeenCalledTimes(2);
+      // Connector dialect preparation can quote the identifiers; normalize
+      // quoting only for the proof that the physical catalog/schema survived
+      // the frozen-plan handoff.
+      const connectorSql = executeQuery.mock.calls.map(([sql]) => String(sql).replace(/["`\[\]]/g, ''));
+      expect(connectorSql).toEqual(expect.arrayContaining([
+        expect.stringMatching(/\bFROM\s+jaffle_shop\.dev\.dim_customers\b/i),
+        expect.stringMatching(/\bFROM\s+jaffle_shop\.dev\.order_items\b/i),
+      ]));
+    } finally {
+      await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
+    }
+  });
+
+  it('replays the exact full-runtime V2 order-count cassette from a fresh project and never aliases a missing runtime dispatch', async () => {
+    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/jaffle-supply-chain');
+    const replayRoot = mkdtempSync(join(tmpdir(), 'dql-runtime-order-count-replay-'));
+    const missingRoot = mkdtempSync(join(tmpdir(), 'dql-runtime-order-count-miss-'));
+    tempDirs.push(replayRoot, missingRoot);
+    const oldCassetteDirectory = process.env.DQL_EVAL_CASSETTE_DIR;
+    const oldCassetteMode = process.env.DQL_EVAL_CASSETTE_MODE;
+    const executeQuery = vi.fn(async (sql: string) => ({
+      columns: ['customer_name', 'count_lifetime_orders'],
+      rows: [{ customer_name: 'Ada', count_lifetime_orders: 3 }],
+      rowCount: 1,
+      sql,
+    }));
+    const clientSuppliedRunId = 'browser-controlled-order-count-run';
+    const ask = async (projectRoot: string, stream = false): Promise<{
+      run: any;
+      accepted?: { runId?: string; operationId?: string };
+    }> => {
+      let server: Server | undefined;
+      try {
+        const port = await startLocalServer({
+          rootDir: projectRoot,
+          projectRoot,
+          executor: { executeQuery } as unknown as QueryExecutor,
+          // Match the disposable Answerability warehouse target. The V2
+          // dispatch includes the runtime execution target, so a generic file
+          // connector would correctly produce a different key from the
+          // DuckDB-backed CLI runtime this fixture protects.
+          connection: { driver: 'duckdb', filepath: join(projectRoot, 'jaffle_shop.duckdb') },
+          preferredPort: 0,
+          captureServer: (created) => { server = created; },
+        });
+        const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs${stream ? '?stream=1' : ''}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            question: 'what is the order count for each customer?',
+            requestedMode: 'ask',
+            // Public run IDs are intentionally untrusted. The server must mint
+            // a new one before controller, SSE, engine, and capability wiring.
+            runId: clientSuppliedRunId,
+          }),
+        });
+        if (stream) {
+          const source = await response.text();
+          expect(response.status, source).toBe(200);
+          const events = source.split(/\n\n+/).flatMap((chunk) => {
+            const event = /^event:\s*([^\n]+)$/m.exec(chunk)?.[1]?.trim();
+            const data = /^data:\s*(.+)$/m.exec(chunk)?.[1];
+            if (!event || !data) return [];
+            try {
+              return [{ event, data: JSON.parse(data) as Record<string, unknown> }];
+            } catch {
+              return [];
+            }
+          });
+          const accepted = events.find((event) => event.event === 'agent-run-accepted')?.data as {
+            runId?: string;
+            operationId?: string;
+          } | undefined;
+          const completed = events.find((event) => event.event === 'agent-run-complete')?.data;
+          expect(accepted).toBeDefined();
+          expect(completed).toBeDefined();
+          return { run: completed, accepted };
+        }
+        const payload = await response.json() as { run: any };
+        expect(response.status, JSON.stringify(payload)).toBe(201);
+        return { run: payload.run };
+      } finally {
+        await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
+      }
+    };
+    try {
+      cpSync(fixtureRoot, replayRoot, { recursive: true });
+      cpSync(fixtureRoot, missingRoot, { recursive: true });
+      process.env.DQL_EVAL_CASSETTE_DIR = join(replayRoot, 'test-cassettes', 'answerability');
+      process.env.DQL_EVAL_CASSETTE_MODE = 'replay';
+
+      const { run: replayed, accepted } = await ask(replayRoot, true);
+      expect(replayed.id).not.toBe(clientSuppliedRunId);
+      expect(replayed.diagnosticReceiptV3?.runId).toBe(replayed.id);
+      expect(accepted).toMatchObject({ runId: replayed.id, operationId: expect.any(String) });
+      expect(accepted?.runId).not.toBe(clientSuppliedRunId);
+      // The capability itself is intentionally opaque and never persisted, but
+      // its server-owned run binding is represented by the frozen receipt. No
+      // rendered or persisted handoff may retain the browser-controlled ID.
+      expect(JSON.stringify(replayed)).not.toContain(clientSuppliedRunId);
+      expect(replayed.route).toBe('generated_answer');
+      expect(replayed.trustState).toBe('review_required');
+      expect(
+        replayed.diagnosticReceiptV3?.cascade?.planFrozen,
+        JSON.stringify({
+          answer: replayed.answer,
+          telemetry: replayed.telemetry,
+          cascade: replayed.diagnosticReceiptV3?.cascade,
+          artifacts: replayed.artifacts,
+        }),
+      ).toBe(true);
+      const exploratoryFreeze = replayed.diagnosticReceiptV3?.cascade?.exploratoryExecutionFreeze;
+      expect(exploratoryFreeze).toMatchObject({
+        version: 1,
+        selectedTier: 'exploratory_sql',
+        authorization: 'capability_minted',
+        candidateIds: ['model.jaffle_shop.dim_customers'],
+      });
+      expect(exploratoryFreeze?.planId).toMatch(/^exploratory-[a-f0-9]{24}$/);
+      expect(exploratoryFreeze?.planFingerprint).toMatch(/^[a-f0-9]{64}$/);
+      expect(exploratoryFreeze?.sqlFingerprint).toMatch(/^[a-f0-9]{32}$/);
+      expect(replayed.diagnosticReceiptV3?.cascade?.attempts).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          tier: 'exploratory_sql',
+          planFrozen: true,
+          candidateIds: ['model.jaffle_shop.dim_customers'],
+        }),
+      ]));
+      // A deterministically migrated cassette is orchestration replay only,
+      // not a real-provider quality sample. Its provider dispatch remains
+      // truthfully zero while the frozen SQL still crosses the connector once.
+      expect(replayed.telemetry).toMatchObject({ providerRoundTrips: 0, sqlExecutions: 1 });
+      expect(executeQuery).toHaveBeenCalledTimes(1);
+      expect(executeQuery.mock.calls.map(([sql]) => String(sql).replace(/["`\[\]]/g, ''))).toEqual(expect.arrayContaining([
+        expect.stringMatching(/\bFROM\s+jaffle_shop\.dev\.dim_customers\b/i),
+      ]));
+
+      // The answer loop's full runtime prompt contains upstream context, so it
+      // has its own V2 key. A direct-runner cassette (or the legacy V1 source)
+      // must never satisfy that request by fallback/alias.
+      rmSync(join(missingRoot, 'test-cassettes', 'answerability', '8b1c5206f05624e16692388161ccc43f.json'));
+      process.env.DQL_EVAL_CASSETTE_DIR = join(missingRoot, 'test-cassettes', 'answerability');
+      const { run: missed } = await ask(missingRoot);
+      expect(missed).toMatchObject({
+        // A replay miss occurs before any proposal can freeze. The planned Ask
+        // lane remains visible for diagnostics, while the result/trust is
+        // blocked and there is no SQL fallback or execution.
+        route: 'generated_answer',
+        trustState: 'blocked',
+        telemetry: { providerRoundTrips: 0, sqlExecutions: 0, fallbackReason: 'provider_error' },
+        diagnosticReceiptV3: {
+          cascade: { selectedTier: 'exploratory_sql', planFrozen: false },
+        },
+      });
+      expect(JSON.stringify(missed)).toContain('8b1c5206f05624e16692388161ccc43f');
+    } finally {
+      if (oldCassetteDirectory === undefined) delete process.env.DQL_EVAL_CASSETTE_DIR;
+      else process.env.DQL_EVAL_CASSETTE_DIR = oldCassetteDirectory;
+      if (oldCassetteMode === undefined) delete process.env.DQL_EVAL_CASSETTE_MODE;
+      else process.env.DQL_EVAL_CASSETTE_MODE = oldCassetteMode;
+    }
+  });
+
   it('rejects forged client plan authority at the HTTP endpoint without provider, tool, or SQL work', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-forged-plan-'));
     tempDirs.push(projectRoot);
@@ -5412,9 +5722,11 @@ LIMIT \${top_n}
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-cancel-api-'));
     tempDirs.push(projectRoot);
     let server: Server | undefined;
+    let serverRunId: string | undefined;
     let runStarted!: () => void;
     const executionStarted = new Promise<void>((resolve) => { runStarted = resolve; });
     const waitForCancellation = ({ request }: { request: AgentRunRequest }) => new Promise<AgentRouteExecutorResult>((_resolve, reject) => {
+      serverRunId = request.runId;
       runStarted();
       if (request.signal?.aborted) {
         reject(request.signal.reason);
@@ -5434,24 +5746,62 @@ LIMIT \${top_n}
         captureServer: (created) => { server = created; },
       });
       const base = `http://127.0.0.1:${port}`;
-      const pendingCreate = fetch(`${base}/api/agent-runs`, {
+      const clientSuppliedRunId = 'e2e-cancel-003';
+      const streamResponse = await fetch(`${base}/api/agent-runs?stream=1`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          runId: 'e2e-cancel-003',
+          runId: clientSuppliedRunId,
           question: 'show revenue as sql',
           requestedMode: 'sql',
         }),
       });
+      expect(streamResponse.status).toBe(200);
+      const reader = streamResponse.body?.getReader();
+      expect(reader).toBeDefined();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let streamDone = false;
+      const events: Array<{ event: string; data: Record<string, unknown> }> = [];
+      const nextSseEvent = async (): Promise<{ event: string; data: Record<string, unknown> } | undefined> => {
+        while (true) {
+          const separator = buffer.search(/\r?\n\r?\n/);
+          if (separator >= 0) {
+            const block = buffer.slice(0, separator);
+            buffer = buffer.slice(buffer[separator] === '\r' ? separator + 4 : separator + 2);
+            const event = /^event:\s*([^\n]+)$/m.exec(block)?.[1]?.trim();
+            const data = /^data:\s*(.+)$/m.exec(block)?.[1];
+            if (!event || !data) continue;
+            const parsed = { event, data: JSON.parse(data) as Record<string, unknown> };
+            events.push(parsed);
+            return parsed;
+          }
+          if (streamDone) return undefined;
+          const chunk = await reader!.read();
+          if (chunk.value) buffer += decoder.decode(chunk.value, { stream: !chunk.done });
+          if (chunk.done) streamDone = true;
+        }
+      };
+      const accepted = await nextSseEvent();
+      expect(accepted).toMatchObject({ event: 'agent-run-accepted' });
+      const canonicalRunId = typeof accepted?.data.runId === 'string' ? accepted.data.runId : undefined;
+      expect(canonicalRunId).toBeTruthy();
+      expect(canonicalRunId).not.toBe(clientSuppliedRunId);
       await executionStarted;
 
-      const cancelResponse = await fetch(`${base}/api/agent-runs/e2e-cancel-003/cancel`, { method: 'POST' });
+      // A body-provided value is neither discoverable nor cancellable.  The
+      // canonical id came only from the accepted server frame.
+      expect((await fetch(`${base}/api/agent-runs/${clientSuppliedRunId}`)).status).toBe(404);
+      expect((await fetch(`${base}/api/agent-runs/${clientSuppliedRunId}/cancel`, { method: 'POST' })).status).toBe(404);
+      const cancelResponse = await fetch(`${base}/api/agent-runs/${canonicalRunId}/cancel`, { method: 'POST' });
       expect(cancelResponse.status).toBe(202);
-      const createResponse = await pendingCreate;
-      expect(createResponse.status).toBe(201);
-      const created = await createResponse.json() as { run: AgentRun };
-      expect(created.run).toMatchObject({
-        id: 'e2e-cancel-003',
+      while (await nextSseEvent()) {
+        // Drain completion after cancellation; a hanging cancellation would
+        // leave this loop unresolved and fail the focused runtime contract.
+      }
+      const created = events.find((event) => event.event === 'agent-run-complete')?.data as AgentRun | undefined;
+      expect(created).toMatchObject({
+        id: canonicalRunId,
         route: 'sql_cell',
         status: 'cancelled',
         trustState: 'not_applicable',
@@ -5462,10 +5812,11 @@ LIMIT \${top_n}
         diagnosticReceipt: { failure: { code: 'RUN_CANCELLED', recoverable: false, safeActions: [] } },
         lifecycle: { state: 'terminal', phase: 'run.cancelled' },
       });
-      expect(created.run.events.at(-1)?.type).toBe('run.cancelled');
-      expect(created.run.repairCapability).toBeUndefined();
+      expect(created?.events.at(-1)?.type).toBe('run.cancelled');
+      expect(created?.repairCapability).toBeUndefined();
+      expect(serverRunId).toBe(canonicalRunId);
 
-      const getResponse = await fetch(`${base}/api/agent-runs/e2e-cancel-003`);
+      const getResponse = await fetch(`${base}/api/agent-runs/${canonicalRunId}`);
       expect(getResponse.status).toBe(200);
       const fetched = await getResponse.json() as { run: AgentRun };
       expect(fetched.run).toMatchObject({ status: 'cancelled', stopReason: 'cancelled', summary: 'Stopped by user.' });
@@ -5479,7 +5830,7 @@ LIMIT \${top_n}
         preferredPort: 0,
         captureServer: (createdReloaded) => { server = createdReloaded; },
       });
-      const reloadedResponse = await fetch(`http://127.0.0.1:${reloadedPort}/api/agent-runs/e2e-cancel-003`);
+      const reloadedResponse = await fetch(`http://127.0.0.1:${reloadedPort}/api/agent-runs/${canonicalRunId}`);
       expect(reloadedResponse.status).toBe(200);
       const reloaded = await reloadedResponse.json() as { run: AgentRun };
       expect(reloaded.run).toMatchObject({
@@ -5507,9 +5858,11 @@ LIMIT \${top_n}
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-operation-cancel-api-'));
     tempDirs.push(projectRoot);
     let server: Server | undefined;
+    let serverRunId: string | undefined;
     let runStarted!: () => void;
     const executionStarted = new Promise<void>((resolve) => { runStarted = resolve; });
     const waitForCancellation = ({ request }: { request: AgentRunRequest }) => new Promise<AgentRouteExecutorResult>((_resolve, reject) => {
+      serverRunId = request.runId;
       runStarted();
       if (request.signal?.aborted) {
         reject(request.signal.reason);
@@ -5529,26 +5882,28 @@ LIMIT \${top_n}
         captureServer: (created) => { server = created; },
       });
       const base = `http://127.0.0.1:${port}`;
-      const runId = 'e2e-cancel-operation-004';
+      const clientSuppliedRunId = 'e2e-cancel-operation-004';
       const pendingCreate = fetch(`${base}/api/agent-runs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ runId, question: 'show revenue as sql', requestedMode: 'sql' }),
+        body: JSON.stringify({ runId: clientSuppliedRunId, question: 'show revenue as sql', requestedMode: 'sql' }),
       });
       await executionStarted;
+      expect(serverRunId).toBeTruthy();
+      expect(serverRunId).not.toBe(clientSuppliedRunId);
       const operationsResponse = await fetch(`${base}/api/operations`);
       const operations = await operationsResponse.json() as { operations: Array<{ id: string; type: string; scope: string }> };
-      const operation = operations.operations.find((candidate) => candidate.type === 'agent_run' && candidate.scope === `agent-run:${runId}`);
+      const operation = operations.operations.find((candidate) => candidate.type === 'agent_run' && candidate.scope === `agent-run:${serverRunId}`);
       expect(operation).toBeDefined();
       const deleteResponse = await fetch(`${base}/api/operations/${encodeURIComponent(operation!.id)}`, { method: 'DELETE' });
       expect(deleteResponse.status).toBe(200);
-      await expect(deleteResponse.json()).resolves.toMatchObject({ status: 'cancelled', scope: `agent-run:${runId}` });
+      await expect(deleteResponse.json()).resolves.toMatchObject({ status: 'cancelled', scope: `agent-run:${serverRunId}` });
 
       const createResponse = await pendingCreate;
       expect(createResponse.status).toBe(201);
       const created = await createResponse.json() as { run: AgentRun };
       expect(created.run).toMatchObject({
-        id: runId,
+        id: serverRunId,
         route: 'sql_cell',
         status: 'cancelled',
         trustState: 'not_applicable',
@@ -5568,7 +5923,7 @@ LIMIT \${top_n}
         preferredPort: 0,
         captureServer: (createdReloaded) => { server = createdReloaded; },
       });
-      const reloadedResponse = await fetch(`http://127.0.0.1:${reloadedPort}/api/agent-runs/${runId}`);
+      const reloadedResponse = await fetch(`http://127.0.0.1:${reloadedPort}/api/agent-runs/${serverRunId}`);
       expect(reloadedResponse.status).toBe(200);
       const reloaded = await reloadedResponse.json() as { run: AgentRun };
       expect(reloaded.run).toMatchObject({
@@ -5749,6 +6104,35 @@ describe('Ask Research baseline continuity', () => {
 });
 
 describe('AI provider settings', () => {
+  it('uses an explicit replay cassette for governed Ask when the fixture has no provider settings', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-governed-cassette-provider-'));
+    const cassetteDir = mkdtempSync(join(tmpdir(), 'dql-governed-cassette-store-'));
+    const oldDir = process.env.DQL_EVAL_CASSETTE_DIR;
+    const oldMode = process.env.DQL_EVAL_CASSETTE_MODE;
+    try {
+      new CassetteStore(cassetteDir).put({
+        key: 'cassette-bootstrap',
+        operation: 'generate',
+        text: 'offline response',
+        providerName: 'claude',
+        recordedAt: '2026-08-22T00:00:00.000Z',
+      });
+      process.env.DQL_EVAL_CASSETTE_DIR = cassetteDir;
+      delete process.env.DQL_EVAL_CASSETTE_MODE;
+
+      const governed = resolveGovernedAnswerRunner(projectRoot);
+      expect(governed?.provider).toBe('anthropic');
+      expect(governed?.runner).toBeTruthy();
+    } finally {
+      if (oldDir === undefined) delete process.env.DQL_EVAL_CASSETTE_DIR;
+      else process.env.DQL_EVAL_CASSETTE_DIR = oldDir;
+      if (oldMode === undefined) delete process.env.DQL_EVAL_CASSETTE_MODE;
+      else process.env.DQL_EVAL_CASSETTE_MODE = oldMode;
+      rmSync(projectRoot, { recursive: true, force: true });
+      rmSync(cassetteDir, { recursive: true, force: true });
+    }
+  });
+
   it('makes saved OpenAI settings the active default instead of falling through to Ollama', () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-ai-provider-openai-'));
     tempDirs.push(projectRoot);
@@ -7951,6 +8335,39 @@ describe('buildAgentPreviewSql', () => {
 });
 
 describe('EXP-001 exploratory join probes', () => {
+  it('binds a frozen artifact leaf relation only to one inspected physical relation', () => {
+    const repairs: string[] = [];
+    const sql = qualifyUnambiguousSqlRelationsFromSchema(
+      'SELECT customer_name, lifetime_spend FROM dim_customers ORDER BY lifetime_spend DESC',
+      [{
+        relation: 'jaffle_shop.dev.dim_customers',
+        name: 'dim_customers',
+        columns: [{ name: 'customer_name' }, { name: 'lifetime_spend' }],
+      }],
+      repairs,
+    );
+
+    expect(sql).toContain('FROM jaffle_shop.dev.dim_customers');
+    expect(repairs).toEqual([
+      'Qualified exploratory relation dim_customers as inspected relation jaffle_shop.dev.dim_customers.',
+    ]);
+  });
+
+  it('does not bind a frozen artifact leaf when multiple inspected relations share it', () => {
+    const repairs: string[] = [];
+    const sql = qualifyUnambiguousSqlRelationsFromSchema(
+      'SELECT customer_name FROM dim_customers',
+      [
+        { relation: 'jaffle_shop.dev.dim_customers', name: 'dim_customers', columns: [{ name: 'customer_name' }] },
+        { relation: 'other.prod.dim_customers', name: 'dim_customers', columns: [{ name: 'customer_name' }] },
+      ],
+      repairs,
+    );
+
+    expect(sql).toContain('FROM dim_customers');
+    expect(repairs).toEqual([]);
+  });
+
   it('repairs a uniquely resolvable relation qualifier and preserves lifetime measures at owner grain', () => {
     const result = repairExploratorySqlBeforeExecution(`
       SELECT

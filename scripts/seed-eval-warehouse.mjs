@@ -12,25 +12,29 @@
  * Usage:
  *   node scripts/seed-eval-warehouse.mjs                 # → jaffle.duckdb (duckdb)
  *   node scripts/seed-eval-warehouse.mjs --out /tmp/j.duckdb
+ *   node scripts/seed-eval-warehouse.mjs --connector-root /tmp/dql-connectors --out /tmp/j.duckdb
+ *   node scripts/seed-eval-warehouse.mjs --out /tmp/jaffle_shop.duckdb --schema dev
  *   node scripts/seed-eval-warehouse.mjs --print [--dialect ansi|duckdb|postgres|snowflake]
  *   node scripts/seed-eval-warehouse.mjs --seed <path/to/seed.json>
  */
 import { createRequire } from 'node:module';
-import { readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { readFileSync, realpathSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 
 function parseArgs(argv) {
-  const args = { print: false, dialect: null, out: null, seed: null };
+  const args = { print: false, dialect: null, out: null, seed: null, schema: null, connectorRoot: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--print' || a === '--dry-run') args.print = true;
     else if (a === '--dialect') args.dialect = argv[++i];
     else if (a === '--out') args.out = argv[++i];
     else if (a === '--seed') args.seed = argv[++i];
+    else if (a === '--schema') args.schema = argv[++i];
+    else if (a === '--connector-root') args.connectorRoot = argv[++i];
   }
   return args;
 }
@@ -58,28 +62,59 @@ function literal(value, dialect) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
-function buildStatements(seed, dialect) {
+function quoteIdentifier(value) {
+  return `"${String(value).replace(/"/g, '""')}"`;
+}
+
+function buildStatements(seed, dialect, schema = null) {
   const statements = [];
+  if (schema) statements.push(`CREATE SCHEMA IF NOT EXISTS ${quoteIdentifier(schema)}`);
   for (const [table, def] of Object.entries(seed.tables)) {
-    const cols = def.columns.map((c) => `"${c.name}" ${sqlType(dialect, c.type)}`).join(', ');
-    statements.push(`DROP TABLE IF EXISTS "${table}"`);
-    statements.push(`CREATE TABLE "${table}" (${cols})`);
-    const colNames = def.columns.map((c) => `"${c.name}"`).join(', ');
+    const relation = schema ? `${quoteIdentifier(schema)}.${quoteIdentifier(table)}` : quoteIdentifier(table);
+    const cols = def.columns.map((c) => `${quoteIdentifier(c.name)} ${sqlType(dialect, c.type)}`).join(', ');
+    statements.push(`DROP TABLE IF EXISTS ${relation}`);
+    statements.push(`CREATE TABLE ${relation} (${cols})`);
+    const colNames = def.columns.map((c) => quoteIdentifier(c.name)).join(', ');
     for (const row of def.rows) {
       const vals = def.columns.map((c) => literal(row[c.name], dialect)).join(', ');
-      statements.push(`INSERT INTO "${table}" (${colNames}) VALUES (${vals})`);
+      statements.push(`INSERT INTO ${relation} (${colNames}) VALUES (${vals})`);
     }
   }
   return statements;
 }
 
-async function seedDuckDb(statements, outPath) {
-  const req = createRequire(new URL('../packages/dql-connectors/package.json', import.meta.url));
+async function seedDuckDb(statements, outPath, connectorRoot) {
+  // A supplied root is intentionally authoritative: CI installs DuckDB into a
+  // disposable non-workspace directory so npm never has to interpret this
+  // repository's `workspace:*` dependencies. Do not fall back to an ambient
+  // module when the explicit root is wrong.
+  const resolvedConnectorRoot = connectorRoot ? resolve(connectorRoot) : null;
+  const req = resolvedConnectorRoot
+    ? createRequire(join(realpathSync(resolvedConnectorRoot), 'package.json'))
+    : createRequire(new URL('../packages/dql-connectors/package.json', import.meta.url));
   let duckdb;
   try {
-    duckdb = req('duckdb');
+    if (resolvedConnectorRoot) {
+      const connectorRootReal = realpathSync(resolvedConnectorRoot);
+      const packageRootReal = realpathSync(join(connectorRootReal, 'node_modules', 'duckdb'));
+      const entryReal = realpathSync(req.resolve('duckdb'));
+      const packageRelativePath = relative(packageRootReal, entryReal);
+      const entryIsInsidePackage = packageRelativePath !== ''
+        && packageRelativePath !== '..'
+        && !packageRelativePath.startsWith(`..${sep}`)
+        && !isAbsolute(packageRelativePath);
+      if (!entryIsInsidePackage) {
+        throw new Error('Resolved DuckDB entry escapes the explicit connector root.');
+      }
+      duckdb = req(entryReal);
+    } else {
+      duckdb = req('duckdb');
+    }
   } catch {
-    console.error('duckdb is not installed. Install it (pnpm add duckdb) or use --print to emit SQL.');
+    const install = resolvedConnectorRoot
+      ? `npm --prefix ${resolvedConnectorRoot} install --no-save --no-package-lock duckdb@1.1.3`
+      : 'pnpm add duckdb';
+    console.error(`duckdb is not installed. Install it (${install}) or use --print to emit SQL.`);
     process.exit(1);
   }
   const db = new duckdb.Database(outPath);
@@ -104,9 +139,9 @@ async function main() {
   }
 
   const dialect = args.dialect ?? 'duckdb';
-  const statements = buildStatements(seed, dialect);
+  const statements = buildStatements(seed, dialect, args.schema);
   const outPath = args.out ?? join(repoRoot, 'jaffle.duckdb');
-  await seedDuckDb(statements, outPath);
+  await seedDuckDb(statements, outPath, args.connectorRoot);
   console.log(`Seeded ${Object.keys(seed.tables).length} tables into ${outPath}`);
 }
 

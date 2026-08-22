@@ -22,7 +22,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
 import { collectInputFiles, loadProjectConfig, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
 import { ManifestCache } from '@duckcodeailabs/dql-project';
-import { defaultKgPath, reindexProject } from '@duckcodeailabs/dql-agent';
+import { defaultKgPath, ensureAgentProjectReady } from '@duckcodeailabs/dql-agent';
 import type { CLIFlags } from '../args.js';
 import { manifestCacheTrackedFiles, readCliDqlVersion } from './compile.js';
 import { runCompile } from './compile.js';
@@ -132,9 +132,17 @@ export async function runSync(
     if (check) return;
     const previousExitCode = process.exitCode;
     process.exitCode = undefined;
-    await runCompile(projectRoot, ['--dbt-manifest', dbtManifestPath!], { ...flags, format: 'text' });
+    const compile = await runCompile(projectRoot, ['--dbt-manifest', dbtManifestPath!], { ...flags, format: 'text' });
     if (process.exitCode) return;
-    const indexed = await reindexProject(projectRoot, { kgPath: defaultKgPath(projectRoot) });
+    if (compile?.reusedPreparedAgentIndex) {
+      console.log('  ✓ dbt sync complete — reused the matching manifest, metadata catalog, and agent index.');
+      process.exitCode = previousExitCode;
+      return;
+    }
+    // Stamp the persisted source-version only after both the KG and metadata
+    // snapshot are ready. `reindexProject` is intentionally a lower-level
+    // primitive and does not make that readiness promise across a restart.
+    const indexed = await ensureAgentProjectReady(projectRoot, { kgPath: defaultKgPath(projectRoot) });
     console.log(`  ✓ dbt sync complete — manifest, metadata, and agent index share the refreshed project state (${indexed.nodes} indexed object(s)).`);
     process.exitCode = previousExitCode;
   };

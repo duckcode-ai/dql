@@ -1,0 +1,23 @@
+{
+  "key": "5f0a9a36292648ea4641adc8dfbc257f",
+  "operation": "generate",
+  "createdAt": "2026-08-22T12:00:00.000Z",
+  "text": "```json\n{\n  \"summary\": \"Return revenue by product category from the selected order-items relation. This is a review-required exploratory SQL proposal.\",\n  \"sql\": \"SELECT product_type AS product_type, SUM(product_price) AS revenue FROM jaffle_shop.dev.order_items GROUP BY product_type ORDER BY revenue DESC LIMIT 200\",\n  \"viz\": \"bar\",\n  \"outputs\": [\"product_type\", \"revenue\"],\n  \"dql\": {\n    \"entity\": \"order_items\",\n    \"dimensions\": [\"product_type\"],\n    \"metrics\": [\"product_price\"]\n  }\n}\n```",
+  "providerName": "claude",
+  "provenance": {
+    "kind": "synthetic_deterministic_orchestration_fixture",
+    "replayClassification": "orchestration_replay_only",
+    "providerQuality": "excluded",
+    "createdAt": "2026-08-22T12:00:00.000Z",
+    "creationMethod": "sanitized_fixture_sql",
+    "source": "current_scoped_runtime_dispatch"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 5,
+    "messageRoles": ["system", "system", "user", "system", "system"],
+    "preCanonicalHash": "5f0a9a36292648ea4641adc8dfbc257f939def5dcccd4a63353dfdb2002308a9",
+    "postCanonicalHash": "5f0a9a36292648ea4641adc8dfbc257f939def5dcccd4a63353dfdb2002308a9",
+    "appliedRuleClasses": []
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "key": "6a7a0b1cde72e1dbd3b20e9ccadb271d",
+  "operation": "generate",
+  "text": "```json\n{\n  \"summary\": \"QUERY PLAN: return one row per customer from the inspected customer dimension. count_lifetime_orders is stored at customer grain, so no join or aggregation is required. This is a review-required SQL preview.\",\n  \"sql\": \"SELECT customer_name AS customer_name, count_lifetime_orders AS count_lifetime_orders FROM dim_customers ORDER BY customer_name LIMIT 200\",\n  \"viz\": \"table\",\n  \"outputs\": [\"customer_name\", \"count_lifetime_orders\"],\n  \"dql\": {\n    \"entity\": \"dim_customers\",\n    \"dimensions\": [\"customer_name\"],\n    \"metrics\": [\"count_lifetime_orders\"]\n  }\n}\n```",
+  "providerName": "claude",
+  "recordedAt": "2026-08-22T08:26:36.000Z"
+}

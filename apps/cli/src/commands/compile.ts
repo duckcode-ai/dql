@@ -22,7 +22,7 @@ import { writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { buildManifest, collectInputFiles, resolveDataLexManifestPath, resolveDbtManifestPath, type DQLManifest } from '@duckcodeailabs/dql-core';
 import { ManifestCache, type TrackedFile } from '@duckcodeailabs/dql-project';
-import { ensureMetadataCatalogFresh } from '@duckcodeailabs/dql-agent';
+import { ensureMetadataCatalogFresh, isAgentProjectIndexReady } from '@duckcodeailabs/dql-agent';
 import type { CLIFlags } from '../args.js';
 
 const MANIFEST_COMPILER_CACHE_VERSION = 'dql2-qualified-domain-context-v2';
@@ -46,11 +46,24 @@ export function readCliDqlVersion(): string {
   return dqlVersion;
 }
 
+/**
+ * The compile result is deliberately small: callers such as `dql sync dbt`
+ * need to know whether a cache hit also left the persisted retrieval snapshot
+ * usable.  They must not infer that from the compiler cache alone because the
+ * metadata/KG snapshot has an independent source-version contract.
+ */
+export interface CompileResult {
+  cacheHit: boolean;
+  /** True only when the project-root manifest was unchanged and the persisted
+   * metadata + KG snapshot was already prepared for that exact source version. */
+  reusedPreparedAgentIndex: boolean;
+}
+
 export async function runCompile(
   pathArg: string | null,
   rest: string[],
   flags: CLIFlags,
-): Promise<void> {
+): Promise<CompileResult | undefined> {
   // Collect all args (pathArg might be a flag if no path was given)
   const allArgs = [...(pathArg ? [pathArg] : []), ...rest];
 
@@ -160,14 +173,24 @@ export async function runCompile(
       await refreshMetadataCatalog(projectRoot, manifest, true);
     }
     console.log(JSON.stringify(manifest, null, 2));
-    return;
+    return { cacheHit, reusedPreparedAgentIndex: false };
   }
 
   // Write manifest file
   const outDir = flags.outDir ? resolve(flags.outDir) : projectRoot;
   const manifestPath = join(outDir, 'dql-manifest.json');
-  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
-  const metadataRefresh = noCache
+  const manifestWritten = writeManifestIfChanged(manifestPath, manifest);
+  // A compiler-cache hit is only a full warm path when the manifest file was
+  // left untouched AND the persisted metadata/KG snapshot already represents
+  // the same source version.  Rewriting identical JSON changes its mtime,
+  // invalidates that version, and made `dql sync dbt` rebuild every index after
+  // reporting a 3ms compile cache hit.
+  const reusedPreparedAgentIndex = !noCache
+    && cacheHit
+    && outDir === projectRoot
+    && !manifestWritten
+    && isAgentProjectIndexReady(projectRoot);
+  const metadataRefresh = noCache || reusedPreparedAgentIndex
     ? null
     : await refreshMetadataCatalog(projectRoot, manifest, false);
 
@@ -233,6 +256,9 @@ export async function runCompile(
       const errCount = metadataRefresh.diagnostics.filter((d) => d.severity === 'error').length;
       console.log(`  Metadata diagnostics: ${errCount} error(s), ${warnCount} warning(s)`);
     }
+  }
+  if (reusedPreparedAgentIndex) {
+    console.log('  Metadata catalog and agent index reused: prepared snapshot matches this manifest.');
   }
   console.log(`  ${cacheHit ? 'Served from cache' : 'Compiled'} in ${elapsed}ms`);
 
@@ -307,6 +333,25 @@ export async function runCompile(
 
     console.log('');
   }
+
+  return { cacheHit, reusedPreparedAgentIndex };
+}
+
+/**
+ * Avoid mtime-only invalidation of the persisted agent snapshot on a compile
+ * cache hit. The emitted manifest is canonical JSON, so byte equality means
+ * the active project contract did not change. A missing/unreadable file still
+ * gets written normally.
+ */
+function writeManifestIfChanged(path: string, manifest: DQLManifest): boolean {
+  const serialized = JSON.stringify(manifest, null, 2);
+  try {
+    if (readFileSync(path, 'utf-8') === serialized) return false;
+  } catch {
+    // The first compile (or an interrupted prior write) needs a fresh file.
+  }
+  writeFileSync(path, serialized);
+  return true;
 }
 
 async function refreshMetadataCatalog(

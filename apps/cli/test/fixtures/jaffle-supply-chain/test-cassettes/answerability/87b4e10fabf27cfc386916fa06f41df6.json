@@ -1,0 +1,23 @@
+{
+  "key": "87b4e10fabf27cfc386916fa06f41df6",
+  "operation": "generate",
+  "createdAt": "2026-08-22T12:00:00.000Z",
+  "text": "```json\n{\n  \"summary\": \"Return total supply cost for each product from the selected supplies relation. This is a review-required exploratory SQL proposal.\",\n  \"sql\": \"SELECT product_id AS product_id, SUM(supply_cost) AS total_supply_cost FROM jaffle_shop.dev.supplies GROUP BY product_id ORDER BY total_supply_cost DESC LIMIT 200\",\n  \"viz\": \"table\",\n  \"outputs\": [\"product_id\", \"total_supply_cost\"],\n  \"dql\": {\n    \"entity\": \"supplies\",\n    \"dimensions\": [\"product_id\"],\n    \"metrics\": [\"supply_cost\"]\n  }\n}\n```",
+  "providerName": "claude",
+  "provenance": {
+    "kind": "synthetic_deterministic_orchestration_fixture",
+    "replayClassification": "orchestration_replay_only",
+    "providerQuality": "excluded",
+    "createdAt": "2026-08-22T12:00:00.000Z",
+    "creationMethod": "sanitized_fixture_sql",
+    "source": "current_scoped_runtime_dispatch"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 5,
+    "messageRoles": ["system", "system", "user", "system", "system"],
+    "preCanonicalHash": "87b4e10fabf27cfc386916fa06f41df67159b47a20b1117c44008c98ce2cc0a2",
+    "postCanonicalHash": "87b4e10fabf27cfc386916fa06f41df67159b47a20b1117c44008c98ce2cc0a2",
+    "appliedRuleClasses": []
+  }
+}

@@ -145,6 +145,39 @@ describe('buildManifest DataLex contract validation', () => {
   });
 });
 
+describe('buildManifest source-cache correctness', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'dql-manifest-source-cache-'));
+    mkdirSync(join(tmpDir, 'blocks'), { recursive: true });
+    writeFileSync(join(tmpDir, 'dql.config.json'), JSON.stringify({ project: 'source-cache' }));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('reuses parsed unchanged sources but reparses a changed declaration', () => {
+    const blockPath = join(tmpDir, 'blocks', 'metric.dql');
+    writeFileSync(blockPath, `block "First" {
+  domain = "sales"
+  query = """SELECT 1 AS value"""
+}`);
+    expect(buildManifest({ projectRoot: tmpDir }).blocks).toHaveProperty('First');
+
+    // Keep this replacement deliberately shape-equivalent: cache correctness
+    // comes from comparing source text, not just path, mtime, or byte length.
+    writeFileSync(blockPath, `block "Other" {
+  domain = "sales"
+  query = """SELECT 1 AS value"""
+}`);
+    const refreshed = buildManifest({ projectRoot: tmpDir });
+    expect(refreshed.blocks).toHaveProperty('Other');
+    expect(refreshed.blocks).not.toHaveProperty('First');
+  });
+});
+
 describe('buildManifest semantic lineage metadata', () => {
   let tmpDir: string;
 

@@ -163,6 +163,8 @@ function canonicalCertifiedOutputMetricIdentity(value: string): string {
   const aliases: Record<string, string> = {
     avg: 'average',
     drink: 'beverage',
+    sale: 'revenue',
+    sales: 'revenue',
     score: 'point',
     scorer: 'point',
     scoring: 'point',

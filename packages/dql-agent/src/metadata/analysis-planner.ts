@@ -3,6 +3,7 @@ import type {
   MetadataAllowedSqlContext,
   MetadataObject,
 } from './catalog.js';
+import { normalizeAnalyticalMeasureTerms } from '../analytical-orchestration.js';
 
 export type AnalysisQuestionMode =
   | 'exact_lookup'
@@ -137,6 +138,15 @@ const METRIC_WORDS = [
   'statistics', 'tax', 'total', 'usage', 'value', 'volume',
 ];
 
+// These words describe an aggregation operation, not a business measure.  They
+// remain useful to the result-shape/compiler stages, but must not compete with
+// an authored metric identity during retrieval (for example, `total supply
+// cost` is the `supply_cost` measure, not a `total` measure plus a `supply`
+// dimension).
+const AGGREGATION_OPERATOR_WORDS = new Set([
+  'total', 'sum', 'average', 'avg', 'minimum', 'min', 'maximum', 'max',
+]);
+
 const DIMENSION_WORDS = [
   'account', 'category', 'channel', 'cohort', 'customer', 'department', 'entity', 'geo',
   'location', 'market', 'merchant', 'month', 'person', 'player', 'product', 'profile',
@@ -183,29 +193,51 @@ export function buildAnalysisQuestionPlan(
       identity.split(/[.:]/).at(-1) ?? identity)
     .replace(/_/g, ' ');
   const lower = languageQuestion.toLowerCase();
+  const definitionArtifactReference = namedArtifactDefinitionReference(cleanQuestion);
   const entities = extractEntities(cleanQuestion);
   const valueMentions = extractValueMentions(entities);
-  const metricTerms = resolveQuestionMetricTerms(
-    lower,
-    uniqueStrings([
-      ...extractQuotedAnalyticalIdentifiers(cleanQuestion),
-      ...extractMetricTerms(languageQuestion),
-    ]),
-    extractFollowUpMetricTerms(followUp, lower),
+  const extractedMetricTerms = normalizeAnalyticalMeasureTerms(
+    cleanQuestion,
+    resolveQuestionMetricTerms(
+      lower,
+      uniqueStrings([
+        ...extractQuotedAnalyticalIdentifiers(cleanQuestion),
+        ...extractMetricTerms(languageQuestion),
+      ]),
+      extractFollowUpMetricTerms(followUp, lower),
+    ),
+    // The planner owns retrieval identity, not display formatting. A sticky
+    // prior measure can be a qualified metric identifier and must survive a
+    // measure-less refinement byte-for-byte; downstream scoring normalizes
+    // independently for lexical matching.
+    { preserveIdentity: true },
   );
   const extractedDimensionTerms = reconcileRankingRoles(
     languageQuestion,
     extractDimensionTerms(languageQuestion),
-    metricTerms,
+    extractedMetricTerms,
   );
+  const typedAggregationRoles = normalizeTypedAggregationRoles(
+    languageQuestion,
+    extractedMetricTerms,
+    extractedDimensionTerms,
+  );
+  // A named artifact-definition request explains the artifact; its own ID is
+  // not a requested query output.  Keep the original words as retrieval terms
+  // below, but do not let an identifier such as `top_customers` manufacture a
+  // measure/dimension contract or trigger SQL execution.
+  const metricTerms = definitionArtifactReference ? [] : typedAggregationRoles.metricTerms;
+  const normalizedDimensionTerms = definitionArtifactReference ? [] : typedAggregationRoles.dimensionTerms;
   const filterTerms = extractFilterTerms(languageQuestion, entities);
   const timeTerms = extractTimeTerms(languageQuestion);
   const dimensionTerms = removeTemporalFilterDimensionTerms(
     languageQuestion,
-    removeFilterOnlyDimensionTerms(languageQuestion, extractedDimensionTerms),
+    removeFilterOnlyDimensionTerms(languageQuestion, normalizedDimensionTerms),
     timeTerms,
   );
-  const mode = inferQuestionMode({ question: cleanQuestion, lower, entities, metricTerms, dimensionTerms, followUp });
+  const mode = definitionArtifactReference
+    ? 'definition'
+    : inferQuestionMode({ question: cleanQuestion, lower, entities, metricTerms, dimensionTerms, followUp });
   const routeIntent = routeIntentForMode(mode);
   const outputShape = outputShapeForMode(mode, lower, dimensionTerms);
   // Certified capability matching is contract-first. An explicit analytical
@@ -214,7 +246,7 @@ export function buildAnalysisQuestionPlan(
   const shouldConsiderCertifiedExact = certifiedExactIsPlausible(mode, entities);
   const needsGeneratedSql = generatedSqlIsLikely(mode, shouldConsiderCertifiedExact);
   const needsResearchWorkspace = researchWorkspaceIsLikely(mode, lower);
-  const requestedShape = buildRequestedAnswerShape(cleanQuestion, {
+  const requestedShapeBase = buildRequestedAnswerShape(cleanQuestion, {
     lower,
     mode,
     metricTerms,
@@ -223,6 +255,13 @@ export function buildAnalysisQuestionPlan(
     timeTerms,
     followUp,
   });
+  const requestedShape = definitionArtifactReference
+    ? {
+        ...requestedShapeBase,
+        requiredOutputs: requestedShapeBase.requiredOutputs.filter((output) =>
+          canonicalShapeTerm(output) !== definitionArtifactReference),
+      }
+    : requestedShapeBase;
   const searchTerms = uniqueStrings(uniqueStrings([
     ...tokenize(cleanQuestion),
     ...entities.flatMap((entity) => tokenize(entity.text)),
@@ -664,6 +703,93 @@ function isMetricLikeColumn(column: string): boolean {
   return /\b(revenue|sales|amount|price|spend|cost|total|count|score|points?|quantity|value|rate|volume)\b/i.test(column.replace(/_/g, ' '));
 }
 
+/**
+ * Recognize only the explicit artifact-definition grammar.  A bare analytical
+ * phrase such as "what does revenue mean" stays available to the ordinary
+ * definition/semantic path; this helper is for an authored artifact name and
+ * deliberately refuses query-shaped suffixes.
+ */
+function namedArtifactDefinitionReference(question: string): string | undefined {
+  const match = /^\s*what\s+does\s+(?:the\s+)?(.+?)\s+(?:measure|mean|define|represent)\s*[?.!]*\s*$/i.exec(question);
+  if (!match?.[1]) return undefined;
+  const originalSubject = match[1].trim();
+  if (/\b(?:by|per|for each|group(?:ed)? by|filter(?:ed)? by|top\s+\d+|show|list|compare)\b/i.test(originalSubject)) {
+    return undefined;
+  }
+  const subject = originalSubject
+    .replace(/\s+(?:certified\s+)?(?:block|metric|model|artifact|semantic\s+model)\s*$/i, '')
+    .trim();
+  if (!subject) return undefined;
+  // Natural language can name an artifact with "block"/"metric", while an
+  // identifier is unambiguous on its own.  Do not turn arbitrary prose into a
+  // no-SQL terminal merely because it uses "what does ... mean".
+  if (!/[_:./-]/.test(subject) && !/\b(?:block|metric|model|artifact)\b/i.test(originalSubject)) return undefined;
+  return canonicalShapeTerm(subject) || undefined;
+}
+
+/**
+ * Prefer the longest typed analytical span over its component words.  This is
+ * extraction normalization only; the router still has to prove the selected
+ * physical fields and no relationship is inferred here.
+ */
+function normalizeTypedAggregationRoles(
+  question: string,
+  metricTerms: string[],
+  dimensionTerms: string[],
+): { metricTerms: string[]; dimensionTerms: string[] } {
+  const match = /\b(?:total|sum|average|avg|minimum|min|maximum|max)\s+([a-z][a-z0-9_ -]{1,60}?)\s+(?:per|by|for\s+each)\s+([a-z][a-z0-9_-]*)\b/i.exec(question);
+  if (!match?.[1] || !match[2]) {
+    return {
+      metricTerms,
+      dimensionTerms: preferLongestDimensionTerms(dimensionTerms),
+    };
+  }
+  const measure = canonicalShapeTerm(match[1]);
+  const dimension = canonicalShapeTerm(match[2]);
+  if (!measure || !dimension) {
+    return {
+      metricTerms,
+      dimensionTerms: preferLongestDimensionTerms(dimensionTerms),
+    };
+  }
+  const measureParts = new Set(measure.split('_').filter(Boolean));
+  const normalizedMetrics = metricTerms.map(canonicalShapeTerm).filter(Boolean);
+  const retainedMetrics = normalizedMetrics.filter((term) =>
+    term !== measure
+    && !AGGREGATION_OPERATOR_WORDS.has(term)
+    && term !== `total_${measure}`
+    && !measureParts.has(term),
+  );
+  const retainedDimensions = dimensionTerms
+    .map(canonicalShapeTerm)
+    .filter((term) => term && !measureParts.has(term));
+  return {
+    metricTerms: uniqueStrings([measure, ...retainedMetrics]).slice(0, 16),
+    dimensionTerms: preferLongestDimensionTerms(uniqueStrings([dimension, ...retainedDimensions])).slice(0, 16),
+  };
+}
+
+/** Remove generic component roles when an explicit compound role is present. */
+function preferLongestDimensionTerms(terms: string[]): string[] {
+  // Dimension roles are canonical identifiers, not display labels. Applying
+  // the same normalizer to both `product_category` and `product category`
+  // keeps parser variants from becoming two competing dimensions.
+  const normalized = uniqueStrings(terms.map(canonicalShapeTerm).filter(Boolean));
+  const ordered = [...normalized].sort((left, right) =>
+    right.split(/[_\s]+/).filter(Boolean).length - left.split(/[_\s]+/).filter(Boolean).length
+    || left.localeCompare(right));
+  const selected: string[] = [];
+  for (const candidate of ordered) {
+    const tokens = candidate.split(/[_\s]+/).filter(Boolean);
+    const coveredByLonger = selected.some((longer) => {
+      const longerTokens = new Set(longer.split(/[_\s]+/).filter(Boolean));
+      return tokens.length < longerTokens.size && tokens.every((token) => longerTokens.has(token));
+    });
+    if (!coveredByLonger) selected.push(candidate);
+  }
+  return selected.sort((left, right) => normalized.indexOf(left) - normalized.indexOf(right));
+}
+
 function inferQuestionMode(input: {
   question: string;
   lower: string;
@@ -875,6 +1001,12 @@ function extractDimensionTerms(question: string): string[] {
   const terms = new Set<string>();
   const rankingByMeasure = /\b(?:top|bottom|highest|lowest|most|least|best|worst|rank(?:ed|ing)?)\b[^?.!,;]{0,80}\bby\s+/i.test(lower);
   if (/\b(?:cusomers?|custmers?|costomers?|clients?|buyers?)\b/i.test(lower)) terms.add('customer');
+  // Preserve authored compound roles before the generic vocabulary contributes
+  // their component words. `product category` is one business dimension, not
+  // two independent groupings named product + category.
+  if (/\b(?:by|per|for\s+each|group(?:ed)?\s+by|split\s+by)\s+product\s+categor(?:y|ies)\b/i.test(lower)) {
+    terms.add('product_category');
+  }
   for (const word of DIMENSION_WORDS) {
     if (new RegExp(`\\b(?:${escapeRegExp(word)}|${escapeRegExp(pluralizeDimensionWord(word))})\\b`, 'i').test(lower)) terms.add(normalizeTerm(word));
   }
@@ -892,7 +1024,7 @@ function extractDimensionTerms(question: string): string[] {
       if (normalized && !isRankingMeasurePhrase) terms.add(normalized);
     }
   }
-  return uniqueStrings([...terms]).slice(0, 16);
+  return preferLongestDimensionTerms([...terms]).slice(0, 16);
 }
 
 /**

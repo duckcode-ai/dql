@@ -522,6 +522,123 @@ describe("AgentRunEngine", () => {
     expect(routeEvent?.payload).not.toHaveProperty('resolvedPlanShadow');
   });
 
+  it('preserves a router-frozen bare-ranking certified block without a second meaning selection or generated downgrade', async () => {
+    const store = new InMemoryAgentRunStore();
+    let certifiedCalls = 0;
+    let generatedCalls = 0;
+    const engine = new AgentRunEngine({
+      store,
+      idGenerator: () => 'run-frozen-top-customers',
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: 'answer', confidence: 1, followsUp: false, source: 'heuristic',
+          reason: 'The certified top_customers block completely covers bare ranking.',
+          meaningResolution: {
+            interpretedQuestion: 'who are the top customers', questionType: 'ranking',
+            selectedConceptIds: ['dql:block:top_customers'],
+            recommendedExecutionId: 'dql:block:top_customers',
+            queryIntent: { measures: [], dimensions: ['customer_name'], filters: [] },
+            rejectedCandidates: [], confidence: 'high', missingInformation: [], recommendedRoute: 'certified',
+          },
+          resolvedAnalyticalPlan: {
+            mode: 'authoritative', capability: 'certified_execution',
+            planId: 'rap:top-customers', fingerprint: 'sha256:top-customers',
+          },
+          analyticalCascadeDecision: {
+            version: 1,
+            requirements: { version: 1, measures: [], dimensions: ['customer_name'], entityTerms: ['customer'], entityDisplayTerms: ['customer_name'], memberTerms: [] },
+            sourceCoverage: [{ version: 1, source: 'certified', status: 'available', candidateIds: ['dql:block:top_customers'] }],
+            attempts: [{ version: 1, tier: 'certified', outcome: 'executable', candidateIds: ['dql:block:top_customers'], reason: 'The block owns the requested ranking outputs.', planFrozen: true }],
+            selectedTier: 'certified', planFrozen: true, stopReason: 'selected',
+          },
+        } as IntentDecision),
+      },
+      executors: {
+        certified_answer: ({ routeDecision }) => {
+          certifiedCalls += 1;
+          expect(routeDecision?.meaningResolution?.selectedConceptIds).toEqual(['dql:block:top_customers']);
+          return {
+            resolvedRoute: 'certified_answer',
+            answerTier: 'certified_block',
+            answer: 'Top customers from the certified block.',
+            status: 'completed', trustState: 'certified', stopReason: 'certified_answer_found',
+            artifacts: [{ id: 'answer:top-customers', kind: 'answer', title: 'Certified top customers', ref: 'top_customers', trustState: 'certified', payload: { selectedConceptIds: ['dql:block:top_customers'] } }],
+          };
+        },
+        generated_answer: () => { generatedCalls += 1; return { answer: 'must not run' }; },
+      },
+    });
+
+    const run = await engine.run({ question: 'who are the top customers', requestedMode: 'ask' });
+
+    expect(certifiedCalls).toBe(1);
+    expect(generatedCalls).toBe(0);
+    expect(run).toMatchObject({ route: 'certified_answer', trustState: 'certified', stopReason: 'certified_answer_found' });
+    expect(run.routeDecision?.meaningResolution?.selectedConceptIds).toEqual(['dql:block:top_customers']);
+    expect(store.get(run.id)).toMatchObject({
+      route: 'certified_answer', trustState: 'certified',
+      routeDecision: { meaningResolution: { selectedConceptIds: ['dql:block:top_customers'] } },
+    });
+  });
+
+  it('persists a router-issued relationship gap witness without broadening generic route state', async () => {
+    const store = new InMemoryAgentRunStore();
+    const engine = new AgentRunEngine({
+      store,
+      idGenerator: () => 'run-persisted-relationship-gap',
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: 'block', confidence: 1, followsUp: false, source: 'heuristic',
+          reason: 'The snapshot lacks a certified, validated, fanout-safe relationship closure.',
+          terminalOutcome: {
+            kind: 'modeling_gap', code: 'ANALYTICAL_MODELING_GAP',
+            message: 'No safe relationship closure exists.',
+            candidateIds: ['dbt:model:customers', 'dbt:model:order_items'],
+            gap: {
+              code: 'MISSING_RELATIONSHIP',
+              missing: ['a certified, validated, fanout-safe relationship proof'],
+              witnessCandidateIds: ['dbt:model:customers', 'dbt:model:order_items'],
+            },
+          },
+        } as IntentDecision),
+      },
+    });
+
+    const run = await engine.run({ question: 'which customers bought perishable products?', requestedMode: 'ask' });
+
+    expect(run).toMatchObject({ route: 'blocked', status: 'blocked', trustState: 'blocked' });
+    expect(run.routeDecision?.terminalOutcome?.gap).toEqual({
+      code: 'MISSING_RELATIONSHIP',
+      missing: ['a certified, validated, fanout-safe relationship proof'],
+      witnessCandidateIds: ['dbt:model:customers', 'dbt:model:order_items'],
+    });
+    expect(store.get(run.id)?.routeDecision?.terminalOutcome?.gap?.code).toBe('MISSING_RELATIONSHIP');
+  });
+
+  it('fails a frozen tier in place when an executor reports a different route', async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-frozen-route-mismatch',
+      now: fixedClock(),
+      router: { decide: () => authoritativeDecision('certified_execution') },
+      executors: {
+        certified_answer: () => ({
+          resolvedRoute: 'generated_answer',
+          answer: 'Generated fallback must not escape this frozen certified plan.',
+          status: 'needs_review', trustState: 'review_required',
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: 'top customers', requestedMode: 'ask' });
+
+    expect(run).toMatchObject({ route: 'certified_answer', status: 'blocked', trustState: 'blocked' });
+    expect(run.evaluations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'frozen-plan-route-mismatch', passed: false }),
+    ]));
+  });
+
   it("routes a confident certified match to a completed certified answer run", async () => {
     const store = new InMemoryAgentRunStore();
     const events: AgentRunEvent[] = [];
@@ -2819,6 +2936,55 @@ describe("AgentRunEngine — conversation route", () => {
     const run = await engine.run({ question: 'what is food_vs_drink_revenue?', requestedMode: 'ask' });
     expect(conversationCalls).toBe(1);
     expect(run.route).toBe('conversation');
+  });
+
+  it('sends an explicit named-block measure request to the certified metadata executor instead of clarification', async () => {
+    let generatedCalls = 0;
+    let conversationCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-named-block-measure-definition',
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: 'clarify', confidence: 1, followsUp: false, source: 'heuristic',
+          requiresClarification: true,
+          reason: 'Bounded retrieval found multiple governed meanings.',
+          clarifyingQuestion: 'Which governed meaning should DQL bind?',
+          retrievalEvidence: {
+            snapshotId: 's', candidateCount: 2,
+            candidateIds: ['dql:block:top_customers', 'dbt:model:dim_customers'],
+          },
+        }),
+      },
+      executors: {
+        conversation: () => {
+          conversationCalls += 1;
+          return { answer: 'must not use conversational fallback' };
+        },
+        generated_answer: () => {
+          generatedCalls += 1;
+          return {
+            answer: 'Certified artifact metadata for top_customers.',
+            answerKind: 'certified',
+            status: 'completed',
+            trustState: 'certified',
+            resolvedRoute: 'certified_answer',
+            stopReason: 'certified_answer_found',
+          };
+        },
+      },
+    });
+
+    const run = await engine.run({ question: 'what does the top_customers block measure?', requestedMode: 'ask' });
+
+    expect(conversationCalls).toBe(0);
+    expect(generatedCalls).toBe(1);
+    expect(run).toMatchObject({
+      route: 'certified_answer',
+      trustState: 'certified',
+      status: 'completed',
+      stopReason: 'certified_answer_found',
+    });
   });
 
   it('still clarifies an analytical question that merely names an artifact', async () => {

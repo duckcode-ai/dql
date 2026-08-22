@@ -129,6 +129,7 @@ export type {
   ContextFusionDiagnosticsV1,
   ContextFusionResultV1,
   EvidenceCandidateRoleV1,
+  ExploratoryExecutionFreezeV1,
   AgentRunDiagnosticReceiptV3,
   ProviderFailureCauseV1,
   ProviderFailureDiagnosticV1,
@@ -204,6 +205,7 @@ export {
   compactSemanticRuntimeFailure,
   materializeKnowledgeLensSkills,
   normalizeWarehouseSqlFailure,
+  scopeContextPackToExploratoryCandidateClosure,
 } from "./answer-loop.js";
 export {
   classifyAnalyticalFailure,
