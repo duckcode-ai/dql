@@ -6,6 +6,43 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.14.2 - 2026-08-21
+
+### Ask AI analytical-cascade recovery
+
+- Restored answerability without weakening the governed boundary: Ask AI now
+  evaluates complete certified, semantic, governed-relational, and bounded
+  exploratory-SQL routes in order before it asks for clarification or reports
+  a gap.
+- Preserved explicit analytical roles through retrieval and selection, so a
+  requested measure, entity/display key, time role, or relationship cannot be
+  replaced by an unrelated but lexically similar candidate.
+- Tightened certified fit: a certified answer must prove the requested measure
+  from its own declared output instead of borrowing coverage from a pooled
+  candidate set.
+
+### Conversation, diagnostics, and research receipts
+
+- Persisted stable clarification selections, the original question, and the
+  typed partial analytical frame so reloads and follow-ups do not repeat or
+  reinterpret a completed choice.
+- Added redacted, phase-specific provider diagnostics for authentication,
+  model, rate-limit, gateway, network, timeout, admission, budget, and
+  cancellation failures.
+- Added structured Ask and Research receipts for source coverage, candidate
+  admission/exclusion, cascade attempts, frozen-plan state, and
+  evidence-supported Research branch verdicts.
+
+### Validation limit
+
+- This release candidate is verified against the local OSS fixtures and
+  packaged runtime. The private office repository, its metadata/vector indexes,
+  fiscal calendar, provider configuration, and warehouse remain outside this
+  repository and require a separate office replay before claiming those
+  customer-specific questions are fixed.
+
+---
+
 ## v1.13.5 - 2026-08-14
 
 ### Ask AI answers in sentences again

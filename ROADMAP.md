@@ -7,7 +7,13 @@ and inspect lineage from source data to dashboard pages.
 
 For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
-## Current State (v1.13.4)
+## Current State (v1.14.2 release candidate)
+
+The working-tree release candidate targets `1.14.2` across the 19 publishable
+packages and the starter CLI range. It is not published: the registry
+`latest` tag remains `1.14.1`, and no `1.14.2` package or release tag exists
+yet. Release status remains contingent on the G5 package, registry, and clean
+install gates.
 
 DQL OSS is ready for local-first use cases:
 

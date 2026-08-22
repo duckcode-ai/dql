@@ -12,15 +12,15 @@ agent memory, issues, old worktrees, and ignored planning files.
 
 ## Verified snapshot
 
-Last checked: **2026-08-15**
+Last checked: **2026-08-21**
 
 | Fact                | Verified state                                                                                          | Evidence                                                                                                                |
 | ------------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Primary branch      | Local `main` and `origin/main` are synchronized at the verified release baseline                        | `git status --short --branch`; `git rev-parse main origin/main`; `git rev-list --left-right --count main...origin/main` |
-| Current OSS release | `1.14.1` across all 19 publishable packages and the starter CLI range                                   | Release manifests and starter CLI range on `main`                                                                        |
-| npm publication     | All 19 packages report `version=1.13.4` and `dist-tags.latest=1.13.4`                                   | Package-by-package `npm view` audit                                                                                       |
-| Published CLI       | Fresh project-local and global installs both reported `dql 1.13.4`                                     | `node scripts/smoke-cli-install.mjs @duckcodeailabs/dql-cli@1.13.4`                                                      |
-| Release tag         | `v1.13.4` identifies the final Git release baseline                                                    | `git rev-parse v1.13.4`; `git ls-remote --tags origin refs/tags/v1.13.4`                                                 |
+| Primary branch      | `main` and `origin/main` share baseline `212b7df8`; the current checkout is intentionally dirty with the Ask AI and release-candidate changes | `git status --short --branch`; `git rev-parse main origin/main`; `git rev-list --left-right --count main...origin/main` |
+| Release target      | Working-tree manifests and the starter CLI range target `1.14.2`; it is a pre-publication candidate, not a released version | `scripts/release-packages.mjs`; release manifests; starter template manifest                                              |
+| npm publication     | Registry `latest` is verified as `1.14.1`; the `1.14.2` target is absent as of this snapshot            | Package-by-package `npm view` audit                                                                                       |
+| Published CLI       | `@duckcodeailabs/dql-cli@latest` is `1.14.1`; `1.14.2` needs post-publication clean local/global install smoke | `npm view @duckcodeailabs/dql-cli dist-tags`; `scripts/smoke-cli-install.mjs`                                            |
+| Release tag         | Local `v1.14.1` identifies the baseline; no `v1.14.2` tag has been created                              | `git tag --points-at 212b7df8`; `git tag -l v1.14.2`                                                                     |
 
 The missing `v1.11.3` through `v1.11.10` and `v1.12.4` through `v1.12.9` tags
 are release-history debt. They do not invalidate the verified npm publication,
@@ -137,9 +137,9 @@ For current-state decisions, use this order:
    observations as advisory context only.
 
 `ROADMAP.md`, `CHANGELOG.md`, and `docs/oss-readiness-checklist.md` contain
-useful historical release evidence. Their latest `1.13.4` entries are release
-documentation, while the live repository, registry audit, install smoke, and
-release tag remain the authoritative publication evidence.
+release-candidate and historical release evidence. They do not establish npm
+publication: live registry audit, install smoke, and the pushed release tag
+remain authoritative.
 
 ## Refresh this snapshot
 

@@ -161,19 +161,31 @@ template lives in `create-dql-app`; the example dbt project is external.
 
 ## Current Release Decision
 
-The OSS release correctness gates and published package smoke checks pass for
-`1.13.4`; npm `latest`, the repository manifests, and clean local/global CLI
-installs resolve to the same version. The tracked `PERF-001` scale fixture has
-no route-parity, concept-resolution, certified-execution, or invented-ID
-failures, but several cold-start and warm-context latency budgets remain above
-target. RFC 0005 acceptance remains implementer-validated pending independent
-verification. The semantic identity/runtime acceptance set also remains
-implementer-validated pending independent verification. The governed semantic
-path, target-bound execution, semantic source-integrity, bounded Snowflake
-runtime, resilient request handling, and Trust & Steps acceptance set remains
-implementer-validated pending an enterprise dbt Cloud and Snowflake replay.
-Maintainer approval records these conditions as disclosed `v1.13.4` OSS
-release exceptions; none is a GA performance claim.
+`1.14.2` is a pre-publication release candidate, not a published release. The
+working-tree manifests and starter CLI range target `1.14.2`; the registry
+`latest` tag remains `1.14.1`, and `1.14.2` remains absent until the tag
+workflow publishes it. G5 package, registry, tag, and clean-install evidence
+must be captured before this document calls `1.14.2` released.
+
+The candidate contains the Ask AI governed-cascade recovery, stable
+conversation selection persistence, phase-specific provider diagnostics, and
+Research receipts. Its local OSS evidence does not verify the private office
+repository, metadata/vector indexes, fiscal calendar, provider configuration,
+or warehouse; those require a separate office replay.
+
+Historical `1.13.4` release evidence follows. It does not establish
+publication or end-to-end office validation for `1.14.2`. The tracked
+`PERF-001` scale fixture has no route-parity, concept-resolution,
+certified-execution, or invented-ID failures, but several cold-start and
+warm-context latency budgets remain above target. RFC 0005 acceptance remains
+implementer-validated pending independent verification. The semantic
+identity/runtime acceptance set also remains implementer-validated pending
+independent verification. The governed semantic path, target-bound execution,
+semantic source-integrity, bounded Snowflake runtime, resilient request
+handling, and Trust & Steps acceptance set remains implementer-validated
+pending an enterprise dbt Cloud and Snowflake replay. Maintainer approval
+records these conditions as disclosed `v1.13.4` OSS release exceptions; none is
+a GA performance claim.
 
 Validated release gates (re-run the browser smoke after the examples
 restructure — bundled examples were removed in favor of the external
