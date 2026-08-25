@@ -4,7 +4,9 @@ import {
   assertCanonicalResult,
   buildAnalyticalTaskGraph,
   buildAnalyticalCascadeDecision,
+  buildAnalyticalRequirementSeedV1,
   buildAnalyticalRequirementSet,
+  categoricalDimensionRequirementTerms,
   buildAnalyticalTurnPlan,
   buildCoverageGap,
   buildResearchEvidenceLedger,
@@ -52,11 +54,155 @@ describe('conversational analytical orchestration contracts', () => {
     expect(requirements.measures).toEqual(expect.arrayContaining(['lost opportunities count', 'lost amount']));
   });
 
+  it('AGT-034 keeps revenue-by-region as one revenue metric and one geography role', () => {
+    const requirements = buildAnalyticalRequirementSet({
+      question: 'Show revenue by sales based on the region',
+      parsedIntent: {
+        measures: ['revenue'],
+        dimensions: ['sales based on the region'],
+        filters: [],
+      },
+    });
+    expect(requirements.measures).toEqual(['revenue']);
+    expect(requirements.dimensions).toEqual(['region']);
+    expect(requirements.dimensions).not.toContain('sales based on the region');
+  });
+
+  it('AGT-034 preserves the customer, revenue, product-category, and default-top-ten tuple', () => {
+    const requirements = buildAnalyticalRequirementSet({
+      question: 'who are the top customers who have revenue by product category?',
+      parsedIntent: { measures: ['revenue'], dimensions: ['product category'], filters: [] },
+    });
+    expect(requirements).toMatchObject({
+      measures: ['revenue'],
+      dimensions: ['product category'],
+      entityTerms: ['customer'],
+      entityDisplayTerms: ['customer name'],
+      ranking: { metricTerms: ['revenue'], direction: 'top', limit: 10, defaultedLimit: true },
+    });
+  });
+
+  it('AGT-034 keeps the customer entity out of the categorical seed lane while retaining its display key', () => {
+    const requirements = buildAnalyticalRequirementSet({
+      question: 'who are the top customers who have revenue by product category?',
+      parsedIntent: {
+        measures: ['revenue'],
+        dimensions: ['customer', 'product category'],
+        filters: [],
+      },
+    });
+    const seed = buildAnalyticalRequirementSeedV1({
+      question: 'who are the top customers who have revenue by product category?',
+      // This is the live failure shape: retrieval may retain the bare entity
+      // noun along with the explicitly requested product category. The host
+      // must not let that noun turn every customer-* attribute into a
+      // competing categorical dimension.
+      parsedIntent: {
+        measures: ['revenue'],
+        dimensions: ['customer', 'product category'],
+        filters: [],
+      },
+      requirements,
+    });
+
+    expect(seed.requirements).toMatchObject({
+      entityTerms: ['customer'],
+      entityDisplayTerms: ['customer name'],
+      dimensions: expect.arrayContaining(['customer', 'product category']),
+    });
+    expect(seed.queryIntent.dimensions).toEqual(expect.arrayContaining([
+      'customer name',
+      'product category',
+    ]));
+    expect(seed.queryIntent.dimensions).not.toContain('customer');
+  });
+
+  it('AGT-034 reserves product category independently of the customer entity role', () => {
+    const requirements = buildAnalyticalRequirementSet({
+      question: 'who are the top customers who have revenue by product category?',
+      parsedIntent: { measures: ['revenue'], dimensions: ['product category', 'customer'], filters: [] },
+    });
+    expect(categoricalDimensionRequirementTerms(requirements)).toEqual(['product category']);
+    const cards = selectRoleBalancedMeaningCandidates({
+      requirements,
+      maxCandidates: 4,
+      candidates: [
+        { id: 'semantic:metric:order_item.revenue', kind: 'semantic_metric', semanticObjectType: 'metric', name: 'Revenue', relevanceScore: 1, compatibility: 'compatible' },
+        // The actual failure shape: this entity card is also technically a
+        // semantic member, but it must not consume the categorical lane.
+        { id: 'semantic:entity:customers.customer', kind: 'semantic_member', semanticObjectType: 'entity', name: 'customers.customer', relevanceScore: 0.99, compatibility: 'compatible' },
+        { id: 'semantic:dimension:customers.customer_name', kind: 'semantic_member', semanticObjectType: 'dimension', name: 'customer_name', aliases: ['customer name'], relevanceScore: 0.8, compatibility: 'compatible' },
+        { id: 'semantic:dimension:products.product_type', kind: 'semantic_member', semanticObjectType: 'dimension', name: 'product_type', aliases: ['product type'], relevanceScore: 0.1, compatibility: 'compatible' },
+      ],
+    });
+    expect(cards.map((card) => card.id)).toEqual(expect.arrayContaining([
+      'semantic:metric:order_item.revenue',
+      'semantic:dimension:products.product_type',
+    ]));
+  });
+
+  it('AGT-034 keeps individual expensive order items as a five-row price ranking with required outputs', () => {
+    const requirements = buildAnalyticalRequirementSet({
+      question: 'Show the five most expensive individual order items with order ID, product ID, and product price.',
+    });
+    expect(requirements).toMatchObject({
+      measures: ['product price'],
+      outputTerms: ['order id', 'product id', 'product price'],
+      grain: 'individual',
+      ranking: { metricTerms: ['product price'], direction: 'top', limit: 5, defaultedLimit: false },
+    });
+    // `product` occurs only as part of explicit output fields here. It is not
+    // a grouping request unless the reader says `by product`.
+    expect(requirements.dimensions).toEqual([]);
+  });
+
+  it('AGT-034 keeps a new free-text multi-metric request immutable when retrieval carries stale rollover intent', () => {
+    const seed = buildAnalyticalRequirementSeedV1({
+      question: 'show revenue and refunds by month',
+      // This mirrors a retrieval/context-pack parser result from an unrelated
+      // prior turn. The seed must treat it as search evidence only, never as
+      // authority for a new free-text request.
+      parsedIntent: {
+        measures: ['rollover balance'],
+        dimensions: ['customer type'],
+        filters: [{ field: 'account_status', value: 'rollover balance' }],
+        timeRange: 'last 30 days',
+        timeGrain: 'month',
+        order: 'desc',
+        limit: 10,
+      },
+    });
+
+    expect(seed.sourceQuestion).toBe('show revenue and refunds by month');
+    expect(seed.requirements.measures).toEqual(expect.arrayContaining(['revenue', 'refunds']));
+    expect(seed.requirements.measures).not.toContain('rollover balance');
+    expect(seed.requirements.dimensions).not.toContain('customer type');
+    expect(seed.requirements.memberTerms).not.toContain('rollover balance');
+    expect(seed.queryIntent).toMatchObject({
+      measures: expect.arrayContaining(['revenue', 'refunds']),
+      dimensions: [],
+      filters: [],
+      timeGrain: 'month',
+    });
+    expect(seed.queryIntent).not.toHaveProperty('timeRange');
+    expect(seed.queryIntent).not.toHaveProperty('order');
+    expect(seed.queryIntent).not.toHaveProperty('limit');
+  });
+
   it('CTX-005/AGT-010 role-balances explicit revenue and account display evidence over owner/sentiment decoys', () => {
     const officeCase = OFFICE_ASK_AI_GOLD_CASES[1];
     const requirements = buildAnalyticalRequirementSet({
       question: officeCase.question,
       parsedIntent: { measures: ['BCM', 'revenue'], dimensions: ['customer'], filters: [] },
+    });
+    expect(requirements).toMatchObject({
+      measures: ['revenue'],
+      ranking: {
+        metricTerms: ['revenue'],
+        direction: 'top',
+        limit: 10,
+        defaultedLimit: true,
+      },
     });
     const cards = selectRoleBalancedMeaningCandidates({
       requirements,
@@ -65,21 +211,56 @@ describe('conversational analytical orchestration contracts', () => {
         { id: 'semantic:dimension:account.owner_email', kind: 'semantic_member', semanticObjectType: 'dimension', name: 'Account Owner Email', relevanceScore: 0.99, compatibility: 'compatible' },
         { id: 'semantic:dimension:account.sentiment', kind: 'semantic_member', semanticObjectType: 'dimension', name: 'Account Sentiment Rating', relevanceScore: 0.98, compatibility: 'compatible' },
         { id: 'semantic:dimension:account.name', kind: 'semantic_member', semanticObjectType: 'dimension', name: 'Account Name', relevanceScore: 0.8, compatibility: 'compatible' },
-        { id: 'semantic:metric:revenue', kind: 'semantic_metric', semanticObjectType: 'metric', name: 'Revenue', relevanceScore: 0.78, compatibility: 'compatible' },
-        { id: 'semantic:metric:bcm', kind: 'semantic_metric', semanticObjectType: 'metric', name: 'BCM', relevanceScore: 0.77, compatibility: 'compatible' },
+        {
+          id: 'semantic:metric:revenue', kind: 'semantic_metric', semanticObjectType: 'metric', name: 'Revenue', relevanceScore: 0.78, compatibility: 'compatible',
+          dimensions: ['semantic:dimension:customer.name'], timeGrains: ['month'], relationshipEvidence: ['dql:relationship:account_to_customer'],
+        },
+        {
+          id: 'semantic:metric:bcm', kind: 'semantic_metric', semanticObjectType: 'metric', name: 'BCM', relevanceScore: 0.77, compatibility: 'compatible',
+          dimensions: ['semantic:dimension:customer.name'], timeGrains: ['month'], relationshipEvidence: ['dql:relationship:account_to_customer'],
+        },
       ],
     });
     expect(cards.map((card) => card.id)).toEqual(expect.arrayContaining([
       'semantic:dimension:account.name',
       'semantic:metric:revenue',
     ]));
+    expect(cards.map((card) => card.id)).not.toContain('semantic:metric:bcm');
     expect(evidenceCandidateRoles(cards.find((card) => card.id === 'semantic:dimension:account.name')!)).toContain('entity_label');
+    // A metric capability may expose dimensions, time grains, and relationship
+    // paths for execution.  Those are not roles the metric itself can fill.
+    expect(evidenceCandidateRoles({
+      id: 'semantic:metric:revenue', kind: 'semantic_metric', semanticObjectType: 'metric', name: 'Revenue',
+      dimensions: ['semantic:dimension:customer.name'], timeGrains: ['month'], relationshipEvidence: ['dql:relationship:account_to_customer'],
+    })).toEqual(['metric']);
+    expect(evidenceCandidateRoles({
+      id: 'semantic:metric:declared-composite', kind: 'semantic_metric', semanticObjectType: 'metric', name: 'Declared composite',
+      compatibilityFacts: ['candidate-role: entity_label'],
+    })).toEqual(['metric', 'entity_label']);
+  });
+
+  it('AGT-010 keeps the context planner top-10 bound visibly defaulted when the user gave no count', () => {
+    const requirements = buildAnalyticalRequirementSet({
+      question: 'Who are the top BCM customers who have highest revenue?',
+      // The local context planner injects this bounded execution default into
+      // parsed intent. It must not erase the receipt's default assumption.
+      parsedIntent: { measures: ['revenue'], dimensions: ['customer'], filters: [], limit: 10 },
+    });
+    expect(requirements.ranking).toMatchObject({
+      metricTerms: ['revenue'],
+      limit: 10,
+      defaultedLimit: true,
+    });
   });
 
   it('AGT-010 defaults an unspecified top-account request to ten without substituting owner or sentiment', () => {
     const officeCase = OFFICE_ASK_AI_GOLD_CASES[2];
     const requirements = buildAnalyticalRequirementSet({ question: officeCase.question });
-    expect(requirements.ranking).toMatchObject({ metricTerms: expect.arrayContaining(['bcm']), limit: 10 });
+    expect(requirements).toMatchObject({
+      entityTerms: ['account'],
+      entityDisplayTerms: ['account name'],
+      ranking: { metricTerms: expect.arrayContaining(['bcm']), limit: 10, defaultedLimit: true },
+    });
     const cards = selectRoleBalancedMeaningCandidates({
       requirements,
       maxCandidates: 3,
@@ -96,6 +277,39 @@ describe('conversational analytical orchestration contracts', () => {
     ]));
   });
 
+  it('AGT-010 reserves a low-ranked account display key instead of treating an entity, owner, or sentiment as the label', () => {
+    const requirements = buildAnalyticalRequirementSet({
+      question: 'What is the current BCM run rate across top accounts?',
+      parsedIntent: { measures: ['BCM run rate'], dimensions: ['account'], filters: [] },
+    });
+    const cards = selectRoleBalancedMeaningCandidates({
+      requirements,
+      maxCandidates: 4,
+      candidates: [
+        { id: 'semantic:metric:account.bcm_run_rate', kind: 'semantic_metric', semanticObjectType: 'metric', name: 'BCM Run Rate', relevanceScore: 0.99, compatibility: 'compatible' },
+        { id: 'dql:entity:revenue::entity::account', kind: 'dql_modeling', name: 'account', relevanceScore: 0.98, compatibility: 'compatible' },
+        { id: 'semantic:entity:account', kind: 'semantic_member', semanticObjectType: 'entity', name: 'Account', relevanceScore: 0.97, compatibility: 'compatible' },
+        { id: 'dbt:column:dim_accounts.account_owner_email', kind: 'sql_column', name: 'Account Owner Email', relevanceScore: 0.96, compatibility: 'compatible' },
+        { id: 'dbt:column:dim_accounts.account_sentiment_rating', kind: 'sql_column', name: 'Account Sentiment Rating', relevanceScore: 0.95, compatibility: 'compatible' },
+        // This simulates the real fixture: the authoritative display key is
+        // below general fused relevance but must be role-reserved.
+        { id: 'dbt:column:dim_accounts.account_name', kind: 'sql_column', name: 'account_name', relevanceScore: 0.19, compatibility: 'compatible' },
+      ],
+    });
+
+    expect(cards.map((card) => card.id)).toEqual(expect.arrayContaining([
+      'semantic:metric:account.bcm_run_rate',
+      'dbt:column:dim_accounts.account_name',
+    ]));
+    expect(evidenceCandidateRoles(cards.find((card) => card.id === 'dql:entity:revenue::entity::account')!)).not.toContain('entity_label');
+    expect(evidenceCandidateRoles(cards.find((card) => card.id === 'semantic:entity:account')!)).not.toContain('entity_label');
+    expect(evidenceCandidateRoles(cards.find((card) => card.id === 'dbt:column:dim_accounts.account_name')!)).toContain('entity_label');
+    expect(cards.map((card) => card.id)).not.toEqual(expect.arrayContaining([
+      'dbt:column:dim_accounts.account_owner_email',
+      'dbt:column:dim_accounts.account_sentiment_rating',
+    ]));
+  });
+
   it('API-007/API-008 records compact cascade and phase-specific provider diagnostics', () => {
     const diagnostic = classifyProviderFailure({ message: 'HTTP 429 rate limit', phase: 'generation' });
     expect(diagnostic).toMatchObject({ cause: 'rate_limited', retryable: true, safeAction: 'wait_and_retry' });
@@ -107,6 +321,35 @@ describe('conversational analytical orchestration contracts', () => {
       stopReason: 'coverage_gap',
     });
     expect(cascade).toMatchObject({ version: 1, sourceCoverage: [{ source: 'semantic' }], attempts: [{ tier: 'semantic' }] });
+  });
+
+  it('AGT-029 stops the authoritative receipt at the first frozen semantic tier', () => {
+    const cascade = buildAnalyticalCascadeDecision({
+      requirements: buildAnalyticalRequirementSet({ question: 'What is the current BCM run rate across top accounts?' }),
+      sourceCoverage: [
+        { version: 1, source: 'certified', status: 'available', candidateIds: [] },
+        { version: 1, source: 'semantic', status: 'available', candidateIds: ['semantic:account_revenue:bcm_run_rate'] },
+        { version: 1, source: 'governed_relational', status: 'available', candidateIds: ['dql:relationship:account_revenue_to_account'] },
+        { version: 1, source: 'exploratory', status: 'available', candidateIds: ['dbt:model:fct_account_revenue'] },
+      ],
+      attempts: [
+        { version: 1, tier: 'certified', outcome: 'unavailable', candidateIds: [], reason: 'No certified tuple.', planFrozen: false },
+        { version: 1, tier: 'semantic', outcome: 'executable', candidateIds: ['semantic:account_revenue:bcm_run_rate'], reason: 'Semantic tuple froze.', planFrozen: true },
+        // These are stale pre-built fallback artifacts. A no-target semantic
+        // execution failure is terminal at semantic; it must not leave them
+        // in a persisted cascade or portable receipt.
+        { version: 1, tier: 'governed_relational', outcome: 'ineligible', candidateIds: ['dql:relationship:account_revenue_to_account'], reason: 'Must not persist after freeze.', planFrozen: false },
+        { version: 1, tier: 'exploratory_sql', outcome: 'executable', candidateIds: ['dbt:model:fct_account_revenue'], reason: 'Must not persist after freeze.', planFrozen: false },
+      ],
+      selectedTier: 'semantic',
+      planFrozen: true,
+      stopReason: 'selected',
+    });
+
+    expect(cascade.attempts.map((attempt) => [attempt.tier, attempt.planFrozen])).toEqual([
+      ['certified', false],
+      ['semantic', true],
+    ]);
   });
 
   it.each([

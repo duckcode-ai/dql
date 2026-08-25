@@ -41,6 +41,31 @@ describe('planResearch', () => {
     expect(breakdown?.action.target).toBe('region');
   });
 
+  it('passes the caller cancellation signal through the hypothesis planner', async () => {
+    const controller = new AbortController();
+    let plannerSignal: AbortSignal | undefined;
+    const plan = await planResearch({
+      question: 'why is revenue down by region',
+      intent: 'diagnose_change',
+      forceInvestigate: true,
+      ...ctx,
+      signal: controller.signal,
+      provider: {
+        generate: async (_messages, options) => {
+          plannerSignal = options?.signal as AbortSignal | undefined;
+          controller.abort(new Error('user cancelled Research'));
+          throw Object.assign(new Error('planner cancelled'), { name: 'AbortError' });
+        },
+      },
+    });
+    expect(plannerSignal).toBeDefined();
+    expect(plannerSignal).not.toBe(controller.signal);
+    expect(plannerSignal?.aborted).toBe(true);
+    // Planner cancellation falls back to the grounded deterministic plan;
+    // it does not leave a half-built or ungrounded Research route.
+    expect(plan.steps.length).toBeGreaterThan(0);
+  });
+
   it('reuses the root plan qualified metric instead of re-matching a similar name', async () => {
     const plannedMetric: KGNode = {
       nodeId: 'metric:rollover_balance',

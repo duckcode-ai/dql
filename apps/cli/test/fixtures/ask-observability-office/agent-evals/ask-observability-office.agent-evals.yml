@@ -1,0 +1,43 @@
+# Synthetic OBS-012 routing and evidence cases. These records intentionally
+# carry no expected SQL, rows, provider transcript, or office data. Run them
+# only through an explicitly configured local evaluation harness.
+
+cases:
+  - name: "certified: lost opportunities by fiscal month and named competitor"
+    question: "Lost opportunities count and lost amount by month for fiscal year FY26 and competitor involved is Datadog"
+    expected:
+      answerable: true
+      kind: certified
+      route: certified
+      certification: certified
+
+  - name: "certified: explicit revenue remains the ranking measure for BCM customers"
+    question: "Who are the top BCM customers who have highest revenue?"
+    expected:
+      answerable: true
+      kind: certified
+      route: certified
+      certification: certified
+
+  - name: "certified: current BCM run rate across top accounts"
+    question: "What is the current BCM run rate across top accounts?"
+    expected:
+      answerable: true
+      kind: certified
+      route: certified
+      certification: certified
+
+  - name: "clarify: account and customer are distinct display entities"
+    question: "Show the top names by revenue"
+    expected:
+      answerable: false
+      kind: no_answer
+      route: blocked
+
+  - name: "terminal gap: unsafe competitor attribution is not inferred"
+    question: "Rank accounts by un-attributed competitor observation signal"
+    expected:
+      answerable: false
+      kind: no_answer
+      route: blocked
+      terminalOutcomeKind: modeling_gap

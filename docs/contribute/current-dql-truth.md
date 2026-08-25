@@ -12,15 +12,15 @@ agent memory, issues, old worktrees, and ignored planning files.
 
 ## Verified snapshot
 
-Last checked: **2026-08-21**
+Last checked: **2026-08-25**
 
 | Fact                | Verified state                                                                                          | Evidence                                                                                                                |
 | ------------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Primary branch      | `main` and `origin/main` share baseline `212b7df8`; the current checkout is intentionally dirty with the Ask AI and release-candidate changes | `git status --short --branch`; `git rev-parse main origin/main`; `git rev-list --left-right --count main...origin/main` |
-| Release target      | Working-tree manifests and the starter CLI range target `1.14.2`; it is a pre-publication candidate, not a released version | `scripts/release-packages.mjs`; release manifests; starter template manifest                                              |
-| npm publication     | Registry `latest` is verified as `1.14.1`; the `1.14.2` target is absent as of this snapshot            | Package-by-package `npm view` audit                                                                                       |
-| Published CLI       | `@duckcodeailabs/dql-cli@latest` is `1.14.1`; `1.14.2` needs post-publication clean local/global install smoke | `npm view @duckcodeailabs/dql-cli dist-tags`; `scripts/smoke-cli-install.mjs`                                            |
-| Release tag         | Local `v1.14.1` identifies the baseline; no `v1.14.2` tag has been created                              | `git tag --points-at 212b7df8`; `git tag -l v1.14.2`                                                                     |
+| Primary branch      | `main` and `origin/main` point at `26e3408`; the checkout is intentionally dirty with the Ask AI implementation and `1.14.3-rc.1` release-prep work | `git status --short --branch`; `git rev-parse main origin/main`; `git rev-list --left-right --count main...origin/main` |
+| Release target      | All 19 release manifests and the starter CLI range target unpublished prerelease `1.14.3-rc.1`; it may publish only with npm tag `next` and exact expected version | Release manifest audit; starter template manifest; `scripts/release-packages.mjs --dry-run --tag next --expected-version 1.14.3-rc.1` |
+| npm publication     | Package-by-package registry audit records `latest=1.14.2` for the 19 release packages; `1.14.3-rc.1` is absent | Current-state npm audit (2026-08-25) |
+| Published CLI       | `@duckcodeailabs/dql-cli@latest` is `1.14.2`; `1.14.3-rc.1` requires post-publication exact-version clean local/global install smoke | `npm view @duckcodeailabs/dql-cli dist-tags`; `scripts/smoke-cli-install.mjs` |
+| Release tag         | Local `v1.14.2` identifies `26e3408`; no `v1.14.3-rc.1` tag has been created | `git tag --points-at 26e3408`; `git tag -l v1.14.3-rc.1` |
 
 The missing `v1.11.3` through `v1.11.10` and `v1.12.4` through `v1.12.9` tags
 are release-history debt. They do not invalidate the verified npm publication,
@@ -79,7 +79,12 @@ The normative DQL 2.0 domain-context pack is
 Its RFCs and specifications are accepted design. Its acceptance matrix records
 implementation evidence, not automatic independent verification.
 
-At this snapshot:
+The requirement counts below were not independently re-audited by this
+release-preparation change. Consult the acceptance matrix for requirement-level
+status; this release candidate remains implementer-evidenced, not independently
+verified.
+
+At the prior acceptance-matrix snapshot:
 
 - 87 acceptance requirements are `implemented`;
 - 27 remain `specified`;

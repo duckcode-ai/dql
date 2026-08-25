@@ -5,7 +5,7 @@ import {
   createProviderDispatchEgressReceipt,
   prepareProviderWireEnvelopeForDispatch,
 } from '../provider-egress.js';
-import type { ProviderDispatchEvent } from './types.js';
+import type { ProviderDispatchCompletionEvent, ProviderDispatchEvent } from './types.js';
 
 function dispatchRecorder() {
   const events: ProviderDispatchEvent[] = [];
@@ -118,12 +118,33 @@ describe('OpenAIProvider', () => {
     const fetchMock = vi.fn(async () => response());
     vi.stubGlobal('fetch', fetchMock);
     const recorded = dispatchRecorder();
+    const completions: ProviderDispatchCompletionEvent[] = [];
     const provider = new OpenAIProvider({ apiKey: 'test-key', baseUrl: 'https://example.test/v1' });
     await expect(provider.generate([{ role: 'user', content: 'hello' }], {
       onProviderDispatch: recorded.observe,
+      onProviderDispatchComplete: (event) => completions.push(event),
     })).rejects.toThrow();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(recorded.events).toHaveLength(1);
     expect(recorded.receipts).toHaveLength(1);
+    expect(completions).toHaveLength(1);
+    expect(completions[0]).toMatchObject({ provider: 'openai', operation: 'generate', attemptIndex: 1 });
+    expect(completions[0]?.outcome).not.toBe('ok');
+  });
+
+  it('closes a completion observation only after the physical response settles', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: 'ok' } }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })));
+    const completions: ProviderDispatchCompletionEvent[] = [];
+    const provider = new OpenAIProvider({ apiKey: 'test-key', baseUrl: 'https://example.test/v1' });
+
+    await expect(provider.generate([{ role: 'user', content: 'hello' }], {
+      onProviderDispatchComplete: (event) => completions.push(event),
+    })).resolves.toBe('ok');
+
+    expect(completions).toEqual([expect.objectContaining({
+      provider: 'openai', operation: 'generate', attemptIndex: 1, outcome: 'ok', httpStatus: 200,
+    })]);
   });
 });

@@ -63,7 +63,7 @@ describe('analysis planner', () => {
   it.each([
     ['who are the top customers by revenue', 'customer', 'revenue'],
     ['show the top accounts by margin', 'account', 'margin'],
-    ['which are the highest products by sales', 'product', 'sale'],
+    ['which are the highest products by sales', 'product', 'revenue'],
     ['list the top jobs by cost', 'job', 'cost'],
   ])('reconciles the ranking sort measure without duplicating it as a dimension: %s', (question, dimension, measure) => {
     const plan = buildAnalysisQuestionPlan(question);
@@ -90,6 +90,18 @@ describe('analysis planner', () => {
     expect(plan.dimensionTerms).toEqual(expect.arrayContaining(dimensions));
     expect(plan.metricTerms).toEqual(expect.arrayContaining(measures));
     for (const measure of measures) expect(plan.dimensionTerms).not.toContain(measure);
+  });
+
+  it('AGT-034 keeps the explicit geography role when sales is a revenue alias in a based-on clause', () => {
+    const plan = buildAnalysisQuestionPlan('Show revenue by sales based on the region');
+
+    expect(plan.metricTerms).toEqual(['revenue']);
+    expect(plan.dimensionTerms).toEqual(['region']);
+    expect(plan.requestedShape).toMatchObject({
+      measures: ['revenue'],
+      dimensions: ['region'],
+    });
+    expect(plan.requestedShape.dimensions).not.toContain('sales_based_on_the_region');
   });
 
   it('treats a relative month as a filter/time grain instead of an output dimension', () => {

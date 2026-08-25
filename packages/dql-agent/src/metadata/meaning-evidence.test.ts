@@ -55,6 +55,45 @@ describe('AGT-010 metadata meaning evidence lanes', () => {
     });
   });
 
+  it('carries catalog-proven output coverage only for an exact certified title when old block metadata omits declared outputs', () => {
+    const evidence = {
+      candidates: [{
+        id: 'dql:block:top_customers_by_revenue', kind: 'certified_block' as const,
+        trustTier: 'certified' as const, name: 'Top Customers by Revenue', aliases: ['Top Customers by Revenue'],
+        relevanceScore: 1, matchReasons: ['exact name or alias'], compatibility: 'partial' as const,
+        compatibilityFacts: ['grain: customer_name', 'parameter: top_n'], exactMatch: true,
+      }],
+    };
+    const pack = {
+      routeDecision: { route: 'certified', exactObjectKey: 'dql:block:top_customers_by_revenue' },
+      questionPlan: {
+        question: 'Top Customers by Revenue', timeTerms: [],
+        requestedShape: { measures: ['revenue'], dimensions: ['customer'] },
+      },
+      retrievalDiagnostics: { certifiedCandidateFits: [{
+        objectKey: 'dql:block:top_customers_by_revenue', name: 'Top Customers by Revenue',
+        applicabilityKind: 'safe_parameterized', applicabilityScore: 1, action: 'certified_answer',
+        fit: {
+          kind: 'exact', confidence: 'high', reasons: ['catalog inferred the certified SQL output contract'],
+          missingOutputs: [], missingDimensions: [], unsupportedFilters: [], topNAction: 'none', inferredContract: true,
+        },
+      }] },
+    };
+
+    const exact = applyContextPackCompatibility(evidence, pack as never).candidates[0]!;
+    const nonExact = applyContextPackCompatibility(evidence, {
+      ...pack,
+      questionPlan: { ...pack.questionPlan, question: 'Show customers ranked by revenue' },
+    } as never).candidates[0]!;
+
+    expect(exact).toMatchObject({
+      compatibility: 'compatible', exactMatch: true, analyticalFitClass: 'exact',
+      compatibilityFacts: expect.arrayContaining(['catalog-proven-output: revenue', 'catalog-proven-output: customer_name']),
+    });
+    expect(nonExact).toMatchObject({ compatibility: 'partial', exactMatch: false, analyticalFitClass: undefined });
+    expect(nonExact.compatibilityFacts).not.toContain('catalog-proven-output: revenue');
+  });
+
   it('AGT-009 never upgrades a tagged top-customers block to a certified revenue answer without its own output', () => {
     const evidence = {
       candidates: [{
@@ -163,6 +202,72 @@ describe('AGT-010 metadata meaning evidence lanes', () => {
       semanticObjectType: 'entity',
       aliases: expect.arrayContaining(['Asset']),
     }));
+  });
+
+  it('keeps dbt column identities distinct from their shared parent model (AGT-034)', () => {
+    const question = 'Show the five most expensive individual order items with order ID, product ID, and product price.';
+    const plan = buildAnalysisQuestionPlan(question);
+    const relation = ranked({
+      objectKey: 'dbt:model:order_items',
+      objectType: 'dbt_model',
+      name: 'order_items',
+      fullName: '"jaffle_shop"."dev"."order_items"',
+      payload: {
+        qualifiedId: 'dbt::model.jaffle_shop.order_items',
+        uniqueId: 'model.jaffle_shop.order_items',
+        relation: '"jaffle_shop"."dev"."order_items"',
+      },
+      score: 1,
+    }, 1, 1);
+    const columns = ['order_id', 'product_id', 'product_price'].map((name, index) => ranked({
+      objectKey: `dbt:column:order_items.${name}`,
+      objectType: 'dbt_column',
+      name,
+      fullName: `order_items.${name}`,
+      // dbt's node unique ID is deliberately shared by all of these fields.
+      payload: {
+        uniqueId: 'model.jaffle_shop.order_items',
+        relation: '"jaffle_shop"."dev"."order_items"',
+      },
+      score: 0.99 - index / 100,
+    }, index + 2, 0.99 - index / 100));
+
+    const evidence = toAgentRetrievalEvidence(
+      buildMeaningEvidencePackage(question, plan, [relation, ...columns]),
+      plan,
+    );
+
+    expect(evidence.candidates.filter((candidate) => candidate.kind === 'sql_column')
+      .map((candidate) => candidate.qualifiedId)
+      .sort()).toEqual([
+        'order_items.order_id',
+        'order_items.product_id',
+        'order_items.product_price',
+      ]);
+    expect(new Set(evidence.candidates.map((candidate) => candidate.qualifiedId ?? candidate.id)).size)
+      .toBe(evidence.candidates.length);
+  });
+
+  it('preserves actual vector and graph memberships from the snapshot through provider evidence', () => {
+    const question = 'Which customer accounts have the highest revenue?';
+    const plan = buildAnalysisQuestionPlan(question);
+    const account = ranked({
+      objectKey: 'semantic:dimension:accounts.account_name',
+      objectType: 'semantic_dimension',
+      name: 'Account Name',
+      fullName: 'semantic:dimension:accounts.account_name',
+      payload: { qualifiedId: 'semantic:dimension:accounts.account_name' },
+      score: 0.9,
+    }, 1, 0.9);
+    const pack = buildMeaningEvidencePackage(question, plan, [account], [
+      { lane: 'vector', candidates: [{ objectKey: account.row.objectKey, objectType: 'semantic_dimension', name: 'Account Name', rank: 1, score: 0.9, reason: 'vector-only fixture' }] },
+      { lane: 'graph', candidates: [{ objectKey: account.row.objectKey, objectType: 'semantic_dimension', name: 'Account Name', rank: 2, score: 0.6, reason: 'graph neighbor fixture' }] },
+    ]);
+    const evidence = toAgentRetrievalEvidence(pack, plan);
+
+    expect(evidence.candidates[0]).toMatchObject({
+      retrievalLanes: [{ lane: 'vector', rank: 1 }, { lane: 'graph', rank: 2 }],
+    });
   });
 
   it('preserves a retrieved semantic metric when exact dimensions fill the semantic class', () => {
@@ -519,5 +624,158 @@ describe('AGT-010 metadata meaning evidence lanes', () => {
       'semantic:dimension:stores.location_name',
     ]));
     expect(buildProviderMeaningEvidencePackage(evidence)).toEqual([]);
+  });
+
+  it('AGT-034 keeps a same-snapshot geographic MetricFlow extension when the raw dimension has a different router ID', () => {
+    const locationId = 'semantic:jaffle_shop:dimension:order_items.location_name';
+    const metricId = 'semantic:jaffle_shop:metric:order_items.revenue';
+    const evidence = toAgentRetrievalEvidence({
+      candidates: [{
+        objectKey: 'semantic:metric:order_items.revenue',
+        qualifiedId: metricId,
+        evidenceClass: 'semantic',
+        trustTier: 'semantic',
+        classRank: 1,
+        relevanceScore: 1,
+        name: 'order_items.revenue',
+        aliases: ['revenue', 'sales'],
+        objectType: 'semantic_metric',
+        relevanceReasons: ['exact metric'],
+        compatibilityFacts: [],
+        businessShape: {
+          aggregation: 'sum', entities: ['order_item'], dimensions: [locationId], timeGrains: [],
+          parameters: [], filters: [], outputs: ['revenue'], sourceRelations: ['order_items'],
+        },
+        analyticalCapability: {
+          metricId,
+          semanticModelId: 'semantic:jaffle_shop:model:order_items',
+          measureIds: ['semantic:jaffle_shop:measure:order_items.product_price'],
+          primaryEntityId: 'semantic:jaffle_shop:entity:order_items.order_item',
+          defaultResultGrainId: 'semantic:jaffle_shop:entity:order_items.order_item',
+          resultGrainIds: ['semantic:jaffle_shop:entity:order_items.order_item'],
+          aggregation: 'sum',
+          additivity: { entities: 'additive', time: 'additive' },
+          dimensions: [{
+            dimensionId: locationId,
+            entityId: 'semantic:jaffle_shop:entity:order_items.order_item',
+            label: 'Location Name',
+            aliases: ['location_name', 'Location Name'],
+            supportedRoles: ['group_by', 'display'],
+            relationshipPathIds: [],
+          }],
+          timeDimensions: [],
+          operations: ['group'],
+          supportedOutputKinds: ['dimension', 'metric_value'],
+          executionCapabilities: [{ route: 'semantic', adapterId: 'metricflow' }],
+          sourceFingerprint: 'fixture:region-extension',
+        },
+        ambiguityPeerIds: [],
+      }, {
+        // This represents the real local catalog shape: the execution/router
+        // identity is a legacy objectKey while its qualified identity is the
+        // same MetricFlow dimension the extension binds. It must not suppress
+        // the supplemental role card merely because their qualified IDs match.
+        objectKey: 'semantic:dimension:order_items.location_name',
+        qualifiedId: locationId,
+        evidenceClass: 'semantic',
+        trustTier: 'semantic',
+        classRank: 2,
+        relevanceScore: 0.8,
+        name: 'order_items.location_name',
+        aliases: ['location_name', 'Location Name'],
+        objectType: 'semantic_dimension',
+        relevanceReasons: ['retrieved local dimension'],
+        compatibilityFacts: [],
+        businessShape: {
+          entities: [], dimensions: [], timeGrains: [], parameters: [], filters: [], outputs: [], sourceRelations: ['order_items'],
+        },
+        ambiguityPeerIds: [],
+      }],
+      byEvidenceClass: { certified: [], semantic: [], sql: [] },
+      ambiguousGroups: [],
+    }, buildAnalysisQuestionPlan('Show revenue by sales based on the region'));
+
+    const extension = evidence.clarificationCandidates?.find((candidate) =>
+      candidate.sameSnapshotRoleExtension?.dimensionId === locationId);
+    expect(extension).toMatchObject({
+      id: locationId,
+      kind: 'semantic_member',
+      aliases: expect.arrayContaining(['region']),
+      sameSnapshotRoleExtension: {
+        metricId,
+        dimensionId: locationId,
+        requestedTerm: 'region',
+        basis: 'sole_metricflow_grouping_dimension',
+      },
+    });
+  });
+
+  it('AGT-034 surfaces the exact capability-backed product type for an explicit product-category role', () => {
+    const metricId = 'semantic:jaffle_shop:metric:order_item.revenue';
+    const productTypeId = 'semantic:jaffle_shop:dimension:products.product_type';
+    const questionPlan = buildAnalysisQuestionPlan('who are the top customers who have revenue by product category?');
+    expect(questionPlan.requestedShape.dimensions).toContain('product_category');
+    const evidence = toAgentRetrievalEvidence({
+      candidates: [{
+        objectKey: 'semantic:metric:order_item.revenue',
+        qualifiedId: metricId,
+        evidenceClass: 'semantic',
+        trustTier: 'semantic',
+        classRank: 1,
+        relevanceScore: 1,
+        name: 'order_item.revenue',
+        aliases: ['revenue', 'sales'],
+        objectType: 'semantic_metric',
+        relevanceReasons: ['exact metric'],
+        compatibilityFacts: [],
+        businessShape: {
+          aggregation: 'sum', entities: ['order_item'], dimensions: [productTypeId], timeGrains: [],
+          parameters: [], filters: [], outputs: ['revenue'], sourceRelations: ['order_items'],
+        },
+        analyticalCapability: {
+          metricId,
+          semanticModelId: 'semantic:jaffle_shop:model:order_item',
+          measureIds: ['semantic:jaffle_shop:measure:order_item.revenue'],
+          primaryEntityId: 'semantic:jaffle_shop:entity:order_item.order_item',
+          defaultResultGrainId: 'semantic:jaffle_shop:entity:order_item.order_item',
+          resultGrainIds: ['semantic:jaffle_shop:entity:order_item.order_item'],
+          aggregation: 'sum',
+          additivity: { entities: 'additive', time: 'additive' },
+          dimensions: [{
+            dimensionId: productTypeId,
+            entityId: 'semantic:jaffle_shop:entity:products.product',
+            label: 'product_type',
+            aliases: ['product_type', 'products.product_type'],
+            supportedRoles: ['group_by', 'display'],
+            nativeGroupingReference: 'product__product_type',
+            nativeGroupingPath: ['product'],
+            relationshipPathIds: [],
+          }],
+          timeDimensions: [],
+          operations: ['group', 'rank'],
+          supportedOutputKinds: ['dimension', 'metric_value', 'rank'],
+          executionCapabilities: [{ route: 'semantic', adapterId: 'metricflow' }],
+          sourceFingerprint: 'fixture:product-category-extension',
+        },
+        ambiguityPeerIds: [],
+      }],
+      byEvidenceClass: { certified: [], semantic: [], sql: [] },
+      ambiguousGroups: [],
+    }, questionPlan);
+
+    const extension = evidence.clarificationCandidates?.find((candidate) =>
+      candidate.sameSnapshotRoleExtension?.dimensionId === productTypeId);
+    expect(extension).toMatchObject({
+      id: productTypeId,
+      qualifiedId: productTypeId,
+      kind: 'semantic_member',
+      aliases: expect.arrayContaining(['product category']),
+      sameSnapshotRoleExtension: {
+        metricId,
+        dimensionId: productTypeId,
+        requestedTerm: 'product category',
+        basis: 'exact_metricflow_grouping_dimension',
+      },
+    });
   });
 });

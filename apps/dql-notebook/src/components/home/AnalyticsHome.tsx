@@ -1,7 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { Plus, MessageSquare, Trash2, Loader2, ShieldCheck, Star, Pencil } from 'lucide-react';
-import { api, type AgentConversationThread } from '../../api/client';
+import {
+  api,
+  type AgentConversationThread,
+  type AgentConversationThreadListResponse,
+} from '../../api/client';
 import { makeCell, useDispatch, useNotebookStore } from '../../store/NotebookStore';
 import type { Cell } from '../../store/types';
 import { initialDomainScope, persistDomainScope, type DomainScope } from './domain-scope';
@@ -44,7 +48,37 @@ export interface Conversation {
 const STORAGE_KEY = 'dql-ask-conversations';
 const ACTIVE_CONVERSATION_STORAGE_KEY = 'dql-ask-active-conversation';
 const DELETED_THREAD_STORAGE_KEY = 'dql-ask-deleted-thread-queue';
+const PROJECT_IDENTITY_STORAGE_KEY = 'dql-ask-conversation-project-identity-v1';
 const MAX_CONVERSATIONS = 100;
+
+/**
+ * The Ask trace is the local, addressable Research evidence surface. Keep the
+ * focus as presentation-only URL state: the store persists only the run ID and
+ * never copies Research payloads into browser navigation.
+ */
+export function askResearchTracePath(runId: string): string {
+  return `/ask/traces/${encodeURIComponent(runId)}?focus=research`;
+}
+
+/**
+ * Navigate an Ask Research artifact to the same local trace evidence used by
+ * the normal Ask run. Keeping this as a small pure seam lets the button remain
+ * a native keyboard-accessible control while the dispatch and addressable URL
+ * behavior are covered without rendering a whole Notebook shell in a test.
+ */
+export function openAskResearchTrace(input: {
+  sourceAskRunId: string;
+  dispatch: (action: { type: 'OPEN_ASK_TRACE'; runId: string }) => void;
+  history?: Pick<History, 'replaceState'>;
+}): void {
+  input.dispatch({ type: 'OPEN_ASK_TRACE', runId: input.sourceAskRunId });
+  const history = input.history ?? (typeof window !== 'undefined' ? window.history : undefined);
+  history?.replaceState(
+    { askTraceRunId: input.sourceAskRunId, focus: 'research' },
+    '',
+    askResearchTracePath(input.sourceAskRunId),
+  );
+}
 
 function askNotebookCellName(value: string | undefined): string {
   const clean = (value ?? 'AI analysis')
@@ -114,11 +148,14 @@ export function mergePersistedAskConversations(
   local: Conversation[],
   threads: AgentConversationThread[],
   deletedThreadIds: ReadonlySet<string> = new Set(),
+  options: { retainCachedItems?: boolean } = {},
 ): Conversation[] {
   const visibleThreads = threads.filter((thread) => !deletedThreadIds.has(thread.id));
-  const localByThread = new Map(
-    local.flatMap((conversation) => conversation.threadId ? [[conversation.threadId, conversation] as const] : []),
-  );
+  const localByThread = options.retainCachedItems === false
+    ? new Map<string, Conversation>()
+    : new Map(
+      local.flatMap((conversation) => conversation.threadId ? [[conversation.threadId, conversation] as const] : []),
+    );
   const recovered = visibleThreads.map((thread): Conversation => {
     const existing = localByThread.get(thread.id);
     return {
@@ -135,15 +172,340 @@ export function mergePersistedAskConversations(
       favorite: thread.favorite ?? existing?.favorite ?? false,
     };
   });
-  const recoveredIds = new Set(visibleThreads.map((thread) => thread.id));
-  return [
-    ...recovered,
-    ...local.filter((conversation) =>
-      (!conversation.threadId || !recoveredIds.has(conversation.threadId))
-      && (!conversation.threadId || !deletedThreadIds.has(conversation.threadId))),
-  ]
+  // A successful server list is the authority for thread membership. Browser
+  // storage may make a response feel instant while this request is in flight,
+  // but it may never keep an unmatched thread/answer alive after reconciliation.
+  return recovered
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
     .slice(0, MAX_CONVERSATIONS);
+}
+
+/**
+ * Boundary captured immediately before the initial durable-thread list starts.
+ * It lets the response replace pre-existing browser cache without erasing a
+ * genuinely new Ask conversation whose create/submit began while that request
+ * was in flight.
+ */
+export interface AskConversationListSnapshot {
+  conversationIds: ReadonlySet<string>;
+  threadIdsByConversationId: ReadonlyMap<string, string | undefined>;
+  /** Stable item identities from the browser cache before the list began. */
+  itemFingerprintsByConversationId: ReadonlyMap<string, ReadonlySet<string>>;
+}
+
+function askConversationItemFingerprint(item: ThreadItem): string {
+  // A `ThreadItem` is append-only. These IDs are enough to calculate an
+  // in-memory boundary delta without retaining question/result text in the
+  // snapshot or exposing it to tracing/persistence.
+  return item.kind === 'user'
+    ? `user:${item.id}`
+    : `run:${item.id}:${item.run.id}`;
+}
+
+export function snapshotAskConversationList(conversations: readonly Conversation[]): AskConversationListSnapshot {
+  return {
+    conversationIds: new Set(conversations.map((conversation) => conversation.id)),
+    threadIdsByConversationId: new Map(
+      conversations.map((conversation) => [conversation.id, conversation.threadId] as const),
+    ),
+    itemFingerprintsByConversationId: new Map(
+      conversations.map((conversation) => [
+        conversation.id,
+        new Set(conversation.items.map(askConversationItemFingerprint)),
+      ] as const),
+    ),
+  };
+}
+
+function postRequestAskConversationCreations(input: {
+  local: readonly Conversation[];
+  requestSnapshot?: AskConversationListSnapshot;
+  requestEpoch?: number;
+  mutationEpochByConversationId?: ReadonlyMap<string, number>;
+}): Conversation[] {
+  const { requestSnapshot, requestEpoch, mutationEpochByConversationId } = input;
+  if (!requestSnapshot || requestEpoch === undefined || !mutationEpochByConversationId) return [];
+  return input.local.flatMap((conversation) => {
+    const mutationEpoch = mutationEpochByConversationId.get(conversation.id);
+    if (mutationEpoch === undefined || mutationEpoch <= requestEpoch) return [];
+    if (!requestSnapshot.conversationIds.has(conversation.id)) return [conversation];
+
+    // A browser-created starter may exist before the list begins. Its server
+    // thread is nevertheless new if assignment completed after the boundary.
+    // Do not carry its old rendered transcript across a project boundary: keep
+    // only items whose stable identity did not exist at request start.
+    const threadIdAtRequest = requestSnapshot.threadIdsByConversationId.get(conversation.id);
+    if (!conversation.threadId || conversation.threadId === threadIdAtRequest) return [];
+    const itemFingerprintsAtRequest = requestSnapshot.itemFingerprintsByConversationId.get(conversation.id) ?? new Set<string>();
+    const postBoundaryItems = conversation.items.filter((item) =>
+      !itemFingerprintsAtRequest.has(askConversationItemFingerprint(item)));
+    return [{
+      // This is a clean shell for the newly bound project-B thread. It must not
+      // retain project-A title, favorite state, questions, answers, or result
+      // rows merely because the browser reused the same local conversation id.
+      id: conversation.id,
+      title: deriveTitle(postBoundaryItems),
+      createdAt: conversation.updatedAt,
+      updatedAt: conversation.updatedAt,
+      items: postBoundaryItems,
+      threadId: conversation.threadId,
+    }];
+  });
+}
+
+function mergePostRequestAskConversationCreations(
+  authoritative: Conversation[],
+  creations: Conversation[],
+): Conversation[] {
+  const merged = [...authoritative];
+  for (const creation of creations) {
+    const existingIndex = merged.findIndex((conversation) =>
+      conversation.id === creation.id
+      || Boolean(conversation.threadId && creation.threadId && conversation.threadId === creation.threadId));
+    if (existingIndex === -1) {
+      merged.push(creation);
+      continue;
+    }
+
+    const existing = merged[existingIndex];
+    const serverTitleIsSpecific = existing.title !== 'Recovered chat' && existing.title !== 'New chat';
+    merged[existingIndex] = {
+      ...existing,
+      id: creation.id,
+      title: serverTitleIsSpecific ? existing.title : creation.title,
+      createdAt: creation.createdAt < existing.createdAt ? creation.createdAt : existing.createdAt,
+      updatedAt: creation.updatedAt > existing.updatedAt ? creation.updatedAt : existing.updatedAt,
+      items: creation.items.length > 0 ? creation.items : existing.items,
+      threadId: creation.threadId ?? existing.threadId,
+      favorite: existing.favorite ?? creation.favorite,
+    };
+  }
+  return merged
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    .slice(0, MAX_CONVERSATIONS);
+}
+
+export interface AskConversationCacheReconciliation {
+  conversations: Conversation[];
+  activeId: string;
+  /** Whether it was safe to reuse locally rendered items for matching threads. */
+  cacheIdentityMatches: boolean;
+  /** Clear stale browser Ask state and remount the current panel. */
+  resetBrowserCache: boolean;
+}
+
+/**
+ * The initial sidebar request is deliberately a small injectable seam. It is
+ * used by AnalyticsHome and lets the race regression exercise a real deferred
+ * list API response rather than only a static reconciliation helper.
+ */
+export async function hydrateInitialAskConversationList(input: {
+  listAgentThreads: (options: { limit: number }) => Promise<AgentConversationThreadListResponse>;
+  requestSnapshot: AskConversationListSnapshot;
+  requestEpoch: number;
+  deletedAtRequestStart: ReadonlySet<string>;
+  getDeletedThreadIds: () => ReadonlySet<string>;
+  getConversations: () => Conversation[];
+  getActiveId: () => string;
+  getMutationEpochByConversationId: () => ReadonlyMap<string, number>;
+  getCachedProjectIdentity: () => string | undefined;
+  createConversationId?: () => string;
+}): Promise<{ projectIdentity?: string; reconciliation: AskConversationCacheReconciliation }> {
+  const { threads, projectIdentity } = await input.listAgentThreads({ limit: MAX_CONVERSATIONS });
+  // New clients label Ask threads explicitly. Older Ask threads used the
+  // generic notebook label without a notebook path, so include those for
+  // lossless upgrade recovery.
+  const askThreads = threads.filter((thread) =>
+    thread.surface === 'ask'
+    || (thread.surface === 'notebook' && !thread.notebookPath));
+  const deletedThreadIds = new Set([
+    ...input.deletedAtRequestStart,
+    ...input.getDeletedThreadIds(),
+  ]);
+  const visibleAskThreads = askThreads.filter((thread) => !deletedThreadIds.has(thread.id));
+  return {
+    projectIdentity,
+    reconciliation: reconcileAskConversationCache({
+      local: input.getConversations(),
+      threads: visibleAskThreads,
+      activeId: input.getActiveId(),
+      deletedThreadIds,
+      cachedProjectIdentity: input.getCachedProjectIdentity(),
+      serverProjectIdentity: projectIdentity,
+      requestSnapshot: input.requestSnapshot,
+      requestEpoch: input.requestEpoch,
+      mutationEpochByConversationId: input.getMutationEpochByConversationId(),
+      createConversationId: input.createConversationId,
+    }),
+  };
+}
+
+/**
+ * Reconcile the temporary browser cache against one successful local runtime
+ * response. A browser origin is not a project boundary: a new `dql notebook`
+ * process can serve a different project at the same origin. Treat an absent,
+ * changed, or malformed identity as untrusted rather than reusing old rows.
+ */
+export function reconcileAskConversationCache(input: {
+  local: Conversation[];
+  threads: AgentConversationThread[];
+  activeId: string;
+  deletedThreadIds?: ReadonlySet<string>;
+  cachedProjectIdentity?: string;
+  serverProjectIdentity?: string;
+  createConversationId?: () => string;
+  /** Snapshot + epoch from before the durable list request began. */
+  requestSnapshot?: AskConversationListSnapshot;
+  requestEpoch?: number;
+  mutationEpochByConversationId?: ReadonlyMap<string, number>;
+}): AskConversationCacheReconciliation {
+  const cachedProjectIdentity = normalizeAskConversationProjectIdentity(input.cachedProjectIdentity);
+  const serverProjectIdentity = normalizeAskConversationProjectIdentity(input.serverProjectIdentity);
+  const cacheIdentityMatches = Boolean(
+    cachedProjectIdentity
+    && serverProjectIdentity
+    && cachedProjectIdentity === serverProjectIdentity,
+  );
+  const authoritativeConversations = mergePersistedAskConversations(
+    input.local,
+    input.threads,
+    input.deletedThreadIds,
+    { retainCachedItems: cacheIdentityMatches },
+  );
+  // Only creations proven to have happened after this request started are
+  // allowed to survive a stale list response. This does not re-authorize the
+  // pre-existing browser cache after an empty/different-project response.
+  const conversations = mergePostRequestAskConversationCreations(
+    authoritativeConversations,
+    postRequestAskConversationCreations(input),
+  );
+  const activeId = conversations.some((conversation) => conversation.id === input.activeId)
+    ? input.activeId
+    : conversations[0]?.id ?? (input.createConversationId ?? makeConversationId)();
+  return {
+    conversations,
+    activeId,
+    cacheIdentityMatches,
+    // An empty Ask list is authoritative too: it must clear a stale sidebar,
+    // selected panel, and rendered answer cache from a prior local runtime.
+    resetBrowserCache: !cacheIdentityMatches || authoritativeConversations.length === 0,
+  };
+}
+
+/** Prevent an unmounted or explicitly revoked Ask panel from writing state. */
+export function isAskConversationPanelCallbackCurrent(input: {
+  callbackConversationId: string;
+  callbackEpoch: number;
+  activeConversationId: string;
+  activeEpoch: number;
+  revokedPanelKeys: ReadonlySet<string>;
+}): boolean {
+  const callbackKey = `${input.callbackConversationId}:${input.callbackEpoch}`;
+  return input.callbackConversationId === input.activeConversationId
+    && input.callbackEpoch === input.activeEpoch
+    && !input.revokedPanelKeys.has(callbackKey);
+}
+
+/**
+ * Pure callback application seam so a late thread-create callback cannot add
+ * a conversation once the panel which created it has been unmounted/revoked.
+ */
+export function applyAskThreadIdCallback(input: {
+  conversations: Conversation[];
+  callbackConversationId: string;
+  callbackEpoch: number;
+  activeConversationId: string;
+  activeEpoch: number;
+  revokedPanelKeys: ReadonlySet<string>;
+  threadId: string;
+  now?: string;
+}): Conversation[] {
+  if (!isAskConversationPanelCallbackCurrent(input)) return input.conversations;
+  const existing = input.conversations.find((conversation) => conversation.id === input.callbackConversationId);
+  if (existing?.threadId === input.threadId) return input.conversations;
+  const now = input.now ?? new Date().toISOString();
+  if (!existing) {
+    return [{
+      id: input.callbackConversationId,
+      title: 'New chat',
+      createdAt: now,
+      updatedAt: now,
+      items: [],
+      threadId: input.threadId,
+    }, ...input.conversations].slice(0, MAX_CONVERSATIONS);
+  }
+  return input.conversations.map((conversation) => conversation.id === input.callbackConversationId
+    ? { ...conversation, threadId: input.threadId, updatedAt: now }
+    : conversation);
+}
+
+/** Apply a panel item callback only while that panel is still current. */
+export function applyAskItemsCallback(input: {
+  conversations: Conversation[];
+  callbackConversationId: string;
+  callbackEpoch: number;
+  activeConversationId: string;
+  activeEpoch: number;
+  revokedPanelKeys: ReadonlySet<string>;
+  items: ThreadItem[];
+  now?: string;
+}): Conversation[] {
+  if (input.items.length === 0 || !isAskConversationPanelCallbackCurrent(input)) return input.conversations;
+  const existing = input.conversations.find((conversation) => conversation.id === input.callbackConversationId);
+  // A re-report on mount (resuming) carries the same length — don't reorder.
+  if (existing && existing.items.length >= input.items.length) return input.conversations;
+  const now = input.now ?? new Date().toISOString();
+  const conversation: Conversation = {
+    id: input.callbackConversationId,
+    title: deriveTitle(input.items),
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+    items: input.items,
+    threadId: existing?.threadId,
+    favorite: existing?.favorite,
+  };
+  return [conversation, ...input.conversations.filter((entry) => entry.id !== input.callbackConversationId)]
+    .slice(0, MAX_CONVERSATIONS);
+}
+
+function normalizeAskConversationProjectIdentity(value: unknown): string | undefined {
+  return typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value)
+    ? value
+    : undefined;
+}
+
+function loadAskConversationProjectIdentity(): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  try {
+    return normalizeAskConversationProjectIdentity(window.localStorage.getItem(PROJECT_IDENTITY_STORAGE_KEY));
+  } catch {
+    return undefined;
+  }
+}
+
+function persistAskConversationProjectIdentity(identity: string | undefined): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const normalized = normalizeAskConversationProjectIdentity(identity);
+    if (normalized) window.localStorage.setItem(PROJECT_IDENTITY_STORAGE_KEY, normalized);
+    else window.localStorage.removeItem(PROJECT_IDENTITY_STORAGE_KEY);
+  } catch {
+    // This only governs an optional rendering cache. The local runtime remains
+    // authoritative even if browser storage is unavailable.
+  }
+}
+
+/** Clear only Ask rendering state. The shared `dql-theme` contract is untouched. */
+function clearAskConversationBrowserCache(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.removeItem(STORAGE_KEY);
+    window.localStorage.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY);
+    window.localStorage.removeItem(DELETED_THREAD_STORAGE_KEY);
+    window.localStorage.removeItem(PROJECT_IDENTITY_STORAGE_KEY);
+  } catch {
+    // A later successful server response still replaces in-memory history.
+  }
 }
 
 function loadDeletedThreadIds(): Set<string> {
@@ -275,6 +637,77 @@ function relativeTime(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
+export type AskHistoryVerificationState = 'pending' | 'verified' | 'unavailable';
+
+/**
+ * Ask must not render a browser-cached conversation until the local runtime
+ * confirms both durable thread state and the active project identity. Keeping
+ * this gate outside UnifiedAgentRunPanel also prevents stale thread hydration
+ * requests before that verification completes.
+ */
+export function AskHistoryVerificationGate({
+  state,
+  t,
+  onRetry,
+  children,
+}: {
+  state: AskHistoryVerificationState;
+  t: Theme;
+  onRetry: () => void;
+  children: React.ReactNode;
+}) {
+  if (state === 'verified') return <>{children}</>;
+  const unavailable = state === 'unavailable';
+  return (
+    <section
+      data-ask-history-verification={state}
+      aria-busy={!unavailable}
+      aria-live="polite"
+      style={{
+        flex: 1,
+        minWidth: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        justifyContent: 'center',
+        alignItems: 'center',
+        gap: 16,
+        padding: 32,
+        color: t.textSecondary,
+      }}
+    >
+      <div style={{ width: 'min(680px, 100%)', display: 'grid', gap: 10 }} aria-hidden="true">
+        <div style={{ height: 18, width: '31%', borderRadius: 6, background: `${t.textPrimary}10` }} />
+        <div style={{ height: 12, width: '82%', borderRadius: 6, background: `${t.textPrimary}0b` }} />
+        <div style={{ height: 12, width: '65%', borderRadius: 6, background: `${t.textPrimary}0b` }} />
+      </div>
+      <div style={{ width: 'min(680px, 100%)', padding: 14, borderRadius: 12, border: `1px solid ${t.headerBorder}`, background: t.cellBg }}>
+        <input
+          disabled
+          aria-label="Ask composer unavailable while history is verified"
+          placeholder={unavailable ? 'Conversation history is unavailable' : 'Verifying conversation history…'}
+          style={{ width: '100%', border: 'none', outline: 'none', background: 'transparent', color: t.textMuted, fontSize: 14 }}
+        />
+      </div>
+      {unavailable ? (
+        <>
+          <p style={{ margin: 0, maxWidth: 560, textAlign: 'center', fontSize: 13, lineHeight: 1.5 }}>
+            Conversation history could not be verified from the local runtime. Cached conversations are hidden until it is available.
+          </p>
+          <button
+            type="button"
+            onClick={onRetry}
+            style={{ padding: '8px 12px', borderRadius: 8, border: `1px solid ${t.accent}`, background: t.accent, color: 'var(--accent-fg)', fontWeight: 650, cursor: 'pointer' }}
+          >
+            Retry history verification
+          </button>
+        </>
+      ) : (
+        <p style={{ margin: 0, fontSize: 13 }}>Verifying this project’s conversation history…</p>
+      )}
+    </section>
+  );
+}
+
 export function AnalyticsHome() {
   const state = useNotebookStore(useShallow((store) => ({
     activeFile: store.activeFile,
@@ -286,8 +719,23 @@ export function AnalyticsHome() {
   const [domainContext, setDomainContext] = useState<DomainScope | undefined>(() => initialDomainScope());
 
   const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations());
-  const [historyLoading, setHistoryLoading] = useState(true);
-  const startedWithLocalHistory = useMemo(() => conversations.length > 0, []);
+  const conversationsRef = React.useRef(conversations);
+  const [historyVerificationState, setHistoryVerificationState] = useState<AskHistoryVerificationState>('pending');
+  const [historyRequestNonce, setHistoryRequestNonce] = useState(0);
+  const historyVerified = historyVerificationState === 'verified';
+  const [conversationEpoch, setConversationEpoch] = useState(0);
+  const conversationEpochRef = React.useRef(0);
+  const invalidatedConversationPanelsRef = React.useRef(new Set<string>());
+  // The initial durable list is asynchronous. Marking local create/submit
+  // mutations lets its stale snapshot replace old cache without deleting a
+  // conversation that was genuinely started against the active runtime.
+  const conversationMutationEpochRef = React.useRef(0);
+  const conversationMutationEpochByIdRef = React.useRef(new Map<string, number>());
+  const markConversationMutation = useCallback((conversationId: string) => {
+    const nextEpoch = conversationMutationEpochRef.current + 1;
+    conversationMutationEpochRef.current = nextEpoch;
+    conversationMutationEpochByIdRef.current.set(conversationId, nextEpoch);
+  }, []);
   // Keep the selected thread across a page remount/reload. The panel's pending-run
   // handoff uses this server thread id to reconnect rather than asking again.
   const [activeId, setActiveId] = useState<string>(() => {
@@ -296,14 +744,20 @@ export function AnalyticsHome() {
       ? stored
       : makeConversationId();
   });
+  const activeIdRef = React.useRef(activeId);
   // Switching conversations remounts the panel. A running panel now persists its
   // run id and reconnects on remount, but keeping the selected conversation stable
   // still avoids an unnecessary context switch while an answer is in progress.
   const [isRunning, setIsRunning] = useState(false);
 
   useEffect(() => {
+    activeIdRef.current = activeId;
     try { window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, activeId); } catch { /* best-effort */ }
   }, [activeId]);
+
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
 
   useEffect(() => {
     // A page may close after the browser copy was removed but before the DELETE
@@ -318,40 +772,54 @@ export function AnalyticsHome() {
 
   useEffect(() => {
     let cancelled = false;
+    setHistoryVerificationState('pending');
     // Keep the request-start tombstones for this response even if a concurrent
     // retry DELETE succeeds first. Otherwise an older in-flight GET could
     // briefly resurrect the just-deleted thread from its stale response body.
     const deletedAtRequestStart = loadDeletedThreadIds();
-    void api.listAgentThreads({ limit: MAX_CONVERSATIONS })
-      .then(({ threads }) => {
+    const listRequestEpoch = conversationMutationEpochRef.current;
+    const listRequestSnapshot = snapshotAskConversationList(conversationsRef.current);
+    void hydrateInitialAskConversationList({
+      listAgentThreads: (options) => api.listAgentThreads(options),
+      requestSnapshot: listRequestSnapshot,
+      requestEpoch: listRequestEpoch,
+      deletedAtRequestStart,
+      getDeletedThreadIds: loadDeletedThreadIds,
+      getConversations: () => conversationsRef.current,
+      getActiveId: () => activeIdRef.current,
+      getMutationEpochByConversationId: () => conversationMutationEpochByIdRef.current,
+      getCachedProjectIdentity: loadAskConversationProjectIdentity,
+    })
+      .then(({ projectIdentity, reconciliation }) => {
         if (cancelled) return;
-        // New clients label Ask threads explicitly. Older Ask threads used the
-        // generic notebook label without a notebook path, so include those for
-        // lossless upgrade recovery.
-        const askThreads = threads.filter((thread) =>
-          thread.surface === 'ask'
-          || (thread.surface === 'notebook' && !thread.notebookPath));
-        const deletedThreadIds = new Set([
-          ...deletedAtRequestStart,
-          ...loadDeletedThreadIds(),
-        ]);
-        const visibleAskThreads = askThreads.filter((thread) => !deletedThreadIds.has(thread.id));
-        setConversations((current) => persistConversations(
-          mergePersistedAskConversations(current, visibleAskThreads, deletedThreadIds),
-        ));
-        if (!startedWithLocalHistory && visibleAskThreads[0]) {
-          setActiveId(recoveredConversationId(visibleAskThreads[0].id));
+        const activeAtReconciliation = activeIdRef.current;
+        if (reconciliation.resetBrowserCache) clearAskConversationBrowserCache();
+        persistAskConversationProjectIdentity(projectIdentity);
+
+        // The panel stores initial items at mount. A cache reset must force a
+        // remount even if a coincidentally reused thread id leaves the selected
+        // conversation id unchanged; otherwise an old result can stay painted.
+        if (reconciliation.resetBrowserCache || reconciliation.activeId !== activeAtReconciliation) {
+          const previousEpoch = conversationEpochRef.current;
+          invalidatedConversationPanelsRef.current.add(`${activeAtReconciliation}:${previousEpoch}`);
+          const nextEpoch = previousEpoch + 1;
+          conversationEpochRef.current = nextEpoch;
+          setConversationEpoch(nextEpoch);
+          activeIdRef.current = reconciliation.activeId;
+          setActiveId(reconciliation.activeId);
         }
+        const nextConversations = persistConversations(reconciliation.conversations);
+        conversationsRef.current = nextConversations;
+        setConversations(nextConversations);
+        setHistoryVerificationState('verified');
       })
       .catch(() => {
-        // Local browser history remains available if the server store cannot
-        // be opened. The next mount retries canonical thread discovery.
+        // A failed verification must never reveal local browser cache. The user
+        // can explicitly retry after the local runtime becomes available.
+        if (!cancelled) setHistoryVerificationState('unavailable');
       })
-      .finally(() => {
-        if (!cancelled) setHistoryLoading(false);
-      });
     return () => { cancelled = true; };
-  }, [startedWithLocalHistory]);
+  }, [historyRequestNonce]);
 
   const activeItems = useMemo(
     () => conversations.find((c) => c.id === activeId)?.items ?? [],
@@ -364,44 +832,47 @@ export function AnalyticsHome() {
 
   const handleItemsChange = useCallback(
     (items: ThreadItem[]) => {
-      if (items.length === 0) return;
-      setConversations((prev) => {
-        const existing = prev.find((c) => c.id === activeId);
-        // A re-report on mount (resuming) carries the same length — don't reorder.
-        if (existing && existing.items.length >= items.length) return prev;
-        const now = new Date().toISOString();
-        const convo: Conversation = {
-          id: activeId,
-          title: deriveTitle(items),
-          createdAt: existing?.createdAt ?? now,
-          updatedAt: now,
-          items,
-          threadId: existing?.threadId,
-        };
-        const next = [convo, ...prev.filter((c) => c.id !== activeId)].slice(0, MAX_CONVERSATIONS);
-        return persistConversations(next);
+      // An old panel can report one final render while the authoritative server
+      // response is replacing it. Never let that revoked panel re-persist a
+      // previous project's question, result, or member value.
+      const next = applyAskItemsCallback({
+        conversations: conversationsRef.current,
+        callbackConversationId: activeId,
+        callbackEpoch: conversationEpoch,
+        activeConversationId: activeIdRef.current,
+        activeEpoch: conversationEpochRef.current,
+        revokedPanelKeys: invalidatedConversationPanelsRef.current,
+        items,
       });
+      if (next === conversationsRef.current) return;
+      markConversationMutation(activeId);
+      const persisted = persistConversations(next);
+      conversationsRef.current = persisted;
+      setConversations(persisted);
     },
-    [activeId],
+    [activeId, conversationEpoch, markConversationMutation],
   );
 
   // Remember the server thread backing this conversation, so resuming it (or a
   // page refresh) continues the same server-persisted thread.
   const handleThreadIdChange = useCallback(
     (threadId: string) => {
-      setConversations((prev) => {
-        const existing = prev.find((c) => c.id === activeId);
-        const now = new Date().toISOString();
-        if (!existing) {
-          return persistConversations([
-            { id: activeId, title: 'New chat', createdAt: now, updatedAt: now, items: [], threadId },
-            ...prev,
-          ]);
-        }
-        return persistConversations(prev.map((c) => (c.id === activeId ? { ...c, threadId } : c)));
+      const next = applyAskThreadIdCallback({
+        conversations: conversationsRef.current,
+        callbackConversationId: activeId,
+        callbackEpoch: conversationEpoch,
+        activeConversationId: activeIdRef.current,
+        activeEpoch: conversationEpochRef.current,
+        revokedPanelKeys: invalidatedConversationPanelsRef.current,
+        threadId,
       });
+      if (next === conversationsRef.current) return;
+      markConversationMutation(activeId);
+      const persisted = persistConversations(next);
+      conversationsRef.current = persisted;
+      setConversations(persisted);
     },
-    [activeId],
+    [activeId, conversationEpoch, markConversationMutation],
   );
 
   /**
@@ -428,12 +899,21 @@ export function AnalyticsHome() {
     if (target?.threadId) void api.updateAgentThread(target.threadId, { favorite: next }).catch(() => undefined);
   }, [conversations]);
 
-  const newChat = useCallback(() => { if (!isRunning) setActiveId(makeConversationId()); }, [isRunning]);
-  const selectConversation = useCallback((id: string) => { if (!isRunning) setActiveId(id); }, [isRunning]);
+  const newChat = useCallback(() => {
+    if (!historyVerified || isRunning) return;
+    const nextActiveId = makeConversationId();
+    activeIdRef.current = nextActiveId;
+    setActiveId(nextActiveId);
+  }, [historyVerified, isRunning]);
+  const selectConversation = useCallback((id: string) => {
+    if (!historyVerified || isRunning) return;
+    activeIdRef.current = id;
+    setActiveId(id);
+  }, [historyVerified, isRunning]);
 
   const deleteConversation = useCallback(
     (id: string) => {
-      if (isRunning) return;
+      if (!historyVerified || isRunning) return;
       const threadId = conversations.find((conversation) => conversation.id === id)?.threadId;
       if (threadId) {
         queueDeletedThreadId(threadId);
@@ -442,10 +922,20 @@ export function AnalyticsHome() {
           .catch(() => undefined);
       }
       setConversations((prev) => persistConversations(prev.filter((c) => c.id !== id)));
-      if (id === activeId) setActiveId(makeConversationId());
+      if (id === activeId) {
+        const nextActiveId = makeConversationId();
+        activeIdRef.current = nextActiveId;
+        setActiveId(nextActiveId);
+      }
     },
-    [activeId, conversations, isRunning],
+    [activeId, conversations, historyVerified, isRunning],
   );
+
+  const retryHistoryVerification = useCallback(() => {
+    if (historyVerificationState === 'pending') return;
+    setHistoryVerificationState('pending');
+    setHistoryRequestNonce((nonce) => nonce + 1);
+  }, [historyVerificationState]);
 
   const openApp = (appId: string, dashboardId?: string, draftId?: string) => {
     if (draftId) {
@@ -455,7 +945,20 @@ export function AnalyticsHome() {
     dispatch({ type: 'OPEN_APP', appId, dashboardId });
   };
 
-  const openResearch = (researchRunId: string, notebookPath?: string) => {
+  const openResearch = (researchRunId: string, notebookPath?: string, sourceAskRunId?: string) => {
+    // Ask has its own full-page trace surface. The prior Global AI dispatch
+    // only mounted a rail on Apps, so this action appeared to do nothing from
+    // Ask (including native Enter/Space activation). Route the canonical Ask
+    // run to its Research stage instead; the trace graph retains the durable
+    // research_branch links and opens the selected Research evidence.
+    if (sourceAskRunId) {
+      openAskResearchTrace({ sourceAskRunId, dispatch });
+      return;
+    }
+
+    // Preserve the old contextual handoff for legacy artifacts that predate
+    // the canonical source Ask run ID. New Ask Research artifacts always take
+    // the addressable trace path above.
     dispatch({
       type: 'OPEN_GLOBAL_AI',
       audience: 'stakeholder',
@@ -485,12 +988,13 @@ export function AnalyticsHome() {
 
   return (
     <div style={{ flex: 1, minWidth: 0, display: 'flex', overflow: 'hidden', background: t.appBg }}>
+      {/* Do not let cached titles/questions render before identity verification. */}
       <ConversationSidebar
         t={t}
-        conversations={conversations}
+        conversations={historyVerified ? conversations : []}
         activeId={activeId}
-        busy={isRunning}
-        loading={historyLoading}
+        busy={isRunning || !historyVerified}
+        loading={historyVerificationState === 'pending'}
         onNewChat={newChat}
         onSelect={selectConversation}
         onDelete={deleteConversation}
@@ -499,32 +1003,38 @@ export function AnalyticsHome() {
       />
 
       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <UnifiedAgentRunPanel
-          key={activeId}
-          themeMode={state.themeMode}
-          title="Ask your data"
-          askLayout
-          scopeHint={domainContext ? `Scoped to ${domainContext.domain}${domainContext.modelAreaId ? ` · ${domainContext.modelAreaId.split('::').at(-1)?.replace(/_/g, ' ')}` : ''}${domainContext.purpose ? ` for ${domainContext.purpose}` : ''}` : 'Ask a question or request deep research'}
-          onClearScope={domainContext ? () => { setDomainContext(undefined); persistDomainScope(undefined); } : undefined}
-          workspaceContext={domainContext}
-          audience="stakeholder"
-          initialMode="auto"
-          initialItems={activeItems}
-          onItemsChange={handleItemsChange}
-          threadId={activeThreadId}
-          onThreadIdChange={handleThreadIdChange}
-          onRunningChange={setIsRunning}
-          onOpenResearch={openResearch}
-          onOpenApp={openApp}
-          onInsertSql={(sql, title, meta?: SqlNotebookDraftMeta) => openEditableNotebookCell({
-            sql,
-            title,
-            question: meta?.question,
-            sourceRunId: meta?.sourceRunId,
-          })}
-          onInsertDql={openEditableNotebookCell}
-          insertDqlActionLabel="Open in notebook"
-        />
+        <AskHistoryVerificationGate
+          state={historyVerificationState}
+          t={t}
+          onRetry={retryHistoryVerification}
+        >
+          <UnifiedAgentRunPanel
+            key={`${activeId}:${conversationEpoch}`}
+            themeMode={state.themeMode}
+            title="Ask your data"
+            askLayout
+            scopeHint={domainContext ? `Scoped to ${domainContext.domain}${domainContext.modelAreaId ? ` · ${domainContext.modelAreaId.split('::').at(-1)?.replace(/_/g, ' ')}` : ''}${domainContext.purpose ? ` for ${domainContext.purpose}` : ''}` : 'Ask a question or request deep research'}
+            onClearScope={domainContext ? () => { setDomainContext(undefined); persistDomainScope(undefined); } : undefined}
+            workspaceContext={domainContext}
+            audience="stakeholder"
+            initialMode="auto"
+            initialItems={activeItems}
+            onItemsChange={handleItemsChange}
+            threadId={activeThreadId}
+            onThreadIdChange={handleThreadIdChange}
+            onRunningChange={setIsRunning}
+            onOpenResearch={openResearch}
+            onOpenApp={openApp}
+            onInsertSql={(sql, title, meta?: SqlNotebookDraftMeta) => openEditableNotebookCell({
+              sql,
+              title,
+              question: meta?.question,
+              sourceRunId: meta?.sourceRunId,
+            })}
+            onInsertDql={openEditableNotebookCell}
+            insertDqlActionLabel="Open in notebook"
+          />
+        </AskHistoryVerificationGate>
       </div>
     </div>
   );

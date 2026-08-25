@@ -137,6 +137,7 @@ import {
   type ManifestRelationshipValidationEvidence,
   normalizeAnalyticalFailureV1,
   normalizeAnalyticalRepairCapabilityV1,
+  normalizeProviderEgressReceiptV1,
   type AnalyticalRepairCapabilityV1,
   type ProviderEgressReceiptV1,
   type AgentRunTelemetryV1,
@@ -166,7 +167,6 @@ import {
   createResearchState,
   narrationMaxTokensForFacts,
   nextHypothesis,
-  rerankCandidates,
   synthesizeResearchNarrative,
   AgenticExecutionCapabilityGate,
   createAgenticSqlExecutionCapability,
@@ -174,9 +174,14 @@ import {
   verifyAgenticSqlExecutionCapability,
   qualifyAuthorizationReferences,
   scopeContextPackToExploratoryCandidateClosure,
+  validateFrozenRequiredOutputProjection,
   validateSqlAgainstLocalContext as validateAuthorizedSqlReferences,
   verifyFinalSql,
+  attachAskTraceObserverV1,
+  askTraceObserverForV1,
   type AgenticSqlExecutionCapabilityV1,
+  type AskTraceObserverV1,
+  type ExploratoryExecutionAuthorizationAttemptV1,
   type ExploratoryExecutionFreezeV1,
   type SqlAuthorizationCheck,
 } from '@duckcodeailabs/dql-agent';
@@ -262,6 +267,11 @@ import {
   internalRelationIdsInSql,
   defaultAgentRunStorePath,
   defaultAgentRunSqlitePath,
+  AskTraceSqliteStoreV1,
+  type AskTraceListQueryV1,
+  createAskTraceObserverV1,
+  defaultAskTraceSqlitePath,
+  createAskTracePortableBundleV1,
   resolveLocalOwner,
   resolveProposeConfig,
   recordQueryRun,
@@ -331,6 +341,7 @@ import {
   createCascadeTrace,
   routeReasoningEffort,
   createAgentRunBudget,
+  selectRoute,
   isProbeSafeColumn,
   deadlineScale,
   routeForCascadeAnswerTier,
@@ -358,6 +369,9 @@ import {
   type AgentRouteExecutor,
   type AgentEvidenceCandidate,
   type AgentRetrievalEvidence,
+  type AnalyticalRequirementSeedV1,
+  type AnalyticalRequirementSetV1,
+  type ResolvedAnalyticalPlan,
   type ContextSourceCoverageV1,
   type ProviderFailureDiagnosticV1,
   type IntentDecision,
@@ -371,6 +385,7 @@ import {
   isTrustedConversationTurn,
   resolveInternalRelationIds,
   analyticalError,
+  analyticalErrorDetail,
   tagAnalyticalError,
   type GroundingExpansionResult,
   type RuntimeSchemaTable,
@@ -378,12 +393,14 @@ import {
   withAnalyticalErrorOriginSync,
   type AnalyticalErrorStage,
   type ProviderDispatchEvent,
+  type ProviderDispatchCompletionEvent,
+  type ProviderDispatchRejectionEvent,
+  type ProviderName,
   assertProviderPayloadAllowed,
   createProviderDispatchEgressReceipt,
   prepareProviderContextForDispatch,
   prepareProviderWireEnvelopeForDispatch,
   markProviderMetadataArray,
-  createProviderEgressReceipt,
   redactProviderResultRows,
   composeVerifiedAnalyticalNarrative,
   classifyProviderFailure,
@@ -394,6 +411,7 @@ import {
   buildResearchHypothesisPlanV2,
   inferResearchValidatorKind,
   buildAnalyticalTurnPlan,
+  buildAnalyticalRequirementSeedV1,
   buildAnalyticalRequirementSet,
   resolveTopRankedRegionDependency,
   DEFAULT_ASK_ROW_EGRESS_POLICY,
@@ -409,6 +427,7 @@ import {
   normalizeAnalyticalExecutionFingerprint,
   normalizeAnalyticalExecutionReceipt,
   createAgentRunCancellationError,
+  isAgentRunUserCancellation,
 } from '@duckcodeailabs/dql-agent';
 import { addSqlResultFilter, dashboardFilterableResultColumns, filterableResultColumns, replaceBlockStudioSql } from './sql-result-filter.js';
 import { gatherProposeEnrichment } from './propose-enrich.js';
@@ -595,11 +614,10 @@ export interface ProjectConfig {
       searchSafeColumns?: string[];
     };
     /**
-     * How many executed rows may reach the AI provider when it writes the answer.
-     * Defaults to a bounded, redacted sample: a model that cannot see the values
-     * cannot describe them, and the fallback for that is a `column: value` dump.
-     * Set `mode: 'disabled'` to keep every cell value on the host — narration
-     * still runs, grounded in column names and computed statistics only.
+     * Maximum redacted result rows that may reach the provider for an explicit
+     * Research run with one-run consent. Ordinary Ask and Research without
+     * consent keep every result value host-local. Set `mode: 'disabled'` (or
+     * zero rows) to disable even opted-in Research row egress.
      */
     providerResultRowEgress?: {
       mode?: 'bounded_sample' | 'disabled';
@@ -743,6 +761,86 @@ export interface LocalServerOptions {
   agentRunExecutors?: AgentRunExecutors;
   /** Host-owned rollback seam; never read from client request payloads. */
   requireMeaningCallForNaturalLanguage?: boolean;
+  /**
+   * Per-runtime capability minted by the local CLI launcher. Only a matching
+   * request header may label a trace as `cli`; public JSON never carries this
+   * authority and browser/MCP requests remain their own server-owned surface.
+   */
+  trustedCliTraceToken?: string;
+}
+
+/** One-time local capability lifetime. It is never persisted or sent to a provider. */
+export const CLI_ASK_TRACE_CAPABILITY_TTL_MS = 30_000;
+
+export interface LocalCliAskTraceCapabilityV1 {
+  capability: string;
+  expiresAt: string;
+  scope: 'agent-runs';
+}
+
+interface LocalCliAskTraceCapabilityRecordV1 {
+  expiresAtMs: number;
+  scope: LocalCliAskTraceCapabilityV1['scope'];
+}
+
+export interface LocalCliAskTraceCapabilityRegistryV1 {
+  issue(input?: { capability?: string; nowMs?: number; ttlMs?: number }): LocalCliAskTraceCapabilityV1;
+  consume(input: {
+    capability: string | string[] | undefined;
+    scope: LocalCliAskTraceCapabilityV1['scope'];
+    loopbackServer: boolean;
+    remoteAddress?: string;
+    nowMs?: number;
+  }): 'cli' | undefined;
+}
+
+function isLoopbackRemoteAddress(value: string | undefined): boolean {
+  return value === '127.0.0.1'
+    || value === '::1'
+    || value === '::ffff:127.0.0.1';
+}
+
+/**
+ * Host-owned, one-shot attribution capabilities for an already-local runtime.
+ * A plain client header is never enough: it must be minted by this process,
+ * unexpired, scoped to AgentRun admission, and arrive over loopback.
+ */
+export function createLocalCliAskTraceCapabilityRegistryV1(
+  options: { now?: () => number; mint?: () => string } = {},
+): LocalCliAskTraceCapabilityRegistryV1 {
+  const records = new Map<string, LocalCliAskTraceCapabilityRecordV1>();
+  const now = options.now ?? Date.now;
+  const mint = options.mint ?? randomUUID;
+  const purge = (at: number) => {
+    for (const [capability, record] of records) {
+      if (record.expiresAtMs <= at) records.delete(capability);
+    }
+  };
+  return {
+    issue(input = {}) {
+      const issuedAt = input.nowMs ?? now();
+      purge(issuedAt);
+      const capability = input.capability ?? mint();
+      const expiresAtMs = issuedAt + Math.max(1, Math.min(CLI_ASK_TRACE_CAPABILITY_TTL_MS, input.ttlMs ?? CLI_ASK_TRACE_CAPABILITY_TTL_MS));
+      records.set(capability, { expiresAtMs, scope: 'agent-runs' });
+      return {
+        capability,
+        expiresAt: new Date(expiresAtMs).toISOString(),
+        scope: 'agent-runs',
+      };
+    },
+    consume(input) {
+      const at = input.nowMs ?? now();
+      purge(at);
+      if (!input.loopbackServer || !isLoopbackRemoteAddress(input.remoteAddress) || typeof input.capability !== 'string') return undefined;
+      const record = records.get(input.capability);
+      if (!record || record.scope !== input.scope || record.expiresAtMs <= at) return undefined;
+      // A capability represents one concrete request admission. Deleting it
+      // prevents copied local headers from relabelling later browser requests.
+      records.delete(input.capability);
+      return 'cli';
+    },
+  };
 }
 
 // Every member of `AgentRunRequestedMode`. The `Record` (rather than a bare
@@ -852,6 +950,98 @@ function agentRunRecord(value: unknown): Record<string, unknown> | undefined {
 
 function agentRunString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+/**
+ * Catalog previews are display-only run-store joins; the trace store and
+ * strict exports remain prompt-free. Returning a partially redacted arbitrary
+ * prompt is not safe: member values, SQL literals, URLs, filesystem paths, and
+ * secrets are all meaningful diagnostics in an analytics system. Therefore a
+ * preview is optional and all-or-nothing: it is returned only for a short
+ * generic analytic question composed entirely of this deliberately small
+ * vocabulary. Every other question is represented by its typed scenario label.
+ */
+const ASK_TRACE_PREVIEW_MAX_CHARS = 160;
+const ASK_TRACE_PREVIEW_ALLOWED_WORDS = new Set([
+  'a', 'account', 'accounts', 'all', 'amount', 'an', 'and', 'are', 'average',
+  'by', 'categories', 'category', 'compare', 'count', 'current', 'customer',
+  'customers', 'daily', 'data', 'date', 'dates', 'dimension', 'dimensions',
+  'fiscal', 'for', 'from', 'growth', 'have', 'highest', 'how', 'is', 'last',
+  'lowest', 'me', 'metric', 'metrics', 'month', 'monthly', 'of', 'order',
+  'orders', 'our', 'previous', 'product', 'products', 'quarter', 'quarterly',
+  'region', 'regions', 'result', 'results', 'revenue', 'sales', 'show',
+  'spend', 'the', 'their', 'these', 'this', 'to', 'top', 'total', 'trend',
+  'trends', 'what', 'when', 'where', 'which', 'who', 'why', 'with', 'year',
+]);
+const ASK_TRACE_PREVIEW_SENSITIVE_PATTERNS = [
+  /\b(?:select|insert|update|delete|drop|alter|create|grant|revoke|truncate|merge|with)\b/i,
+  /(?:--|\/\*|\*\/|;)/,
+  /(?:https?|ftp):\/\/|\bwww\./i,
+  /(?:^|[\s"'`])(?:~\/|\/(?:Users|home|var|tmp|private|etc|opt|Volumes)\/|[A-Za-z]:[\\/])/,
+  /\b\d{3}-\d{2}-\d{4}\b/,
+  /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
+  /(?:\+?\d[\d().\-\s]{7,}\d)/,
+  /\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authorization|password|secret|client[_ -]?secret|private[_ -]?key|session|cookie)\b/i,
+  /\bbearer\s+[a-z0-9._~+\/-]{8,}/i,
+  /\b(?:sk|pk|rk)_[a-z0-9_-]{8,}\b/i,
+  /\b(?:AKIA|ASIA)[A-Z0-9]{12,}\b/,
+  /\bgh[pousr]_[A-Za-z0-9]{16,}\b/,
+  /\beyJ[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/,
+];
+
+export function askTraceQuestionPreview(question: string): string | undefined {
+  const normalized = question.replace(/\s+/g, ' ').trim();
+  if (!normalized || normalized.length > ASK_TRACE_PREVIEW_MAX_CHARS) return undefined;
+  if (ASK_TRACE_PREVIEW_SENSITIVE_PATTERNS.some((pattern) => pattern.test(normalized))) return undefined;
+  // Do not attempt to preserve literals, values, handles, or unclassified
+  // business nouns. The catalog can still identify its typed scenario without
+  // exposing those inputs.
+  if (!/^[A-Za-z ?-]+$/.test(normalized)) return undefined;
+  const words = normalized.toLowerCase().match(/[a-z]+/g);
+  if (!words?.length || words.some((word) => !ASK_TRACE_PREVIEW_ALLOWED_WORDS.has(word))) return undefined;
+  return normalized;
+}
+
+function askTraceScenarioLabel(run: Pick<AgentRun, 'requestedMode' | 'route'>): string {
+  if (run.requestedMode === 'research' || run.route === 'research') return 'Research';
+  const labels: Partial<Record<AgentRunRoute, string>> = {
+    certified_answer: 'Certified answer',
+    semantic_answer: 'Semantic answer',
+    generated_answer: 'Review-required SQL',
+    clarify: 'Clarification',
+    blocked: 'Blocked',
+    conversation: 'Conversation',
+  };
+  return labels[run.route] ?? 'Ask run';
+}
+
+/**
+ * The notebook has exactly two trace client routes. Decode only the single
+ * detail segment for validation so a valid encoded run id (for example
+ * `run%3Aoffice-42`) reaches the SPA, while encoded slashes, malformed escapes,
+ * and nested paths stay ordinary 404s.
+ */
+export function isAskTraceClientDetailPath(pathname: string): boolean {
+  const prefix = '/ask/traces/';
+  if (!pathname.startsWith(prefix)) return false;
+  const encodedRunId = pathname.slice(prefix.length);
+  if (!encodedRunId || encodedRunId.includes('/')) return false;
+  try {
+    const runId = decodeURIComponent(encodedRunId);
+    return /^[0-9A-Za-z][0-9A-Za-z:_-]{0,255}$/.test(runId);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ask owns only these client-side routes. Keep the static fallback explicit so
+ * a notebook reload works while an arbitrary missing path remains a real 404.
+ */
+export function isAskClientRoutePath(pathname: string): boolean {
+  return pathname === '/ask'
+    || pathname === '/ask/traces'
+    || isAskTraceClientDetailPath(pathname);
 }
 
 /** UI catalog fallback labels are not declared project domains. */
@@ -1153,7 +1343,7 @@ export async function scheduleCompoundAnalyticalTasks<T>(input: {
 
 /** What kind of narration a settled run has earned, and how many rows may ground it. */
 export type AgentNarrationPlan =
-  | { mode: 'skip'; reason: 'no_answer' | 'no_provider' | 'nothing_to_narrate' }
+  | { mode: 'skip'; reason: 'no_answer' | 'no_provider' | 'nothing_to_narrate' | 'ordinary_ask' }
   /** Claim-verified narration over the immutable fact set (analytical graph lanes). */
   | { mode: 'verified_facts'; maxRows: number }
   /** Preview-grounded narration for lanes that executed rows without a fact set. */
@@ -1170,17 +1360,12 @@ export type AgentNarrationAnswer =
 /**
  * Decide how a settled answer gets its business-facing prose.
  *
- * This deliberately does NOT read `requestedMode`. Gating narration on
- * `requestedMode === 'research'` meant every ordinary Ask — which the UI sends
- * as `'auto'` — skipped synthesis entirely and shipped the answer loop's
- * deterministic fact-join as the primary answer: the reported `column: value`
- * dump. Narration is owed to any run that actually produced values.
- *
- * Certification, a DQL artifact, and the exploratory candidate are no longer
- * vetoes. EXP-001's grain concern is real, but the answer to "the model might
- * relabel an entity-level measure" is to VERIFY the claims against the fact set
- * (`verified_facts`) and pass the grain statement in as a caveat — not to refuse
- * to write a sentence.
+ * An ordinary Ask already spends its one permitted model call resolving meaning.
+ * Its settled answer is the deterministic, receipt-bound answer produced by the
+ * selected analytical tier; sending result rows to a second narrator would add
+ * a hidden provider phase, change the egress receipt, and make a governed
+ * semantic run look like Research. Only an explicit Research request may run
+ * this optional, fact-checked narration stage.
  */
 export function planAgentRunNarration(
   governedAnswer: AgentNarrationAnswer,
@@ -1193,6 +1378,7 @@ export function planAgentRunNarration(
   // A refusal is not narrated. It owes the user a reason or a clarifying
   // question, which is the clarification lane's job, not the narrator's.
   if (governedAnswer.kind === 'no_answer') return { mode: 'skip', reason: 'no_answer' };
+  if (context.requestedMode !== 'research') return { mode: 'skip', reason: 'ordinary_ask' };
   if (!context.providerAvailable) return { mode: 'skip', reason: 'no_provider' };
   const maxRows = Math.max(0, context.rowEgress.maxNarrationRows);
   // The fact set is the strongest grounding available: every sentence can be
@@ -1245,6 +1431,56 @@ export function trustStateForAgentAnswer(
 ): AgentRunTrustState {
   if (answer.certification === 'certified' || answer.kind === 'certified') return 'certified';
   return semanticAnswerHasPassedAggregationProof(answer) ? 'governed' : 'review_required';
+}
+
+/**
+ * Persisted result payloads outlive the in-memory answer object, so they need
+ * the same trust gate as the visible Ask card.  In particular, an exploratory
+ * result used to inherit the old `governed` fallback merely because it had
+ * rows.  Completion is not governance: only an exact certified answer or a
+ * semantic answer carrying its aggregation proof may be persisted as governed.
+ *
+ * The `answer` overload is the normal Ask path and therefore has the proof.
+ * Generic notebook/result callers deliberately fail closed: route/status words
+ * such as `ai_generated`, `draft_ready`, and `analyst_review_required` are all
+ * review-required, and a bare legacy `governed` string never manufactures
+ * proof after the fact.
+ */
+function canonicalPersistedTrustState(input: {
+  answer?: Pick<AgentAnswer, 'certification' | 'kind' | 'route' | 'aggregationSafetyProof'>;
+  trustState?: unknown;
+  answerTier?: unknown;
+}): AgentRunTrustState | undefined {
+  if (input.answer) {
+    return input.answer.kind === 'no_answer'
+      ? 'blocked'
+      : trustStateForAgentAnswer(input.answer);
+  }
+  const rawTrust = typeof input.trustState === 'string' ? input.trustState.trim().toLowerCase() : '';
+  const tier = typeof input.answerTier === 'string' ? input.answerTier.trim().toLowerCase() : '';
+  // These state names describe generated or analyst-review workflows, never a
+  // governed proof. Keep this list explicit so a newly added presentation
+  // label cannot silently gain governed trust through the old fallback.
+  if (
+    rawTrust === 'ai_generated'
+    || rawTrust === 'draft_ready'
+    || rawTrust === 'analyst_review_required'
+    || rawTrust === 'exploratory'
+    || tier === 'exploratory_sql'
+    || tier === 'generated_sql'
+    || tier === 'ai_generated'
+    || tier === 'draft_ready'
+    || tier === 'analyst_review_required'
+  ) return 'review_required';
+  if (rawTrust === 'blocked') return 'blocked';
+  if (rawTrust === 'not_applicable') return 'not_applicable';
+  if (rawTrust === 'review_required' || rawTrust === 'grounded') return rawTrust;
+  // A bare persisted `governed` label (or an unqualified `certified` label)
+  // lacks the in-memory certified block / semantic aggregation proof. It is
+  // safe to display as review-required until a current Ask answer supplies
+  // that proof above.
+  if (rawTrust === 'governed' || rawTrust === 'certified') return 'review_required';
+  return undefined;
 }
 
 const TRUST_RANK: Record<string, number> = {
@@ -2178,9 +2414,72 @@ function apiErrorMessage(error: unknown): string {
 const ASSUMED_PROVIDER_DISPATCH_MS = 12_000;
 const DISPATCH_SETTLE_MARGIN_MS = 4_000;
 
+/** Server-owned cap for physical provider sends in one Ask run. */
+export interface AgentRunProviderDispatchBudget {
+  total: number;
+  /** Legacy/no-evidence category calls have their own one-call allowance. */
+  classification?: number;
+  meaningResolution: number;
+  /** Optional stricter cap for planning inside `generationGroup`. */
+  planning?: number;
+  generationGroup: number;
+  narration: number;
+  repair: number;
+}
+
+/**
+ * The one runtime authority for provider-send caps.
+ *
+ * Research is limited to twelve physical sends total, one planner, and one
+ * narrator. Ordinary generated lookup normally gets two sends across
+ * candidate-ID meaning and planning/generation. A router-frozen bounded
+ * exploratory plan may use one additional, same-plan provider correction only
+ * after the generation response declines SQL. That third send is a `repair`,
+ * not an LLM replan: it retains the frozen snapshot, target, closure, output
+ * tuple, and route. Classification is a separate legacy/no-evidence phase,
+ * but still consumes the total cap and cannot coexist with candidate-ID
+ * meaning resolution in the ledger.
+ */
+export function agentRunProviderDispatchBudgetForMode(
+  requestedMode: AgentRunRequestedMode | undefined,
+): AgentRunProviderDispatchBudget {
+  if (requestedMode === 'research') {
+    return {
+      total: 12,
+      classification: 1,
+      // A bounded Research root may plan up to six independently routed
+      // hypothesis children. Each child can make one candidate-ID meaning
+      // resolution, all of which remain charged to this same twelve-send
+      // ledger. Ordinary Ask deliberately remains one below.
+      meaningResolution: 6,
+      planning: 1,
+      // One planner plus at most eight generation/tool sends. Together with
+      // one meaning, one narrator, and one repair this cannot exceed twelve.
+      generationGroup: 9,
+      narration: 1,
+      repair: 1,
+    };
+  }
+  return {
+    // One interpretation (candidate-ID meaning OR legacy classification), one
+    // planning/generation transport, and exactly one eligible frozen-plan
+    // correction. The phase-specific limits below keep the exceptional third
+    // attempt from becoming a general Ask retry budget.
+    total: 3,
+    classification: 1,
+    meaningResolution: 1,
+    planning: 1,
+    generationGroup: 1,
+    narration: 0,
+    repair: 1,
+  };
+}
+
 export class RunScopedProviderDispatchEvidence implements ProviderDispatchEvidenceSink {
   private readonly receipts: ProviderEgressReceiptV1[] = [];
   private readonly phaseCounts = new Map<ProviderDispatchPhaseV1, number>();
+  /** At most one physical same-provider transient retry may be admitted per run. */
+  private retryCount = 0;
   private currentRoute: AgentRunRoute;
   /** Wall-clock start of the previous dispatch, used to learn this provider's cost. */
   private lastDispatchStartedAtMs?: number;
@@ -2221,19 +2520,7 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
     this.lastDispatchStartedAtMs = now;
   }
 
-  constructor(private readonly policy: {
-    total: number;
-    meaningResolution: number;
-    generationGroup: number;
-    /**
-     * Narration has its own bucket. It used to share `generationGroup`, so a
-     * run that spent its generation attempts had nothing left to write the
-     * answer with and threw `PROVIDER_DISPATCH_BUDGET_EXHAUSTED` — which is how
-     * an ordinary Ask ended up shipping its deterministic draft as the answer.
-     */
-    narration: number;
-    repair: number;
-  }, private readonly runBudget?: AgentRunBudget,
+  constructor(private readonly policy: AgentRunProviderDispatchBudget, private readonly runBudget?: AgentRunBudget,
     private readonly rowEgress: ProviderResultRowEgressPolicy = ZERO_ROW_EGRESS_POLICY,
   ) {
     this.currentRoute = runBudget?.mode === 'research' ? 'research' : 'generated_answer';
@@ -2255,9 +2542,12 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
       optIn: boolean;
       serializedResultShape?: { resultRowCount: number; columnCount: number };
       cumulativeResultRowCount?: number;
+      retryOfAttemptIndex?: number;
     },
   ): Record<string, unknown> {
-    const softRoute = context.dispatchPhase === 'meaning_resolution' ? 'clarify' : this.currentRoute;
+    const isInterpretationPhase = context.dispatchPhase === 'classification'
+      || context.dispatchPhase === 'meaning_resolution';
+    const softRoute = isInterpretationPhase ? 'clarify' : this.currentRoute;
     // Admission control BEFORE the phase targets: starting a call that the hard
     // deadline will kill mid-flight wastes the remaining budget and ends the run
     // with nothing. Stopping here lets the caller answer from what it has.
@@ -2279,20 +2569,63 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
         `The ${Math.round(this.runBudget.softTargetMs(softRoute) / 1_000)}-second soft target elapsed before this provider dispatch could start.`,
       ), { code: 'RUN_SOFT_TARGET_EXCEEDED' });
     }
-    this.recordDispatchStart();
     if (this.receipts.length >= this.policy.total) {
       throw Object.assign(new Error(
         `Run-wide provider dispatch budget exhausted after ${this.policy.total} physical attempts.`,
       ), { code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' });
     }
+    const retryOfAttemptIndex = context.retryOfAttemptIndex;
+    const retryRequested = retryOfAttemptIndex !== undefined;
+    const retryParent = retryRequested
+      ? this.receipts.find((receipt) => (
+        receipt.provider === event.provider
+        && receipt.dispatchPhase === context.dispatchPhase
+        && receipt.purpose === context.purpose
+        && receipt.attemptIndex === retryOfAttemptIndex
+      ))
+      : undefined;
+    // A retry is transport recovery, not another generation, repair, or route
+    // decision. It must be tied to the same admitted physical provider phase,
+    // and the frozen exploratory repair lane is deliberately excluded so its
+    // one reserved repair transport cannot be spent by a network retry.
+    if (retryRequested && (
+      !Number.isInteger(retryOfAttemptIndex)
+      || retryOfAttemptIndex < 1
+      || !retryParent
+      || this.retryCount >= 1
+      || context.dispatchPhase === 'repair'
+    )) {
+      throw Object.assign(new Error(
+        'A provider retry must be the one permitted same-provider retry of an admitted non-repair physical attempt.',
+      ), { code: 'PROVIDER_DISPATCH_RETRY_NOT_ALLOWED' });
+    }
+    const admittedTransientRetry = retryRequested && Boolean(retryParent);
     const phaseCount = this.phaseCounts.get(context.dispatchPhase) ?? 0;
-    const phaseLimit = context.dispatchPhase === 'meaning_resolution'
-      ? this.policy.meaningResolution
+    const phaseLimit = context.dispatchPhase === 'classification'
+      ? (this.policy.classification ?? 1)
+      : context.dispatchPhase === 'meaning_resolution'
+        ? this.policy.meaningResolution
+      : context.dispatchPhase === 'planning'
+        ? (this.policy.planning ?? this.policy.generationGroup)
       : context.dispatchPhase === 'repair'
         ? this.policy.repair
         : context.dispatchPhase === 'narration'
           ? this.policy.narration
           : this.policy.generationGroup;
+    // Category-only classification is a legacy/no-evidence fallback, not an
+    // alternate route into analytical binding. A run must record one or the
+    // other: allowing both would turn an opaque category prompt into a false
+    // claim that candidate IDs were resolved.
+    const conflictingInterpretationPhase = isInterpretationPhase
+      && this.receipts.some((receipt) => (
+        receipt.dispatchPhase === 'classification'
+        || receipt.dispatchPhase === 'meaning_resolution'
+      ) && receipt.dispatchPhase !== context.dispatchPhase);
+    if (conflictingInterpretationPhase) {
+      throw Object.assign(new Error(
+        'The legacy category classifier and candidate-ID meaning resolution cannot both dispatch in one Ask run.',
+      ), { code: 'PROVIDER_INTERPRETATION_PHASE_CONFLICT' });
+    }
     // Planning and generation share one ledger because they compete for the
     // same "work out the query" budget. Narration does not: it is the step that
     // turns a settled result into an answer, and starving it produces a run
@@ -2300,10 +2633,10 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
     const generationGroupCount = this.receipts.filter((receipt) =>
       receipt.dispatchPhase === 'planning'
       || receipt.dispatchPhase === 'generation').length;
-    if (phaseCount >= phaseLimit || (
+    if (!admittedTransientRetry && (phaseCount >= phaseLimit || (
       (context.dispatchPhase === 'planning' || context.dispatchPhase === 'generation')
       && generationGroupCount >= this.policy.generationGroup
-    )) {
+    ))) {
       throw Object.assign(new Error(
         `Provider dispatch budget exhausted for ${context.dispatchPhase} after ${phaseLimit} physical attempts.`,
       ), { code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' });
@@ -2311,15 +2644,19 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
     const envelope = prepareProviderWireEnvelopeForDispatch(event.provider, event.envelope);
     const projectedRowCount = context.serializedResultShape?.resultRowCount ?? 0;
     const projectedCumulativeRowCount = context.cumulativeResultRowCount ?? projectedRowCount;
-    // Ordinary Ask narration reads its ceiling from the resolved project policy;
-    // Research keeps its own explicit opt-in limits.
-    const permittedRowLimit = context.purpose === 'answer_narration'
+    // The resolver is the single privacy authority. A legacy
+    // `answer_narration` receipt can remain content-free for backwards
+    // readability, but it can never disclose result rows. Research narration
+    // requires both the explicit per-run consent and authority minted by that
+    // resolver; a hand-built positive limit is not enough.
+    const researchNarrationRowsAuthorized = context.purpose === 'research_narration'
+      && context.optIn
+      && this.rowEgress.resultRowAuthority === 'research_run_opt_in';
+    const permittedRowLimit = researchNarrationRowsAuthorized
       ? this.rowEgress.maxNarrationRows
-      : context.optIn && context.purpose === 'research_narration'
-        ? 20
-        : context.optIn && context.purpose === 'research_tool'
-          ? 200
-          : 0;
+      : context.optIn && context.purpose === 'research_tool'
+        ? this.rowEgress.maxToolRows
+        : 0;
     if (projectedRowCount > permittedRowLimit || projectedCumulativeRowCount > permittedRowLimit) {
       throw Object.assign(new Error(
         permittedRowLimit === 0
@@ -2333,6 +2670,11 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
       purpose: context.purpose,
     });
     const rowCount = projectedRowCount;
+    // A rejected admission is not a physical send.  Do not let a rejected
+    // egress/budget guard teach the run budget that the provider was slow, or
+    // consume a receipt/phase count that a later trace would present as a
+    // completed attempt.
+    this.recordDispatchStart();
     this.receipts.push(createProviderDispatchEgressReceipt({
       purpose: context.purpose,
       dispatchPhase: context.dispatchPhase,
@@ -2340,6 +2682,7 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
       ...(event.model ? { model: event.model } : {}),
       operation: event.operation,
       attemptIndex: event.attemptIndex,
+      ...(retryOfAttemptIndex !== undefined ? { retryOfAttemptIndex } : {}),
       options: event.options,
       permittedCategories: rowCount > 0
         ? ['instructions', 'question', 'schema_metadata', 'governed_context', 'result_rows']
@@ -2351,7 +2694,12 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
         ? { cumulativeResultRowCount: context.cumulativeResultRowCount }
         : {}),
     }));
+    // Admission accounting belongs to this ledger only. The Ask provider
+    // wrapper owns trace spans because it is the only boundary that observes
+    // the matching HTTP completion/failure. Recording `ok` here would turn an
+    // admitted-but-failed physical send into a false provider success.
     this.phaseCounts.set(context.dispatchPhase, phaseCount + 1);
+    if (admittedTransientRetry) this.retryCount += 1;
     return envelope;
   }
 
@@ -2368,6 +2716,372 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
 }
 
 const agentRunProviderEvidenceContext = new AsyncLocalStorage<RunScopedProviderDispatchEvidence>();
+/**
+ * Request-local trace context. It is intentionally independent of provider
+ * accounting: tracing cannot admit a dispatch, consume a budget, or change a
+ * connector call. Nested host callbacks can only append typed observations.
+ */
+const agentRunAskTraceContext = new AsyncLocalStorage<AskTraceObserverV1>();
+
+function activeAskTraceObserver(): AskTraceObserverV1 | undefined {
+  const observer = agentRunAskTraceContext.getStore();
+  return observer?.enabled ? observer : undefined;
+}
+
+function runtimeTraceFingerprint(value: string): string {
+  return `sha256:${createHash('sha256').update(value).digest('hex')}`;
+}
+
+function providerTracePhase(phase: ProviderDispatchPhaseV1): ProviderFailureDiagnosticV1['phase'] {
+  switch (phase) {
+    case 'classification': return 'classification';
+    case 'meaning_resolution': return 'meaning_resolution';
+    case 'planning': return 'planning';
+    case 'generation': return 'generation';
+    case 'repair': return 'repair';
+    case 'narration': return 'narration';
+    default: return 'unknown';
+  }
+}
+
+/**
+ * Attach one physical provider transport to the current redacted Ask trace.
+ * The caller remains the authority for admission and egress; this wrapper only
+ * records the same physical send/settlement with its server-owned phase and
+ * purpose.  It is intentionally reusable for meaning and Research narration
+ * so trace provider-attempt counts cannot drift from egress receipts.
+ */
+/**
+ * @internal Exported solely for the local runtime boundary harness.  It is not
+ * an HTTP or durable API: production callers use it to pair the one provider
+ * transport with its same-run trace span and egress receipt.
+ */
+export function createProviderDispatchTrace(input: {
+  observer?: AskTraceObserverV1;
+  phase: ProviderDispatchPhaseV1;
+  purpose: ProviderEgressPurpose;
+  admit: (event: ProviderDispatchEvent) => Record<string, unknown>;
+}): {
+  options: {
+    onProviderDispatch: (event: ProviderDispatchEvent) => Record<string, unknown>;
+    onProviderDispatchComplete: (event: ProviderDispatchCompletionEvent) => void;
+    onProviderDispatchRejected: (event: ProviderDispatchRejectionEvent) => void;
+  };
+  settle: (outcome: 'ok' | 'error' | 'cancelled', error?: unknown) => void;
+} {
+  const observer = input.observer;
+  type PendingAttempt = {
+    spanId: string | undefined;
+    provider: ProviderName;
+    model?: string;
+    attempt: ProviderDispatchEvent['attemptIndex'];
+  };
+  const pending = new Map<string, PendingAttempt[]>();
+  // A transport failure is reported by `onProviderDispatchComplete` and removes
+  // its pending entry before the outer promise rejects. Keep the number of
+  // observed provider boundaries independent of `pending`: a completed
+  // transport failure and a pre-send denial both already have a span, so
+  // `settle(error)` must not manufacture a second synthetic attempt.
+  let observedBoundaryCount = 0;
+  const deniedKeys = new Set<string>();
+  // Some provider adapters emit a rejection notification after reporting the
+  // same HTTP failure through completion. Once admission succeeded, that
+  // notification is not a second denied send; it is the same physical
+  // attempted transport and must retain its admitted/error span only.
+  const admittedKeys = new Set<string>();
+  const key = (event: Pick<ProviderDispatchEvent, 'provider' | 'operation' | 'attemptIndex'>) =>
+    `${event.provider}:${event.operation}:${event.attemptIndex}`;
+  const diagnostic = (event: Pick<ProviderDispatchEvent, 'provider' | 'model'> | undefined, error: unknown) =>
+    classifyProviderFailure({
+      message: error instanceof Error ? error.message : String(error ?? 'provider completion failed'),
+      code: error && typeof error === 'object' ? String((error as { code?: unknown }).code ?? '') : undefined,
+      phase: providerTracePhase(input.phase),
+      ...(event?.provider ? { providerFingerprint: runtimeTraceFingerprint(event.provider) } : {}),
+      ...(event?.model ? { modelFingerprint: runtimeTraceFingerprint(event.model) } : {}),
+    });
+  const start = (
+    event: Pick<ProviderDispatchEvent, 'provider' | 'operation' | 'attemptIndex' | 'model'>,
+    admission: 'admitted' | 'denied',
+    failure?: unknown,
+  ): PendingAttempt => {
+    observedBoundaryCount += 1;
+    const failureDiagnostic = failure === undefined ? undefined : diagnostic(event, failure);
+    const attempt = {
+      version: 1 as const,
+      phase: providerTracePhase(input.phase),
+      purpose: input.purpose,
+      physicalAttemptIndex: event.attemptIndex,
+      providerFingerprint: runtimeTraceFingerprint(event.provider),
+      ...(event.model ? { modelFingerprint: runtimeTraceFingerprint(event.model) } : {}),
+      readiness: admission === 'admitted' ? 'ready' as const : 'unknown' as const,
+      admission,
+      ...(failureDiagnostic?.httpStatusClass ? { httpStatusClass: failureDiagnostic.httpStatusClass } : {}),
+      ...(failureDiagnostic?.retryable !== undefined ? { retryable: failureDiagnostic.retryable } : {}),
+      ...(failureDiagnostic?.safeAction ? { safeAction: failureDiagnostic.safeAction } : {}),
+      ...(failureDiagnostic?.cause ? { cause: failureDiagnostic.cause } : {}),
+      provenance: 'live' as const,
+    };
+    const spanId = observer?.startSpan({
+      name: 'provider.attempt',
+      stage: 'provider',
+      reasonCode: failureDiagnostic ? 'provider_failure' : 'started',
+      payload: { kind: 'provider', attempt },
+    });
+    return { spanId, provider: event.provider, ...(event.model ? { model: event.model } : {}), attempt: event.attemptIndex };
+  };
+  const finish = (
+    entry: PendingAttempt,
+    outcome: 'ok' | 'error' | 'cancelled',
+    error?: unknown,
+    httpStatus?: number,
+  ) => {
+    if (!entry.spanId) return;
+    if (outcome === 'ok') {
+      observer?.finishSpan(entry.spanId, { outcome: 'ok', reasonCode: 'completed' });
+      return;
+    }
+    const failureDiagnostic = diagnostic(
+      { provider: entry.provider, ...(entry.model ? { model: entry.model } : {}) },
+      error ?? (typeof httpStatus === 'number'
+        ? Object.assign(new Error(`HTTP ${httpStatus}`), { code: `HTTP_${httpStatus}` })
+        : undefined),
+    );
+    observer?.finishSpan(entry.spanId, {
+      outcome: outcome === 'cancelled' ? 'cancelled' : 'error',
+      reasonCode: outcome === 'cancelled' ? 'cancelled' : 'provider_failure',
+      payload: {
+        kind: 'provider',
+        attempt: {
+          version: 1,
+          phase: providerTracePhase(input.phase),
+          purpose: input.purpose,
+          physicalAttemptIndex: entry.attempt,
+          providerFingerprint: runtimeTraceFingerprint(entry.provider),
+          ...(entry.model ? { modelFingerprint: runtimeTraceFingerprint(entry.model) } : {}),
+          readiness: 'ready',
+          admission: 'admitted',
+          ...(failureDiagnostic.httpStatusClass ? { httpStatusClass: failureDiagnostic.httpStatusClass } : {}),
+          retryable: failureDiagnostic.retryable,
+          safeAction: failureDiagnostic.safeAction,
+          cause: outcome === 'cancelled' ? 'cancelled' as const : failureDiagnostic.cause,
+          provenance: 'live',
+        },
+      },
+    });
+  };
+  const recordDenied = (
+    event: Pick<ProviderDispatchEvent, 'provider' | 'operation' | 'attemptIndex' | 'model'>,
+    error: unknown,
+  ) => {
+    const eventKey = key(event);
+    // A provider adapter can notify a rejection after our host admission
+    // already threw, or after reporting a completed physical HTTP failure.
+    // The first case retains one denied span and no receipt; the second is
+    // already represented by its admitted/error span and must not be doubled.
+    if (admittedKeys.has(eventKey)) return;
+    if (deniedKeys.has(eventKey)) return;
+    deniedKeys.add(eventKey);
+    const entry = start(event, 'denied', error);
+    const failureDiagnostic = diagnostic(event, error);
+    observer?.finishSpan(entry.spanId, {
+      outcome: 'denied',
+      reasonCode: 'provider_failure',
+      payload: {
+        kind: 'provider',
+        attempt: {
+          version: 1,
+          phase: providerTracePhase(input.phase),
+          purpose: input.purpose,
+          physicalAttemptIndex: event.attemptIndex,
+          providerFingerprint: runtimeTraceFingerprint(event.provider),
+          ...(event.model ? { modelFingerprint: runtimeTraceFingerprint(event.model) } : {}),
+          readiness: 'unknown',
+          admission: 'denied',
+          ...(failureDiagnostic.httpStatusClass ? { httpStatusClass: failureDiagnostic.httpStatusClass } : {}),
+          retryable: failureDiagnostic.retryable,
+          safeAction: failureDiagnostic.safeAction,
+          cause: failureDiagnostic.cause,
+          provenance: 'live',
+        },
+      },
+    });
+  };
+  const options = {
+    onProviderDispatch: (event: ProviderDispatchEvent): Record<string, unknown> => {
+      // Admission is the physical-send boundary.  First let the ledger accept
+      // and receipt the exact envelope; only then start an admitted trace
+      // span. If it rejects, record a denied boundary with no pending entry,
+      // receipt, or claim that bytes left the process.
+      try {
+        const envelope = input.admit(event);
+        const entry = start(event, 'admitted');
+        const eventKey = key(event);
+        admittedKeys.add(eventKey);
+        pending.set(eventKey, [...(pending.get(eventKey) ?? []), entry]);
+        return envelope;
+      } catch (error) {
+        recordDenied(event, error);
+        throw error;
+      }
+    },
+    onProviderDispatchComplete: (event: ProviderDispatchCompletionEvent) => {
+      // A transport/process success is not yet an accepted meaning result. The
+      // provider promise settles after parsing; close the matching physical
+      // span from `settle` so malformed output remains a visible failure.
+      if (event.outcome === 'ok') return;
+      const eventKey = key(event);
+      const entries = pending.get(eventKey) ?? [];
+      const entry = entries.shift();
+      if (entries.length > 0) pending.set(eventKey, entries); else pending.delete(eventKey);
+      if (entry) finish(
+        entry,
+        event.outcome === 'cancelled' ? 'cancelled' : 'error',
+        event.error,
+        event.httpStatus,
+      );
+    },
+    onProviderDispatchRejected: (event: ProviderDispatchRejectionEvent) => {
+      recordDenied(event, event.error);
+    },
+  };
+  return {
+    options,
+    settle: (outcome, error) => {
+      const entries = [...pending.values()].flat();
+      pending.clear();
+      for (const entry of entries) finish(entry, outcome, error);
+      // A provider can fail before it reaches the dispatch observer (for
+      // example subscription CLI readiness). Record that as one typed
+      // provider boundary instead of allowing the root trace to fall back to
+      // `unknown`.
+      if (observedBoundaryCount === 0 && outcome !== 'ok' && observer?.enabled) {
+        const failureDiagnostic = diagnostic(undefined, error);
+        const span = observer.startSpan({
+          name: 'provider.attempt',
+          stage: 'provider',
+          reasonCode: 'provider_failure',
+          payload: {
+            kind: 'provider',
+            attempt: {
+              version: 1,
+              phase: providerTracePhase(input.phase),
+              purpose: input.purpose,
+              physicalAttemptIndex: 1,
+              readiness: 'unknown',
+              admission: 'unknown',
+              retryable: failureDiagnostic.retryable,
+              safeAction: failureDiagnostic.safeAction,
+              cause: failureDiagnostic.cause,
+              provenance: 'live',
+            },
+          },
+        });
+        observer.finishSpan(span, { outcome: outcome === 'cancelled' ? 'cancelled' : 'error', reasonCode: outcome === 'cancelled' ? 'cancelled' : 'provider_failure' });
+      }
+    },
+  };
+}
+
+/**
+ * Router interpretation happens before the answer runner's AsyncLocal trace
+ * scope exists. Its request already carries the server-owned observer, so
+ * adapt the physical category-classification or candidate-ID meaning call to
+ * the shared physical-send trace wrapper without changing router authority.
+ */
+function createRouterInterpretationProviderTrace(input: {
+  request: AgentRunRequest;
+  routerPhase: 'classification' | 'meaning_resolution';
+}): ReturnType<typeof createProviderDispatchTrace> {
+  const purpose: ProviderEgressPurpose = input.routerPhase === 'classification'
+    ? 'classification'
+    : 'answer_generation';
+  return createProviderDispatchTrace({
+    observer: askTraceObserverForV1(input.request),
+    phase: input.routerPhase,
+    purpose,
+    admit: (event) => {
+      const ledger = agentRunProviderEvidenceContext.getStore();
+      if (ledger) {
+        return ledger.observe(event, {
+          purpose,
+          dispatchPhase: input.routerPhase,
+          optIn: false,
+        });
+      }
+      const envelope = prepareProviderWireEnvelopeForDispatch(event.provider, event.envelope);
+      assertProviderPayloadAllowed(envelope, {
+        allowResultRows: false,
+        maxResultRows: 0,
+        purpose,
+      });
+      return envelope;
+    },
+  });
+}
+
+/**
+ * The hypothesis planner is a real Research provider dispatch, not a local
+ * planning convenience.  Keep its one bounded call on the same server-owned
+ * ledger and trace as meaning, generation, and narration so it cannot evade
+ * the Research-12 cap or disappear from the run receipt.
+ *
+ * `planResearchHypotheses` deliberately accepts a small `generate`-only
+ * provider interface.  This adapter preserves that seam while keeping the
+ * physical transport authority at the local-runtime boundary.
+ *
+ * @internal Exported for the local runtime planner/egress regression only.
+ */
+export function createResearchHypothesisPlanningProvider(input: {
+  provider: AgentProvider;
+  request: AgentRunRequest;
+  ledger?: ProviderDispatchEvidenceSink;
+}): AgentProvider {
+  const { provider, request, ledger } = input;
+  return {
+    name: provider.name,
+    available: () => provider.available(),
+    generate: async (messages, options) => {
+      const planningTrace = createProviderDispatchTrace({
+        observer: askTraceObserverForV1(request),
+        phase: 'planning',
+        purpose: 'answer_generation',
+        admit: (event) => {
+          if (ledger) {
+            return ledger.observe(event, {
+              purpose: 'answer_generation',
+              dispatchPhase: 'planning',
+              optIn: false,
+            });
+          }
+          const envelope = prepareProviderWireEnvelopeForDispatch(event.provider, event.envelope);
+          assertProviderPayloadAllowed(envelope, {
+            allowResultRows: false,
+            maxResultRows: 0,
+            purpose: 'answer_generation',
+          });
+          return envelope;
+        },
+      });
+      try {
+        const response = await provider.generate(messages, {
+          ...options,
+          // Hypothesis planning is exactly one preparation transport. The
+          // shared run ledger enforces the remaining Research-12 ceiling.
+          maxProviderDispatches: 1,
+          ...planningTrace.options,
+        });
+        planningTrace.settle('ok');
+        return response;
+      } catch (error) {
+        planningTrace.settle(
+          request.signal?.aborted || options?.signal?.aborted ? 'cancelled' : 'error',
+          error,
+        );
+        throw error;
+      }
+    },
+  };
+}
 
 function mergeRunScopedProviderDispatchEvidence(
   run: AgentRun,
@@ -2450,9 +3164,52 @@ export async function executePreparedAgenticSqlBoundary<T>(input: {
   bindings: unknown;
   scope?: SqlAuthorizationCheck;
   execute: () => Promise<T>;
+  /** Internal harness injection; production obtains the request-local observer. */
+  traceObserver?: AskTraceObserverV1;
 }): Promise<T> {
+  const trace = input.traceObserver ?? activeAskTraceObserver();
+  const sqlFingerprint = runtimeTraceFingerprint(input.preparedSql);
+  const sqlPayload = {
+    kind: 'sql' as const,
+    execution: {
+      version: 1 as const,
+      sqlFingerprint,
+      reviewRequired: true,
+    },
+  };
+  // The statement reached this boundary from the frozen generated-plan path.
+  // Do not infer a generation success later from execution counters: this span
+  // records the actual prepared statement handoff (fingerprint only).
+  const generationSpan = trace?.startSpan({
+    name: 'sql.generate',
+    stage: 'sql',
+    reasonCode: 'started',
+    payload: sqlPayload,
+  });
+  trace?.finishSpan(generationSpan, { outcome: 'ok', reasonCode: 'completed', payload: sqlPayload });
   const capability = input.capability;
+  const validationSpan = trace?.startSpan({
+    name: 'sql.validate',
+    stage: 'sql',
+    reasonCode: 'started',
+    payload: sqlPayload,
+  });
+  const validation = validateAuthorizedSqlReferences(input.preparedSql, undefined);
+  if (!validation.ok) {
+    trace?.finishSpan(validationSpan, { outcome: 'denied', reasonCode: 'sql_denied', payload: sqlPayload });
+    throw analyticalError(
+      'The generated statement did not pass read-only SQL validation, so it was not executed.',
+      { origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql' },
+    );
+  }
+  trace?.finishSpan(validationSpan, { outcome: 'ok', reasonCode: 'completed', payload: sqlPayload });
   if (capability) {
+    const authorizationSpan = trace?.startSpan({
+      name: 'sql.authorize',
+      stage: 'sql',
+      reasonCode: 'started',
+      payload: sqlPayload,
+    });
     const authorization = mintFinalSqlAuthorization({
       sql: input.preparedSql,
       proven: capability.provenIdentifiers.map((identifier) => ({
@@ -2466,7 +3223,6 @@ export async function executePreparedAgenticSqlBoundary<T>(input: {
       targetFingerprint: capability.targetFingerprint,
       bindings: input.bindings,
     });
-    const validation = validateAuthorizedSqlReferences(input.preparedSql, undefined);
     const verdict = verifyFinalSql(authorization, input.preparedSql, qualifyAuthorizationReferences(input.preparedSql, {
       relations: validation.referencedRelations ?? [],
       columns: validation.referencedColumns ?? [],
@@ -2478,13 +3234,64 @@ export async function executePreparedAgenticSqlBoundary<T>(input: {
       console.warn(`[dql] execution authorization: ${verdict.ok ? 'admitted' : 'REFUSED'} proven=${authorization.provenIdentifiers.length}${verdict.ok ? '' : ` reason=${verdict.reason}`}`);
     }
     if (!verdict.ok) {
+      trace?.finishSpan(authorizationSpan, { outcome: 'denied', reasonCode: 'sql_denied', payload: sqlPayload });
       throw analyticalError(
         verdict.reason ?? 'The statement was not authorized for execution.',
         { origin: 'governance_gate', stage: 'execute', code: 'unauthorized_sql' },
       );
     }
+    trace?.finishSpan(authorizationSpan, { outcome: 'ok', reasonCode: 'completed', payload: sqlPayload });
   }
-  return input.execute();
+  const executionSpan = trace?.startSpan({
+    name: 'sql.execute',
+    stage: 'sql',
+    reasonCode: 'started',
+    payload: sqlPayload,
+  });
+  try {
+    const result = await input.execute();
+    trace?.finishSpan(executionSpan, { outcome: 'ok', reasonCode: 'completed', payload: sqlPayload });
+    return result;
+  } catch (error) {
+    trace?.finishSpan(executionSpan, { outcome: 'error', reasonCode: 'sql_failure', payload: sqlPayload });
+    throw error;
+  }
+}
+
+/**
+ * The DQL-artifact executor reaches this callback only after the existing
+ * compiler/read-only validation completed. Record that physical boundary when
+ * an Ask trace is active, without teaching the tracer to choose a tier or
+ * authorize a statement. Generated SQL keeps its stronger capability-bound
+ * boundary above.
+ */
+async function executePreparedArtifactTraceBoundary<T>(input: {
+  preparedSql: string;
+  reviewRequired: boolean;
+  execute: () => Promise<T>;
+}): Promise<T> {
+  const trace = activeAskTraceObserver();
+  const payload = {
+    kind: 'sql' as const,
+    execution: {
+      version: 1 as const,
+      sqlFingerprint: runtimeTraceFingerprint(input.preparedSql),
+      reviewRequired: input.reviewRequired,
+    },
+  };
+  // Certified/semantic artifact execution arrives after its own authoritative
+  // compiler checks. This wrapper has no independent validation or capability
+  // verdict to observe, so it records only the physical execution instead of
+  // manufacturing successful validate/authorize stages after the fact.
+  const execution = trace?.startSpan({ name: 'sql.execute', stage: 'sql', reasonCode: 'started', payload });
+  try {
+    const result = await input.execute();
+    trace?.finishSpan(execution, { outcome: 'ok', reasonCode: 'completed', payload });
+    return result;
+  } catch (error) {
+    trace?.finishSpan(execution, { outcome: 'error', reasonCode: 'sql_failure', payload });
+    throw error;
+  }
 }
 
 export async function startLocalServer(opts: LocalServerOptions): Promise<number> {
@@ -2492,6 +3299,12 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const bindHost = opts.host ?? process.env.DQL_HOST ?? '127.0.0.1';
   const loopback = bindHost === '127.0.0.1' || bindHost === 'localhost' || bindHost === '::1';
   const authToken = opts.authToken ?? process.env.DQL_SERVER_TOKEN;
+  const trustedCliTraceToken = opts.trustedCliTraceToken;
+  const cliAskTraceCapabilities = createLocalCliAskTraceCapabilityRegistryV1();
+  // An ephemeral `dql agent ask` runtime receives its one-shot capability from
+  // its parent process. Register it through the same short-lived, scoped
+  // registry used by an already-running loopback runtime's challenge endpoint.
+  if (trustedCliTraceToken) cliAskTraceCapabilities.issue({ capability: trustedCliTraceToken });
   const runtimeVersion = readDqlRuntimeVersion();
   // Warm the latest-version cache in the background (2s cap, 24h cache; offline → unknown).
   void fetchLatestPublishedDqlVersion();
@@ -2507,6 +3320,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
   const gitRoot = await resolveGitRoot(projectRoot);
   if (gitRoot) ensureLocalRuntimeGitignore(projectRoot);
   let projectConfig = loadProjectConfig(projectRoot);
+  // This opaque value lets the Ask browser cache distinguish a newly started
+  // project/runtime on the same browser origin without exposing `projectRoot`.
+  const conversationProjectIdentity = askConversationProjectIdentity(projectRoot);
   const analyticalExecutionService = new ExecutionService({
     executor,
     projectRoot,
@@ -2832,7 +3648,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     candidate: ConnectionConfig | null | undefined = connection,
   ): ConnectionConfig => {
     if (!candidate) {
-      throw new Error('No database connection is configured yet. Open Connections, add a warehouse or local DuckDB/file connection, then retry.');
+      // This happens before DQL compiles an artifact or hands SQL to a
+      // connector. Preserve that physical boundary for the Ask trace: callers
+      // can project the typed setup failure without claiming that SQL executed.
+      throw analyticalError(
+        'No database connection is configured yet. Open Connections, add a warehouse or local DuckDB/file connection, then retry.',
+        { origin: 'host', stage: 'execute', code: 'connection_not_configured' },
+      );
     }
     assertConnectionNodeCompatibility(candidate);
     return candidate;
@@ -3200,19 +4022,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     return { columns: columns.length > 0 ? columns : Object.keys(rows[0]), rows };
   };
 
-  // Provider-backed narration for stakeholder stories. Reuses the same provider
-  // adapter as the planner; narrateResult always returns (deterministic fallback).
+  // Provider-backed narration for an explicitly consented Research result.
+  // Ordinary Ask never enters this helper; deterministic narration remains the
+  // fallback when Research has no row-egress authority.
   const narrateForAgentRun = async (
     input: NarrateInput,
-    allowProviderResultRows = false,
+    researchResultRowsOptIn = false,
+    traceObserver?: AskTraceObserverV1,
   ): Promise<NarrateResult> => {
     // Without caller consent, keep narration deterministic and make no physical
     // provider dispatch. With consent, serialize only the bounded, redacted
     // sample the transport receipt will account for — bounded by the project's
     // own egress policy, so an admin kill-switch is not silently bypassed here.
-    if (!allowProviderResultRows || !input.result) return narrateResult(input);
+    if (!researchResultRowsOptIn || !input.result) return narrateResult(input);
     const narrationRowEgress = resolveProviderResultRowEgressPolicy({
       projectSetting: projectConfig?.agent?.providerResultRowEgress,
+      requestedMode: 'research',
+      researchOptIn: researchResultRowsOptIn,
     });
     if (narrationRowEgress.maxNarrationRows === 0) return narrateResult(input);
     const safeResult = {
@@ -3223,34 +4049,58 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       ...input,
       result: safeResult,
     };
+    const narrationTrace = createProviderDispatchTrace({
+      // This Research handler can execute after its async trace scope has
+      // returned.  Carry the server-owned observer rather than relying on
+      // AsyncLocalStorage lifetime, so the physical narration receipt and
+      // provider.attempt span remain one-to-one.
+      observer: traceObserver ?? activeAskTraceObserver(),
+      phase: 'narration',
+      purpose: 'research_narration',
+      admit: (event) => {
+        const ledger = agentRunProviderEvidenceContext.getStore();
+        if (ledger) {
+          return ledger.observe(event, {
+            purpose: 'research_narration',
+            dispatchPhase: 'narration',
+            optIn: true,
+            serializedResultShape: {
+              resultRowCount: safeResult.rows.length,
+              columnCount: safeResult.columns.length,
+            },
+            cumulativeResultRowCount: safeResult.rows.length,
+          });
+        }
+        const envelope = prepareProviderWireEnvelopeForDispatch(event.provider, event.envelope);
+        assertProviderPayloadAllowed(envelope, {
+          allowResultRows: false,
+          maxResultRows: 0,
+          purpose: 'research_narration',
+        });
+        return envelope;
+      },
+    });
     return narrateResult(safeInput, {
     complete: async ({ system, user, signal }) => {
       const provider = await createBlockStudioAssistProvider(projectRoot);
       if (!provider) throw new Error('No AI provider configured for narration.');
-      return provider.generate(
-        [{ role: 'system', content: system }, { role: 'user', content: user }],
-        {
-          maxTokens: 600,
-          temperature: 0.2,
-          signal,
-          maxProviderDispatches: 2,
-          ...(agentRunProviderEvidenceContext.getStore() ? {
-            // This lane narrates App/notebook results, not Research. It used to
-            // declare `research_narration` to clear the row check, which made
-            // receipt analytics conflate two different lanes.
-            onProviderDispatch: (event) => agentRunProviderEvidenceContext.getStore()!.observe(event, {
-              purpose: 'answer_narration',
-              dispatchPhase: 'narration',
-              optIn: true,
-              serializedResultShape: {
-                resultRowCount: safeResult.rows.length,
-                columnCount: safeResult.columns.length,
-              },
-              cumulativeResultRowCount: safeResult.rows.length,
-            }),
-          } : {}),
-        },
-      );
+      try {
+        const response = await provider.generate(
+          [{ role: 'system', content: system }, { role: 'user', content: user }],
+          {
+            maxTokens: 600,
+            temperature: 0.2,
+            signal,
+            maxProviderDispatches: 2,
+            ...narrationTrace.options,
+          },
+        );
+        narrationTrace.settle('ok');
+        return response;
+      } catch (error) {
+        narrationTrace.settle(signal?.aborted ? 'cancelled' : 'error', error);
+        throw error;
+      }
     },
     });
   };
@@ -3272,18 +4122,32 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     onProgress?: (message: string) => void,
     routeDecision?: IntentDecision,
   ): Promise<AgentAnswer> {
-    const governed = resolveGovernedAnswerRunner(projectRoot);
+    const researchBranch = request.researchBranch;
+    const isResearchChild = researchBranch?.childRunId === request.runId
+      && Boolean(researchBranch?.rootRunId)
+      && Boolean(researchBranch?.branchId);
+    // The CLI may request one known provider, but the server remains the
+    // authority for what that means.  An unknown id is deliberately retained
+    // long enough to become a typed model-selection/preflight diagnostic;
+    // otherwise the old no-provider branch mislabeled every selection failure
+    // as authentication.
+    const requestedProvider = agentRunWorkspaceValue(request, 'provider');
+    const governed = resolveGovernedAnswerRunner(projectRoot, requestedProvider);
     let resolvedProvider = governed?.provider ?? null;
     let runner = governed?.runner ?? null;
+    const exactCertifiedProviderFreePlan = routeDecision?.resolvedAnalyticalPlan?.mode === 'authoritative'
+      && routeDecision.resolvedAnalyticalPlan.capability === 'certified_execution'
+      && routeDecision.analyticalCascadeDecision?.selectedTier === 'certified'
+      && routeDecision.analyticalCascadeDecision.planFrozen === true;
     const exactProviderFreePlan = routeDecision?.resolvedAnalyticalPlan?.mode === 'authoritative'
       && (routeDecision.resolvedAnalyticalPlan.capability === 'certified_execution'
         || routeDecision.resolvedAnalyticalPlan.capability === 'semantic_execution');
-    if ((!resolvedProvider || !runner) && exactProviderFreePlan) {
+    if (exactCertifiedProviderFreePlan || ((!resolvedProvider || !runner) && exactProviderFreePlan)) {
       const deterministicProvider: AgentProvider = {
         name: 'ollama',
         available: async () => true,
         generate: async () => {
-          throw Object.assign(new Error('Exact certified/semantic execution must not dispatch a provider.'), {
+          throw Object.assign(new Error('Exact certified execution must not dispatch a provider.'), {
             code: 'EXACT_ROUTE_PROVIDER_DISPATCH_FORBIDDEN',
           });
         },
@@ -3292,12 +4156,67 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       runner = createDqlAgentProviderRunner('ollama', deterministicProvider);
     }
     if (!resolvedProvider || !runner) {
-      throw Object.assign(
-        new Error('No AI provider is configured. Configure a subscription (Claude Code / Codex), OpenAI, Gemini, Ollama, or a custom OpenAI-compatible endpoint in Settings.'),
-        { code: 'AUTHENTICATION_FAILED', providerPhase: 'preflight' },
-      );
+      const error = governedProviderPreflightError(requestedProvider);
+      // This is the only no-provider path. It has no physical send, but it is
+      // still a real readiness failure and must be visible as such rather than
+      // manufactured later by the engine from an executor outcome.
+      const trace = askTraceObserverForV1(request);
+      const diagnostic = classifyProviderFailure({
+        message: error.message,
+        code: error.code,
+        phase: 'preflight',
+      });
+      const span = trace.startSpan({
+        name: 'provider.preflight',
+        stage: 'provider',
+        reasonCode: 'provider_preflight',
+        payload: {
+          kind: 'provider',
+          attempt: {
+            version: 1,
+            phase: 'preflight',
+            physicalAttemptIndex: 0,
+            readiness: 'unavailable',
+            admission: 'unknown',
+            cause: diagnostic.cause,
+            retryable: diagnostic.retryable,
+            safeAction: diagnostic.safeAction,
+            provenance: 'live',
+          },
+        },
+      });
+      trace.finishSpan(span, {
+        outcome: 'unavailable',
+        reasonCode: 'provider_preflight',
+      });
+      throw error;
     }
     let governedAnswer: AgentAnswer | undefined;
+    // The answer loop intentionally owns its own user-facing execution
+    // failure. Some tool adapters serialize that error before returning the
+    // governed answer, which means the non-enumerable analytical error tag is
+    // no longer available there. Keep the tiny, typed fact at the physical
+    // frozen-plan callback boundary instead of parsing the returned text. This
+    // covers every frozen execution tier; it is trace-only evidence and neither
+    // changes the answer, its route, nor its trust state.
+    let frozenExecutionSetupFailure: NonNullable<AgentAnswer['observabilityExecutionFailure']> | undefined;
+    const captureFrozenConnectionSetupFailure = (error: unknown): void => {
+      const frozen = routeDecision?.analyticalCascadeDecision?.planFrozen === true;
+      const detail = analyticalErrorDetail(error);
+      if (
+        frozen
+        && detail?.origin === 'host'
+        && detail.stage === 'execute'
+        && detail.code === 'connection_not_configured'
+      ) {
+        frozenExecutionSetupFailure = {
+          version: 1,
+          phase: 'execution',
+          cause: 'connection_not_configured',
+          safeAction: 'configure_connection',
+        };
+      }
+    };
     let providerError: string | undefined;
     let providerDispatchEvidence: ProviderDispatchTerminalEvidence | undefined;
     let providerBoundaryDiagnostic: ProviderFailureDiagnosticV1 | undefined;
@@ -3418,43 +4337,97 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     // Local to this exact answer invocation. Compound children each enter this
     // function separately, so no child can consume another child's capability.
     const agenticExecutionCapabilityGate = new AgenticExecutionCapabilityGate();
+    // The first proposal and its one permitted same-plan repair are distinct
+    // one-shot authorities. Never recycle the first capability after the
+    // connector has consumed it, and never admit a second repair.
+    let exploratoryAuthorization: {
+      initial?: {
+        sqlFingerprint: string;
+        result: { capability: AgenticSqlExecutionCapabilityV1; freeze: ExploratoryExecutionFreezeV1 };
+      };
+      repair?: {
+        sqlFingerprint: string;
+        parentSqlFingerprint: string;
+        result: { capability: AgenticSqlExecutionCapabilityV1; freeze: ExploratoryExecutionFreezeV1 };
+      };
+    } | undefined;
     const prepareExploratorySqlExecution = async (
       sql: string,
+      _artifact?: unknown,
+      authorizationAttempt?: Extract<ExploratoryExecutionAuthorizationAttemptV1, { index: 1 }>,
     ): Promise<{
       capability: AgenticSqlExecutionCapabilityV1;
       freeze: ExploratoryExecutionFreezeV1;
     }> => {
       const cascade = routeDecision?.analyticalCascadeDecision;
       const selectedAttempt = selectedExploratoryAttempt;
+      const selectedPlan = routeDecision?.resolvedAnalyticalPlan;
+      const authorizationStateMismatch = (message: string): Error => Object.assign(
+        analyticalError(message, {
+          // This is an internal lifecycle invariant, not a connector, model,
+          // or retryable network failure. The engine turns this typed code
+          // into the durable SQL-authorize incident below.
+          origin: 'host', stage: 'validation', code: 'exploratory_authorization_state_mismatch',
+        }),
+        { code: 'INTERNAL_EXPLORATORY_AUTHORIZATION_STATE_MISMATCH' },
+      );
       if (
         !cascade
         || cascade.selectedTier !== 'exploratory_sql'
-        || cascade.planFrozen
+        || !cascade.planFrozen
         || !selectedAttempt
         || selectedAttempt.outcome !== 'executable'
+        || !selectedAttempt.planFrozen
         || selectedAttempt.candidateIds.length === 0
+        || !selectedPlan
+        || selectedPlan.capability !== 'bounded_exploration'
       ) {
-        throw analyticalError('The generated SQL no longer matches the router-selected exploratory path, so DQL did not authorize execution.', {
-          origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
-        });
+        throw authorizationStateMismatch('The frozen exploratory plan was not available for SQL authorization, so execution was not attempted.');
+      }
+      const proposedSqlFingerprint = executionFingerprint(sql);
+      const isRepair = authorizationAttempt?.index === 1;
+      if (authorizationAttempt && !isRepair) {
+        throw authorizationStateMismatch('The exploratory SQL repair authorization did not carry the required bounded repair index.');
+      }
+      if (isRepair) {
+        const initial = exploratoryAuthorization?.initial;
+        if (!initial || !authorizationAttempt.parentSqlFingerprint
+          || authorizationAttempt.parentSqlFingerprint !== initial.result.freeze.sqlFingerprint) {
+          throw authorizationStateMismatch('The exploratory SQL repair did not bind to the initial frozen-plan SQL authorization, so execution was not attempted.');
+        }
+        const existingRepair = exploratoryAuthorization?.repair;
+        if (existingRepair) {
+          if (existingRepair.sqlFingerprint === proposedSqlFingerprint
+            && existingRepair.parentSqlFingerprint === authorizationAttempt.parentSqlFingerprint) {
+            return existingRepair.result;
+          }
+          throw authorizationStateMismatch('A second or mismatched exploratory SQL repair was submitted after the one permitted same-plan repair authorization.');
+        }
+      } else {
+        const initial = exploratoryAuthorization?.initial;
+        if (initial) {
+          if (initial.sqlFingerprint === proposedSqlFingerprint) return initial.result;
+          throw authorizationStateMismatch('A different SQL proposal was submitted after the exploratory plan had already been authorized.');
+        }
+        if (exploratoryAuthorization?.repair) {
+          throw authorizationStateMismatch('The initial exploratory SQL authorization could not be replaced after a same-plan repair authorization.');
+        }
       }
       if (!request.runId || !semanticConnection || !preparedContextPack || !preparedExploratoryContextPack) {
-        throw analyticalError('DQL could not bind the selected exploratory query to this run, target, and metadata snapshot, so it was not executed.', {
-          origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
-        });
+        throw authorizationStateMismatch('The frozen exploratory plan could not be bound to this run, target, and metadata snapshot, so execution was not attempted.');
       }
       const retrievalSnapshotId = routeDecision?.retrievalEvidence?.snapshotId;
       const retrievalSourceFingerprint = routeDecision?.retrievalEvidence?.sourceFingerprint;
       const retrievalFreezeSnapshotId = retrievalSnapshotId ?? preparedContextPack.knowledgeLens.snapshotId;
       if (
+        selectedPlan.snapshotId !== retrievalFreezeSnapshotId
+        ||
         (retrievalSnapshotId && retrievalSnapshotId !== preparedContextPack.knowledgeLens.snapshotId)
         || (retrievalSourceFingerprint
           && preparedContextPack.freshness.fingerprint
           && retrievalSourceFingerprint !== preparedContextPack.freshness.fingerprint)
       ) {
-        throw analyticalError('The selected exploratory query no longer matches its retrieval snapshot or source fingerprint, so it was not executed.', {
-          origin: 'governance_gate', stage: 'validation', code: 'snapshot_drift',
-        });
+        throw authorizationStateMismatch('The frozen exploratory plan no longer matches its retrieval snapshot or source fingerprint, so execution was not attempted.');
       }
       projectSnapshot();
       projectSnapshots.assertCurrent(runProjectSnapshot.snapshotId);
@@ -3464,6 +4437,20 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         && target.identityFingerprint !== generatedProposalTargetIdentity.identityFingerprint
       ) {
         throw analyticalError('The selected exploratory query no longer matches the observed execution target, so it was not executed.', {
+          origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+        });
+      }
+      // The plan owns explicit outputs before SQL is generated. Do not allow a
+      // generated query to execute a five-row "closest" table that omitted a
+      // requested order/product identifier: review-required is not permission
+      // to change the user-visible result tuple.
+      const outputProjection = validateFrozenRequiredOutputProjection({
+        plan: selectedPlan,
+        sql,
+        ...(semanticDriver ? { dialect: semanticDriver } : {}),
+      });
+      if (!outputProjection.ok) {
+        throw analyticalError('The selected exploratory query did not prove every explicitly requested frozen output against its exact source column, so it was not executed.', {
           origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
         });
       }
@@ -3526,23 +4513,19 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         proofs.set(`${runtimeTable.relation}.${column}`, 'schema_tool');
       }
       const candidateIds = [...selectedAttempt.candidateIds];
-      const sqlFingerprint = executionFingerprint(sql);
-      const planFingerprint = executionFingerprint(stableExecutionValue({
-        version: 1,
-        tier: 'exploratory_sql',
-        snapshotId: retrievalFreezeSnapshotId,
-        executionSnapshotId: runProjectSnapshot.snapshotId,
-        sourceFingerprint: preparedContextPack.freshness.fingerprint,
-        targetFingerprint: target.identityFingerprint,
-        candidateIds,
-        sqlFingerprint,
-      }));
-      const planId = `exploratory-${planFingerprint.slice(0, 24)}`;
+      const sqlFingerprint = proposedSqlFingerprint;
+      // The immutable router plan is already frozen before SQL generation.
+      // SQL authorization binds the generated bytes and live target *to* that
+      // plan; it must not mint a replacement plan identity.
+      const planFingerprint = selectedPlan.fingerprint;
+      const planId = selectedPlan.planId;
       const capability = createAgenticSqlExecutionCapability({
         sql,
         proven: [...proofs.entries()].map(([identifier, evidence]) => ({ identifier, evidence })),
         runId: request.runId,
-        executionId: `${request.runId}:exploratory:${sqlFingerprint.slice(0, 16)}`,
+        executionId: isRepair
+          ? `${request.runId}:exploratory:repair:1:${sqlFingerprint.slice(0, 16)}`
+          : `${request.runId}:exploratory:${sqlFingerprint.slice(0, 16)}`,
         snapshotId: runProjectSnapshot.snapshotId,
         planId,
         targetFingerprint: target.identityFingerprint,
@@ -3552,13 +4535,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         // latter made a fully validated immutable proposal fail only after its
         // exploratory plan had frozen.
         bindings: { sqlParams: [], variables: {} },
+        exploratoryAuthorizationAttempt: isRepair
+          ? {
+              version: 1,
+              index: 1,
+              parentSqlFingerprint: authorizationAttempt!.parentSqlFingerprint,
+            }
+          : { version: 1, index: 0 },
       });
       if (!capability) {
         throw analyticalError('DQL could not mint a request-scoped exploratory execution capability, so it was not executed.', {
           origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
         });
       }
-      return {
+      const result: {
+        capability: AgenticSqlExecutionCapabilityV1;
+        freeze: ExploratoryExecutionFreezeV1;
+      } = {
         capability,
         freeze: {
           version: 1,
@@ -3570,12 +4563,33 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           sqlFingerprint: capability.candidateSqlFingerprint,
           candidateIds,
           authorization: 'capability_minted',
+          requiredOutputBindings: outputProjection.bindingProofs,
+          authorizationAttempt: isRepair
+            ? {
+                version: 1,
+                index: 1,
+                parentSqlFingerprint: authorizationAttempt!.parentSqlFingerprint,
+              }
+            : { version: 1, index: 0 },
         },
       };
+      if (isRepair) {
+        exploratoryAuthorization ??= {};
+        exploratoryAuthorization.repair = {
+          sqlFingerprint,
+          parentSqlFingerprint: authorizationAttempt!.parentSqlFingerprint,
+          result,
+        };
+      } else {
+        exploratoryAuthorization ??= {};
+        exploratoryAuthorization.initial = { sqlFingerprint, result };
+      }
+      return result;
     };
-    await runner.run(
-      {
+    await agentRunAskTraceContext.run(askTraceObserverForV1(request), async () => runner.run(
+      attachAskTraceObserverV1({
         provider: resolvedProvider,
+        ...(exactCertifiedProviderFreePlan ? { providerPreflightRequired: false } : {}),
         ...(agentRunProviderEvidenceContext.getStore()
           ? { providerDispatchEvidenceSink: agentRunProviderEvidenceContext.getStore() }
           : {}),
@@ -3598,9 +4612,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         },
         reasoningEffort,
         ...(analysisDepth ? { analysisDepth } : {}),
-        orchestrationMode: route === 'research' ? 'research' : 'ask',
-        allowProviderSemanticMemberSelection: route === 'research',
-        researchResultRowsOptIn: route === 'research' && request.researchResultRowsOptIn === true,
+        // A child remains a normal Ask cascade for routing and frozen-plan
+        // authority, but every physical provider transport belongs to its
+        // explicit Research root's ledger/trace budget. This prevents a
+        // concurrent child from inheriting the ordinary Ask one-meaning cap.
+        orchestrationMode: route === 'research' || isResearchChild ? 'research' : 'ask',
+        allowProviderSemanticMemberSelection: route === 'research' || isResearchChild,
+        researchResultRowsOptIn: (request.requestedMode === 'research' || isResearchChild)
+          && request.researchResultRowsOptIn === true,
         projectRoot,
         // Keys the execution authorization, so the proofs the analyst loop
         // gathers can be checked against the statement this run executes.
@@ -3805,7 +4824,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         // deliberately narrower than exploratory preflight: it only qualifies
         // an unambiguous FROM/JOIN leaf already present in the artifact and it
         // never supplies a missing table, join, or column.
-        executeCertifiedBlock: (node, invocation) => {
+        executeCertifiedBlock: async (node, invocation) => {
           const frozenCertifiedPlan = routeDecision?.analyticalCascadeDecision?.planFrozen === true
             && routeDecision.analyticalCascadeDecision.selectedTier === 'certified'
             && routeDecision.resolvedAnalyticalPlan?.capability === 'certified_execution';
@@ -3850,22 +4869,34 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           const certifiedSchemaContext = frozenCertifiedPlan
             ? buildFrozenCertifiedSchemaContext(preparedContextPack, runProjectSnapshot.manifest)
             : preparedQualifiedSchemaContext;
-          return executeCertifiedBlockForAgent(
-            node,
-            invocation,
-            semanticConnection,
-            semanticConnectionName,
-            certifiedSchemaContext,
-            frozenCertifiedPlan,
-          );
+          try {
+            return await executeCertifiedBlockForAgent(
+              node,
+              invocation,
+              semanticConnection,
+              semanticConnectionName,
+              certifiedSchemaContext,
+              frozenCertifiedPlan,
+            );
+          } catch (error) {
+            captureFrozenConnectionSetupFailure(error);
+            throw error;
+          }
         },
-        executeGeneratedSql: (sql, artifact) => executeGeneratedArtifactForAgent(
-          request.question,
-          sql,
-          artifact,
-          semanticConnection,
-          semanticConnectionName,
-        ),
+        executeGeneratedSql: async (sql, artifact) => {
+          try {
+            return await executeGeneratedArtifactForAgent(
+              request.question,
+              sql,
+              artifact,
+              semanticConnection,
+              semanticConnectionName,
+            );
+          } catch (error) {
+            captureFrozenConnectionSetupFailure(error);
+            throw error;
+          }
+        },
         prepareExploratorySqlExecution,
         executeAgenticGeneratedSql: async (capability, sql, artifact) => {
           if (!agenticExecutionCapabilityGate.consume(capability)) {
@@ -3873,28 +4904,40 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               origin: 'governance_gate', stage: 'execute', code: 'unauthorized_sql',
             });
           }
-          return executeGeneratedArtifactForAgent(
-            request.question,
-            sql,
-            artifact,
-            semanticConnection,
-            semanticConnectionName,
-            capability,
-            {
-              runId: request.runId,
-              executionId: capability.executionId,
-              snapshotId: runProjectSnapshot.snapshotId,
-              planId: capability.planId,
-              targetFingerprint: capability.targetFingerprint,
-            },
-          );
+          try {
+            return await executeGeneratedArtifactForAgent(
+              request.question,
+              sql,
+              artifact,
+              semanticConnection,
+              semanticConnectionName,
+              capability,
+              {
+                runId: request.runId,
+                executionId: capability.executionId,
+                snapshotId: runProjectSnapshot.snapshotId,
+                planId: capability.planId,
+                targetFingerprint: capability.targetFingerprint,
+              },
+            );
+          } catch (error) {
+            captureFrozenConnectionSetupFailure(error);
+            throw error;
+          }
         },
-        executeDqlArtifact: (artifact) => executeArtifactReferenceForAgent(
-          artifact,
-          request.question,
-          semanticConnection,
-          semanticConnectionName,
-        ),
+        executeDqlArtifact: async (artifact) => {
+          try {
+            return await executeArtifactReferenceForAgent(
+              artifact,
+              request.question,
+              semanticConnection,
+              semanticConnectionName,
+            );
+          } catch (error) {
+            captureFrozenConnectionSetupFailure(error);
+            throw error;
+          }
+        },
         getSchemaContext: (question, preparedContextPack) => getSchemaContextForAgent(
           question,
           preparedContextPack,
@@ -3904,7 +4947,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             : undefined,
         ),
         probeNamedRelations: (relations) => probeNamedRelationsForAgent(relations, semanticConnection),
-      },
+      }, askTraceObserverForV1(request)),
       (turn) => {
         if (turn.kind === 'thinking') onProgress?.(turn.text);
         if (turn.kind === 'tool_result' && turn.id === 'governed_answer') {
@@ -3917,7 +4960,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         }
       },
       runSignal,
-    );
+    ));
     if (!governedAnswer) {
       throw Object.assign(
         new Error(providerError ?? 'The AI provider did not return a governed answer.'),
@@ -3926,6 +4969,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ...(providerBoundaryDiagnostic ? { providerDiagnostic: providerBoundaryDiagnostic } : {}),
         },
       );
+    }
+    if (frozenExecutionSetupFailure && !governedAnswer.observabilityExecutionFailure) {
+      // Preserve the fact captured at the actual pre-execution setup
+      // boundary. The error itself remains redacted and the answer loop keeps
+      // sole authority over the terminal answer/provenance.
+      governedAnswer = {
+        ...governedAnswer,
+        observabilityExecutionFailure: frozenExecutionSetupFailure,
+      };
     }
     return governedAnswer;
   }
@@ -4324,6 +5376,10 @@ function analyticalFailureSummary(
               resultFingerprint: answer.result.resultFingerprint ?? answer.result.executionReceipt?.resultFingerprint,
               executionReceipt: answer.result.executionReceipt,
               answerTier: answer.route?.tier ?? answer.sourceTier,
+              trustState: canonicalPersistedTrustState({
+                answer,
+                answerTier: answer.route?.tier ?? answer.sourceTier,
+              }),
             });
             answer.result = {
               ...answer.result,
@@ -4332,6 +5388,7 @@ function analyticalFailureSummary(
               rowCount: canonical.rowCount,
               resultFingerprint: canonical.resultFingerprint,
               ...(canonical.executionReceipt ? { executionReceipt: canonical.executionReceipt } : {}),
+              ...(canonical.trustState ? { trustState: canonical.trustState } : {}),
               ...(canonical.answerTier ? { answerTier: canonical.answerTier } : {}),
             };
           }
@@ -4353,9 +5410,13 @@ function analyticalFailureSummary(
           return resolveTopRankedRegionDependency(sourceTaskId, parent?.value?.result
             ? normalizeCanonicalQueryResult({
                 ...parent.value.result,
-                resultFingerprint: parent.value.result.resultFingerprint ?? parent.value.result.executionReceipt?.resultFingerprint,
-                executionReceipt: parent.value.result.executionReceipt,
+              resultFingerprint: parent.value.result.resultFingerprint ?? parent.value.result.executionReceipt?.resultFingerprint,
+              executionReceipt: parent.value.result.executionReceipt,
+              answerTier: parent.value.route?.tier ?? parent.value.sourceTier,
+              trustState: canonicalPersistedTrustState({
+                answer: parent.value,
                 answerTier: parent.value.route?.tier ?? parent.value.sourceTier,
+              }),
               })
             : undefined, parent?.task);
         },
@@ -4474,13 +5535,10 @@ function analyticalFailureSummary(
             ?? governedAnswer.result.executionReceipt?.resultFingerprint,
           executionReceipt: governedAnswer.result.executionReceipt,
           answerTier: governedAnswer.route?.tier ?? governedAnswer.sourceTier,
-          trustState: governedAnswer.certification === 'certified'
-            ? 'certified'
-            : governedAnswer.kind === 'no_answer'
-              ? 'blocked'
-              : governedAnswer.reviewStatus === 'analyst_review_required'
-                ? 'review_required'
-                : 'governed',
+          trustState: canonicalPersistedTrustState({
+            answer: governedAnswer,
+            answerTier: governedAnswer.route?.tier ?? governedAnswer.sourceTier,
+          }),
         });
         governedAnswer.result = {
           ...governedAnswer.result,
@@ -4494,6 +5552,7 @@ function analyticalFailureSummary(
           ...(canonical.executionTime !== undefined ? { executionTime: canonical.executionTime } : {}),
           ...(canonical.truncated ? { truncated: true } : {}),
           ...(canonical.executionReceipt ? { executionReceipt: canonical.executionReceipt } : {}),
+          ...(canonical.trustState ? { trustState: canonical.trustState } : {}),
           ...(canonical.answerTier ? { answerTier: canonical.answerTier } : {}),
         };
       }
@@ -4829,26 +5888,28 @@ function analyticalFailureSummary(
       || (isExploratory && !governedAnswer.result)
       ? undefined
       : sql;
-    // Narrate any run that actually produced values. This used to be gated on
-    // `requestedMode === 'research'`, and because the UI sends ordinary Ask as
-    // `'auto'`, every normal question skipped synthesis and shipped the answer
-    // loop's deterministic fact-join as the primary answer — the reported
-    // `column: value` dump. A model that never sees the result cannot describe
-    // it, so a bounded, redacted row sample goes with the request unless a
-    // project admin has switched row egress off.
+    // Ordinary Ask stops after its bounded meaning call and the selected
+    // deterministic analytical execution. It must not quietly make a second
+    // narration dispatch or disclose result rows: that would make a governed
+    // semantic receipt look like an opted-in Research run. Explicit Research
+    // alone may ask a provider to narrate the settled result.
     let synthesizedAnswer: string | undefined;
     const providerEgressReceipts: ProviderEgressReceiptV1[] = [
       ...(governedAnswer.providerEgressReceipts ?? []),
     ];
     let narrationDurationMs = 0;
-    const researchRowsOptIn = route === 'research' && request.researchResultRowsOptIn === true;
+    const researchRowsOptIn = request.requestedMode === 'research' && request.researchResultRowsOptIn === true;
     const rowEgress = resolveProviderResultRowEgressPolicy({
       projectSetting: projectConfig?.agent?.providerResultRowEgress,
+      requestedMode: request.requestedMode,
       researchOptIn: researchRowsOptIn,
     });
-    // `createBlockStudioAssistProvider` returns null when no AI provider is
-    // configured; a narration failure must never take the governed answer down.
-    const narrationProvider = await createBlockStudioAssistProvider(projectRoot).catch(() => null);
+    // Do not even initialize a narration transport for ordinary Ask. This
+    // preserves the one-meaning-call contract and ensures the provider egress
+    // ledger contains only physical dispatches that actually occurred.
+    const narrationProvider = request.requestedMode === 'research'
+      ? await createBlockStudioAssistProvider(projectRoot).catch(() => null)
+      : null;
     const narrationPlan = planAgentRunNarration(governedAnswer, {
       requestedMode: request.requestedMode,
       providerAvailable: Boolean(narrationProvider),
@@ -4891,16 +5952,35 @@ function analyticalFailureSummary(
     if (narrationPlan.mode !== 'skip' && narrationProvider) {
       const narrationStartedAtMs = Date.now();
       const draft = governedAnswer.answer ?? governedAnswer.text;
-      const observeNarrationDispatch = (event: ProviderDispatchEvent) =>
-        agentRunProviderEvidenceContext.getStore()!.observe(event, {
-          purpose: 'answer_narration',
-          dispatchPhase: 'narration',
-          optIn: narrationMaxRows > 0,
-          serializedResultShape: {
-            resultRowCount: providerPreview?.rows.length ?? 0,
-            columnCount: providerPreview?.columns.length ?? 0,
-          },
-        });
+      const narrationTrace = createProviderDispatchTrace({
+        // Answer-loop narration runs after the inner runner's AsyncLocal trace
+        // scope. The request carries the canonical stored observer for this
+        // run, so use it directly instead of losing the physical send here.
+        observer: askTraceObserverForV1(request),
+        phase: 'narration',
+        purpose: 'research_narration',
+        admit: (event) => {
+          const ledger = agentRunProviderEvidenceContext.getStore();
+          if (ledger) {
+            return ledger.observe(event, {
+              purpose: 'research_narration',
+              dispatchPhase: 'narration',
+              optIn: researchRowsOptIn && narrationMaxRows > 0,
+              serializedResultShape: {
+                resultRowCount: providerPreview?.rows.length ?? 0,
+                columnCount: providerPreview?.columns.length ?? 0,
+              },
+            });
+          }
+          const envelope = prepareProviderWireEnvelopeForDispatch(event.provider, event.envelope);
+          assertProviderPayloadAllowed(envelope, {
+            allowResultRows: false,
+            maxResultRows: 0,
+            purpose: 'research_narration',
+          });
+          return envelope;
+        },
+      });
       const narrationDispatchOptions = (factCount = 0) => ({
         // The ceiling has to grow with the result. Every claim must echo the
         // fact ids it rests on, and a fact id is a long hex string that
@@ -4913,9 +5993,7 @@ function analyticalFailureSummary(
         maxTokens: narrationMaxTokensForFacts(factCount),
         temperature: 0.3,
         maxProviderDispatches: 2,
-        ...(agentRunProviderEvidenceContext.getStore()
-          ? { onProviderDispatch: observeNarrationDispatch }
-          : {}),
+        ...narrationTrace.options,
       });
       try {
         const frame = governedAnswer.resolvedAnalyticalPlan?.analyticalFrame;
@@ -4988,7 +6066,9 @@ function analyticalFailureSummary(
             validationFailures: [],
           };
         }
-      } catch {
+        narrationTrace.settle('ok');
+      } catch (error) {
+        narrationTrace.settle(request.signal?.aborted ? 'cancelled' : 'error', error);
         // Keep the governed draft on any narration failure.
         synthesizedAnswer = undefined;
         narrationIntegrityReceipt = {
@@ -5001,27 +6081,10 @@ function analyticalFailureSummary(
         narrationDurationMs = Date.now() - narrationStartedAtMs;
       }
     }
-    // Every run accounts for its narration egress, including the runs that did
-    // not narrate — "no receipt" must never be ambiguous between "no rows left
-    // the host" and "nobody looked".
-    {
-      const narrated = narrationSource !== undefined;
-      const rowsSent = narrated ? providerPreview?.rows.length ?? 0 : 0;
-      providerEgressReceipts.push(createProviderEgressReceipt({
-        purpose: 'answer_narration',
-        provider: narrated ? narrationProvider?.name ?? 'none' : 'none',
-        permittedCategories: rowsSent > 0
-          ? ['instructions', 'question', 'governed_context', 'result_rows']
-          : ['instructions', 'question', 'governed_context'],
-        optIn: rowsSent > 0,
-        redactionPolicyId: rowEgress.policyId,
-        payload: narrated
-          ? { question: request.question, resultPreview: rowsSent > 0 ? providerPreview : undefined }
-          : { resultRows: 0, providerDisabled: !narrationProvider },
-        resultRowCount: rowsSent,
-        columnCount: narrated ? providerPreview?.columns.length ?? 0 : 0,
-      }));
-    }
+    // Provider egress receipts are evidence of a physical provider dispatch,
+    // not a completeness checklist. `RunScopedProviderDispatchEvidence.observe`
+    // writes the receipt immediately before a real call; deliberately skipped
+    // narration therefore has no synthetic `answer_narration` receipt.
     // A grounding/modeling gap is a REFUSAL. It was computed above but never
     // reached this ternary, so it fell through to `needs_review` — the same
     // status as a perfectly good uncertified answer. Every downstream trust
@@ -5339,6 +6402,9 @@ function analyticalFailureSummary(
       ...(governedAnswer.exploratoryExecutionFreeze
         ? { analyticalExecutionFreeze: governedAnswer.exploratoryExecutionFreeze }
         : {}),
+      ...(governedAnswer.exploratoryRepairExecutionFreeze
+        ? { analyticalExecutionRepairFreeze: governedAnswer.exploratoryRepairExecutionFreeze }
+        : {}),
     };
   };
 
@@ -5400,18 +6466,43 @@ function analyticalFailureSummary(
             ...(request.history ?? []).slice(-6).map((message) => ({ role: message.role, content: message.text })),
             { role: 'user' as const, content: request.question },
           ];
-          text = (await provider.generate(messages, {
-            maxTokens: 320,
-            temperature: 0.6,
-            maxProviderDispatches: 2,
-            ...(agentRunProviderEvidenceContext.getStore() ? {
-              onProviderDispatch: (event) => agentRunProviderEvidenceContext.getStore()!.observe(event, {
+          // Conversation generation is a physical provider transport too.
+          // It is outside the router's candidate-ID meaning call, so retain its
+          // actual `generation` phase rather than relabelling it as meaning.
+          const conversationTrace = createProviderDispatchTrace({
+            observer: askTraceObserverForV1(request),
+            phase: 'generation',
+            purpose: 'answer_generation',
+            admit: (event) => {
+              const ledger = agentRunProviderEvidenceContext.getStore();
+              if (ledger) {
+                return ledger.observe(event, {
+                  purpose: 'answer_generation',
+                  dispatchPhase: 'generation',
+                  optIn: false,
+                });
+              }
+              const envelope = prepareProviderWireEnvelopeForDispatch(event.provider, event.envelope);
+              assertProviderPayloadAllowed(envelope, {
+                allowResultRows: false,
+                maxResultRows: 0,
                 purpose: 'answer_generation',
-                dispatchPhase: 'generation',
-                optIn: false,
-              }),
-            } : {}),
-          })).trim();
+              });
+              return envelope;
+            },
+          });
+          try {
+            text = (await provider.generate(messages, {
+              maxTokens: 320,
+              temperature: 0.6,
+              maxProviderDispatches: 2,
+              ...conversationTrace.options,
+            })).trim();
+            conversationTrace.settle('ok');
+          } catch (error) {
+            conversationTrace.settle(request.signal?.aborted ? 'cancelled' : 'error', error);
+            throw error;
+          }
           // Perceived-latency: surface the reply as one delta for surfaces wired to stream.
           if (text) emitAnswerDelta?.(text);
         }
@@ -5838,6 +6929,7 @@ function analyticalFailureSummary(
     skill_draft: skillAuthoringRunExecutor,
     research: async (researchContext) => {
       const { runId, request, routeDecision, emit } = researchContext;
+      const trace = askTraceObserverForV1(request);
       const metrics = loadSemanticMetrics(projectRoot);
       let blocks = collectPlanBlocks(projectRoot, { certifiedOnly: true });
       const usedCertifiedOnly = blocks.length > 0;
@@ -5854,9 +6946,22 @@ function analyticalFailureSummary(
       // unreachable, `planResearch` keeps its deterministic template, so
       // research never depends on a model being available.
       const researchPlanner = resolveGovernedAnswerRunner(projectRoot);
-      const researchPlannerProvider = researchPlanner
+      const rawResearchPlannerProvider = researchPlanner
         ? createGovernedTextProvider(researchPlanner.provider as never, projectRoot)
         : undefined;
+      const researchPlannerProvider = rawResearchPlannerProvider
+        ? createResearchHypothesisPlanningProvider({
+          provider: rawResearchPlannerProvider,
+          request,
+          ledger: agentRunProviderEvidenceContext.getStore(),
+        })
+        : undefined;
+      const researchPlanSpan = trace.startSpan({
+        name: 'research.plan',
+        stage: 'research',
+        reasonCode: 'started',
+        payload: { kind: 'research', branchCount: 0 },
+      });
       const plan = await planResearch({
         question: request.question,
         metrics,
@@ -5868,14 +6973,30 @@ function analyticalFailureSummary(
         // When the user explicitly picked research, investigate — don't collapse to one step.
         forceInvestigate: request.requestedMode === 'research',
         rootPlan: routeDecision?.resolvedAnalyticalPlan,
+        // Hypothesis planning is bounded by the same request deadline as
+        // every child branch. The planner's internal 20s timer is only an
+        // additional safety limit, never a replacement for cancellation.
+        signal: request.signal,
       });
       // Direct governed answer ("the metric answers this directly"): don't wrap it in
       // a review-required research dossier — run the query through the answer loop and
       // return the executed result table + DQL artifact. A dossier is only for genuine
       // multi-step investigation (plan.done === false) or explicit research mode.
       if (plan.done && !plan.followUp && request.requestedMode !== 'research') {
+        trace.finishSpan(researchPlanSpan, {
+          outcome: 'ok',
+          reasonCode: 'completed',
+          payload: { kind: 'research', branchCount: plan.steps.length },
+        });
         return answerRunExecutor(researchContext);
       }
+      // Research may enter before ordinary Ask selected a root execution
+      // route, but its child requirements must still begin from the reader's
+      // own analytical tuple.  Prefer the already-frozen/meaning seed when
+      // one exists; otherwise build one deterministic host seed from the root
+      // question.  Planner prose and a prior root SQL are never inputs here.
+      const researchRootRequirementSeed = routeDecision?.meaningResolution?.hostRequirementSeed
+        ?? buildAnalyticalRequirementSeedV1({ question: request.question });
       // This is the executable, receipt-bound research plan. It carries the
       // branch hypothesis/expectation/validator kind into every child rather
       // than treating V2 as a presentation-only wrapper after the work ends.
@@ -5887,6 +7008,11 @@ function analyticalFailureSummary(
           targetId: step.action.target,
           validatorKind: inferResearchValidatorKind(step.thought, step.expectation),
         })),
+      });
+      trace.finishSpan(researchPlanSpan, {
+        outcome: 'ok',
+        reasonCode: 'completed',
+        payload: { kind: 'research', branchCount: typedResearchPlan.hypotheses.length },
       });
       // The V2 contract is the executable branch authority: retain its stable
       // hypothesis ID, wording, expectation, target, and validator kind while
@@ -5906,6 +7032,17 @@ function analyticalFailureSummary(
           action: { ...planned.action, target: hypothesis.targetId },
         }];
       });
+      // `typedResearchPlan` can retain a hypothesis that no longer has a
+      // matching, catalog-grounded executable action (for example after a
+      // duplicate target is folded during planning). Scope must describe the
+      // branch set that can actually be investigated, not the presentation
+      // plan that happened to be typed before that admission check.
+      //
+      // Keep this count independent of execution success: a provider or local
+      // execution failure is a failed branch, not evidence that a supported
+      // branch was never available. The ledger will still make failed verdicts
+      // explicit below.
+      let groundableResearchBranchCount = executableResearchBranches.length;
       const typedHypothesesById = new Map(typedResearchPlan.hypotheses.map((hypothesis) => [hypothesis.id, hypothesis]));
       const needsClarification = Boolean(plan.followUp);
       const notebookPath = agentRunNotebookPath(request, runId);
@@ -5929,8 +7066,156 @@ function analyticalFailureSummary(
       };
       let researchRun: ReturnType<typeof withNotebookResearchChecklist> | undefined;
       const researchRuns: Array<ReturnType<typeof withNotebookResearchChecklist>> = [];
+      const researchBranchSpans = new Map<string, { spanId?: string; hypothesisFingerprint: string }>();
+      // These outcomes are independent of the notebook storage status. A
+      // skipped branch is persisted as a reviewable child record (storage has
+      // no `skipped` state), while the immutable Ask artifact/trace retains the
+      // precise bounded Research verdict and stop reason.
+      const researchBranchOutcomes = new Map<string, {
+        status: 'failed' | 'skipped';
+        stopReason: ResearchBranchStopReasonV1;
+        error: string;
+      }>();
+      const researchBranchReceipts: ResearchBranchReceiptV1[] = [];
       let researchWorkspaceError: string | undefined;
+      // The notebook root is created before child execution. Keep its stable
+      // identity outside the storage scope so a root deadline or user
+      // cancellation can still persist a content-safe, restart-readable Ask
+      // artifact after the child storage handle has closed.
+      let researchRootRunId: string | undefined;
+      let partialResearchArtifactPersisted = false;
+      // The engine races every executor against the root cancellation signal.
+      // Keep every admitted child in the current bounded wave available to a
+      // synchronous root abort listener so the immutable partial artifact is
+      // emitted before the outer engine resumes and persists the terminal run.
+      const activeResearchBranches = new Map<string, {
+        branchId: string;
+        childRunId: string;
+        index: number;
+        branchBudgetMs: number;
+        branchSpan?: string;
+        hypothesisFingerprint: string;
+      }>();
+      let rootAbortReceiptPersisted = false;
+
+      // Concurrent branches settle in wall-clock order. Receipts are product
+      // evidence, so retain the planner order independently of timing and
+      // never duplicate a child that the root abort listener already closed.
+      const recordResearchBranchReceipt = (receipt: ResearchBranchReceiptV1): boolean => {
+        if (researchBranchReceipts.some((existing) => existing.childRunId === receipt.childRunId)) return false;
+        researchBranchReceipts.push(receipt);
+        researchBranchReceipts.sort((left, right) => left.index - right.index || left.branchId.localeCompare(right.branchId));
+        return true;
+      };
+
+      const partialResearchLedgerSnapshot = () => {
+        const runsById = new Map(researchRuns.map((run) => [run.id, run]));
+        const entries = researchBranchReceipts.slice(0, 6).map((receipt) => {
+          const branch = runsById.get(receipt.childRunId);
+          const branchContext = agentRunRecord(branch?.context)?.branch as Record<string, unknown> | undefined;
+          const previewRecord = agentRunRecord((branch as { resultPreview?: unknown } | undefined)?.resultPreview);
+          const executionReceipt = normalizeAnalyticalExecutionReceipt(previewRecord?.executionReceipt);
+          const resultFingerprint = normalizeAnalyticalExecutionFingerprint(previewRecord?.resultFingerprint)
+            ?? executionReceipt?.resultFingerprint;
+          const observed = receipt.state === 'completed'
+            && branch?.status === 'ready'
+            && Boolean(resultFingerprint);
+          const status = observed
+            ? 'observed' as const
+            : receipt.state === 'skipped'
+              ? 'skipped' as const
+              : 'failed' as const;
+          return {
+            id: receipt.childRunId,
+            branchId: receipt.branchId,
+            question: branch?.question
+              ?? typedHypothesesById.get(receipt.branchId)?.statement
+              ?? `Research branch ${receipt.index}`,
+            status,
+            ...(previewRecord && Array.isArray(previewRecord.rows)
+              ? { rowCount: previewRecord.rows.length }
+              : {}),
+            ...(resultFingerprint ? { resultFingerprint } : {}),
+            ...(executionReceipt ? { executionReceipt } : {}),
+            facts: [agentRunString(branchContext?.expectation)
+              ?? typedHypothesesById.get(receipt.branchId)?.expectation
+              ?? `Research branch ${receipt.index} did not complete before the root run stopped.`],
+            receipts: observed && resultFingerprint ? [resultFingerprint] : [],
+            ...(!observed ? {
+              error: researchBranchOutcomes.get(receipt.branchId)?.error
+                ?? branch?.error
+                ?? (receipt.stopReason === 'run_deadline'
+                  ? 'Research root reached its deadline while this branch was active.'
+                  : receipt.stopReason === 'cancelled'
+                    ? 'Research was stopped by the user while this branch was active.'
+                    : 'Research branch did not produce an execution receipt or result fingerprint.'),
+            } : {}),
+          };
+        });
+        const researchLedger = buildResearchEvidenceLedger({
+          rootQuestion: request.question,
+          planId: plan.rootPlanId,
+          snapshotId: routeDecision?.resolvedAnalyticalPlan?.snapshotId,
+          entries,
+          // The partial artifact is evidence for restart/review only; it is
+          // never an accepted Research conclusion.
+          stoppingReason: 'blocked',
+        });
+        return {
+          researchLedger,
+          researchLedgerV2: buildResearchEvidenceLedgerV2({
+            rootQuestion: request.question,
+            planId: plan.rootPlanId,
+            snapshotId: routeDecision?.resolvedAnalyticalPlan?.snapshotId,
+            groundableBranchCount: groundableResearchBranchCount,
+            entries: researchLedger.entries.map((entry) => ({
+              ...entry,
+              hypothesis: typedHypothesesById.get(entry.branchId)?.statement,
+              verdict: entry.status === 'observed'
+                ? 'inconclusive' as const
+                : entry.status === 'skipped'
+                  ? 'skipped' as const
+                  : 'failed' as const,
+              counterEvidenceFactIds: [],
+            })),
+            stoppingReason: researchLedger.stoppingReason,
+          }),
+        };
+      };
+
+      const persistPartialResearchArtifact = (terminalReason: 'run_deadline' | 'cancelled') => {
+        if (partialResearchArtifactPersisted || !researchRootRunId) return;
+        const { researchLedger, researchLedgerV2 } = partialResearchLedgerSnapshot();
+        const childRunIds = [...new Set(researchBranchReceipts.map((receipt) => receipt.childRunId))];
+        const branchTrace = researchBranchReceipts.map((receipt) => ({
+          branchId: receipt.branchId,
+          childRunId: receipt.childRunId,
+          spanId: researchBranchSpans.get(receipt.branchId)?.spanId,
+          kind: 'research_branch' as const,
+        }));
+        const artifact = agentRunArtifact('research_run', 'Partial Research evidence', {
+          version: 2,
+          partial: true,
+          terminalReason,
+          rootResearchRunId: researchRootRunId,
+          childRunIds,
+          researchBranchReceipts: [...researchBranchReceipts],
+          researchLedger,
+          researchLedgerV2,
+          traceReference: trace.reference(),
+          researchTrace: { branchTrace },
+        }, researchRootRunId, 'blocked');
+        partialResearchArtifactPersisted = true;
+        emit({
+          type: 'artifact.created',
+          message: 'Saved partial Research receipts before the root run stopped.',
+          route: 'research',
+          trustState: 'blocked',
+          payload: artifact,
+        });
+      };
       if (!needsClarification) {
+        let removeResearchRootAbortListener: (() => void) | undefined;
         try {
           const storage = openNotebookResearchStorage();
           try {
@@ -5951,6 +7236,67 @@ function analyticalFailureSummary(
               owner: agentRunWorkspaceValue(request, 'owner'),
               context: researchContextEnvelope,
             });
+            researchRootRunId = created.id;
+            const persistRootAbortBeforeEngineFinalizes = () => {
+              if (rootAbortReceiptPersisted || !request.signal?.aborted) return;
+              rootAbortReceiptPersisted = true;
+              const userCancelled = isAgentRunUserCancellation(request.signal.reason);
+              const terminalReason: 'cancelled' | 'run_deadline' = userCancelled
+                ? 'cancelled'
+                : 'run_deadline';
+              for (const active of [...activeResearchBranches.values()].sort((left, right) => left.index - right.index)) {
+                if (researchBranchReceipts.some((receipt) => receipt.childRunId === active.childRunId)) continue;
+                const message = userCancelled
+                  ? 'Research was stopped by the user while this branch was active.'
+                  : 'Research root reached its deadline while this branch was active.';
+                storage.updateRun(active.childRunId, {
+                  status: 'error',
+                  error: message,
+                  summary: 'Research branch stopped before producing a result.',
+                  reviewStatus: 'needs_review',
+                });
+                const stopped = storage.getRun(active.childRunId);
+                if (stopped) researchRuns.push(withNotebookResearchChecklist(stopped));
+                researchBranchOutcomes.set(active.branchId, {
+                  status: 'failed',
+                  stopReason: terminalReason,
+                  error: message,
+                });
+                recordResearchBranchReceipt({
+                  version: 1,
+                  branchId: active.branchId,
+                  childRunId: active.childRunId,
+                  index: active.index,
+                  state: 'failed',
+                  verdict: 'failed',
+                  stopReason: terminalReason,
+                  branchBudgetMs: active.branchBudgetMs,
+                });
+                trace.finishSpan(active.branchSpan, {
+                  outcome: userCancelled ? 'cancelled' : 'error',
+                  reasonCode: terminalReason,
+                  payload: {
+                    kind: 'research',
+                    branchId: active.branchId,
+                    hypothesisFingerprint: active.hypothesisFingerprint,
+                    verdict: 'failed',
+                    branchBudgetMs: active.branchBudgetMs,
+                    branchStopReason: terminalReason,
+                  },
+                });
+              }
+              storage.updateRun(created.id, {
+                status: 'error',
+                error: userCancelled
+                  ? 'Research was stopped by the user while a branch was active.'
+                  : 'Research root reached its deadline while a branch was active.',
+                summary: 'Partial Research receipts were saved before the root run stopped.',
+                reviewStatus: 'needs_review',
+              });
+              persistPartialResearchArtifact(terminalReason);
+            };
+            request.signal?.addEventListener('abort', persistRootAbortBeforeEngineFinalizes, { once: true });
+            removeResearchRootAbortListener = () => request.signal?.removeEventListener('abort', persistRootAbortBeforeEngineFinalizes);
             emit({
               type: 'artifact.created',
               message: 'Saved the immutable root research plan; executing bounded child branches.',
@@ -5980,6 +7326,15 @@ function analyticalFailureSummary(
               executableResearchBranches.length > 0 ? executableResearchBranches : [fallbackBranch],
               6,
             );
+            // An explicit Research request with no catalog-grounded planner
+            // step still has one bounded frozen-context branch. It is visible
+            // as limited scope rather than being padded with invented
+            // hypotheses or silently reported as three successful checks.
+            // That fallback is an observable attempt, not catalog-grounded
+            // evidence, so it must not inflate the claimed groundable count.
+            groundableResearchBranchCount = executableResearchBranches.length > 0
+              ? branches.length
+              : 0;
             // The replan edge. Each branch tests one hypothesis; folding its
             // outcome back into the state is what lets the investigation stop
             // when the question is settled instead of grinding through a plan
@@ -5994,23 +7349,58 @@ function analyticalFailureSummary(
                 priorConfidence: 1 - position / (branches.length + 1),
               })),
             );
-            for (let index = 0; index < branches.length; index += 1) {
-              const step = branches[index];
-              if (request.signal?.aborted) rethrowIfCancelled(request.signal.reason, request.signal);
-              // A hypothesis an earlier finding already closed is not
-              // re-investigated, and an exhausted hop budget stops the run.
-              const stillOpen = nextHypothesis(researchState);
-              if (!stillOpen) {
-                emit({
-                  type: 'executor.started',
-                  message: `Stopping early: ${researchState.hopsUsed} of ${branches.length} branches settled what could be settled.`,
-                  route: 'research',
-                });
-                break;
-              }
+            type ResearchBranchFinding = { index: number; summary: string; strength: number };
+            const executeResearchBranch = async (
+              index: number,
+              branchBudget: ReturnType<typeof allocateResearchBranchBudget>,
+            ): Promise<ResearchBranchFinding> => {
+              const step = branches[index]!;
               const branchId = step.hypothesisId;
-              const branchQuestion = `${request.question}\nResearch branch ${index + 1} (${branchId}): ${step.expectation}`;
+              // The planner asset is an evidence hint, not a client-selected
+              // identifier.  Put it in the child question so the shared Ask
+              // retriever can bind it against the child snapshot, rather than
+              // treating a human-facing planner label as a forged structured
+              // selection.  The child router still owns the qualified IDs,
+              // relationship closure, and frozen RAP.
+              // Each child is an ordinary, bounded analytical Ask.  Do not
+              // carry the root's "Research …" wording into its source
+              // question: the router correctly interprets that as a request
+              // to open another Research run instead of resolving and
+              // freezing this hypothesis's own tuple.  The root/child link is
+              // retained in the trace and workspace context below; this text
+              // is only the child analytical requirement seed.
+              // The planner target is an evidence hint, never an executable
+              // query.  Project it with the root host requirements and the
+              // typed action before a child Ask sees it.  This keeps a time
+              // comparison or breakdown tied to the root metric instead of
+              // collapsing every branch to the target label/baseline metric.
+              const branchProjection = buildResearchBranchRequirementProjection({
+                action: step.action,
+                rootRequirementSeed: researchRootRequirementSeed,
+                rootPlan: routeDecision?.resolvedAnalyticalPlan,
+              });
+              const branchQuestion = branchProjection.question;
+              const branchRequirementSeed = branchProjection.requirementSeed;
               const childId = `${created.id}:research:${index + 1}`;
+              const hypothesisFingerprint = runtimeTraceFingerprint(`${step.thought}\u0000${step.expectation}`);
+              const branchSpan = trace.startSpan({
+                name: 'research.validate',
+                stage: 'research',
+                reasonCode: branchBudget.stopReason ?? 'started',
+                payload: {
+                  kind: 'research',
+                  branchId,
+                  hypothesisFingerprint,
+                  ...(branchBudget.branchBudgetMs ? { branchBudgetMs: branchBudget.branchBudgetMs } : {}),
+                  ...(branchBudget.stopReason ? { branchStopReason: branchBudget.stopReason } : {}),
+                },
+              });
+              researchBranchSpans.set(branchId, { spanId: branchSpan, hypothesisFingerprint });
+              trace.recordLink({
+                kind: 'research_branch',
+                targetRunId: childId,
+                hypothesisFingerprint,
+              });
               const child = storage.createRun({
                 id: childId,
                 notebookPath,
@@ -6038,6 +7428,42 @@ function analyticalFailureSummary(
                   },
                 },
               });
+              if (!branchBudget.branchBudgetMs) {
+                const message = 'Research did not start this branch because the remaining run time is reserved for synthesis and persistence.';
+                storage.updateRun(child.id, {
+                  status: 'error',
+                  error: message,
+                  summary: 'Research branch skipped because the bounded branch budget was exhausted.',
+                  reviewStatus: 'needs_review',
+                });
+                const skipped = storage.getRun(child.id);
+                if (skipped) researchRuns.push(withNotebookResearchChecklist(skipped));
+                researchBranchOutcomes.set(branchId, {
+                  status: 'skipped',
+                  stopReason: 'budget_exhausted',
+                  error: message,
+                });
+                recordResearchBranchReceipt({
+                  version: 1,
+                  branchId,
+                  childRunId: child.id,
+                  index: index + 1,
+                  state: 'skipped',
+                  verdict: 'skipped',
+                  stopReason: 'budget_exhausted',
+                });
+                trace.finishSpan(branchSpan, {
+                  outcome: 'skipped',
+                  reasonCode: 'budget_exhausted',
+                  payload: {
+                    kind: 'research',
+                    branchId,
+                    hypothesisFingerprint,
+                    branchStopReason: 'budget_exhausted',
+                  },
+                });
+                return { index, summary: message, strength: 0 };
+              }
               emit({
                 type: 'artifact.created',
                 message: `Started research branch ${index + 1} of ${branches.length}.`,
@@ -6045,36 +7471,174 @@ function analyticalFailureSummary(
                 trustState: 'review_required',
                 payload: { researchRunId: child.id, parentResearchRunId: created.id, branchId },
               });
+              const branchTimeout = AbortSignal.timeout(branchBudget.branchBudgetMs);
+              const branchSignal = request.signal
+                ? AbortSignal.any([request.signal, branchTimeout])
+                : branchTimeout;
+              activeResearchBranches.set(child.id, {
+                branchId,
+                childRunId: child.id,
+                index: index + 1,
+                branchBudgetMs: branchBudget.branchBudgetMs,
+                branchSpan,
+                hypothesisFingerprint,
+              });
               try {
-                const executed = await runNotebookResearch(storage, child, {
-                  domain: agentRunWorkspaceValue(request, 'domain'),
-                  owner: agentRunWorkspaceValue(request, 'owner'),
-                  sourceCellFingerprint,
-                  question: branchQuestion,
-                  intent: researchIntent,
-                  context: {
-                    ...researchContextEnvelope,
-                    rootRunId: created.id,
-                    rootPlanId: plan.rootPlanId,
-                    branch: {
-                      id: branchId,
-                      hypothesisId: step.hypothesisId,
-                      hypothesis: step.thought,
-                      validatorKind: step.validatorKind,
+                const executed = await awaitResearchBranchDeadline((async () => {
+                  /**
+                   * A Research branch is a child Ask run, not a notebook-SQL
+                   * shortcut.  The root Research executor owns the one
+                   * run-scoped dispatch ledger, so preserving its AsyncLocal
+                   * context here makes planning, child meaning/generation,
+                   * bounded repair, and narration compete for the same
+                   * Research-12 physical-send budget.  The child request has
+                   * no conversation/history or root SQL: each hypothesis must
+                   * retrieve, route, and freeze its own tuple/closure.
+                   */
+                  const branchRequest = attachAskTraceObserverV1({
+                    question: branchQuestion,
+                    ...(branchRequirementSeed ? { hostRequirementSeed: branchRequirementSeed } : {}),
+                    researchBranch: {
+                      rootRunId: created.id,
+                      childRunId: child.id,
+                      branchId,
                       index: index + 1,
-                      expectation: step.expectation,
-                      action: step.action,
                     },
-                  },
-                  executionConnection: researchExecutionConnection,
-                  executionConnectionName: researchExecutionConnectionName,
-                  signal: request.signal,
-                  baselineSql: agentRunString(researchSource?.sql),
-                  baselineDqlArtifact: researchSource?.dqlArtifact as NotebookResearchDqlArtifact | undefined,
-                  baselineRunId: agentRunString(researchSource?.runId),
-                });
+                    requestedMode: 'ask' as const,
+                    runId: child.id,
+                    selectedObject: {
+                      kind: 'research' as const,
+                      id: child.id,
+                      title: child.title,
+                    },
+                    executionTarget: request.executionTarget,
+                    audience: request.audience,
+                    reasoningEffort: request.reasoningEffort,
+                    analysisDepth: request.analysisDepth,
+                    thinkingMode: request.thinkingMode,
+                    signal: branchSignal,
+                    runBudget: request.runBudget,
+                    traceSurface: request.traceSurface,
+                    workspaceContext: {
+                      ...(request.workspaceContext ?? {}),
+                      researchBranch: {
+                        rootRunId: created.id,
+                        childRunId: child.id,
+                        branchId,
+                        index: index + 1,
+                        targetId: step.action.target,
+                        validatorKind: step.validatorKind,
+                      },
+                    },
+                  }, trace);
+                  const branchDecision = await agentRunRouter.decide(branchRequest);
+                  const branchRoute = selectRoute(branchRequest, branchDecision);
+                  const frozenBranchRoute = frozenAnalyticalRoute(branchDecision);
+                  const branchPlanFrozen = branchDecision.analyticalCascadeDecision?.planFrozen === true
+                    && branchDecision.resolvedAnalyticalPlan?.mode === 'authoritative';
+                  const executableBranchRoute = branchRoute === 'certified_answer'
+                    || branchRoute === 'semantic_answer'
+                    || branchRoute === 'generated_answer';
+                  const governedAnswer: AgentAnswer = branchPlanFrozen
+                    && frozenBranchRoute === branchRoute
+                    && executableBranchRoute
+                    ? await runGovernedAgentAnswerForRun(
+                      branchRequest,
+                      undefined,
+                      branchRoute,
+                      undefined,
+                      branchDecision,
+                    )
+                    : {
+                      kind: 'no_answer',
+                      text: 'This Research branch did not freeze a safe, hypothesis-specific analytical plan. DQL did not reuse the root query or execute a legacy notebook SQL fallback.',
+                      answer: 'This Research branch did not freeze a safe, hypothesis-specific analytical plan. DQL did not reuse the root query or execute a legacy notebook SQL fallback.',
+                      refusalCode: branchDecision.requiresClarification ? 'ambiguous' : 'grounding_gap',
+                      intentDecision: branchDecision,
+                      resolvedAnalyticalPlan: branchDecision.resolvedAnalyticalPlan,
+                      citations: [],
+                      considered: [],
+                    };
+                  return runNotebookResearch(storage, child, {
+                    domain: agentRunWorkspaceValue(request, 'domain'),
+                    owner: agentRunWorkspaceValue(request, 'owner'),
+                    sourceCellFingerprint,
+                    question: branchQuestion,
+                    intent: researchIntent,
+                    context: {
+                      ...researchContextEnvelope,
+                      rootRunId: created.id,
+                      rootPlanId: plan.rootPlanId,
+                      branch: {
+                        id: branchId,
+                        hypothesisId: step.hypothesisId,
+                        hypothesis: step.thought,
+                        validatorKind: step.validatorKind,
+                        index: index + 1,
+                        expectation: step.expectation,
+                        action: step.action,
+                      },
+                      // Persist a compact, non-prompt branch authority
+                      // witness. It lets restart/trace review distinguish a
+                      // child that honestly could not freeze from one that
+                      // executed a frozen RAP, without granting Notebook
+                      // Research a second route authority.
+                      branchAuthority: {
+                        route: branchRoute,
+                        selectedTier: branchDecision.analyticalCascadeDecision?.selectedTier,
+                        planFrozen: branchPlanFrozen,
+                        planId: branchDecision.resolvedAnalyticalPlan?.planId,
+                        planFingerprint: branchDecision.resolvedAnalyticalPlan?.fingerprint,
+                        capability: branchDecision.resolvedAnalyticalPlan?.capability,
+                        executionId: branchDecision.resolvedAnalyticalPlan?.executionId,
+                        candidateIds: branchDecision.resolvedAnalyticalPlan?.selectedConceptIds,
+                        closureIds: branchDecision.resolvedAnalyticalPlan?.sourceRelationIds,
+                      },
+                    },
+                    executionConnection: researchExecutionConnection,
+                    executionConnectionName: researchExecutionConnectionName,
+                    signal: branchSignal,
+                    authoritativeBranch: {
+                      answer: governedAnswer,
+                      routeDecision: branchDecision,
+                    },
+                  });
+                })(), branchSignal);
                 const branchRun = withNotebookResearchChecklist(executed);
                 researchRuns.push(branchRun);
+                const branchFailed = branchRun.status === 'error';
+                recordResearchBranchReceipt({
+                  version: 1,
+                  branchId,
+                  childRunId: child.id,
+                  index: index + 1,
+                  state: branchFailed ? 'failed' : 'completed',
+                  verdict: branchFailed ? 'failed' : 'inconclusive',
+                  stopReason: branchFailed ? 'execution_failed' : 'completed',
+                  branchBudgetMs: branchBudget.branchBudgetMs,
+                });
+                if (branchFailed) {
+                  const message = branchRun.error
+                    ?? branchRun.summary
+                    ?? 'Research branch stopped before producing a result.';
+                  researchBranchOutcomes.set(branchId, {
+                    status: 'failed',
+                    stopReason: 'execution_failed',
+                    error: message,
+                  });
+                  trace.finishSpan(branchSpan, {
+                    outcome: 'error',
+                    reasonCode: 'execution_failed',
+                    payload: {
+                      kind: 'research',
+                      branchId,
+                      hypothesisFingerprint,
+                      verdict: 'failed',
+                      branchBudgetMs: branchBudget.branchBudgetMs,
+                      branchStopReason: 'execution_failed',
+                    },
+                  });
+                }
                 // Observe, then decide. A branch that produced rows is evidence
                 // for its hypothesis; one that did not is inconclusive, which is
                 // a real outcome and not a failure.
@@ -6085,43 +7649,170 @@ function analyticalFailureSummary(
                 // rows as `supports` would let the dossier report a driver the
                 // evidence never established, which is the failure mode the
                 // whole verified-fact chain exists to prevent.
-                researchState = applyFinding(researchState, {
-                  id: `f${index + 1}`,
-                  hypothesisId: `h${index + 1}`,
-                  verdict: 'inconclusive',
+                return {
+                  index,
                   summary: branchRun.summary ?? '',
                   strength: ((branchRun.resultPreview as { rows?: unknown[] } | undefined)?.rows?.length ?? 0) > 0
                     ? 0.5
                     : 0.1,
-                });
+                };
               } catch (error) {
-                // A child is a real durable run even when cancellation stops the
-                // shared branch budget. Persist the truthful stop before
-                // propagating cancellation to the parent run.
-                const message = error instanceof Error ? error.message : String(error);
+                // A child is a durable Research record even when its own
+                // fair-share deadline expires. Only root/user cancellation
+                // aborts the parent; a local child timeout becomes a typed
+                // failed branch and the remaining branches receive their own
+                // fair share (or explicit budget-exhausted receipts).
+                const rootCancelled = Boolean(request.signal?.aborted);
+                const userCancelled = rootCancelled && isAgentRunUserCancellation(request.signal?.reason);
+                // The synchronous root abort listener has already recorded the
+                // terminal child receipt and partial artifact. Do not race it
+                // with a second child update after the engine has finalized.
+                if (rootCancelled && rootAbortReceiptPersisted) {
+                  rethrowIfCancelled(error, request.signal);
+                }
+                const timedOut = branchTimeout.aborted && !rootCancelled;
+                const stopReason: ResearchBranchStopReasonV1 = userCancelled
+                  ? 'cancelled'
+                  : rootCancelled
+                    ? 'run_deadline'
+                  : timedOut
+                    ? 'research_branch_timeout'
+                    : 'execution_failed';
+                const message = timedOut
+                  ? 'Research branch reached its fair-share deadline before producing a result.'
+                  : error instanceof Error ? error.message : String(error);
                 storage.updateRun(child.id, {
                   status: 'error',
                   error: message,
-                  summary: 'Research branch stopped before producing a result.',
+                  summary: timedOut
+                    ? 'Research branch timed out within its bounded validation window.'
+                    : 'Research branch stopped before producing a result.',
                   reviewStatus: 'needs_review',
                 });
                 const stopped = storage.getRun(child.id);
                 if (stopped) researchRuns.push(withNotebookResearchChecklist(stopped));
-                researchState = applyFinding(researchState, {
-                  id: `f${index + 1}`,
-                  hypothesisId: `h${index + 1}`,
-                  verdict: 'inconclusive',
-                  summary: message,
-                  strength: 0,
+                researchBranchOutcomes.set(branchId, {
+                  status: 'failed',
+                  stopReason,
+                  error: message,
                 });
-                rethrowIfCancelled(error, request.signal);
+                recordResearchBranchReceipt({
+                  version: 1,
+                  branchId,
+                  childRunId: child.id,
+                  index: index + 1,
+                  state: timedOut ? 'timed_out' : 'failed',
+                  verdict: 'failed',
+                  stopReason,
+                  branchBudgetMs: branchBudget.branchBudgetMs,
+                });
+                trace.finishSpan(branchSpan, {
+                  outcome: userCancelled ? 'cancelled' : 'error',
+                  reasonCode: userCancelled
+                    ? 'cancelled'
+                    : rootCancelled
+                      ? 'run_deadline'
+                    : timedOut
+                      ? 'research_branch_timeout'
+                      : 'execution_failed',
+                  payload: {
+                    kind: 'research',
+                    branchId,
+                    hypothesisFingerprint,
+                    verdict: 'failed',
+                    branchBudgetMs: branchBudget.branchBudgetMs,
+                    branchStopReason: stopReason,
+                  },
+                });
+                if (rootCancelled) {
+                  storage.updateRun(created.id, {
+                    status: 'error',
+                    error: userCancelled
+                      ? 'Research was stopped by the user while a branch was active.'
+                      : 'Research root reached its deadline while a branch was active.',
+                    summary: 'Partial Research receipts were saved before the root run stopped.',
+                    reviewStatus: 'needs_review',
+                  });
+                  persistPartialResearchArtifact(userCancelled ? 'cancelled' : 'run_deadline');
+                  rethrowIfCancelled(error, request.signal);
+                }
+                return { index, summary: message, strength: 0 };
+              } finally {
+                activeResearchBranches.delete(child.id);
               }
+            };
+            let nextBranchIndex = 0;
+            while (nextBranchIndex < branches.length) {
+              if (request.signal?.aborted) rethrowIfCancelled(request.signal.reason, request.signal);
+              // Fold an entire settled wave into the deterministic hypothesis
+              // state before admitting the next one. No child completion order
+              // is allowed to choose later work or alter the final dossier.
+              const stillOpen = nextHypothesis(researchState);
+              if (!stillOpen) {
+                emit({
+                  type: 'executor.started',
+                  message: `Stopping early: ${researchState.hopsUsed} of ${branches.length} branches settled what could be settled.`,
+                  route: 'research',
+                });
+                break;
+              }
+              const remainingBranches = branches.length - nextBranchIndex;
+              const branchBudget = allocateResearchBranchBudget({
+                remainingMs: request.runBudget?.remainingMs() ?? 120_000,
+                remainingBranches,
+                maxConcurrentBranches: RESEARCH_MAX_CONCURRENT_BRANCHES,
+              });
+              const waveSize = Math.min(branchBudget.maxConcurrentBranches, remainingBranches);
+              const waveIndexes = Array.from({ length: waveSize }, (_, offset) => nextBranchIndex + offset);
+              emit({
+                type: 'executor.started',
+                message: branchBudget.branchBudgetMs
+                  ? `Starting Research wave ${Math.floor(nextBranchIndex / RESEARCH_MAX_CONCURRENT_BRANCHES) + 1} with ${waveIndexes.length} bounded branches.`
+                  : `Skipping ${waveIndexes.length} Research branches because the remaining root time is reserved for synthesis and persistence.`,
+                route: 'research',
+              });
+              // Run at most three independent branches together. The shared
+              // branch budget is derived from remaining waves, not from the
+              // number of individual branches, so an early slow branch cannot
+              // starve the entire investigation.
+              const settled = await Promise.allSettled(
+                waveIndexes.map((index) => executeResearchBranch(index, branchBudget)),
+              );
+              const rejected = settled.find((entry): entry is PromiseRejectedResult => entry.status === 'rejected');
+              if (rejected) throw rejected.reason;
+              for (const finding of settled
+                .filter((entry): entry is PromiseFulfilledResult<ResearchBranchFinding> => entry.status === 'fulfilled')
+                .map((entry) => entry.value)
+                .sort((left, right) => left.index - right.index)) {
+                researchState = applyFinding(researchState, {
+                  id: `f${finding.index + 1}`,
+                  hypothesisId: `h${finding.index + 1}`,
+                  verdict: 'inconclusive',
+                  summary: finding.summary,
+                  strength: finding.strength,
+                });
+              }
+              nextBranchIndex += waveIndexes.length;
             }
+            const orderedResearchRuns = [...new Map(
+              researchRuns.map((run) => [run.id, run]),
+            ).values()].sort((left, right) => {
+              const leftBranch = agentRunRecord(left.context)?.branch as Record<string, unknown> | undefined;
+              const rightBranch = agentRunRecord(right.context)?.branch as Record<string, unknown> | undefined;
+              const leftIndex = typeof leftBranch?.index === 'number' ? leftBranch.index : Number.MAX_SAFE_INTEGER;
+              const rightIndex = typeof rightBranch?.index === 'number' ? rightBranch.index : Number.MAX_SAFE_INTEGER;
+              return leftIndex - rightIndex || left.id.localeCompare(right.id);
+            });
+            researchRuns.splice(0, researchRuns.length, ...orderedResearchRuns);
             researchRun = researchRuns[0];
           } finally {
+            removeResearchRootAbortListener?.();
             storage.close();
           }
         } catch (error) {
+          if (request.signal?.aborted) {
+            persistPartialResearchArtifact(isAgentRunUserCancellation(request.signal.reason) ? 'cancelled' : 'run_deadline');
+          }
           rethrowIfCancelled(error, request.signal);
           researchWorkspaceError = formatNotebookResearchStorageError(error);
         }
@@ -6149,6 +7840,8 @@ function analyticalFailureSummary(
         snapshotId: routeDecision?.resolvedAnalyticalPlan?.snapshotId,
         entries: researchRuns.slice(0, 6).map((branch, index) => {
           const branchContext = agentRunRecord(branch.context)?.branch as Record<string, unknown> | undefined;
+          const branchId = agentRunString(branchContext?.id) ?? `branch:${index + 1}`;
+          const branchOutcome = researchBranchOutcomes.get(branchId);
           const branchPreviewRecord = agentRunRecord((branch as { resultPreview?: unknown }).resultPreview);
           const branchPreview = coerceNarrateResultData(branchPreviewRecord);
           const previewRecord = branchPreviewRecord;
@@ -6160,12 +7853,14 @@ function analyticalFailureSummary(
           // (on the result or its execution receipt) can make a branch
           // observed (AGT-016/033).
           const executionProof = resultFingerprint;
-          const observed = branch.status === 'ready' && Boolean(executionProof);
+          const observed = !branchOutcome && branch.status === 'ready' && Boolean(executionProof);
           return {
             id: branch.id,
-            branchId: agentRunString(branchContext?.id) ?? `branch:${index + 1}`,
+            branchId,
             question: branch.question,
-            status: observed ? 'observed' as const : branch.status === 'error' ? 'failed' as const : 'skipped' as const,
+            status: observed
+              ? 'observed' as const
+              : branchOutcome?.status ?? (branch.status === 'error' ? 'failed' as const : 'skipped' as const),
             ...(branchPreviewRecord && Array.isArray(branchPreviewRecord.rows)
               ? { rowCount: branchPreviewRecord.rows.length }
               : {}),
@@ -6177,7 +7872,8 @@ function analyticalFailureSummary(
             // receipt/fingerprint (AGT-016/033).
             receipts: executionProof ? [executionProof] : [],
             ...(!observed ? {
-              error: branch.error
+              error: branchOutcome?.error
+                ?? branch.error
                 ?? (branch.status === 'error'
                   ? branch.summary
                   : 'Research branch did not produce an execution receipt or result fingerprint.'),
@@ -6186,7 +7882,9 @@ function analyticalFailureSummary(
         }),
         stoppingReason: needsClarification
           ? 'not_started'
-          : researchRuns.some((run) => run.status === 'error')
+          : researchBranchReceipts.some((receipt) => receipt.stopReason === 'budget_exhausted')
+            ? 'budget'
+            : researchRuns.some((run) => run.status === 'error')
             ? 'insufficient_evidence'
             : executableResearchBranches.length > 6
               ? 'budget'
@@ -6200,7 +7898,7 @@ function analyticalFailureSummary(
         rootQuestion: request.question,
         planId: plan.rootPlanId,
         snapshotId: routeDecision?.resolvedAnalyticalPlan?.snapshotId,
-        groundableBranchCount: typedResearchPlan.hypotheses.length,
+        groundableBranchCount: groundableResearchBranchCount,
         entries: researchLedger.entries.map((entry, index) => ({
           ...entry,
           hypothesis: typedHypothesesById.get(entry.branchId)?.statement ?? plan.steps[index]?.thought,
@@ -6232,6 +7930,24 @@ function analyticalFailureSummary(
         })),
         stoppingReason: researchLedger.stoppingReason,
       });
+      for (const entry of researchLedgerV2.entries) {
+        const branch = researchBranchSpans.get(entry.branchId);
+        if (!branch) continue;
+        // Timeout/skipped spans were finalized at the physical branch boundary
+        // with a typed reason. Do not overwrite that story with a generic
+        // ledger projection during synthesis.
+        if (researchBranchOutcomes.has(entry.branchId)) continue;
+        trace.finishSpan(branch.spanId, {
+          outcome: entry.verdict === 'failed' ? 'error' : entry.verdict === 'skipped' ? 'skipped' : 'ok',
+          reasonCode: entry.verdict === 'failed' ? 'unknown' : 'completed',
+          payload: {
+            kind: 'research',
+            branchId: entry.branchId,
+            hypothesisFingerprint: branch.hypothesisFingerprint,
+            verdict: entry.verdict,
+          },
+        });
+      }
       // A query that ran and matched 0 rows STILL executed — treat it as a clean,
       // grounded execution (not "no result"), so an empty answer is surfaced as
       // "0 rows matched" rather than silently downgraded to review-required.
@@ -6241,19 +7957,28 @@ function analyticalFailureSummary(
         && !researchWorkspaceError
         && researchRuns.length > 0
         && researchRuns.every((run) => run.status === 'ready');
-      const narration = !needsClarification && researchResultData
+      // Finalization has a reserved slice. It can always construct the
+      // deterministic receipt-bound story, but a fresh provider narration may
+      // not begin after its soft cutoff.
+      const narration = !needsClarification && researchResultData && (!request.runBudget || request.runBudget.mayStartNarration())
         ? await narrateForAgentRun({
             question: request.question,
             intent: request.intent,
             result: researchResultData,
             evidence: plan.sources,
           reviewRequired: true,
-          }, request.researchResultRowsOptIn === true)
+          }, request.researchResultRowsOptIn === true, trace)
         : undefined;
       // The cross-branch story. Every branch tested a hypothesis and produced a
       // finding; narrating only the one result the executor happened to carry
       // reported a single fact and discarded the rest, which is the visible
       // half of "research answers one question instead of telling a story".
+      const researchSynthesisSpan = trace.startSpan({
+        name: 'research.synthesize',
+        stage: 'research',
+        reasonCode: 'started',
+        payload: { kind: 'research', branchCount: researchLedgerV2.entries.length },
+      });
       const researchStory = !needsClarification && researchLedgerV2.entries.length > 0
         ? synthesizeResearchNarrative({
           question: request.question,
@@ -6267,6 +7992,11 @@ function analyticalFailureSummary(
           })),
         })
         : undefined;
+      trace.finishSpan(researchSynthesisSpan, {
+        outcome: 'ok',
+        reasonCode: 'completed',
+        payload: { kind: 'research', branchCount: researchLedgerV2.entries.length },
+      });
       const summary = needsClarification
         ? 'Needs clarification before running deeper research.'
         // The story leads; the verified-fact narration follows it, so the
@@ -6285,14 +8015,33 @@ function analyticalFailureSummary(
             : plan.done
               ? 'Prepared a direct grounded-answer plan.'
               : 'Prepared a grounded research plan over real DQL assets.');
-      const scopedSummary = !needsClarification && researchLedgerV2.limitedScope
-        ? `Limited research scope: fewer than three groundable branches were available. ${summary}`
-        : summary;
+      const branchBudgetExhausted = researchBranchReceipts.some((receipt) => receipt.stopReason === 'budget_exhausted');
+      const branchTimedOut = researchBranchReceipts.some((receipt) => receipt.stopReason === 'research_branch_timeout');
+      const allResearchBranchesBoundedOut = researchBranchReceipts.length > 0
+        && researchBranchReceipts.every((receipt) =>
+          receipt.stopReason === 'research_branch_timeout' || receipt.stopReason === 'budget_exhausted',
+        )
+        && branchTimedOut;
+      const scopePrefix = [
+        !needsClarification && researchLedgerV2.limitedScope
+          ? 'Limited research scope: fewer than three groundable branches were available.'
+          : undefined,
+        allResearchBranchesBoundedOut
+          ? 'Limited Research: every admitted branch reached its bounded window before producing a receipt-backed finding. Inspect the branch failures and retry a narrower Research question.'
+          : branchTimedOut
+          ? 'One or more Research branches reached their fair-share deadline; the story uses only completed receipts and marks the remaining evidence as inconclusive or skipped.'
+          : undefined,
+        branchBudgetExhausted
+          ? 'Remaining branches were skipped because time was reserved for synthesis and persistence.'
+          : undefined,
+      ].filter((value): value is string => Boolean(value)).join(' ');
+      const scopedSummary = scopePrefix ? `${scopePrefix} ${summary}` : summary;
       return {
         summary: scopedSummary,
-        answer: plan.followUp?.question ?? narration?.summary
-          ?? (researchZeroRows ? 'The query executed cleanly and matched 0 rows.' : undefined)
-          ?? researchRun?.summary,
+        // Ask renders `answer` ahead of `summary`. Preserve the exact scoped
+        // story there so a no-provider/no-target Research run cannot hide the
+        // limited-scope warning behind a generic "no executed result" line.
+        answer: plan.followUp?.question ?? scopedSummary,
         status: needsClarification ? 'needs_clarification' : 'needs_review',
         trustState: needsClarification ? 'not_applicable' : (researchExecutedCleanly ? 'grounded' : 'review_required'),
         stopReason: needsClarification ? 'needs_clarification' : 'human_review_required',
@@ -6303,6 +8052,14 @@ function analyticalFailureSummary(
               typedResearchPlan,
               researchLedger,
               researchLedgerV2,
+              researchBranchReceipts,
+              researchBudget: {
+                version: 1,
+                finalizationReserveMs: RESEARCH_BRANCH_FINALIZATION_RESERVE_MS,
+                branchTimedOut,
+                branchBudgetExhausted,
+                allResearchBranchesBoundedOut,
+              },
               researchRun,
               researchRuns,
               researchRunId: researchRun?.id,
@@ -6358,7 +8115,7 @@ function analyticalFailureSummary(
             !researchLedgerV2.limitedScope,
             researchLedgerV2.limitedScope ? 'warning' : 'info',
             researchLedgerV2.limitedScope
-              ? `Limited research scope: ${researchLedgerV2.groundableBranchCount} of at least 3 branches produced groundable evidence.`
+              ? `Limited research scope: ${researchLedgerV2.groundableBranchCount} of at least 3 evidence-supported branches were available for this investigation.`
               : `${researchLedgerV2.groundableBranchCount} groundable branches were retained with verdicts and counter-evidence slots.`,
             { groundableBranchCount: researchLedgerV2.groundableBranchCount, limitedScope: researchLedgerV2.limitedScope },
           ),
@@ -6367,6 +8124,12 @@ function analyticalFailureSummary(
           ? [{ id: 'answer-follow-up', label: 'Answer follow-up', route: 'research' }]
           : [
               ...(researchRun?.id ? [{ id: 'open-research', label: 'Open research dossier', artifactKind: 'research_run' as const }] : []),
+              ...(allResearchBranchesBoundedOut
+                ? [
+                    { id: 'inspect-research-failures', label: 'Inspect branch failures', route: 'research' as const },
+                    { id: 'retry-narrower-research', label: 'Retry narrower Research', route: 'research' as const },
+                  ]
+                : []),
               { id: 'create-block', label: 'Review DQL draft', route: 'dql_block_draft', artifactKind: 'dql_block_draft' },
               ...(researchRuns.some((run) => run.generatedSql || run.reviewedSql) ? [{ id: 'insert-sql', label: 'Insert SQL preview', route: 'sql_cell' as const, artifactKind: 'sql_cell' as const }] : []),
             ],
@@ -6737,22 +8500,15 @@ function analyticalFailureSummary(
   // lookup, and governed execution for the lifetime of a request. This removes
   // both positional catalog truncation and the previous duplicate retrieval pass.
   const preparedAgentContextPacks = new WeakMap<AgentRunRequest, LocalContextPack>();
-  /**
-   * Cross-encoder pass over the fused candidates, when a provider is available.
-   * Advisory throughout: it may only reorder ids retrieval returned, and any
-   * failure leaves retrieval's own ordering in place.
-   */
-  const agentRerankCandidates = (() => {
-    const governed = resolveGovernedAnswerRunner(projectRoot);
-    const provider = governed
-      ? createGovernedTextProvider(governed.provider as never, projectRoot)
-      : undefined;
-    if (!provider) return undefined;
-    return (question: string, candidates: ReadonlyArray<{ id: string; summary: string }>) =>
-      rerankCandidates(provider, question, candidates, {
-        timeoutMs: Math.round(2_500 * deadlineScale()),
-      });
-  })();
+  // The candidate-ID meaning call is the sole model-owned relevance decision
+  // for an ordinary Ask.  Do not attach the optional raw-provider cross
+  // encoder here: it bypasses the request-scoped dispatch ledger and can turn
+  // a meaning + generation + frozen-plan repair into four physical provider
+  // sends.  Deterministic retrieval already fuses exact, lexical, vector and
+  // graph evidence before role-balanced admission; the canonical meaning
+  // resolver may reorder only those admitted IDs under the normal Ask budget.
+  // Research has its own explicitly traced planner/evidence paths and does
+  // not borrow an unobserved rerank transport from this shared builder.
   const pendingAgentContextPacks = new WeakMap<AgentRunRequest, Promise<LocalContextPack>>();
 
   const buildAgentRunContextPack = async (request: AgentRunRequest): Promise<LocalContextPack> => {
@@ -6767,6 +8523,10 @@ function analyticalFailureSummary(
     // this only inside the provider adapter allowed stale catalog matches to win
     // before "they" / "this amount" became customer-scoped context.
     const followUp = resolveAgentFollowUpContext(request.conversationContext, request.question);
+    // Persist only the server-produced binding classification on the ephemeral
+    // run request. The engine/trace can explain why prior state was (or was
+    // not) admitted without receiving any prior rows or prompt content.
+    request.conversationBinding = followUp?.binding ?? 'none';
     const serverSnapshot = agentRunRecord(
       request.conversationContext?.conversationEnvelope
         ?? request.conversationContext?.serverSnapshot,
@@ -6832,10 +8592,6 @@ function analyticalFailureSummary(
       },
       strictness: request.analysisDepth === 'deep' ? 'exploratory' : 'balanced',
       limit: request.analysisDepth === 'deep' ? 120 : 80,
-      // The runtime PRE-BUILDS this pack, so wiring the reranker only at the
-      // provider's own `buildLocalContextPack` left it unreachable on the
-      // common path — the prepared pack is used and that call never happens.
-      ...(agentRerankCandidates ? { rerankCandidates: agentRerankCandidates } : {}),
       domainContext: requestedDomain
         ? resolveUiDomainContext({
             manifest: snapshot.manifest,
@@ -6878,6 +8634,7 @@ function analyticalFailureSummary(
       knowledgeLens: pack.knowledgeLens,
       analyticalPolicies: pack.skills.flatMap((skill) => skill.analyticalPolicy ? [skill.analyticalPolicy] : []),
       contextObjects: pack.objects,
+      retrievalLanes: pack.retrievalDiagnostics.lanes,
       durationMs: Date.now() - startedAt,
       truncated: pack.retrievalDiagnostics.topRejected.length > 0,
     });
@@ -7036,64 +8793,94 @@ function analyticalFailureSummary(
   // Provider-agnostic completion the planner injects. Reuses the configured provider
   // adapter; throwing here makes the planner fall back to its deterministic path.
   const agentRunPlanner = createLlmAgentRunPlanner({
-    complete: async ({ system, user, signal }) => {
+    complete: async ({ system, user, request, signal }) => {
       const provider = await createBlockStudioAssistProvider(projectRoot);
       if (!provider) throw new Error('No AI provider configured for planning.');
-      return provider.generate(
-        [
-          { role: 'system', content: system },
-          { role: 'user', content: user },
-        ],
-        {
-          maxTokens: 700,
-          temperature: 0.1,
-          signal,
-          maxProviderDispatches: 2,
-          ...(agentRunProviderEvidenceContext.getStore() ? {
-            onProviderDispatch: (event) => agentRunProviderEvidenceContext.getStore()!.observe(event, {
+      const planningTrace = createProviderDispatchTrace({
+        observer: askTraceObserverForV1(request),
+        phase: 'planning',
+        purpose: 'answer_generation',
+        admit: (event) => {
+          const ledger = agentRunProviderEvidenceContext.getStore();
+          if (ledger) {
+            return ledger.observe(event, {
               purpose: 'answer_generation',
               dispatchPhase: 'planning',
               optIn: false,
-            }),
-          } : {}),
+            });
+          }
+          const envelope = prepareProviderWireEnvelopeForDispatch(event.provider, event.envelope);
+          assertProviderPayloadAllowed(envelope, {
+            allowResultRows: false,
+            maxResultRows: 0,
+            purpose: 'answer_generation',
+          });
+          return envelope;
         },
-      );
+      });
+      try {
+        const response = await provider.generate(
+          [
+            { role: 'system', content: system },
+            { role: 'user', content: user },
+          ],
+          {
+            maxTokens: 700,
+            temperature: 0.1,
+            signal,
+            // A planner is one bounded preparation transport, never a retry
+            // lane. The run-scoped ledger also enforces the cross-phase cap.
+            maxProviderDispatches: 1,
+            ...planningTrace.options,
+          },
+        );
+        planningTrace.settle('ok');
+        return response;
+      } catch (error) {
+        planningTrace.settle(signal?.aborted ? 'cancelled' : 'error', error);
+        throw error;
+      }
     },
     getCatalogContext: buildRankedAgentRunCatalogContext,
   });
 
   // Explicit selections and conversation-only turns remain deterministic;
   // each fresh natural-language analytical turn gets one bounded candidate-ID
-  // interpretation call by default. The rollback is host-owned and cannot be
-  // supplied by an HTTP/MCP client.
+  // meaning call by default. The legacy/no-evidence category classifier is
+  // separately labelled and cannot coexist with that analytical call. The
+  // rollback is host-owned and cannot be supplied by an HTTP/MCP client.
   const agentRunRouter = createHybridRouter({
     requireMeaningCallForNaturalLanguage: opts.requireMeaningCallForNaturalLanguage ?? true,
-    complete: async ({ system, user, signal }) => {
+    complete: async ({ system, user, signal, request, phase }) => {
       const provider = await createBlockStudioAssistProvider(projectRoot);
       if (!provider) throw new Error('No AI provider configured for meaning resolution.');
-      return provider.generate(
-        [
-          { role: 'system', content: system },
-          { role: 'user', content: user },
-        ],
-        {
-          maxTokens: 600,
-          temperature: 0,
-          // AGT-009/PERF-002: ambiguity gets one bounded resolver call. If the
-          // provider stalls, the router falls back to its evidence-only decision
-          // instead of leaving the UI in "Generating and validating SQL" for a
-          // minute or more.
-          signal: boundedAgentMeaningSignal(signal),
-          maxProviderDispatches: 1,
-          ...(agentRunProviderEvidenceContext.getStore() ? {
-            onProviderDispatch: (event) => agentRunProviderEvidenceContext.getStore()!.observe(event, {
-              purpose: 'answer_generation',
-              dispatchPhase: 'meaning_resolution',
-              optIn: false,
-            }),
-          } : {}),
-        },
-      );
+      const dispatchTrace = createRouterInterpretationProviderTrace({
+        request,
+        routerPhase: phase,
+      });
+      try {
+        const response = await provider.generate(
+          [
+            { role: 'system', content: system },
+            { role: 'user', content: user },
+          ],
+          {
+            maxTokens: 600,
+            temperature: 0,
+            // AGT-009/PERF-002: a fresh natural-language Ask gets one bounded
+            // candidate-ID-only interpretation call. A certified exact route
+            // never reaches this callback, preserving its zero-provider path.
+            signal: boundedAgentMeaningSignal(signal),
+            maxProviderDispatches: 1,
+            ...(dispatchTrace?.options ?? {}),
+          },
+        );
+        dispatchTrace?.settle('ok');
+        return response;
+      } catch (error) {
+        dispatchTrace?.settle(signal?.aborted ? 'cancelled' : 'error', error);
+        throw error;
+      }
     },
     getEvidence: buildAgentRunEvidence,
     getCatalogContext: buildRankedAgentRunCatalogContext,
@@ -7105,6 +8892,11 @@ function analyticalFailureSummary(
   const agentRunStore = new SqliteAgentRunStore({
     path: defaultAgentRunSqlitePath(projectRoot),
     legacyJsonPath: defaultAgentRunStorePath(projectRoot),
+  });
+  // OBS-002: traces intentionally live outside agent-runs.sqlite. A corrupt,
+  // oversized, or schema-newer trace store must not make Ask unavailable.
+  const askTraceStore = new AskTraceSqliteStoreV1({
+    path: defaultAskTraceSqlitePath(projectRoot),
   });
   const conversationStorePath = await prepareConversationPath(projectRoot);
   // A run may outlive its streaming browser connection, so cancellation is
@@ -7152,6 +8944,18 @@ function analyticalFailureSummary(
     gates: defaultAgentRunGates,
     planner: agentRunPlanner,
     router: agentRunRouter,
+    traceObserverFactory: ({ runId, request, requestedMode }) => createAskTraceObserverV1({
+      store: askTraceStore,
+      runId,
+      // This host-only value is attached after HTTP capability validation.
+      // The public JSON parser never accepts a caller-supplied surface.
+      surface: request.traceSurface ?? 'browser',
+      mode: requestedMode === 'research' ? 'research' : 'ask',
+      // The durable trace never receives the question text. This server-side
+      // fingerprint is stable enough to correlate a reviewed reproduction.
+      questionFingerprint: `sha256:${createHash('sha256').update(request.question).digest('hex')}`,
+      ...(request.threadId ? { threadId: request.threadId } : {}),
+    }),
   });
 
   const runNotebookForApp = async (appId: string, notebookPath: string): Promise<void> => {
@@ -7292,6 +9096,8 @@ function analyticalFailureSummary(
       path?: string;
       domain?: string;
       chartType?: string;
+      /** Caller-owned trust presentation; tracing never infers it from SQL. */
+      reviewRequired?: boolean;
       /** Same-snapshot physical relations admitted by the frozen Ask plan. */
       qualifiedSchemaContext?: AgentSchemaTable[];
     } = {},
@@ -7410,30 +9216,36 @@ function analyticalFailureSummary(
       sqlParams: plan?.sqlParams,
       variables: { ...(plan?.variables ?? {}), ...invocation.values },
       executePrepared: async (preparation) => {
-        if (pinnedSemanticCompile) {
-          const semanticExecution = await executeTargetBoundSemanticQuery({
-            executor,
-            connection: activeConnection,
-            projectRoot,
-            plannedAdapter: pinnedSemanticCompile.engine,
-            metricFlow: pinnedSemanticCompile.engine === 'metricflow-cli'
-              ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
-              : undefined,
-            compile: async () => pinnedSemanticCompile,
-            prepareSql: () => ({ sql: preparation.executedSql, connection: preparation.connection }),
-            rowBound: invocationInput?.rowLimit ?? pinnedSemanticCompile.effectiveRequest.limit,
-          });
-          if (semanticExecution) {
-            semanticExecutionHolder.value = semanticExecution;
-            return semanticExecution.result;
+        return executePreparedArtifactTraceBoundary({
+          preparedSql: preparation.executedSql,
+          reviewRequired: metadata.reviewRequired ?? true,
+          execute: async () => {
+            if (pinnedSemanticCompile) {
+              const semanticExecution = await executeTargetBoundSemanticQuery({
+                executor,
+                connection: activeConnection,
+                projectRoot,
+                plannedAdapter: pinnedSemanticCompile.engine,
+                metricFlow: pinnedSemanticCompile.engine === 'metricflow-cli'
+                  ? resolveMetricFlowTargetMetadata(projectRoot, projectConfig)
+                  : undefined,
+                compile: async () => pinnedSemanticCompile,
+                prepareSql: () => ({ sql: preparation.executedSql, connection: preparation.connection }),
+                rowBound: invocationInput?.rowLimit ?? pinnedSemanticCompile.effectiveRequest.limit,
+              });
+              if (semanticExecution) {
+                semanticExecutionHolder.value = semanticExecution;
+                return semanticExecution.result;
+              }
+            }
+            return executor.executeQuery(
+              preparation.executedSql,
+              plan?.sqlParams ?? [],
+              runtimeVariables({ ...(plan?.variables ?? {}), ...invocation.values }),
+              preparation.connection,
+            );
           }
-        }
-        return executor.executeQuery(
-          preparation.executedSql,
-          plan?.sqlParams ?? [],
-          runtimeVariables({ ...(plan?.variables ?? {}), ...invocation.values }),
-          preparation.connection,
-        );
+        });
       },
     });
     const semanticExecution = semanticExecutionHolder.value;
@@ -7519,6 +9331,7 @@ function analyticalFailureSummary(
       path: block.filePath,
       domain: block.domain,
       chartType: block.chartType,
+      reviewRequired: false,
       ...(qualifiedSchemaContext?.length ? { qualifiedSchemaContext } : {}),
     }, invocationInput, executionConnection, executionConnectionName);
     return {
@@ -7594,6 +9407,11 @@ function analyticalFailureSummary(
         name: artifact.name,
         path: artifact.sourcePath,
         domain: artifact.source.match(/\bdomain\s*=\s*"([^"]+)"/i)?.[1],
+        // Trust is owned by the route that froze this artifact. A governed
+        // semantic artifact is not exploratory merely because it is not a
+        // certified block; only the explicit review-required artifact lane
+        // carries reviewRequired into the physical SQL span.
+        reviewRequired: artifact.trustState === 'review_required',
       },
       {
         question,
@@ -7998,6 +9816,32 @@ function analyticalFailureSummary(
     const repairs = boundedSql === preflight.sql
       ? [...preflight.repairs]
       : [...preflight.repairs, `Applied the requested overall top-${requestedTopN} bound before exploratory execution.`];
+    // This is the only deterministic SQL rewrite point on the exploratory
+    // execution path. Record it here, rather than inferring a successful SQL
+    // repair later from a generic engine retry event.
+    if (repairs.length > 0) {
+      const trace = activeAskTraceObserver();
+      const repairPayload = {
+        kind: 'sql' as const,
+        execution: {
+          version: 1 as const,
+          sqlFingerprint: runtimeTraceFingerprint(boundedSql),
+          planFingerprint: runtimeTraceFingerprint(normalizedCandidateSql),
+          reviewRequired: true,
+        },
+      };
+      const repairSpan = trace?.startSpan({
+        name: 'sql.repair',
+        stage: 'sql',
+        reasonCode: 'repair_attempted',
+        payload: repairPayload,
+      });
+      trace?.finishSpan(repairSpan, {
+        outcome: 'ok',
+        reasonCode: 'repair_attempted',
+        payload: repairPayload,
+      });
+    }
     if (preflight.blockedReason) {
       return failed(preflight.blockedReason, boundedSql, repairs, [], 'exploratory_preflight_blocked');
     }
@@ -8467,32 +10311,42 @@ function analyticalFailureSummary(
         maxResultRows: 0,
         purpose: 'repair_sql',
       });
+      const repairDispatchTrace = createProviderDispatchTrace({
+        observer: activeAskTraceObserver(),
+        phase: 'repair',
+        purpose: 'repair_sql',
+        admit: (event) => {
+          const envelope = prepareProviderWireEnvelopeForDispatch(provider.name, event.envelope);
+          assertProviderPayloadAllowed(envelope, {
+            allowResultRows: false,
+            maxResultRows: 0,
+            purpose: 'repair_sql',
+          });
+          providerRoundTrips += 1;
+          providerEgressReceipts.push(createProviderDispatchEgressReceipt({
+            purpose: 'repair_sql',
+            dispatchPhase: 'repair',
+            provider: provider.name,
+            permittedCategories: ['instructions', 'question', 'schema_metadata', 'governed_context'],
+            optIn: false,
+            envelope,
+          }));
+          return envelope;
+        },
+      });
       let raw: string;
       try {
         raw = await provider.generate(repairEnvelope.messages, {
           maxTokens: 1200,
           temperature: 0,
-          maxProviderDispatches: 2,
-          onProviderDispatch: (event) => {
-            const envelope = prepareProviderWireEnvelopeForDispatch(provider.name, event.envelope);
-            assertProviderPayloadAllowed(envelope, {
-              allowResultRows: false,
-              maxResultRows: 0,
-              purpose: 'repair_sql',
-            });
-            providerRoundTrips += 1;
-            providerEgressReceipts.push(createProviderDispatchEgressReceipt({
-              purpose: 'repair_sql',
-              dispatchPhase: 'repair',
-              provider: provider.name,
-              permittedCategories: ['instructions', 'question', 'schema_metadata', 'governed_context'],
-              optIn: false,
-              envelope,
-            }));
-            return envelope;
-          },
+          // This is the one parent-bound repair transport. A provider retry
+          // would be a second repair attempt, so the host never authorizes it.
+          maxProviderDispatches: 1,
+          ...repairDispatchTrace.options,
         });
-      } catch {
+        repairDispatchTrace.settle('ok');
+      } catch (error) {
+        repairDispatchTrace.settle('error', error);
         throw Object.assign(
           boundedRepairError('The AI provider could not complete this repair. Check Provider Settings and retry.', 502),
           {
@@ -9150,8 +11004,28 @@ function analyticalFailureSummary(
       baselineSql?: string;
       baselineDqlArtifact?: NotebookResearchDqlArtifact;
       baselineRunId?: string;
+      /**
+       * Explicit Research child branches arrive here only after the shared Ask
+       * router froze their own qualified plan and the governed answer runner
+       * completed (or honestly refused) that plan.  This sentinel prevents the
+       * generic Notebook Research fallback below from reopening a legacy raw
+       * provider/SQL route for a branch that already has an authoritative Ask
+       * decision.
+       */
+      authoritativeBranch?: {
+        answer: AgentAnswer;
+        routeDecision: IntentDecision;
+      };
     } = {},
   ): Promise<NotebookResearchRun> => {
+    // A fair-share branch signal is separate from the root run signal. Check it
+    // at each durable boundary so an overrun cannot later overwrite the
+    // timeout/skipped receipt the parent has already recorded.
+    const throwIfResearchSignalAborted = () => {
+      if (!input.signal?.aborted) return;
+      throw input.signal.reason ?? new DOMException('The Research branch deadline elapsed.', 'TimeoutError');
+    };
+    throwIfResearchSignalAborted();
     const question = notebookResearchString(input.question) || run.question;
     const domain = notebookResearchString(input.domain) ?? run.domain;
     const owner = notebookResearchString(input.owner) ?? run.owner;
@@ -9181,34 +11055,51 @@ function analyticalFailureSummary(
     });
 
     try {
-      const contextPack = await buildLocalContextPack(projectRoot, {
-        question,
-        mode: 'question',
-        surface: 'notebook',
-        selectedContext: {
-          ...notebookResearchSelectedContext(run, context),
-          domain,
-          owner,
-          intent,
-          researchPattern: notebookResearchIntentPattern(intent),
-        },
-        strictness: 'exploratory',
-        limit: 160,
-      }).catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        return {
-          id: '',
-          routeDecision: undefined,
-          evidenceRoles: [],
-          warnings: [`Context pack failed: ${message}`],
-          retrievalDiagnostics: { selectedEvidence: [] },
-        } as unknown as LocalContextPack;
-      });
+      throwIfResearchSignalAborted();
+      // An explicit Research child has already retrieved, interpreted, and
+      // frozen its own authoritative Ask plan before it reaches this durable
+      // Notebook record. Rebuilding a broad Notebook context pack here is
+      // both duplicate work and a fairness bug: it can consume the child's
+      // entire branch window *after* a safe SQL result already exists. Keep a
+      // deliberately small receipt projection instead. It is reporting-only;
+      // execution remains bound to the child RAP supplied above.
+      const contextPack = input.authoritativeBranch
+        ? {
+            id: '',
+            routeDecision: input.authoritativeBranch.routeDecision,
+            evidenceRoles: [],
+            warnings: [],
+            retrievalDiagnostics: { selectedEvidence: [] },
+          } as unknown as LocalContextPack
+        : await buildLocalContextPack(projectRoot, {
+            question,
+            mode: 'question',
+            surface: 'notebook',
+            selectedContext: {
+              ...notebookResearchSelectedContext(run, context),
+              domain,
+              owner,
+              intent,
+              researchPattern: notebookResearchIntentPattern(intent),
+            },
+            strictness: 'exploratory',
+            limit: 160,
+          }).catch((error) => {
+            const message = error instanceof Error ? error.message : String(error);
+            return {
+              id: '',
+              routeDecision: undefined,
+              evidenceRoles: [],
+              warnings: [`Context pack failed: ${message}`],
+              retrievalDiagnostics: { selectedEvidence: [] },
+            } as unknown as LocalContextPack;
+          });
+      throwIfResearchSignalAborted();
 
-      let governedAnswer: AgentAnswer | undefined;
+      let governedAnswer: AgentAnswer | undefined = input.authoritativeBranch?.answer;
       let providerError: string | undefined;
       const generationWarnings: string[] = [];
-      if (!generatedSql && !reviewedSql) {
+      if (!generatedSql && !reviewedSql && !input.authoritativeBranch) {
         const governedResearch = resolveGovernedAnswerRunner(projectRoot);
         const resolvedProvider = governedResearch?.provider ?? null;
         const runner = governedResearch?.runner ?? null;
@@ -9217,6 +11108,7 @@ function analyticalFailureSummary(
         } else {
           const researchSignal = input.signal ?? new AbortController().signal;
           try {
+            throwIfResearchSignalAborted();
             await runner.run(
               {
                 provider: resolvedProvider,
@@ -9266,6 +11158,7 @@ function analyticalFailureSummary(
               },
               researchSignal,
             );
+            throwIfResearchSignalAborted();
           } catch (error) {
             rethrowIfCancelled(error, input.signal);
             providerError = error instanceof Error ? error.message : String(error);
@@ -9287,7 +11180,11 @@ function analyticalFailureSummary(
         || agentAnswerHasExecutionFailure(governedAnswer)
         || Boolean(governedAnswer.analyticalFailure)
         || (!governedAnswer.result && !generatedSql && !dqlArtifact);
-      if (!reviewedSql && baselineSql && deeperCompositionFailed) {
+      // A root baseline is an execution receipt for its own analytical tuple,
+      // not a reusable SQL authority for every Research hypothesis. Explicit
+      // Research children always carry their own router-frozen RAP, so they
+      // must never borrow this generic Notebook fallback.
+      if (!input.authoritativeBranch && !reviewedSql && baselineSql && deeperCompositionFailed) {
         const failure = governedAnswer?.executionError
           ?? governedAnswer?.analyticalFailure?.message
           ?? governedAnswer?.answer
@@ -9311,12 +11208,15 @@ function analyticalFailureSummary(
       let resultPreview: ReturnType<typeof normalizeQueryResult> | undefined;
       let previewError: string | undefined;
       if (!usedBaselineFallback && governedAnswer?.result?.rows && !reviewedSql) {
+        throwIfResearchSignalAborted();
         resultPreview = normalizeNotebookAgentResult(governedAnswer.result);
-      } else if (sqlForPreview) {
+      } else if (sqlForPreview && !input.authoritativeBranch) {
         try {
+          throwIfResearchSignalAborted();
           const previewSql = buildAgentPreviewSql(sqlForPreview);
           const previewStart = Date.now();
           resultPreview = await executeLocalSqlForStoredResult(previewSql, input.executionConnection);
+          throwIfResearchSignalAborted();
           recordNotebookQueryRun(projectRoot, {
             notebookPath: run.notebookPath,
             cellId: run.sourceCellId,
@@ -9345,7 +11245,8 @@ function analyticalFailureSummary(
         }
       }
 
-      const routeDecision = notebookResearchRouteDecisionForRun(run, contextPack.routeDecision, sqlForPreview);
+      const routeDecision = input.authoritativeBranch?.routeDecision
+        ?? notebookResearchRouteDecisionForRun(run, contextPack.routeDecision, sqlForPreview);
       const display = resultPreview
         ? recommendVisualization(projectRoot, {
             prompt: question,
@@ -9392,11 +11293,6 @@ function analyticalFailureSummary(
           ...(governedAnswer?.citations ?? []),
         ].slice(0, 40),
       };
-      const summary = usedBaselineFallback && resultPreview && !previewError
-        ? 'Research retained the successful Ask baseline and revalidated it on the same data target. No unverified replacement query was accepted; use the dossier to add the next breakdown or comparison.'
-        : notebookResearchString(governedAnswer?.answer)
-          ?? notebookResearchString(governedAnswer?.text)
-          ?? notebookResearchSummary(question, resultPreview, previewError);
       const previewRecord = agentRunRecord(resultPreview);
       const executionReceipt = normalizeAnalyticalExecutionReceipt(previewRecord?.executionReceipt);
       // Do not treat a child run ID as execution evidence. The canonical
@@ -9410,6 +11306,31 @@ function analyticalFailureSummary(
         ?? (executionUnavailable
           ? 'Research did not produce an executed result or execution receipt; the branch remains review-required.'
           : undefined);
+      // A Research child reaches this point only after its own Ask cascade
+      // selected and executed a frozen plan.  Once that execution has a
+      // canonical receipt, preserve it immediately with a deterministic,
+      // fact-bound branch narrative.  In particular, do not route the result
+      // back through ordinary Ask narration (or another provider transport)
+      // while the branch's fair-share deadline is running.  The root Research
+      // synthesis consumes this persisted observation later.
+      const authoritativeExecutedBranch = Boolean(
+        input.authoritativeBranch
+        && resultPreview
+        && !previewError
+        && executionProof,
+      );
+      const summary = authoritativeExecutedBranch
+        ? deterministicResearchBranchSummary({
+            question,
+            result: resultPreview!,
+            executionReceipt,
+            analyticalNarrative: governedAnswer?.analyticalNarrative,
+          })
+        : usedBaselineFallback && resultPreview && !previewError
+          ? 'Research retained the successful Ask baseline and revalidated it on the same data target. No unverified replacement query was accepted; use the dossier to add the next breakdown or comparison.'
+          : notebookResearchString(governedAnswer?.answer)
+            ?? notebookResearchString(governedAnswer?.text)
+            ?? notebookResearchSummary(question, resultPreview, previewError);
       const recommendation = previewError
         ? 'Review the SQL, selected metadata, and connection context before rerunning.'
         : dqlArtifact && !reviewedSql
@@ -9427,6 +11348,7 @@ function analyticalFailureSummary(
         dqlArtifact,
         routeDecision,
       });
+      throwIfResearchSignalAborted();
       return storage.updateRun(run.id, {
         domain,
         owner,
@@ -10271,7 +12193,7 @@ function analyticalFailureSummary(
     if (requestOrigin && originAllowed) res.setHeader('Access-Control-Allow-Origin', requestOrigin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, X-DQL-Ask-Trace-Capability');
     if (!originAllowed && path.startsWith('/api/')) {
       res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({ error: 'Origin is not allowed.' }));
@@ -10289,6 +12211,22 @@ function analyticalFailureSummary(
         res.end(serializeJSON({ error: 'A valid DQL server bearer token is required.' }));
         return;
       }
+    }
+
+    // Existing `dql notebook` runtimes cannot hand their in-memory capability
+    // to a later CLI process. A short-lived challenge is therefore issued only
+    // when BOTH the server binding and requesting socket are loopback. Remote
+    // and browser-origin requests retain their normal `browser` attribution.
+    if (req.method === 'GET' && path === '/api/ask-traces/cli-capability') {
+      if (!loopback || !isLoopbackRemoteAddress(req.socket.remoteAddress)) {
+        res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ code: 'TRACE_CLI_CAPABILITY_FORBIDDEN', error: 'CLI trace attribution is available only to a loopback local runtime.' }));
+        return;
+      }
+      const capability = cliAskTraceCapabilities.issue();
+      res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(serializeJSON(capability));
+      return;
     }
 
     if (req.method === 'GET' && path === '/api/health') {
@@ -11457,6 +13395,172 @@ function analyticalFailureSummary(
       return;
     }
 
+    // OBS-005: local-only Ask trace APIs. These endpoints return the compact
+    // trace envelope or its typed, redacted detail; they never read a prompt,
+    // SQL string, result row, provider response, or live network exporter.
+    const writeTraceStoreUnavailable = (traceStatus: ReturnType<typeof askTraceStore.status>) => {
+      const schemaUnsupported = traceStatus.reason === 'unsupported_schema';
+      res.writeHead(schemaUnsupported ? 409 : 503, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        code: schemaUnsupported ? 'TRACE_SCHEMA_UNSUPPORTED' : 'TRACE_STORE_UNAVAILABLE',
+        error: schemaUnsupported
+          ? 'The local Ask trace schema is newer than this DQL runtime can read.'
+          : 'Local Ask trace storage is unavailable.',
+        status: traceStatus,
+      }));
+    };
+    if (req.method === 'GET' && path === '/api/ask-traces/status') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ status: askTraceStore.status() }));
+      return;
+    }
+
+    if (req.method === 'GET' && path === '/api/ask-traces') {
+      const traceStatus = askTraceStore.status();
+      if (!traceStatus.available) {
+        writeTraceStoreUnavailable(traceStatus);
+        return;
+      }
+      const rawLimit = Number(url.searchParams.get('limit'));
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(100, Math.floor(rawLimit)) : 50;
+      // Trace-store filters are all allowlisted scalar receipt fields. The
+      // question preview is deliberately NOT a trace-store filter: prompts do
+      // not live in ask-observability.sqlite and list pagination remains
+      // snapshot/receipt based rather than text-search based.
+      const traceListInput: AskTraceListQueryV1 = {
+        limit,
+        ...(url.searchParams.get('cursor') ? { cursor: url.searchParams.get('cursor')! } : {}),
+        ...(url.searchParams.get('status') ? { status: url.searchParams.get('status') as AskTraceListQueryV1['status'] } : {}),
+        ...(url.searchParams.get('mode') ? { mode: url.searchParams.get('mode') as AskTraceListQueryV1['mode'] } : {}),
+        ...(url.searchParams.get('trustState') ? { trustState: url.searchParams.get('trustState')! } : {}),
+        ...(url.searchParams.get('selectedTier') ? { selectedTier: url.searchParams.get('selectedTier')! } : {}),
+        ...(url.searchParams.get('surface') ? { surface: url.searchParams.get('surface') as AskTraceListQueryV1['surface'] } : {}),
+        ...(url.searchParams.get('recordingStatus') ? { recordingStatus: url.searchParams.get('recordingStatus') as AskTraceListQueryV1['recordingStatus'] } : {}),
+      };
+      const page = askTraceStore.list(traceListInput);
+      const traces = await Promise.all(page.traces.map(async (trace) => {
+        const run = await agentRunStore.get(trace.runId);
+        if (!run) return trace;
+        const questionPreview = askTraceQuestionPreview(run.question);
+        return {
+          ...trace,
+          ...(questionPreview ? { questionPreview } : {}),
+          scenarioLabel: askTraceScenarioLabel(run),
+        };
+      }));
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({ ...page, traces }));
+      return;
+    }
+
+    if (req.method === 'GET' && /^\/api\/ask-traces\/by-run\/[^/]+$/.test(path)) {
+      const traceStatus = askTraceStore.status();
+      if (!traceStatus.available) {
+        writeTraceStoreUnavailable(traceStatus);
+        return;
+      }
+      const runId = decodeURIComponent(path.slice('/api/ask-traces/by-run/'.length));
+      const trace = askTraceStore.getByRun(runId);
+      if (!trace) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ code: 'TRACE_NOT_FOUND', error: 'No local trace was found for this Ask run.' }));
+        return;
+      }
+      if (trace.envelope.recordingStatus === 'detail_expired') {
+        res.writeHead(410, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ code: 'TRACE_DETAIL_EXPIRED', error: 'Detailed trace evidence has expired; the run summary remains available.', envelope: trace.envelope }));
+        return;
+      }
+      const run = await agentRunStore.get(runId);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      // The canonical Ask story is persisted on the AgentRun, not rebuilt from
+      // spans. Join it only at this local API boundary so trace storage never
+      // becomes prompt/result retention and old runs explicitly omit it.
+      res.end(serializeJSON({
+        ...trace,
+        ...(run?.diagnosticReceiptV4?.summary ? { decisionSummary: run.diagnosticReceiptV4.summary } : {}),
+      }));
+      return;
+    }
+
+    if (req.method === 'GET' && /^\/api\/ask-traces\/[0-9a-f]{32}\/export$/.test(path)) {
+      const traceStatus = askTraceStore.status();
+      if (!traceStatus.available) {
+        writeTraceStoreUnavailable(traceStatus);
+        return;
+      }
+      const traceId = path.split('/')[3] ?? '';
+      const trace = askTraceStore.get(traceId);
+      if (!trace) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ code: 'TRACE_NOT_FOUND', error: 'No local trace was found.' }));
+        return;
+      }
+      if (trace.envelope.recordingStatus === 'detail_expired') {
+        res.writeHead(410, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ code: 'TRACE_DETAIL_EXPIRED', error: 'Detailed trace evidence has expired; it cannot be exported.' }));
+        return;
+      }
+      if ((url.searchParams.get('profile') ?? 'strict') !== 'strict') {
+        res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ code: 'TRACE_EXPORT_REDACTION_FAILED', error: 'The runtime export endpoint only serves strict redacted bundles.' }));
+        return;
+      }
+      try {
+        const run = await agentRunStore.get(trace.envelope.runId);
+        const bundle = createAskTracePortableBundleV1(trace, {
+          profile: 'strict',
+          runReceipt: run,
+          provenance: 'recorded',
+        });
+        askTraceStore.recordExportReceipt(trace.envelope.traceId, {
+          version: 1,
+          profile: 'strict',
+          bundleFingerprint: bundle.manifest.bundleFingerprint,
+          exportedAt: bundle.manifest.createdAt,
+          checksums: {
+            'manifest.json': `sha256:${createHash('sha256').update(serializeJSON(bundle.manifest)).digest('hex')}`,
+            ...bundle.manifest.checksums,
+          },
+          canaryPassed: true,
+          ...(bundle.trace.envelope.traceFingerprint ? { traceFingerprint: bundle.trace.envelope.traceFingerprint } : {}),
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="ask-trace-${traceId}.json"` });
+        res.end(serializeJSON(bundle));
+      } catch {
+        res.writeHead(422, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ code: 'TRACE_EXPORT_REDACTION_FAILED', error: 'The local trace could not be exported safely.' }));
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && /^\/api\/ask-traces\/[0-9a-f]{32}$/.test(path)) {
+      const traceStatus = askTraceStore.status();
+      if (!traceStatus.available) {
+        writeTraceStoreUnavailable(traceStatus);
+        return;
+      }
+      const traceId = path.split('/').at(-1) ?? '';
+      const trace = askTraceStore.get(traceId);
+      if (!trace) {
+        res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ code: 'TRACE_NOT_FOUND', error: 'No local trace was found.' }));
+        return;
+      }
+      if (trace.envelope.recordingStatus === 'detail_expired') {
+        res.writeHead(410, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(serializeJSON({ code: 'TRACE_DETAIL_EXPIRED', error: 'Detailed trace evidence has expired; the run summary remains available.', envelope: trace.envelope }));
+        return;
+      }
+      const run = await agentRunStore.get(trace.envelope.runId);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(serializeJSON({
+        ...trace,
+        ...(run?.diagnosticReceiptV4?.summary ? { decisionSummary: run.diagnosticReceiptV4.summary } : {}),
+      }));
+      return;
+    }
+
     /**
      * One-click bounded execution repair.
      *
@@ -11611,6 +13715,41 @@ function analyticalFailureSummary(
       const repairStartedAt = new Date().toISOString();
       const repairStartedAtMs = Date.now();
       const sourceFailureForReservation = analyticalFailedRunFromAgentRun(sourceRun)?.failure;
+      // A one-click repair is a derived Ask run, not an invisible side effect
+      // of the original failure. Give it its own addressable local trace and
+      // keep the source run/trace plus immutable plan fingerprint as typed
+      // linkage. No prompt, SQL, result row, or raw failure text enters it.
+      const repairTrace = createAskTraceObserverV1({
+        store: askTraceStore,
+        runId: derivedRunId,
+        surface: 'browser',
+        mode: sourceRun.requestedMode === 'research' ? 'research' : 'ask',
+        questionFingerprint: runtimeTraceFingerprint(sourceRun.question),
+        ...(sourceRun.traceReference?.traceId ? { parentTraceId: sourceRun.traceReference.traceId } : {}),
+        parentRunId: sourceRun.id,
+      });
+      repairTrace.recordLink({
+        kind: 'derived_repair',
+        targetRunId: sourceRun.id,
+        ...(sourceRun.traceReference?.traceId ? { targetTraceId: sourceRun.traceReference.traceId } : {}),
+      });
+      const repairTracePayload = {
+        kind: 'sql' as const,
+        execution: {
+          version: 1 as const,
+          tier: 'exploratory_sql' as const,
+          planFingerprint: capability.planFingerprint,
+          sqlFingerprint: capability.sqlFingerprint,
+          targetFingerprint: capability.targetFingerprint,
+          reviewRequired: true,
+        },
+      };
+      const repairTraceSpan = repairTrace.startSpan({
+        name: 'sql.repair',
+        stage: 'sql',
+        reasonCode: 'repair_attempted',
+        payload: repairTracePayload,
+      });
       const reservationEvent: AgentRunEvent = {
         id: `${derivedRunId}:repair`,
         runId: derivedRunId,
@@ -11666,6 +13805,7 @@ function analyticalFailureSummary(
       }
       let repaired: BoundedDqlRepairResult;
       try {
+        repaired = await agentRunAskTraceContext.run(repairTrace, async () => {
         // Compile the immutable original wrapper first. A provider receives only
         // this embedded SQL, never the DQL wrapper or its surrounding fields.
         const invocation = prepareBlockInvocation({
@@ -11769,7 +13909,7 @@ function analyticalFailureSummary(
           ...(repairedInvocation.parameters.length ? { parameters: repairedInvocation.parameters } : {}),
           ...(Object.keys(repairedInvocation.values).length ? { parameterValues: repairedInvocation.values } : {}),
         };
-        repaired = {
+        return {
           ...sqlRepair,
           result: {
             ...sqlRepair.result,
@@ -11782,8 +13922,25 @@ function analyticalFailureSummary(
           sqlParams: repairedPlan.sqlParams,
           variables: { ...repairedPlan.variables, ...repairedInvocation.values },
         };
+        });
+        repairTrace.finishSpan(repairTraceSpan, {
+          outcome: 'ok',
+          reasonCode: 'repair_attempted',
+          payload: repairTracePayload,
+        });
       } catch (error) {
         const repairError = error as Error & { status?: number; warehouseFailure?: WarehouseSqlFailureV1 };
+        repairTrace.finishSpan(repairTraceSpan, {
+          outcome: 'error',
+          reasonCode: 'sql_failure',
+          payload: repairTracePayload,
+        });
+        const repairTraceReference = repairTrace.finalize({
+          status: 'blocked',
+          terminalOutcome: 'blocked',
+          trustState: 'blocked',
+          selectedTier: 'exploratory_sql',
+        });
         const dispatchEvidence = providerDispatchTerminalEvidence(error);
         const failedAt = new Date().toISOString();
         const failedTelemetry: AgentRunTelemetryV1 = {
@@ -11831,6 +13988,7 @@ function analyticalFailureSummary(
             providerEgressReceiptFingerprints: failedReceipts.map((receipt) => executionFingerprint(stableExecutionValue(receipt))),
             repairCapabilityFingerprint: executionFingerprint(stableExecutionValue(capability)),
           },
+          ...(repairTraceReference ? { traceReference: repairTraceReference } : {}),
         });
         res.writeHead(repairError.status ?? 500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(serializeJSON({
@@ -11848,6 +14006,21 @@ function analyticalFailureSummary(
       const sourceFailure = analyticalFailedRunFromAgentRun(sourceRun)?.failure;
       const presentationContext = repairPresentationContextFromAgentRun(sourceRun);
       const executionResultFingerprint = result.executionReceipt?.resultFingerprint;
+      const resultTraceSpan = repairTrace.startSpan({
+        name: 'result.normalize',
+        stage: 'result',
+        reasonCode: 'result_accepted',
+        payload: {
+          kind: 'result',
+          ...(executionResultFingerprint ? { resultFingerprint: executionResultFingerprint } : {}),
+          rowCount: result.rowCount,
+          trustState: 'review_required',
+        },
+      });
+      repairTrace.finishSpan(resultTraceSpan, {
+        outcome: 'ok',
+        reasonCode: 'result_accepted',
+      });
       const repairTotalDurationMs = Date.now() - repairStartedAtMs;
       const repairTelemetry: AgentRunTelemetryV1 = {
         version: 1,
@@ -11997,6 +14170,13 @@ function analyticalFailureSummary(
           attempt: 1,
         },
       };
+      const repairTraceReference = repairTrace.finalize({
+        status: 'completed',
+        terminalOutcome: 'needs_review',
+        trustState: 'review_required',
+        selectedTier: 'exploratory_sql',
+      });
+      if (repairTraceReference) derivedRun.traceReference = repairTraceReference;
       await agentRunStore.save(derivedRun);
       recordConversationTurn(threadId ? getConversationStore() : null, threadId, derivedRun);
       res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -12079,6 +14259,16 @@ function analyticalFailureSummary(
           res.end(serializeJSON({ error: parsed.error ?? 'Invalid agent run request.' }));
           return;
         }
+        // A trace surface is host-controlled metadata. Do not parse it from
+        // the JSON body: only the unguessable per-runtime capability passed
+        // from `dql agent ask` may mark this local request as CLI.
+        const traceSurface = cliAskTraceCapabilities.consume({
+          capability: req.headers['x-dql-ask-trace-capability'],
+          scope: 'agent-runs',
+          loopbackServer: loopback,
+          remoteAddress: req.socket.remoteAddress,
+        });
+        if (traceSurface) parsed.request.traceSurface = traceSurface;
         // The answer-loop cascade now proves certified/semantic/generated tiers
         // after retrieval and execution. Avoid pre-routing ordinary Ask runs from
         // token-overlap signals; explicit callers may still provide signals.
@@ -12147,17 +14337,12 @@ function analyticalFailureSummary(
               inheritedSignal: ingressSignal,
             });
             parsed.request!.signal = parsed.request!.runBudget.hardSignal;
-            // Ordinary Ask needs room to think, write, and recover: meaning (1)
-            // + planning/generation (3) + narration (2) + one repair. The old
-            // `total: 2` left nothing for narration once generation had run,
-            // which is why the answer arrived as a deterministic fact-join.
             const runProviderEvidence = new RunScopedProviderDispatchEvidence(
-              parsed.request!.requestedMode === 'research'
-                ? { total: 14, meaningResolution: 1, generationGroup: 11, narration: 2, repair: 1 }
-                : { total: 6, meaningResolution: 1, generationGroup: 3, narration: 2, repair: 1 },
+              agentRunProviderDispatchBudgetForMode(parsed.request!.requestedMode),
               parsed.request!.runBudget,
               resolveProviderResultRowEgressPolicy({
                 projectSetting: projectConfig?.agent?.providerResultRowEgress,
+                requestedMode: parsed.request!.requestedMode,
                 researchOptIn: parsed.request!.requestedMode === 'research'
                   && parsed.request!.researchResultRowsOptIn === true,
               }),
@@ -13359,7 +15544,12 @@ function analyticalFailureSummary(
           const limit = Number(url.searchParams.get('limit') ?? '50');
           const includeArchived = url.searchParams.get('archived') === '1';
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(serializeJSON({ threads: store.listThreads({ limit: Number.isFinite(limit) ? limit : 50, includeArchived }) }));
+          res.end(serializeJSON({
+            threads: store.listThreads({ limit: Number.isFinite(limit) ? limit : 50, includeArchived }),
+            // Browser cache identity only. It is an opaque one-way fingerprint
+            // and intentionally does not become conversation/trace evidence.
+            projectIdentity: conversationProjectIdentity,
+          }));
           return;
         }
         if (req.method === 'POST' && path === '/api/agent/threads') {
@@ -20891,7 +23081,12 @@ table: ${table}${tagList}
       return;
     }
 
-    const requestedPath = path === '/' ? '/index.html' : path;
+    // The notebook owns these explicit client routes. Keep the fallback
+    // deliberately narrow: arbitrary missing paths remain real 404s.
+    const requestedPath = path === '/'
+      || isAskClientRoutePath(path)
+      ? '/index.html'
+      : path;
     const filePath = safeJoin(rootDir, requestedPath);
     if (!filePath || !existsSync(filePath) || statSync(filePath).isDirectory()) {
       res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -20939,6 +23134,7 @@ table: ${table}${tagList}
     projectWatchers.length = 0;
     unsubscribeOperationEvents();
     projectRefreshCoordinator.close();
+    askTraceStore.close();
     for (const client of operationSseClients) {
       try { client.end(); } catch { /* connection already closed */ }
     }
@@ -20980,7 +23176,10 @@ function providerDispatchTerminalEvidence(value: unknown): ProviderDispatchTermi
     || !Number.isInteger(evidence.providerRoundTrips)
     || (evidence.providerRoundTrips ?? -1) < 0) return undefined;
   return {
-    providerEgressReceipts: evidence.providerEgressReceipts,
+    providerEgressReceipts: evidence.providerEgressReceipts.flatMap((receipt) => {
+      const normalized = normalizeProviderEgressReceiptV1(receipt);
+      return normalized ? [normalized] : [];
+    }),
     providerRoundTrips: evidence.providerRoundTrips!,
     toolCalls: Number.isInteger(evidence.toolCalls) && (evidence.toolCalls ?? -1) >= 0 ? evidence.toolCalls! : 0,
     sqlExecutions: Number.isInteger(evidence.sqlExecutions) && (evidence.sqlExecutions ?? -1) >= 0 ? evidence.sqlExecutions! : 0,
@@ -21352,7 +23551,10 @@ function normalizeQueryResult(
     truncated: result?.truncated,
     resultFingerprint: result?.resultFingerprint,
     executionReceipt: result?.executionReceipt,
-    trustState: result?.trustState,
+    trustState: canonicalPersistedTrustState({
+      trustState: result?.trustState,
+      answerTier: result?.answerTier,
+    }),
     answerTier: result?.answerTier,
   });
   const rawRows = Array.isArray(result?.rows) ? result.rows : [];
@@ -21406,7 +23608,22 @@ export function resolveDefaultLLMProvider(projectRoot: string): ProviderId | nul
  * answer-loop runner — never the MCP `claudeCodeRunner`, which doesn't emit a governed
  * answer envelope. Everything else uses the Settings-resolved default runner.
  */
-export function resolveGovernedAnswerRunner(projectRoot: string): { provider: ProviderId; runner: LLMAgentRunner } | null {
+export function resolveGovernedAnswerRunner(
+  projectRoot: string,
+  requestedProvider?: string,
+): { provider: ProviderId; runner: LLMAgentRunner } | null {
+  // This is intentionally before configuration discovery. It lets the
+  // canonical AgentRun preflight distinguish an explicit unknown provider from
+  // an absent configuration, while a known-but-unavailable provider still
+  // reaches its real adapter readiness check (for example Ollama network
+  // failure rather than a fabricated authentication error).
+  if (requestedProvider !== undefined) {
+    if (!isGovernedAnswerProviderId(requestedProvider)) return null;
+    return {
+      provider: requestedProvider as ProviderId,
+      runner: createDqlAgentProviderRunner(requestedProvider),
+    };
+  }
   // Runtime eval cassettes are an explicit, offline provider source. Resolve
   // them before Settings because the CI fixture intentionally has no user
   // provider configuration; otherwise Ask exits at this earlier gate and never
@@ -21447,6 +23664,28 @@ function isGovernedAnswerProviderId(value: unknown): value is ProviderSettingsId
     || value === 'custom-openai'
     || value === 'claude-code'
     || value === 'codex';
+}
+
+/**
+ * The no-runner outcome is still an authoritative provider preflight result.
+ * Preserve an explicit invalid selection as `MODEL_NOT_FOUND` instead of
+ * collapsing it into the historical generic authentication error.
+ */
+export function governedProviderPreflightError(requestedProvider?: string): Error & {
+  code: 'MODEL_NOT_FOUND' | 'AUTHENTICATION_FAILED';
+  providerPhase: 'preflight';
+} {
+  const invalidRequestedProvider = Boolean(requestedProvider)
+    && !isGovernedAnswerProviderId(requestedProvider);
+  return Object.assign(
+    new Error(invalidRequestedProvider
+      ? 'The selected AI provider is not available in this local runtime. Choose a configured provider in Settings and retry.'
+      : 'No AI provider is configured. Configure a subscription (Claude Code / Codex), OpenAI, Gemini, Ollama, or a custom OpenAI-compatible endpoint in Settings.'),
+    {
+      code: invalidRequestedProvider ? 'MODEL_NOT_FOUND' as const : 'AUTHENTICATION_FAILED' as const,
+      providerPhase: 'preflight' as const,
+    },
+  );
 }
 
 /** Map a runner provider id to the settings id whose reasoning ceiling applies. */
@@ -24215,6 +26454,24 @@ function agentRunTelemetryForAnswer(
 
 function executionFingerprint(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+/**
+ * Opaque browser-cache identity for local Ask conversations.  A browser origin
+ * is not a project boundary: a user can stop one `dql notebook` process and
+ * start a different project on the same port.  The client therefore receives
+ * only this one-way, server-owned value and never a local path. It is not a
+ * secret: it is intentionally linkable only within the local browser/runtime
+ * across restarts so stale cache can be rejected; never log or export it.
+ */
+export function askConversationProjectIdentity(projectRoot: string): string {
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = realpathSync(projectRoot);
+  } catch {
+    canonicalRoot = resolve(projectRoot);
+  }
+  return `sha256:${executionFingerprint(`dql.ask.conversation-cache.v1\0${canonicalRoot}`)}`;
 }
 
 function buildSemanticAggregationCompilerReceipt(input: {
@@ -33813,6 +36070,350 @@ export function predictDispatchMs(
 const AGENT_MEANING_TIMEOUT_BASE_MS = 10_000;
 const AGENT_MEANING_TIMEOUT_MS = AGENT_MEANING_TIMEOUT_BASE_MS * deadlineScale();
 
+/**
+ * A Research root owns a fixed 120-second deadline.  Reserve the last slice
+ * for durable branch receipts, deterministic synthesis, and run persistence;
+ * otherwise the first slow child can consume the entire investigation and
+ * leave the user with neither an answer nor an explanation of the failure.
+ *
+ * This is deliberately a local runtime scheduling policy, not a second
+ * product deadline.  The root AgentRunBudget remains the one hard authority.
+ */
+export const RESEARCH_BRANCH_FINALIZATION_RESERVE_MS = 15_000;
+export const RESEARCH_MIN_BRANCH_EXECUTION_MS = 1_000;
+/**
+ * Research branches are independent bounded investigations.  Run a small
+ * deterministic wave so a five-hypothesis plan does not divide the root
+ * budget into five unusably short serial windows.  This is deliberately below
+ * the provider cap and keeps cancellation/finalization responsive.
+ */
+export const RESEARCH_MAX_CONCURRENT_BRANCHES = 3;
+
+export type ResearchBranchStopReasonV1 =
+  | 'completed'
+  | 'research_branch_timeout'
+  | 'budget_exhausted'
+  | 'run_deadline'
+  /** The user explicitly stopped the root Research run. */
+  | 'cancelled'
+  /** The admitted branch failed before an execution receipt was produced. */
+  | 'execution_failed';
+
+/** Content-safe execution receipt for one bounded Research child. */
+export interface ResearchBranchReceiptV1 {
+  version: 1;
+  branchId: string;
+  childRunId: string;
+  index: number;
+  state: 'completed' | 'failed' | 'timed_out' | 'skipped';
+  verdict: 'inconclusive' | 'failed' | 'skipped';
+  stopReason: ResearchBranchStopReasonV1;
+  /** Present for an admitted child; skipped children never start provider/SQL work. */
+  branchBudgetMs?: number;
+}
+
+/**
+ * Fair-share one child deadline from the remaining root time.  The formula is
+ * intentionally deterministic so a trace can explain why a branch stopped:
+ * after finalization is reserved, divide the usable window by the number of
+ * remaining bounded waves.  Every branch in the current wave receives the
+ * same window. A too-small share is a skipped branch, not a late
+ * provider/warehouse admission.
+ */
+export function allocateResearchBranchBudget(input: {
+  remainingMs: number;
+  remainingBranches: number;
+  finalizationReserveMs?: number;
+  minExecutionMs?: number;
+  maxConcurrentBranches?: number;
+}): {
+  version: 1;
+  remainingMs: number;
+  finalizationReserveMs: number;
+  maxConcurrentBranches: number;
+  remainingWaves: number;
+  branchBudgetMs?: number;
+  stopReason?: 'budget_exhausted';
+} {
+  const remainingMs = Math.max(0, Math.trunc(input.remainingMs));
+  const remainingBranches = Math.max(1, Math.trunc(input.remainingBranches));
+  const finalizationReserveMs = Math.max(0, Math.trunc(input.finalizationReserveMs ?? RESEARCH_BRANCH_FINALIZATION_RESERVE_MS));
+  const minExecutionMs = Math.max(1, Math.trunc(input.minExecutionMs ?? RESEARCH_MIN_BRANCH_EXECUTION_MS));
+  const maxConcurrentBranches = Math.max(1, Math.min(
+    remainingBranches,
+    Math.trunc(input.maxConcurrentBranches ?? RESEARCH_MAX_CONCURRENT_BRANCHES),
+  ));
+  const remainingWaves = Math.ceil(remainingBranches / maxConcurrentBranches);
+  const usableMs = Math.max(0, remainingMs - finalizationReserveMs);
+  const branchBudgetMs = Math.floor(usableMs / remainingWaves);
+  if (branchBudgetMs < minExecutionMs) {
+    return {
+      version: 1,
+      remainingMs,
+      finalizationReserveMs,
+      maxConcurrentBranches,
+      remainingWaves,
+      stopReason: 'budget_exhausted',
+    };
+  }
+  return {
+    version: 1,
+    remainingMs,
+    finalizationReserveMs,
+    maxConcurrentBranches,
+    remainingWaves,
+    branchBudgetMs,
+  };
+}
+
+type ResearchBranchActionProjectionInput = {
+  action: {
+    kind: 'lookup_metric' | 'lookup_block' | 'breakdown' | 'compare_time' | 'check_lineage' | 'compose_app';
+    target: string;
+  };
+  /**
+   * The root's host-owned tuple. It may exist before a root route is
+   * executable, which is intentional: Research children still start from the
+   * reader's requirement rather than a planner sentence or root SQL.
+   */
+  rootRequirementSeed: AnalyticalRequirementSeedV1;
+  /** Optional frozen root facts used only to preserve already-resolved terms. */
+  rootPlan?: Pick<ResolvedAnalyticalPlan, 'query' | 'analyticalFrame'>;
+};
+
+export interface ResearchBranchRequirementProjectionV1 {
+  version: 1;
+  action: ResearchBranchActionProjectionInput['action']['kind'];
+  question: string;
+  /**
+   * A host-owned seed only. It deliberately contains no planner supplied
+   * candidate ID: the child router must retrieve and bind candidates from its
+   * own immutable snapshot before it can freeze a plan.
+   */
+  requirementSeed?: AnalyticalRequirementSeedV1;
+}
+
+/**
+ * Convert one typed Research action into an ordinary Ask requirement seed.
+ *
+ * The older branch runner reduced every action to the final token of its
+ * target. That meant `compare_time` and `breakdown` silently discarded the
+ * root metric (and, for time, its required role/grain), so distinct research
+ * branches could all execute the same baseline. This projection is host-only:
+ * it preserves the root tuple and adds the action's one requested operation,
+ * but never turns a planner label into a trusted candidate or SQL authority.
+ */
+export function buildResearchBranchRequirementProjection(
+  input: ResearchBranchActionProjectionInput,
+): ResearchBranchRequirementProjectionV1 {
+  const targetHint = researchBranchTargetHint(input.action.target);
+  const rootRequirements = input.rootRequirementSeed.requirements;
+  const rootPlan = input.rootPlan;
+  const resolvedPlanTerms = (bindings: ResolvedAnalyticalPlan['query']['measures']) => bindings
+    .filter((binding) => binding.status === 'resolved')
+    .map((binding) => binding.requested);
+  const rootMeasures = uniqueResearchBranchTerms(
+    rootRequirements.measures,
+    rootPlan ? resolvedPlanTerms(rootPlan.query.measures) : [],
+  );
+  const rootDimensions = uniqueResearchBranchTerms(
+    rootRequirements.dimensions,
+    rootPlan ? resolvedPlanTerms(rootPlan.query.dimensions) : [],
+  );
+  const rootEntityTerms = uniqueResearchBranchTerms(rootRequirements.entityTerms);
+  const rootEntityDisplayTerms = uniqueResearchBranchTerms(rootRequirements.entityDisplayTerms);
+  const rootMemberTerms = uniqueResearchBranchTerms(rootRequirements.memberTerms);
+  const rootOutputTerms = uniqueResearchBranchTerms(rootRequirements.outputTerms ?? []);
+  const rootTimeGrain = researchBranchTimeGrain(
+    rootRequirements.time?.grain
+      ?? rootPlan?.query.timeGrain
+      ?? rootPlan?.analyticalFrame?.timeContext?.grain,
+  );
+  const rootTime = rootRequirements.time
+    ? { ...rootRequirements.time }
+    : rootTimeGrain
+      ? {
+          role: 'time_axis' as const,
+          grain: rootTimeGrain,
+          requiresDeclaredFiscalCalendar: false,
+        }
+      : undefined;
+  const baseRequirements = (inputOverrides: Partial<AnalyticalRequirementSetV1>): AnalyticalRequirementSetV1 => ({
+    version: 1,
+    measures: rootMeasures,
+    dimensions: rootDimensions,
+    entityTerms: rootEntityTerms,
+    entityDisplayTerms: rootEntityDisplayTerms,
+    memberTerms: rootMemberTerms,
+    ...(rootOutputTerms.length > 0 ? { outputTerms: rootOutputTerms } : {}),
+    ...(rootRequirements.grain ? { grain: rootRequirements.grain } : {}),
+    ...(rootRequirements.ranking ? { ranking: { ...rootRequirements.ranking } } : {}),
+    ...(rootTime ? { time: rootTime } : {}),
+    ...inputOverrides,
+  });
+  const rootTimeRange = input.rootRequirementSeed.queryIntent.timeRange
+    ?? rootPlan?.query.timeRange;
+  const questionWithRootTimeRange = (question: string) => rootTimeRange
+    ? `${question} for ${rootTimeRange}`
+    : question;
+  /**
+   * A child request has one host-owned tuple.  The planner's target can
+   * improve retrieval, but it must not erase a root filter, output, rank,
+   * fiscal binding, or the root measure just because this particular branch
+   * happens to look up a metric.  Rebuild the seed for the child wording, then
+   * restore the immutable root query intent and add only an action-owned
+   * dimension where the action actually requires one.
+   */
+  const projectedSeed = (
+    question: string,
+    requirements: AnalyticalRequirementSetV1,
+  ): AnalyticalRequirementSeedV1 => {
+    const seed = buildAnalyticalRequirementSeedV1({ question, requirements });
+    const rootIntent = input.rootRequirementSeed.queryIntent;
+    const queryIntentDimensions = uniqueResearchBranchTerms(
+      rootIntent.dimensions,
+      requirements.dimensions,
+      requirements.entityDisplayTerms,
+    );
+    const queryIntentMeasures = uniqueResearchBranchTerms(rootIntent.measures, requirements.measures);
+    return {
+      ...seed,
+      queryIntent: {
+        measures: queryIntentMeasures,
+        dimensions: queryIntentDimensions,
+        // Filter/member interpretation is host-owned on the root request. A
+        // branch may bind it to a child snapshot, but may not discard it.
+        filters: rootIntent.filters.map((filter) => ({ ...filter })),
+        ...(rootIntent.timeRange ? { timeRange: rootIntent.timeRange } : {}),
+        ...(rootIntent.timeGrain
+          ? { timeGrain: rootIntent.timeGrain }
+          : requirements.time?.grain ? { timeGrain: requirements.time.grain } : {}),
+        ...(rootIntent.order ? { order: rootIntent.order } : {}),
+        ...(rootIntent.limit !== undefined ? { limit: rootIntent.limit } : {}),
+        ...(rootIntent.fiscalCalendarId ? { fiscalCalendarId: rootIntent.fiscalCalendarId } : {}),
+        ...(rootIntent.fiscalDateRoleId ? { fiscalDateRoleId: rootIntent.fiscalDateRoleId } : {}),
+      },
+    };
+  };
+
+  if (input.action.kind === 'lookup_metric') {
+    // The target remains a retrieval phrase only. Keeping the root tuple here
+    // matters for multi-metric, ranked, fiscal, filtered research: a lookup
+    // branch cannot silently become a query for just the planner's metric.
+    const question = `Focus on ${targetHint} while answering: ${researchBranchRootQuestion(input.rootRequirementSeed.sourceQuestion)}`;
+    return {
+      version: 1,
+      action: input.action.kind,
+      question,
+      requirementSeed: projectedSeed(question, baseRequirements({})),
+    };
+  }
+
+  if (input.action.kind === 'breakdown' && rootMeasures.length > 0) {
+    const question = questionWithRootTimeRange(`Show ${rootMeasures.join(' and ')} by ${targetHint}`);
+    return {
+      version: 1,
+      action: input.action.kind,
+      question,
+      requirementSeed: projectedSeed(question, baseRequirements({
+        dimensions: uniqueResearchBranchTerms(rootDimensions, [targetHint]),
+      })),
+    };
+  }
+
+  if (input.action.kind === 'compare_time' && rootMeasures.length > 0) {
+    const question = questionWithRootTimeRange(`Compare ${rootMeasures.join(' and ')} over time by ${targetHint}`);
+    return {
+      version: 1,
+      action: input.action.kind,
+      question,
+      requirementSeed: projectedSeed(question, baseRequirements({
+        // Keep the time target in the role-balanced requirement package as
+        // a retrieval term. The child router still verifies its exact
+        // time-axis role against its own candidate capability before plan
+        // freeze; a planner label alone cannot authorize a time field.
+        dimensions: uniqueResearchBranchTerms(rootDimensions, [targetHint]),
+        time: {
+          role: 'time_axis',
+          ...(rootTimeGrain ? { grain: rootTimeGrain } : {}),
+          ...(rootRequirements.time?.fiscalPeriod
+            ? { fiscalPeriod: rootRequirements.time.fiscalPeriod }
+            : {}),
+          requiresDeclaredFiscalCalendar: rootRequirements.time?.requiresDeclaredFiscalCalendar ?? false,
+        },
+      })),
+    };
+  }
+
+  // Blocks, lineage, and app composition do not invent an analytical tuple.
+  // Their target remains a bounded retrieval phrase, and the child cascade
+  // decides whether it can freeze a compatible route.
+  return {
+    version: 1,
+    action: input.action.kind,
+    question: targetHint,
+  };
+}
+
+function researchBranchTargetHint(target: string): string {
+  return target
+    .trim()
+    .split(/[/:]/)
+    .at(-1)
+    ?.split('.')
+    .at(-1)
+    ?.replace(/[_-]+/g, ' ')
+    .trim() || 'the planned analytical target';
+}
+
+function researchBranchRootQuestion(sourceQuestion: string): string {
+  const withoutResearchPrefix = sourceQuestion
+    .replace(/^\s*(?:deep\s+)?research\b\s*(?:about|on|into|for)?\s*/i, '')
+    .trim();
+  return withoutResearchPrefix || 'the root analytical question';
+}
+
+function uniqueResearchBranchTerms(...groups: string[][]): string[] {
+  return [...new Set(groups
+    .flat()
+    .map((term) => term.trim())
+    .filter(Boolean))];
+}
+
+function researchBranchTimeGrain(value: string | undefined): 'day' | 'week' | 'month' | 'quarter' | 'year' | undefined {
+  return value === 'day' || value === 'week' || value === 'month' || value === 'quarter' || value === 'year'
+    ? value
+    : undefined;
+}
+
+/**
+ * Race a child against its own signal while consuming an eventual late
+ * rejection. `runNotebookResearch` also receives that signal and checks it at
+ * persistence boundaries, so a slow provider/query cannot overwrite the
+ * already-recorded timeout receipt after this promise rejects.
+ */
+export function awaitResearchBranchDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    void work.catch(() => undefined);
+    return Promise.reject(signal.reason ?? new DOMException('The Research branch deadline elapsed.', 'TimeoutError'));
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      callback();
+    };
+    const onAbort = () => finish(() => reject(signal.reason ?? new DOMException('The Research branch deadline elapsed.', 'TimeoutError')));
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    );
+  });
+}
+
 export function boundedAgentMeaningSignal(
   signal?: AbortSignal,
   timeoutMs: number = AGENT_MEANING_TIMEOUT_MS,
@@ -34546,7 +37147,10 @@ function normalizeNotebookAgentResult(result: AgentResultPayload): ReturnType<ty
     executionTime: result.executionTime,
     resultFingerprint: result.resultFingerprint,
     executionReceipt: result.executionReceipt,
-    trustState: result.executableArtifact?.trustState,
+    trustState: canonicalPersistedTrustState({
+      trustState: result.executableArtifact?.trustState,
+      answerTier: result.answerTier,
+    }),
     answerTier: result.answerTier,
   });
   return {
@@ -34557,6 +37161,7 @@ function normalizeNotebookAgentResult(result: AgentResultPayload): ReturnType<ty
     executionTime: canonical.executionTime ?? 0,
     ...(canonical.truncated ? { truncated: true } : {}),
     ...(canonical.executionReceipt ? { executionReceipt: canonical.executionReceipt } : {}),
+    ...(canonical.trustState ? { trustState: canonical.trustState } : {}),
     ...(canonical.answerTier ? { answerTier: canonical.answerTier } : {}),
   };
 }
@@ -34572,6 +37177,26 @@ function notebookResearchSummary(
     return `Research preview for "${question}" returned ${rowCount.toLocaleString()} row${rowCount === 1 ? '' : 's'} across ${result.columns.length.toLocaleString()} column${result.columns.length === 1 ? '' : 's'}.`;
   }
   return `Research plan created for "${question}". Add or generate SQL, then run a bounded preview.`;
+}
+
+/**
+ * Persisted Research children are deliberately narrated without another model
+ * call after a frozen Ask plan has returned rows.  This keeps the branch inside
+ * its fair-share deadline and makes the stored finding a direct consequence of
+ * its execution receipt rather than an unbounded second interpretation pass.
+ */
+function deterministicResearchBranchSummary(input: {
+  question: string;
+  result: ReturnType<typeof normalizeQueryResult>;
+  executionReceipt?: DqlArtifactExecutionReceipt;
+  analyticalNarrative?: AgentAnswer['analyticalNarrative'];
+}): string {
+  const factNarrative = notebookResearchString(input.analyticalNarrative?.text);
+  const fallback = notebookResearchSummary(input.question, input.result, undefined);
+  const receiptKind = input.executionReceipt?.resultFingerprint
+    ? 'receipt-bound'
+    : 'execution-fingerprint-bound';
+  return `${factNarrative ?? fallback} This ${receiptKind} Research branch was retained for synthesis without a follow-up provider narration.`;
 }
 
 function recordNotebookQueryRun(projectRoot: string, input: {

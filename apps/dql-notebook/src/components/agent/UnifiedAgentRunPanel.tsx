@@ -53,6 +53,8 @@ import {
   type AgentRunStepStatus,
   type AgentRunStopReason,
   type AgentRunTrustState,
+  type AskDecisionSummaryV1,
+  type AskTraceDataV1,
   type AgentThinkingMode,
   type AppBuildProposal,
   type AppStudioBuildDraft,
@@ -77,6 +79,9 @@ import { addAskResultFilter, askArtifactStateKey, askResultFilterCandidates } fr
 export type ThreadItem =
   | { kind: 'user'; id: string; text: string }
   | { kind: 'run'; id: string; run: AgentRun };
+
+/** Must stay byte-for-byte aligned with the full Ask trace legacy notice. */
+export const CANONICAL_DECISION_SUMMARY_UNAVAILABLE = 'Canonical decision summary unavailable for this older run';
 
 /**
  * Research is an explicit workflow decision. Thinking depth remains an
@@ -206,7 +211,7 @@ interface UnifiedAgentRunPanelProps {
   /** Explicit handoff for immutable Modeling/Skills authoring proposals. */
   onReviewAuthoringProposal?: (artifact: AgentRun['artifacts'][number], run: AgentRun) => void;
   onOpenBlock?: (path: string, name?: string) => void;
-  onOpenResearch?: (id: string, notebookPath?: string) => void;
+  onOpenResearch?: (id: string, notebookPath?: string, sourceAskRunId?: string) => void;
   /** Navigate into an app/dashboard (used by the "Added to app" success link). */
   onOpenApp?: (appId: string, dashboardId?: string, draftId?: string) => void;
   /** Reports whether a run is in flight, so a host can avoid unmounting mid-run. */
@@ -590,7 +595,7 @@ export function UnifiedAgentRunPanel({
       modeOverride,
       pendingMode: pendingModeRef.current,
     });
-    const resultRowsOptInForRun = activeMode === 'research' && researchResultRowsOptIn;
+    const resultRowsOptInForRun = researchResultRowsOptInForRun(activeMode, researchResultRowsOptIn);
     // Consent is intentionally one-shot and never inherited by the next run.
     setResearchResultRowsOptIn(false);
     pendingModeRef.current = undefined;
@@ -1263,7 +1268,14 @@ function findActiveAgentRun(threadId?: string): PendingAgentRun | undefined {
 
 const THINKING_MODE_STORAGE_KEY = 'dql.agent.thinkingMode';
 /** Visible consent copy mirrors the provider egress boundary exactly. */
-export const RESEARCH_TOOL_ROWS_CONSENT_TITLE = 'One-run consent: enables up to 200 redacted local-analysis tool rows during explicit Research. Ordinary Ask and Research narration may each use up to 20 redacted rows under their separate bounded narration policy; Ask never sends result rows to tools.';
+export const RESEARCH_TOOL_ROWS_CONSENT_TITLE = 'One-run consent: during explicit Research, enables up to 20 redacted result rows for Research narration and up to 200 redacted local-analysis tool rows. Ordinary Ask—and Research without this selection—keeps result rows local.';
+/** The browser may request row egress only for the Research run currently being submitted. */
+export function researchResultRowsOptInForRun(
+  requestedMode: AgentRunRequestedMode,
+  checked: boolean,
+): boolean {
+  return requestedMode === 'research' && checked;
+}
 export function selectAgentExecutionConnection(
   names: string[],
   defaultName?: string,
@@ -1804,7 +1816,7 @@ function RunCard({
   onInsertSql?: (sql: string, title?: string, meta?: SqlNotebookDraftMeta) => void;
   onInsertDql?: (payload: InsertDqlPayload) => void;
   onOpenBlock?: (path: string, name?: string) => void;
-  onOpenResearch?: (id: string, notebookPath?: string) => void;
+  onOpenResearch?: (id: string, notebookPath?: string, sourceAskRunId?: string) => void;
   onSelectClarification?: (option: AgentRunClarificationOption) => void;
   onNextAction: (action: AgentRun['nextActions'][number]) => void;
 }) {
@@ -1956,20 +1968,39 @@ function RunCard({
         <VerificationChecks evaluations={run.evaluations} t={t} />
       )}
 
-      {run.events.length > 0 ? (
-        <button
-          type="button"
-          className="dql-hover"
-          onClick={() => dispatch({ type: 'OPEN_AGENT_LOG', run })}
-          style={{
-            display: 'inline-flex', alignItems: 'center', gap: 5, alignSelf: 'flex-start',
-            background: 'transparent', border: 'none', cursor: 'pointer', padding: 0,
-            color: t.textMuted, fontSize: 11.5, fontFamily: t.font,
-          }}
-          title="See what the agent did and where the time went"
-        >
-          <ListTree size={12} /> View steps · where the time went
-        </button>
+      {run.events.length > 0 || run.traceReference ? (
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+          {run.events.length > 0 ? (
+            <button
+              type="button"
+              className="dql-hover"
+              onClick={() => dispatch({ type: 'OPEN_AGENT_LOG', run })}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 5, alignSelf: 'flex-start',
+                background: 'transparent', border: 'none', cursor: 'pointer', padding: 0,
+                color: t.textMuted, fontSize: 11.5, fontFamily: t.font,
+              }}
+              title="See what the agent did and where the time went"
+            >
+              <ListTree size={12} /> View steps · where the time went
+            </button>
+          ) : null}
+          {run.traceReference ? (
+            <button
+              type="button"
+              className="dql-hover"
+              onClick={() => dispatch({ type: 'OPEN_ASK_TRACE', runId: run.id })}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 5, alignSelf: 'flex-start',
+                background: 'transparent', border: 'none', cursor: 'pointer', padding: 0,
+                color: t.accent, fontSize: 11.5, fontFamily: t.font, fontWeight: 650,
+              }}
+              title="Open the local, redacted Ask trace"
+            >
+              <GitBranch size={12} /> Open full trace
+            </button>
+          ) : null}
+        </div>
       ) : null}
 
       {completedGuidance ? (
@@ -2101,6 +2132,69 @@ export function askArtifactMeta(artifact: AgentRunArtifact, payload: Record<stri
   }
   parts.push(artifact.trustState === 'certified' ? 'certified block' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'governed' : 'AI-generated');
   return parts.join(' · ');
+}
+
+/**
+ * Research verdicts are branch evidence, not generic run evaluations. The
+ * route/catalog/workspace checks can all be informational while every actual
+ * research branch failed, so never use their green count as a Research health
+ * summary. This projection reads only the typed, persisted V2 ledger.
+ */
+export interface ResearchVerdictSummaryV1 {
+  branchCount: number;
+  groundableBranchCount: number;
+  limitedScope: boolean;
+  verdicts: Record<'supported' | 'contradicted' | 'inconclusive' | 'failed' | 'skipped', number>;
+  compactLabel: string;
+  detail: string;
+}
+
+const RESEARCH_VERDICTS = ['supported', 'contradicted', 'inconclusive', 'failed', 'skipped'] as const;
+
+export function researchVerdictSummary(payload: Record<string, unknown>): ResearchVerdictSummaryV1 | undefined {
+  const ledger = recordOf(payload.researchLedgerV2);
+  if (!ledger) return undefined;
+  const entries = Array.isArray(ledger.entries) ? ledger.entries : [];
+  const verdicts: ResearchVerdictSummaryV1['verdicts'] = {
+    supported: 0,
+    contradicted: 0,
+    inconclusive: 0,
+    failed: 0,
+    skipped: 0,
+  };
+  for (const entry of entries) {
+    const verdict = recordOf(entry)?.verdict;
+    if (typeof verdict === 'string' && RESEARCH_VERDICTS.includes(verdict as typeof RESEARCH_VERDICTS[number])) {
+      verdicts[verdict as keyof typeof verdicts] += 1;
+    }
+  }
+  const branchCount = entries.length;
+  const groundableBranchCount = typeof ledger.groundableBranchCount === 'number'
+    && Number.isFinite(ledger.groundableBranchCount)
+    && ledger.groundableBranchCount >= 0
+    ? Math.trunc(ledger.groundableBranchCount)
+    : branchCount;
+  const limitedScope = ledger.limitedScope === true || groundableBranchCount < 3;
+  const fragments = RESEARCH_VERDICTS.flatMap((verdict) => {
+    const count = verdicts[verdict];
+    if (!count) return [];
+    return [`${count} ${verdict}`];
+  });
+  const branchLabel = branchCount === 0
+    ? 'no branch verdicts recorded'
+    : fragments.join(' · ');
+  const compactLabel = limitedScope
+    ? `Limited research scope · ${branchLabel}`
+    : `Research branches · ${branchLabel}`;
+  const detail = limitedScope
+    ? `Limited research scope: ${groundableBranchCount} of at least 3 evidence-supported branches were available. Verdicts: ${branchLabel}.`
+    : `${groundableBranchCount} evidence-supported branches were available. Verdicts: ${branchLabel}.`;
+  return { branchCount, groundableBranchCount, limitedScope, verdicts, compactLabel, detail };
+}
+
+export function researchVerdictSummaryForRun(run: AgentRun): ResearchVerdictSummaryV1 | undefined {
+  const researchArtifact = run.artifacts.find((artifact) => artifact.kind === 'research_run');
+  return researchArtifact ? researchVerdictSummary(payloadOf(researchArtifact)) : undefined;
 }
 
 function resultCardTitle(run: AgentRun, artifact: AgentRunArtifact): string {
@@ -2298,7 +2392,7 @@ interface AskRunCardProps {
   insertDqlActionLabel?: string;
   replaceDqlActionLabel?: string;
   onOpenBlock?: (path: string, name?: string) => void;
-  onOpenResearch?: (id: string, notebookPath?: string) => void;
+  onOpenResearch?: (id: string, notebookPath?: string, sourceAskRunId?: string) => void;
   onSelectClarification?: (option: AgentRunClarificationOption) => void;
   onNextAction: (action: AgentRun['nextActions'][number]) => void;
   onRepairedRun: (sourceRunId: string, repairedRun: AgentRun) => void;
@@ -2375,7 +2469,6 @@ function AskRunCard(props: AskRunCardProps) {
   // which is the same sentence for everything unclassified.
   const failureMessage = cancelled ? (run.summary || 'Stopped by user.') : blocked ? askFailureDetail(run) : undefined;
   const captureWarning = askRunCaptureWarning(run);
-  const passedChecks = run.evaluations.filter((e) => e.severity === 'info').length;
   const evidence = evidenceFromRun(run);
   const displayArtifacts = cancelled ? [] : run.artifacts;
   const inlineResultArtifacts = displayArtifacts.filter((artifact) => {
@@ -2386,6 +2479,9 @@ function AskRunCard(props: AskRunCardProps) {
   const chipArtifacts = displayArtifacts.filter((a) => !isRichAskArtifact(a, payloadOf(a)) && !inlineResultIds.has(a.id));
   const richArtifacts = displayArtifacts.filter((a) => isRichAskArtifact(a, payloadOf(a)));
   const primaryArtifact = inlineResultArtifacts[0] ?? chipArtifacts[0] ?? displayArtifacts[0];
+  const researchArtifact = displayArtifacts.find((artifact) => artifact.kind === 'research_run');
+  const researchVerdicts = researchVerdictSummaryForRun(run);
+  const passedChecks = researchVerdicts ? 0 : run.evaluations.filter((e) => e.severity === 'info').length;
 
   // Reuse RunCard's action gating so the quiet row offers the same real actions.
   const pinnable = isAgentRunPinnable(run);
@@ -2420,6 +2516,15 @@ function AskRunCard(props: AskRunCardProps) {
         <span style={{ fontSize: 12, fontWeight: 650, color: cancelled ? t.textMuted : blocked ? t.error : t.textSecondary }}>{outcomeLabel}</span>
         {certified && evidence[0] ? (
           <span style={{ fontSize: 11, color: t.textMuted }}>from <span style={{ color: t.accent, fontWeight: 600 }}>{evidence[0].label}</span></span>
+        ) : !blocked && !cancelled && researchVerdicts && researchArtifact ? (
+          <button
+            type="button"
+            aria-label="Open Research branch evidence"
+            onClick={() => openArtifact(researchArtifact.id, 'trust')}
+            style={{ fontSize: 11, color: researchVerdicts.limitedScope ? t.warning : t.textMuted, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontFamily: t.font, display: 'inline-flex', alignItems: 'center', gap: 4, textAlign: 'left' }}
+          >
+            <FileSearch size={11} color={researchVerdicts.limitedScope ? t.warning : t.accent} /> {researchVerdicts.compactLabel}
+          </button>
         ) : !blocked && !cancelled && primaryArtifact && passedChecks > 0 ? (
           <button type="button" onClick={() => openArtifact(primaryArtifact.id, 'trust')} style={{ fontSize: 11, color: t.textMuted, background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontFamily: t.font, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
             <Check size={11} color={t.success} /> {passedChecks} check{passedChecks === 1 ? '' : 's'} passed
@@ -2594,6 +2699,8 @@ interface AnalyticalInspectorContract {
   failure?: Record<string, unknown>;
   semantic?: Record<string, unknown>;
   diagnostic?: Record<string, unknown>;
+  /** Server-produced V4 story; never derive a competing incident from spans. */
+  decisionSummary?: AskDecisionSummaryV1;
 }
 
 /**
@@ -2633,6 +2740,7 @@ export function hasAnalyticalInspectorContract(payload: Record<string, unknown>)
     || recordOf(payload.semanticExecutionTrace)
     || recordOf(payload.diagnosticReceipt)
     || recordOf(payload.diagnosticReceiptV3)
+    || recordOf(payload.diagnosticReceiptV4)
     || fallbackAnalyticalFailure(payload),
   );
 }
@@ -2644,8 +2752,14 @@ export function analyticalInspectorContract(payload: Record<string, unknown>): A
   // preferring V1 hid the diagnostic users needed on normal answer artifacts.
   const legacyDiagnostic = recordOf(payload.diagnosticReceipt);
   const v3Diagnostic = recordOf(payload.diagnosticReceiptV3);
-  const diagnostic = v3Diagnostic
-    ? { ...legacyDiagnostic, ...v3Diagnostic, failure: v3Diagnostic.failure ?? legacyDiagnostic?.failure }
+  const v4Diagnostic = recordOf(payload.diagnosticReceiptV4);
+  const diagnostic = v4Diagnostic || v3Diagnostic
+    ? {
+        ...legacyDiagnostic,
+        ...v3Diagnostic,
+        ...v4Diagnostic,
+        failure: v3Diagnostic?.failure ?? legacyDiagnostic?.failure,
+      }
     : legacyDiagnostic;
   // `diagnostic.plan` is the orchestration step plan, not the analytical plan.
   // Treating it as a ResolvedAnalyticalPlan made a pre-planning failure claim
@@ -2664,7 +2778,18 @@ export function analyticalInspectorContract(payload: Record<string, unknown>): A
     failure: recordOf(payload.analyticalFailure) ?? recordOf(diagnostic?.failure) ?? fallbackAnalyticalFailure(payload),
     semantic: recordOf(payload.semanticExecutionTrace),
     diagnostic,
+    ...(isAskDecisionSummaryV1(v4Diagnostic?.summary) ? { decisionSummary: v4Diagnostic.summary } : {}),
   };
+}
+
+function isAskDecisionSummaryV1(value: unknown): value is AskDecisionSummaryV1 {
+  const summary = recordOf(value);
+  return summary?.version === 1
+    && typeof summary.summaryFingerprint === 'string'
+    && recordOf(summary.understoodRequest) !== undefined
+    && Array.isArray(summary.evidenceByRole)
+    && Array.isArray(summary.tierDecisions)
+    && typeof summary.safeNextAction === 'string';
 }
 
 export function analyticalInspectorSections(): string[] {
@@ -2684,10 +2809,133 @@ export function analyticalRepairActionLabels(safeActions: string[]): string[] {
   ].filter((label): label is string => Boolean(label));
 }
 
-export function agentRunPerformanceRows(run: AgentRun): Array<[string, string]> | undefined {
+/**
+ * The retained AgentRun telemetry predates the local Ask trace and is useful
+ * only for runs that have no addressable trace.  It is not authoritative once
+ * a trace exists: a legacy counter can describe a planned provider/SQL stage
+ * even when the frozen route stopped before that physical boundary.
+ *
+ * Keep this projection deliberately narrow.  Provider readiness, SQL
+ * generation, validation, and authorization are useful trace stages but are
+ * not provider egress or warehouse execution.  The "Calls" row therefore
+ * counts only actual physical attempts, while the stage row retains the rest
+ * of the canonical timeline without inventing a provider or SQL duration.
+ */
+function canonicalPhysicalTraceFacts(trace: Pick<AskTraceDataV1, 'envelope' | 'spans'>): {
+  totalDurationMs: number | undefined;
+  sqlExecutionDurationMs: number | undefined;
+  stages: string;
+  providerAttempts: number;
+  toolCalls: number;
+  sqlExecutions: number;
+  repairs: number;
+} {
+  const durations = new Map<string, number>();
+  let providerAttempts = 0;
+  let toolCalls = 0;
+  let sqlExecutions = 0;
+  let repairs = 0;
+
+  for (const span of trace.spans) {
+    let physicalStage: 'provider' | 'tool' | 'sql' | 'repair' | undefined;
+    if (span.name === 'provider.attempt') {
+      // Admission-denied spans are important evidence, but their producer
+      // explicitly records that no bytes were sent.  Do not turn that safety
+      // guard into a provider call/timing in the performance counter.
+      const admission = recordOf(recordOf(span.payload)?.attempt)?.admission;
+      if (admission !== 'denied') {
+        providerAttempts += 1;
+        physicalStage = 'provider';
+      }
+    } else if (span.name === 'tool.call') {
+      toolCalls += 1;
+      physicalStage = 'tool';
+    } else if (span.name === 'sql.execute') {
+      sqlExecutions += 1;
+      physicalStage = 'sql';
+    } else if (span.name === 'sql.repair') {
+      repairs += 1;
+      physicalStage = 'repair';
+    }
+
+    const duration = traceDurationMs(span.durationMs);
+    if (duration === undefined) continue;
+
+    // Never display `provider: …` or `sql: …` from a preflight, compiler, or
+    // validation span.  Those are not physical provider/warehouse attempts.
+    const stage = physicalStage
+      ?? (span.stage === 'provider' || span.stage === 'tool' || span.stage === 'sql' || span.stage === 'request'
+        ? undefined
+        : span.stage);
+    if (!stage) continue;
+    durations.set(stage, (durations.get(stage) ?? 0) + duration);
+  }
+
+  const orderedStages = [
+    'conversation', 'snapshot', 'retrieval', 'meaning', 'cascade', 'plan',
+    'provider', 'tool', 'sql', 'repair', 'result', 'narration', 'research', 'persistence',
+  ];
+  const stages = orderedStages
+    .flatMap((stage) => durations.has(stage)
+      ? [`${stage}: ${formatTelemetryDuration(durations.get(stage))}`]
+      : [])
+    .join(' · ');
+  const sqlExecutionDurationMs = durations.get('sql');
+  return {
+    totalDurationMs: traceDurationMs(trace.envelope.durationMs),
+    sqlExecutionDurationMs,
+    stages: stages || 'No completed physical provider, tool, SQL, or repair stage was recorded.',
+    providerAttempts,
+    toolCalls,
+    sqlExecutions,
+    repairs,
+  };
+}
+
+function traceDurationMs(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * `trace` is supplied only by the inspector's on-demand local trace request.
+ * It is intentionally not embedded in AgentRun/thread/SSE state.
+ */
+export function agentRunPerformanceRows(
+  run: AgentRun,
+  trace?: Pick<AskTraceDataV1, 'envelope' | 'spans'>,
+): Array<[string, string]> | undefined {
+  if (trace) {
+    const physical = canonicalPhysicalTraceFacts(trace);
+    const providerRows = providerEgressSummary(run, physical.providerAttempts);
+    const orchestrationDurationMs = physical.totalDurationMs === undefined
+      ? undefined
+      : Math.max(0, physical.totalDurationMs - (physical.sqlExecutionDurationMs ?? 0));
+    const planIds = Array.from(new Set((run.artifacts ?? []).flatMap((artifact) => {
+      const payload = payloadOf(artifact);
+      const plan = recordOf(payload.resolvedAnalyticalPlan)
+        ?? recordOf(recordOf(payload.diagnosticReceipt)?.resolvedAnalyticalPlan);
+      const receipt = recordOf(payload.analyticalExecutionReceipt);
+      return [plan?.planId, receipt?.planId].filter((value): value is string => typeof value === 'string' && value.length > 0);
+    })));
+    const artifactIds = Array.from(new Set((run.artifacts ?? [])
+      .map((artifact) => artifact.id)
+      .filter((value): value is string => typeof value === 'string' && value.length > 0)));
+    return [
+      ['Total', physical.totalDurationMs === undefined ? 'Not recorded' : formatTelemetryDuration(physical.totalDurationMs)],
+      ['Warehouse', physical.sqlExecutionDurationMs === undefined ? 'Not recorded' : formatTelemetryDuration(physical.sqlExecutionDurationMs)],
+      ['Orchestration', orchestrationDurationMs === undefined ? 'Not recorded' : formatTelemetryDuration(orchestrationDurationMs)],
+      ['Stages', physical.stages],
+      ['Calls', `${physical.providerAttempts} provider · ${physical.toolCalls} tool · ${physical.sqlExecutions} SQL · ${physical.repairs} repair`],
+      ['Provider rows', providerRows],
+      ['Trace evidence', 'Canonical local physical trace'],
+      ...(run.narrationIntegrityReceipt ? [['Narration', narrationIntegritySummary(run.narrationIntegrityReceipt)] as [string, string]] : []),
+      ['Plan ID', planIds.length > 0 ? planIds.join(', ') : 'Not recorded'],
+      ['Artifact IDs', artifactIds.length > 0 ? artifactIds.join(', ') : 'None'],
+      ['Fallback', run.telemetry?.fallbackReason ?? 'None'],
+    ];
+  }
   const telemetry = run.telemetry;
   if (!telemetry) return undefined;
-  const egressRowCount = (run.providerEgressReceipts ?? []).reduce((sum, item) => sum + item.resultRowCount, 0);
   const totalDurationMs = telemetry.stageDurationsMs.total;
   const warehouseDurationMs = telemetry.warehouseDurationMs;
   const orchestrationDurationMs = totalDurationMs === undefined || warehouseDurationMs === undefined
@@ -2712,14 +2960,108 @@ export function agentRunPerformanceRows(run: AgentRun): Array<[string, string]> 
       .map(([stage, duration]) => `${stage}: ${formatTelemetryDuration(duration)}`)
       .join(' · ')],
     ['Calls', `${telemetry.providerRoundTrips} provider · ${telemetry.toolCalls} tool · ${telemetry.sqlExecutions} SQL · ${telemetry.repairs} repair`],
-    ['Provider rows', egressRowCount === 0
-      ? `0 result rows sent to providers (${telemetry.egressReceipts} content-free receipt${telemetry.egressReceipts === 1 ? '' : 's'})`
-      : `${egressRowCount} bounded, redacted Research result row${egressRowCount === 1 ? '' : 's'} sent with explicit run consent`],
+    ['Provider rows', providerEgressSummary(run, telemetry.providerRoundTrips)],
     ...(run.narrationIntegrityReceipt ? [['Narration', narrationIntegritySummary(run.narrationIntegrityReceipt)] as [string, string]] : []),
     ['Plan ID', planIds.length > 0 ? planIds.join(', ') : 'Not recorded'],
     ['Artifact IDs', artifactIds.length > 0 ? artifactIds.join(', ') : 'None'],
     ['Fallback', telemetry.fallbackReason ?? 'None'],
   ];
+}
+
+/**
+ * Render provider row egress from server-produced physical receipts only.
+ * A row count never implies Research: an ordinary Ask with a legacy/malformed
+ * receipt must be described as Ask evidence, while explicit Research retains
+ * its consent language. New runs only emit a receipt at physical dispatch.
+ */
+export function providerEgressSummary(
+  run: Pick<AgentRun, 'requestedMode' | 'providerEgressReceipts'>,
+  providerAttempts: number,
+): string {
+  if (providerAttempts === 0) return '0 result rows sent to providers (0 content-free receipts)';
+  const receipts = run.providerEgressReceipts ?? [];
+  if (receipts.length === 0) {
+    return `No retained egress receipt for ${providerAttempts} recorded provider attempt${providerAttempts === 1 ? '' : 's'}`;
+  }
+  const rowReceipts = receipts.filter((receipt) => receipt.resultRowCount > 0);
+  const rowCount = rowReceipts.reduce((sum, receipt) => sum + receipt.resultRowCount, 0);
+  const phaseLabel = (receipt: typeof receipts[number]) => {
+    const phase = typeof receipt.dispatchPhase === 'string'
+      ? receipt.dispatchPhase
+      : typeof receipt.purpose === 'string'
+        ? receipt.purpose
+        : undefined;
+    return phase?.replace(/_/g, ' ');
+  };
+  const contentFreePhases = [...new Set(receipts
+    .filter((receipt) => receipt.resultRowCount === 0)
+    .map(phaseLabel)
+    .filter((phase): phase is string => Boolean(phase)))];
+  if (rowCount === 0) {
+    const phaseSuffix = contentFreePhases.length > 0
+      ? ` ${contentFreePhases.join(', ')}`
+      : '';
+    return `0 result rows sent to providers (${receipts.length} content-free${phaseSuffix} receipt${receipts.length === 1 ? '' : 's'})`;
+  }
+  const rowPhases = [...new Set(rowReceipts.map(phaseLabel).filter((phase): phase is string => Boolean(phase)))];
+  const legacyReadOnly = rowReceipts.every((receipt) => receipt.legacyReadOnly === true);
+  if (legacyReadOnly) {
+    return `${rowCount} bounded, redacted legacy non-Research result row${rowCount === 1 ? '' : 's'} retained as read-only evidence; not a current egress authority`;
+  }
+  const explicitResearch = run.requestedMode === 'research'
+    && rowReceipts.every((receipt) => receipt.purpose === 'research_narration' || receipt.purpose === 'research_tool');
+  if (explicitResearch) {
+    return `${rowCount} bounded, redacted Research result row${rowCount === 1 ? '' : 's'} sent with explicit run consent${rowPhases.length ? ` during ${rowPhases.join(', ')}` : ''}`;
+  }
+  return `${rowCount} bounded, redacted Ask result row${rowCount === 1 ? '' : 's'} sent during ${rowPhases.join(', ') || 'an unrecorded provider phase'}`;
+}
+
+type CanonicalPerformanceTraceState =
+  | { state: 'legacy' | 'loading' | 'unavailable'; trace?: undefined }
+  | { state: 'loaded'; trace: AskTraceDataV1 };
+
+/**
+ * Hydrate only the addressable, redacted trace while the inline inspector is
+ * open.  The full trace remains outside AgentRun, thread, and SSE state; this
+ * state is discarded with the inspector.  Until it arrives, do not briefly
+ * show stale legacy counters for a trace-backed run.
+ */
+function useCanonicalPerformanceTrace(run: AgentRun): CanonicalPerformanceTraceState {
+  const traceId = run.traceReference?.traceId;
+  const recordingStatus = run.traceReference?.recordingStatus;
+  const [state, setState] = useState<CanonicalPerformanceTraceState>(() => traceId
+    ? { state: 'loading' }
+    : { state: 'legacy' });
+
+  useEffect(() => {
+    let active = true;
+    if (!traceId) {
+      setState({ state: 'legacy' });
+      return () => { active = false; };
+    }
+    if (recordingStatus === 'unavailable' || recordingStatus === 'detail_expired') {
+      setState({ state: 'unavailable' });
+      return () => { active = false; };
+    }
+    setState({ state: 'loading' });
+    void api.getAskTraceByRun(run.id).then((trace) => {
+      if (!active) return;
+      // A stale response must not be used to describe a different run after
+      // the inspector moves to its replacement/repaired artifact.
+      setState(trace.envelope.runId === run.id
+        ? { state: 'loaded', trace }
+        : { state: 'unavailable' });
+    }).catch(() => {
+      if (active) setState({ state: 'unavailable' });
+    });
+    return () => { active = false; };
+  }, [run.id, traceId, recordingStatus]);
+
+  // The prior run's trace can survive one render before the effect resets.
+  // Never let it replace this run's local facts.
+  return state.state === 'loaded' && state.trace.envelope.runId !== run.id
+    ? { state: 'loading' }
+    : state;
 }
 
 function narrationIntegritySummary(receipt: NonNullable<AgentRun['narrationIntegrityReceipt']>): string {
@@ -2767,6 +3109,18 @@ function AnalyticalHowAnswered({
   const semantic = contract.semantic;
   const semanticFailure = recordOf(semantic?.failure);
   const failure = contract.failure ?? semanticFailure;
+  // V4 is a durable, server-produced story. Prefer the run-level receipt
+  // because it survives an artifact shape change; an artifact copy is only a
+  // backwards-compatible transport fallback. The inspector must not infer a
+  // second incident from spans or generic failure text when this exists.
+  const decisionSummary = run.diagnosticReceiptV4?.summary ?? contract.decisionSummary;
+  const researchBranchSummary = decisionSummary?.researchBranchSummary;
+  // A receipt-backed partial Research result is still a root success. Its
+  // failed child branches belong in Failure & repair as limitations, not as a
+  // synthetic root terminal incident.
+  const partialResearchBranchSummary = researchBranchSummary?.partialSuccess === true
+    ? researchBranchSummary
+    : undefined;
   const semanticAuthoringRequest = recordOf(semantic?.authoringRequest);
   const semanticRuntimeRequest = recordOf(semantic?.runtimeRequest);
   const semanticBindings = recordList(semantic?.bindings);
@@ -2797,7 +3151,12 @@ function AnalyticalHowAnswered({
   const failedBindings = recordList(failure?.failedBindings);
   const semanticSqlExcerpt = recordOf(semanticFailure?.sqlExcerpt);
   const result = run.artifacts.map((artifact) => extractResult(payloadOf(artifact))).find(Boolean);
-  const performanceRows = agentRunPerformanceRows(run);
+  const performanceTrace = useCanonicalPerformanceTrace(run);
+  const performanceRows = performanceTrace.state === 'loaded'
+    ? agentRunPerformanceRows(run, performanceTrace.trace)
+    : performanceTrace.state === 'legacy'
+      ? agentRunPerformanceRows(run)
+      : undefined;
   const sourceTitle = dqlArtifact?.name ?? run.question;
   const [repairMessage, setRepairMessage] = useState<string | null>(null);
   const repairResultMessage = (
@@ -2910,12 +3269,41 @@ function AnalyticalHowAnswered({
         </div>
       </div>
 
+      {run.traceReference ? (
+        <button
+          type="button"
+          className="dql-hover"
+          onClick={() => dispatch({ type: 'OPEN_ASK_TRACE', runId: run.id })}
+          style={{
+            display: 'inline-flex', alignItems: 'center', justifySelf: 'start', gap: 5,
+            background: 'transparent', border: 'none', cursor: 'pointer', padding: '1px 0',
+            color: t.accent, fontSize: 11.5, fontFamily: t.font, fontWeight: 700,
+          }}
+          title="Open the local, redacted Ask trace"
+        >
+          <GitBranch size={12} /> Open full trace
+        </button>
+      ) : null}
+
+      {decisionSummary
+        ? <InspectorDecisionStory summary={decisionSummary} t={t} />
+        : <InspectorDecisionSummaryUnavailable t={t} />}
+
       <AnalyticalInspectorSection index={1} label="Performance & provider egress" t={t} open>
-        {performanceRows ? (
+        {performanceTrace.state === 'loading' ? (
+          <InspectorEmpty t={t}>Loading the local physical trace. Legacy counters are withheld until its recorded attempts are available.</InspectorEmpty>
+        ) : performanceRows ? (
           <InspectorRows rows={performanceRows} t={t} />
+        ) : performanceTrace.state === 'unavailable' ? (
+          <InspectorEmpty t={t}>Canonical physical performance evidence is unavailable for this trace-backed run.</InspectorEmpty>
         ) : (
           <InspectorEmpty t={t}>Performance details were not recorded for this legacy run.</InspectorEmpty>
         )}
+        {performanceTrace.state === 'unavailable' && run.traceReference ? (
+          <p style={{ margin: 0, color: t.textMuted, fontSize: 10.5, lineHeight: 1.45 }}>
+            The local trace detail is unavailable, so physical provider and SQL counters are not shown for this trace-backed run.
+          </p>
+        ) : null}
       </AnalyticalInspectorSection>
 
       <AnalyticalInspectorSection index={2} label="Plan" t={t} open={!failure}>
@@ -3015,7 +3403,7 @@ function AnalyticalHowAnswered({
         </div>
       </AnalyticalInspectorSection>
 
-      <AnalyticalInspectorSection index={5} label="Failure & repair" t={t} open={Boolean(failure)}>
+      <AnalyticalInspectorSection index={5} label="Failure & repair" t={t} open={Boolean(failure || partialResearchBranchSummary)}>
         {failure ? (
           <div style={{ display: 'grid', gap: 9 }}>
             {/* The engine's message now leads the whole panel, so only the
@@ -3074,6 +3462,8 @@ function AnalyticalHowAnswered({
               ) : null}
             </div>
           </div>
+        ) : partialResearchBranchSummary ? (
+          <ResearchPartialFailureRepair summary={partialResearchBranchSummary} t={t} />
         ) : (
           <div style={{ display: 'grid', gap: 8 }}>
             <InspectorEmpty t={t}>No failure was recorded for this run.</InspectorEmpty>
@@ -3085,6 +3475,121 @@ function AnalyticalHowAnswered({
       </AnalyticalInspectorSection>
       {repairMessage ? <div role="status" style={{ fontSize: 10.5, color: repairMessage.toLowerCase().includes('created') ? 'var(--status-success)' : 'var(--status-error)' }}>{repairMessage}</div> : null}
     </div>
+  );
+}
+
+/**
+ * The compact inspector and full Trace page intentionally render the same
+ * durable V4 fields and fingerprint. This is presentation only: it never
+ * promotes a span-derived guess into a second failure explanation.
+ */
+export function InspectorDecisionStory({ summary, t }: { summary: AskDecisionSummaryV1; t: Theme }): JSX.Element {
+  const request = summary.understoodRequest;
+  const researchBranches = summary.researchBranchSummary;
+  const researchLimited = researchBranches?.partialSuccess === true;
+  const rows: Array<[string, string]> = [
+    ['Understood request', `${request.measures} measure${request.measures === 1 ? '' : 's'}, ${request.dimensions} dimension${request.dimensions === 1 ? '' : 's'}${request.entityRequested ? ', an entity output' : ''}${request.ranking ? `, ${request.ranking.direction} ${request.ranking.limit}${request.ranking.defaultedLimit ? ' (default)' : ''}` : ''}. Conversation binding: ${request.conversationBinding.replace(/_/g, ' ')}.`],
+    ['Evidence by role', summary.evidenceByRole.length > 0
+      ? summary.evidenceByRole.map((entry) => `${entry.role.replace(/_/g, ' ')}: ${entry.candidateCount}`).join(' · ')
+      : 'No role evidence was retained for this legacy-compatible run.'],
+    ['Tier decisions', summary.tierDecisions.length > 0
+      ? summary.tierDecisions.map((entry) => `${entry.tier}: ${entry.outcome}${entry.planFrozen ? ' (frozen)' : ''}`).join(' · ')
+      : 'No cascade tier receipt was recorded.'],
+    ['Selected plan', summary.selectedPlan
+      ? `${summary.selectedPlan.tier.replace(/_/g, ' ')}${summary.selectedPlan.planFrozen ? ' frozen' : ''}${summary.selectedPlan.reviewRequired ? '; review required' : ''}.`
+      : 'No executable plan was selected.'],
+    ...(researchBranches ? [['Research branch evidence', inspectorResearchBranchEvidence(researchBranches)] as [string, string]] : []),
+    ['Failure or repair', summary.terminalIncident
+      ? `${summary.terminalIncident.code.replace(/_/g, ' ')} at ${summary.terminalIncident.boundary}; ${summary.terminalIncident.impact.replace(/_/g, ' ')}.`
+      : researchLimited
+        ? `Research limitations: ${researchBranches!.failedBranches + researchBranches!.timedOutBranches + researchBranches!.skippedBranches} child branches did not complete; completed receipt-backed findings remain available.`
+        : 'No terminal incident was recorded.'],
+    ['Safe next action', inspectorSafeNextAction(summary.safeNextAction)],
+    ['Summary fingerprint', summary.summaryFingerprint],
+  ];
+  const issue = Boolean(summary.terminalIncident || researchLimited);
+  return (
+    <section
+      aria-label="Ask decision story"
+      style={{
+        padding: '10px 12px',
+        borderRadius: 8,
+        border: `1px solid ${issue ? 'var(--status-error-border)' : 'var(--status-success-border)'}`,
+        background: issue ? 'var(--status-error-bg)' : 'var(--status-success-bg)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: issue ? 'var(--status-error)' : 'var(--status-success)', fontSize: 12, fontWeight: 750, marginBottom: 8 }}>
+        {issue ? <ShieldAlert size={13} /> : <ShieldCheck size={13} />}
+        Ask decision story
+      </div>
+      <InspectorRows rows={rows} t={t} mono />
+    </section>
+  );
+}
+
+/**
+ * Render the same stored child-branch evidence in the inspector's Failure &
+ * repair accordion. This is deliberately separate from a terminal failure:
+ * a receipt-backed Research finding remains a successful root answer.
+ */
+export function ResearchPartialFailureRepair({
+  summary,
+  t,
+}: {
+  summary: NonNullable<AskDecisionSummaryV1['researchBranchSummary']>;
+  t: Theme;
+}): JSX.Element {
+  const limitedBranches = summary.failedBranches + summary.timedOutBranches + summary.skippedBranches;
+  return (
+    <div aria-label="Research branch limitations" style={{ display: 'grid', gap: 8 }}>
+      <InspectorRows rows={[
+        ['Root outcome', 'The root Research answer remains successful; these child limitations are not a terminal incident.'],
+        ['Research branch evidence', inspectorResearchBranchEvidence(summary)],
+        ['Limitations', `${limitedBranches} child ${limitedBranches === 1 ? 'branch did' : 'branches did'} not complete. Receipt-backed findings remain available.`],
+        ['Safe next action', inspectorSafeNextAction(summary.safeAction)],
+      ]} t={t} />
+    </div>
+  );
+}
+
+function inspectorSafeNextAction(action: AskDecisionSummaryV1['safeNextAction']): string {
+  return action === 'inspect_research_failures'
+    ? 'Inspect failed or timed-out branches; retry narrower Research if the missing evidence matters.'
+    : action.replace(/_/g, ' ');
+}
+
+function inspectorResearchBranchEvidence(summary: NonNullable<AskDecisionSummaryV1['researchBranchSummary']>): string {
+  const reasons = summary.failureReasons.length > 0
+    ? summary.failureReasons.map((entry) => `${entry.code.replace(/_/g, ' ')}: ${entry.branchCount}`).join(' · ')
+    : 'no displayable reason code';
+  const plans = summary.availableChildPlans.length > 0
+    ? ` Persisted child plans: ${summary.availableChildPlans
+      .map((plan) => `${plan.tier.replace(/_/g, ' ')} frozen ×${plan.frozenPlanCount} for ${plan.branchCount} ${plan.branchCount === 1 ? 'branch' : 'branches'}${plan.reviewRequired ? ' (review required)' : ''}`)
+      .join(' · ')}.`
+    : ' No frozen child plan evidence was retained.';
+  return `${summary.receiptBackedBranches} receipt-backed ${summary.receiptBackedBranches === 1 ? 'finding' : 'findings'} · ${summary.failedBranches} failed · ${summary.timedOutBranches} timed out · ${summary.skippedBranches} skipped. Reasons: ${reasons}.${plans} ${summary.linkedChildRunCount} linked child ${summary.linkedChildRunCount === 1 ? 'run' : 'runs'}.`;
+}
+
+export function InspectorDecisionSummaryUnavailable({ t }: { t: Theme }): JSX.Element {
+  return (
+    <section
+      aria-label="Ask decision story unavailable"
+      style={{
+        padding: '10px 12px',
+        borderRadius: 8,
+        border: '1px solid var(--status-warning-border)',
+        background: 'var(--status-warning-bg)',
+        color: t.textSecondary,
+        fontSize: 12,
+        lineHeight: 1.45,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--status-warning)', fontSize: 12, fontWeight: 750, marginBottom: 4 }}>
+        <ShieldAlert size={13} /> Ask decision story
+      </div>
+      <div>{CANONICAL_DECISION_SUMMARY_UNAVAILABLE}.</div>
+      <div style={{ marginTop: 3, color: t.textMuted, fontSize: 11.5 }}>Open the full trace to inspect its raw advanced evidence.</div>
+    </section>
   );
 }
 
@@ -4276,7 +4781,7 @@ function ArtifactView({
   sourceRunId?: string;
   sourceQuestion?: string;
   onOpenBlock?: (path: string, name?: string) => void;
-  onOpenResearch?: (id: string, notebookPath?: string) => void;
+  onOpenResearch?: (id: string, notebookPath?: string, sourceAskRunId?: string) => void;
   onOpenApp?: (appId: string, dashboardId?: string, draftId?: string) => void;
   onNextAction?: (action: AgentRun['nextActions'][number]) => void;
 }) {
@@ -4325,6 +4830,7 @@ function ArtifactView({
     : [];
   const recommendation = typeof narration?.recommendation === 'string' ? narration.recommendation : undefined;
   const certifiedName = artifact.trustState === 'certified' ? certifiedBlockName(artifact, payload) : undefined;
+  const researchVerdicts = artifact.kind === 'research_run' ? researchVerdictSummary(payload) : undefined;
 
   // A governed DQL block draft renders through the shared draft-review card:
   // DQL-first, grounding + enriched metadata + verdict, draft-first status.
@@ -4394,6 +4900,18 @@ function ArtifactView({
           {cleanPresentationText(artifact.title)}
         </div>
       </div>
+      {researchVerdicts ? (
+        <div
+          role="status"
+          aria-label={researchVerdicts.detail}
+          style={{ borderLeft: `3px solid ${researchVerdicts.limitedScope ? t.warning : t.accent}`, padding: '7px 9px', borderRadius: 6, background: researchVerdicts.limitedScope ? `${t.warning}10` : `${t.accent}0d`, display: 'grid', gap: 2 }}
+        >
+          <strong style={{ fontSize: 11.5, color: researchVerdicts.limitedScope ? t.warning : t.textPrimary }}>
+            {researchVerdicts.limitedScope ? 'Limited research scope' : 'Research branch verdicts'}
+          </strong>
+          <span style={{ fontSize: 11, color: t.textSecondary, lineHeight: 1.4 }}>{researchVerdicts.detail}</span>
+        </div>
+      ) : null}
       {keyFindings.length > 0 ? (
         <div style={{ display: 'grid', gap: 4 }}>
           <div style={{ fontSize: 11, fontWeight: 800, color: t.textSecondary }}>Key findings</div>
@@ -4486,7 +5004,14 @@ function ArtifactView({
       ) : null}
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         {researchRunId && onOpenResearch ? (
-          <button type="button" onClick={() => onOpenResearch(researchRunId, notebookPath)} style={smallButtonStyle(t)}>Open research</button>
+          <button
+            type="button"
+            aria-label="Open research evidence"
+            onClick={() => onOpenResearch(researchRunId, notebookPath, sourceRunId)}
+            style={smallButtonStyle(t)}
+          >
+            Open research
+          </button>
         ) : null}
         {sql && onInsertDql ? (
           <button
@@ -5719,6 +6244,8 @@ function AskFailureCard({
  * informative of the three and identical across every unclassified failure.
  */
 function askFailureDetail(run: AgentRun): string | undefined {
+  const relationshipGap = terminalRelationshipGapDetail(run);
+  if (relationshipGap) return relationshipGap;
   for (const artifact of run.artifacts ?? []) {
     const payload = payloadOf(artifact) as {
       warehouseFailure?: { redactedMessage?: unknown; diagnostic?: unknown };
@@ -5740,6 +6267,31 @@ function askFailureDetail(run: AgentRun): string | undefined {
   const bindingDetail = retainedPlanBindingFailure(run);
   if (bindingDetail) return bindingDetail;
   return run.summary || run.diagnosticReceipt?.failure?.message;
+}
+
+/**
+ * The relationship proof receipt is typed authority from the router/cascade,
+ * not an inference from a broad blocked route or an exception string. Surface
+ * it before legacy executor text so `EXECUTION_BLOCKED` cannot hide a safe
+ * no-join decision in the main Ask answer card.
+ */
+function terminalRelationshipGapDetail(run: AgentRun): string | undefined {
+  const receipts: Array<Record<string, unknown> | undefined> = [
+    recordOf(run.diagnosticReceiptV3),
+    ...run.artifacts.map((artifact) => recordOf(payloadOf(artifact).diagnosticReceiptV3)),
+  ];
+  const route = recordOf(run.routeDecision);
+  const routeTerminal = recordOf(route?.terminalOutcome);
+  const routeGap = recordOf(routeTerminal?.gap);
+  const candidates = [
+    ...receipts.flatMap((receipt) => [
+      recordOf(receipt?.terminalGap),
+      recordOf(recordOf(receipt?.cascade)?.terminalGap),
+    ]),
+    routeGap,
+  ];
+  if (!candidates.some((gap) => gap?.code === 'MISSING_RELATIONSHIP')) return undefined;
+  return 'This Ask needs a certified relationship or approved allocation proof before it can run. DQL did not infer a relationship or execute a query.';
 }
 
 /** Defensive compatibility for persisted runs produced before router

@@ -36,6 +36,8 @@ import {
   type MetricCapabilityContract,
   type SemanticAggregationCompilerReceiptV1,
   type ProviderEgressReceiptV1,
+  type ProviderDispatchPhaseV1,
+  type ProviderEgressPurpose,
   type AggregationSafetyProofV1,
 } from '@duckcodeailabs/dql-core';
 import type { KGStore } from './kg/sqlite-fts.js';
@@ -89,6 +91,8 @@ import {
 import { buildSemanticProofAuthorityV1 } from './semantic-proof-authority.js';
 import {
   GENERATED_ANALYTICAL_TUPLE_DRIFT_MESSAGE,
+  frozenRequiredOutputBindingProofsForPlan,
+  validateFrozenRequiredOutputProjection,
   validateGeneratedAnalyticalProposal,
 } from './generated-analytical-proposal.js';
 import { evaluateDbtFirstGeneratedSql } from './metadata/dbt-first-safety.js';
@@ -134,7 +138,9 @@ import {
 } from './cascade/cascade.js';
 import type {
   AnalyticalCascadeTierV1,
+  ExploratoryExecutionAuthorizationAttemptV1,
   ExploratoryExecutionFreezeV1,
+  ExploratoryRequiredOutputBindingProofV1,
 } from './analytical-orchestration.js';
 import { shouldClarifyBeforeGeneration } from './cascade/triage.js';
 import { stampTrustLabel } from './trust/stamp.js';
@@ -212,6 +218,25 @@ export type AnswerSourceTier = 'certified_artifact' | 'business_context' | 'sema
  */
 export type AnswerRefusalCode = 'grounding_gap' | 'modeling_gap' | 'ambiguous' | 'model_declined' | 'provider_error' | 'policy_blocked';
 export type AnalysisDepth = CascadeAnalysisDepth;
+
+/**
+ * A native semantic direct join is governed only after its fanout probe proves
+ * that aggregation will not multiply fact rows. These codes deliberately do
+ * not include adapter/warehouse error text: that text can contain credentials,
+ * SQL literals, or other operator-only detail.
+ */
+export type SemanticFanoutProbeFailureCodeV1 =
+  | 'SEMANTIC_FANOUT_DUPLICATE_KEY'
+  | 'SEMANTIC_FANOUT_PROBE_ERROR'
+  | 'SEMANTIC_FANOUT_PROBE_UNPARSEABLE';
+
+export type SemanticFanoutProbeResultV1 =
+  | { status: 'safe' }
+  | {
+    status: 'blocked';
+    code: SemanticFanoutProbeFailureCodeV1;
+    message: string;
+  };
 
 export interface SemanticExecutionTrace {
   version: 1;
@@ -498,8 +523,10 @@ export interface AgentRefusalDetails {
     | 'COMPILATION_FAILED'
     | 'EXECUTION_FAILED'
     | 'GENERATED_ANALYTICAL_TUPLE_DRIFT'
+    | 'OUTPUT_BINDING_TUPLE_DRIFT'
     | 'semantic_path_ambiguous'
     | 'semantic_runtime_required'
+    | SemanticFanoutProbeFailureCodeV1
     /** DQL's own run budget stopped the turn; the AI provider did not fail. */
     | 'orchestration_budget_exhausted';
   message: string;
@@ -1033,6 +1060,17 @@ export interface AgentMemberBinding {
   sourceTurnId?: string;
 }
 
+/**
+ * Server-owned decision for whether a current turn may consume earlier
+ * analytical state. Omitted values belong to historical persisted runs and
+ * are treated as `none`; callers must never infer a binding from prose alone.
+ */
+export type AgentConversationBindingV1 =
+  | 'none'
+  | 'structured_clarification'
+  | 'prior_result'
+  | 'task_dependency';
+
 export interface AgentFollowUpContext {
   /**
    * 'generic'/'drilldown' — regex-classified follow-ups with routing force.
@@ -1040,6 +1078,8 @@ export interface AgentFollowUpContext {
    * conversation; never excludes artifacts, forces filters, or shifts intent.
    */
   kind: 'generic' | 'drilldown' | 'contextual';
+  /** Deterministic server decision; not an LLM-provided routing hint. */
+  binding?: AgentConversationBindingV1;
   sourceTurnId?: string;
   sourceBlockName?: string;
   sourceQuestion?: string;
@@ -1111,6 +1151,19 @@ export interface AgentEvidence {
   analysisPlan?: AgentAnalysisPlan;
 }
 
+/**
+ * A redacted, execution-bound projection for the local Ask trace. It is not
+ * an analytical-routing or trust input: the originating error remains the
+ * authority and this small allowlist merely lets a persisted trace explain a
+ * post-freeze local setup failure without storing its message.
+ */
+export interface AgentAnswerObservabilityExecutionFailureV1 {
+  version: 1;
+  phase: 'execution';
+  cause: 'connection_not_configured';
+  safeAction: 'configure_connection';
+}
+
 export interface AgentAnswer {
   kind: AnswerKind;
   sourceTier?: AnswerSourceTier;
@@ -1141,6 +1194,12 @@ export interface AgentAnswer {
    * request-scoped capability, before the connector receives SQL.
    */
   exploratoryExecutionFreeze?: ExploratoryExecutionFreezeV1;
+  /**
+   * A second, repair-specific authorization receipt.  It is intentionally
+   * separate from the initial receipt so the engine can prove that the repair
+   * kept the same frozen plan rather than replacing it after execution began.
+   */
+  exploratoryRepairExecutionFreeze?: ExploratoryExecutionFreezeV1;
   /** Terminal receipt binding every source execution and validated output. */
   analyticalExecutionReceipt?: AnalyticalExecutionReceiptV1;
   /** Deterministic facts copied from validated result columns and bound to the receipt. */
@@ -1151,6 +1210,13 @@ export interface AgentAnswer {
   analyticalFreshnessObservation?: AnalyticalFreshnessObservationV1;
   /** Stable redacted diagnostics for the immutable failed analytical run. */
   analyticalFailure?: AnalyticalFailureV1;
+  /**
+   * Content-free terminal setup evidence for a frozen execution authority.
+   * This is deliberately narrower than `analyticalFailure`: it projects an
+   * already tagged host boundary into Ask observability without changing
+   * routing, trust, or the user-facing execution error.
+   */
+  observabilityExecutionFailure?: AgentAnswerObservabilityExecutionFailureV1;
   /** Content-free evidence for provider-bound payloads used by this answer. */
   providerEgressReceipts?: ProviderEgressReceiptV1[];
   /** Positive-evidence aggregation authority; missing/blocked never authorizes repair. */
@@ -1270,6 +1336,12 @@ export interface AgentResultPayload {
   rowCount: number;
   /** Canonical result-contract fingerprint, stable for the named rows/columns. */
   resultFingerprint?: string;
+  /**
+   * Durable result-level trust. This is intentionally repeated from the Ask
+   * envelope because conversation persistence and result follow-ups consume
+   * the canonical result independently of the surrounding card.
+   */
+  trustState?: 'certified' | 'governed' | 'review_required' | 'not_applicable' | 'blocked';
   /** Cascade tier that produced the rows; renderers do not infer it. */
   answerTier?: string;
   executionTime?: number;
@@ -1501,6 +1573,7 @@ export interface AnswerLoopInput {
   prepareExploratorySqlExecution?: (
     sql: string,
     artifact?: DqlArtifactReference,
+    authorizationAttempt?: Extract<ExploratoryExecutionAuthorizationAttemptV1, { index: 1 }>,
   ) => Promise<{
     capability: AgenticSqlExecutionCapabilityV1;
     freeze: ExploratoryExecutionFreezeV1;
@@ -2235,9 +2308,17 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
   const analyticalExecutionGraph = analyticalGraphBuild?.status === 'ready'
     ? analyticalGraphBuild.graph
     : undefined;
+  // A v2 plan can also be synthesized for legacy/direct AnswerLoop callers so
+  // they can opt into the deterministic compiler. That compatibility bridge is
+  // not a router freeze: it must not turn a missing optional graph/adapter into
+  // a terminal answer before the established, safe legacy semantic execution
+  // path is considered. Router-selected semantic plans carry the explicit
+  // `selectedCascadeTier` signal and remain immutable/terminal below.
+  const routerFrozenSemanticPlan = Boolean(frozenSemanticRouteForInput(normalizedInput));
   const analyticalExecutionGraphFailure: AnswerLoopInput['analyticalExecutionGraphFailure'] = normalizedInput.resolvedAnalyticalPlan?.schemaVersion === 2
     && !multiMetricPlan
     && !generatedProposalPlan
+    && routerFrozenSemanticPlan
     ? analyticalGraphBuild?.status === 'blocked'
       ? {
           code: analyticalGraphBuild.code,
@@ -2322,13 +2403,31 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
       }
     : compiledInput;
   const loopResult = await runAnswerLoop(executionInput);
-  const result = applyHollowAnswerGate(
+  let result = applyHollowAnswerGate(
     validateCertifiedAnalyticalGraphAnswer(
       loopResult,
       executionInput.analyticalExecutionGraph,
       executionInput.resolvedAnalyticalPlan?.analyticalFrame,
     ),
   );
+  const frozenSemanticRoute = frozenSemanticRouteForInput(executionInput);
+  // A final defensive boundary keeps future return sites from accidentally
+  // restoring the old semantic -> generated fallthrough. Do not relabel an
+  // actual generated result as semantic: replace it with an inspectable,
+  // same-tier terminal failure instead.
+  const returnedNonSemanticRoute = frozenSemanticRoute && (
+    (result.route !== undefined && result.route.tier !== 'semantic_metric')
+    || (result.route === undefined && result.kind !== 'no_answer' && result.sourceTier !== 'semantic_layer')
+  );
+  if (returnedNonSemanticRoute && frozenSemanticRoute) {
+    result = frozenSemanticPlanFailureAnswer({
+      answerInput: executionInput,
+      considered: result.considered ?? [],
+      providerName: executionInput.provider.name,
+      code: 'EXECUTION_GRAPH_MISMATCH',
+      reason: `The pinned semantic plan ${frozenSemanticRoute.ref ?? 'selected by the router'} returned a non-semantic answer route. DQL did not substitute generated SQL.`,
+    });
+  }
   // Attach the canonical trust label once, at the single exit point, so every
   // return site inside runAnswerLoop stays untouched and backward compatible.
   // Freshness-aware trust: for a certified answer, fold the source block's data
@@ -2336,7 +2435,7 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
   // stale data" / "Certified · upstream failed". Non-certified or fresh answers
   // are unaffected.
   const { _semanticMetricMatch, ...publicResult } = result;
-  const chosenRoute = result.route ?? deriveAiRoute(result, _semanticMetricMatch);
+  const chosenRoute = frozenSemanticRoute ?? result.route ?? deriveAiRoute(result, _semanticMetricMatch);
   // P0 — record the high-level action this turn warranted, so callers can route
   // (compose_app → app build, investigate → research) and the UI can show the
   // agent's reasoning. Computed once at the single exit from the finished answer.
@@ -2470,6 +2569,80 @@ function deriveAiRoute(result: AgentAnswer, metricMatch?: MetricMatch): AiRoute 
     : { tier: 'generated_sql', label: 'Prepared review-required SQL preview.' };
 }
 
+/**
+ * The router owns the cascade decision.  Once it freezes a semantic plan, the
+ * answer loop may either execute that exact plan or return a semantic-tier
+ * terminal failure.  It must never let an unavailable semantic adapter fall
+ * through to the legacy generated-SQL lane merely because the latter can still
+ * construct a preview.
+ */
+function frozenSemanticRouteForInput(
+  input: Pick<AnswerLoopInput, 'resolvedAnalyticalPlan' | 'selectedCascadeTier'>,
+): AiRoute | undefined {
+  const plan = input.resolvedAnalyticalPlan;
+  // `freezeLegacySemanticSelection()` upgrades older direct AnswerLoop callers
+  // to a typed plan so they can use the deterministic semantic compiler. That
+  // migration is not the router's immutable cascade freeze. The server-owned
+  // cascade explicitly carries `selectedCascadeTier: 'semantic'`; only that
+  // signal activates the no-downgrade boundary below. Otherwise direct legacy
+  // callers retain their established deterministic semantic behavior.
+  if (
+    input.selectedCascadeTier !== 'semantic'
+    || plan?.mode !== 'authoritative'
+    || plan.capability !== 'semantic_execution'
+  ) return undefined;
+  const executionId = plan.executionId ?? plan.selectedConceptIds[0];
+  return {
+    tier: 'semantic_metric',
+    label: executionId
+      ? `Frozen semantic plan ${executionId}`
+      : 'Frozen semantic plan',
+    ...(executionId ? { ref: executionId } : {}),
+  };
+}
+
+function frozenSemanticPlanFailureAnswer(input: {
+  answerInput: AnswerLoopInput;
+  considered: KGSearchHit[];
+  providerName: string;
+  code: 'SEMANTIC_LAYER_REQUIRED' | 'COMPILATION_FAILED' | 'EXECUTION_GRAPH_MISMATCH';
+  reason: string;
+}): AgentAnswer {
+  const { answerInput, considered, providerName, code, reason } = input;
+  const route = frozenSemanticRouteForInput(answerInput);
+  // Callers use this only for an authoritative semantic plan. Keep the
+  // fallback defensive so an internal misuse still produces a safe no-answer.
+  const analyticalFailure = analyticalFailureForInput(answerInput, {
+    error: { code, message: reason },
+    phase: 'compilation',
+    failedBindings: answerInput.resolvedAnalyticalPlan?.executionId
+      ? [{
+          qualifiedId: answerInput.resolvedAnalyticalPlan.executionId,
+          role: 'metric',
+          reasonCode: code,
+        }]
+      : undefined,
+  });
+  return {
+    kind: 'no_answer',
+    sourceTier: 'no_answer',
+    certification: 'analyst_review_required',
+    reviewStatus: 'none',
+    confidence: 0,
+    text: analyticalFailure.message,
+    answer: analyticalFailure.message,
+    executionError: analyticalFailure.message,
+    refusalCode: 'grounding_gap',
+    refusalDetails: { code, message: analyticalFailure.message },
+    analyticalFailure,
+    ...(route ? { route } : {}),
+    citations: contextPackCitations(answerInput.contextPack, 8),
+    considered,
+    contextPack: answerInput.contextPack,
+    providerUsed: providerName,
+  };
+}
+
 /** "customers_customer_name" → "customers" for a question the user has to read. */
 function humanizeDeicticDimension(dimension: string): string {
   const leaf = dimension.split(/[.:]/).pop() ?? dimension;
@@ -2500,6 +2673,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   // or provider is dispatched.  Full retrieval stays on `input.contextPack`
   // for receipts and diagnostics only.
   const forcedExploratoryTier = input.selectedCascadeTier === 'exploratory_sql';
+  const frozenSemanticRoute = frozenSemanticRouteForInput(input);
   const exploratoryClosureContextPack = forcedExploratoryTier
     ? scopeContextPackToExploratoryCandidateClosure(scopedContextPack, input.exploratoryCandidateIds)
     : undefined;
@@ -2605,6 +2779,31 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   const authoritativePlanBinding = !forcedExploratoryTier && input.resolvedAnalyticalPlan?.mode === 'authoritative'
     ? input.resolvedPlanExecutionBinding
     : undefined;
+  // `freezeLegacySemanticSelection()` attaches an authoritative-shaped v2
+  // plan for direct AnswerLoop compatibility. It is not the router-owned
+  // semantic cascade decision. Only an explicit selected semantic tier may
+  // make an adapter/graph miss terminal; direct callers retain the established
+  // deterministic metric path, which still applies the ordinary SQL safety
+  // validation before it can execute.
+  const legacyDirectSemanticPlan = input.selectedCascadeTier === undefined
+    && input.resolvedAnalyticalPlan?.mode === 'authoritative'
+    && input.resolvedAnalyticalPlan.recommendedRoute === 'semantic'
+    && !frozenSemanticRoute;
+  // A semantic freeze is an immutable execution authority, not a hint for the
+  // legacy loop.  In particular, projects that have indexed semantic metadata
+  // but have not configured the corresponding local semantic adapter used to
+  // continue into generated SQL.  Stop here with the selected plan's typed
+  // diagnostic instead; no provider, tool, or SQL work is allowed to replace
+  // it after freeze.
+  if (!forcedExploratoryTier && frozenSemanticRoute && !input.semanticLayer) {
+    return frozenSemanticPlanFailureAnswer({
+      answerInput: input,
+      considered,
+      providerName: provider.name,
+      code: 'SEMANTIC_LAYER_REQUIRED',
+      reason: `The pinned semantic adapter for ${frozenSemanticRoute.ref ?? 'the selected semantic plan'} is unavailable.`,
+    });
+  }
   if (!forcedExploratoryTier && input.analyticalPeriodResolutionFailure) {
     const failure = input.analyticalPeriodResolutionFailure;
     const structuredFailureCode = failure.error && typeof failure.error === 'object'
@@ -2696,9 +2895,11 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       input,
       binding: input.semanticGraphExecutionBinding,
       graph: input.analyticalExecutionGraph,
-      capability: normalizeMetricCapabilityContract(
-        input.semanticGraphExecutionBinding.metricNode.payload?.analyticalCapability,
-      )!,
+      // The execution registry identifies the adapter metric, but its compact
+      // node payload may omit the relationship-path metadata that was frozen
+      // on the RAP. Re-deriving aggregation proof from that projection makes
+      // an already accepted native MetricFlow grouping fail post-freeze.
+      capability: input.semanticGraphExecutionBinding.capability,
       considered,
       providerName: provider.name,
     });
@@ -2812,7 +3013,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       providerUsed: provider.name,
     };
   }
-  if (authoritativePlanBinding?.status === 'blocked') {
+  if (authoritativePlanBinding?.status === 'blocked' && !legacyDirectSemanticPlan) {
     // An ambiguous singular reference is answerable the moment the user says
     // which one they meant, so offer the candidates rather than dead-ending.
     // The old refusal shipped the binder's internal sentence as the answer
@@ -2888,7 +3089,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     ? authoritativePlanBinding
     : undefined;
   const preferredSemanticMetric = authoritativeSemanticBinding?.metricNode
-    ?? (input.resolvedAnalyticalPlan?.mode === 'authoritative'
+    ?? (input.resolvedAnalyticalPlan?.mode === 'authoritative' && !legacyDirectSemanticPlan
       ? undefined
       : resolvePreferredSemanticMetric(
           [input.preferredExecutionId, ...(input.preferredEvidenceIds ?? [])],
@@ -2902,7 +3103,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     ? null
     : preferredSemanticMetric
     ? { metric: preferredSemanticMetric, score: 1, basis: 'name' as const }
-    : input.resolvedAnalyticalPlan?.mode === 'authoritative'
+    : input.resolvedAnalyticalPlan?.mode === 'authoritative' && !legacyDirectSemanticPlan
       ? null
       : await matchSemanticMetric(semanticQuestion, semanticMetricNodes, {
           measureTerms: [...questionPlan.requestedShape.measures, ...questionPlan.metricTerms],
@@ -3084,6 +3285,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   if (artifactHit && businessContextTerminal) {
     let result: AgentResultPayload | undefined;
     let executionError: string | undefined;
+    let executionFailureDetail: AnalyticalErrorDetailV1 | undefined;
     if (artifactHit.node.kind === 'block' && input.executeCertifiedBlock) {
       try {
         result = await input.executeCertifiedBlock(artifactHit.node, {
@@ -3095,6 +3297,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         });
         result = trimResultToRequestedTopN(result, questionPlan);
       } catch (err) {
+        executionFailureDetail = analyticalErrorDetail(err);
         executionError = err instanceof Error ? err.message : String(err);
       }
     }
@@ -3213,6 +3416,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         : questionPlan.requestedShape.topN?.n,
     );
     const authoritativeCertifiedFailure = Boolean(authoritativeCertifiedBinding && executionError);
+    const observabilityExecutionFailure = authoritativeCertifiedFailure
+      ? observabilityFailureForFrozenExecution(executionFailureDetail)
+      : undefined;
     // A selected certified block which returns an incomplete tuple is a
     // same-tier terminal failure. It is not a reason to reinterpret meaning,
     // label the partial rows generated, or retry another route after freeze.
@@ -3259,6 +3465,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         block: artifactHit.node.kind === 'block' ? artifactHit.node : undefined,
         result,
         executionError,
+        ...(observabilityExecutionFailure ? { observabilityExecutionFailure } : {}),
         ...(authoritativeCertifiedFailure || authoritativeCertifiedShapeFailure
           ? { refusalCode: 'grounding_gap' as const }
           : {}),
@@ -3775,7 +3982,20 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       contextPack: input.contextPack,
       considered,
       providerUsed: provider.name,
+      ...(frozenSemanticRoute ? { route: frozenSemanticRoute } : {}),
     };
+  }
+  // The semantic branch above has exhausted the exact plan's compiler and
+  // adapter choices.  Do not let `metricFirst` or the ordinary generated
+  // proposal branch reinterpret the question after a semantic freeze.
+  if (frozenSemanticRoute && !semanticBridgeAnswer) {
+    return frozenSemanticPlanFailureAnswer({
+      answerInput: input,
+      considered,
+      providerName: provider.name,
+      code: 'COMPILATION_FAILED',
+      reason: `The pinned semantic adapter could not compose ${frozenSemanticRoute.ref ?? 'the selected semantic plan'} without changing the frozen plan.`,
+    });
   }
   const metricFirst = semanticMetricMatch
     ? buildGovernedMetricFirstSql({
@@ -4107,14 +4327,36 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     || (input.contextPack?.allowedSqlContext?.relations.length ?? 0) > 0
     || (input.contextPack?.allowedSqlContext?.sourceBlockSql.length ?? 0) > 0
     || contextBlocks.length > 0;
+  // A selected bounded-exploration RAP is stronger than the advisory legacy
+  // analytical-path diagnosis.  The latter may still call raw output terms a
+  // semantic "missing dimension" even after the router has proven one safe
+  // physical relation and frozen the exploratory tuple.  Do not let that
+  // advisory pre-freeze diagnosis suppress the one explicitly authorized
+  // same-plan model-decline repair; the host re-validates the exact proposal
+  // against the frozen closure before it can execute.
+  const frozenExploratoryRepair = frozenExploratoryModelRepairAuthority(input);
   if (!parsed.sql && !governedMetricAnswer && wantsGeneratedData && hasGeneratableContext
-    && (analyticalPlan?.safe !== false || analyticalPlanAllowsDbtExploration(analyticalPlan))) {
+    && (frozenExploratoryRepair
+      || analyticalPlan?.safe !== false
+      || analyticalPlanAllowsDbtExploration(analyticalPlan))) {
     try {
       proposed = await generateProposalWithOptionalTools({
         provider,
-        messages: [...messages, { role: 'system', content: FORCE_JOIN_INSTRUCTION }],
-        // One tool round per ordinary Ask. The second generation is a bounded
-        // composition correction over already-retrieved evidence.
+        messages: [...messages, {
+          role: 'system',
+          content: [
+            FORCE_JOIN_INSTRUCTION,
+            ...(frozenExploratoryRepair
+              ? [renderFrozenExploratoryRepairContract(input.resolvedAnalyticalPlan!, questionPlan)]
+              : []),
+          ].join('\n\n'),
+        }],
+        // A router-frozen exploratory plan may consume exactly one additional
+        // provider transport to correct a model decline.  The host carries the
+        // immutable plan and output tuple into this retry; it is neither a
+        // replan nor a route change.  Legacy direct callers retain their
+        // historical composition correction, but do not receive the typed
+        // repair authority below.
         tools: [],
         questionPlan,
         intent,
@@ -4123,6 +4365,13 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         analysisDepth: input.analysisDepth,
         toolCalls: proposalToolCalls,
         providerPayloadGuard: input.providerPayloadGuard,
+        ...(frozenExploratoryRepair
+          ? {
+              dispatchPhase: 'repair' as const,
+              egressPurpose: 'repair_sql' as const,
+              maxProviderDispatches: 1,
+            }
+          : {}),
       });
       parsed = parseProposal(proposed);
     } catch (err) {
@@ -4195,6 +4444,49 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
 
   if (parsed.sql) {
     const frozenPlan = input.resolvedAnalyticalPlan;
+    // The result contract is host-owned even in tests or embedded callers
+    // that provide their own execution adapter.  Stop before capability
+    // preparation when a generated alias is backed by a different physical
+    // column than the frozen plan (for example `product_id AS order_id`).
+    // The local runtime repeats this check while minting the capability and
+    // persists the matching proof on its receipt.
+    if (input.selectedCascadeTier === 'exploratory_sql' && frozenPlan) {
+      const requiredOutputValidation = validateFrozenRequiredOutputProjection({
+        plan: frozenPlan,
+        sql: parsed.sql,
+        ...(input.semanticDriver ? { dialect: input.semanticDriver } : {}),
+      });
+      if (!requiredOutputValidation.ok) {
+        const failedOutputs = [...new Set([
+          ...requiredOutputValidation.missingOutputs,
+          ...requiredOutputValidation.bindingMismatches,
+        ])];
+        const message = `The generated exploratory query did not prove the frozen source binding for required output ${failedOutputs.join(', ')}, so DQL did not execute it.`;
+        return {
+          kind: 'no_answer',
+          sourceTier: 'no_answer',
+          certification: 'analyst_review_required',
+          reviewStatus: 'none',
+          confidence: 0,
+          text: message,
+          answer: message,
+          refusalCode: 'policy_blocked',
+          refusalDetails: {
+            code: 'OUTPUT_BINDING_TUPLE_DRIFT',
+            message,
+          },
+          validationWarnings: [
+            'OUTPUT_BINDING_TUPLE_DRIFT',
+            ...failedOutputs.map((output) => `Frozen output binding not proven: ${output}`),
+          ],
+          citations: contextPackCitations(input.contextPack, 8),
+          memoryContext: input.memoryContext,
+          contextPack: input.contextPack,
+          considered,
+          providerUsed: provider.name,
+        };
+      }
+    }
     if (!governedMetricAnswer && frozenPlan?.mode === 'authoritative' && frozenPlan.schemaVersion === 2) {
       const targetFingerprint = input.generatedProposalTargetFingerprint ?? '';
       const validation = validateGeneratedAnalyticalProposal({
@@ -4830,12 +5122,17 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
   let executionError: string | undefined;
   let warehouseFailure: WarehouseSqlFailureV1 | undefined;
   let exploratoryClosureDenied = false;
+  let semanticFanoutProbeFailure: Extract<SemanticFanoutProbeResultV1, { status: 'blocked' }> | undefined;
   let repairAttempts = 0;
   // A forced proposal may originate from the bounded analyst loop, but it
   // cannot bypass a router-owned exploratory decision.  In that case the host
   // still prepares and freezes the exact validated SQL before execution.
   const exploratoryExecutionSelected = input.selectedCascadeTier === 'exploratory_sql';
-  let preparedExploratoryExecution: {
+  let initialExploratoryExecution: {
+    capability: AgenticSqlExecutionCapabilityV1;
+    freeze: ExploratoryExecutionFreezeV1;
+  } | undefined;
+  let exploratoryRepairExecution: {
     capability: AgenticSqlExecutionCapabilityV1;
     freeze: ExploratoryExecutionFreezeV1;
   } | undefined;
@@ -4853,7 +5150,9 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     executionError = deepCandidateExecutionError;
     warehouseFailure = normalizeWarehouseSqlFailure(deepCandidateExecutionError, input.semanticDriver);
   }
-  const executeCurrentSql = async (): Promise<AgentResultPayload> => {
+  const executeCurrentSql = async (
+    authorizationAttempt?: Extract<ExploratoryExecutionAuthorizationAttemptV1, { index: 1 }>,
+  ): Promise<AgentResultPayload> => {
     const requestedLimit = questionPlan.requestedShape.topN?.scope === 'per_group'
       ? 200
       : questionPlan.requestedShape.topN?.n ?? 200;
@@ -4896,12 +5195,16 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
         });
       }
       // This is the only point at which a router-selected exploratory proposal
-      // crosses from validated text into executable authority. The callback
-      // rechecks the snapshot, physical target, and qualified runtime columns,
-      // then returns a one-shot capability bound to these exact SQL bytes.
-      preparedExploratoryExecution ??= await input.prepareExploratorySqlExecution(parsed.sql!, boundedArtifact);
+      // crosses from validated text into executable authority. The first call
+      // receives the original one-shot capability. A retryable warehouse
+      // failure may mint exactly one *new* repair capability, explicitly bound
+      // to the first SQL fingerprint; it never reopens meaning or routing.
+      const prepared = authorizationAttempt
+        ? await input.prepareExploratorySqlExecution(parsed.sql!, boundedArtifact, authorizationAttempt)
+        : (initialExploratoryExecution ??= await input.prepareExploratorySqlExecution(parsed.sql!, boundedArtifact));
+      if (authorizationAttempt) exploratoryRepairExecution = prepared;
       return input.executeAgenticGeneratedSql(
-        preparedExploratoryExecution.capability,
+        prepared.capability,
         parsed.sql!,
         boundedArtifact,
       );
@@ -4910,6 +5213,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     return input.executeGeneratedSql(parsed.sql!, boundedArtifact);
   };
   if ((input.executeGeneratedSql
+    || input.executeDqlArtifact
     || (input.forcedGeneratedProposal && input.executeAgenticGeneratedSql)
     || exploratoryExecutionSelected) && !result) {
     // Fanout gate for native semantic direct-joins: a duplicate join-key row on
@@ -4918,23 +5222,37 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     // answers). Probe first; on structural contradiction, refuse with the cause
     // instead of presenting wrong numbers — and never hand the error to SQL
     // repair, which would regenerate the same multiplying join.
-    let fanoutContradiction = false;
+    let semanticFanoutBlocked = false;
     if (
       !executionError
       && !input.forcedGeneratedProposal
       && !exploratoryExecutionSelected
-      && input.executeGeneratedSql
       && semanticBridgeAnswer?.composeResult?.fanoutProbeSql
       && semanticBridgeAnswer.sql.trim() === parsed.sql?.trim()
     ) {
-      const inflationError = await probeSemanticJoinFanout(
-        semanticBridgeAnswer.composeResult.fanoutProbeSql,
-        semanticBridgeAnswer.composeResult.tables,
-        input.executeGeneratedSql,
-      );
-      if (inflationError) {
-        executionError = inflationError;
-        fanoutContradiction = true;
+      // A DQL-artifact executor owns the semantic artifact, not an arbitrary
+      // one-row structural SQL probe. If the host did not also provide the
+      // read-only SQL executor needed for that probe, native direct joins fail
+      // closed rather than treating an artifact handoff as proof of uniqueness.
+      const fanoutProbe = input.executeGeneratedSql
+        ? await probeSemanticJoinFanout(
+          semanticBridgeAnswer.composeResult.fanoutProbeSql,
+          semanticBridgeAnswer.composeResult.tables,
+          input.executeGeneratedSql,
+        )
+        : {
+          status: 'blocked' as const,
+          code: 'SEMANTIC_FANOUT_PROBE_ERROR' as const,
+          message: 'DQL did not execute this governed semantic answer because the host could not verify native join fanout before aggregation. Configure the semantic runtime or a read-only SQL probe executor, then retry.',
+        };
+      if (fanoutProbe.status === 'blocked') {
+        // A governed semantic route freezes before execution. If DQL cannot
+        // prove its native join is fanout-safe, it must fail closed rather than
+        // execute, label the result governed, or quietly repair into a
+        // different plan.
+        executionError = fanoutProbe.message;
+        semanticFanoutProbeFailure = fanoutProbe;
+        semanticFanoutBlocked = true;
       }
     }
     try {
@@ -4954,9 +5272,15 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       executionError = warehouseFailure.redactedMessage;
     }
     if (executionError
-      && !input.forcedGeneratedProposal
-      && !exploratoryExecutionSelected
-      && !fanoutContradiction
+      // A host-supplied SQL proposal normally bypasses repair. A router-owned
+      // exploratory proposal is the exception: its frozen plan may authorize
+      // one corrected SQL statement after a retryable warehouse failure.
+      && (!input.forcedGeneratedProposal || exploratoryExecutionSelected)
+      // A router-selected exploratory plan may receive one bounded
+      // same-plan repair. The repair still goes through a fresh host
+      // authorization; it does not reuse the consumed initial capability.
+      && (!exploratoryExecutionSelected || Boolean(initialExploratoryExecution))
+      && !semanticFanoutBlocked
       && !authoritativeSemanticBinding) {
       warehouseFailure ??= normalizeWarehouseSqlFailure(executionError, input.semanticDriver);
       if (isRetryableGeneratedSqlError(warehouseFailure)) {
@@ -4982,7 +5306,13 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
               ],
             };
             try {
-              result = await executeCurrentSql();
+              result = await executeCurrentSql(exploratoryExecutionSelected
+                ? {
+                    version: 1,
+                    index: 1,
+                    parentSqlFingerprint: initialExploratoryExecution!.freeze.sqlFingerprint,
+                  }
+                : undefined);
               executionError = undefined;
               warehouseFailure = undefined;
             } catch (retryErr) {
@@ -5014,6 +5344,20 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
             schemaContext,
             signal: input.signal,
             reasoningEffort: input.reasoningEffort,
+            // Only the router-frozen exploratory lane has authority to spend
+            // the exceptional post-warehouse repair transport. Legacy callers
+            // keep their prior unlabelled repair behavior.
+            ...(
+              exploratoryExecutionSelected
+              && Boolean(initialExploratoryExecution)
+              && frozenExploratoryModelRepairAuthority(input)
+                ? {
+                    dispatchPhase: 'repair' as const,
+                    egressPurpose: 'repair_sql' as const,
+                    maxProviderDispatches: 1,
+                  }
+                : {}
+            ),
           });
           const repaired = parseProposal(repairedRaw);
           if (repaired.sql) {
@@ -5032,7 +5376,11 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
               repairNarrative = repaired.text?.trim() || undefined;
               parsed.sql = repaired.sql;
               parsed.viz = repaired.viz ?? parsed.viz;
-              applyParsedProposalMetadata(parsed, repaired);
+              // A repair fixes SQL bytes only. On the router-owned
+              // exploratory lane, model prose or metadata must never mutate
+              // the host-selected frame, route, outputs, or trust state after
+              // the plan froze.
+              if (!exploratoryExecutionSelected) applyParsedProposalMetadata(parsed, repaired);
               contextValidation = {
                 ok: true,
                 warnings: [
@@ -5041,7 +5389,13 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
                 ],
               };
               try {
-                result = await executeCurrentSql();
+                result = await executeCurrentSql(exploratoryExecutionSelected
+                  ? {
+                      version: 1,
+                      index: 1,
+                      parentSqlFingerprint: initialExploratoryExecution!.freeze.sqlFingerprint,
+                    }
+                  : undefined);
                 executionError = undefined;
                 warehouseFailure = undefined;
               } catch (retryErr) {
@@ -5069,12 +5423,14 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     // A router-selected physical-closure denial happens before a capability
     // exists. Its rejected bytes are diagnostics for the host, never a SQL
     // preview that a user can review, copy, or turn into a draft.
-    sql: exploratoryClosureDenied ? undefined : parsed.sql,
+    sql: exploratoryClosureDenied || semanticFanoutProbeFailure ? undefined : parsed.sql,
     suggestedViz: parsed.viz ?? 'table',
     assumptions: [
       ...(exploratoryClosureDenied
         ? ['The router-selected physical closure rejected the generated SQL before capability minting.']
-        : ['The SQL preview is uncertified until an analyst reviews and promotes the DQL artifact.']),
+        : semanticFanoutProbeFailure
+          ? ['The native semantic join could not be proven fanout-safe before plan freeze, so DQL did not execute or expose its SQL.']
+          : ['The SQL preview is uncertified until an analyst reviews and promotes the DQL artifact.']),
       ...(certifiedExecutionFallback
         ? [`Certified block ${certifiedExecutionFallback.node.name} failed execution and was bypassed: ${certifiedExecutionFallback.error}`]
         : []),
@@ -5098,6 +5454,26 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       }
     }
     const resultShape = result ? validateAnswerResultShape(questionPlan, result) : undefined;
+    // A router-selected exploratory plan carries a host-bound output
+    // projection. The ordinary generated-answer UX may show a partial result
+    // with a warning, but a frozen exploratory plan may not: displaying it
+    // would silently change the tuple DQL authorized. Keep the connector rows
+    // out of the answer/artifact when a broken executor returns them anyway.
+    const missingFrozenExploratoryOutputs = exploratoryExecutionSelected && result
+      ? missingFrozenRequiredOutputProjection(input.resolvedAnalyticalPlan, result)
+      : [];
+    const activeExploratoryOutputFreeze = exploratoryRepairExecution?.freeze ?? initialExploratoryExecution?.freeze;
+    const missingFrozenExploratoryBindingProofs = exploratoryExecutionSelected && result
+      ? missingFrozenRequiredOutputBindingProof(
+          input.resolvedAnalyticalPlan,
+          activeExploratoryOutputFreeze,
+        )
+      : [];
+    const frozenExploratoryOutputFailures = [...new Set([
+      ...missingFrozenExploratoryOutputs,
+      ...missingFrozenExploratoryBindingProofs,
+    ])];
+    const frozenExploratoryOutputContractFailure = frozenExploratoryOutputFailures.length > 0;
     // ANY question whose SQL executed but dropped multiple requested columns used to
     // REFUSE outright ("no governed answer"), throwing away a result that actually
     // ran. Instead, SURFACE the partial result (review-required) with a warning that
@@ -5120,13 +5496,16 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       ...repairNotes,
       ...(resultShape?.warnings ?? []),
       ...(partialShapeWarning ? [partialShapeWarning] : []),
+      ...(frozenExploratoryOutputContractFailure
+        ? [`The executed exploratory result violated the frozen output contract: ${frozenExploratoryOutputFailures.join(', ')}.`]
+        : []),
       ...(topNTrimNote ? [topNTrimNote] : []),
       ...(executionError ? ['The preview execution error must be reviewed before reuse.'] : []),
     ];
     const generatedOutputs = parsed.outputs?.length ? parsed.outputs : resultColumnNames(result);
     const generatedRequestedFilters = mergeProposalStringLists(input.followUp?.filters, parsed.requestedFilters);
     const generatedRequestedDimensions = mergeProposalStringLists(input.followUp?.dimensions, parsed.requestedDimensions);
-    const baseDqlArtifact = exploratoryClosureDenied
+    const baseDqlArtifact = exploratoryClosureDenied || semanticFanoutProbeFailure || frozenExploratoryOutputContractFailure
       ? undefined
       : result?.dqlArtifact ?? semanticBridgeAnswer?.dqlArtifact ?? buildGeneratedSqlDqlArtifact({
       question,
@@ -5155,7 +5534,7 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       : undefined;
     let draftBlock: GeneratedDraftBlock | undefined;
     let draftCaptureError: string | undefined;
-    if (!exploratoryClosureDenied && input.captureGeneratedDraft && parsed.sql) {
+    if (!exploratoryClosureDenied && !semanticFanoutProbeFailure && !frozenExploratoryOutputContractFailure && input.captureGeneratedDraft && parsed.sql) {
       try {
         draftBlock = await input.captureGeneratedDraft({
           question,
@@ -5201,10 +5580,21 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       : undefined;
     const certifiedMetricAnswer = semanticMetricCertification === 'certified' || semanticMetricCertification === 'reviewed';
     const governedMetricExecutionFailure = governedMetricAnswer && Boolean(executionError);
-    const terminalExecutionFailure = governedMetricExecutionFailure || exploratoryClosureDenied;
+    const terminalExecutionFailure = governedMetricExecutionFailure || exploratoryClosureDenied || frozenExploratoryOutputContractFailure;
+    const semanticFanoutTraceError = semanticFanoutProbeFailure
+      ? Object.assign(new Error(semanticFanoutProbeFailure.message), {
+        code: semanticFanoutProbeFailure.code,
+        details: { phase: 'validation' as const },
+      })
+      : executionError;
+    const terminalFailureMessage = frozenExploratoryOutputContractFailure
+      ? `The exploratory execution result did not retain proven frozen output binding ${frozenExploratoryOutputFailures.join(', ')}, so DQL did not display it.`
+      : exploratoryClosureDenied
+      ? 'The generated SQL referenced a relation outside the router-selected physical closure, so DQL did not execute it.'
+      : semanticFanoutProbeFailure?.message;
     const finalSemanticExecutionTrace = semanticTraceAfterExecution(semanticExecutionTrace, {
       executed: Boolean(result),
-      ...(executionError ? { error: executionError } : {}),
+      ...(semanticFanoutTraceError ? { error: semanticFanoutTraceError } : {}),
       ...(result ? { result } : {}),
     });
     return {
@@ -5214,21 +5604,25 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       reviewStatus: terminalExecutionFailure ? 'none' : governedMetricAnswer ? 'governed' : 'draft_ready',
       semanticMetricCertification,
       confidence: terminalExecutionFailure ? 0 : certifiedMetricAnswer ? 0.8 : governedMetricAnswer ? 0.72 : 0.55,
-      text: exploratoryClosureDenied
-        ? 'The generated SQL referenced a relation outside the router-selected physical closure, so DQL did not execute it.'
-        : generatedText,
-      answer: exploratoryClosureDenied
-        ? 'The generated SQL referenced a relation outside the router-selected physical closure, so DQL did not execute it.'
-        : generatedText,
-      ...(exploratoryClosureDenied ? {} : { proposedSql: parsed.sql, sql: parsed.sql }),
-      result,
+      text: terminalFailureMessage ?? generatedText,
+      answer: terminalFailureMessage ?? generatedText,
+      ...(exploratoryClosureDenied || semanticFanoutProbeFailure || frozenExploratoryOutputContractFailure ? {} : { proposedSql: parsed.sql, sql: parsed.sql }),
+      result: frozenExploratoryOutputContractFailure ? undefined : result,
       executionError,
       ...(warehouseFailure ? { warehouseFailure } : {}),
       ...(finalSemanticExecutionTrace ? { semanticExecutionTrace: finalSemanticExecutionTrace } : {}),
-      ...(terminalExecutionFailure ? { refusalCode: 'grounding_gap' as const } : {}),
+      ...(terminalExecutionFailure ? {
+        refusalCode: semanticFanoutProbeFailure ? 'policy_blocked' as const : 'grounding_gap' as const,
+      } : {}),
+      ...(semanticFanoutProbeFailure ? {
+        refusalDetails: {
+          code: semanticFanoutProbeFailure.code,
+          message: semanticFanoutProbeFailure.message,
+        },
+      } : {}),
       suggestedViz: parsed.viz ?? 'table',
-      ...(exploratoryClosureDenied ? {} : { dqlArtifact: answerDqlArtifact }),
-      ...(exploratoryClosureDenied ? {} : {
+      ...(exploratoryClosureDenied || semanticFanoutProbeFailure || frozenExploratoryOutputContractFailure ? {} : { dqlArtifact: answerDqlArtifact }),
+      ...(exploratoryClosureDenied || semanticFanoutProbeFailure || frozenExploratoryOutputContractFailure ? {} : {
         draftBlock,
         draftBlockId: draftBlock?.path,
         promoteCommand: draftBlock ? `dql certify --from-draft ${draftBlock.path}` : undefined,
@@ -5270,7 +5664,8 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
       considered,
       providerUsed: provider.name,
       aggregationSafetyProof,
-      ...(preparedExploratoryExecution ? { exploratoryExecutionFreeze: preparedExploratoryExecution.freeze } : {}),
+      ...(initialExploratoryExecution ? { exploratoryExecutionFreeze: initialExploratoryExecution.freeze } : {}),
+      ...(exploratoryRepairExecution ? { exploratoryRepairExecutionFreeze: exploratoryRepairExecution.freeze } : {}),
       // Carry the governed metric match so the exit point can name a
       // `semantic_metric` route (spec 17, part C).
       _semanticMetricMatch: governedMetricAnswer ? semanticMetricMatch ?? undefined : undefined,
@@ -5309,6 +5704,83 @@ function resultColumnNames(result?: AgentResultPayload): string[] | undefined {
     })
     .filter(Boolean);
   return columns?.length ? columns : undefined;
+}
+
+/**
+ * Check only the host-bound aliases from a frozen plan. This is intentionally
+ * stricter than the conversational shape helper: synonym matching is useful
+ * for ordinary narration, but it cannot substitute a requested order/product
+ * identifier after exploratory SQL has been authorized.
+ */
+function missingFrozenRequiredOutputProjection(
+  plan: ResolvedAnalyticalPlan | undefined,
+  result: AgentResultPayload,
+): string[] {
+  const required = plan?.outputContract?.requiredOutputs ?? [];
+  if (required.length === 0) return [];
+  const columns = new Set((resultColumnNames(result) ?? []).map(canonicalFrozenOutputAlias));
+  return required.flatMap((binding) => {
+    const alias = binding.outputName
+      ?? binding.qualifiedId?.split(/[:.]/).at(-1)
+      ?? binding.requested;
+    const normalized = canonicalFrozenOutputAlias(alias);
+    return normalized && columns.has(normalized) ? [] : [alias];
+  });
+}
+
+/**
+ * A column name in a returned result does not prove where it came from.  The
+ * result is accepted only when the server-owned authorization receipt carries
+ * the exact frozen output-source binding that was parser-validated for the SQL
+ * handed to the connector.  Old persisted receipts remain readable; they
+ * simply cannot authorize a new result for a plan that has explicit outputs.
+ */
+function missingFrozenRequiredOutputBindingProof(
+  plan: ResolvedAnalyticalPlan | undefined,
+  freeze: ExploratoryExecutionFreezeV1 | undefined,
+): string[] {
+  const required = plan?.outputContract?.requiredOutputs ?? [];
+  if (required.length === 0) return [];
+  const expected = frozenRequiredOutputBindingProofsForPlan(plan!);
+  const missingSourceBindingAliases = required
+    .filter((binding) => !expected.some((proof) =>
+      canonicalFrozenOutputAlias(proof.outputName)
+        === canonicalFrozenOutputAlias(binding.outputName
+          ?? binding.qualifiedId?.split(/[:.]/).at(-1)
+          ?? binding.requested)))
+    .map((binding) => binding.outputName
+      ?? binding.qualifiedId?.split(/[:.]/).at(-1)
+      ?? binding.requested);
+  const actual = freeze?.requiredOutputBindings ?? [];
+  const missingProofAliases = expected
+    .filter((proof) => !actual.some((candidate) => sameFrozenRequiredOutputBindingProof(candidate, proof)))
+    .map((proof) => proof.outputName);
+  return [...new Set([...missingSourceBindingAliases, ...missingProofAliases])];
+}
+
+function sameFrozenRequiredOutputBindingProof(
+  actual: ExploratoryRequiredOutputBindingProofV1,
+  expected: ExploratoryRequiredOutputBindingProofV1,
+): boolean {
+  return actual.version === 1
+    && actual.qualifiedId === expected.qualifiedId
+    && canonicalFrozenOutputAlias(actual.outputName) === canonicalFrozenOutputAlias(expected.outputName)
+    && canonicalFrozenSourceIdentifier(actual.relation) === canonicalFrozenSourceIdentifier(expected.relation)
+    && canonicalFrozenSourceIdentifier(actual.column) === canonicalFrozenSourceIdentifier(expected.column);
+}
+
+function canonicalFrozenOutputAlias(value: string): string {
+  return value.toLowerCase()
+    .replace(/["`]/g, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function canonicalFrozenSourceIdentifier(value: string): string {
+  return value.toLowerCase()
+    .replace(/["`\[\]]/g, '')
+    .replace(/\s*\.\s*/g, '.')
+    .trim();
 }
 
 function analyticalCapabilityForPlan(
@@ -5743,10 +6215,13 @@ async function executeSemanticAnalyticalGraph(input: {
     if (proof.status !== 'safe') {
       return analyticalGraphFailureAnswer(
         input,
-        'EXECUTION_GRAPH_MISMATCH',
+        'COMPILATION_FAILED',
         semanticAggregationSafetyFailure(proof),
         {
-          phase: 'validation',
+          // This is compiler/plan validation before a warehouse statement is
+          // dispatched. It must be represented as semantic.compile, never as
+          // result normalization or a SQL execution failure.
+          phase: 'compilation',
           dqlArtifact: composed.dqlArtifact,
           compiledSql: composed.sql,
           semanticExecutionTrace,
@@ -5771,6 +6246,14 @@ async function executeSemanticAnalyticalGraph(input: {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      // A missing local execution target fails at the host's pre-execution
+      // boundary. It must not be recast as a semantic compiler failure merely
+      // because the semantic graph owns the callback. Preserve the narrow,
+      // producer-tagged fact for the durable Ask receipt; it does not alter
+      // the frozen route, trust, or user-facing analytical failure.
+      const observabilityExecutionFailure = observabilityFailureForFrozenExecution(
+        analyticalErrorDetail(error),
+      );
       return analyticalGraphFailureAnswer(
         input,
         'EXECUTION_FAILED',
@@ -5780,6 +6263,14 @@ async function executeSemanticAnalyticalGraph(input: {
           dqlArtifact: composed.dqlArtifact,
           compiledSql: composed.sql,
           semanticExecutionTrace: semanticTraceAfterExecution(semanticExecutionTrace, { executed: false, error }),
+          // The exact aggregation proof already passed before the connector
+          // call. Preserve it so presentation never recasts a warehouse binder
+          // error as a failed semantic aggregation proof.
+          aggregationSafetyProof,
+          // This producer-tagged fact is diagnostic only: it does not alter
+          // routing, trust, or the immutable frozen plan.
+          warehouseFailure: normalizeWarehouseSqlFailure(error, input.input.semanticDriver),
+          ...(observabilityExecutionFailure ? { observabilityExecutionFailure } : {}),
         },
       );
     }
@@ -6248,6 +6739,8 @@ function analyticalGraphFailureAnswer(
     failedBindings?: AnalyticalFailedBindingInput[];
     semanticExecutionTrace?: SemanticExecutionTrace;
     aggregationSafetyProof?: AggregationSafetyProofV1;
+    warehouseFailure?: WarehouseSqlFailureV1;
+    observabilityExecutionFailure?: AgentAnswerObservabilityExecutionFailureV1;
   } = {},
 ): AgentAnswer {
   const analyticalFailure = analyticalFailureForInput(input.input, {
@@ -6277,6 +6770,10 @@ function analyticalGraphFailureAnswer(
     ...(artifacts.dqlArtifact ? { dqlArtifact: artifacts.dqlArtifact } : {}),
     ...(artifacts.semanticExecutionTrace ? { semanticExecutionTrace: artifacts.semanticExecutionTrace } : {}),
     ...(artifacts.aggregationSafetyProof ? { aggregationSafetyProof: artifacts.aggregationSafetyProof } : {}),
+    ...(artifacts.warehouseFailure ? { warehouseFailure: artifacts.warehouseFailure } : {}),
+    ...(artifacts.observabilityExecutionFailure
+      ? { observabilityExecutionFailure: artifacts.observabilityExecutionFailure }
+      : {}),
     citations: contextPackCitations(input.input.contextPack, 8),
     considered: input.considered,
     contextPack: input.input.contextPack,
@@ -6468,6 +6965,48 @@ Rules:
 // combined dataset — show them separately" refusal into the join the user asked
 // for, while still allowing an honest refusal if context is truly missing.
 const FORCE_JOIN_INSTRUCTION = `Your previous attempt declined to produce SQL. Re-read the supplied schema, metadata, and any "Knowledge graph join routes": this question CAN be answered by joining the grounded tables along their documented keys. Do NOT refuse, and do NOT suggest showing the datasets separately — compose ONE read-only SELECT/WITH that joins the relevant tables to answer it directly, following the JSON contract from rule 3. State the grain and the exact join path in the summary. Only if a required table, column, or join key is truly absent from the supplied context may you still ask a clarifying question.`;
+
+/**
+ * A model-decline correction is only a repair when the router already froze a
+ * bounded exploratory RAP and the host supplied the matching capability
+ * mint/consume closures.  Anything weaker is a new planning attempt and must
+ * not borrow the repair transport allowance.
+ */
+function frozenExploratoryModelRepairAuthority(input: Pick<
+  AnswerLoopInput,
+  'selectedCascadeTier' | 'resolvedAnalyticalPlan' | 'prepareExploratorySqlExecution' | 'executeAgenticGeneratedSql'
+>): boolean {
+  const plan = input.resolvedAnalyticalPlan;
+  return input.selectedCascadeTier === 'exploratory_sql'
+    && plan?.mode === 'authoritative'
+    && plan.capability === 'bounded_exploration'
+    && Boolean(plan.planId && plan.fingerprint && plan.snapshotId)
+    && Boolean(input.prepareExploratorySqlExecution && input.executeAgenticGeneratedSql);
+}
+
+/**
+ * The corrective prompt repeats only host-owned tuple facts.  It never asks
+ * the model to choose a new route, relation closure, output contract, or
+ * trust label; SQL authorization re-proves those facts after the response.
+ */
+function renderFrozenExploratoryRepairContract(
+  plan: ResolvedAnalyticalPlan,
+  questionPlan: AnalysisQuestionPlan,
+): string {
+  const requiredOutputs = plan.outputContract?.requiredOutputs?.filter(
+    (output) => output.status === 'resolved' && output.outputName && output.qualifiedId,
+  )
+    .map((output) => `${output.outputName} <- ${output.qualifiedId}`)
+    ?? [];
+  return [
+    'This is the one permitted correction for an already frozen, review-required exploratory plan.',
+    renderRequestedShapeForRepair(questionPlan),
+    requiredOutputs.length > 0
+      ? `Frozen required output bindings (preserve exactly): ${requiredOutputs.join('; ')}`
+      : 'Preserve the frozen requested tuple exactly.',
+    'Use only the relations and columns already supplied in the bounded context. Do not add a relation, change the ranking, remove an output, change the limit, or alter the analytical meaning. The host will validate the same frozen snapshot and closure before execution.',
+  ].join('\n');
+}
 
 /**
  * Produces the prompt-facing subset of a broad local context pack. Global
@@ -9333,6 +9872,12 @@ async function requestSqlRepair(input: {
   schemaContext: AgentSchemaTable[];
   signal?: AbortSignal;
   reasoningEffort?: ReasoningEffort;
+  /** Server-owned only for a frozen exploratory same-plan correction. */
+  dispatchPhase?: ProviderDispatchPhaseV1;
+  /** Paired with dispatchPhase; never derived from model output. */
+  egressPurpose?: ProviderEgressPurpose;
+  /** A frozen-plan repair admits exactly one physical provider transport. */
+  maxProviderDispatches?: number;
 }): Promise<string> {
   const schema = input.schemaContext.length > 0
     ? input.schemaContext
@@ -9372,6 +9917,11 @@ async function requestSqlRepair(input: {
     // bumping would let an internal preview-repair exceed that cap. Escalation-level
     // repairs bump-then-clamp in the host (resolveRunReasoningEffort).
     reasoningEffort: input.reasoningEffort,
+    ...(input.dispatchPhase ? { dispatchPhase: input.dispatchPhase } : {}),
+    ...(input.egressPurpose ? { egressPurpose: input.egressPurpose } : {}),
+    ...(input.maxProviderDispatches !== undefined
+      ? { maxProviderDispatches: input.maxProviderDispatches }
+      : {}),
   });
 }
 
@@ -9386,11 +9936,22 @@ async function generateProposalWithOptionalTools(input: {
   analysisDepth?: AnalysisDepth;
   toolCalls?: AgentEvidenceToolCall[];
   providerPayloadGuard?: ProviderToolLoopOptions['providerPayloadGuard'];
+  /** Server-owned provider lifecycle marker; only bounded repairs set this. */
+  dispatchPhase?: ProviderDispatchPhaseV1;
+  /** Server-owned paired egress purpose; never supplied by user/model input. */
+  egressPurpose?: ProviderEgressPurpose;
+  /** Bounded repair transport cap; absent for ordinary generation. */
+  maxProviderDispatches?: number;
 }): Promise<string> {
   const tools = input.tools?.filter((tool) => tool.name && tool.description) ?? [];
   const options = {
     signal: input.signal,
     reasoningEffort: input.reasoningEffort,
+    ...(input.dispatchPhase ? { dispatchPhase: input.dispatchPhase } : {}),
+    ...(input.egressPurpose ? { egressPurpose: input.egressPurpose } : {}),
+    ...(input.maxProviderDispatches !== undefined
+      ? { maxProviderDispatches: input.maxProviderDispatches }
+      : {}),
   };
   // No tools → plain generation (nothing for the loop to drive).
   if (tools.length === 0) {
@@ -9842,10 +10403,28 @@ function isRetryableGeneratedSqlError(failure: WarehouseSqlFailureV1): boolean {
 }
 
 /**
- * Only SQL-shape/binding failures may leave the certified lane. Connectivity,
- * authorization, cancellation, and timeout failures would affect every query
- * route and must remain terminal rather than triggering wasteful provider work.
+ * Only SQL-shape/binding failures may leave a frozen governed lane.
+ * Connectivity, authorization, cancellation, and timeout failures would affect
+ * every query route and must remain terminal rather than triggering wasteful
+ * provider work.
  */
+function observabilityFailureForFrozenExecution(
+  detail: AnalyticalErrorDetailV1 | undefined,
+): AgentAnswerObservabilityExecutionFailureV1 | undefined {
+  // Do not infer this from user-facing error text. The local runtime tags the
+  // physical pre-execution boundary; this projection only carries that exact
+  // typed fact into the redacted trace after a governed plan has frozen.
+  if (detail?.origin !== 'host' || detail.stage !== 'execute' || detail.code !== 'connection_not_configured') {
+    return undefined;
+  }
+  return {
+    version: 1,
+    phase: 'execution',
+    cause: 'connection_not_configured',
+    safeAction: 'configure_connection',
+  };
+}
+
 function isRetryableCertifiedExecutionError(error: string): boolean {
   return /\b(?:binder|parser|catalog)\s+error\b/i.test(error)
     // DuckDB says "ambiguous reference"; Snowflake says "ambiguous column name".
@@ -10889,31 +11468,47 @@ function uniqueAssets(assets: AgentEvidenceAsset[]): AgentEvidenceAsset[] {
 }
 
 /**
- * Execute the semantic layer's fanout probe and translate a structural
- * contradiction into an actionable refusal message. Probe failures (missing
- * permissions, dialect quirks) return undefined — the probe protects against
- * silent inflation but must never become a new way for a healthy query to fail.
+ * Execute the semantic layer's fanout probe before a governed native semantic
+ * join freezes. A native join that cannot be checked is not a governed-safe
+ * join: fail closed with a redacted typed failure instead of executing a query
+ * that could multiply aggregates. MetricFlow/dbt Cloud paths have their own
+ * compiler guarantees and do not use this native direct-join guard.
  */
 export async function probeSemanticJoinFanout(
   probeSql: string,
   joinedTables: string[],
   executeSql: (sql: string, artifact?: never) => Promise<AgentResultPayload>,
-): Promise<string | undefined> {
+): Promise<SemanticFanoutProbeResultV1> {
   try {
     const payload = await (executeSql as (sql: string) => Promise<AgentResultPayload>)(probeSql);
     const counts = parseFanoutProbeCounts(payload);
-    if (!counts || counts.base <= 0 || counts.joined <= counts.base) return undefined;
+    if (!counts || counts.base <= 0) {
+      return {
+        status: 'blocked',
+        code: 'SEMANTIC_FANOUT_PROBE_UNPARSEABLE',
+        message: 'DQL did not execute this governed semantic answer because its join-safety probe did not return verifiable row counts. Check the declared relationship or run the metric through MetricFlow / dbt Cloud, then retry.',
+      };
+    }
+    if (counts.joined <= counts.base) return { status: 'safe' };
     const factor = counts.joined / counts.base;
     const tables = joinedTables.filter(Boolean).join(', ');
-    return [
-      `Blocked a governed semantic answer whose join inflates results: joining ${tables || 'the declared tables'}`,
-      `turned ${counts.base.toLocaleString('en-US')} base rows into ${counts.joined.toLocaleString('en-US')} (×${factor >= 10 ? Math.round(factor) : factor.toFixed(1)}).`,
-      'The declared join key is not unique on the joined side, so every aggregated value would be multiplied.',
-      'Deduplicate the joined model (for example, filter a slowly-changing dimension to current records)',
-      'or execute this metric through MetricFlow / dbt Cloud, then retry. No numbers were shown because they would be wrong.',
-    ].join(' ');
+    return {
+      status: 'blocked',
+      code: 'SEMANTIC_FANOUT_DUPLICATE_KEY',
+      message: [
+        `Blocked a governed semantic answer whose join inflates results: joining ${tables || 'the declared tables'}`,
+        `turned ${counts.base.toLocaleString('en-US')} base rows into ${counts.joined.toLocaleString('en-US')} (×${factor >= 10 ? Math.round(factor) : factor.toFixed(1)}).`,
+        'The declared join key is not unique on the joined side, so every aggregated value would be multiplied.',
+        'Deduplicate the joined model (for example, filter a slowly-changing dimension to current records)',
+        'or execute this metric through MetricFlow / dbt Cloud, then retry. No numbers were shown because they would be wrong.',
+      ].join(' '),
+    };
   } catch {
-    return undefined;
+    return {
+      status: 'blocked',
+      code: 'SEMANTIC_FANOUT_PROBE_ERROR',
+      message: 'DQL did not execute this governed semantic answer because it could not verify join fanout before aggregation. Check the declared relationship or run the metric through MetricFlow / dbt Cloud, then retry.',
+    };
   }
 }
 

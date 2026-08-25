@@ -3,15 +3,50 @@ import {
   assertProviderPayloadAllowed,
   createProviderEgressReceipt,
   createProviderDispatchEgressReceipt,
+  DEFAULT_ASK_ROW_EGRESS_POLICY,
   inspectProviderPayloadRowShape,
   markProviderMetadataArray,
   prepareProviderContextForDispatch,
   prepareProviderWireEnvelopeForDispatch,
   prepareServerOwnedProviderSchemaContext,
+  RESEARCH_ROW_EGRESS_POLICY,
   redactProviderResultRows,
+  resolveProviderResultRowEgressPolicy,
 } from './provider-egress.js';
 
 describe('provider egress guard (SEC-004)', () => {
+  it('mints result-row authority only for explicit Research with one-run consent', () => {
+    const projectSetting = { mode: 'bounded_sample' as const, maxNarrationRows: 13 };
+
+    expect(DEFAULT_ASK_ROW_EGRESS_POLICY).toMatchObject({
+      maxNarrationRows: 0,
+      resultRowAuthority: 'none',
+    });
+    expect(resolveProviderResultRowEgressPolicy({
+      projectSetting,
+      requestedMode: 'ask',
+      researchOptIn: true,
+    })).toBe(DEFAULT_ASK_ROW_EGRESS_POLICY);
+    expect(resolveProviderResultRowEgressPolicy({
+      projectSetting,
+      requestedMode: 'research',
+      researchOptIn: false,
+    })).toBe(DEFAULT_ASK_ROW_EGRESS_POLICY);
+    expect(resolveProviderResultRowEgressPolicy({
+      projectSetting,
+      researchOptIn: true,
+    })).toBe(DEFAULT_ASK_ROW_EGRESS_POLICY);
+    expect(resolveProviderResultRowEgressPolicy({
+      projectSetting,
+      requestedMode: 'research',
+      researchOptIn: true,
+    })).toMatchObject({
+      ...RESEARCH_ROW_EGRESS_POLICY,
+      maxNarrationRows: 13,
+      resultRowAuthority: 'research_run_opt_in',
+    });
+  });
+
   it('rejects recursively nested row canaries without relying on a rows field', () => {
     const payload = { observation: { arbitrary: [{ customer: 'ROW_CANARY_ADA', amount: 42 }] } };
     expect(() => assertProviderPayloadAllowed(payload, {

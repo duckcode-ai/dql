@@ -10,6 +10,11 @@ import {
   persistedAnalyticalGapWitness,
   analyticalFreshnessObservedThrough,
   analyticalFailedRunFromAgentRun,
+  allocateResearchBranchBudget,
+  buildResearchBranchRequirementProjection,
+  awaitResearchBranchDeadline,
+  RESEARCH_BRANCH_FINALIZATION_RESERVE_MS,
+  RESEARCH_MAX_CONCURRENT_BRANCHES,
   boundedAgentMeaningSignal,
   applyDashboardFiltersToBlockExecution,
   dashboardSemanticFiltersForTile,
@@ -92,6 +97,7 @@ import {
   scheduleCompoundAnalyticalTasks,
   prepareLocalExecution,
   dashboardRuntimeVariables,
+  governedProviderPreflightError,
   resolveDefaultLLMProvider,
   resolveGovernedAnswerRunner,
   resolveAgentRuntimeValueGrounding,
@@ -144,18 +150,27 @@ import {
   assertProviderPayloadAllowed,
   prepareProviderContextForDispatch,
   DEFAULT_ASK_ROW_EGRESS_POLICY,
+  RESEARCH_ROW_EGRESS_POLICY,
   ZERO_ROW_EGRESS_POLICY,
   normalizeCanonicalQueryResult,
   qualifyAuthorizationReferences,
   resolveTopRankedRegionDependency,
+  buildAnalyticalRequirementSeedV1,
+  buildLocalContextPack,
+  toAgentRetrievalEvidence,
   validateSqlAgainstLocalContext,
 } from '@duckcodeailabs/dql-agent';
-import type { AgentRouteExecutorResult, AgentRun, AgentRunRequest } from '@duckcodeailabs/dql-agent';
+import type { AgentRouteExecutorResult, AgentRun, AgentRunRequest, AskTraceObserverV1 } from '@duckcodeailabs/dql-agent';
 import type { DatabaseConnector, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
+import type { ResearchBranchReceiptV1 } from './local-runtime.js';
 import { saveTestedSemanticRuntimeSettings } from './semantic-runtime-settings.js';
 import { addAskResultToAppBuildDraft, createAppPackage, createStoredAppBuildDraft } from './apps-api.js';
 
 const tempDirs: string[] = [];
+const askObservabilityOfficeFixture = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '../test/fixtures/ask-observability-office',
+);
 
 describe('repair target generation identity (API-007)', () => {
   it('detects same-name connection drift without hashing secrets into the identity', () => {
@@ -355,6 +370,7 @@ describe('generated SQL physical authorization boundary', () => {
       bindings,
     })!;
     const executor = vi.fn(async () => ({ rows: [] }));
+    const successfulTrace = traceRecorder();
 
     await expect(executePreparedAgenticSqlBoundary({
       capability: proven,
@@ -362,8 +378,15 @@ describe('generated SQL physical authorization boundary', () => {
       bindings,
       scope,
       execute: executor,
+      traceObserver: successfulTrace.observer,
     })).resolves.toEqual({ rows: [] });
     expect(executor).toHaveBeenCalledTimes(1);
+    expect(successfulTrace.spans).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'sql.generate', outcome: 'ok' }),
+      expect.objectContaining({ name: 'sql.validate', outcome: 'ok' }),
+      expect.objectContaining({ name: 'sql.authorize', outcome: 'ok' }),
+      expect.objectContaining({ name: 'sql.execute', outcome: 'ok' }),
+    ]));
 
     const unproven = createAgenticSqlExecutionCapability({
       sql,
@@ -372,6 +395,7 @@ describe('generated SQL physical authorization boundary', () => {
       bindings,
     })!;
     const refusedExecutor = vi.fn(async () => ({ rows: [] }));
+    const deniedTrace = traceRecorder();
 
     await expect(executePreparedAgenticSqlBoundary({
       capability: unproven,
@@ -379,8 +403,13 @@ describe('generated SQL physical authorization boundary', () => {
       bindings,
       scope,
       execute: refusedExecutor,
+      traceObserver: deniedTrace.observer,
     })).rejects.toMatchObject({ dqlAnalyticalError: { code: 'unauthorized_sql' } });
     expect(refusedExecutor).not.toHaveBeenCalled();
+    expect(deniedTrace.spans).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'sql.authorize', outcome: 'denied', reasonCode: 'sql_denied' }),
+    ]));
+    expect(deniedTrace.spans.some((span) => span.name === 'sql.execute')).toBe(false);
   });
 
   it('proves ORDER BY output aliases through their selected physical source columns only', async () => {
@@ -438,6 +467,33 @@ ORDER BY total_spend DESC`;
     expect(unknownAliasExecutor).not.toHaveBeenCalled();
   });
 });
+
+function traceRecorder(): {
+  observer: AskTraceObserverV1;
+  spans: Array<{ id: string; name: string; outcome?: string; reasonCode?: string }>;
+} {
+  let sequence = 0;
+  const spans: Array<{ id: string; name: string; outcome?: string; reasonCode?: string }> = [];
+  const observer = {
+    enabled: true,
+    recordingStatus: 'recording',
+    startSpan: (input: { name: string }) => {
+      const id = `trace-span-${++sequence}`;
+      spans.push({ id, name: input.name });
+      return id;
+    },
+    finishSpan: (spanId: string | undefined, input?: { outcome?: string; reasonCode?: string }) => {
+      const span = spans.find((candidate) => candidate.id === spanId);
+      if (span) Object.assign(span, input);
+    },
+    recordCandidateDecision: () => {},
+    recordLink: () => {},
+    finalize: () => undefined,
+    markPartial: () => {},
+    reference: () => undefined,
+  } as unknown as AskTraceObserverV1;
+  return { observer, spans };
+}
 
 describe('App Copilot uniform orchestration (AGT-007, AGT-022)', () => {
   it('adapts App research evidence into a deep stakeholder AgentRun', () => {
@@ -3265,7 +3321,7 @@ describe('agent run runtime API', () => {
     }
   });
 
-  it('synthesizes DQL-first answers when executed rows are available', () => {
+  it('permits DQL-first narration only for an explicit Research run', () => {
     expect(shouldSynthesizeAgentRunAnswer({
       kind: 'uncertified',
       certification: 'ai_generated',
@@ -3276,10 +3332,10 @@ describe('agent run runtime API', () => {
         name: 'top_products_by_value',
         source: 'block "top_products_by_value" { query = """select 1""" }',
       },
-    })).toBe(true);
+    }, 'research')).toBe(true);
   });
 
-  it('synthesizes every executed result regardless of certification tier', () => {
+  it('keeps ordinary Ask deterministic and reserves provider narration for explicit Research', () => {
     // A run that produced no values has nothing to narrate...
     expect(shouldSynthesizeAgentRunAnswer({
       kind: 'uncertified',
@@ -3293,14 +3349,21 @@ describe('agent run runtime API', () => {
       text: 'Certified answer',
     })).toBe(false);
 
-    // ...but "certified" is not a reason to hand the user a raw record. The
-    // trust boundary is enforced by verifying claims, not by refusing prose.
+    // Ordinary Ask has already used its bounded meaning call. It does not
+    // disclose rows to a second provider narrator, regardless of trust tier.
     expect(shouldSynthesizeAgentRunAnswer({
       kind: 'certified',
       certification: 'certified',
       text: 'Answered by certified block top_customers.',
       result: { columns: ['customer_name', 'lifetime_spend'], rows: [{ customer_name: 'Matthew', lifetime_spend: 3000 }], rowCount: 1 },
-    })).toBe(true);
+    })).toBe(false);
+
+    expect(shouldSynthesizeAgentRunAnswer({
+      kind: 'certified',
+      certification: 'certified',
+      text: 'Answered by certified block top_customers.',
+      result: { columns: ['customer_name', 'lifetime_spend'], rows: [{ customer_name: 'Matthew', lifetime_spend: 3000 }], rowCount: 1 },
+    }, 'research')).toBe(true);
 
     // A refusal is never narrated: it owes a reason or a question instead.
     expect(shouldSynthesizeAgentRunAnswer({
@@ -3340,16 +3403,20 @@ describe('agent run runtime API', () => {
     }, 'research')).toBe(true);
   });
 
-  it('plans narration independently of the requested mode', () => {
+  it('does not dispatch ordinary Ask narration, even when the UI requested auto mode', () => {
     const result = { columns: ['customer_name'], rows: [{ customer_name: 'Matthew' }], rowCount: 1 };
     const context = { providerAvailable: true, rowEgress: DEFAULT_ASK_ROW_EGRESS_POLICY };
 
-    // The regression: 'auto' is what the Ask panel actually sends, and gating on
-    // 'research' meant it never narrated.
-    for (const requestedMode of ['ask', 'auto', 'research'] as const) {
+    for (const requestedMode of ['ask', 'auto'] as const) {
       expect(planAgentRunNarration({ kind: 'uncertified', result }, { ...context, requestedMode }))
-        .toEqual({ mode: 'preview_grounded', maxRows: 20 });
+        .toEqual({ mode: 'skip', reason: 'ordinary_ask' });
     }
+    expect(planAgentRunNarration({ kind: 'uncertified', result }, {
+      providerAvailable: true,
+      rowEgress: RESEARCH_ROW_EGRESS_POLICY,
+      requestedMode: 'research',
+    }))
+      .toEqual({ mode: 'preview_grounded', maxRows: 20 });
   });
 
   it('prefers claim-verified narration when the run carries an analytical fact set', () => {
@@ -3359,7 +3426,7 @@ describe('agent run runtime API', () => {
         result: { columns: ['customer_name'], rows: [{ customer_name: 'Matthew' }], rowCount: 1 },
         analyticalFacts: { factSetId: 'analytical-facts:test', facts: [] } as never,
       },
-      { requestedMode: 'auto', providerAvailable: true, rowEgress: DEFAULT_ASK_ROW_EGRESS_POLICY },
+      { requestedMode: 'research', providerAvailable: true, rowEgress: RESEARCH_ROW_EGRESS_POLICY },
     );
     expect(plan).toEqual({ mode: 'verified_facts', maxRows: 20 });
   });
@@ -3370,12 +3437,12 @@ describe('agent run runtime API', () => {
       result: { columns: ['customer_name'], rows: [{ customer_name: 'Matthew' }], rowCount: 1 },
     };
     expect(planAgentRunNarration(answer, {
-      requestedMode: 'auto', providerAvailable: false, rowEgress: DEFAULT_ASK_ROW_EGRESS_POLICY,
+      requestedMode: 'research', providerAvailable: false, rowEgress: RESEARCH_ROW_EGRESS_POLICY,
     })).toEqual({ mode: 'skip', reason: 'no_provider' });
 
     // The kill-switch does not stop narration; it stops cell values leaving.
     expect(planAgentRunNarration(answer, {
-      requestedMode: 'auto', providerAvailable: true, rowEgress: ZERO_ROW_EGRESS_POLICY,
+      requestedMode: 'research', providerAvailable: true, rowEgress: ZERO_ROW_EGRESS_POLICY,
     })).toEqual({ mode: 'preview_grounded', maxRows: 0 });
   });
 
@@ -3766,6 +3833,41 @@ describe('agent run runtime API', () => {
       });
       expect(repaired.run.diagnosticReceiptV2).toMatchObject({ version: 2, telemetry: repaired.run.telemetry });
       expect(providerRequests).toHaveLength(1);
+
+      // The one-click repair is independently inspectable: it links back to
+      // the source run while retaining only phase/fingerprint evidence. Its
+      // provider receipt, provider span, and physical SQL boundaries must stay
+      // in parity instead of disappearing behind the repair endpoint.
+      const repairTraceId = repaired.run.traceReference?.traceId;
+      expect(repairTraceId).toMatch(/^[a-f0-9]{32}$/);
+      let repairTrace: any;
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const traceResponse = await nativeFetch(`${base}/api/ask-traces/${repairTraceId}`);
+        if (traceResponse.status === 200) {
+          repairTrace = await traceResponse.json();
+          break;
+        }
+        await new Promise((done) => setTimeout(done, 10));
+      }
+      expect(repairTrace?.envelope).toMatchObject({
+        runId: repaired.run.id,
+        parentRunId: created.run.id,
+        trustState: 'review_required',
+      });
+      expect(repairTrace?.links).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'derived_repair', targetRunId: created.run.id }),
+      ]));
+      expect(repairTrace?.spans.filter((span: { name?: string }) => span.name === 'provider.attempt')).toHaveLength(1);
+      expect(repairTrace?.spans.filter((span: { name?: string }) => span.name === 'sql.repair')).toHaveLength(1);
+      expect(repairTrace?.spans.filter((span: { name?: string }) => span.name === 'sql.execute').length).toBeGreaterThanOrEqual(2);
+      expect(repairTrace?.spans.find((span: { name?: string }) => span.name === 'sql.repair')?.payload).toMatchObject({
+        kind: 'sql',
+        execution: {
+          planFingerprint: expect.any(String),
+          targetFingerprint: expect.any(String),
+          reviewRequired: true,
+        },
+      });
 
       const sourceResponse = await nativeFetch(`${base}/api/agent-runs/${encodeURIComponent(created.run.id)}`);
       const sourceState = await sourceResponse.json() as { lifecycleState: string; run: any };
@@ -5107,7 +5209,27 @@ LIMIT \${top_n}
       // rendered or persisted handoff may retain the browser-controlled ID.
       expect(JSON.stringify(replayed)).not.toContain(clientSuppliedRunId);
       expect(replayed.route).toBe('generated_answer');
-      expect(replayed.trustState).toBe('review_required');
+      expect(
+        replayed.trustState,
+        JSON.stringify({
+          answer: replayed.answer,
+          stopReason: replayed.stopReason,
+          failure: replayed.diagnosticReceipt?.failure,
+          cascade: replayed.diagnosticReceiptV3?.cascade,
+          terminalIncident: replayed.diagnosticReceiptV4?.summary?.terminalIncident,
+        }, null, 2),
+      ).toBe('review_required');
+      // The canonical result is persisted independently for conversation
+      // follow-ups and the API. It must carry the same review-required trust
+      // as the outer Ask run; a generated/exploratory result may never inherit
+      // the former generic `governed` fallback merely because it returned rows.
+      const persistedExploratoryResult = replayed.artifacts
+        .map((artifact: any) => artifact?.payload?.result)
+        .find((result: any) => result && Array.isArray(result.rows));
+      expect(persistedExploratoryResult).toMatchObject({
+        trustState: 'review_required',
+        answerTier: expect.any(String),
+      });
       expect(
         replayed.diagnosticReceiptV3?.cascade?.planFrozen,
         JSON.stringify({
@@ -5122,16 +5244,29 @@ LIMIT \${top_n}
         version: 1,
         selectedTier: 'exploratory_sql',
         authorization: 'capability_minted',
-        candidateIds: ['model.jaffle_shop.dim_customers'],
+        // The frozen closure records the relation plus the measure and
+        // entity-key evidence used to authorize the single-relation query.
+        // It must not collapse back to a relation-only handoff.
+        candidateIds: [
+          'model.jaffle_shop.dim_customers',
+          'dim_customers.count_lifetime_orders',
+          'dim_customers.customer_id',
+        ],
       });
-      expect(exploratoryFreeze?.planId).toMatch(/^exploratory-[a-f0-9]{24}$/);
+      // SQL authorization attaches to the router's already-frozen analytical
+      // plan; it must not mint the legacy SQL-derived `exploratory-*` plan.
+      expect(exploratoryFreeze?.planId).toMatch(/^rap:[a-f0-9]{24}$/);
       expect(exploratoryFreeze?.planFingerprint).toMatch(/^[a-f0-9]{64}$/);
       expect(exploratoryFreeze?.sqlFingerprint).toMatch(/^[a-f0-9]{32}$/);
       expect(replayed.diagnosticReceiptV3?.cascade?.attempts).toEqual(expect.arrayContaining([
         expect.objectContaining({
           tier: 'exploratory_sql',
           planFrozen: true,
-          candidateIds: ['model.jaffle_shop.dim_customers'],
+          candidateIds: [
+            'model.jaffle_shop.dim_customers',
+            'dim_customers.count_lifetime_orders',
+            'dim_customers.customer_id',
+          ],
         }),
       ]));
       // A deterministically migrated cassette is orchestration replay only,
@@ -5143,24 +5278,24 @@ LIMIT \${top_n}
         expect.stringMatching(/\bFROM\s+jaffle_shop\.dev\.dim_customers\b/i),
       ]));
 
-      // The answer loop's full runtime prompt contains upstream context, so it
-      // has its own V2 key. A direct-runner cassette (or the legacy V1 source)
-      // must never satisfy that request by fallback/alias.
-      rmSync(join(missingRoot, 'test-cassettes', 'answerability', '8b1c5206f05624e16692388161ccc43f.json'));
+      // The answer loop's current frozen-exploration prompt has its own V2
+      // key. A direct-runner cassette (or the older migrated V2 source) must
+      // never satisfy that request by fallback or alias.
+      rmSync(join(missingRoot, 'test-cassettes', 'answerability', '44a53a7575fb5885755759c05146630f.json'));
       process.env.DQL_EVAL_CASSETTE_DIR = join(missingRoot, 'test-cassettes', 'answerability');
       const { run: missed } = await ask(missingRoot);
       expect(missed).toMatchObject({
-        // A replay miss occurs before any proposal can freeze. The planned Ask
-        // lane remains visible for diagnostics, while the result/trust is
-        // blocked and there is no SQL fallback or execution.
+        // The router-owned analytical plan freezes before provider SQL
+        // generation. A replay miss is therefore a post-freeze provider
+        // failure: it remains blocked and performs no SQL fallback/execution.
         route: 'generated_answer',
         trustState: 'blocked',
         telemetry: { providerRoundTrips: 0, sqlExecutions: 0, fallbackReason: 'provider_error' },
         diagnosticReceiptV3: {
-          cascade: { selectedTier: 'exploratory_sql', planFrozen: false },
+          cascade: { selectedTier: 'exploratory_sql', planFrozen: true },
         },
       });
-      expect(JSON.stringify(missed)).toContain('8b1c5206f05624e16692388161ccc43f');
+      expect(JSON.stringify(missed)).toContain('44a53a7575fb5885755759c05146630f');
     } finally {
       if (oldCassetteDirectory === undefined) delete process.env.DQL_EVAL_CASSETTE_DIR;
       else process.env.DQL_EVAL_CASSETTE_DIR = oldCassetteDirectory;
@@ -5329,11 +5464,10 @@ LIMIT \${top_n}
     }
   });
 
-  it('AGT-011 persists the initial ambiguity requirements so the first valid structured click is consumed once', async () => {
-    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/jaffle-semantic');
+  it('AGT-011 persists a genuine initial ambiguity so the first valid structured click is consumed once', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-clarification-continuity-'));
     tempDirs.push(projectRoot);
-    cpSync(fixtureRoot, projectRoot, { recursive: true });
+    cpSync(askObservabilityOfficeFixture, projectRoot, { recursive: true });
     let server: Server | undefined;
     try {
       const port = await startLocalServer({
@@ -5355,14 +5489,19 @@ LIMIT \${top_n}
       const initialResponse = await fetch(`${base}/api/agent-runs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: 'show me revenue', threadId: thread.thread.id }),
+        // An exact named measure is no longer ambiguous: the authoritative
+        // requirement seed selects it directly. Ranking "names" remains a
+        // genuine business choice (customer versus product), so it exercises
+        // the persisted server-issued selection contract instead.
+        body: JSON.stringify({ question: 'Show the top names by revenue', threadId: thread.thread.id }),
       });
       expect(initialResponse.status).toBe(201);
       const initial = await initialResponse.json() as { run: any };
       expect(initial.run).toMatchObject({ status: 'needs_clarification', trustState: 'not_applicable' });
-      const selectedId = 'semantic:metric:orders.revenue';
-      expect(initial.run.clarificationOptions?.map((option: { id: string }) => option.id)).toContain(selectedId);
-      expect(initial.run.clarificationOptions?.map((option: { id: string }) => option.id)).not.toContain('dql:block:top_customers');
+      const selectedOption = initial.run.clarificationOptions?.find((option: { id: string; label?: string }) =>
+        option.id.endsWith('customer_name') || option.label === 'Customer Name');
+      expect(selectedOption).toMatchObject({ id: expect.stringMatching(/customer_name$/) });
+      const selectedId = selectedOption!.id;
 
       const persistedResponse = await fetch(`${base}/api/agent/threads/${encodeURIComponent(thread.thread.id)}`);
       expect(persistedResponse.status).toBe(200);
@@ -5383,8 +5522,8 @@ LIMIT \${top_n}
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          question: 'show me revenue',
-          clarificationSourceQuestion: 'show me revenue',
+          question: 'Show the top names by revenue',
+          clarificationSourceQuestion: 'Show the top names by revenue',
           selectedEvidenceId: selectedId,
           threadId: thread.thread.id,
         }),
@@ -5392,16 +5531,1080 @@ LIMIT \${top_n}
       expect(selectedResponse.status).toBe(201);
       const selected = await selectedResponse.json() as { run: any };
       // A valid server-issued selection must not loop back to the original
-      // ambiguity or spend a provider call. This fixture can freeze the
-      // selected semantic plan without provider-generated SQL; a different
-      // fixture may instead end in a typed pre-freeze coverage gap.
+      // ambiguity or spend a provider call. This fixture carries a stale
+      // relationship warning, but the selected Revenue + Customer Name tuple
+      // is one same-model MetricFlow capability and does not consume that
+      // relationship. It may freeze semantic; connector absence still blocks
+      // execution separately.
       expect(selected.run.status).not.toBe('needs_clarification');
       expect(selected.run.telemetry?.providerRoundTrips).toBe(0);
-      expect(selected.run.routeDecision?.meaningResolution?.selectedConceptIds).toContain(selectedId);
+      expect(selected.run.routeDecision?.meaningResolution?.selectedConceptIds).toEqual(expect.arrayContaining([
+        selectedId,
+        expect.stringContaining('revenue'),
+      ]));
       expect(selected.run.diagnosticReceiptV3?.cascade).toMatchObject({
         selectedTier: 'semantic',
         planFrozen: true,
+        stopReason: 'selected',
       });
+      expect(selected.run.diagnosticReceiptV3?.cascade?.attempts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ tier: 'semantic', outcome: 'executable', planFrozen: true }),
+      ]));
+    } finally {
+      await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
+    }
+  });
+
+  it('AGT-011 resumes a freshly offered capability display choice after a runtime restart without repeating clarification', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-capability-choice-restart-'));
+    tempDirs.push(projectRoot);
+    cpSync(askObservabilityOfficeFixture, projectRoot, { recursive: true });
+    // The fixture includes prebuilt metadata, but this test must create its
+    // own authoritative conversation thread and selection contract.
+    rmSync(join(projectRoot, '.dql', 'local'), { recursive: true, force: true });
+    let server: Server | undefined;
+    const start = async () => startLocalServer({
+      rootDir: projectRoot,
+      projectRoot,
+      executor: { executeQuery: vi.fn() } as unknown as QueryExecutor,
+      preferredPort: 0,
+      requireMeaningCallForNaturalLanguage: false,
+      captureServer: (created) => { server = created; },
+    });
+    const close = async () => {
+      const active = server;
+      server = undefined;
+      await new Promise<void>((resolveClose) => active ? active.close(() => resolveClose()) : resolveClose());
+    };
+    try {
+      const firstPort = await start();
+      const firstBase = `http://127.0.0.1:${firstPort}`;
+      const threadResponse = await fetch(`${firstBase}/api/agent/threads`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ surface: 'ask', title: 'Capability choice continuity' }),
+      });
+      expect(threadResponse.status).toBe(201);
+      const thread = await threadResponse.json() as { thread: { id: string } };
+      const initialResponse = await fetch(`${firstBase}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'Show the top names by revenue', threadId: thread.thread.id }),
+      });
+      expect(initialResponse.status).toBe(201);
+      const initial = await initialResponse.json() as { run: any };
+      expect(initial.run).toMatchObject({ status: 'needs_clarification' });
+      const customerName = initial.run.clarificationOptions?.find((option: { id: string; label?: string }) =>
+        option.id === 'semantic:uncategorized:dimension:account_revenue.customer_name'
+        || option.label === 'Customer Name');
+      expect(customerName).toMatchObject({ id: expect.stringMatching(/customer_name$/) });
+      expect(initial.run.routeDecision?.retrievalEvidence?.snapshotId).toEqual(expect.any(String));
+
+      await close();
+      const restartedPort = await start();
+      const restartedBase = `http://127.0.0.1:${restartedPort}`;
+      const selectedResponse = await fetch(`${restartedBase}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'Show the top names by revenue',
+          clarificationSourceQuestion: 'Show the top names by revenue',
+          selectedEvidenceId: customerName.id,
+          threadId: thread.thread.id,
+        }),
+      });
+      expect(selectedResponse.status).toBe(201);
+      const selected = await selectedResponse.json() as { run: any };
+      expect(selected.run.routeDecision?.retrievalEvidence?.snapshotId).toBe(
+        initial.run.routeDecision?.retrievalEvidence?.snapshotId,
+      );
+      // Execution availability can differ by local connector, but a fresh
+      // server-issued choice must bind the original frame once: no absent-ID
+      // block, no provider meaning call, and no second clarification loop.
+      expect(selected.run.answer ?? selected.run.summary ?? '').not.toMatch(/selected governed identifier is no longer present/i);
+      expect(selected.run.status).not.toBe('needs_clarification');
+      expect(selected.run.telemetry?.providerRoundTrips).toBe(0);
+      expect(selected.run.routeDecision?.meaningResolution?.selectedConceptIds).toEqual(expect.arrayContaining([
+        customerName.id,
+        expect.stringContaining('revenue'),
+      ]));
+      // The persisted selection survives restart as the exact same semantic
+      // tuple. The fixture's unrelated stale relationship warning cannot
+      // reopen this same-model display-key choice; a genuinely stale snapshot
+      // remains rejected by the router's server-issued selection guard.
+      expect(selected.run.diagnosticReceiptV3?.cascade).toMatchObject({
+        selectedTier: 'semantic',
+        planFrozen: true,
+        stopReason: 'selected',
+      });
+      expect(selected.run.diagnosticReceiptV3?.cascade?.attempts).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          tier: 'semantic',
+          outcome: 'executable',
+          planFrozen: true,
+        }),
+      ]));
+    } finally {
+      await close();
+    }
+  });
+
+  it('AGT-034 uses real local retrieval to bind sales to revenue and admit the sole same-snapshot geographic MetricFlow grouping', async () => {
+    // This is deliberately a disposable copy of the sanitized Jaffle fixture,
+    // not a hand-built AgentRetrievalEvidence injection. It exercises the
+    // local manifest -> catalog/index -> role-balanced meaning package ->
+    // physical provider completion -> frozen semantic route hand-off, with
+    // the vector lane left unavailable as it is in a fresh local project.
+    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/jaffle-semantic');
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-region-live-retrieval-'));
+    tempDirs.push(projectRoot);
+    cpSync(fixtureRoot, projectRoot, { recursive: true });
+    // Never inherit a fixture's previously-built index. The regression owns
+    // the same cold local metadata/index route an office reproduction takes.
+    rmSync(join(projectRoot, '.dql', 'cache'), { recursive: true, force: true });
+
+    const manifestPath = join(projectRoot, 'target', 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as any;
+    const orders = manifest.nodes['model.jaffle_shop.fct_orders'];
+    // Model the live shape rather than flattening a geography leaf onto order
+    // items. `location_name` lives on a separate semantic model and is
+    // reachable only along `order_id -> location`; this is the exact shape
+    // that previously froze semantic and then failed compilation.
+    orders.columns.location_id = {
+      name: 'location_id',
+      data_type: 'number',
+      description: 'Location foreign key for the order.',
+    };
+    manifest.nodes['model.jaffle_shop.locations'] = {
+      unique_id: 'model.jaffle_shop.locations',
+      resource_type: 'model',
+      name: 'locations',
+      relation_name: null,
+      columns: {
+        location_id: { name: 'location_id', data_type: 'number', description: 'Location identifier.' },
+        location_name: { name: 'location_name', data_type: 'text', description: 'Geographic display name.' },
+      },
+      depends_on: { nodes: [] },
+      config: { materialized: 'table' },
+    };
+    const orderItemsSemantic = manifest.semantic_models['semantic_model.jaffle_shop.order_items'];
+    const ordersSemantic = manifest.semantic_models['semantic_model.jaffle_shop.orders'];
+    const customersSemantic = manifest.semantic_models['semantic_model.jaffle_shop.customers'];
+    const customersModel = manifest.nodes['model.jaffle_shop.dim_customers'];
+    // Preserve the real failure shape in the disposable local index: the
+    // selected metric can reach several authored `customer*` groupings. The
+    // host must use the requested Customer Name display/rank role, not let
+    // Customer Type or Customer Order Number compete merely because a meaning
+    // model selected the Customer entity card.
+    customersModel.columns.customer_type = {
+      name: 'customer_type',
+      data_type: 'text',
+      description: 'Customer category attribute; not the customer display key.',
+    };
+    customersSemantic.dimensions.push({
+      name: 'customer_type', type: 'categorical',
+      description: 'Customer category attribute.', label: 'Customer Type',
+      is_partition: false, type_params: null, expr: null, metadata: null, config: { meta: {} },
+    });
+    orders.columns.customer_order_number = {
+      name: 'customer_order_number',
+      data_type: 'text',
+      description: 'Customer order reference; not the customer display key.',
+    };
+    ordersSemantic.dimensions.push({
+      name: 'customer_order_number', type: 'categorical',
+      description: 'Customer order reference.', label: 'Customer Order Number',
+      is_partition: false, type_params: null, expr: null, metadata: null, config: { meta: {} },
+    });
+    // Use the live MetricFlow entity spelling. The intermediate order entity
+    // is deliberately `order_id`, so the generated capability must expose
+    // `order_id__location__location_name`, never a flattened leaf.
+    orderItemsSemantic.entities.find((entity: { name?: string }) => entity.name === 'order')!.name = 'order_id';
+    ordersSemantic.entities.find((entity: { name?: string }) => entity.name === 'order')!.name = 'order_id';
+    ordersSemantic.entities.push({
+      name: 'location',
+      type: 'foreign',
+      description: null,
+      label: null,
+      role: null,
+      expr: 'location_id',
+      config: { meta: {} },
+    });
+    manifest.semantic_models['semantic_model.jaffle_shop.locations'] = {
+      name: 'locations',
+      model: "ref('locations')",
+      entities: [{
+        name: 'location', type: 'primary', description: null, label: null,
+        role: null, expr: 'location_id', config: { meta: {} },
+      }],
+      dimensions: [{
+        name: 'location_name', type: 'categorical',
+        description: 'Location grouping for regional revenue analysis.',
+        label: 'Location Name', is_partition: false, type_params: null,
+        expr: null, metadata: null, config: { meta: {} },
+      }],
+      measures: [],
+      defaults: { agg_time_dimension: null },
+    };
+    // The fixture's stock revenue metric lives on customers. Give this
+    // disposable context one complete MetricFlow metric + grouping tuple; no
+    // raw relationship is introduced or guessed.
+    const revenue = manifest.metrics['metric.jaffle_shop.revenue'];
+    revenue.depends_on.nodes = ['semantic_model.jaffle_shop.order_items'];
+    revenue.type_params.measure.name = 'product_price';
+    revenue.type_params.input_measures[0].name = 'product_price';
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    saveProviderSettings(projectRoot, {
+      id: 'openai',
+      enabled: true,
+      apiKey: 'sk-region-routing-test',
+      baseUrl: 'https://region-routing.example.test/v1',
+      model: 'region-routing-test',
+    });
+
+    // Pin the actual cold local manifest -> index -> metadata adapter shape
+    // before the HTTP route adds provider behavior. This is deliberately not
+    // a hand-built evidence fixture: an explicit product-category request
+    // must surface the metric-native grouping as a typed same-snapshot
+    // extension even if an ordinary catalog card for that field was ranked
+    // separately.
+    const productCategoryQuestion = 'who are the top customers who have revenue by product category?';
+    const productCategoryPack = await buildLocalContextPack(projectRoot, {
+      question: productCategoryQuestion,
+      mode: 'question',
+      strictness: 'balanced',
+      limit: 80,
+    });
+    const productCategoryEvidence = toAgentRetrievalEvidence(
+      productCategoryPack.retrievalDiagnostics.meaningEvidence!,
+      productCategoryPack.questionPlan,
+      {
+        snapshotId: productCategoryPack.knowledgeLens.snapshotId,
+        sourceFingerprint: productCategoryPack.freshness.fingerprint ?? undefined,
+        contextObjects: productCategoryPack.objects,
+        retrievalLanes: productCategoryPack.retrievalDiagnostics.lanes,
+      },
+    );
+    const revenueCapability = productCategoryEvidence.candidates.find((candidate) =>
+      candidate.kind === 'semantic_metric'
+      && /(?:^|[.:])revenue$/i.test(candidate.id),
+    )?.analyticalCapability;
+    expect(revenueCapability?.dimensions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ dimensionId: expect.stringContaining('customers.customer_name'), supportedRoles: expect.arrayContaining(['display', 'rank_entity']) }),
+      expect.objectContaining({ dimensionId: expect.stringContaining('customers.customer_type'), supportedRoles: expect.arrayContaining(['display', 'rank_entity']) }),
+      expect.objectContaining({ dimensionId: expect.stringContaining('orders.customer_order_number'), supportedRoles: expect.arrayContaining(['display', 'rank_entity']) }),
+    ]));
+    expect(productCategoryEvidence.clarificationCandidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'semantic:jaffle_shop:dimension:order_items.product_type',
+        sameSnapshotRoleExtension: expect.objectContaining({
+          requestedTerm: 'product category',
+          basis: 'exact_metricflow_grouping_dimension',
+        }),
+      }),
+    ]));
+
+    const nativeFetch = globalThis.fetch;
+    type MeaningCard = { id: string; kind: string; name?: string; aliases?: string[] };
+    const meaningSelections: Array<{ selectedCandidateIds: string[]; cards: MeaningCard[] }> = [];
+    const productCategoryMeaningSelections: Array<{ selectedCandidateIds: string[]; cards: MeaningCard[] }> = [];
+    const orderItemMeaningSelections: Array<{ selectedCandidateIds: string[]; cards: MeaningCard[] }> = [];
+    const orderItemQuestion = 'Show the five most expensive individual order items with order ID, product ID, and product price.';
+    // Punctuation keeps the exact analytical tuple but gives the router a new
+    // cache key, so the second run proves the full meaning->generation->repair
+    // lifecycle rather than replaying the first run's cached meaning decision.
+    const orderItemWarehouseQuestion = orderItemQuestion.replace(/\.$/, '?');
+    let emptyMeaningBindingCalls = 0;
+    let orderItemGenerationCalls = 0;
+    let orderItemRepairResponse: 'decline' | 'sql' | undefined;
+    // The second exact run starts with a valid proposal, then the bounded
+    // warehouse seam fails once. This distinguishes the provider-decline
+    // correction above from the only allowed post-execution same-plan repair.
+    let orderItemWarehouseRepairMode = false;
+    let orderItemWarehouseInitialExecutionFailed = false;
+    let orderItemWarehouseRepairResponse: 'sql' | undefined;
+    let providerMessagePosts = 0;
+    const orderItemProviderMessages: Array<{
+      method: string;
+      messageCount: number;
+      hasRepairContract: boolean;
+      hasWarehouseRepairInstruction: boolean;
+    }> = [];
+    const providerFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const target = String(input);
+      if (!target.startsWith('https://region-routing.example.test/')) return nativeFetch(input, init);
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        messages?: Array<{ role?: string; content?: string }>;
+      };
+      const user = body.messages?.find((message) => message.role === 'user')?.content ?? '';
+      const serializedMessages = JSON.stringify(body.messages ?? []);
+      if ((body.messages?.length ?? 0) > 0) providerMessagePosts += 1;
+      // Provider adapters may add a policy/tool system message ahead of the
+      // router-owned system prompt.  The candidate-ID envelope is the stable
+      // contract for this test, whereas the position/content of system
+      // messages is adapter detail.  Identify the real meaning call by its
+      // host-owned bounded-card payload instead of silently treating it as a
+      // SQL-generation call.
+      if (user.includes('Candidate cards: ') && user.includes('Bind only supplied candidate IDs')) {
+        const marker = 'Candidate cards: ';
+        const start = user.indexOf(marker);
+        expect(start).toBeGreaterThanOrEqual(0);
+        const end = user.indexOf('\nBind only supplied candidate IDs', start);
+        const cards = JSON.parse(user.slice(start + marker.length, end < 0 ? undefined : end)) as MeaningCard[];
+        // Model/provider responses can be syntactically valid yet fail to
+        // select any supplied card. Exercise that real server path separately
+        // from the explicit selected-ID run below; routing must recover only
+        // because the snapshot proves the exact `revenue` metric and its sole
+        // MetricFlow geography grouping, not because the test injects a route.
+        if (user.includes('Show revenue by sales based on the region.')) {
+          emptyMeaningBindingCalls += 1;
+          return new Response(JSON.stringify({
+            choices: [{ message: { content: JSON.stringify({
+              selectedCandidateIds: [],
+              confidence: 'low',
+            }) } }],
+          }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        if (/who are the top customers who have revenue by product category\??/i.test(user)) {
+          const metric = cards.find((candidate) => candidate.kind === 'semantic_metric'
+            && [candidate.name, ...(candidate.aliases ?? [])].some((value) => /^(?:revenue|sales)$/i.test(value ?? '')));
+          // Match the production cassette: the meaning model selects the
+          // customer entity, not the display-key leaf.  The host-owned frame
+          // must resolve its declared `customer_name` grouping from the
+          // selected metric capability while retaining the omitted product
+          // category extension below.
+          const customer = cards.find((candidate) => /:entity:[^.]*\.customer$/i.test(candidate.id));
+          const category = cards.find((candidate) => candidate.kind === 'semantic_member'
+            && /(?:^|[.:/])product_type$/i.test(candidate.id));
+          // The provider intentionally omits the product-category card below.
+          // Its presence in the package is the important admission assertion:
+          // local index/lexical retrieval must expose the exact same-metric
+          // native grouping before the model has a chance to drop it.
+          expect(category, JSON.stringify(cards, null, 2)).toBeDefined();
+          if (!metric || !customer) {
+            return new Response(JSON.stringify({
+              choices: [{ message: { content: JSON.stringify({ selectedCandidateIds: [], confidence: 'low' }) } }],
+            }), { status: 200, headers: { 'content-type': 'application/json' } });
+          }
+          const selectedCandidateIds = [metric.id, customer.id];
+          productCategoryMeaningSelections.push({ selectedCandidateIds, cards });
+          return new Response(JSON.stringify({
+            choices: [{ message: { content: JSON.stringify({
+              selectedCandidateIds,
+              recommendedExecutionId: metric.id,
+              confidence: 'high',
+            }) } }],
+          }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        if (user.includes(orderItemQuestion.replace(/\.$/, ''))) {
+          // Match the packaged regression: meaning selects the governed DQL
+          // entity together with the physical projection cards. That entity
+          // is useful relationship evidence, but it has no compiler-owned
+          // governed projection for this tuple. The router must reject that
+          // provisional governed label before freeze and rebuild the same
+          // snapshot as review-required exploratory SQL.
+          const governedEntity = cards.find((candidate) => candidate.kind === 'dql_modeling'
+            && /order[_-]?items?/i.test(`${candidate.id} ${candidate.name ?? ''}`));
+          const model = cards.find((candidate) => candidate.kind === 'dbt_model'
+            && /(?:^|[.:/])order_items$/i.test(candidate.id));
+          const columns = ['order_id', 'product_id', 'product_price'].map((column) => cards.find((candidate) =>
+            // The real metadata adapter exposes DBT-origin physical columns
+            // through its canonical `sql_column` card kind. Retain the
+            // DBT-qualified identity check so a same-named warehouse/supplies
+            // card cannot satisfy this single-relation tuple.
+            candidate.kind === 'sql_column'
+            && candidate.id.startsWith('dbt:column:')
+            && new RegExp(`(?:^|[.:/])order_items\\.${column}$`, 'i').test(candidate.id)));
+          expect(governedEntity, JSON.stringify(cards, null, 2)).toBeDefined();
+          expect(model, JSON.stringify(cards, null, 2)).toBeDefined();
+          expect(columns.every(Boolean), JSON.stringify(cards, null, 2)).toBe(true);
+          const selectedCandidateIds = [governedEntity!, ...columns].map((candidate) => candidate!.id);
+          orderItemMeaningSelections.push({ selectedCandidateIds, cards });
+          return new Response(JSON.stringify({
+            choices: [{ message: { content: JSON.stringify({
+              selectedCandidateIds,
+              recommendedExecutionId: governedEntity!.id,
+              confidence: 'high',
+            }) } }],
+          }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        const metric = cards.find((candidate) => candidate.kind === 'semantic_metric'
+          && [candidate.name, ...(candidate.aliases ?? [])].some((value) => /^(?:revenue|sales)$/i.test(value ?? '')));
+        const geography = cards.find((candidate) => candidate.kind === 'semantic_member'
+          && (candidate.aliases ?? []).some((value) => value.toLowerCase() === 'region'));
+        if (!metric || !geography) {
+          return new Response(JSON.stringify({
+            choices: [{ message: { content: JSON.stringify({ selectedCandidateIds: [], confidence: 'low' }) } }],
+          }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        const selectedCandidateIds = [metric!.id, geography!.id];
+        meaningSelections.push({ selectedCandidateIds, cards });
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            selectedCandidateIds,
+            recommendedExecutionId: metric!.id,
+            confidence: 'high',
+          }) } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      // The candidate-ID call above establishes this request's test-local
+      // meaning boundary. The provider adapter may compact the original user
+      // message away for the repair, so do not make the transport shape itself
+      // decide whether a frozen repair gets a response. The second call below
+      // still asserts the immutable host-owned correction contract.
+      // Provider readiness probes can hit the configured base URL after the
+      // meaning selection. They are not model dispatches and must neither
+      // consume the fixture's one repair response nor be counted as a
+      // provider generation. The transport contract is a chat-completions
+      // envelope with messages; the run-scoped receipt asserts the physical
+      // model sends separately below.
+      if (orderItemMeaningSelections.length > 0 && (body.messages?.length ?? 0) > 0) {
+        const hasFrozenRepairContract = serializedMessages.includes(
+          'one permitted correction for an already frozen, review-required exploratory plan',
+        );
+        const hasWarehouseRepairInstruction = serializedMessages.includes(
+          'failed during bounded preview execution',
+        );
+        orderItemProviderMessages.push({
+          method: init?.method ?? 'GET',
+          messageCount: body.messages!.length,
+          hasRepairContract: hasFrozenRepairContract,
+          hasWarehouseRepairInstruction,
+        });
+        orderItemGenerationCalls += 1;
+        // A syntactically valid model decline is not a route change. For the
+        // frozen exploratory lane the host may issue exactly one correction,
+        // carrying the immutable tuple into that provider attempt. This test
+        // deliberately makes the first planned proposal decline SQL so the
+        // physical-budget/repair path is exercised end to end.
+        if (!hasFrozenRepairContract && !orderItemWarehouseRepairMode) {
+          orderItemRepairResponse = 'decline';
+          return new Response(JSON.stringify({
+            choices: [{ message: { content: JSON.stringify({
+              summary: 'I cannot compose the SQL statement from that context.',
+              viz: 'table',
+            }) } }],
+          }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        if (hasFrozenRepairContract || hasWarehouseRepairInstruction) {
+          if (hasFrozenRepairContract) {
+            expect(serializedMessages).toContain('one permitted correction for an already frozen, review-required exploratory plan');
+          }
+          if (orderItemWarehouseRepairMode) {
+            orderItemWarehouseRepairResponse = 'sql';
+          } else {
+            orderItemRepairResponse = 'sql';
+          }
+        }
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            summary: 'The five most expensive individual order items.',
+            sql: [
+              // Match the packaged provider shape: the frozen closure retains
+              // both its compact dbt identity and this target-bound relation.
+              // The parser must prove `oi.*` back to that one source rather
+              // than treating the two forms as ambiguous same-leaf tables.
+              'SELECT oi.order_id AS order_id, oi.product_id AS product_id, oi.product_price AS product_price',
+              'FROM "jaffle_shop"."dev"."order_items" AS oi',
+              'ORDER BY oi.product_price DESC',
+              'LIMIT 5',
+            ].join('\n'),
+            viz: 'table',
+            outputs: ['order_id', 'product_id', 'product_price'],
+          }) } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      // A deterministic rerank response is intentionally harmless. The
+      // meaningful assertion is the one candidate-ID-only meaning call above.
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({ rankedCandidateIds: [] }) } }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', providerFetch);
+
+    const executeQuery = vi.fn(async (sql: string) => {
+      if (/\border_items\b/i.test(sql)
+        && /\border_id\b/i.test(sql)
+        && /\bproduct_id\b/i.test(sql)
+        && /\bproduct_price\b/i.test(sql)
+        && /\bORDER\s+BY\b[\s\S]*\bproduct_price\b/i.test(sql)
+        && /\bLIMIT\s+5\b/i.test(sql)
+        && !/\bSUM\s*\(/i.test(sql)) {
+        if (orderItemWarehouseRepairMode && !orderItemWarehouseInitialExecutionFailed) {
+          orderItemWarehouseInitialExecutionFailed = true;
+          throw new Error('Snowflake SQL compilation error: simulated bounded exploratory execution failure');
+        }
+        return {
+          columns: ['order_id', 'product_id', 'product_price'],
+          rows: [
+            { order_id: 1, product_id: 2, product_price: 13.5 },
+            { order_id: 2, product_id: 3, product_price: 12 },
+            { order_id: 3, product_id: 4, product_price: 12 },
+            { order_id: 4, product_id: 5, product_price: 12 },
+            { order_id: 5, product_id: 6, product_price: 12 },
+          ],
+          rowCount: 5,
+          sql,
+        };
+      }
+      if (/SUM\s*\(\s*(?:[\w"`]+\.)?product_price\s*\)\s+AS\s+revenue/i.test(sql)
+        && /customer_name/i.test(sql)
+        && /product_type/i.test(sql)) {
+        return {
+          columns: ['customer_name', 'product_type', 'revenue'],
+          rows: [{ customer_name: 'Brittany Barrera', product_type: 'beverage', revenue: 42 }],
+          rowCount: 1,
+          sql,
+        };
+      }
+      return {
+        columns: ['location_name', 'revenue'],
+        rows: [{ location_name: 'Central', revenue: 42 }],
+        rowCount: 1,
+        sql,
+      };
+    });
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        // Execute through the ordinary local semantic adapter path. The query
+        // executor is a bounded warehouse seam; retrieval/indexing, candidate
+        // admission, model selection, freeze, compiler, and result contract
+        // remain the real disposable-project runtime.
+        executor: { executeQuery } as unknown as QueryExecutor,
+        // The query executor above is already the bounded DuckDB seam. Keep
+        // the server's startup connector inert so this deterministic local
+        // runtime regression never attempts a network driver install.
+        connection: { driver: 'file' },
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await nativeFetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'Show revenue by sales based on the region',
+          requestedMode: 'ask',
+        }),
+      });
+      const payload = await response.json() as { run: any };
+      expect(response.status, JSON.stringify(payload)).toBe(201);
+      expect(payload.run.route, JSON.stringify({
+        route: payload.run.route,
+        status: payload.run.status,
+        trustState: payload.run.trustState,
+        stopReason: payload.run.stopReason,
+        summary: payload.run.summary,
+        error: payload.run.error,
+        meaning: payload.run.routeDecision?.meaningResolution,
+        plan: payload.run.routeDecision?.resolvedAnalyticalPlan,
+        cascade: payload.run.diagnosticReceiptV3?.cascade,
+      }, null, 2)).toBe('semantic_answer');
+      expect(payload.run.status, JSON.stringify({
+        status: payload.run.status,
+        trustState: payload.run.trustState,
+        stopReason: payload.run.stopReason,
+        summary: payload.run.summary,
+        error: payload.run.error,
+        terminalIncident: payload.run.diagnosticReceiptV3?.terminalIncident,
+        cascade: payload.run.diagnosticReceiptV3?.cascade,
+        steps: payload.run.steps,
+      }, null, 2)).toBe('completed');
+      expect(payload.run).toMatchObject({
+        route: 'semantic_answer',
+        status: 'completed',
+        trustState: 'governed',
+        diagnosticReceiptV3: {
+          cascade: { selectedTier: 'semantic', planFrozen: true },
+        },
+      });
+      expect(meaningSelections).toHaveLength(1);
+      // An ordinary Ask owns exactly one provider phase here: candidate-ID
+      // meaning resolution. It must not send executed result rows to a hidden
+      // narrator or manufacture an answer_narration receipt after SQL.
+      const meaningDispatches = providerFetch.mock.calls.filter(([, init]) => {
+        const body = JSON.parse(String((init as RequestInit | undefined)?.body ?? '{}')) as {
+          messages?: Array<{ role?: string; content?: string }>;
+        };
+        return body.messages?.some((message) => message.role === 'system' && message.content?.includes('resolve business meaning'));
+      });
+      expect(meaningDispatches).toHaveLength(1);
+      expect(payload.run.telemetry).toMatchObject({ providerRoundTrips: 1, sqlExecutions: 1 });
+      expect(payload.run.providerEgressReceipts).toEqual([
+        expect.objectContaining({
+          purpose: 'answer_generation',
+          dispatchPhase: 'meaning_resolution',
+          resultRowCount: 0,
+          columnCount: 0,
+          optIn: false,
+        }),
+      ]);
+      expect(payload.run.providerEgressReceipts.some((receipt: { dispatchPhase?: string }) =>
+        receipt.dispatchPhase === 'classification',
+      )).toBe(false);
+      expect(payload.run.narrationIntegrityReceipt).toMatchObject({
+        mode: 'skip',
+        outcome: 'skipped',
+        attempted: false,
+        skipReason: 'ordinary_ask',
+      });
+      const traceId = payload.run.traceReference?.traceId;
+      expect(traceId).toMatch(/^[a-f0-9]{32}$/);
+      let traceDetail: any;
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const traceResponse = await nativeFetch(`http://127.0.0.1:${port}/api/ask-traces/${traceId}`);
+        if (traceResponse.status === 200) {
+          traceDetail = await traceResponse.json();
+          break;
+        }
+        await new Promise((done) => setTimeout(done, 10));
+      }
+      expect(traceDetail?.decisionSummary).toEqual(payload.run.diagnosticReceiptV4?.summary);
+      expect(traceDetail?.spans.filter((span: { name?: string }) => span.name === 'provider.attempt')).toHaveLength(1);
+      expect(traceDetail?.spans.find((span: { name?: string }) => span.name === 'sql.execute')?.payload).toMatchObject({
+        kind: 'sql',
+        execution: { reviewRequired: false },
+      });
+      // Runtime metadata probes share the same QueryExecutor seam, but only
+      // one frozen semantic statement may cross the analytical execution
+      // boundary. Count that statement rather than incidental schema probes.
+      const semanticSqlCalls = executeQuery.mock.calls
+        .map(([sql]) => String(sql))
+        .filter((sql) => /SUM\s*\(\s*(?:[\w"`]+\.)?product_price\s*\)\s+AS\s+revenue/i.test(sql)
+          && /\border_items\b/i.test(sql)
+          // The semantic compiler retains the native relation qualifier; the
+          // frozen grouping is still the exact `location_name` leaf.
+          && /GROUP\s+BY\s+(?:[\w"`]+\.)?location_name/i.test(sql));
+      expect(semanticSqlCalls, JSON.stringify(executeQuery.mock.calls.map(([sql]) => String(sql)), null, 2)).toHaveLength(1);
+      expect(payload.run.telemetry).toMatchObject({ sqlExecutions: 1 });
+      expect(payload.run.artifacts[0]?.payload?.result).toMatchObject({
+        columns: ['location_name', 'revenue'],
+        rowCount: 1,
+        trustState: 'governed',
+      });
+      // Keep the router boundary observable: the frame must be attached
+      // before resolved-plan binding, not reconstructed after a V1 plan has
+      // already selected a legacy executor.
+      expect(payload.run.routeDecision?.meaningResolution).toMatchObject({
+        recommendedRoute: 'semantic',
+        selectedConceptIds: expect.arrayContaining(meaningSelections[0]!.selectedCandidateIds),
+      });
+      // Diagnostic assertion kept narrowly typed so a lost host frame reports
+      // the final validated meaning envelope rather than a generic V1 plan.
+      expect(payload.run.routeDecision?.meaningResolution?.analyticalFrame).toMatchObject({
+        version: 2,
+        metricConceptIds: expect.arrayContaining([expect.stringContaining('revenue')]),
+        dimensions: expect.arrayContaining([
+          expect.objectContaining({ dimensionId: expect.stringContaining('location_name'), role: 'group_by' }),
+        ]),
+      });
+      expect(payload.run.routeDecision?.resolvedAnalyticalPlan).toMatchObject({
+        // A candidate-ID meaning result must still receive a host-built V2
+        // frame. Without it the answer loop skips the immutable semantic graph
+        // and falls into legacy SQL/aggregation validation.
+        schemaVersion: 2,
+        capability: 'semantic_execution',
+        analyticalFrame: expect.objectContaining({
+          version: 2,
+          metricConceptIds: expect.arrayContaining([expect.stringContaining('revenue')]),
+          dimensions: expect.arrayContaining([
+            expect.objectContaining({ dimensionId: expect.stringContaining('location_name'), role: 'group_by' }),
+          ]),
+        }),
+        query: {
+          measures: [expect.objectContaining({ requested: 'revenue' })],
+          dimensions: [expect.objectContaining({ requested: 'region' })],
+        },
+      });
+      expect(payload.run.routeDecision?.resolvedAnalyticalPlan?.query?.measures).toHaveLength(1);
+      expect(payload.run.routeDecision?.resolvedAnalyticalPlan?.query?.dimensions?.[0]?.qualifiedId).toContain('location_name');
+      expect(payload.run.routeDecision?.meaningResolution?.selectedConceptIds).toEqual(expect.arrayContaining(
+        meaningSelections[0]!.selectedCandidateIds,
+      ));
+      expect(JSON.stringify(payload.run.routeDecision?.resolvedAnalyticalPlan?.query)).not.toContain('sales based on the region');
+
+      const emptyBindingResponse = await nativeFetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          // The punctuation makes this a separate cache key while preserving
+          // the exact current-turn business tuple. The fake provider above
+          // returns a valid but empty candidate-ID response for this call.
+          question: 'Show revenue by sales based on the region.',
+          requestedMode: 'ask',
+        }),
+      });
+      const emptyBindingPayload = await emptyBindingResponse.json() as { run: any };
+      expect(emptyBindingResponse.status, JSON.stringify(emptyBindingPayload)).toBe(201);
+      expect(emptyMeaningBindingCalls).toBe(1);
+      expect(emptyBindingPayload.run).toMatchObject({
+        route: 'semantic_answer',
+        status: 'completed',
+        trustState: 'governed',
+        diagnosticReceiptV3: {
+          cascade: { selectedTier: 'semantic', planFrozen: true },
+        },
+      });
+      expect(emptyBindingPayload.run.telemetry).toMatchObject({
+        sqlExecutions: 1,
+      });
+      expect(emptyBindingPayload.run.routeDecision?.meaningResolution).toMatchObject({
+        recommendedExecutionId: expect.stringMatching(/(?:^|[.:])revenue$/),
+        selectedConceptIds: expect.arrayContaining([expect.stringMatching(/(?:^|[.:])revenue$/)]),
+      });
+      const allSemanticSqlCalls = executeQuery.mock.calls
+        .map(([sql]) => String(sql))
+        .filter((sql) => /SUM\s*\(\s*(?:[\w"`]+\.)?product_price\s*\)\s+AS\s+revenue/i.test(sql)
+          && /\border_items\b/i.test(sql)
+          && /GROUP\s+BY\s+(?:[\w"`]+\.)?location_name/i.test(sql));
+      expect(allSemanticSqlCalls, JSON.stringify(executeQuery.mock.calls.map(([sql]) => String(sql)), null, 2)).toHaveLength(2);
+
+      const productCategoryResponse = await nativeFetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'who are the top customers who have revenue by product category?',
+          requestedMode: 'ask',
+        }),
+      });
+      const productCategoryPayload = await productCategoryResponse.json() as { run: any };
+      expect(productCategoryResponse.status, JSON.stringify(productCategoryPayload)).toBe(201);
+      expect(productCategoryPayload.run, JSON.stringify({
+        route: productCategoryPayload.run.route,
+        status: productCategoryPayload.run.status,
+        trustState: productCategoryPayload.run.trustState,
+        stopReason: productCategoryPayload.run.stopReason,
+        summary: productCategoryPayload.run.summary,
+        error: productCategoryPayload.run.error,
+        telemetry: productCategoryPayload.run.telemetry,
+        routeDecisionKeys: Object.keys(productCategoryPayload.run.routeDecision ?? {}),
+        meaning: productCategoryPayload.run.routeDecision?.meaningResolution,
+        cascade: productCategoryPayload.run.diagnosticReceiptV3?.cascade,
+        plan: productCategoryPayload.run.routeDecision?.resolvedAnalyticalPlan,
+      }, null, 2)).toMatchObject({
+        route: 'semantic_answer',
+        status: 'completed',
+        trustState: 'governed',
+        diagnosticReceiptV3: {
+          cascade: { selectedTier: 'semantic', planFrozen: true },
+        },
+      });
+      expect(productCategoryPayload.run.telemetry).toMatchObject({ providerRoundTrips: 1, sqlExecutions: 1 });
+      expect(productCategoryMeaningSelections).toHaveLength(1);
+      // The fake provider selected only revenue + customer entity. The runtime
+      // must preserve the unique metric-declared product grouping rather than
+      // treating the provider's omission as proof that product category was
+      // not modeled.
+      // The physical provider selected metric + entity. The host retains the
+      // capability-backed product grouping as a typed override, while the
+      // entity card itself remains an entity identity rather than a fake
+      // display-dimension selection.
+      expect(productCategoryMeaningSelections[0]!.selectedCandidateIds).toEqual(expect.arrayContaining([
+        expect.stringContaining('revenue'),
+        expect.stringContaining('customers.customer'),
+      ]));
+      expect(productCategoryPayload.run.routeDecision?.meaningResolution?.selectedConceptIds).toEqual(expect.arrayContaining([
+        expect.stringContaining('revenue'),
+        expect.stringContaining('product_type'),
+      ]));
+      expect(productCategoryPayload.run.routeDecision?.meaningResolution?.overrideReceipts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ action: 'host_preserved', candidateIds: [expect.stringContaining('product_type')] }),
+      ]));
+      expect(productCategoryPayload.run.routeDecision?.meaningResolution?.hostRequirementSeed?.requirements).toMatchObject({
+        entityTerms: ['customer'],
+        entityDisplayTerms: ['customer name'],
+      });
+      expect(productCategoryPayload.run.routeDecision?.meaningResolution?.hostRequirementSeed?.queryIntent.dimensions).toEqual([
+        'product category',
+        'customer name',
+      ]);
+      expect(productCategoryPayload.run.routeDecision?.resolvedAnalyticalPlan).toMatchObject({
+        schemaVersion: 2,
+        capability: 'semantic_execution',
+        query: {
+          measures: [expect.objectContaining({ requested: 'revenue', status: 'resolved' })],
+          dimensions: expect.arrayContaining([
+            // The host carries `customer name` as a distinct display/rank
+            // requirement; it must not retain a broad `customer` categorical
+            // term that would compete with customer_type/order_number.
+            expect.objectContaining({ requested: 'customer name', qualifiedId: expect.stringContaining('customers.customer_name'), status: 'resolved' }),
+            expect.objectContaining({ requested: 'product category', qualifiedId: expect.stringContaining('product_type'), status: 'resolved' }),
+          ]),
+        },
+      });
+      const productCategorySqlCalls = executeQuery.mock.calls
+        .map(([sql]) => String(sql))
+        .filter((sql) => /SUM\s*\(\s*(?:[\w"`]+\.)?product_price\s*\)\s+AS\s+revenue/i.test(sql)
+          && /customer_name/i.test(sql)
+          && /product_type/i.test(sql));
+      expect(productCategorySqlCalls, JSON.stringify(executeQuery.mock.calls.map(([sql]) => String(sql)), null, 2)).toHaveLength(1);
+      expect(productCategoryPayload.run.artifacts[0]?.payload?.result).toMatchObject({
+        columns: expect.arrayContaining(['customer_name', 'product_type', 'revenue']),
+        rowCount: 1,
+        trustState: 'governed',
+      });
+      expect(productCategoryPayload.run.routeDecision?.analyticalCascadeDecision?.selectedTier).toBe('semantic');
+      expect(productCategoryPayload.run.routeDecision?.meaningResolution?.analyticalFrame?.ambiguity).toEqual([]);
+      expect(productCategoryPayload.run.routeDecision?.resolvedAnalyticalPlan?.query?.dimensions.some((dimension: { qualifiedId?: string }) =>
+        /customer_(?:type|order_number)$/i.test(dimension.qualifiedId ?? ''),
+      )).toBe(false);
+
+      const providerMessagePostsBeforeOrderItem = providerMessagePosts;
+      const orderItemResponse = await nativeFetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: orderItemWarehouseQuestion, requestedMode: 'ask' }),
+      });
+      const orderItemPayload = await orderItemResponse.json() as { run: any };
+      expect(orderItemResponse.status, JSON.stringify(orderItemPayload)).toBe(201);
+      expect(orderItemPayload.run, JSON.stringify({
+        route: orderItemPayload.run.route,
+        status: orderItemPayload.run.status,
+        trustState: orderItemPayload.run.trustState,
+        stopReason: orderItemPayload.run.stopReason,
+        summary: orderItemPayload.run.summary,
+        error: orderItemPayload.run.error,
+        telemetry: orderItemPayload.run.telemetry,
+        meaning: orderItemPayload.run.routeDecision?.meaningResolution,
+        plan: orderItemPayload.run.routeDecision?.resolvedAnalyticalPlan,
+        cascade: orderItemPayload.run.diagnosticReceiptV3?.cascade,
+        failure: orderItemPayload.run.diagnosticReceiptV4?.terminalIncident,
+        artifact: orderItemPayload.run.artifacts[0]?.payload,
+        orderItemGenerationCalls,
+        orderItemRepairResponse,
+        orderItemProviderMessages,
+      }, null, 2)).toMatchObject({
+        route: 'generated_answer',
+        status: 'needs_review',
+        trustState: 'review_required',
+        diagnosticReceiptV3: {
+          cascade: { selectedTier: 'exploratory_sql', planFrozen: true },
+        },
+      });
+      expect(orderItemMeaningSelections, JSON.stringify({
+        telemetry: orderItemPayload.run.telemetry,
+        receipts: orderItemPayload.run.providerEgressReceipts,
+        meaning: orderItemPayload.run.routeDecision?.meaningResolution,
+      }, null, 2)).toHaveLength(1);
+      // The model initially selected the DQL entity. The frozen final meaning
+      // is the router's same-snapshot physical closure, so it may replace that
+      // provisional execution card but must retain the exact requested output
+      // column identities and switch route before SQL generation.
+      expect(orderItemMeaningSelections[0]!.selectedCandidateIds).toEqual(expect.arrayContaining([
+        expect.stringMatching(/dql:entity:.*order[_-]?item/i),
+      ]));
+      expect(orderItemPayload.run.routeDecision?.meaningResolution).toMatchObject({
+        recommendedRoute: 'exploratory',
+        selectedConceptIds: expect.arrayContaining([
+          expect.stringMatching(/order_items\.order_id$/),
+          expect.stringMatching(/order_items\.product_id$/),
+          expect.stringMatching(/order_items\.product_price$/),
+        ]),
+      });
+      expect(orderItemPayload.run.routeDecision?.resolvedAnalyticalPlan).toMatchObject({
+        capability: 'bounded_exploration',
+        query: {
+          dimensions: [],
+          order: 'desc',
+          limit: 5,
+        },
+        outputContract: {
+          requiredOutputs: [
+            expect.objectContaining({
+              requested: 'order id',
+              qualifiedId: expect.stringMatching(/order_items\.order_id$/),
+              outputName: 'order_id',
+              status: 'resolved',
+            }),
+            expect.objectContaining({
+              requested: 'product id',
+              qualifiedId: expect.stringMatching(/order_items\.product_id$/),
+              outputName: 'product_id',
+              status: 'resolved',
+            }),
+            expect.objectContaining({
+              requested: 'product price',
+              qualifiedId: expect.stringMatching(/order_items\.product_price$/),
+              outputName: 'product_price',
+              status: 'resolved',
+            }),
+          ],
+        },
+      });
+      // The local runtime proposal uses the target-bound source through `oi`.
+      // The parser must prove it back to the frozen source before the SQL
+      // capability is minted; the compact-plus-target-bound variant is covered
+      // at the answer-loop boundary below.
+      const frozenOrderItemSources = orderItemPayload.run.routeDecision?.resolvedAnalyticalPlan?.sourceRelationIds ?? [];
+      expect(frozenOrderItemSources.some((source: string) =>
+        /jaffle_shop.*dev.*order_items/i.test(source.replace(/["`\[\]]/g, '')),
+      )).toBe(true);
+      expect(orderItemPayload.run.routeDecision?.analyticalCascadeDecision?.attempts).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          tier: 'governed_relational',
+          outcome: 'ineligible',
+          planFrozen: false,
+        }),
+        expect.objectContaining({
+          tier: 'exploratory_sql',
+          outcome: 'executable',
+          planFrozen: true,
+        }),
+      ]));
+      expect(orderItemPayload.run.diagnosticReceiptV4?.terminalIncident).toBeUndefined();
+      expect(orderItemPayload.run.routeDecision?.clarifyingQuestion).toBeUndefined();
+      expect(orderItemPayload.run.routeDecision?.resolvedAnalyticalPlan?.missingInformation).toEqual([]);
+      expect(orderItemPayload.run.artifacts[0]?.payload?.result).toMatchObject({
+        columns: ['order_id', 'product_id', 'product_price'],
+        rowCount: 5,
+        trustState: 'review_required',
+      });
+      // Candidate-ID meaning + one declined generation + one frozen-plan
+      // correction fits the ordinary Ask three-send ceiling. The repair uses
+      // the same provider, immutable RAP tuple, and no result-row egress.
+      expect(orderItemGenerationCalls).toBe(2);
+      expect(orderItemRepairResponse).toBe('sql');
+      // The candidate-ID resolver, initial generation, and the one frozen-plan
+      // correction are the entire ordinary Ask model budget. A raw reranker or
+      // a hidden classifier would add a fourth physical model POST even when
+      // it evades the run ledger, so pin the transport count independently.
+      expect(providerMessagePosts - providerMessagePostsBeforeOrderItem).toBe(3);
+      expect(orderItemProviderMessages).toEqual([
+        expect.objectContaining({ messageCount: expect.any(Number), hasRepairContract: false }),
+        expect.objectContaining({ messageCount: expect.any(Number), hasRepairContract: true }),
+      ]);
+      expect(orderItemPayload.run.telemetry).toMatchObject({ providerRoundTrips: 3, sqlExecutions: 1 });
+      expect(orderItemPayload.run.providerEgressReceipts).toEqual([
+        expect.objectContaining({ purpose: 'answer_generation', dispatchPhase: 'meaning_resolution', resultRowCount: 0 }),
+        expect.objectContaining({ purpose: 'answer_generation', dispatchPhase: 'generation', resultRowCount: 0 }),
+        expect.objectContaining({ purpose: 'repair_sql', dispatchPhase: 'repair', resultRowCount: 0 }),
+      ]);
+      expect(orderItemPayload.run.providerEgressReceipts.every((receipt: { provider?: string }) =>
+        receipt.provider === 'openai',
+      )).toBe(true);
+      const orderItemSqlCalls = executeQuery.mock.calls
+        .map(([sql]) => String(sql))
+        .filter((sql) => /\border_items\b/i.test(sql)
+          && /\border_id\b/i.test(sql)
+          && /\bproduct_id\b/i.test(sql)
+          && /\bproduct_price\b/i.test(sql)
+          && /\bLIMIT\s+5\b/i.test(sql)
+          && !/\bSUM\s*\(/i.test(sql));
+      expect(orderItemSqlCalls, JSON.stringify(executeQuery.mock.calls.map(([sql]) => String(sql)), null, 2)).toHaveLength(1);
+      const orderItemTraceId = orderItemPayload.run.traceReference?.traceId;
+      expect(orderItemTraceId).toMatch(/^[a-f0-9]{32}$/);
+      const orderItemTraceResponse = await nativeFetch(`http://127.0.0.1:${port}/api/ask-traces/${orderItemTraceId}`);
+      const orderItemTrace = await orderItemTraceResponse.json() as any;
+      expect(orderItemTraceResponse.status).toBe(200);
+      expect(orderItemTrace?.decisionSummary).toEqual(orderItemPayload.run.diagnosticReceiptV4?.summary);
+      expect(orderItemTrace?.spans.find((span: { name?: string }) => span.name === 'plan.freeze')?.payload).toMatchObject({
+        // The portable trace stores the authoritative cascade snapshot rather
+        // than duplicating a second mutable plan projection. The frozen tier
+        // is therefore under the cascade decision.
+        kind: 'cascade',
+        decision: { selectedTier: 'exploratory_sql', planFrozen: true },
+      });
+      expect(orderItemTrace?.spans.find((span: { name?: string }) => span.name === 'sql.execute')?.payload).toMatchObject({
+        kind: 'sql',
+        execution: { reviewRequired: true },
+      });
+      const orderItemProviderAttempts = orderItemTrace?.spans.filter((span: { name?: string }) =>
+        span.name === 'provider.attempt',
+      ) ?? [];
+      expect(orderItemProviderAttempts).toHaveLength(3);
+      expect(orderItemProviderAttempts.map((span: any) => span.payload?.attempt?.phase)).toEqual([
+        'meaning_resolution',
+        'generation',
+        'repair',
+      ]);
+      expect(orderItemProviderAttempts.map((span: any) => span.payload?.attempt?.purpose)).toEqual([
+        'answer_generation',
+        'answer_generation',
+        'repair_sql',
+      ]);
+
+      // AGT-031: the first SQL can fail at the bounded warehouse seam without
+      // reopening meaning or route selection. The same frozen RAP receives one
+      // repair generation, mints a parent-bound authorization, and executes
+      // exactly once more. A fourth provider POST would violate ordinary Ask's
+      // three-send contract.
+      orderItemWarehouseRepairMode = true;
+      const providerMessagePostsBeforeWarehouseRepair = providerMessagePosts;
+      const executeCallsBeforeWarehouseRepair = executeQuery.mock.calls.length;
+      const warehouseRepairResponse = await nativeFetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: orderItemQuestion, requestedMode: 'ask' }),
+      });
+      const warehouseRepairPayload = await warehouseRepairResponse.json() as { run: any };
+      expect(warehouseRepairResponse.status, JSON.stringify(warehouseRepairPayload)).toBe(201);
+      expect(warehouseRepairPayload.run).toMatchObject({
+        route: 'generated_answer',
+        status: 'needs_review',
+        trustState: 'review_required',
+        diagnosticReceiptV3: {
+          cascade: { selectedTier: 'exploratory_sql', planFrozen: true },
+        },
+      });
+      expect(orderItemWarehouseInitialExecutionFailed).toBe(true);
+      expect(orderItemWarehouseRepairResponse, JSON.stringify({
+        run: warehouseRepairPayload.run,
+        providerMessages: orderItemProviderMessages,
+        providerEgressReceipts: warehouseRepairPayload.run.providerEgressReceipts,
+      }, null, 2)).toBe('sql');
+      expect(providerMessagePosts - providerMessagePostsBeforeWarehouseRepair).toBe(3);
+      expect(orderItemMeaningSelections).toHaveLength(2);
+      expect(warehouseRepairPayload.run.telemetry).toMatchObject({ providerRoundTrips: 3, sqlExecutions: 2 });
+      expect(warehouseRepairPayload.run.providerEgressReceipts).toEqual([
+        expect.objectContaining({ purpose: 'answer_generation', dispatchPhase: 'meaning_resolution', resultRowCount: 0 }),
+        expect.objectContaining({ purpose: 'answer_generation', dispatchPhase: 'generation', resultRowCount: 0 }),
+        expect.objectContaining({ purpose: 'repair_sql', dispatchPhase: 'repair', resultRowCount: 0 }),
+      ]);
+      const warehouseRepairSqlCalls = executeQuery.mock.calls
+        .slice(executeCallsBeforeWarehouseRepair)
+        .map(([sql]) => String(sql))
+        .filter((sql) => /\border_items\b/i.test(sql)
+          && /\border_id\b/i.test(sql)
+          && /\bproduct_id\b/i.test(sql)
+          && /\bproduct_price\b/i.test(sql)
+          && /\bLIMIT\s+5\b/i.test(sql));
+      expect(warehouseRepairSqlCalls).toHaveLength(2);
+      expect(orderItemProviderMessages.slice(-1)).toEqual([
+        expect.objectContaining({
+          hasRepairContract: false,
+          hasWarehouseRepairInstruction: true,
+        }),
+      ]);
+      expect(warehouseRepairPayload.run.routeDecision?.resolvedAnalyticalPlan).toMatchObject({
+        capability: 'bounded_exploration',
+      });
+      const warehouseCascade = warehouseRepairPayload.run.diagnosticReceiptV3?.cascade;
+      expect(warehouseCascade?.exploratoryExecutionFreeze).toMatchObject({
+        selectedTier: 'exploratory_sql',
+        authorizationAttempt: { index: 0 },
+      });
+      expect(warehouseCascade?.exploratoryRepairExecutionFreeze).toMatchObject({
+        planId: warehouseCascade?.exploratoryExecutionFreeze?.planId,
+        planFingerprint: warehouseCascade?.exploratoryExecutionFreeze?.planFingerprint,
+        snapshotId: warehouseCascade?.exploratoryExecutionFreeze?.snapshotId,
+        targetFingerprint: warehouseCascade?.exploratoryExecutionFreeze?.targetFingerprint,
+        authorizationAttempt: {
+          index: 1,
+          parentSqlFingerprint: warehouseCascade?.exploratoryExecutionFreeze?.sqlFingerprint,
+        },
+      });
+      const warehouseRepairTraceResponse = await nativeFetch(`http://127.0.0.1:${port}/api/ask-traces/${warehouseRepairPayload.run.traceReference?.traceId}`);
+      const warehouseRepairTrace = await warehouseRepairTraceResponse.json() as any;
+      expect(warehouseRepairTraceResponse.status).toBe(200);
+      const warehouseRepairAttempts = warehouseRepairTrace?.spans.filter((span: { name?: string }) => span.name === 'provider.attempt') ?? [];
+      expect(warehouseRepairAttempts).toHaveLength(3);
+      expect(warehouseRepairAttempts.map((span: any) => span.payload?.attempt?.phase)).toEqual([
+        'meaning_resolution',
+        'generation',
+        'repair',
+      ]);
     } finally {
       await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
     }
@@ -5941,41 +7144,625 @@ LIMIT \${top_n}
 });
 
 describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
+  it('projects lookup, compare-time, and breakdown children from the complete root host tuple without authorizing planner labels', () => {
+    const rootRequirementSeed = {
+      ...buildAnalyticalRequirementSeedV1({
+        question: 'Research gross revenue and refunds for enterprise customers by acquisition channel each month in FY26, showing customer name, top 10',
+        requirements: {
+          version: 1,
+          measures: ['gross revenue', 'refunds'],
+          dimensions: ['acquisition channel'],
+          entityTerms: ['customer'],
+          entityDisplayTerms: ['customer name'],
+          memberTerms: ['enterprise'],
+          outputTerms: ['customer name', 'gross revenue', 'refunds'],
+          grain: 'aggregate',
+          ranking: {
+            metricTerms: ['gross revenue'],
+            entityTerms: ['customer'],
+            direction: 'top',
+            limit: 10,
+            defaultedLimit: false,
+          },
+          time: {
+            role: 'time_axis',
+            grain: 'month',
+            fiscalPeriod: 'FY26',
+            requiresDeclaredFiscalCalendar: true,
+          },
+        },
+      }),
+      queryIntent: {
+        measures: ['gross revenue', 'refunds'],
+        dimensions: ['acquisition channel', 'customer name'],
+        filters: [{ field: 'customer_segment', value: 'enterprise' }],
+        timeRange: 'FY26',
+        timeGrain: 'month',
+        order: 'desc' as const,
+        limit: 10,
+        fiscalCalendarId: 'calendar:fy26',
+        fiscalDateRoleId: 'date:booked_at',
+      },
+    };
+
+    const lookup = buildResearchBranchRequirementProjection({
+      action: { kind: 'lookup_metric', target: 'orders.net_revenue' },
+      rootRequirementSeed,
+    });
+    const compare = buildResearchBranchRequirementProjection({
+      action: { kind: 'compare_time', target: 'semantic:orders:ordered_at' },
+      rootRequirementSeed,
+    });
+    const breakdown = buildResearchBranchRequirementProjection({
+      action: { kind: 'breakdown', target: 'semantic:orders:customer_segment' },
+      rootRequirementSeed,
+    });
+
+    expect(lookup).toMatchObject({
+      action: 'lookup_metric',
+      question: expect.stringContaining('net revenue'),
+      requirementSeed: {
+        requirements: {
+          measures: ['gross revenue', 'refunds'],
+          dimensions: ['acquisition channel'],
+          entityTerms: ['customer'],
+          entityDisplayTerms: ['customer name'],
+          memberTerms: ['enterprise'],
+          outputTerms: ['customer name', 'gross revenue', 'refunds'],
+          grain: 'aggregate',
+          ranking: expect.objectContaining({ metricTerms: ['gross revenue'], entityTerms: ['customer'], direction: 'top', limit: 10 }),
+          time: expect.objectContaining({ role: 'time_axis', grain: 'month', fiscalPeriod: 'FY26', requiresDeclaredFiscalCalendar: true }),
+        },
+        queryIntent: {
+          measures: ['gross revenue', 'refunds'],
+          dimensions: ['acquisition channel', 'customer name'],
+          filters: [{ field: 'customer_segment', value: 'enterprise' }],
+          timeRange: 'FY26',
+          timeGrain: 'month',
+          order: 'desc',
+          limit: 10,
+          fiscalCalendarId: 'calendar:fy26',
+          fiscalDateRoleId: 'date:booked_at',
+        },
+      },
+    });
+    expect(lookup.requirementSeed?.requirements.measures).not.toContain('net revenue');
+    expect(JSON.stringify(lookup)).not.toContain('selectedEvidenceId');
+    expect(compare).toMatchObject({
+      action: 'compare_time',
+      question: 'Compare gross revenue and refunds over time by ordered at for FY26',
+      requirementSeed: {
+        requirements: {
+          measures: ['gross revenue', 'refunds'],
+          dimensions: ['acquisition channel', 'ordered at'],
+          entityTerms: ['customer'],
+          entityDisplayTerms: ['customer name'],
+          memberTerms: ['enterprise'],
+          outputTerms: ['customer name', 'gross revenue', 'refunds'],
+          grain: 'aggregate',
+          ranking: expect.objectContaining({ metricTerms: ['gross revenue'], entityTerms: ['customer'], direction: 'top', limit: 10 }),
+          time: expect.objectContaining({ role: 'time_axis', grain: 'month', fiscalPeriod: 'FY26', requiresDeclaredFiscalCalendar: true }),
+        },
+        queryIntent: expect.objectContaining({
+          measures: ['gross revenue', 'refunds'],
+          dimensions: ['acquisition channel', 'customer name', 'ordered at'],
+          filters: [{ field: 'customer_segment', value: 'enterprise' }],
+          timeRange: 'FY26',
+          timeGrain: 'month',
+          fiscalCalendarId: 'calendar:fy26',
+          fiscalDateRoleId: 'date:booked_at',
+        }),
+      },
+    });
+    expect(breakdown).toMatchObject({
+      action: 'breakdown',
+      question: 'Show gross revenue and refunds by customer segment for FY26',
+      requirementSeed: {
+        requirements: {
+          measures: ['gross revenue', 'refunds'],
+          dimensions: ['acquisition channel', 'customer segment'],
+          entityTerms: ['customer'],
+          entityDisplayTerms: ['customer name'],
+          memberTerms: ['enterprise'],
+          outputTerms: ['customer name', 'gross revenue', 'refunds'],
+          grain: 'aggregate',
+          ranking: expect.objectContaining({ metricTerms: ['gross revenue'], entityTerms: ['customer'], direction: 'top', limit: 10 }),
+          time: expect.objectContaining({ role: 'time_axis', grain: 'month', fiscalPeriod: 'FY26', requiresDeclaredFiscalCalendar: true }),
+        },
+        queryIntent: expect.objectContaining({
+          measures: ['gross revenue', 'refunds'],
+          dimensions: ['acquisition channel', 'customer name', 'customer segment'],
+          filters: [{ field: 'customer_segment', value: 'enterprise' }],
+          timeRange: 'FY26',
+          timeGrain: 'month',
+          fiscalCalendarId: 'calendar:fy26',
+          fiscalDateRoleId: 'date:booked_at',
+        }),
+      },
+    });
+    expect(new Set([lookup.question, compare.question, breakdown.question]).size).toBe(3);
+  });
+
+  it('gives a five-branch Research plan a bounded concurrent-wave h1 window and preserves finalization time when h1 is slow', async () => {
+    // Mirrors the packaged five-hypothesis failure: after planning consumed
+    // ~16.5s, h1 must receive a realistic first-wave window rather than an
+    // unusably small serial share or the entire remaining root deadline.
+    const h1 = allocateResearchBranchBudget({
+      remainingMs: 103_450,
+      remainingBranches: 5,
+    });
+    expect(h1).toEqual({
+      version: 1,
+      remainingMs: 103_450,
+      finalizationReserveMs: RESEARCH_BRANCH_FINALIZATION_RESERVE_MS,
+      maxConcurrentBranches: RESEARCH_MAX_CONCURRENT_BRANCHES,
+      remainingWaves: 2,
+      branchBudgetMs: 44_225,
+    });
+
+    const controller = new AbortController();
+    const slowH1 = awaitResearchBranchDeadline(new Promise<void>(() => undefined), controller.signal);
+    controller.abort(new DOMException('The Research branch deadline elapsed.', 'TimeoutError'));
+    await expect(slowH1).rejects.toMatchObject({ name: 'TimeoutError' });
+
+    // The rest of the plan is never silently lost: when only the reserve is
+    // left, it is recorded as budget-exhausted and synthesis can still land.
+    expect(allocateResearchBranchBudget({
+      remainingMs: RESEARCH_BRANCH_FINALIZATION_RESERVE_MS,
+      remainingBranches: 4,
+    })).toEqual({
+      version: 1,
+      remainingMs: RESEARCH_BRANCH_FINALIZATION_RESERVE_MS,
+      finalizationReserveMs: RESEARCH_BRANCH_FINALIZATION_RESERVE_MS,
+      maxConcurrentBranches: RESEARCH_MAX_CONCURRENT_BRANCHES,
+      remainingWaves: 2,
+      stopReason: 'budget_exhausted',
+    });
+  });
+
+  it('runs a five-hypothesis Research plan in bounded waves and retains a completed first-wave finding when later branches time out', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-research-wave-runtime-'));
+    tempDirs.push(projectRoot);
+    copyResearchRuntimeFixture(projectRoot);
+    saveProviderSettings(projectRoot, {
+      id: 'openai',
+      enabled: true,
+      apiKey: 'sk-research-wave-test',
+      baseUrl: 'https://research-wave.example.test/v1',
+      model: 'research-wave-test',
+    });
+
+    const nativeFetch = globalThis.fetch;
+    let plannerResponseCount = 0;
+    let meaningResponseCount = 0;
+    const plannedTargets = [
+      'orders.gross_revenue',
+      'Revenue by Acquisition Channel',
+      'Runtime Parameter Acceptance',
+      'orders.gross_revenue',
+      'Revenue by Acquisition Channel',
+    ];
+    const providerBodies: Array<{ messages?: Array<{ role?: string; content?: string }> }> = [];
+    const providerFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (!String(input).startsWith('https://research-wave.example.test/')) return nativeFetch(input, init);
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        messages?: Array<{ role?: string; content?: string }>;
+      };
+      providerBodies.push(body);
+      const system = body.messages?.find((message) => message.role === 'system')?.content ?? '';
+      if (system.includes('You plan a data investigation.')) {
+        plannerResponseCount += 1;
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            hypotheses: plannedTargets.map((target, index) => ({
+              statement: `Research hypothesis ${index + 1}: revenue has a distinct, testable driver.`,
+              priorConfidence: 0.9 - (index * 0.1),
+              target,
+              action: 'lookup_metric',
+              expectation: `The governed revenue observation can test hypothesis ${index + 1}.`,
+            })),
+          }) } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (system.includes('You resolve business meaning for DQL')) {
+        meaningResponseCount += 1;
+        const user = body.messages?.find((message) => message.role === 'user')?.content ?? '';
+        const target = user.match(/target asset:\s*([^\.\n]+(?:\.[^\.\n]+)*)\./i)?.[1]?.trim().toLowerCase();
+        const cardsMatch = user.match(/Candidate cards:\s*(\[[\s\S]*\])\s*Bind only supplied/i);
+        const cards = cardsMatch ? JSON.parse(cardsMatch[1]) as Array<{ id: string; name?: string; kind?: string }> : [];
+        const candidate = cards.find((card) => {
+          const name = card.name?.toLowerCase() ?? '';
+          // The child seed is allowed to carry planner prose around the
+          // target, so bind the supplied card by its exact fixture identity
+          // rather than letting a test-only regex decide route authority.
+          if (target?.includes('orders.gross_revenue')) return card.id === 'semantic:metric:orders.gross_revenue';
+          if (target === 'revenue by acquisition channel') return card.kind === 'certified_block' && name === target;
+          if (target === 'runtime parameter acceptance') return card.kind === 'certified_block' && name === target;
+          return false;
+        }) ?? cards.find((card) => card.id === 'semantic:metric:orders.gross_revenue');
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            selectedCandidateIds: candidate ? [candidate.id] : [],
+            confidence: candidate ? 'high' : 'low',
+          }) } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      // A child that reaches the generated lane still uses the exact frozen
+      // child RAP. Its provider result intentionally contains no root SQL;
+      // the test below asserts the baseline cannot be reused as a shortcut.
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: '```json\n{"summary":"Bounded Research observation."}\n```' } }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', providerFetch);
+
+    const nativeTimeout = AbortSignal.timeout.bind(AbortSignal);
+    // Keep the root's real 120-second authority intact, but compress only
+    // child branch deadlines. This makes the regression deterministic without
+    // weakening the production 120-second ceiling or making this test wait.
+    let branchDeadlineCount = 0;
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockImplementation((durationMs) => {
+      // The provider itself has a shorter dispatch timeout.  Only compress
+      // the branch's fair-share windows (52s+ in this fixture), never the
+      // provider timeout that runs inside that branch.
+      if (durationMs !== 120_000 && durationMs > 50_000) {
+        branchDeadlineCount += 1;
+        // Let one first-wave branch use the production fair-share window.
+        // Child routing/semantic compilation is intentionally real here, and
+        // a synthetic 15-second deadline can abort after SQL but before the
+        // deterministic branch result is persisted. The other branches still
+        // hit their independently compressed windows, proving a slow sibling
+        // cannot consume the root Research budget.
+        if (branchDeadlineCount === 1) return nativeTimeout(durationMs);
+        // This cassette isolates the settled child from every later branch:
+        // their already-expired fair-share signals prove they are recorded as
+        // timeouts without creating a legitimate provider request after h1's
+        // governed SQL result. That lets the assertion below catch a future
+        // post-result narrator call rather than concurrent sibling traffic.
+        return AbortSignal.abort(new DOMException('The Research branch deadline elapsed.', 'TimeoutError'));
+      }
+      return nativeTimeout(durationMs);
+    });
+    let executionCount = 0;
+    let governedExecutionCount = 0;
+    let providerBodiesAtFirstGovernedExecution: number | undefined;
+    const executedSql: string[] = [];
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        connection: { driver: 'file' },
+        executor: {
+          executeQuery: vi.fn(async (sql: string) => {
+            executionCount += 1;
+            executedSql.push(sql);
+            // The runtime reads the target catalog before it invokes a child
+            // RAP.  Return a truthful schema response there instead of
+            // accidentally treating metadata discovery as the first observed
+            // research result.  The first *governed analytical* statement is
+            // the one this cassette proves can settle and persist.
+            if (/information_schema\.tables/i.test(sql)) {
+              return {
+                columns: ['table_schema', 'table_name'],
+                rows: [
+                  { table_schema: 'commerce', table_name: 'fct_orders' },
+                  { table_schema: 'growth', table_name: 'dim_customer_acquisition' },
+                ],
+                rowCount: 2,
+              };
+            }
+            if (/sum\s*\(\s*(?:o\.)?order_total\s*\)\s+as\s+gross_revenue/i.test(sql)) {
+              governedExecutionCount += 1;
+              // The first wave contains a certified acquisition-channel
+              // observation and a semantic gross-revenue observation.  Both
+              // are real branch statements; do not confuse either with the
+              // preceding INFORMATION_SCHEMA discovery query.
+              if (governedExecutionCount <= 2) {
+                const groupedByAcquisition = /acquisition_channel/i.test(sql);
+                if (!groupedByAcquisition && providerBodiesAtFirstGovernedExecution === undefined) {
+                  providerBodiesAtFirstGovernedExecution = providerBodies.length;
+                }
+                return {
+                  columns: groupedByAcquisition
+                    ? ['acquisition_channel', 'gross_revenue']
+                    : ['gross_revenue'],
+                  rows: [groupedByAcquisition
+                    ? { acquisition_channel: 'partner', gross_revenue: 1 }
+                    : { gross_revenue: 1 }],
+                  rowCount: 1,
+                  executionReceipt: {
+                    version: 1,
+                    runId: `research-wave-observation-${governedExecutionCount}`,
+                    resultFingerprint: 'b'.repeat(64),
+                  },
+                };
+              }
+              return new Promise<QueryResult>(() => undefined);
+            }
+            return { columns: [], rows: [], rowCount: 0 };
+          }),
+        } as unknown as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          // Keep the root host tuple executable. The child lookup now preserves
+          // it instead of replacing it with the planner target, so a vague
+          // multi-driver phrase is not a valid substitute for gross revenue.
+          question: 'Research gross revenue.',
+          requestedMode: 'research',
+          workspaceContext: {
+            researchSource: {
+              runId: 'research-wave-baseline',
+              // This deliberately valid-looking SQL must never be borrowed by
+              // children. Each branch must own a routed/frozen tuple.
+              sql: 'SELECT 1 AS root_baseline_must_not_execute',
+              trustState: 'review_required',
+            },
+          },
+        }),
+      });
+      const body = await response.json() as { run?: AgentRun; error?: string };
+      expect(response.status, body.error).toBe(201);
+      const artifact = body.run?.artifacts.find((candidate) => candidate.kind === 'research_run');
+      const payload = artifact?.payload as {
+        researchBranchReceipts?: ResearchBranchReceiptV1[];
+        researchRuns?: Array<{ id: string; context?: unknown }>;
+        traceReference?: { traceId?: string };
+      } | undefined;
+      const receipts = payload?.researchBranchReceipts ?? [];
+      expect(plannerResponseCount).toBe(1);
+      expect(meaningResponseCount).toBeGreaterThan(0);
+      expect(receipts).toHaveLength(5);
+      expect(receipts.map((receipt) => receipt.index)).toEqual([1, 2, 3, 4, 5]);
+      expect(receipts[0]).toMatchObject({ state: 'completed', stopReason: 'completed' });
+      expect(receipts.slice(1)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ state: 'timed_out', stopReason: 'research_branch_timeout' }),
+      ]));
+      // At least one first-wave child reaches its own frozen route. The root
+      // baseline is not an executable authority for a different hypothesis.
+      expect(executionCount).toBeGreaterThanOrEqual(1);
+      expect(governedExecutionCount).toBeGreaterThanOrEqual(1);
+      // Once h1 has a governed execution receipt, its branch persists a
+      // deterministic observation. No ordinary Ask narrator/provider call is
+      // allowed after that SQL boundary.
+      // The planner plus the admitted first-wave child meaning calls were
+      // admitted before h1's SQL result. The key boundary is that this count
+      // never grows after the receipt-bearing statement settles.
+      expect(providerBodiesAtFirstGovernedExecution).toBe(4);
+      expect(providerBodies).toHaveLength(providerBodiesAtFirstGovernedExecution!);
+      expect(executedSql.join('\n')).not.toContain('root_baseline_must_not_execute');
+      const traceId = body.run?.traceReference?.traceId;
+      expect(traceId).toMatch(/^[a-f0-9]{32}$/);
+      const traceResponse = await fetch(`http://127.0.0.1:${port}/api/ask-traces/${traceId}`);
+      const tracePayload = await traceResponse.json() as {
+        spans?: Array<{ name?: string; reasonCode?: string }>;
+        links?: Array<{ kind?: string }>;
+        decisionSummary?: unknown;
+      };
+      expect(traceResponse.status).toBe(200);
+      expect(tracePayload.links?.filter((link) => link.kind === 'research_branch')).toHaveLength(5);
+      expect(tracePayload.spans?.filter((span) => span.name === 'research.validate')).toEqual(expect.arrayContaining([
+        expect.objectContaining({ reasonCode: 'completed' }),
+        expect.objectContaining({ reasonCode: 'research_branch_timeout' }),
+      ]));
+      // Every provider body was admitted through the root Research ledger. The
+      // stored physical receipts and provider spans are therefore one-to-one,
+      // and the child traffic remains under the Research-12 contract.
+      const providerReceipts = body.run?.providerEgressReceipts ?? [];
+      const providerSpans = tracePayload.spans?.filter((span) => span.name === 'provider.attempt') ?? [];
+      expect(providerBodies).toHaveLength(4);
+      expect(providerReceipts).toHaveLength(4);
+      expect(providerSpans).toHaveLength(4);
+      expect(providerReceipts).toHaveLength(providerBodies.length);
+      expect(providerSpans).toHaveLength(providerBodies.length);
+      expect(providerBodies.length).toBeLessThanOrEqual(12);
+    } finally {
+      timeoutSpy.mockRestore();
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
+  it('records an all-branch Research timeout as a limited investigation with a branch-specific V4 recovery action', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-research-all-timeout-'));
+    tempDirs.push(projectRoot);
+    copyResearchRuntimeFixture(projectRoot);
+    const nativeTimeout = AbortSignal.timeout.bind(AbortSignal);
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockImplementation((durationMs) => {
+      if (durationMs !== 120_000 && durationMs > 30_000) {
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(new DOMException('The Research branch deadline elapsed.', 'TimeoutError')), 25);
+        return controller.signal;
+      }
+      return nativeTimeout(durationMs);
+    });
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        connection: { driver: 'file' },
+        executor: {
+          executeQuery: vi.fn(async (sql: string) => {
+            if (/^\s*select\b/i.test(sql)) return new Promise<QueryResult>(() => undefined);
+            return { columns: [], rows: [], rowCount: 0 };
+          }),
+        } as unknown as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          // The timeout path must begin from an executable host tuple so the
+          // branch reaches the bounded query rather than failing pre-freeze.
+          question: 'Research gross revenue.',
+          requestedMode: 'research',
+          workspaceContext: {
+            researchSource: { runId: 'baseline-research', sql: 'SELECT 1 AS branch_value', trustState: 'review_required' },
+          },
+        }),
+      });
+      const body = await response.json() as { run?: AgentRun; error?: string };
+      expect(response.status, body.error).toBe(201);
+      expect(body.run?.answer).toContain('Limited Research: every admitted branch reached its bounded window');
+      const artifact = body.run?.artifacts.find((candidate) => candidate.kind === 'research_run');
+      const receipts = ((artifact?.payload as { researchBranchReceipts?: ResearchBranchReceiptV1[] } | undefined)?.researchBranchReceipts ?? []);
+      expect(receipts.length).toBeGreaterThan(0);
+      expect(receipts.every((receipt) => receipt.stopReason === 'research_branch_timeout' || receipt.stopReason === 'budget_exhausted')).toBe(true);
+      expect(receipts.some((receipt) => receipt.stopReason === 'research_branch_timeout')).toBe(true);
+      expect(body.run?.diagnosticReceiptV4?.summary).toMatchObject({
+        terminalIncident: {
+          code: 'RESEARCH_BRANCH_TIMEOUT',
+          boundary: 'run',
+          safeAction: 'inspect_research_failures',
+        },
+        safeNextAction: 'inspect_research_failures',
+      });
+      const traceId = body.run?.traceReference?.traceId;
+      expect(traceId).toMatch(/^[a-f0-9]{32}$/);
+      let trace: { decisionSummary?: unknown } | undefined;
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const traceResponse = await fetch(`http://127.0.0.1:${port}/api/ask-traces/${traceId}`);
+        if (traceResponse.status === 200) {
+          trace = await traceResponse.json() as { decisionSummary?: unknown };
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(trace?.decisionSummary).toEqual(body.run?.diagnosticReceiptV4?.summary);
+    } finally {
+      timeoutSpy.mockRestore();
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
   it('records one receipt-backed branch and one failed branch without synthesizing receipts', async () => {
-    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/dbt-first-commerce');
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-research-branch-evidence-'));
     tempDirs.push(projectRoot);
-    cpSync(join(fixtureRoot, 'domains'), join(projectRoot, 'domains'), { recursive: true });
-    cpSync(join(fixtureRoot, 'target'), join(projectRoot, 'target'), { recursive: true });
-    cpSync(join(fixtureRoot, 'dql.config.json'), join(projectRoot, 'dql.config.json'));
-    cpSync(join(fixtureRoot, 'dbt_project.yml'), join(projectRoot, 'dbt_project.yml'));
-    mkdirSync(join(projectRoot, '.dql', 'cache'), { recursive: true });
-    cpSync(join(fixtureRoot, '.dql', 'cache', 'agent-kg.sqlite'), join(projectRoot, '.dql', 'cache', 'agent-kg.sqlite'));
-    // Deliberately do not copy provider settings: branch 2 must remain a
-    // no-provider/no-SQL failure rather than becoming an invented observation.
+    copyResearchRuntimeFixture(projectRoot);
+    const configPath = join(projectRoot, 'dql.config.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf8')) as { connections?: Record<string, unknown> };
+    config.connections = {
+      ...(config.connections ?? {}),
+      reporting: { driver: 'databricks', host: 'research-reporting.example.test' },
+    };
+    writeFileSync(configPath, JSON.stringify(config));
+    saveProviderSettings(projectRoot, {
+      id: 'openai',
+      enabled: true,
+      apiKey: 'sk-research-branch-evidence-test',
+      baseUrl: 'https://research-branch-evidence.example.test/v1',
+      model: 'research-branch-evidence-test',
+    });
     const executionReceipt = {
       version: 1,
       runId: 'research-child-1',
       resultFingerprint: 'a'.repeat(64),
     };
-    let baselineExecutions = 0;
+    const nativeFetch = globalThis.fetch;
+    const providerFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (!String(input).startsWith('https://research-branch-evidence.example.test/')) {
+        return nativeFetch(input, init);
+      }
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        messages?: Array<{ role?: string; content?: string }>;
+      };
+      const system = body.messages?.find((message) => message.role === 'system')?.content ?? '';
+      if (system.includes('You plan a data investigation.')) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            hypotheses: [
+              {
+                statement: 'Acquisition-channel revenue is a bounded observation.',
+                priorConfidence: 0.9,
+                target: 'Revenue by Acquisition Channel',
+                action: 'lookup_block',
+                expectation: 'The certified acquisition-channel result is available.',
+              },
+              {
+                statement: 'The runtime parameter block is a separately bounded observation.',
+                priorConfidence: 0.8,
+                target: 'Runtime Parameter Acceptance',
+                action: 'lookup_block',
+                expectation: 'The runtime parameter result is available.',
+              },
+              {
+                statement: 'Gross revenue is a separately bounded semantic observation.',
+                priorConfidence: 0.7,
+                target: 'orders.gross_revenue',
+                action: 'lookup_metric',
+                expectation: 'The governed gross-revenue result is available.',
+              },
+            ],
+          }) } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (system.includes('You resolve business meaning for DQL')) {
+        const user = body.messages?.find((message) => message.role === 'user')?.content ?? '';
+        const cardsMatch = user.match(/Candidate cards:\s*(\[[\s\S]*\])\s*Bind only supplied/i);
+        const cards = cardsMatch ? JSON.parse(cardsMatch[1]) as Array<{ id: string; kind?: string; name?: string }> : [];
+        const target = user.match(/"sourceQuestion":"([^"]+)"/)?.[1]?.toLowerCase() ?? '';
+        const candidate = target.includes('revenue by acquisition channel')
+          ? cards.find((card) => card.kind === 'certified_block' && card.name === 'Revenue by Acquisition Channel')
+          : target.includes('runtime parameter acceptance')
+            ? cards.find((card) => card.kind === 'certified_block' && card.name === 'Runtime Parameter Acceptance')
+            : cards.find((card) => card.id === 'semantic:metric:orders.gross_revenue');
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            selectedCandidateIds: candidate ? [candidate.id] : [],
+            confidence: candidate ? 'high' : 'low',
+          }) } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: '```json\n{"summary":"Bounded Research observation."}\n```' } }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', providerFetch);
+    const executedSql: string[] = [];
+    const executionHosts: Array<string | undefined> = [];
     let server: Server | undefined;
     try {
       const port = await startLocalServer({
         rootDir: projectRoot,
         projectRoot,
         executor: {
-          executeQuery: vi.fn(async () => {
-            baselineExecutions += 1;
-            if (baselineExecutions === 1) {
+          executeQuery: vi.fn(async (
+            sql: string,
+            _params: unknown[] = [],
+            _variables: Record<string, unknown> = {},
+            executionConnection?: { host?: string },
+          ) => {
+            executedSql.push(sql);
+            executionHosts.push(executionConnection?.host);
+            if (/information_schema\.tables/i.test(sql)) {
               return {
-                columns: ['branch_value'],
-                rows: [{ branch_value: 1 }],
+                columns: ['table_schema', 'table_name'],
+                rows: [
+                  { table_schema: 'commerce', table_name: 'fct_orders' },
+                  { table_schema: 'growth', table_name: 'dim_customer_acquisition' },
+                ],
+                rowCount: 2,
+              };
+            }
+            if (/acquisition_channel/i.test(sql) && /gross_revenue/i.test(sql)) {
+              return {
+                columns: ['acquisition_channel', 'gross_revenue'],
+                rows: [{ acquisition_channel: 'partner', gross_revenue: 1 }],
                 rowCount: 1,
                 executionReceipt,
               };
             }
-            throw new Error('child branch produced no SQL result');
+            if (/selected_category|gross_revenue/i.test(sql)) {
+              throw new Error('child branch produced no SQL result');
+            }
+            return { columns: [], rows: [], rowCount: 0 };
           }),
         } as unknown as QueryExecutor,
         connection: { driver: 'file' },
@@ -5988,13 +7775,7 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
         body: JSON.stringify({
           question: 'Deep research the revenue decline and its customer, product, and regional drivers',
           requestedMode: 'research',
-          workspaceContext: {
-            researchSource: {
-              runId: 'ask-baseline-1',
-              sql: 'SELECT 1 AS branch_value',
-              trustState: 'review_required',
-            },
-          },
+          executionTarget: { target: 'connection', connectionName: 'reporting' },
         }),
       });
       const payload = await response.json() as { run?: any; error?: string };
@@ -6002,14 +7783,351 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
       const researchArtifact = payload.run?.artifacts?.find((artifact: any) => artifact.kind === 'research_run');
       const researchRuns = researchArtifact?.payload?.researchRuns ?? [];
       const ledger = researchArtifact?.payload?.researchLedger;
+      const branchReceipts = researchArtifact?.payload?.researchBranchReceipts ?? [];
       expect(researchRuns.length).toBeGreaterThanOrEqual(2);
-      expect(researchRuns[0]).toMatchObject({ status: 'ready', resultPreview: { executionReceipt } });
-      expect(researchRuns[1]).toMatchObject({ status: 'error' });
+      const observedRun = researchRuns.find((run: any) =>
+        run.status === 'ready' && typeof run.resultPreview?.executionReceipt?.resultFingerprint === 'string',
+      );
+      expect(observedRun).toMatchObject({
+        status: 'ready',
+        resultPreview: {
+          executionReceipt: expect.objectContaining({
+            resultFingerprint: expect.any(String),
+          }),
+        },
+        context: {
+          branchAuthority: expect.objectContaining({ planFrozen: true, route: 'certified_answer' }),
+        },
+      });
+      const observedFingerprint = observedRun?.resultPreview?.executionReceipt?.resultFingerprint;
+      expect(observedFingerprint).toMatch(/^[a-f0-9]{64}$/);
+      expect(researchRuns).toEqual(expect.arrayContaining([
+        expect.objectContaining({ status: 'error' }),
+      ]));
       expect(ledger.entries).toEqual(expect.arrayContaining([
-        expect.objectContaining({ status: 'observed', receipts: [executionReceipt.resultFingerprint] }),
+        expect.objectContaining({ status: 'observed', receipts: [observedFingerprint] }),
         expect.objectContaining({ status: 'failed', receipts: [] }),
       ]));
       expect(ledger.entries.every((entry: any) => entry.status !== 'observed' || entry.receipts.length > 0)).toBe(true);
+      expect(branchReceipts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ state: 'completed', verdict: 'inconclusive', stopReason: 'completed' }),
+        expect.objectContaining({ state: 'failed', verdict: 'failed' }),
+      ]));
+      expect(executedSql.join('\n')).toContain('acquisition_channel');
+      expect(executedSql.join('\n')).not.toContain('branch_value');
+      // Positive counterpart to the negative browser-baseline test below:
+      // this independently routed/frozen child owns its branch authority and
+      // executes on the explicitly selected connection.
+      expect(executionHosts).toContain('research-reporting.example.test');
+      expect(payload.run?.requestedMode).toBe('research');
+      // The trace API joins the exact persisted V4 summary. A partial
+      // Research success is not a root failure: its one receipt-backed
+      // observation remains available while typed branch limitations explain
+      // why the broader answer is incomplete.
+      const traceId = payload.run?.traceReference?.traceId;
+      expect(traceId).toMatch(/^[a-f0-9]{32}$/);
+      let trace: { decisionSummary?: unknown } | undefined;
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const traceResponse = await fetch(`http://127.0.0.1:${port}/api/ask-traces/${traceId}`);
+        if (traceResponse.status === 200) {
+          trace = await traceResponse.json() as { decisionSummary?: unknown };
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(trace?.decisionSummary).toEqual(payload.run?.diagnosticReceiptV4?.summary);
+      expect(trace?.decisionSummary).toMatchObject({
+        safeNextAction: 'inspect_research_failures',
+        researchBranchSummary: expect.objectContaining({
+          receiptBackedBranches: 1,
+          partialSuccess: true,
+          safeAction: 'inspect_research_failures',
+        }),
+      });
+      expect((trace?.decisionSummary as { terminalIncident?: unknown } | undefined)?.terminalIncident).toBeUndefined();
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
+  const copyResearchRuntimeFixture = (projectRoot: string) => {
+    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/dbt-first-commerce');
+    cpSync(join(fixtureRoot, 'domains'), join(projectRoot, 'domains'), { recursive: true });
+    cpSync(join(fixtureRoot, 'target'), join(projectRoot, 'target'), { recursive: true });
+    cpSync(join(fixtureRoot, 'dql.config.json'), join(projectRoot, 'dql.config.json'));
+    cpSync(join(fixtureRoot, 'dbt_project.yml'), join(projectRoot, 'dbt_project.yml'));
+    mkdirSync(join(projectRoot, '.dql', 'cache'), { recursive: true });
+    cpSync(join(fixtureRoot, '.dql', 'cache', 'agent-kg.sqlite'), join(projectRoot, '.dql', 'cache', 'agent-kg.sqlite'));
+  };
+
+  const partialResearchArtifact = (run: AgentRun | undefined) => run?.artifacts.find((artifact) =>
+    artifact.kind === 'research_run'
+      && artifact.trustState === 'blocked'
+      && (artifact.payload as { partial?: unknown } | undefined)?.partial === true,
+  );
+
+  it('persists a minimal partial Research root artifact across a root deadline during an active branch', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-research-root-deadline-'));
+    tempDirs.push(projectRoot);
+    copyResearchRuntimeFixture(projectRoot);
+    let server: Server | undefined;
+    let beginBranch!: () => void;
+    const branchStarted = new Promise<void>((resolve) => { beginBranch = resolve; });
+    const rootDeadline = new AbortController();
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => rootDeadline.signal);
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        connection: { driver: 'file' },
+        executor: {
+          executeQuery: vi.fn(async (sql: string) => {
+            if (/^\s*select\b/i.test(sql)) {
+              beginBranch();
+              return new Promise<QueryResult>(() => undefined);
+            }
+            return { columns: [], rows: [], rowCount: 0 };
+          }),
+        } as unknown as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const pending = fetch(`${base}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          // Cancellation must interrupt an active, frozen child—not a branch
+          // that became ineligible because the old fixture relied on lookup
+          // discarding the root tuple.
+          question: 'Research gross revenue.',
+          requestedMode: 'research',
+          workspaceContext: {
+            researchSource: { runId: 'baseline-research', sql: 'SELECT 1 AS branch_value', trustState: 'review_required' },
+          },
+        }),
+      });
+      await branchStarted;
+      rootDeadline.abort(new DOMException('The Research root deadline elapsed.', 'TimeoutError'));
+      const response = await pending;
+      const body = await response.json() as { run?: AgentRun; error?: string };
+      expect(response.status, body.error).toBe(201);
+      expect(body.run).toMatchObject({ route: 'blocked', status: 'blocked', trustState: 'blocked' });
+      const artifact = partialResearchArtifact(body.run);
+      expect(artifact).toMatchObject({
+        ref: expect.any(String),
+        payload: expect.objectContaining({
+          version: 2,
+          partial: true,
+          terminalReason: 'run_deadline',
+          rootResearchRunId: expect.any(String),
+          childRunIds: expect.any(Array),
+          researchBranchReceipts: expect.arrayContaining([expect.objectContaining({ state: 'failed', stopReason: 'run_deadline' })]),
+          researchLedgerV2: expect.objectContaining({ version: 2, stoppingReason: 'blocked' }),
+          traceReference: expect.objectContaining({ traceId: expect.any(String) }),
+          researchTrace: expect.objectContaining({ branchTrace: expect.arrayContaining([expect.objectContaining({ kind: 'research_branch', spanId: expect.any(String) })]) }),
+        }),
+      });
+      const deadlinePayload = artifact!.payload as {
+        childRunIds?: string[];
+        traceReference?: { traceId?: string };
+        researchTrace?: { branchTrace?: Array<{ childRunId: string; spanId?: string; kind: string }> };
+      };
+      const deadlineChildRunIds = deadlinePayload.childRunIds ?? [];
+      const deadlineTraceId = deadlinePayload.traceReference?.traceId;
+      const deadlineBranchTrace = deadlinePayload.researchTrace?.branchTrace ?? [];
+      // Both fixture hypotheses start in the first bounded wave. A root
+      // deadline must persist each active child rather than retaining only the
+      // first serial branch from the pre-wave scheduler.
+      expect(deadlineChildRunIds).toHaveLength(2);
+      expect(new Set(deadlineChildRunIds).size).toBe(2);
+      expect(deadlineTraceId).toMatch(/^[a-f0-9]{32}$/);
+      expect(deadlineBranchTrace).toHaveLength(2);
+      expect(deadlineBranchTrace).toEqual(expect.arrayContaining(deadlineChildRunIds.map((childRunId) =>
+        expect.objectContaining({
+          childRunId,
+          kind: 'research_branch',
+          spanId: expect.any(String),
+        }),
+      )));
+
+      await new Promise<void>((resolve) => server?.close(() => resolve()));
+      server = undefined;
+      const reloadedPort = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        connection: { driver: 'file' },
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const reloaded = await fetch(`http://127.0.0.1:${reloadedPort}/api/agent-runs/${body.run!.id}`);
+      const persisted = await reloaded.json() as { run?: AgentRun };
+      expect(reloaded.status).toBe(200);
+      const persistedArtifact = partialResearchArtifact(persisted.run);
+      expect(persistedArtifact).toMatchObject({
+        payload: expect.objectContaining({ terminalReason: 'run_deadline', researchLedgerV2: expect.objectContaining({ version: 2 }) }),
+      });
+      // Restart parity covers the durable branch record and the root trace,
+      // not just the serialized root artifact. The child and span identities
+      // are immutable evidence links and must not be rebuilt differently after
+      // the local runtime reopens its stores.
+      const persistedPayload = persistedArtifact!.payload as typeof deadlinePayload;
+      expect(persistedPayload.childRunIds).toEqual(deadlineChildRunIds);
+      expect(persistedPayload.researchTrace?.branchTrace).toEqual(deadlineBranchTrace);
+      for (const childRunId of deadlineChildRunIds) {
+        const deadlineChild = await fetch(`http://127.0.0.1:${reloadedPort}/api/notebook/research/${encodeURIComponent(childRunId)}`);
+        expect(deadlineChild.status).toBe(200);
+        expect(await deadlineChild.json()).toMatchObject({
+          run: { id: childRunId, status: 'error' },
+        });
+      }
+      let deadlineTrace: any;
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const traceResponse = await fetch(`http://127.0.0.1:${reloadedPort}/api/ask-traces/${deadlineTraceId}`);
+        if (traceResponse.status === 200) {
+          deadlineTrace = await traceResponse.json();
+          break;
+        }
+        await new Promise((done) => setTimeout(done, 10));
+      }
+      expect(deadlineTrace?.envelope).toMatchObject({ runId: body.run!.id });
+      expect(deadlineTrace?.links).toEqual(expect.arrayContaining(deadlineChildRunIds.map((childRunId) =>
+        expect.objectContaining({ kind: 'research_branch', targetRunId: childRunId }),
+      )));
+      expect(deadlineTrace?.spans).toEqual(expect.arrayContaining(deadlineBranchTrace.map((branch) =>
+        expect.objectContaining({ spanId: branch.spanId, name: 'research.validate', reasonCode: 'run_deadline' }),
+      )));
+    } finally {
+      timeoutSpy.mockRestore();
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
+  it('persists a minimal partial Research root artifact across user cancellation and runtime restart', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-research-root-cancel-'));
+    tempDirs.push(projectRoot);
+    copyResearchRuntimeFixture(projectRoot);
+    let server: Server | undefined;
+    let beginBranch!: () => void;
+    const branchStarted = new Promise<void>((resolve) => { beginBranch = resolve; });
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        connection: { driver: 'file' },
+        executor: {
+          executeQuery: vi.fn(async (sql: string) => {
+            if (/^\s*select\b/i.test(sql)) {
+              beginBranch();
+              return new Promise<QueryResult>(() => undefined);
+            }
+            return { columns: [], rows: [], rowCount: 0 };
+          }),
+        } as unknown as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const pending = fetch(`${base}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          // Cancellation must interrupt an active, frozen child—not a branch
+          // that became ineligible because the old fixture relied on lookup
+          // discarding the root tuple.
+          question: 'Research gross revenue.',
+          requestedMode: 'research',
+          workspaceContext: {
+            researchSource: { runId: 'baseline-research', sql: 'SELECT 1 AS branch_value', trustState: 'review_required' },
+          },
+        }),
+      });
+      await branchStarted;
+      const operations = await fetch(`${base}/api/operations`).then(async (response) => response.json()) as {
+        operations: Array<{ id: string; type: string; scope: string }>;
+      };
+      const operation = operations.operations.find((candidate) => candidate.type === 'agent_run' && candidate.scope.startsWith('agent-run:'));
+      expect(operation).toBeDefined();
+      expect((await fetch(`${base}/api/operations/${encodeURIComponent(operation!.id)}`, { method: 'DELETE' })).status).toBe(200);
+      const response = await pending;
+      const body = await response.json() as { run?: AgentRun; error?: string };
+      expect(response.status, body.error).toBe(201);
+      expect(body.run).toMatchObject({ route: 'research', status: 'cancelled', trustState: 'not_applicable', stopReason: 'cancelled' });
+      const artifact = partialResearchArtifact(body.run);
+      expect(artifact).toMatchObject({
+        payload: expect.objectContaining({
+          partial: true,
+          terminalReason: 'cancelled',
+          rootResearchRunId: expect.any(String),
+          childRunIds: expect.any(Array),
+          researchBranchReceipts: expect.arrayContaining([expect.objectContaining({ state: 'failed', stopReason: 'cancelled' })]),
+          researchLedgerV2: expect.objectContaining({ version: 2, stoppingReason: 'blocked' }),
+        }),
+      });
+      const cancellationPayload = artifact!.payload as {
+        childRunIds?: string[];
+        traceReference?: { traceId?: string };
+        researchTrace?: { branchTrace?: Array<{ childRunId: string; spanId?: string; kind: string }> };
+      };
+      const cancellationChildRunIds = cancellationPayload.childRunIds ?? [];
+      const cancellationTraceId = cancellationPayload.traceReference?.traceId;
+      const cancellationBranchTrace = cancellationPayload.researchTrace?.branchTrace ?? [];
+      expect(cancellationChildRunIds).toHaveLength(2);
+      expect(new Set(cancellationChildRunIds).size).toBe(2);
+      expect(cancellationTraceId).toMatch(/^[a-f0-9]{32}$/);
+      expect(cancellationBranchTrace).toHaveLength(2);
+      expect(cancellationBranchTrace).toEqual(expect.arrayContaining(cancellationChildRunIds.map((childRunId) =>
+        expect.objectContaining({
+          childRunId,
+          kind: 'research_branch',
+          spanId: expect.any(String),
+        }),
+      )));
+
+      await new Promise<void>((resolve) => server?.close(() => resolve()));
+      server = undefined;
+      const reloadedPort = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        connection: { driver: 'file' },
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const reloaded = await fetch(`http://127.0.0.1:${reloadedPort}/api/agent-runs/${body.run!.id}`);
+      const persisted = await reloaded.json() as { run?: AgentRun };
+      expect(reloaded.status).toBe(200);
+      const persistedArtifact = partialResearchArtifact(persisted.run);
+      expect(persistedArtifact).toMatchObject({
+        payload: expect.objectContaining({ terminalReason: 'cancelled', researchBranchReceipts: expect.arrayContaining([expect.objectContaining({ stopReason: 'cancelled' })]) }),
+      });
+      const persistedPayload = persistedArtifact!.payload as typeof cancellationPayload;
+      expect(persistedPayload.childRunIds).toEqual(cancellationChildRunIds);
+      expect(persistedPayload.researchTrace?.branchTrace).toEqual(cancellationBranchTrace);
+      for (const childRunId of cancellationChildRunIds) {
+        const cancellationChild = await fetch(`http://127.0.0.1:${reloadedPort}/api/notebook/research/${encodeURIComponent(childRunId)}`);
+        expect(cancellationChild.status).toBe(200);
+        expect(await cancellationChild.json()).toMatchObject({
+          run: { id: childRunId, status: 'error' },
+        });
+      }
+      let cancellationTrace: any;
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const traceResponse = await fetch(`http://127.0.0.1:${reloadedPort}/api/ask-traces/${cancellationTraceId}`);
+        if (traceResponse.status === 200) {
+          cancellationTrace = await traceResponse.json();
+          break;
+        }
+        await new Promise((done) => setTimeout(done, 10));
+      }
+      expect(cancellationTrace?.envelope).toMatchObject({ runId: body.run!.id });
+      expect(cancellationTrace?.links).toEqual(expect.arrayContaining(cancellationChildRunIds.map((childRunId) =>
+        expect.objectContaining({ kind: 'research_branch', targetRunId: childRunId }),
+      )));
+      expect(cancellationTrace?.spans).toEqual(expect.arrayContaining(cancellationBranchTrace.map((branch) =>
+        expect.objectContaining({ spanId: branch.spanId, name: 'research.validate', reasonCode: 'cancelled' }),
+      )));
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
@@ -6017,7 +8135,7 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
 });
 
 describe('Ask Research baseline continuity', () => {
-  it('revalidates the successful Ask baseline on the exact selected connection when deeper composition is unavailable', async () => {
+  it('does not let browser-supplied Research SQL or a fake prior run establish execution or selected-connection authority', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-ask-research-baseline-'));
     tempDirs.push(projectRoot);
     writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
@@ -6086,17 +8204,34 @@ describe('Ask Research baseline continuity', () => {
 
       expect({ status: response.status, error: payload.error }).toEqual({ status: 201, error: undefined });
       expect(payload.run?.route).toBe('research');
-      expect(executionHosts).toContain('reporting.example.test');
+      // A browser may name an old run and carry SQL only as retrieval context.
+      // It cannot turn that SQL into branch authority, select a connection, or
+      // bypass the child router's frozen RAP/closure checks.
+      expect(executionHosts).toEqual([]);
       const researchArtifact = payload.run?.artifacts.find((artifact: any) => artifact.kind === 'research_run');
-      expect(researchArtifact?.payload?.researchRun).toMatchObject({
-        status: 'ready',
-        summary: expect.stringContaining('revalidated it on the same data target'),
-        generatedSql: expect.stringContaining('analytics.orders'),
-        resultPreview: {
-          rows: [{ segment: 'Enterprise', revenue: 4200 }],
-        },
+      expect(payload.run).toMatchObject({
+        route: 'research',
+        status: 'needs_review',
+        trustState: 'review_required',
       });
-      expect(researchArtifact?.payload?.researchRun?.warnings).toContain('Baseline Ask run: ask-run-1');
+      expect(researchArtifact?.payload).toMatchObject({
+        researchLedgerV2: expect.objectContaining({
+          entries: expect.arrayContaining([
+            expect.objectContaining({ status: 'failed', verdict: 'failed', receipts: [] }),
+          ]),
+          stoppingReason: 'insufficient_evidence',
+        }),
+        researchBranchReceipts: expect.arrayContaining([
+          expect.objectContaining({ state: 'failed', verdict: 'failed', stopReason: 'execution_failed' }),
+        ]),
+        researchRun: expect.objectContaining({
+          status: 'error',
+          context: expect.objectContaining({
+            branchAuthority: expect.objectContaining({ planFrozen: false, route: 'clarify' }),
+          }),
+        }),
+      });
+      expect(researchArtifact?.payload?.researchRun?.warnings ?? []).not.toContain('Baseline Ask run: ask-run-1');
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
@@ -6104,6 +8239,20 @@ describe('Ask Research baseline continuity', () => {
 });
 
 describe('AI provider settings', () => {
+  it('keeps an explicit provider-selection failure typed and lets Ollama reach physical readiness', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-governed-provider-selection-'));
+    tempDirs.push(projectRoot);
+
+    const invalid = governedProviderPreflightError('not-a-configured-provider');
+    expect(invalid).toMatchObject({ code: 'MODEL_NOT_FOUND', providerPhase: 'preflight' });
+    // Do not silently fall back to a configured/default provider when the user
+    // explicitly selected an unknown one.
+    expect(resolveGovernedAnswerRunner(projectRoot, 'not-a-configured-provider')).toBeNull();
+    // A known local provider gets a runner even without a live daemon so its
+    // adapter can report the truthful network preflight cause.
+    expect(resolveGovernedAnswerRunner(projectRoot, 'ollama')).toMatchObject({ provider: 'ollama' });
+  });
+
   it('uses an explicit replay cassette for governed Ask when the fixture has no provider settings', () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-governed-cassette-provider-'));
     const cassetteDir = mkdtempSync(join(tmpdir(), 'dql-governed-cassette-store-'));

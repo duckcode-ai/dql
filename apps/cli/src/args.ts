@@ -59,6 +59,10 @@ export interface CLIFlags {
   comment?: string;
   /** `dql agent ask --thread <id>` — continue a persisted conversation thread. */
   thread?: string;
+  /** Local Ask trace commands use an explicit output/profile/mode contract. */
+  traceProfile?: 'strict' | 'support';
+  traceMode?: 'receipt' | 'compare';
+  confirmReviewedIdentifiers?: boolean;
   /** `dql agent ask/eval --reasoning-effort low|medium|high` — affects provider effort and context depth. */
   reasoningEffort?: string;
   /** `dql agent ask/eval --analysis-depth quick|deep` — controls context budget. */
@@ -232,6 +236,16 @@ export function parseArgs(argv: string[]): ParsedArgs {
       flags.comment = argv[++i];
     } else if (arg === '--thread' && i + 1 < argv.length) {
       flags.thread = argv[++i];
+    } else if (arg === '--profile' && i + 1 < argv.length) {
+      const value = argv[++i];
+      if (value === 'strict' || value === 'support') flags.traceProfile = value;
+    } else if (arg === '--mode' && i + 1 < argv.length) {
+      const value = argv[++i];
+      if (value === 'receipt' || value === 'compare') flags.traceMode = value;
+    } else if (arg === '--confirm-reviewed-identifiers') {
+      flags.confirmReviewedIdentifiers = true;
+    } else if (arg === '--out' && i + 1 < argv.length) {
+      flags.outDir = argv[++i];
     } else if (arg === '--reasoning-effort' && i + 1 < argv.length) {
       flags.reasoningEffort = argv[++i];
     } else if ((arg === '--analysis-depth' || arg === '--depth') && i + 1 < argv.length) {

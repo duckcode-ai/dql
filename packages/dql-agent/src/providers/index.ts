@@ -18,13 +18,17 @@ export type {
   AgentToolDefinition,
   ProviderName,
   ProviderDispatchEvent,
+  ProviderDispatchCompletionEvent,
+  ProviderDispatchCompletionObserver,
+  ProviderDispatchRejectionEvent,
+  ProviderDispatchRejectionObserver,
   ProviderDispatchObserver,
   ProviderDispatchOperation,
   ProviderRunOptions,
   ProviderToolLoopOptions,
 } from './types.js';
 export { streamOrGenerate } from './types.js';
-export { DEFAULT_PROVIDER_DISPATCH_LIMIT, prepareProviderHttpDispatch } from './dispatch.js';
+export { DEFAULT_PROVIDER_DISPATCH_LIMIT, prepareProviderHttpDispatch, completeProviderHttpDispatch, fetchProviderHttpDispatch } from './dispatch.js';
 export { ClaudeProvider, OpenAIProvider, GeminiProvider, OllamaProvider, normalizeAnthropicBaseUrl, normalizeGeminiBaseUrl };
 export type { ReasoningEffort, GeminiReasoningStyle, ThinkingMode } from './reasoning-effort.js';
 export {

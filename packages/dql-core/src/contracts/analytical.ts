@@ -327,9 +327,20 @@ export interface AnalyticalRepairCapabilityV1 {
 }
 
 export type ProviderEgressPurpose =
+  /**
+   * Legacy/no-evidence category classification. This is intentionally
+   * distinct from candidate-ID meaning resolution so receipts never claim
+   * that a category-only prompt bound a governed semantic identity.
+   */
+  | 'classification'
   | 'answer_generation'
-  /** Ordinary Ask narration: the provider writes the business-facing answer. */
+  /**
+   * Legacy, content-free answer narration receipt. New ordinary Ask runs do
+   * not dispatch this purpose and it can never disclose result rows; retain it
+   * solely so persisted V1 receipts remain readable.
+   */
   | 'answer_narration'
+  /** Explicit Research-only narration. Result rows require per-run opt-in. */
   | 'research_narration'
   | 'research_tool'
   | 'repair_sql';
@@ -343,6 +354,8 @@ export type ProviderEgressCategory =
 
 /** Server-owned orchestration phase for one physical provider dispatch. */
 export type ProviderDispatchPhaseV1 =
+  /** Category-only legacy/no-evidence router interpretation. */
+  | 'classification'
   | 'meaning_resolution'
   | 'planning'
   | 'generation'
@@ -360,6 +373,12 @@ export interface ProviderEgressReceiptV1 {
   model?: string;
   operation?: 'generate' | 'generate_with_tools' | 'generate_stream';
   attemptIndex?: number;
+  /**
+   * Additive retry lineage for one same-provider transient retry. The value is
+   * the physical attempt index of the admitted parent receipt, never a model
+   * or route retry count.
+   */
+  retryOfAttemptIndex?: number;
   options?: {
     maxTokens?: number;
     temperature?: number;
@@ -373,11 +392,18 @@ export interface ProviderEgressReceiptV1 {
   redactionPolicyId: string;
   optIn: boolean;
   payloadFingerprint: string;
+  /**
+   * A historical local receipt that predates the current no-row ordinary Ask
+   * policy. It is retained only as read-only audit evidence: new dispatch
+   * admission never treats it as permission to send result rows.
+   */
+  legacyReadOnly?: true;
 }
 
 const DIMENSION_ROLES = new Set<AnalyticalDimensionRole>(['group_by', 'filter', 'display', 'rank_entity', 'time_axis']);
 const QUESTION_TYPES = new Set<AnalyticalQuestionType>(['definition', 'scalar', 'ranking', 'trend', 'comparison', 'diagnosis', 'research']);
 const PROVIDER_DISPATCH_PHASES = new Set<ProviderDispatchPhaseV1>([
+  'classification',
   'meaning_resolution',
   'planning',
   'generation',
@@ -442,6 +468,7 @@ const REPAIR_INELIGIBILITY_REASONS = new Set<AnalyticalRepairIneligibilityReason
   'attempt_exhausted',
 ]);
 const PROVIDER_EGRESS_PURPOSES = new Set<ProviderEgressPurpose>([
+  'classification',
   'answer_generation',
   'answer_narration',
   'research_narration',
@@ -531,6 +558,7 @@ export function normalizeProviderEgressReceiptV1(value: unknown): ProviderEgress
     ? record.operation
     : undefined;
   const attemptIndex = record?.attemptIndex;
+  const retryOfAttemptIndex = record?.retryOfAttemptIndex;
   const optionsRecord = objectRecord(record?.options);
   const options: ProviderEgressReceiptV1['options'] = optionsRecord ? {
     ...(typeof optionsRecord.maxTokens === 'number' && Number.isInteger(optionsRecord.maxTokens) && optionsRecord.maxTokens > 0
@@ -563,6 +591,11 @@ export function normalizeProviderEgressReceiptV1(value: unknown): ProviderEgress
     || !provider
     || (record.operation !== undefined && !operation)
     || (record.attemptIndex !== undefined && (typeof attemptIndex !== 'number' || !Number.isInteger(attemptIndex) || attemptIndex < 1))
+    || (record.retryOfAttemptIndex !== undefined && (
+      typeof retryOfAttemptIndex !== 'number'
+      || !Number.isInteger(retryOfAttemptIndex)
+      || retryOfAttemptIndex < 1
+    ))
     || (record.options !== undefined && !optionsRecord)
     || !categories
     || categories.length !== rawCategories?.length
@@ -581,7 +614,36 @@ export function normalizeProviderEgressReceiptV1(value: unknown): ProviderEgress
     || typeof record.optIn !== 'boolean'
     || !payloadFingerprint
   ) return undefined;
-  if (resultRowCount > 0 && (!record.optIn || !categories.includes('result_rows'))) return undefined;
+  // Persisted receipts are untrusted local JSON. A content-free phase must
+  // never be able to advertise result-row egress just because a stale or
+  // hand-edited record has an opt-in flag. Only the explicit Research
+  // transports may be row-bearing, and both require their per-run opt-in.
+  // Check cumulative rows too: a zero-row receipt with a positive cumulative
+  // counter would otherwise make an old classification/meaning receipt look
+  // like it had disclosed rows earlier in the run.
+  const rowBearing = resultRowCount > 0 || (typeof cumulativeResultRowCount === 'number' && cumulativeResultRowCount > 0);
+  const researchRowPurpose = purpose === 'research_narration' || purpose === 'research_tool';
+  const researchPhaseMatchesPurpose = purpose === 'research_narration'
+    ? dispatchPhase === undefined || dispatchPhase === 'narration'
+    : purpose === 'research_tool'
+      ? dispatchPhase === undefined || dispatchPhase === 'generation'
+      : false;
+  // V1/V2 local receipts predate a recorded dispatch phase and may contain a
+  // row-bearing `answer_narration`. Preserve that one historical shape so a
+  // user can inspect older local evidence, but mint a host-owned marker that
+  // makes its non-authoritative status explicit. A new or hand-edited receipt
+  // with a phase is never grandfathered into row egress authority.
+  const legacyOrdinaryNarration = rowBearing
+    && purpose === 'answer_narration'
+    && dispatchPhase === undefined
+    && record.optIn === true
+    && categories.includes('result_rows');
+  if (rowBearing && !legacyOrdinaryNarration && (
+    !researchRowPurpose
+    || !researchPhaseMatchesPurpose
+    || !record.optIn
+    || !categories.includes('result_rows')
+  )) return undefined;
   return {
     version: PROVIDER_EGRESS_RECEIPT_VERSION,
     ...(dispatchPhase ? { dispatchPhase } : {}),
@@ -590,6 +652,7 @@ export function normalizeProviderEgressReceiptV1(value: unknown): ProviderEgress
     ...(model ? { model } : {}),
     ...(operation ? { operation } : {}),
     ...(typeof attemptIndex === 'number' ? { attemptIndex } : {}),
+    ...(typeof retryOfAttemptIndex === 'number' ? { retryOfAttemptIndex } : {}),
     ...(options ? { options } : {}),
     permittedCategories: categories,
     resultRowCount,
@@ -598,6 +661,7 @@ export function normalizeProviderEgressReceiptV1(value: unknown): ProviderEgress
     redactionPolicyId,
     optIn: record.optIn,
     payloadFingerprint,
+    ...(legacyOrdinaryNarration ? { legacyReadOnly: true as const } : {}),
   };
 }
 

@@ -3,7 +3,8 @@ import {
   buildSqlOutputExpressionSignature,
   type MetricCapabilityContract,
 } from '@duckcodeailabs/dql-core';
-import type { ResolvedAnalyticalPlan } from './resolved-analytical-plan.js';
+import type { ExploratoryRequiredOutputBindingProofV1 } from './analytical-orchestration.js';
+import type { ResolvedAnalyticalPlan, ResolvedPlanMemberBinding } from './resolved-analytical-plan.js';
 import type { LocalContextPack, MetadataObject } from './metadata/catalog.js';
 
 export const GENERATED_ANALYTICAL_TUPLE_DRIFT_MESSAGE =
@@ -21,6 +22,7 @@ export type GeneratedAnalyticalTupleDriftCode =
   | 'ORDER_TUPLE_DRIFT'
   | 'LIMIT_TUPLE_DRIFT'
   | 'OUTPUT_TUPLE_DRIFT'
+  | 'OUTPUT_BINDING_TUPLE_DRIFT'
   | 'GRAIN_TUPLE_DRIFT'
   | 'RELATIONSHIP_TUPLE_DRIFT'
   | 'RELATION_TUPLE_DRIFT'
@@ -50,6 +52,115 @@ export type GeneratedAnalyticalProposalValidation =
       message: typeof GENERATED_ANALYTICAL_TUPLE_DRIFT_MESSAGE;
       driftCodes: GeneratedAnalyticalTupleDriftCode[];
     };
+
+/** Result of checking the host-owned explicit output projection. */
+export type FrozenRequiredOutputProjectionValidation =
+  | {
+      ok: true;
+      expectedOutputs: string[];
+      /** Exact source bindings that the host must retain on the execution receipt. */
+      bindingProofs: ExploratoryRequiredOutputBindingProofV1[];
+    }
+  | {
+      ok: false;
+      expectedOutputs: string[];
+      missingOutputs: string[];
+      /** Present when an alias exists but it came from the wrong or unproven source. */
+      bindingMismatches: string[];
+    };
+
+/**
+ * Return only aliases bound by the immutable resolved plan. These are not
+ * phrase matches and are never derived from model-provided `outputs` text.
+ */
+export function frozenRequiredOutputAliasesForPlan(plan: ResolvedAnalyticalPlan): string[] {
+  return [...new Set((plan.outputContract?.requiredOutputs ?? [])
+    .map((binding) => binding.outputName ?? outputLeaf(binding.qualifiedId))
+    .filter((value): value is string => Boolean(value && parserIdentifier(value)))
+    .map(normalizeOutputAlias))];
+}
+
+/**
+ * Return the source binding each new exploratory authorization must prove.
+ * A binding that lacks a physical dbt/runtime column is intentionally absent:
+ * `validateFrozenRequiredOutputProjection` treats that as a terminal proof
+ * gap rather than guessing a source from an output alias.
+ */
+export function frozenRequiredOutputBindingProofsForPlan(
+  plan: ResolvedAnalyticalPlan,
+): ExploratoryRequiredOutputBindingProofV1[] {
+  return (plan.outputContract?.requiredOutputs ?? []).flatMap((binding) => {
+    const outputName = frozenOutputAlias(binding);
+    const source = frozenPhysicalOutputSource(binding.qualifiedId);
+    return outputName && source && binding.qualifiedId
+      ? [{
+          version: 1 as const,
+          outputName,
+          qualifiedId: binding.qualifiedId,
+          relation: source.relation,
+          column: source.column,
+        }]
+      : [];
+  });
+}
+
+/**
+ * Enforce every explicit host output at the SQL authorization boundary. The
+ * caller may still apply stricter capability/closure checks; this helper never
+ * accepts an unbound term or model-supplied alias.
+ */
+export function validateFrozenRequiredOutputProjection(input: {
+  plan: ResolvedAnalyticalPlan;
+  sql: string;
+  dialect?: string;
+}): FrozenRequiredOutputProjectionValidation {
+  const expectedOutputs = frozenRequiredOutputAliasesForPlan(input.plan);
+  if (expectedOutputs.length === 0) return { ok: true, expectedOutputs, bindingProofs: [] };
+  const signature = buildGeneratedAnalyticalSqlSignature(input.sql, input.dialect);
+  const actual = new Set((signature?.outputs ?? []).map((output) => normalizeOutputAlias(output.outputAlias)));
+  const missingOutputs = expectedOutputs.filter((output) => !actual.has(output));
+  const bindingMismatches: string[] = [];
+  const bindingProofs: ExploratoryRequiredOutputBindingProofV1[] = [];
+  const expectedBindingProofs = frozenRequiredOutputBindingProofsForPlan(input.plan);
+  for (const binding of input.plan.outputContract?.requiredOutputs ?? []) {
+    const outputName = frozenOutputAlias(binding);
+    const expectedProof = outputName
+      ? expectedBindingProofs.find((proof) => normalizeOutputAlias(proof.outputName) === normalizeOutputAlias(outputName))
+      : undefined;
+    if (!outputName || !expectedProof) {
+      bindingMismatches.push(outputName ?? binding.requested);
+      continue;
+    }
+    const output = signature?.outputs.find((candidate) =>
+      normalizeOutputAlias(candidate.outputAlias) === normalizeOutputAlias(outputName));
+    if (!output) continue;
+    // A named alias by itself is never proof.  This output expression must
+    // contain exactly one parser-resolved physical column and that source must
+    // be the one selected before the plan froze.  In particular,
+    // `product_id AS order_id` has the expected alias but fails here.
+    const references = output.columnReferences;
+    const exactSource = references.length === 1
+      && normalizePhysicalIdentifier(references[0]!.column) === expectedProof.column
+      && relationMatchesFrozenPhysicalSource(
+        input.plan,
+        references[0]!.relation ?? '',
+        expectedProof.relation,
+      );
+    if (!exactSource) {
+      bindingMismatches.push(outputName);
+      continue;
+    }
+    bindingProofs.push(expectedProof);
+  }
+  return missingOutputs.length === 0 && bindingMismatches.length === 0
+    ? { ok: true, expectedOutputs, bindingProofs }
+    : {
+        ok: false,
+        expectedOutputs,
+        missingOutputs,
+        bindingMismatches: [...new Set(bindingMismatches)],
+      };
+}
 
 /**
  * Structural gate for the one optional generated-SQL proposal downstream of a
@@ -86,15 +197,29 @@ export function validateGeneratedAnalyticalProposal(input: {
       ? { metricId: expectedMetricIds[0]!, direction: plan.query.order }
       : undefined;
   const expectedLimit = frame?.ranking?.limit ?? plan.query.limit;
-  const expectedOutputs = frame?.requestedOutputs.map((output) => output.id)
-    ?? plan.outputContract.fields
-    ?? [...plan.outputContract.dimensions, ...plan.outputContract.measures];
+  const expectedOutputs = [...new Set([
+    ...(frame?.requestedOutputs.map((output) => output.id)
+      ?? plan.outputContract.fields
+      ?? [...plan.outputContract.dimensions, ...plan.outputContract.measures]),
+    ...frozenRequiredOutputAliasesForPlan(plan),
+  ])];
   const signature = buildGeneratedAnalyticalSqlSignature(proposal.sql, input.dialect);
   if (!signature) {
     driftCodes.push('SQL_PARSE_EVIDENCE_MISSING');
   } else {
     const sqlOutputs = signature.outputs.map((output) => output.outputAlias);
     if (!sameSet(sqlOutputs, expectedOutputs)) driftCodes.push('OUTPUT_TUPLE_DRIFT');
+    // An output alias is not enough authority: the expression must be backed
+    // by the exact qualified physical source that the frozen plan selected.
+    // This is deliberately evaluated from the parser-owned projection facts,
+    // not query-wide lexical references or model output labels.
+    if (!validateFrozenRequiredOutputProjection({
+      plan,
+      sql: proposal.sql,
+      ...(input.dialect ? { dialect: input.dialect } : {}),
+    }).ok) {
+      driftCodes.push('OUTPUT_BINDING_TUPLE_DRIFT');
+    }
     const capability = plan.selectedCapability;
     if (!capability || expectedMetricIds.length !== 1) {
       driftCodes.push('METRIC_TUPLE_DRIFT');
@@ -294,4 +419,127 @@ function sameSet(expected: string[], actual: string[]): boolean {
 
 function normalizeId(value: string): string {
   return value.replace(/["`]/g, '').split(/[:.]/).at(-1)!.toLowerCase();
+}
+
+function outputLeaf(value: string | undefined): string | undefined {
+  const leaf = value?.replace(/["`]/g, '').split(/[:.]/).at(-1)?.trim();
+  return leaf && parserIdentifier(leaf) ? leaf : undefined;
+}
+
+function frozenOutputAlias(binding: ResolvedPlanMemberBinding): string | undefined {
+  const alias = binding.outputName ?? outputLeaf(binding.qualifiedId);
+  return alias && parserIdentifier(alias) ? alias : undefined;
+}
+
+/**
+ * A frozen exploratory projection must identify a physical dbt/runtime column.
+ * Semantic/certified members can still use output contracts on their own
+ * execution lanes, but they are not sufficient proof for raw SQL.  Do not
+ * guess a relation from an alias or from another SELECT expression.
+ */
+function frozenPhysicalOutputSource(qualifiedId: string | undefined): {
+  relation: string;
+  column: string;
+} | undefined {
+  if (!qualifiedId) return undefined;
+  const rawId = qualifiedId.trim();
+  const encodedColumn = /(?:^|:)column:([^:]+)$/i.exec(rawId)?.[1];
+  // The local metadata bridge has two canonical physical-column shapes:
+  // `dbt:column:relation.column` and the compact runtime/dbt identity
+  // `relation.column`. The latter is not a model-supplied alias: it is only
+  // admitted after the host has resolved a qualified candidate into the
+  // frozen physical closure. Keep the grammar deliberately narrow so semantic
+  // IDs, block fields, and arbitrary dotted prose cannot become SQL proof.
+  const compactPhysicalColumn = /^[A-Za-z_][A-Za-z0-9_$]*(?:\.[A-Za-z_][A-Za-z0-9_$]*)+$/
+    .test(rawId)
+    ? rawId
+    : undefined;
+  const physicalColumn = encodedColumn ?? compactPhysicalColumn;
+  if (!physicalColumn) return undefined;
+  const parts = physicalColumn
+    .split('.')
+    .map(normalizePhysicalIdentifier)
+    .filter(Boolean);
+  if (parts.length < 2) return undefined;
+  const column = parts.pop()!;
+  const relation = parts.join('.');
+  return relation && column ? { relation, column } : undefined;
+}
+
+function normalizePhysicalIdentifier(value: string): string {
+  return value
+    .trim()
+    .replace(/["`\[\]]/g, '')
+    .replace(/\s*\.\s*/g, '.')
+    .toLowerCase();
+}
+
+/**
+ * The first projection check sees provider SQL as authored (`order_items`),
+ * while the final authorization check sees the same statement after the host
+ * has target-qualified its FROM/JOIN leaf (`jaffle_shop.dev.order_items`).
+ * Treat those forms as one source only when the qualified form is itself in
+ * the frozen physical closure. This is deliberately not a generic leaf-name
+ * match: a different catalog/schema with the same table leaf is rejected.
+ */
+function relationMatchesFrozenPhysicalSource(
+  plan: ResolvedAnalyticalPlan,
+  actualRelation: string,
+  expectedRelation: string,
+): boolean {
+  const actual = normalizePhysicalIdentifier(actualRelation);
+  const expected = normalizePhysicalIdentifier(expectedRelation);
+  if (!actual || !expected) return false;
+
+  const frozenRelations = [...new Set((plan.sourceRelationIds ?? [])
+    .map(normalizePhysicalIdentifier)
+    .filter(Boolean))];
+  const expectedLeaf = physicalIdentifierLeaf(expected);
+  const actualLeaf = physicalIdentifierLeaf(actual);
+  if (!expectedLeaf || actualLeaf !== expectedLeaf) return false;
+
+  const leafSources = frozenRelations.filter((source) => physicalIdentifierLeaf(source) === expectedLeaf);
+  // A frozen local plan may retain both the compact metadata identity
+  // (`order_items`) and the target-bound physical identity
+  // (`jaffle_shop.dev.order_items`) for the *same* selected source.  Those
+  // two representations are not two candidate relations.  Keep the compact
+  // form usable only when there is exactly one non-compact physical source
+  // with that leaf.  Two target-qualified sources with the same leaf remain
+  // ambiguous and therefore cannot be selected by a compact output proof.
+  const qualifiedLeafSources = leafSources.filter((source) => source !== expectedLeaf);
+  const expectedIsCompactLeaf = expected === expectedLeaf;
+  if (expectedIsCompactLeaf) {
+    if (qualifiedLeafSources.length > 1) return false;
+    if (qualifiedLeafSources.length === 1) {
+      // The parser may see either the provider's compact FROM spelling or
+      // the target-qualified form that the host authorizes later. Both must
+      // resolve to this one frozen physical source; a different catalog or
+      // schema with the same leaf is not accepted.
+      return actual === expectedLeaf || actual === qualifiedLeafSources[0];
+    }
+    // A legacy compact-only closure has no target-qualified relation to
+    // compare, so it authorizes only the exact compact parser relation.
+    return frozenRelations.includes(expectedLeaf) && actual === expectedLeaf;
+  }
+
+  // Persisted qualified sources are authoritative only when the exact
+  // relation remains selected in this frozen closure. A copied output binding
+  // must not authorize a relation that the RAP did not select.
+  if (!frozenRelations.includes(expected)) return false;
+  if (actual === expected) return true;
+
+  // The provider may use the compact table spelling before target
+  // qualification. It is safe only when this exact persisted relation is the
+  // sole target-qualified source for that leaf.
+  return actual === actualLeaf
+    && qualifiedLeafSources.length === 1
+    && qualifiedLeafSources[0] === expected;
+}
+
+function physicalIdentifierLeaf(value: string): string | undefined {
+  return value.split('.').filter(Boolean).at(-1);
+}
+
+function normalizeOutputAlias(value: string): string {
+  return normalizeId(value).replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
 }

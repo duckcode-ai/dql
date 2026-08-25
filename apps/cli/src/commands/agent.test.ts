@@ -1,13 +1,20 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildAnalysisQuestionPlan,
   contextRetrievalBudgetForQuestion,
   type AgentAnswer,
   type AgentFollowUpContext,
+  type AgentProvider,
   type AgentRun,
+  type AskTraceObserverV1,
 } from '@duckcodeailabs/dql-agent';
-import { __test__ } from './agent.js';
+import { __test__, createDirectCliAskTraceProvider, runCanonicalCliAsk } from './agent.js';
 import { answerFromRuntimeRun, projectRuntimeRun } from './agent-eval-runtime.js';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 function answerResult(overrides: Partial<AgentAnswer> = {}): AgentAnswer {
   return {
@@ -99,6 +106,126 @@ function runtimeRun(overrides: Partial<AgentRun>): AgentRun {
     ...overrides,
   } as AgentRun;
 }
+
+describe('direct CLI Ask trace bridge (OBS-001, OBS-007)', () => {
+  it('submits a direct Ask once through the canonical runtime and prints its trace reference', async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      requests.push({ url, init });
+      if (url.endsWith('/api/connections')) {
+        return new Response(JSON.stringify({ connections: [] }), { status: 200 });
+      }
+      if (url.endsWith('/api/ask-traces/cli-capability')) {
+        return new Response(JSON.stringify({
+          capability: 'runtime-issued-capability',
+          expiresAt: '2026-08-22T00:00:30.000Z',
+          scope: 'agent-runs',
+        }), { status: 201 });
+      }
+      if (url.endsWith('/api/agent-runs')) {
+        return new Response(JSON.stringify({
+          run: {
+            id: 'server-run-1', route: 'generated_answer', trustState: 'review_required',
+            answer: 'Prepared a review-required answer.',
+            traceReference: { traceId: '0123456789abcdef0123456789abcdef', recordingStatus: 'complete' },
+          },
+        }), { status: 201 });
+      }
+      return new Response('not found', { status: 404 });
+    }));
+    const printed = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    await runCanonicalCliAsk('show customer revenue', undefined, {
+      runtimeUrl: 'http://127.0.0.1:4777',
+      provider: 'ollama',
+      format: 'json',
+    } as any);
+
+    expect(requests.map((request) => request.url)).toEqual([
+      'http://127.0.0.1:4777/api/connections',
+      'http://127.0.0.1:4777/api/ask-traces/cli-capability',
+      'http://127.0.0.1:4777/api/agent-runs',
+    ]);
+    const submitted = JSON.parse(String(requests[2]?.init?.body));
+    expect(submitted).toMatchObject({
+      question: 'show customer revenue',
+      workspaceContext: { provider: 'ollama' },
+    });
+    expect(submitted.workspaceContext).not.toHaveProperty('surface');
+    expect(new Headers(requests[2]?.init?.headers).get('x-dql-ask-trace-capability')).toBe('runtime-issued-capability');
+    expect(JSON.parse(String(printed.mock.calls[0]?.[0]))).toMatchObject({
+      runId: 'server-run-1',
+      traceId: '0123456789abcdef0123456789abcdef',
+      traceRecordingStatus: 'complete',
+    });
+  });
+
+  it('records one physical attempt and waits for provider result settlement', async () => {
+    const spans: Array<{
+      id: string;
+      name: string;
+      finish?: { outcome?: string; reasonCode?: string; payload?: unknown };
+    }> = [];
+    const trace = {
+      enabled: true,
+      recordingStatus: 'recording',
+      startSpan: (input: { name: string }) => {
+        const id = `span-${spans.length + 1}`;
+        spans.push({ id, name: input.name });
+        return id;
+      },
+      finishSpan: (spanId: string | undefined, input?: { outcome?: string; reasonCode?: string; payload?: unknown }) => {
+        const span = spans.find((candidate) => candidate.id === spanId);
+        if (span) span.finish = input;
+      },
+      recordCandidateDecision: () => {},
+      recordLink: () => {},
+      finalize: () => undefined,
+      markPartial: () => {},
+      reference: () => undefined,
+    } as unknown as AskTraceObserverV1;
+    const provider: AgentProvider = {
+      name: 'openai',
+      available: async () => true,
+      generate: async (_messages, options) => {
+        const dispatch = {
+          provider: 'openai' as const,
+          operation: 'generate' as const,
+          attemptIndex: 1,
+          model: 'fixture-model',
+          envelope: {},
+        };
+        options?.onProviderDispatch?.(dispatch);
+        options?.onProviderDispatchComplete?.({
+          ...dispatch,
+          settlement: 'transport',
+          outcome: 'ok',
+        });
+        // A result settlement is the terminal event. The transport milestone
+        // must not create a second span or falsely close the first one.
+        options?.onProviderDispatchComplete?.({
+          ...dispatch,
+          settlement: 'result',
+          outcome: 'ok',
+        });
+        return 'fixture answer';
+      },
+    };
+
+    await expect(createDirectCliAskTraceProvider(provider, trace).generate([{ role: 'user', content: 'hi' }])).resolves.toBe('fixture answer');
+
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({
+      name: 'provider.attempt',
+      finish: {
+        outcome: 'ok',
+        reasonCode: 'completed',
+        payload: { kind: 'provider', attempt: { transportOutcome: 'ok' } },
+      },
+    });
+  });
+});
 
 describe('agent eval answer harness', () => {
   it('scores the persisted certified runtime route rather than an absent AgentAnswer context pack', () => {
@@ -445,6 +572,7 @@ describe('agent eval answer harness', () => {
       'validation',
       'execution',
       'draft',
+      'observability',
       'scoring',
     ]);
     expect(trace.find((stage) => stage.stage === 'execution')).toMatchObject({

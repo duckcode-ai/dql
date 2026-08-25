@@ -178,6 +178,75 @@ describe('SqliteAgentRunStore', () => {
     reopened.close();
   });
 
+  it('drops corrupt row-bearing ordinary Ask receipts while importing legacy JSON', () => {
+    const dir = tmp();
+    const legacy = join(dir, 'agent-runs.json');
+    const corruptReceipt = {
+      version: 1,
+      purpose: 'classification',
+      dispatchPhase: 'classification',
+      provider: 'openai',
+      permittedCategories: ['question', 'result_rows'],
+      resultRowCount: 1,
+      cumulativeResultRowCount: 1,
+      columnCount: 1,
+      redactionPolicyId: 'hand-edited-local-json',
+      optIn: true,
+      payloadFingerprint: 'sha256:corrupt',
+    };
+    const legacyRun = {
+      ...run('legacy-egress', '2026-07-19T10:00:00Z'),
+      providerEgressReceipts: [corruptReceipt],
+      diagnosticReceipt: { version: 1, providerEgressReceipts: [corruptReceipt] },
+      artifacts: [{
+        kind: 'answer',
+        payload: { diagnosticReceipt: { version: 1, providerEgressReceipts: [corruptReceipt] } },
+      }],
+    };
+    writeFileSync(legacy, JSON.stringify({ version: 1, runs: [legacyRun] }));
+
+    const store = new SqliteAgentRunStore({ path: join(dir, 'runs.sqlite'), legacyJsonPath: legacy });
+    const imported = store.get('legacy-egress');
+    expect(imported?.providerEgressReceipts).toEqual([]);
+    expect(imported?.diagnosticReceipt?.providerEgressReceipts).toEqual([]);
+    expect((imported?.artifacts[0]?.payload as { diagnosticReceipt?: { providerEgressReceipts?: unknown[] } })
+      .diagnosticReceipt?.providerEgressReceipts).toEqual([]);
+    store.close();
+  });
+
+  it('keeps V1/V2 phase-less ordinary narration rows as read-only legacy evidence on import', () => {
+    const dir = tmp();
+    const legacy = join(dir, 'agent-runs.json');
+    const legacyReceipt = {
+      version: 1,
+      purpose: 'answer_narration',
+      provider: 'openai',
+      permittedCategories: ['question', 'result_rows'],
+      resultRowCount: 2,
+      cumulativeResultRowCount: 2,
+      columnCount: 1,
+      redactionPolicyId: 'legacy-result-rows-v1',
+      optIn: true,
+      payloadFingerprint: 'sha256:legacy-narration',
+    };
+    const legacyRun = {
+      ...run('legacy-narration', '2026-07-19T10:00:00Z'),
+      providerEgressReceipts: [legacyReceipt],
+      diagnosticReceipt: { version: 1, providerEgressReceipts: [legacyReceipt] },
+    };
+    writeFileSync(legacy, JSON.stringify({ version: 1, runs: [legacyRun] }));
+
+    const store = new SqliteAgentRunStore({ path: join(dir, 'runs.sqlite'), legacyJsonPath: legacy });
+    const imported = store.get('legacy-narration');
+    expect(imported?.providerEgressReceipts).toEqual([
+      expect.objectContaining({ purpose: 'answer_narration', resultRowCount: 2, legacyReadOnly: true }),
+    ]);
+    expect(imported?.diagnosticReceipt?.providerEgressReceipts).toEqual([
+      expect.objectContaining({ purpose: 'answer_narration', legacyReadOnly: true }),
+    ]);
+    store.close();
+  });
+
   it('tolerates a corrupt legacy file (kept on disk, store still works)', () => {
     const dir = tmp();
     const legacy = join(dir, 'agent-runs.json');

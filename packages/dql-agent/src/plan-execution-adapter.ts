@@ -6,7 +6,11 @@
  * Acceptance: AGT-013, AGT-014, API-006.
  */
 
-import { normalizeMetricCapabilityContract, type SemanticLayer } from '@duckcodeailabs/dql-core';
+import {
+  normalizeMetricCapabilityContract,
+  type MetricCapabilityContract,
+  type SemanticLayer,
+} from '@duckcodeailabs/dql-core';
 import type { KGNode } from './kg/types.js';
 import type { MetadataObject } from './metadata/catalog.js';
 import type { SemanticMemberSelection } from './semantic-bridge/compose.js';
@@ -84,6 +88,14 @@ export type SemanticGraphExecutionBinding =
       graphFingerprint: string;
       planId: string;
       planFingerprint: string;
+      /**
+       * The exact normalized capability frozen on the RAP. The registry node
+       * remains the adapter identity lookup, but it is allowed to be a compact
+       * projection that omits relationship-path metadata. Reconstructing
+       * aggregation authority from that projection would make a valid native
+       * MetricFlow grouping fail after the graph has already accepted it.
+       */
+      capability: MetricCapabilityContract;
       metricNode: KGNode;
       invocations: SemanticGraphInvocation[];
     }
@@ -284,6 +296,7 @@ export function adaptResolvedAnalyticalPlan(
       input.semanticLayer,
       selectedCapability,
       plan.schemaVersion === 1,
+      metricNames,
     );
     if ('code' in resolved) return block(resolved.code, resolved.reason, resolved.candidateIds);
     if (isTimeDimension(resolved.definition)) {
@@ -306,6 +319,7 @@ export function adaptResolvedAnalyticalPlan(
       input.semanticLayer,
       selectedCapability,
       plan.schemaVersion === 1,
+      metricNames,
     );
     if ('code' in resolved) return block(resolved.code, resolved.reason, resolved.candidateIds);
     filters.push({ dimension: resolved.name, operator: 'equals', values: [filter.value] });
@@ -531,6 +545,28 @@ export function adaptAnalyticalSemanticGraph(input: {
   if (metricNode.kind !== 'metric') {
     return block('EXECUTION_KIND_MISMATCH', `${plan.executionId} is ${metricNode.kind}, not a semantic metric.`);
   }
+  const selectedCapability = normalizeMetricCapabilityContract(plan.selectedCapability);
+  const metricNodeCapability = normalizeMetricCapabilityContract(metricNode.payload?.analyticalCapability);
+  const semanticExecution = selectedCapability?.executionCapabilities.find((candidate) =>
+    candidate.route === 'semantic' && candidate.adapterId === graph.adapterId);
+  if (
+    !selectedCapability
+    || plan.selectedCapabilityFingerprint !== selectedCapability.sourceFingerprint
+    || plan.executionId !== selectedCapability.metricId
+    || graph.metricId !== selectedCapability.metricId
+    || graph.capabilityFingerprint !== selectedCapability.sourceFingerprint
+    || !semanticExecution
+    || (metricNodeCapability !== undefined && (
+      metricNodeCapability.metricId !== selectedCapability.metricId
+      || metricNodeCapability.sourceFingerprint !== selectedCapability.sourceFingerprint
+    ))
+  ) {
+    return block(
+      'EXECUTION_GRAPH_MISMATCH',
+      'The semantic graph, frozen capability, and pinned registry metric do not share one exact execution authority.',
+      [plan.executionId, graph.metricId],
+    );
+  }
   const metricNames = semanticMetricNames(metricNode, input.semanticLayer);
   if (metricNames.length !== 1) {
     return block(
@@ -539,7 +575,6 @@ export function adaptAnalyticalSemanticGraph(input: {
       metricNames,
     );
   }
-
   const invocations: SemanticGraphInvocation[] = [];
   const frame = plan.analyticalFrame;
   const sourceRanking = frame && !frame.comparison
@@ -556,7 +591,13 @@ export function adaptAnalyticalSemanticGraph(input: {
     const dimensionOutputAliases: string[] = [];
     let timeDimension: SemanticMemberSelection['timeDimension'];
     for (const dimensionId of source.groupByDimensionIds) {
-      const resolved = resolveSemanticDimensionId(dimensionId, input.registry, input.semanticLayer);
+      const resolved = resolveSemanticDimensionId(
+        dimensionId,
+        input.registry,
+        input.semanticLayer,
+        selectedCapability,
+        metricNames,
+      );
       if ('code' in resolved) return block(resolved.code, resolved.reason, resolved.candidateIds);
       if (source.period?.timeDimensionId === dimensionId) {
         timeDimension = { name: resolved.name, granularity: source.period.grain };
@@ -567,7 +608,13 @@ export function adaptAnalyticalSemanticGraph(input: {
     }
     const filters: NonNullable<SemanticMemberSelection['filters']> = [];
     for (const member of source.memberFilters) {
-      const resolved = resolveSemanticDimensionId(member.dimensionId, input.registry, input.semanticLayer);
+      const resolved = resolveSemanticDimensionId(
+        member.dimensionId,
+        input.registry,
+        input.semanticLayer,
+        selectedCapability,
+        metricNames,
+      );
       if ('code' in resolved) return block(resolved.code, resolved.reason, resolved.candidateIds);
       const values = member.canonicalValues.flatMap((value) => scalarFilterValue(value));
       if (values.length !== member.canonicalValues.length) {
@@ -626,6 +673,7 @@ export function adaptAnalyticalSemanticGraph(input: {
     graphFingerprint: graph.fingerprint,
     planId: plan.planId,
     planFingerprint: plan.fingerprint,
+    capability: selectedCapability,
     metricNode,
     invocations,
   };
@@ -676,6 +724,7 @@ function resolveSemanticDimension(
   layer: SemanticLayer,
   selectedCapability = undefined as ReturnType<typeof normalizeMetricCapabilityContract>,
   allowLegacyCapabilityFallback = false,
+  selectedMetricNames: string[] = [],
 ): { name: string; definition: NonNullable<ReturnType<SemanticLayer['resolveGroupBy']>> } | {
   code: 'SEMANTIC_MEMBER_MISSING' | 'SEMANTIC_MEMBER_AMBIGUOUS';
   reason: string;
@@ -710,23 +759,63 @@ function resolveSemanticDimension(
     };
   }
   const node = matches[0]!.node;
-  const localId = stringValue(node.payload?.localId) ?? node.name;
-  const candidates = uniqueDefinitions(semanticRuntimeReferencesForKGNode(node)
-    .map((reference) => layer.resolveGroupBy(reference)));
+  const capabilityDimension = selectedCapability?.dimensions.find((dimension) =>
+    dimension.dimensionId === binding.qualifiedId);
+  const crossModelCapabilityDimension = Boolean(
+    capabilityDimension
+    && selectedCapability
+    && capabilityDimension.entityId !== selectedCapability.primaryEntityId,
+  );
+  // A cross-model semantic grouping is not a bare catalog field. It must use
+  // the metric-relative MetricFlow reference frozen in the capability (for
+  // example `order_id__location__location_name`). Passing
+  // `locations.location_name` through here discards the proven entity path and
+  // lets composeQuery bind an unrelated leaf variant or fail after freeze.
+  const nativeGroupingReference = crossModelCapabilityDimension
+    ? capabilityDimension?.nativeGroupingReference?.trim()
+    : undefined;
+  const nativeGroupingPath = crossModelCapabilityDimension
+    ? capabilityDimension?.nativeGroupingPath?.map((part) => part.trim()).filter(Boolean) ?? []
+    : [];
+  if (crossModelCapabilityDimension && (!nativeGroupingReference || nativeGroupingPath.length === 0)) {
+    return {
+      code: 'SEMANTIC_MEMBER_MISSING',
+      reason: `Qualified dimension ${binding.qualifiedId} has no adapter-native grouping proof for the selected metric.`,
+      candidateIds: [binding.qualifiedId],
+    };
+  }
+  const candidates = nativeGroupingReference
+    ? exactNativeGroupingDefinitions({
+        layer,
+        metricNames: selectedMetricNames,
+        reference: nativeGroupingReference,
+        entityPath: nativeGroupingPath,
+      })
+    : uniqueDefinitions(semanticRuntimeReferencesForKGNode(node)
+        .map((reference) => layer.resolveGroupBy(reference)));
   if (candidates.length !== 1) {
     return {
       code: candidates.length > 1 ? 'SEMANTIC_MEMBER_AMBIGUOUS' : 'SEMANTIC_MEMBER_MISSING',
-      reason: `Qualified dimension ${binding.qualifiedId} maps to ${candidates.length} semantic definitions.`,
+      reason: nativeGroupingReference
+        ? `Qualified dimension ${binding.qualifiedId} is not an exact MetricFlow grouping for the selected metric tuple.`
+        : `Qualified dimension ${binding.qualifiedId} maps to ${candidates.length} semantic definitions.`,
       candidateIds: candidates.map((candidate) => `${candidate.cube ?? candidate.table}.${candidate.name}`),
     };
   }
-  return { name: candidates[0]!.qualifiedName ?? candidates[0]!.name, definition: candidates[0] };
+  return {
+    // Preserve the exact metric-relative reference for composeQuery. The
+    // definition still owns output aliases (`location_name`) and type checks.
+    name: nativeGroupingReference ?? candidates[0]!.qualifiedName ?? candidates[0]!.name,
+    definition: candidates[0],
+  };
 }
 
 function resolveSemanticDimensionId(
   dimensionId: string,
   registry: PlanExecutionRegistryEntry[],
   layer: SemanticLayer,
+  selectedCapability = undefined as ReturnType<typeof normalizeMetricCapabilityContract>,
+  selectedMetricNames: string[] = [],
 ): ReturnType<typeof resolveSemanticDimension> {
   return resolveSemanticDimension(
     {
@@ -737,7 +826,47 @@ function resolveSemanticDimensionId(
     },
     registry,
     layer,
+    selectedCapability,
+    false,
+    selectedMetricNames,
   );
+}
+
+/**
+ * Resolve a cross-model grouping from the selected metric's own MetricFlow
+ * compatibility graph. `SemanticLayer.resolveGroupBy()` deliberately accepts
+ * a bare leaf as a legacy convenience, so it cannot prove that a frozen
+ * multi-hop reference such as `order_id__location__location_name` is actually
+ * queryable for `revenue`. This path is deliberately exact: the reference and
+ * entity trail must both be returned by the adapter for the selected metric
+ * tuple. Otherwise the semantic plan must remain pre-freeze ineligible.
+ */
+function exactNativeGroupingDefinitions(input: {
+  layer: SemanticLayer;
+  metricNames: string[];
+  reference: string;
+  entityPath: string[];
+}): Array<NonNullable<ReturnType<SemanticLayer['resolveGroupBy']>>> {
+  const metricNames = [...new Set(input.metricNames.map((name) => name.trim()).filter(Boolean))];
+  if (metricNames.length === 0) return [];
+  try {
+    return uniqueDefinitions(input.layer.explainCompatibleDimensions(metricNames).compatible
+      .filter((dimension) =>
+        dimension.qualifiedName === input.reference
+        && sameNativeEntityPath(dimension.entityPath, input.entityPath)));
+  } catch {
+    // A compiler/readiness exception is not permission to fall back to a
+    // similarly named leaf. The caller returns a typed semantic member miss,
+    // allowing the pre-freeze cascade to consider only a separately proven
+    // relational/exploratory path.
+    return [];
+  }
+}
+
+function sameNativeEntityPath(actual: string[] | undefined, expected: string[]): boolean {
+  return Array.isArray(actual)
+    && actual.length === expected.length
+    && actual.every((segment, index) => segment === expected[index]);
 }
 
 function semanticMetricNames(node: KGNode, layer: SemanticLayer): string[] {

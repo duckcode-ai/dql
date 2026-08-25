@@ -19,6 +19,8 @@ import type {
   ProviderDispatchEvent,
   ProviderPayloadRowShape,
   AgenticSqlExecutionCapabilityV1,
+  AgentConversationBindingV1,
+  ExploratoryExecutionAuthorizationAttemptV1,
   ExploratoryExecutionFreezeV1,
   AnalyticalTaskDependencyBindingV1,
   NarrationIntegrityReceiptV1,
@@ -159,6 +161,8 @@ export interface ProviderDispatchEvidenceSink {
       optIn: boolean;
       serializedResultShape?: ProviderPayloadRowShape;
       cumulativeResultRowCount?: number;
+      /** Parent physical receipt for one admitted same-provider retry. */
+      retryOfAttemptIndex?: number;
     },
   ): Record<string, unknown>;
   snapshot(fallbackReason?: string): ProviderDispatchTerminalEvidence;
@@ -168,11 +172,24 @@ export interface ProviderDispatchEvidenceSink {
 
 export interface AgentRunRequest {
   provider: ProviderId;
+  /**
+   * Server-owned boundary flag for a router-frozen deterministic certified
+   * execution. `false` means this invocation cannot consult or dispatch an AI
+   * provider, so the provider wrapper must not perform a readiness check or
+   * record a provider preflight span. HTTP ingress never accepts this field.
+   */
+  providerPreflightRequired?: boolean;
   /** Server-owned run-scoped accounting shared by routing, planning and answer generation. */
   providerDispatchEvidenceSink?: ProviderDispatchEvidenceSink;
   messages: ChatTurn[];
   upstream?: { cellId?: string; sql?: string; preview?: unknown };
   conversationContext?: AgentConversationContext;
+  /**
+   * Server-owned decision that admits prior analytical state for this turn.
+   * It is persisted as a receipt and never inferred from unstructured history
+   * by downstream execution code.
+   */
+  conversationBinding?: AgentConversationBindingV1;
   /**
    * Reasoning effort for this run (low/medium/high). Resolved upstream from the
    * engine's per-route effort clamped by the provider's Settings ceiling; the
@@ -212,6 +229,8 @@ export interface AgentRunRequest {
   prepareExploratorySqlExecution?: (
     sql: string,
     artifact?: AgentDqlArtifactReference,
+    /** Exactly one same-plan repair may request a fresh host capability. */
+    authorizationAttempt?: Extract<ExploratoryExecutionAuthorizationAttemptV1, { index: 1 }>,
   ) => Promise<{
     capability: AgenticSqlExecutionCapabilityV1;
     freeze: ExploratoryExecutionFreezeV1;

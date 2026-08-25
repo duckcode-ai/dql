@@ -4,7 +4,7 @@ import type {
   ProviderRunOptions,
 } from './types.js';
 import { geminiReasoningStyle, effortToThinkingBudget } from './reasoning-effort.js';
-import { prepareProviderHttpDispatch } from './dispatch.js';
+import { fetchProviderHttpDispatch } from './dispatch.js';
 
 const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
@@ -82,7 +82,7 @@ export class GeminiProvider implements AgentProvider {
 
     const model = options.model ?? this.defaultModel;
     const url = `${this.baseUrl}/models/${encodeURIComponent(model)}:generateContent`;
-    const envelope = prepareProviderHttpDispatch({
+    const res = await fetchProviderHttpDispatch({
       provider: this.name,
       operation: 'generate',
       attemptIndex: 1,
@@ -98,15 +98,15 @@ export class GeminiProvider implements AgentProvider {
           ...geminiThinkingConfig(model, options),
         },
       },
-    });
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-goog-api-key': this.apiKey,
+      url,
+      init: {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-goog-api-key': this.apiKey,
+        },
+        signal: options.signal,
       },
-      body: JSON.stringify(envelope),
-      signal: options.signal,
     });
     if (!res.ok) {
       const body = await res.text().catch(() => res.statusText);

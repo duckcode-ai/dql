@@ -1,0 +1,23 @@
+{
+  "key": "44a53a7575fb5885755759c05146630f",
+  "operation": "generate",
+  "text": "```json\n{\n  \"summary\": \"QUERY PLAN: return one row per customer from the inspected customer dimension. count_lifetime_orders is stored at customer grain, so no join or aggregation is required. This is a review-required SQL preview.\",\n  \"sql\": \"SELECT customer_name AS customer_name, count_lifetime_orders AS count_lifetime_orders FROM dim_customers ORDER BY customer_name LIMIT 200\",\n  \"viz\": \"table\",\n  \"outputs\": [\"customer_name\", \"count_lifetime_orders\"],\n  \"dql\": {\n    \"entity\": \"dim_customers\",\n    \"dimensions\": [\"customer_name\"],\n    \"metrics\": [\"count_lifetime_orders\"]\n  }\n}\n```",
+  "providerName": "claude",
+  "createdAt": "2026-08-23T00:00:00.000Z",
+  "provenance": {
+    "kind": "synthetic_deterministic_orchestration_fixture",
+    "replayClassification": "orchestration_replay_only",
+    "providerQuality": "excluded",
+    "createdAt": "2026-08-23T00:00:00.000Z",
+    "creationMethod": "sanitized_fixture_sql",
+    "source": "current_scoped_runtime_dispatch"
+  },
+  "fingerprintDiagnostics": {
+    "version": 2,
+    "messageCount": 5,
+    "messageRoles": ["system", "system", "user", "system", "system"],
+    "preCanonicalHash": "44a53a7575fb5885755759c05146630f5fc21dbbd0ea5f19c4b6e18e8226123c",
+    "postCanonicalHash": "44a53a7575fb5885755759c05146630f5fc21dbbd0ea5f19c4b6e18e8226123c",
+    "appliedRuleClasses": []
+  }
+}

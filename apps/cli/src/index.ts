@@ -108,6 +108,8 @@ const HELP = `
     dql schedule list|run|start|status  Local scheduler for @schedule'd blocks (alerts + notifications)
       dql agent ask "<question>"      Block-first agent loop (certified blocks → fallback LLM SQL)
       dql agent threads               List persisted conversation threads (resume with --thread)
+      dql agent trace list|show|export|validate|replay|compare
+                                    Inspect/export local redacted Ask execution traces
       dql agent reindex [path]        Rebuild .dql/cache/agent-kg.sqlite and metadata.sqlite
       dql agent feedback up|down      Record local answer-quality telemetry for later review
       dql agent eval agent-evals.yml  Measure certified/follow-up/refusal accuracy

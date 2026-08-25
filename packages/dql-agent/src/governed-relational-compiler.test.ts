@@ -20,6 +20,24 @@ const amount: AgentEvidenceCandidate = {
   aggregation: 'sum',
   sourceObjects: ['model.shop.orders'],
   relationshipEvidence: ['commerce::relationship::orders_to_customers'],
+  relationshipSafety: [{
+    id: 'commerce::relationship::orders_to_customers',
+    from: 'commerce::entity::order',
+    to: 'commerce::entity::customer',
+    keys: [{ from: 'customer_id', to: 'customer_id' }],
+    status: 'certified',
+    cardinality: 'many_to_one',
+    fanout: 'safe',
+    staleCertification: false,
+    automaticJoinAllowed: true,
+    certificationFingerprint: 'sha256:orders-customers-proof',
+    validation: {
+      status: 'passed',
+      checkedAt: '2026-08-24T00:00:00.000Z',
+      queryFingerprint: 'sha256:orders-customers-query',
+      proofFingerprint: 'sha256:orders-customers-validation',
+    },
+  }],
   relevanceScore: 0.96,
   matchReasons: ['measure'],
   compatibility: 'compatible',
@@ -36,6 +54,31 @@ const customer: AgentEvidenceCandidate = {
   matchReasons: ['dimension'],
   compatibility: 'compatible',
 };
+
+// Governed relational compilation is an authored DQL capability, not a
+// consequence of two qualified physical columns. Keep this fixture explicit
+// so the compiler tests exercise a genuinely executable governed projection
+// rather than the exploratory physical fallback.
+amount.analyticalCapability = {
+  metricId: amount.qualifiedId!,
+  measureIds: [amount.qualifiedId!],
+  primaryEntityId: 'commerce::entity::order',
+  defaultResultGrainId: 'commerce::entity::order',
+  resultGrainIds: ['commerce::entity::order', 'commerce::entity::customer'],
+  aggregation: 'sum',
+  additivity: { entities: 'additive', time: 'additive' },
+  dimensions: [{
+    dimensionId: customer.qualifiedId!,
+    entityId: 'commerce::entity::customer',
+    supportedRoles: ['group_by', 'display', 'rank_entity'],
+    relationshipPathIds: ['commerce::relationship::orders_to_customers'],
+  }],
+  timeDimensions: [],
+  operations: ['group', 'rank'],
+  supportedOutputKinds: ['dimension', 'metric_value'],
+  executionCapabilities: [{ route: 'governed_sql', adapterId: 'relational-v1' }],
+  sourceFingerprint: 'governed-relational-compiler-fixture',
+};
 const resolution: MeaningResolution = {
   interpretedQuestion: 'Top customers by revenue.',
   questionType: 'ranking',
@@ -48,17 +91,26 @@ const resolution: MeaningResolution = {
   recommendedRoute: 'governed_sql',
 };
 
-function plan() {
+function plan(input: { evidenceExpiresAt?: string } = {}) {
+  const metric = input.evidenceExpiresAt === undefined
+    ? amount
+    : {
+        ...amount,
+        relationshipSafety: amount.relationshipSafety?.map((safety) => ({
+          ...safety,
+          evidenceExpiresAt: input.evidenceExpiresAt,
+        })),
+      };
   return buildResolvedAnalyticalPlan({
     question: resolution.interpretedQuestion,
     resolution,
-    evidence: { snapshotId: 'snapshot-relational', candidates: [amount, customer] },
-    candidates: [amount, customer],
+    evidence: { snapshotId: 'snapshot-relational', candidates: [metric, customer] },
+    candidates: [metric, customer],
     mode: 'authoritative',
   });
 }
 
-function registry(): GovernedRelationalRegistry {
+function registry(input: { evidenceExpiresAt?: string } = {}): GovernedRelationalRegistry {
   return {
     snapshotId: 'snapshot-relational',
     fingerprint: 'registry-fingerprint',
@@ -99,6 +151,8 @@ function registry(): GovernedRelationalRegistry {
       qualifiedId: 'commerce::relationship::orders_to_customers',
       fromRelationId: 'model.shop.orders',
       toRelationId: 'model.shop.customers',
+      fromEntityId: 'commerce::entity::order',
+      toEntityId: 'commerce::entity::customer',
       keys: [{ fromColumnId: 'dbt:column:orders.customer_id', toColumnId: 'dbt:column:customers.customer_id' }],
       joinType: 'inner',
       cardinality: 'many_to_one',
@@ -106,6 +160,14 @@ function registry(): GovernedRelationalRegistry {
       status: 'certified',
       automaticJoinAllowed: true,
       staleCertification: false,
+      certificationFingerprint: 'sha256:orders-customers-proof',
+      validation: {
+        status: 'passed',
+        checkedAt: '2026-08-24T00:00:00.000Z',
+        queryFingerprint: 'sha256:orders-customers-query',
+        proofFingerprint: 'sha256:orders-customers-validation',
+      },
+      ...(input.evidenceExpiresAt === undefined ? {} : { evidenceExpiresAt: input.evidenceExpiresAt }),
       identities: ['commerce::relationship::orders_to_customers'],
     }],
   };
@@ -181,6 +243,77 @@ describe('governed relational compiler (AGT-015 / API-006)', () => {
         relationships: registry().relationships.map((relationship) => ({ ...relationship, staleCertification: true })),
       },
     })).toMatchObject({ status: 'blocked', code: 'RELATIONSHIP_NOT_EXECUTABLE' });
+  });
+
+  it('AGT-029 rejects post-freeze registry drift from the exact safety authority', () => {
+    const frozen = plan();
+    expect(frozen.governedRelationshipSafetyProofs).toEqual([
+      expect.objectContaining({
+        relationshipId: 'commerce::relationship::orders_to_customers',
+        fanout: 'safe',
+        certificationFingerprint: 'sha256:orders-customers-proof',
+        validation: expect.objectContaining({ status: 'passed' }),
+        snapshotId: 'snapshot-relational',
+      }),
+    ]);
+    // An unchanged registry remains executable, proving the frozen authority
+    // is not merely a new late compiler requirement.
+    expect(compileGovernedRelationalPlan({ plan: frozen, registry: registry() })).toMatchObject({ status: 'compiled' });
+
+    for (const drifted of [
+      { fanout: 'attribution_required' },
+      { certificationFingerprint: 'sha256:restamped-certification' },
+      { validation: { ...registry().relationships[0]!.validation!, status: 'failed' } },
+      { validation: { ...registry().relationships[0]!.validation!, proofFingerprint: 'sha256:proof-for-other-keys' } },
+    ]) {
+      const changed = registry();
+      changed.relationships[0] = { ...changed.relationships[0]!, ...drifted };
+      expect(compileGovernedRelationalPlan({ plan: frozen, registry: changed })).toMatchObject({
+        status: 'blocked',
+        code: 'RELATIONSHIP_NOT_EXECUTABLE',
+      });
+    }
+
+    // A snapshot string alone is not authority. Persisted pre-safety plans
+    // remain readable but cannot dispatch a fresh governed cross-entity join.
+    expect(compileGovernedRelationalPlan({
+      plan: { ...frozen, governedRelationshipSafetyProofs: [] },
+      registry: registry(),
+    })).toMatchObject({ status: 'blocked', code: 'RELATIONSHIP_NOT_EXECUTABLE' });
+  });
+
+  it('AGT-029 rejects an unchanged frozen relationship proof once its evidence expires at compilation', () => {
+    // The freeze helper intentionally validates source evidence against the
+    // real planning instant. Use a distant timestamp here so plan creation is
+    // independent of wall-clock time; compilation itself uses only `now`.
+    const evidenceExpiresAt = '2099-01-01T12:00:00.000Z';
+    const frozen = plan({ evidenceExpiresAt });
+    const exactRegistry = registry({ evidenceExpiresAt });
+
+    // A future proof remains executable using the exact frozen safety
+    // authority and exact current registry record.
+    expect(compileGovernedRelationalPlan({
+      plan: frozen,
+      registry: exactRegistry,
+      now: () => new Date('2099-01-01T11:59:59.999Z'),
+    })).toMatchObject({ status: 'compiled' });
+
+    // Expiry is exclusive: equality is terminal, and a later execution
+    // instant also fails even though the registry and frozen proof still
+    // match byte-for-byte. The compiler never falls back after this freeze.
+    for (const now of [
+      '2099-01-01T12:00:00.000Z',
+      '2099-01-01T12:00:00.001Z',
+    ]) {
+      expect(compileGovernedRelationalPlan({
+        plan: frozen,
+        registry: exactRegistry,
+        now: () => new Date(now),
+      })).toMatchObject({
+        status: 'blocked',
+        code: 'RELATIONSHIP_NOT_EXECUTABLE',
+      });
+    }
   });
 
   it('validates result columns and fingerprints the displayed rows', () => {
@@ -274,11 +407,19 @@ describe('governed relational compiler (AGT-015 / API-006)', () => {
       executionCapabilities: [{ route: 'governed_sql', adapterId: 'relational-v1' }],
       sourceFingerprint: 'relational-capability-v1',
     };
+    // The execution graph must consume the exact capability fingerprint that
+    // authorized the frozen governed plan. Keeping it on this selected metric
+    // makes this a true governed capability fixture instead of relying on the
+    // old raw-column shortcut.
+    const analyticalMetric: AgentEvidenceCandidate = {
+      ...amount,
+      analyticalCapability: capability,
+    };
     const analyticalPlan = buildResolvedAnalyticalPlan({
       question: frame.interpretedQuestion,
       resolution: { ...resolution, analyticalFrame: frame },
-      evidence: { snapshotId: 'snapshot-relational', candidates: [amount, customer] },
-      candidates: [amount, customer],
+      evidence: { snapshotId: 'snapshot-relational', candidates: [analyticalMetric, customer] },
+      candidates: [analyticalMetric, customer],
       mode: 'authoritative',
     });
     const built = buildAnalyticalExecutionGraph({
@@ -326,5 +467,40 @@ describe('governed relational compiler (AGT-015 / API-006)', () => {
       ],
     });
     expect(compiled.receipt.fingerprint).toMatch(/^[a-f0-9]{64}$/);
+
+    // The graph path must pass the exact captured compilation instant through
+    // to each source statement, not accidentally reintroduce wall-clock
+    // authorization after its own immutable plan was built.
+    const evidenceExpiresAt = '2099-01-01T12:00:00.000Z';
+    const expiringMetric: AgentEvidenceCandidate = {
+      ...analyticalMetric,
+      relationshipSafety: analyticalMetric.relationshipSafety?.map((safety) => ({
+        ...safety,
+        evidenceExpiresAt,
+      })),
+    };
+    const expiringPlan = buildResolvedAnalyticalPlan({
+      question: frame.interpretedQuestion,
+      resolution: { ...resolution, analyticalFrame: frame },
+      evidence: { snapshotId: 'snapshot-relational', candidates: [expiringMetric, customer] },
+      candidates: [expiringMetric, customer],
+      mode: 'authoritative',
+    });
+    const expiringGraph = buildAnalyticalExecutionGraph({
+      plan: expiringPlan,
+      capability,
+      route: 'governed_sql',
+      adapterId: 'relational-v1',
+    });
+    if (expiringGraph.status !== 'ready') throw new Error(expiringGraph.reason);
+    expect(compileGovernedRelationalExecutionGraph({
+      graph: expiringGraph.graph,
+      plan: expiringPlan,
+      registry: registry({ evidenceExpiresAt }),
+      now: () => new Date(evidenceExpiresAt),
+    })).toMatchObject({
+      status: 'blocked',
+      code: 'RELATIONSHIP_NOT_EXECUTABLE',
+    });
   });
 });

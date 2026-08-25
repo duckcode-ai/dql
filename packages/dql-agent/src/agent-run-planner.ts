@@ -31,6 +31,12 @@ import {
 export type AgentRunPlannerCompletion = (input: {
   system: string;
   user: string;
+  /**
+   * The immutable host request owns the provider dispatch context. Passing it
+   * through lets a host pair a planner transport with the exact run trace
+   * without exposing the planner to caller-owned route authority.
+   */
+  request: AgentRunRequest;
   signal?: AbortSignal;
 }) => Promise<string>;
 
@@ -91,6 +97,7 @@ export function createLlmAgentRunPlanner(options: LlmAgentRunPlannerOptions): Ag
         const raw = await options.complete({
           system: buildPlanSystemPrompt(input.maxSteps, input.audience),
           user: buildPlanUserPrompt(input, catalogContext),
+          request: input.request,
           signal: input.request.signal ?? options.signal,
         });
         const parsed = parsePlan(raw, input.maxSteps, input.audience);
@@ -115,6 +122,7 @@ export function createLlmAgentRunPlanner(options: LlmAgentRunPlannerOptions): Ag
         const raw = await options.complete({
           system: buildReplanSystemPrompt(),
           user: buildReplanUserPrompt(input),
+          request: input.request,
           signal: input.request.signal ?? options.signal,
         });
         const parsed = parseReplan(raw, input);

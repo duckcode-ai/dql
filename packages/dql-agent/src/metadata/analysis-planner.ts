@@ -212,10 +212,13 @@ export function buildAnalysisQuestionPlan(
     // independently for lexical matching.
     { preserveIdentity: true },
   );
-  const extractedDimensionTerms = reconcileRankingRoles(
+  const extractedDimensionTerms = normalizeExplicitGroupingGrammar(
     languageQuestion,
-    extractDimensionTerms(languageQuestion),
-    extractedMetricTerms,
+    reconcileRankingRoles(
+      languageQuestion,
+      extractDimensionTerms(languageQuestion),
+      extractedMetricTerms,
+    ),
   );
   const typedAggregationRoles = normalizeTypedAggregationRoles(
     languageQuestion,
@@ -1025,6 +1028,29 @@ function extractDimensionTerms(question: string): string[] {
     }
   }
   return preferLongestDimensionTerms([...terms]).slice(0, 16);
+}
+
+/**
+ * Normalize one unambiguous natural-language grouping construction before it
+ * can become retrieval authority.  In "revenue by sales based on the region",
+ * `by` starts a malformed parser span, while "based on the region" names the
+ * actual grouping role.  `sales` is already normalized as the revenue alias
+ * by the host-owned measure parser; retaining the entire span as a dimension
+ * would make the same immutable requirement seed disagree with retrieval and
+ * prevent the bounded same-snapshot MetricFlow role extension from running.
+ *
+ * This is grammar only: it does not map a business term to a physical field,
+ * infer a join, or make location a general synonym for region.  Candidate
+ * selection still has to prove the one declared grouping field later.
+ */
+function normalizeExplicitGroupingGrammar(question: string, dimensions: string[]): string[] {
+  if (!/\b(?:revenue|sales?)\s+based\s+on\s+(?:the\s+)?region\b/i.test(question)) {
+    return dimensions;
+  }
+  const retained = dimensions.filter((dimension) => !/\b(?:revenue|sales?)\b.*\bbased\s+on\b.*\bregion\b/i.test(
+    dimension.replace(/_/g, ' '),
+  ));
+  return preferLongestDimensionTerms([...retained, 'region']);
 }
 
 /**

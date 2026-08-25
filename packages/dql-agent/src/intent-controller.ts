@@ -19,7 +19,10 @@ import type { AnswerAssumption } from './agentic/assumptions.js';
 import type { MetadataAgentIntent } from './metadata/catalog.js';
 import type { MeaningResolution } from './meaning-resolution.js';
 import type { ResolvedAnalyticalPlan } from './resolved-analytical-plan.js';
-import type { AnalyticalCascadeDecisionV1, AnalyticalCoverageGapV1 } from './analytical-orchestration.js';
+import type {
+  AnalyticalCascadeDecisionV1,
+  AnalyticalCoverageGapV1,
+} from './analytical-orchestration.js';
 
 /** The high-level action the agent will take for a turn. */
 export type AgentAction = 'answer' | 'clarify' | 'investigate' | 'compose_app' | 'converse' | 'block';
@@ -139,6 +142,13 @@ export interface IntentDecision {
     sourceFingerprint?: string;
     candidateCount: number;
     candidateIds: string[];
+    /** Qualified, content-free role/source witnesses for trace projection. */
+    candidateTraceMetadata?: Array<{
+      candidateId: string;
+      role: import('./analytical-orchestration.js').EvidenceCandidateRoleV1;
+      source: import('./analytical-orchestration.js').ContextSourceCoverageV1['source'];
+      lanes?: Array<{ lane: 'exact' | 'lexical' | 'vector' | 'graph' | 'conversation'; rank?: number }>;
+    }>;
   };
   /** A hard ambiguity must remain a clarification; answer-anyway must not bypass it. */
   requiresClarification?: boolean;
@@ -416,7 +426,7 @@ export function looksLikeFollowUp(question: string, hasHistory: boolean): boolea
   if (FOLLOW_UP_RE.test(trimmed)) return true;
   // Analytical references are often full sentences ("what product did they
   // buy for this amount?"). Do not limit pronoun resolution to four words.
-  return /\b(it|its|they|their|them|that|this|those|these|same|previous|prior)\b/i.test(trimmed)
+  return /\b(it|its|they|their|them|he|him|his|she|her|hers|that|this|those|these|same|previous|prior)\b/i.test(trimmed)
     && trimmed.split(/\s+/).length <= 24;
 }
 

@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "classification": "test_only_receipt_expectations",
+  "question": "Research the synthetic FY26 lost-opportunity trend, customer revenue concentration, and counter-evidence.",
+  "minimumGroundableBranches": 3,
+  "branches": [
+    {
+      "id": "fiscal_lost_opportunity_trend",
+      "kind": "trend",
+      "requiredEvidence": ["fiscal_month", "lost_opportunity_count", "lost_amount"],
+      "requiresValidator": "trend",
+      "requiresCounterEvidence": true
+    },
+    {
+      "id": "customer_revenue_concentration",
+      "kind": "comparison",
+      "requiredEvidence": ["customer_name", "revenue"],
+      "requiresValidator": "comparison",
+      "requiresCounterEvidence": true
+    },
+    {
+      "id": "competitor_attribution_limit",
+      "kind": "limitation",
+      "requiredEvidence": ["competitor_observation_to_lost_opportunity"],
+      "requiresValidator": "freshness",
+      "expectedVerdict": "inconclusive",
+      "requiresCounterEvidence": true
+    }
+  ],
+  "synthesis": {
+    "requiresReceiptOnlyEvidence": true,
+    "mustNotPromoteCorrelationToCausation": true,
+    "limitedScopeWhenGroundableBranchCountBelow": 3
+  }
+}

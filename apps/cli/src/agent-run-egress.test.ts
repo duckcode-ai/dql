@@ -4,8 +4,24 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { Server } from 'node:http';
 import type { QueryExecutor } from '@duckcodeailabs/dql-connectors';
-import { providerPayloadFingerprint } from '@duckcodeailabs/dql-agent';
-import { RunScopedProviderDispatchEvidence, startLocalServer } from './local-runtime.js';
+import {
+  attachAskTraceObserverV1,
+  completeProviderHttpDispatch,
+  planResearchHypotheses,
+  prepareProviderHttpDispatch,
+  providerPayloadFingerprint,
+  RESEARCH_ROW_EGRESS_POLICY,
+  type AgentProvider,
+  type AgentRunRequest,
+  type AskTraceObserverV1,
+} from '@duckcodeailabs/dql-agent';
+import {
+  agentRunProviderDispatchBudgetForMode,
+  createProviderDispatchTrace,
+  createResearchHypothesisPlanningProvider,
+  RunScopedProviderDispatchEvidence,
+  startLocalServer,
+} from './local-runtime.js';
 import { saveProviderSettings } from './settings/provider-settings.js';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -16,6 +32,130 @@ const dispatchEvent = {
   attemptIndex: 1,
   envelope: { messages: [{ role: 'user', content: 'bounded research follow-up' }] },
 };
+
+/** A minimal in-memory observer for the local provider-boundary harness. */
+function providerTraceRecorder() {
+  const spans: Array<{
+    id: string;
+    start: Record<string, unknown>;
+    finish?: Record<string, unknown>;
+  }> = [];
+  let sequence = 0;
+  const observer: AskTraceObserverV1 = {
+    recordingStatus: 'recording',
+    enabled: true,
+    startSpan: (input) => {
+      const id = `span-${++sequence}`;
+      spans.push({ id, start: input as unknown as Record<string, unknown> });
+      return id;
+    },
+    finishSpan: (spanId, input) => {
+      const span = spans.find((candidate) => candidate.id === spanId);
+      if (span) span.finish = input as unknown as Record<string, unknown>;
+    },
+    recordCandidateDecision: () => {},
+    recordLink: () => {},
+    finalize: () => undefined,
+    markPartial: () => {},
+    reference: () => undefined,
+  };
+  return { observer, spans };
+}
+
+function providerAttempt(span: { start: Record<string, unknown>; finish?: Record<string, unknown> }) {
+  const payload = (span.finish?.payload ?? span.start.payload) as {
+    kind?: string;
+    attempt?: Record<string, unknown>;
+  } | undefined;
+  return payload?.attempt;
+}
+
+const RESEARCH_HYPOTHESIS_ASSETS = {
+  metrics: ['revenue'],
+  blocks: ['revenue_by_region'],
+  dimensions: ['region'],
+};
+
+const RESEARCH_HYPOTHESES = JSON.stringify({
+  hypotheses: [
+    {
+      statement: 'Revenue changed because the revenue metric moved.',
+      priorConfidence: 0.8,
+      target: 'revenue',
+      action: 'lookup_metric',
+      expectation: 'The revenue observation changed.',
+    },
+    {
+      statement: 'Revenue changed by region.',
+      priorConfidence: 0.6,
+      target: 'region',
+      action: 'breakdown',
+      expectation: 'One region accounts for the movement.',
+    },
+    {
+      statement: 'The certified revenue block limits the observation.',
+      priorConfidence: 0.4,
+      target: 'revenue_by_region',
+      action: 'lookup_block',
+      expectation: 'The block definition qualifies the result.',
+    },
+  ],
+});
+
+function tracedHypothesisProvider(input: {
+  onPhysicalSend?: () => void;
+  cancelAfterAdmission?: () => void;
+  failAfterAdmission?: boolean;
+} = {}): AgentProvider {
+  let attemptIndex = 0;
+  return {
+    name: 'ollama',
+    available: async () => true,
+    generate: async (messages, options) => {
+      const attempt = ++attemptIndex;
+      const dispatchOptions = options ?? {};
+      prepareProviderHttpDispatch({
+        provider: 'ollama',
+        operation: 'generate',
+        attemptIndex: attempt,
+        envelope: { messages },
+        options: dispatchOptions,
+      });
+      // An admission rejection above throws before this line. This counter is
+      // therefore the real transport boundary rather than merely an adapter
+      // invocation attempt.
+      input.onPhysicalSend?.();
+      input.cancelAfterAdmission?.();
+      if (dispatchOptions.signal?.aborted) {
+        const error = Object.assign(new Error('Research planner cancelled.'), { name: 'AbortError', code: 'ABORTED' });
+        completeProviderHttpDispatch({
+          provider: 'ollama', operation: 'generate', attemptIndex: attempt, options: dispatchOptions,
+        }, { outcome: 'cancelled', settlement: 'transport', error });
+        throw error;
+      }
+      if (input.failAfterAdmission) {
+        const error = Object.assign(new Error('HTTP 502'), { code: 'HTTP_502' });
+        completeProviderHttpDispatch({
+          provider: 'ollama', operation: 'generate', attemptIndex: attempt, options: dispatchOptions,
+        }, { outcome: 'error', settlement: 'transport', httpStatus: 502, error });
+        throw error;
+      }
+      completeProviderHttpDispatch({
+        provider: 'ollama', operation: 'generate', attemptIndex: attempt, options: dispatchOptions,
+      }, { outcome: 'ok', settlement: 'transport', httpStatus: 200 });
+      return RESEARCH_HYPOTHESES;
+    },
+  };
+}
+
+function researchPlannerRequest(signal?: AbortSignal): AgentRunRequest {
+  return {
+    runId: 'research-hypothesis-planner',
+    question: 'Investigate revenue drivers by region.',
+    requestedMode: 'research',
+    ...(signal ? { signal } : {}),
+  };
+}
 
 it('still narrates after generation has spent its whole budget', () => {
   // The regression this pins: narration used to share `generationGroup`, so a
@@ -36,45 +176,47 @@ it('still narrates after generation has spent its whole budget', () => {
   })).toThrow(expect.objectContaining({ code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' }));
 
   expect(() => run.observe({ ...dispatchEvent, attemptIndex: 4 }, {
-    purpose: 'answer_narration', dispatchPhase: 'narration', optIn: false,
+    purpose: 'research_narration', dispatchPhase: 'narration', optIn: false,
   })).not.toThrow();
   expect(() => run.observe({ ...dispatchEvent, attemptIndex: 5 }, {
-    purpose: 'answer_narration', dispatchPhase: 'narration', optIn: false,
+    purpose: 'research_narration', dispatchPhase: 'narration', optIn: false,
   })).not.toThrow();
   // Narration has its own ceiling; it is not unbounded.
   expect(() => run.observe({ ...dispatchEvent, attemptIndex: 6 }, {
-    purpose: 'answer_narration', dispatchPhase: 'narration', optIn: false,
+    purpose: 'research_narration', dispatchPhase: 'narration', optIn: false,
   })).toThrow(expect.objectContaining({ code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' }));
 });
 
-it('bounds ordinary narration rows by the resolved project egress policy', () => {
+it('rejects legacy ordinary narration result rows before it creates a receipt', () => {
   const withLimit = (maxNarrationRows: number) => new RunScopedProviderDispatchEvidence(
     { total: 6, meaningResolution: 1, generationGroup: 3, narration: 2, repair: 1 },
     undefined,
     { maxNarrationRows, maxToolRows: 0, source: 'project_config', policyId: 'test-policy' },
   );
 
-  expect(() => withLimit(20).observe(dispatchEvent, {
+  const permissiveLegacyRun = withLimit(20);
+  expect(() => permissiveLegacyRun.observe(dispatchEvent, {
     purpose: 'answer_narration', dispatchPhase: 'narration', optIn: true,
     serializedResultShape: { resultRowCount: 20, columnCount: 2 },
-  })).not.toThrow();
+  })).toThrow(expect.objectContaining({ code: 'PROVIDER_RESULT_ROWS_BLOCKED' }));
+  expect(permissiveLegacyRun.snapshot().providerEgressReceipts).toHaveLength(0);
 
-  // The admin kill-switch: zero rows permitted means a row payload is refused
-  // outright rather than quietly truncated.
+  // A zero/manual policy is also denied. Result-bearing `answer_narration`
+  // has no modern authorization path; only Research may mint one.
   expect(() => withLimit(0).observe(dispatchEvent, {
     purpose: 'answer_narration', dispatchPhase: 'narration', optIn: true,
     serializedResultShape: { resultRowCount: 1, columnCount: 2 },
-  })).toThrow();
+  })).toThrow(expect.objectContaining({ code: 'PROVIDER_RESULT_ROWS_BLOCKED' }));
 });
 
-it('enforces independent Research narration/sample and local-analysis physical egress caps per run', () => {
+it('enforces explicit Research narration and local-analysis physical egress caps per run', () => {
   const collector = () => new RunScopedProviderDispatchEvidence({
     total: 8, meaningResolution: 1, generationGroup: 8, narration: 2, repair: 1,
-  });
+  }, undefined, RESEARCH_ROW_EGRESS_POLICY);
   const run = collector();
 
   expect(() => run.observe(dispatchEvent, {
-    purpose: 'research_narration', dispatchPhase: 'generation', optIn: true,
+    purpose: 'research_narration', dispatchPhase: 'narration', optIn: true,
     serializedResultShape: { resultRowCount: 20, columnCount: 2 }, cumulativeResultRowCount: 20,
   })).not.toThrow();
   expect(() => run.observe(dispatchEvent, {
@@ -92,7 +234,7 @@ it('enforces independent Research narration/sample and local-analysis physical e
     serializedResultShape: { resultRowCount: 201, columnCount: 1 }, cumulativeResultRowCount: 201,
   })).toThrow(expect.objectContaining({ code: 'PROVIDER_RESULT_ROWS_LIMIT_EXCEEDED' }));
   expect(() => collector().observe(dispatchEvent, {
-    purpose: 'research_narration', dispatchPhase: 'generation', optIn: true,
+    purpose: 'research_narration', dispatchPhase: 'narration', optIn: true,
     serializedResultShape: { resultRowCount: 21, columnCount: 1 }, cumulativeResultRowCount: 21,
   })).toThrow(expect.objectContaining({ code: 'PROVIDER_RESULT_ROWS_LIMIT_EXCEEDED' }));
   expect(() => collector().observe(dispatchEvent, {
@@ -107,10 +249,236 @@ it('enforces independent Research narration/sample and local-analysis physical e
   })).not.toThrow();
 });
 
-it('shares one ledger across ordinary meaning and generation phases', () => {
-  const run = new RunScopedProviderDispatchEvidence({
-    total: 2, meaningResolution: 1, generationGroup: 2, narration: 2, repair: 0,
+it('pairs an opted-in Research narration receipt with exactly one physical provider trace attempt', () => {
+  const run = new RunScopedProviderDispatchEvidence(
+    { total: 4, meaningResolution: 1, generationGroup: 2, narration: 1, repair: 0 },
+    undefined,
+    RESEARCH_ROW_EGRESS_POLICY,
+  );
+  const { observer, spans } = providerTraceRecorder();
+  const trace = createProviderDispatchTrace({
+    observer,
+    phase: 'narration',
+    purpose: 'research_narration',
+    admit: (event) => run.observe(event, {
+      purpose: 'research_narration',
+      dispatchPhase: 'narration',
+      optIn: true,
+      serializedResultShape: { resultRowCount: 2, columnCount: 2 },
+      cumulativeResultRowCount: 2,
+    }),
   });
+  const options = { ...trace.options, model: 'research-narrator-test' };
+  prepareProviderHttpDispatch({
+    provider: 'ollama', operation: 'generate', attemptIndex: 1,
+    envelope: dispatchEvent.envelope, options,
+  });
+  completeProviderHttpDispatch({
+    provider: 'ollama', operation: 'generate', attemptIndex: 1, options,
+  }, { outcome: 'ok', settlement: 'transport', httpStatus: 200 });
+  trace.settle('ok');
+
+  expect(run.snapshot().providerEgressReceipts).toEqual([
+    expect.objectContaining({
+      purpose: 'research_narration', dispatchPhase: 'narration',
+      resultRowCount: 2, columnCount: 2, optIn: true,
+    }),
+  ]);
+  expect(spans).toHaveLength(1);
+  expect(providerAttempt(spans[0]!)).toMatchObject({
+    phase: 'narration', purpose: 'research_narration', admission: 'admitted',
+  });
+  expect(spans[0]?.finish).toMatchObject({ outcome: 'ok', reasonCode: 'completed' });
+});
+
+it('accounts the real Research hypothesis planner once, then denies a capped second plan before send', async () => {
+  const ledger = new RunScopedProviderDispatchEvidence(
+    agentRunProviderDispatchBudgetForMode('research'),
+    undefined,
+    RESEARCH_ROW_EGRESS_POLICY,
+  );
+  const { observer, spans } = providerTraceRecorder();
+  const request = attachAskTraceObserverV1(researchPlannerRequest(), observer);
+  let physicalSends = 0;
+  const provider = createResearchHypothesisPlanningProvider({
+    provider: tracedHypothesisProvider({ onPhysicalSend: () => { physicalSends += 1; } }),
+    request,
+    ledger,
+  });
+
+  // This invokes the actual planResearchHypotheses structured call rather
+  // than testing a hand-built provider trace in isolation.
+  const hypotheses = await planResearchHypotheses(
+    provider,
+    request.question,
+    RESEARCH_HYPOTHESIS_ASSETS,
+    { signal: request.signal },
+  );
+  expect(hypotheses).toHaveLength(3);
+  expect(physicalSends).toBe(1);
+  expect(ledger.snapshot().providerEgressReceipts).toEqual([
+    expect.objectContaining({ purpose: 'answer_generation', dispatchPhase: 'planning', resultRowCount: 0 }),
+  ]);
+  expect(spans).toHaveLength(1);
+  expect(providerAttempt(spans[0]!)).toMatchObject({
+    phase: 'planning', purpose: 'answer_generation', admission: 'admitted',
+  });
+  expect(spans[0]?.finish).toMatchObject({ outcome: 'ok', reasonCode: 'completed' });
+
+  // A second hypothesis planner call is not a hidden retry. The shared
+  // Research ledger denies it before the provider adapter may send another
+  // HTTP body; planResearchHypotheses intentionally falls back to `[]`.
+  await expect(planResearchHypotheses(
+    provider,
+    request.question,
+    RESEARCH_HYPOTHESIS_ASSETS,
+    { signal: request.signal },
+  )).resolves.toEqual([]);
+  expect(physicalSends).toBe(1);
+  // The transport itself never starts for this second, denied admission.
+  expect(ledger.snapshot().providerEgressReceipts).toHaveLength(1);
+  expect(spans).toHaveLength(2);
+  expect(providerAttempt(spans[1]!)).toMatchObject({
+    phase: 'planning', purpose: 'answer_generation', admission: 'denied', cause: 'dispatch_budget',
+  });
+  expect(spans[1]?.finish).toMatchObject({ outcome: 'denied', reasonCode: 'provider_failure' });
+});
+
+it('classifies Research hypothesis planner transport failure and inherited cancellation without duplicate sends', async () => {
+  const failingLedger = new RunScopedProviderDispatchEvidence(
+    agentRunProviderDispatchBudgetForMode('research'),
+    undefined,
+    RESEARCH_ROW_EGRESS_POLICY,
+  );
+  const failureTrace = providerTraceRecorder();
+  const failureRequest = attachAskTraceObserverV1(researchPlannerRequest(), failureTrace.observer);
+  const failingProvider = createResearchHypothesisPlanningProvider({
+    provider: tracedHypothesisProvider({ failAfterAdmission: true }),
+    request: failureRequest,
+    ledger: failingLedger,
+  });
+  await expect(planResearchHypotheses(
+    failingProvider,
+    failureRequest.question,
+    RESEARCH_HYPOTHESIS_ASSETS,
+    { signal: failureRequest.signal },
+  )).resolves.toEqual([]);
+  expect(failingLedger.snapshot().providerEgressReceipts).toHaveLength(1);
+  expect(failureTrace.spans).toHaveLength(1);
+  expect(providerAttempt(failureTrace.spans[0]!)).toMatchObject({
+    phase: 'planning', purpose: 'answer_generation', admission: 'admitted', cause: 'gateway', httpStatusClass: '5xx',
+  });
+  expect(failureTrace.spans[0]?.finish).toMatchObject({ outcome: 'error', reasonCode: 'provider_failure' });
+
+  const controller = new AbortController();
+  const cancellationLedger = new RunScopedProviderDispatchEvidence(
+    agentRunProviderDispatchBudgetForMode('research'),
+    undefined,
+    RESEARCH_ROW_EGRESS_POLICY,
+  );
+  const cancellationTrace = providerTraceRecorder();
+  const cancellationRequest = attachAskTraceObserverV1(researchPlannerRequest(controller.signal), cancellationTrace.observer);
+  let cancellationSends = 0;
+  const cancellingProvider = createResearchHypothesisPlanningProvider({
+    provider: tracedHypothesisProvider({
+      onPhysicalSend: () => { cancellationSends += 1; },
+      cancelAfterAdmission: () => controller.abort(new Error('cancelled by user')),
+    }),
+    request: cancellationRequest,
+    ledger: cancellationLedger,
+  });
+  await expect(planResearchHypotheses(
+    cancellingProvider,
+    cancellationRequest.question,
+    RESEARCH_HYPOTHESIS_ASSETS,
+    { signal: cancellationRequest.signal },
+  )).resolves.toEqual([]);
+  expect(cancellationSends).toBe(1);
+  expect(cancellationLedger.snapshot().providerEgressReceipts).toHaveLength(1);
+  expect(cancellationTrace.spans).toHaveLength(1);
+  expect(providerAttempt(cancellationTrace.spans[0]!)).toMatchObject({
+    phase: 'planning', purpose: 'answer_generation', admission: 'admitted', cause: 'cancelled',
+  });
+  expect(cancellationTrace.spans[0]?.finish).toMatchObject({ outcome: 'cancelled', reasonCode: 'cancelled' });
+});
+
+it.each([
+  [429, 'rate_limited', '4xx', true, 'wait_and_retry'],
+  [502, 'gateway', '5xx', true, 'retry_same_provider'],
+] as const)('records one typed provider attempt for HTTP %i without a synthetic duplicate', (
+  status,
+  cause,
+  httpStatusClass,
+  retryable,
+  safeAction,
+) => {
+  const { observer, spans } = providerTraceRecorder();
+  const trace = createProviderDispatchTrace({
+    observer,
+    phase: 'narration',
+    purpose: 'research_narration',
+    admit: (event) => event.envelope,
+  });
+  const options = { ...trace.options, model: 'research-narrator-test' };
+  prepareProviderHttpDispatch({
+    provider: 'ollama', operation: 'generate', attemptIndex: 1,
+    envelope: dispatchEvent.envelope, options,
+  });
+  completeProviderHttpDispatch({
+    provider: 'ollama', operation: 'generate', attemptIndex: 1, options,
+  }, { outcome: 'error', settlement: 'transport', httpStatus: status });
+  // The provider's outer promise rejects after transport completion. Its
+  // settle call must observe the existing boundary, not append a second one.
+  trace.settle('error', Object.assign(new Error(`HTTP ${status}`), { code: `HTTP_${status}` }));
+
+  expect(spans).toHaveLength(1);
+  expect(providerAttempt(spans[0]!)).toMatchObject({
+    phase: 'narration', purpose: 'research_narration', admission: 'admitted',
+    cause, httpStatusClass, retryable, safeAction,
+  });
+  expect(spans[0]?.finish).toMatchObject({ outcome: 'error', reasonCode: 'provider_failure' });
+});
+
+it('records a denied Research row-egress admission without a receipt or admitted trace attempt', () => {
+  const run = new RunScopedProviderDispatchEvidence(
+    { total: 4, meaningResolution: 1, generationGroup: 2, narration: 1, repair: 0 },
+    undefined,
+    RESEARCH_ROW_EGRESS_POLICY,
+  );
+  const { observer, spans } = providerTraceRecorder();
+  const trace = createProviderDispatchTrace({
+    observer,
+    phase: 'narration',
+    purpose: 'research_narration',
+    admit: (event) => run.observe(event, {
+      purpose: 'research_narration',
+      dispatchPhase: 'narration',
+      // The transport asks to serialize a result row but no one-run consent
+      // was supplied. This must stop before any HTTP body can be admitted.
+      optIn: false,
+      serializedResultShape: { resultRowCount: 1, columnCount: 1 },
+      cumulativeResultRowCount: 1,
+    }),
+  });
+  const options = { ...trace.options, model: 'research-narrator-test' };
+  expect(() => prepareProviderHttpDispatch({
+    provider: 'ollama', operation: 'generate', attemptIndex: 1,
+    envelope: dispatchEvent.envelope, options,
+  })).toThrow(expect.objectContaining({ code: 'PROVIDER_RESULT_ROWS_BLOCKED' }));
+  // The outer provider error must not fabricate a second unknown attempt.
+  trace.settle('error', Object.assign(new Error('result rows blocked'), { code: 'PROVIDER_RESULT_ROWS_BLOCKED' }));
+
+  expect(run.snapshot().providerEgressReceipts).toHaveLength(0);
+  expect(spans).toHaveLength(1);
+  expect(providerAttempt(spans[0]!)).toMatchObject({
+    phase: 'narration', purpose: 'research_narration', admission: 'denied',
+    cause: 'admission_denied', safeAction: 'inspect_run',
+  });
+  expect(spans[0]?.finish).toMatchObject({ outcome: 'denied', reasonCode: 'provider_failure' });
+});
+
+it('reserves one third ordinary Ask send for a single frozen-plan provider repair', () => {
+  const run = new RunScopedProviderDispatchEvidence(agentRunProviderDispatchBudgetForMode('ask'));
 
   expect(() => run.observe(dispatchEvent, {
     purpose: 'answer_generation', dispatchPhase: 'meaning_resolution', optIn: false,
@@ -118,29 +486,98 @@ it('shares one ledger across ordinary meaning and generation phases', () => {
   expect(() => run.observe(dispatchEvent, {
     purpose: 'answer_generation', dispatchPhase: 'generation', optIn: false,
   })).not.toThrow();
+  // A repair is a separately typed, same-plan capability. The answer loop only
+  // mints this phase after its frozen exploratory authority check; the ledger
+  // makes room for it without allowing a second generation/replan.
   expect(() => run.observe({ ...dispatchEvent, attemptIndex: 2 }, {
+    purpose: 'repair_sql', dispatchPhase: 'repair', optIn: false,
+  })).not.toThrow();
+  expect(() => run.observe({ ...dispatchEvent, attemptIndex: 3 }, {
+    purpose: 'repair_sql', dispatchPhase: 'repair', optIn: false,
+  })).toThrow(expect.objectContaining({ code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' }));
+  expect(() => run.observe({ ...dispatchEvent, attemptIndex: 4 }, {
     purpose: 'answer_generation', dispatchPhase: 'generation', optIn: false,
   })).toThrow(expect.objectContaining({ code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' }));
-  expect(run.snapshot().providerEgressReceipts).toHaveLength(2);
+  expect(run.snapshot().providerEgressReceipts).toHaveLength(3);
+  expect(run.snapshot().providerEgressReceipts.map((receipt) => receipt.dispatchPhase)).toEqual([
+    'meaning_resolution',
+    'generation',
+    'repair',
+  ]);
 });
 
-it('retains the separate twelve-send Research ledger', () => {
-  const run = new RunScopedProviderDispatchEvidence({
-    total: 12, meaningResolution: 1, generationGroup: 11, narration: 2, repair: 0,
+it('admits one parent-bound transient retry without turning it into a second generation budget', () => {
+  const run = new RunScopedProviderDispatchEvidence(agentRunProviderDispatchBudgetForMode('ask'));
+  const first = { ...dispatchEvent, attemptIndex: 1 };
+  const retry = { ...dispatchEvent, attemptIndex: 2 };
+
+  run.observe(first, {
+    purpose: 'answer_generation', dispatchPhase: 'generation', optIn: false,
   });
+  // The retry retains phase/purpose/provider identity and consumes the total
+  // budget, but is not rejected merely because the normal generation group is
+  // one physical send.
+  run.observe(retry, {
+    purpose: 'answer_generation', dispatchPhase: 'generation', optIn: false,
+    retryOfAttemptIndex: 1,
+  });
+  expect(run.snapshot().providerEgressReceipts).toEqual([
+    expect.objectContaining({ attemptIndex: 1, dispatchPhase: 'generation' }),
+    expect.objectContaining({ attemptIndex: 2, dispatchPhase: 'generation', retryOfAttemptIndex: 1 }),
+  ]);
+  // No retry chaining, cross-phase borrowing, or repair retry is admitted.
+  expect(() => run.observe({ ...dispatchEvent, attemptIndex: 3 }, {
+    purpose: 'answer_generation', dispatchPhase: 'generation', optIn: false,
+    retryOfAttemptIndex: 2,
+  })).toThrow(expect.objectContaining({ code: 'PROVIDER_DISPATCH_RETRY_NOT_ALLOWED' }));
+  expect(() => run.observe({ ...dispatchEvent, attemptIndex: 3 }, {
+    purpose: 'repair_sql', dispatchPhase: 'repair', optIn: false,
+    retryOfAttemptIndex: 1,
+  })).toThrow(expect.objectContaining({ code: 'PROVIDER_DISPATCH_RETRY_NOT_ALLOWED' }));
+});
+
+it('keeps legacy category classification distinct from candidate-ID meaning resolution', () => {
+  const run = new RunScopedProviderDispatchEvidence(agentRunProviderDispatchBudgetForMode('ask'));
+
+  run.observe(dispatchEvent, {
+    purpose: 'classification', dispatchPhase: 'classification', optIn: false,
+  });
+  expect(run.snapshot().providerEgressReceipts).toEqual([
+    expect.objectContaining({ purpose: 'classification', dispatchPhase: 'classification', resultRowCount: 0 }),
+  ]);
+  // A category-only prompt has no qualified candidate binding. It must never
+  // be followed by (or presented as) a candidate-ID meaning resolution.
+  expect(() => run.observe({ ...dispatchEvent, attemptIndex: 2 }, {
+    purpose: 'answer_generation', dispatchPhase: 'meaning_resolution', optIn: false,
+  })).toThrow(expect.objectContaining({ code: 'PROVIDER_INTERPRETATION_PHASE_CONFLICT' }));
+  expect(run.snapshot().providerEgressReceipts).toHaveLength(1);
+});
+
+it('caps explicit Research at twelve physical sends with no thirteenth receipt', () => {
+  const run = new RunScopedProviderDispatchEvidence(agentRunProviderDispatchBudgetForMode('research'));
   run.observe(dispatchEvent, {
     purpose: 'answer_generation', dispatchPhase: 'meaning_resolution', optIn: false,
   });
-  for (let attemptIndex = 1; attemptIndex <= 11; attemptIndex += 1) {
+  run.observe({ ...dispatchEvent, attemptIndex: 1 }, {
+    purpose: 'answer_generation', dispatchPhase: 'planning', optIn: false,
+  });
+  for (let attemptIndex = 1; attemptIndex <= 8; attemptIndex += 1) {
     run.observe({ ...dispatchEvent, attemptIndex }, {
-      purpose: 'research_narration', dispatchPhase: 'generation', optIn: false,
+      purpose: 'answer_generation', dispatchPhase: 'generation', optIn: false,
     });
   }
+  run.observe({ ...dispatchEvent, attemptIndex: 10 }, {
+    purpose: 'research_narration', dispatchPhase: 'narration', optIn: false,
+  });
+  run.observe({ ...dispatchEvent, attemptIndex: 11 }, {
+    purpose: 'repair_sql', dispatchPhase: 'repair', optIn: false,
+  });
 
   expect(run.snapshot().providerEgressReceipts).toHaveLength(12);
   expect(() => run.observe({ ...dispatchEvent, attemptIndex: 12 }, {
-    purpose: 'research_narration', dispatchPhase: 'generation', optIn: false,
+    purpose: 'answer_generation', dispatchPhase: 'generation', optIn: false,
   })).toThrow(expect.objectContaining({ code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' }));
+  expect(run.snapshot().providerEgressReceipts).toHaveLength(12);
 });
 
 it('accounts every physical dispatch once on the persisted AgentRun', async () => {
@@ -209,7 +646,7 @@ it('accounts every physical dispatch once on the persisted AgentRun', async () =
     const persisted = await persistedResponse.json() as { run: any };
 
     // An unmodeled project has no Resolved Analytical Plan to freeze, so the
-    // run fails closed after the route classification and never reaches
+    // run fails closed after the legacy category classification and never reaches
     // generation. That is the RAP contract, not a missing dispatch: the point
     // here is that the ONE dispatch that did happen is fully accounted for.
     expect(persisted.run.status).toBe('blocked');
@@ -218,7 +655,10 @@ it('accounts every physical dispatch once on the persisted AgentRun', async () =
     expect(persisted.run.telemetry.providerRoundTrips).toBe(providerBodies.length);
     expect(persisted.run.providerEgressReceipts).toHaveLength(providerBodies.length);
     expect(persisted.run.providerEgressReceipts.map((receipt: any) => receipt.dispatchPhase)).toEqual([
-      'meaning_resolution',
+      'classification',
+    ]);
+    expect(persisted.run.providerEgressReceipts.map((receipt: any) => receipt.purpose)).toEqual([
+      'classification',
     ]);
     expect(persisted.run.providerEgressReceipts.map((receipt: any) => receipt.payloadFingerprint)).toEqual(
       providerBodies.map(providerPayloadFingerprint),
@@ -290,12 +730,15 @@ it('types a governed refusal as DQL governance, not provider unavailability', as
     expect(response.status).toBe(201);
     const { run } = await response.json() as { run: any };
     // An unmodeled project fails closed on the RAP boundary after the single
-    // route classification, so a second (let alone third) send never happens.
+    // legacy category classification, so a second (let alone third) send never happens.
     // The property worth pinning is the ATTRIBUTION: DQL refusing on its own
     // governance must never be dressed up as the user's AI provider failing,
     // which sends them to re-authenticate a provider that worked fine.
     expect(providerBodies).toHaveLength(1);
     expect(run.telemetry.providerRoundTrips).toBe(1);
+    expect(run.providerEgressReceipts).toEqual([
+      expect.objectContaining({ purpose: 'classification', dispatchPhase: 'classification' }),
+    ]);
     expect(run).toMatchObject({ route: 'blocked', status: 'blocked' });
     expect(JSON.stringify(run)).not.toContain('AI_PROVIDER_FAILURE');
     expect(JSON.stringify(run)).not.toMatch(/provider setup|provider unavailable|subscription failed/i);
@@ -305,7 +748,7 @@ it('types a governed refusal as DQL governance, not provider unavailability', as
   }
 }, 30_000);
 
-it('spends only one physical meaning attempt when OpenAI requests a compatibility retry', async () => {
+it('types a failed legacy category classifier without claiming semantic binding', async () => {
   const projectRoot = mkdtempSync(join(tmpdir(), 'dql-meaning-budget-'));
   writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
   saveProviderSettings(projectRoot, {
@@ -345,12 +788,49 @@ it('spends only one physical meaning attempt when OpenAI requests a compatibilit
     });
     expect(response.status).toBe(201);
     const { run } = await response.json() as { run: any };
-    const meaningBodies = providerBodies.filter((body) => JSON.stringify(body).includes('Pick ONE category'));
+    const classificationBodies = providerBodies.filter((body) => JSON.stringify(body).includes('Pick ONE category'));
     const phases = run.providerEgressReceipts.map((receipt: any) => receipt.dispatchPhase);
 
-    expect(meaningBodies).toHaveLength(1);
+    expect(classificationBodies).toHaveLength(1);
     expect(providerBodies).toHaveLength(1);
-    expect(phases.filter((phase: string) => phase === 'meaning_resolution')).toHaveLength(1);
+    expect(phases.filter((phase: string) => phase === 'classification')).toHaveLength(1);
+    expect(phases.filter((phase: string) => phase === 'meaning_resolution')).toHaveLength(0);
+    expect(run.providerEgressReceipts).toEqual([
+      expect.objectContaining({ purpose: 'classification', dispatchPhase: 'classification' }),
+    ]);
+    const traceId = run.traceReference?.traceId;
+    expect(traceId).toMatch(/^[a-f0-9]{32}$/);
+    let trace: any;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const traceResponse = await nativeFetch(`http://127.0.0.1:${port}/api/ask-traces/${traceId}`);
+      if (traceResponse.status === 200) {
+        trace = await traceResponse.json();
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const attempts = (trace?.spans ?? []).filter((span: any) => span.name === 'provider.attempt');
+    const admitted = attempts.filter((span: any) => span.payload?.attempt?.admission === 'admitted');
+    const denied = attempts.filter((span: any) => span.payload?.attempt?.admission === 'denied');
+    // The first transport was physical and receipt-backed. OpenAI then asks
+    // for a parameter-compatibility retry, which the one-call category budget
+    // rejects before a second body can leave the host. Both are visible, but
+    // only the admitted physical attempt is a receipt/round trip.
+    expect(admitted).toHaveLength(1);
+    expect(admitted[0]?.payload?.attempt).toMatchObject({
+      phase: 'classification', purpose: 'classification', admission: 'admitted',
+    });
+    expect(admitted[0]).toMatchObject({ outcome: 'error', reasonCode: 'provider_failure' });
+    expect(denied).toEqual([
+      expect.objectContaining({
+        outcome: 'denied',
+        payload: expect.objectContaining({
+          attempt: expect.objectContaining({
+            phase: 'classification', purpose: 'classification', cause: 'dispatch_budget',
+          }),
+        }),
+      }),
+    ]);
     expect(phases.filter((phase: string) => ['planning', 'generation', 'narration'].includes(phase)).length)
       .toBeLessThanOrEqual(2);
     expect(providerBodies.length).toBeLessThanOrEqual(3);
@@ -461,6 +941,6 @@ it('stops before starting a dispatch the deadline cannot fit', () => {
 
   // Narration is exempt — it is the step that turns gathered work into an answer.
   expect(() => run.observe({ ...dispatchEvent, attemptIndex: 4 }, {
-    purpose: 'answer_narration', dispatchPhase: 'narration', optIn: false,
+    purpose: 'research_narration', dispatchPhase: 'narration', optIn: false,
   })).not.toThrow();
 });

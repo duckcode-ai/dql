@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -13,6 +13,10 @@ import type { KGNode } from './kg/types.js';
 import { buildLocalContextPack, openMetadataCatalog } from './metadata/catalog.js';
 import { expandGroundingFromCatalog } from './grounding/regrounding.js';
 import type { AgentMessage, AgentProvider } from './providers/types.js';
+import type { ResolvedAnalyticalPlan } from './resolved-analytical-plan.js';
+import { createHybridRouter } from './router.js';
+import { SemanticLayer, type MetricCapabilityContract } from '@duckcodeailabs/dql-core';
+import type { AgentEvidenceCandidate } from './meaning-resolution.js';
 
 class ThrowingProvider implements AgentProvider {
   readonly name = 'openai' as const;
@@ -671,6 +675,1061 @@ describe('Ask AI jaffle-shop regression', () => {
     }
   });
 
+  it('AGT-034 freezes and executes the exact individual order-item question once as review-required exploration', async () => {
+    const kg = new KGStore(defaultKgPath(projectRoot));
+    try {
+      const provider = new ThrowingProvider();
+      const question = 'Show the five most expensive individual order items with order ID, product ID, and product price.';
+      const contextPack = await buildLocalContextPack(projectRoot, { question, limit: 40 });
+      const orderItemsObject = contextPack.objects.find((object) =>
+        object.objectKey === 'dbt:model:order_items'
+        || object.fullName === 'order_items'
+        || object.payload?.relation === 'order_items');
+      const orderItemsRelation = contextPack.allowedSqlContext.relations.find((relation) =>
+        relation.relation === 'order_items');
+
+      // This is the exact router-owned physical closure used by the
+      // exploratory authorizer. The test intentionally does not make the
+      // neighbouring customer/order models executable just because they were
+      // retrieved in the same Jaffle snapshot.
+      expect(orderItemsObject).toBeDefined();
+      expect(orderItemsRelation).toBeDefined();
+      const exploratoryCandidateIds = [orderItemsObject!.objectKey];
+      orderItemsRelation!.objectKey = orderItemsObject!.objectKey;
+      const sql = [
+        'SELECT order_items.order_id AS order_id, order_items.product_id AS product_id, order_items.product_price AS product_price',
+        'FROM order_items',
+        'ORDER BY product_price DESC',
+        'LIMIT 5',
+      ].join('\n');
+      const capability = {
+        version: 1 as const,
+        runId: 'fixture-order-item-exploratory',
+        executionId: 'fixture-order-item-exploratory:initial',
+        snapshotId: contextPack.freshness.fingerprint,
+        planId: 'rap:fixture-order-item-exploratory',
+        targetFingerprint: 'target:fixture-order-items',
+        bindingsFingerprint: 'bindings:fixture-order-items',
+        candidateSqlFingerprint: 'fixture-order-items-sql',
+        provenIdentifiers: [
+          'order_items',
+          'order_items.order_id',
+          'order_items.product_id',
+          'order_items.product_price',
+        ],
+        evidence: {
+          order_items: 'schema_tool' as const,
+          'order_items.order_id': 'schema_tool' as const,
+          'order_items.product_id': 'schema_tool' as const,
+          'order_items.product_price': 'schema_tool' as const,
+        },
+        exploratoryAuthorizationAttempt: { version: 1 as const, index: 0 as const },
+      };
+      const freeze = {
+        version: 1 as const,
+        selectedTier: 'exploratory_sql' as const,
+        planId: capability.planId,
+        planFingerprint: 'f'.repeat(64),
+        snapshotId: capability.snapshotId,
+        targetFingerprint: capability.targetFingerprint,
+        sqlFingerprint: 'a'.repeat(32),
+        candidateIds: exploratoryCandidateIds,
+        authorization: 'capability_minted' as const,
+        requiredOutputBindings: [
+          { version: 1 as const, outputName: 'order_id', qualifiedId: 'dbt:column:order_items.order_id', relation: 'order_items', column: 'order_id' },
+          { version: 1 as const, outputName: 'product_id', qualifiedId: 'dbt:column:order_items.product_id', relation: 'order_items', column: 'product_id' },
+          { version: 1 as const, outputName: 'product_price', qualifiedId: 'dbt:column:order_items.product_price', relation: 'order_items', column: 'product_price' },
+        ],
+        authorizationAttempt: { version: 1 as const, index: 0 as const },
+      };
+      // The route freezes explicit outputs as projection bindings, rather than
+      // turning `order ID` / `product ID` into grouping dimensions.  The
+      // answer loop uses this exact host-owned contract after execution too,
+      // so an adapter cannot return a closest partial table.
+      const frozenOutputPlan = {
+        schemaVersion: 1,
+        mode: 'authoritative',
+        planId: capability.planId,
+        fingerprint: freeze.planFingerprint,
+        snapshotId: capability.snapshotId,
+        question,
+        interpretedQuestion: question,
+        questionType: 'ranking',
+        confidence: 'high',
+        selectedConceptIds: exploratoryCandidateIds,
+        recommendedRoute: 'exploratory',
+        capability: 'bounded_exploration',
+        query: {
+          measures: [{ requested: 'product price', qualifiedId: 'dbt:column:order_items.product_price', status: 'resolved', candidateIds: ['dbt:column:order_items.product_price'] }],
+          dimensions: [],
+          filters: [],
+          order: 'desc',
+          limit: 5,
+        },
+        // The frozen plan carries its physical SQL closure separately from
+        // its selected evidence IDs. A dbt-model evidence ID is not itself a
+        // relation proof for output projection authorization.
+        sourceRelationIds: ['order_items'],
+        relationshipPathIds: [],
+        compatibilityProof: [],
+        outputContract: {
+          measures: ['product_price'],
+          dimensions: [],
+          requiredOutputs: [
+            { requested: 'order id', qualifiedId: 'dbt:column:order_items.order_id', outputName: 'order_id', status: 'resolved', candidateIds: ['dbt:column:order_items.order_id'] },
+            { requested: 'product id', qualifiedId: 'dbt:column:order_items.product_id', outputName: 'product_id', status: 'resolved', candidateIds: ['dbt:column:order_items.product_id'] },
+            { requested: 'product price', qualifiedId: 'dbt:column:order_items.product_price', outputName: 'product_price', status: 'resolved', candidateIds: ['dbt:column:order_items.product_price'] },
+          ],
+        },
+        evidenceIds: exploratoryCandidateIds,
+        rejectedCandidates: [],
+        missingInformation: [],
+      } as ResolvedAnalyticalPlan;
+      let prepareCalls = 0;
+      let executionCalls = 0;
+      const result = await answerBase({
+        question,
+        kg,
+        provider,
+        contextPack,
+        selectedCascadeTier: 'exploratory_sql',
+        exploratoryCandidateIds,
+        resolvedAnalyticalPlan: frozenOutputPlan,
+        forcedGeneratedProposal: { sql, summary: 'The five most expensive individual order items.' },
+        prepareExploratorySqlExecution: async (preparedSql) => {
+          prepareCalls += 1;
+          expect(preparedSql).toBe(sql);
+          return { capability, freeze };
+        },
+        executeAgenticGeneratedSql: async (receivedCapability, preparedSql) => {
+          executionCalls += 1;
+          expect(receivedCapability).toBe(capability);
+          return executeSql(preparedSql);
+        },
+      });
+
+      expect(provider.calls).toHaveLength(0);
+      expect(prepareCalls).toBe(1);
+      expect(executionCalls).toBe(1);
+      expect(result).toMatchObject({
+        kind: 'uncertified',
+        certification: 'ai_generated',
+        reviewStatus: 'draft_ready',
+        exploratoryExecutionFreeze: freeze,
+      });
+      expect(result.proposedSql).toBe(sql);
+      expect(result.result).toMatchObject({
+        columns: ['order_id', 'product_id', 'product_price'],
+        rowCount: 5,
+      });
+      expect((result.result?.rows as Array<Record<string, unknown>>).map((row) => row.product_price)).toEqual([
+        13.5, 12, 12, 12, 12,
+      ]);
+
+      // An output alias cannot borrow a sibling column.  The plan selected the
+      // exact order-id binding, so `product_id AS order_id` must be denied
+      // before a host authorization or warehouse execution is attempted.
+      let spoofedAuthorizations = 0;
+      let spoofedExecutions = 0;
+      const spoofedOutputResult = await answerBase({
+        question,
+        kg,
+        provider,
+        contextPack,
+        selectedCascadeTier: 'exploratory_sql',
+        exploratoryCandidateIds,
+        resolvedAnalyticalPlan: frozenOutputPlan,
+        forcedGeneratedProposal: {
+          sql: [
+            'SELECT order_items.product_id AS order_id, order_items.product_id AS product_id, order_items.product_price AS product_price',
+            'FROM order_items',
+            'ORDER BY product_price DESC',
+            'LIMIT 5',
+          ].join('\n'),
+          summary: 'Spoofed output alias.',
+        },
+        prepareExploratorySqlExecution: async () => {
+          spoofedAuthorizations += 1;
+          return { capability, freeze };
+        },
+        executeAgenticGeneratedSql: async () => {
+          spoofedExecutions += 1;
+          return executeSql(sql);
+        },
+      });
+      expect(spoofedAuthorizations).toBe(0);
+      expect(spoofedExecutions).toBe(0);
+      expect(spoofedOutputResult).toMatchObject({
+        kind: 'no_answer',
+        certification: 'analyst_review_required',
+        reviewStatus: 'none',
+      });
+      expect(spoofedOutputResult.text).toContain('order_id');
+
+      // Result column names alone are insufficient.  A server-owned receipt
+      // must retain the exact parser proof generated at authorization time.
+      const unprovenFreeze = { ...freeze, requiredOutputBindings: [] };
+      const unprovenResult = await answerBase({
+        question,
+        kg,
+        provider,
+        contextPack,
+        selectedCascadeTier: 'exploratory_sql',
+        exploratoryCandidateIds,
+        resolvedAnalyticalPlan: frozenOutputPlan,
+        forcedGeneratedProposal: { sql, summary: 'Unproven output receipt.' },
+        prepareExploratorySqlExecution: async () => ({ capability, freeze: unprovenFreeze }),
+        executeAgenticGeneratedSql: async () => executeSql(sql),
+      });
+      expect(unprovenResult).toMatchObject({
+        kind: 'no_answer',
+        certification: 'analyst_review_required',
+        reviewStatus: 'none',
+        result: undefined,
+      });
+      expect(unprovenResult.text).toContain('order_id');
+
+      const missingOutputResult = await answerBase({
+        question,
+        kg,
+        provider,
+        contextPack,
+        selectedCascadeTier: 'exploratory_sql',
+        exploratoryCandidateIds,
+        resolvedAnalyticalPlan: frozenOutputPlan,
+        forcedGeneratedProposal: { sql, summary: 'The five most expensive individual order items.' },
+        prepareExploratorySqlExecution: async () => ({ capability, freeze }),
+        executeAgenticGeneratedSql: async () => ({
+          columns: ['product_id', 'product_price'],
+          rows: [{ product_id: 'JF001', product_price: 13.5 }],
+          rowCount: 1,
+        }),
+      });
+
+      // Q3 negative: explicit identifiers are not optional enrichment.  A
+      // returned result missing `order_id` must not become a visible
+      // review-required table or a reusable SQL/draft artifact.
+      expect(missingOutputResult).toMatchObject({
+        kind: 'no_answer',
+        certification: 'analyst_review_required',
+        reviewStatus: 'none',
+        result: undefined,
+      });
+      expect(missingOutputResult.proposedSql).toBeUndefined();
+      expect(missingOutputResult.text).toContain('order_id');
+      expect(missingOutputResult.validationWarnings).toEqual(expect.arrayContaining([
+        expect.stringContaining('frozen output contract: order_id'),
+      ]));
+    } finally {
+      kg.close();
+    }
+  });
+
+  it('AGT-031 permits one same-plan repair for the Jaffle order-item exploration and denies a second repair', async () => {
+    const kg = new KGStore(defaultKgPath(projectRoot));
+    try {
+      const provider = new ThrowingProvider();
+      const question = 'Show the five most expensive individual order items with order ID, product ID, and product price.';
+      const contextPack = await buildLocalContextPack(projectRoot, { question, limit: 40 });
+      const orderItemsObject = contextPack.objects.find((object) =>
+        object.objectKey === 'dbt:model:order_items'
+        || object.fullName === 'order_items'
+        || object.payload?.relation === 'order_items');
+      const orderItemsRelation = contextPack.allowedSqlContext.relations.find((relation) =>
+        relation.relation === 'order_items');
+      expect(orderItemsObject).toBeDefined();
+      expect(orderItemsRelation).toBeDefined();
+      const exploratoryCandidateIds = [orderItemsObject!.objectKey];
+      orderItemsRelation!.objectKey = orderItemsObject!.objectKey;
+      const initialSql = [
+        'SELECT order_id, product_id, product_price',
+        'FROM order_items AS oi',
+        'ORDER BY product_price DESC',
+        'LIMIT 5',
+      ].join('\n');
+      const initialCapability = {
+        version: 1 as const,
+        runId: 'fixture-order-item-repair',
+        executionId: 'fixture-order-item-repair:initial',
+        snapshotId: contextPack.freshness.fingerprint,
+        planId: 'rap:fixture-order-item-repair',
+        targetFingerprint: 'target:fixture-order-item-repair',
+        bindingsFingerprint: 'bindings:fixture-order-item-repair',
+        candidateSqlFingerprint: 'a'.repeat(32),
+        provenIdentifiers: [
+          'order_items',
+          'order_items.order_id',
+          'order_items.product_id',
+          'order_items.product_price',
+        ],
+        evidence: {
+          order_items: 'schema_tool' as const,
+          'order_items.order_id': 'schema_tool' as const,
+          'order_items.product_id': 'schema_tool' as const,
+          'order_items.product_price': 'schema_tool' as const,
+        },
+        exploratoryAuthorizationAttempt: { version: 1 as const, index: 0 as const },
+      };
+      const repairCapability = {
+        ...initialCapability,
+        executionId: 'fixture-order-item-repair:repair-1',
+        candidateSqlFingerprint: 'b'.repeat(32),
+        exploratoryAuthorizationAttempt: {
+          version: 1 as const,
+          index: 1 as const,
+          parentSqlFingerprint: 'a'.repeat(32),
+        },
+      };
+      const initialFreeze = {
+        version: 1 as const,
+        selectedTier: 'exploratory_sql' as const,
+        planId: initialCapability.planId,
+        planFingerprint: 'f'.repeat(64),
+        snapshotId: initialCapability.snapshotId,
+        targetFingerprint: initialCapability.targetFingerprint,
+        sqlFingerprint: 'a'.repeat(32),
+        candidateIds: exploratoryCandidateIds,
+        authorization: 'capability_minted' as const,
+        authorizationAttempt: { version: 1 as const, index: 0 as const },
+      };
+      const repairFreeze = {
+        ...initialFreeze,
+        sqlFingerprint: 'b'.repeat(32),
+        authorizationAttempt: {
+          version: 1 as const,
+          index: 1 as const,
+          parentSqlFingerprint: initialFreeze.sqlFingerprint,
+        },
+      };
+      const preparationAttempts: Array<{ index: 0 | 1; parentSqlFingerprint?: string }> = [];
+      let executionCalls = 0;
+      const result = await answerBase({
+        question,
+        kg,
+        provider,
+        contextPack,
+        selectedCascadeTier: 'exploratory_sql',
+        exploratoryCandidateIds,
+        forcedGeneratedProposal: { sql: initialSql },
+        prepareExploratorySqlExecution: async (_sql, _artifact, attempt) => {
+          preparationAttempts.push(attempt ?? { index: 0 });
+          return attempt
+            ? { capability: repairCapability, freeze: repairFreeze }
+            : { capability: initialCapability, freeze: initialFreeze };
+        },
+        executeAgenticGeneratedSql: async (_capability, sql) => {
+          executionCalls += 1;
+          if (executionCalls === 1) {
+            throw new Error('Binder Error: ambiguous column name order_id');
+          }
+          return executeSql(sql);
+        },
+      });
+
+      expect(provider.calls).toHaveLength(0);
+      expect(preparationAttempts).toEqual([
+        { index: 0 },
+        { version: 1, index: 1, parentSqlFingerprint: initialFreeze.sqlFingerprint },
+      ]);
+      expect(executionCalls).toBe(2);
+      expect(result.proposedSql).toContain('oi.order_id');
+      expect(result).toMatchObject({
+        certification: 'ai_generated',
+        reviewStatus: 'draft_ready',
+        exploratoryExecutionFreeze: initialFreeze,
+        exploratoryRepairExecutionFreeze: repairFreeze,
+      });
+      expect(result.result?.rowCount).toBe(5);
+
+      // A second retryable warehouse failure must not mint another capability,
+      // replan, or fall back to an ambient generated-SQL executor.
+      const deniedPrepares: Array<{ index: 0 | 1; parentSqlFingerprint?: string }> = [];
+      let deniedExecutions = 0;
+      const denied = await answerBase({
+        question,
+        kg,
+        provider,
+        contextPack,
+        selectedCascadeTier: 'exploratory_sql',
+        exploratoryCandidateIds,
+        forcedGeneratedProposal: { sql: initialSql },
+        prepareExploratorySqlExecution: async (_sql, _artifact, attempt) => {
+          deniedPrepares.push(attempt ?? { index: 0 });
+          return attempt
+            ? { capability: repairCapability, freeze: repairFreeze }
+            : { capability: initialCapability, freeze: initialFreeze };
+        },
+        executeAgenticGeneratedSql: async () => {
+          deniedExecutions += 1;
+          throw new Error('Binder Error: ambiguous column name order_id');
+        },
+      });
+
+      expect(deniedPrepares).toEqual([
+        { index: 0 },
+        { version: 1, index: 1, parentSqlFingerprint: initialFreeze.sqlFingerprint },
+      ]);
+      expect(deniedExecutions).toBe(2);
+      // The failed draft remains visibly review-required for diagnosis, but
+      // the bounded repair contract stopped at the one authorized retry.
+      expect(denied).toMatchObject({
+        kind: 'uncertified',
+        certification: 'ai_generated',
+        reviewStatus: 'analyst_review_required',
+      });
+      expect(denied.analysisPlan?.repairAttempts).toBe(1);
+      expect(denied.exploratoryExecutionFreeze).toEqual(initialFreeze);
+      expect(denied.exploratoryRepairExecutionFreeze).toEqual(repairFreeze);
+    } finally {
+      kg.close();
+    }
+  });
+
+  it('AGT-017 freezes a complete two-metric month tuple, composes it through the pinned adapter, and executes it once', async () => {
+    const kg = new KGStore(defaultKgPath(projectRoot));
+    try {
+      const question = 'show revenue and refunds by month';
+      const revenueId = 'semantic:metric:order_items.revenue';
+      const refundsId = 'semantic:metric:order_items.refunds';
+      const orderedAtId = 'semantic:dimension:order_items.ordered_at';
+      const capabilityFor = (metricId: string): MetricCapabilityContract => ({
+        metricId,
+        semanticModelId: 'semantic:model:order_items',
+        measureIds: [metricId],
+        primaryEntityId: 'order_item',
+        defaultResultGrainId: 'order_item',
+        resultGrainIds: ['order_item'],
+        aggregation: 'sum',
+        additivity: { entities: 'additive', time: 'additive' },
+        dimensions: [],
+        timeDimensions: [{
+          dimensionId: orderedAtId,
+          role: 'event_time',
+          supportedGrains: ['day', 'month'],
+        }],
+        operations: ['group'],
+        supportedOutputKinds: ['dimension', 'metric_value'],
+        executionCapabilities: [{ route: 'semantic', adapterId: 'metricflow-fixture' }],
+        sourceFingerprint: 'fixture:order-items-multi-metric',
+      });
+      const revenueCapability = capabilityFor(revenueId);
+      const refundsCapability = capabilityFor(refundsId);
+      const candidates: AgentEvidenceCandidate[] = [
+        {
+          id: revenueId,
+          qualifiedId: revenueId,
+          kind: 'semantic_metric',
+          trustTier: 'semantic',
+          name: 'Revenue',
+          aliases: ['revenue', 'sales'],
+          sourceObjects: ['order_items'],
+          relevanceScore: 1,
+          matchReasons: ['exact fixture metric'],
+          compatibility: 'compatible',
+          analyticalCapability: revenueCapability,
+        },
+        {
+          id: refundsId,
+          qualifiedId: refundsId,
+          kind: 'semantic_metric',
+          trustTier: 'semantic',
+          name: 'Refunds',
+          aliases: ['refunds'],
+          sourceObjects: ['order_items'],
+          relevanceScore: 0.99,
+          matchReasons: ['exact fixture metric'],
+          compatibility: 'compatible',
+          analyticalCapability: refundsCapability,
+        },
+        {
+          id: orderedAtId,
+          qualifiedId: orderedAtId,
+          kind: 'semantic_member',
+          semanticObjectType: 'dimension',
+          trustTier: 'semantic',
+          name: 'Ordered At',
+          aliases: ['month', 'ordered at'],
+          sourceObjects: ['order_items'],
+          relevanceScore: 0.98,
+          matchReasons: ['shared fixture time dimension'],
+          compatibility: 'compatible',
+        },
+      ];
+      const router = createHybridRouter({
+        requireMeaningCallForNaturalLanguage: false,
+        getEvidence: async () => ({
+          snapshotId: 'fixture:jaffle-multi-metric',
+          sourceFingerprint: 'fixture:jaffle-multi-metric',
+          parsedIntent: { measures: ['revenue', 'refunds'], dimensions: [], filters: [], timeGrain: 'month' },
+          candidates,
+        }),
+      });
+      const decision = await router.decide({ question });
+
+      expect(decision.analyticalCascadeDecision).toMatchObject({
+        selectedTier: 'semantic',
+        planFrozen: true,
+      });
+      expect(decision.resolvedAnalyticalPlan?.analyticalFrame?.version).toBe(2);
+      expect(decision.resolvedAnalyticalPlan?.query).toMatchObject({
+        measures: [
+          expect.objectContaining({ requested: 'revenue', qualifiedId: revenueId }),
+          expect.objectContaining({ requested: 'refunds', qualifiedId: refundsId }),
+        ],
+        timeGrain: 'month',
+      });
+
+      // The sanitized fixture already has the one-to-one order-item grain; add
+      // its separate refund measure only for this exact semantic lifecycle.
+      // This gives the safety proof two distinct, qualified aggregates rather
+      // than pretending the same physical amount is two different metrics.
+      db.exec('ALTER TABLE order_items ADD COLUMN refund_amount REAL NOT NULL DEFAULT 0');
+      db.exec("UPDATE order_items SET refund_amount = CASE WHEN product_type = 'beverage' THEN product_price * 0.1 ELSE 0 END");
+
+      const semanticLayer = new SemanticLayer({
+        metrics: [
+          {
+            name: 'revenue', label: 'Revenue', description: 'Fixture revenue.', domain: 'commerce',
+            sql: 'product_price', type: 'sum', table: 'order_items', cube: 'order_items', aggTimeDimension: 'ordered_at',
+          },
+          {
+            name: 'refunds', label: 'Refunds', description: 'Fixture refunds.', domain: 'commerce',
+            sql: 'refund_amount', type: 'sum', table: 'order_items', cube: 'order_items', aggTimeDimension: 'ordered_at',
+          },
+        ],
+        dimensions: [{
+          name: 'ordered_at', label: 'Ordered At', description: 'Fixture order time.', domain: 'commerce',
+          sql: 'ordered_at', type: 'date', table: 'order_items', cube: 'order_items', isTimeDimension: true,
+        }],
+      });
+      // Force the exact frozen member selection through the configured semantic
+      // adapter. The adapter gets no chance to rematch only the first metric.
+      vi.spyOn(semanticLayer, 'composeQuery').mockReturnValue(undefined);
+      appendFixtureKgNodes(kg, [
+        fixtureSemanticMetricNode(revenueId, 'revenue', revenueCapability, 'product_price'),
+        fixtureSemanticMetricNode(refundsId, 'refunds', refundsCapability, 'refund_amount'),
+        {
+          nodeId: 'dimension:order_items.ordered_at',
+          kind: 'dimension',
+          name: 'order_items.ordered_at',
+          domain: 'commerce',
+          payload: { registryQualifiedId: orderedAtId, qualifiedId: orderedAtId, localId: 'ordered_at' },
+        },
+      ]);
+      let compilerCalls = 0;
+      let executorCalls = 0;
+      const result = await answerBase({
+        question,
+        kg,
+        provider: new ThrowingProvider(),
+        semanticLayer,
+        resolvedAnalyticalPlan: decision.resolvedAnalyticalPlan,
+        selectedCascadeTier: 'semantic',
+        semanticQueryCompiler: async (selection) => {
+          compilerCalls += 1;
+          expect(selection).toMatchObject({
+            metrics: ['revenue', 'refunds'],
+            timeDimension: { name: 'ordered_at', granularity: 'month' },
+          });
+          return {
+            sql: [
+              "SELECT strftime('%Y-%m-01', ordered_at) AS ordered_at_month,",
+              '  SUM(product_price) AS revenue,',
+              '  SUM(refund_amount) AS refunds',
+              'FROM order_items',
+              'GROUP BY 1',
+              'ORDER BY 1',
+            ].join('\n'),
+            engine: 'metricflow-fixture' as const,
+            selection,
+            trace: {
+              version: 1 as const,
+              adapter: 'metricflow-fixture' as const,
+              status: 'compiled' as const,
+              authoringRequest: { metrics: selection.metrics, dimensions: selection.dimensions ?? [] },
+              bindings: [],
+              warnings: [],
+              steps: [],
+            },
+          };
+        },
+        executeGeneratedSql: async (sql) => {
+          executorCalls += 1;
+          return executeSql(sql);
+        },
+      });
+
+      expect(compilerCalls).toBe(1);
+      expect(executorCalls).toBe(1);
+      expect(result).toMatchObject({
+        sourceTier: 'semantic_layer',
+        certification: 'governed',
+        reviewStatus: 'governed',
+      });
+      expect(result.result?.columns).toEqual(['ordered_at_month', 'revenue', 'refunds']);
+      expect(result.result?.rowCount).toBeGreaterThan(0);
+    } finally {
+      kg.close();
+    }
+  });
+
+  it('AGT-017 keeps different-model/adaptor multi-metric evidence pre-freeze and never compiles just the first metric', async () => {
+    const question = 'show revenue and refunds by month';
+    const revenueId = 'semantic:metric:order_items.revenue';
+    const refundsId = 'semantic:metric:refunds.refunds';
+    const orderedAtId = 'semantic:dimension:order_items.ordered_at';
+    const capabilityFor = (metricId: string, semanticModelId: string, adapterId: string): MetricCapabilityContract => ({
+      metricId,
+      semanticModelId,
+      measureIds: [metricId],
+      primaryEntityId: 'order_item',
+      defaultResultGrainId: 'order_item',
+      resultGrainIds: ['order_item'],
+      aggregation: 'sum',
+      additivity: { entities: 'additive', time: 'additive' },
+      dimensions: [],
+      timeDimensions: [{ dimensionId: orderedAtId, role: 'event_time', supportedGrains: ['month'] }],
+      operations: ['group'],
+      supportedOutputKinds: ['dimension', 'metric_value'],
+      executionCapabilities: [{ route: 'semantic', adapterId }],
+      sourceFingerprint: `fixture:${semanticModelId}`,
+    });
+    const router = createHybridRouter({
+      requireMeaningCallForNaturalLanguage: false,
+      getEvidence: async () => ({
+        snapshotId: 'fixture:jaffle-incompatible-multi-metric',
+        sourceFingerprint: 'fixture:jaffle-incompatible-multi-metric',
+        parsedIntent: { measures: ['revenue', 'refunds'], dimensions: [], filters: [], timeGrain: 'month' },
+        candidates: [
+          {
+            id: revenueId, qualifiedId: revenueId, kind: 'semantic_metric', trustTier: 'semantic',
+            name: 'Revenue', aliases: ['revenue'], relevanceScore: 1, matchReasons: ['exact fixture metric'],
+            compatibility: 'compatible', analyticalCapability: capabilityFor(revenueId, 'semantic:model:order_items', 'metricflow-fixture'),
+          },
+          {
+            id: refundsId, qualifiedId: refundsId, kind: 'semantic_metric', trustTier: 'semantic',
+            name: 'Refunds', aliases: ['refunds'], relevanceScore: 0.99, matchReasons: ['exact fixture metric'],
+            compatibility: 'compatible', analyticalCapability: capabilityFor(refundsId, 'semantic:model:refunds', 'different-metricflow-fixture'),
+          },
+        ],
+      }),
+    });
+    const compiler = vi.fn();
+    const decision = await router.decide({ question });
+
+    expect(decision.analyticalCascadeDecision).toMatchObject({ planFrozen: false });
+    expect(decision.analyticalCascadeDecision?.attempts.find((attempt) => attempt.tier === 'semantic')).toMatchObject({
+      outcome: expect.stringMatching(/ineligible|unavailable/),
+      planFrozen: false,
+    });
+    expect(decision.resolvedAnalyticalPlan?.query).toMatchObject({
+      measures: [
+        expect.objectContaining({ requested: 'revenue', qualifiedId: revenueId }),
+        expect.objectContaining({ requested: 'refunds', qualifiedId: refundsId }),
+      ],
+      timeGrain: 'month',
+    });
+    // There is no router-frozen semantic plan to hand to the adapter. In
+    // particular, it cannot compile the first metric and erase `refunds`.
+    expect(compiler).not.toHaveBeenCalled();
+  });
+
+  it('AGT-034 routes the exact region wording through semantic compilation and one fixture executor call', async () => {
+    const kg = new KGStore(defaultKgPath(projectRoot));
+    try {
+      const question = 'Show revenue by sales based on the region';
+      // Match the packaged Jaffle semantic metadata shape from the built-CLI
+      // failure: a revenue metric at order-item grain and a location display
+      // key reachable only through the MetricFlow-native entity path.
+      const metricId = 'semantic:order_item:revenue';
+      const regionId = 'semantic:uncategorized:dimension:locations.location_name';
+      const capability: MetricCapabilityContract = {
+        metricId,
+        semanticModelId: 'semantic:uncategorized:model:order_item',
+        measureIds: ['semantic:uncategorized:measure:order_item.revenue'],
+        primaryEntityId: 'semantic:uncategorized:entity:order_item.order_item',
+        defaultResultGrainId: 'semantic:uncategorized:entity:order_item.order_item',
+        resultGrainIds: [
+          'semantic:uncategorized:entity:order_item.order_item',
+          'semantic:uncategorized:entity:locations.location',
+        ],
+        aggregation: 'sum',
+        additivity: { entities: 'additive', time: 'additive' },
+        dimensions: [{
+          dimensionId: regionId,
+          entityId: 'semantic:uncategorized:entity:locations.location',
+          label: 'Location Name',
+          aliases: ['region', 'location name'],
+          supportedRoles: ['group_by', 'display'],
+          nativeGroupingReference: 'order_id__location__location_name',
+          nativeGroupingPath: ['order_id', 'location'],
+          relationshipPathIds: [
+            'commerce::relationship::order_to_location',
+            'dql:relationship:commerce::relationship::order_to_location',
+            'order_to_location',
+          ],
+        }],
+        timeDimensions: [],
+        operations: ['group'],
+        supportedOutputKinds: ['dimension', 'metric_value'],
+        executionCapabilities: [{ route: 'semantic', adapterId: 'metricflow' }],
+        sourceFingerprint: 'fixture:jaffle-order-item-revenue-location',
+      };
+      const candidates: AgentEvidenceCandidate[] = [
+        {
+          id: metricId,
+          qualifiedId: metricId,
+          kind: 'semantic_metric',
+          trustTier: 'semantic',
+          name: 'Revenue',
+          aliases: ['revenue', 'sales'],
+          sourceObjects: ['order_items'],
+          relevanceScore: 1,
+          matchReasons: ['fixture metric'],
+          compatibility: 'compatible',
+          analyticalCapability: capability,
+        },
+        {
+          id: regionId,
+          qualifiedId: regionId,
+          kind: 'semantic_member',
+          semanticObjectType: 'dimension',
+          trustTier: 'semantic',
+          name: 'Location Name',
+          aliases: ['region'],
+          sourceObjects: ['order_items'],
+          relevanceScore: 0.99,
+          matchReasons: ['fixture dimension'],
+          compatibility: 'compatible',
+          compatibilityFacts: ['alternative-for:region'],
+        },
+      ];
+      const router = createHybridRouter({
+        requireMeaningCallForNaturalLanguage: false,
+        getEvidence: async () => ({
+          snapshotId: 'fixture:jaffle-region',
+          sourceFingerprint: 'fixture:jaffle-region',
+          parsedIntent: {
+            measures: ['sales based on the region'],
+            dimensions: ['sales based on the region'],
+            filters: [],
+          },
+          candidates,
+        }),
+      });
+      const decision = await router.decide({ question });
+      expect(decision.analyticalCascadeDecision).toMatchObject({
+        selectedTier: 'semantic',
+        planFrozen: true,
+      });
+      expect(decision.resolvedAnalyticalPlan?.query).toMatchObject({
+        measures: [expect.objectContaining({ requested: 'revenue', qualifiedId: metricId })],
+        dimensions: [expect.objectContaining({ requested: 'region', qualifiedId: regionId })],
+      });
+
+      // A real local relational execution confirms that the semantic compiler
+      // can issue the native path's physical join when the immutable proof
+      // authorizes it. These are test-local rows, not project/dbt fixture
+      // edits. The production DuckDB adapter remains covered at the CLI
+      // runtime boundary rather than claiming this SQLite harness is DuckDB.
+      db.exec(`
+        CREATE TABLE orders (order_id INTEGER PRIMARY KEY, location_id INTEGER NOT NULL);
+        CREATE TABLE locations (location_id INTEGER PRIMARY KEY, location_name TEXT NOT NULL);
+        INSERT INTO locations VALUES (1, 'North'), (2, 'South');
+        INSERT INTO orders
+          SELECT order_id, CASE WHEN order_id % 2 = 0 THEN 2 ELSE 1 END
+          FROM fct_orders;
+      `);
+      const semanticLayer = new SemanticLayer();
+      const cube = (name: string, table: string, joins: Array<{
+        name: string;
+        left: string;
+        right: string;
+        type: 'left';
+        sql: string;
+        entity?: string;
+      }> = []) => ({
+        name, label: name, description: '', sql: `SELECT * FROM ${table}`, table,
+        domain: 'commerce', measures: [], dimensions: [], timeDimensions: [], joins,
+        segments: [], preAggregations: [],
+      });
+      semanticLayer.addCube(cube('order_item', 'order_items', [{
+        name: 'orders', left: 'order_item', right: 'orders', type: 'left',
+        sql: '${left}.order_id = ${right}.order_id', entity: 'order_id',
+      }]));
+      semanticLayer.addCube(cube('orders', 'orders', [{
+        name: 'locations', left: 'orders', right: 'locations', type: 'left',
+        sql: '${left}.location_id = ${right}.location_id', entity: 'location',
+      }]));
+      semanticLayer.addCube(cube('locations', 'locations'));
+      semanticLayer.addMetric({
+        name: 'revenue', label: 'Revenue', description: 'Fixture revenue.', domain: 'commerce',
+        sql: 'product_price', type: 'sum', table: 'order_items', cube: 'order_item',
+      });
+      semanticLayer.addDimension({
+        name: 'location_name', label: 'Location Name', description: 'Fixture location.', domain: 'commerce',
+        sql: 'location_name', type: 'string', table: 'locations', cube: 'locations',
+        entityLink: 'location', qualifiedName: 'order_id__location__location_name',
+      });
+      // Model the configured MetricFlow path: member resolution remains local
+      // and pinned, while the semantic runtime—not the native compiler—owns
+      // SQL compilation for this complete semantic tuple.
+      vi.spyOn(semanticLayer, 'composeQuery').mockReturnValue(undefined);
+      // The execution adapter binds only identities from the pinned registry.
+      // Add the two fixture semantic nodes to the same local KG snapshot rather
+      // than letting the semantic compiler rematch the router's selections by
+      // display name.
+      const compactRegistryCapability: MetricCapabilityContract = {
+        ...capability,
+        dimensions: capability.dimensions.map(({ relationshipPathIds: _relationshipPathIds, ...dimension }) => dimension),
+      };
+      appendFixtureKgNodes(kg, [
+        {
+          nodeId: 'metric:order_items.revenue',
+          kind: 'metric',
+          name: 'order_items.revenue',
+          domain: 'commerce',
+          payload: {
+            registryQualifiedId: metricId,
+            qualifiedId: metricId,
+            localId: 'revenue',
+            // The local KG uses a compact projection. The execution proof must
+            // retain the RAP's full relationship authority instead.
+            analyticalCapability: compactRegistryCapability,
+          },
+        },
+        {
+          nodeId: 'dimension:locations.location_name',
+          kind: 'dimension',
+          name: 'locations.location_name',
+          domain: 'commerce',
+          payload: {
+            registryQualifiedId: regionId,
+            qualifiedId: regionId,
+            localId: 'location_name',
+          },
+        },
+      ]);
+      let compilerCalls = 0;
+      let executorCalls = 0;
+      const result = await answerBase({
+        question,
+        kg,
+        provider: new ThrowingProvider(),
+        semanticLayer,
+        resolvedAnalyticalPlan: decision.resolvedAnalyticalPlan,
+        selectedCascadeTier: 'semantic',
+        semanticQueryCompiler: async (selection) => {
+          compilerCalls += 1;
+          expect(selection.metrics).toEqual(expect.arrayContaining(['revenue']));
+          expect(selection.dimensions).toEqual(expect.arrayContaining(['order_id__location__location_name']));
+          return {
+            sql: [
+              'SELECT l.location_name AS location_name, SUM(oi.product_price) AS revenue',
+              'FROM order_items AS oi',
+              'JOIN orders AS o ON oi.order_id = o.order_id',
+              'JOIN locations AS l ON o.location_id = l.location_id',
+              'GROUP BY l.location_name',
+              'ORDER BY l.location_name',
+            ].join('\n'),
+            engine: 'metricflow-fixture' as const,
+            selection,
+            trace: {
+              version: 1 as const,
+              adapter: 'metricflow-fixture' as const,
+              status: 'compiled' as const,
+              authoringRequest: { metrics: selection.metrics, dimensions: selection.dimensions ?? [] },
+              bindings: [],
+              warnings: [],
+              steps: [],
+            },
+          };
+        },
+        executeGeneratedSql: async (sql) => {
+          executorCalls += 1;
+          return executeSql(sql);
+        },
+      });
+
+      expect(result).toMatchObject({
+        kind: 'uncertified',
+        sourceTier: 'semantic_layer',
+        certification: 'governed',
+        reviewStatus: 'governed',
+      });
+      expect(compilerCalls).toBe(1);
+      expect(executorCalls).toBe(1);
+      expect(result.result?.columns).toEqual(['location_name', 'revenue']);
+      expect(result.result?.rowCount).toBe(2);
+      expect(result.aggregationSafetyProof).toMatchObject({
+        status: 'safe',
+        fanout: 'proven_absent',
+        issueCodes: [],
+      });
+    } finally {
+      kg.close();
+    }
+  });
+
+  it('AGT-034 falls through the exact customer/category request from an ineligible semantic tuple to one authorized exploratory execution', async () => {
+    const kg = new KGStore(defaultKgPath(projectRoot));
+    try {
+      const question = 'who are the top customers who have revenue by product category?';
+      const source = 'runtime:relation:order_items';
+      const semanticUnavailable: AgentEvidenceCandidate = {
+        id: 'semantic:metric:orders.revenue',
+        qualifiedId: 'semantic:metric:orders.revenue',
+        kind: 'semantic_metric',
+        trustTier: 'semantic',
+        name: 'orders.revenue',
+        aliases: ['revenue', 'sales'],
+        relevanceScore: 1,
+        matchReasons: ['exact fixture measure'],
+        compatibility: 'incompatible',
+        compatibilityFacts: ['fixture: semantic model intentionally does not support customer plus product category'],
+      };
+      const physical: AgentEvidenceCandidate[] = [
+        {
+          id: 'dbt:model:order_items', qualifiedId: 'dbt:model:order_items', kind: 'dbt_model', trustTier: 'exploratory',
+          name: 'order_items', sourceObjects: [source], relevanceScore: 0.98,
+          matchReasons: ['single-relation fixture closure'], compatibility: 'compatible',
+        },
+        {
+          id: 'dbt:column:order_items.customer_name', qualifiedId: 'dbt:column:order_items.customer_name', kind: 'sql_column', trustTier: 'exploratory',
+          name: 'customer_name', aliases: ['customer', 'customer name'], sourceObjects: [source], relevanceScore: 0.97,
+          matchReasons: ['customer display key'], compatibility: 'compatible',
+        },
+        {
+          id: 'dbt:column:order_items.product_type', qualifiedId: 'dbt:column:order_items.product_type', kind: 'sql_column', trustTier: 'exploratory',
+          name: 'product_type', aliases: ['product category', 'category'], sourceObjects: [source], relevanceScore: 0.96,
+          matchReasons: ['product category'], compatibility: 'compatible',
+        },
+        {
+          id: 'dbt:column:order_items.product_price', qualifiedId: 'dbt:column:order_items.product_price', kind: 'sql_column', trustTier: 'exploratory',
+          name: 'product_price', aliases: ['product price', 'revenue', 'sales'], sourceObjects: [source], relevanceScore: 0.95,
+          matchReasons: ['revenue amount'], compatibility: 'compatible',
+        },
+      ];
+      const router = createHybridRouter({
+        requireMeaningCallForNaturalLanguage: false,
+        getEvidence: async () => ({
+          snapshotId: 'fixture:jaffle-customer-category',
+          sourceFingerprint: 'fixture:jaffle-customer-category',
+          parsedIntent: { measures: ['revenue'], dimensions: ['product category'], filters: [], order: 'desc', limit: 10 },
+          candidates: [semanticUnavailable, ...physical],
+        }),
+      });
+      const decision = await router.decide({ question });
+      const frozenPlan = decision.resolvedAnalyticalPlan;
+      const exploratoryAttempt = decision.analyticalCascadeDecision?.attempts.find((attempt) => attempt.tier === 'exploratory_sql');
+      expect(decision.analyticalCascadeDecision).toMatchObject({
+        selectedTier: 'exploratory_sql',
+        planFrozen: true,
+      });
+      expect(decision.analyticalCascadeDecision?.attempts.find((attempt) => attempt.tier === 'semantic')?.outcome)
+        .toMatch(/ineligible|unavailable/);
+      expect(frozenPlan?.query).toMatchObject({
+        measures: [expect.objectContaining({ requested: 'revenue', qualifiedId: 'dbt:column:order_items.product_price' })],
+        dimensions: expect.arrayContaining([
+          expect.objectContaining({ requested: 'customer name', qualifiedId: 'dbt:column:order_items.customer_name' }),
+          expect.objectContaining({ requested: 'product category', qualifiedId: 'dbt:column:order_items.product_type' }),
+        ]),
+        order: 'desc',
+        limit: 10,
+      });
+      expect(frozenPlan).toBeDefined();
+      expect(exploratoryAttempt).toBeDefined();
+      const exploratoryCandidateIds = exploratoryAttempt!.candidateIds;
+      expect(exploratoryCandidateIds).toEqual(expect.arrayContaining(physical.map((candidate) => candidate.id)));
+
+      const contextPack = await buildLocalContextPack(projectRoot, { question, limit: 40 });
+      const relation = contextPack.allowedSqlContext.relations.find((candidate) => candidate.relation === 'order_items');
+      expect(relation).toBeDefined();
+      relation!.objectKey = 'dbt:model:order_items';
+      const sql = [
+        'SELECT customer_name, product_type AS product_category, SUM(product_price) AS revenue',
+        'FROM order_items',
+        'GROUP BY customer_name, product_type',
+        'ORDER BY revenue DESC',
+        'LIMIT 10',
+      ].join('\n');
+      const capability = {
+        version: 1 as const,
+        runId: 'fixture-customer-category-exploratory',
+        executionId: 'fixture-customer-category-exploratory:initial',
+        snapshotId: frozenPlan!.snapshotId,
+        planId: frozenPlan!.planId,
+        targetFingerprint: 'target:fixture-customer-category',
+        bindingsFingerprint: frozenPlan!.fingerprint,
+        candidateSqlFingerprint: 'fixture-customer-category-sql',
+        provenIdentifiers: [
+          'order_items',
+          'order_items.customer_name',
+          'order_items.product_type',
+          'order_items.product_price',
+        ],
+        evidence: {
+          order_items: 'schema_tool' as const,
+          'order_items.customer_name': 'schema_tool' as const,
+          'order_items.product_type': 'schema_tool' as const,
+          'order_items.product_price': 'schema_tool' as const,
+        },
+        exploratoryAuthorizationAttempt: { version: 1 as const, index: 0 as const },
+      };
+      const freeze = {
+        version: 1 as const,
+        selectedTier: 'exploratory_sql' as const,
+        planId: frozenPlan!.planId,
+        planFingerprint: frozenPlan!.fingerprint,
+        snapshotId: frozenPlan!.snapshotId,
+        targetFingerprint: capability.targetFingerprint,
+        sqlFingerprint: 'c'.repeat(32),
+        candidateIds: exploratoryCandidateIds,
+        authorization: 'capability_minted' as const,
+        authorizationAttempt: { version: 1 as const, index: 0 as const },
+      };
+      let authorizations = 0;
+      let executions = 0;
+      const result = await answerBase({
+        question,
+        kg,
+        provider: new ThrowingProvider(),
+        contextPack,
+        selectedCascadeTier: 'exploratory_sql',
+        exploratoryCandidateIds,
+        resolvedAnalyticalPlan: frozenPlan,
+        forcedGeneratedProposal: { sql, summary: 'Top customer revenue by product category.' },
+        prepareExploratorySqlExecution: async (candidateSql) => {
+          authorizations += 1;
+          expect(candidateSql).toBe(sql);
+          return { capability, freeze };
+        },
+        executeAgenticGeneratedSql: async (receivedCapability, candidateSql) => {
+          executions += 1;
+          expect(receivedCapability).toBe(capability);
+          return executeSql(candidateSql);
+        },
+      });
+
+      expect(authorizations).toBe(1);
+      expect(executions).toBe(1);
+      expect(result).toMatchObject({
+        kind: 'uncertified',
+        sourceTier: 'dbt_manifest',
+        certification: 'ai_generated',
+        reviewStatus: 'draft_ready',
+        exploratoryExecutionFreeze: freeze,
+      });
+      expect(result.result).toMatchObject({
+        columns: ['customer_name', 'product_category', 'revenue'],
+        rowCount: expect.any(Number),
+      });
+      expect(result.result?.rowCount).toBeGreaterThan(0);
+    } finally {
+      kg.close();
+    }
+  });
+
   async function executeCertifiedBlock(block: KGNode): Promise<AgentResultPayload> {
     const catalog = openMetadataCatalog(projectRoot);
     try {
@@ -805,6 +1864,8 @@ function seedJaffleProject(projectRoot: string): void {
         product_id: dbtColumn('product_id', 'text', 'Product SKU.'),
         product_name: dbtColumn('product_name', 'text', 'Product display name.'),
         product_type: dbtColumn('product_type', 'text', 'Product category such as jaffle or beverage.'),
+        customer_name: dbtColumn('customer_name', 'text', 'Customer display name for the sanitized order-item fixture.'),
+        region: dbtColumn('region', 'text', 'Sales location region for the sanitized fixture.'),
         product_price: dbtColumn('product_price', 'number', 'Product revenue amount.'),
         ordered_at: dbtColumn('ordered_at', 'timestamp', 'Order timestamp.'),
       }),
@@ -843,6 +1904,8 @@ function seedJaffleDatabase(db: Database.Database): void {
       product_id TEXT NOT NULL,
       product_name TEXT NOT NULL,
       product_type TEXT NOT NULL,
+      customer_name TEXT NOT NULL,
+      region TEXT NOT NULL,
       product_price REAL NOT NULL,
       ordered_at TEXT NOT NULL
     );
@@ -888,17 +1951,17 @@ function seedJaffleDatabase(db: Database.Database): void {
       (1007, 6, 5.50, 0, 1, 0.00, 5.50, 5.50);
 
     INSERT INTO order_items VALUES
-      (1, 1001, 'JF001', 'Flame Impala', 'jaffle', 12.00, '2024-01-05'),
-      (2, 1001, 'DR001', 'Cold Brew', 'beverage', 4.50, '2024-01-05'),
-      (3, 1002, 'JF002', 'Veggie Jaffle', 'jaffle', 11.00, '2024-01-07'),
-      (4, 1002, 'DR002', 'Chai Latte', 'beverage', 5.50, '2024-01-07'),
-      (5, 1003, 'JF001', 'Flame Impala', 'jaffle', 12.00, '2024-02-02'),
-      (6, 1004, 'JF003', 'Breakfast Jaffle', 'jaffle', 13.50, '2024-02-19'),
-      (7, 1004, 'DR001', 'Cold Brew', 'beverage', 4.50, '2024-02-19'),
-      (8, 1005, 'JF001', 'Flame Impala', 'jaffle', 12.00, '2024-03-03'),
-      (9, 1005, 'DR002', 'Chai Latte', 'beverage', 5.50, '2024-03-03'),
-      (10, 1006, 'JF001', 'Flame Impala', 'jaffle', 12.00, '2024-03-15'),
-      (11, 1007, 'DR002', 'Chai Latte', 'beverage', 5.50, '2024-04-08');
+      (1, 1001, 'JF001', 'Flame Impala', 'jaffle', 'Alice Johnson', 'West', 12.00, '2024-01-05'),
+      (2, 1001, 'DR001', 'Cold Brew', 'beverage', 'Alice Johnson', 'West', 4.50, '2024-01-05'),
+      (3, 1002, 'JF002', 'Veggie Jaffle', 'jaffle', 'Brian Smith', 'East', 11.00, '2024-01-07'),
+      (4, 1002, 'DR002', 'Chai Latte', 'beverage', 'Brian Smith', 'East', 5.50, '2024-01-07'),
+      (5, 1003, 'JF001', 'Flame Impala', 'jaffle', 'Alice Johnson', 'North', 12.00, '2024-02-02'),
+      (6, 1004, 'JF003', 'Breakfast Jaffle', 'jaffle', 'Deepak Patel', 'South', 13.50, '2024-02-19'),
+      (7, 1004, 'DR001', 'Cold Brew', 'beverage', 'Deepak Patel', 'South', 4.50, '2024-02-19'),
+      (8, 1005, 'JF001', 'Flame Impala', 'jaffle', 'Carla Gomez', 'North', 12.00, '2024-03-03'),
+      (9, 1005, 'DR002', 'Chai Latte', 'beverage', 'Carla Gomez', 'North', 5.50, '2024-03-03'),
+      (10, 1006, 'JF001', 'Flame Impala', 'jaffle', 'Emma Davis', 'West', 12.00, '2024-03-15'),
+      (11, 1007, 'DR002', 'Chai Latte', 'beverage', 'Farah Khan', 'East', 5.50, '2024-04-08');
 
     INSERT INTO supplies VALUES
       ('SUP-001', 'JF001', 'bread', 0.33, 1),
@@ -945,4 +2008,47 @@ function dbtColumn(name: string, dataType: string, description: string): Record<
 
 function uniqueStrings(values: string[]): string[] {
   return Array.from(new Set(values));
+}
+
+/**
+ * Test-only registry augmentation for a semantic adapter fixture. The production
+ * adapter intentionally refuses IDs that are not in its immutable registry; a
+ * hand-created router candidate alone is therefore insufficient evidence.
+ */
+function appendFixtureKgNodes(kg: KGStore, additions: KGNode[]): void {
+  const kinds: KGNode['kind'][] = [
+    'block', 'term', 'business_view', 'metric', 'dimension', 'measure',
+    'entity', 'model_area', 'semantic_model', 'saved_query', 'domain',
+    'dbt_model', 'dbt_source', 'notebook', 'dashboard', 'app', 'skill',
+    'relationship', 'contract', 'domain_export', 'domain_import',
+    'conformance', 'policy', 'evaluation',
+  ];
+  const existing = kinds.flatMap((kind) => kg.getNodesByKind(kind, 100_000));
+  const byNodeId = new Map(existing.map((node) => [node.nodeId, node]));
+  for (const node of additions) byNodeId.set(node.nodeId, node);
+  // Edges are irrelevant to this single-model fixture. Execution identities
+  // remain fully pinned by the nodes above, which is the property under test.
+  kg.rebuild([...byNodeId.values()], []);
+}
+
+function fixtureSemanticMetricNode(
+  qualifiedId: string,
+  localId: string,
+  analyticalCapability: MetricCapabilityContract,
+  measureColumn: string,
+): KGNode {
+  return {
+    nodeId: `metric:order_items.${localId}`,
+    kind: 'metric',
+    name: `order_items.${localId}`,
+    domain: 'commerce',
+    payload: {
+      registryQualifiedId: qualifiedId,
+      qualifiedId,
+      localId,
+      relation: 'order_items',
+      measureColumn,
+      analyticalCapability,
+    },
+  };
 }

@@ -18,6 +18,7 @@
 /** What part of the question was assumed rather than proven. */
 export type AssumptionAbout =
   | 'metric'
+  | 'dimension'
   | 'grain'
   | 'timeframe'
   | 'filter'

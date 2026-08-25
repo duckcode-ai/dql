@@ -3,25 +3,11 @@ import { mkdir } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
-const root = process.cwd();
-const dryRun = process.argv.includes('--dry-run');
-const publish = process.argv.includes('--publish');
-const otpArgIndex = process.argv.findIndex((arg) => arg === '--otp');
-const otpEqualsArg = process.argv.find((arg) => arg.startsWith('--otp='));
-const otp = process.env.NPM_CONFIG_OTP
-  ?? process.env.npm_config_otp
-  ?? (otpArgIndex >= 0 ? process.argv[otpArgIndex + 1] : undefined)
-  ?? (otpEqualsArg ? otpEqualsArg.slice('--otp='.length) : undefined);
-
-if (!dryRun && !publish) {
-  console.error('Usage: node scripts/release-packages.mjs --dry-run | --publish [--otp <code>]');
-  process.exit(1);
-}
-
-// Order matters — leaf packages first, leaves of leaves before that. The
-// CLI is published last because it depends on every other workspace package.
-const packages = [
+export const RELEASE_PACKAGE_PATHS = [
+  // Order matters — leaf packages first, leaves of leaves before that. The
+  // CLI is published last because it depends on every other workspace package.
   'packages/dql-telemetry',
   'packages/dql-openlineage',
   'packages/dql-plugin-api',
@@ -43,7 +29,156 @@ const packages = [
   'packages/create-dql-app',
 ];
 
-const artifactsDir = path.join(root, '.release-artifacts');
+export const RELEASE_TAGS = new Set(['latest', 'next']);
+
+const STABLE_VERSION = /^\d+\.\d+\.\d+$/;
+const PRERELEASE_VERSION = /^\d+\.\d+\.\d+-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*$/;
+
+export function parseReleaseArguments(argv, env = process.env) {
+  let dryRun = false;
+  let publish = false;
+  let tag;
+  let expectedVersion;
+  let otp = env.NPM_CONFIG_OTP ?? env.npm_config_otp;
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--dry-run') {
+      dryRun = true;
+      continue;
+    }
+    if (arg === '--publish') {
+      publish = true;
+      continue;
+    }
+    if (arg === '--tag') {
+      const value = argv[index + 1];
+      if (!value || value.startsWith('--')) {
+        throw new Error('Missing value for --tag. Use --tag latest or --tag next.');
+      }
+      if (tag) throw new Error('Specify --tag exactly once.');
+      tag = value;
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('--tag=')) {
+      const value = arg.slice('--tag='.length);
+      if (!value) throw new Error('Missing value for --tag. Use --tag latest or --tag next.');
+      if (tag) throw new Error('Specify --tag exactly once.');
+      tag = value;
+      continue;
+    }
+    if (arg === '--expected-version') {
+      const value = argv[index + 1];
+      if (!value || value.startsWith('--')) {
+        throw new Error('Missing value for --expected-version. Use the exact release SemVer version.');
+      }
+      if (expectedVersion) throw new Error('Specify --expected-version exactly once.');
+      expectedVersion = value;
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('--expected-version=')) {
+      const value = arg.slice('--expected-version='.length);
+      if (!value) throw new Error('Missing value for --expected-version. Use the exact release SemVer version.');
+      if (expectedVersion) throw new Error('Specify --expected-version exactly once.');
+      expectedVersion = value;
+      continue;
+    }
+    if (arg === '--otp') {
+      const value = argv[index + 1];
+      if (!value || value.startsWith('--')) throw new Error('Missing value for --otp.');
+      otp = value;
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('--otp=')) {
+      const value = arg.slice('--otp='.length);
+      if (!value) throw new Error('Missing value for --otp.');
+      otp = value;
+      continue;
+    }
+    throw new Error(`Unknown release argument: ${arg}`);
+  }
+
+  if (Number(dryRun) + Number(publish) !== 1) {
+    throw new Error('Specify exactly one of --dry-run or --publish.');
+  }
+  if (!RELEASE_TAGS.has(tag)) {
+    throw new Error('Release tag is required. Use --tag latest or --tag next.');
+  }
+  if (!expectedVersion) {
+    throw new Error('Expected version is required. Use --expected-version <semver>.');
+  }
+  requiredReleaseTag(expectedVersion);
+
+  return { dryRun, publish, tag, expectedVersion, otp };
+}
+
+export function requiredReleaseTag(version) {
+  if (STABLE_VERSION.test(version)) return 'latest';
+  if (PRERELEASE_VERSION.test(version)) return 'next';
+  throw new Error(`Release version ${version} is not a valid stable or prerelease SemVer version.`);
+}
+
+export function assertReleaseTagCompatibility(version, tag) {
+  const requiredTag = requiredReleaseTag(version);
+  if (tag !== requiredTag) {
+    throw new Error(
+      `Release tag mismatch: ${version} must use --tag ${requiredTag}, received --tag ${tag}.`,
+    );
+  }
+  return requiredTag;
+}
+
+export function assertExpectedReleaseVersion(manifestVersion, expectedVersion) {
+  if (manifestVersion !== expectedVersion) {
+    throw new Error(
+      `Release version mismatch: manifests declare ${manifestVersion}, expected ${expectedVersion}.`,
+    );
+  }
+  return manifestVersion;
+}
+
+export function exactPackageSpec(packageName, version) {
+  return `${packageName}@${version}`;
+}
+
+export function publishCommandArgs({ tag, otp }) {
+  return [
+    'publish',
+    '--access',
+    'public',
+    '--no-git-checks',
+    '--tag',
+    tag,
+    ...(otp ? ['--otp', otp] : []),
+  ];
+}
+
+export function assertSynchronizedReleaseVersions(packageManifests) {
+  const versions = new Set(packageManifests.map(({ manifest }) => manifest.version));
+  if (versions.size !== 1) {
+    const entries = packageManifests
+      .map(({ relPath, manifest }) => `${relPath}=${manifest.version}`)
+      .join(', ');
+    throw new Error(`Release package versions must be synchronized: ${entries}`);
+  }
+  const [version] = versions;
+  requiredReleaseTag(version);
+  return version;
+}
+
+export function readReleasePackageManifests(root) {
+  return RELEASE_PACKAGE_PATHS.map((relPath) => {
+    const packagePath = path.join(root, relPath, 'package.json');
+    const manifest = JSON.parse(readFileSync(packagePath, 'utf-8'));
+    if (!manifest.name || !manifest.version) {
+      throw new Error(`${relPath}/package.json must declare name and version.`);
+    }
+    return { relPath, packagePath, manifest };
+  });
+}
 
 async function run(command, args, cwd) {
   const redactedArgs = args.map((arg, index) => {
@@ -67,9 +202,9 @@ async function run(command, args, cwd) {
   });
 }
 
-async function packageVersionExists(packageName, version) {
+async function packageVersionExists(root, packageName, version) {
   return await new Promise((resolve) => {
-    const child = spawn('npm', ['view', `${packageName}@${version}`, 'version', '--silent'], {
+    const child = spawn('npm', ['view', exactPackageSpec(packageName, version), 'version', '--silent'], {
       cwd: root,
       env: process.env,
       stdio: ['ignore', 'ignore', 'ignore'],
@@ -92,7 +227,7 @@ async function packageVersionExists(packageName, version) {
  *
  * Returns a Map of filePath -> originalContent for restoration after publish.
  */
-function preparePackageManifests() {
+function preparePackageManifests(root) {
   // Build a map of package name -> version from every workspace package,
   // including private packages used only for local build/dev dependencies.
   const versionMap = new Map();
@@ -111,7 +246,7 @@ function preparePackageManifests() {
 
   const originals = new Map();
 
-  for (const relPath of packages) {
+  for (const relPath of RELEASE_PACKAGE_PATHS) {
     const pkgPath = path.join(root, relPath, 'package.json');
     const raw = readFileSync(pkgPath, 'utf-8');
     const pkg = JSON.parse(raw);
@@ -185,59 +320,71 @@ function pruneDistTestArtifacts(packageDir) {
   walk(distDir);
 }
 
-await mkdir(artifactsDir, { recursive: true });
+export async function main({ argv = process.argv.slice(2), cwd = process.cwd(), env = process.env } = {}) {
+  const release = parseReleaseArguments(argv, env);
+  assertReleaseTagCompatibility(release.expectedVersion, release.tag);
+  const packageManifests = readReleasePackageManifests(cwd);
+  const version = assertSynchronizedReleaseVersions(packageManifests);
+  assertExpectedReleaseVersion(version, release.expectedVersion);
+  const artifactsDir = path.join(cwd, '.release-artifacts');
 
-// Build everything first so the CLI tarball picks up a fresh notebook UI
-// bundle. The CLI's own `prepublishOnly` rebuilds `apps/cli` but not
-// `apps/dql-notebook`, whose `dist/` gets copied into the CLI's
-// `dist/assets/dql-notebook/` by copy-runtime-assets.mjs. Past releases
-// shipped a stale React build because that app wasn't rebuilt.
-console.log('\nBuilding all packages (so CLI ships fresh notebook UI)...');
-await run('pnpm', ['-w', 'build'], root);
+  console.log(`\nRelease ${release.dryRun ? 'dry run' : 'publish'}: ${version} -> npm dist-tag ${release.tag}`);
+  await mkdir(artifactsDir, { recursive: true });
 
-// Replace workspace:* with real versions and disable redundant package-level
-// publish hooks before pack/publish.
-console.log('\nPreparing package manifests...');
-const originals = preparePackageManifests();
+  // Build everything first so the CLI tarball picks up a fresh notebook UI
+  // bundle. The CLI's own `prepublishOnly` rebuilds `apps/cli` but not
+  // `apps/dql-notebook`, whose `dist/` gets copied into the CLI's
+  // `dist/assets/dql-notebook/` by copy-runtime-assets.mjs. Past releases
+  // shipped a stale React build because that app wasn't rebuilt.
+  console.log('\nBuilding all packages (so CLI ships fresh notebook UI)...');
+  await run('pnpm', ['-w', 'build'], cwd);
 
-let exitCode = 0;
-try {
-  for (const relPath of packages) {
-    const cwd = path.join(root, relPath);
-    pruneDistTestArtifacts(cwd);
-    if (dryRun) {
-      console.log(`\n==> Packing ${relPath}`);
-      await run('pnpm', ['pack', '--pack-destination', artifactsDir], cwd);
-    } else {
-      const pkg = JSON.parse(readFileSync(path.join(cwd, 'package.json'), 'utf-8'));
-      if (await packageVersionExists(pkg.name, pkg.version)) {
-        console.log(`\n==> Skipping ${relPath} (${pkg.name}@${pkg.version} already exists)`);
-        continue;
+  // Replace workspace:* with real versions and disable redundant package-level
+  // publish hooks before pack/publish.
+  console.log('\nPreparing package manifests...');
+  const originals = preparePackageManifests(cwd);
+
+  let exitCode = 0;
+  try {
+    for (const { relPath, manifest } of packageManifests) {
+      const packageDir = path.join(cwd, relPath);
+      pruneDistTestArtifacts(packageDir);
+      if (release.dryRun) {
+        console.log(`\n==> Packing ${relPath} for npm dist-tag ${release.tag}`);
+        await run('pnpm', ['pack', '--pack-destination', artifactsDir], packageDir);
+      } else if (await packageVersionExists(cwd, manifest.name, manifest.version)) {
+        console.log(`\n==> Skipping ${relPath} (${exactPackageSpec(manifest.name, manifest.version)} already exists)`);
+      } else {
+        console.log(`\n==> Publishing ${relPath} to npm dist-tag ${release.tag}`);
+        await run('pnpm', publishCommandArgs(release), packageDir);
       }
-      console.log(`\n==> Publishing ${relPath}`);
-      await run('pnpm', [
-        'publish',
-        '--access',
-        'public',
-        '--no-git-checks',
-        ...(otp ? ['--otp', otp] : []),
+    }
+    if (release.publish) {
+      const cli = packageManifests.find(({ relPath }) => relPath === 'apps/cli')?.manifest;
+      if (!cli) throw new Error('Release package list must include apps/cli for the post-publish smoke.');
+      const cliSpec = exactPackageSpec(cli.name, cli.version);
+      console.log(`\n==> Verifying clean local/global install for exact ${cliSpec}`);
+      await run(process.execPath, [
+        path.join(cwd, 'scripts/smoke-cli-install.mjs'),
+        cliSpec,
       ], cwd);
     }
+  } catch (err) {
+    console.error(`\nRelease ${release.publish ? 'publish' : 'dry run'} failed: ${err.message}`);
+    exitCode = 1;
+  } finally {
+    // Always restore originals so workspace:* stays in the repo.
+    restoreOriginals(originals);
   }
-  if (publish) {
-    const cli = JSON.parse(readFileSync(path.join(root, 'apps/cli/package.json'), 'utf-8'));
-    console.log(`\n==> Verifying clean local/global install for ${cli.name}@${cli.version}`);
-    await run(process.execPath, [
-      path.join(root, 'scripts/smoke-cli-install.mjs'),
-      `${cli.name}@${cli.version}`,
-    ], root);
-  }
-} catch (err) {
-  console.error(`\nPublish failed: ${err.message}`);
-  exitCode = 1;
-} finally {
-  // Always restore originals so workspace:* stays in the repo
-  restoreOriginals(originals);
+
+  return exitCode;
 }
 
-process.exit(exitCode);
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    process.exitCode = await main();
+  } catch (err) {
+    console.error(`Release setup failed: ${err.message}`);
+    process.exitCode = 1;
+  }
+}

@@ -121,7 +121,7 @@ template lives in `create-dql-app`; the example dbt project is external.
 - `[x]` full workspace install validated in a network-enabled environment
 - `[x]` full `pnpm build` completes successfully
 - `[x]` full `pnpm test` completes successfully
-- `[x]` `pnpm release:dry-run` completes successfully
+- `[x]` `pnpm release:dry-run -- --tag <latest|next> --expected-version <version>` completes successfully
 - `[x]` published package smoke test recorded against npm latest
 
 ---
@@ -161,11 +161,12 @@ template lives in `create-dql-app`; the example dbt project is external.
 
 ## Current Release Decision
 
-`1.14.2` is a pre-publication release candidate, not a published release. The
-working-tree manifests and starter CLI range target `1.14.2`; the registry
-`latest` tag remains `1.14.1`, and `1.14.2` remains absent until the tag
-workflow publishes it. G5 package, registry, tag, and clean-install evidence
-must be captured before this document calls `1.14.2` released.
+`1.14.3-rc.1` is an unpublished prerelease target, not a published release.
+The working-tree manifests and starter CLI range target `1.14.3-rc.1`; the
+current registry `latest` is `1.14.2`, and the release candidate remains absent
+until the tag workflow publishes it to `next`. G5 package, registry, tag, and
+exact-version clean-install evidence must be captured before this document
+calls the release candidate published.
 
 The candidate contains the Ask AI governed-cascade recovery, stable
 conversation selection persistence, phase-specific provider diagnostics, and
@@ -174,7 +175,7 @@ repository, metadata/vector indexes, fiscal calendar, provider configuration,
 or warehouse; those require a separate office replay.
 
 Historical `1.13.4` release evidence follows. It does not establish
-publication or end-to-end office validation for `1.14.2`. The tracked
+publication or end-to-end office validation for `1.14.3-rc.1`. The tracked
 `PERF-001` scale fixture has no route-parity, concept-resolution,
 certified-execution, or invented-ID failures, but several cold-start and
 warm-context latency budgets remain above target. RFC 0005 acceptance remains
@@ -195,15 +196,17 @@ jaffle-shop-duckdb repo):
 - `dql notebook` launches the starter template; Block Studio, Import SQL, and
   Apps dashboard/notebook smoke checks pass in the browser.
 - `dql preview` works for KPI, line chart, and RLS-decorated block examples.
-- `pnpm release:dry-run` completes successfully.
+- `pnpm release:dry-run -- --tag <latest|next> --expected-version <version>` completes successfully.
 - The plan-first and analytical-composition suites pass across core, agent, CLI,
   and the built notebook; the remaining independent-verification and
   `PERF-001` latency exceptions are documented in the changelog and roadmap.
 - Local `node apps/cli/dist/index.js --help` and
   `node apps/cli/dist/index.js --version` resolve successfully.
-- After publishing, verify `npx @duckcodeailabs/dql-cli@latest --version`
-  reports the current release and `npx create-dql-app@latest --help` reports
-  the matching scaffold release.
+- After publishing `1.14.3-rc.1`, verify exact artifacts with
+  `npx @duckcodeailabs/dql-cli@1.14.3-rc.1 --version` and
+  `npx create-dql-app@1.14.3-rc.1 --help`, then separately verify both npm
+  `next` dist-tags point to `1.14.3-rc.1`. `@latest` remains `1.14.2` and is
+  not RC evidence.
 
 ## Recommended Next Actions
 

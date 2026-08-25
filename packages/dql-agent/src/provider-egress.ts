@@ -8,24 +8,32 @@ import type {
 
 export const PROVIDER_RESULT_ROW_REDACTION_POLICY_ID = 'research-result-rows-v1';
 export const PROVIDER_ZERO_RESULT_ROWS_POLICY_ID = 'no-result-rows-v1';
+/** @deprecated Ordinary Ask rows are permanently disabled; retained for receipt compatibility. */
 export const ASK_NARRATION_RESULT_ROW_POLICY_ID = 'ask-narration-rows-v1';
 
-/** Hard ceiling on rows any narration policy may release, whatever the config says. */
-export const MAX_ASK_NARRATION_RESULT_ROWS = 20;
+/** Hard ceiling on rows an explicitly opted-in Research narration may release. */
+export const MAX_RESEARCH_NARRATION_RESULT_ROWS = 20;
+/** @deprecated Use `MAX_RESEARCH_NARRATION_RESULT_ROWS`; ordinary Ask has a zero row budget. */
+export const MAX_ASK_NARRATION_RESULT_ROWS = MAX_RESEARCH_NARRATION_RESULT_ROWS;
+
+/**
+ * A receipt policy is a privacy authority, not a formatting preference. Only
+ * the resolver may mint `research_run_opt_in`; older/manual policies default
+ * to `none` and therefore cannot release rows accidentally.
+ */
+export type ProviderResultRowEgressAuthorityV1 = 'none' | 'research_run_opt_in';
 
 /**
  * How many executed result rows may cross the provider boundary, and under whose
  * authority.
  *
- * A model cannot describe, rank, or compare values it has never seen. Blanket
- * `allowResultRows: false` on every dispatch is what forced answer prose to be
- * built by a local template, which is how an ordinary Ask came to return a
- * `column: value` dump. Ordinary Ask now releases a bounded, redacted sample by
- * default; a project admin can set it back to zero, in which case narration
- * still runs but is grounded only in columns and computed statistics.
+ * Result rows stay host-local by default. A model may see a bounded, redacted
+ * sample only for an explicit Research run whose one-run consent was accepted
+ * by the server. Project configuration can narrow that Research allowance,
+ * but it cannot grant ordinary Ask (or unconsented Research) an exception.
  */
 export interface ProviderResultRowEgressPolicy {
-  /** Rows released to the narration/synthesis dispatch. 0 disables row egress. */
+  /** Rows released to an explicitly opted-in Research narration dispatch. */
   maxNarrationRows: number;
   /** Rows released to tool observations inside a generation loop. */
   maxToolRows: number;
@@ -33,13 +41,16 @@ export interface ProviderResultRowEgressPolicy {
   source: 'default' | 'project_config' | 'request_opt_in';
   /** Recorded on every receipt so an auditor can tell which rule applied. */
   policyId: string;
+  /** Additive: absent legacy/manual policies are treated as `none`. */
+  resultRowAuthority?: ProviderResultRowEgressAuthorityV1;
 }
 
 export const DEFAULT_ASK_ROW_EGRESS_POLICY: ProviderResultRowEgressPolicy = Object.freeze({
-  maxNarrationRows: MAX_ASK_NARRATION_RESULT_ROWS,
+  maxNarrationRows: 0,
   maxToolRows: 0,
   source: 'default',
-  policyId: ASK_NARRATION_RESULT_ROW_POLICY_ID,
+  policyId: PROVIDER_ZERO_RESULT_ROWS_POLICY_ID,
+  resultRowAuthority: 'none',
 });
 
 export const ZERO_ROW_EGRESS_POLICY: ProviderResultRowEgressPolicy = Object.freeze({
@@ -47,38 +58,41 @@ export const ZERO_ROW_EGRESS_POLICY: ProviderResultRowEgressPolicy = Object.free
   maxToolRows: 0,
   source: 'project_config',
   policyId: PROVIDER_ZERO_RESULT_ROWS_POLICY_ID,
+  resultRowAuthority: 'none',
 });
 
 export const RESEARCH_ROW_EGRESS_POLICY: ProviderResultRowEgressPolicy = Object.freeze({
-  maxNarrationRows: MAX_ASK_NARRATION_RESULT_ROWS,
+  maxNarrationRows: MAX_RESEARCH_NARRATION_RESULT_ROWS,
   maxToolRows: 200,
   source: 'request_opt_in',
   policyId: PROVIDER_RESULT_ROW_REDACTION_POLICY_ID,
+  resultRowAuthority: 'research_run_opt_in',
 });
 
 /**
- * Resolve the row-egress policy for one run. The admin kill-switch wins over the
- * default; an explicit Research opt-in is the only thing that widens tool rows.
+ * Resolve the row-egress policy for one run. The only path that may release
+ * result rows is an explicit Research request with its one-run opt-in. A
+ * project ceiling can narrow that request but can never grant rows to ordinary
+ * Ask or to Research without consent.
  */
 export function resolveProviderResultRowEgressPolicy(input: {
   projectSetting?: { mode?: 'bounded_sample' | 'disabled'; maxNarrationRows?: number };
+  /** Server-normalized requested mode. Omitted/unknown modes are denied. */
+  requestedMode?: string;
   researchOptIn?: boolean;
 }): ProviderResultRowEgressPolicy {
   if (input.projectSetting?.mode === 'disabled') return ZERO_ROW_EGRESS_POLICY;
+  if (input.requestedMode !== 'research' || input.researchOptIn !== true) {
+    return DEFAULT_ASK_ROW_EGRESS_POLICY;
+  }
   const configured = input.projectSetting?.maxNarrationRows;
   const maxNarrationRows = typeof configured === 'number' && Number.isFinite(configured)
-    ? Math.max(0, Math.min(MAX_ASK_NARRATION_RESULT_ROWS, Math.trunc(configured)))
-    : MAX_ASK_NARRATION_RESULT_ROWS;
+    ? Math.max(0, Math.min(MAX_RESEARCH_NARRATION_RESULT_ROWS, Math.trunc(configured)))
+    : MAX_RESEARCH_NARRATION_RESULT_ROWS;
   // A zero ceiling from config is the kill-switch by another name: report it as
   // such so receipts carry the honest policy id.
   if (maxNarrationRows === 0) return ZERO_ROW_EGRESS_POLICY;
-  if (input.researchOptIn) return { ...RESEARCH_ROW_EGRESS_POLICY, maxNarrationRows };
-  return {
-    maxNarrationRows,
-    maxToolRows: 0,
-    source: configured === undefined ? 'default' : 'project_config',
-    policyId: ASK_NARRATION_RESULT_ROW_POLICY_ID,
-  };
+  return { ...RESEARCH_ROW_EGRESS_POLICY, maxNarrationRows };
 }
 
 export interface ProviderPayloadGuardPolicy {
@@ -522,6 +536,7 @@ export function createProviderDispatchEgressReceipt(input: {
   model?: string;
   operation?: 'generate' | 'generate_with_tools' | 'generate_stream';
   attemptIndex?: number;
+  retryOfAttemptIndex?: number;
   options?: ProviderEgressReceiptV1['options'];
   permittedCategories: ProviderEgressCategory[];
   optIn: boolean;
@@ -540,6 +555,7 @@ export function createProviderDispatchEgressReceipt(input: {
     ...(input.model ? { model: input.model } : {}),
     ...(input.operation ? { operation: input.operation } : {}),
     ...(input.attemptIndex !== undefined ? { attemptIndex: input.attemptIndex } : {}),
+    ...(input.retryOfAttemptIndex !== undefined ? { retryOfAttemptIndex: input.retryOfAttemptIndex } : {}),
     ...(input.options ? { options: { ...input.options } } : {}),
     permittedCategories: [...input.permittedCategories],
     resultRowCount: Math.max(inspected.shape.resultRowCount, serialized.resultRowCount),

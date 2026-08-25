@@ -154,7 +154,16 @@ export async function planResearchHypotheses(
   if (assets.metrics.length === 0 && assets.blocks.length === 0) return [];
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 20_000);
-  const onAbort = () => controller.abort();
+  // A signal may already be cancelled when an explicit Research executor gets
+  // scheduled (for example after a client navigation races with routing).
+  // `addEventListener` does not replay that event, so carry the reason into
+  // the planner controller before `generate` can admit a late provider send.
+  const onAbort = () => controller.abort(options.signal?.reason);
+  if (options.signal?.aborted) {
+    onAbort();
+    clearTimeout(timer);
+    return [];
+  }
   options.signal?.addEventListener('abort', onAbort, { once: true });
   try {
     const catalog = [

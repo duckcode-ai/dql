@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "classification": "synthetic_offline_observability_fixture",
+  "runtimeSafety": {
+    "requiresNetwork": false,
+    "requiresProvider": false,
+    "requiresWarehouseForStartup": false,
+    "containsGoldSql": false,
+    "containsGoldResults": false,
+    "containsOfficeData": false
+  },
+  "fiscalCalendar": {
+    "calendarId": "calendar:synthetic_fiscal",
+    "dateRole": "opportunity_close_date",
+    "dateField": "fct_lost_opportunities.close_date",
+    "fiscalPeriodField": "fct_lost_opportunities.fiscal_period",
+    "monthField": "fct_lost_opportunities.fiscal_month"
+  },
+  "cascadePaths": {
+    "certified": [
+      "Lost Opportunities by Fiscal Month and Competitor",
+      "Top Customers by Revenue",
+      "Current BCM Run Rate by Account"
+    ],
+    "semantic": [
+      "lost_opportunity_count",
+      "lost_amount",
+      "revenue",
+      "bcm_run_rate"
+    ],
+    "governedRelational": [
+      "lost_opportunity_to_account",
+      "account_to_customer",
+      "account_revenue_to_account"
+    ],
+    "exploratory": {
+      "eligibleSingleRelation": "analytics.revenue_operations.fct_competitor_observations",
+      "trustState": "review_required",
+      "unsafeJoinMustRemainBlocked": "competitor_observation_to_lost_opportunity"
+    }
+  },
+  "questions": [
+    {
+      "id": "lost_opportunities_fy26_datadog",
+      "question": "Lost opportunities count and lost amount by month for fiscal year FY26 and competitor involved is Datadog",
+      "requiredRoles": ["metric", "metric", "categorical_dimension", "time_dimension", "member"],
+      "requiredIds": ["lost_opportunity_count", "lost_amount", "competitor_name", "fiscal_month", "fiscal_period"],
+      "expectedCascadeCandidates": ["certified", "semantic", "governed_relational", "exploratory_sql"]
+    },
+    {
+      "id": "top_bcm_customers_by_revenue",
+      "question": "Who are the top BCM customers who have highest revenue?",
+      "requiredRoles": ["metric", "entity_label", "entity_key"],
+      "requiredIds": ["revenue", "customer_name", "customer_id"],
+      "rankingMeasure": "revenue",
+      "defaultTopN": 10
+    },
+    {
+      "id": "current_bcm_run_rate_top_accounts",
+      "question": "What is the current BCM run rate across top accounts?",
+      "requiredRoles": ["metric", "entity_label", "entity_key"],
+      "requiredIds": ["bcm_run_rate", "account_name", "account_id"],
+      "defaultTopN": 10
+    }
+  ],
+  "ambiguity": {
+    "question": "Show the top names by revenue",
+    "meaningOptions": ["account_name", "customer_name"],
+    "requiresClarification": true
+  },
+  "terminalGap": {
+    "question": "Rank accounts by un-attributed competitor observation signal",
+    "reason": "missing certified attribution relationship",
+    "mustNotInferRelationship": "competitor_observation_to_lost_opportunity"
+  }
+}

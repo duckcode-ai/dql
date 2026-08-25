@@ -100,6 +100,12 @@ function fixtureCapability(candidate: EvalCandidateFixture): MetricCapabilityCon
       entityId: `semantic:${candidate.domain ?? 'commerce'}:entity:${dimension}`,
       supportedRoles: ['group_by', 'rank_entity'],
       relationshipPathIds: [`fixture:relationship:${dimension}`],
+      // Semantic alternatives in this deterministic harness must be genuinely
+      // executable alternatives. A generic relationship is not enough to
+      // offer a user-facing metric clarification after the strict MetricFlow
+      // compatibility gate.
+      nativeGroupingReference: `order__${dimension}`,
+      nativeGroupingPath: ['order'],
     })),
     timeDimensions: [],
     operations: ['group', 'rank'],
@@ -204,7 +210,7 @@ describe('Ask AI orchestration YAML evaluation harness (AGT-027..033 / E2E-022)'
         intent: 'ad_hoc_ranking' as const,
         ...(testCase.prior ? {
           history: [{ role: 'user' as const, text: 'Who are the top customers?' }],
-        } : {}),
+      } : {}),
       };
       const decision = await router.decide(request);
       expect(meaningCalls).toBe(testCase.expected.meaningCalls ?? 1);
@@ -270,7 +276,7 @@ describe('Ask AI orchestration YAML evaluation harness (AGT-027..033 / E2E-022)'
 
       const route = selectRoute(request, decision);
       if (testCase.expected.route) {
-        expect(route === 'generated_answer' ? 'generated_sql' : route).toBe(testCase.expected.route);
+        expect(route === 'generated_answer' ? 'generated_sql' : route, testCase.id).toBe(testCase.expected.route);
       }
       if (testCase.expected.memberBinding) {
         const filter = decision.resolvedAnalyticalPlan?.query.filters.find((item) => item.field === testCase.expected.memberBinding!.dimension);
@@ -320,11 +326,11 @@ describe('Ask AI orchestration YAML evaluation harness (AGT-027..033 / E2E-022)'
       }
 
       if (testCase.id === 'attribute-follow-up') {
-        expect(decision.resolvedAnalyticalPlan?.capability).toBe('governed_relational');
-        expect(decision.resolvedAnalyticalPlan?.query.filters[0]).toMatchObject({
-          field: 'customer_name',
-          value: 'Jessica Richard',
-        });
+        // Raw transcript history is not a server-issued selected-result
+        // binding. A complete/fresh analytical frame must not inherit a
+        // prior person's name as a hidden filter; see the dedicated AGT-031
+        // typed follow-up test for the persisted binding path.
+        expect(decision.resolvedAnalyticalPlan?.query.filters).toEqual([]);
       }
     }
   });

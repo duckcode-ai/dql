@@ -317,7 +317,7 @@ Budgets on the documented reference developer machine:
 | evidence package assembly | p95 `< 250ms` after retrieval; `8–12` cards; `<= 12,000` tokens |
 | natural-language meaning resolution | `<= 1` call; `<= 15s`; `<= 600` output tokens |
 | direct certified/semantic dispatch | `< 1s` excluding warehouse; no planner/tool-loop/synthesis |
-| generated lookup | `<= 2` physical provider sends total across meaning and generation; no ordinary LLM replan; `<= 1` SQL |
+| generated lookup | normally `<= 2` physical provider sends across interpretation and generation; a frozen exploratory plan may use one immutable same-plan `model_declined` correction (`<= 3` total); no ordinary LLM replan; `<= 1` SQL |
 | standard analytical run | `< 45s` excluding separately reported warehouse delay |
 | explicit research run | `< 120s`; `<= 12` physical provider sends total; `<= 1` planner and `<= 1` narrator |
 | warm Domain Workspace summary | p95 `< 250ms` |

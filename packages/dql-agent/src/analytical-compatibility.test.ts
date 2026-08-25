@@ -34,6 +34,12 @@ const semanticCapability: MetricCapabilityContract = {
       entityId: ids.customer,
       supportedRoles: ['group_by', 'filter', 'display', 'rank_entity'],
       relationshipPathIds: [ids.relationship],
+      // Cross-model semantic readiness requires the exact MetricFlow-native
+      // grouping that the compiler will consume. A generic DQL relationship
+      // remains useful for relational/exploratory routes but is not semantic
+      // compiler proof.
+      nativeGroupingReference: 'order__customer__customer_name',
+      nativeGroupingPath: ['order', 'customer'],
     },
   ],
   timeDimensions: [
@@ -563,11 +569,27 @@ describe('deterministic analytical compatibility (CONTRACT-002 / AGT-017 / AGT-0
       failure: { code: 'FRAME_AMBIGUOUS', candidateIds: ['commerce::member::zoom-us', 'commerce::member::zoom-emea'] },
     });
 
+    const missingBinding = zoomRevenueFrame();
+    missingBinding.ambiguity = [{
+      field: 'dimensions.region',
+      reasonCode: 'DIMENSION_UNRESOLVED',
+      candidateIds: [],
+    }];
+    expect(solveAnalyticalCompatibility({
+      frame: missingBinding,
+      candidates: [{ candidateId: ids.metric, capability: semanticCapability }],
+    })).toMatchObject({
+      status: 'blocked',
+      failure: { code: 'FRAME_AMBIGUOUS', candidateIds: [] },
+    });
+
     const noRelationship: MetricCapabilityContract = {
       ...semanticCapability,
       dimensions: semanticCapability.dimensions.map((dimension) => ({
         ...dimension,
         relationshipPathIds: [],
+        nativeGroupingReference: undefined,
+        nativeGroupingPath: undefined,
       })),
     };
     const missingRelationship = solveAnalyticalCompatibility({
@@ -736,6 +758,337 @@ describe('deterministic analytical compatibility (CONTRACT-002 / AGT-017 / AGT-0
     const projected = projectResolvedAnalyticalFrame({ plan, sourceFrame: frame });
     expect(projected.metricConceptIds).toEqual([ids.metric]);
     expect(projected.ambiguity).toEqual([]);
+
+    // AGT-011: the old natural-language phrase remains in the immutable query
+    // audit list after a server-issued display-key click.  It must not reopen
+    // the exact capability ambiguity when one (and only one) offered ID is
+    // already bound by both the host frame and the RAP.
+    const selectedDisplaySourceFrame = {
+      ...frame,
+      ambiguity: [{
+        field: 'dimensions.customer',
+        candidateIds: [ids.customerName, 'commerce::dimension::customer_type'],
+        reasonCode: 'DIMENSION_AMBIGUOUS',
+      }],
+    };
+    const selectedDisplayPlan = {
+      ...plan,
+      query: {
+        ...plan.query,
+        dimensions: [{
+          requested: 'customer',
+          status: 'ambiguous' as const,
+          candidateIds: [ids.customerName, 'commerce::dimension::customer_type'],
+        }, ...plan.query.dimensions],
+      },
+    };
+    expect(projectResolvedAnalyticalFrame({
+      plan: selectedDisplayPlan,
+      sourceFrame: selectedDisplaySourceFrame,
+    }).ambiguity).toEqual([]);
+
+    // The identity escape is not a lexical tie-breaker. If the frozen plan
+    // somehow resolves more than one of the original offered IDs, the frame
+    // remains ambiguous instead of silently choosing either display key.
+    const multiplyResolvedProjection = projectResolvedAnalyticalFrame({
+      plan: {
+        ...selectedDisplayPlan,
+        query: {
+          ...selectedDisplayPlan.query,
+          dimensions: [
+            ...selectedDisplayPlan.query.dimensions,
+            {
+              requested: 'customer type',
+              qualifiedId: 'commerce::dimension::customer_type',
+              status: 'resolved' as const,
+              candidateIds: ['commerce::dimension::customer_type'],
+            },
+          ],
+        },
+      },
+      sourceFrame: {
+        ...selectedDisplaySourceFrame,
+        dimensions: [
+          ...selectedDisplaySourceFrame.dimensions,
+          { dimensionId: 'commerce::dimension::customer_type', role: 'group_by' },
+        ],
+      },
+    });
+    expect(multiplyResolvedProjection.ambiguity).toContainEqual({
+      field: 'dimensions.customer',
+      candidateIds: [ids.customerName, 'commerce::dimension::customer_type'],
+      reasonCode: 'DIMENSION_AMBIGUOUS',
+    });
+
+    // A same-name RAP binding for an unrelated third dimension is not proof
+    // that the server-issued A/B selection was consumed. The ambiguity remains
+    // until one offered source ID is resolved exactly.
+    const unrelatedThirdIdProjection = projectResolvedAnalyticalFrame({
+      plan: {
+        ...selectedDisplayPlan,
+        query: {
+          ...selectedDisplayPlan.query,
+          dimensions: [{
+            requested: 'customer',
+            qualifiedId: 'commerce::dimension::customer_region',
+            status: 'resolved' as const,
+            candidateIds: ['commerce::dimension::customer_region'],
+          // Do not retain the original offered customer_name binding here:
+          // this fixture deliberately models a RAP that resolved only C, not
+          // either source-offered A/B candidate.
+          }, ...plan.query.dimensions.filter((binding) => binding.qualifiedId !== ids.customerName)],
+        },
+      },
+      sourceFrame: selectedDisplaySourceFrame,
+    });
+    expect(unrelatedThirdIdProjection.ambiguity).toContainEqual({
+      field: 'dimensions.customer',
+      candidateIds: [ids.customerName, 'commerce::dimension::customer_type'],
+      reasonCode: 'DIMENSION_AMBIGUOUS',
+    });
+
+    // No offered dimension resolved is equally non-authoritative. This must
+    // remain a clarification, rather than let the raw request text select a
+    // display field after the original A/B candidates disappeared.
+    const zeroResolvedDimensionProjection = projectResolvedAnalyticalFrame({
+      plan: {
+        ...selectedDisplayPlan,
+        query: {
+          ...selectedDisplayPlan.query,
+          dimensions: [{
+            requested: 'customer',
+            status: 'unresolved' as const,
+            candidateIds: [],
+          }, ...plan.query.dimensions.filter((binding) => binding.qualifiedId !== ids.customerName)],
+        },
+      },
+      sourceFrame: selectedDisplaySourceFrame,
+    });
+    expect(zeroResolvedDimensionProjection.ambiguity).toContainEqual({
+      field: 'dimensions.customer',
+      candidateIds: [ids.customerName, 'commerce::dimension::customer_type'],
+      reasonCode: 'DIMENSION_AMBIGUOUS',
+    });
+    // The cascade-facing compatibility solver sees this as an actionable
+    // clarification, never as a silent same-name selection.
+    expect(solveAnalyticalCompatibility({
+      frame: unrelatedThirdIdProjection,
+      candidates: [{ candidateId: ids.metric, capability: semanticCapability }],
+    })).toMatchObject({ status: 'clarify', failure: { code: 'FRAME_AMBIGUOUS' } });
+    expect(solveAnalyticalCompatibility({
+      frame: zeroResolvedDimensionProjection,
+      candidates: [{ candidateId: ids.metric, capability: semanticCapability }],
+    })).toMatchObject({ status: 'clarify', failure: { code: 'FRAME_AMBIGUOUS' } });
+
+    // Older frames may not have retained offered IDs. Keep their legacy
+    // lexical fallback so persisted V1/V2 runs remain readable.
+    const legacyNoCandidateProjection = projectResolvedAnalyticalFrame({
+      plan: {
+        ...plan,
+        query: {
+          ...plan.query,
+          dimensions: [{
+            requested: 'customer',
+            qualifiedId: ids.customerName,
+            status: 'resolved' as const,
+            candidateIds: [ids.customerName],
+          }, ...plan.query.dimensions],
+        },
+      },
+      sourceFrame: {
+        ...frame,
+        ambiguity: [{
+          field: 'dimensions.customer',
+          candidateIds: [],
+          reasonCode: 'DIMENSION_UNRESOLVED',
+        }],
+      },
+    });
+    expect(legacyNoCandidateProjection.ambiguity).toEqual([]);
+
+    // The same identity rule applies to metric ambiguity. A same-name third
+    // metric cannot consume an offered Revenue/Margin choice; legacy empty
+    // candidate lists retain their lexical V1/V2 fallback.
+    const metricAmbiguity = {
+      field: 'metrics.net revenue',
+      candidateIds: [ids.metric, 'commerce::metric::gross_profit'],
+      reasonCode: 'METRIC_AMBIGUOUS',
+    };
+    expect(projectResolvedAnalyticalFrame({
+      plan,
+      sourceFrame: { ...frame, ambiguity: [metricAmbiguity] },
+    }).ambiguity).toEqual([]);
+    // A metric-like ID attached only as a host dimension is not a selected
+    // metric. Cross-role identity reuse must retain the source ambiguity.
+    const crossLaneMetricProjection = projectResolvedAnalyticalFrame({
+      plan,
+      sourceFrame: {
+        ...frame,
+        metricConceptIds: [],
+        dimensions: [
+          ...frame.dimensions,
+          { dimensionId: ids.metric, role: 'group_by' as const },
+        ],
+        ambiguity: [metricAmbiguity],
+      },
+    });
+    expect(crossLaneMetricProjection.ambiguity).toContainEqual(metricAmbiguity);
+    const thirdMetricProjection = projectResolvedAnalyticalFrame({
+      plan: {
+        ...plan,
+        query: {
+          ...plan.query,
+          measures: [{
+            requested: 'net revenue',
+            qualifiedId: 'commerce::metric::gross_profit',
+            status: 'resolved' as const,
+            candidateIds: ['commerce::metric::gross_profit'],
+          }],
+        },
+      },
+      sourceFrame: { ...frame, ambiguity: [metricAmbiguity] },
+    });
+    expect(thirdMetricProjection.ambiguity).toContainEqual(metricAmbiguity);
+    const zeroResolvedMetricProjection = projectResolvedAnalyticalFrame({
+      plan: {
+        ...plan,
+        query: {
+          ...plan.query,
+          measures: [{
+            requested: 'net revenue',
+            status: 'unresolved' as const,
+            candidateIds: [],
+          }],
+        },
+      },
+      sourceFrame: { ...frame, ambiguity: [metricAmbiguity] },
+    });
+    expect(zeroResolvedMetricProjection.ambiguity).toContainEqual(metricAmbiguity);
+    expect(solveAnalyticalCompatibility({
+      frame: thirdMetricProjection,
+      candidates: [{ candidateId: ids.metric, capability: semanticCapability }],
+    })).toMatchObject({ status: 'clarify', failure: { code: 'FRAME_AMBIGUOUS' } });
+    expect(solveAnalyticalCompatibility({
+      frame: zeroResolvedMetricProjection,
+      candidates: [{ candidateId: ids.metric, capability: semanticCapability }],
+    })).toMatchObject({ status: 'clarify', failure: { code: 'FRAME_AMBIGUOUS' } });
+    expect(projectResolvedAnalyticalFrame({
+      plan,
+      sourceFrame: {
+        ...frame,
+        ambiguity: [{ ...metricAmbiguity, candidateIds: [], reasonCode: 'METRIC_UNRESOLVED' }],
+      },
+    }).ambiguity).toEqual([]);
+
+    // Filter binding uses the same candidate identity contract. Unlike the
+    // original lexical query text, a source-offered region A/B choice cannot
+    // be discharged by a same-named C filter. Persisted legacy frames with no
+    // candidate IDs still retain their historical filter fallback.
+    const filterA = 'commerce::dimension::customer_region';
+    const filterB = 'commerce::dimension::customer_segment';
+    const filterC = 'commerce::dimension::customer_country';
+    const filterAmbiguity = {
+      field: 'filters.region',
+      candidateIds: [filterA, filterB],
+      reasonCode: 'FILTER_AMBIGUOUS' as const,
+    };
+    const filterSourceFrame = {
+      ...frame,
+      memberBindings: [{
+        dimensionId: filterA,
+        canonicalValues: ['North'],
+        source: 'question' as const,
+        confidence: 'exact' as const,
+      }],
+      ambiguity: [filterAmbiguity],
+    };
+    const filterPlan = (binding: {
+      status: 'resolved' | 'ambiguous' | 'unresolved';
+      qualifiedId?: string;
+      candidateIds: string[];
+    }) => ({
+      ...plan,
+      query: {
+        ...plan.query,
+        filters: [{
+          field: 'region',
+          value: 'North',
+          binding: {
+            requested: 'region',
+            ...binding,
+          },
+        }],
+      },
+    });
+    expect(projectResolvedAnalyticalFrame({
+      plan: filterPlan({ status: 'resolved', qualifiedId: filterA, candidateIds: [filterA] }),
+      sourceFrame: filterSourceFrame,
+    }).ambiguity).toEqual([]);
+
+    // The ID alone is not enough: filter A only appearing as a group-by on
+    // the host frame cannot discharge a source filter ambiguity. This guards
+    // against an identifier reused in two analytical roles.
+    const crossLaneFilterProjection = projectResolvedAnalyticalFrame({
+      plan: filterPlan({ status: 'resolved', qualifiedId: filterA, candidateIds: [filterA] }),
+      sourceFrame: {
+        ...frame,
+        dimensions: [
+          ...frame.dimensions,
+          { dimensionId: filterA, role: 'group_by' as const },
+        ],
+        memberBindings: [],
+        ambiguity: [filterAmbiguity],
+      },
+    });
+    expect(crossLaneFilterProjection.ambiguity).toContainEqual(filterAmbiguity);
+
+    const thirdFilterProjection = projectResolvedAnalyticalFrame({
+      plan: filterPlan({ status: 'resolved', qualifiedId: filterC, candidateIds: [filterC] }),
+      sourceFrame: filterSourceFrame,
+    });
+    expect(thirdFilterProjection.ambiguity).toContainEqual(filterAmbiguity);
+    const zeroResolvedFilterProjection = projectResolvedAnalyticalFrame({
+      plan: filterPlan({ status: 'unresolved', candidateIds: [] }),
+      sourceFrame: filterSourceFrame,
+    });
+    expect(zeroResolvedFilterProjection.ambiguity).toContainEqual(filterAmbiguity);
+    const multiResolvedFilterProjection = projectResolvedAnalyticalFrame({
+      plan: {
+        ...filterPlan({ status: 'resolved', qualifiedId: filterA, candidateIds: [filterA] }),
+        query: {
+          ...filterPlan({ status: 'resolved', qualifiedId: filterA, candidateIds: [filterA] }).query,
+          filters: [{
+            field: 'region',
+            value: 'North',
+            binding: { requested: 'region', status: 'resolved' as const, qualifiedId: filterA, candidateIds: [filterA] },
+          }, {
+            field: 'segment',
+            value: 'Enterprise',
+            binding: { requested: 'region', status: 'resolved' as const, qualifiedId: filterB, candidateIds: [filterB] },
+          }],
+        },
+      },
+      sourceFrame: {
+        ...filterSourceFrame,
+        memberBindings: [
+          ...filterSourceFrame.memberBindings,
+          { dimensionId: filterB, canonicalValues: ['Enterprise'], source: 'question' as const, confidence: 'exact' as const },
+        ],
+      },
+    });
+    expect(multiResolvedFilterProjection.ambiguity).toContainEqual(filterAmbiguity);
+    expect(solveAnalyticalCompatibility({
+      frame: thirdFilterProjection,
+      candidates: [{ candidateId: ids.metric, capability: semanticCapability }],
+    })).toMatchObject({ status: 'clarify', failure: { code: 'FRAME_AMBIGUOUS' } });
+
+    expect(projectResolvedAnalyticalFrame({
+      plan: filterPlan({ status: 'resolved', qualifiedId: filterA, candidateIds: [filterA] }),
+      sourceFrame: {
+        ...frame,
+        ambiguity: [{ ...filterAmbiguity, candidateIds: [], reasonCode: 'FILTER_UNRESOLVED' }],
+      },
+    }).ambiguity).toEqual([]);
 
     const ambiguousPlan = {
       ...plan,

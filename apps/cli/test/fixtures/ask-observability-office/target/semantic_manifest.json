@@ -1,0 +1,47 @@
+{
+  "semantic_models": [
+    {
+      "name": "lost_opportunities",
+      "model": "ref('fct_lost_opportunities')",
+      "defaults": { "agg_time_dimension": "close_date" },
+      "entities": [
+        { "name": "lost_opportunity", "type": "primary", "expr": "opportunity_id" },
+        { "name": "account", "type": "foreign", "expr": "account_id" }
+      ],
+      "measures": [
+        { "name": "lost_opportunity_count_measure", "agg": "count", "expr": "opportunity_id", "agg_time_dimension": "close_date" },
+        { "name": "lost_amount_measure", "agg": "sum", "expr": "lost_amount", "agg_time_dimension": "close_date" }
+      ],
+      "dimensions": [
+        { "name": "close_date", "type": "time", "type_params": { "time_granularity": "day" } },
+        { "name": "fiscal_period", "type": "categorical" },
+        { "name": "fiscal_month", "type": "categorical" },
+        { "name": "competitor_name", "type": "categorical" }
+      ]
+    },
+    {
+      "name": "account_revenue",
+      "model": "ref('fct_account_revenue')",
+      "defaults": { "agg_time_dimension": "fiscal_period" },
+      "entities": [
+        { "name": "account_revenue", "type": "primary", "expr": "account_id" },
+        { "name": "account", "type": "foreign", "expr": "account_id" }
+      ],
+      "measures": [
+        { "name": "revenue_measure", "agg": "sum", "expr": "revenue", "agg_time_dimension": "fiscal_period" },
+        { "name": "bcm_run_rate_measure", "agg": "sum", "expr": "bcm_run_rate", "agg_time_dimension": "fiscal_period" }
+      ],
+      "dimensions": [
+        { "name": "fiscal_period", "type": "categorical" },
+        { "name": "account_name", "type": "categorical" },
+        { "name": "customer_name", "type": "categorical" }
+      ]
+    }
+  ],
+  "metrics": [
+    { "name": "lost_opportunity_count", "label": "Lost opportunity count", "description": "Synthetic count of closed-lost opportunities.", "type": "simple", "type_params": { "measure": { "name": "lost_opportunity_count_measure" } } },
+    { "name": "lost_amount", "label": "Lost amount", "description": "Synthetic governed lost amount.", "type": "simple", "type_params": { "measure": { "name": "lost_amount_measure" } } },
+    { "name": "revenue", "label": "Revenue", "description": "Synthetic revenue measure used when Revenue is explicitly requested.", "type": "simple", "type_params": { "measure": { "name": "revenue_measure" } } },
+    { "name": "bcm_run_rate", "label": "BCM run rate", "description": "Synthetic BCM run-rate measure.", "type": "simple", "type_params": { "measure": { "name": "bcm_run_rate_measure" } } }
+  ]
+}

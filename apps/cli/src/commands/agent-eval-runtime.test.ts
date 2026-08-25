@@ -93,6 +93,13 @@ describe('runtime driver run projection', () => {
         egressReceipts: 1,
         fallbackReason: 'none',
       },
+      traceReference: {
+        version: 1,
+        traceId: 'a'.repeat(32),
+        recordingStatus: 'complete',
+        storeSchemaVersion: 1,
+        traceFingerprint: 'sha256:trace',
+      },
       routeDecision: {
         action: 'answer', confidence: 0.8, followsUp: false, reason: 'Qualified generated path.',
         retrievalEvidence: { snapshotId: 'snapshot-1', candidateCount: 4, candidateIds: ['dbt:model:orders'] },
@@ -114,6 +121,7 @@ describe('runtime driver run projection', () => {
       toolCallCount: 3,
       terminalOutcome: { kind: 'modeling_gap', code: 'ANALYTICAL_MODELING_GAP' },
       sourceCoverage: [{ source: 'exploratory', status: 'available' }],
+      observability: { recordingStatus: 'complete', storeSchemaVersion: 1, traceFingerprint: 'sha256:trace' },
     });
   });
 });

@@ -1,0 +1,5 @@
+name: ask_observability_office_synthetic
+version: "1.0.0"
+config-version: 2
+profile: ask_observability_office_synthetic
+model-paths: ["models"]

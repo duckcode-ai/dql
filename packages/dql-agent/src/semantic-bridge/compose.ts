@@ -300,10 +300,23 @@ function resolveSemanticMemberSelection(
   if (metrics.length === 0) return undefined;
 
   const selectedMetricNames = metrics.map((metric) => metric.name);
+  // A cross-model MetricFlow group-by is metric-relative. Preserve that exact
+  // adapter spelling only after the selected metric set has returned it from
+  // its compatible set; a bare leaf is not a substitute for the entity path.
+  // The same qualified reference is what plan resolution/freeze proved.
+  const exactCompatibleReferences = new Set(
+    semanticLayer.explainCompatibleDimensions(selectedMetricNames).compatible
+      .map((dimension) => dimension.qualifiedName?.toLowerCase())
+      .filter((reference): reference is string => Boolean(reference)),
+  );
   const dimensions = uniqueStrings(selection.dimensions ?? [])
-    .map((name) => resolveSelectedDimension(semanticLayer, name, selectedMetricNames))
-    .filter((dimension): dimension is DimensionDefinition => Boolean(dimension))
-    .map(semanticDimensionReference);
+    .flatMap((name) => {
+      const dimension = resolveSelectedDimension(semanticLayer, name, selectedMetricNames);
+      if (!dimension) return [];
+      return [exactCompatibleReferences.has(name.toLowerCase())
+        ? name
+        : semanticDimensionReference(dimension)];
+    });
   const dimensionNames = new Set(
     semanticLayer.listDimensions(undefined, { includeVariants: true }).flatMap((dimension) => [
       dimension.name.toLowerCase(),
@@ -311,11 +324,17 @@ function resolveSemanticMemberSelection(
       dimension.qualifiedName?.toLowerCase(),
     ].filter((value): value is string => Boolean(value))),
   );
+  for (const reference of exactCompatibleReferences) dimensionNames.add(reference);
   // A hallucinated dimension is a hard miss — refuse rather than silently drop it.
   if ((selection.dimensions ?? []).some((name) => !dimensionNames.has(name.toLowerCase()))) return undefined;
   const filters = (selection.filters ?? []).flatMap((filter) => {
     const dimension = resolveSelectedDimension(semanticLayer, filter.dimension, selectedMetricNames);
-    return dimension ? [{ ...filter, dimension: semanticDimensionReference(dimension) }] : [];
+    return dimension ? [{
+      ...filter,
+      dimension: exactCompatibleReferences.has(filter.dimension.toLowerCase())
+        ? filter.dimension
+        : semanticDimensionReference(dimension),
+    }] : [];
   });
   if ((selection.filters ?? []).length > 0 && filters.length === 0) return undefined;
   return { metrics, dimensions, filters };

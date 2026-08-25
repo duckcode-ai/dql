@@ -211,6 +211,28 @@ describe('authoritative plan answer loop (AGT-013 / AGT-014)', () => {
       matchReasons: ['dimension'],
       compatibility: 'compatible',
     };
+    // This direct answer-loop fixture is an authored governed projection. A
+    // raw relation/column closure without this capability is deliberately
+    // routed through review-required exploratory SQL by the router.
+    measure.analyticalCapability = {
+      metricId: measure.qualifiedId!,
+      measureIds: [measure.qualifiedId!],
+      primaryEntityId: 'commerce::entity::order',
+      defaultResultGrainId: 'commerce::entity::order',
+      resultGrainIds: ['commerce::entity::order'],
+      aggregation: 'sum',
+      additivity: { entities: 'additive', time: 'additive' },
+      dimensions: [{
+        dimensionId: customer.qualifiedId!,
+        entityId: 'commerce::entity::order',
+        supportedRoles: ['group_by', 'display', 'rank_entity'],
+      }],
+      timeDimensions: [],
+      operations: ['group', 'rank'],
+      supportedOutputKinds: ['dimension', 'metric_value'],
+      executionCapabilities: [{ route: 'governed_sql', adapterId: 'relational-v1' }],
+      sourceFingerprint: 'plan-first-governed-fixture',
+    };
     const resolution: MeaningResolution = {
       interpretedQuestion: 'Top customers by revenue.',
       questionType: 'ranking',
@@ -401,7 +423,10 @@ describe('authoritative plan answer loop (AGT-013 / AGT-014)', () => {
       questionType: 'value',
       selectedConceptIds: [foodVsDrink.id],
       recommendedExecutionId: foodVsDrink.id,
-      queryIntent: { measures: ['sales'], dimensions: ['category'], filters: [] },
+      // Meaning resolution has already normalized the user-facing sales alias
+      // to the certified artifact's declared `revenue` output. The frozen
+      // execution plan must retain that authoritative alias.
+      queryIntent: { measures: ['revenue'], dimensions: ['category'], filters: [] },
       rejectedCandidates: [],
       confidence: 'high',
       missingInformation: [],
@@ -502,7 +527,7 @@ describe('authoritative plan answer loop (AGT-013 / AGT-014)', () => {
       route: { tier: 'certified_block' },
     });
     expect(result.validationWarnings).toEqual(expect.arrayContaining([
-      expect.stringContaining('sale'),
+      expect.stringContaining('revenue'),
     ]));
     expect(result.dqlArtifact?.kind).not.toBe('sql_block');
   });
@@ -536,6 +561,7 @@ describe('authoritative plan answer loop (AGT-013 / AGT-014)', () => {
       relevanceScore: 0.98,
       matchReasons: ['meaning'],
       compatibility: 'compatible',
+      analyticalCapability: semanticCapability('semantic:consumption:rollover_balance', 'balance'),
     };
     const dimension: AgentEvidenceCandidate = {
       id: 'dimension:customer_name',
@@ -871,6 +897,15 @@ describe('authoritative plan answer loop (AGT-013 / AGT-014)', () => {
         status: 'blocked',
         issueCodes: expect.arrayContaining(['SEMANTIC_RATIO_COMPILER_BINDING_REQUIRED']),
       });
+      // Aggregation proof rejection occurs after semantic SQL composition but
+      // before a warehouse statement is dispatched. Keep the durable failure
+      // at the semantic compiler boundary so trace projection cannot present
+      // it as result normalization or SQL execution.
+      expect(blocked.analyticalFailure, sql).toMatchObject({
+        code: 'COMPILATION_FAILED',
+        phase: 'compilation',
+        safeActions: expect.arrayContaining(['edit_dql']),
+      });
     }
     expect(provider.calls).toBe(0);
     expect(executions).toBe(1);
@@ -883,7 +918,9 @@ describe('authoritative plan answer loop (AGT-013 / AGT-014)', () => {
     const capability: MetricCapabilityContract = {
       metricId,
       measureIds: ['semantic:consumption:measure:rollover_balance'],
-      primaryEntityId: 'account',
+      // This is a same-entity semantic grouping fixture. It must not rely on
+      // a generic relationship path as if it were MetricFlow-native proof.
+      primaryEntityId: 'customer',
       defaultResultGrainId: 'scalar',
       resultGrainIds: ['scalar', 'customer'],
       aggregation: 'sum',
@@ -1169,13 +1206,16 @@ function semanticCapability(metricId: string, measure: string): MetricCapability
     metricId,
     semanticModelId: 'semantic:consumption',
     measureIds: [measure],
-    primaryEntityId: 'usage',
+    // The test's `customer_name` grouping is declared on this metric model;
+    // it is not a synthetic cross-model join. Keeping it same-entity avoids
+    // treating a bare result grain as adapter-native relationship proof.
+    primaryEntityId: 'customer_name',
     defaultResultGrainId: 'usage',
     resultGrainIds: ['usage', 'customer_name'],
     aggregation: 'sum',
     additivity: { entities: 'additive', time: 'additive' },
     dimensions: [{
-      dimensionId: 'customer_name',
+      dimensionId: 'semantic:consumption:dimension:customer',
       entityId: 'customer_name',
       supportedRoles: ['group_by', 'rank_entity'],
     }],

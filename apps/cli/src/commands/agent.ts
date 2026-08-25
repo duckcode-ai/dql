@@ -39,6 +39,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { load as loadYaml } from 'js-yaml';
 import {
+  AskTraceSqliteStoreV1,
   KGStore,
   MemoryStore,
   defaultKgPath,
@@ -50,6 +51,7 @@ import {
   resolveDomainContextEnvelope,
   buildAnalysisQuestionPlan,
   buildLocalContextPack,
+  classifyProviderFailure,
   coerceReasoningEffort,
   contextRetrievalBudgetForQuestion,
   deriveGeneratedDraftSlug,
@@ -57,6 +59,7 @@ import {
   recordQueryRun,
   recordRuntimeSchemaSnapshot,
   type ProviderName,
+  type AgentProvider,
   upsertGeneratedDqlArtifactDraft,
   upsertGeneratedDraft,
   validateSqlAgainstLocalContext,
@@ -67,13 +70,22 @@ import {
   type AnalysisDepth,
   type NarrationIntegrityReceiptV1,
   type ReasoningEffort,
+  createAskTraceObserverV1,
+  defaultAskTraceSqlitePath,
+  type AskTraceObserverV1,
+  type ProviderAttemptTraceV1,
+  type ProviderDispatchCompletionEvent,
+  type ProviderDispatchEvent,
+  type ProviderToolLoopOptions,
 } from '@duckcodeailabs/dql-agent';
+import { createHash, randomUUID } from 'node:crypto';
 import { buildManifest, resolveDbtManifestPath } from '@duckcodeailabs/dql-core';
 import type { CLIFlags } from '../args.js';
 import { findProjectRoot } from '../local-runtime.js';
 import { buildAnswerLoopTools, createGroundingContextExpander } from '../llm/answer-loop-tools.js';
 import { judgeAnswer, type JudgeCompletion } from './eval-judge.js';
 import { startProjectRuntime } from './notebook.js';
+import { runAgentTrace } from './agent-trace.js';
 
 /**
  * Resolve the runtime the agent posts certified blocks / generated SQL to.
@@ -88,7 +100,7 @@ import { startProjectRuntime } from './notebook.js';
 async function resolveAgentRuntime(
   projectRoot: string,
   flags: CLIFlags,
-): Promise<{ runtimeBase: string; close: () => Promise<void> }> {
+): Promise<{ runtimeBase: string; close: () => Promise<void>; askTraceCapability?: string }> {
   const explicit = (flags as { runtimeUrl?: string; runtime?: string }).runtimeUrl
     ?? (flags as { runtime?: string }).runtime
     ?? process.env.DQL_RUNTIME_URL;
@@ -103,7 +115,54 @@ async function resolveAgentRuntime(
     return { runtimeBase: base, close: async () => {} };
   }
   const handle = await startProjectRuntime(projectRoot, { preferredPort: 0 });
-  return { runtimeBase: handle.url, close: handle.close };
+  return { runtimeBase: handle.url, close: handle.close, askTraceCapability: handle.askTraceCapability };
+}
+
+function isLoopbackRuntimeUrl(runtimeBase: string): boolean {
+  try {
+    const hostname = new URL(runtimeBase).hostname;
+    return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1' || hostname === '[::1]';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * An already-running local Notebook runtime mints a one-shot, loopback-only
+ * capability for this CLI request. Remote runtimes deliberately receive no
+ * capability and therefore cannot be relabelled as CLI by arbitrary text.
+ */
+export async function requestLoopbackCliAskTraceCapability(runtimeBase: string): Promise<string | undefined> {
+  if (!isLoopbackRuntimeUrl(runtimeBase)) return undefined;
+  try {
+    const response = await fetch(`${runtimeBase.replace(/\/$/, '')}/api/ask-traces/cli-capability`, {
+      headers: { Accept: 'application/json' },
+    });
+    if (!response.ok) return undefined;
+    const payload = await response.json() as { capability?: unknown; expiresAt?: unknown; scope?: unknown };
+    return typeof payload.capability === 'string'
+      && typeof payload.expiresAt === 'string'
+      && payload.scope === 'agent-runs'
+      ? payload.capability
+      : undefined;
+  } catch {
+    // A pre-observability runtime remains usable. Its request stays browser
+    // attributed rather than fabricating a client-controlled CLI surface.
+    return undefined;
+  }
+}
+
+function runtimeProviderForCliFlag(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  switch (value.trim().toLowerCase()) {
+    case 'claude': return 'anthropic';
+    case 'openai': return 'openai';
+    case 'gemini': return 'gemini';
+    case 'ollama': return 'ollama';
+    // Preserve an invalid explicit value through the host request so the
+    // canonical preflight can return a typed `model_not_found` diagnostic.
+    default: return value.trim().toLowerCase();
+  }
 }
 
 async function fetchRuntimeSchemaContext(runtimeBase: string): Promise<AgentSchemaTable[]> {
@@ -189,6 +248,137 @@ function cliAnalysisDepth(flags: CLIFlags): AnalysisDepth | undefined {
   return value === 'quick' || value === 'deep' ? value : undefined;
 }
 
+/**
+ * Compatibility test adapter for a standalone provider boundary. Production
+ * `dql agent ask` no longer calls this: it uses the runtime AgentRun engine so
+ * the router, cascade, freeze, tools, SQL, and provider spans share one
+ * canonical trace. Keep this adapter truthful for lower-level provider tests
+ * without making it an alternate orchestration authority.
+ */
+export function createDirectCliAskTraceProvider(
+  provider: AgentProvider,
+  trace: AskTraceObserverV1,
+): AgentProvider {
+  let attemptIndex = 0;
+  let lastFailedSpanId: string | undefined;
+  type Entry = { spanId: string | undefined; attempt: ProviderAttemptTraceV1 };
+  const pending = new Map<string, Entry[]>();
+  const keyFor = (event: Pick<ProviderDispatchEvent, 'provider' | 'operation' | 'attemptIndex'>) =>
+    `${event.provider}:${event.operation}:${event.attemptIndex}`;
+  const attempt = (event: Pick<ProviderDispatchEvent, 'provider' | 'model'>, retryOfSpanId?: string): ProviderAttemptTraceV1 => ({
+    version: 1 as const,
+    phase: 'generation' as const,
+    physicalAttemptIndex: ++attemptIndex,
+    providerFingerprint: `sha256:${createHash('sha256').update(event.provider).digest('hex')}`,
+    ...(event.model ? { modelFingerprint: `sha256:${createHash('sha256').update(event.model).digest('hex')}` } : {}),
+    ...(retryOfSpanId ? { retryOfSpanId } : {}),
+    admission: 'admitted' as const,
+    provenance: 'live' as const,
+  });
+  const finish = (entry: Entry, outcome: 'ok' | 'error' | 'cancelled', error?: unknown) => {
+    if (!entry.spanId) return;
+    const diagnostic = outcome === 'ok' ? undefined : classifyProviderFailure({
+      phase: 'generation',
+      code: error && typeof error === 'object' ? String((error as { code?: unknown }).code ?? '') : undefined,
+      message: error instanceof Error ? error.message : String(error ?? ''),
+      providerFingerprint: entry.attempt.providerFingerprint,
+      modelFingerprint: entry.attempt.modelFingerprint,
+    });
+    const finalAttempt: ProviderAttemptTraceV1 = outcome === 'ok'
+      ? entry.attempt
+      : {
+          ...entry.attempt,
+          ...(diagnostic?.httpStatusClass ? { httpStatusClass: diagnostic.httpStatusClass } : {}),
+          ...(diagnostic ? { retryable: diagnostic.retryable, safeAction: diagnostic.safeAction } : {}),
+          cause: outcome === 'cancelled' ? 'cancelled' : diagnostic?.cause ?? 'unknown',
+        };
+    trace.finishSpan(entry.spanId, {
+      outcome: outcome === 'ok' ? 'ok' : outcome === 'cancelled' ? 'cancelled' : 'error',
+      reasonCode: outcome === 'ok' ? 'completed' : outcome === 'cancelled' ? 'cancelled' : 'provider_failure',
+      payload: { kind: 'provider', attempt: finalAttempt },
+    });
+    if (outcome !== 'ok') lastFailedSpanId = entry.spanId;
+  };
+  const observedOptions = (options: ProviderToolLoopOptions = {}): ProviderToolLoopOptions => ({
+    ...options,
+    onProviderDispatch: (event) => {
+      const tracedAttempt = attempt(event, lastFailedSpanId);
+      const spanId = trace.startSpan({
+        name: 'provider.attempt',
+        stage: 'provider',
+        reasonCode: 'started',
+        payload: { kind: 'provider', attempt: tracedAttempt },
+      });
+      const key = keyFor(event);
+      pending.set(key, [...(pending.get(key) ?? []), { spanId, attempt: tracedAttempt }]);
+      return options.onProviderDispatch?.(event) ?? event.envelope;
+    },
+    onProviderDispatchComplete: (event: ProviderDispatchCompletionEvent) => {
+      const key = keyFor(event);
+      const entries = pending.get(key) ?? [];
+      const entry = entries[0];
+      if (entry && event.outcome === 'ok' && (event.settlement === 'transport' || event.settlement === 'process')) {
+        entry.attempt = {
+          ...entry.attempt,
+          ...(event.settlement === 'transport' ? { transportOutcome: 'ok' as const } : { processOutcome: 'ok' as const }),
+        };
+      } else {
+        const closed = entries.shift();
+        if (entries.length > 0) pending.set(key, entries); else pending.delete(key);
+        if (closed) finish(
+          closed,
+          event.outcome,
+          event.error ?? (typeof event.httpStatus === 'number' ? Object.assign(new Error(`HTTP ${event.httpStatus}`), { code: `HTTP_${event.httpStatus}` }) : undefined),
+        );
+      }
+      options.onProviderDispatchComplete?.(event);
+    },
+    onProviderDispatchRejected: (event) => {
+      const denied = trace.startSpan({
+        name: 'provider.attempt',
+        stage: 'provider',
+        reasonCode: 'provider_failure',
+        payload: {
+          kind: 'provider',
+          attempt: {
+            ...attempt(event, lastFailedSpanId),
+            admission: 'denied' as const,
+          },
+        },
+      });
+      trace.finishSpan(denied, { outcome: 'denied', reasonCode: 'provider_failure' });
+      lastFailedSpanId = denied;
+      options.onProviderDispatchRejected?.(event);
+    },
+  });
+  const invoke = async <T>(options: ProviderToolLoopOptions | undefined, call: (observed: ProviderToolLoopOptions) => Promise<T>): Promise<T> => {
+    try {
+      const result = await call(observedOptions(options));
+      for (const entries of pending.values()) for (const entry of entries) finish(entry, 'ok');
+      pending.clear();
+      return result;
+    } catch (error) {
+      const outcome = options?.signal?.aborted ? 'cancelled' as const : 'error' as const;
+      for (const entries of pending.values()) for (const entry of entries) finish(entry, outcome, error);
+      pending.clear();
+      throw error;
+    }
+  };
+  return {
+    name: provider.name,
+    available: () => provider.available(),
+    generate: (messages, options) => invoke(options, (observed) => provider.generate(messages, observed)),
+    ...(provider.generateWithTools ? {
+      generateWithTools: (messages: Parameters<NonNullable<AgentProvider['generateWithTools']>>[0], tools: Parameters<NonNullable<AgentProvider['generateWithTools']>>[1], options?: Parameters<NonNullable<AgentProvider['generateWithTools']>>[2]) =>
+        invoke(options, (observed) => provider.generateWithTools!(messages, tools, observed)),
+    } : {}),
+    ...(provider.generateStream ? {
+      generateStream: (messages: Parameters<NonNullable<AgentProvider['generateStream']>>[0], options: Parameters<NonNullable<AgentProvider['generateStream']>>[1], onDelta: Parameters<NonNullable<AgentProvider['generateStream']>>[2]) =>
+        invoke(options, (observed) => provider.generateStream!(messages, observed, onDelta)),
+    } : {}),
+  };
+}
+
 /** A DQL runtime answers `/api/connections` with a connector/connection payload. */
 async function isDqlRuntime(base: string): Promise<boolean> {
   try {
@@ -211,6 +401,8 @@ export async function runAgent(
       return runAsk(rest, flags);
     case 'threads':
       return runThreads(flags);
+    case 'trace':
+      return runAgentTrace(rest, flags);
     case 'reindex':
       return runReindex(rest, flags);
     case 'feedback':
@@ -219,9 +411,10 @@ export async function runAgent(
       return runEval(rest, flags);
     default:
       throw new Error(
-        'Usage: dql agent <ask|threads|reindex|feedback|eval> [args]\n' +
+        'Usage: dql agent <ask|threads|trace|reindex|feedback|eval> [args]\n' +
             '  dql agent ask "<question>" [--provider claude|openai|gemini|ollama] [--user <id>] [--domain <d>] [--purpose <approved-purpose>] [--thread <id>]\n' +
       '  dql agent threads [--runtime-url <url>]\n' +
+      '  dql agent trace list|show|export|validate|replay|compare\n' +
       '  dql agent reindex [path]\n' +
       '  dql agent feedback up|down --block <id> --question "..."\n' +
       '  dql agent eval agent-evals.yml [--provider claude|openai|gemini|ollama] [--execute] [--save]',
@@ -229,19 +422,63 @@ export async function runAgent(
   }
 }
 
+/**
+ * Canonical CLI Ask entrypoint. Direct and threaded CLI questions use the
+ * exact local AgentRun engine as the browser, so trace evidence follows the
+ * router's candidate/cascade/freeze/execution authority rather than a legacy
+ * answer-loop approximation.
+ */
 async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
   const question = rest.join(' ').trim();
   if (!question) throw new Error('Usage: dql agent ask "<question>"');
+  const threadId = (flags as { thread?: string }).thread;
+  return threadId
+    ? runThreadAsk(question, threadId, flags)
+    : runCanonicalCliAsk(question, undefined, flags);
+}
+
+/**
+ * Compatibility entrypoint retained for downstream imports during the CLI
+ * transition. It deliberately delegates before allocating any legacy state,
+ * so even an old internal caller gets the canonical AgentRun trace rather than
+ * an incomplete synthetic receipt.
+ */
+async function runLegacyDirectAsk(rest: string[], flags: CLIFlags): Promise<void> {
+  const question = rest.join(' ').trim();
+  if (!question) throw new Error('Usage: dql agent ask "<question>"');
+  return runCanonicalCliAsk(question, (flags as { thread?: string }).thread, flags);
 
   // Thread-scoped ask: hand the question to the runtime's agent-run engine with
   // the thread id, so the SERVER injects prior turns and persists this run as a
   // new turn (the same conversation store the notebook UI uses).
   const threadId = (flags as { thread?: string }).thread;
-  if (threadId) return runThreadAsk(question, threadId, flags);
+  if (threadId) return runThreadAsk(question, threadId!, flags);
 
   const projectRoot = findProjectRoot(process.cwd());
+  const traceStore = new AskTraceSqliteStoreV1({ path: defaultAskTraceSqlitePath(projectRoot) });
+  const trace = createAskTraceObserverV1({
+    store: traceStore,
+    runId: `cli-${randomUUID()}`,
+    surface: 'cli',
+    mode: 'ask',
+    questionFingerprint: `sha256:${createHash('sha256').update(question).digest('hex')}`,
+  });
+  const classifySpan = trace.startSpan({
+    name: 'request.classify',
+    stage: 'request',
+    reasonCode: 'started',
+    payload: { kind: 'stage', route: 'direct_cli_legacy' },
+  });
   const kgPath = defaultKgPath(projectRoot);
-  await reindexProject(projectRoot, { kgPath });
+  try {
+    await reindexProject(projectRoot, { kgPath });
+    trace.finishSpan(classifySpan, { outcome: 'ok', reasonCode: 'completed' });
+  } catch (error) {
+    trace.finishSpan(classifySpan, { outcome: 'error', reasonCode: 'unknown' });
+    trace.finalize({ status: 'failed' });
+    traceStore.close();
+    throw error;
+  }
 
   const providerName = (flags as { provider?: string }).provider as ProviderName | undefined;
   const userId = (flags as { user?: string }).user;
@@ -251,13 +488,63 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
   const reasoningEffort = cliReasoningEffort(flags);
   const requestedDepth = cliAnalysisDepth(flags);
 
-  const provider = await pickProvider(providerName);
+  let provider: AgentProvider;
+  try {
+    provider = await pickProvider(providerName);
+  } catch (error) {
+    trace.finalize({ status: 'failed' });
+    traceStore.close();
+    throw error;
+  }
   const kg = new KGStore(kgPath);
   const memory = new MemoryStore(defaultMemoryPath(projectRoot));
   const { skills } = loadSkills(projectRoot);
 
   let closeRuntime: (() => Promise<void>) | undefined;
   try {
+    const preflight = trace.startSpan({
+      name: 'provider.preflight',
+      stage: 'provider',
+      reasonCode: 'started',
+      payload: {
+        kind: 'provider',
+        attempt: {
+          version: 1,
+          phase: 'preflight',
+          physicalAttemptIndex: 0,
+          providerFingerprint: `sha256:${createHash('sha256').update(provider.name).digest('hex')}`,
+          readiness: 'unknown',
+          admission: 'unknown',
+          provenance: 'live',
+        },
+      },
+    });
+    let providerReady = false;
+    try { providerReady = await provider.available(); } catch { providerReady = false; }
+    trace.finishSpan(preflight, {
+      outcome: providerReady ? 'ok' : 'unavailable',
+      reasonCode: providerReady ? 'completed' : 'provider_preflight',
+      payload: {
+        kind: 'provider',
+        attempt: {
+          version: 1,
+          phase: 'preflight',
+          physicalAttemptIndex: 0,
+          providerFingerprint: `sha256:${createHash('sha256').update(provider.name).digest('hex')}`,
+          readiness: providerReady ? 'ready' : 'unavailable',
+          admission: 'unknown',
+          cause: providerReady ? undefined : 'authentication',
+          safeAction: providerReady ? undefined : 'fix_provider_configuration',
+          provenance: 'live',
+        },
+      },
+    });
+    if (!providerReady) {
+      throw Object.assign(new Error('The selected AI provider is not ready. Configure or sign in to the provider and retry.'), {
+        code: 'AUTHENTICATION_FAILED',
+      });
+    }
+    const tracedProvider = createDirectCliAskTraceProvider(provider, trace);
     const memoryContext = memory.search({
       query: question,
       scopes: ['project', 'user', 'artifact'],
@@ -276,6 +563,12 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
     closeRuntime = close;
     const schemaContext = await fetchRuntimeSchemaContext(runtimeBase);
     recordCliRuntimeSchemaSnapshot(projectRoot, schemaContext, 'direct CLI runtime schema');
+    const retrievalSpan = trace.startSpan({
+      name: 'retrieval',
+      stage: 'retrieval',
+      reasonCode: 'started',
+      payload: { kind: 'retrieval', candidateCount: 0 },
+    });
     const contextPack = await buildLocalContextPack(projectRoot, {
       question,
       surface: 'cli',
@@ -289,10 +582,15 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
           }
         : undefined,
     }).catch(() => undefined);
+    trace.finishSpan(retrievalSpan, {
+      outcome: 'ok',
+      reasonCode: 'completed',
+      payload: { kind: 'retrieval', candidateCount: contextPack?.objects.length ?? 0 },
+    });
     const answerLoopTools = buildAnswerLoopTools(projectRoot);
     const result = await answer({
       question,
-      provider,
+      provider: tracedProvider,
       kg,
       manifest,
       skills,
@@ -433,6 +731,8 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
         },
       });
 
+    trace.finalize({ status: 'completed' });
+
     if (format === 'json') {
       console.log(JSON.stringify(result, null, 2));
       return;
@@ -448,15 +748,22 @@ async function runAsk(rest: string[], flags: CLIFlags): Promise<void> {
       : '';
     const footer = result.provenanceFooter ? `\n\n— ${result.provenanceFooter}` : '';
     console.log(`${badge}\n\n${result.text}${footer}${cite}`);
-    if (result.result) {
-      console.log(`\nRows: ${result.result.rowCount}`);
-      console.log(JSON.stringify(result.result.rows.slice(0, 5), null, 2));
+    const resultPayload = result.result!;
+    if (resultPayload) {
+      console.log(`\nRows: ${resultPayload.rowCount}`);
+      console.log(JSON.stringify(resultPayload.rows.slice(0, 5), null, 2));
     }
     printDqlArtifactPreview(result);
+  } catch (error) {
+    const cancelled = error instanceof Error && (error as Error).name === 'AbortError';
+    trace.finalize({ status: cancelled ? 'cancelled' : 'failed' });
+    throw error;
   } finally {
     kg.close();
     memory.close();
-    if (closeRuntime) await closeRuntime();
+    const close = closeRuntime;
+    if (close) await close!();
+    traceStore.close();
   }
 }
 
@@ -483,6 +790,94 @@ interface AgentThreadRun {
   trustState?: string;
   answer?: string;
   summary?: string;
+  traceReference?: {
+    traceId?: string;
+    recordingStatus?: string;
+  };
+}
+
+function printCanonicalCliAskRun(run: AgentThreadRun, threadId?: string): void {
+  const badge = run.trustState === 'certified'
+    ? '✓ Certified'
+    : run.trustState === 'grounded'
+      ? '✓ Verified (grounded)'
+      : run.trustState === 'review_required'
+        ? '! AI-generated · review required'
+        : run.trustState === 'blocked'
+          ? '✕ Blocked'
+          : '· Reply';
+  console.log(`${badge}\n\n${(run.answer ?? run.summary ?? '').trim()}`);
+  if (threadId) console.log(`\nThread: ${threadId}`);
+  const trace = run.traceReference;
+  if (trace?.traceId) {
+    console.log(`\nTrace: ${trace.traceId} (${trace.recordingStatus ?? 'recording'})`);
+  } else {
+    console.log('\nTrace: unavailable');
+  }
+}
+
+/**
+ * Submit every user-visible CLI Ask through the runtime AgentRun endpoint.
+ * The runtime owns run IDs, conversation hydration, candidate provenance,
+ * cascade/freeze authority, physical tool/SQL execution, and final trace
+ * reference. The CLI only supplies user intent and an optional host-minted
+ * surface capability.
+ */
+export async function runCanonicalCliAsk(question: string, threadId: string | undefined, flags: CLIFlags): Promise<void> {
+  const projectRoot = findProjectRoot(process.cwd());
+  const format = (flags as { format?: string }).format;
+  const { runtimeBase, close, askTraceCapability: embeddedCapability } = await resolveAgentRuntime(projectRoot, flags);
+  try {
+    const askTraceCapability = embeddedCapability ?? await requestLoopbackCliAskTraceCapability(runtimeBase);
+    const reasoningEffort = cliReasoningEffort(flags);
+    const analysisDepth = cliAnalysisDepth(flags);
+    const domain = (flags as { domain?: string }).domain;
+    const purpose = flags.purpose || undefined;
+    const userId = (flags as { user?: string }).user;
+    const provider = runtimeProviderForCliFlag((flags as { provider?: string }).provider);
+    // `surface` is deliberately absent from public JSON. The runtime assigns
+    // trace surface only after consuming its own loopback capability; this
+    // context carries user intent, never attribution authority.
+    const workspaceContext = {
+      ...(domain ? { domain } : {}),
+      ...(purpose ? { purpose } : {}),
+      ...(userId ? { userId } : {}),
+      ...(provider ? { provider } : {}),
+    };
+    const hasWorkspaceContext = Object.keys(workspaceContext).length > 0;
+    const response = await fetch(`${runtimeBase.replace(/\/$/, '')}/api/agent-runs`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(askTraceCapability ? { 'X-DQL-Ask-Trace-Capability': askTraceCapability } : {}),
+      },
+      body: JSON.stringify({
+        question,
+        ...(threadId ? { threadId } : {}),
+        ...(reasoningEffort ? { reasoningEffort } : {}),
+        ...(analysisDepth ? { analysisDepth } : {}),
+        ...(hasWorkspaceContext ? { workspaceContext } : {}),
+      }),
+    });
+    if (!response.ok) throw new Error(`Runtime returned ${response.status}: ${await response.text()}`);
+    const payload = (await response.json()) as { run?: AgentThreadRun };
+    if (!payload.run?.id) throw new Error('Runtime did not return a canonical agent run.');
+    const run = payload.run;
+    if (format === 'json') {
+      // Preserve the established top-level run shape while adding compact,
+      // content-free trace discoverability for scripts and support bundles.
+      console.log(JSON.stringify({
+        ...run,
+        runId: run.id,
+        ...(run.traceReference?.traceId ? { traceId: run.traceReference.traceId } : {}),
+        traceRecordingStatus: run.traceReference?.recordingStatus ?? 'unavailable',
+      }, null, 2));
+      return;
+    }
+    printCanonicalCliAskRun(run, threadId);
+  } finally {
+    await close();
+  }
 }
 
 /**
@@ -493,44 +888,7 @@ interface AgentThreadRun {
  * across CLI invocations (and across the notebook UI, which shares the store).
  */
 async function runThreadAsk(question: string, threadId: string, flags: CLIFlags): Promise<void> {
-  const projectRoot = findProjectRoot(process.cwd());
-  const format = (flags as { format?: string }).format;
-  const { runtimeBase, close } = await resolveAgentRuntime(projectRoot, flags);
-  try {
-    const reasoningEffort = cliReasoningEffort(flags);
-    const analysisDepth = cliAnalysisDepth(flags);
-    const response = await fetch(`${runtimeBase.replace(/\/$/, '')}/api/agent-runs`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        question,
-        threadId,
-        ...(reasoningEffort ? { reasoningEffort } : {}),
-        ...(analysisDepth ? { analysisDepth } : {}),
-      }),
-    });
-    if (!response.ok) throw new Error(`Runtime returned ${response.status}: ${await response.text()}`);
-    const payload = (await response.json()) as { run?: AgentThreadRun };
-    if (!payload.run) throw new Error('Runtime did not return an agent run.');
-    if (format === 'json') {
-      console.log(JSON.stringify(payload.run, null, 2));
-      return;
-    }
-    const run = payload.run;
-    const badge = run.trustState === 'certified'
-      ? '✓ Certified'
-      : run.trustState === 'grounded'
-        ? '✓ Verified (grounded)'
-        : run.trustState === 'review_required'
-          ? '! AI-generated · review required'
-          : run.trustState === 'blocked'
-            ? '✕ Blocked'
-            : '· Reply';
-    console.log(`${badge}\n\n${(run.answer ?? run.summary ?? '').trim()}`);
-    console.log(`\nThread: ${threadId}`);
-  } finally {
-    await close();
-  }
+  return runCanonicalCliAsk(question, threadId, flags);
 }
 
 /** `dql agent threads` — list server-persisted conversation threads. */
@@ -649,6 +1007,8 @@ interface AgentEvalCase {
     missingContextKind?: string;
     /** Persisted router terminal outcome required for runtime-driven gap cases. */
     terminalOutcomeKind?: 'modeling_gap' | 'policy_blocked';
+    /** OBS-008: assert the compact local trace state without opening trace detail. */
+    traceRecordingStatus?: 'recording' | 'complete' | 'partial' | 'unavailable' | 'detail_expired';
     allowedRelationsOnly?: boolean;
     allowedColumnsOnly?: boolean;
     draftSaved?: boolean;
@@ -716,6 +1076,8 @@ interface AgentEvalResult {
   conversationalAnswer?: boolean;
   /** True when the meaning resolver ran (a provider was reachable). */
   meaningResolved?: boolean;
+  /** Compact trace receipt evidence from a runtime-driven Ask run. */
+  observability?: RuntimeDrivenRun['observability'];
 }
 
 type AgentEvalTraceStageName =
@@ -727,6 +1089,7 @@ type AgentEvalTraceStageName =
   | 'validation'
   | 'execution'
   | 'draft'
+  | 'observability'
   | 'scoring';
 
 interface AgentEvalTraceStage {
@@ -962,6 +1325,7 @@ async function runEval(rest: string[], flags: CLIFlags): Promise<void> {
             && Boolean(runtimeRun.answer?.trim()),
           meaningResolved: Boolean(runtimeRun.routeDecision?.meaningResolution),
         } : {}),
+        ...(runtimeProjection?.observability ? { observability: runtimeProjection.observability } : {}),
         intent: runtimeRun?.routeDecision?.category ?? result.contextPack?.routeDecision.intent,
         reviewStatus: result.reviewStatus,
         contextObjects: runtimeProjection?.retrievalCandidateCount ?? result.contextPack?.objects.length,
@@ -1156,6 +1520,9 @@ function evaluateCase(
   }
   if (expected.terminalOutcomeKind && runtime?.terminalOutcome?.kind !== expected.terminalOutcomeKind) {
     failures.push(`terminal outcome expected ${expected.terminalOutcomeKind}, got ${runtime?.terminalOutcome?.kind ?? 'none'}`);
+  }
+  if (expected.traceRecordingStatus && runtime?.observability?.recordingStatus !== expected.traceRecordingStatus) {
+    failures.push(`trace recording status expected ${expected.traceRecordingStatus}, got ${runtime?.observability?.recordingStatus ?? 'unavailable'}`);
   }
   for (const token of stringList(expected.sqlContains)) {
     if (!result.proposedSql?.toLowerCase().includes(token.toLowerCase())) failures.push(`SQL did not contain "${token}"`);
@@ -1586,6 +1953,22 @@ function buildEvalTrace(input: {
         draftPath: result.draftBlock?.path,
         promoteCommand: result.promoteCommand,
       },
+    },
+    {
+      stage: 'observability',
+      status: runtime?.observability?.recordingStatus === 'complete'
+        ? 'passed'
+        : runtime?.observability ? 'info' : 'not_run',
+      message: runtime?.observability
+        ? `Local Ask trace recording ${runtime.observability.recordingStatus}.`
+        : 'No runtime trace receipt was attached to this evaluation run.',
+      payload: runtime?.observability
+        ? {
+            recordingStatus: runtime.observability.recordingStatus,
+            storeSchemaVersion: runtime.observability.storeSchemaVersion,
+            ...(runtime.observability.traceFingerprint ? { traceFingerprint: runtime.observability.traceFingerprint } : {}),
+          }
+        : undefined,
     },
     {
       stage: 'scoring',

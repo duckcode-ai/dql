@@ -96,6 +96,11 @@ cases:
       repeats: 0
   - id: attribute-follow-up
     verification: executable
+    # This fixture deliberately supplies transcript-shaped history only. It is
+    # not a server-issued selected-result binding, so the current question may
+    # not silently inherit Jessica Richard as a filter. Typed prior-result
+    # drilldown execution is covered by the dedicated AGT-031 answer-loop
+    # fixture, where the persisted member binding is present.
     prior:
       columns: [product_name, customer_name, revenue]
       values:
@@ -131,12 +136,9 @@ cases:
       confidence: high
     expected:
       meaningCalls: 1
-      route: generated_sql
-      memberBinding:
-        dimension: customer_name
-        value: Jessica Richard
+      route: semantic_answer
       metricRequired: false
-      resultColumns: [customer_name, region]
+      resultColumns: [region]
   - id: compound-partial-success
     verification: specified
     question: "What region has top revenue, and which products drive it?"

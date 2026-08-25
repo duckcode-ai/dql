@@ -1,0 +1,125 @@
+entities:
+  - id: lost_opportunity
+    dbt_model: model.ask_observability_office_synthetic.fct_lost_opportunities
+    business_name: Lost opportunity
+    business_context: One closed-lost opportunity with its governed close date and competitor context.
+    analytical_role: event
+    grain: opportunity_id
+    keys: [opportunity_id]
+  - id: account
+    dbt_model: model.ask_observability_office_synthetic.dim_accounts
+    business_name: Account
+    business_context: One synthetic customer account used as the account display entity.
+    analytical_role: dimension
+    grain: account_id
+    keys: [account_id]
+  - id: customer
+    dbt_model: model.ask_observability_office_synthetic.dim_customers
+    business_name: Customer
+    business_context: One synthetic billing customer, distinct from the account display entity.
+    analytical_role: dimension
+    grain: customer_id
+    keys: [customer_id]
+  - id: account_revenue
+    dbt_model: model.ask_observability_office_synthetic.fct_account_revenue
+    business_name: Account revenue snapshot
+    business_context: One synthetic account-period revenue and BCM snapshot.
+    analytical_role: event
+    grain: account_id,fiscal_period
+    keys: [account_id, fiscal_period]
+  - id: competitor_observation
+    dbt_model: model.ask_observability_office_synthetic.fct_competitor_observations
+    business_name: Competitor observation
+    business_context: An un-attributed competitor observation. It is intentionally not safe for account ranking joins.
+    analytical_role: event
+    grain: observation_id
+    keys: [observation_id]
+relationships:
+  - id: lost_opportunity_to_account
+    from: lost_opportunity
+    to: account
+    verb: belongs to
+    description: Every lost opportunity belongs to one governed account.
+    keys: [{ from: account_id, to: account_id }]
+    cardinality: many_to_one
+    fanout: safe
+    status: certified
+    owner: revenue-operations@fixture.test
+    certifiedAgainst:
+      from: { grain: opportunity_id, keys: [opportunity_id] }
+      to: { grain: account_id, keys: [account_id] }
+    validation:
+      status: passed
+      checked_at: "2026-08-22T00:00:00.000Z"
+      query_fingerprint: fixture-lost-opportunity-account-proof
+      proof_fingerprint: e1fcb6bbd7bbcbaa8a2ee63a2dfd239036a6e34bf8cf965c94a0b6738cac9297
+      from_rows: 12
+      to_rows: 8
+      joined_rows: 12
+      from_null_keys: 0
+      to_null_keys: 0
+      unmatched_from: 0
+      max_from_per_key: 4
+      max_to_per_key: 1
+  - id: account_to_customer
+    from: account
+    to: customer
+    verb: billed to
+    description: Every account maps to exactly one synthetic billing customer.
+    keys: [{ from: customer_id, to: customer_id }]
+    cardinality: many_to_one
+    fanout: safe
+    status: certified
+    owner: revenue-operations@fixture.test
+    certifiedAgainst:
+      from: { grain: account_id, keys: [account_id] }
+      to: { grain: customer_id, keys: [customer_id] }
+    validation:
+      status: passed
+      checked_at: "2026-08-22T00:00:00.000Z"
+      query_fingerprint: fixture-account-customer-proof
+      proof_fingerprint: c5bb2dd77b9bb712b44019596e4e84b6d19d656e17ad9875d970ea0c2e6907ec
+      from_rows: 8
+      to_rows: 8
+      joined_rows: 8
+      from_null_keys: 0
+      to_null_keys: 0
+      unmatched_from: 0
+      max_from_per_key: 1
+      max_to_per_key: 1
+  - id: account_revenue_to_account
+    from: account_revenue
+    to: account
+    verb: reports for
+    description: Each account-period snapshot reports for one governed account.
+    keys: [{ from: account_id, to: account_id }]
+    cardinality: many_to_one
+    fanout: safe
+    status: certified
+    owner: revenue-operations@fixture.test
+    certifiedAgainst:
+      from: { grain: account_id,fiscal_period, keys: [account_id, fiscal_period] }
+      to: { grain: account_id, keys: [account_id] }
+    validation:
+      status: passed
+      checked_at: "2026-08-22T00:00:00.000Z"
+      query_fingerprint: fixture-account-revenue-account-proof
+      proof_fingerprint: b80e59ea344820940f773388080ed2492ccded7c7f72df854f2dc4dd2d6b5dac
+      from_rows: 16
+      to_rows: 8
+      joined_rows: 16
+      from_null_keys: 0
+      to_null_keys: 0
+      unmatched_from: 0
+      max_from_per_key: 2
+      max_to_per_key: 1
+  - id: competitor_observation_to_lost_opportunity
+    from: competitor_observation
+    to: lost_opportunity
+    verb: may reference
+    description: Deliberately un-attributed relationship for unsafe-join denial coverage.
+    keys: [{ from: opportunity_id, to: opportunity_id }]
+    cardinality: many_to_many
+    fanout: attribution_required
+    status: draft
+    owner: revenue-operations@fixture.test

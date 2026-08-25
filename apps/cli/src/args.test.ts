@@ -109,6 +109,23 @@ describe('parseArgs', () => {
     expect(parsed.flags.minToolRequirement).toBe(0.75);
   });
 
+  it('parses the bounded local Ask trace export and replay controls', () => {
+    const exportArgs = parseArgs([
+      'agent', 'trace', 'export', 'run-local-1', '--out', 'trace-bundle',
+      '--profile', 'support', '--confirm-reviewed-identifiers', '--question', 'Reviewed business wording only',
+    ]);
+    expect(exportArgs.command).toBe('agent');
+    expect(exportArgs.file).toBe('trace');
+    expect(exportArgs.rest).toEqual(['export', 'run-local-1']);
+    expect(exportArgs.flags).toMatchObject({
+      outDir: 'trace-bundle', traceProfile: 'support', confirmReviewedIdentifiers: true,
+      question: 'Reviewed business wording only',
+    });
+
+    const replayArgs = parseArgs(['agent', 'trace', 'replay', 'trace-bundle', '--mode', 'receipt']);
+    expect(replayArgs.flags.traceMode).toBe('receipt');
+  });
+
   it('parses router eval answer-rate threshold', () => {
     const parsed = parseArgs([
       'eval',

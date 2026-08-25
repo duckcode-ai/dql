@@ -73,6 +73,7 @@ export {
   assertCanonicalResult,
   buildAnalyticalTaskGraph,
   buildAnalyticalCascadeDecision,
+  buildAnalyticalRequirementSeedV1,
   buildAnalyticalRequirementSet,
   buildAnalyticalTurnPlan,
   buildCoverageGap,
@@ -101,13 +102,17 @@ export {
 } from './analytical-orchestration.js';
 export { evaluateAnalyticalRequestPolicy } from './analytical-request-policy.js';
 export type { AnalyticalRequestPolicyDecision } from './analytical-request-policy.js';
+/** Local-only, additive Ask/Research execution tracing (OBS-001..OBS-010). */
+export * from './ask-observability/index.js';
 export type {
   AnalyticalAnswerSectionV1,
   AnalyticalCascadeDecisionV1,
+  AnalyticalCascadeTerminalGapV1,
   AnalyticalCascadeTierOutcomeV1,
   AnalyticalCascadeTierV1,
   AnalyticalCoverageGapV1,
   AnalyticalRequirementSetV1,
+  AnalyticalRequirementSeedV1,
   AgentSelectedResultBindingV1,
   AgentSelectedResultBindingValidation,
   AnalyticalTaskKind,
@@ -129,8 +134,14 @@ export type {
   ContextFusionDiagnosticsV1,
   ContextFusionResultV1,
   EvidenceCandidateRoleV1,
+  AskDecisionSummaryV1,
+  AskTerminalIncidentV1,
   ExploratoryExecutionFreezeV1,
+  ExploratoryRequiredOutputBindingProofV1,
+  ExploratoryExecutionAuthorizationAttemptV1,
+  ExploratoryExecutionAuthorizationReceiptV1,
   AgentRunDiagnosticReceiptV3,
+  AgentRunDiagnosticReceiptV4,
   ProviderFailureCauseV1,
   ProviderFailureDiagnosticV1,
   ResearchEvidenceLedgerV1,
@@ -230,6 +241,7 @@ export {
   redactProviderResultRows,
   stripProviderResultRows,
   ASK_NARRATION_RESULT_ROW_POLICY_ID,
+  MAX_RESEARCH_NARRATION_RESULT_ROWS,
   MAX_ASK_NARRATION_RESULT_ROWS,
   DEFAULT_ASK_ROW_EGRESS_POLICY,
   ZERO_ROW_EGRESS_POLICY,
@@ -239,6 +251,7 @@ export {
   type ProviderPayloadRowShape,
   type BoundedProviderResultRows,
   type ProviderResultRowEgressPolicy,
+  type ProviderResultRowEgressAuthorityV1,
 } from './provider-egress.js';
 export { buildAggregationSafetyProof } from './aggregation-safety-proof.js';
 export {
@@ -274,13 +287,21 @@ export type {
 } from './analytical-failure-repair.js';
 export { detectResultSetOperation, computeResultSetOperation, refersToPriorResult, type PriorResultShape } from "./conversation/result-ops.js";
 export type { ResultSetOperation, PriorResultData, ResultSetComputation } from "./conversation/result-ops.js";
-export type { SemanticExecutionTrace, SemanticQueryCompiler } from "./answer-loop.js";
+export type {
+  AgentConversationBindingV1,
+  SemanticExecutionTrace,
+  SemanticQueryCompiler,
+} from "./answer-loop.js";
 export {
   GENERATED_ANALYTICAL_TUPLE_DRIFT_MESSAGE,
+  frozenRequiredOutputAliasesForPlan,
+  frozenRequiredOutputBindingProofsForPlan,
+  validateFrozenRequiredOutputProjection,
   validateGeneratedAnalyticalProposal,
   type GeneratedAnalyticalProposalV1,
   type GeneratedAnalyticalProposalValidation,
   type GeneratedAnalyticalTupleDriftCode,
+  type FrozenRequiredOutputProjectionValidation,
 } from './generated-analytical-proposal.js';
 export { resolveDomainContextEnvelope, domainContextSearchDomains } from './domain-context.js';
 export type { DomainContextEnvelope, KnowledgeLens, ResolveDomainContextInput } from './domain-context.js';
@@ -1353,6 +1374,7 @@ export {
   coerceThinkingMode,
   resolveThinkingMode,
   prepareProviderHttpDispatch,
+  completeProviderHttpDispatch,
 } from "./providers/index.js";
 export type {
   AgentProvider,
@@ -1360,6 +1382,10 @@ export type {
   AgentToolDefinition,
   ProviderName,
   ProviderDispatchEvent,
+  ProviderDispatchCompletionEvent,
+  ProviderDispatchCompletionObserver,
+  ProviderDispatchRejectionEvent,
+  ProviderDispatchRejectionObserver,
   ProviderDispatchObserver,
   ProviderDispatchOperation,
   ProviderRunOptions,

@@ -143,6 +143,21 @@ describe('runAnalystLoop', () => {
     expect(steps.map((s) => s.kind)).toEqual(expect.arrayContaining(['plan', 'observe', 'verify', 'answer']));
   });
 
+  it('forwards a physical text-protocol tool observation to the host trace hook', async () => {
+    const observed: string[] = [];
+    const provider = textOnly([
+      '```json\n{"tool":"get_table_schema","input":{"relation":"order_items"}}\n```',
+      '```sql\nSELECT product_name FROM order_items\n```',
+    ]);
+
+    const outcome = await runAnalystLoop(input(provider), deps({
+      onToolCall: (event) => observed.push(event.name),
+    }));
+
+    expect(outcome.stop).toBe('composed');
+    expect(observed).toEqual(['get_table_schema']);
+  });
+
   it('does not let a catalog-only context pack authorize generated SQL', async () => {
     // A catalog row says something was indexed under a name; it does not prove a
     // column exists in the warehouse or mint generated execution authority.
@@ -192,6 +207,126 @@ describe('createAnalystLaneHandler', () => {
     expect(passed.agenticSqlExecutionCapability).toMatchObject({
       runId: 'run-a', executionId: 'child-a', snapshotId: 'snapshot-a', planId: 'plan-a', targetFingerprint: 'target-a',
     });
+  });
+
+  it('uses exactly one traced frozen-plan repair after an exploratory model decline', async () => {
+    const repairOptions: unknown[] = [];
+    const repairMessages: unknown[] = [];
+    const provider: AgentProvider = {
+      name: 'ollama',
+      available: async () => true,
+      // The first, bounded analyst turn uses tool mode and declines SQL.
+      generateWithTools: async (_messages, tools) => {
+        for (const current of tools) await current.run({});
+        return '{"summary":"I need more context"}';
+      },
+      // Only the server-owned correction may use plain generation.
+      generate: async (messages, options) => {
+        repairMessages.push(messages);
+        repairOptions.push(options);
+        return JSON.stringify({
+          summary: 'Five most expensive order items.',
+          sql: 'SELECT order_id, product_id, product_price FROM order_items ORDER BY product_price DESC LIMIT 5',
+          viz: 'table',
+          outputs: ['order_id', 'product_id', 'product_price'],
+        });
+      },
+    } as AgentProvider;
+    const legacy = vi.fn(async () => answer);
+    const prepareExploratorySqlExecution = vi.fn(async () => ({
+      capability: { version: 1, sqlFingerprint: 'sql-a' },
+      freeze: { version: 1, sqlFingerprint: 'sql-a' },
+    }));
+    const executeAgenticGeneratedSql = vi.fn(async () => ({ rows: [] }));
+    const handler = createAnalystLaneHandler({ legacy, buildDeps: () => deps() });
+
+    await handler({
+      ...scopedInput(provider),
+      selectedCascadeTier: 'exploratory_sql',
+      resolvedAnalyticalPlan: {
+        schemaVersion: 2,
+        mode: 'authoritative',
+        planId: 'plan-a',
+        fingerprint: 'plan-fingerprint-a',
+        snapshotId: 'snapshot-a',
+        capability: 'bounded_exploration',
+        sourceRelationIds: ['dbt:model:order_items'],
+        query: { measures: [], dimensions: [], filters: [], limit: 5 },
+        outputContract: {
+          measures: [],
+          dimensions: [],
+          requiredOutputs: [
+            { requested: 'order id', qualifiedId: 'dbt:column:order_items.order_id', outputName: 'order_id', status: 'resolved', candidateIds: ['dbt:column:order_items.order_id'] },
+            { requested: 'product id', qualifiedId: 'dbt:column:order_items.product_id', outputName: 'product_id', status: 'resolved', candidateIds: ['dbt:column:order_items.product_id'] },
+            { requested: 'product price', qualifiedId: 'dbt:column:order_items.product_price', outputName: 'product_price', status: 'resolved', candidateIds: ['dbt:column:order_items.product_price'] },
+          ],
+        },
+      },
+      contextPack: {
+        allowedSqlContext: {
+          relations: [{
+            relation: 'order_items', name: 'order_items', source: 'runtime_schema',
+            columns: [{ name: 'order_id' }, { name: 'product_id' }, { name: 'product_price' }],
+          }],
+          sourceBlockSql: [],
+        },
+      },
+      prepareExploratorySqlExecution,
+      executeAgenticGeneratedSql,
+    } as unknown as AnswerLoopInput);
+
+    expect(legacy).toHaveBeenCalledTimes(1);
+    expect(repairOptions).toEqual([expect.objectContaining({
+      dispatchPhase: 'repair', egressPurpose: 'repair_sql', maxProviderDispatches: 1,
+    })]);
+    expect(JSON.stringify(repairMessages[0])).toContain('one permitted correction');
+    expect(JSON.stringify(repairMessages[0])).toContain('order_id <- dbt:column:order_items.order_id');
+    const passed = legacy.mock.calls[0]![0] as AnswerLoopInput;
+    expect(passed.forcedGeneratedProposal?.sql).toBe(
+      'SELECT order_id, product_id, product_price FROM order_items ORDER BY product_price DESC LIMIT 5',
+    );
+    // The handler does not mint execution authority. The same frozen plan and
+    // host callbacks reach the existing prepare/consume boundary unchanged.
+    expect(passed.resolvedAnalyticalPlan?.fingerprint).toBe('plan-fingerprint-a');
+    expect(passed.prepareExploratorySqlExecution).toBe(prepareExploratorySqlExecution);
+    expect(passed.executeAgenticGeneratedSql).toBe(executeAgenticGeneratedSql);
+  });
+
+  it('does not spend a repair dispatch without a complete frozen exploratory authority', async () => {
+    const directGenerate = vi.fn(async () => 'RAW_PROVIDER_CANARY_MUST_NOT_ESCAPE');
+    const provider: AgentProvider = {
+      name: 'ollama',
+      available: async () => true,
+      generate: directGenerate,
+      generateWithTools: async (_messages, tools) => {
+        for (const current of tools) await current.run({});
+        return '{"summary":"I need more context"}';
+      },
+    } as AgentProvider;
+    const legacy = vi.fn(async () => answer);
+    const handler = createAnalystLaneHandler({ legacy, buildDeps: () => deps() });
+    const result = await handler({
+      ...scopedInput(provider),
+      selectedCascadeTier: 'exploratory_sql',
+      resolvedAnalyticalPlan: {
+        schemaVersion: 2,
+        mode: 'authoritative',
+        planId: 'plan-a',
+        // A missing fingerprint means there is no immutable tuple to repair.
+        snapshotId: 'snapshot-a',
+        capability: 'bounded_exploration',
+        sourceRelationIds: ['dbt:model:order_items'],
+        query: { measures: [], dimensions: [], filters: [] },
+        outputContract: { measures: [], dimensions: [] },
+      },
+      prepareExploratorySqlExecution: vi.fn(),
+      executeAgenticGeneratedSql: vi.fn(),
+    } as unknown as AnswerLoopInput);
+
+    expect(directGenerate).not.toHaveBeenCalled();
+    expect(legacy).not.toHaveBeenCalled();
+    expect(result.text).toContain('did not receive final SQL');
+    expect(result.text).not.toContain('RAW_PROVIDER_CANARY_MUST_NOT_ESCAPE');
   });
 
   it('does not invoke an ambient generated executor when scope is missing', async () => {

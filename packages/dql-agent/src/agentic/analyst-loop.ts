@@ -16,7 +16,7 @@ import { createAgenticSqlExecutionCapability } from './sql-authorization.js';
  * proposed identifier was never observed, and say which real one was meant.
  */
 import type { AgentAnswer, AnswerLoopInput } from '../answer-loop.js';
-import type { AgentToolDefinition } from '../providers/types.js';
+import type { AgentToolDefinition, ProviderToolLoopOptions } from '../providers/types.js';
 import type { AnalystTurnPlan } from './turn-plan.js';
 import { runAgenticToolLoopDetailed, type TextToolLoopResult } from './tool-loop.js';
 import { IdentifierLedger } from './identifier-ledger.js';
@@ -56,6 +56,12 @@ export interface AnalystLoopDeps {
    * and the trace falls back to a fixed label.
    */
   planTurn?: (question: string, toolNames: string[]) => Promise<AnalystTurnPlan | undefined>;
+  /**
+   * Physical tool-call observation owned by the runtime boundary.  It records
+   * only typed, redacted trace evidence; it never changes the tool result,
+   * routing decision, or execution authority.
+   */
+  onToolCall?: ProviderToolLoopOptions['onToolCall'];
   onStep?: (step: AnalystStep) => void;
 }
 
@@ -150,6 +156,7 @@ export async function runAnalystLoop(
     ...(input.signal ? { signal: input.signal } : {}),
     maxToolCalls: deps.maxIterations,
     ...(deps.maxProviderDispatches !== undefined ? { maxProviderDispatches: deps.maxProviderDispatches } : {}),
+    ...(deps.onToolCall ? { onToolCall: deps.onToolCall } : {}),
   });
   let raw = initial.text;
   const initialBudgetTerminal = budgetTerminalForToolLoop(initial.stop);
@@ -202,6 +209,7 @@ export async function runAnalystLoop(
         ...(input.signal ? { signal: input.signal } : {}),
         maxToolCalls: deps.maxIterations,
         ...(deps.maxProviderDispatches !== undefined ? { maxProviderDispatches: deps.maxProviderDispatches } : {}),
+        ...(deps.onToolCall ? { onToolCall: deps.onToolCall } : {}),
       },
     );
     raw = repair.text;
@@ -283,6 +291,36 @@ export function createAnalystLaneHandler(deps: {
     if (process.env.DQL_ORCHESTRATOR_TRACE) {
       console.warn(`[dql] analyst loop outcome: stop=${outcome.stop} sql=${outcome.sql ? 'yes' : 'no'} admitted=${outcome.admitted.length} corrections=${outcome.corrections.length}`);
     }
+    // The agentic generated lane normally makes its one generation attempt in
+    // `runAnalystLoop`.  A router-frozen exploratory plan is the narrow
+    // exception: a model decline is allowed ONE server-owned correction before
+    // we declare the plan non-executing.  Previously this handler returned the
+    // no-SQL diagnostic here, before the bounded repair authority in the answer
+    // loop could run.  That made a reserved repair dispatch unreachable while
+    // still spending the initial generation.
+    //
+    // This is deliberately not a second analyst loop or a replan.  The helper
+    // only runs for a complete, authoritative bounded-exploration RAP with the
+    // host's mint-and-consume callbacks.  Its output is handed to the existing
+    // legacy execution boundary as a forced proposal, where the exact frozen
+    // snapshot, closure, target, read-only SQL and output tuple are all
+    // re-authorized before one execution.
+    if (outcome.stop === 'no_sql') {
+      const repair = await repairFrozenExploratoryModelDecline(input);
+      if (repair.sql) {
+        outcome = {
+          ...outcome,
+          sql: repair.sql,
+          stop: 'composed',
+          corrections: [
+            ...outcome.corrections,
+            'The initial model response omitted SQL; one frozen-plan correction was requested.',
+          ],
+        };
+      } else if (repair.terminal) {
+        outcome = { ...outcome, stop: 'budget_exhausted', terminal: repair.terminal };
+      }
+    }
     const scope = input.agenticExecutionScope;
     const composedSql = outcome.stop === 'composed' ? outcome.sql : undefined;
     // A router-selected exploratory tier has a stricter handoff than the
@@ -362,6 +400,148 @@ export function createAnalystLaneHandler(deps: {
     // never ran — the same silent-degradation trap the fallback marker avoids.
     return withAnalystEvidence(answer, outcome);
   };
+}
+
+/**
+ * Whether the host has supplied everything needed for the one permitted
+ * model-decline correction on a router-frozen exploratory plan.  This must
+ * stay stricter than "selected exploratory": without the immutable RAP and
+ * the host-owned authorization closures, another provider call would be a
+ * fresh generated attempt rather than a repair.
+ */
+function mayRepairFrozenExploratoryModelDecline(input: AnswerLoopInput): boolean {
+  const plan = input.resolvedAnalyticalPlan;
+  return input.selectedCascadeTier === 'exploratory_sql'
+    && plan?.mode === 'authoritative'
+    && plan.capability === 'bounded_exploration'
+    && Boolean(plan.planId && plan.fingerprint && plan.snapshotId)
+    && plan.sourceRelationIds.length > 0
+    && Boolean(input.prepareExploratorySqlExecution && input.executeAgenticGeneratedSql);
+}
+
+type FrozenExploratoryRepairResult = {
+  sql?: string;
+  terminal?: Extract<AnalystOutcome['terminal'], 'provider_dispatch_budget_exhausted'>;
+};
+
+/**
+ * Performs the only provider-side correction available to a frozen
+ * exploratory plan after its initial generation declined to emit SQL.
+ *
+ * No result rows, extra retrieval, candidate IDs, route choices, or new
+ * relationship paths cross this boundary.  The schema excerpt is selected
+ * from the already-rendered host context by the frozen physical relation leaf;
+ * execution still requires the stronger capability check in the host.
+ */
+async function repairFrozenExploratoryModelDecline(
+  input: AnswerLoopInput,
+): Promise<FrozenExploratoryRepairResult> {
+  if (!mayRepairFrozenExploratoryModelDecline(input)) return {};
+
+  const plan = input.resolvedAnalyticalPlan!;
+  const relations = frozenExploratoryPromptRelations(input);
+  // Do not ask a model to make up the physical relation when the host did not
+  // retain a matching, bounded schema excerpt.  The caller will surface the
+  // original no-SQL outcome instead of treating this as a fresh planning turn.
+  if (relations.length === 0) return {};
+
+  const outputs = plan.outputContract.requiredOutputs
+    ?.filter((output) => output.status === 'resolved' && output.outputName && output.qualifiedId)
+    .map((output) => `${output.outputName} <- ${output.qualifiedId}`)
+    ?? [];
+  const requestedLimit = plan.query.limit;
+  const schema = relations.map((relation) => {
+    const columns = relation.columns
+      .slice(0, 48)
+      .map((column) => column.name)
+      .filter(Boolean)
+      .join(', ');
+    return `${relation.relation} (${columns})`;
+  }).join('\n');
+  try {
+    const raw = await input.provider.generate([
+      {
+        role: 'system',
+        content: [
+          'Return exactly one JSON object with `summary`, `sql`, `viz`, and `outputs`.',
+          'This is the one permitted correction for an already frozen, review-required exploratory plan.',
+          'Produce one read-only SELECT or WITH query. Do not explain a refusal, call tools, choose a different route, add a relation, remove an output, alter the ranking, or change the limit.',
+          'Use only the supplied physical relations and columns. The host will reject any SQL that differs from the frozen snapshot, source closure, target, read-only policy, or required output bindings.',
+        ].join('\n'),
+      },
+      {
+        role: 'user',
+        content: [
+          `Question: ${input.question}`,
+          outputs.length > 0
+            ? `Frozen required output bindings (preserve exactly): ${outputs.join('; ')}`
+            : 'Preserve the frozen requested output tuple exactly.',
+          requestedLimit !== undefined ? `Frozen limit: ${requestedLimit}` : '',
+          `Bounded physical schema:\n${schema}`,
+        ].filter(Boolean).join('\n\n'),
+      },
+    ], {
+      ...(input.signal ? { signal: input.signal } : {}),
+      ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
+      // The runtime ledger owns the cross-phase ceiling.  This local cap stops a
+      // provider implementation from internally retrying the correction.
+      maxProviderDispatches: 1,
+      dispatchPhase: 'repair',
+      egressPurpose: 'repair_sql',
+    });
+    return { sql: sqlFromFrozenExploratoryRepair(raw) };
+  } catch (error) {
+    if (input.signal?.aborted) throw input.signal.reason ?? error;
+    const code = error && typeof error === 'object'
+      ? String((error as { code?: unknown }).code ?? '')
+      : '';
+    return code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED'
+      ? { terminal: 'provider_dispatch_budget_exhausted' }
+      : {};
+  }
+}
+
+function frozenExploratoryPromptRelations(input: AnswerLoopInput) {
+  const sourceLeaves = new Set(
+    (input.resolvedAnalyticalPlan?.sourceRelationIds ?? [])
+      .map(frozenRelationLeaf)
+      .filter(Boolean),
+  );
+  return (input.contextPack?.allowedSqlContext.relations ?? []).filter((relation) =>
+    sourceLeaves.has(frozenRelationLeaf(relation.relation))
+    || sourceLeaves.has(frozenRelationLeaf(relation.name)),
+  );
+}
+
+function frozenRelationLeaf(value: string | undefined): string {
+  return (value ?? '')
+    .replace(/["`\[\]]/g, '')
+    .split(/[.:/]/)
+    .filter(Boolean)
+    .at(-1)
+    ?.toLowerCase() ?? '';
+}
+
+function sqlFromFrozenExploratoryRepair(raw: string): string | undefined {
+  const candidates = [
+    raw.match(/```json\s*([\s\S]*?)```/i)?.[1]?.trim(),
+    raw.trim().startsWith('{') && raw.trim().endsWith('}') ? raw.trim() : undefined,
+  ].filter((candidate): candidate is string => Boolean(candidate));
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as { sql?: unknown; query?: unknown };
+      const sql = typeof parsed.sql === 'string'
+        ? parsed.sql.trim()
+        : typeof parsed.query === 'string'
+          ? parsed.query.trim()
+          : undefined;
+      if (sql) return sql;
+    } catch {
+      // A malformed repair is treated as the original model decline; never
+      // attempt a second correction or derive SQL from prose.
+    }
+  }
+  return raw.match(/```sql\s*([\s\S]*?)```/i)?.[1]?.trim() || undefined;
 }
 
 function analystNonExecutingAnswer(input: AnswerLoopInput, outcome: AnalystOutcome): AgentAnswer {

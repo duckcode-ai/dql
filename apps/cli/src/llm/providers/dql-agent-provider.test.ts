@@ -16,13 +16,19 @@ import type { AgentRunRequest } from '../types.js';
 import {
   buildAnalysisQuestionPlan,
   buildLocalContextPack,
+  attachAskTraceObserverV1,
   createAgenticSqlExecutionCapability,
   dqlToolNamesForSurface,
   scopeContextPackToExploratoryCandidateClosure,
+  type AskTraceObserverV1,
   type AgentMessage,
   type AgentProvider,
   type ProviderToolLoopOptions,
 } from '@duckcodeailabs/dql-agent';
+import {
+  agentRunProviderDispatchBudgetForMode,
+  RunScopedProviderDispatchEvidence,
+} from '../../local-runtime.js';
 
 function req(messages: Array<{ role: 'user' | 'assistant'; content: string }>): AgentRunRequest {
   return { provider: 'ollama', messages, projectRoot: '/tmp/x' } as AgentRunRequest;
@@ -569,7 +575,10 @@ describe('provider runner — analyst physical dispatch budget', () => {
       cpSync(join(process.cwd(), 'test', 'fixtures', 'jaffle-supply-chain'), root, { recursive: true });
       const configPath = join(root, 'dql.config.json');
       const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
-      config.agent = { orchestrator: { mode: 'agentic', lanes: ['generated'], maxIterations: 8 } };
+      // A stale/local config may still opt in to turn planning. Ordinary Ask
+      // must ignore it: candidate-ID meaning owns the plan and the ordinary
+      // dispatch cap must remain available for generation/repair.
+      config.agent = { orchestrator: { mode: 'agentic', lanes: ['generated'], maxIterations: 8, turnPlanning: true } };
       writeFileSync(configPath, `${JSON.stringify(config)}\n`);
 
       const replies = [
@@ -594,7 +603,29 @@ describe('provider runner — analyst physical dispatch budget', () => {
       };
       const manifest = buildManifest({ projectRoot: root, dbtManifestPath: join(root, 'target', 'manifest.json') });
       const turns: Array<{ kind: string; [key: string]: unknown }> = [];
-      await createDqlAgentProviderRunner('ollama', provider).run({
+      const toolSpans: Array<{ name: string; outcome?: string; safeErrorCode?: string }> = [];
+      const trace = {
+        enabled: true,
+        recordingStatus: 'recording',
+        startSpan: (input: { name: string }) => {
+          toolSpans.push({ name: input.name });
+          return `span-${toolSpans.length}`;
+        },
+        finishSpan: (spanId: string | undefined, input?: { outcome?: string; payload?: unknown }) => {
+          const index = Number(spanId?.replace('span-', '')) - 1;
+          const span = toolSpans[index];
+          if (!span || !input) return;
+          span.outcome = input.outcome;
+          const payload = input.payload as { kind?: string; call?: { safeErrorCode?: string } } | undefined;
+          span.safeErrorCode = payload?.kind === 'tool' ? payload.call?.safeErrorCode : undefined;
+        },
+        recordCandidateDecision: () => {},
+        recordLink: () => {},
+        finalize: () => undefined,
+        markPartial: () => {},
+        reference: () => undefined,
+      } as unknown as AskTraceObserverV1;
+      await createDqlAgentProviderRunner('ollama', provider).run(attachAskTraceObserverV1({
         provider: 'ollama',
         projectRoot: root,
         agentRunId: 'budget-run',
@@ -636,9 +667,10 @@ describe('provider runner — analyst physical dispatch budget', () => {
           retrievalDiagnostics: { strategy: 'sqlite_fts', lanes: [], selectedObjects: 0, selectedEvidence: [] },
         } as never,
         messages: [{ role: 'user', content: 'show order items' }],
-      }, (turn) => turns.push(turn as typeof turns[number]), new AbortController().signal);
+      }, trace), (turn) => turns.push(turn as typeof turns[number]), new AbortController().signal);
 
       expect(calls).toHaveLength(4);
+      expect(calls.every((messages) => !messages.some((message) => /You are planning an analytics investigation/i.test(message.content)))).toBe(true);
       expect(calls[0]!.map((message) => message.content).join('\n')).toContain('at most 3 tool call');
       expect(calls[3]!.map((message) => message.content).join('\n')).toContain('Tool budget reached');
       expect(turns.find((turn) => turn.kind === 'error')).toBeUndefined();
@@ -651,6 +683,373 @@ describe('provider runner — analyst physical dispatch budget', () => {
         .toEqual(expect.arrayContaining([
           expect.objectContaining({ tool: 'identifier_ledger', status: 'checked' }),
         ]));
+      // This is the real text-protocol path used by an agentic Ask: each
+      // `get_table_schema` tool executes before the final SQL proposal, and
+      // its redacted physical boundary is now carried through the projected
+      // answer-loop input rather than being silently dropped.
+      expect(toolSpans.filter((span) => span.name === 'tool.call'))
+        .toEqual([
+          expect.objectContaining({ outcome: 'ok', safeErrorCode: undefined }),
+          expect.objectContaining({ outcome: 'ok', safeErrorCode: undefined }),
+          expect.objectContaining({ outcome: 'ok', safeErrorCode: undefined }),
+        ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('retries one transient same-provider ordinary Ask dispatch and preserves its physical receipt lineage', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dql-provider-runner-transient-retry-'));
+    try {
+      cpSync(join(process.cwd(), 'test', 'fixtures', 'jaffle-supply-chain'), root, { recursive: true });
+      const configPath = join(root, 'dql.config.json');
+      const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+      config.agent = { orchestrator: { mode: 'agentic', lanes: ['generated'], maxIterations: 8, turnPlanning: true } };
+      writeFileSync(configPath, `${JSON.stringify(config)}\n`);
+      const manifest = buildManifest({ projectRoot: root, dbtManifestPath: join(root, 'target', 'manifest.json') });
+      const preparedContextPack = {
+        id: 'pack-transient-retry',
+        question: 'show order items',
+        focusObjectKey: null,
+        mode: 'question',
+        questionPlan: buildAnalysisQuestionPlan('show order items'),
+        objects: [],
+        skills: [],
+        knowledgeLens: { snapshotId: 'snapshot-transient-retry' },
+        edges: [],
+        queryRuns: [],
+        citations: [],
+        evidenceSummaries: [],
+        warnings: [],
+        routeDecision: { route: 'generated_sql' },
+        evidenceRoles: [],
+        allowedSqlContext: {
+          relations: [{
+            relation: 'order_items', name: 'order_items', columns: [],
+            source: 'test', columnCompleteness: 'complete',
+          }],
+          sourceBlockSql: [],
+        },
+        missingContext: [],
+        conflicts: [],
+        appliedHints: [],
+        retrievalDiagnostics: { strategy: 'sqlite_fts', lanes: [], selectedObjects: 0, selectedEvidence: [] },
+      } as never;
+      const cases = [
+        ['HTTP_429', 'HTTP 429 rate limited', 'rate_limited'],
+        ['GATEWAY_503', 'gateway returned 503', 'gateway'],
+        ['NETWORK_FAILURE', 'network socket reset', 'network'],
+      ] as const;
+
+      for (const [code, message, cause] of cases) {
+        const calls: Array<{ messages: AgentMessage[]; options?: ProviderToolLoopOptions }> = [];
+        const admittedCalls: Array<{ messages: AgentMessage[]; options?: ProviderToolLoopOptions }> = [];
+        const spans: Array<{
+          id: string;
+          name: string;
+          start?: { payload?: unknown };
+          finish?: { outcome?: string; payload?: unknown };
+        }> = [];
+        const trace = {
+          enabled: true,
+          recordingStatus: 'recording',
+          startSpan: (input: { name: string; payload?: unknown }) => {
+            const id = `span-${spans.length + 1}`;
+            spans.push({ id, name: input.name, start: input });
+            return id;
+          },
+          finishSpan: (spanId: string | undefined, input?: { outcome?: string; payload?: unknown }) => {
+            const span = spans.find((candidate) => candidate.id === spanId);
+            if (span && input) span.finish = input;
+          },
+          recordCandidateDecision: () => {},
+          recordLink: () => {},
+          finalize: () => undefined,
+          markPartial: () => {},
+          reference: () => undefined,
+        } as unknown as AskTraceObserverV1;
+        const provider: AgentProvider = {
+          name: 'ollama',
+          available: async () => true,
+          generate: async (messages, options) => {
+            calls.push({ messages, options });
+            options?.onProviderDispatch?.({
+              provider: 'ollama', operation: 'generate', attemptIndex: 1, envelope: { messages },
+            });
+            // A provider method can be entered again while the analyst has no
+            // executable handoff, but a throwing dispatch observer means that
+            // no wire body was admitted. Count this only after admission.
+            admittedCalls.push({ messages, options });
+            if (calls.length === 1) {
+              throw Object.assign(new Error(message), { code });
+            }
+            return '```json\n{"summary":"Recovered final SQL.","sql":"SELECT 1 FROM order_items","outputs":["value"]}\n```';
+          },
+        };
+        const turns: Array<{ kind: string; [key: string]: unknown }> = [];
+        const dispatchLedger = new RunScopedProviderDispatchEvidence(
+          agentRunProviderDispatchBudgetForMode('ask'),
+        );
+
+        await createDqlAgentProviderRunner('ollama', provider).run(attachAskTraceObserverV1({
+          provider: 'ollama',
+          projectRoot: root,
+          agentRunId: `transient-retry-${code.toLowerCase()}`,
+          projectSnapshot: { snapshotId: 'snapshot-transient-retry', manifest },
+          providerPreflightRequired: false,
+          resolvedAnalyticalPlan: { planId: 'plan-transient-retry', snapshotId: 'snapshot-transient-retry' } as never,
+          generatedProposalTargetFingerprint: 'target-transient-retry',
+          preparedContextPack,
+          providerDispatchEvidenceSink: dispatchLedger,
+          messages: [{ role: 'user', content: 'show order items' }],
+        }, trace), (turn) => turns.push(turn as typeof turns[number]), new AbortController().signal);
+
+        expect(admittedCalls).toHaveLength(2);
+        expect(admittedCalls[1]?.options).toMatchObject({
+          dispatchPhase: 'generation',
+          egressPurpose: 'answer_generation',
+          retryOfAttemptIndex: 1,
+        });
+        const attempts = spans.filter((span) => span.name === 'provider.attempt');
+        const payload = (span: typeof attempts[number]) => (
+          ((span.finish?.payload ?? span.start?.payload) as { attempt?: Record<string, unknown> } | undefined)?.attempt
+        );
+        const admittedAttempts = attempts.filter((span) => payload(span)?.admission === 'admitted');
+        expect(admittedAttempts).toHaveLength(2);
+        expect(payload(admittedAttempts[0]!)).toMatchObject({
+          phase: 'generation',
+          purpose: 'answer_generation',
+          physicalAttemptIndex: 1,
+          cause,
+          retryable: true,
+        });
+        expect(payload(admittedAttempts[1]!)).toMatchObject({
+          phase: 'generation',
+          purpose: 'answer_generation',
+          physicalAttemptIndex: 2,
+          retryOfSpanId: admittedAttempts[0]!.id,
+        });
+        expect(admittedAttempts[1]!.finish).toMatchObject({ outcome: 'ok' });
+        expect(dispatchLedger.snapshot().providerEgressReceipts).toEqual([
+          expect.objectContaining({ provider: 'ollama', dispatchPhase: 'generation', purpose: 'answer_generation', attemptIndex: 1 }),
+          expect.objectContaining({ provider: 'ollama', dispatchPhase: 'generation', purpose: 'answer_generation', attemptIndex: 1, retryOfAttemptIndex: 1 }),
+        ]);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('denies a second same-provider transient retry without attempting a third dispatch', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dql-provider-runner-second-retry-'));
+    try {
+      cpSync(join(process.cwd(), 'test', 'fixtures', 'jaffle-supply-chain'), root, { recursive: true });
+      const configPath = join(root, 'dql.config.json');
+      const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+      config.agent = { orchestrator: { mode: 'agentic', lanes: ['generated'], maxIterations: 8, turnPlanning: true } };
+      writeFileSync(configPath, `${JSON.stringify(config)}\n`);
+      const manifest = buildManifest({ projectRoot: root, dbtManifestPath: join(root, 'target', 'manifest.json') });
+      const calls: Array<{ options?: ProviderToolLoopOptions }> = [];
+      const spans: Array<{
+        id: string;
+        name: string;
+        start?: { payload?: unknown };
+        finish?: { outcome?: string; payload?: unknown };
+      }> = [];
+      const trace = {
+        enabled: true,
+        recordingStatus: 'recording',
+        startSpan: (input: { name: string; payload?: unknown }) => {
+          const id = `span-${spans.length + 1}`;
+          spans.push({ id, name: input.name, start: input });
+          return id;
+        },
+        finishSpan: (spanId: string | undefined, input?: { outcome?: string; payload?: unknown }) => {
+          const span = spans.find((candidate) => candidate.id === spanId);
+          if (span && input) span.finish = input;
+        },
+        recordCandidateDecision: () => {},
+        recordLink: () => {},
+        finalize: () => undefined,
+        markPartial: () => {},
+        reference: () => undefined,
+      } as unknown as AskTraceObserverV1;
+      const provider: AgentProvider = {
+        name: 'ollama',
+        available: async () => true,
+        generate: async (_messages, options) => {
+          calls.push({ options });
+          options?.onProviderDispatch?.({
+            provider: 'ollama', operation: 'generate', attemptIndex: 1, envelope: { messages: [] },
+          });
+          throw Object.assign(new Error('gateway returned 503'), { code: 'GATEWAY_503' });
+        },
+      };
+      const turns: Array<{ kind: string; [key: string]: unknown }> = [];
+      const dispatchLedger = new RunScopedProviderDispatchEvidence(
+        agentRunProviderDispatchBudgetForMode('ask'),
+      );
+      await createDqlAgentProviderRunner('ollama', provider).run(attachAskTraceObserverV1({
+        provider: 'ollama',
+        projectRoot: root,
+        agentRunId: 'second-transient-retry',
+        projectSnapshot: { snapshotId: 'snapshot-second-retry', manifest },
+        providerPreflightRequired: false,
+        resolvedAnalyticalPlan: { planId: 'plan-second-retry', snapshotId: 'snapshot-second-retry' } as never,
+        generatedProposalTargetFingerprint: 'target-second-retry',
+        providerDispatchEvidenceSink: dispatchLedger,
+        preparedContextPack: {
+          id: 'pack-second-retry', question: 'show order items', focusObjectKey: null, mode: 'question',
+          questionPlan: buildAnalysisQuestionPlan('show order items'), objects: [], skills: [],
+          knowledgeLens: { snapshotId: 'snapshot-second-retry' }, edges: [], queryRuns: [], citations: [],
+          evidenceSummaries: [], warnings: [], routeDecision: { route: 'generated_sql' }, evidenceRoles: [],
+          allowedSqlContext: { relations: [{ relation: 'order_items', name: 'order_items', columns: [], source: 'test', columnCompleteness: 'complete' }], sourceBlockSql: [] },
+          missingContext: [], conflicts: [], appliedHints: [],
+          retrievalDiagnostics: { strategy: 'sqlite_fts', lanes: [], selectedObjects: 0, selectedEvidence: [] },
+        } as never,
+        messages: [{ role: 'user', content: 'show order items' }],
+      }, trace), (turn) => turns.push(turn as typeof turns[number]), new AbortController().signal);
+
+      expect(calls).toHaveLength(2);
+      expect(calls[1]?.options).toMatchObject({ retryOfAttemptIndex: 1 });
+      expect(spans.filter((span) => span.name === 'provider.attempt')).toHaveLength(2);
+      expect(dispatchLedger.snapshot().providerEgressReceipts).toEqual([
+        expect.objectContaining({ attemptIndex: 1, dispatchPhase: 'generation', purpose: 'answer_generation' }),
+        expect.objectContaining({ attemptIndex: 1, dispatchPhase: 'generation', purpose: 'answer_generation', retryOfAttemptIndex: 1 }),
+      ]);
+      expect(turns).toContainEqual(expect.objectContaining({
+        kind: 'tool_result',
+        output: expect.objectContaining({ kind: 'no_answer' }),
+      }));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed at the runner boundary when a non-authoritative Ask attempts to forge repair lifecycle metadata', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dql-provider-runner-forged-repair-'));
+    try {
+      cpSync(join(process.cwd(), 'test', 'fixtures', 'jaffle-supply-chain'), root, { recursive: true });
+      const question = 'what is the order count for each customer?';
+      const { contextPack, candidateIds, closure } = await customerExploratoryClosure(root, question);
+      const manifest = buildManifest({ projectRoot: root, dbtManifestPath: join(root, 'target', 'manifest.json') });
+      const spans: Array<{
+        id: string;
+        name: string;
+        start?: { payload?: unknown };
+        finish?: { outcome?: string; payload?: unknown };
+      }> = [];
+      const trace = {
+        enabled: true,
+        recordingStatus: 'recording',
+        startSpan: (input: { name: string; payload?: unknown }) => {
+          const id = `span-${spans.length + 1}`;
+          spans.push({ id, name: input.name, start: input });
+          return id;
+        },
+        finishSpan: (spanId: string | undefined, input?: { outcome?: string; payload?: unknown }) => {
+          const span = spans.find((candidate) => candidate.id === spanId);
+          if (span && input) span.finish = input;
+        },
+        recordCandidateDecision: () => {},
+        recordLink: () => {},
+        finalize: () => undefined,
+        markPartial: () => {},
+        reference: () => undefined,
+      } as unknown as AskTraceObserverV1;
+      const plan = {
+        // The runner captures this draft/non-authoritative state before the
+        // first call. The test provider subsequently mutates it only to prove
+        // that a downstream caller cannot forge `repair` after runner setup.
+        mode: 'draft',
+        capability: 'bounded_exploration',
+        recommendedRoute: 'exploratory',
+        planId: 'rap-forged-repair',
+        fingerprint: 'f'.repeat(64),
+        snapshotId: contextPack.knowledgeLens.snapshotId,
+        sourceRelationIds: candidateIds,
+        query: { measures: [], dimensions: [], filters: [] },
+      } as Record<string, unknown>;
+      let wireSends = 0;
+      let rawCalls = 0;
+      const provider: AgentProvider = {
+        name: 'ollama',
+        available: async () => true,
+        generate: async (messages, options) => {
+          rawCalls += 1;
+          // `onProviderDispatch` is the exact pre-wire admission boundary. A
+          // throw here means this call never serialized a provider body.
+          options?.onProviderDispatch?.({
+            provider: 'ollama', operation: 'generate', attemptIndex: 1, envelope: { messages },
+          });
+          wireSends += 1;
+          if (rawCalls === 1) {
+            // A malicious/internal caller can arrange to ask for repair after
+            // this initial answer call, but it cannot retroactively turn the
+            // runner-captured RAP into authoritative repair authority.
+            plan.mode = 'authoritative';
+            return '```json\n{"summary":"No SQL was proposed."}\n```';
+          }
+          throw new Error('A forged repair must be denied before this wire body.');
+        },
+      };
+      const dispatchLedger = new RunScopedProviderDispatchEvidence(
+        agentRunProviderDispatchBudgetForMode('ask'),
+      );
+      const turns: Array<{ kind: string; [key: string]: unknown }> = [];
+      const prepare = vi.fn(async () => {
+        throw new Error('Forged repair must not reach exploratory authorization.');
+      });
+      const execute = vi.fn(async () => {
+        throw new Error('Forged repair must not execute SQL.');
+      });
+
+      await createDqlAgentProviderRunner('ollama', provider).run(attachAskTraceObserverV1({
+        provider: 'ollama',
+        projectRoot: root,
+        agentRunId: 'forged-repair-run',
+        projectSnapshot: { snapshotId: contextPack.knowledgeLens.snapshotId, manifest },
+        providerPreflightRequired: false,
+        providerDispatchEvidenceSink: dispatchLedger,
+        preparedContextPack: contextPack,
+        preparedExploratoryContextPack: closure,
+        selectedCascadeTier: 'exploratory_sql',
+        exploratoryCandidateIds: candidateIds,
+        generatedProposalTargetFingerprint: 'target-forged-repair',
+        resolvedAnalyticalPlan: plan as never,
+        prepareExploratorySqlExecution: prepare,
+        executeAgenticGeneratedSql: execute,
+        messages: [{ role: 'user', content: question }],
+      }, trace), (turn) => turns.push(turn as typeof turns[number]), new AbortController().signal);
+
+      expect(rawCalls).toBe(2);
+      expect(wireSends).toBe(1);
+      expect(prepare).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+      expect(dispatchLedger.snapshot().providerEgressReceipts).toEqual([
+        expect.objectContaining({ dispatchPhase: 'generation', purpose: 'answer_generation' }),
+      ]);
+      const attempts = spans.filter((span) => span.name === 'provider.attempt');
+      expect(attempts).toHaveLength(2);
+      const denied = attempts.find((span) => (
+        ((span.finish?.payload ?? span.start?.payload) as { attempt?: Record<string, unknown> } | undefined)
+          ?.attempt?.admission === 'denied'
+      ));
+      expect(denied).toMatchObject({
+        finish: expect.objectContaining({ outcome: 'denied' }),
+      });
+      expect(((denied?.finish?.payload ?? denied?.start?.payload) as { attempt?: Record<string, unknown> })?.attempt)
+        .toMatchObject({
+          phase: 'repair',
+          purpose: 'repair_sql',
+          admission: 'denied',
+          cause: 'admission_denied',
+          safeAction: 'inspect_run',
+        });
+      expect(turns).toContainEqual(expect.objectContaining({
+        kind: 'tool_result',
+        output: expect.objectContaining({ kind: 'no_answer' }),
+      }));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -708,6 +1107,64 @@ describe('provider boundary diagnostics', () => {
     });
     expect(diagnostic).toMatchObject({ cause: 'network', phase: 'preflight', retryable: true });
     expect(JSON.stringify(diagnostic)).not.toContain('localhost');
+  });
+
+  it('keeps physical preflight for a provider-dependent request when the deterministic certified exemption is absent', async () => {
+    const spans: Array<{
+      id: string;
+      name: string;
+      finish?: { outcome?: string; reasonCode?: string; payload?: unknown };
+    }> = [];
+    const trace = {
+      enabled: true,
+      recordingStatus: 'recording',
+      startSpan: (input: { name: string }) => {
+        const id = `span-${spans.length + 1}`;
+        spans.push({ id, name: input.name });
+        return id;
+      },
+      finishSpan: (spanId: string | undefined, input?: { outcome?: string; reasonCode?: string; payload?: unknown }) => {
+        const span = spans.find((candidate) => candidate.id === spanId);
+        if (span) span.finish = input;
+      },
+      recordCandidateDecision: () => {},
+      recordLink: () => {},
+      finalize: () => undefined,
+      markPartial: () => {},
+      reference: () => undefined,
+    } as unknown as AskTraceObserverV1;
+    const unavailable = {
+      name: 'ollama' as const,
+      available: vi.fn(async () => false),
+      generate: vi.fn(async () => 'must not dispatch'),
+    } satisfies AgentProvider;
+    const turns: Array<{ kind: string; message?: string }> = [];
+
+    const providerDependentRequest = req([{ role: 'user', content: 'show revenue' }]);
+    expect(providerDependentRequest.providerPreflightRequired).toBeUndefined();
+    await createDqlAgentProviderRunner('ollama', unavailable).run(
+      attachAskTraceObserverV1(providerDependentRequest, trace),
+      (turn) => turns.push(turn as typeof turns[number]),
+      new AbortController().signal,
+    );
+
+    expect(unavailable.available).toHaveBeenCalledTimes(1);
+    expect(unavailable.generate).not.toHaveBeenCalled();
+    expect(spans).toEqual([expect.objectContaining({
+      name: 'provider.preflight',
+      finish: expect.objectContaining({
+        outcome: 'unavailable',
+        reasonCode: 'provider_preflight',
+        payload: expect.objectContaining({
+          kind: 'provider',
+          // An unreachable local Ollama process is a physical network
+          // readiness failure, never the generic authentication label that
+          // made office diagnostics misleading.
+          attempt: expect.objectContaining({ readiness: 'unavailable', cause: 'network', safeAction: 'retry_same_provider' }),
+        }),
+      }),
+    })]);
+    expect(turns).toContainEqual(expect.objectContaining({ kind: 'error' }));
   });
 });
 
@@ -810,12 +1267,11 @@ describe('drilldown classification', () => {
     expect(__test__.isDrilldownFollowUp('what is net revenue', [])).toBe(false);
   });
 
-  // Evidence beats vocabulary: reusing the prior RESULT's own column names is a
-  // reference to that result whatever words the question uses.
-  it('treats reuse of the prior result shape as a drilldown', () => {
+  it('does not treat overlapping prior-result words as a binding', () => {
     const priorTerms = ['customer', 'beverage', 'revenue'];
-    expect(__test__.isDrilldownFollowUp('who are the customers by region', priorTerms)).toBe(true);
-    // The same phrasing with no shared shape is a new question.
+    // A fresh analytical question may share customer/revenue vocabulary with
+    // a prior answer without inheriting its rows, measures, or filters.
+    expect(__test__.isDrilldownFollowUp('who are the customers by region', priorTerms)).toBe(false);
     expect(__test__.isDrilldownFollowUp('who are the customers by region', ['shipment', 'warehouse'])).toBe(false);
   });
 });
@@ -924,12 +1380,7 @@ describe('conversation context follow-up routing', () => {
       },
     } as AgentRunRequest, question);
 
-    expect(followUp?.memberBindings).toBeUndefined();
-    expect(followUp?.filters ?? []).not.toContain('nutellaphone who dis?');
-    expect(followUp?.priorResultValues).toEqual({
-      product_name: ['nutellaphone who dis?', 'vanilla ice'],
-      region: ['Philadelphia'],
-    });
+    expect(followUp).toBeUndefined();
   });
 
   it('resolves a shortened named member and drops stale block shape for a relative comparison', () => {
@@ -990,10 +1441,7 @@ describe('conversation context follow-up routing', () => {
       },
     } as AgentRunRequest, question);
 
-    expect(followUp?.priorResultValues).toEqual({
-      customer_name: ['Melissa Lopez', 'Melissa Moore'],
-    });
-    expect(followUp?.filters).toBeUndefined();
+    expect(followUp).toBeUndefined();
   });
 
   it('resolves "these categories" to prior result values and dimensions', () => {
@@ -1178,18 +1626,9 @@ describe('conversation context follow-up routing', () => {
       },
     } as AgentRunRequest, question);
 
-    expect(followUp).toMatchObject({
-      kind: 'drilldown',
-      dimensions: ['region'],
-      priorResultValues: {
-        customer_name: ['Melissa Lopez', 'Joy Lam'],
-      },
-    });
-    expect(followUp?.filters).toBeUndefined();
-    expect(followUp?.memberBindings).toBeUndefined();
-    expect(followUp?.resolvedReferences).toBeUndefined();
+    expect(followUp).toBeUndefined();
 
-    const plan = buildAnalysisQuestionPlan(question, followUp);
+   const plan = buildAnalysisQuestionPlan(question, followUp);
     expect(plan.requestedShape.filters).toEqual([]);
     expect(plan.requestedShape.memberBindings).toEqual([]);
     expect(plan.requestedShape.dimensions).toEqual(expect.arrayContaining(['customer', 'region']));
@@ -1524,9 +1963,10 @@ describe('conversation context follow-up routing', () => {
     });
   });
 
-  it('converts regex drilldown carry to contextual when the conversation snapshot says topic shift', () => {
+  it('drops prior-result carry when the conversation snapshot says topic shift', () => {
     const guarded = __test__.applyTopicShiftGuard({
       kind: 'drilldown',
+      binding: 'prior_result',
       sourceQuestion: 'Top products by revenue',
       filters: ['BEV-001'],
       dimensions: ['product'],
@@ -1534,14 +1974,7 @@ describe('conversation context follow-up routing', () => {
       priorMeasures: ['revenue'],
     }, { threadId: 't1', recentTurns: [], topicRelation: 'shift' } as any);
 
-    expect(guarded).toMatchObject({
-      kind: 'contextual',
-      sourceQuestion: 'Top products by revenue',
-    });
-    expect(guarded?.filters).toBeUndefined();
-    expect(guarded?.dimensions).toBeUndefined();
-    expect(guarded?.priorResultValues).toBeUndefined();
-    expect(guarded?.priorMeasures).toBeUndefined();
+    expect(guarded).toBeUndefined();
   });
 
   it('does not invent filters when deictic words have no prior result values', () => {
@@ -1562,7 +1995,7 @@ describe('conversation context follow-up routing', () => {
   });
 });
 
-describe('always-on contextual carry (no regex match)', () => {
+describe('deterministic conversation binding', () => {
   const priorContext = {
     sourceCertifiedBlock: 'food_vs_drink_revenue',
     sourceQuestion: 'Revenue by food vs drink',
@@ -1572,7 +2005,7 @@ describe('always-on contextual carry (no regex match)', () => {
     priorMeasures: ['revenue'],
   };
 
-  it('carries prior-turn context as advisory "contextual" for a topic-shift question', () => {
+  it('keeps a self-contained topic-shift question free of prior-result context', () => {
     const question = 'how many new signups did we get last quarter?';
     const followUp = __test__.followUpFromConversationContext({
       provider: 'ollama',
@@ -1581,16 +2014,21 @@ describe('always-on contextual carry (no regex match)', () => {
       conversationContext: priorContext,
     } as AgentRunRequest, question);
 
-    expect(followUp?.kind).toBe('contextual');
-    expect(followUp?.sourceBlockName).toBe('food_vs_drink_revenue');
-    expect(followUp?.priorResultColumns).toEqual(['category', 'revenue']);
-    expect(followUp?.priorResultValues).toEqual({ category: ['Food', 'Drink'] });
-    // Advisory carry must never FORCE prior filters/dimensions onto a new topic.
-    expect(followUp?.filters).toBeUndefined();
-    expect(followUp?.dimensions).toBeUndefined();
+    expect(followUp).toBeUndefined();
   });
 
-  it('carries context for a definition-style question that fails both regexes', () => {
+  it('AGT-034 keeps the customer/product-category request self-contained after a prior customer result', () => {
+    const question = 'who are the top customers who have revenue by product category?';
+    const followUp = __test__.followUpFromConversationContext({
+      provider: 'ollama',
+      projectRoot: '/tmp/x',
+      messages: [{ role: 'user', content: question }],
+      conversationContext: priorContext,
+    } as AgentRunRequest, question);
+    expect(followUp).toBeUndefined();
+  });
+
+ it('keeps a self-contained definition question free of prior-result context', () => {
     const question = 'what is our monthly recurring revenue?';
     const followUp = __test__.followUpFromConversationContext({
       provider: 'ollama',
@@ -1599,8 +2037,7 @@ describe('always-on contextual carry (no regex match)', () => {
       conversationContext: priorContext,
     } as AgentRunRequest, question);
 
-    expect(followUp?.kind).toBe('contextual');
-    expect(followUp?.filters).toBeUndefined();
+    expect(followUp).toBeUndefined();
   });
 
   it('still returns undefined when there is no useful prior context (turn one stays cold)', () => {
@@ -1615,7 +2052,7 @@ describe('always-on contextual carry (no regex match)', () => {
     expect(followUp).toBeUndefined();
   });
 
-  it('messages-only fallback carries the prior certified block as contextual', () => {
+  it('messages-only fallback does not carry a prior block into a new question', () => {
     const question = 'how many new signups did we get last quarter?';
     const followUp = __test__.inferFollowUpContext({
       provider: 'ollama',
@@ -1627,10 +2064,7 @@ describe('always-on contextual carry (no regex match)', () => {
       ],
     } as AgentRunRequest, question);
 
-    expect(followUp?.kind).toBe('contextual');
-    expect(followUp?.sourceBlockName).toBe('food_vs_drink_revenue');
-    expect(followUp?.filters).toBeUndefined();
-    expect(followUp?.dimensions).toBeUndefined();
+    expect(followUp).toBeUndefined();
   });
 
   it('keeps classifying real drilldown follow-ups as drilldown (regexes still classify)', () => {
@@ -1643,6 +2077,7 @@ describe('always-on contextual carry (no regex match)', () => {
     } as AgentRunRequest, question);
 
     expect(followUp?.kind).toBe('drilldown');
+    expect(followUp?.binding).toBe('prior_result');
   });
 });
 

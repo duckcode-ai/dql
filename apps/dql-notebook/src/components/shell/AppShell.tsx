@@ -2,7 +2,7 @@ import React, { lazy, Suspense, useCallback, useRef, useState, useEffect } from 
 import { useShallow } from 'zustand/react/shallow';
 import { CommandPalette } from '../palette/CommandPalette';
 import { InspectorPanel } from './InspectorPanel';
-import { useDispatch, useNotebookStore } from '../../store/NotebookStore';
+import { askTraceRouteFromPathname, useDispatch, useNotebookStore } from '../../store/NotebookStore';
 import { themes } from '../../themes/notebook-theme';
 import { ActivityBar } from './ActivityBar';
 import { Sidebar } from './Sidebar';
@@ -32,6 +32,8 @@ const ConnectionPanel = lazy(() => import('../panels/ConnectionPanel').then((mod
 const GitPage = lazy(() => import('../git/GitPage').then((module) => ({ default: module.GitPage })));
 const ReadinessPage = lazy(() => import('../readiness/ReadinessPage').then((module) => ({ default: module.ReadinessPage })));
 const AgentLogPage = lazy(() => import('../agent/AgentLogPage').then((module) => ({ default: module.AgentLogPage })));
+const AskTracePage = lazy(() => import('../agent/AskTracePage').then((module) => ({ default: module.AskTracePage })));
+const AskObservabilityPage = lazy(() => import('../agent/AskObservabilityPage').then((module) => ({ default: module.AskObservabilityPage })));
 const GovernedContextPage = lazy(() => import('../domains/GovernedContextPage').then((module) => ({ default: module.GovernedContextPage })));
 const DbtFirstModelingPage = lazy(() => import('../modeling/DbtFirstModelingPage').then((module) => ({ default: module.DbtFirstModelingPage })));
 const AppsView = lazy(() => import('../apps/AppsView').then((module) => ({ default: module.AppsView })));
@@ -47,6 +49,7 @@ export function AppShell() {
     lineageDrawerOpen: store.lineageDrawerOpen,
     lineageFullscreen: store.lineageFullscreen,
     mainView: store.mainView,
+    askTraceRunId: store.askTraceRunId,
     newBlockModalOpen: store.newBlockModalOpen,
     newNotebookModalOpen: store.newNotebookModalOpen,
     setupOpen: store.setupOpen,
@@ -76,6 +79,26 @@ export function AppShell() {
         // A launch-check failure must not trap users outside the local product.
       });
     return () => { alive = false; };
+  }, [dispatch]);
+
+  // OBS-009: a trace deep link is navigation state, not persisted trace data.
+  // Keep browser Back/Forward faithful to the addressable `/ask/traces/:runId`
+  // surface without teaching unrelated pages to parse trace contents.
+  useEffect(() => {
+    const onPopState = () => {
+      const route = askTraceRouteFromPathname(window.location.pathname);
+      if (route?.mainView === 'ask_trace') {
+        dispatch({ type: 'OPEN_ASK_TRACE', runId: route.runId });
+      } else if (route?.mainView === 'ask_observability') {
+        dispatch({ type: 'OPEN_ASK_OBSERVABILITY' });
+      } else {
+        // The trace route is browser navigation state. Returning to Ask must
+        // not leave the previous trace detail mounted after Back/Forward.
+        dispatch({ type: 'SET_MAIN_VIEW', view: 'ask' });
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
   }, [dispatch]);
 
   useEffect(() => {
@@ -287,6 +310,10 @@ export function AppShell() {
               >
                 <AgentLogPage />
               </FullPageSection>
+            ) : state.mainView === 'ask_observability' ? (
+              <AskObservabilityPage />
+            ) : state.mainView === 'ask_trace' && state.askTraceRunId ? (
+              <AskTracePage runId={state.askTraceRunId} />
             ) : (
               <>
                 {state.mainView === 'imports' || state.mainView === 'block_studio' ? (

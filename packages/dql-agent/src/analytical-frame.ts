@@ -44,9 +44,18 @@ export function projectResolvedAnalyticalFrame(input: {
       ? [binding.qualifiedId]
       : []));
   const rankingRequested = Boolean(sourceFrame.ranking || plan.query.order || plan.query.limit !== undefined);
+  const sourceRankEntityDimensionId = sourceFrame.ranking?.entityDimensionId;
   const dimensions: AnalyticalDimensionBindingV2[] = groupedDimensionIds.flatMap((dimensionId, index) => [
     { dimensionId, role: 'group_by' as const },
-    ...(rankingRequested && index === 0 ? [{ dimensionId, role: 'rank_entity' as const }] : []),
+    // Preserve the source frame's rank entity. Reassigning rank ownership to
+    // the first grouped dimension silently changed "top customers by product
+    // category" into "top product categories", then the compatibility guard
+    // correctly rejected the category for lacking `rank_entity` support.
+    ...(rankingRequested && (sourceRankEntityDimensionId
+      ? dimensionId === sourceRankEntityDimensionId
+      : index === 0)
+      ? [{ dimensionId, role: 'rank_entity' as const }]
+      : []),
   ]);
   for (const filter of plan.query.filters) {
     const dimensionId = filter.binding.status === 'resolved' ? filter.binding.qualifiedId : undefined;
@@ -58,11 +67,102 @@ export function projectResolvedAnalyticalFrame(input: {
     dimensions.push({ dimensionId: sourceFrame.timeContext.timeDimensionId, role: 'time_axis' });
   }
 
-  const ambiguity = [
-    ...plan.query.measures.flatMap((binding) => frameBindingAmbiguity('metrics', binding)),
-    ...plan.query.dimensions.flatMap((binding) => frameBindingAmbiguity('dimensions', binding)),
-    ...plan.query.filters.flatMap((filter) => frameBindingAmbiguity('filters', filter.binding)),
-  ];
+  // Keep an unresolved host-built ambiguity intact while projecting the RAP.
+  // Its candidate IDs came from the selected metric's native capability and
+  // are the only valid structured clarification choices. Reconstructing only
+  // from a failed lexical RAP rebind turns two viable `billing account` /
+  // `service account` meanings into an empty generic gap. If RAP resolved the
+  // corresponding binding, the authoritative plan supersedes the source
+  // ambiguity as usual.
+  // Ambiguity is lane-scoped. A physical/semantic ID may legitimately occur
+  // in more than one role, but a group-by binding must never consume a filter
+  // clarification (or vice versa). Keep the source-frame and frozen RAP proof
+  // sets separated by the meaning lane before intersecting them below.
+  const resolvedPlanBindingIds = {
+    metrics: new Set(plan.query.measures.flatMap((binding) =>
+      binding.status === 'resolved' && binding.qualifiedId ? [binding.qualifiedId] : [])),
+    dimensions: new Set(plan.query.dimensions.flatMap((binding) =>
+      binding.status === 'resolved' && binding.qualifiedId ? [binding.qualifiedId] : [])),
+    filters: new Set(plan.query.filters.flatMap((filter) =>
+      filter.binding.status === 'resolved' && filter.binding.qualifiedId ? [filter.binding.qualifiedId] : [])),
+  };
+  const sourceFrameBindingIds = {
+    metrics: new Set(sourceFrame.metricConceptIds),
+    dimensions: new Set(sourceFrame.dimensions
+      .filter((binding) => binding.role !== 'filter')
+      .map((binding) => binding.dimensionId)),
+    filters: new Set([
+      ...sourceFrame.dimensions
+        .filter((binding) => binding.role === 'filter')
+        .map((binding) => binding.dimensionId),
+      ...sourceFrame.memberBindings.map((binding) => binding.dimensionId),
+    ]),
+  };
+  const resolvedSourceAmbiguityKeys = new Set<string>();
+  const unresolvedSourceAmbiguity = sourceFrame.ambiguity.filter((entry) => {
+    const [lane, ...parts] = entry.field.split('.');
+    const requested = normalize(parts.join('.'));
+    if (!requested) return true;
+    // A server-issued clarification selection is already represented as one
+    // exact capability binding in the host-built frame and the RAP. Do not
+    // retain the lexical ambiguity that prompted that selection merely because
+    // the original natural-language phrase (for example, "name") is still in
+    // the audit query list. This is intentionally identity-based rather than
+    // label-based and applies equally to metric, dimension, and filter lanes.
+    // The exact offered ID must be resolved in that same lane on both sides;
+    // a genuine ambiguity remains when zero or more than one offered candidate
+    // is resolved in the frozen tuple.
+    const laneBindingIds = lane === 'metrics' || lane === 'dimensions' || lane === 'filters'
+      ? { source: sourceFrameBindingIds[lane], plan: resolvedPlanBindingIds[lane] }
+      : undefined;
+    const exactlyResolvedCandidateIds = laneBindingIds
+      ? [...new Set(entry.candidateIds.filter((candidateId) =>
+          laneBindingIds.source.has(candidateId)
+          && laneBindingIds.plan.has(candidateId)))]
+      : [];
+    if (exactlyResolvedCandidateIds.length === 1) {
+      resolvedSourceAmbiguityKeys.add(`${lane}.${requested}`);
+      return false;
+    }
+    // Candidate-bearing source ambiguity is an identity contract. A RAP
+    // binding with the same lexical request may be an unrelated third field;
+    // it cannot clear the offered A/B choice. Retain that ambiguity unless the
+    // exact candidate proof above resolved one and only one offered ID.
+    // Legacy source ambiguity without candidates has no such identity proof,
+    // so it retains the historical lexical fallback below.
+    if (entry.candidateIds.length > 0) return true;
+    const binding = lane === 'dimensions'
+      ? plan.query.dimensions.find((item) => normalize(item.requested) === requested)
+      : lane === 'metrics'
+        ? plan.query.measures.find((item) => normalize(item.requested) === requested)
+        : lane === 'filters'
+          ? plan.query.filters.find((item) => normalize(item.binding.requested) === requested)?.binding
+          : undefined;
+    return !binding || binding.status !== 'resolved';
+  });
+  const ambiguity = uniqueAmbiguity([
+    ...unresolvedSourceAmbiguity,
+    // Preserve the original query for audit, but do not let its unresolved
+    // lexical binding recreate an ambiguity that was discharged by exactly one
+    // of the source-offered IDs. This applies to every binding lane: a metric
+    // ambiguity has the same identity contract as a display-dimension one.
+    ...plan.query.measures.flatMap((binding) =>
+      resolvedSourceAmbiguityKeys.has(`metrics.${normalize(binding.requested)}`)
+        ? []
+        : frameBindingAmbiguity('metrics', binding)),
+    // The query list retains the original lexical phrase for audit.  Once an
+    // exact server-issued candidate resolved the corresponding source
+    // ambiguity, that audit binding must not re-create the same ambiguity in
+    // the projected frame.
+    ...plan.query.dimensions.flatMap((binding) =>
+      resolvedSourceAmbiguityKeys.has(`dimensions.${normalize(binding.requested)}`)
+        ? []
+        : frameBindingAmbiguity('dimensions', binding)),
+    ...plan.query.filters.flatMap((filter) =>
+      resolvedSourceAmbiguityKeys.has(`filters.${normalize(filter.binding.requested)}`)
+        ? []
+        : frameBindingAmbiguity('filters', filter.binding)),
+  ]);
   const dimensionOutputs = groupedDimensionIds.map((dimensionId) => ({
     id: localId(dimensionId),
     kind: 'dimension' as const,
@@ -131,6 +231,15 @@ function frameBindingAmbiguity(
   }];
 }
 
+function uniqueAmbiguity(
+  entries: AnalyticalQuestionFrameV2['ambiguity'],
+): AnalyticalQuestionFrameV2['ambiguity'] {
+  return entries.filter((entry, index, all) => all.findIndex((candidate) =>
+    candidate.field === entry.field
+    && candidate.reasonCode === entry.reasonCode
+    && candidate.candidateIds.join('\u0000') === entry.candidateIds.join('\u0000')) === index);
+}
+
 function uniqueOutputs(
   outputs: AnalyticalQuestionFrameV2['requestedOutputs'],
 ): AnalyticalQuestionFrameV2['requestedOutputs'] {
@@ -148,6 +257,21 @@ export function buildDeterministicAnalyticalFrame(input: {
   metricCandidate: AgentEvidenceCandidate;
   /** Complete explicitly requested metric set; the first remains the ranking/default metric. */
   metricCandidates?: AgentEvidenceCandidate[];
+  /**
+   * Host-owned entity and display-key requirements. These are deliberately
+   * separate from ordinary categorical dimensions: a ranking's `customer`
+   * role must bind a unique native customer display/rank field rather than
+   * every capability field whose alias happens to contain `customer`.
+   */
+  entityTerms?: string[];
+  entityDisplayTerms?: string[];
+  /**
+   * Stable semantic-dimension identities selected from a server-issued
+   * clarification. They are not inferred from reply text: each must resolve
+   * against the selected metric's declared capability before it can bind the
+   * frame.
+   */
+  selectedDimensionIds?: string[];
   candidates: AgentEvidenceCandidate[];
 }): AnalyticalQuestionFrameV2 | undefined {
   const capability = normalizeMetricCapabilityContract(input.metricCandidate.analyticalCapability);
@@ -173,10 +297,25 @@ export function buildDeterministicAnalyticalFrame(input: {
     ...(input.evidence.parsedIntent?.order ? { order: input.evidence.parsedIntent.order } : {}),
     ...(input.evidence.parsedIntent?.limit !== undefined ? { limit: input.evidence.parsedIntent.limit } : {}),
   };
+  const rankingRequested = meaningType === 'ranking' || queryIntent.limit !== undefined || /\b(top|bottom|highest|lowest|rank)\b/i.test(input.question);
+  const requestedEntityTerms = unique(input.entityTerms ?? []).map(normalize).filter(Boolean);
+  const requestedEntityDisplayTerms = unique(input.entityDisplayTerms ?? []).map(normalize).filter(Boolean);
   const requestedDimensionTerms = new Set(queryIntent.dimensions.map(normalize).filter(Boolean));
+  // The immutable host seed has already separated the entity role from the
+  // categorical lane. Retain this defensive removal for older callers whose
+  // query intent still contains both forms; otherwise a generic `customer`
+  // candidate can manufacture a false ambiguity among Customer Name, Customer
+  // Type, and Customer Order Number.
+  for (const term of [...requestedEntityTerms, ...requestedEntityDisplayTerms]) {
+    requestedDimensionTerms.delete(term);
+  }
   for (const filter of queryIntent.filters) requestedDimensionTerms.add(normalize(filter.field));
   for (const candidate of input.candidates) {
-    if (candidate.kind !== 'semantic_member') continue;
+    // Entity/member cards may be useful to the bounded meaning call, but they
+    // are not dimension identities. Letting a selected Customer entity card
+    // pass through this loop reintroduced its broad lexical name as a generic
+    // dimension request and made every customer-* capability child compete.
+    if (candidate.kind !== 'semantic_member' || candidate.semanticObjectType !== 'dimension') continue;
     const capabilityDimension = resolveCapabilityDimension(candidate.qualifiedId ?? candidate.id, capability);
     if (!capabilityDimension) continue;
     const terms = [candidate.name, ...(candidate.aliases ?? [])].map(normalize).filter(Boolean);
@@ -187,6 +326,43 @@ export function buildDeterministicAnalyticalFrame(input: {
 
   const ambiguity: AnalyticalQuestionFrameV2['ambiguity'] = [];
   const resolvedDimensions = new Map<string, MetricCapabilityContract['dimensions'][number]>();
+  // A ranking may group by more than one field, but only the explicitly
+  // resolved entity display key is the entity being ranked. Keep that role
+  // separate from generic rankable capability metadata: adapters sometimes
+  // advertise `rank_entity` for a categorical grouping such as product type,
+  // which permits ranking *by* that field but does not make it an answer to
+  // “top customers by product category”.
+  const entityDisplayDimensionIds = new Set<string>();
+  // A structured dimension choice is already a qualified, server-bound
+  // meaning. Bind it only through the metric's authored capability contract;
+  // this is deliberately stronger than adding the option label back into the
+  // natural-language question and prevents a selected member from inventing a
+  // join or a display role it does not own.
+  for (const selectedId of unique(input.selectedDimensionIds ?? [])) {
+    // A model may select a supplied semantic entity card to identify the
+    // entity. It is not a qualified display dimension and must never resolve
+    // by lexical fallback to the first same-named capability child.
+    const dimension = resolveExactCapabilityDimension(selectedId, capability);
+    if (dimension) resolvedDimensions.set(dimension.dimensionId, dimension);
+  }
+  for (const requested of requestedEntityDisplayTerms) {
+    const matches = resolveEntityDisplayTerm({
+      requested,
+      entityTerms: requestedEntityTerms,
+      capability,
+      rankingRequested,
+    });
+    if (matches.length === 1) {
+      resolvedDimensions.set(matches[0]!.dimensionId, matches[0]!);
+      entityDisplayDimensionIds.add(matches[0]!.dimensionId);
+    } else if (matches.length > 1) {
+      ambiguity.push({
+        field: `dimensions.${requested}`,
+        candidateIds: matches.map((dimension) => dimension.dimensionId).sort(),
+        reasonCode: 'DIMENSION_AMBIGUOUS',
+      });
+    }
+  }
   for (const requested of requestedDimensionTerms) {
     const matches = resolveDimensionTerm(requested, capability, input.candidates);
     if (matches.length === 1) resolvedDimensions.set(matches[0]!.dimensionId, matches[0]!);
@@ -215,7 +391,6 @@ export function buildDeterministicAnalyticalFrame(input: {
     });
   }
 
-  const rankingRequested = meaningType === 'ranking' || queryIntent.limit !== undefined || /\b(top|bottom|highest|lowest|rank)\b/i.test(input.question);
   const groupRequested = rankingRequested || /\b(by|per|for each|breakdown)\b/i.test(input.question);
   const dimensions: AnalyticalDimensionBindingV2[] = [];
   for (const dimension of resolvedDimensions.values()) {
@@ -226,7 +401,10 @@ export function buildDeterministicAnalyticalFrame(input: {
     }
     if (dimension.supportedRoles.includes('group_by')) {
       dimensions.push({ dimensionId: dimension.dimensionId, role: 'group_by' });
-      if (rankingRequested && dimension.supportedRoles.includes('rank_entity')) {
+      const isExplicitEntityDisplay = entityDisplayDimensionIds.has(dimension.dimensionId);
+      if (rankingRequested
+        && dimension.supportedRoles.includes('rank_entity')
+        && (entityDisplayDimensionIds.size === 0 || isExplicitEntityDisplay)) {
         dimensions.push({
           dimensionId: dimension.dimensionId,
           role: 'rank_entity',
@@ -237,11 +415,21 @@ export function buildDeterministicAnalyticalFrame(input: {
     }
   }
 
+  // `current` can be an intrinsic business qualifier ("current BCM run
+  // rate"), not a request for a date axis.  Creating a timeContext for that
+  // bare modifier forces every metric through time-dimension compatibility and
+  // incorrectly blocks snapshot metrics that already encode their current/as-
+  // of semantics.  Only require a declared time role for an actual time grain
+  // or temporal filter.  The metric's own governed definition remains the
+  // authority for an unqualified current/latest snapshot value.
+  const requestedTimeGrain = explicitTimeGrain(queryIntent.timeGrain) ?? inferTimeGrain(input.question);
   const timeRequested =
-    Boolean(queryIntent.timeRange || queryIntent.timeGrain) ||
-    /\b(today|current|this (?:day|week|month|quarter|year)|month[ -]to[ -]date|mtd|last year|previous year|year over year|yoy)\b/i.test(input.question);
+    Boolean(queryIntent.timeRange && !isSnapshotOnlyTimeRange(queryIntent.timeRange))
+    || Boolean(requestedTimeGrain)
+    || hasExplicitTemporalFilter(input.question);
   const previousYearRequested = /\b(last year|previous year|year over year|yoy)\b/i.test(input.question);
-  const currentRequested = /\b(today|current|this (?:day|week|month|quarter|year)|month[ -]to[ -]date|mtd)\b/i.test(input.question) || previousYearRequested;
+  const currentRequested = /\b(?:today|yesterday)\b|\b(?:this|current)\s+(?:day|week|month|quarter|year)\b|\b(?:month|quarter|year)[ -]to[ -]date\b|\b(?:mtd|qtd|ytd)\b/i.test(input.question)
+    || previousYearRequested;
   const timeContext: AnalyticalQuestionFrameV2['timeContext'] = timeRequested
     ? {
         ...(capability.timeDimensions.length === 1
@@ -250,7 +438,7 @@ export function buildDeterministicAnalyticalFrame(input: {
               timeRole: capability.timeDimensions[0]!.role,
             }
           : {}),
-        grain: queryIntent.timeGrain ?? inferTimeGrain(input.question),
+        ...(requestedTimeGrain ? { grain: requestedTimeGrain } : {}),
         ...(capability.freshness?.defaultCompletenessPolicy
           ? {
               completenessPolicy: capability.freshness.defaultCompletenessPolicy,
@@ -381,6 +569,20 @@ export function buildDeterministicAnalyticalFrame(input: {
   };
 }
 
+/**
+ * Resolve a selected semantic member through one metric's authored capability
+ * contract. Router validation uses this to compose a persisted metric frame
+ * with a selected display/grouping field without treating the field itself as
+ * a metric meaning.
+ */
+export function resolveMetricCapabilityDimension(
+  metricCandidate: AgentEvidenceCandidate,
+  selectedDimensionId: string,
+): MetricCapabilityContract['dimensions'][number] | undefined {
+  const capability = normalizeMetricCapabilityContract(metricCandidate.analyticalCapability);
+  return capability ? resolveExactCapabilityDimension(selectedDimensionId, capability) : undefined;
+}
+
 function resolveDimensionTerm(requested: string, capability: MetricCapabilityContract, candidates: AgentEvidenceCandidate[]): MetricCapabilityContract['dimensions'] {
   const candidateIds = new Set<string>();
   for (const candidate of candidates) {
@@ -390,11 +592,139 @@ function resolveDimensionTerm(requested: string, capability: MetricCapabilityCon
       candidateIds.add(candidate.qualifiedId ?? candidate.id);
     }
   }
-  return capability.dimensions.filter((dimension) => termsMatch(normalize(dimension.dimensionId), requested) || candidateIds.has(dimension.dimensionId));
+  return capability.dimensions.filter((dimension) => dimensionMatchesTerm(dimension, requested) || candidateIds.has(dimension.dimensionId));
 }
 
 function resolveCapabilityDimension(id: string, capability: MetricCapabilityContract): MetricCapabilityContract['dimensions'][number] | undefined {
-  return capability.dimensions.find((dimension) => dimension.dimensionId === id || termsMatch(normalize(dimension.dimensionId), normalize(id)));
+  // A server-issued clarification can render the capability child under the
+  // stable display namespace `semantic:uncategorized:dimension:` while the
+  // same snapshot's executable contract stores its canonical
+  // `semantic:dimension:` identity.  This is an exact protocol alias, not a
+  // leaf-name fallback: normalize only that namespace and require equality
+  // with a dimension declared by the selected metric capability.  It keeps a
+  // persisted display choice usable after reload without allowing a client to
+  // substitute a same-named field from another model.
+  const canonicalId = canonicalCapabilityDimensionId(id);
+  return capability.dimensions.find((dimension) =>
+    dimension.dimensionId === canonicalId
+    || dimensionMatchesTerm(dimension, normalize(id)));
+}
+
+function resolveExactCapabilityDimension(
+  id: string,
+  capability: MetricCapabilityContract,
+): MetricCapabilityContract['dimensions'][number] | undefined {
+  const exactId = id.trim();
+  const canonicalId = canonicalCapabilityDimensionId(exactId);
+  return capability.dimensions.find((dimension) =>
+    dimension.dimensionId === exactId
+    || dimension.dimensionId === canonicalId
+    // The local manifest adapter may retain the display namespace on the
+    // capability itself while a persisted structured option carries the
+    // executable namespace (or vice versa). Both normalize to the same
+    // protocol identity; no leaf-name or cross-model fallback is allowed.
+    || canonicalCapabilityDimensionId(dimension.dimensionId) === canonicalId);
+}
+
+/**
+ * Resolve a host-owned entity display requirement only through the selected
+ * metric's authored native capability. A bare entity card is not a display
+ * field, and an arbitrary categorical attribute such as `customer_type`
+ * cannot satisfy `top customers`. If two native display/rank fields match the
+ * exact display phrase, retain a genuine typed ambiguity instead of guessing.
+ */
+function resolveEntityDisplayTerm(input: {
+  requested: string;
+  entityTerms: string[];
+  capability: MetricCapabilityContract;
+  rankingRequested: boolean;
+}): MetricCapabilityContract['dimensions'] {
+  // New semantic indexes expose `display` explicitly, while a compatible
+  // older MetricFlow capability may expose only `rank_entity`. Both describe
+  // a metric-native entity result role. Do not relax this to every group-by
+  // field: a customer type or owner grouping is still not an answer to
+  // “top customers”.
+  const nativeEntityDimensions = input.capability.dimensions.filter((dimension) =>
+    dimension.supportedRoles.includes('group_by')
+    && (input.rankingRequested
+      ? dimension.supportedRoles.includes('rank_entity')
+      : dimension.supportedRoles.includes('display'))
+    && (input.entityTerms.length === 0 || input.entityTerms.some((entityTerm) =>
+      termsMatch(normalize(dimension.entityId), entityTerm))));
+  const exactDisplayMatches = nativeEntityDimensions.filter((dimension) =>
+    dimensionMatchesTerm(dimension, input.requested));
+  if (exactDisplayMatches.length > 0) return exactDisplayMatches;
+
+  // `top customers` is host-normalized to the output requirement `customer
+  // name`. A legacy capability can still prove that requirement when it has a
+  // unique native entity field literally named `customer`. Do not let a
+  // broader lexical match turn `customer_type`, `customer_owner`, or
+  // `customer_order_number` into that label. If no exact native identity
+  // exists, preserve only non-attribute entity alternatives so two genuine
+  // authored account paths remain an identifier-bound ambiguity.
+  const entityNativeMatches = nativeEntityDimensions.filter((dimension) =>
+    input.entityTerms.some((entityTerm) =>
+      nativeEntityIdentity(dimension, entityTerm) === 'exact'));
+  if (entityNativeMatches.length > 0) return entityNativeMatches;
+  return nativeEntityDimensions.filter((dimension) =>
+    input.entityTerms.some((entityTerm) =>
+      nativeEntityIdentity(dimension, entityTerm) === 'qualified'));
+}
+
+function nativeEntityIdentity(
+  dimension: MetricCapabilityContract['dimensions'][number],
+  entityTerm: string,
+): 'exact' | 'qualified' | undefined {
+  const normalizedEntity = normalize(entityTerm);
+  if (!normalizedEntity) return undefined;
+  // Use the field's own label/qualified leaf for the entity-key fallback.
+  // Retrieval aliases are deliberately excluded here: an attribute card may
+  // carry the broad entity word as a discovery alias (`customer_type` ↔
+  // `customer`) but that does not make the attribute the entity display key.
+  const identities = [
+    dimension.label,
+    localId(dimension.dimensionId),
+  ].map((value) => value ? normalize(value) : '').filter(Boolean);
+  if (identities.some((identity) => identity === normalizedEntity)) return 'exact';
+  // A field whose own identity begins with the generic entity name is an
+  // attribute of that entity, not its display/rank key. It must not satisfy a
+  // request for the entity itself merely because it is the only field left.
+  if (identities.some((identity) => identity.startsWith(`${normalizedEntity} `))) return undefined;
+  // A qualified authored identity such as `billing account` or `service
+  // account` is a genuine alternative entity role. Return it only to create a
+  // typed ambiguity when there is no exact native entity key.
+  return identities.some((identity) => identity.endsWith(` ${normalizedEntity}`))
+    ? 'qualified'
+    : undefined;
+}
+
+function canonicalCapabilityDimensionId(id: string): string {
+  return id.trim().replace(
+    /^semantic:uncategorized:dimension:/,
+    'semantic:dimension:',
+  );
+}
+
+/**
+ * Match a requested business dimension against the dimension's own authored
+ * label/leaf alias, not its model-qualified namespace.  A metric model named
+ * `account_revenue` prefixes every one of its dimensions; treating that
+ * prefix as a match for "account" made fiscal period and customer name look
+ * like equally valid account display keys.
+ */
+function dimensionMatchesTerm(
+  dimension: MetricCapabilityContract['dimensions'][number],
+  requested: string,
+): boolean {
+  const normalizedRequested = normalize(requested);
+  if (!normalizedRequested) return false;
+  if (normalize(dimension.dimensionId) === normalizedRequested) return true;
+  const identities = [
+    dimension.label,
+    localId(dimension.dimensionId),
+    ...(dimension.aliases ?? []).map(localId),
+  ].map((value) => value ? normalize(value) : '').filter(Boolean);
+  return identities.some((identity) => termsMatch(identity, normalizedRequested));
 }
 
 function phraseAppears(question: string, phrase: string): boolean {
@@ -442,10 +772,40 @@ function localId(value: string): string {
 function inferTimeGrain(question: string): string | undefined {
   if (/\b(today|day|daily)\b/i.test(question)) return 'day';
   if (/\b(week|weekly)\b/i.test(question)) return 'week';
-  if (/\b(month|monthly|mtd)\b/i.test(question)) return 'day';
+  if (/\b(month|monthly|mtd)\b/i.test(question)) return 'month';
   if (/\b(quarter|quarterly)\b/i.test(question)) return 'quarter';
   if (/\b(year|yearly|annual|yoy)\b/i.test(question)) return 'year';
   return undefined;
+}
+
+function explicitTimeGrain(value: string | undefined): 'day' | 'week' | 'month' | 'quarter' | 'year' | undefined {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === 'day'
+    || normalized === 'week'
+    || normalized === 'month'
+    || normalized === 'quarter'
+    || normalized === 'year'
+    ? normalized
+    : undefined;
+}
+
+/**
+ * The parser can represent an explicit time range without preserving every
+ * source token. Keep snapshot-only modifiers out of the physical date-role
+ * contract: a bare "current" / "latest" metric should be answered by its
+ * authored snapshot semantics, not fabricated into a time-axis request.
+ */
+function isSnapshotOnlyTimeRange(value: string): boolean {
+  return /^(?:current|latest|snapshot|as[ -]?of[ -]?(?:latest|current))$/i.test(value.trim());
+}
+
+/**
+ * Detect temporal filters in the user's actual wording. `current` by itself
+ * deliberately does not match: `current BCM run rate` is a metric qualifier,
+ * whereas `current month` and `today` require a date role.
+ */
+function hasExplicitTemporalFilter(question: string): boolean {
+  return /\b(?:today|yesterday)\b|\b(?:this|current|last|previous)\s+(?:day|week|month|quarter|year)\b|\b(?:month|quarter|year)[ -]to[ -]date\b|\b(?:mtd|qtd|ytd|last year|previous year|year over year|yoy)\b|\bfy\s?\d{2,4}\b|\bfiscal\s+year\s+\d{2,4}\b/i.test(question);
 }
 
 function extractLimit(question: string): number | undefined {

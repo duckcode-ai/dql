@@ -2,15 +2,17 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parse, SemanticLayer, type DQLManifest } from "@duckcodeailabs/dql-core";
+import { parse, SemanticLayer, type DQLManifest, type MetricCapabilityContract } from "@duckcodeailabs/dql-core";
 import { KGStore } from "./kg/sqlite-fts.js";
 import { answer as answerBase, inferAnalyticalEntityIds, renderContextValidationRefusalForUser, missingRankedGrainOutput, parseProposal, probeSemanticJoinFanout, compactSemanticRuntimeFailure, normalizeWarehouseSqlFailure, repairAmbiguousColumn, semanticTraceAfterExecution, tightenSourceTargetFlowProjection } from "./answer-loop.js";
 import { analyticalError } from "./analytical-error.js";
 import { buildLocalContextPack } from "./metadata/catalog.js";
+import { buildResolvedAnalyticalPlan } from "./resolved-analytical-plan.js";
 import type { KGNode } from "./kg/types.js";
+import type { AgentEvidenceCandidate } from "./meaning-resolution.js";
 import { buildAnalysisQuestionPlan, type CertifiedBlockApplicability } from "./metadata/analysis-planner.js";
 import type { CertifiedBlockFit } from "./metadata/block-fit.js";
-import type { AgentProvider, AgentMessage, AgentToolDefinition, ProviderToolLoopOptions } from "./providers/types.js";
+import type { AgentProvider, AgentMessage, AgentToolDefinition, ProviderRunOptions, ProviderToolLoopOptions } from "./providers/types.js";
 
 class StubProvider implements AgentProvider {
   readonly name = "claude" as const;
@@ -27,6 +29,29 @@ class StubProvider implements AgentProvider {
     this.messages = messages;
     this.calls.push(messages);
     return this.responses[Math.min(this.calls.length - 1, this.responses.length - 1)];
+  }
+}
+
+/**
+ * Captures the server-owned dispatch annotations passed to a provider.  The
+ * answer loop must not infer these from model output: the local runtime admits
+ * `repair_sql` only after the frozen exploratory RAP authorizes it.
+ */
+class DispatchRecordingProvider implements AgentProvider {
+  readonly name = "claude" as const;
+  readonly calls: AgentMessage[][] = [];
+  readonly options: Array<ProviderRunOptions | undefined> = [];
+
+  constructor(private readonly responses: string[]) {}
+
+  async available(): Promise<boolean> {
+    return true;
+  }
+
+  async generate(messages: AgentMessage[], options?: ProviderRunOptions): Promise<string> {
+    this.calls.push(messages);
+    this.options.push(options);
+    return this.responses[Math.min(this.calls.length - 1, this.responses.length - 1)]!;
   }
 }
 
@@ -378,6 +403,107 @@ describe("answer (block-first loop)", () => {
     expect(result.sourceTier).toBe("semantic_layer");
     expect(result.text).toContain("governed metric order_item.revenue");
     expect(result.aggregationSafetyProof).toMatchObject({ status: "safe", issueCodes: [] });
+  });
+
+  it("does not let a router-selected semantic plan bypass its adapter through the legacy metric path", async () => {
+    // Direct AnswerLoop callers may retain the established deterministic
+    // metric path when they did not receive a router cascade decision. The
+    // same shape becomes immutable once Ask selected semantic: an unavailable
+    // adapter is terminal and must not be relabelled as raw/generated SQL.
+    const metricId = "semantic:growth:metric:order_item.revenue";
+    const capability: MetricCapabilityContract = {
+      metricId,
+      semanticModelId: "semantic:growth:model:order_item",
+      measureIds: ["semantic:growth:measure:product_price"],
+      primaryEntityId: "semantic:growth:entity:order_item",
+      defaultResultGrainId: "semantic:growth:entity:order_item",
+      resultGrainIds: ["semantic:growth:entity:order_item"],
+      aggregation: "sum",
+      additivity: { entities: "additive", time: "additive" },
+      dimensions: [],
+      timeDimensions: [],
+      operations: ["group"],
+      supportedOutputKinds: ["metric_value"],
+      executionCapabilities: [{ route: "semantic", adapterId: "semantic-native" }],
+      sourceFingerprint: "sha256:router-frozen-semantic-boundary",
+    };
+    const candidate: AgentEvidenceCandidate = {
+      id: metricId,
+      qualifiedId: metricId,
+      kind: "semantic_metric",
+      trustTier: "semantic",
+      name: "Revenue",
+      aliases: ["revenue"],
+      relevanceScore: 1,
+      matchReasons: ["exact frozen metric"],
+      compatibility: "compatible",
+      analyticalCapability: capability,
+    };
+    kg.rebuild([{
+      nodeId: "metric:order_item.revenue",
+      kind: "metric",
+      name: "revenue",
+      domain: "growth",
+      status: "certified",
+      sourceTier: "semantic_layer",
+      payload: {
+        qualifiedId: metricId,
+        registryQualifiedId: metricId,
+        localId: "revenue",
+        analyticalCapability: capability,
+      },
+    }], []);
+    const plan = buildResolvedAnalyticalPlan({
+      question: "what is our total revenue?",
+      resolution: {
+        interpretedQuestion: "what is our total revenue?",
+        questionType: "value",
+        selectedConceptIds: [metricId],
+        recommendedExecutionId: metricId,
+        queryIntent: { measures: ["revenue"], dimensions: [], filters: [] },
+        rejectedCandidates: [],
+        confidence: "high",
+        missingInformation: [],
+        recommendedRoute: "semantic",
+      },
+      evidence: { snapshotId: "router-frozen-semantic-boundary", candidates: [candidate] },
+      candidates: [candidate],
+      mode: "authoritative",
+    });
+    expect(plan.capability).toBe("semantic_execution");
+    const executeGeneratedSql = vi.fn(async (sql: string) => ({
+      columns: ["revenue"], rows: [{ revenue: 1 }], rowCount: 1, sql,
+    }));
+
+    const result = await answer({
+      question: "what is our total revenue?",
+      provider: new StubProvider("should never be called"),
+      kg,
+      contextPack: contextPackForRankedRelations("what is our total revenue?", [{
+        relation: "dev.order_items",
+        name: "order_items",
+        source: "semantic layer",
+        columns: [{ name: "product_price", type: "number" }],
+        rank: 1,
+        score: 1,
+        reason: "exact governed metric source",
+      }], { dimensionTerms: [], objects: [{
+        objectKey: metricId,
+        objectType: "semantic_metric",
+        name: "Revenue",
+        payload: { analyticalCapability: capability },
+      }] }) as any,
+      resolvedAnalyticalPlan: plan,
+      selectedCascadeTier: "semantic",
+      executeGeneratedSql,
+    });
+
+    expect(executeGeneratedSql).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      kind: "no_answer",
+      sourceTier: "no_answer",
+      refusalDetails: { code: "SEMANTIC_LAYER_REQUIRED" },
+    });
   });
 
   it("blocks a semantic execution before SQL when its exact aggregation proof is incomplete", async () => {
@@ -6601,12 +6727,228 @@ describe("answer (block-first loop)", () => {
     expect(executeAgentic.mock.calls[0]?.[1]).toBe(forcedSql);
     expect(executeAmbient).not.toHaveBeenCalled();
     expect(result.certification).toBe('ai_generated');
+    // A router-selected exploratory freeze remains an exploratory/generated
+    // route. The semantic freeze guard must not interfere with this distinct
+    // immutable execution authority.
+    expect(result.route?.tier).toBe('generated_sql');
     expect(result.exploratoryExecutionFreeze).toMatchObject({
       selectedTier: 'exploratory_sql',
       authorization: 'capability_minted',
       planId: capability.planId,
       candidateIds: exploratoryCandidateIds,
     });
+  });
+
+  it('AGT-031 authorizes exactly one same-plan exploratory SQL repair after a retryable warehouse failure', async () => {
+    kg.rebuild([], []);
+    const provider = new StubProvider('THIS_PROVIDER_MUST_NOT_BE_CALLED');
+    const initialSql = 'SELECT customer_name FROM dev.orders AS o';
+    const exploratoryCandidateIds = ['dbt:model:orders'];
+    const relations = [{
+      relation: 'dev.orders', name: 'orders', source: 'dbt manifest',
+      columns: [{ name: 'customer_name', type: 'VARCHAR' }], rank: 1, score: 1, reason: 'fixture',
+    }];
+    const exploratoryContextPack = contextPackForRankedRelations('show customer names', relations, {
+      metricTerms: [], dimensionTerms: ['customer'], mode: 'entity_drilldown', routeIntent: 'entity_drilldown',
+      objects: [{
+        objectKey: 'dbt:model:orders', objectType: 'dbt_model', name: 'orders', fullName: 'dev.orders',
+        status: 'dbt_imported', sourcePath: 'models/orders.sql', sourceSystem: 'fixture',
+        payload: { relation: 'dev.orders', sourceRelations: ['dev.orders'], uniqueId: 'model.fixture.orders' },
+      }],
+    });
+    exploratoryContextPack.allowedSqlContext.relations[0]!.objectKey = exploratoryCandidateIds[0];
+    const initialCapability = {
+      version: 1 as const, runId: 'run-same-plan-repair', executionId: 'initial', snapshotId: 'snapshot-repair',
+      planId: 'rap:same-plan-repair', targetFingerprint: 'target-repair', bindingsFingerprint: 'bindings',
+      candidateSqlFingerprint: 'a'.repeat(32), provenIdentifiers: ['dev.orders', 'dev.orders.customer_name'],
+      evidence: { 'dev.orders': 'schema_tool' as const, 'dev.orders.customer_name': 'schema_tool' as const },
+      exploratoryAuthorizationAttempt: { version: 1 as const, index: 0 as const },
+    };
+    const repairCapability = {
+      ...initialCapability,
+      executionId: 'repair-1',
+      candidateSqlFingerprint: 'b'.repeat(32),
+      exploratoryAuthorizationAttempt: {
+        version: 1 as const,
+        index: 1 as const,
+        parentSqlFingerprint: 'a'.repeat(32),
+      },
+    };
+    const initialFreeze = {
+      version: 1 as const, selectedTier: 'exploratory_sql' as const,
+      planId: initialCapability.planId, planFingerprint: 'f'.repeat(64), snapshotId: initialCapability.snapshotId,
+      targetFingerprint: initialCapability.targetFingerprint, sqlFingerprint: 'a'.repeat(32),
+      candidateIds: exploratoryCandidateIds, authorization: 'capability_minted' as const,
+      authorizationAttempt: { version: 1 as const, index: 0 as const },
+    };
+    const repairFreeze = {
+      ...initialFreeze,
+      sqlFingerprint: 'b'.repeat(32),
+      authorizationAttempt: {
+        version: 1 as const,
+        index: 1 as const,
+        parentSqlFingerprint: initialFreeze.sqlFingerprint,
+      },
+    };
+    const prepare = vi.fn(async (
+      _sql: string,
+      _artifact: unknown,
+      authorizationAttempt?: { index: 1; parentSqlFingerprint: string },
+    ) => authorizationAttempt
+      ? { capability: repairCapability, freeze: repairFreeze }
+      : { capability: initialCapability, freeze: initialFreeze });
+    let executions = 0;
+    const execute = vi.fn(async (capability: { executionId: string }, sql: string) => {
+      executions += 1;
+      if (executions === 1) throw new Error('Binder Error: ambiguous column name customer_name');
+      return { columns: ['customer_name'], rows: [{ customer_name: 'Ada' }], rowCount: 1, sql, capability };
+    });
+
+    const result = await answer({
+      question: 'show customer names', provider, kg,
+      selectedCascadeTier: 'exploratory_sql', exploratoryCandidateIds,
+      forcedGeneratedProposal: { sql: initialSql },
+      prepareExploratorySqlExecution: prepare,
+      executeAgenticGeneratedSql: execute,
+      contextPack: exploratoryContextPack,
+      schemaContext: relations,
+    });
+
+    expect(provider.calls).toHaveLength(0);
+    expect(prepare).toHaveBeenCalledTimes(2);
+    expect(prepare.mock.calls[0]?.[2]).toBeUndefined();
+    expect(prepare.mock.calls[1]?.[2]).toEqual({
+      version: 1,
+      index: 1,
+      parentSqlFingerprint: initialFreeze.sqlFingerprint,
+    });
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute.mock.calls.map(([capability]) => (capability as { executionId: string }).executionId)).toEqual(['initial', 'repair-1']);
+    expect(execute.mock.calls[1]?.[1]).toContain('o.customer_name');
+    expect(result.certification).toBe('ai_generated');
+    // `draft_ready` is the answer-loop's legacy local-review vocabulary; the
+    // engine projects this exploratory result to the public `review_required`
+    // trust state (covered by the engine receipt test below).
+    expect(result.reviewStatus).toBe('draft_ready');
+    expect(result.analysisPlan?.repairAttempts).toBe(1);
+    expect(result.exploratoryExecutionFreeze).toEqual(initialFreeze);
+    expect(result.exploratoryRepairExecutionFreeze).toEqual(repairFreeze);
+  });
+
+  it('AGT-031 labels a post-warehouse frozen exploratory correction as one repair dispatch', async () => {
+    // This differs from the local deterministic binder repair above: the
+    // warehouse failure requires one provider correction.  The server must
+    // preserve the frozen RAP tuple and mark that physical send as `repair`,
+    // rather than spending a second unbounded generation turn.
+    kg.rebuild([], []);
+    const provider = new DispatchRecordingProvider([
+      '```json\n{"summary":"Corrected customer query.","sql":"SELECT o.customer_name AS customer_name FROM dev.orders AS o","viz":"table","outputs":["customer_name"]}\n```',
+    ]);
+    const initialSql = 'SELECT o.customer_name AS customer_name FROM dev.orders AS o';
+    const exploratoryCandidateIds = ['dbt:model:orders'];
+    const relations = [{
+      relation: 'dev.orders', name: 'orders', source: 'dbt manifest',
+      columns: [{ name: 'customer_name', type: 'VARCHAR' }], rank: 1, score: 1, reason: 'fixture',
+    }];
+    const contextPack = contextPackForRankedRelations('show customer names', relations, {
+      metricTerms: [], dimensionTerms: ['customer'], mode: 'entity_drilldown', routeIntent: 'entity_drilldown',
+      objects: [{
+        objectKey: 'dbt:model:orders', objectType: 'dbt_model', name: 'orders', fullName: 'dev.orders',
+        status: 'dbt_imported', sourcePath: 'models/orders.sql', sourceSystem: 'fixture',
+        payload: { relation: 'dev.orders', sourceRelations: ['dev.orders'], uniqueId: 'model.fixture.orders' },
+      }],
+    });
+    contextPack.allowedSqlContext.relations[0]!.objectKey = exploratoryCandidateIds[0];
+    const initialCapability = {
+      version: 1 as const, runId: 'run-provider-repair', executionId: 'initial', snapshotId: 'snapshot-provider-repair',
+      planId: 'rap:provider-repair', targetFingerprint: 'target-provider-repair', bindingsFingerprint: 'bindings',
+      candidateSqlFingerprint: 'a'.repeat(32), provenIdentifiers: ['dev.orders', 'dev.orders.customer_name'],
+      evidence: { 'dev.orders': 'schema_tool' as const, 'dev.orders.customer_name': 'schema_tool' as const },
+      exploratoryAuthorizationAttempt: { version: 1 as const, index: 0 as const },
+    };
+    const repairCapability = {
+      ...initialCapability,
+      executionId: 'repair-1',
+      candidateSqlFingerprint: 'b'.repeat(32),
+      exploratoryAuthorizationAttempt: {
+        version: 1 as const,
+        index: 1 as const,
+        parentSqlFingerprint: 'a'.repeat(32),
+      },
+    };
+    const initialFreeze = {
+      version: 1 as const, selectedTier: 'exploratory_sql' as const,
+      planId: initialCapability.planId, planFingerprint: 'f'.repeat(64), snapshotId: initialCapability.snapshotId,
+      targetFingerprint: initialCapability.targetFingerprint, sqlFingerprint: 'a'.repeat(32),
+      candidateIds: exploratoryCandidateIds, authorization: 'capability_minted' as const,
+      authorizationAttempt: { version: 1 as const, index: 0 as const },
+    };
+    const repairFreeze = {
+      ...initialFreeze,
+      sqlFingerprint: 'b'.repeat(32),
+      authorizationAttempt: {
+        version: 1 as const,
+        index: 1 as const,
+        parentSqlFingerprint: initialFreeze.sqlFingerprint,
+      },
+    };
+    const prepare = vi.fn(async (
+      _sql: string,
+      _artifact: unknown,
+      authorizationAttempt?: { index: 1; parentSqlFingerprint: string },
+    ) => authorizationAttempt
+      ? { capability: repairCapability, freeze: repairFreeze }
+      : { capability: initialCapability, freeze: initialFreeze });
+    let executionCount = 0;
+    const execute = vi.fn(async (capability: { executionId: string }, sql: string) => {
+      executionCount += 1;
+      if (executionCount === 1) {
+        throw new Error('Snowflake SQL compilation error: syntax error line 1 at position 14');
+      }
+      return { columns: ['customer_name'], rows: [{ customer_name: 'Ada' }], rowCount: 1, sql, capability };
+    });
+
+    const result = await answer({
+      question: 'show customer names', provider, kg,
+      selectedCascadeTier: 'exploratory_sql', exploratoryCandidateIds,
+      // The repair transport is available only once the router's immutable
+      // authoritative RAP exists. A bare selected tier is deliberately not
+      // enough to acquire this provider phase.
+      resolvedAnalyticalPlan: {
+        mode: 'authoritative',
+        capability: 'bounded_exploration',
+        planId: initialCapability.planId,
+        fingerprint: initialFreeze.planFingerprint,
+        snapshotId: initialCapability.snapshotId,
+        // The authoritative repair gate intentionally reads the immutable
+        // query shape too. Keep this minimal fixture a real RAP shape rather
+        // than relying on a partial cast that can bypass semantic authority
+        // helpers before the exploratory repair branch is exercised.
+        query: { measures: [], dimensions: [], filters: [] },
+      } as never,
+      forcedGeneratedProposal: { sql: initialSql },
+      prepareExploratorySqlExecution: prepare,
+      executeAgenticGeneratedSql: execute,
+      contextPack,
+      schemaContext: relations,
+    });
+
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.options[0]).toMatchObject({
+      dispatchPhase: 'repair',
+      egressPurpose: 'repair_sql',
+      maxProviderDispatches: 1,
+    });
+    expect(prepare).toHaveBeenCalledTimes(2);
+    expect(prepare.mock.calls[1]?.[2]).toEqual({
+      version: 1,
+      index: 1,
+      parentSqlFingerprint: initialFreeze.sqlFingerprint,
+    });
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(result.analysisPlan?.repairAttempts).toBe(1);
+    expect(result.exploratoryExecutionFreeze).toEqual(initialFreeze);
+    expect(result.exploratoryRepairExecutionFreeze).toEqual(repairFreeze);
   });
 
   it('does not expose a SQL preview when the host denies a router-selected exploratory closure', async () => {
@@ -9224,43 +9566,52 @@ describe("probeSemanticJoinFanout (governed semantic fanout gate)", () => {
   const payload = (rows: unknown[]) => ({ columns: ["base_rows", "joined_rows"], rows, rowCount: rows.length });
 
   it("blocks with an actionable message when the join multiplies rows", async () => {
-    const message = await probeSemanticJoinFanout(PROBE_SQL, ["fct_consumption", "dim_customer"], async () =>
+    const outcome = await probeSemanticJoinFanout(PROBE_SQL, ["fct_consumption", "dim_customer"], async () =>
       payload([{ base_rows: 1_000, joined_rows: 250_000 }]) as never);
-    expect(message).toContain("join inflates results");
-    expect(message).toContain("fct_consumption, dim_customer");
-    expect(message).toContain("×250");
-    expect(message).toContain("not unique on the joined side");
+    expect(outcome).toMatchObject({ status: "blocked", code: "SEMANTIC_FANOUT_DUPLICATE_KEY" });
+    if (outcome.status === "blocked") {
+      expect(outcome.message).toContain("join inflates results");
+      expect(outcome.message).toContain("fct_consumption, dim_customer");
+      expect(outcome.message).toContain("×250");
+      expect(outcome.message).toContain("not unique on the joined side");
+    }
   });
 
   it("passes clean N:1 joins (joined count equals base count)", async () => {
-    const message = await probeSemanticJoinFanout(PROBE_SQL, ["f", "d"], async () =>
+    const outcome = await probeSemanticJoinFanout(PROBE_SQL, ["f", "d"], async () =>
       payload([{ base_rows: 1_000, joined_rows: 1_000 }]) as never);
-    expect(message).toBeUndefined();
+    expect(outcome).toEqual({ status: "safe" });
   });
 
   it("passes row-reducing inner joins (fewer rows is loss, not inflation)", async () => {
-    const message = await probeSemanticJoinFanout(PROBE_SQL, ["f", "d"], async () =>
+    const outcome = await probeSemanticJoinFanout(PROBE_SQL, ["f", "d"], async () =>
       payload([{ base_rows: 1_000, joined_rows: 900 }]) as never);
-    expect(message).toBeUndefined();
+    expect(outcome).toEqual({ status: "safe" });
   });
 
   it("parses warehouse casing and array-shaped rows", async () => {
     const upper = await probeSemanticJoinFanout(PROBE_SQL, ["f", "d"], async () =>
       payload([{ BASE_ROWS: "100", JOINED_ROWS: "700" }]) as never);
-    expect(upper).toContain("×7");
+    expect(upper).toMatchObject({ status: "blocked", code: "SEMANTIC_FANOUT_DUPLICATE_KEY" });
+    if (upper.status === "blocked") expect(upper.message).toContain("×7");
     const arrays = await probeSemanticJoinFanout(PROBE_SQL, ["f", "d"], async () =>
       payload([[100, 700]]) as never);
-    expect(arrays).toContain("×7");
+    expect(arrays).toMatchObject({ status: "blocked", code: "SEMANTIC_FANOUT_DUPLICATE_KEY" });
+    if (arrays.status === "blocked") expect(arrays.message).toContain("×7");
   });
 
-  it("never blocks when the probe itself fails or returns garbage", async () => {
+  it("fails closed when the probe errors or does not return verifiable counts", async () => {
     const failed = await probeSemanticJoinFanout(PROBE_SQL, ["f"], async () => {
-      throw new Error("permission denied");
+      throw new Error("permission denied for token=not-for-chat");
     });
-    expect(failed).toBeUndefined();
+    expect(failed).toMatchObject({ status: "blocked", code: "SEMANTIC_FANOUT_PROBE_ERROR" });
+    if (failed.status === "blocked") expect(failed.message).not.toContain("not-for-chat");
     const garbage = await probeSemanticJoinFanout(PROBE_SQL, ["f"], async () =>
       payload([{ something: "else" }]) as never);
-    expect(garbage).toBeUndefined();
+    expect(garbage).toMatchObject({ status: "blocked", code: "SEMANTIC_FANOUT_PROBE_UNPARSEABLE" });
+    const emptyBase = await probeSemanticJoinFanout(PROBE_SQL, ["f"], async () =>
+      payload([{ base_rows: 0, joined_rows: 0 }]) as never);
+    expect(emptyBase).toMatchObject({ status: "blocked", code: "SEMANTIC_FANOUT_PROBE_UNPARSEABLE" });
   });
 });
 

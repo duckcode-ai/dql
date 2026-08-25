@@ -21,14 +21,42 @@ const metric: AgentEvidenceCandidate = {
   name: 'Rollover Balance',
   aliases: ['rollover balance'],
   domain: 'consumption',
-  dimensions: ['semantic:consumption:dimension:customer'],
+  dimensions: ['semantic:consumption:dimension:customer_name'],
   relevanceScore: 0.99,
   matchReasons: ['exact meaning'],
   compatibility: 'compatible',
+  analyticalCapability: {
+    metricId: 'semantic:consumption:rollover_balance',
+    semanticModelId: 'semantic:consumption:model:usage',
+    measureIds: ['semantic:consumption:rollover_balance'],
+    primaryEntityId: 'account',
+    defaultResultGrainId: 'account',
+    resultGrainIds: ['account'],
+    aggregation: 'sum',
+    additivity: { entities: 'additive', time: 'additive' },
+    dimensions: [{
+      dimensionId: 'semantic:consumption:dimension:customer_name',
+      entityId: 'account',
+      label: 'Customer',
+      aliases: ['customer'],
+      supportedRoles: ['group_by', 'filter', 'display', 'rank_entity'],
+      nativeGroupingReference: 'customer_name',
+      nativeGroupingPath: [],
+    }],
+    timeDimensions: [{
+      dimensionId: 'semantic:consumption:dimension:report_date',
+      role: 'report_as_of',
+      supportedGrains: ['day', 'month', 'year'],
+    }],
+    operations: ['filter', 'group', 'rank'],
+    supportedOutputKinds: ['dimension', 'metric_value', 'rank'],
+    executionCapabilities: [{ route: 'semantic', adapterId: 'native' }],
+    sourceFingerprint: 'sha256:consumption-rollover-adapter-fixture',
+  },
 };
 const dimension: AgentEvidenceCandidate = {
   id: 'semantic:dimension:usage.customer_name',
-  qualifiedId: 'semantic:consumption:dimension:customer',
+  qualifiedId: 'semantic:consumption:dimension:customer_name',
   kind: 'semantic_member',
   trustTier: 'semantic',
   name: 'Customer',
@@ -87,7 +115,7 @@ function semanticNodes(): KGNode[] {
     name: 'customer_name',
     domain: 'consumption',
     payload: {
-      registryQualifiedId: 'semantic:consumption:dimension:customer',
+      registryQualifiedId: 'semantic:consumption:dimension:customer_name',
       qualifiedId: 'semantic:consumption:dimension:customer_name',
       localId: 'customer_name',
     },
@@ -142,6 +170,237 @@ describe('plan execution adapter (AGT-013 / AGT-014 / API-006)', () => {
     });
   });
 
+  it('AGT-034 binds a cross-model dimension only through its frozen MetricFlow group-by reference', () => {
+    const metricId = 'semantic:metric:order_item.revenue';
+    const locationId = 'semantic:uncategorized:dimension:locations.location_name';
+    const capability: MetricCapabilityContract = {
+      metricId,
+      semanticModelId: 'semantic:uncategorized:model:order_items',
+      measureIds: ['semantic:measure:order_item.revenue'],
+      primaryEntityId: 'semantic:uncategorized:entity:order_item.order_item',
+      defaultResultGrainId: 'semantic:uncategorized:entity:order_item.order_item',
+      resultGrainIds: [
+        'semantic:uncategorized:entity:order_item.order_item',
+        'semantic:uncategorized:entity:locations.location',
+      ],
+      aggregation: 'sum',
+      additivity: { entities: 'additive', time: 'additive' },
+      dimensions: [{
+        dimensionId: locationId,
+        entityId: 'semantic:uncategorized:entity:locations.location',
+        label: 'Location name',
+        aliases: ['region'],
+        supportedRoles: ['group_by', 'display'],
+        nativeGroupingReference: 'order_id__location__location_name',
+        nativeGroupingPath: ['order_id', 'location'],
+        relationshipPathIds: [
+          'commerce::relationship::order_to_location',
+          'dql:relationship:commerce::relationship::order_to_location',
+          'order_to_location',
+        ],
+      }],
+      timeDimensions: [],
+      operations: ['group'],
+      supportedOutputKinds: ['dimension', 'metric_value'],
+      executionCapabilities: [{ route: 'semantic', adapterId: 'metricflow' }],
+      sourceFingerprint: 'sha256:jaffle-revenue-location-adapter',
+    };
+    const revenue: AgentEvidenceCandidate = {
+      ...metric,
+      id: metricId,
+      qualifiedId: metricId,
+      name: 'Revenue',
+      aliases: ['revenue', 'sales'],
+      analyticalCapability: capability,
+    };
+    const location: AgentEvidenceCandidate = {
+      ...dimension,
+      id: locationId,
+      qualifiedId: locationId,
+      name: 'Location Name',
+      aliases: ['region'],
+    };
+    const makePlan = (candidate = revenue) => buildResolvedAnalyticalPlan({
+      question: 'Show revenue by sales based on the region',
+      resolution: {
+        ...resolution,
+        interpretedQuestion: 'Show revenue by region.',
+        questionType: 'aggregation',
+        selectedConceptIds: [candidate.id, location.id],
+        recommendedExecutionId: candidate.id,
+        queryIntent: { measures: ['revenue'], dimensions: ['region'], filters: [] },
+        recommendedRoute: 'semantic',
+      },
+      evidence: { snapshotId: 'snapshot-jaffle-region', candidates: [candidate, location] },
+      candidates: [candidate, location],
+      mode: 'authoritative',
+    });
+    // This matches the packaged Jaffle runtime shape: the frozen candidate
+    // carries relationship authority, while the compact KG metric projection
+    // retains only the metric identity/native member capability.
+    const compactRegistryCapability: MetricCapabilityContract = {
+      ...capability,
+      dimensions: capability.dimensions.map(({ relationshipPathIds: _relationshipPathIds, ...dimension }) => dimension),
+    };
+    const registry = buildPlanExecutionRegistry({
+      nodes: [{
+        nodeId: 'metric:order_items.revenue', kind: 'metric', name: 'revenue',
+        payload: {
+          qualifiedId: metricId,
+          localId: 'revenue',
+          analyticalCapability: compactRegistryCapability,
+        },
+      }, {
+        nodeId: 'dimension:locations.location_name', kind: 'dimension', name: 'location_name',
+        payload: { qualifiedId: locationId, localId: 'location_name' },
+      }],
+    });
+    const layer = new SemanticLayer();
+    const cube = (name: string, table: string, joins: Array<{
+      name: string;
+      left: string;
+      right: string;
+      type: 'left';
+      sql: string;
+      entity?: string;
+    }> = []) => ({
+      name, label: name, description: '', sql: `SELECT * FROM ${table}`, table,
+      domain: 'commerce', measures: [], dimensions: [], timeDimensions: [], joins,
+      segments: [], preAggregations: [],
+    });
+    // This is the same adapter-native entity graph the capability claims.
+    // Merely adding a `location_name` leaf must not make the test pass.
+    layer.addCube(cube('order_item', 'order_items', [{
+      name: 'orders', left: 'order_item', right: 'orders', type: 'left',
+      sql: '${left}.order_id = ${right}.order_id', entity: 'order_id',
+    }]));
+    layer.addCube(cube('orders', 'orders', [{
+      name: 'locations', left: 'orders', right: 'locations', type: 'left',
+      sql: '${left}.location_id = ${right}.location_id', entity: 'location',
+    }]));
+    layer.addCube(cube('locations', 'locations'));
+    layer.addMetric({ name: 'revenue', label: 'Revenue', description: '', domain: 'commerce', sql: 'product_price', type: 'sum', table: 'order_items', cube: 'order_item' });
+    layer.addDimension({
+      name: 'location_name', label: 'Location name', description: '', domain: 'commerce',
+      sql: 'location_name', type: 'string', table: 'locations', cube: 'locations',
+      entityLink: 'location', qualifiedName: 'location__location_name',
+    });
+
+    const plan = makePlan();
+    expect(plan.capability).toBe('semantic_execution');
+    const nativeBinding = adaptResolvedAnalyticalPlan({
+      plan,
+      registry,
+      semanticLayer: layer,
+      expectedSnapshotId: 'snapshot-jaffle-region',
+    });
+    expect(nativeBinding).toMatchObject({
+      status: 'ready',
+      kind: 'semantic',
+      selection: { metrics: ['revenue'], dimensions: ['order_id__location__location_name'] },
+    });
+
+    const graph = {
+      version: 1 as const,
+      graphId: 'graph:jaffle-region',
+      fingerprint: 'fingerprint:jaffle-region',
+      planId: plan.planId,
+      planFingerprint: plan.fingerprint,
+      snapshotId: plan.snapshotId,
+      route: 'semantic' as const,
+      adapterId: 'metricflow',
+      metricId,
+      capabilityFingerprint: capability.sourceFingerprint,
+      relationshipProofFingerprints: plan.relationshipProofs?.map((proof) => proof.authorityFingerprint) ?? [],
+      nodes: [{
+        id: 'source:all_time',
+        kind: 'source_invocation' as const,
+        dependencies: [],
+        strategy: 'period_aggregate' as const,
+        route: 'semantic' as const,
+        adapterId: 'metricflow',
+        metricId,
+        entityGrainIds: ['semantic:uncategorized:entity:locations.location'],
+        groupByDimensionIds: [locationId],
+        memberFilters: [],
+        outputAliases: {
+          dimensions: [{ dimensionId: locationId, outputId: 'location_name' }],
+          metric: { metricId, outputId: 'revenue' },
+        },
+      }, {
+        id: 'validate:result_contract',
+        kind: 'project_validate' as const,
+        dependencies: ['source:all_time'],
+        outputIds: ['location_name', 'revenue'],
+        entityGrainIds: ['semantic:uncategorized:entity:locations.location'],
+        maxRows: 100,
+      }],
+      terminalNodeId: 'validate:result_contract',
+    };
+    const graphBinding = adaptAnalyticalSemanticGraph({
+      graph,
+      plan,
+      registry,
+      semanticLayer: layer,
+      expectedSnapshotId: 'snapshot-jaffle-region',
+    });
+    expect(graphBinding).toMatchObject({
+      status: 'ready',
+      capability: {
+        sourceFingerprint: capability.sourceFingerprint,
+        dimensions: [expect.objectContaining({
+          dimensionId: locationId,
+          relationshipPathIds: capability.dimensions[0]!.relationshipPathIds,
+        })],
+      },
+    });
+
+    const mismatchedRegistry = buildPlanExecutionRegistry({
+      nodes: [{
+        nodeId: 'metric:order_items.revenue', kind: 'metric', name: 'revenue',
+        payload: {
+          qualifiedId: metricId,
+          localId: 'revenue',
+          analyticalCapability: { ...compactRegistryCapability, sourceFingerprint: 'sha256:wrong-registry-capability' },
+        },
+      }, {
+        nodeId: 'dimension:locations.location_name', kind: 'dimension', name: 'location_name',
+        payload: { qualifiedId: locationId, localId: 'location_name' },
+      }],
+    });
+    expect(adaptAnalyticalSemanticGraph({
+      graph,
+      plan,
+      registry: mismatchedRegistry,
+      semanticLayer: layer,
+      expectedSnapshotId: 'snapshot-jaffle-region',
+    })).toMatchObject({ status: 'blocked', code: 'EXECUTION_GRAPH_MISMATCH' });
+
+    // The generic leaf exists in the semantic layer but is not a valid
+    // metric-relative traversal. It must be rejected before a semantic plan
+    // can freeze, rather than reaching MetricFlow and failing after SQL route
+    // selection.
+    const flattenedRevenue: AgentEvidenceCandidate = {
+      ...revenue,
+      analyticalCapability: {
+        ...capability,
+        dimensions: [{
+          ...capability.dimensions[0]!,
+          nativeGroupingReference: 'location_name',
+          nativeGroupingPath: [],
+        }],
+      },
+    };
+    const flattenedPlan = makePlan(flattenedRevenue);
+    expect(flattenedPlan.capability).toBe('blocked');
+    expect(adaptResolvedAnalyticalPlan({
+      plan: flattenedPlan,
+      registry,
+      semanticLayer: layer,
+      expectedSnapshotId: 'snapshot-jaffle-region',
+    })).toMatchObject({ status: 'blocked', code: 'PLAN_BLOCKED' });
+  });
+
   it('fails closed on duplicate canonical registry IDs and never binds a retrieval alias', () => {
     const layer = new SemanticLayer({
       metrics: [{ name: 'rollover_balance', label: 'Rollover', description: '', domain: 'consumption', sql: 'balance', type: 'sum', table: 'usage' }],
@@ -152,7 +411,7 @@ describe('plan execution adapter (AGT-013 / AGT-014 / API-006)', () => {
       nodeId: 'dimension:other.customer_name',
       name: 'other_customer_name',
       payload: {
-        registryQualifiedId: 'semantic:consumption:dimension:customer',
+        registryQualifiedId: 'semantic:consumption:dimension:customer_name',
         qualifiedId: 'semantic:other:dimension:customer_name',
         localId: 'other_customer_name',
       },
@@ -169,8 +428,8 @@ describe('plan execution adapter (AGT-013 / AGT-014 / API-006)', () => {
           ...node,
           payload: {
             ...node.payload,
-            registryQualifiedId: 'semantic:other:dimension:customer',
-            aliases: ['semantic:consumption:dimension:customer'],
+            registryQualifiedId: 'semantic:other:dimension:customer_name',
+            aliases: ['semantic:consumption:dimension:customer_name'],
           },
         }
       : node);
@@ -387,7 +646,7 @@ describe('plan execution adapter (AGT-013 / AGT-014 / API-006)', () => {
   });
 
   it('adapts each bounded graph period to exact semantic members without rematching the question', () => {
-    const customerId = 'semantic:consumption:dimension:customer';
+    const customerId = 'semantic:consumption:dimension:customer_name';
     const dateId = 'semantic:consumption:dimension:report_date';
     const metricId = metric.qualifiedId!;
     const frame: AnalyticalQuestionFrameV2 = {
@@ -445,6 +704,7 @@ describe('plan execution adapter (AGT-013 / AGT-014 / API-006)', () => {
     };
     const analyticalCapability: MetricCapabilityContract = {
       metricId,
+      semanticModelId: 'semantic:consumption:model:usage',
       measureIds: ['semantic:consumption:measure:rollover_balance'],
       primaryEntityId: 'account',
       defaultResultGrainId: 'scalar',
@@ -455,7 +715,8 @@ describe('plan execution adapter (AGT-013 / AGT-014 / API-006)', () => {
         dimensionId: customerId,
         entityId: 'customer',
         supportedRoles: ['group_by', 'filter', 'rank_entity'],
-        relationshipPathIds: ['consumption::relationship::balance_to_customer'],
+        nativeGroupingReference: 'customer__customer_name',
+        nativeGroupingPath: ['customer'],
       }],
       timeDimensions: [{
         dimensionId: dateId,
@@ -467,11 +728,15 @@ describe('plan execution adapter (AGT-013 / AGT-014 / API-006)', () => {
       executionCapabilities: [{ route: 'semantic', adapterId: 'metricflow-cli' }],
       sourceFingerprint: 'semantic-capability-v1',
     };
+    const graphMetric: AgentEvidenceCandidate = {
+      ...metric,
+      analyticalCapability,
+    };
     const plan = buildResolvedAnalyticalPlan({
       question: frame.interpretedQuestion,
-      resolution: { ...resolution, analyticalFrame: frame },
-      evidence,
-      candidates: [metric, dimension],
+      resolution: { ...resolution, analyticalFrame: frame, selectedConceptIds: [graphMetric.id], recommendedExecutionId: graphMetric.id },
+      evidence: { ...evidence, candidates: [graphMetric, dimension] },
+      candidates: [graphMetric, dimension],
       mode: 'authoritative',
     });
     const built = buildAnalyticalExecutionGraph({
@@ -491,13 +756,31 @@ describe('plan execution adapter (AGT-013 / AGT-014 / API-006)', () => {
         payload: { qualifiedId: dateId, localId: 'report_date' },
       },
     ];
-    const layer = new SemanticLayer({
-      metrics: [{ name: 'rollover_balance', label: 'Rollover', description: '', domain: 'consumption', sql: 'balance', type: 'sum', table: 'usage' }],
-      dimensions: [
-        { name: 'customer_name', label: 'Customer', description: '', domain: 'consumption', sql: 'customer_name', type: 'string', table: 'usage' },
-        { name: 'report_date', label: 'Report date', description: '', domain: 'consumption', sql: 'report_date', type: 'date', table: 'usage', isTimeDimension: true, granularities: ['day', 'month', 'year'] },
-      ],
+    const layer = new SemanticLayer();
+    const cube = (name: string, table: string, joins: Array<{
+      name: string;
+      left: string;
+      right: string;
+      type: 'left';
+      sql: string;
+      entity?: string;
+    }> = []) => ({
+      name, label: name, description: '', sql: `SELECT * FROM ${table}`, table,
+      domain: 'consumption', measures: [], dimensions: [], timeDimensions: [], joins,
+      segments: [], preAggregations: [],
     });
+    layer.addCube(cube('usage', 'usage', [{
+      name: 'customers', left: 'usage', right: 'customers', type: 'left',
+      sql: '${left}.customer_id = ${right}.customer_id', entity: 'customer',
+    }]));
+    layer.addCube(cube('customers', 'customers'));
+    layer.addMetric({ name: 'rollover_balance', label: 'Rollover', description: '', domain: 'consumption', sql: 'balance', type: 'sum', table: 'usage', cube: 'usage' });
+    layer.addDimension({
+      name: 'customer_name', label: 'Customer', description: '', domain: 'consumption',
+      sql: 'customer_name', type: 'string', table: 'customers', cube: 'customers',
+      entityLink: 'customer', qualifiedName: 'customer__customer_name',
+    });
+    layer.addDimension({ name: 'report_date', label: 'Report date', description: '', domain: 'consumption', sql: 'report_date', type: 'date', table: 'usage', cube: 'usage', isTimeDimension: true, granularities: ['day', 'month', 'year'] });
     const binding = adaptAnalyticalSemanticGraph({
       graph: built.graph,
       plan,
@@ -514,9 +797,9 @@ describe('plan execution adapter (AGT-013 / AGT-014 / API-006)', () => {
           adapterId: 'metricflow-cli',
           selection: {
             metrics: ['rollover_balance'],
-            dimensions: ['customer_name'],
+            dimensions: ['customer__customer_name'],
             filters: [
-              { dimension: 'customer_name', operator: 'equals', values: ['Zoom'] },
+              { dimension: 'customer__customer_name', operator: 'equals', values: ['Zoom'] },
               { dimension: 'report_date', operator: 'gte', values: ['2026-07-01T00:00:00.000Z'] },
               { dimension: 'report_date', operator: 'lt', values: ['2026-08-01T00:00:00.000Z'] },
             ],
@@ -527,9 +810,9 @@ describe('plan execution adapter (AGT-013 / AGT-014 / API-006)', () => {
           nodeId: 'source:previous_year',
           selection: {
             metrics: ['rollover_balance'],
-            dimensions: ['customer_name'],
+            dimensions: ['customer__customer_name'],
             filters: [
-              { dimension: 'customer_name', operator: 'equals', values: ['Zoom'] },
+              { dimension: 'customer__customer_name', operator: 'equals', values: ['Zoom'] },
               { dimension: 'report_date', operator: 'gte', values: ['2025-07-01T00:00:00.000Z'] },
               { dimension: 'report_date', operator: 'lt', values: ['2025-08-01T00:00:00.000Z'] },
             ],

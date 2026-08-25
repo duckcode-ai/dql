@@ -8,7 +8,7 @@ import type {
 } from './types.js';
 import { supportsReasoningEffort } from './reasoning-effort.js';
 import { compactToolOutput } from './tool-output.js';
-import { DEFAULT_PROVIDER_DISPATCH_LIMIT, prepareProviderHttpDispatch } from './dispatch.js';
+import { DEFAULT_PROVIDER_DISPATCH_LIMIT, fetchProviderHttpDispatch } from './dispatch.js';
 
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
 
@@ -46,18 +46,19 @@ async function postMessages(
   },
 ): Promise<Response> {
   const send = (envelope: Record<string, unknown>): Promise<Response> => {
-    const dispatchedBody = prepareProviderHttpDispatch({
+    const attemptIndex = dispatch.nextAttempt();
+    return fetchProviderHttpDispatch({
       provider: 'claude',
       operation: dispatch.operation,
-      attemptIndex: dispatch.nextAttempt(),
+      attemptIndex,
       envelope,
       options: dispatch.options,
-    });
-    return fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(dispatchedBody),
-      signal: dispatch.options.signal,
+      url,
+      init: {
+        method: 'POST',
+        headers,
+        signal: dispatch.options.signal,
+      },
     });
   };
   const res = await send({ ...baseBody, ...reasoning });

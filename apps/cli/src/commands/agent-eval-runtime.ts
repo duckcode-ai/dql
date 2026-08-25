@@ -57,6 +57,15 @@ export interface RuntimeDrivenRun {
   terminalOutcome?: NonNullable<AgentRun['routeDecision']>['terminalOutcome'];
   /** Provider/tool count recorded by persisted runtime telemetry. */
   toolCallCount: number;
+  /**
+   * OBS-008: compact receipt evidence only. Evaluation never opens the trace
+   * store or treats a trace as answer authority.
+   */
+  observability?: {
+    recordingStatus: NonNullable<AgentRun['traceReference']>['recordingStatus'];
+    storeSchemaVersion: 1;
+    traceFingerprint?: string;
+  };
 }
 
 /**
@@ -148,6 +157,13 @@ export function projectRuntimeRun(run: AgentRun): RuntimeDrivenRun {
     ...(typeof retrievalCandidateCount === 'number' ? { retrievalCandidateCount } : {}),
     ...(sourceCoverage ? { sourceCoverage } : {}),
     ...(run.routeDecision?.terminalOutcome ? { terminalOutcome: run.routeDecision.terminalOutcome } : {}),
+    ...(run.traceReference ? {
+      observability: {
+        recordingStatus: run.traceReference.recordingStatus,
+        storeSchemaVersion: run.traceReference.storeSchemaVersion,
+        ...(run.traceReference.traceFingerprint ? { traceFingerprint: run.traceReference.traceFingerprint } : {}),
+      },
+    } : {}),
     ...(run.answer ? { answer: run.answer } : {}),
     ...(refusalEvaluation?.id ? { refusalCode: refusalEvaluation.id } : {}),
     ...runtimeRunOutputs(run),

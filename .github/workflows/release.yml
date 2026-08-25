@@ -38,7 +38,17 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm test
-      - run: pnpm release:publish
+      - name: Select npm dist-tag from the release tag
+        id: npm_dist_tag
+        shell: bash
+        run: |
+          release_version="${GITHUB_REF_NAME#v}"
+          if [[ "$release_version" == *-* ]]; then
+            echo "tag=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+      - run: node scripts/release-packages.mjs --publish --tag "${{ steps.npm_dist_tag.outputs.tag }}" --expected-version "${GITHUB_REF_NAME#v}"
 
   package-extension:
     if: github.repository == 'duckcode-ai/dql' && github.event_name == 'workflow_dispatch' && inputs.publish_extension == true

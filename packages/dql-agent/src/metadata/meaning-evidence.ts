@@ -7,8 +7,11 @@ import {
   type AnalyticalPolicyContract,
   type MetricCapabilityContract,
 } from "@duckcodeailabs/dql-core";
-import { candidateMatchesCategoricalDimensionRequirement } from '../analytical-orchestration.js';
-import type { LocalContextPack, MetadataObject } from "./catalog.js";
+import {
+  candidateMatchesCategoricalDimensionRequirement,
+  categoricalDimensionTermsMatch,
+} from '../analytical-orchestration.js';
+import type { LocalContextPack, MetadataObject, MetadataRetrievalLaneResult } from "./catalog.js";
 import {
   certifiedCandidateExplicitlyCoversMeasures,
   type AgentEvidenceCandidate,
@@ -54,6 +57,8 @@ export interface MetadataMeaningCandidate {
   /** Structured relationship facts when this card itself is a relationship. */
   relationshipSafety?: AgentRelationshipSafetyEvidence[];
   provenance?: string;
+  /** Actual snapshot retrieval memberships; never inferred from a display name. */
+  retrievalLanes?: Array<{ lane: 'exact' | 'lexical' | 'vector' | 'graph' | 'conversation'; rank?: number }>;
   ambiguityPeerIds: string[];
 }
 
@@ -80,6 +85,8 @@ export interface AgentRetrievalEvidenceAdapterOptions {
   analyticalPolicies?: AnalyticalPolicyContract[];
   /** Same immutable context-pack objects used to prove member/value bindings. */
   contextObjects?: MetadataObject[];
+  /** Snapshot retrieval results used to preserve multi-lane provenance. */
+  retrievalLanes?: MetadataRetrievalLaneResult[];
 }
 
 export interface MeaningEvidenceInputCandidate {
@@ -107,7 +114,9 @@ export function buildMeaningEvidencePackage(
   question: string,
   questionPlan: AnalysisQuestionPlan,
   ranked: MeaningEvidenceInputCandidate[],
+  retrievalLanes: MetadataRetrievalLaneResult[] = [],
 ): MetadataMeaningEvidencePackage {
+  const laneMembership = laneMembershipByObjectKey(retrievalLanes);
   const questionText = normalizeText(question);
   const questionTokens = tokenSet(questionText);
   const eligible = ranked.flatMap((item) => {
@@ -154,6 +163,7 @@ export function buildMeaningEvidencePackage(
       candidate.aliases,
       candidate.relevanceReasons,
       qualifiedPeerMap.get(candidate.item.row.objectKey) ?? [],
+      laneMembership.get(candidate.item.row.objectKey),
     );
   });
 
@@ -219,6 +229,7 @@ export function buildMeaningEvidencePackage(
       candidate.aliases,
       candidate.relevanceReasons,
       peerMap.get(candidate.item.row.objectKey) ?? [],
+      laneMembership.get(candidate.item.row.objectKey),
     ));
   }
   return {
@@ -506,9 +517,13 @@ export function toAgentRetrievalEvidence(
     1,
     ...sourceCandidates.map((candidate) => candidate.relevanceScore),
   );
-  const candidates: AgentEvidenceCandidate[] = sourceCandidates.map(
-    (candidate) => agentCandidateFromMeaning(candidate, maxRelevance),
-  );
+  const optionLaneMembership = laneMembershipByObjectKey(options.retrievalLanes ?? []);
+  const candidates: AgentEvidenceCandidate[] = sourceCandidates.map((candidate) =>
+    agentCandidateFromMeaning(
+      candidate,
+      maxRelevance,
+      candidate.retrievalLanes ?? optionLaneMembership.get(candidate.objectKey),
+    ));
   const trustedBindings = trustedMemberBindingEvidence(
     questionPlan,
     candidates,
@@ -579,7 +594,11 @@ export function toAgentRetrievalEvidence(
   };
 }
 
-function agentCandidateFromMeaning(candidate: MetadataMeaningCandidate, maxRelevance = 1): AgentEvidenceCandidate {
+function agentCandidateFromMeaning(
+  candidate: MetadataMeaningCandidate,
+  maxRelevance = 1,
+  retrievalLanes?: Array<{ lane: 'exact' | 'lexical' | 'vector' | 'graph' | 'conversation'; rank?: number }>,
+): AgentEvidenceCandidate {
   return {
       id: candidate.objectKey,
       qualifiedId: candidate.qualifiedId,
@@ -613,6 +632,7 @@ function agentCandidateFromMeaning(candidate: MetadataMeaningCandidate, maxRelev
       analyticalCapability: candidate.analyticalCapability,
       eligible: true,
       exactMatch: candidate.relevanceReasons.includes("exact name or alias"),
+      ...(retrievalLanes?.length ? { retrievalLanes } : {}),
   };
 }
 
@@ -737,6 +757,83 @@ function supplementalClarificationEvidence(
         exactMatch: false,
       }];
     }));
+  // A compact retrieval package can contain the selected semantic metric but
+  // not a separately indexed card for one of that metric's declared grouping
+  // dimensions. Retain one exact, same-snapshot extension for that field when
+  // the request names its categorical role. This does not infer a join or a
+  // business alias: the metric capability owns both the qualified dimension
+  // id and the MetricFlow-native grouping path, and the router later admits it
+  // only beside this exact metric. It is intentionally separate from the
+  // geography-only recovery below, which may bind a location-like field for
+  // the distinct business term `region` under a stricter sole-field rule.
+  const exactCapabilityDimensionCards: AgentEvidenceCandidate[] = existing.flatMap((metric) => {
+    if (metric.kind !== 'semantic_metric') return [];
+    const capability = normalizeMetricCapabilityContract(metric.analyticalCapability);
+    if (!capability || !capability.executionCapabilities.some((execution) => execution.route === 'semantic')) return [];
+    const metricId = metric.qualifiedId ?? metric.id;
+    return requestedDimensions.flatMap((requestedTerm) => capability.dimensions.flatMap((dimension) => {
+      if (!dimension.supportedRoles.includes('group_by')) return [];
+      // `existing` is the unbounded retrieval snapshot, not the compact
+      // meaning package. A separately indexed semantic dimension can be
+      // present here yet later lose its role-balanced admission to a raw/dbt
+      // column with the same business words. Preserve the capability-backed
+      // extension in that case so the router can admit it beside its exact
+      // metric. The final de-duplication deliberately retains this extension
+      // (with its metric/role proof) over a plain dimension card.
+      const identities = [
+        dimension.dimensionId,
+        dimension.label ?? '',
+        ...(dimension.aliases ?? []),
+      ];
+      if (!identities.some((identity) => categoricalDimensionTermsMatch(requestedTerm, identity))) return [];
+      return [{
+        id: dimension.dimensionId,
+        qualifiedId: dimension.dimensionId,
+        kind: 'semantic_member' as const,
+        semanticObjectType: 'dimension' as const,
+        trustTier: 'semantic' as const,
+        name: dimension.label ?? dimension.dimensionId.split(/[.:/]/).at(-1) ?? dimension.dimensionId,
+        aliases: uniqueStrings([
+          dimension.label ?? '',
+          ...(dimension.aliases ?? []),
+          requestedTerm,
+        ]),
+        definition: `Same-snapshot MetricFlow grouping field for ${requestedTerm}.`,
+        primaryEntity: dimension.entityId,
+        dimensions: [dimension.dimensionId],
+        sourceObjects: metric.sourceObjects,
+        relationshipEvidence: metric.relationshipEvidence,
+        relationshipSafety: metric.relationshipSafety,
+        relevanceScore: metric.relevanceScore,
+        matchReasons: ['same snapshot exact MetricFlow grouping extension'],
+        compatibility: 'compatible' as const,
+        eligible: true,
+        exactMatch: false,
+        sameSnapshotRoleExtension: {
+          version: 1,
+          role: 'categorical_dimension' as const,
+          requestedTerm,
+          metricId,
+          dimensionId: dimension.dimensionId,
+          basis: 'exact_metricflow_grouping_dimension' as const,
+        },
+      }];
+    }));
+  });
+  // A location-like semantic dimension is not generally a synonym for
+  // "region".  There is one deliberately narrow exception: when every
+  // current-turn requested metric proves the same one MetricFlow grouping
+  // dimension in this immutable snapshot.  Surface that card as a typed,
+  // host-authored extension so the bounded meaning call can bind it; the
+  // selected metric capability still verifies the native grouping path and
+  // remains the only execution authority.  This recovers the real Jaffle
+  // `revenue by ... region` path without guessing a raw join or widening
+  // lexical geography matching.
+  const sameSnapshotRoleExtensions = sameSnapshotGeographyRoleExtensions({
+    requestedMeasures,
+    requestedDimensions,
+    existing,
+  });
   // A bare ranking ("who are the top customers") names an ENTITY and no
   // measure, so every lane above — each keyed on a REQUESTED measure or
   // dimension term — returns nothing, and the clarification has no choices to
@@ -782,9 +879,32 @@ function supplementalClarificationEvidence(
       right.relevanceScore - left.relevanceScore || left.id.localeCompare(right.id));
   })();
 
-  const unique = [...objectCards, ...declaredDimensionCards, ...rankingMeasureCards]
-    .filter((candidate, index, all) => all.findIndex((other) =>
-      (other.qualifiedId ?? other.id) === (candidate.qualifiedId ?? candidate.id)) === index);
+  // The index may yield a generic semantic-dimension card and then this
+  // function may enrich that exact qualified ID with a metric-declared,
+  // same-snapshot role proof. Retain the enriched card: it is not a second
+  // candidate or a guessed relationship, but the only metadata authority that
+  // says this field is queryable with the selected MetricFlow metric for the
+  // current requested role. First-seen de-duplication discarded that proof in
+  // real local indexes and manufactured a false coverage gap for
+  // `product category` / `product_type`.
+  const uniqueByQualifiedId = new Map<string, AgentEvidenceCandidate>();
+  for (const candidate of [
+    ...objectCards,
+    ...exactCapabilityDimensionCards,
+    ...declaredDimensionCards,
+    ...sameSnapshotRoleExtensions,
+    ...rankingMeasureCards,
+  ]) {
+    const key = candidate.qualifiedId ?? candidate.id;
+    const existingCandidate = uniqueByQualifiedId.get(key);
+    if (!existingCandidate
+      || (!existingCandidate.sameSnapshotRoleExtension && candidate.sameSnapshotRoleExtension)) {
+      // Map replacement preserves stable first-seen ordering while retaining
+      // the stricter extension provenance for this one qualified object.
+      uniqueByQualifiedId.set(key, candidate);
+    }
+  }
+  const unique = [...uniqueByQualifiedId.values()];
   const roleLanes = [
     ...requestedDimensions.map((term) => ({ kind: 'dimension' as const, term })),
     ...requestedMeasures.map((term) => ({ kind: 'metric' as const, term })),
@@ -815,6 +935,97 @@ function supplementalClarificationEvidence(
     }
   }
   return selected.slice(0, MAX_SUPPLEMENTAL_CANDIDATES);
+}
+
+function sameSnapshotGeographyRoleExtensions(input: {
+  requestedMeasures: string[];
+  requestedDimensions: string[];
+  existing: AgentEvidenceCandidate[];
+}): AgentEvidenceCandidate[] {
+  const geographyTerms = [...new Set(input.requestedDimensions
+    .map(normalizeText)
+    .filter((term) => term === 'region' || term === 'geography' || term === 'geographic'))];
+  if (geographyTerms.length === 0 || input.requestedMeasures.length === 0) return [];
+
+  const existingGeography = input.existing.some((candidate) =>
+    geographyTerms.some((term) => candidateMatchesCategoricalDimensionRequirement(candidate, [term])));
+  if (existingGeography) return [];
+
+  const canonicalMetricTerm = (value: string): string => {
+    const normalized = normalizeText(value);
+    return normalized === 'sale' || normalized === 'sales' ? 'revenue' : normalized;
+  };
+  const metricMatches = (candidate: AgentEvidenceCandidate, requested: string): boolean => {
+    if (candidate.kind !== 'semantic_metric' || !candidate.analyticalCapability) return false;
+    const expected = canonicalMetricTerm(requested);
+    return [candidate.name, ...(candidate.aliases ?? []), candidate.analyticalCapability.metricId]
+      .map(canonicalMetricTerm)
+      .some((identity) => phraseTermsMatch(expected, identity));
+  };
+  const geographicDimension = (dimension: MetricCapabilityContract['dimensions'][number]): boolean => {
+    const identity = [dimension.dimensionId, dimension.entityId, dimension.label ?? '', ...(dimension.aliases ?? [])]
+      .map(normalizeText)
+      .join(' ');
+    return /\b(?:region|geograph(?:y|ic)|location|country|state|province|city|territory)\b/.test(identity);
+  };
+  const candidatesForMeasure = (requested: string) => input.existing.flatMap((candidate) => {
+    if (!metricMatches(candidate, requested)) return [];
+    const capability = candidate.analyticalCapability!;
+    if (!capability.executionCapabilities.some((execution) => execution.route === 'semantic')) return [];
+    return capability.dimensions
+      .filter((dimension) => dimension.supportedRoles.includes('group_by') && geographicDimension(dimension))
+      .map((dimension) => ({ candidate, dimension }));
+  });
+
+  const matchesByMeasure = input.requestedMeasures.map((requested) => ({
+    requested,
+    matches: candidatesForMeasure(requested),
+  }));
+  if (matchesByMeasure.some(({ matches }) => matches.length === 0)) return [];
+  const sharedDimensionIds = matchesByMeasure
+    .map(({ matches }) => new Set(matches.map(({ dimension }) => dimension.dimensionId)))
+    .reduce<Set<string> | undefined>((shared, ids) => shared === undefined
+      ? ids
+      : new Set([...shared].filter((id) => ids.has(id))), undefined);
+  if (!sharedDimensionIds || sharedDimensionIds.size !== 1) return [];
+
+  const dimensionId = [...sharedDimensionIds][0]!;
+  const witness = matchesByMeasure[0]!.matches.find((match) => match.dimension.dimensionId === dimensionId);
+  if (!witness) return [];
+  const { candidate: metricCandidate, dimension } = witness;
+  const requestedTerm = geographyTerms[0]!;
+  return [{
+    id: dimensionId,
+    qualifiedId: dimensionId,
+    kind: 'semantic_member',
+    semanticObjectType: 'dimension',
+    trustTier: 'semantic',
+    name: dimension.label ?? dimension.dimensionId.split(/[.:/]/).at(-1) ?? dimension.dimensionId,
+    aliases: uniqueStrings([
+      dimension.label ?? '',
+      ...(dimension.aliases ?? []),
+      requestedTerm,
+    ]),
+    definition: `Same-snapshot MetricFlow grouping field for ${requestedTerm}.`,
+    primaryEntity: dimension.entityId,
+    dimensions: [dimensionId],
+    sourceObjects: metricCandidate.sourceObjects,
+    relationshipEvidence: metricCandidate.relationshipEvidence,
+    relationshipSafety: metricCandidate.relationshipSafety,
+    relevanceScore: metricCandidate.relevanceScore,
+    matchReasons: ['same snapshot role-targeted MetricFlow grouping extension'],
+    compatibility: 'compatible',
+    eligible: true,
+    exactMatch: false,
+    sameSnapshotRoleExtension: {
+      version: 1,
+      role: 'categorical_dimension',
+      requestedTerm,
+      metricId: metricCandidate.qualifiedId ?? metricCandidate.id,
+      dimensionId,
+      basis: 'sole_metricflow_grouping_dimension',
+    },
+  }];
 }
 
 function expandedRequestedTerms(terms: string[], objects: MetadataObject[]): string[] {
@@ -1020,8 +1231,40 @@ export function applyContextPackCompatibility(
         // paraphrase "What is monthly revenue?".  Do not promote lexical
         // relevance alone; require the catalog's executable fit verdict.
         const requestedMeasures = pack.questionPlan.requestedShape.measures;
+        // `declaredOutputs` is preferable because it remains independently
+        // visible in the block source. Some older-but-valid certified blocks
+        // only expose their projection through the catalog's immutable SQL
+        // contract, however. Preserve that proof *only* when the reader typed
+        // the exact block title and the same snapshot's catalog has already
+        // selected this precise block as a high-confidence certified answer.
+        // A fuzzy alias, paraphrase, or ordinary semantic question cannot use
+        // this bridge, so non-exact role and output constraints remain intact.
+        const exactCertifiedTitle = typeof pack.questionPlan.question === 'string'
+          && normalizeText(pack.questionPlan.question) === normalizeText(candidate.name)
+          && pack.routeDecision.route === 'certified'
+          && pack.routeDecision.exactObjectKey === candidate.id
+          && fit?.action === 'certified_answer'
+          && (fit.fit.kind === 'exact' || fit.fit.kind === 'trim_safe')
+          && fit.fit.confidence === 'high';
+        const compatibilityFacts = exactCertifiedTitle
+          ? uniqueStrings([
+              ...(candidate.compatibilityFacts ?? []),
+              ...requestedMeasures.map((measure) => `catalog-proven-output: ${measure}`),
+              // The catalog fit also proves this block's declared result
+              // grain. Preserve it as an output only on the exact-title
+              // bridge, so the immutable plan can bind `customer` to its
+              // actual `customer_name` result without making a fuzzy block
+              // title a display-key authority.
+              ...(candidate.compatibilityFacts ?? []).flatMap((fact) =>
+                /^grain:\s*(.+)$/i.exec(fact)?.[1]
+                  ?.split(',')
+                  .map((value) => value.trim())
+                  .filter(Boolean)
+                  .map((value) => `catalog-proven-output: ${value}`) ?? []),
+            ])
+          : candidate.compatibilityFacts;
         const blockDeclaresRequestedMeasures = certifiedCandidateExplicitlyCoversMeasures(
-          candidate,
+          { ...candidate, compatibilityFacts },
           requestedMeasures,
         );
         const completeCertifiedFit = fit?.action === 'certified_answer'
@@ -1030,6 +1273,7 @@ export function applyContextPackCompatibility(
           && blockDeclaresRequestedMeasures;
         return {
           ...candidate,
+          ...(compatibilityFacts ? { compatibilityFacts } : {}),
           // Lexical equality to a block name/alias is useful retrieval signal,
           // but it is not exact analytical authority. The catalog's complete
           // certified fit is the one host-owned exception and is still checked
@@ -1116,15 +1360,24 @@ function candidateCard(
   aliases: string[],
   relevanceReasons: string[],
   ambiguityPeerIds: string[],
+  retrievalLanes?: Array<{ lane: 'exact' | 'lexical' | 'vector' | 'graph' | 'conversation'; rank?: number }>,
 ): MetadataMeaningCandidate {
   const payload = object.payload ?? {};
   const analyticalCapability = normalizeMetricCapabilityContract(
     payload.analyticalCapability,
   );
   const relationshipSafety = relationshipSafetyFromObject(object);
+  // A dbt/runtime column inherits its parent node's `uniqueId`.  That value
+  // is useful lineage metadata, but it is not a column identity: using it as
+  // the candidate's qualified ID collapsed every selected column on a model
+  // into the model itself.  The physical cascade then appeared safe but could
+  // not freeze an exact output contract.  Keep the parent relation in
+  // `sourceRelations`; give a column its source-qualified field identity.
+  const columnObject = object.objectType.endsWith('_column');
   const qualifiedId =
     firstString(
       payload.qualifiedId,
+      ...(columnObject ? [object.fullName] : []),
       payload.uniqueId,
       object.fullName,
       object.objectKey,
@@ -1195,8 +1448,25 @@ function candidateCard(
     ...(analyticalCapability ? { analyticalCapability } : {}),
     ...(relationshipSafety ? { relationshipSafety: [relationshipSafety] } : {}),
     provenance: firstString(payload.provenance, object.sourceSystem),
+    ...(retrievalLanes?.length ? { retrievalLanes } : {}),
     ambiguityPeerIds,
   };
+}
+
+function laneMembershipByObjectKey(
+  lanes: MetadataRetrievalLaneResult[],
+): Map<string, Array<{ lane: 'exact' | 'lexical' | 'vector' | 'graph' | 'conversation'; rank?: number }>> {
+  const memberships = new Map<string, Array<{ lane: 'exact' | 'lexical' | 'vector' | 'graph' | 'conversation'; rank?: number }>>();
+  for (const lane of lanes) {
+    for (const candidate of lane.candidates) {
+      const next = memberships.get(candidate.objectKey) ?? [];
+      if (!next.some((entry) => entry.lane === lane.lane && entry.rank === candidate.rank)) {
+        next.push({ lane: lane.lane, rank: candidate.rank });
+      }
+      memberships.set(candidate.objectKey, next);
+    }
+  }
+  return memberships;
 }
 
 function agentEvidenceKind(candidate: MetadataMeaningCandidate): AgentEvidenceKind {

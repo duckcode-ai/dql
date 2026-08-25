@@ -1,0 +1,27 @@
+// dql-format: 1
+
+block "Top Customers by Revenue" {
+  domain = "revenue_operations"
+  type = "custom"
+  status = "certified"
+  description = "Certified customer ranking where Revenue, not BCM, is the explicit ranking measure."
+  owner = "revenue-operations@fixture.test"
+  grain = "customer_name"
+  parameterPolicy {
+    top_n = "dynamic"
+  }
+  params {
+    top_n: number = 10
+  }
+  query = """
+    SELECT
+      c.customer_name,
+      SUM(r.revenue) AS revenue
+    FROM analytics.fct_account_revenue AS r
+    JOIN analytics.dim_accounts AS a ON r.account_id = a.account_id
+    JOIN analytics.dim_customers AS c ON a.customer_id = c.customer_id
+    GROUP BY 1
+    ORDER BY revenue DESC
+    LIMIT ${top_n}
+  """
+}

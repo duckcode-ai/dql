@@ -13,6 +13,10 @@ import type {
   AnalyticalGraphSourceInvocationNode,
 } from './analytical-execution-graph.js';
 import type { ResolvedAnalyticalPlan, ResolvedPlanMemberBinding } from './resolved-analytical-plan.js';
+import {
+  governedRelationshipSafetyProofIsSelfConsistentV1,
+  type GovernedRelationshipSafetyProofV1,
+} from './relationship-proof.js';
 
 export interface GovernedRelationColumn {
   qualifiedId: string;
@@ -35,6 +39,9 @@ export interface GovernedRelationship {
   qualifiedId: string;
   fromRelationId: string;
   toRelationId: string;
+  /** Exact modeling entities, retained so frozen safety evidence can reject a restamped registry. */
+  fromEntityId?: string;
+  toEntityId?: string;
   keys: Array<{ fromColumnId: string; toColumnId: string }>;
   joinType: 'inner' | 'left';
   cardinality: string;
@@ -42,6 +49,14 @@ export interface GovernedRelationship {
   status: string;
   automaticJoinAllowed: boolean;
   staleCertification: boolean;
+  certificationFingerprint?: string;
+  evidenceExpiresAt?: string;
+  validation?: {
+    status: string;
+    checkedAt: string;
+    queryFingerprint: string;
+    proofFingerprint?: string;
+  };
   identities: string[];
 }
 
@@ -199,6 +214,8 @@ export function buildGovernedRelationalRegistry(input: {
       qualifiedId: relationship.qualifiedId,
       fromRelationId: from.qualifiedId,
       toRelationId: to.qualifiedId,
+      fromEntityId: relationship.from,
+      toEntityId: relationship.to,
       keys,
       joinType: relationship.joinTypes?.includes('left') ? 'left' : 'inner',
       cardinality: relationship.cardinality,
@@ -206,6 +223,22 @@ export function buildGovernedRelationalRegistry(input: {
       status: relationship.status,
       automaticJoinAllowed: relationship.automaticJoinAllowed,
       staleCertification: relationship.staleCertification,
+      ...(relationship.certificationFingerprint
+        ? { certificationFingerprint: relationship.certificationFingerprint }
+        : {}),
+      ...(relationship.evidenceExpiresAt ? { evidenceExpiresAt: relationship.evidenceExpiresAt } : {}),
+      ...(relationship.validation
+        ? {
+            validation: {
+              status: relationship.validation.status,
+              checkedAt: relationship.validation.checkedAt,
+              queryFingerprint: relationship.validation.queryFingerprint,
+              ...(relationship.validation.proofFingerprint
+                ? { proofFingerprint: relationship.validation.proofFingerprint }
+                : {}),
+            },
+          }
+        : {}),
       identities: unique([relationship.qualifiedId, relationship.id, relationship.localId]),
     }];
   });
@@ -213,13 +246,100 @@ export function buildGovernedRelationalRegistry(input: {
   return { ...payload, fingerprint: hash(stableStringify(payload)) };
 }
 
+/**
+ * A registry is mutable project state while a governed plan is immutable. A
+ * matching snapshot ID is therefore necessary but not sufficient: the exact
+ * certified safety facts selected at freeze time must still match the registry
+ * edge about to produce SQL. This prevents a caller from restamping a changed
+ * registry snapshot or relaxing an unsafe fanout after the router froze.
+ */
+function governedRelationshipSafetyForFrozenPlan(
+  plan: ResolvedAnalyticalPlan,
+  relationship: GovernedRelationship,
+): GovernedRelationshipSafetyProofV1 | undefined {
+  const registryIdentities = new Set([
+    relationship.qualifiedId,
+    ...relationship.identities,
+  ].map(normalizeAuthorityIdentity).filter(Boolean));
+  const pathIds = new Set(plan.relationshipPathIds.map(normalizeAuthorityIdentity).filter(Boolean));
+  const matches = (plan.governedRelationshipSafetyProofs ?? []).filter((proof) =>
+    registryIdentities.has(normalizeAuthorityIdentity(proof.relationshipId))
+    && pathIds.has(normalizeAuthorityIdentity(proof.relationshipPathId))
+    && governedRelationshipSafetyProofIsSelfConsistentV1(proof));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function governedRelationshipMatchesFrozenSafety(
+  relationship: GovernedRelationship,
+  proof: GovernedRelationshipSafetyProofV1,
+  snapshotId: string,
+  now: Date,
+): boolean {
+  const validation = relationship.validation;
+  // The proof is immutable, but certification evidence can expire after the
+  // router froze the plan and before the compiler emits SQL. Equality with a
+  // registry value only proves that both copies are stale in the same way; it
+  // is not current execution authority. Expiry is exclusive: at the exact
+  // recorded instant the proof is no longer safe to use.
+  const evidenceExpiresAt = proof.evidenceExpiresAt === undefined
+    ? undefined
+    : Date.parse(proof.evidenceExpiresAt);
+  return proof.snapshotId === snapshotId
+    && relationship.status === proof.status
+    && relationship.staleCertification === proof.staleCertification
+    && relationship.automaticJoinAllowed === proof.automaticJoinAllowed
+    && relationship.fanout === proof.fanout
+    && relationship.cardinality === proof.cardinality
+    && relationship.certificationFingerprint === proof.certificationFingerprint
+    && relationship.evidenceExpiresAt === proof.evidenceExpiresAt
+    && normalizeAuthorityIdentity(relationship.fromEntityId ?? '') === normalizeAuthorityIdentity(proof.from)
+    && normalizeAuthorityIdentity(relationship.toEntityId ?? '') === normalizeAuthorityIdentity(proof.to)
+    && validation?.status === proof.validation.status
+    && validation.checkedAt === proof.validation.checkedAt
+    && validation.queryFingerprint === proof.validation.queryFingerprint
+    && validation.proofFingerprint === proof.validation.proofFingerprint
+    && relationshipKeysMatchFrozenSafety(relationship.keys, proof.keys)
+    && (evidenceExpiresAt === undefined
+      || Number.isFinite(evidenceExpiresAt) && evidenceExpiresAt > now.getTime());
+}
+
+function relationshipKeysMatchFrozenSafety(
+  registryKeys: readonly { fromColumnId: string; toColumnId: string }[],
+  proofKeys: readonly { from: string; to: string }[],
+): boolean {
+  if (registryKeys.length !== proofKeys.length || registryKeys.length === 0) return false;
+  const normalize = (value: string) => value
+    .replace(/["`]/g, '')
+    .split(/[.:/]/)
+    .at(-1)!
+    .trim()
+    .toLowerCase();
+  const registry = registryKeys
+    .map((key) => `${normalize(key.fromColumnId)}:${normalize(key.toColumnId)}`)
+    .sort();
+  const frozen = proofKeys
+    .map((key) => `${normalize(key.from)}:${normalize(key.to)}`)
+    .sort();
+  return registry.every((key, index) => key === frozen[index]);
+}
+
+function normalizeAuthorityIdentity(value: string): string {
+  return value.trim().toLowerCase();
+}
+
 export function compileGovernedRelationalPlan(input: {
   plan: ResolvedAnalyticalPlan;
   registry: GovernedRelationalRegistry;
   driver?: string;
   maxRows?: number;
+  /** Injectable execution clock so relationship-proof expiry is deterministic. */
+  now?: () => Date;
 }): GovernedRelationalCompileResult {
   const { plan, registry } = input;
+  // Capture time once per compilation. A proof cannot become valid again in
+  // the middle of a plan, and this defines expiry-boundary behavior for every
+  // relationship used by the emitted SQL.
+  const compilationNow = input.now?.() ?? new Date();
   if (plan.capability !== 'governed_relational') {
     return blocked('CAPABILITY_MISMATCH', `Plan capability ${plan.capability} is not governed relational.`);
   }
@@ -257,7 +377,19 @@ export function compileGovernedRelationalPlan(input: {
     if (!relationship) {
       return blocked('RELATIONSHIP_PROOF_REQUIRED', `No selected relationship proof connects ${[...joined].join(', ')} to ${relationIds.filter((id) => !joined.has(id)).join(', ')}.`);
     }
-    if (relationship.status !== 'certified' || relationship.staleCertification || !relationship.automaticJoinAllowed) {
+    const frozenSafety = governedRelationshipSafetyForFrozenPlan(plan, relationship);
+    if (!frozenSafety || !governedRelationshipMatchesFrozenSafety(
+      relationship,
+      frozenSafety,
+      plan.snapshotId,
+      compilationNow,
+    )) {
+      return blocked('RELATIONSHIP_NOT_EXECUTABLE', `Relationship ${relationship.qualifiedId} no longer matches the frozen certified safety proof.`);
+    }
+    if (relationship.status !== 'certified'
+      || relationship.staleCertification
+      || !relationship.automaticJoinAllowed
+      || relationship.fanout !== 'safe') {
       return blocked('RELATIONSHIP_NOT_EXECUTABLE', `Relationship ${relationship.qualifiedId} is not fresh, certified, and automatic-join safe.`);
     }
     const next = joined.has(relationship.fromRelationId) ? relationship.toRelationId : relationship.fromRelationId;
@@ -346,8 +478,11 @@ export function compileGovernedRelationalExecutionGraph(input: {
   registry: GovernedRelationalRegistry;
   driver?: string;
   maxRows?: number;
+  /** Passed through to every source compilation as one immutable execution instant. */
+  now?: () => Date;
 }): GovernedAnalyticalGraphCompileResult {
   const { graph, plan, registry } = input;
+  const compilationNow = input.now?.() ?? new Date();
   const graphBlocked = (
     code: Extract<GovernedAnalyticalGraphCompileResult, { status: 'blocked' }>['code'],
     reason: string,
@@ -451,6 +586,7 @@ export function compileGovernedRelationalExecutionGraph(input: {
       registry,
       driver: input.driver,
       maxRows: input.maxRows,
+      now: () => compilationNow,
     });
     if (compiled.status === 'blocked') {
       return graphBlocked(compiled.code, compiled.reason, source.id, compiled.candidateIds);

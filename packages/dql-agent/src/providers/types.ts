@@ -43,6 +43,39 @@ export interface ProviderDispatchEvent {
  */
 export type ProviderDispatchObserver = (event: ProviderDispatchEvent) => Record<string, unknown>;
 
+/** Content-free completion observation for one already-admitted physical send. */
+export interface ProviderDispatchCompletionEvent {
+  provider: ProviderName;
+  operation: ProviderDispatchOperation;
+  attemptIndex: number;
+  model?: string;
+  outcome: 'ok' | 'error' | 'cancelled';
+  /**
+   * The physical boundary which just settled. A successful transport/process
+   * observation is deliberately not a successful provider result: parsers and
+   * stream consumers can still fail afterwards. Existing providers that do
+   * not report this field retain the historical final-result interpretation.
+   */
+  settlement?: 'transport' | 'process' | 'result';
+  httpStatus?: number;
+  /** Runtime-only classification input. Observers must never persist this raw value. */
+  error?: unknown;
+}
+
+export type ProviderDispatchCompletionObserver = (event: ProviderDispatchCompletionEvent) => void;
+
+/** A send that was refused before an HTTP request was admitted. */
+export interface ProviderDispatchRejectionEvent {
+  provider: ProviderName;
+  operation: ProviderDispatchOperation;
+  attemptIndex: number;
+  model?: string;
+  /** Runtime-only classification input; trace observers persist only its typed diagnostic. */
+  error: unknown;
+}
+
+export type ProviderDispatchRejectionObserver = (event: ProviderDispatchRejectionEvent) => void;
+
 export interface ProviderRunOptions {
   /** Optional model override; otherwise the provider picks a sane default. */
   model?: string;
@@ -62,6 +95,29 @@ export interface ProviderRunOptions {
   maxProviderDispatches?: number;
   /** Server-owned hook invoked immediately before every provider HTTP body send. */
   onProviderDispatch?: ProviderDispatchObserver;
+  /** Server-owned hook invoked when that same physical HTTP send settles. */
+  onProviderDispatchComplete?: ProviderDispatchCompletionObserver;
+  /** Server-owned hook invoked when admission rejects a would-be physical send. */
+  onProviderDispatchRejected?: ProviderDispatchRejectionObserver;
+  /**
+   * Server-owned lifecycle label for the physical send.  Providers must carry
+   * this through untouched; the local runtime is the only authority that maps
+   * it to an egress receipt and a trace span.  It exists so an immutable
+   * exploratory-plan correction cannot be miscounted as a second generation.
+   */
+  dispatchPhase?: import('@duckcodeailabs/dql-core').ProviderDispatchPhaseV1;
+  /**
+   * Server-owned egress purpose paired with {@link dispatchPhase}.  Ordinary
+   * Ask generation remains content-free; the only normal Ask repair purpose is
+   * `repair_sql` and it has no result-row permission.
+   */
+  egressPurpose?: import('@duckcodeailabs/dql-core').ProviderEgressPurpose;
+  /**
+   * Server-owned lineage marker for one same-provider transient transport
+   * retry. Providers carry it through to the local ledger; callers cannot use
+   * it to reopen planning or route selection.
+   */
+  retryOfAttemptIndex?: number;
 }
 
 export interface AgentToolDefinition {

@@ -1,0 +1,7 @@
+{
+  "project": "ask-observability-office-synthetic",
+  "manifestVersion": 3,
+  "modeling": { "mode": "dbt-first" },
+  "dbt": { "projectDir": ".", "manifestPath": "target/manifest.json" },
+  "semanticLayer": { "provider": "dbt", "projectPath": "." }
+}

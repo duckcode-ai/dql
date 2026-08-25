@@ -6,6 +6,37 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## v1.14.3-rc.1 - 2026-08-25
+
+### Ask AI orchestration and observability
+
+- Implemented the Ask-first analytical recovery contract: one host-owned
+  analytical frame carries explicit measures, entities, display keys,
+  dimensions, outputs, ranking, time, and conversation binding through the
+  certified, semantic, governed-relational, and safe exploratory cascade.
+- Hardened generated-SQL and relationship authorization around frozen plans,
+  exact output/source bindings, target and snapshot closure, read-only policy,
+  and one bounded in-lane repair. Exploratory results remain
+  `review_required`; only proven certified or semantic execution can be
+  governed.
+- Added durable, redacted Ask/Research trace summaries that distinguish plan,
+  compile, provider, execution, and branch failures; surface a meaningful
+  partial-Research limitation and safe next action without turning a successful
+  root finding into a false blocked run.
+- Tightened provider dispatch and result-row egress: ordinary Ask retains no
+  result-row narration; explicitly opted-in Research records bounded
+  receipt-backed research narration and phase-aware provider attempts.
+
+### Release-candidate status
+
+- `1.14.3-rc.1` is an unpublished npm prerelease target for `next`, not a
+  released `latest` version. The post-publish smoke must install the exact
+  `@duckcodeailabs/dql-cli@1.14.3-rc.1` package.
+- The changes above are implemented with local OSS test/build evidence. They
+  do not independently verify private office metadata, fiscal calendars,
+  provider configuration, vector indexes, or warehouse behavior; those remain
+  separate office replay gates.
+
 ## v1.14.2 - 2026-08-21
 
 ### Ask AI analytical-cascade recovery

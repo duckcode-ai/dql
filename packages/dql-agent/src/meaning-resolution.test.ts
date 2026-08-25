@@ -3,11 +3,13 @@ import {
   buildMeaningEvidencePackage,
   certifiedCandidateExplicitlyCoversMeasures,
   findExplicitEvidenceReference,
+  mergeMeaningResolutionWithRequirementSeed,
   questionTypeFromText,
   validateMeaningResolution,
   type AgentEvidenceCandidate,
   type MeaningResolution,
 } from "./meaning-resolution.js";
+import { buildAnalyticalRequirementSeedV1, buildAnalyticalRequirementSet } from "./analytical-orchestration.js";
 
 function candidate(overrides: Partial<AgentEvidenceCandidate> = {}): AgentEvidenceCandidate {
   return {
@@ -116,6 +118,87 @@ describe("AGT-010 meaning-resolution evidence boundary", () => {
     expect(cards.filter((item) => /owner|sentiment/i.test(item.name)).map((item) => item.name)).toEqual([]);
   });
 
+  it('keeps a BCM metric from an account_revenue model out of an explicit Revenue ranking package', () => {
+    const revenue = candidate({
+      id: 'semantic:metric:account_revenue.revenue',
+      qualifiedId: 'semantic:metric:account_revenue.revenue',
+      kind: 'semantic_metric',
+      semanticObjectType: 'metric',
+      name: 'Revenue',
+      aliases: ['revenue'],
+      relevanceScore: 0.76,
+    });
+    // The physical source/dimension path deliberately includes `revenue`.
+    // It is execution context, not the intrinsic name of this BCM metric.
+    const bcm = candidate({
+      id: 'semantic:metric:account_revenue.bcm_run_rate',
+      qualifiedId: 'semantic:metric:account_revenue.bcm_run_rate',
+      kind: 'semantic_metric',
+      semanticObjectType: 'metric',
+      // This is the display label emitted by the real semantic metadata
+      // adapter. The `account_revenue` prefix must not make BCM a Revenue
+      // metric at the reservation boundary.
+      name: 'account_revenue.bcm_run_rate',
+      aliases: ['BCM', 'run rate'],
+      dimensions: ['semantic:dimension:account_revenue.fiscal_period'],
+      relevanceScore: 0.99,
+    });
+    const question = 'Who are the top BCM customers who have highest revenue?';
+    const requirements = buildAnalyticalRequirementSet({
+      question,
+      parsedIntent: { measures: ['BCM', 'revenue'], dimensions: ['customer'], filters: [] },
+    });
+
+    expect(requirements.ranking).toMatchObject({ metricTerms: ['revenue'], limit: 10, defaultedLimit: true });
+    expect(buildMeaningEvidencePackage({
+      candidates: [revenue, bcm],
+      parsedIntent: { measures: ['BCM', 'revenue'], dimensions: ['customer'], filters: [] },
+    }, 8, question).map((item) => item.id)).toEqual([revenue.id]);
+
+    const invalidSelection = resolution({
+      selectedConceptIds: [bcm.id],
+      recommendedExecutionId: bcm.id,
+      queryIntent: { measures: ['revenue'], dimensions: ['customer'], filters: [], order: 'desc', limit: 10 },
+    });
+    expect(validateMeaningResolution(invalidSelection, [revenue, bcm], ['revenue'], { requirements })).toEqual({
+      ok: false,
+      reason: `The resolver selected a metric that conflicts with the explicit ranking measure: ${bcm.id}`,
+    });
+  });
+
+  it('keeps genuinely requested Revenue and BCM metrics eligible together', () => {
+    const revenue = candidate({
+      id: 'semantic:metric:account_revenue.revenue',
+      qualifiedId: 'semantic:metric:account_revenue.revenue',
+      kind: 'semantic_metric',
+      semanticObjectType: 'metric',
+      name: 'Revenue',
+      aliases: ['revenue'],
+      relevanceScore: 0.76,
+    });
+    const bcm = candidate({
+      id: 'semantic:metric:account_revenue.bcm_run_rate',
+      qualifiedId: 'semantic:metric:account_revenue.bcm_run_rate',
+      kind: 'semantic_metric',
+      semanticObjectType: 'metric',
+      name: 'BCM Run Rate',
+      aliases: ['BCM', 'run rate'],
+      dimensions: ['semantic:dimension:account_revenue.fiscal_period'],
+      relevanceScore: 0.99,
+    });
+    const question = 'Show Revenue and BCM run rate by customer.';
+    const requirements = buildAnalyticalRequirementSet({
+      question,
+      parsedIntent: { measures: ['revenue', 'BCM run rate'], dimensions: ['customer'], filters: [] },
+    });
+
+    expect(requirements.ranking).toBeUndefined();
+    expect(buildMeaningEvidencePackage({
+      candidates: [revenue, bcm],
+      parsedIntent: { measures: ['revenue', 'BCM run rate'], dimensions: ['customer'], filters: [] },
+    }, 8, question).map((item) => item.id)).toEqual(expect.arrayContaining([revenue.id, bcm.id]));
+  });
+
   it('reserves a declared region alternative before the meaning-card cap without treating location as a lexical synonym', () => {
     const revenueDecoys = Array.from({ length: 20 }, (_, index) => candidate({
       id: `semantic:metric:orders.revenue_${index}`,
@@ -198,7 +281,32 @@ describe("AGT-010 meaning-resolution evidence boundary", () => {
     )).toMatchObject({ ok: false });
   });
 
-  it('AGT-009 rejects a certified execution whose own declared outputs omit the requested revenue', () => {
+  it('keeps selected authority strict but prunes a rejected card outside the bounded meaning package', () => {
+    const selected = candidate({ id: 'semantic:metric:actual_rollover_balance' });
+    const result = validateMeaningResolution(
+      resolution({
+        selectedConceptIds: [selected.id],
+        recommendedExecutionId: selected.id,
+        rejectedCandidates: [{ id: 'semantic:metric:rollover_risk', reason: 'different business meaning' }],
+      }),
+      [selected],
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      resolution: {
+        selectedConceptIds: [selected.id],
+        recommendedExecutionId: selected.id,
+        rejectedCandidates: [],
+      },
+    });
+    expect(validateMeaningResolution(
+      resolution({ selectedConceptIds: ['semantic:metric:not_in_package'] }),
+      [selected],
+    )).toMatchObject({ ok: false });
+  });
+
+  it('AGT-009 keeps an incomplete certified nomination in the bounded package for the host cascade to reject or advance', () => {
     const topCustomers = candidate({
       id: 'dql:block:top_customers',
       kind: 'certified_block',
@@ -214,7 +322,7 @@ describe("AGT-010 meaning-resolution evidence boundary", () => {
     });
 
     expect(certifiedCandidateExplicitlyCoversMeasures(topCustomers, ['revenue'])).toBe(false);
-    expect(validateMeaningResolution(selected, [topCustomers])).toMatchObject({ ok: false });
+    expect(validateMeaningResolution(selected, [topCustomers])).toMatchObject({ ok: true });
   });
 
   it('AGT-009 accepts a certified execution only when its own output contract declares revenue', () => {
@@ -247,19 +355,122 @@ describe("AGT-010 meaning-resolution evidence boundary", () => {
     });
   });
 
-  it("rejects a direct semantic route when deterministic shape compatibility is only partial", () => {
+  it("defers partial semantic nomination compatibility to the host-owned cascade", () => {
     expect(validateMeaningResolution(
       resolution(),
       [candidate({ compatibility: "partial" })],
-    )).toEqual({
-      ok: false,
-      reason: "A semantic route requires deterministic measure, grain, and dimension compatibility.",
-    });
+    )).toMatchObject({ ok: true });
   });
 
   it("AGT-001 classifies aggregate asks as values instead of definitions", () => {
     expect(questionTypeFromText("What is total lifetime spend across all customers?")).toBe("value");
     expect(questionTypeFromText("What is customer lifetime value?")).toBe("definition");
     expect(questionTypeFromText("Show revenue by month")).toBe("trend");
+  });
+
+  it('AGT-034 keeps the host requirement seed when a model omits outputs or proposes a different route', () => {
+    const question = 'Show the five most expensive individual order items with order ID, product ID, and product price.';
+    const seed = buildAnalyticalRequirementSeedV1({
+      question,
+      parsedIntent: {
+        measures: ['product price'],
+        dimensions: ['order id', 'product id'],
+        filters: [],
+        order: 'desc',
+        limit: 5,
+      },
+    });
+    const productPrice = candidate({
+      id: 'semantic:metric:order_items.product_price',
+      name: 'Product Price',
+      aliases: ['product price'],
+    });
+    const merged = mergeMeaningResolutionWithRequirementSeed({
+      seed,
+      candidates: [productPrice],
+      resolution: resolution({
+        interpretedQuestion: 'previous customer result instead',
+        questionType: 'definition',
+        selectedConceptIds: [productPrice.id],
+        recommendedExecutionId: productPrice.id,
+        // Deliberately malicious/legacy fields: the host must not lose its
+        // product category/order outputs, ranking, or individual grain.
+        queryIntent: { measures: ['bcm'], dimensions: [], filters: [{ field: 'customer_name', value: 'Brittany Barrera' }], limit: 100 },
+        recommendedRoute: 'certified',
+      }),
+    });
+
+    expect(merged.interpretedQuestion).toBe(question);
+    expect(merged.queryIntent).toEqual(seed.queryIntent);
+    expect(merged.hostRequirementSeed?.requirements).toMatchObject({
+      grain: 'individual',
+      outputTerms: expect.arrayContaining(['order id', 'product id', 'product price']),
+      ranking: { direction: 'top', limit: 5, defaultedLimit: false },
+    });
+    expect(merged.recommendedRoute).toBe('semantic');
+    expect(merged.overrideReceipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: 'interpreted_question', action: 'host_preserved' }),
+      expect.objectContaining({ field: 'query_intent', action: 'host_preserved' }),
+      expect.objectContaining({ field: 'recommended_route', action: 'host_preserved' }),
+    ]));
+    expect(validateMeaningResolution(merged, [productPrice], seed.queryIntent.measures, { requirements: seed.requirements })).toMatchObject({ ok: true });
+  });
+
+  it('AGT-034 keeps a selected semantic metric ahead of a legacy block recommendation', () => {
+    const seed = buildAnalyticalRequirementSeedV1({
+      question: 'Show revenue by customer.',
+      parsedIntent: { measures: ['revenue'], dimensions: ['customer'], filters: [] },
+    });
+    const revenue = candidate({
+      id: 'semantic:metric:orders.revenue',
+      qualifiedId: 'semantic:metric:orders.revenue',
+      name: 'Revenue',
+      aliases: ['revenue'],
+    });
+    const partialBlock = candidate({
+      id: 'block:revenue_by_customer',
+      qualifiedId: 'block:revenue_by_customer',
+      kind: 'certified_block',
+      trustTier: 'certified',
+      name: 'Revenue by customer',
+    });
+    const merged = mergeMeaningResolutionWithRequirementSeed({
+      seed,
+      candidates: [revenue, partialBlock],
+      resolution: resolution({
+        selectedConceptIds: [revenue.id],
+        recommendedExecutionId: partialBlock.id,
+        recommendedRoute: 'certified',
+      }),
+    });
+
+    expect(merged.recommendedExecutionId).toBe(revenue.id);
+    expect(merged.recommendedRoute).toBe('semantic');
+    expect(merged.overrideReceipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: 'recommended_route', action: 'host_preserved' }),
+    ]));
+  });
+
+  it('AGT-034 rejects a model-invented candidate even after host seed merge', () => {
+    const seed = buildAnalyticalRequirementSeedV1({
+      question: 'who are the top customers who have revenue by product category?',
+      parsedIntent: { measures: ['revenue'], dimensions: ['customer name', 'product category'], filters: [] },
+    });
+    const revenue = candidate({ id: 'semantic:metric:orders.revenue', name: 'Revenue' });
+    const merged = mergeMeaningResolutionWithRequirementSeed({
+      seed,
+      candidates: [revenue],
+      resolution: resolution({
+        selectedConceptIds: ['semantic:metric:invented'],
+        recommendedExecutionId: 'semantic:metric:invented',
+        queryIntent: { measures: [], dimensions: [], filters: [{ field: 'customer_name', value: 'prior result' }] },
+      }),
+    });
+
+    expect(merged.queryIntent).toEqual(seed.queryIntent);
+    expect(validateMeaningResolution(merged, [revenue], seed.queryIntent.measures, { requirements: seed.requirements })).toEqual({
+      ok: false,
+      reason: 'The resolver referenced evidence that was not retrieved: semantic:metric:invented',
+    });
   });
 });

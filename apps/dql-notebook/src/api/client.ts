@@ -1071,8 +1071,12 @@ export interface AnalyticalRepairCapabilityV1 {
 
 export interface ProviderEgressReceiptV1 {
   version: 1;
-  purpose: 'answer_generation' | 'research_narration' | 'research_tool' | 'repair_sql';
-  dispatchPhase?: 'meaning_resolution' | 'planning' | 'generation' | 'narration' | 'repair';
+  // `classification` is the legacy/no-evidence category-only router call; it
+  // is distinct from candidate-ID `meaning_resolution` receipts.
+  // `answer_narration` is retained for older local receipts. New ordinary Ask
+  // runs do not dispatch it and it never authorizes result-row egress.
+  purpose: 'classification' | 'answer_generation' | 'answer_narration' | 'research_narration' | 'research_tool' | 'repair_sql';
+  dispatchPhase?: 'classification' | 'meaning_resolution' | 'planning' | 'generation' | 'narration' | 'repair';
   provider: string;
   model?: string;
   operation?: 'generate' | 'generate_with_tools' | 'generate_stream';
@@ -1085,6 +1089,8 @@ export interface ProviderEgressReceiptV1 {
   redactionPolicyId: string;
   optIn: boolean;
   payloadFingerprint: string;
+  /** Historical V1/V2 ordinary narration evidence; read-only, never a new egress grant. */
+  legacyReadOnly?: true;
 }
 
 export interface AgentRunTelemetryV1 {
@@ -1124,6 +1130,12 @@ export interface AgentRunDiagnosticReceiptV3 {
     planFrozen: boolean;
     selectedTier?: 'certified' | 'semantic' | 'governed_relational' | 'exploratory_sql';
     stopReason: 'selected' | 'ambiguous' | 'coverage_gap' | 'denied' | 'post_freeze_failure';
+    terminalGap?: {
+      version: 1;
+      code: 'MISSING_RELATIONSHIP';
+      requirement: 'certified_relationship_or_allocation_proof';
+      witnessCandidateIds: string[];
+    };
     attempts: Array<{
       version: 1;
       tier: 'certified' | 'semantic' | 'governed_relational' | 'exploratory_sql' | 'clarify_or_gap';
@@ -1133,15 +1145,96 @@ export interface AgentRunDiagnosticReceiptV3 {
       planFrozen: boolean;
     }>;
   };
+  terminalGap?: {
+    version: 1;
+    code: 'MISSING_RELATIONSHIP';
+    requirement: 'certified_relationship_or_allocation_proof';
+    witnessCandidateIds: string[];
+  };
   planFrozen: boolean;
   orchestrationMode?: 'legacy' | 'shadow' | 'agentic';
   provider?: {
     version: 1;
     cause: 'authentication' | 'model_not_found' | 'rate_limited' | 'gateway' | 'network' | 'provider_timeout' | 'run_deadline' | 'admission_denied' | 'dispatch_budget' | 'cancelled' | 'unknown';
-    phase: 'preflight' | 'meaning_resolution' | 'planning' | 'generation' | 'repair' | 'narration' | 'unknown';
+    phase: 'preflight' | 'classification' | 'meaning_resolution' | 'planning' | 'generation' | 'repair' | 'narration' | 'unknown';
     retryable: boolean;
     safeAction: 'retry_same_provider' | 'fix_provider_configuration' | 'wait_and_retry' | 'inspect_run' | 'none';
   };
+  finalStopReason: string;
+}
+
+/** Canonical content-safe Ask story produced by the server once per run. */
+export interface AskDecisionSummaryV1 {
+  version: 1;
+  summaryFingerprint: string;
+  understoodRequest: {
+    measures: number;
+    dimensions: number;
+    entityRequested: boolean;
+    outputCount: number;
+    ranking?: { direction: 'top' | 'bottom'; limit: number; defaultedLimit: boolean };
+    conversationBinding: 'none' | 'structured_clarification' | 'prior_result' | 'task_dependency';
+  };
+  evidenceByRole: Array<{ role: 'metric' | 'entity_key' | 'entity_label' | 'categorical_dimension' | 'time_dimension' | 'member' | 'relationship' | 'context'; candidateCount: number }>;
+  tierDecisions: Array<{ tier: 'certified' | 'semantic' | 'governed_relational' | 'exploratory_sql' | 'clarify_or_gap'; outcome: 'executable' | 'ineligible' | 'unavailable' | 'ambiguous' | 'denied'; planFrozen: boolean }>;
+  selectedPlan?: { tier: 'certified' | 'semantic' | 'governed_relational' | 'exploratory_sql'; planFrozen: boolean; reviewRequired: boolean };
+  terminalIncident?: AskTerminalIncidentV1;
+  /** Stored branch-level limitation evidence for a root-successful Research run. */
+  researchBranchSummary?: AskResearchBranchSummaryV1;
+  safeNextAction: AskTerminalIncidentV1['safeAction'] | 'none';
+}
+
+/** Additive V4 Research evidence. Branch prompts, rows, SQL, and provider content are never retained here. */
+export interface AskResearchBranchSummaryV1 {
+  version: 1;
+  totalBranches: number;
+  completedBranches: number;
+  receiptBackedBranches: number;
+  failedBranches: number;
+  timedOutBranches: number;
+  skippedBranches: number;
+  partialSuccess: boolean;
+  failureReasons: Array<{
+    code: 'execution_failed' | 'research_branch_timeout' | 'budget_exhausted' | 'run_deadline' | 'cancelled';
+    branchCount: number;
+  }>;
+  availableChildPlans: Array<{
+    tier: 'certified' | 'semantic' | 'governed_relational' | 'exploratory_sql';
+    frozenPlanCount: number;
+    branchCount: number;
+    reviewRequired: boolean;
+  }>;
+  linkedChildRunCount: number;
+  safeAction: 'inspect_research_failures';
+}
+
+export interface AskTerminalIncidentV1 {
+  version: 1;
+  code: 'INTERNAL_EXPLORATORY_AUTHORIZATION_STATE_MISMATCH' | 'CONNECTION_NOT_CONFIGURED' | 'COMPILATION_FAILED' | 'ANALYTICAL_EXECUTION_FAILED' | 'ANALYTICAL_COVERAGE_GAP' | 'PROVIDER_FAILURE' | 'RESEARCH_BRANCH_TIMEOUT' | 'RESEARCH_RUN_DEADLINE' | 'CANCELLED';
+  boundary: 'plan.compile' | 'semantic.compile' | 'sql.authorize' | 'sql.execute' | 'provider' | 'cascade' | 'run';
+  origin: 'internal_invariant' | 'governance_gate' | 'semantic_compiler' | 'plan_compiler' | 'provider' | 'warehouse' | 'unknown';
+  impact: 'execution_not_attempted' | 'execution_failed' | 'answer_not_produced' | 'run_cancelled';
+  safeAction:
+    | 'export_redacted_trace'
+    | 'configure_connection'
+    | 'change_authorized_connection'
+    | 'inspect_failure'
+    | 'retry_same_plan'
+    | 'refresh_snapshot'
+    | 'edit_dql'
+    | 'open_sql_notebook'
+    | 'request_access'
+    | 'reapply_semantic_runtime'
+    | 'review_analytical_failure'
+    | 'inspect_research_failures'
+    | 'none';
+}
+
+export interface AgentRunDiagnosticReceiptV4 {
+  version: 4;
+  runId: string;
+  summary: AskDecisionSummaryV1;
+  terminalIncident?: AskTerminalIncidentV1;
   finalStopReason: string;
 }
 
@@ -1154,7 +1247,7 @@ export interface NarrationIntegrityReceiptV1 {
   factCount: number;
   maxRows: number;
   validationFailures: string[];
-  skipReason?: 'no_answer' | 'no_provider' | 'nothing_to_narrate';
+  skipReason?: 'no_answer' | 'no_provider' | 'nothing_to_narrate' | 'ordinary_ask';
   errorCode?: 'narration_error';
 }
 
@@ -1175,6 +1268,141 @@ export interface AgentRunProgressV1 {
   lifecycle: AgentRunLifecycleV1;
   analyticalTurnPlan?: Record<string, unknown>;
   analyticalTaskOutcomes?: Array<Record<string, unknown>>;
+  /** OBS-001: compact pointer only; full trace detail is fetched by run id. */
+  traceReference?: AgentRunTraceReferenceV1;
+}
+
+/**
+ * Local Ask observability is intentionally not part of an AgentRun body. This
+ * additive reference lets the UI navigate to typed, redacted evidence without
+ * copying a prompt, SQL text, result rows, or provider payload into a run.
+ */
+export interface AgentRunTraceReferenceV1 {
+  version: 1;
+  traceId: string;
+  recordingStatus: 'recording' | 'complete' | 'partial' | 'unavailable' | 'detail_expired';
+  storeSchemaVersion: 1;
+  traceFingerprint?: string;
+}
+
+export type AskTraceSpanOutcomeV1 = 'ok' | 'error' | 'denied' | 'cancelled' | 'skipped' | 'unavailable' | 'interrupted';
+export type AskTraceRecordingStatusV1 = AgentRunTraceReferenceV1['recordingStatus'];
+
+/** A bounded, redacted observation returned by the local-only trace API. */
+export interface AskTraceSpanV1 {
+  version: 1;
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+  ordinal: number;
+  name: string;
+  stage: string;
+  startedAt: string;
+  completedAt?: string;
+  durationMs?: number;
+  outcome: AskTraceSpanOutcomeV1;
+  reasonCode: string;
+  payload: {
+    kind: 'stage' | 'snapshot' | 'retrieval' | 'meaning' | 'cascade' | 'provider' | 'tool' | 'sql' | 'result' | 'conversation' | 'research' | 'persistence';
+    [key: string]: unknown;
+  };
+}
+
+export interface AskTraceCandidateDecisionV1 {
+  version: 1;
+  traceId: string;
+  sequence: number;
+  candidateId: string;
+  displayLabel?: string;
+  role: string;
+  source: string;
+  lane?: string;
+  laneRank?: number;
+  fusedRank?: number;
+  decision: 'retrieved' | 'reserved' | 'admitted' | 'extended' | 'model_selected' | 'model_rejected' | 'excluded';
+  reasonCode: string;
+  compatibilityCode?: string;
+}
+
+export interface AskTraceLinkV1 {
+  version: 1;
+  kind: 'research_branch' | 'clarification_continuation' | 'derived_repair' | 'prior_result';
+  sourceTraceId: string;
+  sourceRunId: string;
+  targetTraceId?: string;
+  targetRunId?: string;
+  hypothesisFingerprint?: string;
+  choiceFingerprint?: string;
+  verdictFingerprint?: string;
+  createdAt: string;
+}
+
+export interface AskTraceEnvelopeV1 {
+  version: 1;
+  traceId: string;
+  rootSpanId: string;
+  runId: string;
+  surface: 'browser' | 'cli' | 'mcp' | 'chat';
+  mode: 'ask' | 'research';
+  threadId?: string;
+  snapshotId?: string;
+  questionFingerprint: string;
+  status: 'running' | 'completed' | 'blocked' | 'failed' | 'cancelled' | 'interrupted';
+  terminalOutcome?: 'completed' | 'needs_review' | 'needs_clarification' | 'cancelled' | 'blocked';
+  recordingStatus: AskTraceRecordingStatusV1;
+  trustState?: string;
+  selectedTier?: string;
+  startedAt: string;
+  completedAt?: string;
+  durationMs?: number;
+  firstIssueSpanId?: string;
+  traceFingerprint?: string;
+  spanCount: number;
+  candidateDecisionCount: number;
+  droppedRecordCount: number;
+  parentTraceId?: string;
+  parentRunId?: string;
+}
+
+export interface AskTraceDataV1 {
+  envelope: AskTraceEnvelopeV1;
+  spans: AskTraceSpanV1[];
+  candidateDecisions: AskTraceCandidateDecisionV1[];
+  links: AskTraceLinkV1[];
+  /** Joined at read time from the durable run receipt; old traces omit it. */
+  decisionSummary?: AskDecisionSummaryV1;
+}
+
+export interface AskTraceStoreStatusV1 {
+  available: boolean;
+  schemaVersion: number;
+  recordingEnabled: boolean;
+  readOnly?: boolean;
+  reason?: 'unsupported_schema' | 'store_error' | 'disabled';
+}
+
+export interface AskTraceListEntryV1 extends AskTraceEnvelopeV1 {
+  detailAvailable: boolean;
+  /** Joined at API read time from the local run store; never persisted in the trace store. */
+  questionPreview?: string;
+  scenarioLabel?: string;
+}
+
+export interface AskTraceListQueryV1 {
+  limit?: number;
+  cursor?: string;
+  status?: AskTraceEnvelopeV1['status'];
+  mode?: AskTraceEnvelopeV1['mode'];
+  trustState?: string;
+  selectedTier?: string;
+  surface?: AskTraceEnvelopeV1['surface'];
+  recordingStatus?: AskTraceRecordingStatusV1;
+}
+
+export interface AskTraceListResponseV1 {
+  traces: AskTraceListEntryV1[];
+  nextCursor?: string;
+  total?: number;
 }
 
 export interface AgentRun {
@@ -1205,8 +1433,11 @@ export interface AgentRun {
   diagnosticReceipt?: AgentRunDiagnosticReceiptV1;
   diagnosticReceiptV2?: AgentRunDiagnosticReceiptV2;
   diagnosticReceiptV3?: AgentRunDiagnosticReceiptV3;
+  diagnosticReceiptV4?: AgentRunDiagnosticReceiptV4;
   narrationIntegrityReceipt?: NarrationIntegrityReceiptV1;
   telemetry?: AgentRunTelemetryV1;
+  /** OBS-001: compact local trace reference; trace detail is never embedded here. */
+  traceReference?: AgentRunTraceReferenceV1;
   repairCapability?: AnalyticalRepairCapabilityV1;
   providerEgressReceipts?: ProviderEgressReceiptV1[];
   derivation?: {
@@ -1487,6 +1718,16 @@ export interface AgentConversationThread {
   favorite?: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Server-owned project identity for reconciling the browser's temporary Ask
+ * rendering cache. It is an opaque fingerprint, never a local path or user
+ * identity, and is only returned by the local thread-list endpoint.
+ */
+export interface AgentConversationThreadListResponse {
+  threads: AgentConversationThread[];
+  projectIdentity?: string;
 }
 
 export interface AgentConversationTurnResult {
@@ -3812,6 +4053,39 @@ export const api = {
     return request<AgentRunStateResponse>(`/api/agent-runs/${encodeURIComponent(id)}`);
   },
 
+  /** OBS-005: compact local-only trace status. No trace payload is cached in the notebook store. */
+  async getAskTraceStatus(): Promise<{ status: AskTraceStoreStatusV1 }> {
+    return request<{ status: AskTraceStoreStatusV1 }>('/api/ask-traces/status');
+  },
+
+  async listAskTraces(input: AskTraceListQueryV1 = {}): Promise<AskTraceListResponseV1> {
+    const params = new URLSearchParams();
+    if (typeof input.limit === 'number' && Number.isFinite(input.limit)) {
+      params.set('limit', String(Math.max(1, Math.min(100, Math.floor(input.limit)))));
+    }
+    if (input.cursor) params.set('cursor', input.cursor);
+    if (input.status) params.set('status', input.status);
+    if (input.mode) params.set('mode', input.mode);
+    if (input.trustState) params.set('trustState', input.trustState);
+    if (input.selectedTier) params.set('selectedTier', input.selectedTier);
+    if (input.surface) params.set('surface', input.surface);
+    if (input.recordingStatus) params.set('recordingStatus', input.recordingStatus);
+    const suffix = params.size ? `?${params.toString()}` : '';
+    return request<AskTraceListResponseV1>(`/api/ask-traces${suffix}`);
+  },
+
+  async getAskTraceByRun(runId: string): Promise<AskTraceDataV1> {
+    return request<AskTraceDataV1>(`/api/ask-traces/by-run/${encodeURIComponent(runId)}`);
+  },
+
+  async getAskTrace(traceId: string): Promise<AskTraceDataV1> {
+    return request<AskTraceDataV1>(`/api/ask-traces/${encodeURIComponent(traceId)}`);
+  },
+
+  async exportAskTrace(traceId: string): Promise<unknown> {
+    return request<unknown>(`/api/ask-traces/${encodeURIComponent(traceId)}/export?profile=strict`);
+  },
+
   async deriveAnalyticalRepair(id: string, repair: AnalyticalRepairRequest): Promise<AnalyticalRepairDerivationResponse> {
     return request<AnalyticalRepairDerivationResponse>(`/api/agent-runs/${encodeURIComponent(id)}/analytical-repair`, {
       method: 'POST',
@@ -3893,14 +4167,14 @@ export const api = {
     });
   },
 
-  async listAgentThreads(input?: { limit?: number; archived?: boolean }): Promise<{ threads: AgentConversationThread[] }> {
+  async listAgentThreads(input?: { limit?: number; archived?: boolean }): Promise<AgentConversationThreadListResponse> {
     const params = new URLSearchParams();
     if (typeof input?.limit === 'number' && Number.isFinite(input.limit)) {
       params.set('limit', String(input.limit));
     }
     if (input?.archived) params.set('archived', '1');
     const suffix = params.toString() ? `?${params.toString()}` : '';
-    return request<{ threads: AgentConversationThread[] }>(`/api/agent/threads${suffix}`);
+    return request<AgentConversationThreadListResponse>(`/api/agent/threads${suffix}`);
   },
 
   async createAgentThread(input: { surface?: string; title?: string; notebookPath?: string } = {}): Promise<AgentConversationThread> {

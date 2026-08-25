@@ -80,8 +80,21 @@ describe('buildGeneratedAnalyticalSqlSignature', () => {
       aggregateFunctions: ['SUM'],
       columns: ['revenue'],
       aggregateInputs: [{ func: 'SUM', distinct: false, column: 'revenue', relation: 'orders' }],
+      columnReferences: [{ column: 'revenue', relation: 'orders', tableAlias: 'o', unqualified: false }],
     });
     expect(signature?.filterExpression).toBeTruthy();
+  });
+
+  it('keeps source-column proof scoped to each quoted output alias', () => {
+    const signature = buildGeneratedAnalyticalSqlSignature(
+      'SELECT "order_items"."order_id" AS "order_id", "order_items"."product_id" AS "product_id" FROM "order_items"',
+    );
+    expect(signature?.outputs.find((output) => output.outputAlias === 'order_id')?.columnReferences).toEqual([
+      { column: 'order_id', relation: 'order_items', tableAlias: 'order_items', unqualified: false },
+    ]);
+    expect(signature?.outputs.find((output) => output.outputAlias === 'product_id')?.columnReferences).toEqual([
+      { column: 'product_id', relation: 'order_items', tableAlias: 'order_items', unqualified: false },
+    ]);
   });
 
   it('exposes spoofed aggregate expressions and UNION branches', () => {

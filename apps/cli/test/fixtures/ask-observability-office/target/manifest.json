@@ -1,0 +1,140 @@
+{
+  "metadata": { "project_name": "ask_observability_office_synthetic" },
+  "nodes": {
+    "model.ask_observability_office_synthetic.fct_lost_opportunities": {
+      "resource_type": "model",
+      "name": "fct_lost_opportunities",
+      "alias": "fct_lost_opportunities",
+      "database": "analytics",
+      "schema": "revenue_operations",
+      "original_file_path": "models/revenue_operations/fct_lost_opportunities.sql",
+      "description": "Synthetic one-row-per-lost-opportunity fact for local observability tests.",
+      "meta": { "dql": { "grain": "opportunity_id", "keys": ["opportunity_id"], "time_role": "opportunity_close_date", "calendar_id": "calendar:synthetic_fiscal", "comparison_alignment": "fiscal_period", "completeness_policy": "closed_period" } },
+      "columns": {
+        "opportunity_id": { "name": "opportunity_id", "description": "Synthetic opportunity identifier", "data_type": "varchar", "tests": ["unique", "not_null"] },
+        "account_id": { "name": "account_id", "description": "Governed account key", "data_type": "varchar", "tests": ["not_null"] },
+        "close_date": { "name": "close_date", "description": "Declared fiscal close-date role", "data_type": "date" },
+        "fiscal_period": { "name": "fiscal_period", "description": "Declared fiscal period such as FY26", "data_type": "varchar" },
+        "fiscal_month": { "name": "fiscal_month", "description": "Declared fiscal monthly reporting grain", "data_type": "varchar" },
+        "competitor_name": { "name": "competitor_name", "description": "Named competitor involved in a lost opportunity", "data_type": "varchar" },
+        "lost_amount": { "name": "lost_amount", "description": "Synthetic governed lost amount", "data_type": "numeric" }
+      },
+      "depends_on": { "nodes": [] }
+    },
+    "model.ask_observability_office_synthetic.dim_accounts": {
+      "resource_type": "model",
+      "name": "dim_accounts",
+      "alias": "dim_accounts",
+      "database": "analytics",
+      "schema": "revenue_operations",
+      "original_file_path": "models/revenue_operations/dim_accounts.sql",
+      "description": "Synthetic one-row-per-account display dimension.",
+      "meta": { "dql": { "grain": "account_id", "keys": ["account_id"] } },
+      "columns": {
+        "account_id": { "name": "account_id", "description": "Synthetic account identifier", "data_type": "varchar", "tests": ["unique", "not_null"] },
+        "customer_id": { "name": "customer_id", "description": "Governed billing customer key", "data_type": "varchar", "tests": ["not_null"] },
+        "account_name": { "name": "account_name", "description": "Account display name", "data_type": "varchar" },
+        "account_owner_name": { "name": "account_owner_name", "description": "Account owner attribute; not the account entity display key", "data_type": "varchar" },
+        "account_owner_email": { "name": "account_owner_email", "description": "Account owner email attribute; not the account entity display key", "data_type": "varchar" },
+        "account_sentiment_rating": { "name": "account_sentiment_rating", "description": "Account sentiment attribute; not the account entity display key", "data_type": "varchar" }
+      },
+      "depends_on": { "nodes": [] }
+    },
+    "model.ask_observability_office_synthetic.dim_customers": {
+      "resource_type": "model",
+      "name": "dim_customers",
+      "alias": "dim_customers",
+      "database": "analytics",
+      "schema": "revenue_operations",
+      "original_file_path": "models/revenue_operations/dim_customers.sql",
+      "description": "Synthetic one-row-per-billing-customer dimension.",
+      "meta": { "dql": { "grain": "customer_id", "keys": ["customer_id"] } },
+      "columns": {
+        "customer_id": { "name": "customer_id", "description": "Synthetic customer identifier", "data_type": "varchar", "tests": ["unique", "not_null"] },
+        "customer_name": { "name": "customer_name", "description": "Customer display name", "data_type": "varchar" },
+        "customer_segment": { "name": "customer_segment", "description": "Synthetic customer segment", "data_type": "varchar" }
+      },
+      "depends_on": { "nodes": [] }
+    },
+    "model.ask_observability_office_synthetic.fct_account_revenue": {
+      "resource_type": "model",
+      "name": "fct_account_revenue",
+      "alias": "fct_account_revenue",
+      "database": "analytics",
+      "schema": "revenue_operations",
+      "original_file_path": "models/revenue_operations/fct_account_revenue.sql",
+      "description": "Synthetic account-period revenue and BCM fact.",
+      "meta": { "dql": { "grain": "account_id,fiscal_period", "keys": ["account_id", "fiscal_period"], "time_role": "account_revenue_period", "calendar_id": "calendar:synthetic_fiscal", "comparison_alignment": "fiscal_period" } },
+      "columns": {
+        "account_id": { "name": "account_id", "description": "Governed account key", "data_type": "varchar", "tests": ["not_null"] },
+        "fiscal_period": { "name": "fiscal_period", "description": "Declared fiscal period", "data_type": "varchar" },
+        "revenue": { "name": "revenue", "description": "Explicit Revenue ranking measure", "data_type": "numeric" },
+        "bcm_run_rate": { "name": "bcm_run_rate", "description": "Synthetic BCM run-rate measure", "data_type": "numeric" },
+        "is_current_period": { "name": "is_current_period", "description": "Current reporting-period indicator", "data_type": "boolean" }
+      },
+      "depends_on": { "nodes": ["model.ask_observability_office_synthetic.dim_accounts"] }
+    },
+    "model.ask_observability_office_synthetic.fct_competitor_observations": {
+      "resource_type": "model",
+      "name": "fct_competitor_observations",
+      "alias": "fct_competitor_observations",
+      "database": "analytics",
+      "schema": "revenue_operations",
+      "original_file_path": "models/revenue_operations/fct_competitor_observations.sql",
+      "description": "Synthetic un-attributed competitor observations for unsafe relationship denial coverage.",
+      "meta": { "dql": { "grain": "observation_id", "keys": ["observation_id"] } },
+      "columns": {
+        "observation_id": { "name": "observation_id", "description": "Synthetic observation identifier", "data_type": "varchar", "tests": ["unique", "not_null"] },
+        "opportunity_id": { "name": "opportunity_id", "description": "Potential opportunity reference without attribution proof", "data_type": "varchar" },
+        "competitor_signal": { "name": "competitor_signal", "description": "Synthetic competitor signal", "data_type": "varchar" }
+      },
+      "depends_on": { "nodes": [] }
+    }
+  },
+  "sources": {},
+  "semantic_models": {
+    "semantic_model.ask_observability_office_synthetic.lost_opportunities": {
+      "name": "lost_opportunities",
+      "model": "ref('fct_lost_opportunities')",
+      "defaults": { "agg_time_dimension": "close_date" },
+      "entities": [
+        { "name": "lost_opportunity", "type": "primary", "expr": "opportunity_id" },
+        { "name": "account", "type": "foreign", "expr": "account_id" }
+      ],
+      "measures": [
+        { "name": "lost_opportunity_count_measure", "agg": "count", "expr": "opportunity_id", "agg_time_dimension": "close_date" },
+        { "name": "lost_amount_measure", "agg": "sum", "expr": "lost_amount", "agg_time_dimension": "close_date" }
+      ],
+      "dimensions": [
+        { "name": "close_date", "type": "time", "type_params": { "time_granularity": "day" } },
+        { "name": "fiscal_period", "type": "categorical" },
+        { "name": "fiscal_month", "type": "categorical" },
+        { "name": "competitor_name", "type": "categorical" }
+      ]
+    },
+    "semantic_model.ask_observability_office_synthetic.account_revenue": {
+      "name": "account_revenue",
+      "model": "ref('fct_account_revenue')",
+      "defaults": { "agg_time_dimension": "fiscal_period" },
+      "entities": [
+        { "name": "account_revenue", "type": "primary", "expr": "account_id" },
+        { "name": "account", "type": "foreign", "expr": "account_id" }
+      ],
+      "measures": [
+        { "name": "revenue_measure", "agg": "sum", "expr": "revenue", "agg_time_dimension": "fiscal_period" },
+        { "name": "bcm_run_rate_measure", "agg": "sum", "expr": "bcm_run_rate", "agg_time_dimension": "fiscal_period" }
+      ],
+      "dimensions": [
+        { "name": "fiscal_period", "type": "categorical" },
+        { "name": "account_name", "type": "categorical" },
+        { "name": "customer_name", "type": "categorical" }
+      ]
+    }
+  },
+  "metrics": {
+    "metric.ask_observability_office_synthetic.lost_opportunity_count": { "name": "lost_opportunity_count", "label": "Lost opportunity count", "description": "Synthetic count of closed-lost opportunities.", "type": "simple", "type_params": { "measure": "lost_opportunity_count_measure" } },
+    "metric.ask_observability_office_synthetic.lost_amount": { "name": "lost_amount", "label": "Lost amount", "description": "Synthetic governed lost amount.", "type": "simple", "type_params": { "measure": "lost_amount_measure" } },
+    "metric.ask_observability_office_synthetic.revenue": { "name": "revenue", "label": "Revenue", "description": "Synthetic revenue measure used when Revenue is explicitly requested.", "type": "simple", "type_params": { "measure": "revenue_measure" } },
+    "metric.ask_observability_office_synthetic.bcm_run_rate": { "name": "bcm_run_rate", "label": "BCM run rate", "description": "Synthetic BCM run-rate measure.", "type": "simple", "type_params": { "measure": "bcm_run_rate_measure" } }
+  }
+}

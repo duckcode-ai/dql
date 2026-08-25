@@ -161,6 +161,10 @@ export interface AnalyticalRequirementSetV1 {
   entityTerms: string[];
   entityDisplayTerms: string[];
   memberTerms: string[];
+  /** Explicit projection fields are requirements, not optional prompt hints. */
+  outputTerms?: string[];
+  /** `individual` requests a row-level relation rather than an aggregate. */
+  grain?: 'individual' | 'aggregate';
   ranking?: {
     metricTerms: string[];
     entityTerms: string[];
@@ -175,6 +179,186 @@ export interface AnalyticalRequirementSetV1 {
     fiscalPeriod?: string;
     /** A fiscal token is not executable until a declared calendar binds it. */
     requiresDeclaredFiscalCalendar: boolean;
+  };
+}
+
+/**
+ * Host-owned analytical input to the one bounded meaning call.  The seed is
+ * built before any provider response and is the only source of explicit user
+ * requirements downstream.  The model may bind supplied candidate IDs and
+ * explain ambiguity; it may not erase, add, or replace the request tuple.
+ *
+ * This is deliberately not an execution plan. It contains business terms and
+ * parsed filters only; the compatibility solver and immutable resolved plan
+ * still own qualified identifiers, joins, SQL, trust, and route selection.
+ */
+export interface AnalyticalRequirementSeedV1 {
+  version: 1;
+  sourceQuestion: string;
+  requirements: AnalyticalRequirementSetV1;
+  queryIntent: {
+    measures: string[];
+    dimensions: string[];
+    filters: Array<{ field: string; value: string }>;
+    timeRange?: string;
+    timeGrain?: string;
+    order?: 'asc' | 'desc';
+    limit?: number;
+    fiscalCalendarId?: string;
+    fiscalDateRoleId?: string;
+  };
+}
+
+/** Build the immutable host request tuple before a meaning model can respond. */
+export function buildAnalyticalRequirementSeedV1(input: {
+  question: string;
+  parsedIntent?: Partial<{
+    measures: string[];
+    dimensions: string[];
+    filters: Array<{ field: string; value: string }>;
+    timeRange: string;
+    timeGrain: string;
+    order: 'asc' | 'desc';
+    limit: number;
+    fiscalCalendarId: string;
+    fiscalDateRoleId: string;
+  }>;
+  requirements?: AnalyticalRequirementSetV1;
+  fiscalCalendar?: { id: string; dateRoleId?: string; fiscalPeriodFieldId?: string };
+}): AnalyticalRequirementSeedV1 {
+  // Retrieval/parser output is intentionally broad: it may contain useful
+  // context from a prior turn, vector hit, or search expansion.  It is not an
+  // authority for a new free-text request.  Keep only refinements that the
+  // source question itself demonstrates before they can contribute to the
+  // frozen host tuple. Structured clarification selections are merged by the
+  // router into `requirements` before this function is called.
+  const parsed = currentQuestionGroundedParsedIntent(input.question, input.parsedIntent);
+  const requirements = input.requirements ?? buildAnalyticalRequirementSet({
+    question: input.question,
+    parsedIntent: parsed,
+  });
+  // Order and limit are lexical requirements, not parser defaults. In
+  // particular, a prior ranking must not turn a complete new question into a
+  // top-N query just because retrieval retained an old `limit` or `order`.
+  const order = requirements.ranking
+    ? requirements.ranking.direction === 'bottom' ? 'asc' as const : 'desc' as const
+    : undefined;
+  const limit = requirements.ranking?.limit;
+  const filters = [...(parsed?.filters ?? [])].map((filter) => ({ field: filter.field, value: filter.value }));
+  if (requirements.time?.fiscalPeriod && input.fiscalCalendar?.fiscalPeriodFieldId
+    && !filters.some((filter) => filter.field === input.fiscalCalendar!.fiscalPeriodFieldId)) {
+    filters.push({ field: input.fiscalCalendar.fiscalPeriodFieldId, value: requirements.time.fiscalPeriod });
+  }
+  return {
+    version: 1,
+    sourceQuestion: input.question,
+    requirements,
+    queryIntent: {
+      measures: [...requirements.measures],
+      // A ranking's entity display key is an execution requirement, not a
+      // prompt nicety. Keep it in the host-owned query tuple, but do not put
+      // the broad entity noun (for example `customer`) in the categorical
+      // dimension lane. A metric can legitimately expose customer type and
+      // customer order number as groupings; neither is interchangeable with
+      // the requested customer display/rank key. The frame resolves the
+      // display term against the selected metric's native display/rank role.
+      dimensions: [...new Set([
+        ...categoricalDimensionRequirementTerms(requirements),
+        ...requirements.entityDisplayTerms,
+      ])],
+      filters,
+      ...(parsed?.timeRange ? { timeRange: parsed.timeRange } : {}),
+      ...(requirements.time?.grain
+        ? { timeGrain: requirements.time.grain }
+        : parsed?.timeGrain ? { timeGrain: parsed.timeGrain } : {}),
+      ...(order ? { order } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+      // A calendar/date role is declared snapshot metadata, never an ID
+      // copied from retrieval/parser evidence.
+      ...(input.fiscalCalendar?.id ? { fiscalCalendarId: input.fiscalCalendar.id } : {}),
+      ...(input.fiscalCalendar?.dateRoleId ? { fiscalDateRoleId: input.fiscalCalendar.dateRoleId } : {}),
+    },
+  };
+}
+
+type RetrievalParsedIntentRefinement = Partial<{
+  measures: string[];
+  dimensions: string[];
+  filters: Array<{ field: string; value: string }>;
+  timeRange: string;
+  timeGrain: string;
+  order: 'asc' | 'desc';
+  limit: number;
+  fiscalCalendarId: string;
+  fiscalDateRoleId: string;
+}>;
+
+/**
+ * Return only parser refinements whose business words occur in the current
+ * source question. This deliberately does not try to recover previous turn
+ * context: continuation is represented by a server-issued structured choice
+ * and merged separately by the host. The helper is exported for regression
+ * tests and for router paths that construct a requirement set before a seed.
+ */
+export function currentQuestionGroundedParsedIntent(
+  question: string,
+  parsedIntent: RetrievalParsedIntentRefinement | undefined,
+): RetrievalParsedIntentRefinement | undefined {
+  if (!parsedIntent) return undefined;
+  // These are intentionally tiny, product-wide vocabulary aliases rather
+  // than semantic guessing. They let a retrieval parser retain the same
+  // current-turn business phrase (`drink revenue` for `beverage revenue`, or
+  // `sales` for `revenue`) while still rejecting an unrelated prior-turn
+  // phrase such as `rollover balance`. Do not add customer/model-specific
+  // synonyms here: those require a qualified selected candidate and an
+  // override receipt at the meaning boundary.
+  const canonicalGroundingToken = (term: string): string => {
+    if (term === 'sale' || term === 'sales') return 'revenue';
+    if (term === 'drink' || term === 'drinks') return 'beverage';
+    return term;
+  };
+  const questionTerms = new Set(normalizeRequirementTerm(question)
+    .split(' ')
+    .filter((term) => term.length > 1)
+    .map(canonicalGroundingToken));
+  const groundedTerm = (value: string | undefined): boolean => {
+    const terms = normalizeRequirementTerm(value ?? '')
+      .split(' ')
+      .filter((term) => term.length > 1 && !/^(?:the|a|an|by|for|with|and|or|of|to|in|on|at)$/.test(term))
+      .map(canonicalGroundingToken);
+    return terms.length > 0 && terms.every((term) => {
+      if (questionTerms.has(term)) return true;
+      // Preserve only a trivial singular/plural normalization. Anything more
+      // permissive would let a stale retrieved phrase become a new request.
+      return term.endsWith('s')
+        ? questionTerms.has(term.slice(0, -1))
+        : questionTerms.has(`${term}s`);
+    });
+  };
+  const timeRangeGrounded = (value: string | undefined): boolean => {
+    const normalized = normalizeRequirementTerm(value ?? '');
+    if (!normalized) return false;
+    if (groundedTerm(normalized)) return true;
+    return /^(?:last|previous|past) \d+ (?:day|days|week|weeks|month|months|quarter|quarters|year|years)$/.test(normalized)
+      && normalizeRequirementTerm(question).includes(normalized);
+  };
+  const measures = (parsedIntent.measures ?? []).filter(groundedTerm);
+  const dimensions = (parsedIntent.dimensions ?? []).filter(groundedTerm);
+  // A parser may contribute the column that a reader's explicitly named value
+  // belongs to, but the value itself must appear in this request. This drops
+  // stale rollover-balance/member filters while retaining a current named
+  // member that the host can bind to a qualified field.
+  const filters = (parsedIntent.filters ?? []).filter((filter) => groundedTerm(filter.value));
+  const timeRange = timeRangeGrounded(parsedIntent.timeRange)
+    ? parsedIntent.timeRange
+    : undefined;
+  return {
+    ...(measures.length > 0 ? { measures } : {}),
+    ...(dimensions.length > 0 ? { dimensions } : {}),
+    ...(filters.length > 0 ? { filters } : {}),
+    ...(timeRange ? { timeRange } : {}),
+    // Grain/ranking/limit are derived deterministically from the source
+    // question below. Never promote parser values by themselves.
   };
 }
 
@@ -222,6 +406,164 @@ export interface ExploratoryExecutionFreezeV1 {
   candidateIds: string[];
   /** The host minted one single-use capability before connector execution. */
   authorization: 'capability_minted';
+  /**
+   * Per-output proof emitted by the host SQL validator.  When a frozen plan
+   * names explicit projected identifiers, a result is displayable only if the
+   * authorization receipt carries one exact physical source binding for each
+   * of them.  Optional for pre-V4 persisted receipts; required for new
+   * exploratory execution with required outputs.
+   */
+  requiredOutputBindings?: ExploratoryRequiredOutputBindingProofV1[];
+  /**
+   * SQL authorization is distinct from the router plan freeze.  Index zero is
+   * the first exact SQL handoff; index one is the only permitted same-plan
+   * correction after a retryable warehouse execution failure.  Older receipts
+   * omit this additive field and are interpreted as the original handoff.
+   */
+  authorizationAttempt?: ExploratoryExecutionAuthorizationAttemptV1;
+}
+
+/**
+ * Host-owned proof that one output alias in the authorized SQL came from the
+ * exact physical source selected in the frozen analytical plan.  The SQL text
+ * remains in the local execution boundary; this portable receipt carries only
+ * qualified identifiers and normalized relation/column names.
+ */
+export interface ExploratoryRequiredOutputBindingProofV1 {
+  version: 1;
+  outputName: string;
+  qualifiedId: string;
+  relation: string;
+  column: string;
+}
+
+/**
+ * Server-owned lifecycle marker for an exploratory SQL capability.  A repair
+ * does not reopen routing or meaning: it may only replace the SQL bytes while
+ * preserving the frozen plan, snapshot, target, candidate closure, and
+ * read-only validation proof.
+ */
+export type ExploratoryExecutionAuthorizationAttemptV1 =
+  | { version: 1; index: 0; parentSqlFingerprint?: never }
+  | { version: 1; index: 1; parentSqlFingerprint: string };
+
+/**
+ * A host authorization attaches to a plan the router has already frozen.  The
+ * plan freeze establishes the meaning, candidate closure, and source snapshot;
+ * this receipt establishes only the exact read-only SQL and live target.  It
+ * is intentionally an alias of the existing wire shape so persisted V1/V3
+ * runs remain readable while callers stop treating authorization as the point
+ * at which a plan becomes frozen.
+ *
+ * Acceptance: AGT-029, AGT-031, AGT-034.
+ */
+export type ExploratoryExecutionAuthorizationReceiptV1 = ExploratoryExecutionFreezeV1;
+
+/** A content-safe, server-produced terminal incident for Ask observability. */
+export interface AskTerminalIncidentV1 {
+  version: 1;
+  code: 'INTERNAL_EXPLORATORY_AUTHORIZATION_STATE_MISMATCH'
+    | 'CONNECTION_NOT_CONFIGURED'
+    /** A frozen plan failed before any statement reached the warehouse. */
+    | 'COMPILATION_FAILED'
+    | 'ANALYTICAL_EXECUTION_FAILED'
+    | 'ANALYTICAL_COVERAGE_GAP'
+    | 'PROVIDER_FAILURE'
+    /** Every admitted Research branch used its bounded window without a finding. */
+    | 'RESEARCH_BRANCH_TIMEOUT'
+    /** Explicit Research exhausted its root deadline before finalization. */
+    | 'RESEARCH_RUN_DEADLINE'
+    | 'CANCELLED';
+  boundary: 'plan.compile' | 'semantic.compile' | 'sql.authorize' | 'sql.execute' | 'provider' | 'cascade' | 'run';
+  origin: 'internal_invariant' | 'governance_gate' | 'semantic_compiler' | 'plan_compiler' | 'provider' | 'warehouse' | 'unknown';
+  impact: 'execution_not_attempted' | 'execution_failed' | 'answer_not_produced' | 'run_cancelled';
+  safeAction:
+    | 'export_redacted_trace'
+    | 'configure_connection'
+    | 'change_authorized_connection'
+    | 'inspect_failure'
+    | 'retry_same_plan'
+    | 'refresh_snapshot'
+    | 'edit_dql'
+    | 'open_sql_notebook'
+    | 'request_access'
+    | 'reapply_semantic_runtime'
+    | 'review_analytical_failure'
+    | 'inspect_research_failures'
+    | 'none';
+}
+
+/**
+ * A compact, producer-owned account of a completed-but-limited Research run.
+ *
+ * This is deliberately distinct from `AskTerminalIncidentV1`: the root Ask
+ * can retain a receipt-backed finding and its selected trust state while one
+ * or more independently bounded Research children failed, timed out, or were
+ * skipped.  The summary carries only typed counts, reason codes, and frozen
+ * child-plan evidence; it never retains branch prompts, result rows, SQL, or
+ * provider content.
+ */
+export interface AskResearchBranchSummaryV1 {
+  version: 1;
+  totalBranches: number;
+  /** Children that completed their bounded lifecycle. */
+  completedBranches: number;
+  /** Completed children with a persisted execution receipt in the V2 ledger. */
+  receiptBackedBranches: number;
+  failedBranches: number;
+  timedOutBranches: number;
+  skippedBranches: number;
+  /** True only when a receipt-backed finding survived alongside a limited child. */
+  partialSuccess: boolean;
+  failureReasons: Array<{
+    code: 'execution_failed' | 'research_branch_timeout' | 'budget_exhausted' | 'run_deadline' | 'cancelled';
+    branchCount: number;
+  }>;
+  /** Frozen child plans actually persisted by the Research root. */
+  availableChildPlans: Array<{
+    tier: Exclude<AnalyticalCascadeTierV1, 'clarify_or_gap'>;
+    frozenPlanCount: number;
+    branchCount: number;
+    reviewRequired: boolean;
+  }>;
+  /** Distinct child run IDs carried by durable branch receipts. */
+  linkedChildRunCount: number;
+  safeAction: 'inspect_research_failures';
+}
+
+/** One compact canonical story used by both the inspector and full trace. */
+export interface AskDecisionSummaryV1 {
+  version: 1;
+  summaryFingerprint: string;
+  understoodRequest: {
+    measures: number;
+    dimensions: number;
+    entityRequested: boolean;
+    outputCount: number;
+    ranking?: { direction: 'top' | 'bottom'; limit: number; defaultedLimit: boolean };
+    conversationBinding: 'none' | 'structured_clarification' | 'prior_result' | 'task_dependency';
+  };
+  evidenceByRole: Array<{ role: EvidenceCandidateRoleV1; candidateCount: number }>;
+  tierDecisions: Array<{ tier: AnalyticalCascadeTierV1; outcome: AnalyticalCascadeTierOutcomeV1; planFrozen: boolean }>;
+  selectedPlan?: { tier: Exclude<AnalyticalCascadeTierV1, 'clarify_or_gap'>; planFrozen: boolean; reviewRequired: boolean };
+  terminalIncident?: AskTerminalIncidentV1;
+  /** Present for persisted Research branch evidence; does not change root status. */
+  researchBranchSummary?: AskResearchBranchSummaryV1;
+  safeNextAction: AskTerminalIncidentV1['safeAction'] | 'none';
+}
+
+/**
+ * A narrow, producer-owned terminal relationship witness carried with the
+ * authoritative cascade.  It is deliberately enumerated rather than a copy
+ * of router prose: durable Ask receipts must explain an allocation/relationship
+ * block without persisting a question, candidate label, or inferred join.
+ */
+export interface AnalyticalCascadeTerminalGapV1 {
+  version: 1;
+  code: 'MISSING_RELATIONSHIP';
+  requirement: 'certified_relationship_or_allocation_proof';
+  /** Qualified evidence IDs only; presentation never infers new paths. */
+  witnessCandidateIds: string[];
 }
 
 /**
@@ -238,6 +580,14 @@ export interface AnalyticalCascadeDecisionV1 {
   planFrozen: boolean;
   /** Present only after a selected exploratory proposal is host-authorized. */
   exploratoryExecutionFreeze?: ExploratoryExecutionFreezeV1;
+  /**
+   * Present only when one retryable warehouse failure received the sole
+   * permitted same-plan exploratory SQL repair authorization.  The original
+   * receipt remains above so persisted evidence proves parent-before-repair.
+   */
+  exploratoryRepairExecutionFreeze?: ExploratoryExecutionFreezeV1;
+  /** Present only when the router supplied a typed, relationship-safe gap. */
+  terminalGap?: AnalyticalCascadeTerminalGapV1;
   stopReason: 'selected' | 'ambiguous' | 'coverage_gap' | 'denied' | 'post_freeze_failure';
 }
 
@@ -258,7 +608,7 @@ export type ProviderFailureCauseV1 =
 export interface ProviderFailureDiagnosticV1 {
   version: 1;
   cause: ProviderFailureCauseV1;
-  phase: 'preflight' | 'meaning_resolution' | 'planning' | 'generation' | 'repair' | 'narration' | 'unknown';
+  phase: 'preflight' | 'classification' | 'meaning_resolution' | 'planning' | 'generation' | 'repair' | 'narration' | 'unknown';
   retryable: boolean;
   safeAction: 'retry_same_provider' | 'fix_provider_configuration' | 'wait_and_retry' | 'inspect_run' | 'none';
   httpStatusClass?: '4xx' | '5xx';
@@ -276,9 +626,23 @@ export interface AgentRunDiagnosticReceiptV3 {
   runId: string;
   sourceCoverage: ContextSourceCoverageV1[];
   cascade?: AnalyticalCascadeDecisionV1;
+  /** Direct projection for run-detail consumers that do not traverse cascade. */
+  terminalGap?: AnalyticalCascadeTerminalGapV1;
   planFrozen: boolean;
   orchestrationMode?: 'legacy' | 'shadow' | 'agentic';
   provider?: ProviderFailureDiagnosticV1;
+  finalStopReason: string;
+}
+
+/**
+ * Additive canonical Ask story. V1/V2/V3 remain readable; this receipt is
+ * deliberately JSON-only so no metadata/index migration is needed.
+ */
+export interface AgentRunDiagnosticReceiptV4 {
+  version: 4;
+  runId: string;
+  summary: AskDecisionSummaryV1;
+  terminalIncident?: AskTerminalIncidentV1;
   finalStopReason: string;
 }
 
@@ -342,7 +706,7 @@ export function inferAnalyticalTurnKind(question: string): AnalyticalTurnKind {
   return 'aggregation';
 }
 
-type RoleBalancedEvidenceCandidate = {
+export type RoleBalancedEvidenceCandidate = {
   id: string;
   qualifiedId?: string;
   kind?: string;
@@ -361,11 +725,37 @@ type RoleBalancedEvidenceCandidate = {
    * may use the narrowly typed declarations below.
    */
   compatibilityFacts?: string[];
+  /**
+   * A narrowly-scoped host extension derived from the same immutable semantic
+   * capability snapshot.  It is not a lexical synonym or model assertion:
+   * the retriever may mint it only when one MetricFlow-capable grouping field
+   * is uniquely available for the requested business role.  Keeping the
+   * source metric and exact dimension identity here lets routing record the
+   * assumption while the frozen capability still owns execution safety.
+   */
+  sameSnapshotRoleExtension?: SameSnapshotRoleExtensionV1;
   analyticalCapability?: {
     dimensions?: Array<{ dimensionId?: string }>;
     timeDimensions?: Array<{ dimensionId?: string }>;
   };
 };
+
+export interface SameSnapshotRoleExtensionV1 {
+  version: 1;
+  role: 'categorical_dimension';
+  requestedTerm: string;
+  metricId: string;
+  dimensionId: string;
+  /**
+   * `sole_metricflow_grouping_dimension` is the deliberately narrow
+   * geography recovery path. `exact_metricflow_grouping_dimension` is an
+   * equally snapshot-bound extension for a current-question categorical
+   * phrase whose exact, qualified dimension is declared by the admitted
+   * metric capability. Neither value permits lexical joins or a model-owned
+   * field identity.
+   */
+  basis: 'sole_metricflow_grouping_dimension' | 'exact_metricflow_grouping_dimension';
+}
 
 function normalizeRequirementTerm(value: string): string {
   return value.toLowerCase()
@@ -380,6 +770,44 @@ function uniqueRequirementTerms(values: Array<string | undefined>): string[] {
     .filter((value): value is string => typeof value === 'string')
     .map(normalizeRequirementTerm)
     .filter(Boolean))];
+}
+
+/**
+ * Entity/display terms are represented in the historical `dimensions` seed
+ * so ranking plans can retain their requested grain. They must not consume
+ * the separate categorical-dimension admission lane. For example, in "top
+ * customers by product category", `customer` is the entity/rank role while
+ * `product category` is the required categorical grouping role.
+ */
+export function categoricalDimensionRequirementTerms(
+  requirements: Pick<AnalyticalRequirementSetV1, 'dimensions' | 'entityTerms' | 'entityDisplayTerms'>,
+): string[] {
+  const entityTerms = new Set(uniqueRequirementTerms([
+    ...requirements.entityTerms,
+    ...requirements.entityDisplayTerms,
+  ]));
+  return uniqueRequirementTerms(requirements.dimensions)
+    .filter((term) => !entityTerms.has(term));
+}
+
+/**
+ * A small, typed vocabulary bridge for categorical field identities. It is
+ * intentionally not a general synonym engine: only the field-kind suffix is
+ * canonicalized, while the scoped business noun must still match. Thus
+ * `product category` can bind the snapshot-declared `product_type`, whereas
+ * `customer_type` cannot satisfy it. A bare `category` remains potentially
+ * ambiguous when more than one qualified `*_type` field exists.
+ */
+export function categoricalDimensionTermsMatch(left: string, right: string): boolean {
+  const normalizedLeft = normalizeRequirementTerm(left);
+  const normalizedRight = normalizeRequirementTerm(right);
+  if (!normalizedLeft || !normalizedRight) return false;
+  const phraseMatch = (a: string, b: string): boolean => a === b || a.endsWith(` ${b}`) || b.endsWith(` ${a}`);
+  if (phraseMatch(normalizedLeft, normalizedRight)) return true;
+  const canonicalizeKind = (value: string): string => value
+    .replace(/\bcategories\b/g, 'type')
+    .replace(/\bcategory\b/g, 'type');
+  return phraseMatch(canonicalizeKind(normalizedLeft), canonicalizeKind(normalizedRight));
 }
 
 function isTemporalTerm(term: string): boolean {
@@ -452,6 +880,45 @@ function normalizedTypedAggregationRequirements(input: {
 }
 
 /**
+ * Keep grammatical wrappers out of the physical tuple. In particular, a
+ * parser can return `sales based on the region` as a dimension for a simple
+ * revenue-by-region request. That is neither a business dimension nor an
+ * object DQL may report as absent.
+ */
+function normalizeAnalyticalDimensionTerms(question: string, values: readonly string[]): string[] {
+  const hasRegion = /\b(?:by|based\s+on(?:\s+the)?|across|per)\s+(?:the\s+)?region\b/i.test(question);
+  const hasProductCategory = /\bproduct\s+categor(?:y|ies)\b/i.test(question);
+  // A planner can surface the noun from a projected field as a grouping
+  // dimension (for example `product` from “with product ID and product
+  // price”).  An output is not a `by product` group. Keep the noun only when
+  // the reader actually supplied a grouping construction; otherwise the
+  // host-owned row-level/output tuple would acquire a fake dimension and
+  // make an otherwise single-table exploratory plan ambiguous.
+  const outputRoots = new Set(explicitOutputTerms(question)
+    .map((term) => term.replace(/\s+(?:id|name|price)$/i, '').trim())
+    .filter(Boolean));
+  const isExplicitGroupingRoot = (term: string): boolean => {
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`\\b(?:by|per|across|for\\s+each)\\s+(?:the\\s+)?${escaped}(?:s)?\\b`, 'i').test(question);
+  };
+  const normalized = uniqueRequirementTerms([...values])
+    .filter((value) => !/\b(?:revenue|sales)\b.*\b(?:based\s+on|by)\b.*\bregion\b/.test(value))
+    .filter((value) => !(hasProductCategory && /^(?:product|category)$/.test(value)))
+    .filter((value) => !outputRoots.has(value) || isExplicitGroupingRoot(value));
+  return uniqueRequirementTerms([
+    ...normalized,
+    ...(hasRegion ? ['region'] : []),
+    ...(hasProductCategory ? ['product category'] : []),
+  ]);
+}
+
+function explicitOutputTerms(question: string): string[] {
+  const terms = [...question.matchAll(/\b(?:order|product|customer|account)\s+(?:id|name|price)\b/gi)]
+    .map((match) => match[0] ?? '');
+  return uniqueRequirementTerms(terms);
+}
+
+/**
  * Normalize grammatical aggregation wrappers before they become a plan
  * requirement.  Retrieval/parser output is allowed to retain useful search
  * phrases, but an immutable plan must never treat "count for each customer"
@@ -470,7 +937,16 @@ export function normalizeAnalyticalMeasureTerms(
 ): string[] {
   const normalizedQuestion = normalizeRequirementTerm(question);
   const groupedOrderCount = /\borders?\s+count\s+(?:for|per)\s+(?:each|every)\s+(?:the\s+)?(?:account|customer|client|company|product|order|item|row)s?\b/.test(normalizedQuestion);
+  // A parser often singularizes the business alias `sales` into `sale`.  That
+  // is not a second measure beside revenue: it is the same current-question
+  // request.  Canonicalize only that standalone vocabulary alias here; named
+  // measures such as `sales_tax` or `sales_pipeline` keep their identity.
+  const canonicalMeasureAlias = (value: string): string => {
+    const normalized = normalizeRequirementTerm(value);
+    return normalized === 'sale' || normalized === 'sales' ? 'revenue' : value;
+  };
   const terms = values
+    .map(canonicalMeasureAlias)
     .filter((value) => !isStructuralMeasurePhrase(value))
     .filter((value) => !(groupedOrderCount && /^(?:order|orders)$/i.test(normalizeRequirementTerm(value))));
   if (groupedOrderCount && !terms.some((value) => normalizeRequirementTerm(value) === 'count')) {
@@ -523,6 +999,46 @@ function nonRedundantLexicalMeasureTerms(
 }
 
 /**
+ * A ranking question can contain a business qualifier immediately before the
+ * ranked entity (for example, "BCM customers") as well as the measure that
+ * actually orders the result ("highest revenue").  The retrieval parser keeps
+ * both phrases because both are useful for recall, but they are not equivalent
+ * plan requirements.  Prefer a direct ranking clause over the broad parser
+ * hint before any candidate is admitted as a metric.
+ *
+ * This deliberately remains narrow.  It only disambiguates when the parser
+ * supplied competing measures and the user also wrote an explicit comparator;
+ * parser-absent and already-unambiguous ranking requests retain their existing
+ * normal meaning-resolution path.
+ */
+function explicitRankingMeasureTerms(
+  question: string,
+  parsedMeasures: readonly string[],
+): string[] {
+  const parsed = uniqueRequirementTerms([...parsedMeasures]);
+  if (parsed.length < 2) return [];
+  const phrases: string[] = [];
+  const endOfMeasure = String.raw`(?=\s+(?:across|among|for|per|in|where|during|over|with|that|which|who|and|or)\b|[?.!,;]|$)`;
+  for (const pattern of [
+    new RegExp(String.raw`\b(?:highest|lowest|most|least)\s+(?:the\s+)?([a-z][a-z0-9_. -]{0,80}?)${endOfMeasure}`, 'gi'),
+  ]) {
+    for (const match of question.matchAll(pattern)) {
+      const phrase = normalizeRequirementTerm(match[1] ?? '');
+      if (phrase && !isTemporalTerm(phrase)) phrases.push(phrase);
+    }
+  }
+  const direct = uniqueRequirementTerms(phrases);
+  if (direct.length === 0) return [];
+
+  // Preserve the parser's more stable authored phrase when it is the same
+  // measure.  This avoids replacing `net revenue` with a looser lexical root,
+  // while still removing an entity modifier such as `BCM` in `BCM customers`.
+  const matchedParsed = parsed.filter((measure) => direct.some((phrase) =>
+    measure === phrase || measure.includes(phrase) || phrase.includes(measure)));
+  return matchedParsed.length > 0 ? matchedParsed : direct;
+}
+
+/**
  * Parse only stable analytical roles. This is purposefully narrower than an
  * LLM interpretation: unknown business phrases remain available to the normal
  * bounded meaning resolver instead of being guessed here.
@@ -539,7 +1055,9 @@ export function buildAnalyticalRequirementSet(input: {
 }): AnalyticalRequirementSetV1 {
   const question = input.question;
   const lower = question.toLowerCase();
-  const parsed = input.parsedIntent;
+  // Parser/retrieval evidence may be broad or stale. A requirement set is
+  // host authority, so only source-question-grounded refinements may enter it.
+  const parsed = currentQuestionGroundedParsedIntent(question, input.parsedIntent);
   const grainMatch = lower.match(/\b(?:by|per|each)\s+(day|week|month|quarter|year)\b|\b(monthly|weekly|quarterly|yearly|daily)\b/i);
   const grainWord = (grainMatch?.[1] ?? grainMatch?.[0]?.replace(/ly\b/i, '') ?? '').toLowerCase();
   const grain = grainWord === 'daily' ? 'day'
@@ -551,12 +1069,18 @@ export function buildAnalyticalRequirementSet(input: {
               : undefined;
   const fiscal = lower.match(/\bfy\s?(\d{2,4})\b|\bfiscal\s+year\s+(\d{2,4})\b/i);
   const fiscalPeriod = fiscal ? `FY${fiscal[1] ?? fiscal[2]}`.toUpperCase() : undefined;
-  const ranking = lower.match(/\b(top|bottom|highest|lowest)\s*(\d+)?\b/i);
-  const requestedDimensions = uniqueRequirementTerms(parsed?.dimensions ?? []);
+  const ranking = lower.match(/\b(top|bottom|highest|lowest|most|least|expensive|cheapest)\s*(\d+)?\b/i);
+  const leadingOrdinalRanking = lower.match(/\b(\d+)\s+(?:most|least|expensive|cheapest)\b/i);
+  const requestedDimensions = normalizeAnalyticalDimensionTerms(question, parsed?.dimensions ?? []);
   const entityTerms = uniqueRequirementTerms([
     ...((lower.match(/\b(?:account|accounts|customer|customers|client|clients|company|companies)\b/g) ?? [])),
   ]).map((term) => term.replace(/s$/, ''));
-  const entityDisplayTerms = /\b(?:who|which)\b/i.test(question)
+  // A ranking result needs a human-readable entity output even when the
+  // wording starts with "what" rather than "who" or "which".  Treat the
+  // entity's display key as a required role for `top accounts` / `top
+  // customers`; an entity key, owner field, or sentiment attribute is not a
+  // substitute for the result label.
+  const entityDisplayTerms = (/\b(?:who|which)\b/i.test(question) || Boolean(ranking && entityTerms.length > 0))
     ? uniqueRequirementTerms(entityTerms.map((term) => `${term} name`))
     : [];
   // "this amount" is a deictic reference to a prior result, not a request to
@@ -565,10 +1089,19 @@ export function buildAnalyticalRequirementSet(input: {
   // option. Concrete metric words remain typed requirements, including the
   // common revenue/refunds pair used by multi-metric requests.
   const deicticAmount = /\b(?:this|that|the|such)\s+amount\b/i.test(question);
-  const parsedMeasures = normalizeAnalyticalMeasureTerms(question, parsed?.measures ?? []);
+  // `sales` is a common business synonym for revenue. Do not add the broad
+  // revenue root merely because a named metric contains it (`beverage revenue`)
+  // or an exact certified block would suddenly look multi-metric.
+  const salesIsRevenueAlias = /\bsales\b/i.test(question);
+  const parsedMeasures = normalizeAnalyticalMeasureTerms(question, parsed?.measures ?? [])
+    .filter((measure) => !/\bsales\s+based\s+on\b/.test(normalizeRequirementTerm(measure)));
   const parsedMeasuresWithLexicalTerms = uniqueRequirementTerms([
     ...parsedMeasures,
     ...nonRedundantLexicalMeasureTerms(parsedMeasures, question),
+    ...(salesIsRevenueAlias ? ['revenue'] : []),
+    ...(/\b(?:most|highest|expensive)\b.*\bproduct\s+price\b|\bproduct\s+price\b.*\b(?:most|highest|expensive)\b/i.test(question)
+      ? ['product price']
+      : []),
     ...(!deicticAmount
       && /\bamount\b/i.test(question)
       && !parsedMeasures.some((measure) => normalizeRequirementTerm(measure).split(' ').includes('amount'))
@@ -580,13 +1113,31 @@ export function buildAnalyticalRequirementSet(input: {
     measures: parsedMeasuresWithLexicalTerms,
     dimensions: requestedDimensions.filter((term) => !isTemporalTerm(term)),
   });
-  const measures = typedRequirements.measures;
+  const explicitRankingMeasures = ranking
+    ? explicitRankingMeasureTerms(question, typedRequirements.measures)
+    : [];
+  // A direct ranking clause is the explicit analytical measure.  Keep broad
+  // parser/retrieval phrases out of the execution tuple so a contextual term
+  // cannot become a second ranking metric or force a false clarification.
+  const measures = explicitRankingMeasures.length > 0
+    ? explicitRankingMeasures
+    : typedRequirements.measures;
   const dimensions = typedRequirements.dimensions;
   const rankingMetricTerms = ranking ? measures : [];
-  const parsedLimit = typeof parsed?.limit === 'number' && Number.isFinite(parsed.limit) && parsed.limit > 0
-    ? Math.floor(parsed.limit)
-    : undefined;
-  const explicitLimit = ranking?.[2] ? Number(ranking[2]) : parsedLimit;
+  // A context planner supplies its own safety default (`topN: 10`) for bare
+  // rankings. It is a useful execution bound, but it is not user intent. Read
+  // an explicit count only from the actual question so the cascade/answer
+  // receipt can disclose that a bare “top” used DQL's default rather than
+  // misleadingly presenting it as a requested limit.
+  const wordRankingLimit = lower.match(/\b(?:top|bottom|highest|lowest|most|least|expensive|cheapest)\s+(one|two|three|four|five|six|seven|eight|nine|ten)\b|\b(one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:most|least|expensive|cheapest)\b/i)?.slice(1).find(Boolean)?.toLowerCase();
+  const explicitWordLimit: Record<string, number> = {
+    one: 1, two: 2, three: 3, four: 4, five: 5,
+    six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  };
+  const explicitLimit = ranking?.[2]
+    ? Number(ranking[2])
+    : leadingOrdinalRanking?.[1] ? Number(leadingOrdinalRanking[1])
+    : wordRankingLimit ? explicitWordLimit[wordRankingLimit] : undefined;
   const time = grain || fiscalPeriod
     ? {
         role: grain ? 'time_axis' as const : 'time_filter' as const,
@@ -602,12 +1153,14 @@ export function buildAnalyticalRequirementSet(input: {
     entityTerms,
     entityDisplayTerms,
     memberTerms: uniqueRequirementTerms((parsed?.filters ?? []).map((filter) => filter.value)),
+    ...(explicitOutputTerms(question).length > 0 ? { outputTerms: explicitOutputTerms(question) } : {}),
+    ...(/\bindividual\b/i.test(question) ? { grain: 'individual' as const } : {}),
     ...(ranking
       ? {
           ranking: {
             metricTerms: rankingMetricTerms,
             entityTerms,
-            direction: /bottom|lowest/i.test(ranking[1] ?? '') ? 'bottom' : 'top',
+            direction: /bottom|lowest|least|cheapest/i.test(ranking[1] ?? '') ? 'bottom' : 'top',
             limit: explicitLimit ?? 10,
             defaultedLimit: explicitLimit === undefined,
           },
@@ -617,28 +1170,95 @@ export function buildAnalyticalRequirementSet(input: {
   };
 }
 
-/** Classify the role an already-qualified candidate may fill. */
-export function evidenceCandidateRoles(candidate: RoleBalancedEvidenceCandidate): EvidenceCandidateRoleV1[] {
-  const identity = uniqueRequirementTerms([
+const DECLARED_CANDIDATE_ROLE_ALIASES: ReadonlyArray<readonly [EvidenceCandidateRoleV1, readonly string[]]> = [
+  ['metric', ['metric']],
+  ['entity_key', ['entity key', 'entity id']],
+  ['entity_label', ['entity label', 'display key', 'display label']],
+  ['categorical_dimension', ['categorical dimension', 'category dimension']],
+  ['time_dimension', ['time dimension', 'date dimension']],
+  ['member', ['member']],
+  ['relationship', ['relationship']],
+  ['context', ['context']],
+];
+
+/**
+ * Only an authored declaration may let an object fill an additional role.  A
+ * metric's capability lists dimensions, time grains, and relationship paths it
+ * *uses*; that does not make the metric itself a display key, time column, or
+ * relationship candidate.  Compatibility facts are snapshot-authored metadata
+ * and therefore the only additive role declaration accepted here.
+ */
+function explicitlyDeclaredCandidateRoles(candidate: RoleBalancedEvidenceCandidate): Set<EvidenceCandidateRoleV1> {
+  const declared = new Set<EvidenceCandidateRoleV1>();
+  for (const fact of candidate.compatibilityFacts ?? []) {
+    const normalized = normalizeRequirementTerm(fact);
+    if (!/^(?:(?:candidate|evidence|intrinsic|supported) )?roles?\b/.test(normalized)) continue;
+    const suffix = normalized.replace(/^(?:(?:candidate|evidence|intrinsic|supported) )?roles?\s*/, '');
+    for (const [role, aliases] of DECLARED_CANDIDATE_ROLE_ALIASES) {
+      if (aliases.some((alias) => new RegExp(`(?:^| )${alias}(?:$| )`).test(suffix))) declared.add(role);
+    }
+  }
+  return declared;
+}
+
+function intrinsicCandidateIdentity(candidate: RoleBalancedEvidenceCandidate): string {
+  return uniqueRequirementTerms([
     candidate.id,
     candidate.qualifiedId,
     candidate.name,
-    ...(candidate.aliases ?? []),
-    ...(candidate.dimensions ?? []),
-    ...(candidate.analyticalCapability?.dimensions ?? []).map((dimension) => dimension.dimensionId),
-    ...(candidate.analyticalCapability?.timeDimensions ?? []).map((dimension) => dimension.dimensionId),
   ]).join(' ');
+}
+
+/**
+ * Keep account display-key selection separate from common account attributes.
+ * Candidate names originate in dbt/semantic identifiers, so underscores and
+ * dots must be normalized before testing (`account_sentiment_rating` is just
+ * as much an attribute as "Account Sentiment Rating").
+ */
+export function hasEntityAttributeTerm(value: string): boolean {
+  return /\b(?:owner|sentiment|email)\b/i.test(normalizeRequirementTerm(value));
+}
+
+export function isEntityAttributeCandidate(candidate: RoleBalancedEvidenceCandidate): boolean {
+  return hasEntityAttributeTerm(intrinsicCandidateIdentity(candidate));
+}
+
+/** Classify the role an already-qualified candidate may fill. */
+export function evidenceCandidateRoles(candidate: RoleBalancedEvidenceCandidate): EvidenceCandidateRoleV1[] {
+  const identity = intrinsicCandidateIdentity(candidate);
   const roles = new Set<EvidenceCandidateRoleV1>();
-  if (candidate.kind === 'semantic_metric' || candidate.semanticObjectType === 'metric' || /\bmetric\b/.test(identity)) roles.add('metric');
-  if (candidate.semanticObjectType === 'entity' || /(?:^| )(?:account|customer|client|company) id\b/.test(identity) || /\bentity\b/.test(identity)) roles.add('entity_key');
-  if (/\b(?:account|customer|client|company)(?: name)?\b/.test(identity)
-    && /\b(?:name|label|display|account|customer|client|company)\b/.test(identity)
-    && !/\b(?:owner|sentiment|email)\b/.test(identity)) roles.add('entity_label');
-  if (/(?:\bdate\b|\btime\b|\bmonth\b|\bquarter\b|\byear\b)/.test(identity)
-    || (candidate.timeGrains?.length ?? 0) > 0
-    || (candidate.analyticalCapability?.timeDimensions?.length ?? 0) > 0) roles.add('time_dimension');
-  if ((candidate.relationshipEvidence?.length ?? 0) > 0 || /\b(?:relationship|join|bridge)\b/.test(identity)) roles.add('relationship');
-  if (candidate.kind === 'semantic_member' || candidate.semanticObjectType === 'dimension') roles.add('categorical_dimension');
+  const physicalColumn = candidate.kind === 'sql_column';
+  const metricCandidate = candidate.kind === 'semantic_metric'
+    || candidate.semanticObjectType === 'metric'
+    || candidate.semanticObjectType === 'measure'
+    || /\bmetric\b/.test(identity)
+    || (physicalColumn && /\b(?:revenue|amount|count|rate|bcm|spend|cost|margin|total)\b/.test(identity));
+  if (metricCandidate) roles.add('metric');
+
+  // Capability metadata belongs to the metric's execution contract.  It must
+  // not be treated as the metric object's own entity, display, time, or join
+  // identity.  Explicit snapshot metadata is the only exception.
+  if (!metricCandidate) {
+    if (candidate.semanticObjectType === 'entity'
+      || /(?:^| )(?:account|customer|client|company) (?:id|key)\b/.test(identity)
+      || /\bentity\b/.test(identity)) roles.add('entity_key');
+    // Entity identity (for example `semantic:entity:account`) proves an
+    // entity key/grain but not the field a person can read in a ranking
+    // result.  Require an intrinsic display-name declaration instead of
+    // allowing every identifier that merely contains "account" or
+    // "customer" to fill the entity-label role.  Explicit authored role
+    // facts below remain the only additive exception.
+    if (/\b(?:account|customer|client|company)\b/.test(identity)
+      && /\b(?:name|label|display)\b/.test(identity)
+      && !hasEntityAttributeTerm(identity)) roles.add('entity_label');
+    if (/(?:\bdate\b|\btime\b|\bmonth\b|\bquarter\b|\byear\b|\bfiscal\b|\bperiod\b)/.test(identity)
+      || (candidate.timeGrains?.length ?? 0) > 0) roles.add('time_dimension');
+    if ((candidate.kind === 'dql_modeling' && (candidate.relationshipEvidence?.length ?? 0) > 0)
+      || /\b(?:relationship|join|bridge)\b/.test(identity)) roles.add('relationship');
+    if (candidate.kind === 'semantic_member' || candidate.semanticObjectType === 'dimension'
+      || (physicalColumn && /\b(?:competitor|region|category|segment|status|type|owner|sentiment|active)\b/.test(identity))) roles.add('categorical_dimension');
+  }
+  for (const role of explicitlyDeclaredCandidateRoles(candidate)) roles.add(role);
   if (candidate.kind === 'sql_column' || candidate.kind === 'dbt_model' || candidate.kind === 'sql_table') roles.add('context');
   if (roles.size === 0) roles.add('context');
   return [...roles];
@@ -658,8 +1278,68 @@ function candidateMatchesTerms(
     ...(candidate.dimensions ?? []),
   ]).join(' ');
   if (terms.some((term) => identity.includes(term) || term.includes(identity))) return true;
+  if (options.categoricalDimension === true
+    && terms.some((term) => categoricalDimensionTermsMatch(term, identity))) return true;
   return options.categoricalDimension === true
     && candidateMatchesCategoricalDimensionRequirement(candidate, terms);
+}
+
+/**
+ * A metric's attached dimensions, source model, and relationship path are
+ * execution context.  They are deliberately useful for binding a complete
+ * plan, but must never make one metric match the name of another.  In
+ * particular, `bcm_run_rate` from an `account_revenue` model is not the
+ * `revenue` ranking measure merely because its source-model identity contains
+ * that word.
+ */
+function metricCandidateIdentityTerms(candidate: RoleBalancedEvidenceCandidate): string[] {
+  const terminalMetricIdentity = (value: string | undefined): string | undefined => {
+    if (!value) return undefined;
+    const namespaceLeaf = value.split(':').filter(Boolean).at(-1) ?? value;
+    const metricLeaf = namespaceLeaf.split(/[./]/).filter(Boolean).at(-1) ?? namespaceLeaf;
+    return normalizeRequirementTerm(metricLeaf);
+  };
+  return uniqueRequirementTerms([
+    // Metadata cards sometimes use their source-qualified identifier as the
+    // display label (for example `account_revenue.bcm_run_rate`). Treat that
+    // exactly like an ID: its terminal metric leaf is intrinsic identity and
+    // its model prefix is execution context. A human label such as `Total
+    // Revenue` has no namespace separator and is retained intact.
+    terminalMetricIdentity(candidate.name),
+    ...(candidate.aliases ?? []).map(terminalMetricIdentity),
+    terminalMetricIdentity(candidate.id),
+    terminalMetricIdentity(candidate.qualifiedId),
+  ]);
+}
+
+function metricCandidateMatchesTerms(
+  candidate: RoleBalancedEvidenceCandidate,
+  terms: readonly string[],
+): boolean {
+  const identities = metricCandidateIdentityTerms(candidate);
+  return terms.some((term) => {
+    const normalizedTerm = normalizeRequirementTerm(term);
+    if (!normalizedTerm) return false;
+    return identities.some((identity) => identity === normalizedTerm
+      || identity.endsWith(` ${normalizedTerm}`)
+      || normalizedTerm.endsWith(` ${identity}`));
+  });
+}
+
+/**
+ * A direct ranking measure is authoritative for metric admission.  Other
+ * retrieved metrics remain visible in the lifecycle receipt, but they cannot
+ * become a second metric choice merely because they are correlated with the
+ * entity phrase in the question.
+ */
+export function candidateConflictsWithExplicitRankingMeasure(
+  candidate: RoleBalancedEvidenceCandidate,
+  requirements: AnalyticalRequirementSetV1,
+): boolean {
+  const metricTerms = requirements.ranking?.metricTerms ?? [];
+  return metricTerms.length > 0
+    && evidenceCandidateRoles(candidate).includes('metric')
+    && !metricCandidateMatchesTerms(candidate, metricTerms);
 }
 
 /**
@@ -671,9 +1351,16 @@ function candidateMatchesTerms(
  * broad lexical geography expansion while retaining role-balanced recall.
  */
 export function candidateMatchesCategoricalDimensionRequirement(
-  candidate: Pick<RoleBalancedEvidenceCandidate, 'compatibilityFacts'>,
+  candidate: Pick<RoleBalancedEvidenceCandidate, 'compatibilityFacts' | 'sameSnapshotRoleExtension'>,
   terms: readonly string[],
 ): boolean {
+  const extension = candidate.sameSnapshotRoleExtension;
+  if (extension?.role === 'categorical_dimension'
+    && (extension.basis === 'sole_metricflow_grouping_dimension'
+      || extension.basis === 'exact_metricflow_grouping_dimension')) {
+    const requested = new Set(terms.map(normalizeRequirementTerm).filter(Boolean));
+    if (requested.has(normalizeRequirementTerm(extension.requestedTerm))) return true;
+  }
   const facts = new Set((candidate.compatibilityFacts ?? [])
     .map(normalizeRequirementTerm)
     .filter(Boolean));
@@ -716,7 +1403,8 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
       || left.id.localeCompare(right.id));
   const selected: T[] = [];
   const add = (candidate: T | undefined): void => {
-    if (candidate && selected.length < max && !selected.some((item) => item.id === candidate.id)) selected.push(candidate);
+    if (!candidate || candidateConflictsWithExplicitRankingMeasure(candidate, input.requirements)) return;
+    if (selected.length < max && !selected.some((item) => item.id === candidate.id)) selected.push(candidate);
   };
   const servesRequestedRole = (candidate: T): boolean => {
     const roles = evidenceCandidateRoles(candidate);
@@ -732,9 +1420,10 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
       ...input.requirements.entityDisplayTerms,
     ])) return true;
     if (roles.includes('time_dimension') && Boolean(input.requirements.time)) return true;
+    const categoricalTerms = categoricalDimensionRequirementTerms(input.requirements);
     if (roles.includes('categorical_dimension')
-      && input.requirements.dimensions.length > 0
-      && candidateMatchesTerms(candidate, input.requirements.dimensions, { categoricalDimension: true })) return true;
+      && categoricalTerms.length > 0
+      && candidateMatchesTerms(candidate, categoricalTerms, { categoricalDimension: true })) return true;
     if (roles.includes('relationship')
       && (input.requirements.dimensions.length > 1 || input.requirements.entityTerms.length > 0)) return true;
     return false;
@@ -750,7 +1439,7 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
     ['metric', input.requirements.ranking?.metricTerms.length ? input.requirements.ranking.metricTerms : input.requirements.measures],
     ['entity_label', [...input.requirements.entityTerms, ...input.requirements.entityDisplayTerms]],
     ['time_dimension', input.requirements.time ? [input.requirements.time.grain ?? 'time'] : []],
-    ['categorical_dimension', input.requirements.dimensions],
+    ['categorical_dimension', categoricalDimensionRequirementTerms(input.requirements)],
     ['relationship', input.requirements.dimensions.length > 1 || input.requirements.entityTerms.length > 0 ? ['relationship'] : []],
   ];
   for (const [role, terms] of required) {
@@ -769,7 +1458,7 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
       // role nor a useful categorical reservation unless the user explicitly
       // named that attribute. This runs during the pre-cap pin pass so noisy
       // same-kind cards cannot enter through the categorical role.
-      const explicitlyRequestsAttribute = /\b(?:owner|sentiment|email)\b/i.test([
+      const explicitlyRequestsAttribute = hasEntityAttributeTerm([
         ...input.requirements.dimensions,
         ...input.requirements.entityTerms,
         ...input.requirements.entityDisplayTerms,
@@ -783,7 +1472,7 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
       if (role === 'categorical_dimension'
         && hasRequestedEntityLabel
         && !explicitlyRequestsAttribute
-        && /\b(?:owner|sentiment|email)\b/i.test(candidate.name ?? candidate.id)) continue;
+        && isEntityAttributeCandidate(candidate)) continue;
       // For entity labels, role is more important than a lexical owner/email
       // hit. For all other roles, prefer an identity matching the requested
       // business term but retain a role candidate when the request is terse.
@@ -810,13 +1499,13 @@ export function classifyProviderFailure(input: {
   const text = `${input.code ?? ''} ${input.message ?? ''}`.toLowerCase();
   const cause: ProviderFailureCauseV1 = /cancel/.test(text) ? 'cancelled'
     : /dispatch.?budget|provider_dispatch_budget/.test(text) ? 'dispatch_budget'
-      : /deadline.?insufficient|admission|soft.?target/.test(text) ? 'admission_denied'
+      : /deadline.?insufficient|admission|soft.?target|provider_result_rows_(?:blocked|limit_exceeded)/.test(text) ? 'admission_denied'
         : /run.?deadline|time limit/.test(text) ? 'run_deadline'
           : /timeout|timed out/.test(text) ? 'provider_timeout'
             : /401|403|api key|unauthori[sz]ed|auth(?:entication)?/.test(text) ? 'authentication'
               : /model(?:[ _-]+|\s+).*not[ _-]?found|unknown model|model_not_found|404/.test(text) ? 'model_not_found'
                 : /429|rate[ _-]?limit|too many requests/.test(text) ? 'rate_limited'
-                  : /502|503|504|gateway/.test(text) ? 'gateway'
+                  : /\b5\d{2}\b|gateway/.test(text) ? 'gateway'
                     : /econn|network|fetch failed|not reachable|connection refused/.test(text) ? 'network'
                       : 'unknown';
   const retryable = cause === 'rate_limited' || cause === 'gateway' || cause === 'network' || cause === 'provider_timeout';
@@ -825,7 +1514,7 @@ export function classifyProviderFailure(input: {
       : cause === 'cancelled' ? 'none'
         : 'inspect_run';
   const httpStatusClass = /\b(?:401|403|404|429)\b/.test(text) ? '4xx' as const
-    : /\b(?:502|503|504)\b/.test(text) ? '5xx' as const
+    : /\b5\d{2}\b/.test(text) ? '5xx' as const
       : undefined;
   return {
     version: 1,
@@ -841,6 +1530,28 @@ export function classifyProviderFailure(input: {
 }
 
 export function buildAnalyticalCascadeDecision(input: Omit<AnalyticalCascadeDecisionV1, 'version'>): AnalyticalCascadeDecisionV1 {
+  // A frozen tier is the end of the authoritative cascade.  Later tiers are
+  // neither evaluated nor eligible as a fallback, even when the selected
+  // compiler, adapter, or execution target subsequently fails.  Retaining
+  // pre-built later attempts in the receipt makes a truthful post-freeze
+  // failure look like a silent downgrade and invalidates portable replay.
+  // Normalize at the shared construction boundary so every router path and
+  // every emitted trace receives the same immutable attempt prefix.
+  const attempts: CascadeTierAttemptV1[] = [];
+  for (const inputAttempt of input.attempts) {
+    const attempt: CascadeTierAttemptV1 = {
+      ...inputAttempt,
+      version: 1,
+      candidateIds: [...new Set(inputAttempt.candidateIds)].slice(0, 32),
+      // Decision-level `planFrozen` is the server-owned source of truth. A
+      // legacy caller may have stamped it only on the decision; keep the
+      // selected attempt coherent before enforcing the immutable prefix.
+      planFrozen: inputAttempt.planFrozen
+        || (input.planFrozen === true && input.selectedTier === inputAttempt.tier),
+    };
+    attempts.push(attempt);
+    if (attempt.planFrozen) break;
+  }
   return {
     version: 1,
     ...input,
@@ -849,7 +1560,15 @@ export function buildAnalyticalCascadeDecision(input: Omit<AnalyticalCascadeDeci
       version: 1,
       candidateIds: [...new Set(coverage.candidateIds)].slice(0, 32),
     })),
-    attempts: input.attempts.map((attempt) => ({ ...attempt, version: 1, candidateIds: [...new Set(attempt.candidateIds)].slice(0, 32) })),
+    attempts,
+    ...(input.terminalGap ? {
+      terminalGap: {
+        version: 1,
+        code: 'MISSING_RELATIONSHIP',
+        requirement: 'certified_relationship_or_allocation_proof',
+        witnessCandidateIds: [...new Set(input.terminalGap.witnessCandidateIds)].sort().slice(0, 32),
+      },
+    } : {}),
   };
 }
 

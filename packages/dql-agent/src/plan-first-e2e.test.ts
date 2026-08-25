@@ -32,6 +32,9 @@ const metric: AgentEvidenceCandidate = {
   relevanceScore: 0.98,
   matchReasons: ['full business meaning'],
   compatibility: 'compatible',
+  // Router-selected semantic plans must carry the same exact capability that
+  // the execution adapter will prove against the pinned semantic registry.
+  analyticalCapability: semanticCapability('semantic:consumption:actual_rollover_balance', 'balance'),
 };
 const wrongMetric: AgentEvidenceCandidate = {
   id: 'metric:rollover_risk',
@@ -126,12 +129,16 @@ function semanticCapability(metricId: string, measure: string): MetricCapability
     metricId,
     semanticModelId: 'semantic:consumption',
     measureIds: [measure],
-    primaryEntityId: 'usage',
+    primaryEntityId: 'customer_name',
     defaultResultGrainId: 'usage',
     resultGrainIds: ['usage', 'customer_name'],
     aggregation: 'sum',
     additivity: { entities: 'additive', time: 'additive' },
-    dimensions: [{ dimensionId: 'customer_name', entityId: 'customer_name', supportedRoles: ['group_by', 'rank_entity'] }],
+    dimensions: [{
+      dimensionId: 'semantic:consumption:dimension:customer',
+      entityId: 'customer_name',
+      supportedRoles: ['group_by', 'rank_entity'],
+    }],
     timeDimensions: [],
     operations: ['group', 'rank'],
     supportedOutputKinds: ['dimension', 'metric_value', 'rank'],
@@ -409,7 +416,9 @@ describe('plan-first surface parity E2E (API-006 / E2E-012)', () => {
     expect(contracts).toHaveLength(surfaces.length);
     expect(contracts.every((contract) => JSON.stringify(contract) === JSON.stringify(contracts[0]))).toBe(true);
     expect(contracts[0]).toMatchObject({
-      planSchemaVersion: 1,
+      // Natural-language Ask now freezes its host-owned requirement seed and
+      // therefore emits the additive v2 analytical frame contract.
+      planSchemaVersion: 2,
       snapshotId: 'snapshot-plan-first-e2e',
       selectedConceptIds: [metric.qualifiedId],
       executionId: metric.qualifiedId,

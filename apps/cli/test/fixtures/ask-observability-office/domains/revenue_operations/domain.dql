@@ -1,0 +1,6 @@
+// dql-format: 1
+
+domain "Revenue Operations" {
+  id = "revenue_operations"
+  owner = "revenue-operations@fixture.test"
+}

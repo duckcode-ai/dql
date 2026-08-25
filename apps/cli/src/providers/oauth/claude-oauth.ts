@@ -2,6 +2,7 @@ import * as crypto from 'node:crypto';
 import * as http from 'node:http';
 import { URL } from 'node:url';
 import {
+  completeProviderHttpDispatch,
   prepareProviderHttpDispatch,
   type AgentProvider,
   type AgentMessage,
@@ -339,7 +340,7 @@ export class ClaudeOAuthProvider implements AgentProvider {
     const userId = generateUserId(this.manager.getEmail() || undefined);
     const maxTokens = options.maxTokens ?? this.maxTokens;
 
-    const body = prepareProviderHttpDispatch({
+    const dispatch = {
       provider: this.name,
       operation: 'generate',
       attemptIndex: 1,
@@ -355,23 +356,54 @@ export class ClaudeOAuthProvider implements AgentProvider {
       thinking: thinkingFor(options.reasoningEffort, maxTokens),
       metadata: { user_id: userId },
       },
-    });
-
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-        'Anthropic-Version': '2023-06-01',
-        'Anthropic-Beta': ANTHROPIC_OAUTH_BETAS,
-      },
-      body: JSON.stringify(body),
-      signal: options.signal,
-    });
-    if (!res.ok) {
-      throw new Error(`claude (subscription): ${res.status} ${await res.text().catch(() => res.statusText)}`);
+    } as const;
+    const body = prepareProviderHttpDispatch(dispatch);
+    let transportSettled = false;
+    let transportSucceeded = false;
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'Anthropic-Version': '2023-06-01',
+          'Anthropic-Beta': ANTHROPIC_OAUTH_BETAS,
+        },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      });
+      transportSettled = true;
+      transportSucceeded = res.ok;
+      completeProviderHttpDispatch(dispatch, {
+        settlement: 'transport',
+        outcome: res.ok ? 'ok' : 'error',
+        httpStatus: res.status,
+      });
+      if (!res.ok) {
+        throw new Error(`claude (subscription): ${res.status} ${await res.text().catch(() => res.statusText)}`);
+      }
+      const json = (await res.json()) as { content?: Array<{ type: string; text?: string }> };
+      if (!Array.isArray(json.content)) {
+        throw Object.assign(new Error('Claude subscription returned a malformed response.'), {
+          code: 'PROVIDER_RESULT_MALFORMED',
+        });
+      }
+      const text = json.content.filter((b) => b.type === 'text').map((b) => b.text ?? '').join('');
+      if (!text.trim()) {
+        throw Object.assign(new Error('Claude subscription returned no assistant text.'), {
+          code: 'PROVIDER_RESULT_MALFORMED',
+        });
+      }
+      completeProviderHttpDispatch(dispatch, { settlement: 'result', outcome: 'ok' });
+      return text;
+    } catch (error) {
+      const cancelled = options.signal?.aborted || (error instanceof Error && error.name === 'AbortError');
+      if (!transportSettled) {
+        completeProviderHttpDispatch(dispatch, { settlement: 'transport', outcome: cancelled ? 'cancelled' : 'error', error });
+      } else if (transportSucceeded) {
+        completeProviderHttpDispatch(dispatch, { settlement: 'result', outcome: cancelled ? 'cancelled' : 'error', error });
+      }
+      throw error;
     }
-    const json = (await res.json()) as { content?: Array<{ type: string; text?: string }> };
-    return (json.content ?? []).filter((b) => b.type === 'text').map((b) => b.text ?? '').join('');
   }
 }

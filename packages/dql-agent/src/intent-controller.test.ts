@@ -177,6 +177,8 @@ describe('follow-up + compose-app detection', () => {
     expect(looksLikeFollowUp('why?', false)).toBe(false);
     expect(looksLikeFollowUp('what is total revenue', true)).toBe(false);
     expect(looksLikeFollowUp('what product they bought for this amount?', true)).toBe(true);
+    expect(looksLikeFollowUp('which region does she belong to?', true)).toBe(true);
+    expect(looksLikeFollowUp('what did he buy?', true)).toBe(true);
   });
 
   it('distinguishes prior-answer explanations from requested recalculations', () => {

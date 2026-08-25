@@ -18,6 +18,10 @@ change the Cloud theme, App, Block, or Modeling surfaces.
    interpretation fields, never SQL or free-form trust. Explicit selections,
    reruns/Apply, structured clarification, and frozen Research children may
    use the zero-call path (`AGT-027`, `AGT-028`).
+   The legacy/no-evidence category-only classifier, when it is needed for a
+   non-analytical fallback, is recorded as the distinct `classification`
+   provider phase and egress purpose. It cannot coexist with candidate-ID
+   `meaning_resolution` in the same run and never proves a governed binding.
 3. Before the plan freezes, Ask evaluates the compatible cascade in order:
    certified block → semantic compile → governed relational composition →
    review-required generated SQL. A missing governed tier is not itself an
@@ -44,6 +48,19 @@ change the Cloud theme, App, Block, or Modeling surfaces.
   clauses may partially succeed, while failed clauses retain their typed gap
   and evidence. Research records at most six receipt-backed branch entries,
   followed by an explicit synthesis/stopping reason (`AGT-033`).
+- Each Research branch receives a fair share of the remaining run deadline
+  after reserving finalization time. A timed-out branch records a terminal
+  receipt and span; branches that cannot start within the remaining budget are
+  recorded as `budget_exhausted`. If the reserve remains, synthesis returns a
+  limited, receipt-grounded result rather than losing completed branch evidence
+  (`AGT-016`, `AGT-033`).
+- If the root deadline or an explicit user cancellation interrupts an active
+  Research branch, the local runtime persists a redacted, blocked partial root
+  artifact before terminal run finalization. It preserves the root and child
+  IDs, branch receipt/ledger, and trace links for restart inspection; the
+  interrupted branch is typed `run_deadline` or `cancelled`, while an ordinary
+  child execution failure is typed `execution_failed`, never `completed`
+  (`AGT-033`, `OBS-005`, `OBS-012`).
 
 ## Trust and repair boundary
 

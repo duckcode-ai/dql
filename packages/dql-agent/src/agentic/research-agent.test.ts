@@ -86,6 +86,20 @@ describe('research hypotheses', () => {
     expect(out).toEqual([]);
   });
 
+  it('does not admit a late hypothesis provider call when the inherited Research signal is already cancelled', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('user cancelled Research'));
+    let called = false;
+    const out = await planResearchHypotheses(
+      { generate: async () => { called = true; return ok; } },
+      'why did revenue fall',
+      ASSETS,
+      { signal: controller.signal },
+    );
+    expect(called).toBe(false);
+    expect(out).toEqual([]);
+  });
+
   it('shows the model the catalog it must ground in', async () => {
     let prompt = '';
     await planResearchHypotheses(

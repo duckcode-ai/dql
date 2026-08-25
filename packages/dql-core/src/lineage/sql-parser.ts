@@ -99,6 +99,16 @@ export interface SqlOutputExpressionSignature {
 export interface GeneratedAnalyticalOutputSignature extends SqlOutputExpressionSignature {
   /** Aggregate calls and their parser-resolved physical inputs for this output only. */
   aggregateInputs: SqlAggregateReference[];
+  /**
+   * Parser-resolved physical column references for this output expression only.
+   *
+   * Keeping these per projection (rather than using the query-wide reference
+   * list) lets a caller prove that `order_id AS order_id` is backed by the
+   * frozen order-id source, not merely that some order-id column appeared
+   * elsewhere in the statement.  Relation aliases are resolved to their
+   * physical relation when the parser can prove them.
+   */
+  columnReferences: SqlColumnReference[];
 }
 
 /** Parser-owned semantic facts for a generated analytical SELECT. */
@@ -422,19 +432,29 @@ export function buildGeneratedAnalyticalSqlSignature(
   const aliasToRelation = new Map(Object.entries(analysis.aliasToRelation));
   const singleRelation = analysis.tables.length === 1 ? analysis.tables[0] : undefined;
   const derivedRelations = new Set(analysis.derivedRelations.map(normalizeSqlIdentifier));
+  const ctes = new Set(analysis.ctes.map(normalizeSqlIdentifier));
   const outputs = statement.columns.map((column, index) => {
     const expression = (column as Record<string, unknown>).expr;
     const aggregateInputs: SqlAggregateReference[] = [];
+    const columnReferences: SqlColumnReference[] = [];
     collectSqlAggregates(expression, {
-      ctes: new Set(analysis.ctes.map(normalizeSqlIdentifier)),
+      ctes,
       derivedRelations,
       aliasToRelation,
       ...(singleRelation ? { singleRelation } : {}),
       aggregates: aggregateInputs,
     });
+    collectSqlColumns(expression, {
+      ctes,
+      derivedRelations,
+      aliasToRelation,
+      ...(singleRelation ? { singleRelation } : {}),
+      columns: columnReferences,
+    });
     return {
       ...buildOutputExpressionSignatureFromAst(expression, normalizeSqlIdentifier(outputAliases[index]!)),
       aggregateInputs,
+      columnReferences: dedupeColumnReferences(columnReferences),
     };
   });
 

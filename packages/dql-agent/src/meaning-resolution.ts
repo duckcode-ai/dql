@@ -14,9 +14,15 @@ import type {
 import type { KnowledgeLens } from './domain-context.js';
 import {
   buildAnalyticalRequirementSet,
+  candidateConflictsWithExplicitRankingMeasure,
   evidenceCandidateRoles,
+  hasEntityAttributeTerm,
+  isEntityAttributeCandidate,
   selectRoleBalancedMeaningCandidates,
+  type AnalyticalRequirementSetV1,
+  type AnalyticalRequirementSeedV1,
   type ContextSourceCoverageV1,
+  type SameSnapshotRoleExtensionV1,
 } from './analytical-orchestration.js';
 
 export type AgentEvidenceKind =
@@ -97,6 +103,12 @@ export interface AgentEvidenceCandidate {
   matchReasons: string[];
   compatibility: AgentEvidenceCompatibility;
   compatibilityFacts?: string[];
+  /**
+   * Host-authored role admission from one immutable semantic capability
+   * snapshot.  A resolver may select this supplied card, but cannot mint or
+   * alter it; the selected metric capability remains the execution authority.
+   */
+  sameSnapshotRoleExtension?: SameSnapshotRoleExtensionV1;
   /** Normalized executable capability. Names alone never supply missing facts. */
   analyticalCapability?: MetricCapabilityContract;
   /** Deterministic certified-asset fit; ignored for non-certified evidence. */
@@ -105,14 +117,23 @@ export interface AgentEvidenceCandidate {
   eligible?: boolean;
   /** True only for an exact qualified/name/approved-alias match. */
   exactMatch?: boolean;
+  /**
+   * Real membership in the immutable retrieval snapshot. Multiple lanes are
+   * retained because fusion must not erase whether a card came from vector,
+   * graph, lexical, exact, or the conversation continuation boundary.
+   */
+  retrievalLanes?: Array<{ lane: 'exact' | 'lexical' | 'vector' | 'graph' | 'conversation'; rank?: number }>;
 }
 
 /**
  * Return the authored output identity that proves a certified block can answer
- * one requested measure.  This reads only the block's own `output:` facts,
- * which are populated from declared/output-contract fields at indexing time.
- * Block names, tags, examples, definitions, and unrelated retrieved metrics
- * are intentionally absent: none of those is an executable output contract.
+ * one requested measure. This normally reads only the block's own `output:`
+ * facts, which are populated from declared/output-contract fields at indexing
+ * time. An exact block-title request may additionally carry a
+ * `catalog-proven-output:` fact from the snapshot-local catalog fit. That fact
+ * is minted only after the catalog has already bound this exact title to a
+ * high-confidence certified answer contract; names, tags, examples,
+ * definitions, and unrelated retrieved metrics are intentionally absent.
  */
 export function certifiedCandidateDeclaredMeasureOutput(
   candidate: AgentEvidenceCandidate,
@@ -122,11 +143,35 @@ export function certifiedCandidateDeclaredMeasureOutput(
   const requestedIdentity = canonicalCertifiedOutputMetricIdentity(requested);
   if (!requestedIdentity) return undefined;
   const declared = (candidate.compatibilityFacts ?? [])
-    .flatMap((fact) => /^output:\s*(.+)$/i.exec(fact)?.[1] ?? [])
+    .flatMap((fact) => /^(?:output|catalog-proven-output):\s*(.+)$/i.exec(fact)?.[1] ?? [])
     .map((output) => output.trim())
     .filter(Boolean);
   return declared.find((output) =>
     canonicalCertifiedOutputMetricIdentity(output) === requestedIdentity,
+  );
+}
+
+/**
+ * Return the block output that proves a requested display/grouping dimension.
+ * This is intentionally narrower than retrieval matching: only a declared
+ * output or the catalog-proven output bridge for an exact certified title may
+ * bind a dimension to the block executor. `customer_name` is a valid output
+ * for the business term `customer`; arbitrary attributes such as owner or
+ * sentiment are not.
+ */
+export function certifiedCandidateDeclaredDimensionOutput(
+  candidate: AgentEvidenceCandidate,
+  requested: string,
+): string | undefined {
+  if (candidate.kind !== 'certified_block') return undefined;
+  const requestedIdentity = canonicalCertifiedOutputDimensionIdentity(requested);
+  if (!requestedIdentity) return undefined;
+  const declared = (candidate.compatibilityFacts ?? [])
+    .flatMap((fact) => /^(?:output|catalog-proven-output):\s*(.+)$/i.exec(fact)?.[1] ?? [])
+    .map((output) => output.trim())
+    .filter(Boolean);
+  return declared.find((output) =>
+    canonicalCertifiedOutputDimensionIdentity(output) === requestedIdentity,
   );
 }
 
@@ -191,6 +236,19 @@ function canonicalCertifiedOutputMetricIdentity(value: string): string {
     .filter(Boolean);
   while (tokens.length > 1 && genericModifiers.has(tokens[0]!)) tokens.shift();
   while (tokens.length > 1 && genericModifiers.has(tokens.at(-1)!)) tokens.pop();
+  return tokens.join('_');
+}
+
+function canonicalCertifiedOutputDimensionIdentity(value: string): string {
+  const tokens = value
+    .toLowerCase()
+    .replace(/[_./:-]+/g, ' ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .split(/\s+/)
+    .map((token) => token.endsWith('s') && token.length > 3 ? token.slice(0, -1) : token)
+    .filter(Boolean);
+  const displaySuffixes = new Set(['display', 'id', 'key', 'label', 'name', 'title']);
+  while (tokens.length > 1 && displaySuffixes.has(tokens.at(-1)!)) tokens.pop();
   return tokens.join('_');
 }
 
@@ -280,6 +338,33 @@ export interface MeaningResolution {
     message: string;
     candidateIds: string[];
   }>;
+  /** Immutable host tuple supplied before the one bounded meaning call. */
+  hostRequirementSeed?: AnalyticalRequirementSeedV1;
+  /**
+   * Canonical metric-capability dimensions restored from a validated,
+   * server-issued clarification selection. This is host continuation state,
+   * not a model-provided query-intent field; RAP revalidates each ID against
+   * the selected metric capability before it can enter the frozen plan.
+   */
+  structuredDimensionIds?: string[];
+  /** Content-safe record of model fields the host deliberately did not grant authority. */
+  overrideReceipts?: MeaningResolutionOverrideReceiptV1[];
+  /**
+   * Parse-only distinction for the bounded candidate-ID protocol. A provider
+   * may return a syntactically valid object with no selected IDs while omitting
+   * every clarification instruction. That is not itself a business
+   * clarification: the router may use a host-proven frozen plan, if one exists.
+   * An explicit provider clarification is intentionally never marked here.
+   */
+  emptyCandidateBinding?: true;
+}
+
+export interface MeaningResolutionOverrideReceiptV1 {
+  version: 1;
+  field: 'interpreted_question' | 'question_type' | 'query_intent' | 'recommended_route' | 'analytical_frame' | 'candidate_selection' | 'member_binding';
+  action: 'host_preserved' | 'selection_accepted';
+  reason: string;
+  candidateIds?: string[];
 }
 
 export interface MeaningResolutionInput {
@@ -287,6 +372,8 @@ export interface MeaningResolutionInput {
   history?: Array<{ role: "user" | "assistant"; text: string }>;
   evidence: AgentRetrievalEvidence;
   candidates: AgentEvidenceCandidate[];
+  /** Host-owned typed request tuple; never model-authored. */
+  requirementSeed?: AnalyticalRequirementSeedV1;
   signal?: AbortSignal;
 }
 
@@ -325,6 +412,11 @@ export function buildMeaningEvidencePackage(
   // role-aware admission code ever saw them.
   const canonicalEligible = canonicalizeMetricMeasureCandidates(evidence.candidates)
     .filter((candidate) => candidate.eligible !== false)
+    // Preserve the retrieval result for lifecycle/diagnostics, but do not put
+    // a correlated non-requested metric in the bounded meaning package. An
+    // explicit ranking measure is a typed requirement, not a prompt hint the
+    // resolver may replace with a more highly scored BCM/run-rate card.
+    .filter((candidate) => !candidateConflictsWithExplicitRankingMeasure(candidate, requirements))
     .sort(compareCandidates);
   const rawPinned = selectRoleBalancedMeaningCandidates({
     candidates: canonicalEligible,
@@ -337,10 +429,10 @@ export function buildMeaningEvidencePackage(
   // categorical-dimension parser also saw the token "account". An explicit
   // attribute request remains eligible.
   const requestedEntityDisplay = requirements.entityDisplayTerms.length > 0;
-  const explicitlyRequestsAttribute = /\b(?:owner|sentiment|email)\b/i.test(question);
+  const explicitlyRequestsAttribute = hasEntityAttributeTerm(question);
   const hasRawPinnedEntityLabel = rawPinned.some((candidate) => evidenceCandidateRoles(candidate).includes('entity_label'));
   const pinned = requestedEntityDisplay && hasRawPinnedEntityLabel && !explicitlyRequestsAttribute
-    ? rawPinned.filter((candidate) => !/\b(?:owner|sentiment|email)\b/i.test(candidate.name))
+    ? rawPinned.filter((candidate) => !isEntityAttributeCandidate(candidate))
     : rawPinned;
   const kindCounts = new Map<AgentEvidenceKind, number>();
   const perKindQualified = canonicalEligible
@@ -363,7 +455,7 @@ export function buildMeaningEvidencePackage(
     // An account owner/e-mail/sentiment is an attribute, never a substitute
     // for the requested account/customer display entity. Do not let it consume
     // the remaining meaning cards after that display role was successfully pinned.
-    return !hasPinnedEntityLabel || !/\b(?:owner|sentiment|email)\b/i.test(candidate.name);
+    return !hasPinnedEntityLabel || !isEntityAttributeCandidate(candidate);
   });
   return [...pinned, ...safeFill]
     .slice(0, limit);
@@ -432,6 +524,7 @@ export function validateMeaningResolution(
   value: MeaningResolution,
   candidates: AgentEvidenceCandidate[],
   requestedMeasures: string[] = value.queryIntent.measures,
+  options: { requirements?: AnalyticalRequirementSetV1 } = {},
 ): { ok: true; resolution: MeaningResolution } | { ok: false; reason: string } {
   const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
   const selectedConceptIds = value.selectedConceptIds.length > 0
@@ -439,53 +532,76 @@ export function validateMeaningResolution(
     : value.recommendedExecutionId
       ? [value.recommendedExecutionId]
       : [];
-  const referencedIds = [
+  // Selected/recommended IDs are execution authority and must be present in
+  // the bounded package the resolver received. Rejections are explanatory
+  // only: hosts may retain a full-snapshot rejection ledger even when its
+  // card was correctly pruned from the 16-card meaning package. Do not let a
+  // non-authoritative rejected ID invalidate an otherwise valid frozen plan.
+  const authoritativeIds = [
     ...value.selectedConceptIds,
     ...(value.recommendedExecutionId ? [value.recommendedExecutionId] : []),
-    ...value.rejectedCandidates.map((candidate) => candidate.id),
   ];
-  const invented = referencedIds.find((id) => !byId.has(id));
+  const invented = authoritativeIds.find((id) => !byId.has(id));
   if (invented) return { ok: false, reason: `The resolver referenced evidence that was not retrieved: ${invented}` };
-  if (value.confidence !== "low" && selectedConceptIds.length === 0) {
+  const packageRejectedCandidates = value.rejectedCandidates.filter((candidate) => byId.has(candidate.id));
+  const normalizedValue = packageRejectedCandidates.length === value.rejectedCandidates.length
+    ? value
+    : { ...value, rejectedCandidates: packageRejectedCandidates };
+  if (normalizedValue.confidence !== "low" && selectedConceptIds.length === 0) {
     return { ok: false, reason: "A medium/high-confidence resolution must select at least one retrieved concept." };
   }
   const selected = selectedConceptIds.map((id) => byId.get(id)!);
   if (selected.some((candidate) => candidate.eligible === false || candidate.compatibility === "incompatible")) {
     return { ok: false, reason: "The resolver selected ineligible or incompatible evidence." };
   }
-  const rejectedIds = new Set(value.rejectedCandidates.map((candidate) => candidate.id));
+  // The evidence package normally excludes a competing metric before the
+  // resolver sees it. Keep the same check at the model-output boundary so an
+  // extension, legacy caller, or malformed resolver response cannot turn an
+  // explicitly named ranking measure into a correlated alternative.
+  const explicitRankingConflict = options.requirements
+    ? selected.find((candidate) => candidateConflictsWithExplicitRankingMeasure(candidate, options.requirements!))
+    : undefined;
+  if (explicitRankingConflict) {
+    return {
+      ok: false,
+      reason: `The resolver selected a metric that conflicts with the explicit ranking measure: ${explicitRankingConflict.id}`,
+    };
+  }
+  const rejectedIds = new Set(normalizedValue.rejectedCandidates.map((candidate) => candidate.id));
   if (selectedConceptIds.some((id) => rejectedIds.has(id))) {
     return { ok: false, reason: "The resolver both selected and rejected the same evidence." };
   }
-  const executionId = value.recommendedExecutionId ?? value.selectedConceptIds[0];
+  const executionId = normalizedValue.recommendedExecutionId ?? normalizedValue.selectedConceptIds[0];
   if (executionId) {
     const execution = byId.get(executionId)!;
+    if (options.requirements && candidateConflictsWithExplicitRankingMeasure(execution, options.requirements)) {
+      return {
+        ok: false,
+        reason: `The resolver selected a metric that conflicts with the explicit ranking measure: ${execution.id}`,
+      };
+    }
     if (execution.eligible === false || execution.compatibility === "incompatible") {
       return { ok: false, reason: "The recommended execution evidence is ineligible or incompatible." };
     }
-    if (value.recommendedRoute === "certified" && execution.kind !== "certified_block") {
-      return { ok: false, reason: "A certified route must reference a certified block." };
-    }
-    if (value.recommendedRoute === "certified" && execution.compatibility !== "compatible") {
-      return { ok: false, reason: "A certified route requires a deterministically compatible block fit." };
-    }
-    if (value.recommendedRoute === 'certified'
-      && !certifiedCandidateExplicitlyCoversMeasures(execution, requestedMeasures)) {
-      return {
-        ok: false,
-        reason: 'A certified route must declare every requested measure in the selected block output contract.',
-      };
-    }
-    if (value.recommendedRoute === "semantic" && execution.kind !== "semantic_metric" && execution.kind !== "semantic_member") {
-      return { ok: false, reason: "A semantic route must reference semantic evidence." };
-    }
-    if (value.recommendedRoute === "semantic" && execution.compatibility !== "compatible") {
-      return { ok: false, reason: "A semantic route requires deterministic measure, grain, and dimension compatibility." };
-    }
+    // `recommendedRoute` is deliberately not validated here.  The bounded
+    // meaning call can nominate only supplied IDs; the authoritative cascade
+    // subsequently evaluates the full host-owned requirement seed against
+    // those IDs.  Rejecting a partial selected semantic metric at this boundary
+    // used the model-adjacent nomination as route authority and stopped the
+    // valid same-snapshot metric + grouping extension before the semantic
+    // compatibility solver could prove it.  The same rule applies to a
+    // selected certified block: its output contract is checked by the
+    // certified cascade before freeze, where an incomplete block advances to
+    // semantic/exploratory rather than becoming a false terminal failure.
+    //
+    // Package membership, eligibility, incompatible evidence, and explicit
+    // ranking conflicts above remain hard boundaries; this only defers tier
+    // fitness to the host-owned planner.
+    void execution;
   }
-  if (value.analyticalFrame) {
+  if (normalizedValue.analyticalFrame) {
     const invalidFrameReference = firstInvalidAnalyticalFrameReference(
-      value.analyticalFrame,
+      normalizedValue.analyticalFrame,
       candidates,
       executionId,
     );
@@ -495,9 +611,9 @@ export function validateMeaningResolution(
   }
   return {
     ok: true,
-    resolution: selectedConceptIds === value.selectedConceptIds
-      ? value
-      : { ...value, selectedConceptIds },
+    resolution: selectedConceptIds === normalizedValue.selectedConceptIds
+      ? normalizedValue
+      : { ...normalizedValue, selectedConceptIds },
   };
 }
 
@@ -584,6 +700,281 @@ function firstInvalidAnalyticalFrameReference(
     for (const id of ambiguity.candidateIds) if (!evidenceIds.has(id)) return `ambiguity candidate ${id}`;
   }
   return undefined;
+}
+
+/**
+ * Merge the one model meaning response into the host-owned request seed.
+ *
+ * Candidate IDs are the only model-controlled execution-adjacent values, and
+ * they are still validated against the exact supplied package afterwards. The
+ * model's route, SQL-adjacent frame, query intent, and reworded question are
+ * presentation suggestions at most; accepting them as authority was how an
+ * omitted product category/order ID or an inherited prior filter silently
+ * changed the answer tuple after retrieval.
+ */
+export function mergeMeaningResolutionWithRequirementSeed(input: {
+  seed: AnalyticalRequirementSeedV1;
+  resolution: MeaningResolution;
+  candidates: AgentEvidenceCandidate[];
+}): MeaningResolution {
+  const { seed, resolution, candidates } = input;
+  const modelSelectedConceptIds = [...new Set([
+    ...resolution.selectedConceptIds,
+    ...(resolution.recommendedExecutionId ? [resolution.recommendedExecutionId] : []),
+  ])];
+  // A model can bind only supplied IDs, but supplied is not synonymous with
+  // grounded in the current request. Discard a known semantic metric that
+  // would add a qualifier not present in the immutable seed. Keep unknown IDs
+  // in the result so `validateMeaningResolution` still rejects inventions at
+  // the boundary rather than silently laundering them away.
+  const omittedUngroundedMetricIds = modelSelectedConceptIds.filter((id) => {
+    const candidate = candidates.find((item) => item.id === id || item.qualifiedId === id);
+    return candidate?.kind === 'semantic_metric'
+      && !metricCandidateExactlyMatchesSeed(candidate, seed);
+  });
+  const selectedConceptIds = modelSelectedConceptIds.filter((id) =>
+    !omittedUngroundedMetricIds.includes(id));
+  // A minimal candidate-ID-only response is intentionally allowed for the
+  // one bounded meaning call.  Do not let the order of a role-targeted member
+  // extension turn that member into the execution target merely because the
+  // model omitted the optional recommendation.  A selected metric is the
+  // host-safe default; a member only supplies a dimension binding beside it.
+  const selectedMetricId = selectedConceptIds.find((id) => {
+    const candidate = candidates.find((item) => item.id === id || item.qualifiedId === id);
+    return candidate?.kind === 'semantic_metric'
+      // A selected metric can supersede a legacy recommendation only when it
+      // proves the host-owned metric wording.  Token-overlap retrieval is not
+      // enough here: otherwise `rollover amount` silently became
+      // `rollover_balance_amount` merely because a pooled semantic card had
+      // been selected alongside a certified nomination.  The cascade can
+      // still evaluate a partial candidate later; this guard only prevents a
+      // model selection from adding an unspoken metric qualifier.
+      && metricCandidateExactlyMatchesSeed(candidate, seed);
+  });
+  // A model may nominate a certified block in its legacy recommendation while
+  // selecting a supplied semantic metric.  The recommendation is not route
+  // authority; when one selected metric exists, it is the only safe host
+  // execution nomination.  This preserves the candidate-ID boundary without
+  // letting an unproved block displace the selected complete semantic tuple.
+  const recommendedExecutionId = selectedMetricId
+    ?? resolution.recommendedExecutionId
+    ?? selectedConceptIds[0];
+  const recommendedCandidate = recommendedExecutionId
+    ? candidates.find((candidate) => candidate.id === recommendedExecutionId || candidate.qualifiedId === recommendedExecutionId)
+    : undefined;
+  const rejectedCandidates = resolution.rejectedCandidates.filter((candidate) =>
+    candidates.some((known) => known.id === candidate.id || known.qualifiedId === candidate.id));
+  const queryIntent = bindSelectedMemberValuesToSeed({
+    seed,
+    selectedConceptIds,
+    candidates,
+  });
+  const receipts: MeaningResolutionOverrideReceiptV1[] = [];
+  const recordHostPreserved = (
+    field: Exclude<MeaningResolutionOverrideReceiptV1['field'], 'candidate_selection' | 'member_binding'>,
+    differs: boolean,
+    reason: string,
+  ) => {
+    if (differs) receipts.push({ version: 1, field, action: 'host_preserved', reason });
+  };
+  recordHostPreserved(
+    'interpreted_question',
+    normalizeMeaningText(resolution.interpretedQuestion) !== normalizeMeaningText(seed.sourceQuestion),
+    'The source question remains host-owned; model rephrasing cannot add context.',
+  );
+  recordHostPreserved(
+    'question_type',
+    resolution.questionType !== questionTypeFromText(seed.sourceQuestion),
+    'The host classifies the request mode before meaning resolution.',
+  );
+  recordHostPreserved(
+    'query_intent',
+    !sameQueryIntent(resolution.queryIntent, seed.queryIntent),
+    'Explicit measures, entity/grain, dimensions, filters, ranking, outputs, and time requirements remain host-owned.',
+  );
+  recordHostPreserved(
+    'recommended_route',
+    resolution.recommendedRoute !== (recommendedCandidate ? cascadeNominationForCandidate(recommendedCandidate) : 'clarify'),
+    'Tier selection is deterministic cascade authority, not a model recommendation.',
+  );
+  recordHostPreserved(
+    'analytical_frame',
+    resolution.analyticalFrame !== undefined,
+    'A model frame cannot introduce identifiers, SQL semantics, trust, or a replacement route.',
+  );
+  if (selectedConceptIds.length > 0) {
+    receipts.push({
+      version: 1,
+      field: 'candidate_selection',
+      action: 'selection_accepted',
+      reason: 'The model selected supplied candidate IDs; host validation still verifies package membership and compatibility.',
+      candidateIds: selectedConceptIds,
+    });
+  }
+  if (omittedUngroundedMetricIds.length > 0) {
+    receipts.push({
+      version: 1,
+      field: 'candidate_selection',
+      action: 'host_preserved',
+      reason: 'A selected semantic metric would add an unspoken qualifier to the host-owned measure requirement.',
+      candidateIds: omittedUngroundedMetricIds,
+    });
+  }
+  if (!sameQueryIntent(queryIntent, seed.queryIntent)) {
+    receipts.push({
+      version: 1,
+      field: 'member_binding',
+      action: 'selection_accepted',
+      reason: 'A selected, supplied semantic member canonically bound an existing host filter value; no filter field or scope was added.',
+      candidateIds: selectedConceptIds,
+    });
+  }
+  return {
+    interpretedQuestion: seed.sourceQuestion,
+    questionType: questionTypeFromText(seed.sourceQuestion),
+    selectedConceptIds,
+    ...(recommendedExecutionId ? { recommendedExecutionId } : {}),
+    queryIntent,
+    rejectedCandidates,
+    confidence: resolution.confidence,
+    missingInformation: [...new Set(resolution.missingInformation)],
+    recommendedRoute: recommendedCandidate ? cascadeNominationForCandidate(recommendedCandidate) : 'clarify',
+    ...(resolution.clarifyingQuestion ? { clarifyingQuestion: resolution.clarifyingQuestion } : {}),
+    hostRequirementSeed: seed,
+    ...(receipts.length > 0 ? { overrideReceipts: receipts } : {}),
+  };
+}
+
+/**
+ * Keep the host's literal metric requirement authoritative when choosing a
+ * primary nominated metric. This intentionally uses exact canonical identity
+ * rather than retrieval-style token matching: aliases are normalized into the
+ * requirement seed before this boundary, so a legitimate `sales` ->
+ * `revenue` binding still matches while a related `rollover balance amount`
+ * card cannot add `balance` to an unspoken request for `rollover amount`.
+ */
+function metricCandidateExactlyMatchesSeed(
+  candidate: AgentEvidenceCandidate,
+  seed: AnalyticalRequirementSeedV1,
+): boolean {
+  if (seed.requirements.measures.length === 0) return true;
+  const identities = [candidate.name, ...(candidate.aliases ?? []), candidate.qualifiedId ?? candidate.id]
+    .map((value) => canonicalMetricIdentity(value))
+    .filter(Boolean);
+  // A multi-metric tuple legitimately selects one candidate per requested
+  // measure. Each candidate must prove at least one host metric; requiring a
+  // single candidate to prove the entire tuple would drop `beverage revenue`
+  // beside `total revenue` before the semantic compiler can combine them.
+  return seed.requirements.measures.some((measure) => {
+    const requested = canonicalMetricIdentity(measure);
+    const genericBareTerm = /^(?:amount|value|count|number|total|rate|percentage|percent)$/.test(requested);
+    return identities.some((identity) => identity === requested
+      // A governed semantic metric may carry a leading accounting qualifier
+      // (`net revenue`) for the reader's base term (`revenue`).  Keep that
+      // narrow suffix form for the established semantic contract, but never
+      // permit an inserted qualifier: `rollover balance amount` must not
+      // satisfy the distinct request `rollover amount`.
+      || (!genericBareTerm && identity.endsWith(` ${requested}`)));
+  });
+}
+
+function canonicalMetricIdentity(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/[._:/-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * A selected semantic member can canonically correct an already-host-owned
+ * filter value (for example a retrieved alias/typo), but it cannot introduce
+ * a new filter field, member, or prior-result scope.  Ambiguous member cards
+ * deliberately leave the seed value untouched for later clarification.
+ */
+function bindSelectedMemberValuesToSeed(input: {
+  seed: AnalyticalRequirementSeedV1;
+  selectedConceptIds: string[];
+  candidates: AgentEvidenceCandidate[];
+}): MeaningQueryIntent {
+  const selectedMembers = input.selectedConceptIds.flatMap((id) => {
+    const candidate = input.candidates.find((item) => item.id === id || item.qualifiedId === id);
+    return candidate?.kind === 'semantic_member' ? [candidate] : [];
+  });
+  const queryIntent = cloneSeedQueryIntent(input.seed);
+  return {
+    ...queryIntent,
+    filters: queryIntent.filters.map((filter) => {
+      const matches = selectedMembers.filter((candidate) =>
+        [candidate.name, ...(candidate.aliases ?? [])]
+          .map(normalizeMemberBindingText)
+          .includes(normalizeMemberBindingText(filter.value)));
+      return matches.length === 1 ? { ...filter, value: matches[0]!.name } : filter;
+    }),
+  };
+}
+
+function normalizeMemberBindingText(value: string): string {
+  return value.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+/**
+ * The model's selected candidate is a nomination for the cascade, not the
+ * final eligibility verdict. A partial certified card must therefore enter
+ * the certified tier so the deterministic output-contract check can continue
+ * to semantic/exploratory evidence instead of pretending it is raw SQL.
+ */
+function cascadeNominationForCandidate(candidate: AgentEvidenceCandidate): MeaningExecutionRoute {
+  if (candidate.kind === 'certified_block') return 'certified';
+  if (candidate.kind === 'semantic_metric' || candidate.kind === 'semantic_member') return 'semantic';
+  return candidate.trustTier === 'governed_sql' ? 'governed_sql' : 'exploratory';
+}
+
+function cloneSeedQueryIntent(seed: AnalyticalRequirementSeedV1): MeaningQueryIntent {
+  return {
+    measures: [...seed.queryIntent.measures],
+    dimensions: [...seed.queryIntent.dimensions],
+    filters: seed.queryIntent.filters.map((filter) => ({ field: filter.field, value: filter.value })),
+    ...(seed.queryIntent.timeRange ? { timeRange: seed.queryIntent.timeRange } : {}),
+    ...(seed.queryIntent.timeGrain ? { timeGrain: seed.queryIntent.timeGrain } : {}),
+    ...(seed.queryIntent.order ? { order: seed.queryIntent.order } : {}),
+    ...(seed.queryIntent.limit !== undefined ? { limit: seed.queryIntent.limit } : {}),
+    ...(seed.queryIntent.fiscalCalendarId ? { fiscalCalendarId: seed.queryIntent.fiscalCalendarId } : {}),
+    ...(seed.queryIntent.fiscalDateRoleId ? { fiscalDateRoleId: seed.queryIntent.fiscalDateRoleId } : {}),
+  };
+}
+
+function sameQueryIntent(
+  left: MeaningQueryIntent,
+  right: AnalyticalRequirementSeedV1['queryIntent'],
+): boolean {
+  return JSON.stringify({
+    measures: left.measures,
+    dimensions: left.dimensions,
+    filters: left.filters,
+    timeRange: left.timeRange,
+    timeGrain: left.timeGrain,
+    order: left.order,
+    limit: left.limit,
+    fiscalCalendarId: left.fiscalCalendarId,
+    fiscalDateRoleId: left.fiscalDateRoleId,
+  }) === JSON.stringify({
+    measures: right.measures,
+    dimensions: right.dimensions,
+    filters: right.filters,
+    timeRange: right.timeRange,
+    timeGrain: right.timeGrain,
+    order: right.order,
+    limit: right.limit,
+    fiscalCalendarId: right.fiscalCalendarId,
+    fiscalDateRoleId: right.fiscalDateRoleId,
+  });
+}
+
+function normalizeMeaningText(value: string): string {
+  return value.trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
 export function routeForEvidenceCandidate(candidate: AgentEvidenceCandidate): MeaningExecutionRoute {

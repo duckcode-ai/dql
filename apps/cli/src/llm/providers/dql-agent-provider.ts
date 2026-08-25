@@ -2,7 +2,12 @@ import {
   classifyProviderFailure,
   deadlineScale,
   planAnalystTurn,
+  attachAskTraceObserverV1,
+  analyticalErrorDetail,
   rerankCandidates,
+  askTraceObserverForV1,
+  type AskTraceObserverV1,
+  type ProviderAttemptTraceV1,
   type ProviderFailureDiagnosticV1,
 } from '@duckcodeailabs/dql-agent';
 import { buildAnalystLoopTools } from '../analyst-loop-tools.js';
@@ -27,6 +32,7 @@ import {
   type CertifiedFitConfirmation,
   type CertifiedFitConfirmationRequest,
   type AgentFollowUpContext,
+  type AgentConversationBindingV1,
   type AgentMemberBinding,
   type AgentPriorResultReference,
   type AgentProvider,
@@ -35,6 +41,7 @@ import {
   type ConversationSnapshot,
   type LocalContextPack,
   type ProviderDispatchEvent,
+  type ProviderDispatchCompletionEvent,
   type Skill,
   isTrustedConversationTurn,
   createProviderDispatchEgressReceipt,
@@ -60,7 +67,14 @@ import {
   resolveCassetteModeFromEnv,
   withCassette,
 } from '../../commands/agent-eval-cassette.js';
-import { buildManifest, normalizeDqlArtifactReference, resolveDbtManifestPath, type ProviderEgressReceiptV1 } from '@duckcodeailabs/dql-core';
+import {
+  buildManifest,
+  normalizeDqlArtifactReference,
+  resolveDbtManifestPath,
+  type ProviderDispatchPhaseV1,
+  type ProviderEgressPurpose,
+  type ProviderEgressReceiptV1,
+} from '@duckcodeailabs/dql-core';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -82,6 +96,18 @@ type SimpleProviderId =
   | Extract<ProviderId, 'anthropic' | 'openai' | 'gemini' | 'ollama' | 'custom-openai'>
   | 'claude-code'
   | 'codex';
+
+/**
+ * The local runtime rejects a missing connection before it hands a statement
+ * to a connector. Keep this check structural: parsing a user-facing message
+ * here would let an unrelated warehouse failure disappear from SQL telemetry.
+ */
+function isPreSqlConnectionConfigurationError(error: unknown): boolean {
+  const detail = analyticalErrorDetail(error);
+  return detail?.origin === 'host'
+    && detail.stage === 'execute'
+    && detail.code === 'connection_not_configured';
+}
 
 interface ProviderSpec {
   label: string;
@@ -190,6 +216,134 @@ function providerBoundaryDiagnostic(input: {
     modelFingerprint: fingerprint(config.model),
     baseOriginFingerprint: fingerprint(origin),
   });
+}
+
+/** One-way runtime correlation only; never persist the provider/model string. */
+function runtimeFingerprint(value: string): string {
+  return `sha256:${createHash('sha256').update(value).digest('hex')}`;
+}
+
+/**
+ * Tool names are executable contract identifiers, not user/model supplied
+ * values. Keep even that narrow surface allowlisted so an unexpected provider
+ * payload cannot turn a trace into a metadata side channel.
+ */
+const TRACEABLE_ASK_TOOL_KINDS = new Set([
+  'check_compatibility',
+  'compile_resolved_analytical_plan',
+  'compile_semantic_query',
+  'describe_notebook_dataset',
+  'execute_local_analysis',
+  'explain_metric',
+  'get_table_schema',
+  'list_notebook_datasets',
+  'preview_query',
+  'propose_cross_source_join',
+  'query_semantic_model',
+  'sample_notebook_dataset',
+  'scan_manifest',
+  'search_metadata',
+  'search_project_files',
+  'search_semantic_layer',
+  'search_values',
+  'validate_sql',
+]);
+
+const ASK_TRACE_TOOL_CALLBACK = Symbol('dql.askTraceToolCallback');
+
+/**
+ * A same-provider transport retry is minted only by this physical runner after
+ * it observed a typed transient failure.  The public option field is carried
+ * to providers for receipt correlation, but it is not itself authority to
+ * borrow an earlier receipt.
+ */
+const RUNNER_OWNED_RETRY_LINEAGE: unique symbol = Symbol('dql.runnerOwnedRetryLineage');
+
+type RunnerOwnedProviderToolLoopOptions = ProviderToolLoopOptions & {
+  [RUNNER_OWNED_RETRY_LINEAGE]?: {
+    parentAttemptIndex: number;
+    phase: ProviderDispatchPhaseV1;
+    purpose: ProviderEgressPurpose;
+  };
+};
+
+function frozenExploratoryRepairAuthorityForRequest(req: AgentRunRequest): boolean {
+  const plan = req.resolvedAnalyticalPlan;
+  return req.orchestrationMode !== 'research'
+    && req.selectedCascadeTier === 'exploratory_sql'
+    && plan?.mode === 'authoritative'
+    && plan.capability === 'bounded_exploration'
+    && Boolean(plan.planId && plan.fingerprint && plan.snapshotId)
+    && (plan.sourceRelationIds?.length ?? 0) > 0
+    && Boolean(
+      req.generatedProposalTargetFingerprint
+      && req.prepareExploratorySqlExecution
+      && req.executeAgenticGeneratedSql,
+    );
+}
+
+function repairAuthorityAdmissionError(): Error {
+  return Object.assign(new Error(
+    'Repair transport admission denied because this ordinary Ask has no matching frozen exploratory repair authority.',
+  ), { code: 'PROVIDER_REPAIR_AUTHORITY_ADMISSION_DENIED' });
+}
+
+function retryLineageAdmissionError(): Error {
+  return Object.assign(new Error(
+    'Provider retry admission denied because retry lineage was not minted by this runner after a transient same-provider failure.',
+  ), { code: 'PROVIDER_RETRY_LINEAGE_ADMISSION_DENIED' });
+}
+
+type TraceAwareToolCallback = NonNullable<ProviderToolLoopOptions['onToolCall']> & {
+  [ASK_TRACE_TOOL_CALLBACK]?: true;
+};
+
+function recordPhysicalToolCallTrace(
+  observer: AskTraceObserverV1,
+  event: Parameters<NonNullable<ProviderToolLoopOptions['onToolCall']>>[0],
+  attemptIndex: number,
+): void {
+  if (!observer.enabled) return;
+  const now = Date.now();
+  const duration = Math.max(0, Math.min(86_400_000, event.durationMs ?? 0));
+  const startedAt = new Date(now - duration).toISOString();
+  const completedAt = new Date(now).toISOString();
+  const call = {
+    version: 1 as const,
+    toolCallId: `tool-${attemptIndex}`,
+    toolKind: TRACEABLE_ASK_TOOL_KINDS.has(event.name) ? event.name : 'unknown_tool',
+    attemptIndex,
+    ...(event.isError ? { safeErrorCode: 'tool_error' } : {}),
+  };
+  const span = observer.startSpan({
+    name: 'tool.call',
+    stage: 'tool',
+    startedAt,
+    payload: { kind: 'tool', call },
+    reasonCode: 'started',
+  });
+  observer.finishSpan(span, {
+    completedAt,
+    outcome: event.isError ? 'error' : 'ok',
+    reasonCode: event.isError ? 'tool_failure' : 'completed',
+    payload: { kind: 'tool', call },
+  });
+}
+
+function createAskTraceToolCallback(observer: AskTraceObserverV1): TraceAwareToolCallback {
+  let attemptIndex = 0;
+  const callback: TraceAwareToolCallback = (event) => {
+    recordPhysicalToolCallTrace(observer, event, ++attemptIndex);
+  };
+  Object.defineProperty(callback, ASK_TRACE_TOOL_CALLBACK, {
+    value: true,
+    enumerable: false,
+  });
+  return callback;
+}
+
+function isAskTraceToolCallback(callback: ProviderToolLoopOptions['onToolCall'] | undefined): boolean {
+  return Boolean((callback as TraceAwareToolCallback | undefined)?.[ASK_TRACE_TOOL_CALLBACK]);
 }
 
 function createCertifiedFitConfirmation(provider: AgentProvider, signal?: AbortSignal): CertifiedFitConfirmation {
@@ -491,10 +645,17 @@ function readOrchestratorConfig(projectRoot: string): Record<string, unknown> | 
  * measured on ollama, where all three agentic dispatches planned successfully
  * and then died at "soft target elapsed before this provider dispatch could
  * start". Its payoff is a legible trace, and `onStep` is not wired to SSE yet,
- * so today it buys nothing a user can see. Opt in with
- * `agent.orchestrator.turnPlanning: true` once streaming lands.
+ * so today it buys nothing a user can see. Ordinary Ask already has a
+ * candidate-ID meaning call that produces the host-owned analytical plan, so
+ * it must never spend an extra provider transport on turn planning even when
+ * a stale local config enables it. Research remains the only explicit lane
+ * that may opt in to a separate plan stage.
  */
-function turnPlanningEnabled(projectRoot: string): boolean {
+function turnPlanningEnabled(
+  projectRoot: string,
+  orchestrationMode: AgentRunRequest['orchestrationMode'] | undefined,
+): boolean {
+  if (orchestrationMode !== 'research') return false;
   const orchestrator = readAgentConfig(projectRoot)?.orchestrator;
   if (!orchestrator || typeof orchestrator !== 'object') return false;
   return (orchestrator as { turnPlanning?: unknown }).turnPlanning === true;
@@ -592,8 +753,24 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
     async run(req, emit, signal) {
       const spec = SPECS[id];
       const rawProvider = applyEvalCassette(providerOverride ?? spec.create(req.projectRoot), req.projectRoot);
+      const askTrace = askTraceObserverForV1(req);
+      // A router-frozen exact certified block is a deterministic execution
+      // lane. It may not probe provider readiness merely because it shares the
+      // answer-loop adapter with provider-dependent routes. The flag is
+      // server-owned and the deterministic provider below throws if a future
+      // branch accidentally tries to generate text, so this cannot create a
+      // silent provider fallback.
+      const providerPreflightRequired = req.providerPreflightRequired !== false;
       const isResearch = req.orchestrationMode === 'research';
-      const maxProviderDispatches = isResearch ? 8 : 4;
+      const frozenExploratoryRepairRoute = frozenExploratoryRepairAuthorityForRequest(req);
+      // Ordinary analytical Ask has one candidate-ID interpretation, one
+      // generation, and — only for an already frozen exploratory plan — one
+      // same-plan model-decline correction. The shared run ledger remains the
+      // authority across calls; this per-provider ceiling keeps un-ledgered
+      // direct callers in the same bounded shape.  A legacy text-tool run is
+      // not an analytical repair route and retains its established three-tool
+      // plus final-response wrapper cap; it cannot acquire the repair phase.
+      const maxProviderDispatches = isResearch ? 8 : frozenExploratoryRepairRoute ? 3 : 4;
       const researchRowsOptIn = isResearch && req.researchResultRowsOptIn === true;
       const sharedDispatchEvidence = req.providerDispatchEvidenceSink;
       let providerRoundTrips = 0;
@@ -602,6 +779,16 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
       let pendingColumnCount = 0;
       let pendingCumulativeResultRowCount = 0;
       let pendingResearchPurpose: 'research_narration' | 'research_tool' = 'research_narration';
+      let physicalToolAttemptIndex = 0;
+      let physicalProviderAttemptIndex = 0;
+      let lastFailedProviderSpanId: string | undefined;
+      let physicalDispatchSequence = 0;
+      let lastAdmittedPhysicalDispatch: {
+        sequence: number;
+        attemptIndex: number;
+        phase: ProviderDispatchPhaseV1;
+        purpose: ProviderEgressPurpose;
+      } | undefined;
       const providerEgressReceipts: ProviderEgressReceiptV1[] = [];
       const dispatchEvidence = (fallbackReason: string) => {
         const shared = sharedDispatchEvidence?.snapshot(fallbackReason);
@@ -616,47 +803,287 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
               fallbackReason,
             };
       };
+      /**
+       * Count a SQL call at the physical execution boundary, not merely when
+       * the answer loop asks the host to prepare one. A tagged missing
+       * connection fails before the connector sees SQL, so it must remain zero
+       * in the durable receipt and trace. Other rejected execution callbacks
+       * retain the historical count: they may have reached the warehouse and
+       * failed there.
+       */
+      const executeAtSqlBoundary = async <T>(work: () => Promise<T>): Promise<T> => {
+        try {
+          const result = await work();
+          sqlExecutions += 1;
+          return result;
+        } catch (error) {
+          if (!isPreSqlConnectionConfigurationError(error)) sqlExecutions += 1;
+          throw error;
+        }
+      };
       signal.addEventListener('abort', () => {
         const reason = signal.reason;
         if (reason && typeof reason === 'object') {
           Object.assign(reason, { providerDispatchEvidence: dispatchEvidence('cancelled') });
         }
       }, { once: true });
-      const withPhysicalDispatchObserver = (options?: ProviderToolLoopOptions): ProviderToolLoopOptions => ({
+      const providerAttemptPayload = (
+        event: Pick<ProviderDispatchEvent, 'provider' | 'model'>,
+        input: {
+          admission: 'admitted' | 'denied';
+          phase: ProviderDispatchPhaseV1;
+          purpose: ProviderEgressPurpose;
+          retryOfSpanId?: string;
+          diagnostic?: ProviderFailureDiagnosticV1;
+        },
+      ) => {
+        const diagnostic = input.diagnostic;
+        const config = getEffectiveProviderConfig(req.projectRoot, id);
+        let baseOrigin: string | undefined;
+        if (config.baseUrl) {
+          try { baseOrigin = new URL(config.baseUrl).origin; } catch { baseOrigin = config.baseUrl; }
+        }
+        const model = event.model ?? config.model;
+        return {
+          version: 1 as const,
+          phase: input.phase,
+          purpose: input.purpose,
+          physicalAttemptIndex: ++physicalProviderAttemptIndex,
+          providerFingerprint: diagnostic?.providerFingerprint ?? runtimeFingerprint(event.provider),
+          ...(diagnostic?.modelFingerprint || model ? { modelFingerprint: diagnostic?.modelFingerprint ?? runtimeFingerprint(model!) } : {}),
+          ...(diagnostic?.baseOriginFingerprint || baseOrigin ? { baseOriginFingerprint: diagnostic?.baseOriginFingerprint ?? runtimeFingerprint(baseOrigin!) } : {}),
+          ...(input.retryOfSpanId ? { retryOfSpanId: input.retryOfSpanId } : {}),
+          admission: input.admission,
+          ...(diagnostic?.httpStatusClass ? { httpStatusClass: diagnostic.httpStatusClass } : {}),
+          ...(diagnostic?.retryable !== undefined ? { retryable: diagnostic.retryable } : {}),
+          ...(diagnostic?.safeAction ? { safeAction: diagnostic.safeAction } : {}),
+          ...(diagnostic?.cause ? { cause: diagnostic.cause } : {}),
+          provenance: 'live' as const,
+        };
+      };
+      const providerDiagnosticForTrace = (
+        error: unknown,
+        phase: ProviderFailureDiagnosticV1['phase'],
+      ): ProviderFailureDiagnosticV1 => providerBoundaryDiagnostic({
+        providerId: id,
+        projectRoot: req.projectRoot,
+        phase,
+        error,
+        code: error && typeof error === 'object' ? String((error as { code?: unknown }).code ?? '') : undefined,
+      });
+      /**
+       * The wrapper is the authoritative physical-dispatch boundary. Preserve
+       * a Research phase that the host explicitly set, but ordinary Ask only
+       * accepts the frozen-plan repair marker; every other Ask transport is
+       * answer generation.
+       */
+      const providerDispatchIdentity = (options?: ProviderToolLoopOptions): {
+        dispatchPhase: ProviderDispatchPhaseV1;
+        purpose: ProviderEgressPurpose;
+        ordinaryRepairRequested: boolean;
+        ordinaryRepairAuthorized: boolean;
+        retryRequested: boolean;
+        retryAuthorized: boolean;
+      } => {
+        const requestedPhase = options?.dispatchPhase;
+        const requestedPurpose = options?.egressPurpose;
+        // In an ordinary Ask, `repair` and `repair_sql` are a paired,
+        // server-owned capability.  Preserve the requested repair identity in
+        // a denied trace so support can see what was refused, but do not admit
+        // it unless this runner captured the immutable exploratory RAP and
+        // the answer loop supplied the single-send repair shape.
+        const ordinaryRepairRequested = !isResearch
+          && (requestedPhase === 'repair' || requestedPurpose === 'repair_sql');
+        const ordinaryRepairAuthorized = ordinaryRepairRequested
+          && frozenExploratoryRepairRoute
+          && requestedPhase === 'repair'
+          && requestedPurpose === 'repair_sql'
+          && options?.maxProviderDispatches === 1
+          && options?.retryOfAttemptIndex === undefined;
+        const researchPhase = requestedPhase === 'classification'
+          || requestedPhase === 'meaning_resolution'
+          || requestedPhase === 'planning'
+          || requestedPhase === 'generation'
+          || requestedPhase === 'narration'
+          || requestedPhase === 'repair';
+        const dispatchPhase: ProviderDispatchPhaseV1 = isResearch && researchPhase
+          ? requestedPhase
+          : ordinaryRepairRequested
+            ? 'repair'
+            : 'generation';
+        const purpose: ProviderEgressPurpose = dispatchPhase === 'repair'
+          ? 'repair_sql'
+          : isResearch && (
+            requestedPurpose === 'research_narration'
+            || requestedPurpose === 'research_tool'
+            || requestedPurpose === 'answer_generation'
+          )
+            ? requestedPurpose
+            : isResearch
+              ? pendingResearchPurpose
+              : 'answer_generation';
+        const retryRequested = options?.retryOfAttemptIndex !== undefined;
+        const runnerRetry = (options as RunnerOwnedProviderToolLoopOptions | undefined)?.[RUNNER_OWNED_RETRY_LINEAGE];
+        const retryAuthorized = retryRequested
+          && Boolean(
+            runnerRetry
+            && runnerRetry.parentAttemptIndex === options?.retryOfAttemptIndex
+            && runnerRetry.phase === dispatchPhase
+            && runnerRetry.purpose === purpose,
+          );
+        return {
+          dispatchPhase,
+          purpose,
+          ordinaryRepairRequested,
+          ordinaryRepairAuthorized,
+          retryRequested,
+          retryAuthorized,
+        };
+      };
+      const withPhysicalDispatchObserver = (options?: ProviderToolLoopOptions): {
+        options: ProviderToolLoopOptions;
+        settle(outcome: 'ok' | 'error' | 'cancelled', error?: unknown): void;
+      } => {
+        // The answer loop can label exactly one frozen-plan correction as a
+        // repair. Do not let arbitrary provider options mint another phase:
+        // the local runner owns all other ordinary Ask dispatches as generation.
+        const identity = providerDispatchIdentity(options);
+        const {
+          dispatchPhase,
+          purpose,
+          ordinaryRepairRequested,
+          ordinaryRepairAuthorized,
+          retryRequested,
+          retryAuthorized,
+        } = identity;
+        const requestedPhysicalCap = typeof options?.maxProviderDispatches === 'number'
+          && Number.isInteger(options.maxProviderDispatches)
+          && options.maxProviderDispatches > 0
+          ? options.maxProviderDispatches
+          : maxProviderDispatches;
+        // A repair response is one physical send even if a lower-level
+        // provider supports protocol retries. The frozen plan's one repair
+        // reservation must not turn into an unbounded transport loop.
+        const physicalDispatchCap = dispatchPhase === 'repair'
+          ? 1
+          : Math.min(maxProviderDispatches, requestedPhysicalCap);
+        const onToolCall = options?.onToolCall;
+        const onProviderDispatch = options?.onProviderDispatch;
+        const onProviderDispatchComplete = options?.onProviderDispatchComplete;
+        const onProviderDispatchRejected = options?.onProviderDispatchRejected;
+        type PhysicalTraceEntry = {
+          spanId: string | undefined;
+          attempt: ProviderAttemptTraceV1;
+        };
+        const pending = new Map<string, PhysicalTraceEntry[]>();
+        const keyForDispatch = (event: Pick<ProviderDispatchEvent, 'provider' | 'operation' | 'attemptIndex'>) => `${event.provider}:${event.operation}:${event.attemptIndex}`;
+        // An admission failure can be surfaced both by a throwing admission
+        // callback and a provider's optional rejection callback. It is one
+        // unsent attempt, not two trace rows.
+        const admittedKeys = new Set<string>();
+        const deniedKeys = new Set<string>();
+        const finish = (
+          entry: PhysicalTraceEntry,
+          outcome: 'ok' | 'error' | 'cancelled',
+          error?: unknown,
+          httpStatus?: number,
+        ) => {
+          if (!entry.spanId) return;
+          if (outcome === 'ok') {
+            askTrace.finishSpan(entry.spanId, {
+              outcome: 'ok',
+              reasonCode: 'completed',
+              payload: { kind: 'provider', attempt: entry.attempt },
+            });
+            return;
+          }
+          const diagnostic = providerDiagnosticForTrace(
+            error ?? (typeof httpStatus === 'number' ? Object.assign(new Error(`HTTP ${httpStatus}`), { code: `HTTP_${httpStatus}` }) : undefined),
+            dispatchPhase,
+          );
+          const failureAttempt = {
+            ...entry.attempt,
+            ...(diagnostic.httpStatusClass ? { httpStatusClass: diagnostic.httpStatusClass } : {}),
+            retryable: diagnostic.retryable,
+            safeAction: diagnostic.safeAction,
+            cause: outcome === 'cancelled' ? 'cancelled' as const : diagnostic.cause,
+          };
+          askTrace.finishSpan(entry.spanId, {
+            outcome: outcome === 'cancelled' ? 'cancelled' : 'error',
+            reasonCode: outcome === 'cancelled' ? 'cancelled' : 'provider_failure',
+            payload: { kind: 'provider', attempt: failureAttempt },
+          });
+          lastFailedProviderSpanId = entry.spanId;
+        };
+        const physicalOptions: ProviderToolLoopOptions = {
         ...(options ?? {}),
-        // A tool-calling loop capped at two physical sends can make exactly one
-        // tool call before it must answer, which is not enough to look something
-        // up and then use it. The run-scoped ledger is the real guardrail.
-        maxProviderDispatches,
+        // The raw provider loop has the same outer ceiling as the local Ask
+        // contract. The run-scoped ledger is the authority for phase limits:
+        // one planning/generation transport plus, only when the answer loop
+        // presents a frozen exploratory repair marker, one repair transport.
+        maxProviderDispatches: physicalDispatchCap,
         ...(sharedDispatchEvidence?.mayStartToolCall
           ? { mayStartToolCall: () => sharedDispatchEvidence.mayStartToolCall!() }
           : {}),
         onProviderDispatch: (event: ProviderDispatchEvent) => {
-          const purpose = isResearch ? pendingResearchPurpose : 'answer_generation';
-          if (sharedDispatchEvidence) {
-            const envelope = sharedDispatchEvidence.observe(event, {
-              purpose,
-              dispatchPhase: 'generation',
-              optIn: pendingResultRowCount > 0 && researchRowsOptIn,
-              serializedResultShape: {
-                resultRowCount: pendingResultRowCount,
-                columnCount: pendingColumnCount,
-              },
-              ...(pendingCumulativeResultRowCount > 0
-                ? { cumulativeResultRowCount: pendingCumulativeResultRowCount }
-                : {}),
-            });
-            pendingResultRowCount = 0;
-            pendingColumnCount = 0;
-            pendingCumulativeResultRowCount = 0;
-            pendingResearchPurpose = 'research_narration';
-            return envelope;
-          }
+          try {
+            // This is the last synchronous boundary before a native provider
+            // serializes bytes.  A caller cannot mint an ordinary Ask repair
+            // merely by placing lifecycle labels in `ProviderToolLoopOptions`.
+            if (ordinaryRepairRequested && !ordinaryRepairAuthorized) {
+              throw repairAuthorityAdmissionError();
+            }
+            // Retry correlation is likewise host-owned. The shared ledger
+            // validates the parent receipt too, but this marker prevents a
+            // caller from claiming an arbitrary earlier attempt before that
+            // receipt check can admit a wire body.
+            if (retryRequested && !retryAuthorized) {
+              throw retryLineageAdmissionError();
+            }
+            if (sharedDispatchEvidence) {
+              const envelope = sharedDispatchEvidence.observe(event, {
+                purpose,
+                dispatchPhase,
+                optIn: pendingResultRowCount > 0 && researchRowsOptIn,
+                serializedResultShape: {
+                  resultRowCount: pendingResultRowCount,
+                  columnCount: pendingColumnCount,
+                },
+                ...(pendingCumulativeResultRowCount > 0
+                  ? { cumulativeResultRowCount: pendingCumulativeResultRowCount }
+                  : {}),
+                ...(options?.retryOfAttemptIndex !== undefined
+                  ? { retryOfAttemptIndex: options.retryOfAttemptIndex }
+                  : {}),
+              });
+              pendingResultRowCount = 0;
+              pendingColumnCount = 0;
+              pendingCumulativeResultRowCount = 0;
+              pendingResearchPurpose = 'research_narration';
+              const observedEnvelope = onProviderDispatch?.(event) ?? envelope;
+              const attempt = providerAttemptPayload(event, {
+                admission: 'admitted',
+                phase: dispatchPhase,
+                purpose,
+                retryOfSpanId: lastFailedProviderSpanId,
+              });
+              const spanId = askTrace.startSpan({ name: 'provider.attempt', stage: 'provider', reasonCode: 'started', payload: { kind: 'provider', attempt } });
+              const key = keyForDispatch(event);
+              lastAdmittedPhysicalDispatch = {
+                sequence: ++physicalDispatchSequence,
+                attemptIndex: event.attemptIndex,
+                phase: dispatchPhase,
+                purpose,
+              };
+              admittedKeys.add(key);
+              pending.set(key, [...(pending.get(key) ?? []), { spanId, attempt }]);
+              return observedEnvelope;
+            }
           // Fallback path only (CLI/MCP-direct runs carry no shared ledger).
           // Kept in step with `maxProviderDispatches` above so the same question
           // does not get a different budget depending on which surface asked it.
-          if (!isResearch && providerRoundTrips >= 4) {
-            throw Object.assign(new Error('Provider dispatch budget exhausted after four ordinary generation attempts.'), {
+          if (!isResearch && providerRoundTrips >= physicalDispatchCap) {
+            throw Object.assign(new Error(`Provider dispatch budget exhausted after ${physicalDispatchCap} ordinary Ask attempts.`), {
               code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED',
             });
           }
@@ -669,8 +1096,11 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           providerRoundTrips += 1;
           providerEgressReceipts.push(createProviderDispatchEgressReceipt({
             purpose,
-            dispatchPhase: 'generation',
+            dispatchPhase,
             provider: rawProvider.name,
+            ...(options?.retryOfAttemptIndex !== undefined
+              ? { retryOfAttemptIndex: options.retryOfAttemptIndex }
+              : {}),
             permittedCategories: pendingResultRowCount > 0
               ? ['instructions', 'question', 'schema_metadata', 'governed_context', 'result_rows']
               : ['instructions', 'question', 'schema_metadata', 'governed_context'],
@@ -688,71 +1118,325 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           pendingColumnCount = 0;
           pendingCumulativeResultRowCount = 0;
           pendingResearchPurpose = 'research_narration';
-          return envelope;
+          const observedEnvelope = onProviderDispatch?.(event) ?? envelope;
+          const attempt = providerAttemptPayload(event, {
+            admission: 'admitted',
+            phase: dispatchPhase,
+            purpose,
+            retryOfSpanId: lastFailedProviderSpanId,
+          });
+          const spanId = askTrace.startSpan({ name: 'provider.attempt', stage: 'provider', reasonCode: 'started', payload: { kind: 'provider', attempt } });
+          const key = keyForDispatch(event);
+          lastAdmittedPhysicalDispatch = {
+            sequence: ++physicalDispatchSequence,
+            attemptIndex: event.attemptIndex,
+            phase: dispatchPhase,
+            purpose,
+          };
+          admittedKeys.add(key);
+          pending.set(key, [...(pending.get(key) ?? []), { spanId, attempt }]);
+          return observedEnvelope;
+          } catch (error) {
+            // The send was denied before an HTTP attempt. Preserve that
+            // distinction so support does not misread a budget/admission guard
+            // as a provider outage.
+            const key = keyForDispatch(event);
+            if (!admittedKeys.has(key) && !deniedKeys.has(key)) {
+              deniedKeys.add(key);
+              const diagnostic = providerDiagnosticForTrace(error, dispatchPhase);
+              const attempt = providerAttemptPayload(event, {
+                admission: 'denied',
+                phase: dispatchPhase,
+                purpose,
+                diagnostic,
+                retryOfSpanId: lastFailedProviderSpanId,
+              });
+              const spanId = askTrace.startSpan({ name: 'provider.attempt', stage: 'provider', reasonCode: 'provider_failure', payload: { kind: 'provider', attempt } });
+              askTrace.finishSpan(spanId, {
+                outcome: 'denied',
+                reasonCode: 'provider_failure',
+                payload: { kind: 'provider', attempt },
+              });
+              lastFailedProviderSpanId = spanId;
+            }
+            try {
+              onProviderDispatchRejected?.({
+                provider: event.provider,
+                operation: event.operation,
+                attemptIndex: event.attemptIndex,
+                ...(event.model ? { model: event.model } : {}),
+                error,
+              });
+            } catch {
+              // A source observer cannot turn a denied local admission into a
+              // provider send or a second failure record.
+            }
+            throw error;
+          }
         },
-      });
+        onProviderDispatchComplete: (event: ProviderDispatchCompletionEvent) => {
+          const key = keyForDispatch(event);
+          const entries = pending.get(key) ?? [];
+          const entry = entries[0];
+          // A successful HTTP response or subscription child-process exit is
+          // merely a physical milestone. Keep the same span open until the
+          // parser/stream/result path settles; this prevents a malformed 200
+          // response from being recorded as a successful provider attempt.
+          if (entry && event.outcome === 'ok' && (event.settlement === 'transport' || event.settlement === 'process')) {
+            entry.attempt = {
+              ...entry.attempt,
+              ...(event.settlement === 'transport' ? { transportOutcome: 'ok' as const } : { processOutcome: 'ok' as const }),
+            };
+          } else {
+            const closed = entries.shift();
+            if (entries.length > 0) pending.set(key, entries); else pending.delete(key);
+            if (closed) finish(closed, event.outcome, event.error, event.httpStatus);
+          }
+          onProviderDispatchComplete?.(event);
+        },
+        onProviderDispatchRejected: (event) => {
+          // `prepareProviderHttpDispatch` rejected this before it could send
+          // bytes. Keep it as a denied admission rather than pretending an
+          // HTTP attempt happened (or losing dispatch-budget evidence).
+          const key = keyForDispatch(event);
+          if (!admittedKeys.has(key) && !deniedKeys.has(key)) {
+            deniedKeys.add(key);
+            const diagnostic = providerDiagnosticForTrace(event.error, dispatchPhase);
+            const attempt = providerAttemptPayload(event, {
+              admission: 'denied',
+              phase: dispatchPhase,
+              purpose,
+              diagnostic,
+              retryOfSpanId: lastFailedProviderSpanId,
+            });
+            const spanId = askTrace.startSpan({
+              name: 'provider.attempt',
+              stage: 'provider',
+              reasonCode: 'provider_failure',
+              payload: { kind: 'provider', attempt },
+            });
+            askTrace.finishSpan(spanId, {
+              outcome: 'denied',
+              reasonCode: 'provider_failure',
+              payload: { kind: 'provider', attempt },
+            });
+            lastFailedProviderSpanId = spanId;
+          }
+          try { onProviderDispatchRejected?.(event); } catch { /* observer is fail-open */ }
+        },
+        onToolCall: (event) => {
+          // Native providers call this callback at the physical tool boundary.
+          // Text-protocol loops use the trace-marked callback they received
+          // directly, so this avoids recording a single tool twice.
+          if (!isAskTraceToolCallback(onToolCall)) {
+            recordPhysicalToolCallTrace(askTrace, event, ++physicalToolAttemptIndex);
+          }
+          onToolCall?.(event);
+        },
+        };
+        return {
+          options: physicalOptions,
+          settle: (outcome, error) => {
+            for (const entries of pending.values()) {
+              for (const entry of entries) finish(entry, outcome, error);
+            }
+            pending.clear();
+          },
+        };
+      };
       // One retry only, on the SAME configured provider and only for failures
       // that are normally transient. The physical-dispatch observer remains in
       // the path for both attempts, so a retry cannot exceed the run-wide
       // dispatch budget or silently fail over to another provider.
       let transientRetryUsed = false;
-      const mayRetrySameProvider = (error: unknown): boolean => {
-        if (signal.aborted || transientRetryUsed) return false;
-        const code = error && typeof error === 'object' ? String((error as { code?: unknown }).code ?? '') : '';
-        const message = error instanceof Error ? error.message : String(error ?? '');
-        const diagnostic = `${code} ${message}`;
-        return !/PROVIDER_DISPATCH_BUDGET|RUN_SOFT_TARGET|RUN_DEADLINE|PROJECT_SNAPSHOT|abort|cancel/i.test(diagnostic)
-          && /(?:429|rate limit|too many requests|502|503|504|gateway|econn|network|fetch failed|connection refused|timeout|timed out)/i.test(diagnostic);
+      const mayRetrySameProvider = (
+        error: unknown,
+        identity: ReturnType<typeof providerDispatchIdentity>,
+        parent: typeof lastAdmittedPhysicalDispatch | undefined,
+      ): boolean => {
+        // A frozen exploratory run deliberately reserves its third physical
+        // dispatch for the same-plan SQL repair. A transient retry of meaning
+        // or generation would consume that reservation, so it is forbidden.
+        if (
+          signal.aborted
+          || transientRetryUsed
+          || frozenExploratoryRepairRoute
+          || identity.dispatchPhase === 'repair'
+          || !parent
+          || parent.phase !== identity.dispatchPhase
+          || parent.purpose !== identity.purpose
+        ) return false;
+        const diagnostic = providerDiagnosticForTrace(error, identity.dispatchPhase);
+        return diagnostic.retryable && (
+          diagnostic.cause === 'rate_limited'
+          || diagnostic.cause === 'gateway'
+          || diagnostic.cause === 'network'
+          || diagnostic.cause === 'provider_timeout'
+        );
       };
-      const retrySameProviderOnce = async <T>(operation: () => Promise<T>): Promise<T> => {
+      const retrySameProviderOnce = async <T>(
+        sourceOptions: ProviderToolLoopOptions | undefined,
+        operation: (options: ProviderToolLoopOptions | undefined) => Promise<T>,
+      ): Promise<T> => {
+        const identity = providerDispatchIdentity(sourceOptions);
+        const dispatchSequenceBefore = physicalDispatchSequence;
         try {
-          return await operation();
+          return await operation(sourceOptions);
         } catch (error) {
-          if (!mayRetrySameProvider(error)) throw error;
+          const parent = lastAdmittedPhysicalDispatch?.sequence && lastAdmittedPhysicalDispatch.sequence > dispatchSequenceBefore
+            ? lastAdmittedPhysicalDispatch
+            : undefined;
+          if (!mayRetrySameProvider(error, identity, parent)) throw error;
           transientRetryUsed = true;
           emit({ kind: 'thinking', text: 'The configured AI provider had a transient error; retrying it once within this run budget.' });
-          return operation();
+          // The retry carries immutable phase/purpose/provider lineage. The
+          // ledger re-validates the parent receipt before it admits any bytes.
+          const retryOptions: RunnerOwnedProviderToolLoopOptions = {
+            ...(sourceOptions ?? {}),
+            dispatchPhase: identity.dispatchPhase,
+            egressPurpose: identity.purpose,
+            retryOfAttemptIndex: parent!.attemptIndex,
+          };
+          Object.defineProperty(retryOptions, RUNNER_OWNED_RETRY_LINEAGE, {
+            value: {
+              parentAttemptIndex: parent!.attemptIndex,
+              phase: identity.dispatchPhase,
+              purpose: identity.purpose,
+            },
+            enumerable: false,
+          });
+          return operation(retryOptions);
+        }
+      };
+      const invokePhysicalProvider = async <T>(
+        sourceOptions: ProviderToolLoopOptions | undefined,
+        invoke: (options: ProviderToolLoopOptions) => Promise<T>,
+      ): Promise<T> => {
+        const observed = withPhysicalDispatchObserver(sourceOptions);
+        try {
+          const result = await invoke(observed.options);
+          // Built-in HTTP providers close each span via
+          // `onProviderDispatchComplete`; this only closes a custom provider
+          // that exposes admission but not the optional completion callback.
+          observed.settle('ok');
+          return result;
+        } catch (error) {
+          observed.settle(signal.aborted ? 'cancelled' : 'error', error);
+          throw error;
         }
       };
       const provider: AgentProvider = {
         name: rawProvider.name,
         available: () => rawProvider.available(),
-        generate: (...args) => {
-          return retrySameProviderOnce(() => rawProvider.generate(args[0], withPhysicalDispatchObserver(args[1])));
-        },
+        generate: (...args) => retrySameProviderOnce(
+          args[1],
+          (sourceOptions) => invokePhysicalProvider(sourceOptions, (options) => rawProvider.generate(args[0], options)),
+        ),
         ...(rawProvider.generateWithTools ? {
-          generateWithTools: (...args: Parameters<NonNullable<AgentProvider['generateWithTools']>>) => {
-            return retrySameProviderOnce(() => rawProvider.generateWithTools!(args[0], args[1], withPhysicalDispatchObserver(args[2])));
-          },
+          generateWithTools: (...args: Parameters<NonNullable<AgentProvider['generateWithTools']>>) => retrySameProviderOnce(
+            args[2],
+            (sourceOptions) => invokePhysicalProvider(sourceOptions, (options) => rawProvider.generateWithTools!(args[0], args[1], options)),
+          ),
         } : {}),
         ...(rawProvider.generateStream ? {
-          generateStream: (...args: Parameters<NonNullable<AgentProvider['generateStream']>>) => {
-            return rawProvider.generateStream!(args[0], withPhysicalDispatchObserver(args[1]), args[2]);
-          },
+          generateStream: (...args: Parameters<NonNullable<AgentProvider['generateStream']>>) => invokePhysicalProvider(args[1], (options) => rawProvider.generateStream!(args[0], options, args[2])),
         } : {}),
       };
-      const available = await provider.available().catch(() => false);
-      if (!available) {
-        const message = `${spec.label} is not configured or reachable. ${spec.setup}`;
-        emit({
-          kind: 'error',
-          message,
-          providerDiagnostic: providerBoundaryDiagnostic({
+      if (providerPreflightRequired) {
+        // Readiness is a real provider operation, not a proxy for a later
+        // answer-loop invocation. Record its own outcome before a route can
+        // depend on this provider, while keeping the observer wholly fail-open.
+        const preflightSpan = askTrace.startSpan({
+          name: 'provider.preflight',
+          stage: 'provider',
+          reasonCode: 'started',
+          payload: {
+            kind: 'provider',
+            attempt: {
+              version: 1,
+              phase: 'preflight',
+              physicalAttemptIndex: 0,
+              providerFingerprint: runtimeFingerprint(rawProvider.name),
+              readiness: 'unknown',
+              admission: 'unknown',
+              provenance: 'live',
+            },
+          },
+        });
+        let preflightError: unknown;
+        let available = false;
+        try {
+          available = await provider.available();
+        } catch (error) {
+          preflightError = error;
+        }
+        if (!available) {
+          const message = `${spec.label} is not configured or reachable. ${spec.setup}`;
+          const diagnostic = providerBoundaryDiagnostic({
             providerId: id,
             projectRoot: req.projectRoot,
             phase: 'preflight',
-            error: message,
+            error: preflightError ?? message,
             // Local Ollama readiness is a reachability concern; configured
             // remote providers missing credentials are authentication issues.
-            code: id === 'ollama' ? 'NETWORK_FAILURE' : 'AUTHENTICATION_FAILED',
-          }),
+            code: preflightError && typeof preflightError === 'object'
+              ? String((preflightError as { code?: unknown }).code ?? '')
+              : id === 'ollama' ? 'NETWORK_FAILURE' : 'AUTHENTICATION_FAILED',
+          });
+          askTrace.finishSpan(preflightSpan, {
+            outcome: 'unavailable',
+            reasonCode: 'provider_preflight',
+            payload: {
+              kind: 'provider',
+              attempt: {
+                version: 1,
+                phase: 'preflight',
+                physicalAttemptIndex: 0,
+                providerFingerprint: diagnostic.providerFingerprint ?? runtimeFingerprint(rawProvider.name),
+                ...(diagnostic.modelFingerprint ? { modelFingerprint: diagnostic.modelFingerprint } : {}),
+                ...(diagnostic.baseOriginFingerprint ? { baseOriginFingerprint: diagnostic.baseOriginFingerprint } : {}),
+                readiness: 'unavailable',
+                admission: 'unknown',
+                retryable: diagnostic.retryable,
+                safeAction: diagnostic.safeAction,
+                cause: diagnostic.cause,
+                provenance: 'live',
+              },
+            },
+          });
+          emit({
+            kind: 'error',
+            message,
+            providerDiagnostic: diagnostic,
+          });
+          return;
+        }
+        askTrace.finishSpan(preflightSpan, {
+          outcome: 'ok',
+          reasonCode: 'completed',
+          payload: {
+            kind: 'provider',
+            attempt: {
+              version: 1,
+              phase: 'preflight',
+              physicalAttemptIndex: 0,
+              providerFingerprint: runtimeFingerprint(rawProvider.name),
+              readiness: 'ready',
+              admission: 'unknown',
+              provenance: 'live',
+            },
+          },
         });
-        return;
       }
 
       try {
         const requestStartedAt = Date.now();
-        emit({ kind: 'thinking', text: `Using ${spec.label} through the governed DQL agent.` });
+        emit({
+          kind: 'thinking',
+          text: providerPreflightRequired
+            ? `Using ${spec.label} through the governed DQL agent.`
+            : 'Executing the router-selected certified plan without an AI provider.',
+        });
         const kgPath = defaultKgPath(req.projectRoot);
         if (!existsSync(kgPath)) {
           emit({ kind: 'thinking', text: 'Building the local agent knowledge graph from terms, business views, blocks, apps, dashboards, dbt, and semantic metadata.' });
@@ -774,6 +1458,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           const conversationSnapshot = conversationSnapshotFromContext(req.conversationContext);
           const rawFollowUp = followUpFromConversationContext(req, rawQuestion) ?? inferFollowUpContext(req, rawQuestion);
           const followUp = applyTopicShiftGuard(rawFollowUp, conversationSnapshot);
+          // This is a server-side decision recorded by the engine/trace. It
+          // never comes from client JSON or an LLM response.
+          req.conversationBinding = followUp?.binding ?? 'none';
           // CTX-003: retrieval and planning operate on the user's current words.
           // Prior SQL, DQL source, owners, and result metadata stay in the typed
           // follow-up envelope rendered separately for the provider; concatenating
@@ -980,7 +1667,12 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           // The strangler seam. `answerAgentic` and `answer` are interchangeable
           // here; which runs is a per-lane config decision that defaults to
           // legacy, so this is a no-op until a lane is explicitly enabled.
-          const answerLoopInput: Parameters<typeof answer>[0] = {
+          // Preserve the non-enumerable observer when the provider runner
+          // projects the AgentRun request into the answer-loop input.  The
+          // analyst loop receives this projected object, so dropping the
+          // observer here would make actual text-protocol tool calls invisible
+          // even though provider, router, and SQL evidence was recorded.
+          const answerLoopInput: Parameters<typeof answer>[0] = attachAskTraceObserverV1<Parameters<typeof answer>[0]>({
             question,
             ...(req.resolvedAnalyticalPlan
               ? { resolvedAnalyticalPlan: req.resolvedAnalyticalPlan }
@@ -1041,10 +1733,16 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             ...(req.preferredEvidenceIds?.length ? { preferredEvidenceIds: req.preferredEvidenceIds } : {}),
             ...(req.preferredExecutionId ? { preferredExecutionId: req.preferredExecutionId } : {}),
             executeCertifiedBlock: req.executeCertifiedBlock
-              ? async (...args) => { guardSnapshot(); sqlExecutions += 1; return req.executeCertifiedBlock!(...args); }
+              ? async (...args) => {
+                  guardSnapshot();
+                  return executeAtSqlBoundary(() => req.executeCertifiedBlock!(...args));
+                }
               : undefined,
             executeGeneratedSql: req.executeGeneratedSql
-              ? async (...args) => { guardSnapshot(); sqlExecutions += 1; return req.executeGeneratedSql!(...args); }
+              ? async (...args) => {
+                  guardSnapshot();
+                  return executeAtSqlBoundary(() => req.executeGeneratedSql!(...args));
+                }
               : undefined,
             prepareExploratorySqlExecution: req.prepareExploratorySqlExecution
               ? async (sql, ...args) => {
@@ -1076,8 +1774,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             executeAgenticGeneratedSql: req.executeAgenticGeneratedSql
               ? async (capability, sql, artifact) => {
                   guardSnapshot();
-                  sqlExecutions += 1;
-                  return req.executeAgenticGeneratedSql!(capability, sql, artifact);
+                  return executeAtSqlBoundary(() => req.executeAgenticGeneratedSql!(capability, sql, artifact));
                 }
               : undefined,
             agenticExecutionScope: {
@@ -1087,7 +1784,10 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
               targetFingerprint: req.generatedProposalTargetFingerprint,
             },
             executeDqlArtifact: req.executeDqlArtifact
-              ? async (...args) => { guardSnapshot(); sqlExecutions += 1; return req.executeDqlArtifact!(...args); }
+              ? async (...args) => {
+                  guardSnapshot();
+                  return executeAtSqlBoundary(() => req.executeDqlArtifact!(...args));
+                }
               : undefined,
             expandGroundingContext: createGroundingContextExpander(req.projectRoot, req.probeNamedRelations),
             answerLoopTools,
@@ -1125,7 +1825,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             // NOTE: no captureGeneratedDraft here — a plain answer/research question must NOT
             // auto-write a draft into the blocks space. A draft is created only when the user
             // explicitly acts (the "Create DQL draft" action → the dql_block_draft route).
-          };
+          } as Parameters<typeof answer>[0], askTrace);
           const result = await answerAgentic(answerLoopInput, {
             policy: resolveOrchestratorPolicy({
               config: readOrchestratorConfig(req.projectRoot),
@@ -1153,14 +1853,15 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
                     maxIterations: resolveOrchestratorPolicy({
                       config: readOrchestratorConfig(req.projectRoot),
                     }).maxIterations,
-                    // Match the physical wrapper cap and reserve the final
-                    // composition dispatch: an ordinary cap of four permits
-                    // at most three text-protocol tool observations.
+                    // Keep the raw loop bounded by the same physical ceiling
+                    // as the wrapper. The run-scoped ledger still admits only
+                    // one ordinary generation/planning transport; a separate
+                    // frozen-plan repair marker is required for the third send.
                     maxProviderDispatches,
                     // Scaled by the same knob as every other agent deadline, so
                     // a local model that needs seconds per call is not planned
                     // out of existence by a budget calibrated for a hosted one.
-                    ...(turnPlanningEnabled(req.projectRoot) ? {
+                    ...(turnPlanningEnabled(req.projectRoot, req.orchestrationMode) ? {
                     planTurn: async (question: string, toolNames: string[]) => {
                       const plan = await planAnalystTurn(
                         loopInput.provider,
@@ -1179,6 +1880,11 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
                       return plan;
                     },
                     } : {}),
+                    // Text-protocol tool loops execute tools outside the
+                    // provider transport, so carry the same physical-boundary
+                    // observer through the loop. The marker prevents the
+                    // provider wrapper from duplicating native tool records.
+                    onToolCall: createAskTraceToolCallback(askTraceObserverForV1(loopInput)),
                     // The loop's trace, on the channel the provider already uses
                     // for progress. `thinking` turns become `onProgress`, which
                     // the run engine emits as `executor.started` over SSE — so
@@ -1656,9 +2362,12 @@ function extractSelectedBlockHints(req: AgentRunRequest): string[] {
 }
 
 function inferFollowUpContext(req: AgentRunRequest, question: string): AgentFollowUpContext | undefined {
-  // Messages-only fallback (no structured conversationContext). Regexes classify the
-  // kind; a non-matching question still carries the prior turn as advisory 'contextual'.
-  const kind = isGenericFollowUp(question) ? 'generic' : isDrilldownFollowUp(question) ? 'drilldown' : 'contextual';
+  // Messages-only fallback (no structured conversationContext). A prior
+  // assistant turn is not permission to carry rows, measures, or a block into
+  // a complete new analytical question. Admit it only for an explicit
+  // prior-result reference/operation; otherwise this returns `undefined`.
+  const kind = isGenericFollowUp(question) ? 'generic' : isDrilldownFollowUp(question) ? 'drilldown' : undefined;
+  if (!kind) return undefined;
   for (let i = req.messages.length - 1; i >= 0; i--) {
     const msg = req.messages[i];
     if (msg.role !== 'assistant') continue;
@@ -1666,6 +2375,7 @@ function inferFollowUpContext(req: AgentRunRequest, question: string): AgentFoll
     if (!sourceBlockName) continue;
     return {
       kind,
+      binding: 'prior_result',
       sourceBlockName,
       sourceAnswer: msg.content.slice(0, 1200),
       filters: kind === 'drilldown' ? extractDrilldownFilters(question) : undefined,
@@ -1708,16 +2418,11 @@ function applyTopicShiftGuard(
   snapshot: ConversationSnapshot | undefined,
 ): AgentFollowUpContext | undefined {
   if (!followUp || snapshot?.topicRelation !== 'shift') return followUp;
-  if (followUp.kind !== 'drilldown') return followUp;
-  return {
-    ...followUp,
-    kind: 'contextual',
-    filters: undefined,
-    dimensions: undefined,
-    priorResultValues: undefined,
-    priorMeasures: undefined,
-    priorLimit: undefined,
-  };
+  // A server-produced compound dependency is a direct child input, not an
+  // incidental thread carry. Every other result binding is dropped on a
+  // topic shift so a fresh analytical request cannot receive prior rows or
+  // measures merely because the thread has history.
+  return followUp.binding === 'task_dependency' ? followUp : undefined;
 }
 
 /**
@@ -1755,6 +2460,7 @@ function resolveAgentFollowUpContextRaw(
   if (taskDependency) {
     return {
       kind: 'drilldown',
+      binding: 'task_dependency',
       sourceTurnId: `task:${taskDependency.sourceTaskId}`,
       filters: [taskDependency.value],
       dimensions: [taskDependency.canonicalColumn],
@@ -1811,22 +2517,23 @@ function resolveAgentFollowUpContextRaw(
   const relativeComparison = isEntityRelativeComparisonQuestion(question);
   const hasUsefulContext = Boolean(sourceBlockName || priorResultColumns?.length || focusedPriorResultValues || priorDqlArtifact);
   if (!hasUsefulContext) return undefined;
+  // Prior-result material is execution-relevant context, not a friendly
+  // transcript hint. A complete new question therefore receives no carry at
+  // all. The only admission routes are a resolved typed reference, an
+  // explicit prior-result operation, or a deictic/generic follow-up.
   const inferredKind = resolvedReferences.memberBindings?.length
     ? 'drilldown'
     : isGenericFollowUp(question)
-    ? 'generic'
-    : isDrilldownFollowUp(question, priorShapeTerms(priorResultColumns, focusedPriorResultValues))
-      ? 'drilldown'
-      : null;
-  // Always-on carry: the regexes only CLASSIFY the follow-up kind — they no longer
-  // gate whether conversation context exists at all. A question that matches neither
-  // pattern still carries the prior turn as advisory 'contextual' state; the model
-  // (not a regex) decides whether it's relevant to the new question.
-  const kind = inferredKind
-    ?? (context.followupKind === 'generic' || context.followupKind === 'drilldown' ? context.followupKind : null)
-    ?? 'contextual';
+      ? 'generic'
+      : isDrilldownFollowUp(question, priorShapeTerms(priorResultColumns, focusedPriorResultValues))
+        ? 'drilldown'
+        : undefined;
+  if (!inferredKind) return undefined;
+  const binding: AgentConversationBindingV1 = 'prior_result';
+  const kind = inferredKind;
   return {
     kind,
+    binding,
     sourceTurnId: cleanOptionalString(activeTurn?.id) ?? cleanOptionalString(context.sourceAnswerId),
     // A relative comparison needs the named member from history, not the prior
     // block's result contract. Carrying a beverage-ranking block into "less tax
@@ -2594,7 +3301,7 @@ function isGenericFollowUp(question: string): boolean {
  * Now it needs either a deictic reference to the prior result, or an explicit
  * drill verb that only makes sense relative to something already on screen.
  */
-function isDrilldownFollowUp(question: string, priorTerms: string[] = []): boolean {
+function isDrilldownFollowUp(question: string, _priorTerms: string[] = []): boolean {
   const lower = question.toLowerCase();
   const deicticDrilldown = /\b(?:this|that|these|those|same|above|previous|prior)\s+(?:amount|value|orders?|results?|rows?|customers?|products?|cat(?:egor|agor|ogor)(?:y|ies)|segments?|regions?)\b/.test(lower)
     || /\b(?:they|their|them|he|she|him|his|her|hers)\b/.test(lower);
@@ -2603,14 +3310,17 @@ function isDrilldownFollowUp(question: string, priorTerms: string[] = []): boole
   // a short gap between them rather than adjacently.
   const explicitDrillVerb = /\b(drills?|breakdowns?|slices?|segments?|splits?|why|drivers?|root cause|variance)\b/.test(lower)
     || /\bbreak\b.{0,16}\bdown\b/.test(lower);
-  // Evidence, not vocabulary: a question that reuses the PRIOR RESULT's own
-  // column or dimension names is talking about that result, whatever words it
-  // uses to do it. This is what distinguishes "who are the customers by region"
-  // asked after a customers table (a drilldown) from the same phrasing asked on
-  // a brand-new topic (not one).
-  const reusesPriorShape = priorTerms.some((term) => term && lower.includes(term));
-  if (!deicticDrilldown && !explicitDrillVerb && !reusesPriorShape) return false;
-  return deicticDrilldown || !/\b(what is|what are|define|definition|meaning of)\b/.test(lower);
+  const hasDeicticReference = /\b(?:this|that|these|those|same|above|previous|prior|they|their|them|he|she|him|his|her|hers)\b/.test(lower);
+  const resultStateReference = /\b(?:decline|drop|change|increase|decrease|variance)\b/.test(lower);
+  // A shared word such as customer, revenue, or region is not a prior-result
+  // reference. It appears in many unrelated analytical questions and used to
+  // make a fresh request inherit the prior answer's filters and measures.
+  const explicitPriorResultOperation = /\b(?:top|bottom)\s+\d+\s+of\s+(?:these|those|them|the\s+(?:prior|previous)?\s*results?)\b/.test(lower)
+    || /\b(?:average|sum|total|compare)\s+(?:of|across)\s+(?:these|those|them|the\s+(?:prior|previous)?\s*results?)\b/.test(lower);
+  if (!deicticDrilldown && !explicitPriorResultOperation && !(explicitDrillVerb && (hasDeicticReference || resultStateReference))) return false;
+  // Bare definitions should not inherit a prior result merely because they
+  // contain a pronoun. An explicit result operation remains authoritative.
+  return explicitPriorResultOperation || !/\b(what is|what are|define|definition|meaning of)\b/.test(lower);
 }
 
 /**

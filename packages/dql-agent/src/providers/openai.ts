@@ -8,7 +8,7 @@ import type {
 import { consumeSse } from './claude.js';
 import { supportsReasoningEffort } from './reasoning-effort.js';
 import { compactToolOutput } from './tool-output.js';
-import { DEFAULT_PROVIDER_DISPATCH_LIMIT, prepareProviderHttpDispatch } from './dispatch.js';
+import { DEFAULT_PROVIDER_DISPATCH_LIMIT, fetchProviderHttpDispatch } from './dispatch.js';
 
 /**
  * Translate reasoning effort into the Chat Completions `reasoning_effort` param.
@@ -68,18 +68,18 @@ export class OpenAIProvider implements AgentProvider {
       if (includeTemperature) body.temperature = options.temperature ?? 0.2;
 
       dispatches += 1;
-      const dispatchedBody = prepareProviderHttpDispatch({
+      const res = await fetchProviderHttpDispatch({
         provider: this.name,
         operation: 'generate',
         attemptIndex: dispatches,
         envelope: body,
         options,
-      });
-      const res = await fetch(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(dispatchedBody),
-        signal: options.signal,
+        url: `${this.baseUrl}/chat/completions`,
+        init: {
+          method: 'POST',
+          headers,
+          signal: options.signal,
+        },
       });
       if (res.ok) return extractOpenAIChatContent(await res.json());
 
@@ -137,18 +137,18 @@ export class OpenAIProvider implements AgentProvider {
 
     const send = (body: Record<string, unknown>): Promise<Response> => {
       dispatches += 1;
-      const dispatchedBody = prepareProviderHttpDispatch({
+      return fetchProviderHttpDispatch({
         provider: this.name,
         operation: 'generate_with_tools',
         attemptIndex: dispatches,
         envelope: body,
         options,
-      });
-      return fetch(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(dispatchedBody),
-        signal: options.signal,
+        url: `${this.baseUrl}/chat/completions`,
+        init: {
+          method: 'POST',
+          headers,
+          signal: options.signal,
+        },
       });
     };
 
@@ -301,18 +301,18 @@ export class OpenAIProvider implements AgentProvider {
       stream: true,
       ...openaiReasoning(options.model ?? this.defaultModel, options),
     };
-    const dispatchedBody = prepareProviderHttpDispatch({
+    const res = await fetchProviderHttpDispatch({
       provider: this.name,
       operation: 'generate_stream',
       attemptIndex: 1,
       envelope: body,
       options,
-    });
-    const res = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(dispatchedBody),
-      signal: options.signal,
+      url: `${this.baseUrl}/chat/completions`,
+      init: {
+        method: 'POST',
+        headers,
+        signal: options.signal,
+      },
     });
     if (!res.ok || !res.body) {
       const body = await res.text().catch(() => res.statusText);

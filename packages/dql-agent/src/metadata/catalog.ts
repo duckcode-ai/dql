@@ -1805,7 +1805,12 @@ export async function buildLocalContextPack(
       limit: request.limit ?? 120,
     });
     const conflicts = buildCandidateConflicts(reranked.ranked);
-    const meaningEvidence = buildMeaningEvidencePackage(request.question, questionPlan, reranked.ranked);
+    const meaningEvidence = buildMeaningEvidencePackage(
+      request.question,
+      questionPlan,
+      reranked.ranked,
+      snapshotRetrieval.lanes,
+    );
     const compileConflicts = catalog.compileConflicts();
     const routeDecision = withMetadataTrustLabelInfo(await planContextPackRoute({
       request,

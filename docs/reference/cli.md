@@ -143,6 +143,7 @@ dql lineage --dashboard daily_ops      # consumption lineage
 | `dql agent reindex` | Rebuild `.dql/cache/agent-kg.sqlite` and metadata cache |
 | `dql agent feedback up\|down` | Record answer feedback |
 | `dql agent eval <file.yml>` | Run answer-loop eval checks with metrics and JSON traces; cases can assert `expected.minToolCalls` for tool-observed deep/research flows |
+| `dql agent trace list\|show\|export\|validate\|replay\|compare` | Inspect and export local redacted Ask trace receipts without starting a provider, tool, SQL, or network path |
 | `dql mcp [path]` | Run the DQL MCP server over stdio |
 | `dql mcp --http [path]` | Run loopback HTTP MCP with a bearer token |
 | `dql mcp test [path]` | Verify manifest, metadata catalog, agent index, and MCP tool readiness |

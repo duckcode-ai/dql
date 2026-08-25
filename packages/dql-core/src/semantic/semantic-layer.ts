@@ -1139,7 +1139,19 @@ export class SemanticLayer {
           dimension.qualifiedName === reference
           || semanticDimensionReferences(dimension).some((candidate) => candidate === reference),
         );
-    if (allVariants.length === 0) return this.dimensions.get(reference) ?? this.resolveGroupBy(reference);
+    if (allVariants.length === 0) {
+      // MetricFlow emits cross-model group-bys relative to the selected metric
+      // (for example `order_id__location__location_name`). That spelling is
+      // intentionally not stored as a global dimension alias: it is valid only
+      // when the exact selected metric can traverse its declared entity path.
+      // Resolve it through the adapter's compatible set before considering the
+      // legacy global lookup. A leaf/name match is never enough here.
+      const exactCompatible = this.explainCompatibleDimensions(metrics.map((metric) => metric.name)).compatible
+        .filter((dimension) => dimension.qualifiedName === reference);
+      if (exactCompatible.length === 1) return exactCompatible[0]!;
+      if (exactCompatible.length > 1) return undefined;
+      return this.dimensions.get(reference) ?? this.resolveGroupBy(reference);
+    }
     if (allVariants.length === 1) return allVariants[0];
 
     const metricTables = new Set(metrics.map((metric) => metric.table).filter(Boolean));

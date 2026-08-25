@@ -84,6 +84,10 @@ describe("createLlmAgentRunPlanner", () => {
     }));
 
     expect(complete.mock.calls[0]?.[0].signal).toBe(controller.signal);
+    expect(complete.mock.calls[0]?.[0].request).toMatchObject({
+      question: "why is revenue down?",
+      requestedMode: "auto",
+    });
   });
 
   it("does not replace cancellation with a deterministic fallback plan", async () => {

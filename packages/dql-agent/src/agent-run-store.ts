@@ -11,6 +11,7 @@
 import Database from 'better-sqlite3';
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { normalizeProviderEgressReceiptV1 } from '@duckcodeailabs/dql-core';
 import type {
   AgentRun,
   AgentRunDiagnosticReceiptV1,
@@ -68,6 +69,7 @@ export class SqliteAgentRunStore implements AgentRunStore {
   }
 
   save(run: AgentRun): void {
+    const persistedRun = normalizeRunProviderEgressReceipts(run);
     const now = new Date().toISOString();
     this.db.prepare(`
       INSERT INTO agent_runs (id, question, route, status, started_at, completed_at, compacted, payload_json, updated_at)
@@ -82,13 +84,13 @@ export class SqliteAgentRunStore implements AgentRunStore {
         payload_json = excluded.payload_json,
         updated_at = excluded.updated_at
     `).run(
-      run.id,
-      run.question,
-      run.route,
-      (run as { status?: string }).status ?? null,
-      run.startedAt,
-      (run as { completedAt?: string }).completedAt ?? null,
-      JSON.stringify(run),
+      persistedRun.id,
+      persistedRun.question,
+      persistedRun.route,
+      (persistedRun as { status?: string }).status ?? null,
+      persistedRun.startedAt,
+      (persistedRun as { completedAt?: string }).completedAt ?? null,
+      JSON.stringify(persistedRun),
       now,
     );
     this.enforceRetention();
@@ -302,7 +304,9 @@ export class SqliteAgentRunStore implements AgentRunStore {
     if (!existsSync(legacyJsonPath)) return;
     try {
       const parsed = JSON.parse(readFileSync(legacyJsonPath, 'utf-8')) as { runs?: unknown };
-      const runs = Array.isArray(parsed.runs) ? parsed.runs.filter(isAgentRunRecord) : [];
+      const runs = Array.isArray(parsed.runs)
+        ? parsed.runs.filter(isAgentRunRecord).map(normalizeRunProviderEgressReceipts)
+        : [];
       const insert = this.db.prepare(`
         INSERT OR IGNORE INTO agent_runs (id, question, route, status, started_at, completed_at, compacted, payload_json, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
@@ -343,10 +347,50 @@ export function defaultAgentRunSqlitePath(projectRoot: string): string {
 function parseRun(payload: string): AgentRun | undefined {
   try {
     const value = JSON.parse(payload) as unknown;
-    return isAgentRunRecord(value) ? value : undefined;
+    return isAgentRunRecord(value) ? normalizeRunProviderEgressReceipts(value) : undefined;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Durable run JSON is local and therefore untrusted on import/read. Keep an
+ * invalid provider receipt from advertising historical row egress through the
+ * primary run field, diagnostic receipt, or its diagnostic artifact payload.
+ */
+function normalizeRunProviderEgressReceipts(run: AgentRun): AgentRun {
+  const normalizeReceiptList = (value: unknown) => Array.isArray(value)
+    ? value.flatMap((receipt) => {
+        const normalized = normalizeProviderEgressReceiptV1(receipt);
+        return normalized ? [normalized] : [];
+      })
+    : undefined;
+  const normalizeReceiptContainer = (value: unknown): unknown => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    const record = value as Record<string, unknown>;
+    const providerEgressReceipts = normalizeReceiptList(record.providerEgressReceipts);
+    return providerEgressReceipts === undefined
+      ? value
+      : { ...record, providerEgressReceipts };
+  };
+  const rootReceipts = normalizeReceiptList((run as unknown as Record<string, unknown>).providerEgressReceipts);
+  const diagnosticReceipt = normalizeReceiptContainer((run as unknown as Record<string, unknown>).diagnosticReceipt);
+  const artifacts = run.artifacts.map((artifact) => {
+    if (!artifact.payload || typeof artifact.payload !== 'object' || Array.isArray(artifact.payload)) return artifact;
+    const payload = artifact.payload as Record<string, unknown>;
+    const normalizedDiagnosticReceipt = normalizeReceiptContainer(payload.diagnosticReceipt);
+    return normalizedDiagnosticReceipt === payload.diagnosticReceipt
+      ? artifact
+      : { ...artifact, payload: { ...payload, diagnosticReceipt: normalizedDiagnosticReceipt } };
+  });
+  return {
+    ...run,
+    ...(rootReceipts === undefined ? {} : { providerEgressReceipts: rootReceipts }),
+    ...(diagnosticReceipt === (run as unknown as Record<string, unknown>).diagnosticReceipt
+      ? {}
+      : { diagnosticReceipt: diagnosticReceipt as AgentRun['diagnosticReceipt'] }),
+    artifacts,
+  };
 }
 
 function parseProgress(payload: string): AgentRunProgressV1 | undefined {

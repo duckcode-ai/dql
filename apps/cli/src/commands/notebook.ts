@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import type { Server } from 'node:http';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +29,8 @@ export function resolveNotebookConnection(config: ProjectConfig, projectRoot: st
 export interface ProjectRuntimeHandle {
   port: number;
   url: string;
+  /** Private per-runtime capability used only by the short-lived CLI Ask client. */
+  askTraceCapability: string;
   /** Stop the HTTP listener so the process can exit (no-op if already closed). */
   close: () => Promise<void>;
 }
@@ -45,6 +48,7 @@ export async function startProjectRuntime(
   const executor = new QueryExecutor();
   const connection = resolveNotebookConnection(config, projectRoot);
   const host = opts.host ?? process.env.DQL_HOST ?? '127.0.0.1';
+  const askTraceCapability = randomUUID();
   let server: Server | undefined;
   const port = await startLocalServer({
     rootDir: NOTEBOOK_APP_DIR,
@@ -53,12 +57,14 @@ export async function startProjectRuntime(
     connection,
     preferredPort: opts.preferredPort ?? 0,
     host,
+    trustedCliTraceToken: askTraceCapability,
     captureServer: (created) => { server = created; },
   });
   const printHost = host === '0.0.0.0' ? '127.0.0.1' : host;
   return {
     port,
     url: `http://${printHost}:${port}`,
+    askTraceCapability,
     close: () => new Promise<void>((resolveClose) => {
       if (!server) return resolveClose();
       server.close(() => resolveClose());

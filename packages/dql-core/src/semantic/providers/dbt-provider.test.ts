@@ -807,6 +807,16 @@ saved_queries:
         qualifiedName: 'order_id__customer__customer_name',
         entityPath: ['order_id', 'customer'],
       }));
+      // The per-metric MetricFlow spelling is not a global leaf alias. It must
+      // nevertheless be accepted by the same native compatibility graph that
+      // produced it, so a frozen Ask plan cannot pass proof then fail its
+      // compiler before SQL is generated.
+      expect(layer.resolveDimension('order_id__customer__customer_name', ['revenue']))
+        .toMatchObject({ cube: 'customers', name: 'customer_name' });
+      expect(layer.composeQuery({
+        metrics: ['revenue'],
+        dimensions: ['order_id__customer__customer_name'],
+      })).not.toBeNull();
     });
 
     it('fails closed when a foreign entity has two primary model targets', () => {

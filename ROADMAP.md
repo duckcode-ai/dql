@@ -7,13 +7,14 @@ and inspect lineage from source data to dashboard pages.
 
 For completed changes, see [CHANGELOG.md](./CHANGELOG.md).
 
-## Current State (v1.14.2 release candidate)
+## Current State (v1.14.3-rc.1 release candidate)
 
-The working-tree release candidate targets `1.14.2` across the 19 publishable
-packages and the starter CLI range. It is not published: the registry
-`latest` tag remains `1.14.1`, and no `1.14.2` package or release tag exists
-yet. Release status remains contingent on the G5 package, registry, and clean
-install gates.
+The working-tree release candidate targets `1.14.3-rc.1` across the 19
+publishable packages and the starter CLI range. It is not published: the
+registry `latest` tag is `1.14.2`, `1.14.3-rc.1` is absent, and no
+`v1.14.3-rc.1` tag exists yet. This prerelease must publish with npm dist-tag
+`next`; release status remains contingent on the G5 package, registry, and
+exact-version clean-install gates.
 
 DQL OSS is ready for local-first use cases:
 

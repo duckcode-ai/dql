@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { Boxes, MessageCircle, Settings } from 'lucide-react';
+import { Activity, Boxes, MessageCircle, Settings } from 'lucide-react';
 import { Tooltip } from '@duckcodeailabs/dql-ui';
 import {
   FileText,
@@ -123,7 +123,11 @@ export function ActivityBar() {
     persistExpanded(expanded);
   }, [expanded]);
 
-  function handlePanelClick(panel: SidebarPanel | 'home' | 'ask' | 'modeling') {
+  function handlePanelClick(panel: SidebarPanel | 'home' | 'ask' | 'modeling' | 'ask_observability') {
+    if (panel === 'ask_observability') {
+      dispatch({ type: 'OPEN_ASK_OBSERVABILITY' });
+      return;
+    }
     if (panel === 'home' || panel === 'ask' || panel === 'modeling') {
       dispatch({ type: 'SET_MAIN_VIEW', view: panel });
       return;
@@ -151,7 +155,7 @@ export function ActivityBar() {
   // the onboarding flow (Settings → Setup); the app lands on Apps.
   const navGroups: Array<{
     label: string;
-    items: Array<{ key: SidebarPanel | 'ask' | 'modeling'; title: string; icon: React.ReactNode; active: boolean }>;
+    items: Array<{ key: SidebarPanel | 'ask' | 'modeling' | 'ask_observability'; title: string; icon: React.ReactNode; active: boolean }>;
   }> = [
     {
       label: 'Insights',
@@ -175,6 +179,7 @@ export function ActivityBar() {
         // "Domains" sent people looking for a domain list and left Modeling
         // undiscoverable — the word only appeared after you already arrived.
         { key: 'domains', title: 'Modeling', icon: <Boxes size={16} strokeWidth={1.75} />, active: state.mainView === 'domains' || state.mainView === 'modeling' || state.mainView === 'skills' },
+        { key: 'ask_observability', title: 'Ask observability', icon: <Activity size={16} strokeWidth={1.75} />, active: state.mainView === 'ask_observability' || state.mainView === 'ask_trace' },
         { key: 'git', title: 'Source control', icon: <GitBranch size={16} strokeWidth={1.75} />, active: state.mainView === 'git' },
         { key: 'settings', title: 'Settings', icon: <Settings size={16} strokeWidth={1.75} />, active: state.mainView === 'settings' || state.mainView === 'connection' },
       ],

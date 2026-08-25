@@ -462,6 +462,14 @@ describe('withCassette', () => {
       key: '5f0a9a36292648ea4641adc8dfbc257f',
       relation: 'jaffle_shop.dev.order_items',
       projection: 'SUM(product_price) AS revenue',
+    }, {
+      // Deliberate sanitized deterministic replay for the same scoped
+      // runtime dispatch contract. It remains orchestration-only evidence:
+      // its provenance excludes provider-quality evaluation and its SQL is a
+      // one-relation, read-only customer fixture.
+      key: '44a53a7575fb5885755759c05146630f',
+      relation: 'dim_customers',
+      projection: 'count_lifetime_orders AS count_lifetime_orders',
     }] as const;
     const store = new CassetteStore(cassetteDirectory);
 
@@ -496,7 +504,7 @@ describe('withCassette', () => {
     }
 
     expect(cassetteEvidenceSummary(store)).toMatchObject({
-      syntheticDeterministicOrchestrationFixtureEntries: 2,
+      syntheticDeterministicOrchestrationFixtureEntries: 3,
       realProviderQualityEligible: false,
       realProviderQualityExclusionReasons: expect.arrayContaining([
         'synthetic_deterministic_orchestration_fixture',

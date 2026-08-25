@@ -44,17 +44,42 @@ function readInitialThemeMode(): 'obsidian' | 'paper' | 'white' {
   return 'paper';
 }
 
+/**
+ * OBS-009 / OBS-013: Ask trace navigation deliberately persists only a route
+ * and (for detail) a run ID. Keep the parser pure so reload/back-forward
+ * behavior can be tested without constructing a trace, API client, or browser
+ * cache entry.
+ */
+export type AskTraceRoute =
+  | { mainView: 'ask_observability' }
+  | { mainView: 'ask_trace'; runId: string };
+
+export function askTraceRouteFromPathname(pathname: string | undefined): AskTraceRoute | undefined {
+  if (pathname === '/ask/traces') return { mainView: 'ask_observability' };
+  const match = pathname?.match(/^\/ask\/traces\/([^/]+)$/);
+  return match?.[1] ? { mainView: 'ask_trace', runId: decodeURIComponent(match[1]) } : undefined;
+}
+
 function readInitialMainView(): NotebookState['mainView'] {
   if (typeof window === 'undefined') return 'apps';
+  const askTraceRoute = askTraceRouteFromPathname(window.location?.pathname);
+  if (askTraceRoute) return askTraceRoute.mainView;
   const params = new URLSearchParams(window.location.search);
   return params.has('domain') || params.has('domainSection') || params.has('modelArea')
     ? 'domains'
     : 'apps';
 }
 
+function readInitialAskTraceRunId(): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  const route = askTraceRouteFromPathname(window.location?.pathname);
+  return route?.mainView === 'ask_trace' ? route.runId : undefined;
+}
+
 const initialState: NotebookState = {
   mainView: readInitialMainView(),
   agentLogRun: undefined,
+  askTraceRunId: readInitialAskTraceRunId(),
   settingsTab: 'overview',
   themeMode: readInitialThemeMode(),
   appMode: readInitialAppMode(),
@@ -150,6 +175,11 @@ export function ensureUniqueCellIds(cells: Cell[]): Cell[] {
 function notebookReducer(state: NotebookState, action: NotebookAction): NotebookState {
   switch (action.type) {
     case 'SET_MAIN_VIEW':
+      // A user leaving either trace catalog/detail through the normal Ask
+      // navigation should not reload back into the prior trace route.
+      if (action.view === 'ask' && typeof window !== 'undefined' && /^\/ask\/traces(?:\/|$)/.test(window.location.pathname)) {
+        window.history.pushState({}, '', '/ask');
+      }
       if (action.view === 'imports') {
         return {
           ...state,
@@ -199,6 +229,21 @@ function notebookReducer(state: NotebookState, action: NotebookAction): Notebook
       };
     case 'OPEN_AGENT_LOG':
       return { ...state, agentLogRun: action.run, mainView: 'agent_log' };
+
+    case 'OPEN_ASK_TRACE': {
+      if (typeof window !== 'undefined') {
+        const nextPath = `/ask/traces/${encodeURIComponent(action.runId)}`;
+        if (window.location.pathname !== nextPath) window.history.pushState({ askTraceRunId: action.runId }, '', nextPath);
+      }
+      return { ...state, askTraceRunId: action.runId, mainView: 'ask_trace' };
+    }
+
+    case 'OPEN_ASK_OBSERVABILITY': {
+      if (typeof window !== 'undefined' && window.location.pathname !== '/ask/traces') {
+        window.history.pushState({ askObservability: true }, '', '/ask/traces');
+      }
+      return { ...state, askTraceRunId: undefined, mainView: 'ask_observability' };
+    }
 
     case 'SET_SETTINGS_TAB':
       return { ...state, settingsTab: action.tab };

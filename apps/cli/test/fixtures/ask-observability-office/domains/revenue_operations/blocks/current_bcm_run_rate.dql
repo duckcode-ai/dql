@@ -1,0 +1,26 @@
+// dql-format: 1
+
+block "Current BCM Run Rate by Account" {
+  domain = "revenue_operations"
+  type = "custom"
+  status = "certified"
+  description = "Certified current BCM run-rate breakdown by account display name."
+  owner = "revenue-operations@fixture.test"
+  grain = "account_name"
+  parameterPolicy {
+    top_n = "dynamic"
+  }
+  params {
+    top_n: number = 10
+  }
+  query = """
+    SELECT
+      a.account_name,
+      r.bcm_run_rate
+    FROM analytics.fct_account_revenue AS r
+    JOIN analytics.dim_accounts AS a ON r.account_id = a.account_id
+    WHERE r.is_current_period = TRUE
+    ORDER BY r.bcm_run_rate DESC
+    LIMIT ${top_n}
+  """
+}

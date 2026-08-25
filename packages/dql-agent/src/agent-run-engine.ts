@@ -29,6 +29,7 @@ import {
   type PartialCascadeBudgetModel,
 } from "./cascade/budgets.js";
 import type { MetadataAgentIntent } from "./metadata/catalog.js";
+import type { AgentConversationBindingV1 } from './answer-loop.js';
 import { buildAnalysisQuestionPlan } from "./metadata/analysis-planner.js";
 import type { ReasoningEffort, ThinkingMode } from "./providers/reasoning-effort.js";
 import {
@@ -38,6 +39,11 @@ import {
 import {
   buildCoverageGap,
   classifyProviderFailure,
+  type AgentRunDiagnosticReceiptV4,
+  type AskDecisionSummaryV1,
+  type AskResearchBranchSummaryV1,
+  type AskTerminalIncidentV1,
+  type AnalyticalRequirementSeedV1,
   type AgentRunDiagnosticReceiptV3,
   type ExploratoryExecutionFreezeV1,
   type AgentSelectedResultBindingV1,
@@ -45,6 +51,18 @@ import {
   type AnalyticalTurnPlanV1,
 } from './analytical-orchestration.js';
 import { evaluateAnalyticalRequestPolicy } from './analytical-request-policy.js';
+import { frozenRequiredOutputBindingProofsForPlan } from './generated-analytical-proposal.js';
+import {
+  attachAskTraceObserverV1,
+  askTraceObserverForV1,
+  finalizeAgentRunTraceV1,
+  noOpAskTraceObserverV1,
+  recordAuthoritativeRouterDecisionV1,
+  recordAuthoritativePlanFreezeV1,
+  recordEngineTraceEventV1,
+  recordExecutionAttemptSummaryV1,
+} from './ask-observability/index.js';
+import type { AskTraceObserverV1, AgentRunTraceReferenceV1, AskTraceSurfaceV1 } from './ask-observability/index.js';
 
 export type AgentRunRequestedMode = "auto" | "ask" | "research" | "sql" | "block" | "app" | "modeling" | "skill";
 
@@ -280,7 +298,12 @@ export interface NarrationIntegrityReceiptV1 {
   maxRows: number;
   /** Stable verifier codes, not provider prose or raw result values. */
   validationFailures: string[];
-  skipReason?: "no_answer" | "no_provider" | "nothing_to_narrate";
+  /**
+   * Ordinary Ask answers keep their deterministic, receipt-bound answer text.
+   * Only an explicit Research run may dispatch a provider narrator or send
+   * result rows after execution.
+   */
+  skipReason?: "no_answer" | "no_provider" | "nothing_to_narrate" | "ordinary_ask";
   /** Stable host code only; raw provider errors are intentionally not persisted. */
   errorCode?: "narration_error";
 }
@@ -313,8 +336,35 @@ export type AgentRunExecutionTarget =
   | { target: "connection"; connectionName?: string }
   | { target: "local" };
 
+/**
+ * Host-only lineage for a bounded Ask child composed by an explicit Research
+ * run. This is deliberately separate from `workspaceContext`: it changes
+ * dispatch accounting but is never hydrated from public JSON. The child still
+ * routes its own question through the normal Ask cascade; the marker only
+ * binds physical provider traffic to the already-admitted Research root.
+ */
+export interface AgentRunResearchBranchV1 {
+  rootRunId: string;
+  childRunId: string;
+  branchId: string;
+  index: number;
+}
+
 export interface AgentRunRequest {
   question: string;
+  /**
+   * Host-only requirement seed for an internally composed child Ask. Public
+   * JSON request parsers must never hydrate this field. It lets a bounded
+   * Research hypothesis retain its planner-selected target tuple without
+   * re-parsing planner prose as additional user measures.
+   */
+  hostRequirementSeed?: AnalyticalRequirementSeedV1;
+  /**
+   * Server-owned explicit Research-child lineage. Public request parsers must
+   * never hydrate it. It grants no route or SQL authority: each child still
+   * needs its own frozen analytical plan and selected closure.
+   */
+  researchBranch?: AgentRunResearchBranchV1;
   /** Exact candidate selected from a prior structured clarification. */
   selectedEvidenceId?: string;
   /**
@@ -343,6 +393,8 @@ export interface AgentRunRequest {
   executionTarget?: AgentRunExecutionTarget;
   workspaceContext?: Record<string, unknown>;
   conversationContext?: Record<string, unknown>;
+  /** Server-owned admission result for prior conversation material. */
+  conversationBinding?: AgentConversationBindingV1;
   history?: Array<{ role: "user" | "assistant"; text: string }>;
   /** Server-side conversation thread this run belongs to (persistence + resume). */
   threadId?: string;
@@ -360,6 +412,11 @@ export interface AgentRunRequest {
   thinkingMode?: ThinkingMode;
   /** Host-only cancellation signal. JSON request parsers must never hydrate it. */
   signal?: AbortSignal;
+  /**
+   * Server-owned trace surface. Public request parsers must never hydrate it;
+   * local runtime admission derives it from a per-runtime capability instead.
+   */
+  traceSurface?: AskTraceSurfaceV1;
   /**
    * Host-only single wall-clock authority. Soft targets stop new discovery;
    * only `hardSignal` cancels a frozen plan/compile/execution. JSON parsers
@@ -466,6 +523,8 @@ export interface AgentRun {
   id: string;
   question: string;
   requestedMode: AgentRunRequestedMode;
+  /** Additive durable binding receipt for the question that produced this run. */
+  conversationBinding?: AgentConversationBindingV1;
   route: AgentRunRoute;
   status: AgentRunStatus;
   trustState: AgentRunTrustState;
@@ -498,6 +557,8 @@ export interface AgentRun {
   diagnosticReceiptV2?: AgentRunDiagnosticReceiptV2;
   /** Additive content-free cascade/provider receipt; V1/V2 remain readable. */
   diagnosticReceiptV3?: AgentRunDiagnosticReceiptV3;
+  /** Additive canonical Ask story. Older V1/V2/V3 receipts remain readable. */
+  diagnosticReceiptV4?: AgentRunDiagnosticReceiptV4;
   narrationIntegrityReceipt?: NarrationIntegrityReceiptV1;
   telemetry?: AgentRunTelemetryV1;
   /** Server-owned automatic repair authority. Legacy runs omit it and fail closed. */
@@ -509,6 +570,8 @@ export interface AgentRun {
   /** Turn-level clause graph and per-clause outcomes for conversational analytics. */
   analyticalTurnPlan?: AnalyticalTurnPlanV1;
   analyticalTaskOutcomes?: AnalyticalTaskOutcomeV1[];
+  /** Additive local trace reference; detailed evidence stays in ask-observability.sqlite. */
+  traceReference?: AgentRunTraceReferenceV1;
 }
 
 /**
@@ -535,6 +598,8 @@ export interface AgentRunProgressV1 {
   lifecycle: AgentRunLifecycleV1;
   analyticalTurnPlan?: AnalyticalTurnPlanV1;
   analyticalTaskOutcomes?: AnalyticalTaskOutcomeV1[];
+  /** Allows restart finalization/UI to find the local trace without shipping spans. */
+  traceReference?: AgentRunTraceReferenceV1;
 }
 
 export interface AgentRouteExecutionContext {
@@ -608,6 +673,8 @@ export interface AgentRouteExecutorResult {
    * consumes this receipt; it never infers a freeze from a route label or ID.
    */
   analyticalExecutionFreeze?: ExploratoryExecutionFreezeV1;
+  /** One bounded same-plan repair receipt, never a replacement route/plan. */
+  analyticalExecutionRepairFreeze?: ExploratoryExecutionFreezeV1;
   analyticalTurnPlan?: AnalyticalTurnPlanV1;
   analyticalTaskOutcomes?: AnalyticalTaskOutcomeV1[];
 }
@@ -695,6 +762,16 @@ export interface AgentRunEngineOptions {
   maxSteps?: number;
   /** Injectable for deterministic deadline tests; production uses AbortSignal.timeout. */
   routeTimeoutSignal?: (durationMs: number) => AbortSignal;
+  /**
+   * Runtime-owned trace factory. It is additive and must return a no-op observer
+   * on any local store fault; the engine never waits for a network exporter.
+   */
+  traceObserverFactory?: (input: {
+    runId: string;
+    request: AgentRunRequest;
+    startedAt: string;
+    requestedMode: AgentRunRequestedMode;
+  }) => AskTraceObserverV1 | undefined;
 }
 
 const DEFAULT_MAX_STEPS = 4;
@@ -870,21 +947,30 @@ export function resolveClarificationContinuation(request: AgentRunRequest): Clar
   if (!reply || (!structuredSelection && !isLikelyClarificationReply(reply))) return undefined;
 
   const fromServer = latestClarificationFromConversationContext(request.conversationContext);
+  const serverIssuedStructuredSelection = structuredSelection
+    ? serverIssuedStructuredClarification(request)
+    : undefined;
   const fromHistory = latestClarificationFromHistory(request.history);
   // A UI selection is bound to the exact run that rendered the options. Carry
   // that run's source question explicitly so the continuation still works when
   // the optional conversation store is unavailable, after a reload, or when
   // the user selects an option on an older visible answer. Server history still
   // supplies the original clarifying prose when it is available.
-  const pending = explicitSourceQuestion
-    ? {
-        sourceQuestion: explicitSourceQuestion,
-        clarifyingQuestion: fromServer?.clarifyingQuestion
-          ?? fromHistory?.clarifyingQuestion
-          ?? 'Which governed meaning should be used?',
-      }
-    : fromServer ?? fromHistory;
-  if (!pending || pending.sourceQuestion.trim().toLowerCase() === reply.toLowerCase()) return undefined;
+  const pending = serverIssuedStructuredSelection
+    ?? (explicitSourceQuestion
+      ? {
+          sourceQuestion: explicitSourceQuestion,
+          clarifyingQuestion: fromServer?.clarifyingQuestion
+            ?? fromHistory?.clarifyingQuestion
+            ?? 'Which governed meaning should be used?',
+        }
+      : fromServer ?? fromHistory);
+  // A structured option intentionally submits the original question together
+  // with a stable, server-issued identifier.  Treating that exact text as a
+  // fresh question drops the persisted typed frame and makes the router ask
+  // the same clarification again.  The equality guard remains important for
+  // free-text replies, where an unchanged question carries no new meaning.
+  if (!pending || (!structuredSelection && pending.sourceQuestion.trim().toLowerCase() === reply.toLowerCase())) return undefined;
 
   return {
     ...pending,
@@ -896,6 +982,42 @@ export function resolveClarificationContinuation(request: AgentRunRequest): Clar
       'Proceed with the most specific governed interpretation supported by the original request and this reply. Do not repeat the same clarification. If the reply does not select one of several options explicitly, choose the narrowest concrete interpretation consistent with the original wording and state that assumption in the answer.',
     ].join('\n\n'),
   };
+}
+
+/**
+ * Use the original server snapshot for an identifier-bound continuation when
+ * it carries the host-only authority record that local runtime reconstructs
+ * from its persisted thread.  This prevents a browser-provided label (or a
+ * stale client source question) from replacing the typed analytical frame
+ * before router validation.  The router still performs the final snapshot and
+ * option-ID validation before any plan can freeze.
+ */
+function serverIssuedStructuredClarification(
+  request: AgentRunRequest,
+): Pick<ClarificationContinuation, 'sourceQuestion' | 'clarifyingQuestion'> | undefined {
+  if (!request.threadId) return undefined;
+  const context = clarificationRecord(request.conversationContext);
+  const authority = clarificationRecord(context?.serverIssuedClarificationSelection);
+  if (authority?.version !== 1
+    || clarificationString(authority.threadId) !== request.threadId) return undefined;
+  const authoritySourceTurnId = clarificationString(authority.sourceTurnId);
+  const authoritySnapshotId = clarificationString(authority.snapshotId);
+  if (!authoritySourceTurnId || !authoritySnapshotId) return undefined;
+
+  for (const source of [
+    clarificationRecord(context?.conversationEnvelope),
+    clarificationRecord(context?.serverSnapshot),
+  ]) {
+    if (clarificationString(source?.threadId) !== request.threadId) continue;
+    const pending = clarificationRecord(source?.pendingClarification);
+    const selection = clarificationRecord(pending?.selection);
+    if (clarificationString(pending?.sourceTurnId) !== authoritySourceTurnId
+      || clarificationString(selection?.snapshotId) !== authoritySnapshotId) continue;
+    const sourceQuestion = clarificationString(pending?.sourceQuestion);
+    const clarifyingQuestion = clarificationString(pending?.question);
+    if (sourceQuestion && clarifyingQuestion) return { sourceQuestion, clarifyingQuestion };
+  }
+  return undefined;
 }
 
 function latestClarificationFromHistory(
@@ -1175,6 +1297,7 @@ export class AgentRunEngine {
   private readonly budgetModel: PartialCascadeBudgetModel;
   private readonly maxSteps: number;
   private readonly routeTimeoutSignal: (durationMs: number) => AbortSignal;
+  private readonly traceObserverFactory?: AgentRunEngineOptions['traceObserverFactory'];
 
   constructor(options: AgentRunEngineOptions = {}) {
     this.executors = options.executors ?? {};
@@ -1194,6 +1317,7 @@ export class AgentRunEngine {
     };
     this.maxSteps = Math.max(1, options.maxSteps ?? DEFAULT_MAX_STEPS);
     this.routeTimeoutSignal = options.routeTimeoutSignal ?? ((durationMs) => AbortSignal.timeout(durationMs));
+    this.traceObserverFactory = options.traceObserverFactory;
   }
 
   /**
@@ -1255,6 +1379,58 @@ export class AgentRunEngine {
     const startedAt = this.timestamp();
     const runStartedAtMs = Date.parse(startedAt);
     const requestedMode = request.requestedMode ?? "auto";
+    // OBS-001/OBS-002: valid engine requests receive a server-owned trace after
+    // their run ID is known.  The observer is explicitly non-authoritative and
+    // a factory/store failure becomes a no-op, never an Ask failure.
+    let traceObserver: AskTraceObserverV1 = noOpAskTraceObserverV1;
+    try {
+      traceObserver = this.traceObserverFactory?.({ runId, request, startedAt, requestedMode })
+        ?? noOpAskTraceObserverV1;
+    } catch {
+      traceObserver = noOpAskTraceObserverV1;
+    }
+    request = attachAskTraceObserverV1({ ...request }, traceObserver);
+    // Continuity is relationship evidence, not new routing input. Keep only
+    // stable run IDs and one-way fingerprints so a trace can explain why this
+    // turn reused a clarification/result/derived plan without persisting chat
+    // text, values, SQL, or an invented parent trace.
+    if (clarificationContinuation) {
+      traceObserver.recordLink({
+        kind: 'clarification_continuation',
+        choiceFingerprint: traceLinkFingerprint(request.selectedEvidenceId ?? clarificationContinuation.sourceQuestion),
+      });
+    }
+    if (request.selectedResultBinding) {
+      traceObserver.recordLink({
+        kind: 'prior_result',
+        targetRunId: request.selectedResultBinding.sourceRunId,
+        choiceFingerprint: traceLinkFingerprint([
+          request.selectedResultBinding.sourceArtifactId,
+          request.selectedResultBinding.canonicalColumn,
+          request.selectedResultBinding.rowFingerprint,
+          request.selectedResultBinding.resultFingerprint,
+        ].join('\u0000')),
+      });
+    }
+    const derivedSourceRunId = traceDerivedSourceRunId(request.workspaceContext);
+    if (derivedSourceRunId) {
+      traceObserver.recordLink({
+        kind: 'derived_repair',
+        targetRunId: derivedSourceRunId,
+        choiceFingerprint: traceLinkFingerprint(derivedSourceRunId),
+      });
+    }
+    const conversationBinding = traceConversationBinding(request, clarificationContinuation);
+    const conversationTrace = traceObserver.startSpan({
+      name: 'conversation.hydrate',
+      stage: 'conversation',
+      payload: {
+        kind: 'conversation',
+        continuation: conversationBinding !== 'none',
+        binding: conversationBinding,
+      },
+    });
+    traceObserver.finishSpan(conversationTrace, { outcome: 'ok', reasonCode: 'completed' });
     const runBudget = request.runBudget ?? createAgentRunBudget({
       requestedMode,
       startedAtMs: runStartedAtMs,
@@ -1262,7 +1438,11 @@ export class AgentRunEngine {
       timeoutSignal: this.routeTimeoutSignal,
       nowMs: () => this.now().getTime(),
     });
-    request = { ...request, runBudget, signal: runBudget.hardSignal };
+    // Preserve the non-enumerable observer across the immutable request update.
+    // A plain spread drops symbol properties, which previously made the router
+    // lose candidate/cascade/freeze evidence even though the engine still
+    // emitted its own outer spans.
+    request = attachAskTraceObserverV1({ ...request, runBudget, signal: runBudget.hardSignal }, traceObserver);
     const events: AgentRunEvent[] = [];
     let plan: AgentRunPlan | undefined;
     const executedSteps: AgentRunStep[] = [];
@@ -1286,6 +1466,7 @@ export class AgentRunEngine {
         startedAt,
         updatedAt: startedAt,
       },
+      ...(traceObserver.reference() ? { traceReference: traceObserver.reference() } : {}),
     };
     let checkpointQueue: Promise<void> = Promise.resolve();
     const persistProgress = () => {
@@ -1340,6 +1521,11 @@ export class AgentRunEngine {
         ];
       }
       if (full.type === "step.completed") progress.steps = [...executedSteps];
+      // Event payloads are intentionally not copied: they may contain raw
+      // answer/tool data. The typed mapping records only stage identity.
+      recordEngineTraceEventV1(traceObserver, full);
+      const traceReference = traceObserver.reference();
+      if (traceReference) progress.traceReference = traceReference;
       persistProgress();
       onEvent?.(full);
     };
@@ -1438,6 +1624,7 @@ export class AgentRunEngine {
         id: runId,
         question: submittedQuestion,
         requestedMode,
+        conversationBinding: request.conversationBinding ?? traceConversationBinding(request, clarificationContinuation),
         route: 'blocked',
         status: 'blocked',
         trustState: 'blocked',
@@ -1464,7 +1651,12 @@ export class AgentRunEngine {
       run.diagnosticReceipt = diagnosticReceiptForRun(run);
       run.diagnosticReceiptV2 = diagnosticReceiptV2ForRun(run);
       run.diagnosticReceiptV3 = diagnosticReceiptV3ForRun(run);
-      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3);
+      run.diagnosticReceiptV4 = diagnosticReceiptV4ForRun(run);
+      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3, run.diagnosticReceiptV4);
+      // Observability is deliberately finalized only after the authoritative
+      // receipt exists, and before the ordinary run store persists its compact
+      // reference. A local trace write failure never changes this outcome.
+      finalizeAgentRunTraceV1(traceObserver, run);
       await checkpointQueue;
       await this.store?.save(run);
       return run;
@@ -1476,6 +1668,11 @@ export class AgentRunEngine {
     // pre-try await escaped the engine and left active UI runs looking endless.
     let routeDecision: IntentDecision = buildIntentDecision(request);
     try {
+      const classifySpan = traceObserver.startSpan({
+        name: 'request.classify',
+        stage: 'request',
+        payload: { kind: 'stage', requestedMode },
+      });
       routeDecision = clarificationContinuation && !request.selectedEvidenceId
         ? {
             action: "answer",
@@ -1486,6 +1683,11 @@ export class AgentRunEngine {
         }
         : await awaitWithAbort(this.decideRoute(request), request.signal);
       routeDecision = enforceOrdinaryAnalyticalPlanBoundary(request, routeDecision);
+      traceObserver.finishSpan(classifySpan, { outcome: 'ok', reasonCode: 'route_selected' });
+      // Router/cascade evidence is captured after its authoritative decision
+      // is sealed. The trace adapter only projects IDs, counters, and typed
+      // receipts; it never participates in route selection.
+      recordAuthoritativeRouterDecisionV1(traceObserver, routeDecision);
       const defaultRoute = answerAnywayRoute(
         constrainRouteForAudience(selectRoute(request, routeDecision), audience),
         request,
@@ -1580,6 +1782,10 @@ export class AgentRunEngine {
               : `Re-running ${route.replaceAll("_", " ")} executor (repair attempt ${attempt}).`,
             route,
           });
+          // Provider readiness belongs at the provider boundary. The engine
+          // cannot infer it from an executor return value: a deterministic
+          // route may be provider-free and a provider route can fail during
+          // preflight before any executor result exists.
           result = await this.executeRoute({
             runId,
             request,
@@ -1594,12 +1800,21 @@ export class AgentRunEngine {
             emit,
             emitAnswerDelta: onAnswerDelta,
           });
+          recordExecutionAttemptSummaryV1(traceObserver, result);
           // The router owns a frozen analytical tier. An executor may report a
           // same-tier execution failure, but it cannot turn a certified or
           // semantic plan into generated work (or vice versa) after execution
           // has started. Keep this guard in the engine as well as host adapters
           // so an injected/legacy executor cannot redefine durable provenance.
+          const planWasFrozen = routeDecision.analyticalCascadeDecision?.planFrozen === true;
           routeDecision = applyExploratoryExecutionFreeze(routeDecision, result.analyticalExecutionFreeze);
+          routeDecision = applyExploratoryExecutionFreeze(routeDecision, result.analyticalExecutionRepairFreeze);
+          // The router froze the exploratory plan before SQL generation. The
+          // host receipt below only authorizes this exact SQL/target against
+          // that immutable plan; it never creates a second freeze transition.
+          if (!planWasFrozen && routeDecision.analyticalCascadeDecision?.planFrozen) {
+            recordAuthoritativePlanFreezeV1(traceObserver, routeDecision.analyticalCascadeDecision);
+          }
           result = preserveFrozenAnalyticalRoute(route, routeDecision, result);
           result = consumeRepeatedClarificationSelection(request, routeDecision, result);
           if (result.analyticalTurnPlan) progress.analyticalTurnPlan = result.analyticalTurnPlan;
@@ -1856,7 +2071,9 @@ export class AgentRunEngine {
       run.diagnosticReceipt = diagnosticReceiptForRun(run);
       run.diagnosticReceiptV2 = diagnosticReceiptV2ForRun(run);
       run.diagnosticReceiptV3 = diagnosticReceiptV3ForRun(run);
-      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3);
+      run.diagnosticReceiptV4 = diagnosticReceiptV4ForRun(run);
+      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3, run.diagnosticReceiptV4);
+      finalizeAgentRunTraceV1(traceObserver, run);
       await checkpointQueue;
       await this.store?.save(run);
       return run;
@@ -1907,6 +2124,7 @@ export class AgentRunEngine {
           id: runId,
           question: submittedQuestion,
           requestedMode,
+          conversationBinding: request.conversationBinding ?? traceConversationBinding(request, clarificationContinuation),
           route: cancelledRoute,
           status: "cancelled",
           trustState: "not_applicable",
@@ -1942,6 +2160,8 @@ export class AgentRunEngine {
         };
         run.diagnosticReceiptV2 = diagnosticReceiptV2ForRun(run);
         run.diagnosticReceiptV3 = diagnosticReceiptV3ForRun(run);
+        run.diagnosticReceiptV4 = diagnosticReceiptV4ForRun(run);
+        finalizeAgentRunTraceV1(traceObserver, run);
         await checkpointQueue;
         await this.store?.save(run);
         return run;
@@ -1949,7 +2169,9 @@ export class AgentRunEngine {
       const message = isOrchestrationBudgetExhausted(err)
         ? 'Ask could not complete within its bounded orchestration. Nothing was executed; narrow the metric or dimension and retry.'
         : err instanceof Error && err.name === "TimeoutError"
-        ? "This analytical run reached its time limit before it finished. A timeout alone does not prove a cross-model join or semantic-modeling problem. Open Trust & Steps to see the last recorded phase; retry the same bounded question or use Research for a longer budget. No result was accepted."
+        ? requestedMode === 'research'
+          ? 'This Research run reached its bounded deadline before finalization. Review the recorded branch receipts and trace, then narrow the investigation and retry. No result was accepted.'
+          : "This analytical run reached its time limit before it finished. A timeout alone does not prove a cross-model join or semantic-modeling problem. Open Trust & Steps to see the last recorded phase; retry the same bounded question or use Research for a longer budget. No result was accepted."
         : err instanceof Error ? err.message : String(err);
       const failedRoute = progress.route;
       const failedPhase = progress.lifecycle.phase;
@@ -1961,7 +2183,7 @@ export class AgentRunEngine {
         trustState: "blocked",
       });
       const completedAt = this.timestamp();
-      const failure = diagnosticFailureFromError(err, failedPhase);
+      const failure = diagnosticFailureFromError(err, failedPhase, requestedMode);
       const evaluations: AgentRunEvaluation[] = [
         ...progress.evaluations,
         {
@@ -1989,6 +2211,7 @@ export class AgentRunEngine {
         id: runId,
         question: submittedQuestion,
         requestedMode,
+        conversationBinding: request.conversationBinding ?? traceConversationBinding(request, clarificationContinuation),
         route: "blocked",
         status: "blocked",
         trustState: "blocked",
@@ -2026,7 +2249,9 @@ export class AgentRunEngine {
       };
       run.diagnosticReceiptV2 = diagnosticReceiptV2ForRun(run);
       run.diagnosticReceiptV3 = diagnosticReceiptV3ForRun(run);
-      run.artifacts = attachDiagnosticReceipt(retainedArtifacts, receipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3);
+      run.diagnosticReceiptV4 = diagnosticReceiptV4ForRun(run);
+      run.artifacts = attachDiagnosticReceipt(retainedArtifacts, receipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3, run.diagnosticReceiptV4);
+      finalizeAgentRunTraceV1(traceObserver, run);
       await checkpointQueue;
       await this.store?.save(run);
       return run;
@@ -2060,6 +2285,7 @@ export class AgentRunEngine {
         id: input.runId,
         question: input.request.question,
         requestedMode: input.requestedMode,
+        conversationBinding: input.request.conversationBinding ?? traceConversationBinding(input.request, undefined),
         route: "blocked",
         status: "blocked",
         trustState: "blocked",
@@ -2107,6 +2333,7 @@ export class AgentRunEngine {
       id: input.runId,
       question: input.request.question,
       requestedMode: input.requestedMode,
+      conversationBinding: input.request.conversationBinding ?? traceConversationBinding(input.request, undefined),
       route,
       status: finalOutcome.status,
       trustState: finalOutcome.trustState,
@@ -2176,9 +2403,16 @@ export class AgentRunEngine {
       }
       const signal = context.request.runBudget?.hardSignal ?? context.request.signal;
       if (signal?.aborted) throw signal.reason ?? routeTimeoutError();
+      // Route executors own physical provider/tool/SQL boundaries. Preserve the
+      // non-enumerable observer when adding the run signal; a normal object
+      // spread would otherwise leave canonical routing evidence intact while
+      // silently dropping every physical execution span.
       const execution = Promise.resolve(executor({
         ...context,
-        request: { ...context.request, ...(signal ? { signal } : {}) },
+        request: attachAskTraceObserverV1(
+          { ...context.request, ...(signal ? { signal } : {}) },
+          askTraceObserverForV1(context.request),
+        ),
       }));
       return awaitWithAbort(execution, signal);
     }
@@ -2201,6 +2435,43 @@ export class AgentRunEngine {
   private timestamp(): string {
     return this.now().toISOString();
   }
+}
+
+function traceLinkFingerprint(value: string): string {
+  return `sha256:${createHash('sha256').update(value).digest('hex')}`;
+}
+
+/** Only a host-produced repair derivation is linkable; ordinary authoring context is not. */
+function traceDerivedSourceRunId(workspaceContext: AgentRunRequest['workspaceContext']): string | undefined {
+  if (!workspaceContext || typeof workspaceContext !== 'object' || Array.isArray(workspaceContext)) return undefined;
+  const record = workspaceContext as Record<string, unknown>;
+  const derivation = record.traceDerivation;
+  if (derivation !== 'analytical_repair' && derivation !== 'derived_repair') return undefined;
+  return typeof record.sourceRunId === 'string' && record.sourceRunId.trim()
+    ? record.sourceRunId
+    : undefined;
+}
+
+/**
+ * Record only why the conversation boundary was available, never the member,
+ * question, row, or free-text selection that it carried. The local runtime
+ * resolves its typed follow-up before retrieval; this trace label lets an
+ * office reproduction distinguish a missing binding from a later retrieval or
+ * execution failure without turning traces into chat persistence.
+ */
+function traceConversationBinding(
+  request: AgentRunRequest,
+  clarification: ClarificationContinuation | undefined,
+): AgentConversationBindingV1 {
+  if (clarification || request.selectedEvidenceId) return 'structured_clarification';
+  if (request.conversationBinding) return request.conversationBinding;
+  if (request.selectedResultBinding) return 'prior_result';
+  const context = request.conversationContext;
+  if (!context || Object.keys(context).length === 0) return 'none';
+  if ('analyticalTaskDependencyBinding' in context) return 'task_dependency';
+  // A snapshot merely makes a prior binding *available*. It is not evidence
+  // that this self-contained question selected it.
+  return 'none';
 }
 
 /**
@@ -2376,17 +2647,22 @@ function applyExploratoryExecutionFreeze(
   if (!freeze) return decision;
   const cascade = decision.analyticalCascadeDecision;
   const attempt = cascade?.attempts.find((candidate) => candidate.tier === 'exploratory_sql');
+  const selectedPlan = decision.resolvedAnalyticalPlan;
+  const existing = cascade?.exploratoryExecutionFreeze;
+  const existingRepair = cascade?.exploratoryRepairExecutionFreeze;
+  const authorizationAttempt = normalizedExploratoryAuthorizationAttempt(freeze);
   const sameCandidates = Boolean(
     attempt
     && attempt.candidateIds.length === freeze.candidateIds.length
     && attempt.candidateIds.every((candidate, index) => candidate === freeze.candidateIds[index]),
   );
   const retrievalSnapshotId = decision.retrievalEvidence?.snapshotId;
-  const valid = Boolean(
+  const validBaseReceipt = Boolean(
     cascade
     && cascade.selectedTier === 'exploratory_sql'
-    && cascade.planFrozen === false
+    && cascade.planFrozen === true
     && attempt?.outcome === 'executable'
+    && attempt.planFrozen === true
     && sameCandidates
     && freeze.version === 1
     && freeze.selectedTier === 'exploratory_sql'
@@ -2396,28 +2672,155 @@ function applyExploratoryExecutionFreeze(
     && freeze.snapshotId.trim()
     && freeze.targetFingerprint.trim()
     && freeze.sqlFingerprint.trim()
+    && selectedPlan?.capability === 'bounded_exploration'
+    && selectedPlan.planId === freeze.planId
+    && selectedPlan.fingerprint === freeze.planFingerprint
+    && selectedPlan.snapshotId === freeze.snapshotId
+    && freezeCarriesRequiredOutputBindings(selectedPlan, freeze)
     && (!retrievalSnapshotId || retrievalSnapshotId === freeze.snapshotId),
   );
-  if (!valid) {
-    throw Object.assign(new Error('The exploratory execution receipt did not match the router-selected candidate set and was not accepted.'), {
-      code: 'EXPLORATORY_FREEZE_RECEIPT_MISMATCH',
-    });
+  if (!validBaseReceipt) {
+    throw exploratoryAuthorizationStateMismatch();
   }
+  // A replay of one exact host handoff is harmless. A repair is a fresh,
+  // separately-minted capability, but its receipt must name the initial SQL
+  // authorization and keep every immutable plan binding identical.
+  if (authorizationAttempt.index === 0) {
+    if (existing) {
+      if (sameExploratoryAuthorizationReceipt(existing, freeze)) return decision;
+      throw exploratoryAuthorizationStateMismatch();
+    }
+    if (existingRepair) throw exploratoryAuthorizationStateMismatch();
+    return withExploratoryAuthorizationReceipt(decision, freeze, 'initial');
+  }
+  if (authorizationAttempt.index !== 1
+    || !authorizationAttempt.parentSqlFingerprint
+    || !existing
+    || existingRepair
+    || authorizationAttempt.parentSqlFingerprint !== existing.sqlFingerprint
+    || !sameExploratoryPlanBindings(existing, freeze)) {
+    throw exploratoryAuthorizationStateMismatch();
+  }
+  return withExploratoryAuthorizationReceipt(decision, freeze, 'repair');
+}
+
+function withExploratoryAuthorizationReceipt(
+  decision: IntentDecision,
+  freeze: ExploratoryExecutionFreezeV1,
+  kind: 'initial' | 'repair',
+): IntentDecision {
+  const cascade = decision.analyticalCascadeDecision!;
   return {
     ...decision,
     analyticalCascadeDecision: {
-      ...cascade!,
-      planFrozen: true,
-      exploratoryExecutionFreeze: freeze,
-      attempts: cascade!.attempts.map((candidate) => candidate.tier === 'exploratory_sql'
+      ...cascade,
+      ...(kind === 'initial'
+        ? { exploratoryExecutionFreeze: freeze }
+        : { exploratoryRepairExecutionFreeze: freeze }),
+      attempts: cascade.attempts.map((candidate) => candidate.tier === 'exploratory_sql'
         ? {
             ...candidate,
-            planFrozen: true,
-            reason: `${candidate.reason} Host-authorized immutable exploratory execution plan ${freeze.planId}.`,
+            // The router froze the plan before SQL generation. The host only
+            // binds exact SQL/target bytes to that immutable plan. A repair
+            // cannot choose another tier or mutate the analytical frame.
+            reason: kind === 'repair'
+              ? `${candidate.reason} Host authorized one same-plan SQL repair against frozen plan ${freeze.planId}.`
+              : `${candidate.reason} Host authorized SQL execution against frozen plan ${freeze.planId}.`,
           }
         : candidate),
     },
   };
+}
+
+function normalizedExploratoryAuthorizationAttempt(
+  freeze: ExploratoryExecutionFreezeV1,
+): { index: 0 | 1; parentSqlFingerprint?: string } {
+  const attempt = freeze.authorizationAttempt;
+  // V1/V3 persisted receipts predate explicit authorization-attempt evidence.
+  // They are compatible only as the original handoff, never as a repair.
+  if (!attempt) return { index: 0 };
+  if (attempt.version !== 1 || (attempt.index !== 0 && attempt.index !== 1)) {
+    throw exploratoryAuthorizationStateMismatch();
+  }
+  if (attempt.index === 0) {
+    if ('parentSqlFingerprint' in attempt && attempt.parentSqlFingerprint) {
+      throw exploratoryAuthorizationStateMismatch();
+    }
+    return { index: 0 };
+  }
+  if (!attempt.parentSqlFingerprint?.trim()) throw exploratoryAuthorizationStateMismatch();
+  return { index: 1, parentSqlFingerprint: attempt.parentSqlFingerprint };
+}
+
+function sameExploratoryPlanBindings(
+  left: ExploratoryExecutionFreezeV1,
+  right: ExploratoryExecutionFreezeV1,
+): boolean {
+  return left.version === right.version
+    && left.selectedTier === right.selectedTier
+    && left.planId === right.planId
+    && left.planFingerprint === right.planFingerprint
+    && left.snapshotId === right.snapshotId
+    && left.targetFingerprint === right.targetFingerprint
+    && left.authorization === right.authorization
+    && sameFrozenRequiredOutputBindings(left.requiredOutputBindings, right.requiredOutputBindings)
+    && left.candidateIds.length === right.candidateIds.length
+    && left.candidateIds.every((candidate, index) => candidate === right.candidateIds[index]);
+}
+
+function freezeCarriesRequiredOutputBindings(
+  plan: IntentDecision['resolvedAnalyticalPlan'] | undefined,
+  freeze: ExploratoryExecutionFreezeV1,
+): boolean {
+  if (!plan) return false;
+  // Pre-V4 persisted plans did not carry an output contract. They remain
+  // readable, but newly frozen plans with explicit outputs must carry the
+  // exact physical binding proofs below.
+  const required = plan.outputContract?.requiredOutputs ?? [];
+  if (required.length === 0) return true;
+  const expected = frozenRequiredOutputBindingProofsForPlan(plan);
+  const actual = freeze.requiredOutputBindings;
+  return expected.length === required.length
+    && Array.isArray(actual)
+    && sameFrozenRequiredOutputBindings(actual, expected);
+}
+
+function sameFrozenRequiredOutputBindings(
+  left: ExploratoryExecutionFreezeV1['requiredOutputBindings'],
+  right: ExploratoryExecutionFreezeV1['requiredOutputBindings'],
+): boolean {
+  const normalize = (bindings: ExploratoryExecutionFreezeV1['requiredOutputBindings']): string[] =>
+    (bindings ?? []).map((binding) => [
+      binding.version,
+      binding.outputName.toLowerCase().replace(/["`\[\]]/g, ''),
+      binding.qualifiedId,
+      binding.relation.toLowerCase().replace(/["`\[\]]/g, '').replace(/\s*\.\s*/g, '.'),
+      binding.column.toLowerCase().replace(/["`\[\]]/g, ''),
+    ].join('|')).sort();
+  const leftBindings = normalize(left);
+  const rightBindings = normalize(right);
+  return leftBindings.length === rightBindings.length
+    && leftBindings.every((binding, index) => binding === rightBindings[index]);
+}
+
+function sameExploratoryAuthorizationReceipt(
+  left: ExploratoryExecutionFreezeV1,
+  right: ExploratoryExecutionFreezeV1,
+): boolean {
+  const leftAttempt = normalizedExploratoryAuthorizationAttempt(left);
+  const rightAttempt = normalizedExploratoryAuthorizationAttempt(right);
+  return sameExploratoryPlanBindings(left, right)
+    && left.sqlFingerprint === right.sqlFingerprint
+    && left.authorization === right.authorization
+    && leftAttempt.index === rightAttempt.index
+    && leftAttempt.parentSqlFingerprint === rightAttempt.parentSqlFingerprint;
+}
+
+function exploratoryAuthorizationStateMismatch(): Error {
+  return Object.assign(
+    new Error('The exploratory SQL authorization receipt did not match the already-frozen analytical plan. Execution was not attempted.'),
+    { code: 'INTERNAL_EXPLORATORY_AUTHORIZATION_STATE_MISMATCH' },
+  );
 }
 
 /**
@@ -2788,10 +3191,24 @@ function terminalLifecycle(
 function diagnosticFailureFromError(
   error: unknown,
   phase: string,
+  requestedMode?: AgentRunRequestedMode,
 ): AgentRunDiagnosticFailureV1 {
   const name = error instanceof Error ? error.name : "";
   const message = error instanceof Error ? error.message : String(error);
   const lower = `${name} ${message}`.toLowerCase();
+  if (
+    error
+    && typeof error === 'object'
+    && (error as { code?: unknown }).code === 'INTERNAL_EXPLORATORY_AUTHORIZATION_STATE_MISMATCH'
+  ) {
+    return {
+      code: 'INTERNAL_EXPLORATORY_AUTHORIZATION_STATE_MISMATCH',
+      phase: 'sql.authorize',
+      message: 'The frozen exploratory plan did not match the SQL authorization receipt. Execution was not attempted.',
+      recoverable: false,
+      safeActions: ['export_redacted_trace'],
+    };
+  }
   if (isOrchestrationBudgetExhausted(error)) {
     return {
       code: 'orchestration_budget_exhausted',
@@ -2802,6 +3219,15 @@ function diagnosticFailureFromError(
     };
   }
   if (name === "TimeoutError" || lower.includes("time limit") || lower.includes("timeout")) {
+    if (requestedMode === 'research') {
+      return {
+        code: 'RESEARCH_RUN_DEADLINE',
+        phase: 'research.run',
+        message: 'Research reached its bounded run deadline before finalization.',
+        recoverable: true,
+        safeActions: ['inspect_failure'],
+      };
+    }
     return {
       code: "TIMEOUT",
       phase,
@@ -2904,6 +3330,11 @@ function diagnosticReceiptV3ForRun(run: AgentRun): AgentRunDiagnosticReceiptV3 {
   // route names or identifier text here: that erased stale/error lane states
   // and falsely reported governed-relational success for pure exploration.
   const cascade = run.routeDecision?.analyticalCascadeDecision;
+  // The router may retain a broader terminal witness for presentation, while
+  // the cascade carries the only persistable, enumerated relationship-proof
+  // receipt. Prefer that immutable cascade value and do not infer a gap from a
+  // failure message or route label here.
+  const terminalGap = cascade?.terminalGap;
   const sourceCoverage = cascade?.sourceCoverage ?? [];
   const planFrozen = cascade?.planFrozen ?? false;
   const artifactProviderDiagnostic = run.artifacts
@@ -2925,10 +3356,535 @@ function diagnosticReceiptV3ForRun(run: AgentRun): AgentRunDiagnosticReceiptV3 {
     runId: run.id,
     sourceCoverage,
     ...(cascade ? { cascade } : {}),
+    ...(terminalGap ? { terminalGap } : {}),
     planFrozen,
     ...(provider ? { provider } : {}),
     finalStopReason: run.stopReason,
   };
+}
+
+/**
+ * Build the one canonical, content-safe Ask story. This is produced from the
+ * authoritative run receipt once, then joined by both the inspector and the
+ * full local trace. Neither surface is allowed to reconstruct an incident from
+ * spans or a generic error string.
+ */
+function diagnosticReceiptV4ForRun(run: AgentRun): AgentRunDiagnosticReceiptV4 {
+  const cascade = run.routeDecision?.analyticalCascadeDecision;
+  const requirements = cascade?.requirements;
+  const candidates = run.routeDecision?.retrievalEvidence?.candidateTraceMetadata ?? [];
+  const roleCounts = new Map<AskDecisionSummaryV1['evidenceByRole'][number]['role'], number>();
+  for (const candidate of candidates) {
+    roleCounts.set(candidate.role, (roleCounts.get(candidate.role) ?? 0) + 1);
+  }
+  const researchBranchObservability = researchBranchObservabilityForRun(run);
+  for (const evidence of researchBranchObservability.evidenceByRole) {
+    roleCounts.set(evidence.role, (roleCounts.get(evidence.role) ?? 0) + evidence.candidateCount);
+  }
+  const terminalIncident = terminalIncidentForRun(run, cascade?.stopReason);
+  const summaryInput = {
+    version: 1 as const,
+    understoodRequest: {
+      measures: requirements?.measures.length ?? 0,
+      dimensions: requirements?.dimensions.length ?? 0,
+      entityRequested: Boolean((requirements?.entityTerms.length ?? 0) || (requirements?.entityDisplayTerms.length ?? 0)),
+      outputCount: requirements?.outputTerms?.length ?? 0,
+      ...(requirements?.ranking
+        ? { ranking: { ...requirements.ranking } }
+        : {}),
+      // This comes from the server-owned request admission, not a generic
+      // `followsUp` heuristic. A complete question with thread history is
+      // still `none` unless it explicitly selected a valid binding.
+      conversationBinding: run.conversationBinding ?? 'none',
+    },
+    evidenceByRole: [...roleCounts.entries()]
+      .map(([role, candidateCount]) => ({ role, candidateCount }))
+      .sort((left, right) => left.role.localeCompare(right.role)),
+    tierDecisions: (cascade?.attempts ?? []).map((attempt) => ({
+      tier: attempt.tier,
+      outcome: attempt.outcome,
+      planFrozen: attempt.planFrozen,
+    })),
+    ...(cascade?.selectedTier
+      ? {
+          selectedPlan: {
+            tier: cascade.selectedTier,
+            planFrozen: cascade.planFrozen,
+            reviewRequired: cascade.selectedTier === 'exploratory_sql',
+          },
+        }
+      : {}),
+    ...(terminalIncident ? { terminalIncident } : {}),
+    ...(researchBranchObservability.summary ? { researchBranchSummary: researchBranchObservability.summary } : {}),
+    safeNextAction: terminalIncident?.safeAction
+      ?? (researchBranchObservability.summary?.partialSuccess
+        ? researchBranchObservability.summary.safeAction
+        : 'none') as AskDecisionSummaryV1['safeNextAction'],
+  };
+  const summary: AskDecisionSummaryV1 = {
+    ...summaryInput,
+    summaryFingerprint: receiptFingerprint(summaryInput),
+  };
+  return {
+    version: 4,
+    runId: run.id,
+    summary,
+    ...(terminalIncident ? { terminalIncident } : {}),
+    finalStopReason: run.stopReason,
+  };
+}
+
+type AskSummaryEvidenceRole = AskDecisionSummaryV1['evidenceByRole'][number]['role'];
+type AskResearchBranchFailureCode = AskResearchBranchSummaryV1['failureReasons'][number]['code'];
+type AskResearchChildTier = AskResearchBranchSummaryV1['availableChildPlans'][number]['tier'];
+
+const ASK_SUMMARY_EVIDENCE_ROLES: readonly AskSummaryEvidenceRole[] = [
+  'metric',
+  'entity_key',
+  'entity_label',
+  'categorical_dimension',
+  'time_dimension',
+  'member',
+  'relationship',
+  'context',
+];
+
+const ASK_RESEARCH_BRANCH_FAILURE_CODES: readonly AskResearchBranchFailureCode[] = [
+  'execution_failed',
+  'research_branch_timeout',
+  'budget_exhausted',
+  'run_deadline',
+  'cancelled',
+];
+
+const ASK_RESEARCH_CHILD_TIERS: readonly AskResearchChildTier[] = [
+  'certified',
+  'semantic',
+  'governed_relational',
+  'exploratory_sql',
+];
+
+/**
+ * Project only persisted, typed Research child evidence into V4. The root
+ * result remains authoritative: this helper never promotes a failed branch
+ * into a root incident or infers a missing plan from spans.
+ */
+function researchBranchObservabilityForRun(run: AgentRun): {
+  summary?: AskResearchBranchSummaryV1;
+  evidenceByRole: Array<{ role: AskSummaryEvidenceRole; candidateCount: number }>;
+} {
+  // A persisted V4 receipt can be reprojected after request normalization by
+  // a host. The root route is therefore the durable authority as well as the
+  // original requested mode: an explicit Research run must not lose its
+  // child-story merely because an older host omitted `requestedMode` while
+  // preserving the authoritative `research` route and research artifact.
+  if (run.requestedMode !== 'research' && run.route !== 'research') {
+    return { evidenceByRole: [] };
+  }
+
+  const payload = persistedResearchArtifactPayloadForRun(run);
+  if (!payload) return { evidenceByRole: [] };
+
+  const rawReceipts = Array.isArray(payload.researchBranchReceipts)
+    ? payload.researchBranchReceipts
+    : [];
+  const receipts = new Map<string, Record<string, unknown>>();
+  for (const value of rawReceipts) {
+    const receipt = clarificationRecord(value);
+    const childRunId = clarificationString(receipt?.childRunId);
+    const branchId = clarificationString(receipt?.branchId);
+    const state = clarificationString(receipt?.state);
+    const stopReason = clarificationString(receipt?.stopReason);
+    // This field is producer-owned. A malformed imported receipt must not
+    // become an apparently successful Research story.
+    if (!receipt || !childRunId || !branchId || !state || !stopReason) continue;
+    const key = `${childRunId}:${branchId}`;
+    if (!receipts.has(key)) receipts.set(key, receipt);
+  }
+  if (receipts.size === 0) return { evidenceByRole: [] };
+
+  const childRuns = persistedResearchChildRuns(payload);
+  const evidenceByRole = persistedResearchChildEvidenceByRole(childRuns);
+  const receiptBackedChildIds = persistedReceiptBackedResearchChildIds(payload);
+
+  let completedBranches = 0;
+  let failedBranches = 0;
+  let timedOutBranches = 0;
+  let skippedBranches = 0;
+  const failureReasons = new Map<AskResearchBranchFailureCode, number>();
+  const linkedChildRunIds = new Set<string>();
+  for (const receipt of receipts.values()) {
+    const childRunId = clarificationString(receipt.childRunId)!;
+    linkedChildRunIds.add(childRunId);
+    const state = clarificationString(receipt.state);
+    const stopReason = clarificationString(receipt.stopReason);
+    if (state === 'completed' && stopReason === 'completed') {
+      completedBranches += 1;
+      continue;
+    }
+    if (state === 'timed_out') timedOutBranches += 1;
+    else if (state === 'skipped') skippedBranches += 1;
+    else failedBranches += 1;
+    if (isAskResearchBranchFailureCode(stopReason)) {
+      failureReasons.set(stopReason, (failureReasons.get(stopReason) ?? 0) + 1);
+    }
+  }
+
+  const receiptBackedBranches = [...receipts.values()]
+    .filter((receipt) => clarificationString(receipt.state) === 'completed'
+      && clarificationString(receipt.stopReason) === 'completed'
+      && receiptBackedChildIds.has(clarificationString(receipt.childRunId)!))
+    .length;
+  const incompleteBranches = failedBranches + timedOutBranches + skippedBranches;
+  const summary: AskResearchBranchSummaryV1 = {
+    version: 1,
+    totalBranches: receipts.size,
+    completedBranches,
+    receiptBackedBranches,
+    failedBranches,
+    timedOutBranches,
+    skippedBranches,
+    partialSuccess: receiptBackedBranches > 0 && incompleteBranches > 0,
+    failureReasons: [...failureReasons.entries()]
+      .map(([code, branchCount]) => ({ code, branchCount }))
+      .sort((left, right) => left.code.localeCompare(right.code)),
+    availableChildPlans: persistedResearchChildPlans(childRuns),
+    linkedChildRunCount: linkedChildRunIds.size,
+    safeAction: 'inspect_research_failures',
+  };
+  return { summary, evidenceByRole };
+}
+
+/** Use only the durable root research artifact with branch receipts. */
+function persistedResearchArtifactPayloadForRun(run: AgentRun): Record<string, unknown> | undefined {
+  let selected: Record<string, unknown> | undefined;
+  let selectedCount = -1;
+  for (const artifact of run.artifacts) {
+    if (artifact.kind !== 'research_run') continue;
+    const payload = clarificationRecord(artifact.payload);
+    const count = Array.isArray(payload?.researchBranchReceipts) ? payload.researchBranchReceipts.length : 0;
+    if (payload && count > selectedCount) {
+      selected = payload;
+      selectedCount = count;
+    }
+  }
+  return selected;
+}
+
+function persistedResearchChildRuns(payload: Record<string, unknown>): Record<string, unknown>[] {
+  const candidates = [
+    ...(Array.isArray(payload.researchRuns) ? payload.researchRuns : []),
+    payload.researchRun,
+  ];
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const value of candidates) {
+    const child = clarificationRecord(value);
+    const id = clarificationString(child?.id);
+    if (child && id && !byId.has(id)) byId.set(id, child);
+  }
+  return [...byId.values()];
+}
+
+function persistedResearchChildEvidenceByRole(
+  childRuns: readonly Record<string, unknown>[],
+): Array<{ role: AskSummaryEvidenceRole; candidateCount: number }> {
+  const counts = new Map<AskSummaryEvidenceRole, number>();
+  for (const child of childRuns) {
+    const routeDecision = clarificationRecord(child.routeDecision);
+    const retrieval = clarificationRecord(routeDecision?.retrievalEvidence);
+    const candidates = Array.isArray(retrieval?.candidateTraceMetadata)
+      ? retrieval.candidateTraceMetadata
+      : [];
+    for (const value of candidates) {
+      const candidate = clarificationRecord(value);
+      const role = clarificationString(candidate?.role);
+      if (!isAskSummaryEvidenceRole(role)) continue;
+      counts.set(role, (counts.get(role) ?? 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .map(([role, candidateCount]) => ({ role, candidateCount }))
+    .sort((left, right) => left.role.localeCompare(right.role));
+}
+
+function persistedReceiptBackedResearchChildIds(payload: Record<string, unknown>): Set<string> {
+  const ledger = clarificationRecord(payload.researchLedgerV2);
+  const entries = Array.isArray(ledger?.entries) ? ledger.entries : [];
+  const ids = new Set<string>();
+  for (const value of entries) {
+    const entry = clarificationRecord(value);
+    const id = clarificationString(entry?.id);
+    const receipts = Array.isArray(entry?.receipts) ? entry.receipts : [];
+    if (entry?.status === 'observed' && id && receipts.some((receipt) => clarificationString(receipt))) {
+      ids.add(id);
+    }
+  }
+  return ids;
+}
+
+function persistedResearchChildPlans(
+  childRuns: readonly Record<string, unknown>[],
+): AskResearchBranchSummaryV1['availableChildPlans'] {
+  const plansByTier = new Map<AskResearchChildTier, { planKeys: Set<string>; childRunIds: Set<string> }>();
+  for (const child of childRuns) {
+    const childRunId = clarificationString(child.id);
+    const context = clarificationRecord(child.context);
+    const authority = clarificationRecord(context?.branchAuthority);
+    const tier = clarificationString(authority?.selectedTier);
+    const planId = clarificationString(authority?.planId);
+    const planFingerprint = clarificationString(authority?.planFingerprint);
+    if (!childRunId || authority?.planFrozen !== true || !isAskResearchChildTier(tier) || !planId || !planFingerprint) continue;
+    const entry = plansByTier.get(tier) ?? { planKeys: new Set<string>(), childRunIds: new Set<string>() };
+    entry.planKeys.add(`${planId}:${planFingerprint}`);
+    entry.childRunIds.add(childRunId);
+    plansByTier.set(tier, entry);
+  }
+  return [...plansByTier.entries()]
+    .map(([tier, value]) => ({
+      tier,
+      frozenPlanCount: value.planKeys.size,
+      branchCount: value.childRunIds.size,
+      reviewRequired: tier === 'exploratory_sql',
+    }))
+    .sort((left, right) => left.tier.localeCompare(right.tier));
+}
+
+function isAskSummaryEvidenceRole(value: string | undefined): value is AskSummaryEvidenceRole {
+  return Boolean(value) && ASK_SUMMARY_EVIDENCE_ROLES.includes(value as AskSummaryEvidenceRole);
+}
+
+function isAskResearchBranchFailureCode(value: string | undefined): value is AskResearchBranchFailureCode {
+  return Boolean(value) && ASK_RESEARCH_BRANCH_FAILURE_CODES.includes(value as AskResearchBranchFailureCode);
+}
+
+function isAskResearchChildTier(value: string | undefined): value is AskResearchChildTier {
+  return Boolean(value) && ASK_RESEARCH_CHILD_TIERS.includes(value as AskResearchChildTier);
+}
+
+function terminalIncidentForRun(
+  run: AgentRun,
+  cascadeStopReason: string | undefined,
+): AskTerminalIncidentV1 | undefined {
+  const executionSetupFailure = terminalConnectionSetupFailureForRun(run);
+  if (executionSetupFailure) {
+    return {
+      version: 1,
+      code: 'CONNECTION_NOT_CONFIGURED',
+      boundary: 'sql.execute',
+      origin: 'governance_gate',
+      impact: 'execution_not_attempted',
+      safeAction: 'configure_connection',
+    };
+  }
+  const failureCode = run.diagnosticReceipt?.failure?.code;
+  if (failureCode === 'INTERNAL_EXPLORATORY_AUTHORIZATION_STATE_MISMATCH') {
+    return {
+      version: 1,
+      code: 'INTERNAL_EXPLORATORY_AUTHORIZATION_STATE_MISMATCH',
+      boundary: 'sql.authorize',
+      origin: 'internal_invariant',
+      impact: 'execution_not_attempted',
+      safeAction: 'export_redacted_trace',
+    };
+  }
+  if (failureCode === 'RESEARCH_RUN_DEADLINE') {
+    return {
+      version: 1,
+      code: 'RESEARCH_RUN_DEADLINE',
+      boundary: 'run',
+      origin: 'governance_gate',
+      impact: 'answer_not_produced',
+      safeAction: 'inspect_failure',
+    };
+  }
+  // A completed root can still be materially limited when every admitted
+  // Research child exhausted its bounded window. This is producer-owned
+  // receipt evidence, not an incident reconstructed from trace timing. It
+  // must be visible in the same V4 summary used by the inspector and full
+  // trace so the user is never told there was no incident after a zero-finding
+  // investigation.
+  if (terminalResearchBranchTimeoutForRun(run)) {
+    return {
+      version: 1,
+      code: 'RESEARCH_BRANCH_TIMEOUT',
+      boundary: 'run',
+      origin: 'governance_gate',
+      impact: 'answer_not_produced',
+      safeAction: 'inspect_research_failures',
+    };
+  }
+  if (failureCode === 'RUN_CANCELLED' || run.status === 'cancelled') {
+    return { version: 1, code: 'CANCELLED', boundary: 'run', origin: 'unknown', impact: 'run_cancelled', safeAction: 'none' };
+  }
+  if (failureCode === 'CONNECTION_NOT_CONFIGURED') {
+    return { version: 1, code: 'CONNECTION_NOT_CONFIGURED', boundary: 'sql.execute', origin: 'governance_gate', impact: 'execution_not_attempted', safeAction: 'configure_connection' };
+  }
+  // A frozen semantic/analytical plan may fail while the compiler is resolving
+  // its already-proven identifiers.  That is categorically different from a
+  // warehouse failure: no statement was authorized or executed.  Preserve the
+  // producer's typed `COMPILATION_FAILED` cause before consulting connector
+  // evidence so both Ask surfaces tell the same pre-SQL story.
+  const compilationFailure = terminalCompilationFailureForRun(run);
+  if (compilationFailure) {
+    const semantic = isSemanticCompilationForRun(run);
+    return {
+      version: 1,
+      code: 'COMPILATION_FAILED',
+      boundary: semantic ? 'semantic.compile' : 'plan.compile',
+      origin: semantic ? 'semantic_compiler' : 'plan_compiler',
+      impact: 'execution_not_attempted',
+      safeAction: compilationFailure.safeAction,
+    };
+  }
+  const warehouseFailure = terminalWarehouseFailureForRun(run);
+  if (warehouseFailure) {
+    return {
+      version: 1,
+      code: 'ANALYTICAL_EXECUTION_FAILED',
+      boundary: 'sql.execute',
+      origin: 'warehouse',
+      impact: 'execution_failed',
+      // A typed missing relation after a frozen plan reached the connector is
+      // not a generic retry. The target may be an empty local database or a
+      // different approved warehouse, so direct the operator to that target.
+      safeAction: warehouseFailure.category === 'unknown_relation'
+        ? 'change_authorized_connection'
+        : 'inspect_failure',
+    };
+  }
+  if (run.diagnosticReceiptV3?.provider) {
+    return { version: 1, code: 'PROVIDER_FAILURE', boundary: 'provider', origin: 'provider', impact: 'answer_not_produced', safeAction: 'inspect_failure' };
+  }
+  if (cascadeStopReason === 'coverage_gap' || cascadeStopReason === 'ambiguous' || cascadeStopReason === 'denied') {
+    return { version: 1, code: 'ANALYTICAL_COVERAGE_GAP', boundary: 'cascade', origin: 'governance_gate', impact: 'answer_not_produced', safeAction: 'inspect_failure' };
+  }
+  if (run.status === 'blocked') {
+    return { version: 1, code: 'ANALYTICAL_EXECUTION_FAILED', boundary: 'sql.execute', origin: 'unknown', impact: 'execution_failed', safeAction: 'inspect_failure' };
+  }
+  return undefined;
+}
+
+/**
+ * Read only the narrow host setup receipt emitted before a connector receives
+ * SQL. This must win over the broad analytical failure payload because a
+ * semantic graph can catch the host error after its compiler work completed.
+ */
+function terminalConnectionSetupFailureForRun(run: AgentRun): boolean {
+  return run.artifacts.some((artifact) => {
+    const payload = artifact.payload;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+    const setup = (payload as Record<string, unknown>).observabilityExecutionFailure;
+    if (!setup || typeof setup !== 'object' || Array.isArray(setup)) return false;
+    const record = setup as Record<string, unknown>;
+    return record.version === 1
+      && record.phase === 'execution'
+      && record.cause === 'connection_not_configured'
+      && record.safeAction === 'configure_connection';
+  });
+}
+
+/**
+ * Read only a producer-owned analytical failure. A compiler failure may have
+ * prepared SQL text, but it is still pre-execution until the durable telemetry
+ * records a SQL call. This guard keeps a real warehouse failure from being
+ * relabeled as semantic/planning just because a legacy adapter reused a broad
+ * failure code in a later stage.
+ */
+function terminalCompilationFailureForRun(
+  run: AgentRun,
+): { safeAction: AskTerminalIncidentV1['safeAction'] } | undefined {
+  if ((run.telemetry?.sqlExecutions ?? 0) > 0) return undefined;
+  for (const artifact of run.artifacts) {
+    const payload = artifact.payload;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) continue;
+    const failure = (payload as Record<string, unknown>).analyticalFailure;
+    if (!failure || typeof failure !== 'object' || Array.isArray(failure)) continue;
+    const record = failure as Record<string, unknown>;
+    if (record.code !== 'COMPILATION_FAILED' || record.phase !== 'compilation') continue;
+    return {
+      safeAction: terminalIncidentSafeAction(record.safeActions) ?? 'inspect_failure',
+    };
+  }
+  return undefined;
+}
+
+function isSemanticCompilationForRun(run: AgentRun): boolean {
+  // Only the router-owned cascade may identify a semantic execution tier.
+  // Direct/legacy semantic callers can still carry an immutable plan, but
+  // without that authority their failure is accurately a generic plan compile
+  // incident rather than a reconstructed semantic route.
+  return run.routeDecision?.analyticalCascadeDecision?.selectedTier === 'semantic';
+}
+
+/** Keep V4's recovery action in the same compact vocabulary as trace spans. */
+function terminalIncidentSafeAction(value: unknown): AskTerminalIncidentV1['safeAction'] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const actions: readonly AskTerminalIncidentV1['safeAction'][] = [
+    'export_redacted_trace',
+    'configure_connection',
+    'change_authorized_connection',
+    'inspect_failure',
+    'retry_same_plan',
+    'refresh_snapshot',
+    'edit_dql',
+    'open_sql_notebook',
+    'request_access',
+    'reapply_semantic_runtime',
+    'review_analytical_failure',
+    'inspect_research_failures',
+    'none',
+  ];
+  return value.find((action): action is AskTerminalIncidentV1['safeAction'] =>
+    typeof action === 'string' && actions.includes(action as AskTerminalIncidentV1['safeAction']),
+  );
+}
+
+/**
+ * A Research root is deliberately allowed to complete its receipt-bound
+ * synthesis after child deadlines. Surface a terminal incident only when no
+ * child completed an observation and all admitted children were bounded out;
+ * a partially successful investigation remains a review-required answer with
+ * a limited-scope note rather than a false failure.
+ */
+function terminalResearchBranchTimeoutForRun(run: AgentRun): boolean {
+  for (const artifact of run.artifacts) {
+    const payload = artifact.payload;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) continue;
+    const receipts = (payload as Record<string, unknown>).researchBranchReceipts;
+    if (!Array.isArray(receipts) || receipts.length === 0) continue;
+    const stopReasons = receipts
+      .map((receipt) => receipt && typeof receipt === 'object'
+        ? (receipt as Record<string, unknown>).stopReason
+        : undefined)
+      .filter((reason): reason is string => typeof reason === 'string');
+    if (stopReasons.length !== receipts.length) continue;
+    const allBounded = stopReasons.every((reason) =>
+      reason === 'research_branch_timeout' || reason === 'budget_exhausted',
+    );
+    if (allBounded && stopReasons.some((reason) => reason === 'research_branch_timeout')) return true;
+  }
+  return false;
+}
+
+/**
+ * Read only enum evidence emitted at the real connector boundary. SQL text and
+ * redacted driver diagnostics remain in the artifact inspector; they cannot
+ * become routing or trace-summary authority.
+ */
+function terminalWarehouseFailureForRun(
+  run: AgentRun,
+): { category: string } | undefined {
+  for (const artifact of run.artifacts) {
+    const payload = artifact.payload;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) continue;
+    const failure = (payload as Record<string, unknown>).warehouseFailure;
+    if (!failure || typeof failure !== 'object' || Array.isArray(failure)) continue;
+    const record = failure as Record<string, unknown>;
+    if (record.version === 1 && record.origin === 'warehouse' && typeof record.category === 'string') {
+      return { category: record.category };
+    }
+  }
+  return undefined;
 }
 
 function emptyRunTelemetry(total: number, fallbackReason: string): AgentRunTelemetryV1 {
@@ -2965,6 +3921,7 @@ function attachDiagnosticReceipt(
   receipt: AgentRunDiagnosticReceiptV1,
   receiptV2?: AgentRunDiagnosticReceiptV2,
   receiptV3?: AgentRunDiagnosticReceiptV3,
+  receiptV4?: AgentRunDiagnosticReceiptV4,
 ): AgentRunArtifact[] {
   if (artifacts.length === 0) {
     if (!receipt.failure) return artifacts;
@@ -2973,7 +3930,7 @@ function attachDiagnosticReceipt(
       kind: "answer",
       title: "Agent run diagnostics",
       trustState: "blocked",
-      payload: { diagnosticReceipt: receipt, ...(receiptV2 ? { diagnosticReceiptV2: receiptV2 } : {}), ...(receiptV3 ? { diagnosticReceiptV3: receiptV3 } : {}) },
+      payload: { diagnosticReceipt: receipt, ...(receiptV2 ? { diagnosticReceiptV2: receiptV2 } : {}), ...(receiptV3 ? { diagnosticReceiptV3: receiptV3 } : {}), ...(receiptV4 ? { diagnosticReceiptV4: receiptV4 } : {}) },
     }];
   }
   const preferredIndex = Math.max(0, artifacts.findIndex((artifact) => artifact.kind === "answer"));
@@ -2989,6 +3946,7 @@ function attachDiagnosticReceipt(
         diagnosticReceipt: receipt,
         ...(receiptV2 ? { diagnosticReceiptV2: receiptV2 } : {}),
         ...(receiptV3 ? { diagnosticReceiptV3: receiptV3 } : {}),
+        ...(receiptV4 ? { diagnosticReceiptV4: receiptV4 } : {}),
       },
     };
   });

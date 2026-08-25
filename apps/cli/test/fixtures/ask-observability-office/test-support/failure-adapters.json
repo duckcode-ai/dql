@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "classification": "test_only_injected_boundaries",
+  "runtimeConfiguration": false,
+  "adapters": [
+    {
+      "id": "provider-authentication",
+      "boundary": "provider",
+      "phase": "preflight",
+      "cause": "authentication",
+      "safeAction": "configure_provider",
+      "injectedBy": "focused_test"
+    },
+    {
+      "id": "provider-timeout",
+      "boundary": "provider",
+      "phase": "completion",
+      "cause": "provider_timeout",
+      "safeAction": "retry_same_provider",
+      "injectedBy": "focused_test"
+    },
+    {
+      "id": "tool-denied",
+      "boundary": "tool",
+      "outcome": "denied",
+      "safeErrorCode": "tool_denied",
+      "safeAction": "review_tool_scope",
+      "injectedBy": "focused_test"
+    },
+    {
+      "id": "sql-authorize-denied",
+      "boundary": "sql",
+      "stage": "authorize",
+      "outcome": "denied",
+      "reasonCode": "sql_authorization_denied",
+      "safeAction": "review_sql_scope",
+      "injectedBy": "focused_test"
+    },
+    {
+      "id": "sql-repair-once",
+      "boundary": "sql",
+      "stages": ["generate", "validate", "execute", "repair"],
+      "outcome": "error",
+      "maximumRepairs": 1,
+      "safeAction": "review_generated_sql",
+      "injectedBy": "focused_test"
+    }
+  ]
+}

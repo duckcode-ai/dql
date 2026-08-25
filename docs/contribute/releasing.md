@@ -1,12 +1,25 @@
 # Release process
 
 DQL uses one version across OSS publishable packages. The authoritative npm
-publication path is the `vX.Y.Z` tag workflow in
+publication path is the `vX.Y.Z` or `vX.Y.Z-prerelease` tag workflow in
 [`.github/workflows/release.yml`](../../.github/workflows/release.yml). It runs
 `scripts/release-packages.mjs`, which builds the workspace, rewrites
 `workspace:*` dependencies to concrete versions for packing/publishing, and
 restores the repo manifests afterward. A release tag publishes npm packages
 only; it never publishes the VS Code extension.
+
+Every dry run and publish must name an npm dist-tag explicitly. Stable versions
+must use `latest`; prereleases (including release candidates) must use `next`.
+The release script rejects a mismatched tag before it builds or publishes, and
+passes the selected tag to every `pnpm publish` invocation. It also requires a
+trusted `--expected-version` and refuses to build, pack, or publish unless all
+19 release manifests exactly match it. The tag workflow derives that value from
+the pushed `v...` Git tag.
+
+| Release version | Required npm dist-tag | Example Git tag |
+| --- | --- | --- |
+| Stable | `latest` | `v1.14.3` |
+| Prerelease / RC | `next` | `v1.14.3-rc.1` |
 
 ## Cut a Release
 
@@ -19,7 +32,13 @@ pnpm install --frozen-lockfile
 pnpm build
 pnpm test
 node scripts/check-doc-links.mjs
-pnpm release:dry-run
+pnpm release:dry-run -- --tag latest --expected-version 1.7.0
+```
+
+For a prerelease candidate, replace `latest` with `next`:
+
+```bash
+pnpm release:dry-run -- --tag next --expected-version 1.7.0-rc.1
 ```
 
 4. Commit the release candidate and push `main`. Let ordinary CI complete.
@@ -34,10 +53,29 @@ git push origin v1.7.0
 7. Smoke the published packages:
 
 ```bash
-npx @duckcodeailabs/dql-cli@latest --version
-npx @duckcodeailabs/dql-cli@latest --help
-npx create-dql-app@latest --help
+npx @duckcodeailabs/dql-cli@1.7.0 --version
+npx @duckcodeailabs/dql-cli@1.7.0 --help
+npx create-dql-app@1.7.0 --help
 ```
+
+Use the exact published prerelease version in the same commands for an RC. Do
+not use `@latest` or `@next` as the post-publish proof: the release script's
+own smoke uses the exact CLI package spec so a moving dist-tag cannot mask a
+wrong publication.
+
+For the current `1.14.3-rc.1` candidate, record both independent facts:
+
+```bash
+npx @duckcodeailabs/dql-cli@1.14.3-rc.1 --version
+npx @duckcodeailabs/dql-cli@1.14.3-rc.1 --help
+npx create-dql-app@1.14.3-rc.1 --help
+npm view @duckcodeailabs/dql-cli dist-tags.next
+npm view create-dql-app dist-tags.next
+```
+
+The first three commands prove the exact published artifacts. The last two
+prove that `next` points to the release candidate. Neither check treats
+`@latest` as evidence for an RC.
 
 ## Local same-SHA fallback
 
@@ -53,8 +91,12 @@ registry target version agree, then run:
 git diff --check
 git rev-parse HEAD
 git rev-parse v1.7.0^{}
-pnpm release:publish
+pnpm release:publish -- --tag latest --expected-version 1.7.0
 ```
+
+Use `--tag next --expected-version 1.7.0-rc.1` for an authorized prerelease
+fallback. The script will reject a stable version with `next`, a prerelease
+with `latest`, or any expected version that differs from the manifests.
 
 Record that the packages came from the tagged SHA, investigate why the tag
 workflow failed, and perform the same registry and install smoke checks. The

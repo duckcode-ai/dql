@@ -1,0 +1,29 @@
+// dql-format: 1
+
+block "Lost Opportunities by Fiscal Month and Competitor" {
+  domain = "revenue_operations"
+  type = "custom"
+  status = "certified"
+  description = "Certified lost opportunity count and lost amount by fiscal month for a named competitor."
+  owner = "revenue-operations@fixture.test"
+  grain = "fiscal_month,competitor_name"
+  parameterPolicy {
+    competitor_name = "dynamic"
+    fiscal_period = "dynamic"
+  }
+  params {
+    competitor_name: string = "Datadog"
+    fiscal_period: string = "FY26"
+  }
+  query = """
+    SELECT
+      fiscal_month,
+      competitor_name,
+      COUNT(*) AS lost_opportunity_count,
+      SUM(lost_amount) AS lost_amount
+    FROM analytics.fct_lost_opportunities
+    WHERE competitor_name = ${competitor_name}
+      AND fiscal_period = ${fiscal_period}
+    GROUP BY 1, 2
+  """
+}

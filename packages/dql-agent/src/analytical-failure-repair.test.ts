@@ -41,6 +41,7 @@ describe('stable analytical diagnostics (API-007 / SEC-004)', () => {
   it.each([
     [{ code: '42703', message: 'column secret_name does not exist' }, 'COLUMN_NOT_FOUND'],
     [{ sqlState: '42P01', message: 'relation hidden_table does not exist' }, 'RELATION_NOT_FOUND'],
+    [new Error('Binder Error: Catalog "jaffle_shop" does not exist'), 'RELATION_NOT_FOUND'],
     [{ code: '42501', message: 'permission denied' }, 'PERMISSION_DENIED'],
     [new Error('column reference customer_id is ambiguous'), 'AMBIGUOUS_COLUMN'],
     [new Error('syntax error near warehouse token'), 'DIALECT_ERROR'],
@@ -72,6 +73,21 @@ describe('stable analytical diagnostics (API-007 / SEC-004)', () => {
     expect(first.message).not.toMatch(/zoom|hunter2|orders/i);
     expect(first.dqlFingerprint).toMatch(/^[a-f0-9]{64}$/);
     expect(first.sqlFingerprint).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it('treats a missing warehouse catalog as a target-selection failure, not a generic compilation miss', () => {
+    const failure = createAnalyticalFailure({
+      error: new Error('Binder Error: Catalog "jaffle_shop" does not exist'),
+      phase: 'execution',
+      snapshotId: 'snapshot-1',
+      planFingerprint: fingerprint('a'),
+    });
+
+    expect(failure).toMatchObject({
+      code: 'RELATION_NOT_FOUND',
+      phase: 'execution',
+      safeActions: expect.arrayContaining(['change_authorized_connection']),
+    });
   });
 
   it('redacts connection strings, secrets, tokens, and literal values from diagnostics', () => {

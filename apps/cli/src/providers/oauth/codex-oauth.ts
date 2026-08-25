@@ -3,6 +3,7 @@ import * as crypto from 'node:crypto';
 import * as http from 'node:http';
 import { URL } from 'node:url';
 import {
+  completeProviderHttpDispatch,
   prepareProviderHttpDispatch,
   type AgentProvider,
   type AgentMessage,
@@ -389,55 +390,80 @@ export class CodexOAuthProvider implements AgentProvider {
       body.reasoning = { effort: options.reasoningEffort, summary: 'auto' };
       body.include = ['reasoning.encrypted_content'];
     }
-    const dispatchBody = prepareProviderHttpDispatch({
+    const dispatch = {
       provider: this.name,
       operation: 'generate_stream',
       attemptIndex: 1,
       options,
       envelope: body,
-    });
-
-    const res = await fetch(`${CODEX_API_BASE_URL}/responses`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-        originator: 'roo-code',
-        session_id: this.sessionId,
-        'User-Agent': `dql/${os.platform()} node/${process.version.slice(1)}`,
-        ...(accountId ? { 'ChatGPT-Account-Id': accountId } : {}),
-      },
-      body: JSON.stringify(dispatchBody),
-      signal: options.signal,
-    });
-    if (!res.ok || !res.body) {
-      throw new Error(`chatgpt (subscription): ${res.status} ${await res.text().catch(() => res.statusText)}`);
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let out = '';
-    const consume = (raw: string) => {
-      const evt = parseSse(raw);
-      if (!evt) return;
-      const type = evt.type as string | undefined;
-      if ((type === 'response.output_text.delta' || type === 'response.text.delta') && typeof evt.delta === 'string') {
-        out += evt.delta;
+    } as const;
+    const dispatchBody = prepareProviderHttpDispatch(dispatch);
+    let transportSettled = false;
+    let transportSucceeded = false;
+    try {
+      const res = await fetch(`${CODEX_API_BASE_URL}/responses`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          originator: 'roo-code',
+          session_id: this.sessionId,
+          'User-Agent': `dql/${os.platform()} node/${process.version.slice(1)}`,
+          ...(accountId ? { 'ChatGPT-Account-Id': accountId } : {}),
+        },
+        body: JSON.stringify(dispatchBody),
+        signal: options.signal,
+      });
+      transportSettled = true;
+      transportSucceeded = res.ok && Boolean(res.body);
+      completeProviderHttpDispatch(dispatch, {
+        settlement: 'transport',
+        outcome: transportSucceeded ? 'ok' : 'error',
+        httpStatus: res.status,
+      });
+      if (!res.ok || !res.body) {
+        throw new Error(`chatgpt (subscription): ${res.status} ${await res.text().catch(() => res.statusText)}`);
       }
-    };
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (value) buffer += decoder.decode(value, { stream: !done });
-      let idx: number;
-      while ((idx = buffer.indexOf('\n\n')) !== -1) {
-        consume(buffer.slice(0, idx));
-        buffer = buffer.slice(idx + 2);
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let out = '';
+      const consume = (raw: string) => {
+        const evt = parseSse(raw);
+        if (!evt) return;
+        const type = evt.type as string | undefined;
+        if ((type === 'response.output_text.delta' || type === 'response.text.delta') && typeof evt.delta === 'string') {
+          out += evt.delta;
+        }
+      };
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (value) buffer += decoder.decode(value, { stream: !done });
+        let idx: number;
+        while ((idx = buffer.indexOf('\n\n')) !== -1) {
+          consume(buffer.slice(0, idx));
+          buffer = buffer.slice(idx + 2);
+        }
+        if (done) break;
       }
-      if (done) break;
+      // Flush a final event not terminated by a blank line.
+      if (buffer.trim()) consume(buffer);
+      if (!out.trim()) {
+        throw Object.assign(new Error('ChatGPT subscription returned no assistant text.'), {
+          code: 'PROVIDER_RESULT_MALFORMED',
+        });
+      }
+      completeProviderHttpDispatch(dispatch, { settlement: 'result', outcome: 'ok' });
+      return out;
+    } catch (error) {
+      const cancelled = options.signal?.aborted || (error instanceof Error && error.name === 'AbortError');
+      if (!transportSettled) {
+        completeProviderHttpDispatch(dispatch, { settlement: 'transport', outcome: cancelled ? 'cancelled' : 'error', error });
+      } else if (transportSucceeded) {
+        completeProviderHttpDispatch(dispatch, { settlement: 'result', outcome: cancelled ? 'cancelled' : 'error', error });
+      }
+      throw error;
     }
-    // Flush a final event not terminated by a blank line.
-    if (buffer.trim()) consume(buffer);
-    return out;
   }
 }

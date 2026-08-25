@@ -267,5 +267,86 @@ describe('analytical cross-surface contracts (CONTRACT-002 / AGT-017 / API-007)'
       version: 1,
       purpose: 'research_narration',
     });
+    expect(normalizeProviderEgressReceiptV1({
+      ...receipt,
+      purpose: 'classification',
+      dispatchPhase: 'classification',
+      resultRowCount: 0,
+      cumulativeResultRowCount: 0,
+      columnCount: 0,
+      optIn: false,
+      permittedCategories: ['question', 'schema_metadata'],
+      redactionPolicyId: 'no-result-rows-v1',
+    })).toMatchObject({ purpose: 'classification', dispatchPhase: 'classification', resultRowCount: 0 });
+    const retryReceipt = normalizeProviderEgressReceiptV1({
+      ...receipt,
+      purpose: 'answer_generation',
+      dispatchPhase: 'generation',
+      attemptIndex: 2,
+      retryOfAttemptIndex: 1,
+      resultRowCount: 0,
+      cumulativeResultRowCount: 0,
+      columnCount: 0,
+      optIn: false,
+      permittedCategories: ['question', 'schema_metadata'],
+      redactionPolicyId: 'no-result-rows-v1',
+    });
+    expect(retryReceipt).toMatchObject({
+      dispatchPhase: 'generation', attemptIndex: 2, retryOfAttemptIndex: 1,
+    });
+    expect(normalizeProviderEgressReceiptV1({ ...retryReceipt!, retryOfAttemptIndex: 0 })).toBeUndefined();
+    // V1/V2 receipts did not retain a dispatch phase. A historical ordinary
+    // narration remains readable, but the host stamps it read-only so it can
+    // never be reused as an egress grant for a new Ask run.
+    expect(normalizeProviderEgressReceiptV1({
+      ...receipt,
+      purpose: 'answer_narration',
+      dispatchPhase: undefined,
+    })).toMatchObject({ purpose: 'answer_narration', legacyReadOnly: true, resultRowCount: 20 });
+  });
+
+  it('rejects imported row-bearing receipts outside explicitly opted-in Research', () => {
+    const researchReceipt = {
+      version: 1,
+      purpose: 'research_narration',
+      dispatchPhase: 'narration',
+      provider: 'openai',
+      permittedCategories: ['question', 'schema_metadata', 'result_rows'],
+      resultRowCount: 1,
+      cumulativeResultRowCount: 1,
+      columnCount: 2,
+      redactionPolicyId: 'research-result-rows-v1',
+      optIn: true,
+      payloadFingerprint: 'sha256:research-row',
+    } as const;
+    expect(normalizeProviderEgressReceiptV1(researchReceipt)).toMatchObject({
+      purpose: 'research_narration', resultRowCount: 1, optIn: true,
+    });
+    expect(normalizeProviderEgressReceiptV1({
+      ...researchReceipt,
+      purpose: 'research_tool',
+      dispatchPhase: 'generation',
+    })).toMatchObject({ purpose: 'research_tool', resultRowCount: 1, optIn: true });
+
+    // These shapes simulate hand-edited or stale local run JSON. Normalizing
+    // them on import drops the entire receipt, so old content-free Ask phases
+    // cannot claim that provider result rows were permitted or disclosed.
+    for (const invalid of [
+      { purpose: 'classification', dispatchPhase: 'classification' },
+      { purpose: 'answer_generation', dispatchPhase: 'meaning_resolution' },
+      { purpose: 'answer_narration', dispatchPhase: 'narration' },
+      { purpose: 'research_narration', dispatchPhase: 'classification' },
+      { purpose: 'research_tool', dispatchPhase: 'narration' },
+      { purpose: 'research_narration', dispatchPhase: 'narration', optIn: false },
+      { purpose: 'research_tool', dispatchPhase: 'generation', optIn: false },
+      {
+        purpose: 'classification',
+        dispatchPhase: 'classification',
+        resultRowCount: 0,
+        cumulativeResultRowCount: 1,
+      },
+    ]) {
+      expect(normalizeProviderEgressReceiptV1({ ...researchReceipt, ...invalid })).toBeUndefined();
+    }
   });
 });

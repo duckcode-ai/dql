@@ -3,7 +3,7 @@ import type {
   AgentMessage,
   ProviderRunOptions,
 } from './types.js';
-import { prepareProviderHttpDispatch } from './dispatch.js';
+import { fetchProviderHttpDispatch } from './dispatch.js';
 
 /**
  * Local Ollama provider — talks to a local Ollama daemon on
@@ -34,7 +34,7 @@ export class OllamaProvider implements AgentProvider {
     for (const baseUrl of await this.orderedBaseUrls()) {
       try {
         attemptIndex += 1;
-        const envelope = prepareProviderHttpDispatch({
+        const res = await fetchProviderHttpDispatch({
           provider: this.name,
           operation: 'generate',
           attemptIndex,
@@ -49,12 +49,12 @@ export class OllamaProvider implements AgentProvider {
               num_predict: options.maxTokens ?? 1024,
             },
           },
-        });
-        const res = await fetch(`${baseUrl}/api/chat`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(envelope),
-          signal: options.signal,
+          url: `${baseUrl}/api/chat`,
+          init: {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            signal: options.signal,
+          },
         });
         if (!res.ok) {
           const body = await res.text().catch(() => res.statusText);
@@ -82,7 +82,7 @@ export class OllamaProvider implements AgentProvider {
     for (const baseUrl of await this.orderedBaseUrls()) {
       try {
         attemptIndex += 1;
-        const envelope = prepareProviderHttpDispatch({
+        const res = await fetchProviderHttpDispatch({
           provider: this.name,
           operation: 'generate_stream',
           attemptIndex,
@@ -94,12 +94,12 @@ export class OllamaProvider implements AgentProvider {
             think: false,
             options: { temperature: options.temperature ?? 0.2, num_predict: options.maxTokens ?? 1024 },
           },
-        });
-        const res = await fetch(`${baseUrl}/api/chat`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(envelope),
-          signal: options.signal,
+          url: `${baseUrl}/api/chat`,
+          init: {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            signal: options.signal,
+          },
         });
         if (!res.ok || !res.body) {
           const body = await res.text().catch(() => res.statusText);

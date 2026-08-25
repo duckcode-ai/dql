@@ -428,24 +428,29 @@ Simple routes are deliberately shallow (`PERF-002`):
 | ----- | ------------- | -------------------- | ----------------------------- | --- | ------ | --------- |
 | explicit qualified definition | 0 | 0 | 0 | 0 | 0 | 0 |
 | explicit qualified data | 0 | 0 | 0 | 1 | 0 | 0 |
-| natural-language certified/semantic | <= 1 | 0 | <= 1 | <= 1 | 0 | <= 2 |
-| governed/exploratory generated SQL | <= 1 | <= 3 | <= 6 across meaning, generation, narration, repair | <= 1 | <= 1 | <= 2 |
-| explicit research/diagnosis | <= 1 | <= 11 | <= 14 under the separate Research policy | <= 6 | <= 1 total | <= 2 |
+| natural-language certified/semantic | <= 1 | 0 | <= 1 | <= 1 | 0 | 0 |
+| governed/exploratory generated SQL | <= 1 | <= 1 planning/generation | <= 3 only when a frozen exploratory plan needs its one same-plan provider correction; otherwise <= 2 across interpretation and planning/generation | <= 1 | <= 1 immutable same-plan provider correction after `model_declined`; <= 1 bounded SQL repair, never a reroute | 0 |
+| explicit research/diagnosis | <= 1 | <= 9 planning/generation, including <= 1 planner | <= 12 under the separate Research policy | <= 6 | <= 1 total | <= 1, only with explicit row opt-in |
 
-Definition rendering is deterministic. **Result rendering is not.** Any route
-that produced values narrates them, because a `label: value` join of the result
-rows is a record, not an answer — gating narration on `requestedMode` meant
-every ordinary Ask (which the UI sends as `auto`) shipped that record as its
-answer. Narration is *verified, not authored*: on the analytical-graph lanes the
-model drafts claims that must each cite a fact id, and
-`validateAnalyticalNarrativeClaims` rejects causal wording, unknown facts,
-unsupported numbers, and hidden material caveats before the prose is shown. The
-deterministic join remains the floor and is explicitly labelled when a
-verification failure forces it.
+Definition and ordinary Ask result rendering are deterministic. Ordinary Ask
+does not send result rows to a provider and does not dispatch `answer_narration`;
+its normal maximum is two physical sends: the candidate-ID meaning call and,
+when needed, one planning/generation transport. A router-frozen bounded
+exploratory plan may reserve one third send only when that generated response
+declines SQL: the correction carries the same plan, snapshot, execution target,
+relationship closure, output bindings, ranking, and limit, and cannot reselect
+meaning, widen scope, change route, or use another provider. A second provider
+repair is denied. Explicit Research may use one
+`research_narration` dispatch only when the user enables the run-scoped
+result-row opt-in. That narration is *verified, not authored*: on the
+analytical-graph lanes the model drafts claims that must each cite a fact id,
+and `validateAnalyticalNarrativeClaims` rejects causal wording, unknown facts,
+unsupported numbers, and hidden material caveats before prose is shown. The
+deterministic fact-based synthesis remains the floor when no Research row
+opt-in or narration transport is available.
 
-Narration has its own dispatch bucket. Sharing `generationGroup` meant a run
-that spent its generation attempts could not afford to write the answer, and
-failed with a budget error after computing the correct numbers.
+Research narration has its own one-send bucket. Planning and generation share
+one group so a Research run cannot exceed its twelve physical-send ceiling.
 
 Cancellation and inherited deadlines propagate through retrieval, meaning
 resolution, generation, validation, database execution, repair, and research.

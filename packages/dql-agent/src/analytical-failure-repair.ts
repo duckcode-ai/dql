@@ -145,7 +145,11 @@ const SAFE_FAILURES: Record<AnalyticalFailureCode, {
   RELATION_NOT_FOUND: {
     message: 'A governed relation required by the selected plan is unavailable.',
     recoverability: 'refresh_snapshot',
-    safeActions: ['refresh_snapshot', 'edit_dql', 'open_sql_notebook'],
+    // A missing warehouse catalog/relation can be stale project metadata, but
+    // can also mean the active connection points at a different database (for
+    // example a new in-memory DuckDB target). Suggest the approved target
+    // choice first without reopening the frozen plan or guessing a relation.
+    safeActions: ['change_authorized_connection', 'refresh_snapshot', 'edit_dql', 'open_sql_notebook'],
   },
   PERMISSION_DENIED: {
     message: 'The selected governed route was denied by the active warehouse permissions.',
@@ -214,7 +218,7 @@ export function classifyAnalyticalFailure(error: unknown, fallback: AnalyticalFa
   if (/permission denied|access denied|not authorized|insufficient privilege|forbidden/.test(text)) return 'PERMISSION_DENIED';
   if (/ambiguous (column|field)|column reference .* ambiguous/.test(text)) return 'AMBIGUOUS_COLUMN';
   if (/column .* (does not exist|not found|unknown)|unknown column|invalid identifier/.test(text)) return 'COLUMN_NOT_FOUND';
-  if (/(relation|table|view) .* (does not exist|not found|unknown)|unknown table/.test(text)) return 'RELATION_NOT_FOUND';
+  if (/(catalog|relation|table|view) .* (does not exist|not found|unknown)|unknown table/.test(text)) return 'RELATION_NOT_FOUND';
   if (/snapshot .* (changed|stale|mismatch)|source changed|schema drift/.test(text)) return 'SNAPSHOT_DRIFT';
   if (/timed? ?out|deadline exceeded|query timeout/.test(text)) return 'TIMEOUT';
   if (/result contract|missing output|unexpected output|row bound|decimal value required/.test(text)) return 'RESULT_CONTRACT_MISMATCH';

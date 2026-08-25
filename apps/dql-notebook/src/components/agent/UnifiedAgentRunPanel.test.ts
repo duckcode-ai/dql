@@ -1,6 +1,9 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { buildConversationContext, type ConversationThreadItem } from './agentConversationContext';
-import type { AgentRunEvent } from '../../api/client';
+import type { AgentRunEvent, AskTraceDataV1 } from '../../api/client';
+import { themes } from '../../themes/notebook-theme';
 import type * as UnifiedAgentRunPanelModule from './UnifiedAgentRunPanel';
 
 let resolveArtifactDqlView: typeof UnifiedAgentRunPanelModule.resolveArtifactDqlView;
@@ -37,7 +40,15 @@ let askFailureOriginTyped: typeof UnifiedAgentRunPanelModule.askFailureOrigin;
 let askFailurePresentation: typeof UnifiedAgentRunPanelModule.ASK_FAILURE_PRESENTATION;
 let extractResult: typeof UnifiedAgentRunPanelModule.extractResult;
 let resolveComposerRequestedMode: typeof UnifiedAgentRunPanelModule.resolveComposerRequestedMode;
+let researchResultRowsOptInForRun: typeof UnifiedAgentRunPanelModule.researchResultRowsOptInForRun;
 let researchToolRowsConsentTitle: typeof UnifiedAgentRunPanelModule.RESEARCH_TOOL_ROWS_CONSENT_TITLE;
+let providerEgressSummary: typeof UnifiedAgentRunPanelModule.providerEgressSummary;
+let researchVerdictSummary: typeof UnifiedAgentRunPanelModule.researchVerdictSummary;
+let researchVerdictSummaryForRun: typeof UnifiedAgentRunPanelModule.researchVerdictSummaryForRun;
+let InspectorDecisionStory: typeof UnifiedAgentRunPanelModule.InspectorDecisionStory;
+let ResearchPartialFailureRepair: typeof UnifiedAgentRunPanelModule.ResearchPartialFailureRepair;
+let InspectorDecisionSummaryUnavailable: typeof UnifiedAgentRunPanelModule.InspectorDecisionSummaryUnavailable;
+let inspectorLegacySummaryNotice: typeof UnifiedAgentRunPanelModule.CANONICAL_DECISION_SUMMARY_UNAVAILABLE;
 
 beforeAll(async () => {
     vi.stubGlobal('window', { location: { origin: 'http://localhost' } });
@@ -76,10 +87,84 @@ beforeAll(async () => {
     askFailurePresentation = module.ASK_FAILURE_PRESENTATION;
     extractResult = module.extractResult;
     resolveComposerRequestedMode = module.resolveComposerRequestedMode;
+    researchResultRowsOptInForRun = module.researchResultRowsOptInForRun;
     researchToolRowsConsentTitle = module.RESEARCH_TOOL_ROWS_CONSENT_TITLE;
+    providerEgressSummary = module.providerEgressSummary;
+    researchVerdictSummary = module.researchVerdictSummary;
+    researchVerdictSummaryForRun = module.researchVerdictSummaryForRun;
+    InspectorDecisionStory = module.InspectorDecisionStory;
+    ResearchPartialFailureRepair = module.ResearchPartialFailureRepair;
+    InspectorDecisionSummaryUnavailable = module.InspectorDecisionSummaryUnavailable;
+    inspectorLegacySummaryNotice = module.CANONICAL_DECISION_SUMMARY_UNAVAILABLE;
 });
 
 describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
+
+  it('OBS-014 gives old inspector runs the same canonical-summary-unavailable notice as full trace', () => {
+    const markup = renderToStaticMarkup(createElement(InspectorDecisionSummaryUnavailable, { t: themes.paper }));
+    expect(markup).toContain(inspectorLegacySummaryNotice);
+    expect(markup).toContain('Open the full trace to inspect its raw advanced evidence.');
+    expect(markup).not.toContain('provider-dependent stage');
+  });
+
+  it('OBS-012 keeps a root-successful partial Research answer visible while showing stored child limitations', () => {
+    const summary = {
+      version: 1,
+      summaryFingerprint: 'p'.repeat(64),
+      understoodRequest: { measures: 1, dimensions: 2, entityRequested: true, outputCount: 1, conversationBinding: 'none' },
+      evidenceByRole: [{ role: 'metric', candidateCount: 1 }],
+      tierDecisions: [],
+      researchBranchSummary: {
+        version: 1,
+        totalBranches: 5,
+        completedBranches: 1,
+        receiptBackedBranches: 1,
+        failedBranches: 4,
+        timedOutBranches: 0,
+        skippedBranches: 0,
+        partialSuccess: true,
+        failureReasons: [{ code: 'execution_failed', branchCount: 4 }],
+        availableChildPlans: [{ tier: 'semantic', frozenPlanCount: 1, branchCount: 1, reviewRequired: false }],
+        linkedChildRunCount: 5,
+        safeAction: 'inspect_research_failures',
+      },
+      safeNextAction: 'inspect_research_failures',
+    } as const;
+    const markup = renderToStaticMarkup(createElement(InspectorDecisionStory, { summary: summary as never, t: themes.paper }));
+    expect(markup).toContain('Research branch evidence');
+    expect(markup).toContain('1 receipt-backed finding');
+    expect(markup).toContain('execution failed: 4');
+    expect(markup).toContain('semantic frozen ×1 for 1 branch');
+    expect(markup).toContain('Research limitations: 4 child branches did not complete');
+    expect(markup).toContain('Inspect failed or timed-out branches; retry narrower Research');
+    expect(markup).not.toContain('No terminal incident was recorded.');
+  });
+
+  it('OBS-012 renders stored partial Research limitations in Failure & repair without inventing a root failure', () => {
+    const summary = {
+      version: 1,
+      totalBranches: 5,
+      completedBranches: 2,
+      receiptBackedBranches: 2,
+      failedBranches: 3,
+      timedOutBranches: 0,
+      skippedBranches: 0,
+      partialSuccess: true,
+      failureReasons: [{ code: 'execution_failed', branchCount: 3 }],
+      availableChildPlans: [{ tier: 'semantic', frozenPlanCount: 2, branchCount: 2, reviewRequired: false }],
+      linkedChildRunCount: 5,
+      safeAction: 'inspect_research_failures',
+    } as const;
+    const markup = renderToStaticMarkup(createElement(ResearchPartialFailureRepair, { summary: summary as never, t: themes.paper }));
+    expect(markup).toContain('Research branch limitations');
+    expect(markup).toContain('The root Research answer remains successful');
+    expect(markup).toContain('2 receipt-backed findings');
+    expect(markup).toContain('3 failed');
+    expect(markup).toContain('execution failed: 3');
+    expect(markup).toContain('3 child branches did not complete');
+    expect(markup).toContain('Inspect failed or timed-out branches; retry narrower Research');
+    expect(markup).not.toContain('No failure was recorded for this run.');
+  });
 
   it('keeps explicit Research separate from high thinking and preserves one-shot actions', () => {
     expect(resolveComposerRequestedMode({ initialMode: 'auto', researchMode: false })).toBe('auto');
@@ -91,9 +176,88 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
   });
 
   it('describes Research tool-row consent separately from ordinary Ask narration rows', () => {
+    expect(researchResultRowsOptInForRun('ask', true)).toBe(false);
+    expect(researchResultRowsOptInForRun('auto', true)).toBe(false);
+    expect(researchResultRowsOptInForRun('research', false)).toBe(false);
+    expect(researchResultRowsOptInForRun('research', true)).toBe(true);
+    expect(researchToolRowsConsentTitle).toContain('20 redacted result rows for Research narration');
     expect(researchToolRowsConsentTitle).toContain('200 redacted local-analysis tool rows');
-    expect(researchToolRowsConsentTitle).toContain('Ordinary Ask and Research narration may each use up to 20 redacted rows');
-    expect(researchToolRowsConsentTitle).toContain('Ask never sends result rows to tools');
+    expect(researchToolRowsConsentTitle).toContain('Ordinary Ask—and Research without this selection—keeps result rows local');
+  });
+
+  it('labels a legacy category classifier without presenting it as meaning resolution', () => {
+    expect(providerEgressSummary({
+      requestedMode: 'ask',
+      providerEgressReceipts: [{
+        version: 1,
+        purpose: 'classification',
+        dispatchPhase: 'classification',
+        provider: 'local',
+        permittedCategories: ['instructions', 'question'],
+        resultRowCount: 0,
+        columnCount: 0,
+        redactionPolicyId: 'no-result-rows-v1',
+        optIn: false,
+        payloadFingerprint: 'sha256:classification',
+      }],
+    }, 1)).toBe('0 result rows sent to providers (1 content-free classification receipt)');
+  });
+
+  it('labels imported legacy ordinary narration rows as read-only rather than current Ask egress', () => {
+    expect(providerEgressSummary({
+      requestedMode: 'ask',
+      providerEgressReceipts: [{
+        version: 1,
+        purpose: 'answer_narration',
+        provider: 'local',
+        permittedCategories: ['instructions', 'question', 'result_rows'],
+        resultRowCount: 3,
+        cumulativeResultRowCount: 3,
+        columnCount: 2,
+        redactionPolicyId: 'legacy-local-v1',
+        optIn: true,
+        payloadFingerprint: 'sha256:legacy',
+        legacyReadOnly: true,
+      }],
+    }, 1)).toBe('3 bounded, redacted legacy non-Research result rows retained as read-only evidence; not a current egress authority');
+  });
+
+  it('renders typed Research branch verdicts instead of rebranding informational run checks as passes', () => {
+    // This is the API-serialized no-provider fixture shape: the route/catalog
+    // evaluations may be informational, while both physical branch validators
+    // failed. The presentation must say that plainly and retain limited scope.
+    const payload = JSON.parse(JSON.stringify({
+      researchLedgerV2: {
+        version: 2,
+        groundableBranchCount: 2,
+        limitedScope: true,
+        entries: [
+          { branchId: 'h1', verdict: 'failed' },
+          { branchId: 'h2', verdict: 'failed' },
+        ],
+      },
+    })) as Record<string, unknown>;
+    expect(researchVerdictSummary(payload)).toMatchObject({
+      branchCount: 2,
+      groundableBranchCount: 2,
+      limitedScope: true,
+      verdicts: { failed: 2 },
+      compactLabel: 'Limited research scope · 2 failed',
+    });
+    expect(researchVerdictSummary(payload)?.detail).toContain('2 of at least 3 evidence-supported branches');
+    expect(researchVerdictSummary(payload)?.compactLabel).not.toMatch(/passed|verified/i);
+
+    const run = {
+      id: 'ask-research-no-provider',
+      route: 'research',
+      artifacts: [{ id: 'research-artifact', kind: 'research_run', title: 'Research plan', payload }],
+      evaluations: [
+        { id: 'route-decision', severity: 'info', passed: true },
+        { id: 'catalog-grounding', severity: 'info', passed: true },
+        { id: 'research-workspace', severity: 'info', passed: true },
+      ],
+    } as any;
+    expect(researchVerdictSummaryForRun(run)?.compactLabel).toBe('Limited research scope · 2 failed');
   });
 
   it('names the exact App page used by the added-result confirmation', () => {
@@ -293,6 +457,38 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
       provider: { phase: 'preflight', cause: 'model_not_found' },
       failure: { code: 'LEGACY_FAILURE' },
     });
+    const v4 = analyticalInspectorContract({
+      diagnosticReceiptV4: {
+        version: 4,
+        runId: 'run-v4',
+        finalStopReason: 'execution_failed',
+        summary: {
+          version: 1,
+          summaryFingerprint: 'sha256:shared-inspector-trace-story',
+          understoodRequest: { measures: 1, dimensions: 1, entityRequested: true, outputCount: 2, conversationBinding: 'none' },
+          evidenceByRole: [{ role: 'metric', candidateCount: 1 }],
+          tierDecisions: [{ tier: 'exploratory_sql', outcome: 'executable', planFrozen: true }],
+          selectedPlan: { tier: 'exploratory_sql', planFrozen: true, reviewRequired: true },
+          terminalIncident: {
+            version: 1,
+            code: 'INTERNAL_EXPLORATORY_AUTHORIZATION_STATE_MISMATCH',
+            boundary: 'sql.authorize',
+            origin: 'internal_invariant',
+            impact: 'execution_not_attempted',
+            safeAction: 'export_redacted_trace',
+          },
+          safeNextAction: 'export_redacted_trace',
+        },
+      },
+    });
+    expect(v4?.decisionSummary).toMatchObject({
+      summaryFingerprint: 'sha256:shared-inspector-trace-story',
+      terminalIncident: {
+        code: 'INTERNAL_EXPLORATORY_AUTHORIZATION_STATE_MISMATCH',
+        boundary: 'sql.authorize',
+        impact: 'execution_not_attempted',
+      },
+    });
     expect(analyticalInspectorSections()).toEqual([
       'Performance & provider egress',
       'Plan',
@@ -330,6 +526,136 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
       ['Artifact IDs', 'artifact-1'],
     ]));
     expect(agentRunPerformanceRows({} as Parameters<typeof agentRunPerformanceRows>[0])).toBeUndefined();
+  });
+
+  it('OBS-010 projects ordinary Ask egress from its actual meaning receipt without calling it Research', () => {
+    const trace = JSON.parse(JSON.stringify({
+      envelope: {
+        version: 1, traceId: '9'.repeat(32), rootSpanId: '8'.repeat(16), runId: 'ordinary-semantic',
+        surface: 'browser', mode: 'ask', questionFingerprint: 'sha256:question', status: 'completed',
+        recordingStatus: 'complete', startedAt: '2026-08-24T12:00:00.000Z', completedAt: '2026-08-24T12:00:00.030Z', durationMs: 30,
+        spanCount: 3, candidateDecisionCount: 0, droppedRecordCount: 0,
+      },
+      spans: [
+        { version: 1, traceId: '9'.repeat(32), spanId: '8'.repeat(16), ordinal: 0, name: 'ask.run', stage: 'request', startedAt: '2026-08-24T12:00:00.000Z', durationMs: 30, outcome: 'ok', reasonCode: 'completed', payload: { kind: 'stage' } },
+        { version: 1, traceId: '9'.repeat(32), spanId: '7'.repeat(16), ordinal: 1, name: 'provider.attempt', stage: 'provider', startedAt: '2026-08-24T12:00:00.001Z', durationMs: 10, outcome: 'ok', reasonCode: 'completed', payload: { kind: 'provider' } },
+        { version: 1, traceId: '9'.repeat(32), spanId: '6'.repeat(16), ordinal: 2, name: 'sql.execute', stage: 'sql', startedAt: '2026-08-24T12:00:00.012Z', durationMs: 12, outcome: 'ok', reasonCode: 'completed', payload: { kind: 'sql', execution: { reviewRequired: false } } },
+      ],
+      candidateDecisions: [], links: [],
+    })) as AskTraceDataV1;
+    const run = {
+      requestedMode: 'ask',
+      providerEgressReceipts: [{
+        version: 1,
+        purpose: 'answer_generation',
+        dispatchPhase: 'meaning_resolution',
+        provider: 'test',
+        permittedCategories: ['instructions', 'question'],
+        resultRowCount: 0,
+        columnCount: 0,
+        redactionPolicyId: 'no-result-rows-v1',
+        optIn: false,
+        payloadFingerprint: 'a'.repeat(64),
+      }],
+    } as unknown as Parameters<typeof agentRunPerformanceRows>[0];
+    const rows = agentRunPerformanceRows(run, trace);
+    const providerRows = rows?.find(([label]) => label === 'Provider rows')?.[1] ?? '';
+    expect(providerRows).toBe('0 result rows sent to providers (1 content-free meaning resolution receipt)');
+    expect(providerRows).not.toContain('Research');
+    expect(rows).toEqual(expect.arrayContaining([
+      ['Calls', '1 provider · 0 tool · 1 SQL · 0 repair'],
+    ]));
+  });
+
+  it('uses the API-serialized canonical trace instead of stale legacy provider and SQL telemetry for an exact certified route', () => {
+    // This mirrors the frozen certified/no-connection runtime shape: older
+    // telemetry can still contain planned provider/SQL counters, but the
+    // local trace proves neither physical boundary was reached.
+    const trace = JSON.parse(JSON.stringify({
+      envelope: {
+        version: 1, traceId: 'a'.repeat(32), rootSpanId: 'b'.repeat(16), runId: 'certified-no-connection',
+        surface: 'browser', mode: 'ask', questionFingerprint: 'sha256:question', status: 'blocked',
+        recordingStatus: 'complete', startedAt: '2026-08-23T12:00:00.000Z', completedAt: '2026-08-23T12:00:00.042Z', durationMs: 42,
+        spanCount: 4, candidateDecisionCount: 0, droppedRecordCount: 0,
+      },
+      spans: [
+        { version: 1, traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), ordinal: 0, name: 'ask.run', stage: 'request', startedAt: '2026-08-23T12:00:00.000Z', durationMs: 42, outcome: 'error', reasonCode: 'post_freeze_failure', payload: { kind: 'stage' } },
+        { version: 1, traceId: 'a'.repeat(32), spanId: 'c'.repeat(16), parentSpanId: 'b'.repeat(16), ordinal: 1, name: 'cascade.evaluate', stage: 'cascade', startedAt: '2026-08-23T12:00:00.001Z', durationMs: 8, outcome: 'ok', reasonCode: 'cascade_selected', payload: { kind: 'cascade' } },
+        { version: 1, traceId: 'a'.repeat(32), spanId: 'd'.repeat(16), parentSpanId: 'b'.repeat(16), ordinal: 2, name: 'plan.freeze', stage: 'plan', startedAt: '2026-08-23T12:00:00.010Z', durationMs: 1, outcome: 'ok', reasonCode: 'plan_frozen', payload: { kind: 'cascade' } },
+        { version: 1, traceId: 'a'.repeat(32), spanId: 'e'.repeat(16), parentSpanId: 'b'.repeat(16), ordinal: 3, name: 'result.normalize', stage: 'result', startedAt: '2026-08-23T12:00:00.012Z', durationMs: 1, outcome: 'error', reasonCode: 'post_freeze_failure', payload: { kind: 'result', failureCode: 'CONNECTION_NOT_CONFIGURED', safeAction: 'configure_connection' } },
+      ],
+      candidateDecisions: [], links: [],
+    })) as AskTraceDataV1;
+    const staleRun = {
+      telemetry: {
+        version: 1,
+        stageDurationsMs: { provider: 21, execution: 1, total: 42 },
+        providerRoundTrips: 0,
+        toolCalls: 0,
+        sqlExecutions: 1,
+        repairs: 0,
+        egressReceipts: 1,
+      },
+      providerEgressReceipts: [{ resultRowCount: 7 }],
+    } as unknown as Parameters<typeof agentRunPerformanceRows>[0];
+
+    const rows = agentRunPerformanceRows(staleRun, trace);
+    expect(rows).toEqual(expect.arrayContaining([
+      ['Total', '42ms'],
+      ['Warehouse', 'Not recorded'],
+      ['Orchestration', '42ms'],
+      ['Calls', '0 provider · 0 tool · 0 SQL · 0 repair'],
+      ['Provider rows', '0 result rows sent to providers (0 content-free receipts)'],
+      ['Trace evidence', 'Canonical local physical trace'],
+    ]));
+    const stageSummary = rows?.find(([label]) => label === 'Stages')?.[1] ?? '';
+    expect(stageSummary).toContain('cascade: 8ms');
+    expect(stageSummary).not.toContain('provider:');
+    expect(stageSummary).not.toContain('sql:');
+  });
+
+  it('keeps genuine provider, tool, SQL, and repair counts tied to their physical trace attempts', () => {
+    const trace = JSON.parse(JSON.stringify({
+      envelope: {
+        version: 1, traceId: 'f'.repeat(32), rootSpanId: '1'.repeat(16), runId: 'physical-attempts',
+        surface: 'browser', mode: 'ask', questionFingerprint: 'sha256:question', status: 'completed',
+        recordingStatus: 'complete', startedAt: '2026-08-23T12:00:00.000Z', completedAt: '2026-08-23T12:00:00.100Z', durationMs: 100,
+        spanCount: 7, candidateDecisionCount: 0, droppedRecordCount: 0,
+      },
+      spans: [
+        { version: 1, traceId: 'f'.repeat(32), spanId: '1'.repeat(16), ordinal: 0, name: 'provider.preflight', stage: 'provider', startedAt: '2026-08-23T12:00:00.000Z', durationMs: 4, outcome: 'ok', reasonCode: 'completed', payload: { kind: 'provider' } },
+        { version: 1, traceId: 'f'.repeat(32), spanId: '2'.repeat(16), ordinal: 1, name: 'provider.attempt', stage: 'provider', startedAt: '2026-08-23T12:00:00.004Z', durationMs: 12, outcome: 'ok', reasonCode: 'completed', payload: { kind: 'provider' } },
+        { version: 1, traceId: 'f'.repeat(32), spanId: '3'.repeat(16), ordinal: 2, name: 'tool.call', stage: 'tool', startedAt: '2026-08-23T12:00:00.016Z', durationMs: 3, outcome: 'ok', reasonCode: 'completed', payload: { kind: 'tool' } },
+        { version: 1, traceId: 'f'.repeat(32), spanId: '4'.repeat(16), ordinal: 3, name: 'sql.generate', stage: 'sql', startedAt: '2026-08-23T12:00:00.019Z', durationMs: 2, outcome: 'ok', reasonCode: 'completed', payload: { kind: 'sql' } },
+        { version: 1, traceId: 'f'.repeat(32), spanId: '5'.repeat(16), ordinal: 4, name: 'sql.execute', stage: 'sql', startedAt: '2026-08-23T12:00:00.021Z', durationMs: 10, outcome: 'ok', reasonCode: 'completed', payload: { kind: 'sql' } },
+        { version: 1, traceId: 'f'.repeat(32), spanId: '6'.repeat(16), ordinal: 5, name: 'sql.repair', stage: 'sql', startedAt: '2026-08-23T12:00:00.031Z', durationMs: 5, outcome: 'ok', reasonCode: 'repair_attempted', payload: { kind: 'sql' } },
+        // Admission denial is retained as a trace stage, but no provider
+        // bytes were sent and it must not inflate physical call/timing rows.
+        { version: 1, traceId: 'f'.repeat(32), spanId: '7'.repeat(16), ordinal: 6, name: 'provider.attempt', stage: 'provider', startedAt: '2026-08-23T12:00:00.036Z', durationMs: 8, outcome: 'denied', reasonCode: 'provider_failure', payload: { kind: 'provider', attempt: { admission: 'denied' } } },
+      ],
+      candidateDecisions: [], links: [],
+    })) as AskTraceDataV1;
+    const run = {
+      telemetry: {
+        version: 1, stageDurationsMs: { provider: 99, total: 999 }, providerRoundTrips: 0, toolCalls: 0, sqlExecutions: 0, repairs: 0, egressReceipts: 1,
+      },
+      providerEgressReceipts: [{ resultRowCount: 0 }],
+    } as unknown as Parameters<typeof agentRunPerformanceRows>[0];
+
+    const rows = agentRunPerformanceRows(run, trace);
+    expect(rows).toEqual(expect.arrayContaining([
+      ['Warehouse', '10ms'],
+      ['Orchestration', '90ms'],
+      ['Calls', '1 provider · 1 tool · 1 SQL · 1 repair'],
+      ['Provider rows', '0 result rows sent to providers (1 content-free receipt)'],
+    ]));
+    const stageSummary = rows?.find(([label]) => label === 'Stages')?.[1] ?? '';
+    expect(stageSummary).toContain('provider: 12ms');
+    expect(stageSummary).toContain('tool: 3ms');
+    expect(stageSummary).toContain('sql: 10ms');
+    expect(stageSummary).toContain('repair: 5ms');
+    expect(stageSummary).not.toContain('provider: 16ms');
+    expect(stageSummary).not.toContain('provider: 20ms');
   });
 
   it.each([
@@ -452,6 +778,17 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     }, 'How much CCU did we bill last month?')).toEqual({
       question: 'How much CCU did we bill last month?',
       selectedEvidenceId: 'semantic:metric:dbt_core_models.total_ccu_count',
+    });
+  });
+
+  it('UI-010 keeps the original Revenue/top-10 question when Account Name is the structured display choice', () => {
+    expect(clarificationSelectionInput({
+      id: 'semantic:uncategorized:dimension:account_revenue.account_name',
+      label: 'Account Name',
+      kind: 'semantic_member',
+    }, 'Show the top names by revenue')).toEqual({
+      question: 'Show the top names by revenue',
+      selectedEvidenceId: 'semantic:uncategorized:dimension:account_revenue.account_name',
     });
   });
 
@@ -875,6 +1212,25 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
         executionTime: 2100,
       },
     })).toBe('Table · 10 rows · 2.1s · certified block');
+  });
+
+  it('keeps the exact certified-title result visibly certified instead of relabeling it as generated', () => {
+    const run = {
+      id: 'exact-certified-title',
+      question: 'Top Customers by Revenue',
+      route: 'certified_answer',
+      status: 'completed',
+      trustState: 'certified',
+      routeDecision: {
+        analyticalCascadeDecision: { selectedTier: 'certified', planFrozen: true },
+      },
+      artifacts: [{
+        id: 'answer', kind: 'answer', trustState: 'certified',
+        payload: { selectedConceptIds: ['revenue_operations::block::Top Customers by Revenue'] },
+      }],
+    } as any;
+    expect(trustExplainer(run)).toBe('Answered from a certified block.');
+    expect(askArtifactMeta(run.artifacts[0], run.artifacts[0].payload)).toContain('certified block');
   });
 
   it('opens the technical inspector on DQL before SQL, lineage, or trust', () => {
@@ -1423,6 +1779,36 @@ describe('failure card origin and detail', () => {
       warehouseFailure: { origin: 'warehouse', redactedMessage: 'Binder Error: no such column: amt' },
     }, { diagnosticReceipt: { failure: { message: 'could not compile its immutable analytical plan' } } }));
     expect(detail).toBe('Binder Error: no such column: amt');
+  });
+
+  it('shows a typed missing relationship proof ahead of a generic blocked executor message', () => {
+    const run = runWith({
+      diagnosticReceiptV3: {
+        version: 3,
+        terminalGap: {
+          version: 1,
+          code: 'MISSING_RELATIONSHIP',
+          requirement: 'certified_relationship_or_allocation_proof',
+          witnessCandidateIds: ['semantic:relationship:competitor_to_account'],
+        },
+      },
+      executionError: 'EXECUTION_BLOCKED',
+    }, {
+      diagnosticReceiptV3: {
+        version: 3,
+        terminalGap: {
+          version: 1,
+          code: 'MISSING_RELATIONSHIP',
+          requirement: 'certified_relationship_or_allocation_proof',
+          witnessCandidateIds: ['semantic:relationship:competitor_to_account'],
+        },
+      },
+      summary: 'EXECUTION_BLOCKED',
+    });
+
+    expect(askFailureDetail(run)).toBe(
+      'This Ask needs a certified relationship or approved allocation proof before it can run. DQL did not infer a relationship or execute a query.',
+    );
   });
 
   it('falls back through executionError, then summary', () => {

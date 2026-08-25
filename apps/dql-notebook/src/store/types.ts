@@ -163,7 +163,7 @@ export interface ParamConfig {
 }
 export type SidebarPanel = 'files' | 'schema' | 'block_library' | 'connection' | 'lineage' | 'git' | 'apps' | 'readiness' | 'skills' | 'domains' | 'settings' | null;
 export type DevPanelTab = 'logs' | 'errors';
-export type MainView = 'home' | 'ask' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'git' | 'apps' | 'readiness' | 'skills' | 'domains' | 'modeling' | 'settings' | 'agent_log' | 'help';
+export type MainView = 'home' | 'ask' | 'notebook' | 'business_artifact' | 'lineage' | 'lineage_detail' | 'block_studio' | 'imports' | 'connection' | 'git' | 'apps' | 'readiness' | 'skills' | 'domains' | 'modeling' | 'settings' | 'agent_log' | 'ask_trace' | 'ask_observability' | 'help';
 
 export type GlobalAiAudience = 'stakeholder' | 'analyst';
 
@@ -1456,6 +1456,8 @@ export interface NotebookState {
   globalAi: GlobalAiState;
   // The agent run currently open in the Agent Steps (agent_log) page, if any.
   agentLogRun?: AgentRun;
+  /** OBS-009: only the requested run id is durable navigation state. */
+  askTraceRunId?: string;
 }
 
 export type InspectorContext =
@@ -1466,6 +1468,9 @@ export type InspectorContext =
 export type NotebookAction =
   | { type: 'SET_MAIN_VIEW'; view: MainView }
   | { type: 'OPEN_AGENT_LOG'; run: AgentRun }
+  | { type: 'OPEN_ASK_TRACE'; runId: string }
+  /** OBS-013: local Ask trace catalog. Only a route is stored, never trace payloads. */
+  | { type: 'OPEN_ASK_OBSERVABILITY' }
   | { type: 'SET_SETTINGS_TAB'; tab: SettingsTab }
   | { type: 'SET_THEME'; mode: ThemeMode }
   | { type: 'SET_APP_MODE'; mode: AppMode }

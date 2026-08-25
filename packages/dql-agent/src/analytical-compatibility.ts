@@ -156,8 +156,15 @@ export function solveAnalyticalCompatibility(input: {
       message: `The analytical frame has unresolved ambiguity: ${first.reasonCode}.`,
       candidateIds: [...first.candidateIds],
     };
+    // Clarification is only a user action when the immutable frame retained
+    // at least two qualified, executable meanings for the missing role.  An
+    // empty (or singleton) candidate list is a coverage/modeling gap, not a
+    // question the reader can answer.  Treating it as `clarify` caused the
+    // router to offer arbitrary capability dimensions for an unmodeled term
+    // such as "crew" instead of preserving the typed pre-freeze gap.
+    const userResolvable = first.candidateIds.length >= 2;
     return {
-      status: 'clarify',
+      status: userResolvable ? 'clarify' : 'blocked',
       frame,
       failure,
       failures: [failure],

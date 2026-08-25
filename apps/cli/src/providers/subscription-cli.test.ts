@@ -142,4 +142,41 @@ describe('subscription CLI dispatch accounting', () => {
     )).rejects.toThrow();
     expect(dispatches).toHaveLength(0);
   });
+
+  it.each([
+    ['Claude', () => new ClaudeCodeCliProvider({
+      command: 'fixture-claude',
+      runProcess: async () => ({ code: 0, stdout: 'not a JSON result', stderr: '' }),
+    })],
+    ['Codex', () => new CodexCliProvider({
+      command: 'fixture-codex',
+      runProcess: async () => ({ code: 0, stdout: '{"type":"turn.completed"}', stderr: '' }),
+    })],
+  ])('records a successful %s process followed by an invalid-result failure', async (_label, createProvider) => {
+    const completions: Array<{ settlement?: string; outcome?: string }> = [];
+    await expect(createProvider().generate([{ role: 'user', content: 'hi' }], {
+      onProviderDispatchComplete: (event) => { completions.push(event); },
+    })).rejects.toThrow();
+    expect(completions).toEqual([
+      expect.objectContaining({ settlement: 'process', outcome: 'ok' }),
+      expect.objectContaining({ settlement: 'result', outcome: 'error' }),
+    ]);
+  });
+
+  it('records cancellation at actual child-process settlement rather than a parser failure', async () => {
+    const controller = new AbortController();
+    const provider = new ClaudeCodeCliProvider({
+      command: 'fixture-claude',
+      runProcess: async () => {
+        controller.abort(new DOMException('cancelled', 'AbortError'));
+        return { code: 0, stdout: '{"is_error":false,"result":"late"}', stderr: '' };
+      },
+    });
+    const completions: Array<{ settlement?: string; outcome?: string }> = [];
+    await expect(provider.generate([{ role: 'user', content: 'hi' }], {
+      signal: controller.signal,
+      onProviderDispatchComplete: (event) => { completions.push(event); },
+    })).rejects.toThrow(/cancelled/i);
+    expect(completions).toEqual([expect.objectContaining({ settlement: 'process', outcome: 'cancelled' })]);
+  });
 });

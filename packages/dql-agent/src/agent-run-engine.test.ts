@@ -23,6 +23,9 @@ import {
 } from "./agent-run-engine.js";
 import { defaultAgentRunGates } from "./agent-run-gates.js";
 import { decideAgentAction, type IntentDecision } from "./intent-controller.js";
+import { createHybridRouter } from './router.js';
+import type { AgentEvidenceCandidate } from './meaning-resolution.js';
+import type { AskTraceObserverV1 } from './ask-observability/index.js';
 
 /** Router-owned proof used by engine-boundary tests; do not synthesize routes from IDs. */
 function safeExploratoryCascade() {
@@ -49,6 +52,96 @@ function safeExploratoryCascade() {
     selectedTier: 'exploratory_sql' as const,
     planFrozen: false,
     stopReason: 'selected' as const,
+  };
+}
+
+/** A router-owned, already-frozen exploration plan for host authorization tests. */
+function frozenExploratoryDecision(): IntentDecision {
+  const cascade = safeExploratoryCascade();
+  const candidateIds = ['dbt:model:orders', 'runtime:column:revenue', 'runtime:column:customer_name'];
+  return {
+    action: 'answer',
+    confidence: 1,
+    followsUp: false,
+    source: 'heuristic',
+    reason: 'The router froze one review-required exploratory closure.',
+    retrievalEvidence: { snapshotId: 'snapshot-frozen-exploration', candidateCount: candidateIds.length, candidateIds },
+    analyticalCascadeDecision: {
+      ...cascade,
+      planFrozen: true,
+      attempts: cascade.attempts.map((attempt) => attempt.tier === 'exploratory_sql'
+        ? { ...attempt, planFrozen: true }
+        : attempt),
+    },
+    resolvedAnalyticalPlan: {
+      mode: 'authoritative',
+      capability: 'bounded_exploration',
+      planId: 'rap:frozen-exploration',
+      fingerprint: 'sha256:frozen-exploration',
+      snapshotId: 'snapshot-frozen-exploration',
+    } as IntentDecision['resolvedAnalyticalPlan'],
+  };
+}
+
+/** A router-owned frozen semantic decision for trace-boundary tests. */
+function frozenSemanticDecision(): IntentDecision {
+  const metricId = 'semantic:metric:revenue';
+  return {
+    action: 'answer',
+    confidence: 1,
+    followsUp: false,
+    source: 'heuristic',
+    reason: 'The router froze one compiler-compatible semantic tuple.',
+    retrievalEvidence: {
+      snapshotId: 'snapshot-frozen-semantic',
+      candidateCount: 1,
+      candidateIds: [metricId],
+    },
+    analyticalCascadeDecision: {
+      version: 1,
+      requirements: {
+        version: 1,
+        measures: ['revenue'],
+        dimensions: [],
+        entityTerms: [],
+        entityDisplayTerms: [],
+        memberTerms: [],
+      },
+      sourceCoverage: [{
+        version: 1,
+        source: 'semantic',
+        status: 'available',
+        candidateIds: [metricId],
+      }],
+      attempts: [
+        {
+          version: 1,
+          tier: 'certified',
+          outcome: 'unavailable',
+          candidateIds: [],
+          reason: 'No certified complete tuple.',
+          planFrozen: false,
+        },
+        {
+          version: 1,
+          tier: 'semantic',
+          outcome: 'executable',
+          candidateIds: [metricId],
+          reason: 'The selected semantic members are compiler-compatible.',
+          planFrozen: true,
+        },
+      ],
+      selectedTier: 'semantic',
+      planFrozen: true,
+      stopReason: 'selected',
+    },
+    resolvedAnalyticalPlan: {
+      mode: 'authoritative',
+      capability: 'semantic_execution',
+      planId: 'rap:frozen-semantic',
+      fingerprint: 'sha256:frozen-semantic',
+      snapshotId: 'snapshot-frozen-semantic',
+    } as IntentDecision['resolvedAnalyticalPlan'],
   };
 }
 
@@ -361,6 +454,297 @@ describe("AgentRunEngine", () => {
       planFrozen: false,
     });
     expect(run.diagnosticReceiptV3?.cascade?.attempts).toEqual(cascade.attempts);
+  });
+
+  it('AGT-034/OBS-014 records a mismatched exploratory authorization as an internal no-execution incident', async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-exploratory-authorization-mismatch',
+      now: fixedClock(),
+      router: { decide: () => frozenExploratoryDecision() },
+      executors: {
+        generated_answer: () => ({
+          answer: 'This answer must not be accepted.',
+          analyticalExecutionFreeze: {
+            version: 1,
+            selectedTier: 'exploratory_sql',
+            // A target/SQL authorization cannot mint or substitute plan
+            // authority after the router froze the closure.
+            planId: 'rap:forged-after-sql',
+            planFingerprint: 'sha256:frozen-exploration',
+            snapshotId: 'snapshot-frozen-exploration',
+            targetFingerprint: 'target:test',
+            sqlFingerprint: 'sql:test',
+            candidateIds: ['dbt:model:orders', 'runtime:column:revenue', 'runtime:column:customer_name'],
+            authorization: 'capability_minted',
+          },
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: 'revenue by customer', requestedMode: 'ask' });
+
+    expect(run).toMatchObject({ status: 'blocked', trustState: 'blocked' });
+    expect(run.diagnosticReceipt?.failure).toMatchObject({
+      code: 'INTERNAL_EXPLORATORY_AUTHORIZATION_STATE_MISMATCH',
+      phase: 'sql.authorize',
+      recoverable: false,
+      safeActions: ['export_redacted_trace'],
+    });
+    expect(run.diagnosticReceiptV4?.summary).toMatchObject({
+      terminalIncident: {
+        code: 'INTERNAL_EXPLORATORY_AUTHORIZATION_STATE_MISMATCH',
+        boundary: 'sql.authorize',
+        origin: 'internal_invariant',
+        impact: 'execution_not_attempted',
+        safeAction: 'export_redacted_trace',
+      },
+      safeNextAction: 'export_redacted_trace',
+    });
+  });
+
+  it('OBS-014 records a frozen semantic warehouse binder failure as a typed execution incident', async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-semantic-warehouse-binder',
+      now: fixedClock(),
+      router: { decide: () => authoritativeDecision('semantic_execution') },
+      executors: {
+        semantic_answer: () => ({
+          answer: 'The selected warehouse relation is unavailable.',
+          status: 'blocked',
+          trustState: 'blocked',
+          stopReason: 'blocked',
+          artifacts: [{
+            id: 'semantic-binder-failure',
+            kind: 'answer',
+            title: 'Semantic execution could not complete',
+            trustState: 'blocked',
+            payload: {
+              analyticalFailure: {
+                version: 1,
+                code: 'RELATION_NOT_FOUND',
+                phase: 'execution',
+                message: 'A governed relation required by the selected plan is unavailable.',
+                recoverability: 'refresh_snapshot',
+                failedBindings: [],
+                snapshotId: 'snapshot-semantic-binder',
+                safeActions: ['change_authorized_connection', 'refresh_snapshot'],
+              },
+              warehouseFailure: {
+                version: 1,
+                origin: 'warehouse',
+                stage: 'execution',
+                category: 'unknown_relation',
+                retryDisposition: 'refresh_metadata',
+                redactedMessage: 'Binder Error: Catalog [redacted] does not exist.',
+              },
+            },
+          }],
+          evaluations: [],
+          nextActions: [],
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: 'revenue by region', requestedMode: 'ask' });
+
+    expect(run).toMatchObject({ status: 'blocked', trustState: 'blocked' });
+    expect(run.diagnosticReceiptV4?.summary).toMatchObject({
+      terminalIncident: {
+        code: 'ANALYTICAL_EXECUTION_FAILED',
+        boundary: 'sql.execute',
+        origin: 'warehouse',
+        impact: 'execution_failed',
+        safeAction: 'change_authorized_connection',
+      },
+      safeNextAction: 'change_authorized_connection',
+    });
+  });
+
+  it('OBS-014 classifies a router-frozen pre-SQL semantic compilation failure without rewriting provider or SQL counts', async () => {
+    let sequence = 0;
+    const spans: Array<{ id: string; name: string; payload?: unknown; outcome?: string; reasonCode?: string }> = [];
+    const observer = {
+      enabled: true,
+      recordingStatus: 'recording',
+      startSpan: (input) => {
+        const id = `compile-span-${++sequence}`;
+        spans.push({ id, name: input.name, payload: input.payload });
+        return id;
+      },
+      finishSpan: (spanId, input) => {
+        const span = spans.find((candidate) => candidate.id === spanId);
+        if (span) Object.assign(span, input);
+      },
+      recordCandidateDecision: () => {},
+      recordLink: () => {},
+      finalize: () => undefined,
+      markPartial: () => {},
+      reference: () => undefined,
+    } satisfies AskTraceObserverV1;
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-frozen-plan-compilation-failure',
+      now: fixedClock(),
+      traceObserverFactory: () => observer,
+      router: { decide: () => frozenSemanticDecision() },
+      executors: {
+        semantic_answer: () => ({
+          answer: 'No answer was produced.',
+          status: 'blocked',
+          trustState: 'blocked',
+          stopReason: 'blocked',
+          artifacts: [{
+            id: 'semantic-compile-failure',
+            kind: 'answer',
+            title: 'Semantic compilation could not complete',
+            trustState: 'blocked',
+            payload: {
+              analyticalFailure: {
+                version: 1,
+                code: 'COMPILATION_FAILED',
+                phase: 'compilation',
+                safeActions: ['edit_dql', 'open_sql_notebook'],
+              },
+            },
+          }],
+          telemetry: {
+            version: 1,
+            stageDurationsMs: { provider: 11, total: 11 },
+            providerRoundTrips: 1,
+            toolCalls: 0,
+            sqlExecutions: 0,
+            repairs: 0,
+            egressReceipts: 1,
+          },
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: 'revenue by region', requestedMode: 'ask' });
+    const summary = run.diagnosticReceiptV4?.summary;
+
+    expect(run).toMatchObject({ route: 'semantic_answer', status: 'blocked', trustState: 'blocked' });
+    expect(run.telemetry).toMatchObject({ providerRoundTrips: 1, toolCalls: 0, sqlExecutions: 0, repairs: 0 });
+    expect(run.diagnosticReceipt?.failure).toMatchObject({ code: 'COMPILATION_FAILED' });
+    expect(summary).toMatchObject({
+      summaryFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+      terminalIncident: {
+        version: 1,
+        code: 'COMPILATION_FAILED',
+        boundary: 'semantic.compile',
+        origin: 'semantic_compiler',
+        impact: 'execution_not_attempted',
+        safeAction: 'edit_dql',
+      },
+      safeNextAction: 'edit_dql',
+    });
+    expect(run.diagnosticReceiptV4?.terminalIncident).toEqual(summary?.terminalIncident);
+    const terminal = spans.find((span) => span.name === 'semantic.compile' && span.reasonCode === 'post_freeze_failure');
+    expect(terminal).toMatchObject({
+      outcome: 'error',
+      payload: { kind: 'result', failureCode: 'COMPILATION_FAILED', safeAction: 'edit_dql' },
+    });
+    expect(spans.some((span) => span.name === 'sql.execute')).toBe(false);
+  });
+
+  it('AGT-031 persists one same-plan exploratory repair without reopening routing', async () => {
+    const initialFreeze = {
+      version: 1 as const,
+      selectedTier: 'exploratory_sql' as const,
+      planId: 'rap:frozen-exploration',
+      planFingerprint: 'sha256:frozen-exploration',
+      snapshotId: 'snapshot-frozen-exploration',
+      targetFingerprint: 'target:test',
+      sqlFingerprint: 'a'.repeat(32),
+      candidateIds: ['dbt:model:orders', 'runtime:column:revenue', 'runtime:column:customer_name'],
+      authorization: 'capability_minted' as const,
+      authorizationAttempt: { version: 1 as const, index: 0 as const },
+    };
+    const repairFreeze = {
+      ...initialFreeze,
+      sqlFingerprint: 'b'.repeat(32),
+      authorizationAttempt: {
+        version: 1 as const,
+        index: 1 as const,
+        parentSqlFingerprint: initialFreeze.sqlFingerprint,
+      },
+    };
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-exploratory-same-plan-repair',
+      now: fixedClock(),
+      router: { decide: () => frozenExploratoryDecision() },
+      executors: {
+        generated_answer: () => ({
+          answer: 'The corrected exploratory query returned a review-required result.',
+          status: 'completed',
+          trustState: 'review_required',
+          analyticalExecutionFreeze: initialFreeze,
+          analyticalExecutionRepairFreeze: repairFreeze,
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: 'revenue by customer', requestedMode: 'ask' });
+
+    expect(run).toMatchObject({ status: 'completed', trustState: 'review_required' });
+    expect(run.routeDecision?.analyticalCascadeDecision).toMatchObject({
+      selectedTier: 'exploratory_sql',
+      planFrozen: true,
+      exploratoryExecutionFreeze: initialFreeze,
+      exploratoryRepairExecutionFreeze: repairFreeze,
+    });
+    expect(run.routeDecision?.resolvedAnalyticalPlan).toMatchObject({
+      planId: initialFreeze.planId,
+      fingerprint: initialFreeze.planFingerprint,
+      snapshotId: initialFreeze.snapshotId,
+      capability: 'bounded_exploration',
+    });
+  });
+
+  it('AGT-031 denies a second or mismatched exploratory repair receipt without execution fallback', async () => {
+    const initialFreeze = {
+      version: 1 as const,
+      selectedTier: 'exploratory_sql' as const,
+      planId: 'rap:frozen-exploration',
+      planFingerprint: 'sha256:frozen-exploration',
+      snapshotId: 'snapshot-frozen-exploration',
+      targetFingerprint: 'target:test',
+      sqlFingerprint: 'a'.repeat(32),
+      candidateIds: ['dbt:model:orders', 'runtime:column:revenue', 'runtime:column:customer_name'],
+      authorization: 'capability_minted' as const,
+      authorizationAttempt: { version: 1 as const, index: 0 as const },
+    };
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-exploratory-second-repair-denied',
+      now: fixedClock(),
+      router: { decide: () => frozenExploratoryDecision() },
+      executors: {
+        generated_answer: () => ({
+          answer: 'This must not be accepted.',
+          analyticalExecutionFreeze: initialFreeze,
+          analyticalExecutionRepairFreeze: {
+            ...initialFreeze,
+            sqlFingerprint: 'c'.repeat(32),
+            // A repair may only refer to the initial receipt. This forged
+            // parent simulates a second repair or changed SQL lineage.
+            authorizationAttempt: {
+              version: 1 as const,
+              index: 1 as const,
+              parentSqlFingerprint: 'b'.repeat(32),
+            },
+          },
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: 'revenue by customer', requestedMode: 'ask' });
+
+    expect(run).toMatchObject({ status: 'blocked', trustState: 'blocked' });
+    expect(run.diagnosticReceipt?.failure).toMatchObject({
+      code: 'INTERNAL_EXPLORATORY_AUTHORIZATION_STATE_MISMATCH',
+      phase: 'sql.authorize',
+      recoverable: false,
+      safeActions: ['export_redacted_trace'],
+    });
   });
 
   it('allows one bounded same-route repair after an ordinary generated Ask attempt fails', async () => {
@@ -1188,6 +1572,189 @@ describe("AgentRunEngine", () => {
     expect(store.get("run-routing-timeout")?.summary).toContain("reached its time limit");
   });
 
+  it('classifies an explicit Research root deadline without directing the user to start Research again', async () => {
+    const store = new InMemoryAgentRunStore();
+    const controller = new AbortController();
+    controller.abort(new DOMException('The Research deadline elapsed.', 'TimeoutError'));
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-research-root-timeout',
+      now: fixedClock(),
+      store,
+      router: {
+        decide: async () => {
+          throw controller.signal.reason;
+        },
+      },
+    });
+
+    const run = await engine.run({
+      question: 'Research revenue by product category and locations',
+      requestedMode: 'research',
+      signal: controller.signal,
+    });
+
+    expect(run.summary).toContain('Research run reached its bounded deadline');
+    expect(run.summary).not.toContain('use Research');
+    expect(run.diagnosticReceipt?.failure).toMatchObject({
+      code: 'RESEARCH_RUN_DEADLINE',
+      phase: 'research.run',
+      safeActions: ['inspect_failure'],
+    });
+    expect(run.diagnosticReceiptV4?.terminalIncident).toEqual(expect.objectContaining({
+      code: 'RESEARCH_RUN_DEADLINE',
+      boundary: 'run',
+      safeAction: 'inspect_failure',
+    }));
+  });
+
+  it('surfaces an all-branch bounded Research outcome as one stored V4 incident with a narrower-Research recovery action', async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-research-branch-timeout',
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: 'investigate',
+          confidence: 1,
+          followsUp: false,
+          reason: 'The user explicitly requested Research.',
+        }),
+      },
+      executors: {
+        research: () => ({
+          status: 'needs_review',
+          trustState: 'review_required',
+          stopReason: 'human_review_required',
+          answer: 'Limited Research: every admitted branch reached its bounded window before producing a receipt-backed finding.',
+          artifacts: [{
+            id: 'research-timeouts',
+            kind: 'research_run',
+            title: 'Limited Research',
+            trustState: 'review_required',
+            payload: {
+              researchBranchReceipts: [
+                { version: 1, branchId: 'h1', childRunId: 'h1', index: 1, state: 'timed_out', verdict: 'failed', stopReason: 'research_branch_timeout' },
+                { version: 1, branchId: 'h2', childRunId: 'h2', index: 2, state: 'skipped', verdict: 'skipped', stopReason: 'budget_exhausted' },
+              ],
+            },
+          }],
+        }),
+      },
+    });
+
+    const run = await engine.run({
+      question: 'Research revenue by product category, locations, and customer concentration.',
+      requestedMode: 'research',
+    });
+
+    expect(run).toMatchObject({ route: 'research', status: 'needs_review', trustState: 'review_required' });
+    expect(run.diagnosticReceiptV4?.summary).toMatchObject({
+      terminalIncident: {
+        code: 'RESEARCH_BRANCH_TIMEOUT',
+        boundary: 'run',
+        origin: 'governance_gate',
+        impact: 'answer_not_produced',
+        safeAction: 'inspect_research_failures',
+      },
+      safeNextAction: 'inspect_research_failures',
+    });
+    expect(run.diagnosticReceiptV4?.terminalIncident).toEqual(run.diagnosticReceiptV4?.summary.terminalIncident);
+    expect(run.diagnosticReceiptV4?.summary.researchBranchSummary).toMatchObject({
+      partialSuccess: false,
+      timedOutBranches: 1,
+      skippedBranches: 1,
+    });
+  });
+
+  it('keeps a receipt-backed partial Research answer successful while storing child limitations, evidence, and a branch recovery action', async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-research-partial-success',
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: 'investigate',
+          confidence: 1,
+          followsUp: false,
+          reason: 'The user explicitly requested Research.',
+        }),
+      },
+      executors: {
+        research: () => ({
+          status: 'needs_review',
+          trustState: 'review_required',
+          stopReason: 'human_review_required',
+          answer: 'One receipt-backed Research observation is available; the remaining branches are limited.',
+          artifacts: [{
+            id: 'research-partial-success',
+            kind: 'research_run',
+            title: 'Partial Research',
+            trustState: 'review_required',
+            payload: {
+              researchBranchReceipts: [
+                { version: 1, branchId: 'h1', childRunId: 'child-1', index: 1, state: 'completed', verdict: 'inconclusive', stopReason: 'completed' },
+                { version: 1, branchId: 'h2', childRunId: 'child-2', index: 2, state: 'failed', verdict: 'failed', stopReason: 'execution_failed' },
+                { version: 1, branchId: 'h3', childRunId: 'child-3', index: 3, state: 'failed', verdict: 'failed', stopReason: 'execution_failed' },
+                { version: 1, branchId: 'h4', childRunId: 'child-4', index: 4, state: 'failed', verdict: 'failed', stopReason: 'execution_failed' },
+                { version: 1, branchId: 'h5', childRunId: 'child-5', index: 5, state: 'failed', verdict: 'failed', stopReason: 'execution_failed' },
+              ],
+              researchLedgerV2: {
+                entries: [{ id: 'child-1', branchId: 'h1', status: 'observed', receipts: ['a'.repeat(64)] }],
+              },
+              researchRuns: [
+                {
+                  id: 'child-1',
+                  routeDecision: {
+                    retrievalEvidence: {
+                      candidateTraceMetadata: [
+                        { role: 'metric' },
+                        { role: 'categorical_dimension' },
+                      ],
+                    },
+                  },
+                  context: {
+                    branchAuthority: {
+                      selectedTier: 'semantic',
+                      planFrozen: true,
+                      planId: 'rap:child-1',
+                      planFingerprint: 'sha256:child-1',
+                    },
+                  },
+                },
+              ],
+            },
+          }],
+        }),
+      },
+    });
+
+    const run = await engine.run({
+      question: 'Research revenue by product category, compare locations, and identify top customers.',
+      requestedMode: 'research',
+    });
+
+    expect(run).toMatchObject({ route: 'research', status: 'needs_review', trustState: 'review_required' });
+    expect(run.diagnosticReceiptV4?.terminalIncident).toBeUndefined();
+    expect(run.diagnosticReceiptV4?.summary).toMatchObject({
+      safeNextAction: 'inspect_research_failures',
+      researchBranchSummary: {
+        totalBranches: 5,
+        completedBranches: 1,
+        receiptBackedBranches: 1,
+        failedBranches: 4,
+        timedOutBranches: 0,
+        skippedBranches: 0,
+        partialSuccess: true,
+        failureReasons: [{ code: 'execution_failed', branchCount: 4 }],
+        availableChildPlans: [{ tier: 'semantic', frozenPlanCount: 1, branchCount: 1, reviewRequired: false }],
+        linkedChildRunCount: 5,
+        safeAction: 'inspect_research_failures',
+      },
+    });
+    expect(run.diagnosticReceiptV4?.summary.evidenceByRole).toEqual(expect.arrayContaining([
+      { role: 'metric', candidateCount: 1 },
+      { role: 'categorical_dimension', candidateCount: 1 },
+    ]));
+  });
+
   it("persists runs to a project-local file store", async () => {
     const dir = mkdtempSync(join(tmpdir(), "dql-agent-run-store-"));
     try {
@@ -1796,6 +2363,60 @@ describe("clarification continuations — Ask surface", () => {
     });
   });
 
+  it("treats an original-question structured dimension click as a continuation", () => {
+    const continuation = resolveClarificationContinuation({
+      question: "Show the top names by revenue",
+      selectedEvidenceId: "semantic:uncategorized:dimension:account_revenue.account_name",
+      clarificationSourceQuestion: "Show the top names by revenue",
+      history: [],
+    });
+
+    expect(continuation).toMatchObject({
+      sourceQuestion: "Show the top names by revenue",
+      reply: "Show the top names by revenue",
+    });
+  });
+
+  it('binds a structured click to the server-persisted source frame instead of a client-carried label', () => {
+    const continuation = resolveClarificationContinuation({
+      question: 'Customer Name',
+      selectedEvidenceId: 'semantic:uncategorized:dimension:account_revenue.customer_name',
+      // This can be stale after a reload; it must not replace the server
+      // source question before retrieval or routing.
+      clarificationSourceQuestion: 'Customer Name',
+      threadId: 'thr-server-issued-selection',
+      conversationContext: {
+        serverIssuedClarificationSelection: {
+          version: 1,
+          threadId: 'thr-server-issued-selection',
+          sourceTurnId: 'turn-server-issued-selection',
+          snapshotId: 'snapshot-server-issued-selection',
+        },
+        conversationEnvelope: {
+          version: 1,
+          threadId: 'thr-server-issued-selection',
+          recentTurns: [],
+          pendingClarification: {
+            sourceTurnId: 'turn-server-issued-selection',
+            sourceQuestion: 'Show the top names by revenue',
+            question: 'Which governed display field should DQL use?',
+            selection: {
+              version: 1,
+              optionIds: ['semantic:uncategorized:dimension:account_revenue.customer_name'],
+              ambiguityCandidateIds: ['semantic:uncategorized:dimension:account_revenue.customer_name'],
+              snapshotId: 'snapshot-server-issued-selection',
+            },
+          },
+        },
+      },
+    });
+
+    expect(continuation).toMatchObject({
+      sourceQuestion: 'Show the top names by revenue',
+      reply: 'Customer Name',
+    });
+  });
+
   it("does not fold a complete new question into a pending clarification", () => {
     const continuation = resolveClarificationContinuation({
       question: "Which warehouses shipped late last quarter?",
@@ -2150,6 +2771,76 @@ describe("clarification continuations", () => {
     expect(generatedCalls).toBe(0);
     expect(run.clarificationOptions).toBeUndefined();
     expect(run.answer).toContain("could not freeze an exact analytical plan");
+  });
+});
+
+describe('Ask trace continuity links (OBS-008)', () => {
+  it('records clarification, prior-result, and host-derived repair relationships without routing from them', async () => {
+    const links: Array<Record<string, unknown>> = [];
+    const observer = traceLinkObserver(links);
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-trace-continuity',
+      now: fixedClock(),
+      traceObserverFactory: () => observer,
+      router: {
+        decide: () => ({ action: 'converse', confidence: 1, reason: 'Deterministic conversation.', source: 'heuristic' }),
+      },
+      executors: { conversation: async () => ({ answer: 'Done.' }) },
+    });
+
+    await engine.run({
+      question: 'Revenue',
+      selectedEvidenceId: 'semantic:metric:revenue',
+      clarificationSourceQuestion: 'Which revenue metric should I use?',
+      selectedResultBinding: {
+        version: 1,
+        sourceRunId: 'run-prior-result',
+        sourceArtifactId: 'artifact-prior-result',
+        canonicalColumn: 'customer_name',
+        value: 'not-persisted-in-trace',
+        rowFingerprint: 'sha256:row',
+        resultFingerprint: 'sha256:result',
+      },
+      workspaceContext: { traceDerivation: 'analytical_repair', sourceRunId: 'run-source-repair' },
+    });
+
+    expect(links).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'clarification_continuation', choiceFingerprint: expect.stringMatching(/^sha256:/) }),
+      expect.objectContaining({ kind: 'prior_result', targetRunId: 'run-prior-result', choiceFingerprint: expect.stringMatching(/^sha256:/) }),
+      expect.objectContaining({ kind: 'derived_repair', targetRunId: 'run-source-repair' }),
+    ]));
+    expect(JSON.stringify(links)).not.toContain('not-persisted-in-trace');
+  });
+
+  it('records prior-result conversation binding before routing without retaining a member value', async () => {
+    const spans: Array<Record<string, unknown>> = [];
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-trace-prior-result-binding',
+      now: fixedClock(),
+      traceObserverFactory: () => traceLinkObserver([], spans),
+      router: {
+        decide: () => ({ action: 'converse', confidence: 1, reason: 'Deterministic conversation.', source: 'heuristic' }),
+      },
+      executors: { conversation: async () => ({ answer: 'Done.' }) },
+    });
+
+    await engine.run({
+      question: 'Which region does she belong to?',
+      selectedResultBinding: {
+        version: 1,
+        sourceRunId: 'run-prior-result',
+        sourceArtifactId: 'artifact-prior-result',
+        canonicalColumn: 'customer_name',
+        value: 'not-persisted-in-trace',
+        rowFingerprint: 'sha256:row',
+        resultFingerprint: 'sha256:result',
+      },
+    });
+
+    expect(spans.find((span) => span.name === 'conversation.hydrate')).toMatchObject({
+      payload: { kind: 'conversation', continuation: true, binding: 'prior_result' },
+    });
+    expect(JSON.stringify(spans)).not.toContain('not-persisted-in-trace');
   });
 });
 
@@ -2741,6 +3432,119 @@ describe("AgentRunEngine — conversation route", () => {
     expect(generatedCalls).toBe(1);
   });
 
+  it('AGT-009/AGT-010/OBS-012 executes the explicit revenue ranking for BCM customers without a second metric clarification', async () => {
+    const capability = (metricId: string): NonNullable<AgentEvidenceCandidate['analyticalCapability']> => ({
+      metricId,
+      measureIds: [`${metricId}:measure`],
+      primaryEntityId: 'semantic:entity:account_revenue',
+      defaultResultGrainId: 'semantic:entity:customer',
+      resultGrainIds: ['semantic:entity:customer'],
+      aggregation: 'sum',
+      additivity: { entities: 'additive', time: 'additive' },
+      dimensions: [{
+        // The native MetricFlow grouping is an exact qualified binding, not a
+        // relationship-path hint. Keep the fixture aligned with the index
+        // contract: `customer_name` is the leaf used in the native group-by.
+        dimensionId: 'semantic:dimension:customer.customer_name',
+        entityId: 'semantic:entity:customer',
+        label: 'Customer Name',
+        aliases: ['customer', 'customer name'],
+        supportedRoles: ['group_by', 'filter', 'display', 'rank_entity'],
+        relationshipPathIds: ['dql:relationship:account_to_customer'],
+        nativeGroupingReference: 'account__customer__customer_name',
+        nativeGroupingPath: ['account', 'customer'],
+      }],
+      timeDimensions: [],
+      operations: ['filter', 'group', 'rank'],
+      supportedOutputKinds: ['dimension', 'metric_value', 'rank'],
+      executionCapabilities: [{ route: 'semantic', adapterId: 'native' }],
+      sourceFingerprint: `sha256:engine-${metricId.replace(/[^a-z0-9]/gi, '')}`,
+    });
+    const metric = (input: {
+      id: string;
+      name: string;
+      aliases: string[];
+      relevanceScore: number;
+    }): AgentEvidenceCandidate => ({
+      id: input.id,
+      qualifiedId: input.id,
+      kind: 'semantic_metric',
+      trustTier: 'semantic',
+      name: input.name,
+      aliases: input.aliases,
+      dimensions: ['semantic:dimension:customer.customer_name'],
+      timeGrains: ['month'],
+      relationshipEvidence: ['dql:relationship:account_to_customer'],
+      relevanceScore: input.relevanceScore,
+      matchReasons: ['synthetic office-shaped ranking fixture'],
+      compatibility: 'compatible',
+      exactMatch: true,
+      analyticalCapability: capability(input.id),
+    });
+    const revenue = metric({
+      id: 'semantic:metric:revenue', name: 'Revenue', aliases: ['revenue'], relevanceScore: 0.75,
+    });
+    const bcm = metric({
+      id: 'semantic:metric:bcm_run_rate', name: 'BCM Run Rate', aliases: ['BCM'], relevanceScore: 0.98,
+    });
+    let semanticCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-office-revenue-ranking',
+      now: fixedClock(),
+      router: createHybridRouter({
+        requireMeaningCallForNaturalLanguage: false,
+        getEvidence: async () => ({
+          snapshotId: 'fixture:office-ask-ai:v1',
+          sourceFingerprint: 'sha256:office-engine-revenue',
+          parsedIntent: { measures: ['BCM', 'revenue'], dimensions: ['customer'], filters: [] },
+          candidates: [
+            revenue,
+            bcm,
+            {
+              id: 'semantic:dimension:customer.customer_name', qualifiedId: 'semantic:dimension:customer.customer_name',
+              kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+              name: 'Customer Name', aliases: ['customer', 'customer name'], relevanceScore: 0.8,
+              matchReasons: ['synthetic customer display'], compatibility: 'compatible',
+            },
+            {
+              id: 'semantic:entity:customer', qualifiedId: 'semantic:entity:customer',
+              kind: 'semantic_member', semanticObjectType: 'entity', trustTier: 'semantic',
+              name: 'Customer', aliases: ['customer'], relevanceScore: 0.79,
+              matchReasons: ['synthetic customer entity'], compatibility: 'compatible',
+            },
+          ],
+        }),
+      }),
+      executors: {
+        semantic_answer: () => {
+          semanticCalls += 1;
+          return { answer: 'Synthetic semantic result.' };
+        },
+      },
+    });
+
+    const run = await engine.run({
+      question: 'Who are the top BCM customers who have highest revenue?',
+      requestedMode: 'ask',
+    });
+
+    expect(semanticCalls).toBe(1);
+    expect(run.route).toBe('semantic_answer');
+    expect(run.status).not.toBe('needs_clarification');
+    expect(run.routeDecision).toMatchObject({
+      requiresClarification: false,
+      meaningResolution: {
+        recommendedExecutionId: 'semantic:metric:revenue',
+        selectedConceptIds: ['semantic:metric:revenue'],
+        queryIntent: { measures: ['revenue'], order: 'desc', limit: 10 },
+      },
+      analyticalCascadeDecision: {
+        selectedTier: 'semantic',
+        requirements: { ranking: { metricTerms: ['revenue'], defaultedLimit: true, limit: 10 } },
+      },
+    });
+  });
+
   it('still asks a clarification that is waiting for its first answer', async () => {
     // A pending question is not a repeat — suppressing it would skip the one
     // clarification that legitimately needed asking.
@@ -3218,6 +4022,23 @@ describe("AgentRunEngine — conversation route", () => {
 
 function fixedClock(): () => Date {
   return () => new Date("2026-06-29T00:00:00.000Z");
+}
+
+function traceLinkObserver(links: Array<Record<string, unknown>>, spans: Array<Record<string, unknown>> = []): AskTraceObserverV1 {
+  return {
+    enabled: true,
+    recordingStatus: 'recording',
+    startSpan: (input) => {
+      spans.push({ name: input.name, payload: input.payload });
+      return '1111111111111111';
+    },
+    finishSpan: () => {},
+    recordCandidateDecision: () => {},
+    recordLink: (link) => links.push(link as Record<string, unknown>),
+    finalize: () => undefined,
+    markPartial: () => {},
+    reference: () => undefined,
+  };
 }
 
 function authoritativeDecision(

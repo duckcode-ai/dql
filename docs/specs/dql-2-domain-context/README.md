@@ -28,14 +28,15 @@ through review before continuing.
 11. [Analytical composition and transparent repair](10-analytical-composition-and-repair.md)
 12. [Context authoring, YAML import, and authoring AI](11-context-authoring-and-ai.md)
 13. [Ask AI orchestration contract](12-ask-ai-orchestration.md)
-14. [Acceptance matrix](acceptance-matrix.md)
-15. [Execution tracker](execution-tracker.md)
+14. [Ask AI observability contract](13-ask-ai-observability.md)
+15. [Acceptance matrix](acceptance-matrix.md)
+16. [Execution tracker](execution-tracker.md)
 
 ## Stable requirement IDs
 
 Requirements use these immutable prefixes: `SPEC`, `CFG`, `ID`, `DOM`, `PRD`,
 `REL`, `CONTRACT`, `SKILL`, `CTX`, `AGT`, `API`, `UI`, `MIG`, `PERF`, `SEC`, and
-`E2E`. An ID is never reused or renumbered. Superseded requirements remain in
+`E2E`, and `OBS`. An ID is never reused or renumbered. Superseded requirements remain in
 the matrix with a pointer to their replacement.
 
 ## Verification rule

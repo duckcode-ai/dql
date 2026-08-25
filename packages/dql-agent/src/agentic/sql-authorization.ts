@@ -8,6 +8,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import type { ExploratoryExecutionAuthorizationAttemptV1 } from '../analytical-orchestration.js';
 
 export type IdentifierEvidence = 'compiler' | 'preview' | 'schema_tool' | 'catalog';
 
@@ -46,6 +47,12 @@ export interface AgenticSqlExecutionCapabilityV1 extends Omit<ExecutionAuthoriza
   candidateSqlFingerprint: string;
   provenIdentifiers: string[];
   evidence: Record<string, IdentifierEvidence>;
+  /**
+   * Host-only lifecycle proof for a router-selected exploratory execution.
+   * It is never a user artifact or bearer token.  A repair gets a distinct
+   * capability; it cannot reuse the initial one-shot capability.
+   */
+  exploratoryAuthorizationAttempt?: ExploratoryExecutionAuthorizationAttemptV1;
 }
 
 export interface SqlAuthorizationVerdict {
@@ -116,6 +123,7 @@ export function createAgenticSqlExecutionCapability(input: {
   planId?: string;
   targetFingerprint?: string;
   bindings?: unknown;
+  exploratoryAuthorizationAttempt?: ExploratoryExecutionAuthorizationAttemptV1;
 }): AgenticSqlExecutionCapabilityV1 | undefined {
   const runId = requiredCapabilityIdentity(input.runId);
   const snapshotId = requiredCapabilityIdentity(input.snapshotId);
@@ -133,6 +141,9 @@ export function createAgenticSqlExecutionCapability(input: {
     bindingsFingerprint: fingerprintSqlBindings(input.bindings ?? {}),
     candidateSqlFingerprint: fingerprintSql(input.sql),
     ...normalizedProof,
+    ...(input.exploratoryAuthorizationAttempt
+      ? { exploratoryAuthorizationAttempt: input.exploratoryAuthorizationAttempt }
+      : {}),
   };
 }
 

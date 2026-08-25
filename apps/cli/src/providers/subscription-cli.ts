@@ -21,6 +21,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  completeProviderHttpDispatch,
   prepareProviderHttpDispatch,
   type AgentMessage,
   type AgentProvider,
@@ -28,7 +29,7 @@ import {
   type ProviderRunOptions,
 } from '@duckcodeailabs/dql-agent';
 
-interface RunResult {
+export interface SubscriptionCliRunResult {
   code: number | null;
   stdout: string;
   stderr: string;
@@ -36,7 +37,7 @@ interface RunResult {
   timedOut?: boolean;
 }
 
-interface RunOptions {
+export interface SubscriptionCliRunOptions {
   input?: string;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
@@ -45,12 +46,18 @@ interface RunOptions {
 }
 
 /** Spawn a process, optionally feed stdin, and collect stdout/stderr. Never throws. */
-function runProcess(command: string, args: string[], options: RunOptions = {}): Promise<RunResult> {
+export type SubscriptionCliProcessRunner = (
+  command: string,
+  args: string[],
+  options?: SubscriptionCliRunOptions,
+) => Promise<SubscriptionCliRunResult>;
+
+function runProcess(command: string, args: string[], options: SubscriptionCliRunOptions = {}): Promise<SubscriptionCliRunResult> {
   return new Promise((resolve) => {
     let settled = false;
     let timedOut = false;
     let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
-    const finish = (result: RunResult) => { if (!settled) { settled = true; resolve(result); } };
+    const finish = (result: SubscriptionCliRunResult) => { if (!settled) { settled = true; resolve(result); } };
     let child;
     try {
       child = spawn(command, args, {
@@ -154,10 +161,12 @@ export class ClaudeCodeCliProvider implements AgentProvider {
   readonly name: ProviderName = 'claude';
   private readonly command: string;
   private readonly defaultModel?: string;
+  private readonly processRunner: SubscriptionCliProcessRunner;
 
-  constructor(opts: { command?: string; model?: string } = {}) {
+  constructor(opts: { command?: string; model?: string; runProcess?: SubscriptionCliProcessRunner } = {}) {
     this.command = opts.command ?? 'claude';
     this.defaultModel = opts.model;
+    this.processRunner = opts.runProcess ?? runProcess;
   }
 
   /** Installed AND logged in (checked via `claude auth status --json`). */
@@ -192,7 +201,7 @@ export class ClaudeCodeCliProvider implements AgentProvider {
     // A run whose deadline already fired must not spawn a doomed child process.
     throwIfAlreadyCancelled(options.signal);
     const flattened = flattenMessages(messages);
-    const prepared = prepareProviderHttpDispatch({
+    const dispatch = {
       provider: this.name,
       operation: 'generate',
       attemptIndex: 1,
@@ -203,7 +212,8 @@ export class ClaudeCodeCliProvider implements AgentProvider {
         prompt: flattened.prompt,
         options: { tools: false, maxTurns: 1, permissionMode: 'dontAsk', sessionPersistence: false },
       },
-    });
+    } as const;
+    const prepared = prepareProviderHttpDispatch(dispatch);
     const system = typeof prepared.system === 'string' ? prepared.system : '';
     const prompt = typeof prepared.prompt === 'string' ? prepared.prompt : '';
     const model = typeof prepared.model === 'string' ? prepared.model : undefined;
@@ -220,8 +230,10 @@ export class ClaudeCodeCliProvider implements AgentProvider {
     ];
     // Isolated cwd so no project CLAUDE.md / .claude settings leak into the completion.
     const cwd = mkdtempSync(join(tmpdir(), 'dql-claude-'));
+    let processSettled = false;
+    let processSucceeded = false;
     try {
-      const res = await runProcess(this.command, args, {
+      const res = await this.processRunner(this.command, args, {
         input: prompt,
         cwd,
         env: claudeSubscriptionEnv(),
@@ -232,6 +244,14 @@ export class ClaudeCodeCliProvider implements AgentProvider {
         timeoutMs: resolveSubscriptionCliTimeoutMs(),
         signal: options.signal,
       });
+      const cancelled = options.signal?.aborted;
+      processSucceeded = !cancelled && !res.timedOut && !res.spawnError && res.code === 0;
+      processSettled = true;
+      completeProviderHttpDispatch(dispatch, {
+        settlement: 'process',
+        outcome: cancelled ? 'cancelled' : processSucceeded ? 'ok' : 'error',
+        ...(res.spawnError ? { error: res.spawnError } : {}),
+      });
       // A mid-flight cancellation SIGTERMed the child; surface the exact abort
       // reason (e.g. the run deadline's TimeoutError), never a parse error.
       throwIfAlreadyCancelled(options.signal);
@@ -240,6 +260,9 @@ export class ClaudeCodeCliProvider implements AgentProvider {
       }
       if (res.spawnError) {
         throw new Error(`Claude Code CLI not found. Install it (https://claude.com/claude-code) and run \`claude /login\`, or switch to an API-key provider. (${res.spawnError.message})`);
+      }
+      if (res.code !== 0) {
+        throw new Error(`Claude Code exited before producing an answer${res.stderr ? `: ${res.stderr.trim()}` : '.'}`);
       }
       const parsed = parseClaudeResult(res.stdout);
       if (parsed === undefined) {
@@ -252,7 +275,16 @@ export class ClaudeCodeCliProvider implements AgentProvider {
         }
         throw new Error(`claude returned an error: ${message}`);
       }
+      completeProviderHttpDispatch(dispatch, { settlement: 'result', outcome: 'ok' });
       return parsed.text;
+    } catch (error) {
+      const cancelled = options.signal?.aborted || (error instanceof Error && error.name === 'AbortError');
+      if (!processSettled) {
+        completeProviderHttpDispatch(dispatch, { settlement: 'process', outcome: cancelled ? 'cancelled' : 'error', error });
+      } else if (processSucceeded) {
+        completeProviderHttpDispatch(dispatch, { settlement: 'result', outcome: cancelled ? 'cancelled' : 'error', error });
+      }
+      throw error;
     } finally {
       try { rmSync(cwd, { recursive: true, force: true }); } catch { /* noop */ }
     }
@@ -290,10 +322,12 @@ export class CodexCliProvider implements AgentProvider {
   readonly name: ProviderName = 'openai';
   private readonly command: string;
   private readonly defaultModel?: string;
+  private readonly processRunner: SubscriptionCliProcessRunner;
 
-  constructor(opts: { command?: string; model?: string } = {}) {
+  constructor(opts: { command?: string; model?: string; runProcess?: SubscriptionCliProcessRunner } = {}) {
     this.command = opts.command ?? 'codex';
     this.defaultModel = opts.model;
+    this.processRunner = opts.runProcess ?? runProcess;
   }
 
   async available(): Promise<boolean> {
@@ -323,7 +357,7 @@ export class CodexCliProvider implements AgentProvider {
     // A run whose deadline already fired must not spawn a doomed child process.
     throwIfAlreadyCancelled(options.signal);
     const flattened = flattenMessages(messages);
-    const prepared = prepareProviderHttpDispatch({
+    const dispatch = {
       provider: this.name,
       operation: 'generate',
       attemptIndex: 1,
@@ -334,7 +368,8 @@ export class CodexCliProvider implements AgentProvider {
         prompt: flattened.prompt,
         options: { sandbox: 'read-only', ephemeral: true, sessionPersistence: false },
       },
-    });
+    } as const;
+    const prepared = prepareProviderHttpDispatch(dispatch);
     const system = typeof prepared.system === 'string' ? prepared.system : '';
     const prompt = typeof prepared.prompt === 'string' ? prepared.prompt : '';
     const model = typeof prepared.model === 'string' ? prepared.model : undefined;
@@ -352,12 +387,22 @@ export class CodexCliProvider implements AgentProvider {
       '--output-last-message', outFile, // write just the final assistant text
       ...(model ? ['--model', model] : []),
     ];
+    let processSettled = false;
+    let processSucceeded = false;
     try {
-      const res = await runProcess(this.command, args, {
+      const res = await this.processRunner(this.command, args, {
         input: fullPrompt,
         cwd,
         timeoutMs: resolveSubscriptionCliTimeoutMs(),
         signal: options.signal,
+      });
+      const cancelled = options.signal?.aborted;
+      processSucceeded = !cancelled && !res.timedOut && !res.spawnError && res.code === 0;
+      processSettled = true;
+      completeProviderHttpDispatch(dispatch, {
+        settlement: 'process',
+        outcome: cancelled ? 'cancelled' : processSucceeded ? 'ok' : 'error',
+        ...(res.spawnError ? { error: res.spawnError } : {}),
       });
       // A mid-flight cancellation SIGTERMed the child; surface the exact abort
       // reason (e.g. the run deadline's TimeoutError), never a parse error.
@@ -368,18 +413,37 @@ export class CodexCliProvider implements AgentProvider {
       if (res.spawnError) {
         throw new Error(`Codex CLI not found. Install it and run \`codex login\` with your ChatGPT plan, or switch to an API-key provider. (${res.spawnError.message})`);
       }
+      if (res.code !== 0) {
+        throw new Error(`Codex exited before producing an answer${res.stderr ? `: ${res.stderr.trim()}` : '.'}`);
+      }
       if (existsSync(outFile)) {
         const text = readFileSync(outFile, 'utf-8').trim();
-        if (text) return text;
+        if (text) {
+          completeProviderHttpDispatch(dispatch, { settlement: 'result', outcome: 'ok' });
+          return text;
+        }
       }
       // Fallback: parse the JSONL event stream for the final agent_message.
       const fromStream = parseCodexFinalMessage(res.stdout);
-      if (fromStream) return fromStream;
+      if (fromStream) {
+        completeProviderHttpDispatch(dispatch, { settlement: 'result', outcome: 'ok' });
+        return fromStream;
+      }
       const message = res.stderr.trim() || 'no output';
       if (/not (logged|signed) in|login|unauthor|401/i.test(message)) {
         throw new Error('Codex is not logged in. Run `codex login` with your ChatGPT plan, then retry.');
       }
-      throw new Error(`codex exec produced no message: ${message}`);
+      throw Object.assign(new Error(`codex exec produced no message: ${message}`), {
+        code: 'PROVIDER_RESULT_MALFORMED',
+      });
+    } catch (error) {
+      const cancelled = options.signal?.aborted || (error instanceof Error && error.name === 'AbortError');
+      if (!processSettled) {
+        completeProviderHttpDispatch(dispatch, { settlement: 'process', outcome: cancelled ? 'cancelled' : 'error', error });
+      } else if (processSucceeded) {
+        completeProviderHttpDispatch(dispatch, { settlement: 'result', outcome: cancelled ? 'cancelled' : 'error', error });
+      }
+      throw error;
     } finally {
       try { rmSync(cwd, { recursive: true, force: true }); } catch { /* noop */ }
     }

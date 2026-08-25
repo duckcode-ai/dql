@@ -29,8 +29,16 @@ const HEAVY_TEST_FILES = [
   'src/metadata/catalog.test.ts',
   'src/project-state.test.ts',
 ];
-const EXPECTED_TEST_FILES = 150;
-const EXPECTED_TESTS = 1966;
+// Keep this audited set explicit: new Ask analytical-frame and observability
+// regressions must participate in the same serial package gate rather than
+// being silently omitted from the receipt audit.
+const EXPECTED_TEST_FILES = 152;
+// Keep the aggregate receipt exact. The current Ask routing, semantic-proof,
+// trace, product-category, exploratory-output, and governed-proof regressions
+// total 2,090
+// non-skipped tests; a
+// future accidental skip must not be hidden by a broad package pass.
+const EXPECTED_TESTS = 2090;
 
 function discoverTestFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {

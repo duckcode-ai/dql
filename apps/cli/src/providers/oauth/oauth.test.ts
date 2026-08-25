@@ -98,9 +98,11 @@ describe('ClaudeOAuthProvider request', () => {
     }));
     const provider = new ClaudeOAuthProvider({ projectRoot: root, model: 'claude-sonnet-4-5' });
     const dispatches: unknown[] = [];
+    const completions: Array<{ settlement?: string; outcome?: string }> = [];
     const out = await provider.generate([{ role: 'user', content: 'hi' }], {
       reasoningEffort: 'high',
       onProviderDispatch: (event) => { dispatches.push(event); return event.envelope; },
+      onProviderDispatchComplete: (event) => { completions.push(event); },
     });
     expect(out).toBe('answer');
     expect(captured?.headers.Authorization).toBe('Bearer TOK');
@@ -108,6 +110,23 @@ describe('ClaudeOAuthProvider request', () => {
     expect(captured?.body.system[0].text).toContain('Claude Code');
     expect(captured?.body.thinking).toEqual({ type: 'enabled', budget_tokens: 20000 });
     expect(dispatches).toHaveLength(1);
+    expect(completions).toEqual([
+      expect.objectContaining({ settlement: 'transport', outcome: 'ok' }),
+      expect.objectContaining({ settlement: 'result', outcome: 'ok' }),
+    ]);
+  });
+
+  it('records a successful transport followed by a malformed-result failure', async () => {
+    setClaudeCredentials(root, { type: 'claude', access_token: 'TOK', refresh_token: 'REF', expired: new Date(Date.now() + 3.6e6).toISOString() });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ content: [] }), { status: 200, headers: { 'content-type': 'application/json' } })));
+    const completions: Array<{ settlement?: string; outcome?: string }> = [];
+    await expect(new ClaudeOAuthProvider({ projectRoot: root }).generate([{ role: 'user', content: 'hi' }], {
+      onProviderDispatchComplete: (event) => { completions.push(event); },
+    })).rejects.toThrow(/no assistant text/i);
+    expect(completions).toEqual([
+      expect.objectContaining({ settlement: 'transport', outcome: 'ok' }),
+      expect.objectContaining({ settlement: 'result', outcome: 'error' }),
+    ]);
   });
 
   it('throws a clear error when there is no credential at all', async () => {
@@ -150,14 +169,33 @@ describe('CodexOAuthProvider request', () => {
     }));
     const provider = new CodexOAuthProvider({ projectRoot: root });
     const dispatches: unknown[] = [];
+    const completions: Array<{ settlement?: string; outcome?: string }> = [];
     const out = await provider.generate([{ role: 'user', content: 'hi' }], {
       reasoningEffort: 'medium',
       onProviderDispatch: (event) => { dispatches.push(event); return event.envelope; },
+      onProviderDispatchComplete: (event) => { completions.push(event); },
     });
     expect(out).toBe('Hello');
     expect(captured?.Authorization).toBe('Bearer CTOK');
     expect(captured?.['ChatGPT-Account-Id']).toBe('acct_9');
     expect(dispatches).toHaveLength(1);
+    expect(completions).toEqual([
+      expect.objectContaining({ settlement: 'transport', outcome: 'ok' }),
+      expect.objectContaining({ settlement: 'result', outcome: 'ok' }),
+    ]);
+  });
+
+  it('records a successful stream transport followed by an invalid-result failure', async () => {
+    setCodexCredentials(root, { type: 'openai-codex', access_token: 'CTOK', refresh_token: 'CREF', expires: Date.now() + 3.6e6 });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('data: {"type":"response.completed"}\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } })));
+    const completions: Array<{ settlement?: string; outcome?: string }> = [];
+    await expect(new CodexOAuthProvider({ projectRoot: root }).generate([{ role: 'user', content: 'hi' }], {
+      onProviderDispatchComplete: (event) => { completions.push(event); },
+    })).rejects.toThrow(/no assistant text/i);
+    expect(completions).toEqual([
+      expect.objectContaining({ settlement: 'transport', outcome: 'ok' }),
+      expect.objectContaining({ settlement: 'result', outcome: 'error' }),
+    ]);
   });
 
   it.each([
@@ -172,10 +210,23 @@ describe('CodexOAuthProvider request', () => {
   ])('records the %s physical attempt when fetch fails', async (_label, createProvider) => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new DOMException('cancelled', 'AbortError'); }));
     const dispatches: unknown[] = [];
+    const completions: Array<{ settlement?: string; outcome?: string }> = [];
     await expect(createProvider().generate([{ role: 'user', content: 'hi' }], {
       onProviderDispatch: (event) => { dispatches.push(event); return event.envelope; },
+      onProviderDispatchComplete: (event) => { completions.push(event); },
     })).rejects.toThrow();
     expect(dispatches).toHaveLength(1);
+    expect(completions).toEqual([expect.objectContaining({ settlement: 'transport', outcome: 'cancelled' })]);
+  });
+
+  it('records a network transport failure without a false successful result', async () => {
+    setClaudeCredentials(root, { type: 'claude', access_token: 'TOK', refresh_token: 'REF', expired: new Date(Date.now() + 3.6e6).toISOString() });
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('fetch failed'); }));
+    const completions: Array<{ settlement?: string; outcome?: string }> = [];
+    await expect(new ClaudeOAuthProvider({ projectRoot: root }).generate([{ role: 'user', content: 'hi' }], {
+      onProviderDispatchComplete: (event) => { completions.push(event); },
+    })).rejects.toThrow(/fetch failed/i);
+    expect(completions).toEqual([expect.objectContaining({ settlement: 'transport', outcome: 'error' })]);
   });
 
   it('flushes a final text delta even when the stream lacks a trailing blank line', async () => {
