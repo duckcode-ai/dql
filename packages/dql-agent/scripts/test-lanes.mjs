@@ -32,13 +32,18 @@ const HEAVY_TEST_FILES = [
 // Keep this audited set explicit: new Ask analytical-frame and observability
 // regressions must participate in the same serial package gate rather than
 // being silently omitted from the receipt audit.
-const EXPECTED_TEST_FILES = 152;
+const EXPECTED_TEST_FILES = 153;
 // Keep the aggregate receipt exact. The current Ask routing, semantic-proof,
-// trace, product-category, exploratory-output, and governed-proof regressions
-// total 2,090
+// trace, product-category, exploratory-output, governed-proof, compound
+// metric-binding, V6 decision-story, V2 continuation persistence, and the
+// final bounded Ask planner/execution, constrained recovery (including a
+// full initial package plus #17 targeted extension), and explicit
+// filter/time/ranking regressions, plus the certified profile and exact
+// semantic order-count fast paths, and durable failed-planner V6 receipt
+// regressions, total 2,138
 // non-skipped tests; a
 // future accidental skip must not be hidden by a broad package pass.
-const EXPECTED_TESTS = 2090;
+const EXPECTED_TESTS = 2138;
 
 function discoverTestFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {

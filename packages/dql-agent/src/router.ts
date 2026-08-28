@@ -41,7 +41,7 @@ import {
   type MeaningExecutionRoute,
   type MeaningResolution,
 } from "./meaning-resolution.js";
-import { normalizeAnalyticalQuestionFrameV2 } from "@duckcodeailabs/dql-core";
+import { normalizeAnalyticalQuestionFrameV2, type MetricCapabilityContract } from "@duckcodeailabs/dql-core";
 import {
   buildResolvedAnalyticalPlan,
   type ResolvedAnalyticalPlan,
@@ -57,6 +57,7 @@ import {
   isEntityAttributeCandidate,
   type AnalyticalCascadeDecisionV1,
   type AnalyticalCascadeTerminalGapV1,
+  type AnalyticalProgram,
   type AnalyticalRequirementSetV1,
   type AnalyticalRequirementSeedV1,
   type CascadeTierAttemptV1,
@@ -323,7 +324,7 @@ function parseClassification(raw: string): RouterClassification | undefined {
   };
 }
 
-function buildMeaningSystemPrompt(): string {
+export function buildMeaningSystemPrompt(): string {
   return [
     "You resolve business meaning for DQL, a governed analytics system.",
     "The host already performed broad retrieval and supplied a host-owned requirement seed. Compare ONLY the supplied candidate cards against that seed.",
@@ -339,7 +340,7 @@ function buildMeaningSystemPrompt(): string {
   ].join("\n");
 }
 
-function buildMeaningUserPrompt(
+export function buildMeaningUserPrompt(
   request: AgentRunRequest,
   evidence: AgentRetrievalEvidence,
   candidates: AgentEvidenceCandidate[],
@@ -607,6 +608,7 @@ function retrievalTrace(
   return {
     ...(evidence.snapshotId ? { snapshotId: evidence.snapshotId } : {}),
     ...(evidence.sourceFingerprint ? { sourceFingerprint: evidence.sourceFingerprint } : {}),
+    ...(evidence.continuityFingerprint ? { continuityFingerprint: evidence.continuityFingerprint } : {}),
     candidateCount: candidates.length,
     candidateIds: candidates.map((candidate) => candidate.id),
     ...(candidateTraceMetadata.length ? { candidateTraceMetadata } : {}),
@@ -635,7 +637,12 @@ function traceSourceForCandidate(candidate: AgentEvidenceCandidate): ContextSour
   return 'exploratory';
 }
 
-function traceCandidateLifecycleBeforePruning(
+/**
+ * Persist the immutable snapshot's candidate lifecycle for either the legacy
+ * router or AskAnalystRuntimeV1. This is an observability projection only: it
+ * cannot retrieve, rank, admit, or alter a program.
+ */
+export function recordAskCandidateLifecycleV1(
   request: AgentRunRequest,
   evidence: AgentRetrievalEvidence,
   candidates: AgentEvidenceCandidate[],
@@ -657,9 +664,15 @@ function traceCandidateLifecycleBeforePruning(
     ...(requirements.dimensions.length ? ['categorical_dimension' as const] : []),
     ...(requirements.dimensions.length > 1 || requirements.entityTerms.length ? ['relationship' as const] : []),
   ]);
-  const candidateLimit = 32;
+  // Candidate lifecycle is an Advanced trace projection over the immutable
+  // prequalification/search backing pool. It intentionally has a larger cap
+  // than EvidenceWorkspaceV2 (32) so users can see a relevant candidate was
+  // pruned as `not_admitted` rather than falsely told it was absent. This
+  // projection is not an admission path: planner cards stay <=16 and the
+  // frozen execution closure stays <=32 plus an explicit bounded extension.
+  const rawCandidateTraceLimit = 80;
   const hasRequestedEntityLabel = requirements.entityTerms.length > 0 || requirements.entityDisplayTerms.length > 0;
-  for (const [index, candidate] of candidates.slice(0, candidateLimit).entries()) {
+  for (const [index, candidate] of candidates.slice(0, rawCandidateTraceLimit).entries()) {
     const roles = evidenceCandidateRoles(candidate);
     const source = traceSourceForCandidate(candidate);
     // This receipt must retain the actual retrieval memberships captured by
@@ -1134,7 +1147,14 @@ function relationshipGraphReaches(
   return false;
 }
 
-function attributionRequiredRelationshipGapDecision(input: {
+/**
+ * Evaluate an attribution/allocation policy boundary from one immutable
+ * snapshot. AskAnalystRuntimeV1 invokes this before an optional provider
+ * meaning call: a declared denial is neither an ambiguity nor a provider
+ * failure. This helper only evaluates supplied evidence; it never retrieves
+ * additional context or executes a query.
+ */
+export function attributionRequiredRelationshipGapDecision(input: {
   request: AgentRunRequest;
   base: IntentDecision;
   evidence: AgentRetrievalEvidence;
@@ -1637,12 +1657,32 @@ function preFreezePhysicalCascadeDecision(input: {
   requiredPhysicalFieldTerms?: string[];
   messagePrefix: string;
   terminalCandidateIds?: string[];
+  /** Optional active-target scope; never triggers a new retrieval. */
+  targetScope?: string;
+  /**
+   * Source metadata can be available while the selected semantic compiler is
+   * not. Preserve that operational pre-freeze boundary in the tier receipt
+   * rather than relabeling it as a generic tuple-ineligible semantic source.
+   */
+  semanticTierUnavailable?: boolean;
+  /**
+   * Frozen Ask programs may inspect only their admitted execution closure.
+   * Legacy callers omit this and retain the normal same-snapshot extension;
+   * the authoritative compiler supplies it so a tail card can never become
+   * executable after program freeze.
+   */
+  executionCandidateIds?: readonly string[];
   /** A bare ranking can inspect physical safety, but cannot invent its measure. */
   requireRankingMetric?: boolean;
 }): IntentDecision {
   // `candidates` can be the capped meaning package. Physical eligibility is
   // allowed one same-snapshot extension, never a new retrieval/domain scope.
-  const snapshotCandidates = immutableSnapshotCandidates(input.evidence, input.candidates);
+  const snapshotCandidates = targetScopedSameSnapshotCandidates(
+    input.evidence,
+    input.candidates,
+    input.targetScope,
+    input.executionCandidateIds,
+  );
   const physicalPath = hasSafeExploratoryPhysicalPath(
     input.requirements,
     snapshotCandidates,
@@ -1717,12 +1757,15 @@ function preFreezePhysicalCascadeDecision(input: {
     source: Extract<ContextSourceCoverageV1['source'], 'certified' | 'semantic'>,
   ): CascadeTierAttemptV1 => {
     const item = coverageFor(source);
+    const semanticCompilerUnavailable = tier === 'semantic' && input.semanticTierUnavailable;
     return {
       version: 1,
       tier,
-      outcome: item?.status === 'available' ? 'ineligible' : 'unavailable',
+      outcome: semanticCompilerUnavailable || item?.status !== 'available' ? 'unavailable' : 'ineligible',
       candidateIds: item?.candidateIds ?? [],
-      reason: item?.status === 'available'
+      reason: semanticCompilerUnavailable
+        ? 'The selected semantic compiler was unavailable before plan freeze.'
+        : item?.status === 'available'
         ? `The ${tier} tier did not prove the complete requested tuple before plan freeze.`
         : `The ${tier} source was ${item?.status ?? 'unavailable'} in this snapshot.`,
       planFrozen: false,
@@ -1827,6 +1870,7 @@ function preFreezePhysicalCascadeDecision(input: {
 function immutableSnapshotCandidates(
   evidence: AgentRetrievalEvidence,
   candidates: AgentEvidenceCandidate[],
+  executionCandidateIds?: readonly string[],
 ): AgentEvidenceCandidate[] {
   const byId = new Map<string, AgentEvidenceCandidate>();
   for (const candidate of [
@@ -1836,7 +1880,45 @@ function immutableSnapshotCandidates(
   ]) {
     if (!byId.has(candidate.id)) byId.set(candidate.id, candidate);
   }
-  return [...byId.values()];
+  const snapshot = [...byId.values()];
+  if (!executionCandidateIds) return snapshot;
+  const allowed = new Set(executionCandidateIds);
+  return snapshot.filter((candidate) =>
+    allowed.has(candidate.id) || allowed.has(candidate.qualifiedId ?? candidate.id));
+}
+
+/**
+ * The one permitted physical extension stays inside the already acquired
+ * snapshot and, when the active target is represented in source provenance,
+ * restricts physical cards to that target. This prevents a semantic target
+ * mismatch from being misreported as global schema absence while retaining
+ * relationship cards needed to prove a safe closure.
+ */
+function targetScopedSameSnapshotCandidates(
+  evidence: AgentRetrievalEvidence,
+  candidates: AgentEvidenceCandidate[],
+  targetScope?: string,
+  executionCandidateIds?: readonly string[],
+): AgentEvidenceCandidate[] {
+  const snapshot = immutableSnapshotCandidates(evidence, candidates, executionCandidateIds);
+  if (!targetScope) return snapshot;
+  const normalized = targetScope.toLowerCase();
+  const physical = snapshot.filter((candidate) => candidate.kind === 'sql_table'
+    || candidate.kind === 'sql_column' || candidate.kind === 'dbt_model' || candidate.kind === 'dbt_source');
+  const scopedPhysical = physical.filter((candidate) => [
+    ...(candidate.sourceObjects ?? []),
+    candidate.provenance ?? '',
+    candidate.semanticModel ?? '',
+    candidate.domain ?? '',
+  ].some((value) => value.toLowerCase().includes(normalized)));
+  // Provenance often does not carry a connection name in older indexes. In
+  // that case retain the immutable snapshot rather than inventing absence.
+  if (scopedPhysical.length === 0) return snapshot;
+  const scopedIds = new Set(scopedPhysical.map((candidate) => candidate.id));
+  return snapshot.filter((candidate) => !physical.includes(candidate)
+    || scopedIds.has(candidate.id)
+    || candidate.kind === 'dql_modeling'
+    || (candidate.relationshipEvidence?.length ?? 0) > 0);
 }
 
 /**
@@ -1854,6 +1936,8 @@ function continuePreFreezeModelingGapThroughPhysicalSnapshot(input: {
   evidence: AgentRetrievalEvidence;
   candidates: AgentEvidenceCandidate[];
   question: string;
+  /** Frozen authoritative execution closure, when this is compiler-owned. */
+  executionCandidateIds?: readonly string[];
 }): IntentDecision {
   const { decision, evidence } = input;
   const plan = decision.resolvedAnalyticalPlan;
@@ -1887,7 +1971,7 @@ function continuePreFreezeModelingGapThroughPhysicalSnapshot(input: {
   const physicalContinuation = preFreezePhysicalCascadeDecision({
     base: input.base,
     evidence,
-    candidates: immutableSnapshotCandidates(evidence, input.candidates),
+    candidates: immutableSnapshotCandidates(evidence, input.candidates, input.executionCandidateIds),
     question: input.question,
     requirements,
     missingTerms,
@@ -1896,6 +1980,7 @@ function continuePreFreezeModelingGapThroughPhysicalSnapshot(input: {
       ? 'The selected governed relational interpretation did not prove a compiler-owned DQL projection before plan freeze.'
       : 'The selected semantic interpretation was pre-freeze-ineligible for the complete requested tuple.',
     terminalCandidateIds: plan.selectedConceptIds,
+    ...(input.executionCandidateIds ? { executionCandidateIds: input.executionCandidateIds } : {}),
   });
   if (physicalContinuation.action === 'answer'
     && physicalContinuation.analyticalCascadeDecision?.selectedTier === 'exploratory_sql') {
@@ -2356,6 +2441,190 @@ function routeDecisionForResolution(
 }
 
 /**
+ * Compiler-only bridge for AskAnalystRuntimeV1.  The runtime owns question
+ * framing, candidate admission, meaning selection, and the immutable program;
+ * this adapter only validates that selected program against existing safe
+ * certified/MetricFlow/relational/exploratory compilers.  It must never call a
+ * provider, retrieve a new snapshot, or nominate a different business meaning.
+ */
+export function compileAskAnalyticalProgramV1(input: {
+  base: IntentDecision;
+  request: AgentRunRequest;
+  evidence: AgentRetrievalEvidence;
+  /** Immutable route-neutral program produced by AskAnalystRuntimeV1. */
+  program: AnalyticalProgram;
+  /** Same-snapshot compiler context, including a bounded physical closure. */
+  executionCandidates?: AgentEvidenceCandidate[];
+  candidates: AgentEvidenceCandidate[];
+  resolution: MeaningResolution;
+  requirements: AnalyticalRequirementSetV1;
+  mode?: ResolvedAnalyticalPlan['mode'];
+}): IntentDecision {
+  const readiness = input.request.askAnalystTierReadiness;
+  // A compiler must never widen the program that the runtime froze.  A stale
+  // adapter-selected identity is a compilation failure, not an invitation to
+  // rank/retrieve/interpret the question again.
+  const executionCandidates = input.executionCandidates ?? input.candidates;
+  const executionIds = new Set(input.program.executionCandidateIds ?? input.program.candidateIds);
+  const executionCandidateIds = [...executionIds];
+  const isProgramExecutionCandidate = (candidate: AgentEvidenceCandidate) =>
+    executionIds.has(candidate.id) || executionIds.has(candidate.qualifiedId ?? candidate.id);
+  if (executionCandidates.some((candidate) => !isProgramExecutionCandidate(candidate))) {
+    return immutableProgramBlocked(input.base, 'A compiler received a candidate outside the frozen Ask execution closure.');
+  }
+  const seedFilters = input.request.hostRequirementSeed?.queryIntent.filters ?? [];
+  if (!validProgramFilterBindings(input.program, seedFilters)) {
+    return immutableProgramBlocked(input.base, 'The immutable Ask program did not retain valid field, operator, and value bindings for every requested filter.');
+  }
+  const programIds = new Set(input.program.candidateIds);
+  // The compiler receives the full frozen 32-card execution closure for
+  // relationship/physical compilation, but only the program's verified
+  // selected cards may authorize meaning. Do not treat closure membership as
+  // selection authority: that would let a tail candidate change the question
+  // after planner verification.
+  const programIdentityIds = new Set(input.candidates
+    .filter((candidate) => programIds.has(candidate.id) || programIds.has(candidate.qualifiedId ?? candidate.id))
+    .flatMap((candidate) => [candidate.id, candidate.qualifiedId].filter((id): id is string => Boolean(id))));
+  const selectedIds = [
+    ...input.resolution.selectedConceptIds,
+    ...(input.resolution.recommendedExecutionId ? [input.resolution.recommendedExecutionId] : []),
+  ];
+  if (selectedIds.some((id) => !programIds.has(id) && !programIdentityIds.has(id))) {
+    return {
+      ...input.base,
+      action: 'block',
+      confidence: 1,
+      source: 'heuristic',
+      followsUp: false,
+      reason: 'The immutable Ask program did not authorize every selected compiler identity.',
+      terminalOutcome: {
+        kind: 'policy_blocked',
+        code: 'ANALYTICAL_POLICY_BLOCKED',
+        message: 'A compiler attempted to consume a candidate outside the frozen Ask program.',
+        candidateIds: selectedIds,
+      },
+    };
+  }
+  // `candidates` is the runtime-verified business tuple. The larger frozen
+  // execution closure is deliberately supplied only to the physical
+  // continuation below. Passing it into the semantic router lets a related
+  // metric or numeric attribute re-open meaning selection after program
+  // verification (for example Orders + Drink Orders + customer order number
+  // for the singular request "order count for each customer").
+  const selectedMeaningCandidates = input.candidates.filter((candidate) =>
+    programIds.has(candidate.id) || programIds.has(candidate.qualifiedId ?? candidate.id));
+  const decision = routeDecisionForResolution(
+    input.base,
+    input.evidence,
+    selectedMeaningCandidates,
+    input.resolution,
+    'heuristic',
+    input.request.question,
+    input.mode ?? 'authoritative',
+  );
+  // A material business choice is resolved before target readiness.  A target
+  // being unavailable does not make two independently valid semantic display
+  // meanings become one physical meaning; collapsing it first caused offline
+  // structured clarification/restart flows to report a false coverage gap.
+  // Once an immutable meaning is selected, readiness still advances an
+  // unavailable semantic target through the same-snapshot physical cascade.
+  if (decision.requiresClarification === true || decision.action === 'clarify') {
+    return decision;
+  }
+  // Connector/active-target readiness is recorded separately because it is an
+  // execution boundary, not necessarily a semantic *compiler* boundary. A
+  // native semantic plan can be proven and frozen from an authored local
+  // snapshot without a configured connection; execution then reports the
+  // normal post-freeze setup failure. Adapter/target binding for MetricFlow or
+  // another external semantic compiler is folded into semanticCompiler by the
+  // host readiness probe, so only that state authorizes pre-freeze fallback.
+  const semanticUnavailable = readiness?.semanticCompiler === 'unavailable';
+  // A semantic adapter/target mismatch is a pre-freeze availability result,
+  // not a modeling absence. A safe physical closure from this exact snapshot
+  // may still answer as review-required exploratory SQL.
+  if (semanticUnavailable && input.resolution.recommendedRoute === 'semantic') {
+    return preFreezePhysicalCascadeDecision({
+      base: input.base,
+      evidence: input.evidence,
+      candidates: executionCandidates,
+      question: input.request.question,
+      requirements: input.requirements,
+      missingTerms: [
+        ...input.requirements.measures,
+        ...input.requirements.dimensions,
+        ...input.requirements.entityTerms,
+        ...input.requirements.entityDisplayTerms,
+      ],
+      requiredPhysicalFieldTerms: [
+        ...input.requirements.measures,
+        ...input.requirements.dimensions,
+        ...input.requirements.entityTerms,
+        ...input.requirements.entityDisplayTerms,
+      ],
+      messagePrefix: 'The semantic compiler or active target was unavailable before plan freeze; DQL evaluated the same-snapshot safe physical path independently.',
+      terminalCandidateIds: input.resolution.selectedConceptIds,
+      ...(input.request.executionTarget?.target === 'connection' && input.request.executionTarget.connectionName
+        ? { targetScope: input.request.executionTarget.connectionName }
+        : {}),
+      executionCandidateIds,
+      semanticTierUnavailable: true,
+      requireRankingMetric: Boolean(input.requirements.ranking && input.requirements.ranking.metricTerms.length === 0),
+    });
+  }
+  // A selected semantic/governed plan may be invalid before it freezes. That
+  // is explicitly allowed to advance, but a frozen, denied, or unsafe plan is
+  // never silently downgraded.
+  return continuePreFreezeModelingGapThroughPhysicalSnapshot({
+    decision,
+    base: input.base,
+    evidence: input.evidence,
+    candidates: executionCandidates,
+    question: input.request.question,
+    executionCandidateIds,
+  });
+}
+
+function immutableProgramBlocked(base: IntentDecision, message: string): IntentDecision {
+  return {
+    ...base,
+    action: 'block',
+    confidence: 1,
+    source: 'heuristic',
+    followsUp: false,
+    reason: message,
+    terminalOutcome: {
+      kind: 'policy_blocked',
+      code: 'ANALYTICAL_POLICY_BLOCKED',
+      message,
+      candidateIds: [],
+    },
+  };
+}
+
+function validProgramFilterBindings(
+  program: AnalyticalProgram,
+  seedFilters: Array<{ field: string; value: string }>,
+): boolean {
+  if (program.filters.some((filter) => filter.fieldTerms.length === 0 || !filter.fieldTerms.every(Boolean) || !filter.value.trim() || filter.operator === 'unknown')) return false;
+  // Direct compiler consumers from before AskAnalystRuntimeV1 do not carry a
+  // host requirement seed. They still must provide internally valid filters,
+  // but cannot be compared to a seed that was never supplied. Authoritative
+  // Ask always supplies one and therefore takes the exact-binding branch.
+  if (seedFilters.length === 0) return true;
+  // A program with no predicate is valid only when the host seed also has no
+  // predicate. When a seed exists, exact normalized bindings make it
+  // impossible for a compiler to drop, broaden, or replace a user filter.
+  const normalize = (field: string, operator: string, value: string) =>
+    `${field.trim().toLowerCase()}|${operator.trim().toLowerCase()}|${value.trim().toLowerCase()}`;
+  const expected = seedFilters.map((filter) => normalize(filter.field, 'equals', filter.value)).sort();
+  const actual = program.filters
+    .map((filter) => filter.fieldTerms.map((field) => normalize(field, filter.operator, filter.value)))
+    .flat()
+    .sort();
+  return expected.length === actual.length && expected.every((value, index) => value === actual[index]);
+}
+
+/**
  * A block may be relevant to a metric without returning that metric. When a
  * stale catalog result or provider selection nominates such a block, continue
  * with one exact semantic definition when it exists; otherwise preserve the
@@ -2706,7 +2975,7 @@ function clarificationOptionsForQualifiedIds(
     .map(({ id, candidate }) => {
     return {
       id: candidate?.id ?? id,
-      label: candidate?.name || qualifiedIdLabel(candidate?.qualifiedId ?? id),
+      label: clarificationOptionLabel(candidate?.name, candidate?.qualifiedId ?? id),
       ...(candidate?.definition?.trim() ? { description: candidate.definition.trim() } : {}),
       kind: candidate?.kind ?? 'semantic_member',
     };
@@ -2716,6 +2985,19 @@ function clarificationOptionsForQualifiedIds(
 function qualifiedIdLabel(id: string): string {
   const local = id.split(/[:./]/).filter(Boolean).at(-1) ?? id;
   return local.replace(/[_-]+/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+/**
+ * Candidate names are canonical metadata values, not necessarily presentation
+ * labels. Keep a curated label intact, but humanize local snake/kebab names so
+ * a stable clarification never asks a business user to choose `account_name`.
+ */
+function clarificationOptionLabel(name: string | undefined, fallbackId: string): string {
+  const trimmed = name?.trim();
+  if (!trimmed) return qualifiedIdLabel(fallbackId);
+  return /[_-]/.test(trimmed)
+    ? trimmed.replace(/[_-]+/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase())
+    : trimmed;
 }
 
 function routedClarificationQuestion(
@@ -3094,8 +3376,8 @@ function buildClarificationOptions(
     return {
       id: candidate.id,
       label: ambiguousName
-        ? `${candidate.name} (${candidateKindLabel(candidate.kind)})`
-        : candidate.name,
+        ? `${clarificationOptionLabel(candidate.name, candidate.qualifiedId ?? candidate.id)} (${candidateKindLabel(candidate.kind)})`
+        : clarificationOptionLabel(candidate.name, candidate.qualifiedId ?? candidate.id),
       ...(description ? { description } : {}),
       kind: candidate.kind,
     };
@@ -3864,6 +4146,66 @@ function isSameSnapshotCategoricalExtensionForMetric(
 }
 
 /**
+ * A planner/runtime selection can name a semantic display card through its
+ * registry identity while the metric capability names the same field through
+ * its MetricFlow identity.  That is common for dbt MetricFlow exports:
+ * `semantic:dimension:customers.customer_name` is the selected registry card,
+ * while the metric declares
+ * `semantic:uncategorized:dimension:customers.customer_name` as its native
+ * grouping field.
+ *
+ * Do not reopen retrieval to bridge those forms.  When (and only when) the
+ * already-selected semantic member maps uniquely to an exact group-by
+ * dimension on the already-selected metric capability, record the
+ * same-snapshot proof on that selected card.  The existing semantic compiler
+ * still checks the normalized capability, additivity, and native grouping
+ * path before freezing.  This lets a complete singular tuple execute without
+ * permitting a correlated metric, a numeric order attribute, or any
+ * unselected workspace card to become meaning authority.
+ */
+function bindSelectedMetricFlowGroupingExtensions(
+  metricCandidate: AgentEvidenceCandidate,
+  candidates: AgentEvidenceCandidate[],
+): AgentEvidenceCandidate[] {
+  const capability = normalizeEvidenceAnalyticalCapability(metricCandidate).capability;
+  if (!capability) return candidates;
+  const normalizedIdentitySet = (candidate: AgentEvidenceCandidate): Set<string> => new Set([
+    candidate.id,
+    candidate.qualifiedId,
+    candidate.name,
+    ...(candidate.aliases ?? []),
+  ].filter((identity): identity is string => Boolean(identity)).map(normalizeMetricPhrase).filter(Boolean));
+  const dimensionIdentities = (dimension: MetricCapabilityContract['dimensions'][number]): Set<string> => new Set([
+    dimension.dimensionId,
+    dimension.label,
+    ...(dimension.aliases ?? []),
+  ].filter((identity): identity is string => Boolean(identity)).map(normalizeMetricPhrase).filter(Boolean));
+
+  return candidates.map((candidate) => {
+    if (candidate.kind !== 'semantic_member'
+      || candidate.compatibility === 'incompatible'
+      || candidate.sameSnapshotRoleExtension) return candidate;
+    const identities = normalizedIdentitySet(candidate);
+    const matchedDimensions = capability.dimensions.filter((dimension) =>
+      dimension.supportedRoles.includes('group_by')
+      && [...dimensionIdentities(dimension)].some((identity) => identities.has(identity)));
+    if (matchedDimensions.length !== 1) return candidate;
+    const dimension = matchedDimensions[0]!;
+    return {
+      ...candidate,
+      sameSnapshotRoleExtension: {
+        version: 1,
+        role: 'categorical_dimension',
+        requestedTerm: candidate.name,
+        metricId: capability.metricId,
+        dimensionId: dimension.dimensionId,
+        basis: 'exact_metricflow_grouping_dimension',
+      },
+    };
+  });
+}
+
+/**
  * A model chooses from the bounded package, but it cannot remove a unique
  * host-required categorical grouping whose exact qualified field is already
  * declared by the selected metric's immutable capability. This is a binding,
@@ -3899,11 +4241,14 @@ function directResolution(
   // model path. Raw parser terms are retrieval hints only: they may not turn a
   // normalized business alias back into a phantom metric or dimension after
   // the meaning boundary has been intentionally skipped.
-  const requirementSeed = buildAnalyticalRequirementSeedV1({
-    question: request.question,
-    parsedIntent: evidence.parsedIntent,
-    fiscalCalendar: declaredFiscalCalendar(evidence, candidates),
-  });
+  const requirementSeed = request.hostRequirementSeed?.version === 1
+    && request.hostRequirementSeed.sourceQuestion === request.question
+    ? request.hostRequirementSeed
+    : buildAnalyticalRequirementSeedV1({
+        question: request.question,
+        parsedIntent: evidence.parsedIntent,
+        fiscalCalendar: declaredFiscalCalendar(evidence, candidates),
+      });
   const hostOwnedEvidence: AgentRetrievalEvidence = {
     ...evidence,
     parsedIntent: {
@@ -4167,6 +4512,94 @@ function attachHostOwnedAnalyticalFrame(input: {
     selectedConceptIds,
     analyticalFrame,
     ...(overrideReceipts?.length ? { overrideReceipts } : {}),
+  };
+}
+
+/**
+ * Bind an already validated runtime meaning selection to the immutable
+ * host-owned analytical frame.  This is intentionally a narrow compiler
+ * adapter: it does not retrieve, rank candidates, call a provider, or change
+ * the runtime program.  Keeping the V2 frame construction here lets the
+ * existing MetricFlow compiler retain its capability/additivity validation
+ * without returning ownership of interpretation to the legacy router.
+ */
+export function bindAskAnalystProgramMeaningV1(input: {
+  request: AgentRunRequest;
+  evidence: AgentRetrievalEvidence;
+  candidates: AgentEvidenceCandidate[];
+  requirementSeed: AnalyticalRequirementSeedV1;
+  resolution: MeaningResolution;
+}): MeaningResolution {
+  // The runtime has already verified which cards express the business tuple.
+  // `input.candidates` can still contain the 16-card planner package so the
+  // compiler has definition/relationship context, but it is not permission
+  // to rebuild the frame with every correlated metric in that package. In the
+  // retained Jaffle snapshot, that turned the singular Orders metric into
+  // Orders + Large Orders + Food Orders + Drink Orders after verification.
+  // Preserve only server-validated selection identities here; execution
+  // closure remains a separate compiler input later in the cascade.
+  const selectedIdentityIds = new Set([
+    ...input.resolution.selectedConceptIds,
+    ...(input.resolution.recommendedExecutionId ? [input.resolution.recommendedExecutionId] : []),
+  ]);
+  const selectedCandidates = input.candidates.filter((candidate) => [candidate.id, candidate.qualifiedId]
+    .filter((identity): identity is string => Boolean(identity))
+    .some((identity) => selectedIdentityIds.has(identity)));
+  // Legacy/direct callers can lack a selected card only when they supplied an
+  // incomplete resolution. Keep their prior behavior rather than fabricating
+  // an empty frame; authoritative Ask always takes the narrow branch above.
+  const framingCandidates = selectedCandidates.length > 0 ? selectedCandidates : input.candidates;
+  const metricCandidate = framingCandidates.find((candidate) =>
+    candidate.kind === 'semantic_metric'
+    && (candidate.id === input.resolution.recommendedExecutionId
+      || candidate.qualifiedId === input.resolution.recommendedExecutionId
+      || input.resolution.selectedConceptIds.some((identity) =>
+        candidate.id === identity || candidate.qualifiedId === identity)));
+  const compilerFramingCandidates = metricCandidate
+    ? bindSelectedMetricFlowGroupingExtensions(metricCandidate, framingCandidates)
+    : framingCandidates;
+  // The Ask runtime may rebuild the compiler-facing seed after verifying
+  // canonical planner bindings. `attachHostOwnedAnalyticalFrame` deliberately
+  // preserves most of the incoming resolution, so explicitly carry that
+  // verified seed forward here. Otherwise a valid same-snapshot extension
+  // can produce a frame with `locations.location_name`, only for RAP binding
+  // to reopen the stale pre-planner phrase `region` and mark it unresolved.
+  const frameBound = {
+    ...attachHostOwnedAnalyticalFrame({ ...input, candidates: compilerFramingCandidates }),
+    hostRequirementSeed: input.requirementSeed,
+  };
+  const protectedResolution = preventDegenerateRankingResolution(
+    frameBound,
+    input.evidence,
+    compilerFramingCandidates,
+    input.requirementSeed.sourceQuestion,
+  );
+  // This adapter may enrich a selected MetricFlow tuple with host-owned
+  // dimensions, but it may not silently subtract a verified runtime
+  // selection. `attachHostOwnedAnalyticalFrame` rebuilds legacy resolution
+  // fields for compiler compatibility; some native Measure -> MetricFlow
+  // Metric pairs intentionally have different text identities (for example
+  // `order_count` -> `Orders`). Keep every already-validated candidate ID
+  // from the authoritative program, limited to this same candidate package.
+  // The verifier/compiler still prove the metric's capability, grain, and
+  // relationship closure before freeze.
+  const allowed = new Set(compilerFramingCandidates.flatMap((candidate) => [
+    candidate.id,
+    candidate.qualifiedId ?? candidate.id,
+  ]));
+  const preservedSelectedConceptIds = input.resolution.selectedConceptIds
+    .filter((identity) => allowed.has(identity));
+  const selectedConceptIds = [...new Set([
+    ...protectedResolution.selectedConceptIds,
+    ...preservedSelectedConceptIds,
+  ])];
+  const originalRecommendedExecutionId = input.resolution.recommendedExecutionId;
+  return {
+    ...protectedResolution,
+    selectedConceptIds,
+    ...(originalRecommendedExecutionId && allowed.has(originalRecommendedExecutionId)
+      ? { recommendedExecutionId: originalRecommendedExecutionId }
+      : {}),
   };
 }
 
@@ -5682,8 +6115,12 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
         return softBoundaryDecision(request, base, initialDiscoveryRoute);
       }
 
-      let evidence: AgentRetrievalEvidence | undefined;
-      if (options.getEvidence) {
+      // AskAnalystRuntimeV1 acquires one immutable snapshot before invoking
+      // this compiler broker. Reusing that host-only handoff prevents a second
+      // retrieval/ranking decision from silently becoming another source of
+      // truth. Legacy callers retain the original retrieval behavior.
+      let evidence: AgentRetrievalEvidence | undefined = request.askAnalystEvidence;
+      if (!evidence && options.getEvidence) {
         try {
           evidence = await options.getEvidence(request);
         } catch (error) {
@@ -5714,6 +6151,51 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
               ]).filter((candidate) => evidence!.clarificationCandidates!.some((item) => item.id === candidate.id)) }
             : {}),
         };
+        // Authoritative AskAnalystRuntimeV1 already completed the bounded
+        // interpretation/tool phase.  Do not re-run legacy candidate ranking,
+        // clarification heuristics, or a provider call here: this layer is a
+        // compiler broker only and can validate exactly the immutable program
+        // selection against safe compiler primitives.
+        if (request.askAnalystProgram && request.askAnalystMeaningResolution) {
+          const programIds = new Set(request.askAnalystProgram.candidateIds);
+          const executionIds = new Set(
+            request.askAnalystProgram.executionCandidateIds
+              ?? request.askAnalystProgram.candidateIds,
+          );
+          const programCandidates = evidence.candidates.filter((candidate) =>
+            programIds.has(candidate.id) || programIds.has(candidate.qualifiedId ?? candidate.id));
+          const executionCandidates = evidence.candidates.filter((candidate) =>
+            executionIds.has(candidate.id) || executionIds.has(candidate.qualifiedId ?? candidate.id));
+          const requirements = request.askAnalystState?.frame.requirements
+            ?? request.hostRequirementSeed?.requirements;
+          if (!requirements || programCandidates.length === 0) {
+            return {
+              ...base,
+              action: 'block',
+              confidence: 1,
+              reason: 'The Ask runtime program could not be compiled because its snapshot-bound candidate selection was unavailable.',
+              source: 'heuristic',
+              followsUp: false,
+              terminalOutcome: {
+                kind: 'modeling_gap',
+                code: 'ANALYTICAL_MODELING_GAP',
+                message: 'The immutable Ask runtime program did not retain a compiler-eligible candidate selection.',
+                candidateIds: request.askAnalystProgram.candidateIds,
+              },
+            };
+          }
+          return compileAskAnalyticalProgramV1({
+            base,
+            request,
+            evidence,
+            program: request.askAnalystProgram,
+            candidates: programCandidates,
+            executionCandidates,
+            resolution: request.askAnalystMeaningResolution,
+            requirements,
+            mode: options.resolvedPlanMode ?? 'authoritative',
+          });
+        }
         // Ranking measure identity is resolved from the same immutable
         // request/evidence frame that drives package reservation.  A metric
         // may remain in broad retrieval context, but it cannot become a
@@ -5782,7 +6264,7 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
         // supplied so explicit revenue, entity labels, and time roles cannot be
         // pruned by unrelated lexical matches.
         let candidates = buildMeaningEvidencePackage(evidence, options.maxMeaningCandidates ?? 16, continuationQuestion);
-        traceCandidateLifecycleBeforePruning(request, evidence, retrievedCandidates, candidates);
+        recordAskCandidateLifecycleV1(request, evidence, retrievedCandidates, candidates);
         // The complete already-retrieved set is retained only to validate a
         // server-issued stable selection before any route can fall through to
         // a generic/generated answer. New free-text choices are constrained to
@@ -5935,12 +6417,15 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
           // matched semantic metric remains the only execution/measure
           // authority. A selected dimension must therefore never flow through
           // the metric-only direct-resolution path as the primary candidate.
+          const canonicalLiteral = canonicalLiteralEvidenceReference(request.question, candidates);
           const explicit = selectedDimensionBinding?.metricCandidate
             ?? selectedEvidence
-            ?? findExplicitEvidenceReference(request.question, candidates);
+            ?? findExplicitEvidenceReference(request.question, candidates)
+            ?? canonicalLiteral;
           const explicitMeaningBinding = Boolean(explicit && (
             request.selectedEvidenceId
             || /@(metric|block|model|table|column)\(/i.test(request.question)
+            || canonicalLiteral?.id === explicit.id
           ));
           const shouldUseMeaningCall = requireMeaningCall
             && !explicitMeaningBinding
@@ -6089,8 +6574,12 @@ export function createHybridRouter(options: HybridRouterOptions = {}): AgentRout
           // did run, committing to the best governed reading is the whole point.
           let meaningResolverReachable = true;
           try {
-            if (request.runBudget && !request.runBudget.mayStartDiscovery('clarify')) {
-              return softBoundaryDecision(request, base, 'clarify');
+            // Meaning is the one bounded planning continuation of an ordinary
+            // generated Ask, not a user clarification. Charging it to the
+            // short clarify target was the direct cause of the 1.14.x
+            // "discovery window ended" loop before semantic/raw fallback.
+            if (request.runBudget && !request.runBudget.mayStartDiscovery('generated_answer')) {
+              return softBoundaryDecision(request, base, 'generated_answer');
             }
             let resolution: MeaningResolution | undefined;
             try {
@@ -6449,15 +6938,45 @@ function softBoundaryDecision(
   const seconds = Math.round((request.runBudget?.softTargetMs(route) ?? 15_000) / 1_000);
   return {
     ...base,
-    action: 'clarify',
+    // A budget/admission boundary is an operational condition, never a
+    // business ambiguity.  Returning `clarify` here made the UI ask users to
+    // choose a metric or grain even though no competing executable meanings
+    // had been validated.  Keep this a typed terminal block so diagnostics can
+    // offer a retry/recovery action without teaching users to compensate for a
+    // runtime deadline.
+    action: 'block',
     confidence: 1,
     source: 'heuristic',
-    requiresClarification: true,
+    requiresClarification: false,
+    clarifyingQuestion: undefined,
     reason: `The ${seconds}-second discovery target elapsed before a plan was frozen, so DQL did not start another retrieval or provider branch.`,
-    clarifyingQuestion: request.runBudget?.mode === 'research'
-      ? 'Research has stopped starting new branches. Would you like to narrow the question and retry?'
-      : 'The discovery window ended before an exact plan was frozen. Which metric or grain should DQL use on retry?',
   };
+}
+
+/**
+ * A literal stable metric/block identifier is already a user-selected meaning.
+ * It is intentionally narrower than a human label such as "revenue": only
+ * an identifier-shaped value (`foo_bar`, `namespace.metric`, `metric:foo`) or
+ * a supplied exact qualified ID can bypass the one meaning call. This restores
+ * the useful 1.13 zero-call semantic path without turning lexical retrieval
+ * into permission to guess between similarly named business metrics.
+ */
+function canonicalLiteralEvidenceReference(
+  question: string,
+  candidates: AgentEvidenceCandidate[],
+): AgentEvidenceCandidate | undefined {
+  const normalizedQuestion = question.toLowerCase();
+  const matches = candidates.filter((candidate) => {
+    if (candidate.compatibility === 'incompatible' || candidate.eligible === false) return false;
+    const identities = [candidate.qualifiedId, candidate.id, candidate.name, ...(candidate.aliases ?? [])]
+      .filter((value): value is string => Boolean(value))
+      .filter((value) => /[_:.]/.test(value));
+    return identities.some((identity) => {
+      const escaped = identity.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(`(^|[^a-z0-9_.:-])${escaped}($|[^a-z0-9_.:-])`, 'i').test(normalizedQuestion);
+    });
+  });
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 export { intentForCategory, parseMeaningResolution };

@@ -13,6 +13,7 @@ import {
   looksLikeNamedCertifiedArtifactMetadataRequest,
   decideAgentAction,
   looksLikeComposeApp,
+  type AskAnalystTaskExecutionV1,
   type IntentDecision,
   type IntentSignals,
 } from "./intent-controller.js";
@@ -39,17 +40,25 @@ import {
 import {
   buildCoverageGap,
   classifyProviderFailure,
+  type AgentRunDiagnosticReceiptV6,
+  type AgentRunDiagnosticReceiptV5,
+  type AnalyticalProgram,
+  type AskAnalystState,
+  type BusinessAnswer,
   type AgentRunDiagnosticReceiptV4,
   type AskDecisionSummaryV1,
   type AskResearchBranchSummaryV1,
   type AskTerminalIncidentV1,
   type AnalyticalRequirementSeedV1,
   type AgentRunDiagnosticReceiptV3,
+  type ProviderFailureDiagnosticV1,
   type ExploratoryExecutionFreezeV1,
   type AgentSelectedResultBindingV1,
   type AnalyticalTaskOutcomeV1,
   type AnalyticalTurnPlanV1,
+  normalizeCanonicalQueryResult,
 } from './analytical-orchestration.js';
+import type { AgentRetrievalEvidence, MeaningResolution } from './meaning-resolution.js';
 import { evaluateAnalyticalRequestPolicy } from './analytical-request-policy.js';
 import { frozenRequiredOutputBindingProofsForPlan } from './generated-analytical-proposal.js';
 import {
@@ -350,6 +359,39 @@ export interface AgentRunResearchBranchV1 {
   index: number;
 }
 
+/**
+ * Server-owned execution handoff for one already-verified ordinary Ask task.
+ *
+ * This is deliberately separate from the legacy `workspaceContext`
+ * `analyticalTaskChild` marker.  The latter was introduced for the old
+ * compound scheduler and only prevents recursive scheduling; it does not bind
+ * a frozen AskAnalyst task to its task-local question.  Public request parsers
+ * must never hydrate this object.  The original parent question remains on the
+ * outer run for conversation and trace persistence only.
+ */
+export interface AgentRunAskAnalystTaskChildV1 {
+  version: 1;
+  taskId: string;
+  question: string;
+  instructions: string[];
+}
+
+/**
+ * Server-owned continuity constraint reconstructed from a persisted thread
+ * result.  It is deliberately not accepted at public ingress: the values are
+ * an immutable execution filter only after the host proves their source turn
+ * and result binding.  Keeping the display dimension and result fingerprint
+ * beside the host requirement seed makes a plural follow-up such as "those
+ * customers" auditable without making prior rows provider context.
+ */
+export interface AgentRunPriorResultMemberBindingV1 {
+  version: 1;
+  displayDimension: string;
+  values: string[];
+  sourceTurnId?: string;
+  resultFingerprint?: string;
+}
+
 export interface AgentRunRequest {
   question: string;
   /**
@@ -359,6 +401,39 @@ export interface AgentRunRequest {
    * re-parsing planner prose as additional user measures.
    */
   hostRequirementSeed?: AnalyticalRequirementSeedV1;
+  /**
+   * Host-only Ask Analyst state. The authoritative runtime creates this before
+   * the legacy compiler broker runs; public JSON parsers must never hydrate it.
+   */
+  askAnalystState?: AskAnalystState;
+  /** Immutable route-neutral program built by AskAnalystRuntimeV1. */
+  askAnalystProgram?: AnalyticalProgram;
+  /** Runtime-owned, validated meaning selection. Compiler brokers may not replace it. */
+  askAnalystMeaningResolution?: MeaningResolution;
+  /** Snapshot-scoped readiness supplied before compiler selection. */
+  askAnalystTierReadiness?: {
+    connector: 'ready' | 'unavailable' | 'unknown';
+    activeTarget: 'ready' | 'unavailable' | 'unknown';
+    semanticCompiler: 'ready' | 'unavailable' | 'unknown';
+    semanticCandidateReadiness?: Array<{
+      candidateId: string;
+      status: 'ready' | 'unavailable' | 'unknown';
+    }>;
+    physicalSchema: 'ready' | 'unavailable' | 'unknown';
+    targetFingerprint?: string;
+  };
+  /** Host-only checkpoint hook; public JSON input never hydrates runtime state. */
+  askAnalystCheckpoint?: (state: AskAnalystState) => void;
+  /** Runtime-owned frozen execution plan; engine must consume it verbatim. */
+  askAnalystFrozenPlan?: AgentRunPlan;
+  /** Same-snapshot retrieval handoff from the Ask runtime to the compiler broker. */
+  askAnalystEvidence?: AgentRetrievalEvidence;
+  /**
+   * Server-owned frozen-task execution boundary.  It makes the child question
+   * authoritative for compiler/executor input while preserving the submitted
+   * parent question only on the outer persisted run and trace.
+   */
+  askAnalystTaskChild?: AgentRunAskAnalystTaskChildV1;
   /**
    * Server-owned explicit Research-child lineage. Public request parsers must
    * never hydrate it. It grants no route or SQL authority: each child still
@@ -373,6 +448,12 @@ export interface AgentRunRequest {
    * authority by itself.
    */
   selectedResultBinding?: AgentSelectedResultBindingV1;
+  /**
+   * Server-reconstructed plural prior-result constraint. Public JSON parsers
+   * must never hydrate this field; the host materializes it from a persisted
+   * conversation thread before the Ask runtime frames the question.
+   */
+  priorResultMemberBinding?: AgentRunPriorResultMemberBindingV1;
   /** Host-only terminal diagnostic when a selected result cannot be re-bound. */
   selectedResultBindingGap?: { code: string; message: string };
   /**
@@ -475,6 +556,13 @@ export interface AgentRunPlannedStep {
   route: AgentRunRoute;
   goal: string;
   successCriteria: string[];
+  /**
+   * Server-owned analytical task identity for a compound authoritative Ask.
+   * It is absent for legacy/LLM plans and public request payloads cannot mint
+   * it.  When present, the engine swaps in the matching immutable task
+   * program, meaning resolution, readiness, and cascade receipt.
+   */
+  askAnalystTaskId?: string;
 }
 
 export type AgentRunPlanSource = "llm" | "deterministic";
@@ -498,6 +586,8 @@ export interface AgentRunStep {
   id: string;
   index: number;
   route: AgentRunRoute;
+  /** Server-owned frozen Ask task binding when this step is a compound child. */
+  askAnalystTaskId?: string;
   resolvedRoute?: AgentRunRoute;
   goal: string;
   successCriteria: string[];
@@ -559,6 +649,14 @@ export interface AgentRun {
   diagnosticReceiptV3?: AgentRunDiagnosticReceiptV3;
   /** Additive canonical Ask story. Older V1/V2/V3 receipts remain readable. */
   diagnosticReceiptV4?: AgentRunDiagnosticReceiptV4;
+  /** Additive V1.15 runtime/state/fact receipt; V1-V4 remain readable. */
+  diagnosticReceiptV5?: AgentRunDiagnosticReceiptV5;
+  /** Additive retrieval-first Ask story. V1-V5 remain readable. */
+  diagnosticReceiptV6?: AgentRunDiagnosticReceiptV6;
+  /** Fact-driven result envelope generated after the accepted executor result. */
+  businessAnswer?: BusinessAnswer;
+  /** Typed Ask runtime state retained across persistence/reload. */
+  askAnalystState?: AskAnalystState;
   narrationIntegrityReceipt?: NarrationIntegrityReceiptV1;
   telemetry?: AgentRunTelemetryV1;
   /** Server-owned automatic repair authority. Legacy runs omit it and fail closed. */
@@ -598,6 +696,8 @@ export interface AgentRunProgressV1 {
   lifecycle: AgentRunLifecycleV1;
   analyticalTurnPlan?: AnalyticalTurnPlanV1;
   analyticalTaskOutcomes?: AnalyticalTaskOutcomeV1[];
+  /** Typed local continuation checkpoint; not part of public trace export. */
+  askAnalystState?: AskAnalystState;
   /** Allows restart finalization/UI to find the local trace without shipping spans. */
   traceReference?: AgentRunTraceReferenceV1;
 }
@@ -677,6 +777,9 @@ export interface AgentRouteExecutorResult {
   analyticalExecutionRepairFreeze?: ExploratoryExecutionFreezeV1;
   analyticalTurnPlan?: AnalyticalTurnPlanV1;
   analyticalTaskOutcomes?: AnalyticalTaskOutcomeV1[];
+  /** Optional executor update to the runtime state after a fact-backed result. */
+  askAnalystState?: AskAnalystState;
+  businessAnswer?: BusinessAnswer;
 }
 
 export type AgentRouteExecutor = (
@@ -1478,6 +1581,7 @@ export class AgentRunEngine {
         artifacts: [...progress.artifacts],
         evaluations: [...progress.evaluations],
         events: [...progress.events],
+        ...(progress.askAnalystState ? { askAnalystState: progress.askAnalystState } : {}),
       };
       checkpointQueue = checkpointQueue.then(async () => {
         try {
@@ -1540,6 +1644,23 @@ export class AgentRunEngine {
         ...(clarificationContinuation ? { clarificationResolved: true } : {}),
       },
     });
+    // AskAnalystRuntimeV1 emits typed state checkpoints after framing and each
+    // bounded tool action. They are local/restart material only and are never
+    // exported through the content-free trace projection.
+    // Checkpointing adds a callback after the observer was attached above.
+    // Preserve the non-enumerable trace observer through this immutable update:
+    // otherwise the authoritative runtime can record its router state while
+    // the later provider/compiler/execution adapter sees a no-op observer.
+    // That made a successfully executed deterministic physical program appear
+    // to have no SQL generation, validation, authorization, or execution in
+    // the same trace.
+    request = attachAskTraceObserverV1({
+      ...request,
+      askAnalystCheckpoint: (state) => {
+        progress.askAnalystState = state;
+        persistProgress();
+      },
+    }, traceObserver);
 
     // This check is intentionally before route selection.  A restricted direct
     // disclosure must not be embedded, retrieved, sent to a provider, value
@@ -1652,7 +1773,8 @@ export class AgentRunEngine {
       run.diagnosticReceiptV2 = diagnosticReceiptV2ForRun(run);
       run.diagnosticReceiptV3 = diagnosticReceiptV3ForRun(run);
       run.diagnosticReceiptV4 = diagnosticReceiptV4ForRun(run);
-      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3, run.diagnosticReceiptV4);
+      attachAskAnalystRuntimeReceipt(run);
+      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3, run.diagnosticReceiptV4, run.diagnosticReceiptV5, run.diagnosticReceiptV6);
       // Observability is deliberately finalized only after the authoritative
       // receipt exists, and before the ordinary run store persists its compact
       // reference. A local trace write failure never changes this outcome.
@@ -1696,11 +1818,18 @@ export class AgentRunEngine {
       );
       const authoritativeAsk = routeDecision.resolvedAnalyticalPlan?.mode === 'authoritative'
         && requestedMode !== 'research';
-      const activePlanner = authoritativeAsk
+      // AskAnalystRuntimeV1 owns the single immutable task program. The
+      // engine may still use the legacy deterministic/LLM planners for every
+      // other surface, but it must never replace a runtime-frozen Ask task
+      // with a new generic one-step interpretation.
+      const runtimeFrozenPlan = authoritativeAsk
+        ? routeDecision.askAnalystDecision?.frozenPlan
+        : undefined;
+      const activePlanner = authoritativeAsk && !runtimeFrozenPlan
         ? createDeterministicAgentRunPlanner()
         : this.planner;
       const planningSignal = request.runBudget?.hardSignal ?? request.signal;
-      plan = await awaitWithAbort(Promise.resolve(activePlanner.plan({
+      plan = runtimeFrozenPlan ?? await awaitWithAbort(Promise.resolve(activePlanner.plan({
         request,
         routeDecision,
         defaultRoute,
@@ -1721,6 +1850,31 @@ export class AgentRunEngine {
         ...step,
         route: answerAnywayRoute(constrainRouteForAudience(step.route, audience), request, audience, routeDecision),
       }));
+      // A multi-task authoritative Ask is an all-or-nothing frozen task queue.
+      // It is not a legacy compound plan that can silently omit later tasks or
+      // substitute a freshly parsed child graph.  The runtime supplied every
+      // accepted task before the first compiler freeze; reject an inconsistent
+      // handoff before executing any part of it.
+      const authoritativeTaskExecutions = authoritativeAsk
+        ? routeDecision.askAnalystDecision?.taskExecutions ?? []
+        : [];
+      const authoritativeCompoundAsk = authoritativeTaskExecutions.length > 1;
+      const authoritativeTaskIds = new Set(authoritativeTaskExecutions.map((task) => task.taskId));
+      const authoritativeQueueIds = queue
+        .map((step) => step.askAnalystTaskId)
+        .filter((taskId): taskId is string => Boolean(taskId));
+      const authoritativeQueueValid = !authoritativeCompoundAsk || (
+        queue.length === authoritativeTaskExecutions.length
+        && authoritativeQueueIds.length === authoritativeTaskExecutions.length
+        && new Set(authoritativeQueueIds).size === authoritativeQueueIds.length
+        && authoritativeQueueIds.every((taskId) => authoritativeTaskIds.has(taskId))
+      );
+      if (!authoritativeQueueValid) {
+        throw Object.assign(
+          new Error('The authoritative Ask runtime did not supply one frozen execution step for every accepted task. No partial task was executed.'),
+          { code: 'ASK_ANALYST_TASK_PLAN_MISMATCH' },
+        );
+      }
       const budgets = createCascadeBudgetState(this.budgetModel);
       let stepCount = 0;
       let finalStep: AgentRunStep | undefined;
@@ -1732,11 +1886,49 @@ export class AgentRunEngine {
       // must not drop the data answer an earlier step already computed.
       let bestAnswerResult: AgentRouteExecutorResult | undefined;
 
-      while (queue.length > 0 && stepCount < this.maxSteps) {
+      // The runtime bounds ordinary Ask to three accepted tasks.  Once it
+      // accepts a compound mission, every frozen child must receive one
+      // execution attempt even when the generic engine's normal plan cap is
+      // smaller.  Do not turn the cap into a silent partial answer.
+      const executionStepLimit = authoritativeCompoundAsk ? queue.length : this.maxSteps;
+      while (queue.length > 0 && stepCount < executionStepLimit) {
         const planned = queue.shift()!;
         stepCount += 1;
         const route = planned.route;
         const stepId = `${runId}:step:${stepCount}`;
+        // A compound authoritative Ask carries one immutable compiler handoff
+        // per accepted task.  Swap it in at the execution boundary rather than
+        // letting task-2 inherit task-1's frame, candidates, or cascade.
+        const taskExecution = authoritativeAsk && planned.askAnalystTaskId
+          ? routeDecision.askAnalystDecision?.taskExecutions?.find((task) => task.taskId === planned.askAnalystTaskId)
+          : undefined;
+        const taskQuestion = taskExecution
+          ? taskExecution.state.mission.tasks.find((task) => task.id === taskExecution.taskId)?.question
+            ?? planned.goal
+          : undefined;
+        const taskRequest = taskExecution && taskQuestion
+          ? attachAskTraceObserverV1({
+              ...request,
+              // Every compiler and executor sees only the frozen child
+              // question.  The submitted parent remains captured by the root
+              // trace observer and is restored onto the persisted run below.
+              question: taskQuestion,
+              askAnalystTaskChild: {
+                version: 1 as const,
+                taskId: taskExecution.taskId,
+                question: taskQuestion,
+                instructions: [...planned.successCriteria],
+              },
+              askAnalystState: taskExecution.state,
+              askAnalystProgram: taskExecution.program,
+              askAnalystMeaningResolution: taskExecution.meaningResolution,
+              askAnalystTierReadiness: taskExecution.tierReadiness,
+              hostRequirementSeed: taskExecution.requirementSeed,
+            }, traceObserver)
+          : request;
+        let taskRouteDecision = taskExecution
+          ? taskScopedRouteDecision(routeDecision, taskExecution)
+          : routeDecision;
 
         emit({
           type: "step.started",
@@ -1745,17 +1937,17 @@ export class AgentRunEngine {
           payload: { stepId, index: stepCount, goal: planned.goal, successCriteria: planned.successCriteria },
         });
         const resolvedPlanShadow = stepCount === 1
-          ? compareResolvedPlanShadow(routeDecision, route)
+          ? compareResolvedPlanShadow(taskRouteDecision, route)
           : undefined;
         emit({
           type: "route.decided",
           message: stepCount === 1
-            ? routeDecision.reason
+            ? taskRouteDecision.reason
             : `Routed step ${stepCount} to ${route.replaceAll("_", " ")}.`,
           route,
           payload: stepCount === 1
             ? {
-                ...routeDecision,
+                ...taskRouteDecision,
                 ...(resolvedPlanShadow
                   ? { resolvedPlanShadow }
                   : {}),
@@ -1788,9 +1980,9 @@ export class AgentRunEngine {
           // preflight before any executor result exists.
           result = await this.executeRoute({
             runId,
-            request,
+            request: taskRequest,
             route,
-            routeDecision,
+            routeDecision: taskRouteDecision,
             maxRepairAttempts: budgets.limits.lane.execution,
             attempt,
             stepGoal: planned.goal,
@@ -1806,22 +1998,36 @@ export class AgentRunEngine {
           // semantic plan into generated work (or vice versa) after execution
           // has started. Keep this guard in the engine as well as host adapters
           // so an injected/legacy executor cannot redefine durable provenance.
-          const planWasFrozen = routeDecision.analyticalCascadeDecision?.planFrozen === true;
-          routeDecision = applyExploratoryExecutionFreeze(routeDecision, result.analyticalExecutionFreeze);
-          routeDecision = applyExploratoryExecutionFreeze(routeDecision, result.analyticalExecutionRepairFreeze);
+          const planWasFrozen = taskRouteDecision.analyticalCascadeDecision?.planFrozen === true;
+          taskRouteDecision = applyExploratoryExecutionFreeze(taskRouteDecision, result.analyticalExecutionFreeze);
+          taskRouteDecision = applyExploratoryExecutionFreeze(taskRouteDecision, result.analyticalExecutionRepairFreeze);
+          // Legacy/non-authoritative execution has no task-local durable
+          // decision. Promote the validated host authorization receipts back
+          // to the run-level decision so the persisted run and trace retain
+          // the same immutable exploratory handoff that the executor used.
+          // Authoritative compound Ask keeps its outer decision as a turn
+          // summary and records each task-local handoff independently.
+          // A single authoritative task is still the whole Ask answer.  Its
+          // host-issued exploratory execution freeze must be promoted to the
+          // outer decision so V3/V6 persistence and the trace retain the same
+          // capability receipt that authorized SQL.  Compound Ask keeps each
+          // frozen child isolated under its task execution receipts.
+          if (!taskExecution || (routeDecision.askAnalystDecision?.taskExecutions?.length ?? 0) === 1) {
+            routeDecision = taskRouteDecision;
+          }
           // The router froze the exploratory plan before SQL generation. The
           // host receipt below only authorizes this exact SQL/target against
           // that immutable plan; it never creates a second freeze transition.
-          if (!planWasFrozen && routeDecision.analyticalCascadeDecision?.planFrozen) {
-            recordAuthoritativePlanFreezeV1(traceObserver, routeDecision.analyticalCascadeDecision);
+          if (!planWasFrozen && taskRouteDecision.analyticalCascadeDecision?.planFrozen) {
+            recordAuthoritativePlanFreezeV1(traceObserver, taskRouteDecision.analyticalCascadeDecision);
           }
-          result = preserveFrozenAnalyticalRoute(route, routeDecision, result);
-          result = consumeRepeatedClarificationSelection(request, routeDecision, result);
+          result = preserveFrozenAnalyticalRoute(route, taskRouteDecision, result);
+          result = consumeRepeatedClarificationSelection(taskRequest, taskRouteDecision, result);
           if (result.analyticalTurnPlan) progress.analyticalTurnPlan = result.analyticalTurnPlan;
           if (result.analyticalTaskOutcomes) progress.analyticalTaskOutcomes = result.analyticalTaskOutcomes;
           persistProgress();
 
-          evaluations = this.evaluate({ route, request, routeDecision, result, attempt });
+          evaluations = this.evaluate({ route, request: taskRequest, routeDecision: taskRouteDecision, result, attempt });
           for (const evaluation of evaluations) {
             emit({
               type: "evaluation.recorded",
@@ -1846,7 +2052,7 @@ export class AgentRunEngine {
           // A frozen analytical plan has one route and no downstream planner,
           // rematch, route escalation, or whole-answer regeneration authority.
           // Typed server-issued repair is a separate derived run.
-          if (authoritativeAsk || routeDecision.analyticalCascadeDecision?.planFrozen === true) {
+          if (authoritativeAsk || taskRouteDecision.analyticalCascadeDecision?.planFrozen === true) {
             stepStatus = 'needs_review';
             break;
           }
@@ -1864,7 +2070,7 @@ export class AgentRunEngine {
             artifacts: result.artifacts ?? [],
           };
           const decision = await activePlanner.replan({
-            request,
+            request: taskRequest,
             plan,
             currentStep,
             remainingSteps: queue,
@@ -1948,6 +2154,7 @@ export class AgentRunEngine {
             id: stepId,
             index: stepCount,
             route,
+            ...(planned.askAnalystTaskId ? { askAnalystTaskId: planned.askAnalystTaskId } : {}),
             goal: planned.goal,
             successCriteria: planned.successCriteria,
             status: "escalated",
@@ -1975,15 +2182,16 @@ export class AgentRunEngine {
           route,
           result,
           evaluations,
-          request,
+          taskRequest,
           isClarify,
           clarifyQuestion,
-          routeDecision.terminalOutcome?.message,
+          taskRouteDecision.terminalOutcome?.message,
         );
         const step: AgentRunStep = {
           id: stepId,
           index: stepCount,
           route,
+          ...(planned.askAnalystTaskId ? { askAnalystTaskId: planned.askAnalystTaskId } : {}),
           resolvedRoute: result.resolvedRoute,
           goal: planned.goal,
           successCriteria: planned.successCriteria,
@@ -2018,7 +2226,13 @@ export class AgentRunEngine {
           finalStep = step;
           finalResult = result;
           finalOutcome = outcome;
-          break;
+          // Every accepted authoritative child was frozen before the first
+          // execution.  A blocked/clarify outcome for task-1 must not prevent
+          // task-2 from receiving its independently scoped attempt and receipt.
+          // Finalization below aggregates these outcomes as all-or-nothing, so
+          // no partial answer can escape.
+          if (!authoritativeCompoundAsk) break;
+          continue;
         }
 
         finalStep = step;
@@ -2028,12 +2242,24 @@ export class AgentRunEngine {
           bestAnswerResult = result;
         }
 
-        if (outcome.status === "blocked") break;
-        if (outcome.status === "needs_clarification") break;
-        if (isTerminalSuccess(route, outcome)) break;
+        if (outcome.status === "blocked" && !authoritativeCompoundAsk) break;
+        if (outcome.status === "needs_clarification" && !authoritativeCompoundAsk) break;
+        // A successful task is terminal only for a single-task Ask.  Multi-task
+        // authoritative plans were all frozen before execution and therefore
+        // continue to their own task-local result receipt.
+        const hasMoreAuthoritativeTasks = authoritativeAsk
+          && (routeDecision.askAnalystDecision?.taskExecutions?.length ?? 0) > 1;
+        if (isTerminalSuccess(route, outcome) && !hasMoreAuthoritativeTasks) break;
         // Otherwise continue to the next planned step (if any remain).
       }
 
+      const authoritativeCompoundFailure = authoritativeCompoundAsk
+        ? compoundAskFailureForFrozenTasks({
+            expectedTaskIds: [...authoritativeTaskIds],
+            plan,
+            steps: executedSteps,
+          })
+        : undefined;
       const run = this.finalizeRun({
         runId,
         request,
@@ -2047,6 +2273,7 @@ export class AgentRunEngine {
         finalOutcome,
         clarifyOutcome,
         bestAnswerResult,
+        ...(authoritativeCompoundFailure ? { authoritativeCompoundFailure } : {}),
         budgetUsage: cascadeBudgetTrace(budgets),
         events,
       });
@@ -2072,7 +2299,8 @@ export class AgentRunEngine {
       run.diagnosticReceiptV2 = diagnosticReceiptV2ForRun(run);
       run.diagnosticReceiptV3 = diagnosticReceiptV3ForRun(run);
       run.diagnosticReceiptV4 = diagnosticReceiptV4ForRun(run);
-      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3, run.diagnosticReceiptV4);
+      attachAskAnalystRuntimeReceipt(run);
+      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3, run.diagnosticReceiptV4, run.diagnosticReceiptV5, run.diagnosticReceiptV6);
       finalizeAgentRunTraceV1(traceObserver, run);
       await checkpointQueue;
       await this.store?.save(run);
@@ -2161,6 +2389,7 @@ export class AgentRunEngine {
         run.diagnosticReceiptV2 = diagnosticReceiptV2ForRun(run);
         run.diagnosticReceiptV3 = diagnosticReceiptV3ForRun(run);
         run.diagnosticReceiptV4 = diagnosticReceiptV4ForRun(run);
+        attachAskAnalystRuntimeReceipt(run);
         finalizeAgentRunTraceV1(traceObserver, run);
         await checkpointQueue;
         await this.store?.save(run);
@@ -2250,7 +2479,8 @@ export class AgentRunEngine {
       run.diagnosticReceiptV2 = diagnosticReceiptV2ForRun(run);
       run.diagnosticReceiptV3 = diagnosticReceiptV3ForRun(run);
       run.diagnosticReceiptV4 = diagnosticReceiptV4ForRun(run);
-      run.artifacts = attachDiagnosticReceipt(retainedArtifacts, receipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3, run.diagnosticReceiptV4);
+      attachAskAnalystRuntimeReceipt(run);
+      run.artifacts = attachDiagnosticReceipt(retainedArtifacts, receipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3, run.diagnosticReceiptV4, run.diagnosticReceiptV5, run.diagnosticReceiptV6);
       finalizeAgentRunTraceV1(traceObserver, run);
       await checkpointQueue;
       await this.store?.save(run);
@@ -2271,6 +2501,7 @@ export class AgentRunEngine {
     finalOutcome?: StepOutcome;
     clarifyOutcome?: { step: AgentRunStep; question?: string };
     bestAnswerResult?: AgentRouteExecutorResult;
+    authoritativeCompoundFailure?: AuthoritativeCompoundFailureV1;
     budgetUsage: CascadeBudgetTrace;
     events: AgentRunEvent[];
   }): AgentRun {
@@ -2278,6 +2509,65 @@ export class AgentRunEngine {
     const repairAttempts = input.budgetUsage.usage.laneExecutionAttemptsUsed;
     const escalationAttempts = input.budgetUsage.usage.engineEscalationsUsed;
     const completedAt = this.timestamp();
+
+    if (input.authoritativeCompoundFailure) {
+      const failure = input.authoritativeCompoundFailure;
+      const failedSteps = input.steps.filter((step) =>
+        step.askAnalystTaskId && failure.failedTaskIds.includes(step.askAnalystTaskId));
+      // The per-task steps remain on the run and trace as evidence, but a
+      // compound Ask never adopts an earlier data artifact/answer after one
+      // accepted frozen task failed.  Returning only the failed artifacts
+      // avoids presenting a partial result as the response to the whole ask.
+      const artifacts = failedSteps.flatMap((step) => step.artifacts);
+      const evaluations = [
+        ...input.steps.flatMap((step) => step.evaluations),
+        {
+          id: 'authoritative-compound-all-or-nothing',
+          label: 'Frozen Ask task completion',
+          passed: false,
+          severity: 'blocking' as const,
+          message: failure.message,
+          evidence: {
+            expectedTaskIds: failure.expectedTaskIds,
+            completedTaskIds: failure.completedTaskIds,
+            failedTaskIds: failure.failedTaskIds,
+            missingTaskIds: failure.missingTaskIds,
+          },
+        },
+      ];
+      return {
+        id: input.runId,
+        question: input.request.question,
+        requestedMode: input.requestedMode,
+        conversationBinding: input.request.conversationBinding ?? traceConversationBinding(input.request, undefined),
+        route: 'blocked',
+        status: 'blocked',
+        trustState: 'blocked',
+        stopReason: 'blocked',
+        startedAt: input.startedAt,
+        completedAt,
+        selectedObject: input.request.selectedObject,
+        executionTarget: input.request.executionTarget,
+        routeDecision: input.routeDecision,
+        plan: input.plan,
+        steps: input.steps,
+        summary: failure.message,
+        answer: failure.message,
+        answerKind: 'governed',
+        artifacts,
+        evaluations,
+        events: input.events,
+        nextActions: applyAudienceToNextActions(
+          defaultNextActions('blocked', 'blocked'),
+          resolveAudience(input.request),
+          'blocked',
+        ),
+        repairAttempts,
+        escalationAttempts,
+        budgetUsage: input.budgetUsage,
+        ...authoringDerivationFromRequest(input.request),
+      };
+    }
 
     if (!finalStep || !finalResult || !finalOutcome) {
       // No step produced a usable result (e.g. an empty plan). Treat as blocked.
@@ -2370,6 +2660,8 @@ export class AgentRunEngine {
       ...(finalResult.narrationIntegrityReceipt ? {
         narrationIntegrityReceipt: finalResult.narrationIntegrityReceipt,
       } : {}),
+      ...(finalResult.askAnalystState ? { askAnalystState: finalResult.askAnalystState } : {}),
+      ...(finalResult.businessAnswer ? { businessAnswer: finalResult.businessAnswer } : {}),
       escalationAttempts,
       budgetUsage: input.budgetUsage,
       ...(finalResult.analyticalTurnPlan ? { analyticalTurnPlan: finalResult.analyticalTurnPlan } : {}),
@@ -2435,6 +2727,53 @@ export class AgentRunEngine {
   private timestamp(): string {
     return this.now().toISOString();
   }
+}
+
+interface AuthoritativeCompoundFailureV1 {
+  expectedTaskIds: string[];
+  completedTaskIds: string[];
+  failedTaskIds: string[];
+  missingTaskIds: string[];
+  message: string;
+}
+
+/**
+ * A compound authoritative Ask is accepted only after every task has its own
+ * immutable program.  Preserve a receipt for every attempted child, then make
+ * the parent terminal when any child blocked/clarified/escalated or was never
+ * attempted.  This is intentionally evaluated after the queue drains so a
+ * first failure cannot hide a later frozen task from the trace.
+ */
+function compoundAskFailureForFrozenTasks(input: {
+  expectedTaskIds: string[];
+  plan: AgentRunPlan;
+  steps: AgentRunStep[];
+}): AuthoritativeCompoundFailureV1 | undefined {
+  const expectedTaskIds = [...input.expectedTaskIds];
+  const expected = new Set(expectedTaskIds);
+  const taskSteps = input.steps.filter((step) => step.askAnalystTaskId && expected.has(step.askAnalystTaskId));
+  const completedTaskIds = [...new Set(taskSteps
+    .filter((step) => step.status === 'passed' || step.status === 'repaired' || step.status === 'needs_review')
+    .map((step) => step.askAnalystTaskId!))];
+  const failedTaskIds = [...new Set(taskSteps
+    .filter((step) => step.status === 'blocked' || step.status === 'clarify' || step.status === 'escalated')
+    .map((step) => step.askAnalystTaskId!))];
+  const attempted = new Set(taskSteps.map((step) => step.askAnalystTaskId!));
+  const missingTaskIds = expectedTaskIds.filter((taskId) => !attempted.has(taskId));
+  if (failedTaskIds.length === 0 && missingTaskIds.length === 0 && completedTaskIds.length === expectedTaskIds.length) {
+    return undefined;
+  }
+  const failureParts = [
+    failedTaskIds.length ? `${failedTaskIds.length} frozen task${failedTaskIds.length === 1 ? '' : 's'} failed` : '',
+    missingTaskIds.length ? `${missingTaskIds.length} frozen task${missingTaskIds.length === 1 ? '' : 's'} did not receive an execution attempt` : '',
+  ].filter(Boolean);
+  return {
+    expectedTaskIds,
+    completedTaskIds,
+    failedTaskIds,
+    missingTaskIds,
+    message: `The Ask plan ran every available frozen task, but ${failureParts.join(' and ') || 'the task receipts were incomplete'}. No partial result was accepted.`,
+  };
 }
 
 function traceLinkFingerprint(value: string): string {
@@ -3343,14 +3682,15 @@ function diagnosticReceiptV3ForRun(run: AgentRun): AgentRunDiagnosticReceiptV3 {
     .map((payload) => payload.providerFailure)
     .find((failure): failure is Record<string, unknown> => Boolean(failure) && typeof failure === 'object' && !Array.isArray(failure));
   const persistedProviderDiagnostic = artifactProviderDiagnostic?.diagnostic;
-  const provider = persistedProviderDiagnostic && typeof persistedProviderDiagnostic === 'object'
+  const provider = run.routeDecision?.providerFailure
+    ?? (persistedProviderDiagnostic && typeof persistedProviderDiagnostic === 'object'
     ? persistedProviderDiagnostic as AgentRunDiagnosticReceiptV3['provider']
     : (() => {
         const failure = run.diagnosticReceipt?.failure;
         return failure && (failure.code === 'AI_PROVIDER_FAILURE' || /provider/i.test(failure.code))
           ? classifyProviderFailure({ message: failure.message, code: failure.code, phase: 'generation' })
           : undefined;
-      })();
+      })());
   return {
     version: 3,
     runId: run.id,
@@ -3431,6 +3771,818 @@ function diagnosticReceiptV4ForRun(run: AgentRun): AgentRunDiagnosticReceiptV4 {
     summary,
     ...(terminalIncident ? { terminalIncident } : {}),
     finalStopReason: run.stopReason,
+  };
+}
+
+/**
+ * Attach the V1.15 runtime state after the executor settles. The state was
+ * created before the compiler broker ran; this final projection adds only
+ * outcome counters and never asks a legacy layer to reinterpret the question.
+ */
+function attachAskAnalystRuntimeReceipt(run: AgentRun): void {
+  const initial = run.askAnalystState ?? run.routeDecision?.askAnalystDecision?.state;
+  if (!initial) return;
+  const phase: AskAnalystState['phase'] = run.status === 'needs_clarification'
+    ? 'clarify'
+    : run.status === 'blocked' || run.status === 'cancelled'
+      ? 'blocked'
+      : 'executed';
+  const executionAttempts = analyticalExecutionAttemptCount(run);
+  const workspaceTools = runtimeWorkspaceToolsForRun(initial, run, executionAttempts);
+  const state = finalizeAskAnalystState(initial, {
+    phase,
+    workspaceTools,
+    ...(run.routeDecision?.askAnalystDecision?.resolvedPlan
+      ? { resolvedPlan: run.routeDecision.askAnalystDecision.resolvedPlan }
+      : {}),
+    toolCalls: workspaceTools.length,
+    executionAttempts,
+    repairAttempts: run.repairAttempts,
+  });
+  run.askAnalystState = state;
+  // Ordinary Ask intentionally does not send result rows to a narration
+  // provider.  Every successful compiler still owes the reader a useful,
+  // fact-bound answer, though.  Project the canonical local result into a
+  // bounded set of deterministic facts before accepting the BusinessAnswer;
+  // this is the common path for certified blocks, MetricFlow, and safe
+  // physical execution that did not already produce graph-native facts.
+  attachDeterministicResultFacts(run);
+  // The persisted/runtime envelope is the only reader-facing answer authority
+  // for an authoritative Ask.  Never let an executor's arbitrary `answer`
+  // bypass the fact/narrative validation below after the runtime has frozen a
+  // program.
+  run.businessAnswer = businessAnswerForRun(run);
+  run.answer = run.businessAnswer.answer;
+  run.diagnosticReceiptV5 = diagnosticReceiptV5ForRun(run, state, run.businessAnswer);
+  run.diagnosticReceiptV6 = diagnosticReceiptV6ForRun(run, state, run.diagnosticReceiptV5);
+}
+
+/** Preserve either persisted state version while adding executor-owned facts. */
+function finalizeAskAnalystState<T extends AskAnalystState>(
+  initial: T,
+  input: {
+    phase: AskAnalystState['phase'];
+    workspaceTools: AskAnalystState['workspace']['tools'];
+    resolvedPlan?: import('./analytical-orchestration.js').ResolvedAnalyticalPlanV2;
+    toolCalls: number;
+    executionAttempts: number;
+    repairAttempts: number;
+  },
+): T {
+  return {
+    ...initial,
+    phase: input.phase,
+    workspace: {
+      ...initial.workspace,
+      tools: input.workspaceTools,
+    },
+    ...(input.resolvedPlan ? { resolvedPlan: input.resolvedPlan } : {}),
+    toolCalls: input.toolCalls,
+    executionAttempts: input.executionAttempts,
+    repairAttempts: input.repairAttempts,
+  } as T;
+}
+
+function analyticalExecutionAttemptCount(run: AgentRun): number {
+  const executableRoutes = new Set<AgentRunRoute>([
+    'certified_answer', 'semantic_answer', 'generated_answer', 'research',
+  ]);
+  return run.steps
+    .filter((step) => executableRoutes.has(step.resolvedRoute ?? step.route))
+    .reduce((total, step) => total + step.attempts, 0);
+}
+
+/**
+ * Keep the default runtime story short and useful: snapshot, interpretation
+ * when a provider actually ran, compiler, execution, and the one permitted
+ * repair.  Detailed nested spans remain in Advanced trace instead of flooding
+ * the first diagnostic view with every retrieval lane.
+ */
+function runtimeWorkspaceToolsForRun(
+  initial: AskAnalystState,
+  run: AgentRun,
+  executionAttempts: number,
+): AskAnalystState['workspace']['tools'] {
+  const tools = [...initial.workspace.tools];
+  const has = (kind: AskAnalystState['workspace']['tools'][number]['kind']) => tools.some((tool) => tool.kind === kind);
+  const candidateIds = initial.workspace.admittedCandidateIds.slice(0, 32);
+  // Provider meaning receipts are written by AskAnalystRuntimeV1 at the actual
+  // call boundary. Do not synthesize one from aggregate telemetry here.
+  if (executionAttempts > 0 && !has('execute')) {
+    tools.push({
+      version: 1,
+      id: 'tool:execute',
+      kind: 'execute',
+      status: run.status === 'blocked' || run.status === 'cancelled' ? 'failed' : 'completed',
+      candidateIds,
+      reasonCode: run.status === 'blocked' || run.status === 'cancelled' ? 'execution_failed' : 'execution_completed',
+    });
+  }
+  if (run.repairAttempts > 0 && !has('repair')) {
+    tools.push({
+      version: 1,
+      id: 'tool:repair',
+      kind: 'repair',
+      status: run.status === 'blocked' ? 'failed' : 'completed',
+      candidateIds,
+      reasonCode: run.status === 'blocked' ? 'repair_exhausted' : 'repair_completed',
+    });
+  }
+  return tools.slice(0, 12);
+}
+
+const RESULT_FACT_MAX_ROWS = 10;
+const RESULT_FACT_MAX_COLUMNS = 12;
+const RESULT_FACT_MAX_VALUE_CHARS = 1_024;
+const RESULT_FACT_NARRATIVE_ROWS = 5;
+
+interface AuthoritativeExecutedAnswerArtifactV1 {
+  artifact: AgentRunArtifact;
+  payload: Record<string, unknown>;
+  /** Canonical fingerprint of the final, frozen execution result. */
+  resultFingerprint: string;
+}
+
+interface DeterministicResultFactV1 {
+  factId: string;
+  kind: 'result_scope' | 'result_row';
+  resultFingerprint: string;
+  rowIndex?: number;
+  values?: Record<string, unknown>;
+  details?: Record<string, unknown>;
+  provenance: {
+    artifactId: string;
+    trustState: AgentRunTrustState;
+    answerTier?: string;
+    executionReceiptFingerprint?: string;
+  };
+}
+
+interface DeterministicResultFactSetV1 {
+  version: 1;
+  factSetId: string;
+  resultFingerprint: string;
+  facts: DeterministicResultFactV1[];
+}
+
+interface DeterministicResultNarrativeV1 {
+  version: 1;
+  factSetId: string;
+  text: string;
+  claims: Array<{ claimId: string; factIds: string[]; text: string }>;
+}
+
+/**
+ * Turn a successful canonical result into local, result-fingerprint-bound
+ * facts when a compiler did not emit the stricter analytical graph fact set.
+ * This never calls a provider and never trusts an executor's prose.  It is
+ * deliberately bounded by rows, columns, and scalar size so a result cannot
+ * turn an Ask receipt into an unbounded secondary data store.
+ */
+function attachDeterministicResultFacts(run: AgentRun): void {
+  if (run.status !== 'completed' && run.status !== 'needs_review') return;
+  // Do not let a prior SQL cell, a draft, or an unrelated answer artifact
+  // become reader-facing fact authority. A fact projection belongs only to the
+  // executed answer artifact from the final authoritative frozen plan.
+  const authoritative = authoritativeExecutedAnswerArtifactsForRun(run);
+  const authoritativeIds = new Set(authoritative.map(({ artifact }) => artifact.id));
+  if (authoritativeIds.size === 0) return;
+  run.artifacts = run.artifacts.map((artifact) => {
+    if (!authoritativeIds.has(artifact.id)) return artifact;
+    const payload = objectRecordForResultFacts(artifact.payload);
+    if (!payload || payload.kind === 'no_answer' || hasFactLinkedNarrative(payload)) return artifact;
+    const projection = deterministicResultFactProjection({
+      artifactId: artifact.id,
+      trustState: artifact.trustState,
+      question: run.question,
+      result: payload.result,
+      answerTier: typeof payload.answerTier === 'string' ? payload.answerTier : undefined,
+    });
+    if (!projection) return artifact;
+    return {
+      ...artifact,
+      payload: {
+        ...payload,
+        analyticalFacts: projection.factSet,
+        analyticalNarrative: projection.narrative,
+      },
+    };
+  });
+}
+
+/**
+ * Facts and narrative may only come from the final execution artifact selected
+ * by an authoritative frozen Ask plan. `run.artifacts` intentionally retains
+ * earlier durable work for inspection, so scanning it wholesale would let a
+ * stale SQL cell or previous answer supersede the result the engine actually
+ * accepted. Multiple final answer artifacts are acceptable only when they
+ * prove the same canonical result fingerprint; ambiguity fails closed.
+ */
+function authoritativeExecutedAnswerArtifactsForRun(run: AgentRun): AuthoritativeExecutedAnswerArtifactV1[] {
+  if (run.requestedMode !== 'ask'
+    || run.status === 'blocked'
+    || run.status === 'cancelled'
+    || run.routeDecision?.resolvedAnalyticalPlan?.mode !== 'authoritative'
+    || run.routeDecision.analyticalCascadeDecision?.planFrozen !== true) {
+    return [];
+  }
+  const finalStep = [...run.steps].reverse().find((step) =>
+    (step.resolvedRoute ?? step.route) === run.route
+    && step.status !== 'blocked'
+    && step.status !== 'clarify');
+  if (!finalStep) return [];
+  const finalAnswerIds = new Set(
+    finalStep.artifacts
+      .filter((artifact) => artifact.kind === 'answer' && artifact.trustState !== 'blocked')
+      .map((artifact) => artifact.id),
+  );
+  if (finalAnswerIds.size === 0) return [];
+  const candidates = run.artifacts.flatMap((artifact) => {
+    if (!finalAnswerIds.has(artifact.id) || artifact.kind !== 'answer' || artifact.trustState === 'blocked') return [];
+    const payload = objectRecordForResultFacts(artifact.payload);
+    const rawResult = payload && objectRecordForResultFacts(payload.result);
+    const canonical = rawResult ? canonicalResultForFactProjection(rawResult) : undefined;
+    if (!payload || !canonical) return [];
+    return [{ artifact, payload, resultFingerprint: canonical.resultFingerprint }];
+  });
+  const resultFingerprints = new Set(candidates.map((candidate) => candidate.resultFingerprint));
+  return resultFingerprints.size === 1 ? candidates : [];
+}
+
+function deterministicResultFactProjection(input: {
+  artifactId: string;
+  trustState: AgentRunTrustState;
+  question: string;
+  result: unknown;
+  answerTier?: string;
+}): { factSet: DeterministicResultFactSetV1; narrative: DeterministicResultNarrativeV1 } | undefined {
+  const rawResult = objectRecordForResultFacts(input.result);
+  const canonical = rawResult ? canonicalResultForFactProjection(rawResult) : undefined;
+  if (!rawResult || !canonical) return undefined;
+  const rawReceipt = objectRecordForResultFacts(rawResult.executionReceipt);
+  const receiptFingerprint = stringForResultFacts(rawReceipt?.resultFingerprint);
+  if (canonical.columns.length === 0) return undefined;
+  const columns = canonical.columns.slice(0, RESULT_FACT_MAX_COLUMNS);
+  const rows = canonical.rows.slice(0, RESULT_FACT_MAX_ROWS).map((row) =>
+    Object.fromEntries(columns.flatMap((column) => {
+      const value = boundedResultFactValue(row[column]);
+      return value === undefined ? [] : [[column, value] as const];
+    })),
+  );
+  const provenance = {
+    artifactId: input.artifactId,
+    trustState: input.trustState,
+    ...(input.answerTier ?? canonical.answerTier ? { answerTier: input.answerTier ?? canonical.answerTier } : {}),
+    ...(receiptFingerprint ? { executionReceiptFingerprint: receiptFingerprint } : {}),
+  };
+  const scopeDetails = {
+    rowCount: canonical.rowCount,
+    returnedRowCount: canonical.rows.length,
+    columns,
+    ...(canonical.truncated ? { truncated: true } : {}),
+  };
+  const facts: DeterministicResultFactV1[] = [
+    {
+      factId: deterministicResultFactId(canonical.resultFingerprint, 'scope', scopeDetails),
+      kind: 'result_scope',
+      resultFingerprint: canonical.resultFingerprint,
+      details: scopeDetails,
+      provenance,
+    },
+    ...rows.map((values, rowIndex) => ({
+      factId: deterministicResultFactId(canonical.resultFingerprint, `row:${rowIndex}`, values),
+      kind: 'result_row' as const,
+      resultFingerprint: canonical.resultFingerprint,
+      rowIndex,
+      values,
+      provenance,
+    })),
+  ];
+  const factSetPayload = {
+    version: 1 as const,
+    resultFingerprint: canonical.resultFingerprint,
+    facts,
+  };
+  const factSet: DeterministicResultFactSetV1 = {
+    ...factSetPayload,
+    factSetId: `result-facts:${deterministicResultHash(factSetPayload).slice(0, 24)}`,
+  };
+  const narrative = deterministicResultNarrative({
+    question: input.question,
+    factSet,
+    rowCount: canonical.rowCount,
+    returnedRowCount: canonical.rows.length,
+    truncated: canonical.truncated === true,
+    columns,
+  });
+  return { factSet, narrative };
+}
+
+function deterministicResultNarrative(input: {
+  question: string;
+  factSet: DeterministicResultFactSetV1;
+  rowCount: number;
+  returnedRowCount: number;
+  truncated: boolean;
+  columns: string[];
+}): DeterministicResultNarrativeV1 {
+  const scope = input.factSet.facts[0]!;
+  const claims: DeterministicResultNarrativeV1['claims'] = [{
+    claimId: 'claim:result_scope',
+    factIds: [scope.factId],
+    text: `The query returned ${input.rowCount.toLocaleString()} row${input.rowCount === 1 ? '' : 's'} across ${input.columns.length.toLocaleString()} column${input.columns.length === 1 ? '' : 's'}${input.truncated ? '; the returned rows are truncated.' : '.'}`,
+  }];
+  const rowFacts = input.factSet.facts
+    .filter((fact): fact is DeterministicResultFactV1 & { rowIndex: number; values: Record<string, unknown> } =>
+      fact.kind === 'result_row' && fact.rowIndex !== undefined && Boolean(fact.values),
+    )
+    .slice(0, RESULT_FACT_NARRATIVE_ROWS);
+  const rankedQuestion = /\b(?:top|highest|most|least|lowest)\b/i.test(input.question);
+  for (const fact of rowFacts) {
+    const values = fact.values;
+    const labelColumn = input.columns.find((column) => /(?:customer|account|client|user|name)(?:_|$)/i.test(column) && values[column] != null)
+      ?? input.columns.find((column) => values[column] != null);
+    const label = labelColumn ? deterministicResultDisplayValue(values[labelColumn]) : undefined;
+    const details = input.columns
+      .filter((column) => column !== labelColumn && values[column] !== undefined)
+      .map((column) => `${humanizeResultColumn(column)}: ${deterministicResultDisplayValue(values[column])}`);
+    const text = label
+      ? `${rankedQuestion ? 'Returned result' : 'Result'} ${fact.rowIndex + 1}: ${label}${details.length > 0 ? ` — ${details.join('; ')}` : ''}.`
+      : `Returned result ${fact.rowIndex + 1}${details.length > 0 ? `: ${details.join('; ')}` : '.'}`;
+    claims.push({
+      claimId: `claim:result_row:${fact.rowIndex}`,
+      factIds: [fact.factId],
+      text,
+    });
+  }
+  if (rowFacts.length === 0 && input.returnedRowCount === 0) {
+    claims.push({
+      claimId: 'claim:no_returned_rows',
+      factIds: [scope.factId],
+      text: 'The query completed with zero returned rows.',
+    });
+  }
+  return {
+    version: 1,
+    factSetId: input.factSet.factSetId,
+    text: claims.map((claim) => claim.text).join(' '),
+    claims,
+  };
+}
+
+function hasFactLinkedNarrative(payload: Record<string, unknown>): boolean {
+  const factSet = objectRecordForResultFacts(payload.analyticalFacts);
+  const narrative = objectRecordForResultFacts(payload.analyticalNarrative);
+  if (!factSet || !narrative || typeof factSet.factSetId !== 'string' || narrative.factSetId !== factSet.factSetId) return false;
+  // Facts may only narrate the exact canonical result that the artifact
+  // persists. A graph-native fact set produced before a normalization or
+  // execution-receipt change is useful diagnostics, but it is not authority
+  // for the reader-facing answer.
+  const rawResult = objectRecordForResultFacts(payload.result);
+  const canonical = rawResult ? canonicalResultForFactProjection(rawResult) : undefined;
+  if (rawResult && (!canonical || factSet.resultFingerprint !== canonical.resultFingerprint)) return false;
+  const factIds = new Set(
+    Array.isArray(factSet.facts)
+      ? factSet.facts.flatMap((fact) => {
+          const record = objectRecordForResultFacts(fact);
+          return typeof record?.factId === 'string' ? [record.factId] : [];
+        })
+      : [],
+  );
+  if (factIds.size === 0 || !Array.isArray(narrative.claims)) return false;
+  const claims = narrative.claims.flatMap((claim) => {
+    const record = objectRecordForResultFacts(claim);
+    const ids = Array.isArray(record?.factIds)
+      ? record.factIds.filter((id): id is string => typeof id === 'string')
+      : [];
+    return ids.length > 0 ? [ids] : [];
+  });
+  return claims.length > 0 && claims.every((ids) => ids.every((id) => factIds.has(id)));
+}
+
+function canonicalResultForFactProjection(rawResult: Record<string, unknown>): ReturnType<typeof normalizeCanonicalQueryResult> | undefined {
+  const rawReceipt = objectRecordForResultFacts(rawResult.executionReceipt);
+  const suppliedFingerprint = stringForResultFacts(rawResult.resultFingerprint);
+  const receiptFingerprint = stringForResultFacts(rawReceipt?.resultFingerprint);
+  // The persisted result fingerprint identifies the exact rendered row set.
+  // A nested receipt can identify an earlier graph/adapter boundary instead,
+  // so retain it separately as provenance but never let it replace the reader
+  // result identity. The host has already admitted this internal result at the
+  // execution boundary; this projector never accepts public row input.
+  return normalizeCanonicalQueryResult({
+    columns: rawResult.columns,
+    rows: rawResult.rows,
+    rowCount: rawResult.rowCount,
+    executionTime: rawResult.executionTime,
+    resultFingerprint: suppliedFingerprint ?? receiptFingerprint,
+    executionReceipt: rawResult.executionReceipt,
+    trustState: rawResult.trustState,
+    answerTier: rawResult.answerTier,
+  });
+}
+
+function objectRecordForResultFacts(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function stringForResultFacts(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function boundedResultFactValue(value: unknown): unknown | undefined {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+    return typeof value === 'string' && value.length > RESULT_FACT_MAX_VALUE_CHARS ? undefined : value;
+  }
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'bigint') return value.toString();
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized && serialized.length <= RESULT_FACT_MAX_VALUE_CHARS ? serialized : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function deterministicResultFactId(resultFingerprint: string, kind: string, payload: unknown): string {
+  return `result-fact:${deterministicResultHash({ resultFingerprint, kind, payload }).slice(0, 24)}`;
+}
+
+function deterministicResultHash(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+function deterministicResultDisplayValue(value: unknown): string {
+  if (value === null) return 'null';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : 'not-a-number';
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  return typeof value === 'undefined' ? 'undefined' : String(value);
+}
+
+function humanizeResultColumn(column: string): string {
+  return column.replace(/[_-]+/g, ' ').replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function businessAnswerForRun(run: AgentRun): BusinessAnswer {
+  // An accepted compound Ask is all-or-nothing. The engine deliberately
+  // continues through later frozen children after an earlier one fails so the
+  // trace has a receipt for each task; it must not then replace the aggregate
+  // terminal message with a generic connection incident or a later child
+  // result. The blocking evaluation is server-generated at finalization, not
+  // executor prose, so it is a safe deterministic answer authority here.
+  const compoundFailure = run.evaluations.find((evaluation) =>
+    evaluation.id === 'authoritative-compound-all-or-nothing'
+    && evaluation.severity === 'blocking'
+    && evaluation.passed === false
+    && typeof evaluation.message === 'string'
+    && evaluation.message.trim().length > 0);
+  if (compoundFailure) {
+    return {
+      version: 1,
+      mode: 'deterministic_fallback',
+      trustState: 'blocked',
+      factIds: [],
+      answer: compoundFailure.message,
+      limitations: ['No partial result was accepted because one or more frozen Ask tasks did not complete.'],
+    };
+  }
+  const authoritative = authoritativeExecutedAnswerArtifactsForRun(run);
+  const factIds = new Set<string>();
+  const resultFingerprint = authoritative[0]?.resultFingerprint;
+  const factSetIds = new Set<string>();
+  const narratives: Array<{
+    text: string;
+    factSetId: string;
+    claims: Array<{ factIds: string[] }>;
+  }> = [];
+  for (const { payload: record } of authoritative) {
+    const factSet = record.analyticalFacts;
+    if (factSet && typeof factSet === 'object' && !Array.isArray(factSet)) {
+      const factRecord = factSet as Record<string, unknown>;
+      if (factRecord.resultFingerprint !== resultFingerprint) continue;
+      if (typeof factRecord.factSetId === 'string') factSetIds.add(factRecord.factSetId);
+      if (Array.isArray(factRecord.facts)) {
+        for (const fact of factRecord.facts) {
+          if (fact && typeof fact === 'object' && typeof (fact as Record<string, unknown>).factId === 'string') {
+            factIds.add((fact as Record<string, unknown>).factId as string);
+          }
+        }
+      }
+    }
+    const narrative = record.analyticalNarrative;
+    if (narrative && typeof narrative === 'object' && !Array.isArray(narrative)) {
+      const narrativeRecord = narrative as Record<string, unknown>;
+      const text = typeof narrativeRecord.text === 'string' ? narrativeRecord.text.trim() : '';
+      const factSetId = typeof narrativeRecord.factSetId === 'string' ? narrativeRecord.factSetId : '';
+      const claims = Array.isArray(narrativeRecord.claims)
+        ? narrativeRecord.claims.flatMap((claim) => {
+            if (!claim || typeof claim !== 'object' || Array.isArray(claim)) return [];
+            const claimRecord = claim as Record<string, unknown>;
+            const ids = Array.isArray(claimRecord.factIds)
+              ? claimRecord.factIds.filter((id): id is string => typeof id === 'string')
+              : [];
+            return [{ factIds: ids }];
+          })
+        : [];
+      if (text && factSetId) narratives.push({ text, factSetId, claims });
+    }
+  }
+  const acceptedNarrative = narratives.find((narrative) =>
+    factSetIds.has(narrative.factSetId)
+    && narrative.claims.length > 0
+    && narrative.claims.every((claim) => claim.factIds.length > 0 && claim.factIds.every((id) => factIds.has(id))));
+  const factsOnly = Boolean(acceptedNarrative);
+  const deterministicAnswer = run.status === 'blocked' || run.status === 'cancelled'
+    ? deterministicTerminalAnswerForRun(run)
+    : run.status === 'needs_clarification'
+      ? 'One business choice is required before DQL can run this question.'
+      : 'The query completed, but no fact-linked narrative was retained. Open the result to review the validated data.';
+  return {
+    version: 1,
+    mode: factsOnly ? 'facts_only' : 'deterministic_fallback',
+    trustState: run.trustState === 'grounded' ? 'governed' : run.trustState,
+    factIds: [...factIds].sort(),
+    ...(resultFingerprint ? { resultFingerprint } : {}),
+    answer: acceptedNarrative?.text ?? deterministicAnswer,
+    limitations: run.status === 'blocked'
+      ? ['No executable result was accepted.']
+      : run.status === 'needs_clarification'
+        ? ['A materially different executable business meaning requires a choice.']
+        : factsOnly
+          ? []
+          : ['Narrative is deterministic because no validated analytical fact set was retained.'],
+  };
+}
+
+/**
+ * A blocked Ask still needs a useful, content-safe explanation.  Derive this
+ * only from the typed terminal incident already persisted for the run: never
+ * surface a raw connector, provider, SQL, or model error through the answer
+ * field.  The trace retains the redacted diagnostic receipt for operators.
+ */
+function deterministicTerminalAnswerForRun(run: AgentRun): string {
+  const incident = terminalIncidentForRun(
+    run,
+    run.routeDecision?.analyticalCascadeDecision?.stopReason,
+  );
+  switch (incident?.code) {
+    case 'CONNECTION_NOT_CONFIGURED':
+      return 'No database connection is configured yet. Add an approved connection, then retry this question.';
+    case 'PROVIDER_FAILURE':
+      return 'The AI provider could not complete this Ask step. Check provider readiness, then retry.';
+    case 'COMPILATION_FAILED':
+      return 'DQL selected a governed plan but could not compile it for the current target. Review the semantic target, then retry.';
+    case 'ANALYTICAL_COVERAGE_GAP':
+      return 'DQL could not prove one safe analytical path from the current metadata snapshot. Review the available modeled fields, then retry.';
+    case 'ANALYTICAL_EXECUTION_FAILED':
+      return 'The selected governed query did not complete on the current connection. Review the connection and trace, then retry.';
+    case 'CANCELLED':
+      return 'This Ask run was cancelled before it completed.';
+    default:
+      return 'No executable data answer was accepted for this Ask run.';
+  }
+}
+
+function diagnosticReceiptV5ForRun(
+  run: AgentRun,
+  state: AskAnalystState,
+  businessAnswer: BusinessAnswer,
+): AgentRunDiagnosticReceiptV5 {
+  const legacy = run.diagnosticReceiptV4?.summary;
+  const selectedCompiler = state.resolvedPlan?.compiler;
+  const whatHappened = run.status === 'blocked'
+    ? 'The Ask runtime did not complete an executable analytical answer.'
+    : run.status === 'needs_clarification'
+      ? 'The Ask runtime paused because validated executable meanings materially differ.'
+      : selectedCompiler
+        ? `The Ask runtime compiled one route-neutral program with the ${selectedCompiler} compiler.`
+        : 'The Ask runtime completed without selecting an analytical compiler.';
+  const why = run.status === 'blocked'
+    ? legacy?.terminalIncident
+      ? `The recorded terminal incident was ${legacy.terminalIncident.code}.`
+      : 'No safe executable compiler plan was accepted from the current evidence snapshot.'
+    : run.status === 'needs_clarification'
+      ? 'The selected meanings would change the result, so DQL did not guess.'
+      : state.resolvedPlan?.reviewRequired
+        ? 'The selected plan required review before generated SQL execution.'
+        : 'The selected plan passed the current compiler and trust boundary.';
+  const impact = run.status === 'blocked'
+    ? 'No executable data answer was completed for this run.'
+    : run.status === 'needs_clarification'
+      ? 'The query is waiting for one business choice; no query was executed.'
+      : businessAnswer.mode === 'facts_only'
+        ? 'The displayed answer is bound to validated result facts.'
+        : 'The displayed answer uses the deterministic narration fallback.';
+  const summaryInput = {
+    version: 2 as const,
+    runtimeMode: state.mode,
+    whatHappened,
+    why,
+    impact,
+    nextAction: legacy?.safeNextAction ?? 'none',
+    ...(selectedCompiler ? { selectedCompiler } : {}),
+    programTaskCount: state.program.taskIds.length,
+    admittedCandidateCount: state.workspace.admittedCandidateIds.length,
+    toolCallCount: state.toolCalls,
+    executionAttempts: state.executionAttempts,
+  };
+  const provider = providerFailureForRun(run);
+  return {
+    version: 5,
+    runId: run.id,
+    state: diagnosticAskAnalystState(state),
+    summary: {
+      ...summaryInput,
+      summaryFingerprint: receiptFingerprint(summaryInput),
+    },
+    businessAnswer: diagnosticBusinessAnswer(businessAnswer),
+    ...(provider ? { provider } : {}),
+    finalStopReason: run.stopReason,
+  };
+}
+
+/**
+ * V6 is the concise, receipt-only Ask story shown by default. It is built
+ * from already durable state at finalization, so it cannot create a second
+ * routing authority or infer a connection/SQL attempt before one occurred.
+ */
+function diagnosticReceiptV6ForRun(
+  run: AgentRun,
+  state: AskAnalystState,
+  receipt: AgentRunDiagnosticReceiptV5,
+): AgentRunDiagnosticReceiptV6 {
+  const tools = state.workspace.tools;
+  const tool = (kind: AskAnalystState['workspace']['tools'][number]['kind']) => tools.find((item) => item.kind === kind);
+  const planner = tool('provider_meaning');
+  const extension = tool('candidate_extension');
+  const cascade = run.routeDecision?.analyticalCascadeDecision;
+  const planFrozen = state.resolvedPlan?.planFrozen === true || cascade?.planFrozen === true;
+  const executionAttempts = state.executionAttempts;
+  const connectionAttempted = planFrozen && (executionAttempts > 0 || terminalConnectionSetupFailureForRun(run));
+  const persistedPlanning = state.version === 2 ? state.planningReceipt : undefined;
+  // A failed dispatch is still a planner call. Older persisted V2 state could
+  // be checkpointed before its receipt incremented, while the tool boundary
+  // was already durable. Prefer that boundary to avoid a V6/UI story which
+  // says "planner skipped" even though diagnostics show a provider attempt.
+  const plannerAttempted = planner?.status === 'completed' || planner?.status === 'failed';
+  const plannerCalls = Math.max(
+    persistedPlanning?.plannerCalls ?? 0,
+    plannerAttempted ? Math.max(1, state.planningContinuations) : 0,
+  );
+  const revisionCalls = persistedPlanning?.revisionCalls
+    ?? (extension?.status === 'completed' && plannerCalls > 1 ? 1 : 0);
+  const plannerMode = persistedPlanning?.mode ?? (plannerCalls === 0
+    ? (state.workspace.admittedCandidateIds.length ? 'deterministic_binding' : 'exact_fast_path')
+    : revisionCalls > 0 ? 'targeted_revision' : 'initial_planner');
+  const roleCounts = new Map<AgentRunDiagnosticReceiptV6['roleCoverage'][number]['role'], number>();
+  for (const candidate of run.routeDecision?.retrievalEvidence?.candidateTraceMetadata ?? []) {
+    roleCounts.set(candidate.role, (roleCounts.get(candidate.role) ?? 0) + 1);
+  }
+  const roleCoverage = [...roleCounts.entries()]
+    .map(([role, candidateCount]) => ({ role, candidateCount }))
+    .sort((left, right) => left.role.localeCompare(right.role));
+  const terminalIncident = run.diagnosticReceiptV4?.terminalIncident;
+  const verification = persistedPlanning?.verification ?? (state.phase === 'blocked'
+    ? { version: 1 as const, status: 'invalid' as const, missingRoles: [], candidateIds: [], reasonCode: 'pre_freeze_verification_blocked' }
+    : state.phase === 'clarify'
+      ? { version: 1 as const, status: 'ambiguous' as const, missingRoles: [], candidateIds: [], reasonCode: 'validated_meaning_ambiguity' }
+      : { version: 1 as const, status: 'valid' as const, missingRoles: [], candidateIds: state.program.candidateIds.slice(0, 16), reasonCode: 'immutable_program_verified' });
+  const story: AgentRunDiagnosticReceiptV6['story'] = [
+    { stage: 'retrieval', status: tool('retrieve_snapshot')?.status === 'failed' ? 'unavailable' : 'completed', reasonCode: tool('retrieve_snapshot')?.reasonCode ?? 'snapshot_not_recorded' },
+    { stage: 'role_coverage', status: state.workspace.workspaceCandidateIds?.length || state.workspace.admittedCandidateIds.length ? 'completed' : 'unavailable', reasonCode: state.workspace.workspaceCandidateIds?.length ? 'bounded_workspace_qualified' : 'no_qualified_workspace' },
+    {
+      stage: 'planner',
+      status: planner?.status === 'failed' ? 'blocked' : plannerCalls > 0 ? 'completed' : 'skipped',
+      reasonCode: planner?.reasonCode ?? plannerMode,
+    },
+    { stage: 'verification', status: verification.status === 'valid' ? 'completed' : verification.status === 'ambiguous' ? 'blocked' : 'blocked', reasonCode: verification.reasonCode },
+    { stage: 'targeted_recovery', status: extension?.status === 'completed' ? 'completed' : 'skipped', reasonCode: extension?.reasonCode ?? 'not_required' },
+    { stage: 'cascade', status: cascade?.planFrozen ? 'completed' : state.phase === 'blocked' ? 'blocked' : 'unavailable', reasonCode: cascade?.stopReason ?? (state.phase === 'blocked' ? 'pre_freeze_blocked' : 'cascade_not_selected') },
+    { stage: 'freeze', status: planFrozen ? 'completed' : 'skipped', reasonCode: planFrozen ? 'immutable_plan_frozen' : 'no_plan_frozen' },
+    { stage: 'connection', status: connectionAttempted ? 'completed' : 'skipped', reasonCode: connectionAttempted ? 'connection_boundary_attempted_after_freeze' : 'connection_not_attempted' },
+    { stage: 'execution', status: executionAttempts > 0 ? 'completed' : 'skipped', reasonCode: executionAttempts > 0 ? 'executor_attempt_recorded' : 'execution_not_attempted' },
+    { stage: 'facts', status: receipt.businessAnswer?.factIds.length ? 'completed' : 'skipped', reasonCode: receipt.businessAnswer?.factIds.length ? 'fact_bound_business_answer' : 'no_accepted_result_facts' },
+  ];
+  return {
+    ...receipt,
+    version: 6,
+    planning: {
+      version: 1,
+      mode: plannerMode,
+      plannerCalls,
+      revisionCalls,
+      verification,
+    },
+    roleCoverage,
+    cascade: {
+      attempts: (cascade?.attempts ?? []).map((attempt) => ({
+        tier: attempt.tier,
+        outcome: attempt.outcome,
+        planFrozen: attempt.planFrozen,
+      })),
+      ...(cascade?.selectedTier ? { selectedTier: cascade.selectedTier } : {}),
+      ...(cascade?.stopReason ? { stopReason: cascade.stopReason } : {}),
+      planFrozen,
+    },
+    ...(terminalIncident ? {
+      origin: {
+        boundary: terminalIncident.boundary,
+        origin: terminalIncident.origin,
+        impact: terminalIncident.impact,
+      },
+    } : {}),
+    connection: { attempted: connectionAttempted },
+    execution: { attempts: executionAttempts },
+    facts: {
+      factCount: receipt.businessAnswer?.factIds.length ?? 0,
+      ...(receipt.businessAnswer?.resultFingerprint ? { resultFingerprint: receipt.businessAnswer.resultFingerprint } : {}),
+    },
+    safeNextAction: receipt.summary.nextAction,
+    story,
+  };
+}
+
+function providerFailureForRun(run: AgentRun): ProviderFailureDiagnosticV1 | undefined {
+  if (run.routeDecision?.providerFailure) return run.routeDecision.providerFailure;
+  if (run.diagnosticReceiptV3?.provider) return run.diagnosticReceiptV3.provider;
+  for (const artifact of run.artifacts) {
+    const payload = artifact.payload;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) continue;
+    const failure = (payload as Record<string, unknown>).providerFailure;
+    if (!failure || typeof failure !== 'object' || Array.isArray(failure)) continue;
+    const diagnostic = (failure as Record<string, unknown>).diagnostic;
+    if (diagnostic && typeof diagnostic === 'object' && !Array.isArray(diagnostic)) {
+      return diagnostic as ProviderFailureDiagnosticV1;
+    }
+  }
+  return undefined;
+}
+
+/** Content-free export boundary for V5 inspector/full-trace receipts. */
+function diagnosticAskAnalystState(state: AskAnalystState): AgentRunDiagnosticReceiptV5['state'] {
+  return {
+    version: 1,
+    mode: state.mode,
+    phase: state.phase,
+    questionFingerprint: state.frame.questionFingerprint,
+    kind: state.frame.kind,
+    requirementCounts: {
+      measures: state.frame.requirements.measures.length,
+      dimensions: state.frame.requirements.dimensions.length,
+      entityTerms: state.frame.requirements.entityTerms.length + state.frame.requirements.entityDisplayTerms.length,
+      members: state.frame.requirements.memberTerms.length,
+      filters: state.program.filters?.length ?? 0,
+    },
+    mission: {
+      mode: state.mission.mode,
+      taskCount: state.mission.tasks.length,
+      deferredTaskCount: state.mission.deferredTasks?.length ?? 0,
+      hypothesisCount: state.mission.hypotheses.length,
+    },
+    workspace: {
+      ...(state.workspace.snapshotId ? { snapshotId: state.workspace.snapshotId } : {}),
+      ...(state.workspace.sourceFingerprint ? { sourceFingerprint: state.workspace.sourceFingerprint } : {}),
+      admittedCandidateCount: state.workspace.admittedCandidateIds.length,
+      excludedCandidateCount: state.workspace.excludedCandidates.length,
+      sourceCoverage: state.workspace.sourceCoverage.map((coverage) => ({
+        source: coverage.source,
+        status: coverage.status,
+        candidateCount: coverage.candidateIds.length,
+      })),
+      tools: state.workspace.tools.map((tool) => ({
+        id: tool.id,
+        kind: tool.kind,
+        status: tool.status,
+        reasonCode: tool.reasonCode,
+      })),
+    },
+    program: {
+      id: state.program.id,
+      taskCount: state.program.taskIds.length,
+      candidateCount: state.program.candidateIds.length,
+      requiredRoles: [...state.program.requiredRoles],
+      outputAssertionCount: state.program.outputs.assertions?.length ?? 0,
+    },
+    ...(state.resolvedPlan ? { resolvedPlan: state.resolvedPlan } : {}),
+    counters: {
+      planningContinuations: state.planningContinuations,
+      toolCalls: state.toolCalls,
+      executionAttempts: state.executionAttempts,
+      repairAttempts: state.repairAttempts,
+    },
+  };
+}
+
+function diagnosticBusinessAnswer(answer: BusinessAnswer): NonNullable<AgentRunDiagnosticReceiptV5['businessAnswer']> {
+  return {
+    version: 1,
+    mode: answer.mode,
+    trustState: answer.trustState,
+    factIds: [...answer.factIds],
+    ...(answer.resultFingerprint ? { resultFingerprint: answer.resultFingerprint } : {}),
+    limitationCount: answer.limitations.length,
   };
 }
 
@@ -3665,8 +4817,17 @@ function terminalIncidentForRun(
   run: AgentRun,
   cascadeStopReason: string | undefined,
 ): AskTerminalIncidentV1 | undefined {
+  const runtimeState = run.askAnalystState ?? run.routeDecision?.askAnalystDecision?.state;
+  const planFrozen = runtimeState?.resolvedPlan?.planFrozen === true
+    || run.routeDecision?.analyticalCascadeDecision?.planFrozen === true;
+  const executionRecorded = analyticalExecutionAttemptCount(run) > 0
+    || (run.telemetry?.sqlExecutions ?? 0) > 0;
   const executionSetupFailure = terminalConnectionSetupFailureForRun(run);
-  if (executionSetupFailure) {
+  // Connection wording is legal only after an immutable plan crossed its
+  // actual connector boundary. A planner/verification failure is never a
+  // "current connection" incident merely because an older adapter used a
+  // broad blocked status.
+  if (executionSetupFailure && planFrozen) {
     return {
       version: 1,
       code: 'CONNECTION_NOT_CONFIGURED',
@@ -3716,7 +4877,7 @@ function terminalIncidentForRun(
   if (failureCode === 'RUN_CANCELLED' || run.status === 'cancelled') {
     return { version: 1, code: 'CANCELLED', boundary: 'run', origin: 'unknown', impact: 'run_cancelled', safeAction: 'none' };
   }
-  if (failureCode === 'CONNECTION_NOT_CONFIGURED') {
+  if (failureCode === 'CONNECTION_NOT_CONFIGURED' && planFrozen) {
     return { version: 1, code: 'CONNECTION_NOT_CONFIGURED', boundary: 'sql.execute', origin: 'governance_gate', impact: 'execution_not_attempted', safeAction: 'configure_connection' };
   }
   // A frozen semantic/analytical plan may fail while the compiler is resolving
@@ -3758,8 +4919,27 @@ function terminalIncidentForRun(
   if (cascadeStopReason === 'coverage_gap' || cascadeStopReason === 'ambiguous' || cascadeStopReason === 'denied') {
     return { version: 1, code: 'ANALYTICAL_COVERAGE_GAP', boundary: 'cascade', origin: 'governance_gate', impact: 'answer_not_produced', safeAction: 'inspect_failure' };
   }
-  if (run.status === 'blocked') {
+  // Planning/meaning/reference validation has no connection or SQL boundary.
+  // Preserve that truth even when an older adapter gives the terminal run a
+  // broad `blocked` status without a cascade stop reason.
+  if (run.status === 'blocked'
+    && runtimeState?.phase === 'blocked'
+    && !planFrozen
+    && !executionRecorded) {
+    return {
+      version: 1,
+      code: 'ANALYTICAL_COVERAGE_GAP',
+      boundary: 'cascade',
+      origin: 'governance_gate',
+      impact: 'answer_not_produced',
+      safeAction: 'inspect_failure',
+    };
+  }
+  if (run.status === 'blocked' && planFrozen && executionRecorded) {
     return { version: 1, code: 'ANALYTICAL_EXECUTION_FAILED', boundary: 'sql.execute', origin: 'unknown', impact: 'execution_failed', safeAction: 'inspect_failure' };
+  }
+  if (run.status === 'blocked') {
+    return { version: 1, code: 'ANALYTICAL_COVERAGE_GAP', boundary: 'cascade', origin: 'governance_gate', impact: 'answer_not_produced', safeAction: 'inspect_failure' };
   }
   return undefined;
 }
@@ -3922,6 +5102,8 @@ function attachDiagnosticReceipt(
   receiptV2?: AgentRunDiagnosticReceiptV2,
   receiptV3?: AgentRunDiagnosticReceiptV3,
   receiptV4?: AgentRunDiagnosticReceiptV4,
+  receiptV5?: AgentRunDiagnosticReceiptV5,
+  receiptV6?: AgentRunDiagnosticReceiptV6,
 ): AgentRunArtifact[] {
   if (artifacts.length === 0) {
     if (!receipt.failure) return artifacts;
@@ -3930,7 +5112,7 @@ function attachDiagnosticReceipt(
       kind: "answer",
       title: "Agent run diagnostics",
       trustState: "blocked",
-      payload: { diagnosticReceipt: receipt, ...(receiptV2 ? { diagnosticReceiptV2: receiptV2 } : {}), ...(receiptV3 ? { diagnosticReceiptV3: receiptV3 } : {}), ...(receiptV4 ? { diagnosticReceiptV4: receiptV4 } : {}) },
+      payload: { diagnosticReceipt: receipt, ...(receiptV2 ? { diagnosticReceiptV2: receiptV2 } : {}), ...(receiptV3 ? { diagnosticReceiptV3: receiptV3 } : {}), ...(receiptV4 ? { diagnosticReceiptV4: receiptV4 } : {}), ...(receiptV5 ? { diagnosticReceiptV5: receiptV5 } : {}), ...(receiptV6 ? { diagnosticReceiptV6: receiptV6 } : {}) },
     }];
   }
   const preferredIndex = Math.max(0, artifacts.findIndex((artifact) => artifact.kind === "answer"));
@@ -3947,6 +5129,8 @@ function attachDiagnosticReceipt(
         ...(receiptV2 ? { diagnosticReceiptV2: receiptV2 } : {}),
         ...(receiptV3 ? { diagnosticReceiptV3: receiptV3 } : {}),
         ...(receiptV4 ? { diagnosticReceiptV4: receiptV4 } : {}),
+        ...(receiptV5 ? { diagnosticReceiptV5: receiptV5 } : {}),
+        ...(receiptV6 ? { diagnosticReceiptV6: receiptV6 } : {}),
       },
     };
   });
@@ -4023,6 +5207,34 @@ function consumeRepeatedClarificationSelection(
     answerRefusalCode: 'modeling_gap',
     summary: message,
     answer: message,
+  };
+}
+
+/**
+ * Rehydrate the server-owned compiler decision for one frozen Ask task.  The
+ * outer decision remains the durable turn summary, while this scoped view is
+ * the sole authority passed to the executor/evaluator for the current step.
+ */
+function taskScopedRouteDecision(
+  outer: IntentDecision,
+  task: AskAnalystTaskExecutionV1,
+): IntentDecision {
+  return {
+    ...task.compilerDecision,
+    meaningResolution: task.meaningResolution,
+    // `compileVerifiedAskTasks` accepts a task only after the compiler broker
+    // supplied its complete resolved-plan authority. Do not manufacture a
+    // legacy resolved plan here from a V2 receipt.
+    ...(task.compilerDecision.resolvedAnalyticalPlan
+      ? { resolvedAnalyticalPlan: task.compilerDecision.resolvedAnalyticalPlan }
+      : {}),
+    askAnalystDecision: {
+      version: 1,
+      mode: outer.askAnalystDecision?.mode ?? 'authoritative',
+      state: task.state,
+      resolvedPlan: task.resolvedPlan,
+      ...(outer.askAnalystDecision?.frozenPlan ? { frozenPlan: outer.askAnalystDecision.frozenPlan } : {}),
+    },
   };
 }
 

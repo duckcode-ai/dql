@@ -385,6 +385,8 @@ function redactRunReceipt(value: unknown, trace: AskTraceDataV1, profile: AskTra
     profile,
     salt,
   );
+  const runtimeReceiptV5 = portableRuntimeReceiptV5(record.diagnosticReceiptV5, profile, salt);
+  const runtimeReceiptV6 = portableRuntimeReceiptV6(record.diagnosticReceiptV6, profile, salt);
   return {
     version: 1,
     traceReference: {
@@ -399,12 +401,309 @@ function redactRunReceipt(value: unknown, trace: AskTraceDataV1, profile: AskTra
     planFrozen: source.planFrozen === true,
     finalStopReason: typeof source.finalStopReason === 'string' ? source.finalStopReason : undefined,
     ...(terminalGap ? { terminalGap } : {}),
+    ...(runtimeReceiptV5 ? { runtimeReceiptV5 } : {}),
+    ...(runtimeReceiptV6 ? { runtimeReceiptV6 } : {}),
     telemetry: sanitizeTelemetry(record.telemetry),
     fingerprints: {
       plan: map(findFingerprint(record, 'planFingerprint'), 'plan'),
       sql: map(findFingerprint(record, 'sqlFingerprint'), 'sql'),
       result: map(findFingerprint(record, 'resultFingerprint'), 'result'),
     },
+  };
+}
+
+/**
+ * V6 adds the short reader-facing decision path to V5.  Keep the portable
+ * shape deliberately narrower than the persisted receipt: a support bundle
+ * needs counts, enum outcomes, and pseudonymous identity fingerprints, never
+ * raw requirements, member values, candidate lifecycle prose, or answer text.
+ */
+function portableRuntimeReceiptV6(value: unknown, profile: AskTraceExportProfileV1, salt: string): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const receipt = value as Record<string, unknown>;
+  if (receipt.version !== 6 || typeof receipt.runId !== 'string') return undefined;
+  const record = (candidate: unknown): Record<string, unknown> | undefined =>
+    candidate && typeof candidate === 'object' && !Array.isArray(candidate) ? candidate as Record<string, unknown> : undefined;
+  // The V5 projection is an explicit allowlist for all inherited fields. Do
+  // not copy V6 state/workspace wholesale merely because it extends V5.
+  const base = portableRuntimeReceiptV5({ ...receipt, version: 5 }, profile, salt);
+  if (!base) return undefined;
+  const planning = record(receipt.planning);
+  const allowedModes = new Set(['exact_fast_path', 'initial_planner', 'targeted_revision', 'deterministic_binding']);
+  const allowedVerification = new Set(['valid', 'needs_targeted_context', 'ambiguous', 'denied', 'invalid']);
+  const allowedStages = new Set(['retrieval', 'role_coverage', 'planner', 'verification', 'targeted_recovery', 'cascade', 'freeze', 'connection', 'execution', 'facts']);
+  const allowedStatuses = new Set(['completed', 'skipped', 'blocked', 'unavailable']);
+  const allowedRoles = new Set(['metric', 'entity_key', 'entity_label', 'categorical_dimension', 'time_dimension', 'member', 'relationship', 'context']);
+  const allowedTiers = new Set(['certified', 'semantic', 'governed_relational', 'exploratory_sql', 'clarify_or_gap']);
+  const allowedTierOutcomes = new Set(['executable', 'ineligible', 'unavailable', 'ambiguous', 'denied']);
+  const allowedBoundaries = new Set(['plan.compile', 'semantic.compile', 'sql.authorize', 'sql.execute', 'provider', 'cascade', 'run']);
+  const allowedOrigins = new Set(['internal_invariant', 'governance_gate', 'semantic_compiler', 'plan_compiler', 'provider', 'warehouse', 'unknown']);
+  const allowedImpacts = new Set(['execution_not_attempted', 'execution_failed', 'answer_not_produced', 'run_cancelled']);
+  const allowedActions = new Set(['export_redacted_trace', 'configure_connection', 'change_authorized_connection', 'inspect_failure', 'retry_same_plan', 'refresh_snapshot', 'edit_dql', 'open_sql_notebook', 'request_access', 'reapply_semantic_runtime', 'review_analytical_failure', 'inspect_research_failures', 'none']);
+  const finiteCount = (candidate: unknown): number | undefined => typeof candidate === 'number' && Number.isFinite(candidate)
+    ? Math.max(0, Math.min(10_000, Math.floor(candidate)))
+    : undefined;
+  const pseudonym = (candidate: unknown, kind: string) => typeof candidate === 'string'
+    ? (profile === 'strict' ? pseudo(candidate, salt, kind) : candidate)
+    : undefined;
+  const verificationRecord = planning ? record(planning.verification) : undefined;
+  const safePlanning = planning
+    && planning.version === 1
+    && typeof planning.mode === 'string'
+    && allowedModes.has(planning.mode)
+    && verificationRecord
+    && verificationRecord.version === 1
+    && typeof verificationRecord.status === 'string'
+    && allowedVerification.has(verificationRecord.status)
+    ? {
+        version: 1,
+        mode: planning.mode,
+        ...(finiteCount(planning.plannerCalls) !== undefined ? { plannerCalls: finiteCount(planning.plannerCalls)! } : {}),
+        ...(finiteCount(planning.revisionCalls) !== undefined ? { revisionCalls: finiteCount(planning.revisionCalls)! } : {}),
+        verification: {
+          version: 1,
+          status: verificationRecord.status,
+          missingRoleCount: Array.isArray(verificationRecord.missingRoles)
+            ? verificationRecord.missingRoles.filter((role): role is string => typeof role === 'string').slice(0, 8).length
+            : 0,
+          candidateIds: Array.isArray(verificationRecord.candidateIds)
+            ? verificationRecord.candidateIds
+                .filter((id): id is string => typeof id === 'string')
+                .slice(0, 32)
+                .map((id) => pseudonym(id, 'candidate'))
+            : [],
+          reasonCode: typeof verificationRecord.reasonCode === 'string'
+            && /^[a-z0-9_:-]{1,96}$/.test(verificationRecord.reasonCode)
+            ? verificationRecord.reasonCode
+            : 'unrecognized_reason',
+        },
+      }
+    : undefined;
+  const story = Array.isArray(receipt.story)
+    ? receipt.story.flatMap((step) => {
+        const item = record(step);
+        if (!item || typeof item.stage !== 'string' || !allowedStages.has(item.stage)
+          || typeof item.status !== 'string' || !allowedStatuses.has(item.status)) return [];
+        return [{
+          stage: item.stage,
+          status: item.status,
+          reasonCode: typeof item.reasonCode === 'string' && /^[a-z0-9_:-]{1,96}$/.test(item.reasonCode)
+            ? item.reasonCode
+            : 'unrecognized_reason',
+        }];
+      })
+    : [];
+  const roleCoverage = Array.isArray(receipt.roleCoverage)
+    ? receipt.roleCoverage.flatMap((entry) => {
+        const item = record(entry);
+        if (!item || typeof item.role !== 'string' || !allowedRoles.has(item.role)) return [];
+        const candidateCount = finiteCount(item.candidateCount);
+        return candidateCount === undefined ? [] : [{ role: item.role, candidateCount }];
+      })
+    : [];
+  const cascade = record(receipt.cascade);
+  const safeCascade = cascade && typeof cascade.planFrozen === 'boolean'
+    ? {
+        attempts: Array.isArray(cascade.attempts)
+          ? cascade.attempts.flatMap((entry) => {
+              const item = record(entry);
+              if (!item || typeof item.tier !== 'string' || !allowedTiers.has(item.tier)
+                || typeof item.outcome !== 'string' || !allowedTierOutcomes.has(item.outcome)
+                || typeof item.planFrozen !== 'boolean') return [];
+              return [{ tier: item.tier, outcome: item.outcome, planFrozen: item.planFrozen }];
+            })
+          : [],
+        ...(typeof cascade.selectedTier === 'string' && allowedTiers.has(cascade.selectedTier) ? { selectedTier: cascade.selectedTier } : {}),
+        ...(typeof cascade.stopReason === 'string' && /^[a-z0-9_:-]{1,96}$/.test(cascade.stopReason) ? { stopReason: cascade.stopReason } : {}),
+        planFrozen: cascade.planFrozen,
+      }
+    : undefined;
+  const origin = record(receipt.origin);
+  const safeOrigin = origin
+    && typeof origin.boundary === 'string' && allowedBoundaries.has(origin.boundary)
+    && typeof origin.origin === 'string' && allowedOrigins.has(origin.origin)
+    && typeof origin.impact === 'string' && allowedImpacts.has(origin.impact)
+    ? { boundary: origin.boundary, origin: origin.origin, impact: origin.impact }
+    : undefined;
+  const connection = record(receipt.connection);
+  const execution = record(receipt.execution);
+  const facts = record(receipt.facts);
+  const safeConnection = connection && typeof connection.attempted === 'boolean'
+    ? { attempted: connection.attempted }
+    : undefined;
+  const executionAttempts = execution ? finiteCount(execution.attempts) : undefined;
+  const safeFacts = facts ? {
+    ...(finiteCount(facts.factCount) !== undefined ? { factCount: finiteCount(facts.factCount)! } : {}),
+    ...(typeof facts.resultFingerprint === 'string' ? { resultFingerprint: pseudonym(facts.resultFingerprint, 'result') } : {}),
+  } : undefined;
+  const safeTelemetry = sanitizeTelemetry(receipt.telemetry);
+  return {
+    ...base,
+    version: 6,
+    ...(safePlanning ? { planning: safePlanning } : {}),
+    roleCoverage,
+    ...(safeCascade ? { cascade: safeCascade } : {}),
+    ...(safeOrigin ? { origin: safeOrigin } : {}),
+    ...(safeConnection ? { connection: safeConnection } : {}),
+    ...(executionAttempts !== undefined ? { execution: { attempts: executionAttempts } } : {}),
+    ...(safeTelemetry ? { telemetry: safeTelemetry } : {}),
+    ...(safeFacts ? { facts: safeFacts } : {}),
+    ...(typeof receipt.safeNextAction === 'string' && allowedActions.has(receipt.safeNextAction) ? { safeNextAction: receipt.safeNextAction } : {}),
+    story,
+  };
+}
+
+/**
+ * Keep portable V5 parity with the full local trace without exporting raw Ask
+ * state.  The V5 receipt is already content-free; strict export additionally
+ * pseudonymizes fact/result/question identities while retaining its summary
+ * fingerprint so a support bundle can be matched to the on-device trace.
+ */
+function portableRuntimeReceiptV5(value: unknown, profile: AskTraceExportProfileV1, salt: string): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const receipt = value as Record<string, unknown>;
+  if (receipt.version !== 5 || typeof receipt.runId !== 'string') return undefined;
+  const record = (value: unknown): Record<string, unknown> | undefined =>
+    value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  const summary = record(receipt.summary);
+  const state = record(receipt.state);
+  const businessAnswer = record(receipt.businessAnswer);
+  const provider = record(receipt.provider);
+  const pseudonym = (value: unknown, kind: string) => typeof value === 'string'
+    ? (profile === 'strict' ? pseudo(value, salt, kind) : value)
+    : undefined;
+  const safeSummary = summary ? {
+    version: summary.version,
+    summaryFingerprint: summary.summaryFingerprint,
+    runtimeMode: summary.runtimeMode,
+    selectedCompiler: summary.selectedCompiler,
+    programTaskCount: summary.programTaskCount,
+    admittedCandidateCount: summary.admittedCandidateCount,
+    toolCallCount: summary.toolCallCount,
+    executionAttempts: summary.executionAttempts,
+  } : undefined;
+  const safeState = state ? {
+    version: state.version,
+    mode: state.mode,
+    phase: state.phase,
+    questionFingerprint: pseudonym(state.questionFingerprint, 'question'),
+    kind: state.kind,
+    requirementCounts: state.requirementCounts,
+    mission: state.mission,
+    workspace: portableRuntimeWorkspaceV5(state.workspace, profile, salt),
+    program: (() => {
+      const program = record(state.program);
+      return program ? {
+        id: pseudonym(program.id, 'program'),
+        taskCount: program.taskCount,
+        candidateCount: program.candidateCount,
+        requiredRoles: program.requiredRoles,
+        outputAssertionCount: program.outputAssertionCount,
+      } : undefined;
+    })(),
+    resolvedPlan: (() => {
+      const plan = record(state.resolvedPlan);
+      return plan ? {
+        version: plan.version,
+        programId: pseudonym(plan.programId, 'program'),
+        compiler: plan.compiler,
+        selectedTier: plan.selectedTier,
+        planFrozen: plan.planFrozen,
+        reviewRequired: plan.reviewRequired,
+        planFingerprint: pseudonym(plan.planFingerprint, 'plan'),
+      } : undefined;
+    })(),
+    counters: state.counters,
+  } : undefined;
+  const safeBusinessAnswer = businessAnswer ? {
+    version: businessAnswer.version,
+    mode: businessAnswer.mode,
+    trustState: businessAnswer.trustState,
+    factIds: Array.isArray(businessAnswer.factIds)
+      ? businessAnswer.factIds.filter((id): id is string => typeof id === 'string').map((id) => pseudonym(id, 'fact'))
+      : [],
+    resultFingerprint: pseudonym(businessAnswer.resultFingerprint, 'result'),
+    limitationCount: businessAnswer.limitationCount,
+  } : undefined;
+  const safeProvider = provider ? {
+    version: provider.version,
+    cause: provider.cause,
+    phase: provider.phase,
+    retryable: provider.retryable,
+    safeAction: provider.safeAction,
+    httpStatusClass: provider.httpStatusClass,
+    providerFingerprint: pseudonym(provider.providerFingerprint, 'provider'),
+    modelFingerprint: pseudonym(provider.modelFingerprint, 'model'),
+    baseOriginFingerprint: pseudonym(provider.baseOriginFingerprint, 'origin'),
+  } : undefined;
+  return {
+    version: 5,
+    runId: pseudonym(receipt.runId, 'run'),
+    ...(safeState ? { state: safeState } : {}),
+    ...(safeSummary ? { summary: safeSummary } : {}),
+    ...(safeBusinessAnswer ? { businessAnswer: safeBusinessAnswer } : {}),
+    ...(safeProvider ? { provider: safeProvider } : {}),
+    finalStopReason: receipt.finalStopReason,
+  };
+}
+
+function portableRuntimeWorkspaceV5(value: unknown, profile: AskTraceExportProfileV1, salt: string): Record<string, unknown> | undefined {
+  const workspace = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+  if (!workspace) return undefined;
+  const pseudoIdentifier = (value: unknown, kind: string) => typeof value === 'string'
+    ? (profile === 'strict' ? pseudo(value, salt, kind) : value)
+    : undefined;
+  const sourceValues = new Set([
+    'certified', 'semantic', 'governed_relational', 'exploratory', 'dbt_manifest', 'runtime_schema', 'vector', 'conversation', 'business_context',
+  ]);
+  const statuses = new Set(['available', 'empty', 'stale', 'unavailable', 'errored', 'skipped']);
+  const toolKinds = new Set(['retrieve_snapshot', 'candidate_extension', 'compiler_broker', 'provider_meaning', 'execute', 'repair']);
+  const toolStatuses = new Set(['completed', 'skipped', 'failed']);
+  const reasonCodes = new Set([
+    'snapshot_acquired', 'broker_retrieval_required', 'snapshot_retrieval_failed', 'shadow_preserves_legacy_decision',
+    'meaning_resolution_completed', 'canonical_or_structured_binding', 'meaning_resolution_failed', 'meaning_resolution_unavailable',
+    'execution_completed', 'execution_failed', 'repair_completed', 'repair_exhausted', 'no_compiler_selected',
+  ]);
+  const finiteCount = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.min(10_000, Math.floor(value)))
+    : undefined;
+  const sourceCoverage = Array.isArray(workspace.sourceCoverage)
+    ? workspace.sourceCoverage.flatMap((coverage) => {
+        if (!coverage || typeof coverage !== 'object' || Array.isArray(coverage)) return [];
+        const record = coverage as Record<string, unknown>;
+        if (typeof record.source !== 'string' || !sourceValues.has(record.source)
+          || typeof record.status !== 'string' || !statuses.has(record.status)) return [];
+        const candidateCount = finiteCount(record.candidateCount);
+        return [{ source: record.source, status: record.status, ...(candidateCount !== undefined ? { candidateCount } : {}) }];
+      })
+    : [];
+  const tools = Array.isArray(workspace.tools)
+    ? workspace.tools.flatMap((tool) => {
+        if (!tool || typeof tool !== 'object' || Array.isArray(tool)) return [];
+        const record = tool as Record<string, unknown>;
+        if (typeof record.id !== 'string' || typeof record.kind !== 'string' || !toolKinds.has(record.kind)
+          || typeof record.status !== 'string' || !toolStatuses.has(record.status)) return [];
+        return [{
+          id: pseudoIdentifier(record.id, 'tool'),
+          kind: record.kind,
+          status: record.status,
+          reasonCode: typeof record.reasonCode === 'string' && reasonCodes.has(record.reasonCode)
+            ? record.reasonCode
+            : 'unrecognized_reason',
+        }];
+      })
+    : [];
+  const admittedCandidateCount = finiteCount(workspace.admittedCandidateCount);
+  const excludedCandidateCount = finiteCount(workspace.excludedCandidateCount);
+  return {
+    ...(typeof workspace.snapshotId === 'string' ? { snapshotId: pseudoIdentifier(workspace.snapshotId, 'snapshot') } : {}),
+    ...(typeof workspace.sourceFingerprint === 'string' ? { sourceFingerprint: pseudoIdentifier(workspace.sourceFingerprint, 'source') } : {}),
+    ...(admittedCandidateCount !== undefined ? { admittedCandidateCount } : {}),
+    ...(excludedCandidateCount !== undefined ? { excludedCandidateCount } : {}),
+    sourceCoverage,
+    tools,
   };
 }
 

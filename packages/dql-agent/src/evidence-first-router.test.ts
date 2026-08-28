@@ -2818,7 +2818,10 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
         filters: [],
       },
     });
-    expect(requirements.measures).toEqual(['count']);
+    // Keep the authored business measure intact. Collapsing this to generic
+    // `count` makes an unfiltered order-count metric indistinguishable from
+    // scoped count metrics during the provider-free semantic fast path.
+    expect(requirements.measures).toEqual(['order count']);
 
     const physical = [
       candidate({

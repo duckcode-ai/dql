@@ -71,6 +71,15 @@ export interface MetadataMeaningEvidencePackage {
    * role-balanced.
    */
   qualifiedCandidates?: MetadataMeaningCandidate[];
+  /**
+   * The one broad, immutable retrieval snapshot retained by an Ask host before
+   * it makes its own 32-item workspace and 16-card planner package.  This is
+   * deliberately larger than `qualifiedCandidates`: a relevance-only first
+   * cut must not erase a physical product/order relation before role-balanced
+   * admission has a chance to reserve it.  It is not a provider package and
+   * callers must still make a bounded, auditable admission decision.
+   */
+  snapshotCandidates?: MetadataMeaningCandidate[];
   byEvidenceClass: Record<MetadataEvidenceClass, MetadataMeaningCandidate[]>;
   ambiguousGroups: Array<{ candidateIds: string[]; reason: string }>;
 }
@@ -87,6 +96,12 @@ export interface AgentRetrievalEvidenceAdapterOptions {
   contextObjects?: MetadataObject[];
   /** Snapshot retrieval results used to preserve multi-lane provenance. */
   retrievalLanes?: MetadataRetrievalLaneResult[];
+  /**
+   * Ask Analyst Runtime consumes the broad immutable snapshot and performs
+   * its own role-balanced 32/16 admission.  Legacy callers retain the compact
+   * qualified package by default.
+   */
+  preferSnapshotCandidates?: boolean;
 }
 
 export interface MeaningEvidenceInputCandidate {
@@ -103,6 +118,7 @@ const GENERIC_MEANING_TOKENS = new Set([
 ]);
 const MAX_CANDIDATES_PER_CLASS = 4;
 const MAX_QUALIFIED_CANDIDATES = 32;
+const MAX_SNAPSHOT_CANDIDATES = 80;
 const ANALYTICAL_TIME_GRAINS = new Set(['day', 'week', 'month', 'quarter', 'year', 'season', 'period']);
 
 /**
@@ -148,12 +164,27 @@ export function buildMeaningEvidencePackage(
     || left.item.rank - right.item.rank
     || left.item.row.objectKey.localeCompare(right.item.row.objectKey));
 
-  const qualifiedPeerMap = buildAmbiguityPeers(eligible.slice(0, MAX_QUALIFIED_CANDIDATES).map((candidate) => ({
+  const snapshotEligible = eligible.slice(0, MAX_SNAPSHOT_CANDIDATES);
+  const qualifiedPeerMap = buildAmbiguityPeers(snapshotEligible.map((candidate) => ({
     objectKey: candidate.item.row.objectKey,
     aliases: candidate.aliases,
   })));
+  const snapshotCounts: Record<MetadataEvidenceClass, number> = { certified: 0, semantic: 0, sql: 0 };
+  const snapshotCandidates = snapshotEligible.map((candidate) => {
+    snapshotCounts[candidate.evidenceClass] += 1;
+    return candidateCard(
+      candidate.item.row,
+      candidate.evidenceClass,
+      snapshotCounts[candidate.evidenceClass],
+      candidate.relevanceScore,
+      candidate.aliases,
+      candidate.relevanceReasons,
+      qualifiedPeerMap.get(candidate.item.row.objectKey) ?? [],
+      laneMembership.get(candidate.item.row.objectKey),
+    );
+  });
   const qualifiedCounts: Record<MetadataEvidenceClass, number> = { certified: 0, semantic: 0, sql: 0 };
-  const qualifiedCandidates = eligible.slice(0, MAX_QUALIFIED_CANDIDATES).map((candidate) => {
+  const qualifiedCandidates = snapshotEligible.slice(0, MAX_QUALIFIED_CANDIDATES).map((candidate) => {
     qualifiedCounts[candidate.evidenceClass] += 1;
     return candidateCard(
       candidate.item.row,
@@ -236,6 +267,7 @@ export function buildMeaningEvidencePackage(
     candidates: (['certified', 'semantic', 'sql'] as const)
       .flatMap((evidenceClass) => byEvidenceClass[evidenceClass]),
     qualifiedCandidates,
+    snapshotCandidates,
     byEvidenceClass,
     ambiguousGroups: ambiguityGroups(peerMap),
   };
@@ -510,7 +542,9 @@ export function toAgentRetrievalEvidence(
   questionPlan: AnalysisQuestionPlan,
   options: AgentRetrievalEvidenceAdapterOptions = {},
 ): AgentRetrievalEvidence {
-  const sourceCandidates = evidence.qualifiedCandidates?.length
+  const sourceCandidates = options.preferSnapshotCandidates && evidence.snapshotCandidates?.length
+    ? evidence.snapshotCandidates
+    : evidence.qualifiedCandidates?.length
     ? evidence.qualifiedCandidates
     : evidence.candidates;
   const maxRelevance = Math.max(

@@ -89,3 +89,102 @@ only normal zero-call exception.
 
 The focused package tests and production builds are implementer evidence. The
 designated built-CLI fixture and independent verifier still own `verified` status.
+
+## Ask Analyst Runtime V1.15 amendment
+
+`AskAnalystRuntimeV1` is the authoritative entrypoint for Ask and explicit
+Research. It creates one `BusinessQuestionFrameV3`, bounded
+`AnalyticalMissionV1`, same-snapshot `EvidenceWorkspaceV1`, and route-neutral
+`AnalyticalProgramV1` before invoking a compiler. Certified blocks, MetricFlow,
+governed relational execution, and review-required exploratory SQL are compiler
+choices for that one program; they are not independent routers. The previous
+hybrid router remains a compiler broker and execution adapter only. It receives
+the runtime-owned evidence snapshot, so it cannot retrieve a second snapshot or
+reparse the business question.
+
+- `AGT-035`: exact stable qualified metric/block references, structured
+  selections, reruns, and frozen Research children are zero-provider meaning
+  paths. A normal fresh Ask gets at most two planning continuations.
+- `AGT-036`: ordinary Ask has at most three tasks, twelve runtime tools, one
+  execution per task, and one repair total under the existing 45-second ceiling.
+- `AGT-037`: pre-freeze unavailable/ineligible compilers advance in canonical
+  order; policy denial remains terminal and a frozen compiler never downgrades.
+- `AGT-038`: clarification is reserved for two or more validated executable
+  business meanings that would change the result. Technical/retrieval/provider
+  failures are typed incident states, never clarification prompts.
+- `AGT-039`: results produce `BusinessAnswerV1` from validated fact IDs. The
+  default narration is facts-only; deterministic narration is labelled when no
+  fact set exists. An unspecified ranking limit defaults to 10 and is retained
+  in the typed frame for presentation.
+- `AGT-040`: Research uses the same runtime for each bounded child program and
+  labels fewer than three groundable branches as limited scope. Row presence is
+  not causal evidence.
+- `API-015`: `AskAnalystStateV1` and the typed conversation delta persist with
+  `AgentRunDiagnosticReceiptV5`; V1–V4 stay readable.
+- `OBS-015`: the default inspector story is What happened, Why, Impact, and
+  How to proceed. Raw/noisy local spans remain available only in the Advanced
+  trace view.
+- `E2E-023`: browser/CLI/MCP parity compares the same program IDs, compiler
+  selection, frozen-plan state, fact/result fingerprints, and terminal cause.
+
+This amendment is implemented, not independently verified. The designated
+built-CLI fixture and independent verifier still own verification status.
+
+## Retrieval-first adaptive Ask amendment
+
+`AskAnalystRuntimeV1` now uses a retrieval-first adaptive loop for ordinary
+Ask. It keeps the same governed cascade and immutable-plan safety boundary,
+but makes interpretation and recovery explicit rather than treating a narrow
+planner package as proof that the snapshot is absent.
+
+1. One immutable source snapshot is prequalified into at most 32 qualified
+   workspace candidates. A role-balanced package releases at most 16 cards to
+   the planner: explicit measures, entity key/display, each requested
+   categorical dimension, time, filter/member, and relationship roles are
+   reserved before correlated candidates fill spare capacity. Excluded cards
+   are recorded as `not_admitted`, never as missing (`CTX-008`, `AGT-041`).
+2. A normal analytical Ask receives one provider-neutral structured planning
+   call unless an exact, server-proven fast path applies. The planner returns
+   supplied IDs, typed operations, assumptions, and an optional one-role
+   recovery request; it cannot emit SQL, joins, trust, policy, compiler
+   eligibility, or a frozen plan (`AGT-042`).
+3. The verifier proves every selected ID against the supplied package and
+   every explicit requested measure, entity/display, dimension, member/filter,
+   time, ranking, and output requirement. Parser/retrieval guesses are
+   advisory; current-question filter literals, time/calendar, ranking, and
+   output constraints remain host-owned. Qualified planner bindings may correct
+   a stale inferred metric or display field, but cannot weaken those explicit
+   constraints (`AGT-044`).
+4. If exactly one verifier-proven role is missing, the host performs one
+   same-snapshot, role/term-targeted search over the immutable 32-card
+   workspace, admits at most four cards and three existing relationship paths,
+   and permits exactly one constrained revision. The revision receives the
+   prior proposal, prior selected IDs, verification feedback, and only the
+   released target cards. Hidden/invented IDs, unmatched terms, unsafe joins,
+   multiple unresolved roles, and all recovery after freeze are typed gaps,
+   not another planning loop (`AGT-042`, `AGT-045`).
+5. The verified route-neutral program then evaluates certified → MetricFlow →
+   governed relational → review-required exploratory SQL. Pre-freeze
+   unavailable/ineligible tiers advance; denied remains terminal; a frozen
+   plan does not downgrade. Ordinary Ask never becomes Research from wording
+   alone. A planner may merge only semantically compatible ingress clauses;
+   otherwise every accepted one of at most three task programs gets its own
+   frozen/executed receipt, or the whole Ask returns a pre-freeze scope gap
+   without partial-success presentation (`AGT-043`, `AGT-046`).
+
+Planner readiness is checked and traced before planner dispatch. A real
+preflight cause is retained; an unconfigured or bare-unavailable provider is
+an `unknown` configuration-safe incident, not an authentication claim. A
+connection message is legal only after a frozen plan has actually attempted a
+connection/compiler/execution boundary. Result facts are built from the final
+executed answer artifact only, then constrain `BusinessAnswerV2` narration;
+deterministic factual narration remains available when the narration call
+fails.
+
+`AskAnalystStateV2`, `AnalyticalProgramV2`, the typed conversation delta, and
+`AgentRunDiagnosticReceiptV6` are additive JSON persistence. V1 state/program
+and V1–V5 receipts remain readable. The default trace is one compact decision
+story—interpretation, role coverage, planner, verifier/recovery, cascade,
+freeze/connection, execution, facts, and safe next action—while raw spans and
+candidate lifecycle remain Advanced local evidence (`API-016`, `OBS-016`,
+`E2E-024`).

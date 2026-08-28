@@ -4,7 +4,7 @@
  * a few verbatim recent turns + how the new question relates to the topic.
  */
 
-import type { ConversationStore, ConversationTurn } from './session-store.js';
+import type { ConversationResultMemberSetV1, ConversationStore, ConversationTurn } from './session-store.js';
 import type { AgentDqlArtifactReference } from '../answer-loop.js';
 import type { CascadeAnswerResult } from '../cascade/cascade.js';
 import type { KnowledgeLens } from '../domain-context.js';
@@ -53,6 +53,8 @@ export interface ConversationSnapshotTurn {
   resultColumns?: string[];
   resultRowCount?: number;
   resultDimensionValues?: Record<string, string[]>;
+  /** Bounded local continuity sets; never rendered into portable trace output. */
+  resultMemberSets?: ConversationResultMemberSetV1[];
   sourceSql?: string;
   dqlArtifact?: AgentDqlArtifactReference;
   cascade?: CascadeAnswerResult;
@@ -97,6 +99,7 @@ export interface ConversationEnvelopeV1 {
       ambiguityCandidateIds: string[];
       requirements?: AnalyticalRequirementSetV1;
       snapshotId?: string;
+      continuityFingerprint?: string;
     };
   };
 }
@@ -236,12 +239,16 @@ function pendingClarificationSelection(
   const snapshotId = typeof record.snapshotId === 'string' && record.snapshotId.trim()
     ? record.snapshotId.trim()
     : undefined;
+  const continuityFingerprint = typeof record.continuityFingerprint === 'string' && record.continuityFingerprint.trim()
+    ? record.continuityFingerprint.trim()
+    : undefined;
   return {
     version: 1,
     optionIds,
     ambiguityCandidateIds,
     ...(requirements ? { requirements } : {}),
     ...(snapshotId ? { snapshotId } : {}),
+    ...(continuityFingerprint ? { continuityFingerprint } : {}),
   };
 }
 
@@ -497,6 +504,7 @@ function snapshotTurn(turn: ConversationTurn): ConversationSnapshotTurn {
     resultColumns: turn.result?.columns,
     resultRowCount: turn.result?.rowCount,
     resultDimensionValues: turn.result?.dimensionValues,
+    resultMemberSets: turn.result?.memberSets,
     refusalCode: turn.refusalCode,
     executionError: turn.executionError,
     sourceSql: turn.sql,

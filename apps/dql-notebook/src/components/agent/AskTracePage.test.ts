@@ -92,6 +92,63 @@ describe('AskTracePage presentation model', () => {
     expect(notebook.howToFix).not.toContain('Inspect the recorded decision');
   });
 
+  it('OBS-016 renders the V6 decision story with the real pre-freeze and execution boundaries', () => {
+    const rootSpan = root();
+    const trace: AskTraceDataV1 = {
+      envelope: {
+        version: 1, traceId: 'v'.repeat(32), rootSpanId: rootSpan.spanId, runId: 'run-v6-story', surface: 'browser', mode: 'ask', questionFingerprint: 'sha256:question',
+        status: 'blocked', recordingStatus: 'complete', startedAt: rootSpan.startedAt, spanCount: 1, candidateDecisionCount: 3, droppedRecordCount: 0,
+      },
+      spans: [rootSpan], candidateDecisions: [], links: [],
+      runtimeDecisionSummary: {
+        version: 2, summaryFingerprint: 'f'.repeat(64), runtimeMode: 'authoritative',
+        whatHappened: 'The Ask runtime did not complete an executable analytical answer.',
+        why: 'No safe executable compiler plan was accepted from the current evidence snapshot.',
+        impact: 'No executable data answer was completed for this run.',
+        nextAction: 'inspect_failure', programTaskCount: 1, admittedCandidateCount: 16, toolCallCount: 2, executionAttempts: 0,
+      },
+      runtimeReceiptV6: {
+        version: 6, runId: 'run-v6-story',
+        state: {},
+        summary: {
+          version: 2, summaryFingerprint: 'f'.repeat(64), runtimeMode: 'authoritative',
+          whatHappened: 'unused', why: 'unused', impact: 'unused', nextAction: 'inspect_failure',
+          programTaskCount: 1, admittedCandidateCount: 16, toolCallCount: 2, executionAttempts: 0,
+        },
+        finalStopReason: 'coverage_gap',
+        planning: {
+          version: 1, mode: 'targeted_revision', plannerCalls: 2, revisionCalls: 1,
+          verification: { status: 'invalid', missingRoles: ['relationship'], candidateIds: [], reasonCode: 'pre_freeze_verification_blocked' },
+        },
+        roleCoverage: [{ role: 'metric', candidateCount: 2 }, { role: 'relationship', candidateCount: 1 }],
+        cascade: { attempts: [{ tier: 'semantic', outcome: 'ineligible', planFrozen: false }], stopReason: 'coverage_gap', planFrozen: false },
+        origin: { boundary: 'cascade', origin: 'governance_gate', impact: 'answer_not_produced' },
+        connection: { attempted: false },
+        execution: { attempts: 0 },
+        facts: { factCount: 0 },
+        safeNextAction: 'inspect_failure',
+        story: [
+          { stage: 'retrieval', status: 'completed', reasonCode: 'snapshot_acquired' },
+          { stage: 'verification', status: 'blocked', reasonCode: 'pre_freeze_verification_blocked' },
+          { stage: 'connection', status: 'skipped', reasonCode: 'connection_not_attempted' },
+          { stage: 'execution', status: 'skipped', reasonCode: 'execution_not_attempted' },
+        ],
+      },
+    };
+    const markup = renderToStaticMarkup(createElement(TraceDecisionStory, { trace, t: themes.paper, onSelectSpan: () => undefined }));
+    expect(markup).toContain('Role coverage');
+    expect(markup).toContain('metric: 2');
+    expect(markup).toContain('Planner &amp; verification');
+    expect(markup).toContain('targeted revision');
+    expect(markup).toContain('Cascade &amp; freeze');
+    expect(markup).toContain('Connection &amp; execution');
+    expect(markup).toContain('no connection attempted');
+    expect(markup).toContain('Origin boundary');
+    expect(markup).toContain('cascade · governance gate · answer not produced.');
+    expect(markup).toContain('Inspect the recorded decision and advanced evidence before retrying.');
+    expect(markup).not.toContain('sql.execute');
+  });
+
   it('renders the recorded limited-Research incident with its branch-focused recovery action', () => {
     const incident = incidentSummaryFromDecisionSummary({
       version: 1,

@@ -1238,6 +1238,116 @@ export interface AgentRunDiagnosticReceiptV4 {
   finalStopReason: string;
 }
 
+/** V1.15 default Ask trace story. Detailed spans remain in the local trace page. */
+export interface AskDecisionSummaryV2 {
+  version: 2;
+  summaryFingerprint: string;
+  runtimeMode: 'legacy' | 'shadow' | 'authoritative';
+  whatHappened: string;
+  why: string;
+  impact: string;
+  nextAction: AskTerminalIncidentV1['safeAction'] | 'none';
+  selectedCompiler?: 'certified' | 'metricflow' | 'governed_relational' | 'exploratory_sql' | 'none';
+  programTaskCount: number;
+  admittedCandidateCount: number;
+  toolCallCount: number;
+  executionAttempts: number;
+}
+
+export interface AgentRunDiagnosticReceiptV5 {
+  version: 5;
+  runId: string;
+  summary: AskDecisionSummaryV2;
+  finalStopReason: string;
+  state?: Record<string, unknown>;
+  businessAnswer?: {
+    version: 1;
+    mode: 'facts_only' | 'deterministic_fallback';
+    trustState: AgentRunTrustState;
+    factIds: string[];
+    resultFingerprint?: string;
+    limitationCount: number;
+  };
+  provider?: {
+    version: 1;
+    cause: string;
+    phase: string;
+    retryable: boolean;
+    safeAction: string;
+    httpStatusClass?: '4xx' | '5xx';
+    providerFingerprint?: string;
+    modelFingerprint?: string;
+    baseOriginFingerprint?: string;
+  };
+}
+
+/** Concise default Ask story. Raw trace spans remain available only in Advanced. */
+export interface AgentRunDiagnosticReceiptV6 extends Omit<AgentRunDiagnosticReceiptV5, 'version'> {
+  version: 6;
+  planning?: {
+    version: 1;
+    mode: string;
+    plannerCalls: number;
+    revisionCalls: number;
+    verification: { status: string; missingRoles: string[]; candidateIds: string[]; reasonCode: string };
+  };
+  roleCoverage: Array<{ role: string; candidateCount: number }>;
+  cascade: {
+    attempts: Array<{ tier: string; outcome: string; planFrozen: boolean }>;
+    selectedTier?: string;
+    stopReason?: string;
+    planFrozen: boolean;
+  };
+  origin?: { boundary: string; origin: string; impact: string };
+  connection: { attempted: boolean };
+  execution: { attempts: number };
+  facts: { factCount: number; resultFingerprint?: string };
+  safeNextAction: AgentRunDiagnosticReceiptV5['summary']['nextAction'];
+  story: Array<{
+    stage: 'retrieval' | 'role_coverage' | 'planner' | 'verification' | 'targeted_recovery' | 'cascade' | 'freeze' | 'connection' | 'execution' | 'facts';
+    status: 'completed' | 'skipped' | 'blocked' | 'unavailable';
+    reasonCode: string;
+  }>;
+}
+
+/**
+ * Narrow persisted Ask envelope used by reader-facing surfaces. The complete
+ * local continuation is server-owned; the browser only needs this stable
+ * runtime identity to select the fact-bound BusinessAnswer presentation.
+ */
+export interface AskAnalystRuntimeStateV1 {
+  version: 1;
+  mode: 'legacy' | 'shadow' | 'authoritative';
+  phase: 'framed' | 'evidence_ready' | 'program_ready' | 'compiled' | 'executed' | 'clarify' | 'blocked';
+  frame?: {
+    version: 3;
+    questionFingerprint: string;
+    kind: string;
+  };
+  program?: {
+    version: 1;
+    id: string;
+    taskIds?: string[];
+  };
+  counters?: {
+    planningContinuations: number;
+    toolCalls: number;
+    executionAttempts: number;
+    repairAttempts: number;
+  };
+}
+
+/** Reader-facing fact-bound answer; raw executor prose is not a UI authority. */
+export interface AgentRunBusinessAnswerV1 {
+  version: 1;
+  mode: 'facts_only' | 'deterministic_fallback';
+  trustState: AgentRunTrustState;
+  factIds: string[];
+  resultFingerprint?: string;
+  answer?: string;
+  limitations: string[];
+}
+
 /** Content-free persisted outcome of the answer narration stage. */
 export interface NarrationIntegrityReceiptV1 {
   version: 1;
@@ -1371,6 +1481,11 @@ export interface AskTraceDataV1 {
   links: AskTraceLinkV1[];
   /** Joined at read time from the durable run receipt; old traces omit it. */
   decisionSummary?: AskDecisionSummaryV1;
+  runtimeDecisionSummary?: AskDecisionSummaryV2;
+  /** Same redacted V5 projection returned by the full trace API. */
+  runtimeReceiptV5?: AgentRunDiagnosticReceiptV5;
+  /** Same redacted V6 decision story returned by the full trace API. */
+  runtimeReceiptV6?: AgentRunDiagnosticReceiptV6;
 }
 
 export interface AskTraceStoreStatusV1 {
@@ -1434,6 +1549,11 @@ export interface AgentRun {
   diagnosticReceiptV2?: AgentRunDiagnosticReceiptV2;
   diagnosticReceiptV3?: AgentRunDiagnosticReceiptV3;
   diagnosticReceiptV4?: AgentRunDiagnosticReceiptV4;
+  diagnosticReceiptV5?: AgentRunDiagnosticReceiptV5;
+  diagnosticReceiptV6?: AgentRunDiagnosticReceiptV6;
+  businessAnswer?: AgentRunBusinessAnswerV1;
+  /** Persisted server-owned runtime checkpoint; client consumes the narrow stable shape only. */
+  askAnalystState?: AskAnalystRuntimeStateV1;
   narrationIntegrityReceipt?: NarrationIntegrityReceiptV1;
   telemetry?: AgentRunTelemetryV1;
   /** OBS-001: compact local trace reference; trace detail is never embedded here. */

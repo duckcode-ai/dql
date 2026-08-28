@@ -96,12 +96,16 @@ export {
   resolveTopRankedRegionDependency,
   researchVerdictFromValidatedObservation,
   selectRoleBalancedMeaningCandidates,
+  selectRoleBalancedWorkspaceCandidates,
   splitAnalyticalTasks,
   summarizeTaskOutcomes,
   validateSelectedResultBinding,
 } from './analytical-orchestration.js';
 export { evaluateAnalyticalRequestPolicy } from './analytical-request-policy.js';
 export type { AnalyticalRequestPolicyDecision } from './analytical-request-policy.js';
+/** V1.15 authoritative Ask entrypoint; legacy router is its compiler broker. */
+export { createAskAnalystRuntimeV1 } from './ask-runtime/ask-analyst-runtime.js';
+export type { AskAnalystRuntimeOptionsV1, AskAnalystRuntimeV1 } from './ask-runtime/ask-analyst-runtime.js';
 /** Local-only, additive Ask/Research execution tracing (OBS-001..OBS-010). */
 export * from './ask-observability/index.js';
 export type {
@@ -135,6 +139,38 @@ export type {
   ContextFusionResultV1,
   EvidenceCandidateRoleV1,
   AskDecisionSummaryV1,
+  AskDecisionSummaryV2,
+  AskAnalystRuntimeModeV1,
+  AskPlanningModeV1,
+  BusinessQuestionFrameV3,
+  BusinessQuestionFrameV4,
+  AnalyticalHypothesisV1,
+  AnalyticalHypothesisKindV1,
+  AnalyticalMissionV1,
+  EvidenceWorkspaceToolReceiptV1,
+  EvidenceWorkspaceV1,
+  EvidenceWorkspaceV2,
+  AnalyticalProgramV1,
+  AnalyticalProgramV2,
+  AnalyticalProgram,
+  ResolvedAnalyticalPlanV2,
+  AskAnalystConversationDeltaV1,
+  AskAnalystConversationDeltaV2,
+  AskAnalystStateV1,
+  AskAnalystStateV2,
+  AskAnalystState,
+  BusinessAnswerV1,
+  BusinessAnswerV2,
+  BusinessAnswer,
+  AnalyticalPlannerCandidateCardV1,
+  AnalyticalPlannerRequestV1,
+  AnalyticalPlannerOperationV1,
+  AnalyticalPlannerTaskProposalV1,
+  AnalyticalPlannerProposalV1,
+  TargetedContextRequestV1,
+  TargetedContextResultV1,
+  ProgramVerificationFeedbackV1,
+  AskAnalystPlanningReceiptV1,
   AskTerminalIncidentV1,
   ExploratoryExecutionFreezeV1,
   ExploratoryRequiredOutputBindingProofV1,
@@ -142,6 +178,8 @@ export type {
   ExploratoryExecutionAuthorizationReceiptV1,
   AgentRunDiagnosticReceiptV3,
   AgentRunDiagnosticReceiptV4,
+  AgentRunDiagnosticReceiptV5,
+  AgentRunDiagnosticReceiptV6,
   ProviderFailureCauseV1,
   ProviderFailureDiagnosticV1,
   ResearchEvidenceLedgerV1,
@@ -392,6 +430,7 @@ export type {
   AgentRunLifecycleState,
   AgentRunLifecycleV1,
   AgentRunProgressV1,
+  AgentRunPriorResultMemberBindingV1,
   AgentRunSelectedObject,
   AgentRunStatus,
   AgentRunStep,
@@ -417,6 +456,10 @@ export {
   type LlmAgentRunPlannerOptions,
 } from "./agent-run-planner.js";
 export {
+  buildMeaningSystemPrompt,
+  buildMeaningUserPrompt,
+  bindAskAnalystProgramMeaningV1,
+  compileAskAnalyticalProgramV1,
   createHybridRouter,
   parseMeaningResolution,
   type RouterClassification,
@@ -897,6 +940,8 @@ export type {
   ConversationThread,
   ConversationTurn,
   ConversationTurnInput,
+  ConversationResultMemberEntityV1,
+  ConversationResultMemberSetV1,
   ConversationTurnResult,
   ConversationTurnSearchOptions,
 } from "./conversation/session-store.js";

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,7 +37,7 @@ function safeExploratoryCascade() {
       dimensions: ['customer'],
       entityTerms: ['customer'],
       entityDisplayTerms: ['customer name'],
-      memberTerms: [],
+      memberTerms: ['Brittany Barrera'],
     },
     sourceCoverage: [
       { version: 1 as const, source: 'semantic' as const, status: 'available' as const, candidateIds: ['semantic:metric:revenue'] },
@@ -454,6 +454,396 @@ describe("AgentRunEngine", () => {
       planFrozen: false,
     });
     expect(run.diagnosticReceiptV3?.cascade?.attempts).toEqual(cascade.attempts);
+  });
+
+  it('AGT-035/API-015/OBS-015 persists one Ask runtime state and fact-bound decision story', async () => {
+    const requirements = {
+      version: 1 as const,
+      measures: ['revenue'],
+      dimensions: [],
+      entityTerms: [],
+      entityDisplayTerms: [],
+      memberTerms: ['Brittany Barrera'],
+    };
+    const state = {
+      version: 1 as const,
+      mode: 'authoritative' as const,
+      phase: 'compiled' as const,
+      frame: {
+        version: 3 as const,
+        questionFingerprint: 'sha256:question',
+        kind: 'aggregation' as const,
+        requirements,
+        conversation: { binding: 'none' as const },
+      },
+      mission: { version: 1 as const, mode: 'ask' as const, taskLimit: 3, planningContinuationLimit: 2, tasks: [], hypotheses: [] },
+      workspace: {
+        version: 1 as const,
+        snapshotId: 'snapshot-runtime-v1',
+        sourceCoverage: [{ version: 1 as const, source: 'semantic' as const, status: 'available' as const, candidateIds: ['semantic:metric:revenue'] }],
+        admittedCandidateIds: ['semantic:metric:revenue'],
+        excludedCandidates: [],
+        tools: [{ version: 1 as const, id: 'tool:retrieve_snapshot', kind: 'retrieve_snapshot' as const, status: 'completed' as const, candidateIds: ['semantic:metric:revenue'], reasonCode: 'snapshot_acquired' }],
+      },
+      program: {
+        version: 1 as const,
+        id: 'program:revenue',
+        frameFingerprint: 'sha256:question',
+        taskIds: [],
+        candidateIds: ['semantic:metric:revenue'],
+        requiredRoles: ['metric' as const],
+        filters: [{ fieldTerms: ['customer_name'], memberIds: ['Brittany Barrera'], value: 'Brittany Barrera', operator: 'equals' as const }],
+        comparison: { kind: 'none' as const, terms: [] },
+        relationshipRequirements: [],
+        outputs: {
+          measures: ['revenue'], dimensions: [], entityDisplayTerms: [],
+          assertions: ['all_requested_measures' as const, 'result_contract' as const],
+        },
+      },
+      conversationDelta: { version: 1 as const, sourceQuestionFingerprint: 'sha256:question', partialFrame: { kind: 'aggregation' as const, requirements } },
+      planningContinuations: 0,
+      toolCalls: 2,
+      executionAttempts: 0,
+      repairAttempts: 0,
+    };
+    const decision = frozenSemanticDecision();
+    decision.askAnalystDecision = {
+      version: 1,
+      mode: 'authoritative',
+      state,
+      resolvedPlan: {
+        version: 2,
+        programId: state.program.id,
+        compiler: 'metricflow',
+        selectedTier: 'semantic',
+        planFrozen: true,
+        reviewRequired: false,
+        planFingerprint: 'sha256:frozen-semantic',
+      },
+      frozenPlan: {
+        source: 'deterministic',
+        rationale: 'Runtime-owned frozen semantic task.',
+        steps: [{
+          id: 'program:revenue:task:1',
+          route: 'semantic_answer',
+          goal: 'revenue',
+          successCriteria: ['Execute only the frozen program.'],
+        }],
+      },
+    };
+    const store = new InMemoryAgentRunStore();
+    const planner = {
+      plan: vi.fn(() => {
+        throw new Error('The legacy planner must not replace a runtime-frozen Ask plan.');
+      }),
+      replan: vi.fn(() => ({ decision: 'accept' as const })),
+    };
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-ask-runtime-v5',
+      now: fixedClock(),
+      store,
+      planner,
+      router: { decide: () => decision },
+      executors: {
+        semantic_answer: () => ({
+          // The executor's prose is never answer authority. A successful
+          // canonical result must instead become bounded, fingerprint-bound
+          // facts before the authoritative BusinessAnswer is rendered.
+          answer: 'Untrusted arbitrary prose.',
+          artifacts: [{
+            id: 'answer:revenue', kind: 'answer', title: 'Revenue', trustState: 'governed',
+            payload: {
+              result: {
+                columns: ['customer_name', 'revenue'],
+                rows: [{ customer_name: 'Brittany Barrera', revenue: 42 }],
+                rowCount: 1,
+                resultFingerprint: 'result:revenue-42',
+                answerTier: 'semantic_metric',
+              },
+            },
+          }],
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: 'revenue', requestedMode: 'ask' });
+
+    expect(run.diagnosticReceiptV5).toMatchObject({
+      version: 5,
+      state: { phase: 'executed', program: { id: 'program:revenue' }, counters: { executionAttempts: 1 } },
+      summary: { runtimeMode: 'authoritative', selectedCompiler: 'metricflow', executionAttempts: 1 },
+      businessAnswer: { mode: 'facts_only', resultFingerprint: 'result:revenue-42' },
+    });
+    expect(run.diagnosticReceiptV6).toMatchObject({
+      version: 6,
+      planning: { plannerCalls: 0, verification: { status: 'valid' } },
+      cascade: { selectedTier: 'semantic', planFrozen: true },
+      connection: { attempted: true },
+      execution: { attempts: 1 },
+      facts: { factCount: 2, resultFingerprint: 'result:revenue-42' },
+      safeNextAction: 'none',
+      story: expect.arrayContaining([
+        expect.objectContaining({ stage: 'freeze', status: 'completed' }),
+        expect.objectContaining({ stage: 'connection', status: 'completed' }),
+        expect.objectContaining({ stage: 'execution', status: 'completed' }),
+        expect.objectContaining({ stage: 'facts', status: 'completed' }),
+      ]),
+    });
+    expect(run.businessAnswer?.factIds).toHaveLength(2);
+    expect(run.answer).toContain('Brittany Barrera');
+    expect(run.answer).toContain('42');
+    expect(run.answer).not.toContain('Untrusted arbitrary prose');
+    expect(store.get(run.id)?.diagnosticReceiptV5).toEqual(run.diagnosticReceiptV5);
+    expect(planner.plan).not.toHaveBeenCalled();
+    const exported = JSON.stringify(run.diagnosticReceiptV5);
+    expect(exported).not.toContain('Brittany Barrera');
+    expect(exported).not.toContain('Revenue is 42.');
+  });
+
+  it('AGT-036 executes every independently frozen ordinary Ask task with its task-local program', async () => {
+    const requirements = {
+      version: 1 as const,
+      measures: ['revenue'],
+      dimensions: [],
+      entityTerms: [],
+      entityDisplayTerms: [],
+      memberTerms: [],
+    };
+    const taskExecution = (taskId: string, programId: string) => {
+      const state = {
+        version: 1 as const,
+        mode: 'authoritative' as const,
+        phase: 'compiled' as const,
+        frame: {
+          version: 3 as const,
+          questionFingerprint: `sha256:${taskId}`,
+          kind: 'aggregation' as const,
+          requirements,
+          conversation: { binding: 'none' as const },
+        },
+        mission: {
+          version: 1 as const,
+          mode: 'ask' as const,
+          taskLimit: 3,
+          planningContinuationLimit: 2,
+          tasks: [{ id: taskId, kind: 'direct_answer' as const, question: `Revenue task ${taskId}` }],
+          hypotheses: [],
+        },
+        workspace: {
+          version: 1 as const,
+          snapshotId: 'snapshot:compound',
+          sourceCoverage: [],
+          admittedCandidateIds: ['semantic:metric:revenue'],
+          excludedCandidates: [],
+          tools: [],
+        },
+        program: {
+          version: 1 as const,
+          id: programId,
+          frameFingerprint: `sha256:${taskId}`,
+          taskIds: [taskId],
+          candidateIds: ['semantic:metric:revenue'],
+          executionCandidateIds: ['semantic:metric:revenue'],
+          requiredRoles: ['metric' as const],
+          filters: [],
+          comparison: { kind: 'none' as const, terms: [] },
+          relationshipRequirements: [],
+          outputs: {
+            measures: ['revenue'],
+            dimensions: [],
+            entityDisplayTerms: [],
+            assertions: ['all_requested_measures' as const, 'result_contract' as const],
+          },
+        },
+        conversationDelta: {
+          version: 2 as const,
+          sourceQuestionFingerprint: `sha256:${taskId}`,
+          partialFrame: { kind: 'aggregation' as const, requirements, planningMode: 'initial_planner' as const },
+          programId,
+        },
+        planningContinuations: 1,
+        toolCalls: 2,
+        executionAttempts: 0,
+        repairAttempts: 0,
+      };
+      const compilerDecision = frozenSemanticDecision();
+      const { askAnalystDecision: _runtimeOnly, ...compilerOnlyDecision } = compilerDecision;
+      return {
+        version: 1 as const,
+        taskId,
+        state,
+        program: state.program,
+        meaningResolution: {
+          version: 1 as const,
+          selectedConceptIds: ['semantic:metric:revenue'],
+          queryIntent: { measures: ['revenue'], dimensions: [], filters: [] },
+        },
+        requirementSeed: {
+          version: 1 as const,
+          sourceQuestion: `Revenue task ${taskId}`,
+          requirements,
+          queryIntent: { measures: ['revenue'], dimensions: [], filters: [] },
+        },
+        tierReadiness: {
+          connector: 'ready' as const,
+          activeTarget: 'ready' as const,
+          semanticCompiler: 'ready' as const,
+          physicalSchema: 'ready' as const,
+        },
+        compilerDecision: compilerOnlyDecision,
+        resolvedPlan: {
+          version: 2 as const,
+          programId,
+          compiler: 'metricflow' as const,
+          selectedTier: 'semantic' as const,
+          planFrozen: true,
+          reviewRequired: false,
+          planFingerprint: `sha256:${programId}`,
+        },
+      };
+    };
+    const first = taskExecution('task-1', 'program:task-1');
+    const second = taskExecution('task-2', 'program:task-2');
+    const decision = frozenSemanticDecision();
+    decision.askAnalystDecision = {
+      version: 1,
+      mode: 'authoritative',
+      state: first.state,
+      resolvedPlan: first.resolvedPlan,
+      frozenPlan: {
+        source: 'deterministic',
+        rationale: 'Two independently frozen ordinary Ask tasks.',
+        steps: [
+          { id: 'task-1', askAnalystTaskId: 'task-1', route: 'semantic_answer', goal: 'Revenue task 1', successCriteria: [] },
+          { id: 'task-2', askAnalystTaskId: 'task-2', route: 'semantic_answer', goal: 'Revenue task 2', successCriteria: [] },
+        ],
+      },
+      taskExecutions: [first, second],
+    };
+    const executedPrograms: string[] = [];
+    const executedQuestions: string[] = [];
+    const executedChildIds: string[] = [];
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-compound-authoritative-ask',
+      now: fixedClock(),
+      planner: {
+        plan: vi.fn(() => { throw new Error('The legacy planner must not replace a runtime-frozen compound Ask.'); }),
+        replan: vi.fn(() => ({ decision: 'accept' as const })),
+      },
+      router: { decide: () => decision },
+      executors: {
+        semantic_answer: ({ request }) => {
+          const programId = request.askAnalystProgram?.id;
+          if (!programId) throw new Error('Expected a task-local Ask program at the executor boundary.');
+          executedPrograms.push(programId);
+          executedQuestions.push(request.question);
+          executedChildIds.push(request.askAnalystTaskChild?.taskId ?? 'missing');
+          return {
+            answer: `Result for ${programId}`,
+            artifacts: [{
+              id: `answer:${programId}`,
+              kind: 'answer',
+              title: programId,
+              trustState: 'governed',
+              payload: {
+                result: {
+                  columns: ['revenue'],
+                  rows: [{ revenue: programId === first.program.id ? 1 : 2 }],
+                  rowCount: 1,
+                  resultFingerprint: `result:${programId}`,
+                  answerTier: 'semantic_metric',
+                },
+              },
+            }],
+          };
+        },
+      },
+    });
+
+    const run = await engine.run({ question: 'show revenue; show revenue again', requestedMode: 'ask' });
+
+    expect(executedPrograms).toEqual([first.program.id, second.program.id]);
+    expect(executedQuestions).toEqual(['Revenue task task-1', 'Revenue task task-2']);
+    expect(executedChildIds).toEqual(['task-1', 'task-2']);
+    expect(run.plan?.steps.map((step) => step.askAnalystTaskId)).toEqual(['task-1', 'task-2']);
+    expect(run.steps.map((step) => step.route)).toEqual(['semantic_answer', 'semantic_answer']);
+    expect(run.steps.map((step) => step.status)).toEqual(['passed', 'passed']);
+
+    // A failure in the first immutable child must not hide task-2 from the
+    // trace or turn task-2's result into a misleading partial success.
+    const failedThenContinued: string[] = [];
+    const failureEngine = new AgentRunEngine({
+      idGenerator: () => 'run-compound-authoritative-failure',
+      now: fixedClock(),
+      planner: {
+        plan: vi.fn(() => { throw new Error('The legacy planner must not replace frozen children.'); }),
+        replan: vi.fn(() => ({ decision: 'accept' as const })),
+      },
+      router: { decide: () => decision },
+      executors: {
+        semantic_answer: ({ request }) => {
+          const taskId = request.askAnalystTaskChild?.taskId;
+          failedThenContinued.push(taskId ?? 'missing');
+          if (taskId === 'task-1') {
+            return {
+              status: 'blocked' as const,
+              trustState: 'blocked' as const,
+              summary: 'The first frozen child could not execute.',
+              artifacts: [{
+                id: 'failure:task-1', kind: 'answer' as const, title: 'Task 1 failure', trustState: 'blocked' as const,
+                payload: { code: 'TASK_1_BLOCKED' },
+              }],
+            };
+          }
+          return {
+            answer: 'Task 2 must remain a receipt only when task 1 blocks.',
+            artifacts: [{
+              id: 'answer:task-2', kind: 'answer' as const, title: 'Task 2', trustState: 'governed' as const,
+              payload: {
+                result: {
+                  columns: ['revenue'], rows: [{ revenue: 2 }], rowCount: 1,
+                  resultFingerprint: 'result:task-2', answerTier: 'semantic_metric',
+                },
+              },
+            }],
+          };
+        },
+      },
+    });
+    const failedRun = await failureEngine.run({ question: 'show revenue; show revenue again', requestedMode: 'ask' });
+    expect(failedThenContinued).toEqual(['task-1', 'task-2']);
+    expect(failedRun.steps.map((step) => step.status)).toEqual(['blocked', 'passed']);
+    expect(failedRun).toMatchObject({ status: 'blocked', trustState: 'blocked' });
+    expect(failedRun.answer).toContain('No partial result was accepted');
+    expect(failedRun.answer).not.toContain('Task 2 must remain');
+  });
+
+  it('rejects an arbitrary executor answer and facts when the final answer artifact has no canonical result', async () => {
+    const state = {
+      version: 1 as const,
+      mode: 'authoritative' as const,
+      phase: 'compiled' as const,
+      frame: { version: 3 as const, questionFingerprint: 'sha256:question', kind: 'aggregation' as const, requirements: { version: 1 as const, measures: ['revenue'], dimensions: [], entityTerms: [], entityDisplayTerms: [], memberTerms: [] }, conversation: { binding: 'none' as const } },
+      mission: { version: 1 as const, mode: 'ask' as const, taskLimit: 3, planningContinuationLimit: 2, tasks: [], hypotheses: [] },
+      workspace: { version: 1 as const, admittedCandidateIds: ['semantic:metric:revenue'], excludedCandidates: [], sourceCoverage: [], tools: [] },
+      program: { version: 1 as const, id: 'program:revenue', frameFingerprint: 'sha256:question', taskIds: [], candidateIds: ['semantic:metric:revenue'], requiredRoles: ['metric' as const], filters: [], relationshipRequirements: [], outputs: { measures: ['revenue'], dimensions: [], entityDisplayTerms: [], assertions: ['all_requested_measures' as const, 'result_contract' as const] } },
+      conversationDelta: { version: 1 as const, sourceQuestionFingerprint: 'sha256:question', partialFrame: { kind: 'aggregation' as const, requirements: { version: 1 as const, measures: ['revenue'], dimensions: [], entityTerms: [], entityDisplayTerms: [], memberTerms: [] } } },
+      planningContinuations: 0, toolCalls: 1, executionAttempts: 0, repairAttempts: 0,
+    };
+    const decision = frozenSemanticDecision();
+    decision.askAnalystDecision = { version: 1, mode: 'authoritative', state };
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-unbound-answer', now: fixedClock(), router: { decide: () => decision },
+      executors: { semantic_answer: () => ({
+        answer: 'Untrusted arbitrary prose.',
+        artifacts: [{ id: 'answer:revenue', kind: 'answer', title: 'Revenue', trustState: 'governed', payload: { analyticalFacts: { factSetId: 'facts:revenue', resultFingerprint: 'result:revenue', facts: [{ factId: 'fact:revenue' }] } } }],
+      }) },
+    });
+
+    const run = await engine.run({ question: 'revenue', requestedMode: 'ask' });
+    expect(run.businessAnswer).toMatchObject({ mode: 'deterministic_fallback', factIds: [] });
+    expect(run.answer).toBe('The query completed, but no fact-linked narrative was retained. Open the result to review the validated data.');
+    expect(run.answer).not.toContain('Untrusted arbitrary prose');
   });
 
   it('AGT-034/OBS-014 records a mismatched exploratory authorization as an internal no-execution incident', async () => {

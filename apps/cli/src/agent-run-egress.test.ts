@@ -17,6 +17,7 @@ import {
 } from '@duckcodeailabs/dql-agent';
 import {
   agentRunProviderDispatchBudgetForMode,
+  createRouterInterpretationProviderTrace,
   createProviderDispatchTrace,
   createResearchHypothesisPlanningProvider,
   RunScopedProviderDispatchEvidence,
@@ -325,6 +326,13 @@ it('accounts the real Research hypothesis planner once, then denies a capped sec
   });
   expect(spans[0]?.finish).toMatchObject({ outcome: 'ok', reasonCode: 'completed' });
 
+  // The root investigation plan is not a child Simple Ask planner call. One
+  // admitted child can still start its own initial plan on the shared twelve
+  // send ledger; the second *root* hypothesis plan remains denied below.
+  expect(() => ledger.observe({ ...dispatchEvent, attemptIndex: 2 }, {
+    purpose: 'answer_generation', dispatchPhase: 'planning', planningKind: 'initial', optIn: false,
+  })).not.toThrow();
+
   // A second hypothesis planner call is not a hidden retry. The shared
   // Research ledger denies it before the provider adapter may send another
   // HTTP body; planResearchHypotheses intentionally falls back to `[]`.
@@ -336,7 +344,7 @@ it('accounts the real Research hypothesis planner once, then denies a capped sec
   )).resolves.toEqual([]);
   expect(physicalSends).toBe(1);
   // The transport itself never starts for this second, denied admission.
-  expect(ledger.snapshot().providerEgressReceipts).toHaveLength(1);
+  expect(ledger.snapshot().providerEgressReceipts).toHaveLength(2);
   expect(spans).toHaveLength(2);
   expect(providerAttempt(spans[1]!)).toMatchObject({
     phase: 'planning', purpose: 'answer_generation', admission: 'denied', cause: 'dispatch_budget',
@@ -506,6 +514,88 @@ it('reserves one third ordinary Ask send for a single frozen-plan provider repai
   ]);
 });
 
+it('admits exactly one initial planner and one verifier-directed targeted revision in the CLI ledger', () => {
+  const run = new RunScopedProviderDispatchEvidence(agentRunProviderDispatchBudgetForMode('ask'));
+
+  // This uses the CLI host ledger rather than the runtime's injected planner
+  // seam: the second call is the physical egress that previously died because
+  // planning shared the one generation slot.
+  expect(() => run.observe(dispatchEvent, {
+    purpose: 'answer_generation', dispatchPhase: 'planning', planningKind: 'initial', optIn: false,
+  })).not.toThrow();
+  expect(() => run.observe({ ...dispatchEvent, attemptIndex: 2 }, {
+    purpose: 'answer_generation', dispatchPhase: 'planning', planningKind: 'targeted_revision', optIn: false,
+  })).not.toThrow();
+  expect(() => run.observe({ ...dispatchEvent, attemptIndex: 3 }, {
+    purpose: 'answer_generation', dispatchPhase: 'planning', planningKind: 'targeted_revision', optIn: false,
+  })).toThrow(expect.objectContaining({ code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' }));
+  expect(() => run.observe({ ...dispatchEvent, attemptIndex: 4 }, {
+    purpose: 'answer_generation', dispatchPhase: 'planning', planningKind: 'initial', optIn: false,
+  })).toThrow(expect.objectContaining({ code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' }));
+  // SQL generation retains its independent one-send cap; planner turns do not
+  // consume it.
+  expect(() => run.observe({ ...dispatchEvent, attemptIndex: 5 }, {
+    purpose: 'answer_generation', dispatchPhase: 'generation', optIn: false,
+  })).not.toThrow();
+  expect(() => run.observe({ ...dispatchEvent, attemptIndex: 6 }, {
+    purpose: 'answer_generation', dispatchPhase: 'generation', optIn: false,
+  })).toThrow(expect.objectContaining({ code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' }));
+  expect(run.snapshot().providerEgressReceipts.map((receipt) => receipt.dispatchPhase)).toEqual([
+    'planning',
+    'planning',
+    'generation',
+  ]);
+});
+
+it('sends exactly two planner transports through the real CLI planning bridge only after targeted recovery', () => {
+  const ledger = new RunScopedProviderDispatchEvidence(agentRunProviderDispatchBudgetForMode('ask'));
+  const request: AgentRunRequest = {
+    runId: 'ask-planning-revision-egress',
+    question: 'show revenue by product',
+    requestedMode: 'ask',
+  };
+  let physicalSends = 0;
+  const sendPlanning = (planningKind: 'initial' | 'targeted_revision') => {
+    const trace = createRouterInterpretationProviderTrace({
+      request,
+      routerPhase: 'planning',
+      planningKind,
+      ledger,
+    });
+    const options = { maxProviderDispatches: 1, ...trace.options };
+    prepareProviderHttpDispatch({
+      provider: 'ollama',
+      operation: 'generate',
+      attemptIndex: 1,
+      envelope: dispatchEvent.envelope,
+      options,
+    });
+    // This line is deliberately after prepareProviderHttpDispatch: a ledger
+    // denial must prove that no provider transport body would have started.
+    physicalSends += 1;
+    completeProviderHttpDispatch({
+      provider: 'ollama', operation: 'generate', attemptIndex: 1, options,
+    }, { outcome: 'ok', settlement: 'transport', httpStatus: 200 });
+    trace.settle('ok');
+  };
+
+  sendPlanning('initial');
+  sendPlanning('targeted_revision');
+  expect(physicalSends).toBe(2);
+  expect(ledger.snapshot().providerEgressReceipts).toEqual([
+    expect.objectContaining({ dispatchPhase: 'planning' }),
+    expect.objectContaining({ dispatchPhase: 'planning' }),
+  ]);
+
+  // A second revision is denied at the same CLI physical-send bridge; it is
+  // not merely rejected by an in-memory counter after egress.
+  expect(() => sendPlanning('targeted_revision')).toThrow(expect.objectContaining({
+    code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED',
+  }));
+  expect(physicalSends).toBe(2);
+  expect(ledger.snapshot().providerEgressReceipts).toHaveLength(2);
+});
+
 it('admits one parent-bound transient retry without turning it into a second generation budget', () => {
   const run = new RunScopedProviderDispatchEvidence(agentRunProviderDispatchBudgetForMode('ask'));
   const first = { ...dispatchEvent, attemptIndex: 1 };
@@ -619,6 +709,11 @@ it('accounts every physical dispatch once on the persisted AgentRun', async () =
       rootDir: projectRoot,
       projectRoot,
       executor: {} as QueryExecutor,
+      // This regression is about the retained legacy category-classification
+      // dispatch bridge and its persisted egress receipt, not the
+      // authoritative Ask planner (which correctly has no qualified
+      // analytical cards in this deliberately unmodeled project).
+      askAnalystRuntimeMode: 'legacy',
       preferredPort: 0,
       captureServer: (value) => { server = value; },
     });
@@ -715,6 +810,8 @@ it('types a governed refusal as DQL governance, not provider unavailability', as
       rootDir: projectRoot,
       projectRoot,
       executor: {} as QueryExecutor,
+      // Keep this boundary test on the legacy classifier seam it exercises.
+      askAnalystRuntimeMode: 'legacy',
       preferredPort: 0,
       captureServer: (value) => { server = value; },
     });
@@ -778,6 +875,9 @@ it('types a failed legacy category classifier without claiming semantic binding'
       rootDir: projectRoot,
       projectRoot,
       executor: {} as QueryExecutor,
+      // The assertion below intentionally covers legacy classification
+      // failure accounting, not authoritative planner admission.
+      askAnalystRuntimeMode: 'legacy',
       preferredPort: 0,
       captureServer: (value) => { server = value; },
     });
@@ -870,6 +970,8 @@ it('isolates dispatch receipts across concurrent HTTP AgentRuns', async () => {
       rootDir: projectRoot,
       projectRoot,
       executor: {} as QueryExecutor,
+      // Exercise per-run isolation for the retained legacy dispatch bridge.
+      askAnalystRuntimeMode: 'legacy',
       preferredPort: 0,
       captureServer: (value) => { server = value; },
     });

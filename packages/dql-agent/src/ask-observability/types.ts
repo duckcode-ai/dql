@@ -9,6 +9,7 @@ import type {
   AnalyticalCascadeDecisionV1,
   AnalyticalCascadeTierV1,
   AskDecisionSummaryV1,
+  AskDecisionSummaryV2,
   ContextSourceCoverageV1,
   EvidenceCandidateRoleV1,
   ProviderFailureCauseV1,
@@ -477,6 +478,8 @@ export interface AskTraceDataV1 {
   links: AskTraceLinkV1[];
   /** Joined from the server-owned AgentRun receipt at read time. */
   decisionSummary?: AskDecisionSummaryV1;
+  /** V1.15 runtime-owned story, joined from the same durable run receipt. */
+  runtimeDecisionSummary?: AskDecisionSummaryV2;
 }
 
 export interface AskTraceListEntryV1 extends AskTraceEnvelopeV1 {

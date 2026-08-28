@@ -107,6 +107,7 @@ describe('classifyConversationalTurn', () => {
       'what are we revewing and discussing in whole conversaion?',
       'summarize our conversation',
       'where were we?',
+      'thanks, can you walk me through what we just looked at?',
     ]) {
       expect(classifyConversationalTurn(q, true)).toBe('smalltalk');
     }

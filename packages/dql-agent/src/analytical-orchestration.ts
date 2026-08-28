@@ -13,7 +13,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { DqlArtifactExecutionReceipt } from '@duckcodeailabs/dql-core';
+import type { AgentRunTelemetryV1, DqlArtifactExecutionReceipt } from '@duckcodeailabs/dql-core';
 
 export const ANALYTICAL_ORCHESTRATION_CONTRACT_VERSION = 1 as const;
 
@@ -646,6 +646,528 @@ export interface AgentRunDiagnosticReceiptV4 {
   finalStopReason: string;
 }
 
+/**
+ * Ask Analyst Runtime V1 contracts.
+ *
+ * These records deliberately separate an agent's business interpretation from
+ * the deterministic compiler/execution authority.  They contain typed intent,
+ * stable candidate identities, and receipts — never prompts, provider
+ * responses, SQL text, result rows, credentials, or hidden reasoning.
+ *
+ * Acceptance: AGT-035..040, API-015, OBS-015, E2E-023.
+ */
+export type AskAnalystRuntimeModeV1 = 'legacy' | 'shadow' | 'authoritative';
+
+export interface BusinessQuestionFrameV3 {
+  version: 3;
+  /** Stable only within the persisted run; raw question text stays on AgentRun. */
+  questionFingerprint: string;
+  kind: AnalyticalTurnKind;
+  requirements: AnalyticalRequirementSetV1;
+  /** A source question supplied a top-N default; presentation must disclose it. */
+  defaultedTop?: { limit: number };
+  conversation: {
+    binding: 'none' | 'structured_clarification' | 'prior_result' | 'task_dependency';
+    sourceTurnId?: string;
+    selectedStableId?: string;
+  };
+}
+
+export type AnalyticalHypothesisKindV1 =
+  | 'direct_answer'
+  | 'trend'
+  | 'comparison'
+  | 'contributor'
+  | 'anomaly'
+  | 'freshness'
+  | 'counter_evidence';
+
+/** Agent-proposed question to test; deterministic execution validates it. */
+export interface AnalyticalHypothesisV1 {
+  version: 1;
+  id: string;
+  kind: AnalyticalHypothesisKindV1;
+  taskId: string;
+  status: 'planned' | 'supported' | 'contradicted' | 'inconclusive' | 'failed' | 'skipped';
+  requiredRoles: EvidenceCandidateRoleV1[];
+}
+
+/** Bounded mission owned by the Ask runtime before a compiler is selected. */
+export interface AnalyticalMissionV1 {
+  version: 1;
+  mode: 'ask' | 'research';
+  taskLimit: number;
+  planningContinuationLimit: number;
+  /**
+   * The ingress task graph exceeded this mission's bounded capacity. This is
+   * separate from `deferredTasks`: ordinary Ask must present a scope outcome
+   * before planning/execution rather than silently dropping clauses.
+   */
+  scopeOverflow?: boolean;
+  tasks: AnalyticalTaskV1[];
+  /**
+   * Ordinary Ask currently freezes one route-neutral executable program per
+   * turn. When ingress splits a compound request, retain the unexecuted
+   * clauses explicitly instead of silently running task-1 and losing the
+   * rest. Research owns the multi-branch execution contract.
+   */
+  deferredTasks?: Array<Pick<AnalyticalTaskV1, 'id' | 'kind'>>;
+  hypotheses: AnalyticalHypothesisV1[];
+}
+
+export interface EvidenceWorkspaceToolReceiptV1 {
+  version: 1;
+  id: string;
+  kind: 'retrieve_snapshot' | 'candidate_extension' | 'compiler_broker' | 'provider_meaning' | 'execute' | 'repair';
+  status: 'completed' | 'skipped' | 'failed';
+  candidateIds: string[];
+  reasonCode: string;
+}
+
+/** Same-snapshot evidence admission; excluded is never interpreted as absent. */
+export interface EvidenceWorkspaceV1 {
+  version: 1;
+  snapshotId?: string;
+  sourceFingerprint?: string;
+  sourceCoverage: ContextSourceCoverageV1[];
+  /**
+   * Additive V2 admission projection.  Legacy readers use
+   * `admittedCandidateIds`; new Ask runs retain the qualified 32-card
+   * execution workspace separately from the 16 cards released to the
+   * planner.  Both are stable IDs from one immutable snapshot.
+   */
+  workspaceCandidateIds?: string[];
+  plannerCandidateIds?: string[];
+  admittedCandidateIds: string[];
+  excludedCandidates: Array<{ id: string; reasonCode: 'role_cap' | 'incompatible' | 'ranking_conflict' | 'duplicate' | 'not_admitted' }>;
+  tools: EvidenceWorkspaceToolReceiptV1[];
+}
+
+/**
+ * Route-neutral analytical intent.  Certified, MetricFlow, governed
+ * relational, and exploratory SQL are all compilers of this one program.
+ */
+export interface AnalyticalProgramV1 {
+  version: 1;
+  id: string;
+  frameFingerprint: string;
+  taskIds: string[];
+  /** Immutable selected evidence identities. Compilers may only consume these. */
+  candidateIds: string[];
+  /**
+   * Same-snapshot compiler context. This is deliberately separate from the
+   * bounded meaning cards: a physical relation/column closure may be needed
+   * for a pre-freeze fallback even when it was not sent to the meaning model.
+   * It is still immutable, target-scoped by the compiler, and never a license
+   * to retrieve or nominate a new business meaning.
+   */
+  executionCandidateIds?: string[];
+  requiredRoles: EvidenceCandidateRoleV1[];
+  /** Route-neutral predicate/member contract; never inferred by a compiler. */
+  filters: Array<{
+    fieldTerms: string[];
+    memberIds: string[];
+    /** Literal/member binding owned by the program, never guessed by a compiler. */
+    value: string;
+    operator: 'equals' | 'in' | 'between' | 'contains' | 'unknown';
+  }>;
+  ranking?: {
+    metricTerms: string[];
+    direction: 'asc' | 'desc';
+    limit: number;
+    defaultedLimit?: boolean;
+  };
+  time?: {
+    roleTerms: string[];
+    calendarId?: string;
+    fiscalPeriodTerms: string[];
+    grain?: NonNullable<AnalyticalRequirementSetV1['time']>['grain'];
+  };
+  comparison?: {
+    kind: 'none' | 'period_over_period' | 'segment' | 'baseline';
+    terms: string[];
+  };
+  /** Stable relationship evidence IDs required to combine selected objects. */
+  relationshipRequirements: string[];
+  outputs: {
+    measures: string[];
+    dimensions: string[];
+    entityDisplayTerms: string[];
+    timeGrain?: NonNullable<AnalyticalRequirementSetV1['time']>['grain'];
+    limit?: number;
+    assertions: Array<'all_requested_measures' | 'all_requested_dimensions' | 'safe_relationship_closure' | 'result_contract'>;
+  };
+}
+
+/** Runtime-owned selection receipt around the existing immutable RAP. */
+export interface ResolvedAnalyticalPlanV2 {
+  version: 2;
+  programId: string;
+  compiler: 'certified' | 'metricflow' | 'governed_relational' | 'exploratory_sql' | 'none';
+  selectedTier?: Exclude<AnalyticalCascadeTierV1, 'clarify_or_gap'>;
+  planFrozen: boolean;
+  reviewRequired: boolean;
+  planFingerprint?: string;
+}
+
+/** Typed continuation material that survives reload without reparsing prose. */
+export interface AskAnalystConversationDeltaV1 {
+  version: 1;
+  sourceQuestionFingerprint: string;
+  selectedStableId?: string;
+  selectedResultBindingId?: string;
+  partialFrame: Pick<BusinessQuestionFrameV3, 'kind' | 'requirements'>;
+}
+
+export interface AskAnalystStateV1 {
+  version: 1;
+  mode: AskAnalystRuntimeModeV1;
+  phase: 'framed' | 'evidence_ready' | 'program_ready' | 'compiled' | 'executed' | 'clarify' | 'blocked';
+  frame: BusinessQuestionFrameV3;
+  mission: AnalyticalMissionV1;
+  workspace: EvidenceWorkspaceV1;
+  program: AnalyticalProgramV1;
+  resolvedPlan?: ResolvedAnalyticalPlanV2;
+  conversationDelta: AskAnalystConversationDeltaV1;
+  planningContinuations: number;
+  toolCalls: number;
+  executionAttempts: number;
+  repairAttempts: number;
+}
+
+/** A fact-bound answer envelope. Narrative can only summarize these receipts. */
+export interface BusinessAnswerV1 {
+  version: 1;
+  mode: 'facts_only' | 'deterministic_fallback';
+  trustState: 'certified' | 'governed' | 'review_required' | 'blocked' | 'not_applicable';
+  factIds: string[];
+  resultFingerprint?: string;
+  /** The accepted answer text, already visible in the corresponding artifact. */
+  answer?: string;
+  limitations: string[];
+}
+
+/**
+ * Content-free runtime projection for diagnostics/trace export. The durable
+ * local run retains typed continuation state; this projection intentionally
+ * omits raw question, requirement/member values, answer text, SQL, and rows.
+ */
+export interface AskAnalystDiagnosticStateV1 {
+  version: 1;
+  mode: AskAnalystRuntimeModeV1;
+  phase: AskAnalystStateV1['phase'];
+  questionFingerprint: string;
+  kind: AnalyticalTurnKind;
+  requirementCounts: {
+    measures: number;
+    dimensions: number;
+    entityTerms: number;
+    members: number;
+    filters: number;
+  };
+  mission: { mode: AnalyticalMissionV1['mode']; taskCount: number; deferredTaskCount: number; hypothesisCount: number };
+  workspace: {
+    snapshotId?: string;
+    sourceFingerprint?: string;
+    admittedCandidateCount: number;
+    excludedCandidateCount: number;
+    sourceCoverage: Array<{ source: ContextSourceCoverageV1['source']; status: ContextSourceCoverageV1['status']; candidateCount: number }>;
+    tools: Array<Pick<EvidenceWorkspaceToolReceiptV1, 'id' | 'kind' | 'status' | 'reasonCode'>>;
+  };
+  program: {
+    id: string;
+    taskCount: number;
+    candidateCount: number;
+    requiredRoles: EvidenceCandidateRoleV1[];
+    outputAssertionCount: number;
+  };
+  resolvedPlan?: ResolvedAnalyticalPlanV2;
+  counters: { planningContinuations: number; toolCalls: number; executionAttempts: number; repairAttempts: number };
+}
+
+export interface BusinessAnswerDiagnosticProjectionV1 {
+  version: 1;
+  mode: BusinessAnswerV1['mode'];
+  trustState: BusinessAnswerV1['trustState'];
+  factIds: string[];
+  resultFingerprint?: string;
+  limitationCount: number;
+}
+
+/** Compact default trace story; advanced spans remain in local observability. */
+export interface AskDecisionSummaryV2 {
+  version: 2;
+  summaryFingerprint: string;
+  runtimeMode: AskAnalystRuntimeModeV1;
+  whatHappened: string;
+  why: string;
+  impact: string;
+  nextAction: AskTerminalIncidentV1['safeAction'] | 'none';
+  selectedCompiler?: ResolvedAnalyticalPlanV2['compiler'];
+  programTaskCount: number;
+  admittedCandidateCount: number;
+  toolCallCount: number;
+  executionAttempts: number;
+}
+
+/** Additive V5 receipt; V1-V4 remain readable JSON records. */
+export interface AgentRunDiagnosticReceiptV5 {
+  version: 5;
+  runId: string;
+  state: AskAnalystDiagnosticStateV1;
+  summary: AskDecisionSummaryV2;
+  businessAnswer?: BusinessAnswerDiagnosticProjectionV1;
+  /** Typed terminal provider evidence from the physical provider boundary. */
+  provider?: ProviderFailureDiagnosticV1;
+  finalStopReason: string;
+}
+
+/**
+ * Additive retrieval-first Ask contracts.  V1 records remain the persisted
+ * compatibility shape; V2 is the authoritative runtime shape for new turns.
+ * The planner gets qualified cards only and cannot turn a raw retrieval term
+ * into an execution identity.
+ */
+export type AskPlanningModeV1 = 'exact_fast_path' | 'initial_planner' | 'targeted_revision' | 'deterministic_binding';
+
+export interface AnalyticalPlannerCandidateCardV1 {
+  version: 1;
+  id: string;
+  qualifiedId?: string;
+  /** Compact retrieval label/aliases; never a raw definition dump or row data. */
+  label?: string;
+  aliases?: string[];
+  roles: EvidenceCandidateRoleV1[];
+  source: ContextSourceCoverageV1['source'];
+  trustTier: 'certified' | 'semantic' | 'governed' | 'exploratory';
+  exactMatch: boolean;
+  relationHints?: string[];
+}
+
+export interface AnalyticalPlannerRequestV1 {
+  version: 1;
+  planningMode: AskPlanningModeV1;
+  /** Raw business question is intentionally available only at the bounded planner boundary. */
+  question: string;
+  questionFingerprint: string;
+  /**
+   * Advisory frame for the planner. It is deliberately not an immutable
+   * execution tuple: parser-derived metric/entity/dimension guesses can be
+   * corrected only by selecting locally-qualified cards. Explicit user
+   * predicates, time, ranking and output constraints remain host verified.
+   */
+  frame: Pick<BusinessQuestionFrameV4, 'kind' | 'requirements' | 'conversation' | 'planningMode'>;
+  /** Host-owned, content-safe hints; they are advisory and never execution authority. */
+  advisoryHints: string[];
+  sourceCoverage: Array<Pick<ContextSourceCoverageV1, 'source' | 'status'>>;
+  /**
+   * Bounded server-derived task options. They are not an execution plan: the
+   * planner may select one compatible option or two/three independent options,
+   * and the verifier later requires every selected ID to freeze and execute.
+   */
+  taskOptions: Array<{ id: string; kind: AnalyticalTaskV1['kind']; question: string }>;
+  /**
+   * Present only for the one verifier-directed revision. Prior selected
+   * bindings are immutable context; only a card in `targetedCandidates` may
+   * fill the verifier-proven missing role.
+   */
+  priorProposal?: Pick<AnalyticalPlannerProposalV1, 'version' | 'selectedConceptIds' | 'tasks'>;
+  priorSelectedConceptIds?: string[];
+  verificationFeedback?: ProgramVerificationFeedbackV1;
+  /** At most four verifier-admitted cards released for a targeted revision. */
+  targetedCandidates?: AnalyticalPlannerCandidateCardV1[];
+  candidates: AnalyticalPlannerCandidateCardV1[];
+  deadlineMs: number;
+}
+
+export type AnalyticalPlannerOperationV1 =
+  | 'aggregate'
+  | 'rank'
+  | 'group'
+  | 'filter'
+  | 'trend'
+  | 'compare'
+  | 'project';
+
+export interface AnalyticalPlannerTaskProposalV1 {
+  version: 1;
+  taskId: string;
+  /**
+   * Server task options this one program deliberately covers. Omitted means
+   * only `taskId`. The verifier must prove complete coverage before a
+   * compatible multi-clause Ask may collapse to one execution.
+   */
+  coveredTaskIds?: string[];
+  selectedConceptIds: string[];
+  /** Candidate-ID role bindings only; the verifier owns role compatibility. */
+  roleBindings: Partial<Record<EvidenceCandidateRoleV1, string[]>>;
+  /** Typed analytical intent, never SQL/DQL or a compiler authorization. */
+  operations: AnalyticalPlannerOperationV1[];
+  preferredCompiler?: 'certified' | 'metricflow' | 'governed_relational' | 'exploratory_sql';
+  assumptions?: string[];
+}
+
+export interface TargetedContextRequestV1 {
+  version: 1;
+  /** Exactly one verifier-proven role may be recovered per Ask turn. */
+  missingRoles: EvidenceCandidateRoleV1[];
+  /**
+   * Normalized business terms used to search the existing immutable 32-card
+   * workspace. The planner never receives or mints hidden workspace IDs.
+   */
+  searchTerms?: string[];
+  /** Optional references to cards already in the supplied 16-card package. */
+  relatedCandidateIds?: string[];
+  /**
+   * Legacy compatibility carrier. New planner JSON must not use this to name
+   * an unadmitted card; the verifier rejects anything outside the planner
+   * package before it can be treated as a recovery hint.
+   */
+  candidateIds?: string[];
+  /** Existing same-snapshot relationship paths, bounded to three. */
+  relationshipPathIds?: string[];
+}
+
+export interface TargetedContextResultV1 {
+  version: 1;
+  status: 'admitted' | 'unavailable' | 'denied';
+  candidateIds: string[];
+  relationshipPathIds: string[];
+  reasonCode: string;
+}
+
+export interface AnalyticalPlannerProposalV1 {
+  version: 1;
+  tasks: AnalyticalPlannerTaskProposalV1[];
+  selectedConceptIds: string[];
+  confidence?: 'high' | 'medium' | 'low';
+  missingInformation?: string[];
+  recovery?: TargetedContextRequestV1;
+}
+
+export interface ProgramVerificationFeedbackV1 {
+  version: 1;
+  status: 'valid' | 'needs_targeted_context' | 'ambiguous' | 'denied' | 'invalid';
+  missingRoles: EvidenceCandidateRoleV1[];
+  candidateIds: string[];
+  reasonCode: string;
+}
+
+export interface EvidenceWorkspaceV2 extends Omit<EvidenceWorkspaceV1, 'version' | 'admittedCandidateIds'> {
+  version: 2;
+  /** The qualified immutable closure; never exceeds 32 candidates. */
+  workspaceCandidateIds: string[];
+  /** Cards released to the one planner call; never exceeds 16. */
+  plannerCandidateIds: string[];
+  /** V1 consumers read this as the planner admission. */
+  admittedCandidateIds: string[];
+  targetedContext?: TargetedContextResultV1;
+}
+
+export interface BusinessQuestionFrameV4 extends Omit<BusinessQuestionFrameV3, 'version'> {
+  version: 4;
+  planningMode: AskPlanningModeV1;
+}
+
+export interface AnalyticalProgramV2 extends Omit<AnalyticalProgramV1, 'version' | 'candidateIds' | 'executionCandidateIds'> {
+  version: 2;
+  /** Validated meaning cards selected by the planner. */
+  candidateIds: string[];
+  /** Full immutable qualified workspace consumed by compilers. */
+  executionCandidateIds: string[];
+  plannerCandidateIds: string[];
+  workspaceCandidateIds: string[];
+  /**
+   * Provider-neutral business interpretation accepted by the deterministic
+   * verifier. IDs remain canonicalized below; the planner never gains join,
+   * grain, additivity, trust, or compiler authority.
+   */
+  planner: {
+    version: 1;
+    tasks: Array<{
+      taskId: string;
+      coveredTaskIds?: string[];
+      selectedConceptIds: string[];
+      roleBindings: Partial<Record<EvidenceCandidateRoleV1, string[]>>;
+      operations: AnalyticalPlannerOperationV1[];
+      preferredCompiler?: AnalyticalPlannerTaskProposalV1['preferredCompiler'];
+      assumptions: string[];
+    }>;
+    confidence?: AnalyticalPlannerProposalV1['confidence'];
+    missingInformation: string[];
+  };
+}
+
+export interface AskAnalystConversationDeltaV2 extends Omit<AskAnalystConversationDeltaV1, 'version' | 'partialFrame'> {
+  version: 2;
+  partialFrame: Pick<BusinessQuestionFrameV4, 'kind' | 'requirements' | 'planningMode'>;
+  programId?: string;
+}
+
+export interface AskAnalystStateV2 extends Omit<AskAnalystStateV1, 'version' | 'frame' | 'workspace' | 'program' | 'conversationDelta'> {
+  version: 2;
+  frame: BusinessQuestionFrameV4;
+  workspace: EvidenceWorkspaceV2;
+  program: AnalyticalProgramV2;
+  conversationDelta: AskAnalystConversationDeltaV2;
+  planningMode: AskPlanningModeV1;
+  plannerRevisionCount: number;
+  planningReceipt?: AskAnalystPlanningReceiptV1;
+}
+
+export interface AskAnalystPlanningReceiptV1 {
+  version: 1;
+  mode: AskPlanningModeV1;
+  plannerCalls: number;
+  revisionCalls: number;
+  verification: ProgramVerificationFeedbackV1;
+}
+
+export interface BusinessAnswerV2 extends Omit<BusinessAnswerV1, 'version'> {
+  version: 2;
+  /** Facts and result fingerprint are the only authoritative narrative source. */
+  factBinding: 'validated_result_facts' | 'deterministic_fallback';
+}
+
+export interface AgentRunDiagnosticReceiptV6 extends Omit<AgentRunDiagnosticReceiptV5, 'version'> {
+  version: 6;
+  planning?: AskAnalystPlanningReceiptV1;
+  /** Role coverage is count-only: raw terms and candidate labels stay Advanced-only. */
+  roleCoverage: Array<{ role: EvidenceCandidateRoleV1; candidateCount: number }>;
+  /** The exact pre-execution cascade record behind the selected compiler. */
+  cascade: {
+    attempts: Array<Pick<CascadeTierAttemptV1, 'tier' | 'outcome' | 'planFrozen'>>;
+    selectedTier?: AnalyticalCascadeDecisionV1['selectedTier'];
+    stopReason?: string;
+    planFrozen: boolean;
+  };
+  /** Present only for a typed terminal incident; never inferred from prose. */
+  origin?: Pick<AskTerminalIncidentV1, 'boundary' | 'origin' | 'impact'>;
+  connection: { attempted: boolean };
+  execution: { attempts: number };
+  /**
+   * Content-safe physical counters. Research roots aggregate server-owned
+   * child execution counters (with durable receipt fallback for older child
+   * records); the root dispatch ledger remains the authority for provider
+   * egress so child spans are never double-counted.
+   */
+  telemetry?: AgentRunTelemetryV1;
+  facts: { factCount: number; resultFingerprint?: string };
+  safeNextAction: AskDecisionSummaryV2['nextAction'];
+  /** Compact default story; raw spans and candidate lifecycle remain Advanced-only. */
+  story: Array<{
+    stage: 'retrieval' | 'role_coverage' | 'planner' | 'verification' | 'targeted_recovery' | 'cascade' | 'freeze' | 'connection' | 'execution' | 'facts';
+    status: 'completed' | 'skipped' | 'blocked' | 'unavailable';
+    reasonCode: string;
+  }>;
+}
+
+/** New runtime values are V2; V1 values remain readable from old JSON runs. */
+export type AskAnalystState = AskAnalystStateV1 | AskAnalystStateV2;
+export type AnalyticalProgram = AnalyticalProgramV1 | AnalyticalProgramV2;
+export type BusinessQuestionFrame = BusinessQuestionFrameV3 | BusinessQuestionFrameV4;
+export type BusinessAnswer = BusinessAnswerV1 | BusinessAnswerV2;
+
 export interface AnalyticalTurnPlanV1 {
   version: 1;
   turnId?: string;
@@ -925,18 +1447,19 @@ function explicitOutputTerms(question: string): string[] {
  * or "for each customer" as separate physical measures.  The grouping entity
  * is represented by the dimension/entity roles instead.
  *
- * `order count for each customer` is the common prose form for a count
- * aggregation at customer grain.  Keep the aggregation (`count`) and remove
- * the object noun (`order`) only for that exact grouped construction; a named
- * metric such as `order_value` remains untouched.
+ * `order count for each customer` is the common prose form for the authored
+ * `order_count` semantic measure at customer grain.  Keep that compound
+ * identity intact: reducing it to the generic aggregation `count` makes the
+ * unfiltered `Orders` MetricFlow metric indistinguishable from scoped metrics
+ * such as `Drink Orders` and `Food Orders`.  The grouping entity is still
+ * represented by the dimension/entity roles rather than becoming another
+ * measure.
  */
 export function normalizeAnalyticalMeasureTerms(
   question: string,
   values: readonly string[],
   options: { preserveIdentity?: boolean } = {},
 ): string[] {
-  const normalizedQuestion = normalizeRequirementTerm(question);
-  const groupedOrderCount = /\borders?\s+count\s+(?:for|per)\s+(?:each|every)\s+(?:the\s+)?(?:account|customer|client|company|product|order|item|row)s?\b/.test(normalizedQuestion);
   // A parser often singularizes the business alias `sales` into `sale`.  That
   // is not a second measure beside revenue: it is the same current-question
   // request.  Canonicalize only that standalone vocabulary alias here; named
@@ -947,11 +1470,7 @@ export function normalizeAnalyticalMeasureTerms(
   };
   const terms = values
     .map(canonicalMeasureAlias)
-    .filter((value) => !isStructuralMeasurePhrase(value))
-    .filter((value) => !(groupedOrderCount && /^(?:order|orders)$/i.test(normalizeRequirementTerm(value))));
-  if (groupedOrderCount && !terms.some((value) => normalizeRequirementTerm(value) === 'count')) {
-    terms.push('count');
-  }
+    .filter((value) => !isStructuralMeasurePhrase(value));
   // An inherited measure can already be a stable semantic/dbt identity. Keep
   // that identity intact for the planner/meaning handoff; matching and display
   // have their own normalizers. Rewriting `total_consumption_units` to prose
@@ -975,26 +1494,78 @@ export function normalizeAnalyticalMeasureTerms(
  * phrase that already owns it: adding both `beverage revenue` and `revenue`
  * turns one requested metric into two and incorrectly rejects a block whose
  * own declared output is `beverage_revenue`. The same holds for `order count`
- * and its generic `count` root; grouped prose is normalized to `count` before
- * this helper runs, so retaining both is neither necessary nor correct.
+ * and its generic `count` root; the authored compound is retained and owns
+ * that generic aggregation vocabulary for this question.
  */
 function nonRedundantLexicalMeasureTerms(
   parsedMeasures: readonly string[],
   question: string,
 ): string[] {
-  const lexical = ['revenue', 'refund', 'refunds', 'bcm', 'run rate', 'count']
+  const compoundTerms = explicitQuestionCompoundMeasureTerms(question);
+  const lexical = [
+    ...compoundTerms,
+    ...['revenue', 'refund', 'refunds', 'bcm', 'run rate', 'count'],
+  ]
+    // `BCM run rate` is one named business measure, not the independent
+    // lexical roots `bcm` and `run rate`.
+    .filter((term) => !compoundTerms.some((compound) => compound !== term && compound.includes(term)))
     .filter((term) => new RegExp(`\\b${term.replace(' ', '\\s+')}\\b`, 'i').test(question));
   return lexical.filter((term) => {
-    if (term === 'count') {
-      return !parsedMeasures.some((measure) =>
-        normalizeRequirementTerm(measure).split(' ').includes('count'));
-    }
-    const token = term === 'refunds' ? 'refund' : term;
-    return !parsedMeasures.some((measure) =>
-      normalizeRequirementTerm(measure)
-        .split(' ')
-        .some((word) => word === token || (token === 'refund' && word === 'refunds')),
-    );
+    // A multi-word lexical root such as `run rate` must be considered owned
+    // by `BCM run rate`. The old word-by-word comparison only worked for a
+    // one-word root and added both phrases as independent measures, which
+    // prevented an otherwise exact semantic metric from binding without a
+    // provider. Treat the lexical phrase as redundant when all of its tokens
+    // are already present in one parsed measure. Keep the narrow refund
+    // singular/plural equivalence so existing vocabulary remains stable.
+    const lexicalTokens = normalizeRequirementTerm(term)
+      .split(' ')
+      .filter(Boolean)
+      .map((token) => token === 'refunds' ? 'refund' : token);
+    return !parsedMeasures.some((measure) => {
+      const measureTokens = new Set(
+        normalizeRequirementTerm(measure)
+          .split(' ')
+          .filter(Boolean)
+          .map((token) => token === 'refunds' ? 'refund' : token),
+      );
+      return lexicalTokens.every((token) => measureTokens.has(token));
+    });
+  });
+}
+
+/**
+ * Preserve explicit multi-word business measures when a retrieval parser
+ * emits only a suffix such as `rate`. This is intentionally a compact,
+ * vocabulary-backed list rather than a speculative phrase synthesizer: it
+ * upgrades only a phrase the user actually wrote and whose complete meaning
+ * is common in the governed analytics catalog.
+ */
+function explicitQuestionCompoundMeasureTerms(question: string): string[] {
+  return [
+    ...(/\borders?\s+count\b/i.test(question) ? ['order count'] : []),
+    ...(/\bbcm\s+run\s+rate\b/i.test(question) ? ['bcm run rate'] : []),
+  ];
+}
+
+/**
+ * A parser fragment must not become a second measure when the source question
+ * contains an explicit compound business measure that subsumes it. For
+ * example, `rate` plus `BCM run rate` is one requested metric. We only remove
+ * strict token subsets of a phrase explicitly present in the user question;
+ * independent named measures remain separate requirements.
+ */
+function preferExplicitQuestionCompoundMeasures(terms: readonly string[], question: string): string[] {
+  const compounds = explicitQuestionCompoundMeasureTerms(question)
+    .map((term) => ({ term, tokens: normalizeRequirementTerm(term).split(' ').filter(Boolean) }));
+  if (compounds.length === 0) return uniqueRequirementTerms([...terms]);
+  return uniqueRequirementTerms([...terms]).filter((term) => {
+    const normalized = normalizeRequirementTerm(term);
+    const tokens = normalized.split(' ').filter(Boolean);
+    return !compounds.some((compound) => normalized !== compound.term
+      && tokens.length > 0
+      && tokens.length < compound.tokens.length
+      && tokens.every((token) => compound.tokens.includes(token)));
   });
 }
 
@@ -1095,19 +1666,22 @@ export function buildAnalyticalRequirementSet(input: {
   const salesIsRevenueAlias = /\bsales\b/i.test(question);
   const parsedMeasures = normalizeAnalyticalMeasureTerms(question, parsed?.measures ?? [])
     .filter((measure) => !/\bsales\s+based\s+on\b/.test(normalizeRequirementTerm(measure)));
-  const parsedMeasuresWithLexicalTerms = uniqueRequirementTerms([
-    ...parsedMeasures,
-    ...nonRedundantLexicalMeasureTerms(parsedMeasures, question),
-    ...(salesIsRevenueAlias ? ['revenue'] : []),
-    ...(/\b(?:most|highest|expensive)\b.*\bproduct\s+price\b|\bproduct\s+price\b.*\b(?:most|highest|expensive)\b/i.test(question)
-      ? ['product price']
-      : []),
-    ...(!deicticAmount
-      && /\bamount\b/i.test(question)
-      && !parsedMeasures.some((measure) => normalizeRequirementTerm(measure).split(' ').includes('amount'))
-      ? ['amount']
-      : []),
-  ]);
+  const parsedMeasuresWithLexicalTerms = preferExplicitQuestionCompoundMeasures(
+    uniqueRequirementTerms([
+      ...parsedMeasures,
+      ...nonRedundantLexicalMeasureTerms(parsedMeasures, question),
+      ...(salesIsRevenueAlias ? ['revenue'] : []),
+      ...(/\b(?:most|highest|expensive)\b.*\bproduct\s+price\b|\bproduct\s+price\b.*\b(?:most|highest|expensive)\b/i.test(question)
+        ? ['product price']
+        : []),
+      ...(!deicticAmount
+        && /\bamount\b/i.test(question)
+        && !parsedMeasures.some((measure) => normalizeRequirementTerm(measure).split(' ').includes('amount'))
+        ? ['amount']
+        : []),
+    ]),
+    question,
+  );
   const typedRequirements = normalizedTypedAggregationRequirements({
     question,
     measures: parsedMeasuresWithLexicalTerms,
@@ -1256,7 +1830,8 @@ export function evidenceCandidateRoles(candidate: RoleBalancedEvidenceCandidate)
     if ((candidate.kind === 'dql_modeling' && (candidate.relationshipEvidence?.length ?? 0) > 0)
       || /\b(?:relationship|join|bridge)\b/.test(identity)) roles.add('relationship');
     if (candidate.kind === 'semantic_member' || candidate.semanticObjectType === 'dimension'
-      || (physicalColumn && /\b(?:competitor|region|category|segment|status|type|owner|sentiment|active)\b/.test(identity))) roles.add('categorical_dimension');
+      || (physicalColumn && /\b(?:competitor|region|category|segment|status|type|owner|sentiment|active|product|description)\b/.test(identity))) roles.add('categorical_dimension');
+    if (candidate.kind === 'semantic_member' && candidate.semanticObjectType === 'member') roles.add('member');
   }
   for (const role of explicitlyDeclaredCandidateRoles(candidate)) roles.add(role);
   if (candidate.kind === 'sql_column' || candidate.kind === 'dbt_model' || candidate.kind === 'sql_table') roles.add('context');
@@ -1394,7 +1969,12 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
   /** Use before any kind cap to reserve exact/required-role cards. */
   pinOnly?: boolean;
 }): T[] {
-  const max = Math.max(1, Math.min(16, Math.floor(input.maxCandidates ?? 16)));
+  // This selector is used twice by Ask Analyst Runtime: once to make the
+  // immutable 32-item execution workspace and again to make the compact
+  // 16-card planner package.  Keep the ceiling here rather than allowing a
+  // caller to accidentally turn a retrieval result into an unbounded prompt
+  // or compiler closure.
+  const max = Math.max(1, Math.min(32, Math.floor(input.maxCandidates ?? 16)));
   const ranked = [...new Map(input.candidates
     .filter((candidate) => candidate.id.trim() && candidate.compatibility !== 'incompatible')
     .map((candidate) => [candidate.id, candidate] as const)).values()]
@@ -1406,6 +1986,7 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
     if (!candidate || candidateConflictsWithExplicitRankingMeasure(candidate, input.requirements)) return;
     if (selected.length < max && !selected.some((item) => item.id === candidate.id)) selected.push(candidate);
   };
+  const categoricalTerms = categoricalDimensionRequirementTerms(input.requirements);
   const servesRequestedRole = (candidate: T): boolean => {
     const roles = evidenceCandidateRoles(candidate);
     const metricTerms = input.requirements.ranking?.metricTerms.length
@@ -1415,15 +1996,17 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
     // An entity term such as "account" is deliberately insufficient for an
     // attribute (Account Owner Email) to displace the requested display key.
     // Only an actual entity-label candidate may satisfy this binding.
+    if (roles.includes('entity_key') && candidateMatchesTerms(candidate, input.requirements.entityTerms)) return true;
     if (roles.includes('entity_label') && candidateMatchesTerms(candidate, [
       ...input.requirements.entityTerms,
       ...input.requirements.entityDisplayTerms,
     ])) return true;
     if (roles.includes('time_dimension') && Boolean(input.requirements.time)) return true;
-    const categoricalTerms = categoricalDimensionRequirementTerms(input.requirements);
     if (roles.includes('categorical_dimension')
       && categoricalTerms.length > 0
       && candidateMatchesTerms(candidate, categoricalTerms, { categoricalDimension: true })) return true;
+    if (roles.includes('member') && input.requirements.memberTerms.length > 0
+      && candidateMatchesTerms(candidate, input.requirements.memberTerms)) return true;
     if (roles.includes('relationship')
       && (input.requirements.dimensions.length > 1 || input.requirements.entityTerms.length > 0)) return true;
     return false;
@@ -1435,21 +2018,27 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
     if (input.pinOnly && !servesRequestedRole(candidate)) continue;
     add(candidate);
   }
-  const required: Array<[EvidenceCandidateRoleV1, string[]]> = [
-    ['metric', input.requirements.ranking?.metricTerms.length ? input.requirements.ranking.metricTerms : input.requirements.measures],
-    ['entity_label', [...input.requirements.entityTerms, ...input.requirements.entityDisplayTerms]],
-    ['time_dimension', input.requirements.time ? [input.requirements.time.grain ?? 'time'] : []],
-    ['categorical_dimension', categoricalDimensionRequirementTerms(input.requirements)],
-    ['relationship', input.requirements.dimensions.length > 1 || input.requirements.entityTerms.length > 0 ? ['relationship'] : []],
+  const required: Array<{ role: EvidenceCandidateRoleV1; terms: string[]; limit: number; categorical?: boolean }> = [
+    // An explicit ranking measure is never displaced by correlated metric
+    // variants. Two cards leave room for a compatible canonical/alias pair.
+    { role: 'metric', terms: input.requirements.ranking?.metricTerms.length ? input.requirements.ranking.metricTerms : input.requirements.measures, limit: 2 },
+    { role: 'entity_key', terms: input.requirements.entityTerms, limit: 1 },
+    { role: 'entity_label', terms: [...input.requirements.entityTerms, ...input.requirements.entityDisplayTerms], limit: 2 },
+    // Each requested breakdown gets two candidates, bounded to four total so
+    // a product/category request cannot be crowded out by customer variants.
+    ...categoricalTerms.slice(0, 2).map((term) => ({ role: 'categorical_dimension' as const, terms: [term], limit: 2, categorical: true })),
+    { role: 'time_dimension', terms: input.requirements.time ? [input.requirements.time.grain ?? 'time'] : [], limit: 2 },
+    { role: 'member', terms: input.requirements.memberTerms, limit: 2 },
+    { role: 'relationship', terms: input.requirements.dimensions.length > 1 || input.requirements.entityTerms.length > 0 ? ['relationship'] : [], limit: 2 },
   ];
-  for (const [role, terms] of required) {
+  for (const { role, terms, limit, categorical } of required) {
     // No requested categorical dimension means that high-scoring arbitrary
     // members are noise, not a role reservation. This is the subtle path that
     // used to admit Account Owner and Sentiment immediately after Account Name.
     if (terms.length === 0) continue;
     let admitted = 0;
     for (const candidate of ranked) {
-      if (admitted >= 2 || selected.length >= max) break;
+      if (admitted >= limit || selected.length >= max) break;
       const roles = evidenceCandidateRoles(candidate);
       if (!roles.includes(role)) continue;
       // "top accounts" needs the account display key, not any field whose
@@ -1476,7 +2065,7 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
       // For entity labels, role is more important than a lexical owner/email
       // hit. For all other roles, prefer an identity matching the requested
       // business term but retain a role candidate when the request is terse.
-      if (terms.length > 0 && !candidateMatchesTerms(candidate, terms, { categoricalDimension: role === 'categorical_dimension' })
+      if (terms.length > 0 && !candidateMatchesTerms(candidate, terms, { categoricalDimension: categorical === true })
         && role !== 'time_dimension' && role !== 'relationship' && role !== 'entity_label') continue;
       add(candidate);
       admitted += 1;
@@ -1486,6 +2075,23 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
     for (const candidate of ranked) add(candidate);
   }
   return selected;
+}
+
+/**
+ * Build the Ask execution workspace before planner admission.  It is the
+ * only helper that may create the 32-card closure; all later compiler paths
+ * must intersect with this immutable result rather than reaching back into a
+ * broad snapshot.
+ */
+export function selectRoleBalancedWorkspaceCandidates<T extends RoleBalancedEvidenceCandidate>(input: {
+  candidates: T[];
+  requirements: AnalyticalRequirementSetV1;
+}): T[] {
+  return selectRoleBalancedMeaningCandidates({
+    candidates: input.candidates,
+    requirements: input.requirements,
+    maxCandidates: 32,
+  });
 }
 
 export function classifyProviderFailure(input: {
@@ -1620,20 +2226,42 @@ export function buildAnalyticalTaskGraph(input: {
   inheritedBindings?: Array<{ id: string; value: string; source: 'conversation' | 'result' | 'user' }>;
   maxTasks?: number;
 }): { kind: AnalyticalTurnKind; tasks: AnalyticalTaskV1[]; partial: boolean } {
-  const rootKind = input.mode === 'research' ? 'research' : inferAnalyticalTurnKind(input.question);
+  // Research is an explicit mode boundary. Investigative wording in an
+  // ordinary Ask can influence its operations but must not silently switch it
+  // to the multi-branch Research budget/execution contract.
+  const inferredKind = inferAnalyticalTurnKind(input.question);
+  const rootKind = input.mode === 'research'
+    ? 'research'
+    : inferredKind === 'research'
+      ? 'diagnosis'
+      : inferredKind;
   // A research turn may later create bounded evidence branches, but that is a
   // research planner's job. Splitting at ingress loses the surrounding story
   // before it has an opportunity to reason about it.
-  const clauses = (rootKind === 'research' ? [input.question.trim()] : splitAnalyticalTasks(input.question))
-    .slice(0, Math.max(1, Math.min(6, input.maxTasks ?? 6)));
+  const sourceClauses = rootKind === 'research'
+    ? [input.question.trim()]
+    : splitAnalyticalTasks(input.question);
+  const taskCap = Math.max(1, Math.min(6, input.maxTasks ?? 6));
+  // Keep the overflow visible to the runtime.  The prior `slice()` silently
+  // accepted the first three ordinary-Ask clauses and returned `partial:
+  // false`, which could make a four-question request look successfully
+  // answered after only three frozen programs.  Ordinary Ask must stop before
+  // planning/execution in that case; explicit Research owns broader branching.
+  const partial = sourceClauses.length > taskCap;
+  const clauses = sourceClauses.slice(0, taskCap);
   const candidateIds = [...new Set((input.candidateIds ?? []).filter((id) => id.trim()))];
   const metrics = [...new Set((input.metrics ?? []).filter((metric) => metric.trim()))];
   const dimensions = [...new Set((input.dimensions ?? []).filter((dimension) => dimension.trim()))];
   const filters = input.filters ?? [];
   const inheritedBindings = input.inheritedBindings ?? [];
   const unboundTasks = clauses.map((clause, index): AnalyticalTaskV1 => {
-    const kind = rootKind === 'research' ? 'research' : inferAnalyticalTurnKind(clause);
-    const research = kind === 'research' || kind === 'diagnosis';
+    const inferredClauseKind = rootKind === 'research' ? 'research' : inferAnalyticalTurnKind(clause);
+    const kind = rootKind === 'research'
+      ? 'research'
+      : inferredClauseKind === 'research'
+        ? 'diagnosis'
+        : inferredClauseKind;
+    const research = rootKind === 'research';
     const taskKind: AnalyticalTaskKind = research
       ? 'research_branch'
       : kind === 'lookup'
@@ -1668,7 +2296,7 @@ export function buildAnalyticalTaskGraph(input: {
   return {
     kind: rootKind === 'research' ? 'research' : tasks.length > 1 ? 'compound' : rootKind,
     tasks,
-    partial: false,
+    partial,
   };
 }
 

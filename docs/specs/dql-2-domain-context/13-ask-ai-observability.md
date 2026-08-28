@@ -195,3 +195,40 @@ readable and explicitly says that a canonical decision summary is unavailable.
 `execution_not_attempted` impact and the only safe action
 `export_redacted_trace`; it is never labeled `unknown` or
 `retry-after-connection`.
+
+## OBS-015 — Ask Analyst Runtime story
+
+`AgentRunDiagnosticReceiptV5` adds the persisted `AskAnalystStateV1`, a
+fact-bound `BusinessAnswerV1`, and `AskDecisionSummaryV2`. The default
+inspector story is intentionally short and decision-oriented: **What happened**,
+**Why**, **Impact on answer**, **How to proceed**, and the bounded program/tool/
+execution count. The trace tree, provider spans, candidate lifecycle, and other
+high-cardinality evidence remain Advanced/local-only detail.
+
+The V5 state carries stable IDs, fingerprints, typed requirements, and a typed
+conversation delta. It does not persist prompts, provider messages, SQL, result
+rows, values, credentials, file paths, or chain-of-thought. V1–V4 receipts
+remain readable and continue to use their existing presentation paths.
+
+## OBS-016 — retrieval-first decision story
+
+`AgentRunDiagnosticReceiptV6` projects the authoritative
+`AskAnalystStateV2` into one concise, content-safe decision story. Its default
+sections are: interpretation, role coverage, planning, verifier/recovery,
+cascade attempts, freeze/connection boundary, execution, facts, and safe next
+action. The inspector and full trace use the same V6 summary fingerprint.
+
+The receipt records source/snapshot fingerprints, bounded workspace/planner
+counts, candidate lifecycle reason codes, planner call and revision counts,
+verified task IDs, targeted extension count/path count, tier attempts,
+connection attempted state, provider phase/cause/retryability, final
+fact/result fingerprints, and a safe action. It never stores a question,
+prompt, provider body, member value, SQL, result row, secret, or path. Raw
+candidate identities and spans stay in local Advanced evidence and are subject
+to the existing strict export projection.
+
+Planner failures are recorded as `planning.initial` or `planning.revision`;
+pre-freeze verification/recovery failures remain `meaning_validation` or
+coverage incidents. They are not rendered as connection or SQL-execution
+failures. V1–V5 receipts continue to render through their compatible summary
+paths.

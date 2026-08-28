@@ -176,6 +176,66 @@ export function certifiedCandidateDeclaredDimensionOutput(
 }
 
 /**
+ * Return only the declared block dimensions that define its authored result
+ * grain.  A certified block can return descriptive attributes alongside the
+ * grain key without changing the number of result rows: a one-row-per-customer
+ * profile may legitimately include both `customer_name` and `customer_type`.
+ * Treating every returned attribute as a grouping key rejects that complete
+ * customer answer and unnecessarily sends a catalog-proven exact match to the
+ * provider planner.
+ *
+ * The proof is deliberately conservative.  When an authored grain fact is
+ * present, an output is grain-driving only when its canonical identity is
+ * wholly represented by the grain wording.  If no output can be tied back to
+ * the grain, retain the older all-dimensions behaviour rather than weakening
+ * a block with an opaque grain declaration.  This keeps a customer-ranked
+ * block from answering the scalar request `show me revenue`: `customer_name`
+ * is still a grain-driving output that the scalar request did not ask for.
+ */
+export function certifiedCandidateGrainDimensionOutputs(
+  candidate: AgentEvidenceCandidate,
+): string[] {
+  if (candidate.kind !== 'certified_block') return [];
+  const declared = [...new Set((candidate.dimensions ?? [])
+    .map((dimension) => certifiedCandidateDeclaredDimensionOutput(candidate, dimension))
+    .filter((output): output is string => Boolean(output))
+    .map((output) => output.trim())
+    .filter(Boolean))];
+  if (declared.length === 0) return [];
+
+  const grainFacts = (candidate.compatibilityFacts ?? [])
+    .flatMap((fact) => /^grain:\s*(.+)$/i.exec(fact)?.[1] ?? [])
+    .map((grain) => grain.trim())
+    .filter(Boolean);
+  if (grainFacts.length === 0) return declared;
+
+  const ignoredGrainTokens = new Set([
+    'a', 'an', 'and', 'at', 'by', 'for', 'in', 'of', 'on', 'per', 'row',
+    'rows', 'the', 'to', 'with', 'result', 'results', 'record', 'records',
+    'ranking', 'rank', 'purchase', 'profile', 'value', 'values',
+  ]);
+  const grainTokenSets = grainFacts.map((grain) => new Set(
+    grain.toLowerCase()
+      .replace(/[_./:-]+/g, ' ')
+      .replace(/[^a-z0-9 ]+/g, ' ')
+      .split(/\s+/)
+      .map((token) => token.endsWith('s') && token.length > 3 ? token.slice(0, -1) : token)
+      .filter((token) => token.length > 0 && !ignoredGrainTokens.has(token)),
+  ));
+  const grainDriving = declared.filter((output) => {
+    const outputTokens = canonicalCertifiedOutputDimensionIdentity(output)
+      .split('_')
+      .filter(Boolean);
+    return outputTokens.length > 0 && grainTokenSets.some((tokens) =>
+      outputTokens.every((token) => tokens.has(token)));
+  });
+  // An opaque/legacy grain fact is not enough to waive the existing
+  // no-extra-grouping protection.  Fall back to every declared dimension if
+  // none can be proven as the block's grain key.
+  return grainDriving.length > 0 ? grainDriving : declared;
+}
+
+/**
  * A certified tier can freeze only when the selected block itself declares
  * every requested measure.  This is deliberately stricter than retrieval
  * relevance: `top_customers` tagged with revenue but outputting only
@@ -255,6 +315,14 @@ function canonicalCertifiedOutputDimensionIdentity(value: string): string {
 export interface AgentRetrievalEvidence {
   snapshotId?: string;
   sourceFingerprint?: string;
+  /**
+   * Stable, content-addressed proof of the candidate identities and authored
+   * capability contracts relevant to a server-issued Ask selection. Unlike a
+   * local SQLite snapshot handle, it survives a process restart that rebuilds
+   * equivalent index files. It is never a substitute for current candidate
+   * membership/capability validation.
+   */
+  continuityFingerprint?: string;
   knowledgeLens?: KnowledgeLens;
   candidates: AgentEvidenceCandidate[];
   /**
@@ -285,6 +353,28 @@ export interface AgentRetrievalEvidence {
     truncated?: boolean;
     /** Actual retrieval-lane/source state captured with this snapshot. */
     sourceCoverage?: ContextSourceCoverageV1[];
+    /**
+     * Pre-freeze execution readiness captured against this exact snapshot and
+     * active target. These are availability signals, never permission to
+     * bypass compiler/relationship safety.
+     */
+    tierReadiness?: {
+      connector?: 'ready' | 'unavailable' | 'unknown';
+      activeTarget?: 'ready' | 'unavailable' | 'unknown';
+      semanticCompiler?: 'ready' | 'unavailable' | 'unknown';
+      /**
+       * Compiler readiness for the semantic metric identities in this exact
+       * snapshot. The Ask runtime applies this only to its already-selected
+       * metric set; a ready unrelated metric must not authorize another
+       * external-only metric to freeze.
+       */
+      semanticCandidateReadiness?: Array<{
+        candidateId: string;
+        status: 'ready' | 'unavailable' | 'unknown';
+      }>;
+      physicalSchema?: 'ready' | 'unavailable' | 'unknown';
+      targetFingerprint?: string;
+    };
   };
 }
 
@@ -629,6 +719,12 @@ function firstInvalidAnalyticalFrameReference(
   for (const candidate of candidates) {
     evidenceIds.add(candidate.id);
     if (candidate.qualifiedId) evidenceIds.add(candidate.qualifiedId);
+    // Semantic adapters can expose a retrieval-stable member identity beside
+    // the canonical capability dimension ID. Those exact aliases are authored
+    // snapshot identities, not a lexical fallback. Keep them in the frame
+    // proof so a server-issued capability choice survives local index
+    // normalization without being treated as invented evidence.
+    for (const alias of candidate.aliases ?? []) evidenceIds.add(alias);
     if (candidate.kind === 'semantic_metric') {
       metricIds.add(candidate.id);
       if (candidate.qualifiedId) metricIds.add(candidate.qualifiedId);
@@ -644,6 +740,9 @@ function firstInvalidAnalyticalFrameReference(
     metricIds.add(capability.metricId);
     entityIds.add(capability.primaryEntityId);
     for (const grain of capability.resultGrainIds) entityIds.add(grain);
+    for (const dimension of capability.dimensions) {
+      entityIds.add(dimension.entityId);
+    }
     for (const dimension of capability.dimensions) dimensionIds.add(dimension.dimensionId);
     for (const dimension of capability.timeDimensions) dimensionIds.add(dimension.dimensionId);
   }
@@ -666,20 +765,38 @@ function firstInvalidAnalyticalFrameReference(
   for (const [kind, ids, allowed] of checks) {
     for (const id of ids) if (!allowed.has(id)) return `${kind} ${id}`;
   }
-  const selected = executionId
-    ? candidates.find((candidate) => candidate.id === executionId || candidate.qualifiedId === executionId)
-    : undefined;
-  const selectedCapability = selected?.analyticalCapability;
-  if (selectedCapability) {
-    const selectedMetricIds = new Set([selectedCapability.metricId]);
-    const selectedDimensionIds = new Set([
-      ...selectedCapability.dimensions.map((dimension) => dimension.dimensionId),
-      ...selectedCapability.timeDimensions.map((dimension) => dimension.dimensionId),
-    ]);
-    const selectedEntityIds = new Set([
-      selectedCapability.primaryEntityId,
-      ...selectedCapability.resultGrainIds,
-    ]);
+  // A canonical multi-metric request has one recommended execution metric but
+  // more than one explicit, retrieved capability. Validate membership against
+  // the complete selected metric set here; compatibility/additivity across
+  // that set is still proven by the immutable compiler below. Checking only
+  // the first metric converted a valid `metric_a + metric_b` identity binding
+  // into the false “not retrieved” gap before MetricFlow got a chance to
+  // evaluate it.
+  const selectedCapabilities = candidates
+    .filter((candidate) => {
+      const identities = [candidate.id, candidate.qualifiedId, candidate.analyticalCapability?.metricId]
+        .filter((id): id is string => Boolean(id));
+      return identities.some((id) => frame.metricConceptIds.includes(id))
+        || Boolean(executionId && identities.includes(executionId));
+    })
+    .flatMap((candidate) => candidate.analyticalCapability ? [candidate.analyticalCapability] : []);
+  if (selectedCapabilities.length > 0) {
+    const selectedMetricIds = new Set(selectedCapabilities.map((capability) => capability.metricId));
+    const selectedDimensionIds = new Set(selectedCapabilities.flatMap((capability) => [
+      ...capability.dimensions.map((dimension) => dimension.dimensionId),
+      ...capability.timeDimensions.map((dimension) => dimension.dimensionId),
+    ]));
+    const selectedEntityIds = new Set(selectedCapabilities.flatMap((capability) => [
+      capability.primaryEntityId,
+      ...capability.resultGrainIds,
+      // A MetricFlow capability may safely expose a governed product/order
+      // grouping dimension whose entity differs from its primary aggregate
+      // entity.  The frame records that declared entity grain for the output;
+      // rejecting it merely because it was not the metric's primary entity
+      // turns a complete customer-by-product program into a false "not
+      // retrieved" gap before semantic compilation can evaluate it.
+      ...capability.dimensions.map((dimension) => dimension.entityId),
+    ]));
     const selectedChecks: Array<[string, Iterable<string>, Set<string>]> = [
       ['selected capability metric', frame.metricConceptIds, selectedMetricIds],
       ['selected capability entity grain', frame.entityGrainIds, selectedEntityIds],

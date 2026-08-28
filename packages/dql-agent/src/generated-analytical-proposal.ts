@@ -509,7 +509,16 @@ function relationMatchesFrozenPhysicalSource(
   const qualifiedLeafSources = leafSources.filter((source) => source !== expectedLeaf);
   const expectedIsCompactLeaf = expected === expectedLeaf;
   if (expectedIsCompactLeaf) {
-    if (qualifiedLeafSources.length > 1) return false;
+    if (qualifiedLeafSources.length > 1) {
+      // A local dbt project can surface the selected model once through its
+      // manifest relation (`catalog.main.table`) and once through the active
+      // runtime target (`catalog.dev.table`).  They are only aliases when the
+      // frozen authority also carries the exact qualified dbt model identity.
+      // Do not generalize this to arbitrary same-leaf tables: without that
+      // immutable model identity, two qualified sources remain ambiguous.
+      if (!isFrozenLocalDbtRuntimeAliasPair(plan, qualifiedLeafSources, expectedLeaf)) return false;
+      return actual === expectedLeaf || qualifiedLeafSources.includes(actual);
+    }
     if (qualifiedLeafSources.length === 1) {
       // The parser may see either the provider's compact FROM spelling or
       // the target-qualified form that the host authorizes later. Both must
@@ -534,6 +543,35 @@ function relationMatchesFrozenPhysicalSource(
   return actual === actualLeaf
     && qualifiedLeafSources.length === 1
     && qualifiedLeafSources[0] === expected;
+}
+
+/**
+ * Recognize the one local dbt/runtime alias shape that can be proven without
+ * reopening a frozen physical closure.  The model ID is server-issued during
+ * snapshot binding; provider SQL and public request fields cannot create it.
+ *
+ * This remains intentionally narrower than a generic `main`/`dev` rule:
+ * the two relations must share one catalog and table leaf, use exactly those
+ * two schemas, and have the exact qualified dbt model in the frozen plan.
+ */
+function isFrozenLocalDbtRuntimeAliasPair(
+  plan: ResolvedAnalyticalPlan,
+  qualifiedLeafSources: string[],
+  expectedLeaf: string,
+): boolean {
+  if (qualifiedLeafSources.length !== 2) return false;
+  const parsed = qualifiedLeafSources.map((source) => source.split('.').filter(Boolean));
+  if (!parsed.every((parts) => parts.length === 3 && parts[2] === expectedLeaf)) return false;
+
+  const [first, second] = parsed as [[string, string, string], [string, string, string]];
+  if (first[0] !== second[0]) return false;
+  if (new Set([first[1], second[1]]).size !== 2) return false;
+  if (!new Set([first[1], second[1]]).has('main') || !new Set([first[1], second[1]]).has('dev')) {
+    return false;
+  }
+
+  const qualifiedModelId = `dbt::model.${first[0]}.${expectedLeaf}`;
+  return plan.selectedConceptIds.some((id) => normalizePhysicalIdentifier(id) === qualifiedModelId);
 }
 
 function physicalIdentifierLeaf(value: string): string | undefined {

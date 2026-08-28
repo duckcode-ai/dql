@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildMeaningEvidencePackage,
   certifiedCandidateExplicitlyCoversMeasures,
+  certifiedCandidateGrainDimensionOutputs,
   findExplicitEvidenceReference,
   mergeMeaningResolutionWithRequirementSeed,
   questionTypeFromText,
@@ -41,6 +42,27 @@ function resolution(overrides: Partial<MeaningResolution> = {}): MeaningResoluti
 }
 
 describe("AGT-010 meaning-resolution evidence boundary", () => {
+  it('distinguishes a certified profile attribute from a grain-driving output', () => {
+    const profile = candidate({
+      id: 'dql:block:customer_profile',
+      kind: 'certified_block',
+      trustTier: 'certified',
+      name: 'customer_profile',
+      dimensions: ['customer_name', 'customer_type'],
+      compatibilityFacts: [
+        'grain: one row per customer',
+        'output: customer_name',
+        'output: customer_type',
+      ],
+    });
+
+    // `customer_type` is a returned customer attribute. It does not create a
+    // second row grain, so it cannot force a provider call for the otherwise
+    // exact `who are the top customers?` certified path. The customer label
+    // remains grain-driving and still protects scalar revenue requests.
+    expect(certifiedCandidateGrainDimensionOutputs(profile)).toEqual(['customer_name']);
+  });
+
   it("keeps relevance primary so unrelated certification cannot beat the right meaning", () => {
     const candidates = buildMeaningEvidencePackage({
       candidates: [

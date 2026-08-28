@@ -338,6 +338,7 @@ export interface TraceIncidentSummaryV1 {
 }
 
 export function incidentSummaryForTrace(trace: AskTraceDataV1): TraceIncidentSummaryV1 {
+  if (trace.runtimeDecisionSummary) return incidentSummaryFromRuntimeDecisionSummary(trace.runtimeDecisionSummary);
   // New runs carry one server-produced story. Do not build a competing generic
   // incident from spans; only legacy runs fall through to the compatibility
   // renderer below.
@@ -541,6 +542,17 @@ export function incidentSummaryForTrace(trace: AskTraceDataV1): TraceIncidentSum
   };
 }
 
+export function incidentSummaryFromRuntimeDecisionSummary(summary: NonNullable<AskTraceDataV1['runtimeDecisionSummary']>): TraceIncidentSummaryV1 {
+  const attention = /did not complete|paused|blocked/i.test(summary.whatHappened);
+  return {
+    state: attention ? 'attention' : 'healthy',
+    whatHappened: summary.whatHappened,
+    why: summary.why,
+    impact: summary.impact,
+    howToFix: safeActionInstruction(summary.nextAction),
+  };
+}
+
 /**
  * Project the one stored server decision summary into the inspector copy.
  * Exported for the presentation regression so safe-action wording cannot drift
@@ -632,6 +644,58 @@ function researchBranchPlanText(summary: NonNullable<NonNullable<AskTraceDataV1[
 
 /** The default top-to-bottom story for V4 runs. Old traces remain readable. */
 export function TraceDecisionStory({ trace, t, onSelectSpan: _onSelectSpan }: { trace: AskTraceDataV1; t: Theme; onSelectSpan: (spanId: string) => void }): JSX.Element {
+  const runtime = trace.runtimeDecisionSummary;
+  const runtimeV6 = trace.runtimeReceiptV6;
+  if (runtime) {
+    const attention = /did not complete|paused|blocked/i.test(runtime.whatHappened);
+    const roleCoverage = runtimeV6?.roleCoverage?.length
+      ? runtimeV6.roleCoverage.map((entry) => `${entry.role.replace(/_/g, ' ')}: ${entry.candidateCount}`).join(' · ')
+      : undefined;
+    const planner = runtimeV6?.planning;
+    const cascade = runtimeV6?.cascade;
+    const sections: Array<[string, string]> = [
+      ['What happened', runtime.whatHappened],
+      ['Why', runtime.why],
+      ['Impact', runtime.impact],
+      ['Role coverage', roleCoverage ?? `${runtime.admittedCandidateCount} qualified candidate${runtime.admittedCandidateCount === 1 ? '' : 's'} admitted.`],
+      ['Planner & verification', planner
+        ? `${planner.mode.replace(/_/g, ' ')} · ${planner.plannerCalls} planner call${planner.plannerCalls === 1 ? '' : 's'} · verification ${planner.verification.status.replace(/_/g, ' ')}.`
+        : `${runtime.runtimeMode} · ${runtime.programTaskCount} task${runtime.programTaskCount === 1 ? '' : 's'} · deterministic receipt.`],
+      ['Cascade & freeze', cascade
+        ? `${cascade.attempts.length} tier attempt${cascade.attempts.length === 1 ? '' : 's'} · ${cascade.selectedTier?.replace(/_/g, ' ') ?? 'no executable tier'}${cascade.planFrozen ? ' · frozen' : ' · not frozen'}.`
+        : `${runtime.selectedCompiler ?? 'none'} · no cascade receipt.`],
+      ['Connection & execution', runtimeV6
+        ? `${runtimeV6.connection.attempted ? 'connection attempted after freeze' : 'no connection attempted'} · ${runtimeV6.execution.attempts} execution attempt${runtimeV6.execution.attempts === 1 ? '' : 's'}.`
+        : `${runtime.selectedCompiler ?? 'none'} · ${runtime.executionAttempts} execution attempt${runtime.executionAttempts === 1 ? '' : 's'}.`],
+      ['Facts', runtimeV6
+        ? `${runtimeV6.facts.factCount} validated fact${runtimeV6.facts.factCount === 1 ? '' : 's'}${runtimeV6.facts.resultFingerprint ? ' bound to the result.' : '.'}`
+        : 'No V6 fact receipt was retained.'],
+      ...(runtimeV6?.origin
+        ? [['Origin boundary', `${runtimeV6.origin.boundary.replace(/_/g, ' ')} · ${runtimeV6.origin.origin.replace(/_/g, ' ')} · ${runtimeV6.origin.impact.replace(/_/g, ' ')}.`] as [string, string]]
+        : []),
+      ...(runtimeV6?.story?.length
+        ? [['Decision path', runtimeV6.story.map((step) => `${step.stage.replace(/_/g, ' ')}: ${step.status.replace(/_/g, ' ')}`).join(' · ')] as [string, string]]
+        : []),
+      ['Safe next action', safeActionInstruction(runtimeV6?.safeNextAction ?? runtime.nextAction)],
+    ];
+    return (
+      <section aria-label="Ask decision story" style={{ margin: '0 0 14px', padding: '14px 16px', border: `1px solid ${attention ? t.warning : t.success}`, borderRadius: 11, background: t.cellBg }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: attention ? t.warning : t.success, fontSize: 13, fontWeight: 750 }}>
+          {attention ? <AlertTriangle size={15} aria-hidden="true" /> : <CheckCircle2 size={15} aria-hidden="true" />}
+          Ask decision story
+          <span style={{ color: t.textMuted, fontFamily: t.fontMono, fontSize: 10.5, fontWeight: 500 }}>#{runtime.summaryFingerprint.slice(0, 12)}</span>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 11, marginTop: 12 }}>
+          {sections.map(([label, value]) => (
+            <div key={label} style={{ minWidth: 0 }}>
+              <div style={{ color: t.textMuted, fontSize: 10.5, fontWeight: 750, letterSpacing: '.025em', textTransform: 'uppercase' }}>{label}</div>
+              <div style={{ marginTop: 4, color: t.textSecondary, fontSize: 12, lineHeight: 1.45 }}>{value}</div>
+            </div>
+          ))}
+        </div>
+      </section>
+    );
+  }
   const summary = trace.decisionSummary;
   if (!summary) {
     return (

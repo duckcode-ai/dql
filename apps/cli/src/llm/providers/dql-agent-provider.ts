@@ -39,6 +39,7 @@ import {
   type ProviderToolLoopOptions,
   type AgentResultPayload,
   type ConversationSnapshot,
+  type ConversationResultMemberSetV1,
   type LocalContextPack,
   type ProviderDispatchEvent,
   type ProviderDispatchCompletionEvent,
@@ -760,7 +761,8 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
       // server-owned and the deterministic provider below throws if a future
       // branch accidentally tries to generate text, so this cannot create a
       // silent provider fallback.
-      const providerPreflightRequired = req.providerPreflightRequired !== false;
+      const providerPreflightRequired = req.providerPreflightRequired !== false
+        && !req.deterministicExploratoryProposal;
       const isResearch = req.orchestrationMode === 'research';
       const frozenExploratoryRepairRoute = frozenExploratoryRepairAuthorityForRequest(req);
       // Ordinary analytical Ask has one candidate-ID interpretation, one
@@ -882,6 +884,8 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
         purpose: ProviderEgressPurpose;
         ordinaryRepairRequested: boolean;
         ordinaryRepairAuthorized: boolean;
+        ordinaryPlanningRequested: boolean;
+        ordinaryPlanningAuthorized: boolean;
         retryRequested: boolean;
         retryAuthorized: boolean;
       } => {
@@ -900,6 +904,17 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           && requestedPurpose === 'repair_sql'
           && options?.maxProviderDispatches === 1
           && options?.retryOfAttemptIndex === undefined;
+        // Authoritative Ask planner calls are a server-owned, bounded ingress
+        // into the analytical runtime.  Preserve their physical phase so the
+        // local ledger can distinguish one initial planner call from one
+        // verifier-directed revision.  A bare client phase label cannot mint
+        // this lane: it must carry the typed planning marker and one-send cap.
+        const ordinaryPlanningRequested = !isResearch && requestedPhase === 'planning';
+        const ordinaryPlanningAuthorized = ordinaryPlanningRequested
+          && requestedPurpose === 'answer_generation'
+          && (options?.analyticalPlanningKind === 'initial' || options?.analyticalPlanningKind === 'targeted_revision')
+          && options?.maxProviderDispatches === 1
+          && options?.retryOfAttemptIndex === undefined;
         const researchPhase = requestedPhase === 'classification'
           || requestedPhase === 'meaning_resolution'
           || requestedPhase === 'planning'
@@ -908,6 +923,8 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           || requestedPhase === 'repair';
         const dispatchPhase: ProviderDispatchPhaseV1 = isResearch && researchPhase
           ? requestedPhase
+          : ordinaryPlanningAuthorized
+            ? 'planning'
           : ordinaryRepairRequested
             ? 'repair'
             : 'generation';
@@ -936,6 +953,8 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           purpose,
           ordinaryRepairRequested,
           ordinaryRepairAuthorized,
+          ordinaryPlanningRequested,
+          ordinaryPlanningAuthorized,
           retryRequested,
           retryAuthorized,
         };
@@ -953,6 +972,8 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           purpose,
           ordinaryRepairRequested,
           ordinaryRepairAuthorized,
+          ordinaryPlanningRequested,
+          ordinaryPlanningAuthorized,
           retryRequested,
           retryAuthorized,
         } = identity;
@@ -1033,6 +1054,12 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             if (ordinaryRepairRequested && !ordinaryRepairAuthorized) {
               throw repairAuthorityAdmissionError();
             }
+            if (ordinaryPlanningRequested && !ordinaryPlanningAuthorized) {
+              throw Object.assign(
+                new Error('Analytical planning dispatch requires a server-owned initial or targeted-revision marker.'),
+                { code: 'PROVIDER_DISPATCH_PLANNING_NOT_ALLOWED' },
+              );
+            }
             // Retry correlation is likewise host-owned. The shared ledger
             // validates the parent receipt too, but this marker prevents a
             // caller from claiming an arbitrary earlier attempt before that
@@ -1054,6 +1081,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
                   : {}),
                 ...(options?.retryOfAttemptIndex !== undefined
                   ? { retryOfAttemptIndex: options.retryOfAttemptIndex }
+                  : {}),
+                ...(dispatchPhase === 'planning' && options?.analyticalPlanningKind
+                  ? { planningKind: options.analyticalPlanningKind }
                   : {}),
               });
               pendingResultRowCount = 0;
@@ -1435,7 +1465,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           kind: 'thinking',
           text: providerPreflightRequired
             ? `Using ${spec.label} through the governed DQL agent.`
-            : 'Executing the router-selected certified plan without an AI provider.',
+            : req.deterministicExploratoryProposal
+              ? 'Executing the router-selected deterministic physical plan without an AI provider.'
+              : 'Executing the router-selected certified plan without an AI provider.',
         });
         const kgPath = defaultKgPath(req.projectRoot);
         if (!existsSync(kgPath)) {
@@ -1674,6 +1706,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           // even though provider, router, and SQL evidence was recorded.
           const answerLoopInput: Parameters<typeof answer>[0] = attachAskTraceObserverV1<Parameters<typeof answer>[0]>({
             question,
+            ...(req.skipCrossResultComputation
+              ? { skipCrossResultComputation: true }
+              : {}),
             ...(req.resolvedAnalyticalPlan
               ? { resolvedAnalyticalPlan: req.resolvedAnalyticalPlan }
               : {}),
@@ -1685,6 +1720,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
               : {}),
             ...(req.generatedProposalTargetFingerprint
               ? { generatedProposalTargetFingerprint: req.generatedProposalTargetFingerprint }
+              : {}),
+            ...(req.deterministicExploratoryProposal
+              ? { forcedGeneratedProposal: req.deterministicExploratoryProposal }
               : {}),
             ...(req.analyticalReferenceInstant
               ? { analyticalReferenceInstant: req.analyticalReferenceInstant }
@@ -1826,7 +1864,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             // auto-write a draft into the blocks space. A draft is created only when the user
             // explicitly acts (the "Create DQL draft" action → the dql_block_draft route).
           } as Parameters<typeof answer>[0], askTrace);
-          const result = await answerAgentic(answerLoopInput, {
+          const result = req.deterministicExploratoryProposal
+            ? await answer(answerLoopInput)
+            : await answerAgentic(answerLoopInput, {
             policy: resolveOrchestratorPolicy({
               config: readOrchestratorConfig(req.projectRoot),
             }),
@@ -2362,10 +2402,18 @@ function extractSelectedBlockHints(req: AgentRunRequest): string[] {
 }
 
 function inferFollowUpContext(req: AgentRunRequest, question: string): AgentFollowUpContext | undefined {
-  // Messages-only fallback (no structured conversationContext). A prior
-  // assistant turn is not permission to carry rows, measures, or a block into
-  // a complete new analytical question. Admit it only for an explicit
-  // prior-result reference/operation; otherwise this returns `undefined`.
+  // A browser-carried assistant message is never enough to establish prior
+  // governed authority. In particular, text such as "Answered by certified
+  // block **x**" cannot become source attribution, a result filter, or a
+  // compiler hint unless the host has reconstructed a persisted conversation
+  // snapshot for this thread. HTTP Ask ingress removes public history; this
+  // guard keeps alternative/direct provider entry points from reintroducing
+  // the same authority bypass.
+  if (!conversationSnapshotFromContext(req.conversationContext)) return undefined;
+  // Even with server-backed context, a prior assistant turn is not permission
+  // to carry rows, measures, or a block into a complete new analytical
+  // question. Admit it only for an explicit prior-result reference/operation;
+  // otherwise this returns `undefined`.
   const kind = isGenericFollowUp(question) ? 'generic' : isDrilldownFollowUp(question) ? 'drilldown' : undefined;
   if (!kind) return undefined;
   for (let i = req.messages.length - 1; i >= 0; i--) {
@@ -2482,7 +2530,22 @@ function resolveAgentFollowUpContextRaw(
     ? activeTurn.result as Record<string, unknown>
     : undefined;
   const sourceBlockName = cleanOptionalString(activeTurn?.sourceCertifiedBlock) ?? cleanOptionalString(context.sourceCertifiedBlock);
-  const priorResultValues = cleanStringRecordArray(activeResult?.dimensionValues) ?? cleanStringRecordArray(context.resultDimensionValues);
+  const priorMemberSets = cleanPriorResultMemberSets(activeResult?.memberSets)
+    ?? cleanPriorResultMemberSets(context.resultMemberSets);
+  // New turns persist entity/display sets with a content-free result
+  // fingerprint. Legacy rows retain `dimensionValues`, so merge both forms for
+  // restart compatibility. The resolver always binds the display values; an
+  // optional entity key is preserved as local continuity metadata, not guessed
+  // into a user-visible filter.
+  const priorResultValues = mergePriorResultValues(
+    memberSetValuesByDimension(priorMemberSets),
+    cleanStringRecordArray(activeResult?.dimensionValues),
+    cleanStringRecordArray(context.resultDimensionValues),
+  );
+  const pluralPriorEntity = pluralPriorResultEntity(question);
+  const priorResultSetUnavailable = Boolean(
+    pluralPriorEntity && valuesForPriorDimension(priorResultValues ?? {}, pluralPriorEntity).length === 0,
+  );
   const priorResultColumns = mergeStrings(
     arrayValue(activeResult?.columns),
     context.resultColumns,
@@ -2516,7 +2579,21 @@ function resolveAgentFollowUpContextRaw(
   const hasFocusedReference = Boolean(resolvedReferences.valuesByDimension);
   const relativeComparison = isEntityRelativeComparisonQuestion(question);
   const hasUsefulContext = Boolean(sourceBlockName || priorResultColumns?.length || focusedPriorResultValues || priorDqlArtifact);
-  if (!hasUsefulContext) return undefined;
+  if (!hasUsefulContext) {
+    // "Those customers" is an explicit set reference. Do not silently turn it
+    // into a global customer ranking when the retained result values are absent
+    // (for example, an intentionally redacted old row). The Ask runtime turns
+    // this typed continuity gap into a clarification before any compiler or
+    // connection attempt.
+    if (!priorResultSetUnavailable || !pluralPriorEntity) return undefined;
+    return {
+      kind: 'drilldown',
+      binding: 'prior_result',
+      dimensions: [pluralPriorEntity],
+      unresolvedReferences: [`The previous result did not retain the displayed ${pluralPriorEntity} set needed for "those ${pluralPriorEntity}s".`],
+      priorResultSetUnavailable: true,
+    };
+  }
   // Prior-result material is execution-relevant context, not a friendly
   // transcript hint. A complete new question therefore receives no carry at
   // all. The only admission routes are a resolved typed reference, an
@@ -2585,7 +2662,10 @@ function resolveAgentFollowUpContextRaw(
       sourceTurnId: cleanOptionalString(activeTurn?.id) ?? cleanOptionalString(context.sourceAnswerId),
     })),
     resolvedReferences: resolvedReferences.labels,
-    unresolvedReferences: resolvedReferences.unresolved,
+    unresolvedReferences: priorResultSetUnavailable && pluralPriorEntity
+      ? [`The previous result did not retain the displayed ${pluralPriorEntity} set needed for "those ${pluralPriorEntity}s".`]
+      : resolvedReferences.unresolved,
+    ...(priorResultSetUnavailable ? { priorResultSetUnavailable: true } : {}),
     deicticChoices: resolvedReferences.deicticChoices,
     // The prior turn's actual rows, so a follow-up can compute across the shown
     // results ("of these, the average") without a fresh query. A relative
@@ -2666,6 +2746,7 @@ function conversationTurnsFromContext(context: AgentRunRequest['conversationCont
       columns: context?.resultColumns ?? context?.outputColumns,
       rowsSample: context?.resultRowsSample,
       dimensionValues: context?.resultDimensionValues,
+      memberSets: context?.resultMemberSets,
       measureColumns: context?.priorMeasures,
     },
     route: context?.route,
@@ -2701,6 +2782,7 @@ function snapshotTurnToConversationRecord(
     result: compactConversationRecord({
       columns: turn.resultColumns,
       dimensionValues: turn.resultDimensionValues,
+      memberSets: turn.resultMemberSets,
       rowCount: turn.resultRowCount,
     }),
   });
@@ -2745,7 +2827,10 @@ function activeConversationTurn(
     }
   }
   if (activeId) {
-    if (activeMatch && !turnIsUntrustedContext(activeMatch)) return activeMatch;
+    // An active chat-only recap is presentation context, not an analytical
+    // result boundary. Fall through to the last trusted result-bearing turn so
+    // plural deictic references retain their bounded member set after reload.
+    if (activeMatch && !turnIsUntrustedContext(activeMatch) && turnHasUsefulResult(activeMatch)) return activeMatch;
   }
   // When nothing in the thread is trustworthy there is NO anchor. Falling back
   // to the last turn regardless meant a thread whose turns had all failed kept
@@ -2770,7 +2855,12 @@ function turnHasUsefulResult(turn: Record<string, unknown>): boolean {
   const columns = arrayValue(result?.columns);
   const rows = arrayValue(result?.rowsSample);
   const values = cleanStringRecordArray(result?.dimensionValues);
-  return Boolean(columns?.length || rows?.length || values);
+  const memberSets = cleanPriorResultMemberSets(result?.memberSets);
+  // New persisted turns can retain a typed entity/display set even when an
+  // older compacted record no longer carries the preview rows. Treat that set
+  // as result-bearing continuity evidence; otherwise a later chat-only turn
+  // can displace the only safe anchor after restart.
+  return Boolean(columns?.length || rows?.length || values || memberSets?.length);
 }
 
 function scoreTurnForQuestion(turn: Record<string, unknown>, question: string): number {
@@ -3190,6 +3280,76 @@ function valuesForPriorDimension(values: Record<string, string[]>, dim: string):
   if (dim === 'product') aliases.push('sku');
   if (dim === 'category') aliases.push('product_type', 'category_name');
   return Array.from(new Set(aliases.flatMap((alias) => values[alias] ?? []))).filter(Boolean);
+}
+
+function pluralPriorResultEntity(question: string): 'customer' | 'account' | 'product' | 'user' | undefined {
+  const lower = question.toLowerCase();
+  if (/\b(?:these|those|same|previous|prior)\s+customers?\b|\bof\s+(?:these|those)\s+customers?\b/.test(lower)) return 'customer';
+  if (/\b(?:these|those|same|previous|prior)\s+accounts?\b|\bof\s+(?:these|those)\s+accounts?\b/.test(lower)) return 'account';
+  if (/\b(?:these|those|same|previous|prior)\s+products?\b|\bof\s+(?:these|those)\s+products?\b/.test(lower)) return 'product';
+  if (/\b(?:these|those|same|previous|prior)\s+users?\b|\bof\s+(?:these|those)\s+users?\b/.test(lower)) return 'user';
+  return undefined;
+}
+
+function cleanPriorResultMemberSets(value: unknown): ConversationResultMemberSetV1[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const allowedEntities = new Set<ConversationResultMemberSetV1['entity']>([
+    'customer', 'account', 'product', 'user', 'other',
+  ]);
+  const sets = value.flatMap((raw): ConversationResultMemberSetV1[] => {
+    const record = cleanRecord(raw);
+    if (!record || record.version !== 1) return [];
+    const entity = cleanOptionalString(record.entity) as ConversationResultMemberSetV1['entity'] | undefined;
+    const displayColumn = cleanOptionalString(record.displayColumn);
+    const displayValues = arrayValue(record.displayValues)
+      ?.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .map((item) => item.trim())
+      .filter((item, index, values) => values.indexOf(item) === index)
+      .slice(0, 24);
+    if (!entity || !allowedEntities.has(entity) || !displayColumn || !displayValues?.length) return [];
+    const keyColumn = cleanOptionalString(record.keyColumn);
+    const keyValues = arrayValue(record.keyValues)
+      ?.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .map((item) => item.trim())
+      .filter((item, index, values) => values.indexOf(item) === index)
+      .slice(0, 24);
+    const resultFingerprint = cleanOptionalString(record.resultFingerprint);
+    return [{
+      version: 1,
+      entity,
+      displayColumn,
+      displayValues,
+      ...(keyColumn && keyValues?.length ? { keyColumn, keyValues } : {}),
+      ...(resultFingerprint && /^[a-f0-9]{64}$/i.test(resultFingerprint)
+        ? { resultFingerprint: resultFingerprint.toLowerCase() }
+        : {}),
+    }];
+  });
+  return sets.length > 0 ? sets.slice(0, 8) : undefined;
+}
+
+function memberSetValuesByDimension(
+  sets: ConversationResultMemberSetV1[] | undefined,
+): Record<string, string[]> | undefined {
+  if (!sets?.length) return undefined;
+  const values = Object.fromEntries(sets.map((set) => [set.displayColumn, set.displayValues]));
+  return Object.keys(values).length > 0 ? values : undefined;
+}
+
+function mergePriorResultValues(
+  ...records: Array<Record<string, string[]> | undefined>
+): Record<string, string[]> | undefined {
+  const merged: Record<string, string[]> = {};
+  for (const record of records) {
+    for (const [dimension, values] of Object.entries(record ?? {})) {
+      const existing = merged[dimension] ?? [];
+      const next = Array.from(new Set([...existing, ...values]))
+        .filter(Boolean)
+        .slice(0, 24);
+      if (next.length > 0) merged[dimension] = next;
+    }
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
 function formatResultDimensionValues(value: Record<string, string[]>): string {

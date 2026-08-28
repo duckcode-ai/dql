@@ -17,6 +17,8 @@ import {
   replayAskTraceReceiptV1,
   toAgentRetrievalEvidence,
   validateAskTraceBundleV1,
+  type AgentProvider,
+  type AgentRunRequest,
   type AgentRunExecutors,
 } from '@duckcodeailabs/dql-agent';
 import type { ConnectionConfig, QueryExecutor } from '@duckcodeailabs/dql-connectors';
@@ -49,6 +51,10 @@ async function start(root: string, options: {
   executor?: QueryExecutor;
   connection?: ConnectionConfig;
   requireMeaningCallForNaturalLanguage?: boolean;
+  askAnalyticalPlannerProviderFactory?: (input: {
+    projectRoot: string;
+    request: AgentRunRequest;
+  }) => AgentProvider | null | Promise<AgentProvider | null>;
 } = {}): Promise<string> {
   let server: Server | undefined;
   const port = await startLocalServer({
@@ -60,6 +66,9 @@ async function start(root: string, options: {
     ...(options.agentRunExecutors ? { agentRunExecutors: options.agentRunExecutors } : {}),
     ...(options.requireMeaningCallForNaturalLanguage !== undefined
       ? { requireMeaningCallForNaturalLanguage: options.requireMeaningCallForNaturalLanguage }
+      : {}),
+    ...(options.askAnalyticalPlannerProviderFactory
+      ? { askAnalyticalPlannerProviderFactory: options.askAnalyticalPlannerProviderFactory }
       : {}),
     captureServer: (created) => { server = created; },
   });
@@ -522,7 +531,10 @@ describe('local Ask trace API errors (OBS-009)', () => {
     expect(body.run.status).not.toBe('needs_clarification');
     expect(body.run.routeDecision).toMatchObject({
       requiresClarification: false,
-      meaningResolution: { queryIntent: { measures: ['revenue'], limit: 10 } },
+      // The verifier persists the canonical semantic metric after it proves
+      // the requested business term. This is the immutable planning identity,
+      // not a second lexical interpretation of "revenue".
+      meaningResolution: { queryIntent: { measures: ['account_revenue.revenue'], limit: 10 } },
       analyticalCascadeDecision: { selectedTier: 'semantic', planFrozen: true },
     });
     expect(semanticAnswer).toHaveBeenCalledTimes(1);
@@ -573,6 +585,12 @@ describe('local Ask trace API errors (OBS-009)', () => {
         status?: string;
         trustState?: string;
         stopReason?: string;
+        answer?: string;
+        businessAnswer?: {
+          mode?: string;
+          factIds?: string[];
+          resultFingerprint?: string;
+        };
         artifacts?: Array<{ payload?: { result?: { resultFingerprint?: string; answerTier?: string } } }>;
         routeDecision?: {
           meaningResolution?: { selectedConceptIds?: string[]; recommendedExecutionId?: string };
@@ -608,14 +626,24 @@ describe('local Ask trace API errors (OBS-009)', () => {
       stopReason: 'governed_semantic_answer',
       routeDecision: {
         meaningResolution: {
-          selectedConceptIds: ['semantic:metric:account_revenue.revenue'],
+          // The route-neutral program retains both the requested metric and
+          // the required customer display dimension. Dropping the dimension
+          // here would make the frozen semantic tuple incomplete.
+          selectedConceptIds: [
+            'semantic:metric:account_revenue.revenue',
+            'semantic:dimension:account_revenue.customer_name',
+          ],
           recommendedExecutionId: 'semantic:metric:account_revenue.revenue',
         },
         analyticalCascadeDecision: { selectedTier: 'semantic', planFrozen: true },
         resolvedAnalyticalPlan: {
-          // The router's candidate ID is projected to the semantic plan's
-          // canonical execution ID, not inferred from a display label.
-          selectedConceptIds: ['semantic:account_revenue:revenue'],
+          // Router candidate IDs are projected to canonical semantic plan
+          // identities without losing the display dimension the program
+          // needs to produce the requested ranked rows.
+          selectedConceptIds: [
+            'semantic:account_revenue:revenue',
+            'semantic:uncategorized:dimension:customer_name',
+          ],
           executionId: 'semantic:account_revenue:revenue',
         },
       },
@@ -625,6 +653,12 @@ describe('local Ask trace API errors (OBS-009)', () => {
       answerTier: 'semantic_metric',
     });
     const resultFingerprint = body.run.artifacts?.[0]?.payload?.result?.resultFingerprint;
+    expect(body.run.businessAnswer).toMatchObject({
+      mode: 'facts_only',
+      resultFingerprint,
+    });
+    expect(body.run.businessAnswer?.factIds?.length).toBeGreaterThan(0);
+    expect(body.run.answer).toContain('Synthetic Customer');
     expect(detail?.spans.find((span) => span.name === 'result.normalize')?.payload).toMatchObject({
       kind: 'result',
       resultFingerprint,
@@ -797,7 +831,7 @@ describe('local Ask trace API errors (OBS-009)', () => {
     expect(initial.run.status).toBe('needs_clarification');
     const accountName = initial.run.clarificationOptions?.find((option) => option.label === 'Account Name');
     const customerName = initial.run.clarificationOptions?.find((option) => option.label === 'Customer Name');
-    expect(accountName?.id).toBe('semantic:uncategorized:dimension:account_revenue.account_name');
+    expect(accountName?.id, JSON.stringify(initial.run.clarificationOptions)).toBe('semantic:uncategorized:dimension:account_revenue.account_name');
     expect(customerName?.id).toBe('semantic:uncategorized:dimension:account_revenue.customer_name');
 
     const persistedResponse = await fetch(`${firstBase}/api/agent/threads/${encodeURIComponent(thread.thread.id)}`);
@@ -858,7 +892,7 @@ describe('local Ask trace API errors (OBS-009)', () => {
       routeDecision: {
         meaningResolution: {
           recommendedExecutionId: 'semantic:metric:account_revenue.revenue',
-          queryIntent: { measures: ['revenue'], limit: 10 },
+          queryIntent: { measures: ['account_revenue.revenue'], limit: 10 },
           selectedConceptIds: expect.arrayContaining([
             'semantic:metric:account_revenue.revenue',
             accountName!.id,
@@ -928,7 +962,7 @@ describe('local Ask trace API errors (OBS-009)', () => {
     expect(requirements).toMatchObject({
       entityTerms: ['account'],
       entityDisplayTerms: ['account name'],
-      ranking: { metricTerms: expect.arrayContaining(['bcm']), limit: 10, defaultedLimit: true },
+      ranking: { metricTerms: ['bcm run rate'], limit: 10, defaultedLimit: true },
     });
     expect(requirements.time).toBeUndefined();
     expect(meaningPackage.map((candidate) => candidate.id)).toEqual(expect.arrayContaining([
@@ -1074,14 +1108,55 @@ describe('local Ask trace API errors (OBS-009)', () => {
       status: 'completed' as const,
       trustState: 'certified' as const,
       stopReason: 'certified_answer_found' as const,
-      artifacts: [{
-        id: 'answer:fixture-certified-title',
-        kind: 'answer' as const,
-        title: 'Certified top customers',
-        ref: 'revenue_operations::block::Top Customers by Revenue',
-        trustState: 'certified' as const,
-        payload: { selectedConceptIds: ['revenue_operations::block::Top Customers by Revenue'] },
-      }],
+      artifacts: [
+        // This is a deliberately self-consistent old artifact. It remains in
+        // the run for inspection, but it must never become final answer
+        // authority merely because its facts and narrative cite one another.
+        {
+          id: 'sql:stale-top-customers',
+          kind: 'sql_cell' as const,
+          title: 'Stale SQL preview',
+          trustState: 'review_required' as const,
+          payload: {
+            result: {
+              columns: ['customer_name', 'lifetime_spend'],
+              rows: [{ customer_name: 'Forged stale customer', lifetime_spend: 999999 }],
+              rowCount: 1,
+              resultFingerprint: 'result:stale-top-customers',
+            },
+            analyticalFacts: {
+              factSetId: 'facts:stale-top-customers',
+              resultFingerprint: 'result:stale-top-customers',
+              facts: [{ factId: 'fact:stale-top-customers' }],
+            },
+            analyticalNarrative: {
+              factSetId: 'facts:stale-top-customers',
+              text: 'FORGED STALE CUSTOMER HAS 999999 LIFETIME SPEND.',
+              claims: [{ factIds: ['fact:stale-top-customers'] }],
+            },
+          },
+        },
+        {
+          id: 'answer:fixture-certified-title',
+          kind: 'answer' as const,
+          title: 'Certified top customers',
+          ref: 'revenue_operations::block::Top Customers by Revenue',
+          trustState: 'certified' as const,
+          payload: {
+            selectedConceptIds: ['revenue_operations::block::Top Customers by Revenue'],
+            // A local certified result has no narration-provider egress. The
+            // engine must still project these exact rows into bounded facts and
+            // render a useful fact-linked answer for the reader.
+            result: {
+              columns: ['customer_name', 'lifetime_spend'],
+              rows: [{ customer_name: 'Brittany Barrera', lifetime_spend: 2701.72 }],
+              rowCount: 1,
+              resultFingerprint: 'result:certified-top-customers',
+              answerTier: 'certified_block',
+            },
+          },
+        },
+      ],
       evaluations: [],
       nextActions: [],
     }));
@@ -1104,6 +1179,8 @@ describe('local Ask trace API errors (OBS-009)', () => {
         status?: string;
         trustState?: string;
         stopReason?: string;
+        answer?: string;
+        businessAnswer?: { mode?: string; factIds?: string[]; resultFingerprint?: string };
         routeDecision?: {
           meaningResolution?: { selectedConceptIds?: string[] };
           analyticalCascadeDecision?: {
@@ -1129,6 +1206,15 @@ describe('local Ask trace API errors (OBS-009)', () => {
     });
     expect(certifiedAnswer).toHaveBeenCalledOnce();
     expect(nonCertifiedExecutor).not.toHaveBeenCalled();
+    expect(body.run.businessAnswer).toMatchObject({
+      mode: 'facts_only',
+      resultFingerprint: 'result:certified-top-customers',
+    });
+    expect(body.run.businessAnswer?.factIds?.length).toBeGreaterThan(0);
+    expect(body.run.answer).toContain('Brittany Barrera');
+    expect(body.run.answer).toContain('2701.72');
+    expect(body.run.answer).not.toContain('FORGED STALE CUSTOMER');
+    expect(body.run.answer).not.toContain('999999');
     const traceId = body.run.traceReference?.traceId;
     expect(traceId).toMatch(/^[a-f0-9]{32}$/);
 
@@ -1606,6 +1692,214 @@ describe('local Ask trace API errors (OBS-009)', () => {
     const response = await fetch(`${base}/api/ask-traces/${traceId}/export?profile=support`);
     expect(response.status).toBe(422);
     await expect(response.json()).resolves.toMatchObject({ code: 'TRACE_EXPORT_REDACTION_FAILED' });
+  });
+
+  it.each([
+    ['AUTHENTICATION_FAILED', '401 Unauthorized', 'authentication'],
+    ['MODEL_NOT_FOUND', 'model not found', 'model_not_found'],
+    ['ECONNREFUSED', 'connection refused', 'network'],
+    ['HTTP_502', '502 gateway', 'gateway'],
+    ['ETIMEDOUT', 'provider timeout', 'provider_timeout'],
+  ] as const)('records planner preflight %s as %s before any connection or SQL attempt', async (code, message, cause) => {
+    const fixture = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/ask-observability-office');
+    const root = mkdtempSync(join(tmpdir(), `dql-office-planner-preflight-${cause}-`));
+    directories.push(root);
+    cpSync(fixture, root, { recursive: true });
+    rmSync(join(root, '.dql', 'cache'), { recursive: true, force: true });
+    const available = vi.fn(async () => {
+      throw Object.assign(new Error(message), { code });
+    });
+    const generate = vi.fn(async () => {
+      throw new Error('Planner dispatch must not begin after failed preflight.');
+    });
+    const planner: AgentProvider = { name: 'ollama', available, generate };
+    const executeQuery = vi.fn();
+    const base = await start(root, {
+      executor: { executeQuery } as unknown as QueryExecutor,
+      askAnalyticalPlannerProviderFactory: () => planner,
+    });
+
+    // This office-shaped customer/product/revenue request cannot take a
+    // one-relation deterministic fast path. It must reach the planner
+    // boundary, where readiness is recorded before any compiler/connection
+    // or SQL executor boundary can start.
+    const response = await fetch(`${base}/api/agent-runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: 'who are the top customers have product with revenue',
+        requestedMode: 'ask',
+      }),
+    });
+    expect(response.status).toBe(201);
+    const body = await response.json() as {
+      run: {
+        status?: string;
+        telemetry?: { sqlExecutions?: number };
+        routeDecision?: { providerFailure?: { cause?: string; phase?: string } };
+        traceReference?: { traceId?: string };
+      };
+    };
+    expect(available).toHaveBeenCalledOnce();
+    expect(generate).not.toHaveBeenCalled();
+    expect(executeQuery).not.toHaveBeenCalled();
+    expect(body.run.status).toBe('blocked');
+    expect(body.run.telemetry?.sqlExecutions).toBe(0);
+    expect(body.run.routeDecision?.providerFailure, JSON.stringify(body.run.routeDecision)).toMatchObject({
+      cause,
+      phase: 'preflight',
+    });
+    const traceId = body.run.traceReference?.traceId;
+    expect(traceId).toMatch(/^[a-f0-9]{32}$/);
+    let trace: {
+      spans: Array<{
+        name: string;
+        stage: string;
+        outcome: string;
+        payload?: { kind?: string; attempt?: { phase?: string; cause?: string } };
+      }>;
+    } | undefined;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const detail = await fetch(`${base}/api/ask-traces/${traceId}`);
+      if (detail.status === 200) {
+        trace = await detail.json() as typeof trace;
+        break;
+      }
+      await new Promise((done) => setTimeout(done, 10));
+    }
+    const preflight = trace?.spans.find((span) => span.name === 'provider.preflight');
+    expect(preflight).toMatchObject({
+      stage: 'provider', outcome: 'unavailable',
+      payload: { kind: 'provider', attempt: { phase: 'preflight', cause } },
+    });
+    expect(trace?.spans.some((span) => span.name === 'sql.execute' || span.name === 'connection.preflight')).toBe(false);
+  });
+
+  it('records an unconfigured planner as a configuration-safe preflight incident, not authentication', async () => {
+    const fixture = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/ask-observability-office');
+    const root = mkdtempSync(join(tmpdir(), 'dql-office-planner-preflight-unconfigured-'));
+    directories.push(root);
+    cpSync(fixture, root, { recursive: true });
+    rmSync(join(root, '.dql', 'cache'), { recursive: true, force: true });
+    const executeQuery = vi.fn();
+    const base = await start(root, {
+      executor: { executeQuery } as unknown as QueryExecutor,
+      // The host has deliberately no configured planner. Returning null here
+      // exercises the same server-owned preflight boundary as production,
+      // without letting a fixture-local default provider alter the cause.
+      askAnalyticalPlannerProviderFactory: () => null,
+    });
+
+    const response = await fetch(`${base}/api/agent-runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: 'who are the top customers have product with revenue',
+        requestedMode: 'ask',
+      }),
+    });
+    expect(response.status).toBe(201);
+    const body = await response.json() as {
+      run: {
+        status?: string;
+        telemetry?: { sqlExecutions?: number };
+        routeDecision?: { providerFailure?: { cause?: string; phase?: string; safeAction?: string } };
+        traceReference?: { traceId?: string };
+      };
+    };
+    expect(body.run.status).toBe('blocked');
+    expect(body.run.telemetry?.sqlExecutions).toBe(0);
+    expect(executeQuery).not.toHaveBeenCalled();
+    expect(body.run.routeDecision?.providerFailure).toMatchObject({
+      cause: 'unknown',
+      phase: 'preflight',
+      safeAction: 'fix_provider_configuration',
+    });
+    const traceId = body.run.traceReference?.traceId;
+    expect(traceId).toMatch(/^[a-f0-9]{32}$/);
+    let trace: {
+      spans: Array<{
+        name: string;
+        stage: string;
+        outcome: string;
+        payload?: { kind?: string; attempt?: { phase?: string; cause?: string; safeAction?: string } };
+      }>;
+    } | undefined;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const detail = await fetch(`${base}/api/ask-traces/${traceId}`);
+      if (detail.status === 200) {
+        trace = await detail.json() as typeof trace;
+        break;
+      }
+      await new Promise((done) => setTimeout(done, 10));
+    }
+    expect(trace?.spans.find((span) => span.name === 'provider.preflight')).toMatchObject({
+      stage: 'provider', outcome: 'unavailable',
+      payload: {
+        kind: 'provider',
+        attempt: { phase: 'preflight', cause: 'unknown', safeAction: 'fix_provider_configuration' },
+      },
+    });
+    expect(trace?.spans.some((span) => span.name === 'sql.execute' || span.name === 'connection.preflight')).toBe(false);
+  });
+
+  it('records a bare configured-provider readiness false as configuration-safe unknown, not authentication', async () => {
+    const fixture = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/ask-observability-office');
+    const root = mkdtempSync(join(tmpdir(), 'dql-office-planner-preflight-false-ready-'));
+    directories.push(root);
+    cpSync(fixture, root, { recursive: true });
+    rmSync(join(root, '.dql', 'cache'), { recursive: true, force: true });
+    const available = vi.fn(async () => false);
+    const generate = vi.fn(async () => {
+      throw new Error('Planner dispatch must not begin after false readiness.');
+    });
+    const planner: AgentProvider = { name: 'openai', available, generate };
+    const executeQuery = vi.fn();
+    const base = await start(root, {
+      executor: { executeQuery } as unknown as QueryExecutor,
+      askAnalyticalPlannerProviderFactory: () => planner,
+    });
+
+    const response = await fetch(`${base}/api/agent-runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: 'who are the top customers have product with revenue',
+        requestedMode: 'ask',
+      }),
+    });
+    expect(response.status).toBe(201);
+    const body = await response.json() as {
+      run: {
+        status?: string;
+        telemetry?: { sqlExecutions?: number };
+        routeDecision?: { providerFailure?: { cause?: string; phase?: string; safeAction?: string } };
+        traceReference?: { traceId?: string };
+      };
+    };
+    expect(available).toHaveBeenCalledOnce();
+    expect(generate).not.toHaveBeenCalled();
+    expect(executeQuery).not.toHaveBeenCalled();
+    expect(body.run.status).toBe('blocked');
+    expect(body.run.telemetry?.sqlExecutions).toBe(0);
+    expect(body.run.routeDecision?.providerFailure).toMatchObject({
+      cause: 'unknown', phase: 'preflight', safeAction: 'fix_provider_configuration',
+    });
+    const traceId = body.run.traceReference?.traceId;
+    expect(traceId).toMatch(/^[a-f0-9]{32}$/);
+    let trace: { spans: Array<{ name: string; payload?: { attempt?: { cause?: string; safeAction?: string } } }> } | undefined;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const detail = await fetch(`${base}/api/ask-traces/${traceId}`);
+      if (detail.status === 200) {
+        trace = await detail.json() as typeof trace;
+        break;
+      }
+      await new Promise((done) => setTimeout(done, 10));
+    }
+    expect(trace?.spans.find((span) => span.name === 'provider.preflight')).toMatchObject({
+      payload: { attempt: { cause: 'unknown', safeAction: 'fix_provider_configuration' } },
+    });
+    expect(trace?.spans.some((span) => span.name === 'sql.execute' || span.name === 'connection.preflight')).toBe(false);
   });
 });
 

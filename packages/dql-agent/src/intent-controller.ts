@@ -22,7 +22,13 @@ import type { ResolvedAnalyticalPlan } from './resolved-analytical-plan.js';
 import type {
   AnalyticalCascadeDecisionV1,
   AnalyticalCoverageGapV1,
+  AnalyticalProgram,
+  AskAnalystState,
+  BusinessAnswer,
+  ProviderFailureDiagnosticV1,
+  ResolvedAnalyticalPlanV2,
 } from './analytical-orchestration.js';
+import type { AgentRunPlan } from './agent-run-engine.js';
 
 /** The high-level action the agent will take for a turn. */
 export type AgentAction = 'answer' | 'clarify' | 'investigate' | 'compose_app' | 'converse' | 'block';
@@ -140,6 +146,8 @@ export interface IntentDecision {
   retrievalEvidence?: {
     snapshotId?: string;
     sourceFingerprint?: string;
+    /** Opaque restart-safe continuity proof; never contains candidate content. */
+    continuityFingerprint?: string;
     candidateCount: number;
     candidateIds: string[];
     /** Qualified, content-free role/source witnesses for trace projection. */
@@ -168,6 +176,55 @@ export interface IntentDecision {
     /** Exact analytical coverage category, when the router/producer proved one. */
     gap?: AnalyticalTerminalGapWitness;
   };
+  /** Provider failures are terminal infrastructure evidence, never modeling gaps. */
+  providerFailure?: ProviderFailureDiagnosticV1;
+  /**
+   * V1.15 Ask runtime receipt.  The runtime owns the business frame, evidence
+   * workspace, and route-neutral program; the old router may only compile it.
+   * It is additive so persisted pre-runtime decisions remain readable.
+   */
+  askAnalystDecision?: {
+    version: 1;
+    mode: 'legacy' | 'shadow' | 'authoritative';
+    state: AskAnalystState;
+    resolvedPlan?: ResolvedAnalyticalPlanV2;
+    /** Runtime-built immutable task plan; engine executes it without replanning meaning. */
+    frozenPlan?: AgentRunPlan;
+    businessAnswer?: BusinessAnswer;
+    /**
+     * A compound ordinary Ask freezes one independently verified compiler
+     * program per accepted task.  The engine consumes this server-owned list
+     * verbatim; it may not reuse task-1's meaning/cascade for task-2.
+     */
+    taskExecutions?: AskAnalystTaskExecutionV1[];
+  };
+}
+
+/**
+ * Immutable per-task compiler handoff owned by AskAnalystRuntimeV1.  It is
+ * intentionally additive so pre-V2 persisted decisions remain readable.
+ */
+export interface AskAnalystTaskExecutionV1 {
+  version: 1;
+  taskId: string;
+  state: AskAnalystState;
+  program: AnalyticalProgram;
+  meaningResolution: MeaningResolution;
+  /** Verified task-local compiler bindings; never hydrated from public ingress. */
+  requirementSeed: import('./analytical-orchestration.js').AnalyticalRequirementSeedV1;
+  tierReadiness: {
+    connector: 'ready' | 'unavailable' | 'unknown';
+    activeTarget: 'ready' | 'unavailable' | 'unknown';
+    semanticCompiler: 'ready' | 'unavailable' | 'unknown';
+    semanticCandidateReadiness?: Array<{
+      candidateId: string;
+      status: 'ready' | 'unavailable' | 'unknown';
+    }>;
+    physicalSchema: 'ready' | 'unavailable' | 'unknown';
+    targetFingerprint?: string;
+  };
+  compilerDecision: Omit<IntentDecision, 'askAnalystDecision'>;
+  resolvedPlan: ResolvedAnalyticalPlanV2;
 }
 
 /** A confident match means a certified block or governed metric clearly fits. */
@@ -234,7 +291,7 @@ const GRATITUDE_RE =
 const META_CAPABILITY_RE =
   /\b(what\s+can\s+you\s+do|what\s+do\s+you\s+do|how\s+do\s+(you|i)\s+(work|use)|who\s+are\s+you|what\s+are\s+you|what\s+is\s+dql|help\s+me\s+get\s+started|how\s+can\s+you\s+help|what\s+should\s+i\s+ask|how\s+does\s+this\s+work|are\s+you\s+(an?\s+)?(ai|bot|llm))\b/i;
 const CONTEXT_RECAP_RE =
-  /\b(?:what\s+(?:(?:are|were|have)\s+we|we\s+(?:are|were|have))\s+(?:been\s+)?talking\s+about|what\s+(?:(?:are|were)\s+we|we\s+(?:are|were))\s+(?:(?:reviewing|discussing|covering)(?:\s+and\s+(?:reviewing|discussing|covering))*|working\s+on)(?:\s+(?:here|so\s+far|in\s+(?:(?:this|the|our|whole)\s+)?(?:chat|conversation|discussion|thread)))?|what\s+(?:is|was)\s+(?:this|the|our|whole)\s+(?:chat|conversation|discussion|thread)\s+about|what\s+is\s+this\s+about|where\s+were\s+we|remind\s+me(?:\s+what\s+we\s+were\s+(?:talking|reviewing|discussing)\s+about)?|recap(?:\s+(?:this|our|the|whole))?(?:\s+(?:chat|conversation|discussion|thread))?|summari[sz]e\s+(?:this|our|the|whole)(?:\s+(?:chat|conversation|discussion|thread))?)\b/;
+  /\b(?:what\s+(?:(?:are|were|have)\s+we|we\s+(?:are|were|have))\s+(?:been\s+)?talking\s+about|what\s+(?:(?:are|were)\s+we|we\s+(?:are|were))\s+(?:(?:reviewing|discussing|covering)(?:\s+and\s+(?:reviewing|discussing|covering))*|working\s+on)(?:\s+(?:here|so\s+far|in\s+(?:(?:this|the|our|whole)\s+)?(?:chat|conversation|discussion|thread)))?|what\s+(?:is|was)\s+(?:this|the|our|whole)\s+(?:chat|conversation|discussion|thread)\s+about|what\s+is\s+this\s+about|where\s+were\s+we|remind\s+me(?:\s+what\s+we\s+were\s+(?:talking|reviewing|discussing)\s+about)?|(?:can\s+you\s+)?walk\s+me\s+through\s+what\s+we\s+(?:just\s+)?looked\s+at|recap(?:\s+(?:this|our|the|whole))?(?:\s+(?:chat|conversation|discussion|thread))?|summari[sz]e\s+(?:this|our|the|whole)(?:\s+(?:chat|conversation|discussion|thread))?)\b/;
 /**
  * Questions about the meaning or scope of the latest successful answer. These
  * must be answered from the persisted artifact contract rather than interpreted

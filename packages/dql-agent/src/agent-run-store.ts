@@ -9,6 +9,7 @@
  * a user actually reopens stay complete while history stops growing unbounded.
  */
 import Database from 'better-sqlite3';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { normalizeProviderEgressReceiptV1 } from '@duckcodeailabs/dql-core';
@@ -18,6 +19,11 @@ import type {
   AgentRunProgressV1,
   AgentRunStore,
 } from './agent-run-engine.js';
+import type {
+  AgentRunDiagnosticReceiptV5,
+  AgentRunDiagnosticReceiptV6,
+  AskAnalystState,
+} from './analytical-orchestration.js';
 
 export interface SqliteAgentRunStoreOptions {
   /** Path of the .sqlite file (created on first use). */
@@ -189,12 +195,20 @@ export class SqliteAgentRunStore implements AgentRunStore {
           evaluations: progress.evaluations,
           failure,
         };
+        const runtimeReceipt = interruptedRuntimeReceiptV5(progress, userCancelled, route);
+        const runtimeReceiptV6 = runtimeReceipt
+          ? interruptedRuntimeReceiptV6(progress, userCancelled, runtimeReceipt)
+          : undefined;
         const diagnosticArtifact = {
           id: `${progress.id}:diagnostic`,
           kind: 'answer' as const,
           title: userCancelled ? 'Cancelled agent run' : 'Interrupted agent run',
           trustState: 'blocked' as const,
-          payload: { diagnosticReceipt: receipt },
+          payload: {
+            diagnosticReceipt: receipt,
+            ...(runtimeReceipt ? { diagnosticReceiptV5: runtimeReceipt } : {}),
+            ...(runtimeReceiptV6 ? { diagnosticReceiptV6: runtimeReceiptV6 } : {}),
+          },
         };
         const run: AgentRun = {
           id: progress.id,
@@ -251,6 +265,10 @@ export class SqliteAgentRunStore implements AgentRunStore {
           repairAttempts: 0,
           escalationAttempts: 0,
           diagnosticReceipt: receipt,
+          ...(runtimeReceipt ? { diagnosticReceiptV5: runtimeReceipt } : {}),
+          ...(runtimeReceiptV6 ? { diagnosticReceiptV6: runtimeReceiptV6 } : {}),
+          ...(progress.askAnalystState ? { askAnalystState: progress.askAnalystState } : {}),
+          ...(progress.traceReference ? { traceReference: progress.traceReference } : {}),
           lifecycle: {
             ...progress.lifecycle,
             state: 'terminal',
@@ -338,6 +356,199 @@ export class SqliteAgentRunStore implements AgentRunStore {
       // Rename is best-effort (e.g. another process holds the file on Windows).
     }
   }
+}
+
+/**
+ * Restart recovery retains the typed continuation state for a deliberate retry,
+ * but its diagnostic artifact/export receipt must remain content-free. Never
+ * copy the question, filter values, member values, answer, SQL, or rows here.
+ */
+function interruptedRuntimeReceiptV5(
+  progress: AgentRunProgressV1,
+  cancelled: boolean,
+  route: NonNullable<AgentRunProgressV1['route']>,
+): AgentRunDiagnosticReceiptV5 | undefined {
+  const state = progress.askAnalystState;
+  if (!state) return undefined;
+  const diagnosticState = interruptedDiagnosticState(state);
+  const summaryInput = {
+    version: 2 as const,
+    runtimeMode: state.mode,
+    whatHappened: cancelled
+      ? 'The Ask runtime was cancelled before its final result was accepted.'
+      : 'The Ask runtime was interrupted before its final result was accepted.',
+    why: cancelled
+      ? 'The local run was cancelled before finalization.'
+      : 'The local DQL runtime restarted before finalization.',
+    impact: 'No executable data answer was accepted for this run.',
+    nextAction: cancelled ? 'none' as const : 'retry_same_plan' as const,
+    ...(state.resolvedPlan?.compiler ? { selectedCompiler: state.resolvedPlan.compiler } : {}),
+    programTaskCount: state.program.taskIds.length,
+    admittedCandidateCount: state.workspace.admittedCandidateIds.length,
+    toolCallCount: state.toolCalls,
+    executionAttempts: state.executionAttempts,
+  };
+  return {
+    version: 5,
+    runId: progress.id,
+    state: diagnosticState,
+    summary: {
+      ...summaryInput,
+      summaryFingerprint: `sha256:${createHash('sha256').update(JSON.stringify(summaryInput)).digest('hex')}`,
+    },
+    businessAnswer: {
+      version: 1,
+      mode: 'deterministic_fallback',
+      trustState: cancelled ? 'not_applicable' : 'blocked',
+      factIds: [],
+      limitationCount: 1,
+    },
+    finalStopReason: cancelled ? 'cancelled' : 'blocked',
+  };
+}
+
+/**
+ * Restart recovery has no live trace collector, so V6 is projected only from
+ * the persisted V2 state and its content-free V5 envelope. Do not infer a
+ * connection or SQL attempt from elapsed time/prose: an interrupted execution
+ * count is retained separately and the connection boundary remains skipped
+ * unless a terminal run receipt recorded it before restart.
+ */
+function interruptedRuntimeReceiptV6(
+  progress: AgentRunProgressV1,
+  cancelled: boolean,
+  receipt: AgentRunDiagnosticReceiptV5,
+): AgentRunDiagnosticReceiptV6 {
+  const state = progress.askAnalystState!;
+  const planning = state.version === 2
+    ? state.planningReceipt
+    : undefined;
+  const plannerTool = state.workspace.tools.find((tool) => tool.kind === 'provider_meaning');
+  const recoveryTool = state.workspace.tools.find((tool) => tool.kind === 'candidate_extension');
+  const planFrozen = state.resolvedPlan?.planFrozen === true;
+  const verification = planning?.verification ?? {
+    version: 1 as const,
+    status: state.phase === 'clarify' ? 'ambiguous' as const : state.phase === 'blocked' ? 'invalid' as const : 'valid' as const,
+    missingRoles: [],
+    candidateIds: [],
+    reasonCode: state.phase === 'clarify'
+      ? 'persisted_clarification_state'
+      : state.phase === 'blocked'
+        ? 'persisted_blocked_state'
+        : 'persisted_program_state',
+  };
+  // A durable failed provider tool is a planner attempt too. This restores a
+  // truthful concise V6 restart story for V2 checkpoints saved between
+  // dispatch and planning-receipt finalization.
+  const plannerAttempted = plannerTool?.status === 'completed' || plannerTool?.status === 'failed';
+  const plannerCalls = Math.max(
+    planning?.plannerCalls ?? 0,
+    plannerAttempted ? Math.max(1, state.planningContinuations) : 0,
+  );
+  const revisionCalls = planning?.revisionCalls
+    ?? (recoveryTool?.status === 'completed' && plannerCalls > 1 ? 1 : 0);
+  const planningMode = planning?.mode
+    ?? (plannerCalls === 0
+      ? 'deterministic_binding'
+      : revisionCalls > 0 ? 'targeted_revision' : 'initial_planner');
+  const executionAttempts = state.executionAttempts;
+  return {
+    ...receipt,
+    version: 6,
+    planning: {
+      version: 1,
+      mode: planningMode,
+      plannerCalls,
+      revisionCalls,
+      verification,
+    },
+    // Candidate roles/labels are intentionally not persisted in the restart
+    // projection. Empty is more truthful than rebuilding role counts from
+    // raw member/requirement terms after a process restart.
+    roleCoverage: [],
+    cascade: {
+      attempts: [],
+      ...(state.resolvedPlan?.selectedTier ? { selectedTier: state.resolvedPlan.selectedTier } : {}),
+      ...(state.resolvedPlan?.compiler && state.resolvedPlan.compiler !== 'none'
+        ? { stopReason: `persisted_${state.resolvedPlan.compiler}_plan` }
+        : {}),
+      planFrozen,
+    },
+    connection: { attempted: false },
+    execution: { attempts: executionAttempts },
+    facts: { factCount: 0 },
+    safeNextAction: receipt.summary.nextAction,
+    story: [
+      { stage: 'retrieval', status: state.workspace.snapshotId ? 'completed' : 'skipped', reasonCode: state.workspace.snapshotId ? 'persisted_snapshot' : 'snapshot_not_retained' },
+      { stage: 'role_coverage', status: 'skipped', reasonCode: 'content_free_restart_projection' },
+      {
+        stage: 'planner',
+        status: plannerTool?.status === 'failed' ? 'blocked' : plannerCalls > 0 ? 'completed' : 'skipped',
+        reasonCode: plannerTool?.reasonCode ?? planningMode,
+      },
+      { stage: 'verification', status: verification.status === 'valid' ? 'completed' : 'blocked', reasonCode: verification.reasonCode },
+      { stage: 'targeted_recovery', status: recoveryTool?.status === 'completed' ? 'completed' : 'skipped', reasonCode: recoveryTool?.reasonCode ?? 'not_required' },
+      { stage: 'cascade', status: planFrozen ? 'completed' : state.phase === 'blocked' ? 'blocked' : 'skipped', reasonCode: state.resolvedPlan?.compiler ?? 'no_persisted_compiler' },
+      { stage: 'freeze', status: planFrozen ? 'completed' : 'skipped', reasonCode: planFrozen ? 'persisted_plan_frozen' : 'no_persisted_plan' },
+      { stage: 'connection', status: 'skipped', reasonCode: 'connection_boundary_not_retained_on_restart' },
+      { stage: 'execution', status: executionAttempts > 0 ? 'blocked' : 'skipped', reasonCode: executionAttempts > 0 ? 'interrupted_after_execution_attempt' : 'execution_not_attempted' },
+      { stage: 'facts', status: 'skipped', reasonCode: cancelled ? 'run_cancelled_before_final_facts' : 'run_interrupted_before_final_facts' },
+    ],
+  };
+}
+
+function interruptedDiagnosticState(state: AskAnalystState): AgentRunDiagnosticReceiptV5['state'] {
+  return {
+    version: 1,
+    mode: state.mode,
+    phase: state.phase,
+    questionFingerprint: state.frame.questionFingerprint,
+    kind: state.frame.kind,
+    requirementCounts: {
+      measures: state.frame.requirements.measures.length,
+      dimensions: state.frame.requirements.dimensions.length,
+      entityTerms: state.frame.requirements.entityTerms.length + state.frame.requirements.entityDisplayTerms.length,
+      members: state.frame.requirements.memberTerms.length,
+      filters: state.program.filters.length,
+    },
+    mission: {
+      mode: state.mission.mode,
+      taskCount: state.mission.tasks.length,
+      deferredTaskCount: state.mission.deferredTasks?.length ?? 0,
+      hypothesisCount: state.mission.hypotheses.length,
+    },
+    workspace: {
+      ...(state.workspace.snapshotId ? { snapshotId: state.workspace.snapshotId } : {}),
+      ...(state.workspace.sourceFingerprint ? { sourceFingerprint: state.workspace.sourceFingerprint } : {}),
+      admittedCandidateCount: state.workspace.admittedCandidateIds.length,
+      excludedCandidateCount: state.workspace.excludedCandidates.length,
+      sourceCoverage: state.workspace.sourceCoverage.map((coverage) => ({
+        source: coverage.source,
+        status: coverage.status,
+        candidateCount: coverage.candidateIds.length,
+      })),
+      tools: state.workspace.tools.map((tool) => ({
+        id: tool.id,
+        kind: tool.kind,
+        status: tool.status,
+        reasonCode: tool.reasonCode,
+      })),
+    },
+    program: {
+      id: state.program.id,
+      taskCount: state.program.taskIds.length,
+      candidateCount: state.program.candidateIds.length,
+      requiredRoles: state.program.requiredRoles,
+      outputAssertionCount: state.program.outputs.assertions.length,
+    },
+    ...(state.resolvedPlan ? { resolvedPlan: state.resolvedPlan } : {}),
+    counters: {
+      planningContinuations: state.planningContinuations,
+      toolCalls: state.toolCalls,
+      executionAttempts: state.executionAttempts,
+      repairAttempts: state.repairAttempts,
+    },
+  };
 }
 
 export function defaultAgentRunSqlitePath(projectRoot: string): string {

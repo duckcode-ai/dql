@@ -72,6 +72,12 @@ an acceptance-matrix update.
 | AGT-032 | Every successful analytical result crosses one canonical versioned result contract before persistence or rendering: named columns, object rows, row count, execution receipt/fingerprint, and source/trust metadata. Narration and UI tables consume that same object-row contract. |
 | AGT-033 | Ask conversation state is typed and source-attributed. Deictic follow-ups resolve against trusted prior result members, compound questions execute as bounded task graphs with partial success, and Deep Research records at most six receipt-backed branches plus a deterministic synthesis/stop reason. |
 | AGT-034 | A router-selected exploratory plan freezes its qualified same-snapshot closure before SQL generation. Host authorization may attach only the exact read-only SQL/target receipt to that frozen plan; an unfrozen, mismatched, or replacement receipt is terminal, records `INTERNAL_EXPLORATORY_AUTHORIZATION_STATE_MISMATCH`, and never executes SQL. |
+| AGT-035 | Ask enters one authoritative Ask Analyst Runtime before legacy routing. Exact stable references and structured continuations are zero-call; ordinary Ask has bounded planning continuations. |
+| AGT-036 | One route-neutral analytical program bounds Ask tasks/tools/executions/repair while reusing existing safe compilers. |
+| AGT-037 | Certified, MetricFlow, governed relational, and exploratory SQL are compilers selected in canonical pre-freeze order; post-freeze fallback is forbidden. |
+| AGT-038 | Only materially different validated executable meanings clarify; technical/provider/retrieval failures remain typed incidents. |
+| AGT-039 | `BusinessAnswerV1` is fact-bound with deterministic fallback and disclosed default top-10. |
+| AGT-040 | Research children use the same runtime and retain branch verdict/limited-scope evidence. |
 | OBS-001 | Ask observability is additive and fail-open: it records execution evidence but cannot route, authorize, retry, alter trust, alter a deadline, or alter an Ask result. |
 | OBS-002 | An AgentRun, thread, run list, and SSE may carry only a compact versioned trace reference. Full local trace detail is never embedded in those transport contracts. |
 | OBS-003 | Local Ask trace records use W3C-shaped IDs and a closed typed payload union; prompts, responses, SQL, literals, rows, values, paths, headers, secrets, and arbitrary error bodies are rejected at the persistence boundary. |
@@ -86,6 +92,7 @@ an acceptance-matrix update.
 | OBS-012 | Ask observability preserves V1–V3 receipt readability and the local-first OSS boundary; it adds no hosted telemetry, tenancy, SSO/RBAC, managed secrets, centralized audit, or approval workflow. |
 | OBS-013 | Govern exposes a local Ask trace catalog at `/ask/traces`; it supports bounded receipt-field filters and pagination, joins only a redacted question preview from the local run store at read time, and links directly to the existing run-ID trace detail without persisting that preview in trace storage. |
 | OBS-014 | Ask persists one content-safe server-produced decision summary and typed terminal incident per V4 diagnostic receipt. The compact inspector and full trace render that same stored summary fingerprint; advanced spans remain supplemental and legacy runs explicitly report that the summary is unavailable. |
+| OBS-015 | Ask persists a concise V5 runtime story (what happened, why, impact, next action) while detailed stages stay in Advanced/local trace views. |
 | EXP-004 | An exploratory App result remains transient until explicit approval materializes an app-scoped review DQL draft; that draft cannot be published, promoted, or certified automatically. |
 | API-001 | Domain, modeling, onboarding, and context APIs return stable codes and snapshot IDs. |
 | API-002 | App proposal is write-free; commit is snapshot/hash guarded and atomic; dashboard run/story APIs bind filters, results, persona, trust, and evidence to stable fingerprints. |
@@ -101,6 +108,7 @@ an acceptance-matrix update.
 | API-012 | Every context-authoring path uses immutable proposal/revision IDs, exact source and snapshot fingerprints, dependency closure, compile-before-accept, atomic rollback, and stale `409` conflicts with zero partial writes. |
 | API-013 | App create, edit, publish, delete, and restore operations bind an expected App revision or package fingerprint, update Git-owned source atomically, and keep recoverable local lifecycle state outside governed source. |
 | API-014 | App source search is cursor-paginated and exact-resolvable; AI proposal revisions and manual/AI composition are server-owned, revision/snapshot guarded, and atomically create canonical source-to-tile bindings. |
+| API-015 | Ask runtime state, typed conversation delta, compiler selection, and fact-bound answer persist in additive V5 receipts without breaking V1-V4 readers. |
 | UI-001 | Domain Studio uses vertical contextual navigation; global product navigation stays stable. |
 | UI-002 | dbt-owned metadata is read-only and edited only through previewed source patches. |
 | UI-004 | Generated Apps render page navigation, an apply/reset filter row, a live Business Story row, KPI band, analysis tiles, detail evidence, then reviewer appendix. |

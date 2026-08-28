@@ -66,8 +66,39 @@ export interface ConversationTurnResult {
   columns?: string[];
   rowsSample?: unknown[][];
   dimensionValues?: Record<string, string[]>;
+  /**
+   * Bounded, typed entity sets projected from an executed result. These are
+   * local conversation continuity material: they let a later question such as
+   * "which of those customers" bind to the displayed set after a restart
+   * without treating a prior answer's prose, SQL, or first row as authority.
+   *
+   * `resultFingerprint` is a content-free linkage to the executed result.
+   * The values remain in the local conversation store and must not be copied
+   * into portable traces or diagnostic exports.
+   */
+  memberSets?: ConversationResultMemberSetV1[];
   measureColumns?: string[];
   rowCount?: number;
+}
+
+export type ConversationResultMemberEntityV1 =
+  | 'customer'
+  | 'account'
+  | 'product'
+  | 'user'
+  | 'other';
+
+export interface ConversationResultMemberSetV1 {
+  version: 1;
+  entity: ConversationResultMemberEntityV1;
+  /** Human-readable result column used for a deictic entity reference. */
+  displayColumn: string;
+  displayValues: string[];
+  /** Optional stable key when the executed result exposed one. */
+  keyColumn?: string;
+  keyValues?: string[];
+  /** Content-free canonical result linkage; absent for legacy persisted rows. */
+  resultFingerprint?: string;
 }
 
 export interface ConversationTurnInput {
@@ -552,10 +583,41 @@ function capTurnResult(result: ConversationTurnResult | undefined): Conversation
           .map(([key, values]) => [key, values.slice(0, MAX_DIMENSION_VALUES)]),
       )
     : undefined;
+  const memberSets = result.memberSets
+    ?.slice(0, MAX_DIMENSION_KEYS)
+    .flatMap((set): ConversationResultMemberSetV1[] => {
+      if (!set || set.version !== 1 || !set.displayColumn?.trim()) return [];
+      const displayValues = Array.from(new Set(set.displayValues
+        .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+        .map((value) => value.trim())))
+        .slice(0, MAX_DIMENSION_VALUES);
+      if (displayValues.length === 0) return [];
+      const keyValues = set.keyValues
+        ? Array.from(new Set(set.keyValues
+          .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+          .map((value) => value.trim())))
+          .slice(0, MAX_DIMENSION_VALUES)
+        : undefined;
+      const resultFingerprint = typeof set.resultFingerprint === 'string'
+        && /^[a-f0-9]{64}$/i.test(set.resultFingerprint)
+        ? set.resultFingerprint.toLowerCase()
+        : undefined;
+      return [{
+        version: 1,
+        entity: set.entity,
+        displayColumn: set.displayColumn.trim().slice(0, 180),
+        displayValues,
+        ...(set.keyColumn?.trim() && keyValues?.length
+          ? { keyColumn: set.keyColumn.trim().slice(0, 180), keyValues }
+          : {}),
+        ...(resultFingerprint ? { resultFingerprint } : {}),
+      }];
+    });
   return {
     columns,
     rowsSample,
     dimensionValues,
+    ...(memberSets?.length ? { memberSets } : {}),
     measureColumns: result.measureColumns?.slice(0, MAX_COLUMNS),
     rowCount: result.rowCount,
   };

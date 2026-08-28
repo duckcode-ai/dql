@@ -143,6 +143,15 @@ describe('ConversationStore', () => {
         columns: Array.from({ length: 40 }, (_, i) => `col_${i}`),
         rowsSample: Array.from({ length: 20 }, () => ['Food', 240877]),
         dimensionValues: { category: Array.from({ length: 40 }, (_, i) => `value_${i}`) },
+        memberSets: [{
+          version: 1,
+          entity: 'product',
+          displayColumn: 'product_name',
+          displayValues: Array.from({ length: 40 }, (_, i) => `product_${i}`),
+          keyColumn: 'product_id',
+          keyValues: Array.from({ length: 40 }, (_, i) => `product_${i}`),
+          resultFingerprint: 'e'.repeat(64),
+        }],
         rowCount: 2,
       },
       contract: { measures: ['revenue'], dimensions: ['category'] },
@@ -155,6 +164,13 @@ describe('ConversationStore', () => {
     // follow-up compute covers a realistic top-N result.
     expect(stored.result?.rowsSample).toHaveLength(20);
     expect(stored.result?.dimensionValues?.category).toHaveLength(24);
+    expect(stored.result?.memberSets).toEqual([expect.objectContaining({
+      entity: 'product',
+      displayColumn: 'product_name',
+      displayValues: expect.arrayContaining(['product_0']),
+      resultFingerprint: 'e'.repeat(64),
+    })]);
+    expect(stored.result?.memberSets?.[0]?.displayValues).toHaveLength(24);
     expect(stored.result?.rowCount).toBe(2);
     expect(stored.contract).toEqual({ measures: ['revenue'], dimensions: ['category'] });
     expect(stored.sourceCertifiedBlock).toBe('food_vs_drink_revenue');

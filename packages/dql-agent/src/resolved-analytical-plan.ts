@@ -27,6 +27,7 @@ import {
   certifiedCandidateDeclaredDimensionOutput,
   certifiedCandidateDeclaredMeasureOutput,
   certifiedCandidateExplicitlyCoversMeasures,
+  certifiedCandidateGrainDimensionOutputs,
 } from './meaning-resolution.js';
 import { currentQuestionGroundedParsedIntent } from './analytical-orchestration.js';
 import {
@@ -189,7 +190,33 @@ export interface ResolvedAnalyticalPlanDelta {
 export function buildResolvedAnalyticalPlan(
   input: BuildResolvedAnalyticalPlanInput,
 ): ResolvedAnalyticalPlan {
-  const byLegacyId = new Map(input.candidates.map((candidate) => [candidate.id, candidate]));
+  // A same-snapshot MetricFlow role extension deliberately retains the
+  // source card's legacy ID so older persisted selections remain readable,
+  // while carrying the capability-qualified dimension ID that the frozen
+  // plan must compile.  Do not let a later, short-alias copy of that card win
+  // the legacy-ID map: doing so reopens a lexically similar but unproven
+  // dimension after the runtime already verified the exact grouping field.
+  // This is narrowly scoped to an extension whose qualified ID is present in
+  // the resolved immutable frame; ordinary duplicate retrieval cards retain
+  // the historical last-card behavior.
+  const frameDimensionIds = new Set(
+    input.resolution.analyticalFrame?.dimensions.map((binding) => binding.dimensionId) ?? [],
+  );
+  const isFrameQualifiedSemanticExtension = (candidate: AgentEvidenceCandidate | undefined): boolean =>
+    Boolean(
+      candidate?.kind === 'semantic_member'
+      && candidate.sameSnapshotRoleExtension
+      && candidate.qualifiedId
+      && frameDimensionIds.has(candidate.qualifiedId),
+    );
+  const byLegacyId = new Map<string, AgentEvidenceCandidate>();
+  for (const candidate of input.candidates) {
+    const existing = byLegacyId.get(candidate.id);
+    if (existing && isFrameQualifiedSemanticExtension(existing) && !isFrameQualifiedSemanticExtension(candidate)) {
+      continue;
+    }
+    byLegacyId.set(candidate.id, candidate);
+  }
   const selectedCandidates = input.resolution.selectedConceptIds
     .flatMap((id) => byLegacyId.get(id) ? [byLegacyId.get(id)!] : []);
   const executionCandidate = input.resolution.recommendedExecutionId
@@ -305,6 +332,36 @@ export function buildResolvedAnalyticalPlan(
     const normalizedRequested = normalize(requested);
     if (selectedCertifiedBlock && hostCertifiedProjectionTerms.has(normalizedRequested)) {
       return bindCertifiedDeclaredDimension(requested);
+    }
+    // A V2 frame is already the verified, snapshot-bound result of the
+    // planner role bindings.  Re-scoring its selected dimensions against
+    // every capability field can swap two valid roles when an entity label
+    // and a categorical grouping coexist (for example Customer Name plus
+    // Product Category).  Prefer an exact qualified frame binding when the
+    // request names that field or a same-snapshot extension explicitly maps
+    // the business term to it.  This is an identity-preserving projection,
+    // not a lexical fallback: the frame ID must be an eligible dimension of
+    // the selected capability and the extension must carry its original
+    // metric/dimension proof.
+    const frameOwnedDimensionIds = uniqueSorted((input.resolution.analyticalFrame?.dimensions ?? [])
+      .filter((binding) => capabilityEntailsFrameDimension(selectedCapability, binding))
+      .map((binding) => binding.dimensionId));
+    const exactFrameIds = frameOwnedDimensionIds.filter((dimensionId) => {
+      const dimension = selectedCapability?.dimensions.find((item) => item.dimensionId === dimensionId);
+      if (!dimension || !roles.every((role) => dimension.supportedRoles.includes(role))) return false;
+      return frameDimensionMatchesRequestedBinding({
+        requested: normalizedRequested,
+        dimension,
+        candidates: input.candidates,
+      });
+    });
+    if (exactFrameIds.length === 1) {
+      return {
+        requested,
+        qualifiedId: exactFrameIds[0],
+        status: 'resolved',
+        candidateIds: exactFrameIds,
+      };
     }
     // The candidate-ID meaning protocol cannot author a frame, but the host
     // has already bound a V2 frame from the immutable requirement seed. A
@@ -846,6 +903,43 @@ function capabilityDimensionMatchScore(
     + (capability.resultGrainIds.includes(dimension.entityId) ? 4 : 0)
     + ((dimension.relationshipPathIds?.length ?? 0) > 0 ? 4 : 0);
   return identityScore + authorityScore;
+}
+
+/**
+ * Match a frozen V2 frame dimension only through its own qualified identity,
+ * authored label/alias, or the host-authored same-snapshot extension that
+ * produced the frame.  The latter is intentionally exact: a capability
+ * extension records both the original requested business term and the native
+ * MetricFlow dimension ID, so it can carry `product category` to
+ * `order_items.product_type` without turning arbitrary semantic aliases into
+ * compiler authority.
+ */
+function frameDimensionMatchesRequestedBinding(input: {
+  requested: string;
+  dimension: MetricCapabilityContract['dimensions'][number];
+  candidates: AgentEvidenceCandidate[];
+}): boolean {
+  if (!input.requested) return false;
+  const namespaceTail = input.dimension.dimensionId.split(':').at(-1) ?? input.dimension.dimensionId;
+  const identities = [
+    input.dimension.dimensionId,
+    namespaceTail,
+    input.dimension.label,
+    ...(input.dimension.aliases ?? []),
+  ]
+    .filter((value): value is string => Boolean(value))
+    .map(normalize);
+  if (identities.includes(input.requested)) return true;
+  return input.candidates.some((candidate) => {
+    const extension = candidate.sameSnapshotRoleExtension;
+    if (!extension
+      || extension.version !== 1
+      || extension.role !== 'categorical_dimension'
+      || normalize(extension.requestedTerm) !== input.requested) return false;
+    const candidateId = candidate.qualifiedId ?? candidate.id;
+    return candidateId === input.dimension.dimensionId
+      && extension.dimensionId === input.dimension.dimensionId;
+  });
 }
 
 function conventionalIdentitySpecificity(term: string, requestedTokens: string[]): number {
@@ -1649,13 +1743,31 @@ function certifiedBlockProvesHostProjection(
     : seed.queryIntent.dimensions;
   const terms = uniqueSorted([
     ...projectedDimensions,
+    ...seed.requirements.entityTerms,
     ...seed.requirements.entityDisplayTerms,
     ...(seed.requirements.outputTerms ?? []),
   ].map(normalize).filter(Boolean));
-  return terms.every((term) => Boolean(
+  if (!terms.every((term) => Boolean(
     certifiedCandidateDeclaredDimensionOutput(block, term)
     || certifiedCandidateDeclaredMeasureOutput(block, term),
-  ));
+  ))) return false;
+  const declaredRequestedDimensions = terms
+    .map((term) => certifiedCandidateDeclaredDimensionOutput(block, term))
+    .filter((output): output is string => Boolean(output))
+    .map(normalize);
+  // A block can return profile attributes or filterable inputs beside the
+  // output that establishes its grain. Treat only an authored grain-driving
+  // output as an extra grouping field. This keeps a complete customer profile
+  // executable for a customer ranking while still rejecting a scalar revenue
+  // request against a customer-grain block.
+  const declaredBlockDimensions = certifiedCandidateGrainDimensionOutputs(block)
+    .map(normalize)
+    .filter(Boolean);
+  // Do not certify a narrower/wider saved answer than the frozen host tuple.
+  // Extra grouped dimensions alter result grain even if the requested measure
+  // happens to be an authored block output.
+  return declaredBlockDimensions.length === 0
+    || declaredBlockDimensions.every((dimension) => declaredRequestedDimensions.includes(dimension));
 }
 
 function certifiedBlockCanUseExactCanonicalDimensionProjection(
@@ -1840,7 +1952,7 @@ function sameSnapshotSemanticExtensionProvesFrozenTuple(input: {
     && Boolean(binding.qualifiedId)
     && metricAuthorityIds.has(binding.qualifiedId!))) return false;
 
-  return input.candidates.some((candidate) => {
+  const declaredExtensionProvesTuple = input.candidates.some((candidate) => {
     const extension = candidate.sameSnapshotRoleExtension;
     if (!extension
       || extension.version !== 1
@@ -1851,6 +1963,61 @@ function sameSnapshotSemanticExtensionProvesFrozenTuple(input: {
       || (candidate.qualifiedId ?? candidate.id) !== extension.dimensionId) return false;
     return input.dimensions.some((binding) => binding.qualifiedId === extension.dimensionId);
   });
+  if (declaredExtensionProvesTuple) return true;
+
+  // dbt/MetricFlow registry cards commonly have a registry identity such as
+  // `semantic:dimension:customers.customer_name`, while the selected metric
+  // capability carries its canonical MetricFlow identity
+  // `semantic:uncategorized:dimension:customers.customer_name`.  Both are
+  // sourced from the same immutable snapshot. A selected semantic member that
+  // *exactly* names one declared group-by field is therefore a direct
+  // same-snapshot binding, even when the index did not materialize the older
+  // `sameSnapshotRoleExtension` wrapper. This does not broaden selection:
+  // only cards already in the frozen authority set are considered, and every
+  // requested bound dimension must be proved by the selected metric's own
+  // capability before the semantic tier can freeze.
+  return input.dimensions.every((binding) => {
+    if (binding.status !== 'resolved' || !binding.qualifiedId) return false;
+    const dimension = capability.dimensions.find((item) =>
+      item.dimensionId === binding.qualifiedId
+      && item.supportedRoles.includes('group_by'));
+    return Boolean(dimension && input.candidates.some((candidate) =>
+      // When metadata supplies an explicit extension record, it is the
+      // authority for this bridge and must name the selected metric. Do not
+      // bypass a mismatched record through an alias-only direct fallback.
+      !candidate.sameSnapshotRoleExtension
+      && selectedSemanticMemberMatchesCapabilityDimension(candidate, dimension)));
+  });
+}
+
+/**
+ * Match only stable metadata identities, never a free-form short alias. This
+ * lets a selected registry card bind the same declared MetricFlow field while
+ * preventing a broad word such as `customer` from making `customer_order_number`
+ * look like the requested customer display key.
+ */
+function selectedSemanticMemberMatchesCapabilityDimension(
+  candidate: AgentEvidenceCandidate,
+  dimension: MetricCapabilityContract['dimensions'][number],
+): boolean {
+  if (candidate.kind !== 'semantic_member' || candidate.compatibility === 'incompatible') return false;
+  const stableForms = (values: Array<string | undefined>): Set<string> => new Set(values
+    .filter((value): value is string => Boolean(value))
+    .filter((value) => /[.:/_-]/.test(value))
+    .map(normalize)
+    .filter(Boolean));
+  const candidateForms = stableForms([
+    candidate.id,
+    candidate.qualifiedId,
+    candidate.name,
+    ...(candidate.aliases ?? []),
+  ]);
+  const dimensionForms = stableForms([
+    dimension.dimensionId,
+    dimension.label,
+    ...(dimension.aliases ?? []),
+  ]);
+  return [...candidateForms].some((form) => dimensionForms.has(form));
 }
 
 function normalize(value: string): string {

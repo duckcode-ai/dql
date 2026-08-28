@@ -50,6 +50,11 @@ import {
 } from "./mixed-source-sql.js";
 import { resolveNpmInvocation } from './npm-runtime.js';
 import {
+  buildAnalyticalPlannerSystemPrompt,
+  buildAnalyticalPlannerUserPrompt,
+  parseAnalyticalPlannerProposal,
+} from './ask-runtime/analytical-planner.js';
+import {
   ensureDqlGitignore,
   isGovernedSourceFile,
   isLegacyBroadDqlIgnore,
@@ -252,6 +257,7 @@ import {
   SqliteAgentRunStore,
   defaultAgentRunGates,
   createLlmAgentRunPlanner,
+  createAskAnalystRuntimeV1,
   createHybridRouter,
   computeResultStats,
   buildDeterministicDashboardStory,
@@ -364,6 +370,8 @@ import {
   type AgentRunStatus,
   type AgentRunStopReason,
   type AgentRunTrustState,
+  type AgentRunDiagnosticReceiptV5,
+  type AgentRunDiagnosticReceiptV6,
   type NarrationIntegrityReceiptV1,
   type AgentRouteExecutorResult,
   type AgentRouteExecutor,
@@ -423,6 +431,7 @@ import {
   type AnalyticalTaskDependencyBindingV1,
   type AnalyticalTaskDependencyResolution,
   type AnalyticalTurnPlanV1,
+  type ConversationResultMemberSetV1,
   normalizeCanonicalQueryResult,
   normalizeAnalyticalExecutionFingerprint,
   normalizeAnalyticalExecutionReceipt,
@@ -550,6 +559,7 @@ import {
 } from './semantic-runtime-settings.js';
 import { observeWarehouseTargetIdentity } from './semantic-execution/connection-identity.js';
 import { configuredWarehouseTargetIdentity } from './semantic-execution/connection-identity.js';
+import { probeAskTierReadinessV1 } from './ask-runtime/readiness.js';
 import {
   executeTargetBoundSemanticQuery,
   semanticExecutionFailureCode,
@@ -761,6 +771,17 @@ export interface LocalServerOptions {
   agentRunExecutors?: AgentRunExecutors;
   /** Host-owned rollback seam; never read from client request payloads. */
   requireMeaningCallForNaturalLanguage?: boolean;
+  /** Whole-runtime rollout control; never accepted from browser/MCP payloads. */
+  askAnalystRuntimeMode?: 'legacy' | 'shadow' | 'authoritative';
+  /**
+   * Host-only Ask-planner provider seam for deterministic local-runtime
+   * integration tests.  It is never read from HTTP/MCP payloads and does not
+   * grant a caller provider, route, or execution authority.
+   */
+  askAnalyticalPlannerProviderFactory?: (input: {
+    projectRoot: string;
+    request: AgentRunRequest;
+  }) => AgentProvider | null | Promise<AgentProvider | null>;
   /**
    * Per-runtime capability minted by the local CLI launcher. Only a matching
    * request header may label a trace as `cli`; public JSON never carries this
@@ -1119,6 +1140,10 @@ function parseAgentRunAnalysisDepth(value: unknown): AnalysisDepth | undefined {
     : undefined;
 }
 
+function isAskContinuationMode(mode: AgentRunRequestedMode | undefined): boolean {
+  return mode !== 'block' && mode !== 'app' && mode !== 'modeling' && mode !== 'skill';
+}
+
 function parseAgentRunSelectedObject(value: unknown): AgentRunSelectedObject | undefined {
   const record = agentRunRecord(value);
   if (!record) return undefined;
@@ -1188,8 +1213,21 @@ export function parseAgentRunRequestBody(body: unknown): { request?: AgentRunReq
       workspaceContext,
       conversationContext: sanitizeClientConversationContext(agentRunRecord(record.conversationContext), {
         stripStructuredSelectionEnvelope: Boolean(agentRunString(record.selectedEvidenceId)),
+        // Ask (including explicit Research) may only carry result-set state
+        // from a server-reconstructed thread. Browser payloads still retain
+        // ordinary non-authoritative hints, but cannot establish a member
+        // filter, source/trust claim, or prior-result continuation.
+        stripResultBearingContext: isAskContinuationMode(requestedMode),
       }),
-      history: parseAgentRunHistory(record.history),
+      // Public Ask/Research history is not a continuation authority. It may
+      // contain prose that resembles a certified answer, a result row, or a
+      // prior clarification; allowing it into the analytical path lets a
+      // browser manufacture source attribution or a follow-up scope. A valid
+      // local thread reconstructs its own bounded history after ingress.
+      // Non-Ask authoring routes retain their existing request-local history.
+      history: isAskContinuationMode(requestedMode)
+        ? undefined
+        : parseAgentRunHistory(record.history),
       threadId: agentRunString(record.threadId),
       // `runId` is deliberately absent at public ingress. It scopes the
       // controller, persisted run, SSE operation, and one-shot SQL capability,
@@ -1212,10 +1250,43 @@ const CLIENT_PLAN_AUTHORITY_KEYS = new Set([
   'analyticalTaskDependencyBinding',
 ]);
 
-// A no-thread embedding may retain ordinary conversation context, but a
-// selectedEvidenceId is a structured server continuation—not a client plan
-// hint. Strip this state only for that selection path, while always stripping
-// the host-only authority marker below.
+// Result-bearing conversation fields are authority only after the local host
+// has reconstructed them from a persisted thread. In particular, accepting
+// these values from an Ask HTTP body lets a browser turn an arbitrary literal
+// into a governed SQL filter after a redacted prior result. Keep this list
+// intentionally broad for Ask: opaque UI hints remain allowed, but result,
+// source, prior, and transcript-shaped state never crosses this boundary.
+const CLIENT_RESULT_BEARING_CONTEXT_KEYS = new Set([
+  'turns',
+  'history',
+  'outputColumns',
+  'answerContract',
+  'dqlArtifact',
+  'requestedFilters',
+  'requestedDimensions',
+  'requestedMeasures',
+  'memberBindings',
+  'resolvedReferences',
+  'unresolvedReferences',
+  'activeTurnId',
+  'latestTurnId',
+  'conversationSummary',
+  'conversationEnvelope',
+  'serverSnapshot',
+  'serverIssuedClarificationSelection',
+]);
+
+function isClientResultBearingContextKey(key: string): boolean {
+  if (CLIENT_RESULT_BEARING_CONTEXT_KEYS.has(key)) return true;
+  const normalized = key.toLowerCase();
+  return normalized.startsWith('source')
+    || normalized.startsWith('prior')
+    || normalized.startsWith('result');
+}
+
+// A selectedEvidenceId is a structured server continuation—not a client plan
+// hint. The backing envelope is always host-owned; selected continuations also
+// lose any lookalike envelope before the store validates the stable choice.
 const CLIENT_STRUCTURED_SELECTION_AUTHORITY_KEYS = new Set([
   'conversationEnvelope',
   'serverSnapshot',
@@ -1229,7 +1300,10 @@ const CLIENT_STRUCTURED_SELECTION_AUTHORITY_KEYS = new Set([
  */
 function sanitizeClientConversationContext(
   context: Record<string, unknown> | undefined,
-  options: { stripStructuredSelectionEnvelope?: boolean } = {},
+  options: {
+    stripStructuredSelectionEnvelope?: boolean;
+    stripResultBearingContext?: boolean;
+  } = {},
 ): Record<string, unknown> | undefined {
   if (!context) return undefined;
   const sanitize = (value: unknown): unknown => {
@@ -1240,7 +1314,12 @@ function sanitizeClientConversationContext(
       const isHostOnlySelectionAuthority = key === 'serverIssuedClarificationSelection';
       const isUntrustedSelectionEnvelope = options.stripStructuredSelectionEnvelope
         && CLIENT_STRUCTURED_SELECTION_AUTHORITY_KEYS.has(key);
-      return CLIENT_PLAN_AUTHORITY_KEYS.has(key) || isHostOnlySelectionAuthority || isUntrustedSelectionEnvelope
+      const isUntrustedResultBearingContext = options.stripResultBearingContext
+        && isClientResultBearingContextKey(key);
+      return CLIENT_PLAN_AUTHORITY_KEYS.has(key)
+        || isHostOnlySelectionAuthority
+        || isUntrustedSelectionEnvelope
+        || isUntrustedResultBearingContext
         ? []
         : [[key, sanitize(nested)]];
     }));
@@ -1913,7 +1992,6 @@ function businessNarrativeGaps(warnings: string[] | undefined): string[] | undef
 async function conversationContextFromThread(
   store: ConversationStore,
   threadId: string,
-  clientContext: Record<string, unknown> | undefined,
   question?: string,
   preservePendingClarification = false,
 ): Promise<Record<string, unknown>> {
@@ -1950,12 +2028,14 @@ async function conversationContextFromThread(
       requestedFilters: conversationStringArray(contract.filters),
       requestedDimensions: conversationStringArray(contract.dimensions),
       requestedMeasures: conversationStringArray(contract.measures),
+      rankingDirection: agentRunString(contract.rankingDirection),
       topN: topNValue,
       result: turn.result
         ? compactConversationRecord({
             columns: turn.result.columns,
             rowsSample: turn.result.rowsSample,
             dimensionValues: turn.result.dimensionValues,
+            memberSets: turn.result.memberSets,
             measureColumns: turn.result.measureColumns,
             rowCount: turn.result.rowCount,
           })
@@ -1987,10 +2067,19 @@ async function conversationContextFromThread(
         threadId,
         sourceTurnId: pendingSourceTurnId,
         snapshotId: pendingSelection.snapshotId,
+        ...(pendingSelection.continuityFingerprint
+          ? { continuityFingerprint: pendingSelection.continuityFingerprint }
+          : {}),
       }
     : undefined;
+  // A valid local thread is the sole authority for continuation context.
+  // In particular, do not merge browser-carried result rows, dimensions,
+  // source blocks, history, or prior-result member sets here: a redacted
+  // persisted result must remain unavailable rather than being repopulated
+  // with attacker-controlled values that later become a server-side filter.
+  // Request-level non-authoritative UI hints travel through `workspaceContext`
+  // and `selectedObject`, not this execution-relevant conversation envelope.
   return {
-    ...(sanitizeClientConversationContext(clientContext) ?? {}),
     conversationStateVersion: 1,
     threadId,
     ...(serverSnapshot ? { conversationEnvelope: serverSnapshot } : {}),
@@ -2017,9 +2106,124 @@ async function conversationContextFromThread(
 function lastTrustedTurnId(turns: Array<Record<string, unknown>>): string | undefined {
   for (let index = turns.length - 1; index >= 0; index -= 1) {
     const turn = turns[index] as Record<string, unknown> & { id?: string };
-    if (isTrustedConversationTurn(turn as Parameters<typeof isTrustedConversationTurn>[0])) return turn.id;
+    // Chat-only recap and greeting turns are trustworthy prose, but they are
+    // not a result-set anchor. Selecting one here discarded the prior
+    // certified result's typed member set after reload, so "those customers"
+    // quietly widened to every customer. Keep the latest substantive result
+    // as the follow-up anchor; the recap is still retained as `latestTurnId`.
+    if (isTrustedConversationTurn(turn as Parameters<typeof isTrustedConversationTurn>[0])
+      && conversationTurnHasUsefulResult(turn)) return turn.id;
   }
   return undefined;
+}
+
+function conversationTurnHasUsefulResult(turn: Record<string, unknown>): boolean {
+  const result = agentRunRecord(turn.result);
+  if (!result) return false;
+  return Array.isArray(result.columns) && result.columns.length > 0
+    || Array.isArray(result.rowsSample) && result.rowsSample.length > 0
+    || agentRunRecord(result.dimensionValues) && Object.keys(agentRunRecord(result.dimensionValues)!).length > 0
+    || Array.isArray(result.memberSets) && result.memberSets.length > 0;
+}
+
+/**
+ * A plural deictic phrase is an operation over a previously displayed set,
+ * not an invitation to rerun the question over every row in the warehouse.
+ * This intentionally lives at the HTTP host boundary because only this host
+ * knows whether a persisted thread was resolved before the Ask runtime begins.
+ */
+function pluralPriorResultEntityReference(question: string): string | undefined {
+  const normalized = question.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
+  const match = normalized.match(/\b(?:those|these|the\s+(?:previous|prior)|above)\s+(customers|accounts|products|orders|opportunities|regions|categories)\b/);
+  if (!match) return undefined;
+  const plural = match[1];
+  return plural === 'categories' ? 'category' : plural.slice(0, -1);
+}
+
+function markUnavailablePluralPriorResultSet(request: AgentRunRequest): void {
+  if (request.selectedResultBindingGap || request.priorResultMemberBinding) return;
+  const entity = pluralPriorResultEntityReference(request.question);
+  if (!entity) return;
+  request.selectedResultBindingGap = {
+    code: 'PRIOR_RESULT_MEMBER_SET_UNAVAILABLE',
+    message: `The previous result did not retain the displayed ${entity} set needed for this follow-up, so it cannot safely run against all data.`,
+  };
+}
+
+/**
+ * Materialize a plural prior-result reference before the authoritative Ask
+ * runtime frames the request.  `buildAgentRunContextPack` also classifies
+ * follow-ups for retrieval diagnostics, but it runs after the Ask runtime has
+ * built its immutable requirement seed.  Applying this only after retrieval
+ * made "those customers" an explanation-only hint and let a follow-up rank
+ * the entire warehouse.
+ *
+ * This is intentionally an HTTP-host boundary: it accepts only the
+ * server-reconstructed conversation envelope for the requested persisted
+ * thread. Browser conversation JSON cannot supply this filter, a prior member
+ * set, or a host requirement seed. The values remain local execution context;
+ * they are never copied into provider prompts.
+ */
+function hydratePersistedPriorResultMemberBinding(request: AgentRunRequest): void {
+  if (!request.threadId || request.askAnalystTaskChild || request.researchBranch) return;
+  const context = request.conversationContext;
+  const envelope = agentRunRecord(context?.conversationEnvelope);
+  if (!envelope || agentRunString(envelope.threadId) !== request.threadId) return;
+
+  const followUp = resolveAgentFollowUpContext(context, request.question);
+  request.conversationBinding = followUp?.binding ?? request.conversationBinding ?? 'none';
+  if (followUp?.priorResultSetUnavailable) {
+    request.selectedResultBindingGap = {
+      code: 'PRIOR_RESULT_MEMBER_SET_UNAVAILABLE',
+      message: followUp.unresolvedReferences?.[0]
+        ?? 'The prior result set is unavailable, so this follow-up cannot safely run against all data.',
+    };
+    return;
+  }
+  if (followUp?.binding !== 'prior_result') return;
+
+  const rawBinding = followUp.memberBindings?.find((binding) =>
+    binding.source === 'prior_result' && binding.values.length > 0);
+  if (!rawBinding) return;
+  const values = [...new Set(rawBinding.values
+    .map((value) => value.trim())
+    .filter(Boolean))].slice(0, 24);
+  if (values.length === 0) return;
+  // The resolver intentionally uses business entities (`customer`) for
+  // deictic language. Recover the persisted display field (`customer_name`)
+  // when available so the compiler binds an actual qualified dimension rather
+  // than reinterpreting an entity noun as a new broad grouping.
+  const displayDimension = Object.entries(followUp.priorResultValues ?? {})
+    .find(([, candidateValues]) => values.every((value) => candidateValues.includes(value)))?.[0]
+    ?? rawBinding.dimension;
+  if (!displayDimension) return;
+
+  request.priorResultMemberBinding = {
+    version: 1,
+    displayDimension,
+    values,
+    ...(rawBinding.sourceTurnId ? { sourceTurnId: rawBinding.sourceTurnId } : {}),
+  };
+  const seed = request.hostRequirementSeed?.version === 1
+    && request.hostRequirementSeed.sourceQuestion === request.question
+    ? request.hostRequirementSeed
+    : buildAnalyticalRequirementSeedV1({ question: request.question });
+  const existingKeys = new Set(seed.queryIntent.filters.map((filter) =>
+    `${filter.field.trim().toLowerCase()}\u0000${filter.value.trim().toLowerCase()}`));
+  const carriedFilters = values.flatMap((value) => {
+    const key = `${displayDimension.trim().toLowerCase()}\u0000${value.toLowerCase()}`;
+    if (existingKeys.has(key)) return [];
+    existingKeys.add(key);
+    return [{ field: displayDimension, value }];
+  });
+  request.hostRequirementSeed = {
+    ...seed,
+    sourceQuestion: request.question,
+    queryIntent: {
+      ...seed.queryIntent,
+      filters: [...seed.queryIntent.filters, ...carriedFilters],
+    },
+  };
 }
 
 /** Best-effort: persist a completed run as a conversation turn (never throws). */
@@ -2192,10 +2396,16 @@ export function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInp
         ...(run.routeDecision?.retrievalEvidence?.snapshotId
           ? { snapshotId: run.routeDecision.retrievalEvidence.snapshotId }
           : {}),
+        ...(run.routeDecision?.retrievalEvidence?.continuityFingerprint
+          ? { continuityFingerprint: run.routeDecision.retrievalEvidence.continuityFingerprint }
+          : {}),
       }
     : undefined;
   const rowCountRaw = result?.rowCount;
   const measureColumns = conversationMeasureColumns(columns, requestedShape, rows);
+  const dimensionValues = conversationDimensionValues(columns, memberRows);
+  const resultFingerprint = conversationResultFingerprint(result, payload);
+  const memberSets = conversationResultMemberSets(columns, memberRows, resultFingerprint);
   return {
     agentRunId: run.id,
     question: run.question,
@@ -2229,7 +2439,8 @@ export function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInp
       ? {
           columns,
           rowsSample,
-          dimensionValues: conversationDimensionValues(columns, memberRows),
+          dimensionValues,
+          ...(memberSets?.length ? { memberSets } : {}),
           measureColumns,
           rowCount: typeof rowCountRaw === 'number' ? rowCountRaw : rows.length || undefined,
         }
@@ -2336,6 +2547,71 @@ function conversationDimensionValues(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/**
+ * Project only bounded entity identity/display sets from an executed result.
+ * They are persisted locally for deterministic continuation binding, never
+ * emitted into the content-free Ask trace or portable diagnostics.
+ */
+function conversationResultMemberSets(
+  columns: string[],
+  rows: Array<Record<string, unknown>>,
+  resultFingerprint: string | undefined,
+): ConversationResultMemberSetV1[] | undefined {
+  if (columns.length === 0 || rows.length === 0) return undefined;
+  const entityForColumn = (column: string): ConversationResultMemberSetV1['entity'] | undefined => {
+    const lower = column.toLowerCase();
+    if (/\bcustomer\b/.test(lower.replace(/[_./:-]+/g, ' '))) return 'customer';
+    if (/\baccount\b/.test(lower.replace(/[_./:-]+/g, ' '))) return 'account';
+    if (/\bproduct\b/.test(lower.replace(/[_./:-]+/g, ' '))) return 'product';
+    if (/\buser\b/.test(lower.replace(/[_./:-]+/g, ' '))) return 'user';
+    return undefined;
+  };
+  const valuesFor = (column: string): string[] => Array.from(new Set(rows
+    .map((row) => row[column])
+    .filter((value): value is string | number => (typeof value === 'string' && value.trim().length > 0)
+      || (typeof value === 'number' && Number.isFinite(value)))
+    .map((value) => String(value).trim())))
+    .filter(Boolean)
+    .slice(0, 24);
+  const sets: ConversationResultMemberSetV1[] = [];
+  for (const column of columns.slice(0, 24)) {
+    const entity = entityForColumn(column);
+    // A display label is the only safe deictic binding surface. Numeric IDs
+    // become an optional companion key, never the fallback display value.
+    if (!entity || /(?:^|_)(?:id|key)(?:$|_)/i.test(column)) continue;
+    const displayValues = valuesFor(column);
+    if (displayValues.length === 0) continue;
+    const keyColumn = columns.find((candidate) => {
+      const lower = candidate.toLowerCase();
+      return entityForColumn(candidate) === entity && /(?:^|_)(?:id|key)(?:$|_)/i.test(lower);
+    });
+    const keyValues = keyColumn ? valuesFor(keyColumn) : undefined;
+    sets.push({
+      version: 1,
+      entity,
+      displayColumn: column,
+      displayValues,
+      ...(keyColumn && keyValues?.length ? { keyColumn, keyValues } : {}),
+      ...(resultFingerprint ? { resultFingerprint } : {}),
+    });
+  }
+  return sets.length > 0 ? sets.slice(0, 4) : undefined;
+}
+
+function conversationResultFingerprint(
+  result: Record<string, unknown> | undefined,
+  payload: Record<string, unknown> | undefined,
+): string | undefined {
+  const executionReceipt = agentRunRecord(result?.executionReceipt);
+  const businessAnswer = agentRunRecord(payload?.businessAnswer);
+  const candidates = [
+    agentRunString(result?.resultFingerprint),
+    agentRunString(executionReceipt?.resultFingerprint),
+    agentRunString(businessAnswer?.resultFingerprint),
+  ];
+  return candidates.find((value): value is string => Boolean(value && /^[a-f0-9]{64}$/i.test(value)))?.toLowerCase();
+}
+
 function conversationStringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const values = value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
@@ -2422,6 +2698,15 @@ export interface AgentRunProviderDispatchBudget {
   meaningResolution: number;
   /** Optional stricter cap for planning inside `generationGroup`. */
   planning?: number;
+  /**
+   * One verifier-directed, same-snapshot revision after a successfully
+   * admitted initial analytical planner call.  This is deliberately separate
+   * from the ordinary planning and SQL-generation limits: it cannot turn into
+   * a second free-form plan or consume the SQL generation allowance.
+   */
+  planningRevision?: number;
+  /** One root Research hypothesis plan; separate from child Simple-Ask plans. */
+  researchHypothesisPlanning?: number;
   generationGroup: number;
   narration: number;
   repair: number;
@@ -2448,13 +2733,20 @@ export function agentRunProviderDispatchBudgetForMode(
       total: 12,
       classification: 1,
       // A bounded Research root may plan up to six independently routed
-      // hypothesis children. Each child can make one candidate-ID meaning
-      // resolution, all of which remain charged to this same twelve-send
-      // ledger. Ordinary Ask deliberately remains one below.
+      // hypothesis children. The root investigation plan has its own one-send
+      // slot; each child then uses the same typed Simple Ask planner contract
+      // as ordinary Ask. All of those physical sends still share the hard
+      // twelve-send ledger below.
       meaningResolution: 6,
-      planning: 1,
-      // One planner plus at most eight generation/tool sends. Together with
-      // one meaning, one narrator, and one repair this cannot exceed twelve.
+      researchHypothesisPlanning: 1,
+      planning: 6,
+      // A revision is verifier-directed and can only follow an admitted child
+      // initial plan. The total cap remains the final authority, so these
+      // limits do not grant more than twelve provider sends in a Research run.
+      planningRevision: 5,
+      // At most the remaining calls may be provider tools/generation. Together
+      // with root/child planning, narration and repair, `total` remains the
+      // hard ceiling.
       generationGroup: 9,
       narration: 1,
       repair: 1,
@@ -2462,13 +2754,15 @@ export function agentRunProviderDispatchBudgetForMode(
   }
   return {
     // One interpretation (candidate-ID meaning OR legacy classification), one
-    // planning/generation transport, and exactly one eligible frozen-plan
-    // correction. The phase-specific limits below keep the exceptional third
-    // attempt from becoming a general Ask retry budget.
-    total: 3,
+    // initial analytical planner, one verifier-directed same-snapshot planner
+    // revision, one SQL generation transport, and exactly one eligible
+    // frozen-plan correction.  The narrowly typed revision cap below keeps
+    // this from becoming a general Ask retry budget.
+    total: 5,
     classification: 1,
     meaningResolution: 1,
     planning: 1,
+    planningRevision: 1,
     generationGroup: 1,
     narration: 0,
     repair: 1,
@@ -2478,6 +2772,11 @@ export function agentRunProviderDispatchBudgetForMode(
 export class RunScopedProviderDispatchEvidence implements ProviderDispatchEvidenceSink {
   private readonly receipts: ProviderEgressReceiptV1[] = [];
   private readonly phaseCounts = new Map<ProviderDispatchPhaseV1, number>();
+  /** Planning revisions have their own verifier-owned admission slot. */
+  private planningInitialCount = 0;
+  private planningRevisionCount = 0;
+  /** The one root Research hypothesis-plan transport. */
+  private researchHypothesisPlanningCount = 0;
   /** At most one physical same-provider transient retry may be admitted per run. */
   private retryCount = 0;
   private currentRoute: AgentRunRoute;
@@ -2543,11 +2842,17 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
       serializedResultShape?: { resultRowCount: number; columnCount: number };
       cumulativeResultRowCount?: number;
       retryOfAttemptIndex?: number;
+      /** Server-owned subtype for root Research or the Ask planner. */
+      planningKind?: 'initial' | 'targeted_revision' | 'research_hypothesis';
     },
   ): Record<string, unknown> {
     const isInterpretationPhase = context.dispatchPhase === 'classification'
       || context.dispatchPhase === 'meaning_resolution';
-    const softRoute = isInterpretationPhase ? 'clarify' : this.currentRoute;
+    // Classification is a genuine short discovery/clarify preflight. Meaning
+    // resolution belongs to the Ask program and must use the selected route's
+    // regular analytical budget; charging it to clarify caused valid semantic
+    // and exploratory fallbacks to die before their first compiler attempt.
+    const softRoute = context.dispatchPhase === 'classification' ? 'clarify' : this.currentRoute;
     // Admission control BEFORE the phase targets: starting a call that the hard
     // deadline will kill mid-flight wastes the remaining budget and ends the run
     // with nothing. Stopping here lets the caller answer from what it has.
@@ -2601,12 +2906,19 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
     }
     const admittedTransientRetry = retryRequested && Boolean(retryParent);
     const phaseCount = this.phaseCounts.get(context.dispatchPhase) ?? 0;
+    const planningKind = context.dispatchPhase === 'planning'
+      ? (context.planningKind ?? 'initial')
+      : undefined;
     const phaseLimit = context.dispatchPhase === 'classification'
       ? (this.policy.classification ?? 1)
       : context.dispatchPhase === 'meaning_resolution'
         ? this.policy.meaningResolution
       : context.dispatchPhase === 'planning'
-        ? (this.policy.planning ?? this.policy.generationGroup)
+      ? planningKind === 'targeted_revision'
+          ? (this.policy.planningRevision ?? 0)
+          : planningKind === 'research_hypothesis'
+            ? (this.policy.researchHypothesisPlanning ?? 0)
+            : (this.policy.planning ?? this.policy.generationGroup)
       : context.dispatchPhase === 'repair'
         ? this.policy.repair
         : context.dispatchPhase === 'narration'
@@ -2626,20 +2938,32 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
         'The legacy category classifier and candidate-ID meaning resolution cannot both dispatch in one Ask run.',
       ), { code: 'PROVIDER_INTERPRETATION_PHASE_CONFLICT' });
     }
-    // Planning and generation share one ledger because they compete for the
-    // same "work out the query" budget. Narration does not: it is the step that
-    // turns a settled result into an answer, and starving it produces a run
-    // that computed the right numbers and then could not say them.
+    // SQL generation owns a distinct one-send cap.  Planning is a structured
+    // interpretation phase, and one verifier-directed same-snapshot revision
+    // is separately admitted below.  Counting planning as SQL generation used
+    // to block the accepted initial-planner -> targeted-context -> revision
+    // flow before the revision reached provider egress.
     const generationGroupCount = this.receipts.filter((receipt) =>
-      receipt.dispatchPhase === 'planning'
-      || receipt.dispatchPhase === 'generation').length;
-    if (!admittedTransientRetry && (phaseCount >= phaseLimit || (
-      (context.dispatchPhase === 'planning' || context.dispatchPhase === 'generation')
-      && generationGroupCount >= this.policy.generationGroup
-    ))) {
+      receipt.dispatchPhase === 'generation').length;
+    const targetedRevisionBeforeInitial = planningKind === 'targeted_revision'
+      && this.planningInitialCount < 1;
+    const planningCount = planningKind === 'targeted_revision'
+      ? this.planningRevisionCount
+      : planningKind === 'research_hypothesis'
+        ? this.researchHypothesisPlanningCount
+        : planningKind === 'initial'
+          ? this.planningInitialCount
+          : phaseCount;
+    if (!admittedTransientRetry && (
+      targetedRevisionBeforeInitial
+      || planningCount >= phaseLimit
+      || (context.dispatchPhase === 'generation' && generationGroupCount >= this.policy.generationGroup)
+    )) {
       throw Object.assign(new Error(
-        `Provider dispatch budget exhausted for ${context.dispatchPhase} after ${phaseLimit} physical attempts.`,
-      ), { code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' });
+        targetedRevisionBeforeInitial
+          ? 'A targeted planning revision requires one admitted initial planner call.'
+          : `Provider dispatch budget exhausted for ${planningKind === 'targeted_revision' ? 'targeted planning revision' : context.dispatchPhase} after ${phaseLimit} physical attempts.`,
+        ), { code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED' });
     }
     const envelope = prepareProviderWireEnvelopeForDispatch(event.provider, event.envelope);
     const projectedRowCount = context.serializedResultShape?.resultRowCount ?? 0;
@@ -2699,6 +3023,9 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
     // the matching HTTP completion/failure. Recording `ok` here would turn an
     // admitted-but-failed physical send into a false provider success.
     this.phaseCounts.set(context.dispatchPhase, phaseCount + 1);
+    if (!admittedTransientRetry && planningKind === 'initial') this.planningInitialCount += 1;
+    if (!admittedTransientRetry && planningKind === 'targeted_revision') this.planningRevisionCount += 1;
+    if (!admittedTransientRetry && planningKind === 'research_hypothesis') this.researchHypothesisPlanningCount += 1;
     if (admittedTransientRetry) this.retryCount += 1;
     return envelope;
   }
@@ -2988,9 +3315,18 @@ export function createProviderDispatchTrace(input: {
  * adapt the physical category-classification or candidate-ID meaning call to
  * the shared physical-send trace wrapper without changing router authority.
  */
-function createRouterInterpretationProviderTrace(input: {
+/**
+ * @internal Host-owned physical dispatch bridge for Ask interpretation and
+ * planning. Exported only for the local egress integration harness; the
+ * runtime never receives a ledger or trace authority from client ingress.
+ */
+export function createRouterInterpretationProviderTrace(input: {
   request: AgentRunRequest;
-  routerPhase: 'classification' | 'meaning_resolution';
+  routerPhase: 'classification' | 'meaning_resolution' | 'planning';
+  /** The only planning revision admission is minted by AskAnalystRuntime. */
+  planningKind?: 'initial' | 'targeted_revision';
+  /** Test/host injection only; production resolves the request-local ledger. */
+  ledger?: ProviderDispatchEvidenceSink;
 }): ReturnType<typeof createProviderDispatchTrace> {
   const purpose: ProviderEgressPurpose = input.routerPhase === 'classification'
     ? 'classification'
@@ -3000,12 +3336,15 @@ function createRouterInterpretationProviderTrace(input: {
     phase: input.routerPhase,
     purpose,
     admit: (event) => {
-      const ledger = agentRunProviderEvidenceContext.getStore();
+      const ledger = input.ledger ?? agentRunProviderEvidenceContext.getStore();
       if (ledger) {
         return ledger.observe(event, {
           purpose,
           dispatchPhase: input.routerPhase,
           optIn: false,
+          ...(input.routerPhase === 'planning' && input.planningKind
+            ? { planningKind: input.planningKind }
+            : {}),
         });
       }
       const envelope = prepareProviderWireEnvelopeForDispatch(event.provider, event.envelope);
@@ -3051,6 +3390,10 @@ export function createResearchHypothesisPlanningProvider(input: {
               purpose: 'answer_generation',
               dispatchPhase: 'planning',
               optIn: false,
+              // This is the one root investigation plan. Admitted Research
+              // children must retain their own Simple Ask initial/revision
+              // slots instead of being blocked behind this transport.
+              planningKind: 'research_hypothesis',
             });
           }
           const envelope = prepareProviderWireEnvelopeForDispatch(event.provider, event.envelope);
@@ -3083,28 +3426,39 @@ export function createResearchHypothesisPlanningProvider(input: {
   };
 }
 
-function mergeRunScopedProviderDispatchEvidence(
+/** @internal Exported for the Research-root terminal aggregation regression. */
+export function mergeRunScopedProviderDispatchEvidence(
   run: AgentRun,
   evidence: ProviderDispatchTerminalEvidence,
 ): AgentRun {
   const providerEgressReceipts = [...evidence.providerEgressReceipts];
   const elapsed = Math.max(0, Date.parse(run.completedAt) - Date.parse(run.startedAt));
+  // A Research root has no direct warehouse call of its own: its bounded
+  // Simple-Ask children persist the execution receipts.  The executor adds
+  // their content-safe aggregate to `run.telemetry`; this terminal merge must
+  // retain it instead of overwriting it with the root provider-ledger's
+  // intentionally zero SQL/tool counters. Provider receipts remain ledger
+  // authoritative because all root and child sends share that one ledger.
+  const inheritedTelemetry = run.telemetry;
   const telemetry: AgentRunTelemetryV1 = {
     version: 1,
     stageDurationsMs: {
-      ...(run.telemetry?.stageDurationsMs ?? {}),
+      ...(inheritedTelemetry?.stageDurationsMs ?? {}),
       total: Number.isFinite(elapsed) ? Math.min(86_400_000, elapsed) : 0,
     },
-    providerRoundTrips: evidence.providerRoundTrips,
-    toolCalls: run.telemetry?.toolCalls ?? evidence.toolCalls,
-    sqlExecutions: run.telemetry?.sqlExecutions ?? evidence.sqlExecutions,
-    repairs: run.telemetry?.repairs ?? evidence.repairs,
+    // `max`, never a sum: an AsyncLocal root ledger already observes every
+    // child provider send, while child telemetry is the fallback for direct
+    // executor/test paths that have no egress receipt ledger.
+    providerRoundTrips: Math.max(evidence.providerRoundTrips, inheritedTelemetry?.providerRoundTrips ?? 0),
+    toolCalls: Math.max(evidence.toolCalls, inheritedTelemetry?.toolCalls ?? 0),
+    sqlExecutions: Math.max(evidence.sqlExecutions, inheritedTelemetry?.sqlExecutions ?? 0),
+    repairs: Math.max(evidence.repairs, inheritedTelemetry?.repairs ?? 0),
     egressReceipts: providerEgressReceipts.length,
-    ...(run.telemetry?.warehouseDurationMs !== undefined
-      ? { warehouseDurationMs: run.telemetry.warehouseDurationMs }
+    ...(inheritedTelemetry?.warehouseDurationMs !== undefined
+      ? { warehouseDurationMs: inheritedTelemetry.warehouseDurationMs }
       : {}),
-    ...(run.telemetry?.fallbackReason
-      ? { fallbackReason: run.telemetry.fallbackReason }
+    ...(inheritedTelemetry?.fallbackReason
+      ? { fallbackReason: inheritedTelemetry.fallbackReason }
       : evidence.fallbackReason !== 'none'
         ? { fallbackReason: evidence.fallbackReason }
         : {}),
@@ -3124,16 +3478,35 @@ function mergeRunScopedProviderDispatchEvidence(
       ? { repairCapabilityFingerprint: run.diagnosticReceiptV2.repairCapabilityFingerprint }
       : {}),
   };
+  const diagnosticReceiptV5 = run.requestedMode === 'research'
+    ? run.diagnosticReceiptV5
+      ? synchronizeResearchRuntimeReceiptV5(run.diagnosticReceiptV5, telemetry)
+      : researchRootRuntimeReceiptV5(run, telemetry)
+    : run.diagnosticReceiptV5;
+  const diagnosticReceiptV6 = run.requestedMode === 'research'
+    ? run.diagnosticReceiptV6
+      ? synchronizeResearchRuntimeReceiptV6(run.diagnosticReceiptV6, telemetry, diagnosticReceiptV5)
+      : researchRootRuntimeReceiptV6(run, telemetry, diagnosticReceiptV5)
+    : run.diagnosticReceiptV6;
   const artifacts = run.artifacts.map((artifact) => {
     if (!artifact.payload || typeof artifact.payload !== 'object' || Array.isArray(artifact.payload)) return artifact;
     const payload = artifact.payload as Record<string, unknown>;
-    if (!('diagnosticReceipt' in payload) && !('diagnosticReceiptV2' in payload)) return artifact;
+    if (!('diagnosticReceipt' in payload)
+      && !('diagnosticReceiptV2' in payload)
+      && !('diagnosticReceiptV3' in payload)
+      && !('diagnosticReceiptV4' in payload)
+      && !('diagnosticReceiptV5' in payload)
+      && !('diagnosticReceiptV6' in payload)) return artifact;
     return {
       ...artifact,
       payload: {
         ...payload,
         ...(diagnosticReceipt ? { diagnosticReceipt } : {}),
         diagnosticReceiptV2,
+        ...(run.diagnosticReceiptV3 ? { diagnosticReceiptV3: run.diagnosticReceiptV3 } : {}),
+        ...(run.diagnosticReceiptV4 ? { diagnosticReceiptV4: run.diagnosticReceiptV4 } : {}),
+        ...(diagnosticReceiptV5 ? { diagnosticReceiptV5 } : {}),
+        ...(diagnosticReceiptV6 ? { diagnosticReceiptV6 } : {}),
       },
     };
   });
@@ -3144,7 +3517,327 @@ function mergeRunScopedProviderDispatchEvidence(
     telemetry,
     ...(diagnosticReceipt ? { diagnosticReceipt } : {}),
     diagnosticReceiptV2,
+    ...(diagnosticReceiptV5 ? { diagnosticReceiptV5 } : {}),
+    ...(diagnosticReceiptV6 ? { diagnosticReceiptV6 } : {}),
   };
+}
+
+/**
+ * Aggregate only durable Research-child evidence into the root telemetry.
+ *
+ * A child may have a provider/tool counter even when its query ultimately
+ * fails, so those counters are retained for every uniquely persisted child.
+ * SQL executions use the server-owned child runtime counter as their physical
+ * authority. A failed warehouse dispatch has no result fingerprint, but it is
+ * still a real SQL attempt and must remain visible at the Research root. A
+ * canonical result fingerprint/execution receipt is only the fallback for
+ * older child records that predate the counter, and remains the separate
+ * authority for observed facts. The child run ID, rather than the result
+ * fingerprint, is the de-duplication key because two independently executed
+ * hypotheses can legitimately return the same result.
+ */
+/** @internal Exported for the focused child-counter aggregation regression. */
+export function researchChildTelemetryForRoot(
+  researchRuns: readonly NotebookResearchRun[],
+): AgentRunTelemetryV1 {
+  const observedRunIds = new Set<string>();
+  let providerRoundTrips = 0;
+  let toolCalls = 0;
+  let sqlExecutions = 0;
+  let repairs = 0;
+  let providerDurationMs = 0;
+  let toolDurationMs = 0;
+  let executionDurationMs = 0;
+
+  for (const child of researchRuns) {
+    const childId = agentRunString(child.id);
+    if (!childId || observedRunIds.has(childId)) continue;
+    observedRunIds.add(childId);
+
+    const evidence = agentRunRecord(child.evidence);
+    const agentEvidence = agentRunRecord(evidence?.agentEvidence);
+    const runtimeCounters = agentRunRecord(agentEvidence?.runtimeCounters);
+    const childToolCalls = Array.isArray(agentEvidence?.toolCalls)
+      ? agentEvidence.toolCalls.filter((call) => agentRunRecord(call))
+      : [];
+    providerRoundTrips += nonNegativeTelemetryCount(runtimeCounters?.providerRoundTrips);
+    toolCalls += Math.max(nonNegativeTelemetryCount(runtimeCounters?.toolCalls), childToolCalls.length);
+    repairs += nonNegativeTelemetryCount(runtimeCounters?.repairs);
+
+    for (const timing of Array.isArray(agentEvidence?.timings) ? agentEvidence.timings : []) {
+      const record = agentRunRecord(timing);
+      const durationMs = boundedTelemetryDuration(record?.durationMs);
+      if (durationMs === undefined) continue;
+      if (record?.phase === 'answer_resolution') providerDurationMs += durationMs;
+    }
+    for (const toolCall of childToolCalls) {
+      toolDurationMs += boundedTelemetryDuration(agentRunRecord(toolCall)?.durationMs) ?? 0;
+    }
+
+    const preview = agentRunRecord(child.resultPreview);
+    const executionReceipt = normalizeAnalyticalExecutionReceipt(preview?.executionReceipt);
+    const resultFingerprint = normalizeAnalyticalExecutionFingerprint(preview?.resultFingerprint)
+      ?? executionReceipt?.resultFingerprint;
+    const childSqlExecutions = nonNegativeTelemetryCount(runtimeCounters?.sqlExecutions);
+    // The persisted child counter is the physical authority, including a
+    // connector/executor failure before a result exists. Never add its receipt
+    // fallback as well: a successful child can have both and must count once.
+    const physicalSqlExecutions = childSqlExecutions > 0
+      ? childSqlExecutions
+      : resultFingerprint
+        ? 1
+        : 0;
+    if (physicalSqlExecutions === 0) continue;
+    sqlExecutions += physicalSqlExecutions;
+    const executionTime = boundedTelemetryDuration(preview?.executionTime)
+      ?? boundedTelemetryDuration(agentRunRecord(agentEvidence?.execution)?.executionTime);
+    if (executionTime !== undefined) executionDurationMs += executionTime;
+  }
+
+  return {
+    version: 1,
+    stageDurationsMs: {
+      ...(providerDurationMs > 0 ? { provider: providerDurationMs } : {}),
+      ...(toolDurationMs > 0 ? { tools: toolDurationMs } : {}),
+      ...(executionDurationMs > 0 ? { execution: executionDurationMs } : {}),
+    },
+    providerRoundTrips,
+    toolCalls,
+    sqlExecutions,
+    repairs,
+    // Only the root request-scoped ledger persists provider egress receipts.
+    // Child counters are not a substitute for that transport evidence.
+    egressReceipts: 0,
+    ...(executionDurationMs > 0 ? { warehouseDurationMs: executionDurationMs } : {}),
+  };
+}
+
+function nonNegativeTelemetryCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.min(1_000_000, Math.trunc(value))
+    : 0;
+}
+
+function boundedTelemetryDuration(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.min(86_400_000, Math.trunc(value))
+    : undefined;
+}
+
+function synchronizeResearchRuntimeReceiptV5(
+  receipt: NonNullable<AgentRun['diagnosticReceiptV5']>,
+  telemetry: AgentRunTelemetryV1,
+): NonNullable<AgentRun['diagnosticReceiptV5']> {
+  const { summaryFingerprint: _previousSummaryFingerprint, ...summaryWithoutFingerprint } = receipt.summary;
+  const executionAttempts = Math.max(summaryWithoutFingerprint.executionAttempts, telemetry.sqlExecutions);
+  const toolCallCount = Math.max(summaryWithoutFingerprint.toolCallCount, telemetry.toolCalls);
+  const summaryInput = { ...summaryWithoutFingerprint, toolCallCount, executionAttempts };
+  return {
+    ...receipt,
+    state: {
+      ...receipt.state,
+      counters: {
+        ...receipt.state.counters,
+        toolCalls: Math.max(receipt.state.counters.toolCalls, telemetry.toolCalls),
+        executionAttempts: Math.max(receipt.state.counters.executionAttempts, telemetry.sqlExecutions),
+        repairAttempts: Math.max(receipt.state.counters.repairAttempts, telemetry.repairs),
+      },
+    },
+    summary: {
+      ...summaryInput,
+      summaryFingerprint: executionFingerprint(JSON.stringify(summaryInput)),
+    },
+  };
+}
+
+function synchronizeResearchRuntimeReceiptV6(
+  receipt: NonNullable<AgentRun['diagnosticReceiptV6']>,
+  telemetry: AgentRunTelemetryV1,
+  receiptV5: AgentRun['diagnosticReceiptV5'],
+): NonNullable<AgentRun['diagnosticReceiptV6']> {
+  const executionAttempts = Math.max(receipt.execution.attempts, telemetry.sqlExecutions);
+  return {
+    ...receipt,
+    ...(receiptV5 ? {
+      state: receiptV5.state,
+      summary: receiptV5.summary,
+      ...(receiptV5.businessAnswer ? { businessAnswer: receiptV5.businessAnswer } : {}),
+    } : {}),
+    telemetry,
+    execution: { attempts: executionAttempts },
+    story: receipt.story.map((stage) => stage.stage === 'execution' && telemetry.sqlExecutions > 0
+      ? { ...stage, status: 'completed' as const, reasonCode: 'research_child_sql_attempted' }
+      : stage),
+  };
+}
+
+/**
+ * Explicit Research currently owns its root hypothesis plan separately from
+ * the ordinary AskAnalyst state machine.  It can still produce several
+ * independently frozen Simple-Ask children.  Build a deliberately
+ * content-free V5/V6 root projection from those durable child receipts so the
+ * trace does not claim that their SQL/tool work was zero or absent.
+ *
+ * This is an aggregation receipt, not a new execution authority: it names no
+ * rows, SQL, candidate labels, or child prompt material, and the root ledger
+ * remains the authority for provider egress receipts.
+ */
+function researchRootRuntimeReceiptV5(
+  run: AgentRun,
+  telemetry: AgentRunTelemetryV1,
+): AgentRunDiagnosticReceiptV5 {
+  const children = researchRootReceiptChildren(run);
+  const observedChildFingerprints = children
+    .flatMap((child) => child.resultFingerprint ? [child.resultFingerprint] : []);
+  const trustedState = run.trustState === 'certified'
+    ? 'certified'
+    : run.trustState === 'review_required'
+      ? 'review_required'
+      : run.status === 'blocked'
+        ? 'blocked'
+        : run.trustState === 'not_applicable'
+          ? 'not_applicable'
+          : 'governed';
+  const state = {
+    version: 1 as const,
+    mode: 'authoritative' as const,
+    phase: run.status === 'blocked' || run.status === 'cancelled'
+      ? 'blocked' as const
+      : 'executed' as const,
+    questionFingerprint: executionFingerprint(`research-root:${run.question}`),
+    kind: 'research' as const,
+    requirementCounts: { measures: 0, dimensions: 0, entityTerms: 0, members: 0, filters: 0 },
+    mission: {
+      mode: 'research' as const,
+      taskCount: children.length,
+      deferredTaskCount: 0,
+      hypothesisCount: children.length,
+    },
+    workspace: {
+      admittedCandidateCount: 0,
+      excludedCandidateCount: 0,
+      sourceCoverage: [],
+      tools: [{
+        id: 'tool:research_child_execution',
+        kind: 'execute' as const,
+        status: telemetry.sqlExecutions > 0 ? 'completed' as const : 'skipped' as const,
+        reasonCode: telemetry.sqlExecutions > 0
+          ? 'research_child_sql_attempted'
+          : 'no_research_child_sql_attempt',
+      }],
+    },
+    program: {
+      id: `research-root:${executionFingerprint(run.id).slice(0, 24)}`,
+      taskCount: children.length,
+      candidateCount: 0,
+      requiredRoles: [],
+      outputAssertionCount: 0,
+    },
+    counters: {
+      planningContinuations: 0,
+      toolCalls: telemetry.toolCalls,
+      executionAttempts: telemetry.sqlExecutions,
+      repairAttempts: telemetry.repairs,
+    },
+  } satisfies AgentRunDiagnosticReceiptV5['state'];
+  const nextAction = run.diagnosticReceiptV4?.summary.safeNextAction ?? 'none';
+  const summaryInput = {
+    version: 2 as const,
+    runtimeMode: 'authoritative' as const,
+    whatHappened: telemetry.sqlExecutions > 0
+      ? 'Research aggregated child analytical SQL attempts.'
+      : 'Research completed without a recorded child SQL attempt.',
+    why: telemetry.sqlExecutions > 0
+      ? 'Counts use server-owned child execution counters when present; canonical result fingerprints remain the separate fact boundary.'
+      : 'No child recorded a physical SQL execution or durable execution receipt.',
+    impact: telemetry.sqlExecutions > 0
+      ? 'The root trace retains child physical execution attempts without copying result rows; only receipt-backed results are presented as facts.'
+      : 'No child physical execution is presented as a root data answer.',
+    nextAction,
+    programTaskCount: children.length,
+    admittedCandidateCount: 0,
+    toolCallCount: telemetry.toolCalls,
+    executionAttempts: telemetry.sqlExecutions,
+  } satisfies Omit<AgentRunDiagnosticReceiptV5['summary'], 'summaryFingerprint'>;
+  return {
+    version: 5,
+    runId: run.id,
+    state,
+    summary: {
+      ...summaryInput,
+      summaryFingerprint: executionFingerprint(JSON.stringify(summaryInput)),
+    },
+    ...(observedChildFingerprints.length > 0 ? {
+      businessAnswer: {
+        version: 1,
+        mode: 'facts_only',
+        trustState: trustedState,
+        factIds: observedChildFingerprints.map((fingerprint) => `research-result:${fingerprint.slice(0, 24)}`),
+        ...(observedChildFingerprints.length === 1 ? { resultFingerprint: observedChildFingerprints[0] } : {}),
+        limitationCount: Math.max(0, children.length - observedChildFingerprints.length),
+      },
+    } : {}),
+    finalStopReason: run.stopReason,
+  };
+}
+
+function researchRootRuntimeReceiptV6(
+  run: AgentRun,
+  telemetry: AgentRunTelemetryV1,
+  receiptV5: AgentRun['diagnosticReceiptV5'],
+): AgentRunDiagnosticReceiptV6 | undefined {
+  if (!receiptV5) return undefined;
+  const executionObserved = telemetry.sqlExecutions > 0;
+  const connectionAttempted = executionObserved;
+  return {
+    ...receiptV5,
+    version: 6,
+    roleCoverage: [],
+    cascade: {
+      attempts: [],
+      planFrozen: executionObserved,
+    },
+    connection: { attempted: connectionAttempted },
+    execution: { attempts: telemetry.sqlExecutions },
+    telemetry,
+    facts: {
+      factCount: receiptV5.businessAnswer?.factIds.length ?? 0,
+      ...(receiptV5.businessAnswer?.resultFingerprint
+        ? { resultFingerprint: receiptV5.businessAnswer.resultFingerprint }
+        : {}),
+    },
+    safeNextAction: receiptV5.summary.nextAction,
+    story: [
+      { stage: 'retrieval', status: 'skipped', reasonCode: 'research_root_uses_child_snapshots' },
+      { stage: 'role_coverage', status: 'skipped', reasonCode: 'research_child_role_coverage_retained_per_branch' },
+      { stage: 'planner', status: telemetry.providerRoundTrips > 0 ? 'completed' : 'skipped', reasonCode: telemetry.providerRoundTrips > 0 ? 'research_provider_activity_recorded' : 'no_research_provider_activity' },
+      { stage: 'verification', status: executionObserved ? 'completed' : 'skipped', reasonCode: executionObserved ? 'research_child_physical_execution_recorded' : 'no_research_child_physical_execution' },
+      { stage: 'targeted_recovery', status: 'skipped', reasonCode: 'not_applicable_to_research_root' },
+      { stage: 'cascade', status: executionObserved ? 'completed' : 'skipped', reasonCode: executionObserved ? 'child_cascade_completed' : 'no_child_cascade_completed' },
+      { stage: 'freeze', status: executionObserved ? 'completed' : 'skipped', reasonCode: executionObserved ? 'child_plan_frozen' : 'no_child_plan_frozen' },
+      { stage: 'connection', status: connectionAttempted ? 'completed' : 'skipped', reasonCode: connectionAttempted ? 'child_connection_attempted' : 'connection_not_attempted' },
+      { stage: 'execution', status: executionObserved ? 'completed' : 'skipped', reasonCode: executionObserved ? 'research_child_sql_attempted' : 'execution_not_attempted' },
+      { stage: 'facts', status: (receiptV5.businessAnswer?.factIds.length ?? 0) > 0 ? 'completed' : 'skipped', reasonCode: (receiptV5.businessAnswer?.factIds.length ?? 0) > 0 ? 'receipt_backed_research_facts' : 'no_receipt_backed_research_facts' },
+    ],
+  };
+}
+
+function researchRootReceiptChildren(run: AgentRun): Array<{ id: string; resultFingerprint?: string }> {
+  const artifact = run.artifacts.find((candidate) => candidate.kind === 'research_run');
+  const payload = agentRunRecord(artifact?.payload);
+  const runs = Array.isArray(payload?.researchRuns) ? payload.researchRuns : [];
+  const seen = new Set<string>();
+  return runs.flatMap((child, index) => {
+    const record = agentRunRecord(child);
+    const id = agentRunString(record?.id) ?? `research-child-${index + 1}`;
+    if (seen.has(id)) return [];
+    seen.add(id);
+    const preview = agentRunRecord(record?.resultPreview);
+    const receipt = normalizeAnalyticalExecutionReceipt(preview?.executionReceipt);
+    const resultFingerprint = normalizeAnalyticalExecutionFingerprint(preview?.resultFingerprint)
+      ?? receipt?.resultFingerprint;
+    return [{ id, ...(resultFingerprint ? { resultFingerprint } : {}) }];
+  });
 }
 
 /**
@@ -4135,6 +4828,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const governed = resolveGovernedAnswerRunner(projectRoot, requestedProvider);
     let resolvedProvider = governed?.provider ?? null;
     let runner = governed?.runner ?? null;
+    // A one-relation physical program can be compiled deterministically from
+    // the runtime's already-qualified identifiers. This is deliberately much
+    // narrower than general raw-SQL generation: no filters, joins, time
+    // transforms, ranking, or aggregation synthesis is admitted here. The
+    // normal closure/capability guards still validate and execute the emitted
+    // statement, but no provider is needed merely to restate a projection that
+    // the frozen program already proves.
+    const deterministicExploratoryProposal = deterministicExploratoryProposalFromRuntime(routeDecision);
     const exactCertifiedProviderFreePlan = routeDecision?.resolvedAnalyticalPlan?.mode === 'authoritative'
       && routeDecision.resolvedAnalyticalPlan.capability === 'certified_execution'
       && routeDecision.analyticalCascadeDecision?.selectedTier === 'certified'
@@ -4142,7 +4843,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const exactProviderFreePlan = routeDecision?.resolvedAnalyticalPlan?.mode === 'authoritative'
       && (routeDecision.resolvedAnalyticalPlan.capability === 'certified_execution'
         || routeDecision.resolvedAnalyticalPlan.capability === 'semantic_execution');
-    if (exactCertifiedProviderFreePlan || ((!resolvedProvider || !runner) && exactProviderFreePlan)) {
+    if (exactCertifiedProviderFreePlan
+      || deterministicExploratoryProposal
+      || ((!resolvedProvider || !runner) && exactProviderFreePlan)) {
       const deterministicProvider: AgentProvider = {
         name: 'ollama',
         available: async () => true,
@@ -4589,7 +5292,17 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     await agentRunAskTraceContext.run(askTraceObserverForV1(request), async () => runner.run(
       attachAskTraceObserverV1({
         provider: resolvedProvider,
-        ...(exactCertifiedProviderFreePlan ? { providerPreflightRequired: false } : {}),
+        // The server materializes this only from the persisted thread before
+        // Ask framing. It prevents the legacy answer-loop adapter from
+        // treating a constrained "those customers" follow-up as a local
+        // cross-result calculation and skipping the frozen semantic query.
+        ...(request.priorResultMemberBinding
+          ? { skipCrossResultComputation: true }
+          : {}),
+        ...(exactCertifiedProviderFreePlan || deterministicExploratoryProposal
+          ? { providerPreflightRequired: false }
+          : {}),
+        ...(deterministicExploratoryProposal ? { deterministicExploratoryProposal } : {}),
         ...(agentRunProviderEvidenceContext.getStore()
           ? { providerDispatchEvidenceSink: agentRunProviderEvidenceContext.getStore() }
           : {}),
@@ -4891,6 +5604,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               artifact,
               semanticConnection,
               semanticConnectionName,
+              undefined,
+              undefined,
+              askTraceObserverForV1(request),
             );
           } catch (error) {
             captureFrozenConnectionSetupFailure(error);
@@ -4919,6 +5635,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
                 planId: capability.planId,
                 targetFingerprint: capability.targetFingerprint,
               },
+              askTraceObserverForV1(request),
             );
           } catch (error) {
             captureFrozenConnectionSetupFailure(error);
@@ -5317,8 +6034,17 @@ function analyticalFailureSummary(
     // never client-provided execution authority.
     if (!request.runId) request.runId = runId;
     const runStartedAtMs = Date.now();
+    // A frozen AskAnalyst child is already one verified task.  Rebuilding a
+    // graph from the parent compound question here would re-enter the legacy
+    // scheduler and can execute unfrozen siblings.  The engine supplies this
+    // host-only marker together with a task-local question; the original
+    // parent remains on the persisted outer run/trace, never in SQL planning.
+    const authoritativeTaskChild = request.askAnalystTaskChild?.version === 1
+      ? request.askAnalystTaskChild
+      : undefined;
+    const executionQuestion = authoritativeTaskChild?.question ?? request.question;
     const turnPlan = buildAnalyticalTurnPlan({
-      question: request.question,
+      question: executionQuestion,
       mode: route === 'research' ? 'research' : 'ask',
       turnId: request.runId,
       candidateIds: routeDecision?.retrievalEvidence?.candidateIds ?? [],
@@ -5326,7 +6052,8 @@ function analyticalFailureSummary(
       snapshotId: routeDecision?.resolvedAnalyticalPlan?.snapshotId ?? routeDecision?.retrievalEvidence?.snapshotId,
       sourceFingerprint: routeDecision?.resolvedAnalyticalPlan?.sourceFingerprint ?? routeDecision?.retrievalEvidence?.sourceFingerprint,
     });
-    const childTurn = Boolean(request.workspaceContext && typeof request.workspaceContext === 'object'
+    const childTurn = Boolean(authoritativeTaskChild)
+      || Boolean(request.workspaceContext && typeof request.workspaceContext === 'object'
       && (request.workspaceContext as Record<string, unknown>).analyticalTaskChild === true);
     // Compound questions are a bounded task graph, not one query whose answer
     // is copied into several labels. Independent children share the parent's
@@ -6438,12 +7165,20 @@ function analyticalFailureSummary(
       label: prompt,
     }));
 
-    // A question about the latest answer is an evidence lookup, not another
-    // warehouse run. Resolve it from the persisted artifact contract before
-    // considering a provider-generated conversational reply.
-    let text = kind === 'answer_explanation'
-      ? buildPriorAnswerExplanation(request.question, request.conversationContext)
+    // A closed thread-recap is an evidence lookup, not open conversation. Its
+    // ranking and result facts must come only from the persisted local turn;
+    // sending that turn to a provider lets ordinary prose invent a different
+    // sort column or leader. `smalltalk` reaches this branch only for the
+    // tightly classified recap grammar, and only when a retained recap exists.
+    const persistedRecap = kind === 'smalltalk'
+      ? buildConversationContextRecap(request.conversationContext)
       : undefined;
+    // A question about the latest answer is likewise an evidence lookup, not
+    // another warehouse run. Resolve it from the persisted artifact contract
+    // before considering a provider-generated conversational reply.
+    let text = persistedRecap ?? (kind === 'answer_explanation'
+      ? buildPriorAnswerExplanation(request.question, request.conversationContext)
+      : undefined);
     // A definitional question that NAMES a governed artifact is answerable from
     // the catalog: the description, domain, and dimensions are already recorded.
     // Reaching for a provider to paraphrase facts we hold can only add drift, and
@@ -6522,7 +7257,11 @@ function analyticalFailureSummary(
     }
 
     return {
-      summary: kind === 'answer_explanation' ? 'Explained the previous answer.' : 'Replied conversationally.',
+      summary: persistedRecap
+        ? 'Summarized persisted conversation facts.'
+        : kind === 'answer_explanation'
+          ? 'Explained the previous answer.'
+          : 'Replied conversationally.',
       answer: text,
       answerKind,
       status: 'completed',
@@ -8036,6 +8775,12 @@ function analyticalFailureSummary(
           : undefined,
       ].filter((value): value is string => Boolean(value)).join(' ');
       const scopedSummary = scopePrefix ? `${scopePrefix} ${summary}` : summary;
+      // The root Research executor itself does not execute SQL. Its child
+      // Simple-Ask runs do, and each durable child has already retained the
+      // canonical result receipt/fingerprint checked below. Carry only their
+      // aggregate physical counters to the engine so the final root V2/V6
+      // receipts tell the same story as the linked child spans.
+      const telemetry = researchChildTelemetryForRoot(researchRuns);
       return {
         summary: scopedSummary,
         // Ask renders `answer` ahead of `summary`. Preserve the exact scoped
@@ -8045,6 +8790,7 @@ function analyticalFailureSummary(
         status: needsClarification ? 'needs_clarification' : 'needs_review',
         trustState: needsClarification ? 'not_applicable' : (researchExecutedCleanly ? 'grounded' : 'review_required'),
         stopReason: needsClarification ? 'needs_clarification' : 'human_review_required',
+        telemetry,
         artifacts: needsClarification
           ? []
           : [agentRunArtifact('research_run', 'Research plan', {
@@ -8527,6 +9273,17 @@ function analyticalFailureSummary(
     // run request. The engine/trace can explain why prior state was (or was
     // not) admitted without receiving any prior rows or prompt content.
     request.conversationBinding = followUp?.binding ?? 'none';
+    // A plural deictic reference is a bounded prior-result set operation, not
+    // a friendly hint. If the server-side thread cannot recover that set after
+    // restart (for example a deliberately redacted legacy result), stop before
+    // retrieval/planning rather than widening "those customers" to all data.
+    if (followUp?.priorResultSetUnavailable) {
+      request.selectedResultBindingGap = {
+        code: 'PRIOR_RESULT_MEMBER_SET_UNAVAILABLE',
+        message: followUp.unresolvedReferences?.[0]
+          ?? 'The prior result set is unavailable, so this follow-up cannot safely run against all data.',
+      };
+    }
     const serverSnapshot = agentRunRecord(
       request.conversationContext?.conversationEnvelope
         ?? request.conversationContext?.serverSnapshot,
@@ -8615,17 +9372,146 @@ function analyticalFailureSummary(
     return task;
   };
 
+  /**
+   * Readiness is established from persisted local configuration and the
+   * already-loaded semantic snapshot. This probe deliberately does not execute
+   * SQL: it distinguishes a compiler which can author a frozen semantic plan
+   * from the later connection boundary which can execute that plan.
+   */
+  const askTierReadinessForEvidence = async (
+    request: AgentRunRequest,
+    candidates: AgentEvidenceCandidate[],
+    physicalSchemaAvailable: boolean,
+  ) => {
+    const descriptor = executionTargetDescriptor(request as unknown as Record<string, unknown>);
+    const targetConnection = descriptor.target === 'local'
+      ? datasetWorkspace.localConnection
+      : resolveNamedConnection(descriptor.connectionName);
+    let targetConfigured = Boolean(targetConnection);
+    if (targetConnection) {
+      try {
+        assertConnectionNodeCompatibility(targetConnection);
+      } catch {
+        targetConfigured = false;
+      }
+    }
+    const connectorInstalled = Boolean(targetConnection && getConnectorInstallStatuses(projectRoot)
+      .find((status) => status.driver === targetConnection.driver)?.installed);
+    const targetIdentity = targetConnection ? configuredWarehouseTargetIdentity(targetConnection) : undefined;
+    const semanticCandidates = candidates.filter((candidate) =>
+      candidate.kind === 'semantic_metric' || candidate.kind === 'semantic_member' || candidate.trustTier === 'semantic');
+    const semanticAdapterIds = (candidate: AgentEvidenceCandidate): string[] =>
+      candidate.analyticalCapability?.executionCapabilities
+        .flatMap((capability) => capability.route === 'semantic' && typeof capability.adapterId === 'string'
+          ? [capability.adapterId]
+          : []) ?? [];
+    const requiredSemanticAdapters = semanticCandidates.flatMap(semanticAdapterIds);
+    // A MetricFlow-imported card can still be compiled by DQL's in-process
+    // semantic compiler when the already-loaded semantic layer proves that
+    // exact metric is natively composable. This proof remains bound to each
+    // semantic candidate below: a ready native metric cannot make a distinct
+    // MetricFlow-only metric appear ready.
+    const nativeSemanticCompilerProven = (candidate: AgentEvidenceCandidate): boolean => {
+      const layer = semanticLayer;
+      if (!layer || candidate.kind !== 'semantic_metric') return false;
+      const identities = [
+        candidate.name,
+        candidate.analyticalCapability?.metricId,
+        candidate.id,
+        candidate.qualifiedId,
+      ].flatMap((identity) => {
+        const normalized = identity?.trim();
+        if (!normalized) return [];
+        const leaf = normalized.split(/[.:/]/).filter(Boolean).at(-1);
+        return leaf && leaf !== normalized
+          ? [normalized, normalized.toLowerCase(), leaf, leaf.toLowerCase()]
+          : [normalized, normalized.toLowerCase()];
+      });
+      return [...new Set(identities)].some((metricName) => layer.canComposeMetric(metricName));
+    };
+    // Read only persisted/local adapter status here. A readiness probe must not
+    // make a hidden network request or turn Ask routing into an availability
+    // test; explicit adapter checks own their own endpoint and receipts.
+    const semanticRuntime = await getSemanticRuntimeStatus(projectRoot).catch(() => undefined);
+    const metricFlowTarget = resolveMetricFlowTargetMetadata(projectRoot, projectConfig);
+    const cloudSettings = getSemanticRuntimeSettings(projectRoot).dbtCloud;
+    const adapters = (semanticRuntime?.adapters ?? []).map((adapter) => {
+      const targetBound = adapter.id === 'native'
+        ? targetConfigured
+        : adapter.id === 'metricflow-cli'
+          ? Boolean(targetIdentity && metricFlowTarget?.expectedTarget
+            && metricFlowTarget.expectedTarget.identityFingerprint === targetIdentity.identityFingerprint)
+          : Boolean(targetIdentity && cloudSettings.executionTargetFingerprint
+            && cloudSettings.executionTargetFingerprint === targetIdentity.identityFingerprint);
+      return { id: adapter.id, ready: adapter.ready, targetBound };
+    });
+    const normalizeAdapterId = (id: string): string => id.trim().toLowerCase() === 'metricflow' ? 'metricflow-cli' : id.trim().toLowerCase();
+    const adaptersById = new Map(adapters.map((adapter) => [normalizeAdapterId(adapter.id), adapter]));
+    const adapterReadyForCandidate = (adapterId: string): boolean => {
+      const normalized = normalizeAdapterId(adapterId);
+      if (normalized === 'native') return true;
+      const adapter = adaptersById.get(normalized);
+      if (!adapter?.ready) return false;
+      return targetConfigured ? adapter.targetBound : true;
+    };
+    const nativeReadyCandidateIds = new Set(
+      semanticCandidates
+        .filter(nativeSemanticCompilerProven)
+        .map((candidate) => candidate.qualifiedId ?? candidate.id),
+    );
+    if (nativeReadyCandidateIds.size > 0) requiredSemanticAdapters.push('native');
+    const semanticCandidateReadiness = semanticCandidates
+      .filter((candidate) => candidate.kind === 'semantic_metric')
+      .map((candidate) => ({
+        candidateId: candidate.qualifiedId ?? candidate.id,
+        status: nativeReadyCandidateIds.has(candidate.qualifiedId ?? candidate.id)
+          || semanticAdapterIds(candidate).some(adapterReadyForCandidate)
+          ? 'ready' as const
+          : 'unavailable' as const,
+      }));
+    const readiness = {
+      ...probeAskTierReadinessV1({
+      targetConfigured,
+      connectorInstalled,
+      physicalSchemaAvailable,
+      semanticCandidatesPresent: semanticCandidates.length > 0,
+      requiredSemanticAdapters,
+      adapters,
+      ...(targetIdentity ? { targetFingerprint: targetIdentity.identityFingerprint } : {}),
+      }),
+      ...(semanticCandidateReadiness.length > 0 ? { semanticCandidateReadiness } : {}),
+    };
+    // `agentRunExecutors` is an explicit host-owned execution boundary used
+    // by embedders and deterministic local tests. A supplied semantic executor
+    // is itself the selected adapter/target for that host; do not make it
+    // appear unavailable merely because no separately configured warehouse
+    // connection exists. Browser/MCP payloads cannot set this option.
+    if (opts.agentRunExecutors?.semantic_answer) {
+      return {
+        ...readiness,
+        connector: 'ready' as const,
+        activeTarget: 'ready' as const,
+        semanticCompiler: 'ready' as const,
+      };
+    }
+    return readiness;
+  };
+
   const buildAgentRunEvidence = async (request: AgentRunRequest): Promise<AgentRetrievalEvidence> => {
     const startedAt = Date.now();
     const pack = await buildAgentRunContextPack(request);
     const meaningEvidence = pack.retrievalDiagnostics.meaningEvidence;
     if (!meaningEvidence) {
+      const readiness = await askTierReadinessForEvidence(request, [], false);
       return {
         snapshotId: pack.knowledgeLens.snapshotId,
         sourceFingerprint: pack.freshness.fingerprint ?? undefined,
         knowledgeLens: pack.knowledgeLens,
         candidates: [],
-        diagnostics: { durationMs: Date.now() - startedAt },
+        diagnostics: {
+          durationMs: Date.now() - startedAt,
+          tierReadiness: readiness,
+        },
       };
     }
     const evidence = toAgentRetrievalEvidence(meaningEvidence, pack.questionPlan, {
@@ -8637,6 +9523,11 @@ function analyticalFailureSummary(
       retrievalLanes: pack.retrievalDiagnostics.lanes,
       durationMs: Date.now() - startedAt,
       truncated: pack.retrievalDiagnostics.topRejected.length > 0,
+      // Ask Analyst Runtime owns the compact 32-item workspace and the
+      // 16-card planner admission. Keep the one local snapshot broad enough
+      // for it to reserve a required physical product/order closure before a
+      // relevance-only package can prune it.
+      preferSnapshotCandidates: true,
     });
     // Preserve real snapshot/lane outcomes for the router receipt. These are
     // not reconstructed later from candidate IDs: a source with no selected
@@ -8648,7 +9539,14 @@ function analyticalFailureSummary(
       && retrievalLaneStates.every((item) => item.status === 'error');
     const retrievalSkipped = retrievalLaneStates.length > 0
       && retrievalLaneStates.every((item) => item.status === 'skipped');
-    const snapshotStale = /\bstale\b|out[- ]of[- ]date/i.test(pack.warnings.join(' '));
+    // Freshness is source-wide only when the snapshot/catalog itself is
+    // stale. A relationship-proof warning can be stale while the semantic,
+    // certified, and physical objects in the same immutable snapshot remain
+    // current; marking every source stale in that case incorrectly prevents
+    // a safe independent compiler from evaluating its own capability.
+    const snapshotStale = pack.warnings.some((warning) =>
+      /\b(?:metadata|catalog|context(?:\s+pack)?|snapshot)\b[^\n]{0,96}\b(?:stale|out[- ]of[- ]date)\b/i.test(warning)
+      || /\b(?:stale|out[- ]of[- ]date)\b[^\n]{0,96}\b(?:metadata|catalog|context(?:\s+pack)?|snapshot)\b/i.test(warning));
     const coverageStatus = (hasCandidate: boolean): 'available' | 'empty' | 'stale' | 'errored' | 'skipped' => {
       if (snapshotStale) return 'stale';
       if (hasCandidate) return 'available';
@@ -8701,9 +9599,20 @@ function analyticalFailureSummary(
       candidateIds: [],
       reason: hasConversation ? 'Persisted conversation context was supplied for this turn.' : 'No persisted conversation context was supplied for this turn.',
     });
+    const physicalSchemaAvailable = sourceCoverage.some((coverage) =>
+      (coverage.source === 'runtime_schema' || coverage.source === 'dbt_manifest') && coverage.status === 'available');
+    const readiness = await askTierReadinessForEvidence(request, compatible.candidates, physicalSchemaAvailable);
     return {
       ...compatible,
-      diagnostics: { ...compatible.diagnostics, sourceCoverage },
+      continuityFingerprint: askEvidenceContinuityFingerprint(compatible),
+      diagnostics: {
+        ...compatible.diagnostics,
+        sourceCoverage,
+        // Availability is captured before cascade freeze. These fields do not
+        // authorize execution; they let the runtime advance a pre-freeze
+        // semantic mismatch to independently grounded physical exploration.
+        tierReadiness: readiness,
+      },
     };
   };
 
@@ -8849,7 +9758,7 @@ function analyticalFailureSummary(
   // meaning call by default. The legacy/no-evidence category classifier is
   // separately labelled and cannot coexist with that analytical call. The
   // rollback is host-owned and cannot be supplied by an HTTP/MCP client.
-  const agentRunRouter = createHybridRouter({
+  const agentRunCompilerBroker = createHybridRouter({
     requireMeaningCallForNaturalLanguage: opts.requireMeaningCallForNaturalLanguage ?? true,
     complete: async ({ system, user, signal, request, phase }) => {
       const provider = await createBlockStudioAssistProvider(projectRoot);
@@ -8884,6 +9793,78 @@ function analyticalFailureSummary(
     },
     getEvidence: buildAgentRunEvidence,
     getCatalogContext: buildRankedAgentRunCatalogContext,
+  });
+  // V1.15 has one Ask entrypoint. The existing hybrid router survives only as
+  // its safe compiler broker; it receives the runtime-owned snapshot/frame and
+  // cannot acquire another source of meaning. Shadow records the same state
+  // without a second execution, while legacy remains a host-only rollback.
+  const agentRunRouter = createAskAnalystRuntimeV1({
+    mode: opts.askAnalystRuntimeMode ?? 'authoritative',
+    getEvidence: buildAgentRunEvidence,
+    compilerBroker: agentRunCompilerBroker,
+    // Test/offline hosts may explicitly opt out of a provider meaning call.
+    // The runtime still accepts only a uniquely exact semantic binding and
+    // leaves all remaining ambiguity/coverage/relationship decisions to its
+    // immutable compiler program.
+    allowDeterministicNaturalLanguageBinding: opts.requireMeaningCallForNaturalLanguage === false,
+    // The authoritative runtime owns the one bounded analytical planning
+    // call.  This adapter receives only the role-balanced 16-card package and
+    // returns a provider-neutral candidate/role/operation proposal; SQL,
+    // joins, trust, compiler selection, and execution remain deterministic.
+    planAnalytical: async ({ request, plannerRequest }) => {
+      // Planning is a provider-dependent boundary, but it must never collapse
+      // an unavailable configured adapter to an opaque "no provider" error.
+      // Preflight happens inside the Ask trace before the first planner
+      // transport; a failed readiness check has no SQL/connection attempt.
+      const injectedProvider = opts.askAnalyticalPlannerProviderFactory
+        ? await opts.askAnalyticalPlannerProviderFactory({ projectRoot, request })
+        : undefined;
+      const provider = await preflightAskAnalyticalPlannerProvider({
+        projectRoot,
+        request,
+        provider: injectedProvider === undefined
+          ? await createBlockStudioAssistProvider(projectRoot, undefined, { availability: 'defer' })
+          : injectedProvider,
+      });
+      const dispatchTrace = createRouterInterpretationProviderTrace({
+        request,
+        routerPhase: 'planning',
+        planningKind: plannerRequest.planningMode === 'targeted_revision'
+          ? 'targeted_revision'
+          : 'initial',
+      });
+      try {
+        // The structured planner request carries verification feedback for a
+        // targeted revision.  Do not append a second free-form copy here:
+        // keeping the single bounded JSON payload makes the immutable prior
+        // proposal and <=4-card extension auditable and prevents a revision
+        // from silently becoming an unconstrained replan.
+        const user = buildAnalyticalPlannerUserPrompt(plannerRequest);
+        const response = await provider.generate(
+          [
+            { role: 'system', content: buildAnalyticalPlannerSystemPrompt() },
+            { role: 'user', content: user },
+          ],
+          {
+            maxTokens: 600,
+            temperature: 0,
+            signal: boundedAgentMeaningSignal(request.signal),
+            maxProviderDispatches: 1,
+            dispatchPhase: 'planning',
+            egressPurpose: 'answer_generation',
+            analyticalPlanningKind: plannerRequest.planningMode === 'targeted_revision'
+              ? 'targeted_revision'
+              : 'initial',
+            ...(dispatchTrace?.options ?? {}),
+          },
+        );
+        dispatchTrace?.settle('ok');
+        return parseAnalyticalPlannerProposal(response);
+      } catch (error) {
+        dispatchTrace?.settle(request.signal?.aborted ? 'cancelled' : 'error', error);
+        throw error;
+      }
+    },
   });
 
   // P0: one row per run with retention + old-run compaction. The legacy JSON
@@ -9529,6 +10510,13 @@ function analyticalFailureSummary(
     executionConnectionName?: string,
     agenticCapability?: AgenticSqlExecutionCapabilityV1,
     agenticScope?: SqlAuthorizationCheck,
+    /**
+     * Ask execution can outlive the runner's AsyncLocalStorage handoff when a
+     * legacy adapter invokes the frozen compiler. Carry the server-owned
+     * observer explicitly for that narrow path so the SQL boundary records
+     * what actually happened rather than relying on an ambient context.
+     */
+    traceObserver?: AskTraceObserverV1,
   ): Promise<AgentResultPayload> => {
     const activeConnection = requireActiveConnection(executionConnection);
     const rowBound = clampAnalyticalRowBound(seed?.limit ?? 200);
@@ -9619,6 +10607,7 @@ function analyticalFailureSummary(
             snapshotId: projectSnapshot().snapshotId,
             ...(agenticCapability ? { targetFingerprint: agenticCapability.targetFingerprint } : {}),
           },
+          ...(traceObserver ? { traceObserver } : {}),
           execute: async () => {
             // A semantic query the loop already compiled (MetricFlow / dbt
             // Cloud) must execute through its pinned target binding, not as
@@ -9725,6 +10714,7 @@ function analyticalFailureSummary(
     executionConnectionName?: string,
     agenticCapability?: AgenticSqlExecutionCapabilityV1,
     agenticScope?: SqlAuthorizationCheck,
+    traceObserver?: AskTraceObserverV1,
   ): Promise<AgentResultPayload> => {
     // A seed that is already a certified/saved artifact keeps the DQL-first
     // path: there the `.dql` source IS the contract, and its parameters and
@@ -9742,7 +10732,17 @@ function analyticalFailureSummary(
         executionConnectionName,
       );
     }
-    return executeGeneratedSqlDirect(question, sql, seed, executionConnection, undefined, executionConnectionName, agenticCapability, agenticScope);
+    return executeGeneratedSqlDirect(
+      question,
+      sql,
+      seed,
+      executionConnection,
+      undefined,
+      executionConnectionName,
+      agenticCapability,
+      agenticScope,
+      traceObserver,
+    );
   };
 
   /**
@@ -13479,6 +14479,9 @@ function analyticalFailureSummary(
       res.end(serializeJSON({
         ...trace,
         ...(run?.diagnosticReceiptV4?.summary ? { decisionSummary: run.diagnosticReceiptV4.summary } : {}),
+        ...(run?.diagnosticReceiptV5?.summary ? { runtimeDecisionSummary: run.diagnosticReceiptV5.summary } : {}),
+        ...(run?.diagnosticReceiptV5 ? { runtimeReceiptV5: run.diagnosticReceiptV5 } : {}),
+        ...(run?.diagnosticReceiptV6 ? { runtimeReceiptV6: run.diagnosticReceiptV6 } : {}),
       }));
       return;
     }
@@ -13557,6 +14560,9 @@ function analyticalFailureSummary(
       res.end(serializeJSON({
         ...trace,
         ...(run?.diagnosticReceiptV4?.summary ? { decisionSummary: run.diagnosticReceiptV4.summary } : {}),
+        ...(run?.diagnosticReceiptV5?.summary ? { runtimeDecisionSummary: run.diagnosticReceiptV5.summary } : {}),
+        ...(run?.diagnosticReceiptV5 ? { runtimeReceiptV5: run.diagnosticReceiptV5 } : {}),
+        ...(run?.diagnosticReceiptV6 ? { runtimeReceiptV6: run.diagnosticReceiptV6 } : {}),
       }));
       return;
     }
@@ -14279,7 +15285,6 @@ function analyticalFailureSummary(
           parsed.request.conversationContext = await conversationContextFromThread(
             conversationStore,
             parsed.request.threadId,
-            parsed.request.conversationContext,
             parsed.request.question,
             Boolean(parsed.request.selectedEvidenceId),
           );
@@ -14287,6 +15292,19 @@ function analyticalFailureSummary(
           // history would duplicate the same conversation into the prompt a
           // second time — dropping it keeps follow-up prompts bounded.
           if (parsed.request.history?.length) parsed.request.history = [];
+          // Must run before `AgentRunEngine.run`: the Ask runtime freezes its
+          // requirement seed before later retrieval/context-pack construction.
+          // This host-only call turns a persisted plural result set into one
+          // immutable local member filter or a typed continuity gap.
+          hydratePersistedPriorResultMemberBinding(parsed.request);
+        }
+        // Threadless/public continuation JSON is deliberately non-authoritative.
+        // If a plural deictic Ask cannot be rebound from a persisted member set,
+        // fail closed before retrieval or planning rather than turning "those
+        // customers" into an unscoped governed query. This also covers a valid
+        // but empty/legacy thread where no retained member set was recoverable.
+        if (isAskContinuationMode(parsed.request.requestedMode)) {
+          markUnavailablePluralPriorResultSet(parsed.request);
         }
         const wantsStream = url.searchParams.get('stream') === '1' || url.searchParams.get('stream') === 'true';
         // The public body may carry UI correlation data, but the run identity
@@ -23135,6 +24153,12 @@ table: ${table}${tagList}
     unsubscribeOperationEvents();
     projectRefreshCoordinator.close();
     askTraceStore.close();
+    // The conversation store owns a SQLite handle for this runtime only.
+    // Closing it with the HTTP server is required for a genuine local restart
+    // to reopen the persisted thread cleanly (and avoids retaining a stale
+    // WAL handle after the Notebook process has stopped).
+    conversationStoreInstance?.close();
+    conversationStoreInstance = undefined;
     for (const client of operationSseClients) {
       try { client.end(); } catch { /* connection already closed */ }
     }
@@ -26566,6 +27590,33 @@ function stableExecutionValue(value: unknown): string {
     if (Array.isArray(item)) return item;
     return Object.fromEntries(Object.entries(item as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right)));
   });
+}
+
+/**
+ * Opaque continuity proof for a server-issued Ask clarification. Snapshot
+ * handles can be recreated when a local runtime restarts, but an old semantic
+ * dimension button must be usable only if the currently retrieved semantic
+ * metric capability is exactly equivalent. The retrieval set deliberately is
+ * not part of this proof: a focused continuation changes lexical/vector ranks
+ * and can legitimately omit unrelated physical/context cards. The runtime
+ * still rechecks the selected option against the CURRENT metric capability,
+ * eligibility, compatibility, and role support before it binds a program.
+ *
+ * Keep business definitions, member values, retrieval ranks, prompts, and
+ * rows out of the proof: this value is persisted with a conversation and may
+ * appear in a redacted receipt.
+ */
+function askEvidenceContinuityFingerprint(evidence: Pick<AgentRetrievalEvidence, 'candidates'>): string {
+  const semanticCapabilities = evidence.candidates
+    .filter((candidate) => candidate.kind === 'semantic_metric' && candidate.analyticalCapability)
+    .map((candidate) => ({
+    id: candidate.id,
+    qualifiedId: candidate.qualifiedId,
+    aliases: [...(candidate.aliases ?? [])].sort(),
+    semanticModel: candidate.semanticModel,
+    analyticalCapability: candidate.analyticalCapability,
+  })).sort((left, right) => `${left.qualifiedId ?? left.id}\u0000${left.id}`.localeCompare(`${right.qualifiedId ?? right.id}\u0000${right.id}`));
+  return `sha256:${createHash('sha256').update(stableExecutionValue({ semanticCapabilities })).digest('hex')}`;
 }
 
 function renderCompostingPrBody(candidates: SemanticCompostingMetricCandidate[]): string {
@@ -32809,9 +33860,18 @@ async function buildBlockStudioAiAssistSummary(
   }
 }
 
+type AssistProviderAvailabilityMode = 'require_ready' | 'defer';
+
+/**
+ * Create one locally configured assist provider.  Most callers keep the
+ * historical `require_ready` behavior.  The Ask planner deliberately asks
+ * for a deferred instance so it can record its own phase-specific preflight
+ * receipt before any planner dispatch is attempted.
+ */
 async function createBlockStudioAssistProvider(
   projectRoot: string,
   requestedProvider?: ProviderSettingsId,
+  options: { availability?: AssistProviderAvailabilityMode } = {},
 ): Promise<AgentProvider | null> {
   // Runtime-driven evals intentionally start from a clean fixture with no user
   // provider settings. When replay cassettes are explicitly enabled, their
@@ -32869,7 +33929,196 @@ async function createBlockStudioAssistProvider(
   // exactly the calls whose non-determinism it was recorded to remove. A local
   // baseline reproduced that: the same question blocked on one run and answered
   // on the next, and zero cassettes were written.
-  return await provider.available() ? applyEvalCassette(provider, projectRoot) : null;
+  const wrapped = applyEvalCassette(provider, projectRoot);
+  if (options.availability === 'defer') return wrapped;
+  return await wrapped.available() ? wrapped : null;
+}
+
+type AskPlannerPreflightError = Error & {
+  code: string;
+  providerPhase: 'preflight';
+  providerDiagnostic: ProviderFailureDiagnosticV1;
+};
+
+function plannerProviderSettingsId(provider: AgentProvider | null | undefined): ProviderSettingsId | undefined {
+  switch (provider?.name) {
+    case 'claude': return 'anthropic';
+    case 'openai': return 'openai';
+    case 'gemini': return 'gemini';
+    case 'ollama': return 'ollama';
+    default: return undefined;
+  }
+}
+
+function providerPreflightError(input: {
+  projectRoot: string;
+  provider?: AgentProvider | null;
+  error?: unknown;
+  code?: string;
+}): AskPlannerPreflightError {
+  const providerId = plannerProviderSettingsId(input.provider);
+  const message = input.error instanceof Error
+    ? input.error.message
+    : typeof input.error === 'string' && input.error.trim()
+      ? input.error
+      : input.provider
+        ? 'The configured AI provider is not ready for analytical planning.'
+        : 'No AI provider is configured for analytical planning.';
+  // An absent provider *or* a bare `available() === false` result is not
+  // authentication evidence.  Only a typed adapter error/code may establish
+  // auth, model, network, gateway, or timeout. This keeps a configured but
+  // locally unavailable provider from sending users credential advice with no
+  // actual credential failure in the trace.
+  const fallbackCode = 'PROVIDER_CONFIGURATION_UNAVAILABLE';
+  const inheritedCode = input.error && typeof input.error === 'object'
+    ? String((input.error as { code?: unknown }).code ?? '')
+    : '';
+  const code = input.code ?? (inheritedCode || fallbackCode);
+  const config = providerId ? getEffectiveProviderConfig(input.projectRoot, providerId) : undefined;
+  const fingerprint = (value: string | undefined): string | undefined => value?.trim()
+    ? runtimeTraceFingerprint(value.trim())
+    : undefined;
+  const baseOrigin = config?.baseUrl
+    ? (() => {
+        try { return new URL(config.baseUrl!).origin; } catch { return config.baseUrl; }
+      })()
+    : undefined;
+  const classified = classifyProviderFailure({
+    message,
+    code,
+    phase: 'preflight',
+    ...(input.provider?.name ? { providerFingerprint: runtimeTraceFingerprint(input.provider.name) } : {}),
+    ...(fingerprint(config?.model) ? { modelFingerprint: fingerprint(config?.model) } : {}),
+    ...(fingerprint(baseOrigin) ? { baseOriginFingerprint: fingerprint(baseOrigin) } : {}),
+  });
+  const hasTypedReadinessEvidence = Boolean(input.error || input.code || inheritedCode);
+  const providerDiagnostic: ProviderFailureDiagnosticV1 = !input.provider || !hasTypedReadinessEvidence
+    ? {
+        ...classified,
+        cause: 'unknown',
+        retryable: false,
+        safeAction: 'fix_provider_configuration',
+      }
+    : classified;
+  return Object.assign(new Error(input.provider
+    ? 'The configured AI provider is not ready for analytical planning. No query was executed.'
+    : 'No AI provider is configured for analytical planning. Configure a provider and retry; no query was executed.'), {
+    code,
+    providerPhase: 'preflight' as const,
+    providerDiagnostic,
+  });
+}
+
+/**
+ * Run the real provider/model readiness check at the planner boundary.  This
+ * has no provider-generation ledger admission and no connector effect: it
+ * exists solely to retain redacted preflight cause and trace truth before a
+ * natural-language Ask depends on a planner call.
+ *
+ * Exported for the local host integration harness only. It is not an API and
+ * receives its provider exclusively from server-owned configuration/tests.
+ */
+export async function preflightAskAnalyticalPlannerProvider(input: {
+  projectRoot: string;
+  request: AgentRunRequest;
+  provider: AgentProvider | null;
+}): Promise<AgentProvider> {
+  const observer = askTraceObserverForV1(input.request);
+  const providerId = plannerProviderSettingsId(input.provider);
+  const config = providerId ? getEffectiveProviderConfig(input.projectRoot, providerId) : undefined;
+  const initialSpan = observer.startSpan({
+    name: 'provider.preflight',
+    stage: 'provider',
+    reasonCode: 'provider_preflight',
+    payload: {
+      kind: 'provider',
+      attempt: {
+        version: 1,
+        phase: 'preflight',
+        purpose: 'answer_generation',
+        physicalAttemptIndex: 0,
+        ...(input.provider?.name ? { providerFingerprint: runtimeTraceFingerprint(input.provider.name) } : {}),
+        ...(config?.model ? { modelFingerprint: runtimeTraceFingerprint(config.model) } : {}),
+        readiness: 'unknown',
+        admission: 'unknown',
+        provenance: 'live',
+      },
+    },
+  });
+  if (!input.provider) {
+    const error = providerPreflightError({ projectRoot: input.projectRoot, provider: input.provider });
+    observer.finishSpan(initialSpan, {
+      outcome: 'unavailable',
+      reasonCode: 'provider_preflight',
+      payload: {
+        kind: 'provider',
+        attempt: {
+          version: 1,
+          phase: 'preflight',
+          purpose: 'answer_generation',
+          physicalAttemptIndex: 0,
+          readiness: 'unavailable',
+          admission: 'unknown',
+          retryable: error.providerDiagnostic.retryable,
+          safeAction: error.providerDiagnostic.safeAction,
+          cause: error.providerDiagnostic.cause,
+          provenance: 'live',
+        },
+      },
+    });
+    throw error;
+  }
+  try {
+    const ready = await input.provider.available();
+    if (!ready) throw providerPreflightError({ projectRoot: input.projectRoot, provider: input.provider });
+    observer.finishSpan(initialSpan, {
+      outcome: 'ok',
+      reasonCode: 'completed',
+      payload: {
+        kind: 'provider',
+        attempt: {
+          version: 1,
+          phase: 'preflight',
+          purpose: 'answer_generation',
+          physicalAttemptIndex: 0,
+          providerFingerprint: runtimeTraceFingerprint(input.provider.name),
+          ...(config?.model ? { modelFingerprint: runtimeTraceFingerprint(config.model) } : {}),
+          readiness: 'ready',
+          admission: 'unknown',
+          provenance: 'live',
+        },
+      },
+    });
+    return input.provider;
+  } catch (caught) {
+    const error = caught && typeof caught === 'object'
+      && 'providerDiagnostic' in caught
+      ? caught as AskPlannerPreflightError
+      : providerPreflightError({ projectRoot: input.projectRoot, provider: input.provider, error: caught });
+    observer.finishSpan(initialSpan, {
+      outcome: 'unavailable',
+      reasonCode: 'provider_preflight',
+      payload: {
+        kind: 'provider',
+        attempt: {
+          version: 1,
+          phase: 'preflight',
+          purpose: 'answer_generation',
+          physicalAttemptIndex: 0,
+          providerFingerprint: runtimeTraceFingerprint(input.provider.name),
+          ...(config?.model ? { modelFingerprint: runtimeTraceFingerprint(config.model) } : {}),
+          readiness: 'unavailable',
+          admission: 'unknown',
+          retryable: error.providerDiagnostic.retryable,
+          safeAction: error.providerDiagnostic.safeAction,
+          cause: error.providerDiagnostic.cause,
+          ...(error.providerDiagnostic.httpStatusClass ? { httpStatusClass: error.providerDiagnostic.httpStatusClass } : {}),
+          provenance: 'live',
+        },
+      },
+    });
+    throw error;
+  }
 }
 
 /** Convert a governed answer's result payload into a bounded synthesis preview. */
@@ -33006,6 +34255,90 @@ export function buildConversationContextRecap(context: Record<string, unknown> |
   ].filter(Boolean);
   if (contextBits.length === 0) return undefined;
   return `We were talking about ${contextBits.join('. ')}.`;
+}
+
+/**
+ * Recaps are a fact lookup, not a re-narration of the last assistant message.
+ * The persisted answer text may itself have been generated, truncated, or
+ * (for older rows) saved before fact-bound narration existed.  Only a trusted
+ * analytical result with a persisted plan/result contract may therefore make
+ * a closed recap answerable without a provider.
+ */
+function latestTrustedAnalyticalResultTurn(
+  context: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const turns = Array.isArray(context.turns)
+    ? context.turns.map(agentRunRecord).filter((turn): turn is Record<string, unknown> => Boolean(turn)).slice(-6)
+    : [];
+  const activeTurnId = agentRunString(context.activeTurnId);
+  const active = activeTurnId
+    ? turns.find((turn) => agentRunString(turn.id) === activeTurnId)
+    : undefined;
+  const ordered = active
+    ? [active, ...turns.slice().reverse().filter((turn) => turn !== active)]
+    : turns.slice().reverse();
+  return ordered.find((turn) => isTrustedAnalyticalResultTurn(turn));
+}
+
+function isTrustedAnalyticalResultTurn(turn: Record<string, unknown>): boolean {
+  if (!isTrustedConversationTurn(turn) || !conversationTurnHasUsefulResult(turn)) return false;
+  const route = agentRunString(turn.route)?.toLowerCase();
+  // A conversation reply, greeting, general-knowledge response, or other
+  // prose-only route must not establish a governed result/ranking authority.
+  if (route) {
+    return route === 'certified_answer'
+      || route === 'semantic_answer'
+      || route === 'generated_answer'
+      || route === 'research';
+  }
+  // Legacy rows did not always retain a route. Treat them as analytical only
+  // when another server-persisted analytical artifact identifies the result.
+  return Boolean(
+    agentRunString(turn.sourceCertifiedBlock)
+      || agentRunRecord(turn.dqlArtifact)
+      || agentRunRecord(turn.cascade),
+  );
+}
+
+function conversationTurnFactArray(
+  turn: Record<string, unknown>,
+  requestedKey: 'requestedMeasures' | 'requestedDimensions',
+  contractKey: 'measures' | 'dimensions',
+): string[] {
+  const direct = agentRunStringArray(turn[requestedKey]);
+  if (direct.length > 0) return direct;
+  const contract = agentRunRecord(turn.contract);
+  return agentRunStringArray(contract?.[contractKey]);
+}
+
+function conversationTurnTopN(turn: Record<string, unknown>): number | undefined {
+  if (typeof turn.topN === 'number' && Number.isFinite(turn.topN) && turn.topN > 0) {
+    return Math.floor(turn.topN);
+  }
+  const contract = agentRunRecord(turn.contract);
+  const raw = contract?.topN;
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) return Math.floor(raw);
+  if (raw && typeof raw === 'object') {
+    const n = (raw as { n?: unknown }).n;
+    if (typeof n === 'number' && Number.isFinite(n) && n > 0) return Math.floor(n);
+  }
+  return undefined;
+}
+
+function conversationTurnRankingDirection(turn: Record<string, unknown>): 'top' | 'bottom' | undefined {
+  const direct = agentRunString(turn.rankingDirection)?.toLowerCase();
+  const contract = agentRunRecord(turn.contract);
+  const value = direct ?? agentRunString(contract?.rankingDirection)?.toLowerCase();
+  return value === 'top' || value === 'bottom' ? value : undefined;
+}
+
+function conversationResultContainsField(
+  field: string,
+  columns: string[],
+): boolean {
+  const normalize = (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+  const target = normalize(field);
+  return columns.some((column) => normalize(column) === target);
 }
 
 function latestSubstantiveConversationTurn(
@@ -33154,11 +34487,24 @@ function buildConversationTurnsRecap(context: Record<string, unknown>): string |
   const turns = Array.isArray(context.turns)
     ? context.turns.map(agentRunRecord).filter((turn): turn is Record<string, unknown> => Boolean(turn)).slice(-3)
     : [];
-  const selected = latestSubstantiveConversationTurn(context);
+  const selected = latestTrustedAnalyticalResultTurn(context);
   if (!selected) return undefined;
   const result = agentRunRecord(selected.result);
   const values = agentRunRecord(result?.dimensionValues);
   const columns = agentRunStringArray(result?.columns).slice(0, 8);
+  const resultMeasures = agentRunStringArray(result?.measureColumns);
+  const plannedMeasures = conversationTurnFactArray(selected, 'requestedMeasures', 'measures');
+  const measures = plannedMeasures.length > 0 ? plannedMeasures : resultMeasures;
+  const dimensions = conversationTurnFactArray(selected, 'requestedDimensions', 'dimensions');
+  const rankingDirection = conversationTurnRankingDirection(selected);
+  const topN = conversationTurnTopN(selected);
+  // Do not infer an ordering from the first returned row or from a second
+  // measure column. A ranking sentence needs one declared measure which is
+  // actually present in the persisted result contract.
+  const rankingMeasure = rankingDirection && measures.length === 1
+    && conversationResultContainsField(measures[0]!, [...columns, ...resultMeasures])
+    ? measures[0]
+    : undefined;
   const firstRow = firstConversationResultRow(result?.rowsSample, columns);
   const leadParts = buildPriorValueLeadParts(values);
   const rowFacts = firstRow
@@ -33175,9 +34521,19 @@ function buildConversationTurnsRecap(context: Record<string, unknown>): string |
     .map((turn) => agentRunString(turn.question))
     .filter((value): value is string => Boolean(value))
     .slice(-2);
+  const planFacts = [
+    measures.length > 0
+      ? `recorded measure${measures.length === 1 ? '' : 's'}: ${measures.map(humanizeArtifactField).join(', ')}`
+      : '',
+    dimensions.length > 0
+      ? `recorded grouping: ${dimensions.map(humanizeArtifactField).join(', ')}`
+      : '',
+    rankingMeasure ? `recorded ranking: ${rankingDirection} by ${humanizeArtifactField(rankingMeasure)}` : '',
+    topN ? `recorded result limit: ${topN}` : '',
+  ].filter(Boolean);
   const bits = [
     agentRunString(selected.question) ? `the latest question "${agentRunString(selected.question)}"` : '',
-    agentRunString(selected.answerSummary) ? `latest answer summary: ${agentRunString(selected.answerSummary)}` : '',
+    planFacts.length > 0 ? planFacts.join('; ') : '',
     columns.length ? `result columns: ${columns.join(', ')}` : '',
     leadParts.length ? `notable prior values: ${leadParts.join(', ')}` : '',
     rowFacts.length ? `first result row: ${rowFacts.join(', ')}` : '',
@@ -36346,12 +37702,18 @@ export function buildResearchBranchRequirementProjection(
   }
 
   // Blocks, lineage, and app composition do not invent an analytical tuple.
-  // Their target remains a bounded retrieval phrase, and the child cascade
-  // decides whether it can freeze a compatible route.
+  // They do, however, investigate the root question rather than a bare target
+  // token. Retaining the host-owned root tuple lets the child Simple Ask
+  // runtime acquire and validate its own evidence before executing; reducing a
+  // lineage branch to `gross revenue` used to erase the metric/context frame
+  // and turn an otherwise executable bounded branch into a pre-freeze provider
+  // incident. The action target remains advisory retrieval wording only.
+  const question = `Inspect ${targetHint} in the context of: ${researchBranchRootQuestion(input.rootRequirementSeed.sourceQuestion)}`;
   return {
     version: 1,
     action: input.action.kind,
-    question: targetHint,
+    question,
+    requirementSeed: projectedSeed(question, baseRequirements({})),
   };
 }
 
@@ -37287,6 +38649,129 @@ function updateNotebookResearchFromCellExecution(
 function compactSqlForRunHistory(sql: string): string {
   const clean = sql.replace(/\s+/g, ' ').trim();
   return clean.length > 1200 ? `${clean.slice(0, 1197)}...` : clean;
+}
+
+/**
+ * Compile the intentionally tiny physical subset that the authoritative Ask
+ * runtime has already proved without a provider: one qualified relation and a
+ * projection of selected, qualified columns. This is not a general text-to-SQL
+ * fallback. Filters, joins, grain transforms, rankings, and derived
+ * aggregations remain on their existing compiler/agent paths because a local
+ * projection must not invent any of those semantics.
+ *
+ * The SQL still enters the normal exploratory closure validator and one-shot
+ * execution-capability gate. Returning undefined means the caller must use the
+ * ordinary bounded provider path instead of widening this compiler.
+ */
+function deterministicExploratoryProposalFromRuntime(
+  routeDecision: IntentDecision | undefined,
+): { sql: string; summary: string; suggestedViz: string } | undefined {
+  const runtime = routeDecision?.askAnalystDecision;
+  const state = runtime?.state;
+  const plan = routeDecision?.resolvedAnalyticalPlan;
+  const cascade = routeDecision?.analyticalCascadeDecision;
+  if (
+    runtime?.mode !== 'authoritative'
+    || !state
+    || state.resolvedPlan?.compiler !== 'exploratory_sql'
+    || !plan
+    || plan.mode !== 'authoritative'
+    || plan.capability !== 'bounded_exploration'
+    || cascade?.selectedTier !== 'exploratory_sql'
+    || cascade.planFrozen !== true
+  ) return undefined;
+
+  // This receipt is minted only by AskAnalystRuntimeV1 after its strict
+  // same-relation, every-field binding check. Canonical-ID and provider-backed
+  // selections deliberately remain on their own compilers.
+  // Task-local execution states are produced before the final root receipt
+  // appends the human-readable planner tool. Their typed planning receipt is
+  // nevertheless immutable, and is the authoritative signal for a
+  // provider-free single-relation physical program. Prefer it, retaining the
+  // V1 tool receipt as a backwards-compatible fallback for persisted runs.
+  const hasV2DeterministicReceipt = state.version === 2
+    && state.planningMode === 'deterministic_binding'
+    && (state.planningReceipt?.plannerCalls === 0
+      || state.workspace.tools.some((tool) =>
+        tool.kind === 'provider_meaning'
+          && tool.status === 'skipped'
+          && tool.reasonCode === 'deterministic_single_relation_physical_binding'));
+  const hasLegacyDeterministicReceipt = state.workspace.tools.some((tool) =>
+    tool.kind === 'provider_meaning'
+      && tool.status === 'skipped'
+      && tool.reasonCode === 'deterministic_single_relation_physical_binding');
+  const deterministicBinding = hasV2DeterministicReceipt || hasLegacyDeterministicReceipt;
+  if (!deterministicBinding) return undefined;
+
+  const program = state.program;
+  if (
+    program.filters.length > 0
+    || Boolean(program.ranking)
+    || Boolean(program.time)
+    || program.comparison?.kind && program.comparison.kind !== 'none'
+    || program.relationshipRequirements.length > 0
+  ) return undefined;
+  const relations = plan.sourceRelationIds ?? [];
+  if (relations.length !== 1 || !isSafeQualifiedPhysicalIdentifier(relations[0])) return undefined;
+
+  const selectedColumns = (routeDecision?.meaningResolution?.selectedConceptIds ?? [])
+    .map(deterministicPhysicalColumnName)
+    .filter((column): column is string => Boolean(column));
+  const columns = [...new Set(selectedColumns)];
+  if (columns.length === 0 || columns.some((column) => !isSafePhysicalIdentifier(column))) return undefined;
+
+  const requirements = state.frame.requirements;
+  const requiredTerms = [
+    ...requirements.measures,
+    ...requirements.dimensions,
+    ...requirements.entityTerms,
+    ...requirements.entityDisplayTerms,
+  ];
+  if (requiredTerms.length === 0 || !requiredTerms.every((term) =>
+    columns.some((column) => deterministicPhysicalTermMatchesColumn(term, column)))) return undefined;
+
+  // Keep human-readable entity/display columns ahead of stored metric columns.
+  // This is presentation only; the immutable selected IDs retain authority.
+  const measureColumns = columns.filter((column) => requirements.measures.some((term) =>
+    deterministicPhysicalTermMatchesColumn(term, column)));
+  const dimensionColumns = columns.filter((column) => !measureColumns.includes(column));
+  const projection = [...dimensionColumns, ...measureColumns];
+  if (projection.length !== columns.length) return undefined;
+  const quote = (identifier: string) => `"${identifier.replaceAll('"', '""')}"`;
+  const sql = `SELECT ${projection.map(quote).join(', ')} FROM ${relations[0]!.split('.').map(quote).join('.')}`;
+  return {
+    sql,
+    summary: 'Executed the frozen, single-relation physical projection. This answer is review-required because it was compiled from qualified raw metadata rather than a certified block or semantic metric.',
+    suggestedViz: 'table',
+  };
+}
+
+function deterministicPhysicalColumnName(candidateId: string): string | undefined {
+  const normalized = candidateId.trim();
+  if (!normalized.startsWith('dbt:column:')) return undefined;
+  const identity = normalized.slice('dbt:column:'.length);
+  const column = identity.slice(identity.lastIndexOf('.') + 1).trim();
+  return column || undefined;
+}
+
+function isSafePhysicalIdentifier(value: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_$]*$/.test(value);
+}
+
+function isSafeQualifiedPhysicalIdentifier(value: string): boolean {
+  const parts = value.split('.').map((part) => part.trim());
+  return parts.length > 0 && parts.every(isSafePhysicalIdentifier);
+}
+
+function deterministicPhysicalTermMatchesColumn(term: string, column: string): boolean {
+  const tokens = (value: string) => value.toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((token) => token.endsWith('s') && token.length > 3 ? token.slice(0, -1) : token);
+  const termTokens = tokens(term);
+  const columnTokens = new Set(tokens(column));
+  return termTokens.length > 0 && termTokens.every((token) => columnTokens.has(token));
 }
 
 function buildAgentSchemaContextFromContextPack(

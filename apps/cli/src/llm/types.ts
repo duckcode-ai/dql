@@ -25,6 +25,7 @@ import type {
   AnalyticalTaskDependencyBindingV1,
   NarrationIntegrityReceiptV1,
   ProviderFailureDiagnosticV1,
+  ConversationResultMemberSetV1,
 } from '@duckcodeailabs/dql-agent';
 import type { DQLManifest, ProviderDispatchPhaseV1, ProviderEgressPurpose, ProviderEgressReceiptV1 } from '@duckcodeailabs/dql-core';
 
@@ -57,6 +58,8 @@ export interface AgentConversationContext {
   resultColumns?: string[];
   resultRowsSample?: Record<string, unknown>[];
   resultDimensionValues?: Record<string, string[]>;
+  /** Server-persisted local result-set bindings; not a client execution authority. */
+  resultMemberSets?: ConversationResultMemberSetV1[];
   appliedFilters?: Record<string, unknown>;
   priorLimit?: number;
   priorMeasures?: string[];
@@ -100,6 +103,7 @@ export interface AgentConversationTurn {
     columns?: string[];
     rowsSample?: Record<string, unknown>[];
     dimensionValues?: Record<string, string[]>;
+    memberSets?: ConversationResultMemberSetV1[];
     measureColumns?: string[];
     rowCount?: number;
   };
@@ -163,6 +167,13 @@ export interface ProviderDispatchEvidenceSink {
       cumulativeResultRowCount?: number;
       /** Parent physical receipt for one admitted same-provider retry. */
       retryOfAttemptIndex?: number;
+      /**
+       * Server-owned subtype for the bounded planner phase. `research_hypothesis`
+       * is the one root investigation-plan transport; it is deliberately
+       * separate from the Simple Ask planning calls made by admitted Research
+       * children. A child cannot spend the root's one hypothesis-plan slot.
+       */
+      planningKind?: 'initial' | 'targeted_revision' | 'research_hypothesis';
     },
   ): Record<string, unknown>;
   snapshot(fallbackReason?: string): ProviderDispatchTerminalEvidence;
@@ -173,12 +184,31 @@ export interface ProviderDispatchEvidenceSink {
 export interface AgentRunRequest {
   provider: ProviderId;
   /**
+   * Server-owned continuation guard. A persisted plural prior-result member
+   * binding is a filter on a newly frozen program, not permission for the
+   * legacy cross-result arithmetic shortcut. HTTP ingress never accepts it.
+   */
+  skipCrossResultComputation?: boolean;
+  /**
    * Server-owned boundary flag for a router-frozen deterministic certified
    * execution. `false` means this invocation cannot consult or dispatch an AI
    * provider, so the provider wrapper must not perform a readiness check or
    * record a provider preflight span. HTTP ingress never accepts this field.
    */
   providerPreflightRequired?: boolean;
+  /**
+   * Server-owned SQL compiled from an already frozen, one-relation Ask
+   * program. It is only admitted after the authoritative runtime proved every
+   * selected field against the same snapshot. The runner still sends it through
+   * the normal closure validation and one-shot execution capability; it merely
+   * avoids asking a provider to regenerate an identical physical projection.
+   * HTTP/MCP input must never hydrate this field.
+   */
+  deterministicExploratoryProposal?: {
+    sql: string;
+    summary?: string;
+    suggestedViz?: string;
+  };
   /** Server-owned run-scoped accounting shared by routing, planning and answer generation. */
   providerDispatchEvidenceSink?: ProviderDispatchEvidenceSink;
   messages: ChatTurn[];

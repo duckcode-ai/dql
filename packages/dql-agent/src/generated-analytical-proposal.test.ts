@@ -257,6 +257,44 @@ describe('generated analytical proposal tuple gate (AGT-013/014/018)', () => {
       ],
     });
 
+    // The local dbt manifest and active runtime target can retain
+    // `catalog.main.table` and `catalog.dev.table` for the exact same frozen
+    // dbt model.  The compact output IDs remain source-bound only because the
+    // qualified selected model proves that narrow alias pair; either mapping
+    // alone would be ambiguous without that immutable identity.
+    const withFrozenLocalDbtRuntimeAliases = structuredClone(withCompactPhysicalOutputs);
+    withFrozenLocalDbtRuntimeAliases.sourceRelationIds = [
+      'jaffle_shop.main.order_items',
+      'jaffle_shop.dev.order_items',
+    ];
+    withFrozenLocalDbtRuntimeAliases.selectedConceptIds = [
+      'dbt::model.jaffle_shop.order_items',
+    ];
+    expect(validateFrozenRequiredOutputProjection({
+      plan: withFrozenLocalDbtRuntimeAliases,
+      sql: `SELECT oi.order_id AS order_id,
+          oi.product_id AS product_id,
+          oi.product_price AS product_price
+        FROM jaffle_shop.dev.order_items AS oi
+        ORDER BY oi.product_price DESC
+        LIMIT 5`,
+    })).toMatchObject({ ok: true });
+
+    const withoutFrozenLocalDbtModel = structuredClone(withFrozenLocalDbtRuntimeAliases);
+    withoutFrozenLocalDbtModel.selectedConceptIds = ['dbt:model:order_items'];
+    expect(validateFrozenRequiredOutputProjection({
+      plan: withoutFrozenLocalDbtModel,
+      sql: `SELECT oi.order_id AS order_id,
+          oi.product_id AS product_id,
+          oi.product_price AS product_price
+        FROM jaffle_shop.dev.order_items AS oi
+        ORDER BY oi.product_price DESC
+        LIMIT 5`,
+    })).toMatchObject({
+      ok: false,
+      bindingMismatches: ['order_id', 'product_id', 'product_price'],
+    });
+
     // Duplicate output aliases are parser-invalid and must never be treated
     // as a proof for one frozen output binding.
     expect(validateFrozenRequiredOutputProjection({

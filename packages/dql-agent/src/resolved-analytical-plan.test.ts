@@ -482,6 +482,19 @@ describe('ResolvedAnalyticalPlan (AGT-013 / API-006)', () => {
     };
     expect(build({ extension: mismatchedExtension }).capability).toBe('blocked');
 
+    // The local registry can retain its own card ID while preserving the
+    // MetricFlow field as the card's qualified identity.  That is sufficient
+    // for a selected partial metric to prove the declared native grouping;
+    // it must not require the historical wrapper record to be present.
+    const registryIdentityExtension: AgentEvidenceCandidate = {
+      ...regionExtension,
+      id: 'semantic:registry:dimension:locations.location_name',
+      qualifiedId: locationNameId,
+      aliases: ['locations.location_name', locationNameId],
+      sameSnapshotRoleExtension: undefined,
+    };
+    expect(build({ extension: registryIdentityExtension }).capability).toBe('semantic_execution');
+
     // A leaf spelling alone is not a MetricFlow execution graph. This is the
     // exact failure shape from the live trace: a cross-model `locations`
     // member looked superficially compatible with `order_item.revenue`, but

@@ -778,4 +778,36 @@ describe('AGT-010 metadata meaning evidence lanes', () => {
       },
     });
   });
+
+  it('CTX-008 retains a broad immutable snapshot for Ask admission without widening legacy compact evidence', () => {
+    const candidate = (id: string, objectType: string) => ({
+      objectKey: id,
+      qualifiedId: id,
+      evidenceClass: 'sql' as const,
+      trustTier: 'exploratory' as const,
+      classRank: 1,
+      relevanceScore: 1,
+      name: id,
+      aliases: [],
+      objectType,
+      relevanceReasons: ['fixture'],
+      compatibilityFacts: [],
+      businessShape: { entities: [], dimensions: [], timeGrains: [], parameters: [], filters: [], outputs: [], sourceRelations: [] },
+      ambiguityPeerIds: [],
+    });
+    const compact = [candidate('dbt:model:customers', 'dbt_model')];
+    const broad = [...compact, candidate('dbt:model:orders', 'dbt_model'), candidate('dbt:model:order_items', 'dbt_model'), candidate('dbt:model:products', 'dbt_model')];
+    const questionPlan = buildAnalysisQuestionPlan('top customers with product revenue');
+    const pack = {
+      candidates: compact,
+      qualifiedCandidates: compact,
+      snapshotCandidates: broad,
+      byEvidenceClass: { certified: [], semantic: [], sql: compact },
+      ambiguousGroups: [],
+    };
+    expect(toAgentRetrievalEvidence(pack, questionPlan).candidates.map((item) => item.id)).toEqual(['dbt:model:customers']);
+    expect(toAgentRetrievalEvidence(pack, questionPlan, { preferSnapshotCandidates: true }).candidates.map((item) => item.id)).toEqual(expect.arrayContaining([
+      'dbt:model:customers', 'dbt:model:orders', 'dbt:model:order_items', 'dbt:model:products',
+    ]));
+  });
 });

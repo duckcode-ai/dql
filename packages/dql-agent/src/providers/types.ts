@@ -107,6 +107,13 @@ export interface ProviderRunOptions {
    */
   dispatchPhase?: import('@duckcodeailabs/dql-core').ProviderDispatchPhaseV1;
   /**
+   * Server-owned sub-phase for the bounded analytical planner. It exists only
+   * to distinguish one initial proposal from one verifier-directed targeted
+   * revision at the local egress ledger; providers cannot use it to select a
+   * route or request another planner loop.
+   */
+  analyticalPlanningKind?: 'initial' | 'targeted_revision';
+  /**
    * Server-owned egress purpose paired with {@link dispatchPhase}.  Ordinary
    * Ask generation remains content-free; the only normal Ask repair purpose is
    * `repair_sql` and it has no result-row permission.

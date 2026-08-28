@@ -1,11 +1,58 @@
 import { describe, expect, it, vi } from "vitest";
-import { createHybridRouter, humanizeCandidateDefinition, collapseRedundantGovernedCandidates, bestGovernedInterpretation } from "./router.js";
-import type { AgentRunRequest } from "./agent-run-engine.js";
-import type { AgentEvidenceCandidate } from "./meaning-resolution.js";
+import { createHybridRouter, humanizeCandidateDefinition, collapseRedundantGovernedCandidates, bestGovernedInterpretation, compileAskAnalyticalProgramV1 } from "./router.js";
+import { createAgentRunBudget, type AgentRunRequest } from "./agent-run-engine.js";
+import type { AgentEvidenceCandidate, AgentRetrievalEvidence, MeaningResolution } from "./meaning-resolution.js";
+import type { AnalyticalProgramV1, AnalyticalRequirementSetV1 } from './analytical-orchestration.js';
 
 const ask = (question: string, extra: Partial<AgentRunRequest> = {}): AgentRunRequest => ({ question, ...extra });
 
 describe("createHybridRouter", () => {
+  it('treats a soft budget admission failure as a technical block, never a business clarification', async () => {
+    const budget = createAgentRunBudget({
+      requestedMode: 'ask',
+      startedAtMs: 0,
+      nowMs: () => 31_000,
+      timeoutSignal: () => new AbortController().signal,
+    });
+    const router = createHybridRouter({ getEvidence: async () => ({ candidates: [] }) });
+
+    const decision = await router.decide(ask('show revenue', { runBudget: budget }));
+
+    expect(decision).toMatchObject({
+      action: 'block',
+      requiresClarification: false,
+    });
+    expect(decision.clarifyingQuestion).toBeUndefined();
+  });
+
+  it("treats one literal canonical semantic identifier as a zero-provider meaning binding", async () => {
+    const complete = vi.fn(async () => JSON.stringify({ category: 'data_lookup', depth: 'quick', needsClarification: false, rationale: 'should not run' }));
+    const canonicalMetric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:orders.revenue',
+      qualifiedId: 'semantic:metric:orders.revenue',
+      kind: 'semantic_metric',
+      trustTier: 'semantic',
+      name: 'orders.revenue',
+      aliases: ['revenue'],
+      relevanceScore: 1,
+      matchReasons: ['exact canonical identifier'],
+      compatibility: 'compatible',
+      exactMatch: true,
+    };
+    const router = createHybridRouter({
+      complete,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot:canonical',
+        candidates: [canonicalMetric],
+        parsedIntent: { measures: ['revenue'], dimensions: [], filters: [] },
+      }),
+    });
+
+    await router.decide(ask('Show semantic:metric:orders.revenue'));
+
+    expect(complete).not.toHaveBeenCalled();
+  });
+
   it("does NOT call the LLM when the deterministic decision is confident", async () => {
     const complete = vi.fn(async () => "{}");
     const router = createHybridRouter({ complete });
@@ -245,5 +292,255 @@ describe('committing to a governed reading instead of interrogating the user', (
       cand({ id: 'semantic:model:orders', kind: 'semantic_member', semanticObjectType: 'model', compatibility: 'unknown', relevanceScore: 1 }),
       cand({ id: 'dql:entity:core::entity::orders', kind: 'dql_modeling', compatibility: 'partial', relevanceScore: 0.9 }),
     ])?.id).toBe('semantic:model:orders');
+  });
+});
+
+describe('frozen Ask compiler closures', () => {
+  it('AGT-036 never admits a same-snapshot tail column outside the frozen program into physical routing', () => {
+    const relation: AgentEvidenceCandidate = {
+      id: 'dbt:model:orders', qualifiedId: 'dbt:model:orders', kind: 'dbt_model', trustTier: 'exploratory',
+      name: 'orders', relevanceScore: 1, matchReasons: ['runtime schema'], compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:orders'],
+    };
+    const revenueColumn: AgentEvidenceCandidate = {
+      id: 'runtime:column:orders.revenue', qualifiedId: 'runtime:column:orders.revenue', kind: 'sql_column', trustTier: 'exploratory',
+      name: 'revenue', relevanceScore: 1, matchReasons: ['runtime schema'], compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:orders'],
+    };
+    // This is present in the retrieval snapshot but deliberately absent from
+    // executionCandidateIds. Before the closure check, the physical fallback
+    // unioned evidence.candidates and silently selected it as `region`.
+    const tailRegion: AgentEvidenceCandidate = {
+      id: 'runtime:column:orders.region_tail', qualifiedId: 'runtime:column:orders.region_tail', kind: 'sql_column', trustTier: 'exploratory',
+      name: 'region', relevanceScore: 0.01, matchReasons: ['same snapshot tail'], compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:orders'],
+    };
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', kind: 'semantic_metric', trustTier: 'semantic',
+      name: 'orders.revenue', relevanceScore: 1, matchReasons: ['exact metric'], compatibility: 'compatible',
+      analyticalCapability: {
+        metricId: 'semantic:metric:orders.revenue', semanticModelId: 'semantic:model:orders', measureIds: ['revenue'],
+        primaryEntityId: 'semantic:entity:order', defaultResultGrainId: 'semantic:grain:order', resultGrainIds: ['semantic:grain:order'],
+        aggregation: 'sum', additivity: { entities: 'additive', time: 'additive' }, dimensions: [], timeDimensions: [],
+        operations: ['group'], supportedOutputKinds: ['metric_value'], executionCapabilities: [{ route: 'semantic', adapterId: 'metricflow-cli' }],
+        sourceFingerprint: 'sha256:metric',
+      },
+    };
+    const requirements: AnalyticalRequirementSetV1 = {
+      version: 1, measures: ['revenue'], dimensions: ['region'], entityTerms: [], entityDisplayTerms: [], memberTerms: [],
+    };
+    const program: AnalyticalProgramV1 = {
+      version: 1,
+      id: 'program:frozen-closure',
+      frameFingerprint: 'sha256:frame',
+      taskIds: ['task:1'],
+      candidateIds: [metric.id],
+      executionCandidateIds: [metric.id, relation.id, revenueColumn.id],
+      requiredRoles: ['metric', 'categorical_dimension'],
+      filters: [],
+      relationshipRequirements: [],
+      outputs: {
+        measures: ['revenue'], dimensions: ['region'], entityDisplayTerms: [],
+        assertions: ['all_requested_measures', 'all_requested_dimensions', 'safe_relationship_closure', 'result_contract'],
+      },
+    };
+    const evidence: AgentRetrievalEvidence = {
+      snapshotId: 'snapshot:frozen-closure',
+      candidates: [metric, relation, revenueColumn, tailRegion],
+      parsedIntent: { measures: ['revenue'], dimensions: ['region'], filters: [] },
+      diagnostics: { tierReadiness: { semanticCompiler: 'unavailable', physicalSchema: 'ready' } },
+    };
+    const resolution: MeaningResolution = {
+      interpretedQuestion: 'show revenue by region', questionType: 'value', selectedConceptIds: [metric.id],
+      recommendedExecutionId: metric.id, queryIntent: { measures: ['revenue'], dimensions: ['region'], filters: [] },
+      rejectedCandidates: [], confidence: 'high', missingInformation: [], recommendedRoute: 'semantic',
+    };
+
+    const decision = compileAskAnalyticalProgramV1({
+      base: { action: 'answer', confidence: 1, followsUp: false, source: 'heuristic', reason: 'base' },
+      request: {
+        question: 'show revenue by region',
+        requestedMode: 'ask',
+        askAnalystTierReadiness: { semanticCompiler: 'unavailable', physicalSchema: 'ready' },
+      },
+      evidence,
+      program,
+      candidates: [metric],
+      executionCandidates: [metric, relation, revenueColumn],
+      resolution,
+      requirements,
+    });
+
+    expect(decision.action).toBe('block');
+    expect(decision.resolvedAnalyticalPlan).toBeUndefined();
+    const exploratory = decision.analyticalCascadeDecision?.attempts.find((attempt) => attempt.tier === 'exploratory_sql');
+    expect(exploratory?.outcome).toBe('unavailable');
+    expect(exploratory?.candidateIds).not.toContain(tailRegion.id);
+    expect(decision.analyticalCascadeDecision?.planFrozen).toBe(false);
+
+    // Cover the other compiler-owned pre-freeze path too: a semantic plan
+    // that is structurally ineligible advances through the same immutable
+    // closure rather than re-unioning the full retrieval snapshot.
+    const continuedDecision = compileAskAnalyticalProgramV1({
+      base: { action: 'answer', confidence: 1, followsUp: false, source: 'heuristic', reason: 'base' },
+      request: {
+        question: 'show revenue by region',
+        requestedMode: 'ask',
+        askAnalystTierReadiness: { semanticCompiler: 'ready', physicalSchema: 'ready' },
+      },
+      evidence,
+      program,
+      candidates: [metric],
+      executionCandidates: [metric, relation, revenueColumn],
+      resolution,
+      requirements,
+    });
+    expect(continuedDecision.action).toBe('block');
+    expect(continuedDecision.resolvedAnalyticalPlan).toBeDefined();
+    const continuedExploratory = continuedDecision.analyticalCascadeDecision?.attempts.find((attempt) => attempt.tier === 'exploratory_sql');
+    expect(continuedExploratory?.outcome).toBe('unavailable');
+    expect(continuedExploratory?.candidateIds).not.toContain(tailRegion.id);
+  });
+
+  it('AGT-035 never re-authorizes scoped order variants or an order number from a full execution closure', () => {
+    const customerName: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:dimension:customers.customer_name',
+      qualifiedId: 'semantic:uncategorized:dimension:customers.customer_name',
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      trustTier: 'semantic',
+      name: 'customers.customer_name',
+      aliases: ['customer', 'customer name', 'customer_name'],
+      relevanceScore: 1,
+      matchReasons: ['qualified display'],
+      compatibility: 'compatible',
+    };
+    const customerOrderNumber: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:dimension:orders.customer_order_number',
+      qualifiedId: 'semantic:uncategorized:dimension:orders.customer_order_number',
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      trustTier: 'semantic',
+      name: 'orders.customer_order_number',
+      aliases: ['customer order number'],
+      relevanceScore: 0.99,
+      matchReasons: ['qualified numeric attribute'],
+      compatibility: 'compatible',
+    };
+    const genericOrders: AgentEvidenceCandidate = {
+      id: 'semantic:orders:orders',
+      qualifiedId: 'semantic:orders:orders',
+      kind: 'semantic_metric',
+      trustTier: 'semantic',
+      name: 'orders.orders',
+      aliases: ['orders', 'order count'],
+      definition: 'Count of orders.',
+      relevanceScore: 1,
+      matchReasons: ['exact generic metric'],
+      compatibility: 'compatible',
+      analyticalCapability: {
+        metricId: 'semantic:orders:orders',
+        semanticModelId: 'semantic:model:orders',
+        measureIds: ['semantic:uncategorized:measure:orders.order_count'],
+        primaryEntityId: 'semantic:entity:orders.order',
+        defaultResultGrainId: 'semantic:grain:orders.order',
+        resultGrainIds: ['semantic:grain:orders.order', 'semantic:grain:customers.customer'],
+        aggregation: 'count',
+        additivity: { entities: 'additive', time: 'additive' },
+        dimensions: [
+          {
+            dimensionId: customerName.qualifiedId!,
+            entityId: 'semantic:entity:customers.customer',
+            label: 'Customer Name',
+            aliases: ['customer', 'customer name'],
+            supportedRoles: ['group_by', 'display', 'rank_entity'],
+          },
+          {
+            dimensionId: customerOrderNumber.qualifiedId!,
+            entityId: 'semantic:entity:orders.order',
+            label: 'Customer Order Number',
+            aliases: ['customer order number'],
+            supportedRoles: ['group_by', 'display'],
+          },
+        ],
+        timeDimensions: [],
+        operations: ['group'],
+        supportedOutputKinds: ['metric_value', 'dimension'],
+        executionCapabilities: [{ route: 'semantic', adapterId: 'metricflow' }],
+        sourceFingerprint: 'sha256:orders',
+      },
+    };
+    const scopedMetrics = ['new_customer_orders', 'drink_orders', 'food_orders'].map((name) => ({
+      ...genericOrders,
+      id: `semantic:orders:${name}`,
+      qualifiedId: `semantic:orders:${name}`,
+      name: `orders.${name}`,
+      aliases: [name],
+      definition: `Count of ${name.replaceAll('_', ' ')}.`,
+    }));
+    const program: AnalyticalProgramV1 = {
+      version: 1,
+      id: 'program:order-count-minimal',
+      frameFingerprint: 'sha256:order-count',
+      taskIds: ['task:1'],
+      candidateIds: [genericOrders.id, customerName.id],
+      executionCandidateIds: [genericOrders.id, customerName.id, customerOrderNumber.id, ...scopedMetrics.map((candidate) => candidate.id)],
+      requiredRoles: ['metric', 'entity_label'],
+      filters: [],
+      relationshipRequirements: [],
+      outputs: {
+        measures: ['orders'],
+        dimensions: [],
+        entityDisplayTerms: ['customer'],
+        assertions: ['all_requested_measures', 'all_requested_dimensions', 'safe_relationship_closure', 'result_contract'],
+      },
+    };
+    const evidence: AgentRetrievalEvidence = {
+      snapshotId: 'snapshot:retained-jaffle-order-count',
+      candidates: [genericOrders, customerName, customerOrderNumber, ...scopedMetrics],
+      parsedIntent: { measures: ['order count'], dimensions: ['customer'], filters: [] },
+    };
+    const resolution: MeaningResolution = {
+      interpretedQuestion: 'what is the order count for each customer?',
+      questionType: 'value',
+      selectedConceptIds: [genericOrders.id, customerName.id],
+      recommendedExecutionId: genericOrders.id,
+      queryIntent: { measures: ['orders'], dimensions: ['customer_name'], filters: [] },
+      rejectedCandidates: [],
+      confidence: 'high',
+      missingInformation: [],
+      recommendedRoute: 'semantic',
+    };
+    const requirements: AnalyticalRequirementSetV1 = {
+      version: 1,
+      measures: ['orders'],
+      dimensions: [],
+      entityTerms: ['customer'],
+      entityDisplayTerms: ['customer'],
+      memberTerms: [],
+    };
+
+    const decision = compileAskAnalyticalProgramV1({
+      base: { action: 'answer', confidence: 1, followsUp: false, source: 'heuristic', reason: 'base' },
+      request: {
+        question: 'what is the order count for each customer?',
+        requestedMode: 'ask',
+        askAnalystTierReadiness: { semanticCompiler: 'ready', physicalSchema: 'ready' },
+      },
+      evidence,
+      program,
+      // Deliberately model a defensive compiler caller that supplies the full
+      // frozen closure as its candidate package. The compiler must project it
+      // back to program.candidateIds before legacy semantic reconciliation.
+      candidates: evidence.candidates,
+      executionCandidates: evidence.candidates,
+      resolution,
+      requirements,
+    });
+
+    expect(decision.meaningResolution?.selectedConceptIds).toEqual([genericOrders.id, customerName.id]);
+    expect(decision.meaningResolution?.selectedConceptIds).not.toContain(customerOrderNumber.id);
+    for (const scoped of scopedMetrics) expect(decision.meaningResolution?.selectedConceptIds).not.toContain(scoped.id);
+    expect(decision.terminalOutcome?.candidateIds).toEqual([genericOrders.id, customerName.id]);
   });
 });

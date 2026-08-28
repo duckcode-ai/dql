@@ -1013,6 +1013,140 @@ describe('Ask trace portable bundles', () => {
     expect(inMemory.trace.envelope.runId).not.toBe(trace.envelope.runId);
   });
 
+  it('strictly allowlists V5 workspace diagnostics and excludes secret-like member values', () => {
+    const { store, observer } = memoryObserver({ runId: 'run-v5-allowlist' });
+    observer.finalize({ status: 'completed', trustState: 'governed', selectedTier: 'semantic' });
+    const trace = store.getByRun('run-v5-allowlist')!;
+    const memberValue = 'sk_member_abcdefghijklmnop';
+    const bundle = createAskTracePortableBundleV1(trace, {
+      profile: 'strict',
+      provenance: 'recorded',
+      runReceipt: {
+        id: 'run-v5-allowlist',
+        diagnosticReceiptV5: {
+          version: 5,
+          runId: 'run-v5-allowlist',
+          state: {
+            version: 1,
+            mode: 'authoritative',
+            phase: 'executed',
+            questionFingerprint: 'sha256:question',
+            kind: 'aggregation',
+            requirementCounts: { measures: 1, dimensions: 0, entityTerms: 0, members: 1, filters: 1 },
+            mission: { mode: 'ask', taskCount: 1, deferredTaskCount: 0, hypothesisCount: 1 },
+            workspace: {
+              snapshotId: memberValue,
+              sourceFingerprint: memberValue,
+              admittedCandidateCount: 1,
+              excludedCandidateCount: 0,
+              sourceCoverage: [{ source: 'semantic', status: 'available', candidateCount: 1, reason: memberValue }],
+              tools: [{ id: `tool:${memberValue}`, kind: 'retrieve_snapshot', status: 'completed', reasonCode: 'snapshot_acquired', member: memberValue }],
+              rawMember: memberValue,
+            },
+            program: { id: 'program:v5', taskCount: 1, candidateCount: 1, requiredRoles: ['metric'], outputAssertionCount: 2 },
+            counters: { planningContinuations: 0, toolCalls: 1, executionAttempts: 1, repairAttempts: 0 },
+          },
+          summary: {
+            version: 2, summaryFingerprint: 'sha256:v5-summary', runtimeMode: 'authoritative',
+            whatHappened: 'not exported', why: 'not exported', impact: 'not exported', nextAction: 'none',
+            selectedCompiler: 'metricflow', programTaskCount: 1, admittedCandidateCount: 1, toolCallCount: 1, executionAttempts: 1,
+          },
+          businessAnswer: { version: 1, mode: 'facts_only', trustState: 'governed', factIds: ['fact:v5'], limitationCount: 0 },
+          finalStopReason: 'governed_semantic_answer',
+        },
+        // V6 must use the same explicit redaction boundary. In particular,
+        // neither its inherited state nor its planning evidence may leak a
+        // raw member/requirement value into a strict support bundle.
+        diagnosticReceiptV6: {
+          version: 6,
+          runId: 'run-v5-allowlist',
+          state: {
+            version: 1,
+            mode: 'authoritative',
+            phase: 'executed',
+            questionFingerprint: 'sha256:question',
+            kind: 'aggregation',
+            requirementCounts: { measures: 1, dimensions: 0, entityTerms: 0, members: 1, filters: 1 },
+            mission: { mode: 'ask', taskCount: 1, deferredTaskCount: 0, hypothesisCount: 1 },
+            workspace: {
+              snapshotId: memberValue,
+              sourceFingerprint: memberValue,
+              admittedCandidateCount: 1,
+              excludedCandidateCount: 0,
+              sourceCoverage: [{ source: 'semantic', status: 'available', candidateCount: 1, reason: memberValue }],
+              tools: [{ id: `tool:${memberValue}`, kind: 'retrieve_snapshot', status: 'completed', reasonCode: 'snapshot_acquired', member: memberValue }],
+              rawMember: memberValue,
+            },
+            program: { id: 'program:v6', taskCount: 1, candidateCount: 1, requiredRoles: ['metric'], outputAssertionCount: 2 },
+            counters: { planningContinuations: 1, toolCalls: 1, executionAttempts: 1, repairAttempts: 0 },
+          },
+          summary: {
+            version: 2, summaryFingerprint: 'sha256:v6-summary', runtimeMode: 'authoritative',
+            whatHappened: 'not exported', why: 'not exported', impact: 'not exported', nextAction: 'none',
+            selectedCompiler: 'metricflow', programTaskCount: 1, admittedCandidateCount: 1, toolCallCount: 1, executionAttempts: 1,
+          },
+          planning: {
+            version: 1,
+            mode: 'initial_planner',
+            plannerCalls: 1,
+            revisionCalls: 0,
+            verification: {
+              version: 1,
+              status: 'valid',
+              missingRoles: [],
+              candidateIds: [`semantic:${memberValue}`],
+              reasonCode: 'immutable_program_verified',
+              rawRequirement: memberValue,
+            },
+          },
+          roleCoverage: [{ role: 'metric', candidateCount: 1, rawRequirement: memberValue }],
+          cascade: {
+            attempts: [{ tier: 'semantic', outcome: 'executable', planFrozen: true, rawMember: memberValue }],
+            selectedTier: 'semantic',
+            stopReason: 'semantic_complete',
+            planFrozen: true,
+          },
+          origin: { boundary: 'provider', origin: 'provider', impact: 'answer_not_produced', rawMember: memberValue },
+          connection: { attempted: false, rawMember: memberValue },
+          execution: { attempts: 1, rawMember: memberValue },
+          facts: { factCount: 1, resultFingerprint: memberValue, rawMember: memberValue },
+          safeNextAction: 'inspect_failure',
+          story: [
+            { stage: 'retrieval', status: 'completed', reasonCode: 'snapshot_acquired', rawMember: memberValue },
+            { stage: 'verification', status: 'completed', reasonCode: 'immutable_program_verified' },
+          ],
+          finalStopReason: 'governed_semantic_answer',
+        },
+      },
+    });
+    const serialized = JSON.stringify(bundle);
+    expect(serialized).not.toContain(memberValue);
+    const workspace = (bundle.runReceipt.runtimeReceiptV5 as { state?: { workspace?: Record<string, unknown> } })?.state?.workspace;
+    expect(workspace).toMatchObject({ admittedCandidateCount: 1, excludedCandidateCount: 0 });
+    expect(workspace).not.toHaveProperty('rawMember');
+    expect((workspace?.tools as Array<{ id: string }>)[0]?.id).not.toContain(memberValue);
+    expect((workspace?.sourceCoverage as Array<Record<string, unknown>>)[0]).not.toHaveProperty('reason');
+    const runtimeV6 = bundle.runReceipt.runtimeReceiptV6 as {
+      state?: { workspace?: Record<string, unknown> };
+      planning?: { verification?: { candidateIds?: string[]; missingRoleCount?: number } };
+      story?: Array<Record<string, unknown>>;
+    };
+    expect(runtimeV6).toMatchObject({ version: 6, planning: { mode: 'initial_planner', verification: { missingRoleCount: 0 } } });
+    expect(runtimeV6.state?.workspace).not.toHaveProperty('rawMember');
+    expect(runtimeV6.planning?.verification?.candidateIds?.[0]).not.toContain(memberValue);
+    expect(runtimeV6.planning?.verification).not.toHaveProperty('rawRequirement');
+    expect(runtimeV6.story?.[0]).not.toHaveProperty('rawMember');
+    expect(runtimeV6).toMatchObject({
+      roleCoverage: [{ role: 'metric', candidateCount: 1 }],
+      cascade: { selectedTier: 'semantic', planFrozen: true },
+      connection: { attempted: false },
+      execution: { attempts: 1 },
+      facts: { factCount: 1 },
+      safeNextAction: 'inspect_failure',
+    });
+    expect((runtimeV6 as Record<string, unknown>).origin).toEqual({ boundary: 'provider', origin: 'provider', impact: 'answer_not_produced' });
+  });
+
   it('requires confirmation and scans support-provided reviewed prose before export', () => {
     const { store, observer } = memoryObserver({ runId: 'run-support' });
     observer.finalize({ status: 'completed' });

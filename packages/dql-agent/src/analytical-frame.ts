@@ -202,15 +202,7 @@ export function projectResolvedAnalyticalFrame(input: {
     metricConceptIds,
     entityGrainIds: plan.entityGrain ? [plan.entityGrain] : sourceFrame.entityGrainIds,
     dimensions,
-    memberBindings: plan.query.filters.flatMap((filter) =>
-      filter.binding.status === 'resolved' && filter.binding.qualifiedId
-        ? [{
-            dimensionId: filter.binding.qualifiedId,
-            canonicalValues: [filter.value],
-            source: 'question' as const,
-            confidence: 'exact' as const,
-          }]
-        : []),
+    memberBindings: memberBindingsForResolvedPlanFilters(plan.query.filters),
     ...(ranking ? { ranking } : {}),
     requestedOutputs,
     ambiguity,
@@ -246,7 +238,46 @@ function uniqueOutputs(
   return outputs.filter((output, index, all) => all.findIndex((candidate) => candidate.id === output.id) === index);
 }
 
-function unique(values: string[]): string[] {
+/**
+ * A plural prior-result continuation is one membership predicate (`IN`), not
+ * ten independent equality predicates.  Both the deterministic and resolved
+ * frame paths use this helper so a persisted member set cannot become an
+ * impossible `customer_name = A AND customer_name = B` condition after a
+ * restart.
+ */
+function appendMemberBinding(
+  bindings: AnalyticalQuestionFrameV2['memberBindings'],
+  next: AnalyticalQuestionFrameV2['memberBindings'][number],
+): void {
+  const index = bindings.findIndex((binding) => binding.dimensionId === next.dimensionId);
+  if (index < 0) {
+    bindings.push({ ...next, canonicalValues: unique(next.canonicalValues) });
+    return;
+  }
+  const existing = bindings[index]!;
+  bindings[index] = {
+    ...existing,
+    canonicalValues: unique([...existing.canonicalValues, ...next.canonicalValues]),
+  };
+}
+
+function memberBindingsForResolvedPlanFilters(
+  filters: ResolvedAnalyticalPlan['query']['filters'],
+): AnalyticalQuestionFrameV2['memberBindings'] {
+  const bindings: AnalyticalQuestionFrameV2['memberBindings'] = [];
+  for (const filter of filters) {
+    if (filter.binding.status !== 'resolved' || !filter.binding.qualifiedId) continue;
+    appendMemberBinding(bindings, {
+      dimensionId: filter.binding.qualifiedId,
+      canonicalValues: [filter.value],
+      source: 'question',
+      confidence: 'exact',
+    });
+  }
+  return bindings;
+}
+
+function unique<T>(values: T[]): T[] {
   return [...new Set(values)];
 }
 
@@ -326,6 +357,7 @@ export function buildDeterministicAnalyticalFrame(input: {
 
   const ambiguity: AnalyticalQuestionFrameV2['ambiguity'] = [];
   const resolvedDimensions = new Map<string, MetricCapabilityContract['dimensions'][number]>();
+  const structuredSelectedDimensionIds = new Set<string>();
   // A ranking may group by more than one field, but only the explicitly
   // resolved entity display key is the entity being ranked. Keep that role
   // separate from generic rankable capability metadata: adapters sometimes
@@ -343,9 +375,29 @@ export function buildDeterministicAnalyticalFrame(input: {
     // entity. It is not a qualified display dimension and must never resolve
     // by lexical fallback to the first same-named capability child.
     const dimension = resolveExactCapabilityDimension(selectedId, capability);
-    if (dimension) resolvedDimensions.set(dimension.dimensionId, dimension);
+    if (dimension) {
+      resolvedDimensions.set(dimension.dimensionId, dimension);
+      structuredSelectedDimensionIds.add(dimension.dimensionId);
+    }
   }
   for (const requested of requestedEntityDisplayTerms) {
+    // A structured clarification click is a server-issued, capability-bound
+    // answer to this exact display-key ambiguity. Once it has proved a single
+    // native display/rank field for the requested label, do not recreate the
+    // original Account Name vs Customer Name ambiguity from the broad word
+    // "names". The selected field was already checked against this metric's
+    // authored capability above; this branch only consumes that binding.
+    const selectedDisplayMatches = [...structuredSelectedDimensionIds]
+      .map((dimensionId) => resolvedDimensions.get(dimensionId))
+      .filter((dimension): dimension is MetricCapabilityContract['dimensions'][number] => Boolean(dimension))
+      .filter((dimension) => dimension.supportedRoles.includes('group_by')
+        && (rankingRequested
+          ? dimension.supportedRoles.includes('rank_entity')
+          : dimension.supportedRoles.includes('display')));
+    if (selectedDisplayMatches.length === 1) {
+      entityDisplayDimensionIds.add(selectedDisplayMatches[0]!.dimensionId);
+      continue;
+    }
     const matches = resolveEntityDisplayTerm({
       requested,
       entityTerms: requestedEntityTerms,
@@ -364,6 +416,20 @@ export function buildDeterministicAnalyticalFrame(input: {
     }
   }
   for (const requested of requestedDimensionTerms) {
+    // Generic parser terms such as `name` can match more than one capability
+    // field. A server-issued qualified selection has already resolved that
+    // exact ambiguity, so preserve its native field rather than re-opening
+    // the broad lexical candidate set on a restart/follow-up.
+    const selectedMatches = [...structuredSelectedDimensionIds]
+      .map((dimensionId) => resolvedDimensions.get(dimensionId))
+      .filter((dimension): dimension is MetricCapabilityContract['dimensions'][number] => Boolean(dimension))
+      .filter((dimension) => dimensionMatchesTerm(dimension, requested)
+        || selectedSameSnapshotDimensionBindsRequestedTerm({
+          dimension,
+          requested,
+          candidates: input.candidates,
+        }));
+    if (selectedMatches.length === 1) continue;
     const matches = resolveDimensionTerm(requested, capability, input.candidates);
     if (matches.length === 1) resolvedDimensions.set(matches[0]!.dimensionId, matches[0]!);
     else if (matches.length > 1) {
@@ -383,7 +449,7 @@ export function buildDeterministicAnalyticalFrame(input: {
     const dimension = matches[0]!;
     filterDimensionIds.add(dimension.dimensionId);
     resolvedDimensions.set(dimension.dimensionId, dimension);
-    memberBindings.push({
+    appendMemberBinding(memberBindings, {
       dimensionId: dimension.dimensionId,
       canonicalValues: [filter.value],
       source: 'question',
@@ -627,6 +693,34 @@ function resolveExactCapabilityDimension(
 }
 
 /**
+ * A same-snapshot MetricFlow extension is an exact server-side binding from
+ * a business term (for example `region`) to one declared capability child
+ * (for example `locations.location_name`). Once that child was selected and
+ * revalidated above, do not reopen the raw word match merely because the
+ * authored field label does not literally contain "region". This is limited
+ * to the persisted extension contract and exact capability identity; it is
+ * not a geographic synonym or a cross-model fallback.
+ */
+function selectedSameSnapshotDimensionBindsRequestedTerm(input: {
+  dimension: MetricCapabilityContract['dimensions'][number];
+  requested: string;
+  candidates: AgentEvidenceCandidate[];
+}): boolean {
+  const requested = normalize(input.requested);
+  if (!requested) return false;
+  return input.candidates.some((candidate) => {
+    const extension = candidate.sameSnapshotRoleExtension;
+    if (!extension
+      || extension.version !== 1
+      || extension.role !== 'categorical_dimension'
+      || normalize(extension.requestedTerm) !== requested) return false;
+    const candidateIdentity = candidate.qualifiedId ?? candidate.id;
+    return sameCapabilityDimensionIdentity(candidateIdentity, input.dimension.dimensionId)
+      && sameCapabilityDimensionIdentity(extension.dimensionId, input.dimension.dimensionId);
+  });
+}
+
+/**
  * Resolve a host-owned entity display requirement only through the selected
  * metric's authored native capability. A bare entity card is not a display
  * field, and an arbitrary categorical attribute such as `customer_type`
@@ -703,6 +797,10 @@ function canonicalCapabilityDimensionId(id: string): string {
     /^semantic:uncategorized:dimension:/,
     'semantic:dimension:',
   );
+}
+
+function sameCapabilityDimensionIdentity(left: string, right: string): boolean {
+  return canonicalCapabilityDimensionId(left) === canonicalCapabilityDimensionId(right);
 }
 
 /**

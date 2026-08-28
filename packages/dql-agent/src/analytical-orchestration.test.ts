@@ -21,6 +21,7 @@ import {
   normalizeCanonicalQueryResult,
   resolveTopRankedRegionDependency,
   selectRoleBalancedMeaningCandidates,
+  selectRoleBalancedWorkspaceCandidates,
   retrieveContextLanes,
   summarizeTaskOutcomes,
   validateSelectedResultBinding,
@@ -141,6 +142,43 @@ describe('conversational analytical orchestration contracts', () => {
     ]));
   });
 
+  it('CTX-008 reserves customer/product/relationship evidence ahead of crowded correlated revenue variants', () => {
+    const requirements = buildAnalyticalRequirementSet({
+      question: 'who are the top customers have product with revenue',
+      parsedIntent: { measures: ['revenue'], dimensions: ['customer', 'product'], filters: [] },
+    });
+    const revenueVariants = Array.from({ length: 24 }, (_, index) => ({
+      id: `semantic:metric:orders.revenue_variant_${index}`,
+      kind: 'semantic_metric' as const,
+      semanticObjectType: 'metric' as const,
+      name: `Revenue Variant ${index}`,
+      aliases: ['revenue'],
+      relevanceScore: 1 - index / 100,
+      compatibility: 'compatible',
+    }));
+    const candidates = [
+      ...revenueVariants,
+      { id: 'semantic:entity:customers.customer', kind: 'semantic_member' as const, semanticObjectType: 'entity' as const, name: 'Customer', relevanceScore: 0.2, compatibility: 'compatible' },
+      { id: 'semantic:dimension:customers.customer_name', kind: 'semantic_member' as const, semanticObjectType: 'dimension' as const, name: 'Customer Name', aliases: ['customer name'], relevanceScore: 0.19, compatibility: 'compatible' },
+      { id: 'semantic:dimension:products.product_description', kind: 'semantic_member' as const, semanticObjectType: 'dimension' as const, name: 'Product Description', aliases: ['product', 'product description'], relevanceScore: 0.18, compatibility: 'compatible' },
+      { id: 'dql:relationship:customer_order_item_product', kind: 'dql_modeling' as const, name: 'Customer to order item to product relationship', relationshipEvidence: ['dql:relationship:customer_order_item_product'], relevanceScore: 0.17, compatibility: 'compatible' },
+      { id: 'dbt:model:products', kind: 'dbt_model' as const, name: 'products', relevanceScore: 0.16, compatibility: 'compatible' },
+    ];
+    const workspace = selectRoleBalancedWorkspaceCandidates({ candidates, requirements });
+    const planner = selectRoleBalancedMeaningCandidates({ candidates: workspace, requirements, maxCandidates: 16 });
+
+    expect(workspace.length).toBeLessThanOrEqual(32);
+    expect(planner.length).toBeLessThanOrEqual(16);
+    expect(workspace.map((candidate) => candidate.id)).toEqual(expect.arrayContaining([
+      'semantic:metric:orders.revenue_variant_0',
+      'semantic:entity:customers.customer',
+      'semantic:dimension:customers.customer_name',
+      'semantic:dimension:products.product_description',
+      'dql:relationship:customer_order_item_product',
+    ]));
+    expect(planner.map((candidate) => candidate.id)).toContain('semantic:dimension:products.product_description');
+  });
+
   it('AGT-034 keeps individual expensive order items as a five-row price ranking with required outputs', () => {
     const requirements = buildAnalyticalRequirementSet({
       question: 'Show the five most expensive individual order items with order ID, product ID, and product price.',
@@ -259,7 +297,7 @@ describe('conversational analytical orchestration contracts', () => {
     expect(requirements).toMatchObject({
       entityTerms: ['account'],
       entityDisplayTerms: ['account name'],
-      ranking: { metricTerms: expect.arrayContaining(['bcm']), limit: 10, defaultedLimit: true },
+      ranking: { metricTerms: ['bcm run rate'], limit: 10, defaultedLimit: true },
     });
     const cards = selectRoleBalancedMeaningCandidates({
       requirements,
@@ -275,6 +313,18 @@ describe('conversational analytical orchestration contracts', () => {
       'semantic:dimension:account.name',
       'semantic:metric:bcm_run_rate',
     ]));
+  });
+
+  it('AGT-010 keeps an explicitly written BCM run rate as one metric when retrieval only parsed its rate suffix', () => {
+    const requirements = buildAnalyticalRequirementSet({
+      question: 'What is the current BCM run rate across top accounts?',
+      // This is the real failure mode from the local retrieval snapshot: the
+      // parser supplied a useful suffix, but the immutable Ask frame must
+      // preserve the complete user-written business metric.
+      parsedIntent: { measures: ['rate'], dimensions: ['account'], filters: [] },
+    });
+    expect(requirements.measures).toEqual(['bcm run rate']);
+    expect(requirements.ranking).toMatchObject({ metricTerms: ['bcm run rate'], limit: 10, defaultedLimit: true });
   });
 
   it('AGT-010 reserves a low-ranked account display key instead of treating an entity, owner, or sentiment as the label', () => {
@@ -641,6 +691,20 @@ describe('conversational analytical orchestration contracts', () => {
       status: index === 0 ? 'completed' : 'gap',
     })));
     expect(outcomes).toMatchObject({ status: 'partial', completed: ['task-1'], gaps: ['task-2'] });
+  });
+
+  it('marks ordinary Ask task overflow instead of silently dropping a fourth clause', () => {
+    const graph = buildAnalyticalTaskGraph({
+      question: 'Show revenue; show order count; show customers; show products',
+      mode: 'ask',
+      maxTasks: 3,
+    });
+    expect(graph).toMatchObject({ kind: 'compound', partial: true });
+    expect(graph.tasks.map((task) => task.question)).toEqual([
+      'Show revenue',
+      'show order count',
+      'show customers',
+    ]);
   });
 
   it('binds only the demonstrated top-region customer dependency (AGT-030)', () => {

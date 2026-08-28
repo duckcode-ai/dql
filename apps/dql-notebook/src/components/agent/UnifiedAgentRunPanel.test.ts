@@ -489,6 +489,33 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
         impact: 'execution_not_attempted',
       },
     });
+    const v5 = analyticalInspectorContract({
+      diagnosticReceiptV5: {
+        version: 5,
+        runId: 'run-v5',
+        finalStopReason: 'selected',
+        summary: {
+          version: 2,
+          summaryFingerprint: 'sha256:ask-runtime-story',
+          runtimeMode: 'authoritative',
+          whatHappened: 'The Ask runtime compiled one route-neutral program with the metricflow compiler.',
+          why: 'The selected plan passed the current compiler and trust boundary.',
+          impact: 'The displayed answer is bound to validated result facts.',
+          nextAction: 'none',
+          selectedCompiler: 'metricflow',
+          programTaskCount: 1,
+          admittedCandidateCount: 3,
+          toolCallCount: 4,
+          executionAttempts: 1,
+        },
+      },
+    });
+    expect(v5?.runtimeDecisionSummary).toMatchObject({
+      summaryFingerprint: 'sha256:ask-runtime-story',
+      runtimeMode: 'authoritative',
+      selectedCompiler: 'metricflow',
+      executionAttempts: 1,
+    });
     expect(analyticalInspectorSections()).toEqual([
       'Performance & provider egress',
       'Plan',

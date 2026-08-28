@@ -54,6 +54,7 @@ import {
   type AgentRunStopReason,
   type AgentRunTrustState,
   type AskDecisionSummaryV1,
+  type AskDecisionSummaryV2,
   type AskTraceDataV1,
   type AgentThinkingMode,
   type AppBuildProposal,
@@ -131,9 +132,21 @@ export function agentRunHistoryFromItems(items: ThreadItem[]): Array<{ role: 'us
       if (history.at(-1)?.role === 'user') history.pop();
       continue;
     }
-    history.push({ role: 'assistant', text: item.run.answer?.trim() || item.run.summary });
+    history.push({ role: 'assistant', text: acceptedAskAnswer(item.run)?.trim() || item.run.summary });
   }
   return history.slice(-12);
+}
+
+/**
+ * An authoritative Ask card must render the persisted fact-bound envelope,
+ * never a free-form executor answer that happened to share the run. Legacy
+ * and conversational runs retain their historical presentation contract.
+ */
+export function acceptedAskAnswer(run: AgentRun): string | undefined {
+  if (run.askAnalystState?.mode === 'authoritative' || run.diagnosticReceiptV5?.state) {
+    return run.businessAnswer?.answer;
+  }
+  return run.answer;
 }
 
 /** A submitted run that may outlive this mounted panel (tab switch, reload, or navigation). */
@@ -1900,10 +1913,10 @@ function RunCard({
         </div>
       ) : null}
 
-      {run.summary && !(run.answer && sameText(cleanPresentationText(run.summary), cleanAnswerText(run.answer))) ? (
+      {run.summary && !(acceptedAskAnswer(run) && sameText(cleanPresentationText(run.summary), cleanAnswerText(acceptedAskAnswer(run)!))) ? (
         <div style={{ fontSize: 12.5, lineHeight: 1.45, color: t.textSecondary }}>{cleanPresentationText(run.summary)}</div>
       ) : null}
-      {run.answer ? <div style={answerBoxStyle(t)}><StructuredAnswerText text={cleanAnswerText(run.answer)} t={t} /></div> : null}
+      {acceptedAskAnswer(run) ? <div style={answerBoxStyle(t)}><StructuredAnswerText text={cleanAnswerText(acceptedAskAnswer(run)!)} t={t} /></div> : null}
 
       {run.analyticalTaskOutcomes && run.analyticalTaskOutcomes.length > 1 ? (
         <div style={{ display: 'grid', gap: 5, padding: '8px 10px', border: `1px solid ${t.cellBorder}`, borderRadius: 8, background: t.cellBg }}>
@@ -2454,7 +2467,7 @@ function AskRunCard(props: AskRunCardProps) {
   // A clarify turn's `answer` IS the question being asked, and a blocked run's
   // `answer` is the business-language reason the loop wrote. Dropping both left
   // the user with a canned headline and nothing actionable underneath.
-  const presentationAnswer = run.answer;
+  const presentationAnswer = acceptedAskAnswer(run);
   const outcomeLabel = cancelled
     ? 'Stopped by user'
     : blocked
@@ -2701,6 +2714,8 @@ interface AnalyticalInspectorContract {
   diagnostic?: Record<string, unknown>;
   /** Server-produced V4 story; never derive a competing incident from spans. */
   decisionSummary?: AskDecisionSummaryV1;
+  /** V1.15 concise runtime story shown before the advanced local trace. */
+  runtimeDecisionSummary?: AskDecisionSummaryV2;
 }
 
 /**
@@ -2741,6 +2756,7 @@ export function hasAnalyticalInspectorContract(payload: Record<string, unknown>)
     || recordOf(payload.diagnosticReceipt)
     || recordOf(payload.diagnosticReceiptV3)
     || recordOf(payload.diagnosticReceiptV4)
+    || recordOf(payload.diagnosticReceiptV5)
     || fallbackAnalyticalFailure(payload),
   );
 }
@@ -2753,11 +2769,13 @@ export function analyticalInspectorContract(payload: Record<string, unknown>): A
   const legacyDiagnostic = recordOf(payload.diagnosticReceipt);
   const v3Diagnostic = recordOf(payload.diagnosticReceiptV3);
   const v4Diagnostic = recordOf(payload.diagnosticReceiptV4);
-  const diagnostic = v4Diagnostic || v3Diagnostic
+  const v5Diagnostic = recordOf(payload.diagnosticReceiptV5);
+  const diagnostic = v5Diagnostic || v4Diagnostic || v3Diagnostic
     ? {
         ...legacyDiagnostic,
         ...v3Diagnostic,
         ...v4Diagnostic,
+        ...v5Diagnostic,
         failure: v3Diagnostic?.failure ?? legacyDiagnostic?.failure,
       }
     : legacyDiagnostic;
@@ -2779,6 +2797,7 @@ export function analyticalInspectorContract(payload: Record<string, unknown>): A
     semantic: recordOf(payload.semanticExecutionTrace),
     diagnostic,
     ...(isAskDecisionSummaryV1(v4Diagnostic?.summary) ? { decisionSummary: v4Diagnostic.summary } : {}),
+    ...(isAskDecisionSummaryV2(v5Diagnostic?.summary) ? { runtimeDecisionSummary: v5Diagnostic.summary } : {}),
   };
 }
 
@@ -2790,6 +2809,16 @@ function isAskDecisionSummaryV1(value: unknown): value is AskDecisionSummaryV1 {
     && Array.isArray(summary.evidenceByRole)
     && Array.isArray(summary.tierDecisions)
     && typeof summary.safeNextAction === 'string';
+}
+
+function isAskDecisionSummaryV2(value: unknown): value is AskDecisionSummaryV2 {
+  const summary = recordOf(value);
+  return summary?.version === 2
+    && typeof summary.summaryFingerprint === 'string'
+    && typeof summary.runtimeMode === 'string'
+    && typeof summary.whatHappened === 'string'
+    && typeof summary.why === 'string'
+    && typeof summary.impact === 'string';
 }
 
 export function analyticalInspectorSections(): string[] {
@@ -3114,6 +3143,7 @@ function AnalyticalHowAnswered({
   // backwards-compatible transport fallback. The inspector must not infer a
   // second incident from spans or generic failure text when this exists.
   const decisionSummary = run.diagnosticReceiptV4?.summary ?? contract.decisionSummary;
+  const runtimeDecisionSummary = run.diagnosticReceiptV5?.summary ?? contract.runtimeDecisionSummary;
   const researchBranchSummary = decisionSummary?.researchBranchSummary;
   // A receipt-backed partial Research result is still a root success. Its
   // failed child branches belong in Failure & repair as limitations, not as a
@@ -3285,9 +3315,11 @@ function AnalyticalHowAnswered({
         </button>
       ) : null}
 
-      {decisionSummary
-        ? <InspectorDecisionStory summary={decisionSummary} t={t} />
-        : <InspectorDecisionSummaryUnavailable t={t} />}
+      {runtimeDecisionSummary
+        ? <InspectorRuntimeDecisionStory summary={runtimeDecisionSummary} t={t} />
+        : decisionSummary
+          ? <InspectorDecisionStory summary={decisionSummary} t={t} />
+          : <InspectorDecisionSummaryUnavailable t={t} />}
 
       <AnalyticalInspectorSection index={1} label="Performance & provider egress" t={t} open>
         {performanceTrace.state === 'loading' ? (
@@ -3483,6 +3515,34 @@ function AnalyticalHowAnswered({
  * durable V4 fields and fingerprint. This is presentation only: it never
  * promotes a span-derived guess into a second failure explanation.
  */
+export function InspectorRuntimeDecisionStory({ summary, t }: { summary: AskDecisionSummaryV2; t: Theme }): JSX.Element {
+  const issue = /did not complete|paused/i.test(summary.whatHappened);
+  const rows: Array<[string, string]> = [
+    ['What happened', summary.whatHappened],
+    ['Why', summary.why],
+    ['Impact on answer', summary.impact],
+    ['How to proceed', inspectorSafeNextAction(summary.nextAction)],
+    ['Program', `${summary.programTaskCount} task${summary.programTaskCount === 1 ? '' : 's'} · ${summary.admittedCandidateCount} admitted candidates · ${summary.toolCallCount} tool calls · ${summary.executionAttempts} execution attempt${summary.executionAttempts === 1 ? '' : 's'}${summary.selectedCompiler ? ` · ${summary.selectedCompiler.replace(/_/g, ' ')}` : ''}.`],
+    ['Runtime receipt', summary.summaryFingerprint],
+  ];
+  return (
+    <section
+      aria-label="Ask runtime story"
+      style={{
+        padding: '10px 12px', borderRadius: 8,
+        border: `1px solid ${issue ? 'var(--status-error-border)' : 'var(--status-success-border)'}`,
+        background: issue ? 'var(--status-error-bg)' : 'var(--status-success-bg)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: issue ? 'var(--status-error)' : 'var(--status-success)', fontSize: 12, fontWeight: 750, marginBottom: 8 }}>
+        {issue ? <ShieldAlert size={13} /> : <ShieldCheck size={13} />}
+        Ask runtime story
+      </div>
+      <InspectorRows rows={rows} t={t} mono />
+    </section>
+  );
+}
+
 export function InspectorDecisionStory({ summary, t }: { summary: AskDecisionSummaryV1; t: Theme }): JSX.Element {
   const request = summary.understoodRequest;
   const researchBranches = summary.researchBranchSummary;
@@ -4138,7 +4198,7 @@ function AddToAppButton({
       pageId: requestedPageId,
       title: tileTitle,
       question: run.question,
-      answer: run.answer ?? run.summary,
+      answer: acceptedAskAnswer(run) ?? run.summary,
       certifiedBlockId: certifiedBlock,
       dqlSource: dqlArtifact?.source,
       sql: answerSqlFromRun(run),

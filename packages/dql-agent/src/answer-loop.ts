@@ -1096,6 +1096,13 @@ export interface AgentFollowUpContext {
   resolvedReferences?: string[];
   unresolvedReferences?: string[];
   /**
+   * An explicit plural reference (for example, "those customers") whose
+   * bounded prior-result entity set was not retained locally. This is a typed
+   * clarification/gap signal, never permission to widen the next query to all
+   * members.
+   */
+  priorResultSetUnavailable?: boolean;
+  /**
    * What a singular reference ("this customer") could have meant when the prior
    * result offered several. Present ONLY when the reference is genuinely
    * ambiguous; the run turns these into clarification options rather than
@@ -1441,6 +1448,14 @@ export interface CertifiedBlockInvocationInput {
 
 export interface AnswerLoopInput {
   question: string;
+  /**
+   * Server-owned continuation guard for a plural prior-result member binding.
+   * Such a follow-up must execute its already-frozen analytical program with
+   * the persisted member set as a filter.  It must not be mistaken for a
+   * cross-result arithmetic request merely because it contains "those".
+   * Public callers cannot hydrate this flag.
+   */
+  skipCrossResultComputation?: boolean;
   /** Immutable interpretation selected by the evidence-first router. */
   resolvedAnalyticalPlan?: ResolvedAnalyticalPlan;
   /**
@@ -2170,7 +2185,9 @@ export async function answer(input: AnswerLoopInput): Promise<AgentAnswer> {
   // Cross-result computations are intentionally independent of the KG and
   // warehouse. Preserve this earliest exit before building any execution
   // registry so lightweight follow-up callers do not need runtime services.
-  const earlyCrossResult = tryCrossResultAnswer(normalizedInput);
+  const earlyCrossResult = normalizedInput.skipCrossResultComputation
+    ? null
+    : tryCrossResultAnswer(normalizedInput);
   if (earlyCrossResult) {
     return {
       ...earlyCrossResult,
