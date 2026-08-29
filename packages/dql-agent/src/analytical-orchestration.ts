@@ -150,6 +150,14 @@ export type EvidenceCandidateRoleV1 =
   | 'context';
 
 /**
+ * Content-safe statement of what the bounded planner package established for
+ * one requested role. `alternatives` deliberately means that qualified cards
+ * were retained for a user choice; it never claims the business meaning was
+ * proven merely because retrieval found related fields.
+ */
+export type EvidenceRoleCoverageStateV1 = 'proven' | 'alternatives';
+
+/**
  * A typed, content-safe reading of the analytical requirements in a question.
  * It is advisory for retrieval/ranking only: the compatibility solver and the
  * immutable resolved plan still own authorization and execution.
@@ -161,6 +169,13 @@ export interface AnalyticalRequirementSetV1 {
   entityTerms: string[];
   entityDisplayTerms: string[];
   memberTerms: string[];
+  /**
+   * A host-validated predicate reconstructed from one stable prior result
+   * selection. This is execution context, not an LLM-selected meaning: the
+   * runtime keeps it through retrieval/planning so a deictic follow-up cannot
+   * widen back to the full warehouse after reload.
+   */
+  priorResultMemberBinding?: AnalyticalPriorResultMemberBindingV1;
   /** Explicit projection fields are requirements, not optional prompt hints. */
   outputTerms?: string[];
   /** `individual` requests a row-level relation rather than an aggregate. */
@@ -179,6 +194,70 @@ export interface AnalyticalRequirementSetV1 {
     fiscalPeriod?: string;
     /** A fiscal token is not executable until a declared calendar binds it. */
     requiresDeclaredFiscalCalendar: boolean;
+  };
+}
+
+/**
+ * Additive, host-owned representation of a selected value from a prior
+ * canonical result. It intentionally mirrors the engine boundary without
+ * importing that module, so analytical framing remains cycle-free.
+ */
+export interface AnalyticalPriorResultMemberBindingV1 {
+  version: 1;
+  displayDimension: string;
+  values: string[];
+  sourceTurnId?: string;
+  resultFingerprint?: string;
+}
+
+/**
+ * Preserve a validated prior-result predicate as typed analytical context.
+ * The selected display key supplies the entity/display requirements needed to
+ * retrieve relationship closure; the literal values remain an immutable host
+ * filter and are never treated as a provider-selected member meaning.
+ */
+export function withAnalyticalPriorResultMemberBinding(
+  requirements: AnalyticalRequirementSetV1,
+  binding: AnalyticalPriorResultMemberBindingV1 | undefined,
+): AnalyticalRequirementSetV1 {
+  const displayDimension = binding?.displayDimension?.trim();
+  const seenValues = new Set<string>();
+  const values = (binding?.values ?? []).flatMap((value) => {
+    const trimmed = value.trim();
+    const normalized = normalizeRequirementTerm(trimmed);
+    if (!trimmed || !normalized || seenValues.has(normalized)) return [];
+    seenValues.add(normalized);
+    return [trimmed];
+  });
+  if (!displayDimension || values.length === 0) return requirements;
+  const normalizedDisplay = normalizeRequirementTerm(displayDimension);
+  const entityTerm = normalizedDisplay
+    .replace(/\b(?:name|id|key|label|email)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return {
+    ...requirements,
+    entityTerms: uniqueRequirementTerms([
+      ...requirements.entityTerms,
+      ...(entityTerm ? [entityTerm] : []),
+    ]),
+    entityDisplayTerms: uniqueRequirementTerms([
+      ...requirements.entityDisplayTerms,
+      normalizedDisplay,
+    ]),
+    // These values are retained for local compiler/filter construction. The
+    // planner request redacts this host-only binding and does not require a
+    // member card when it is present.
+    memberTerms: uniqueRequirementTerms([...requirements.memberTerms, ...values]),
+    priorResultMemberBinding: {
+      version: 1,
+      // Preserve the canonical host field spelling for the immutable filter;
+      // normalized text above is only for role matching/admission.
+      displayDimension,
+      values,
+      ...(binding?.sourceTurnId ? { sourceTurnId: binding.sourceTurnId } : {}),
+      ...(binding?.resultFingerprint ? { resultFingerprint: binding.resultFingerprint } : {}),
+    },
   };
 }
 
@@ -224,6 +303,7 @@ export function buildAnalyticalRequirementSeedV1(input: {
     fiscalDateRoleId: string;
   }>;
   requirements?: AnalyticalRequirementSetV1;
+  priorResultMemberBinding?: AnalyticalPriorResultMemberBindingV1;
   fiscalCalendar?: { id: string; dateRoleId?: string; fiscalPeriodFieldId?: string };
 }): AnalyticalRequirementSeedV1 {
   // Retrieval/parser output is intentionally broad: it may contain useful
@@ -233,10 +313,14 @@ export function buildAnalyticalRequirementSeedV1(input: {
   // frozen host tuple. Structured clarification selections are merged by the
   // router into `requirements` before this function is called.
   const parsed = currentQuestionGroundedParsedIntent(input.question, input.parsedIntent);
-  const requirements = input.requirements ?? buildAnalyticalRequirementSet({
+  const baseRequirements = input.requirements ?? buildAnalyticalRequirementSet({
     question: input.question,
     parsedIntent: parsed,
   });
+  const requirements = withAnalyticalPriorResultMemberBinding(
+    baseRequirements,
+    input.priorResultMemberBinding ?? baseRequirements.priorResultMemberBinding,
+  );
   // Order and limit are lexical requirements, not parser defaults. In
   // particular, a prior ranking must not turn a complete new question into a
   // top-N query just because retrieval retained an old `limit` or `order`.
@@ -245,6 +329,13 @@ export function buildAnalyticalRequirementSeedV1(input: {
     : undefined;
   const limit = requirements.ranking?.limit;
   const filters = [...(parsed?.filters ?? [])].map((filter) => ({ field: filter.field, value: filter.value }));
+  for (const value of requirements.priorResultMemberBinding?.values ?? []) {
+    const field = requirements.priorResultMemberBinding?.displayDimension;
+    if (!field || filters.some((filter) =>
+      normalizeRequirementTerm(filter.field) === normalizeRequirementTerm(field)
+      && normalizeRequirementTerm(filter.value) === normalizeRequirementTerm(value))) continue;
+    filters.push({ field, value });
+  }
   if (requirements.time?.fiscalPeriod && input.fiscalCalendar?.fiscalPeriodFieldId
     && !filters.some((filter) => filter.field === input.fiscalCalendar!.fiscalPeriodFieldId)) {
     filters.push({ field: input.fiscalCalendar.fiscalPeriodFieldId, value: requirements.time.fiscalPeriod });
@@ -941,7 +1032,17 @@ export interface AnalyticalPlannerCandidateCardV1 {
   source: ContextSourceCoverageV1['source'];
   trustTier: 'certified' | 'semantic' | 'governed' | 'exploratory';
   exactMatch: boolean;
+  /**
+   * The card was retained so the planner can resolve one otherwise-unmet
+   * business role. This is admission context only: it is not a declared
+   * alias, selected meaning, or execution authorization. The verifier must
+   * still prove an exact declaration or one unique inferred substitution.
+   */
+  admissionReasonCode?: 'candidate_for_unresolved_role';
+  unresolvedRoles?: EvidenceCandidateRoleV1[];
   relationHints?: string[];
+  /** Present only for a host-authored relationship-path card; exploratory never implies governed authority. */
+  relationshipProofClass?: 'governed' | 'exploratory';
 }
 
 export interface AnalyticalPlannerRequestV1 {
@@ -1061,6 +1162,17 @@ export interface EvidenceWorkspaceV2 extends Omit<EvidenceWorkspaceV1, 'version'
   plannerCandidateIds: string[];
   /** V1 consumers read this as the planner admission. */
   admittedCandidateIds: string[];
+  /**
+   * Content-safe role admission counters. These are captured at the runtime
+   * boundary, rather than reconstructed later from raw retrieval cards, so a
+   * V7 trace can distinguish a missing requested role from a role-cap
+   * exclusion after reload without retaining business labels or values.
+   */
+  roleCoverage?: Array<{
+    role: EvidenceCandidateRoleV1;
+    candidateCount: number;
+    state?: EvidenceRoleCoverageStateV1;
+  }>;
   targetedContext?: TargetedContextResultV1;
 }
 
@@ -1133,7 +1245,12 @@ export interface AgentRunDiagnosticReceiptV6 extends Omit<AgentRunDiagnosticRece
   version: 6;
   planning?: AskAnalystPlanningReceiptV1;
   /** Role coverage is count-only: raw terms and candidate labels stay Advanced-only. */
-  roleCoverage: Array<{ role: EvidenceCandidateRoleV1; candidateCount: number }>;
+  roleCoverage: Array<{
+    role: EvidenceCandidateRoleV1;
+    candidateCount: number;
+    /** `alternatives` is a clarification state, not a proof of business meaning. */
+    state?: EvidenceRoleCoverageStateV1;
+  }>;
   /** The exact pre-execution cascade record behind the selected compiler. */
   cascade: {
     attempts: Array<Pick<CascadeTierAttemptV1, 'tier' | 'outcome' | 'planFrozen'>>;
@@ -1160,6 +1277,50 @@ export interface AgentRunDiagnosticReceiptV6 extends Omit<AgentRunDiagnosticRece
     status: 'completed' | 'skipped' | 'blocked' | 'unavailable';
     reasonCode: string;
   }>;
+}
+
+/**
+ * Additive V7 reader receipt.  V6 remains the detailed, content-free trace
+ * record; V7 projects it into the few decisions an analyst needs first:
+ * whether the question was understood, whether evidence was sufficient, what
+ * the planner/cascade decided, and whether a result was actually narrated.
+ * It deliberately carries counts and enum outcomes only—never prompt text,
+ * SQL, result rows, provider payloads, candidate labels, or member values.
+ */
+export interface AgentRunDiagnosticReceiptV7 extends Omit<AgentRunDiagnosticReceiptV6, 'version'> {
+  version: 7;
+  inspector: {
+    understood: {
+      questionKind: BusinessQuestionFrameV4['kind'];
+      conversationBinding: BusinessQuestionFrameV4['conversation']['binding'];
+      measureCount: number;
+      dimensionCount: number;
+      entityRequested: boolean;
+      hasBoundFilter: boolean;
+    };
+    evidence: {
+      admittedCandidateCount: number;
+      roleCount: number;
+      recoveryAttempted: boolean;
+    };
+    planning: {
+      mode: AskPlanningModeV1;
+      plannerCalls: number;
+      verification: ProgramVerificationFeedbackV1['status'];
+    };
+    route: {
+      selectedTier?: AnalyticalCascadeDecisionV1['selectedTier'];
+      tierAttemptCount: number;
+      planFrozen: boolean;
+      reviewRequired: boolean;
+    };
+    outcome: {
+      connectionAttempted: boolean;
+      executionAttempts: number;
+      factCount: number;
+      narration: 'fact_bound' | 'result_without_facts' | 'not_applicable';
+    };
+  };
 }
 
 /** New runtime values are V2; V1 values remain readable from old JSON runs. */
@@ -1235,6 +1396,8 @@ export type RoleBalancedEvidenceCandidate = {
   semanticObjectType?: string;
   name?: string;
   aliases?: string[];
+  /** Source-authored semantic or physical value type when the snapshot has it. */
+  dataType?: string;
   dimensions?: string[];
   timeGrains?: string[];
   relationshipEvidence?: string[];
@@ -1696,7 +1859,14 @@ export function buildAnalyticalRequirementSet(input: {
   const measures = explicitRankingMeasures.length > 0
     ? explicitRankingMeasures
     : typedRequirements.measures;
-  const dimensions = typedRequirements.dimensions;
+  // Retrieval/parser hints sometimes repeat an explicit measure as a
+  // dimension (for example `revenue` in "show revenue by region").  Keep
+  // the user-authored measure authoritative and remove only an exact
+  // normalized duplicate.  A broader substring rule would incorrectly drop
+  // legitimate dimensions such as `product revenue category`.
+  const measureTerms = new Set(measures.map((measure) => normalizeRequirementTerm(measure)));
+  const dimensions = typedRequirements.dimensions.filter((dimension) =>
+    !measureTerms.has(normalizeRequirementTerm(dimension)));
   const rankingMetricTerms = ranking ? measures : [];
   // A context planner supplies its own safety default (`topN: 10`) for bare
   // rankings. It is a useful execution bound, but it is not user intent. Read
@@ -1797,6 +1967,32 @@ export function isEntityAttributeCandidate(candidate: RoleBalancedEvidenceCandid
   return hasEntityAttributeTerm(intrinsicCandidateIdentity(candidate));
 }
 
+/**
+ * Time is a type-level role, not a lexical synonym. Semantic indexes from
+ * dbt/MetricFlow commonly retain all members as `dimension`, so a typed
+ * `opened_date` must not also enter the ordinary categorical/geographic
+ * fallback lane. A card-level semantic-time class or physical/semantic type
+ * is authoritative. `timeGrains` alone is deliberately not: older retrieval
+ * adapters can inherit a model/metric's supported grains onto unrelated
+ * entity and display cards. Names are used only for legacy cards with no
+ * source type.
+ */
+function candidateHasDeclaredTimeRole(candidate: RoleBalancedEvidenceCandidate): boolean {
+  if (candidate.semanticObjectType === 'time_dimension') return true;
+  const dataType = normalizeRequirementTerm(candidate.dataType ?? '');
+  return /(?:^| )(?:date|datetime|timestamp|timestamptz|timestampntz|time)(?:$| )/.test(dataType);
+}
+
+function candidateUsesLegacyTimeNameFallback(candidate: RoleBalancedEvidenceCandidate): boolean {
+  // A supplied type is authoritative even when a legacy name happens to
+  // contain `date` (for example a text display label). A missing/empty
+  // time-grain list is not a positive type declaration, so old untyped cards
+  // retain this safe fallback.
+  if (normalizeRequirementTerm(candidate.dataType ?? '')) return false;
+  return /(?:\bdate\b|\btime\b|\bmonth\b|\bquarter\b|\byear\b|\bfiscal\b|\bperiod\b)/
+    .test(intrinsicCandidateIdentity(candidate));
+}
+
 /** Classify the role an already-qualified candidate may fill. */
 export function evidenceCandidateRoles(candidate: RoleBalancedEvidenceCandidate): EvidenceCandidateRoleV1[] {
   const identity = intrinsicCandidateIdentity(candidate);
@@ -1807,6 +2003,17 @@ export function evidenceCandidateRoles(candidate: RoleBalancedEvidenceCandidate)
     || candidate.semanticObjectType === 'measure'
     || /\bmetric\b/.test(identity)
     || (physicalColumn && /\b(?:revenue|amount|count|rate|bcm|spend|cost|margin|total)\b/.test(identity));
+  // A temporal type/grain is stronger than an authored compatibility-role
+  // label. Index migrations can leave an old `roles categorical dimension`
+  // fact on a date field, but allowing that contradictory fact back into the
+  // ordinary inference lane turns time fields into false geography choices.
+  // Metrics retain their explicit compatibility roles because capability
+  // metadata is not the metric object's own temporal identity.
+  const declaredTimeRole = !metricCandidate && candidateHasDeclaredTimeRole(candidate);
+  const legacyTimeName = !metricCandidate
+    && !declaredTimeRole
+    && candidateUsesLegacyTimeNameFallback(candidate);
+  const temporalCandidate = declaredTimeRole || legacyTimeName;
   if (metricCandidate) roles.add('metric');
 
   // Capability metadata belongs to the metric's execution contract.  It must
@@ -1825,15 +2032,34 @@ export function evidenceCandidateRoles(candidate: RoleBalancedEvidenceCandidate)
     if (/\b(?:account|customer|client|company)\b/.test(identity)
       && /\b(?:name|label|display)\b/.test(identity)
       && !hasEntityAttributeTerm(identity)) roles.add('entity_label');
-    if (/(?:\bdate\b|\btime\b|\bmonth\b|\bquarter\b|\byear\b|\bfiscal\b|\bperiod\b)/.test(identity)
-      || (candidate.timeGrains?.length ?? 0) > 0) roles.add('time_dimension');
+    if (temporalCandidate) roles.add('time_dimension');
     if ((candidate.kind === 'dql_modeling' && (candidate.relationshipEvidence?.length ?? 0) > 0)
       || /\b(?:relationship|join|bridge)\b/.test(identity)) roles.add('relationship');
-    if (candidate.kind === 'semantic_member' || candidate.semanticObjectType === 'dimension'
-      || (physicalColumn && /\b(?:competitor|region|category|segment|status|type|owner|sentiment|active|product|description)\b/.test(identity))) roles.add('categorical_dimension');
+    // `semantic_member` intentionally collapses dimensions, entities, models,
+    // and saved queries in older local indexes. Only a real (or legacy
+    // unclassified) dimension can be a categorical field. A semantic model or
+    // entity is execution context, never a user-visible grouping dimension.
+    const semanticDimension = candidate.semanticObjectType === 'dimension'
+      || (candidate.kind === 'semantic_member' && candidate.semanticObjectType === undefined);
+    // A time dimension can be grouped at a time grain, but it is not an
+    // ordinary categorical/geographic alternative for a business term such
+    // as `region`. Keep the role sets mutually exclusive here; the semantic
+    // compiler still receives the same qualified identity when time is asked.
+    if (!temporalCandidate
+      && (semanticDimension
+        || (physicalColumn && /\b(?:competitor|region|category|segment|status|type|owner|sentiment|active|product|description)\b/.test(identity)))) {
+      roles.add('categorical_dimension');
+    }
     if (candidate.kind === 'semantic_member' && candidate.semanticObjectType === 'member') roles.add('member');
   }
-  for (const role of explicitlyDeclaredCandidateRoles(candidate)) roles.add(role);
+  for (const role of explicitlyDeclaredCandidateRoles(candidate)) {
+    // Do not let a stale/contradictory authored compatibility declaration
+    // reverse a source-authored temporal type or legacy temporal identity.
+    // The temporal role remains visible; only the conflicting ordinary
+    // categorical role is rejected.
+    if (temporalCandidate && role === 'categorical_dimension') continue;
+    roles.add(role);
+  }
   if (candidate.kind === 'sql_column' || candidate.kind === 'dbt_model' || candidate.kind === 'sql_table') roles.add('context');
   if (roles.size === 0) roles.add('context');
   return [...roles];
@@ -2867,6 +3093,244 @@ export interface ResearchEvidenceLedgerV2 {
   groundableBranchCount: number;
   limitedScope: boolean;
   stoppingReason: ResearchEvidenceLedgerV1['stoppingReason'];
+}
+
+/**
+ * A local structural lineage observation is not a query result.  This receipt
+ * deliberately carries only bounded counts, opaque fingerprints, and
+ * allowlisted status values: it must never become a place where prompts, SQL,
+ * rows, graph labels, paths, or provider output are persisted.
+ */
+export type ResearchLineageEvidenceStatusV1 = 'completed' | 'missing' | 'ambiguous' | 'stale' | 'truncated' | 'unavailable';
+
+export type ResearchLineageResolutionV1 =
+  | 'exact_id'
+  | 'exact_name'
+  | 'canonical_alias'
+  | 'missing'
+  | 'ambiguous'
+  | 'stale'
+  | 'unavailable';
+
+export type ResearchLineageNodeTypeV1 =
+  | 'source_table'
+  | 'dbt_model'
+  | 'dbt_source'
+  | 'term'
+  | 'block'
+  | 'business_view'
+  | 'metric'
+  | 'dimension'
+  | 'domain'
+  | 'chart'
+  | 'notebook'
+  | 'dashboard'
+  | 'app';
+
+export interface ResearchLineageEvidenceReceiptV1 {
+  version: 1;
+  evidenceKind: 'lineage_graph';
+  /** Opaque local identity only; no source path or graph content is retained. */
+  snapshotId?: string;
+  snapshotFingerprint?: string;
+  graphFingerprint: string;
+  targetFingerprint: string;
+  status: ResearchLineageEvidenceStatusV1;
+  resolution: ResearchLineageResolutionV1;
+  candidateCount: number;
+  targetType?: ResearchLineageNodeTypeV1;
+  upstreamNodeCount: number;
+  downstreamNodeCount: number;
+  upstreamPathCount: number;
+  downstreamPathCount: number;
+  traversedNodeCount: number;
+  traversedEdgeCount: number;
+  maxDepth: number;
+  maxPaths: number;
+  maxNodes: number;
+  maxEdges: number;
+  truncated: boolean;
+  /** One-way digest of the bounded structural program, never a result digest. */
+  structuralFingerprint?: string;
+  validator: {
+    version: 1;
+    kind: 'structural_dependency';
+    evaluated: boolean;
+    outcome: 'dependency_observed' | 'inconclusive';
+    /** A lineage edge is structural evidence only, never a causal conclusion. */
+    nonCausal: true;
+  };
+  /** This program must not dispatch AI, SQL, warehouse, or repair work. */
+  zeroCallCounters: {
+    providerCalls: 0;
+    sqlExecutions: 0;
+    warehouseExecutions: 0;
+    repairAttempts: 0;
+  };
+}
+
+export type ResearchEvidenceKindV3 = 'analytical_result' | 'lineage_graph';
+
+/**
+ * V3 is additive and content-safe.  V1/V2 remain available to old readers,
+ * while V3 distinguishes a receipt-bound analytical result from a bounded
+ * structural lineage observation.  In particular, the lineage variant has no
+ * result fingerprint, execution receipt, row count, SQL, or provider payload.
+ */
+export interface ResearchEvidenceLedgerAnalyticalEntryV3 {
+  version: 3;
+  id: string;
+  branchId: string;
+  evidenceKind: 'analytical_result';
+  status: ResearchLedgerEntryV1['status'];
+  verdict: ResearchEvidenceVerdictV2;
+  hypothesisFingerprint?: string;
+  factIds: string[];
+  counterEvidenceFactIds: string[];
+  receiptFingerprints: string[];
+  resultFingerprint?: string;
+}
+
+export interface ResearchEvidenceLedgerLineageEntryV3 {
+  version: 3;
+  id: string;
+  branchId: string;
+  evidenceKind: 'lineage_graph';
+  /** The structural program completed even when a target is missing/stale. */
+  status: 'observed' | 'failed' | 'skipped';
+  verdict: ResearchEvidenceVerdictV2;
+  hypothesisFingerprint?: string;
+  factIds: string[];
+  counterEvidenceFactIds: string[];
+  receiptFingerprints: string[];
+  lineageReceipt: ResearchLineageEvidenceReceiptV1;
+}
+
+export type ResearchEvidenceLedgerEntryV3 =
+  | ResearchEvidenceLedgerAnalyticalEntryV3
+  | ResearchEvidenceLedgerLineageEntryV3;
+
+export interface ResearchEvidenceLedgerV3 {
+  version: 3;
+  /** One-way root-question identity; V3 does not retain research prose. */
+  rootQuestionFingerprint: string;
+  planId?: string;
+  snapshotId?: string;
+  entries: ResearchEvidenceLedgerEntryV3[];
+  factIds: string[];
+  groundableBranchCount: number;
+  limitedScope: boolean;
+  stoppingReason: ResearchEvidenceLedgerV1['stoppingReason'];
+}
+
+export interface ResearchEvidenceLedgerAnalyticalInputV3 {
+  kind: 'analytical_result';
+  index: number;
+  entry: ResearchEvidenceLedgerEntryV2;
+  hypothesisFingerprint?: string;
+}
+
+export interface ResearchEvidenceLedgerLineageInputV3 {
+  kind: 'lineage_graph';
+  index: number;
+  id: string;
+  branchId: string;
+  receipt: ResearchLineageEvidenceReceiptV1;
+  hypothesisFingerprint?: string;
+  /** Omitted means the direct structural program completed normally. */
+  status?: 'observed' | 'failed' | 'skipped';
+}
+
+function ledgerFactIdsV3(branchId: string, facts: string[]): { ids: string[]; byFact: Map<string, string> } {
+  const byFact = new Map<string, string>();
+  const ids: string[] = [];
+  for (const fact of facts) {
+    const normalized = fact.trim();
+    if (!normalized || byFact.has(normalized)) continue;
+    const id = `fact:${branchId}:${ids.length + 1}`;
+    ids.push(id);
+    byFact.set(normalized, id);
+  }
+  return { ids, byFact };
+}
+
+/**
+ * Build a mixed V3 ledger without reinterpreting V1/V2.  The legacy ledgers
+ * continue to contain analytical branches only, because their `observed`
+ * state requires an execution/result receipt and would otherwise falsely
+ * represent a graph walk as query execution.
+ */
+export function buildResearchEvidenceLedgerV3(input: {
+  rootQuestionFingerprint: string;
+  planId?: string;
+  snapshotId?: string;
+  groundableBranchCount?: number;
+  entries: Array<ResearchEvidenceLedgerAnalyticalInputV3 | ResearchEvidenceLedgerLineageInputV3>;
+  stoppingReason?: ResearchEvidenceLedgerV1['stoppingReason'];
+}): ResearchEvidenceLedgerV3 {
+  const entries = input.entries
+    .slice(0, 6)
+    .sort((left, right) => left.index - right.index || left.kind.localeCompare(right.kind))
+    .map((source): ResearchEvidenceLedgerEntryV3 => {
+      if (source.kind === 'analytical_result') {
+        const entry = source.entry;
+        const facts = ledgerFactIdsV3(entry.branchId, entry.facts);
+        const counterEvidenceFactIds = [...new Set(entry.counterEvidenceFactIds)]
+          .flatMap((fact) => facts.byFact.get(fact) ? [facts.byFact.get(fact)!] : []);
+        const resultFingerprint = normalizeAnalyticalExecutionFingerprint(entry.resultFingerprint);
+        return {
+          version: 3,
+          id: entry.id,
+          branchId: entry.branchId,
+          evidenceKind: 'analytical_result',
+          status: entry.status,
+          verdict: entry.verdict,
+          ...(source.hypothesisFingerprint ? { hypothesisFingerprint: source.hypothesisFingerprint } : {}),
+          factIds: facts.ids,
+          counterEvidenceFactIds,
+          receiptFingerprints: resultFingerprint ? [resultFingerprint] : [],
+          ...(resultFingerprint ? { resultFingerprint } : {}),
+        };
+      }
+
+      const facts = ledgerFactIdsV3(source.branchId, [
+        `lineage:${source.receipt.status}`,
+        `lineage:resolution:${source.receipt.resolution}`,
+      ]);
+      const status = source.status
+        ?? (source.receipt.status === 'completed' || source.receipt.status === 'truncated'
+          ? 'observed'
+          : 'failed');
+      return {
+        version: 3,
+        id: source.id,
+        branchId: source.branchId,
+        evidenceKind: 'lineage_graph',
+        status,
+        // The local graph can establish a structural dependency. It cannot
+        // establish causation, even when a complete path exists.
+        verdict: status === 'skipped' ? 'skipped' : 'inconclusive',
+        ...(source.hypothesisFingerprint ? { hypothesisFingerprint: source.hypothesisFingerprint } : {}),
+        factIds: facts.ids,
+        counterEvidenceFactIds: [],
+        receiptFingerprints: source.receipt.structuralFingerprint ? [source.receipt.structuralFingerprint] : [],
+        lineageReceipt: source.receipt,
+      };
+    });
+  const observedGroundableBranchCount = entries.filter((entry) => entry.status === 'observed' && entry.verdict !== 'skipped').length;
+  const plannedGroundableBranchCount = Math.max(0, Math.min(6, Math.trunc(input.groundableBranchCount ?? 0)));
+  const groundableBranchCount = Math.max(observedGroundableBranchCount, plannedGroundableBranchCount);
+  return {
+    version: 3,
+    rootQuestionFingerprint: input.rootQuestionFingerprint,
+    ...(input.planId ? { planId: input.planId } : {}),
+    ...(input.snapshotId ? { snapshotId: input.snapshotId } : {}),
+    entries,
+    factIds: [...new Set(entries.flatMap((entry) => [...entry.factIds, ...entry.counterEvidenceFactIds]))],
+    groundableBranchCount,
+    limitedScope: groundableBranchCount < 3,
+    stoppingReason: input.stoppingReason ?? (entries.length > 0 ? 'completed' : 'not_started'),
+  };
 }
 
 export function capResearchBranches<T>(branches: T[], max = 6): T[] {

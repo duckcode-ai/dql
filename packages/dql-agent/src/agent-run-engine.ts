@@ -41,6 +41,7 @@ import {
   buildCoverageGap,
   classifyProviderFailure,
   type AgentRunDiagnosticReceiptV6,
+  type AgentRunDiagnosticReceiptV7,
   type AgentRunDiagnosticReceiptV5,
   type AnalyticalProgram,
   type AskAnalystState,
@@ -653,6 +654,8 @@ export interface AgentRun {
   diagnosticReceiptV5?: AgentRunDiagnosticReceiptV5;
   /** Additive retrieval-first Ask story. V1-V5 remain readable. */
   diagnosticReceiptV6?: AgentRunDiagnosticReceiptV6;
+  /** Additive concise Ask inspector. V1-V6 remain readable. */
+  diagnosticReceiptV7?: AgentRunDiagnosticReceiptV7;
   /** Fact-driven result envelope generated after the accepted executor result. */
   businessAnswer?: BusinessAnswer;
   /** Typed Ask runtime state retained across persistence/reload. */
@@ -1774,7 +1777,7 @@ export class AgentRunEngine {
       run.diagnosticReceiptV3 = diagnosticReceiptV3ForRun(run);
       run.diagnosticReceiptV4 = diagnosticReceiptV4ForRun(run);
       attachAskAnalystRuntimeReceipt(run);
-      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3, run.diagnosticReceiptV4, run.diagnosticReceiptV5, run.diagnosticReceiptV6);
+      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3, run.diagnosticReceiptV4, run.diagnosticReceiptV5, run.diagnosticReceiptV6, run.diagnosticReceiptV7);
       // Observability is deliberately finalized only after the authoritative
       // receipt exists, and before the ordinary run store persists its compact
       // reference. A local trace write failure never changes this outcome.
@@ -2300,7 +2303,7 @@ export class AgentRunEngine {
       run.diagnosticReceiptV3 = diagnosticReceiptV3ForRun(run);
       run.diagnosticReceiptV4 = diagnosticReceiptV4ForRun(run);
       attachAskAnalystRuntimeReceipt(run);
-      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3, run.diagnosticReceiptV4, run.diagnosticReceiptV5, run.diagnosticReceiptV6);
+      run.artifacts = attachDiagnosticReceipt(run.artifacts, run.diagnosticReceipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3, run.diagnosticReceiptV4, run.diagnosticReceiptV5, run.diagnosticReceiptV6, run.diagnosticReceiptV7);
       finalizeAgentRunTraceV1(traceObserver, run);
       await checkpointQueue;
       await this.store?.save(run);
@@ -2480,7 +2483,7 @@ export class AgentRunEngine {
       run.diagnosticReceiptV3 = diagnosticReceiptV3ForRun(run);
       run.diagnosticReceiptV4 = diagnosticReceiptV4ForRun(run);
       attachAskAnalystRuntimeReceipt(run);
-      run.artifacts = attachDiagnosticReceipt(retainedArtifacts, receipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3, run.diagnosticReceiptV4, run.diagnosticReceiptV5, run.diagnosticReceiptV6);
+      run.artifacts = attachDiagnosticReceipt(retainedArtifacts, receipt, run.diagnosticReceiptV2, run.diagnosticReceiptV3, run.diagnosticReceiptV4, run.diagnosticReceiptV5, run.diagnosticReceiptV6, run.diagnosticReceiptV7);
       finalizeAgentRunTraceV1(traceObserver, run);
       await checkpointQueue;
       await this.store?.save(run);
@@ -3201,6 +3204,17 @@ function enforceOrdinaryAnalyticalPlanBoundary(
   request: AgentRunRequest,
   decision: IntentDecision,
 ): IntentDecision {
+  // AskAnalystRuntimeV1 has already retrieved, planned, verified and (when
+  // possible) frozen this ordinary Ask turn.  The engine is a dispatcher at
+  // this boundary, not a second cascade owner.  In particular, do not let the
+  // legacy modelling-gap rescue reinterpret a pre-freeze canonical decision:
+  // that used to turn one immutable cascade into two competing routes.
+  // Post-freeze executor/warehouse safety checks remain below the engine
+  // boundary and are intentionally unchanged.
+  if (decision.askAnalystDecision?.mode === 'authoritative'
+    || request.askAnalystState?.mode === 'authoritative') {
+    return decision;
+  }
   const ordinaryAsk = request.requestedMode === undefined
     || request.requestedMode === 'auto'
     || request.requestedMode === 'ask';
@@ -3722,6 +3736,8 @@ function diagnosticReceiptV4ForRun(run: AgentRun): AgentRunDiagnosticReceiptV4 {
     roleCounts.set(evidence.role, (roleCounts.get(evidence.role) ?? 0) + evidence.candidateCount);
   }
   const terminalIncident = terminalIncidentForRun(run, cascade?.stopReason);
+  const runtimeReviewRequired = run.askAnalystState?.resolvedPlan?.reviewRequired === true
+    || run.routeDecision?.askAnalystDecision?.state.resolvedPlan?.reviewRequired === true;
   const summaryInput = {
     version: 1 as const,
     understoodRequest: {
@@ -3750,7 +3766,7 @@ function diagnosticReceiptV4ForRun(run: AgentRun): AgentRunDiagnosticReceiptV4 {
           selectedPlan: {
             tier: cascade.selectedTier,
             planFrozen: cascade.planFrozen,
-            reviewRequired: cascade.selectedTier === 'exploratory_sql',
+            reviewRequired: cascade.selectedTier === 'exploratory_sql' || runtimeReviewRequired,
           },
         }
       : {}),
@@ -3815,6 +3831,7 @@ function attachAskAnalystRuntimeReceipt(run: AgentRun): void {
   run.answer = run.businessAnswer.answer;
   run.diagnosticReceiptV5 = diagnosticReceiptV5ForRun(run, state, run.businessAnswer);
   run.diagnosticReceiptV6 = diagnosticReceiptV6ForRun(run, state, run.diagnosticReceiptV5);
+  run.diagnosticReceiptV7 = diagnosticReceiptV7ForRun(run, state, run.diagnosticReceiptV6);
 }
 
 /** Preserve either persisted state version while adding executor-owned facts. */
@@ -3979,11 +3996,19 @@ function attachDeterministicResultFacts(run: AgentRun): void {
  * prove the same canonical result fingerprint; ambiguity fails closed.
  */
 function authoritativeExecutedAnswerArtifactsForRun(run: AgentRun): AuthoritativeExecutedAnswerArtifactV1[] {
-  if (run.requestedMode !== 'ask'
+  // Notebook Ask submits ordinary analytical turns as `auto`; the runtime has
+  // already classified and frozen the authoritative Ask plan by this point.
+  // Treating only the legacy explicit `ask` mode as fact eligible discarded
+  // verified result facts after a successful query and produced the generic
+  // "no fact-linked narrative" message. Other modes remain closed here.
+  const runtimeFrozenAuthoritative = run.askAnalystState?.mode === 'authoritative'
+    && run.askAnalystState.resolvedPlan?.planFrozen === true;
+  const decisionFrozenAuthoritative = run.routeDecision?.resolvedAnalyticalPlan?.mode === 'authoritative'
+    && run.routeDecision.analyticalCascadeDecision?.planFrozen === true;
+  if ((run.requestedMode !== 'ask' && run.requestedMode !== 'auto')
     || run.status === 'blocked'
     || run.status === 'cancelled'
-    || run.routeDecision?.resolvedAnalyticalPlan?.mode !== 'authoritative'
-    || run.routeDecision.analyticalCascadeDecision?.planFrozen !== true) {
+    || (!runtimeFrozenAuthoritative && !decisionFrozenAuthoritative)) {
     return [];
   }
   const finalStep = [...run.steps].reverse().find((step) =>
@@ -4352,10 +4377,15 @@ function diagnosticReceiptV5ForRun(
 ): AgentRunDiagnosticReceiptV5 {
   const legacy = run.diagnosticReceiptV4?.summary;
   const selectedCompiler = state.resolvedPlan?.compiler;
+  const ordinaryRoleInferenceAmbiguity = run.status === 'needs_clarification'
+    && state.version === 2
+    && state.planningReceipt?.verification?.reasonCode === 'ordinary_role_inference_ambiguous';
   const whatHappened = run.status === 'blocked'
     ? 'The Ask runtime did not complete an executable analytical answer.'
     : run.status === 'needs_clarification'
-      ? 'The Ask runtime paused because validated executable meanings materially differ.'
+      ? ordinaryRoleInferenceAmbiguity
+        ? 'The Ask runtime paused because inferred candidate fields need one business choice.'
+        : 'The Ask runtime paused because validated executable meanings materially differ.'
       : selectedCompiler
         ? `The Ask runtime compiled one route-neutral program with the ${selectedCompiler} compiler.`
         : 'The Ask runtime completed without selecting an analytical compiler.';
@@ -4364,7 +4394,9 @@ function diagnosticReceiptV5ForRun(
       ? `The recorded terminal incident was ${legacy.terminalIncident.code}.`
       : 'No safe executable compiler plan was accepted from the current evidence snapshot.'
     : run.status === 'needs_clarification'
-      ? 'The selected meanings would change the result, so DQL did not guess.'
+      ? ordinaryRoleInferenceAmbiguity
+        ? 'The snapshot retained multiple safe inferred fields for one requested role, so DQL did not choose or execute a query.'
+        : 'The selected meanings would change the result, so DQL did not guess.'
       : state.resolvedPlan?.reviewRequired
         ? 'The selected plan required review before generated SQL execution.'
         : 'The selected plan passed the current compiler and trust boundary.';
@@ -4436,13 +4468,30 @@ function diagnosticReceiptV6ForRun(
   const plannerMode = persistedPlanning?.mode ?? (plannerCalls === 0
     ? (state.workspace.admittedCandidateIds.length ? 'deterministic_binding' : 'exact_fast_path')
     : revisionCalls > 0 ? 'targeted_revision' : 'initial_planner');
+  // V2 workspace admission captures count-only business role coverage after
+  // exact pins, atomic relationship paths, and the 16-card cap. Prefer it to
+  // raw retrieval metadata: the latter answers "what was found", while this
+  // receipt must explain "what the planner could actually use". V1 remains
+  // readable through the legacy trace-metadata fallback.
+  const recordedRoleCoverage = state.workspace.version === 2
+    ? state.workspace.roleCoverage
+    : undefined;
   const roleCounts = new Map<AgentRunDiagnosticReceiptV6['roleCoverage'][number]['role'], number>();
   for (const candidate of run.routeDecision?.retrievalEvidence?.candidateTraceMetadata ?? []) {
     roleCounts.set(candidate.role, (roleCounts.get(candidate.role) ?? 0) + 1);
   }
-  const roleCoverage = [...roleCounts.entries()]
-    .map(([role, candidateCount]) => ({ role, candidateCount }))
-    .sort((left, right) => left.role.localeCompare(right.role));
+  const roleCoverage = recordedRoleCoverage?.length
+    ? recordedRoleCoverage
+      .filter((entry) => Number.isFinite(entry.candidateCount) && entry.candidateCount >= 0)
+      .map((entry) => ({
+        role: entry.role,
+        candidateCount: entry.candidateCount,
+        ...(entry.state === 'alternatives' || entry.state === 'proven' ? { state: entry.state } : {}),
+      }))
+      .sort((left, right) => left.role.localeCompare(right.role))
+    : [...roleCounts.entries()]
+      .map(([role, candidateCount]) => ({ role, candidateCount }))
+      .sort((left, right) => left.role.localeCompare(right.role));
   const terminalIncident = run.diagnosticReceiptV4?.terminalIncident;
   const verification = persistedPlanning?.verification ?? (state.phase === 'blocked'
     ? { version: 1 as const, status: 'invalid' as const, missingRoles: [], candidateIds: [], reasonCode: 'pre_freeze_verification_blocked' }
@@ -4501,6 +4550,63 @@ function diagnosticReceiptV6ForRun(
     },
     safeNextAction: receipt.summary.nextAction,
     story,
+  };
+}
+
+/**
+ * V7 is the compact first-read inspector. It is a pure projection of the
+ * finalized V6 receipt and frozen runtime state, so browser presentation
+ * cannot become a second planner, router, or trust authority.
+ */
+function diagnosticReceiptV7ForRun(
+  run: AgentRun,
+  state: AskAnalystState,
+  receipt: AgentRunDiagnosticReceiptV6,
+): AgentRunDiagnosticReceiptV7 {
+  const requirements = state.frame.requirements;
+  const planning = receipt.planning;
+  const resolvedPlan = state.resolvedPlan ?? run.routeDecision?.askAnalystDecision?.resolvedPlan;
+  const factCount = receipt.facts.factCount;
+  const narration: AgentRunDiagnosticReceiptV7['inspector']['outcome']['narration'] = factCount > 0
+    ? 'fact_bound'
+    : run.status === 'completed' || run.status === 'needs_review'
+      ? 'result_without_facts'
+      : 'not_applicable';
+  return {
+    ...receipt,
+    version: 7,
+    inspector: {
+      understood: {
+        questionKind: state.frame.kind,
+        conversationBinding: state.frame.conversation.binding,
+        measureCount: requirements.measures.length,
+        dimensionCount: requirements.dimensions.length + requirements.entityDisplayTerms.length + (requirements.outputTerms?.length ?? 0),
+        entityRequested: requirements.entityTerms.length > 0,
+        hasBoundFilter: state.program.filters.length > 0,
+      },
+      evidence: {
+        admittedCandidateCount: state.workspace.admittedCandidateIds.length,
+        roleCount: receipt.roleCoverage.length,
+        recoveryAttempted: receipt.story.some((step) => step.stage === 'targeted_recovery' && step.status === 'completed'),
+      },
+      planning: {
+        mode: planning?.mode ?? 'deterministic_binding',
+        plannerCalls: planning?.plannerCalls ?? 0,
+        verification: planning?.verification.status ?? (state.phase === 'clarify' ? 'ambiguous' : state.phase === 'blocked' ? 'invalid' : 'valid'),
+      },
+      route: {
+        ...(receipt.cascade.selectedTier ? { selectedTier: receipt.cascade.selectedTier } : {}),
+        tierAttemptCount: receipt.cascade.attempts.length,
+        planFrozen: receipt.cascade.planFrozen,
+        reviewRequired: resolvedPlan?.reviewRequired === true,
+      },
+      outcome: {
+        connectionAttempted: receipt.connection.attempted,
+        executionAttempts: receipt.execution.attempts,
+        factCount,
+        narration,
+      },
+    },
   };
 }
 
@@ -4977,13 +5083,37 @@ function terminalCompilationFailureForRun(
   for (const artifact of run.artifacts) {
     const payload = artifact.payload;
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) continue;
-    const failure = (payload as Record<string, unknown>).analyticalFailure;
-    if (!failure || typeof failure !== 'object' || Array.isArray(failure)) continue;
-    const record = failure as Record<string, unknown>;
-    if (record.code !== 'COMPILATION_FAILED' || record.phase !== 'compilation') continue;
-    return {
-      safeAction: terminalIncidentSafeAction(record.safeActions) ?? 'inspect_failure',
-    };
+    const record = payload as Record<string, unknown>;
+    const failure = record.analyticalFailure;
+    if (failure && typeof failure === 'object' && !Array.isArray(failure)) {
+      const failureRecord = failure as Record<string, unknown>;
+      if (failureRecord.code === 'COMPILATION_FAILED' && failureRecord.phase === 'compilation') {
+        return {
+          safeAction: terminalIncidentSafeAction(failureRecord.safeActions) ?? 'inspect_failure',
+        };
+      }
+    }
+    // Semantic adapters retain their own compiler receipt. Some historical
+    // answer-loop paths lose the outer analytical-failure wrapper while
+    // serializing a failed provider tool result; the typed semantic receipt is
+    // still a pre-SQL compiler fact and must never fall through to the generic
+    // "current connection" incident. It is only considered before a durable
+    // SQL execution counter exists, so a real warehouse failure keeps its
+    // execution classification.
+    const semanticTrace = record.semanticExecutionTrace;
+    if (!semanticTrace || typeof semanticTrace !== 'object' || Array.isArray(semanticTrace)) continue;
+    const traceFailure = (semanticTrace as Record<string, unknown>).failure;
+    if (!traceFailure || typeof traceFailure !== 'object' || Array.isArray(traceFailure)) continue;
+    const traceFailureRecord = traceFailure as Record<string, unknown>;
+    if (
+      traceFailureRecord.phase === 'compilation'
+      && (traceFailureRecord.code === 'SEMANTIC_COMPILATION_FAILED'
+        || traceFailureRecord.code === 'COMPILATION_FAILED')
+    ) {
+      return {
+        safeAction: terminalIncidentSafeAction(traceFailureRecord.safeActions) ?? 'inspect_failure',
+      };
+    }
   }
   return undefined;
 }
@@ -5104,6 +5234,7 @@ function attachDiagnosticReceipt(
   receiptV4?: AgentRunDiagnosticReceiptV4,
   receiptV5?: AgentRunDiagnosticReceiptV5,
   receiptV6?: AgentRunDiagnosticReceiptV6,
+  receiptV7?: AgentRunDiagnosticReceiptV7,
 ): AgentRunArtifact[] {
   if (artifacts.length === 0) {
     if (!receipt.failure) return artifacts;
@@ -5112,7 +5243,7 @@ function attachDiagnosticReceipt(
       kind: "answer",
       title: "Agent run diagnostics",
       trustState: "blocked",
-      payload: { diagnosticReceipt: receipt, ...(receiptV2 ? { diagnosticReceiptV2: receiptV2 } : {}), ...(receiptV3 ? { diagnosticReceiptV3: receiptV3 } : {}), ...(receiptV4 ? { diagnosticReceiptV4: receiptV4 } : {}), ...(receiptV5 ? { diagnosticReceiptV5: receiptV5 } : {}), ...(receiptV6 ? { diagnosticReceiptV6: receiptV6 } : {}) },
+      payload: { diagnosticReceipt: receipt, ...(receiptV2 ? { diagnosticReceiptV2: receiptV2 } : {}), ...(receiptV3 ? { diagnosticReceiptV3: receiptV3 } : {}), ...(receiptV4 ? { diagnosticReceiptV4: receiptV4 } : {}), ...(receiptV5 ? { diagnosticReceiptV5: receiptV5 } : {}), ...(receiptV6 ? { diagnosticReceiptV6: receiptV6 } : {}), ...(receiptV7 ? { diagnosticReceiptV7: receiptV7 } : {}) },
     }];
   }
   const preferredIndex = Math.max(0, artifacts.findIndex((artifact) => artifact.kind === "answer"));
@@ -5131,6 +5262,7 @@ function attachDiagnosticReceipt(
         ...(receiptV4 ? { diagnosticReceiptV4: receiptV4 } : {}),
         ...(receiptV5 ? { diagnosticReceiptV5: receiptV5 } : {}),
         ...(receiptV6 ? { diagnosticReceiptV6: receiptV6 } : {}),
+        ...(receiptV7 ? { diagnosticReceiptV7: receiptV7 } : {}),
       },
     };
   });
@@ -5155,16 +5287,32 @@ function computeStepOutcome(
       summary: result.summary ?? clarifyQuestion ?? fallback.summary,
     };
   }
-  const status = result.status ?? statusFromEvaluations(route, evaluations, fallback.status);
-  const trustState = result.trustState ?? trustStateFromEvaluations(route, evaluations, fallback.trustState);
+  const rawStatus = result.status ?? statusFromEvaluations(route, evaluations, fallback.status);
+  const rawTrustState = result.trustState ?? trustStateFromEvaluations(route, evaluations, fallback.trustState);
+  // A unique semantic grouping may be inferred only under the runtime's
+  // explicit review contract.  Preserve that contract through the generic
+  // engine adapter instead of allowing a successful MetricFlow executor to
+  // silently re-label it as governed.
+  const runtimeReviewRequired = request.askAnalystState?.resolvedPlan?.reviewRequired === true;
+  const status = runtimeReviewRequired && rawStatus === 'completed'
+    ? 'needs_review'
+    : rawStatus;
+  const trustState = runtimeReviewRequired && status !== 'blocked' && status !== 'needs_clarification'
+    ? 'review_required'
+    : rawTrustState;
   // API-007 / AGT-019: a blocked analytical run may carry an intentionally
   // redacted failure envelope needed for inspection and immutable repair. Keep
   // only artifacts that the executor explicitly marked blocked; never retain a
   // governed/reviewable artifact merely because it happened to accompany a
   // terminal failure.
-  const artifacts = status === "blocked"
+  const rawArtifacts = status === "blocked"
     ? (result.artifacts ?? []).filter((artifact) => artifact.trustState === "blocked")
     : result.artifacts ?? defaultArtifacts(route, result, request);
+  const artifacts = runtimeReviewRequired && status !== 'blocked'
+    ? rawArtifacts.map((artifact) => artifact.trustState === 'blocked'
+      ? artifact
+      : { ...artifact, trustState: 'review_required' as const })
+    : rawArtifacts;
   const stopReason = result.stopReason ?? stopReasonFor(route, status, trustState, artifacts);
   return {
     status,
@@ -5653,12 +5801,15 @@ function stopReasonFor(
 ): AgentRunStopReason {
   if (status === "cancelled") return "cancelled";
   if (status === "blocked" || trustState === "blocked") return "blocked";
+  // A semantic result may be executable yet require review because the
+  // runtime used one declared inferred grouping. Other reviewable authoring
+  // routes keep their existing artifact-created stop semantics.
+  if (route === "semantic_answer" && (status === "needs_review" || trustState === "review_required")) return "human_review_required";
   if (route === "conversation") return "conversational_reply";
   if (status === "needs_clarification") return "needs_clarification";
   if (route === "certified_answer") return "certified_answer_found";
   if (route === "semantic_answer") return "governed_semantic_answer";
   if (artifacts.length > 0 && route !== "generated_answer") return "artifact_created";
-  if (status === "needs_review") return "human_review_required";
   return "generated_review_required";
 }
 

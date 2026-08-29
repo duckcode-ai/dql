@@ -145,6 +145,8 @@ export type AskTraceSpanNameV1 =
   | 'conversation.persist'
   | 'run.persist'
   | 'research.plan'
+  /** A zero-call, bounded local structural lineage program. */
+  | 'research.lineage'
   | 'research.validate'
   | 'research.synthesize';
 
@@ -213,6 +215,7 @@ export type CandidateDecisionReasonV1 =
   | 'alias_match'
   | 'conversation_binding'
   | 'role_reserved'
+  | 'candidate_for_unresolved_role'
   | 'fused_relevance_fill'
   | 'same_snapshot_extension'
   | 'relationship_closure'
@@ -448,6 +451,25 @@ export type AskTraceSpanPayloadV1 =
       hypothesisFingerprint?: string;
       verdict?: 'supported' | 'contradicted' | 'inconclusive' | 'failed' | 'skipped';
       branchCount?: number;
+      /** Structural lineage is distinct from a provider/SQL analytical child. */
+      evidenceKind?: 'analytical_result' | 'lineage_graph';
+      /** Content-free local graph outcome; never target labels, paths, or rows. */
+      lineageStatus?: 'completed' | 'missing' | 'ambiguous' | 'stale' | 'truncated' | 'unavailable';
+      lineageResolution?: 'exact_id' | 'exact_name' | 'canonical_alias' | 'missing' | 'ambiguous' | 'stale' | 'unavailable';
+      upstreamNodeCount?: number;
+      downstreamNodeCount?: number;
+      /**
+       * Cardinality only.  Deliberately avoid retaining graph paths (or a
+       * path-shaped field name) in the local trace payload.
+       */
+      upstreamRouteCount?: number;
+      downstreamRouteCount?: number;
+      /** Fixed bounds for the local structural program, not graph content. */
+      lineageMaxDepth?: number;
+      lineageMaxRoutes?: number;
+      lineageMaxNodes?: number;
+      lineageMaxEdges?: number;
+      lineageTruncated?: boolean;
       /** Content-free fair-share budget assigned to one child branch. */
       branchBudgetMs?: number;
       /** Terminal child outcome; never a provider/warehouse error message. */

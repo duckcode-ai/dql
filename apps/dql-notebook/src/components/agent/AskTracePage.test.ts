@@ -17,12 +17,13 @@ let formatMs: typeof AskTracePageModule.formatMs;
 let TraceTimeline: typeof AskTracePageModule.TraceTimeline;
 let askTraceFocusFromSearch: typeof AskTracePageModule.askTraceFocusFromSearch;
 let researchFocusSpanForTrace: typeof AskTracePageModule.researchFocusSpanForTrace;
+let lineageResearchStoryForSpan: typeof AskTracePageModule.lineageResearchStoryForSpan;
 let TraceDecisionStory: typeof AskTracePageModule.TraceDecisionStory;
 let traceLegacySummaryNotice: typeof AskTracePageModule.CANONICAL_DECISION_SUMMARY_UNAVAILABLE;
 
 beforeAll(async () => {
   vi.stubGlobal('window', { location: { origin: 'http://localhost', pathname: '/ask/traces/run-local' } });
-  ({ buildSpanTree, flattenVisibleTree, stageLabel, traceInitialExpanded, incidentSummaryForTrace, incidentSummaryFromDecisionSummary, traceGraph, traceTimelinePresentation, formatMs, TraceTimeline, askTraceFocusFromSearch, researchFocusSpanForTrace, TraceDecisionStory, CANONICAL_DECISION_SUMMARY_UNAVAILABLE: traceLegacySummaryNotice } = await import('./AskTracePage'));
+  ({ buildSpanTree, flattenVisibleTree, stageLabel, traceInitialExpanded, incidentSummaryForTrace, incidentSummaryFromDecisionSummary, traceGraph, traceTimelinePresentation, formatMs, TraceTimeline, askTraceFocusFromSearch, researchFocusSpanForTrace, lineageResearchStoryForSpan, TraceDecisionStory, CANONICAL_DECISION_SUMMARY_UNAVAILABLE: traceLegacySummaryNotice } = await import('./AskTracePage'));
 });
 
 const root = (overrides: Partial<AskTraceSpanV1> = {}): AskTraceSpanV1 => ({
@@ -92,6 +93,36 @@ describe('AskTracePage presentation model', () => {
     expect(notebook.howToFix).not.toContain('Inspect the recorded decision');
   });
 
+  it('AGT-034 explains a review-required semantic result as an inferred mapping, not exploratory SQL', () => {
+    const base = {
+      version: 1,
+      summaryFingerprint: 's'.repeat(64),
+      understoodRequest: {
+        measures: 1,
+        dimensions: 1,
+        entityRequested: false,
+        outputCount: 1,
+        conversationBinding: 'none',
+      },
+      evidenceByRole: [],
+      tierDecisions: [{ tier: 'semantic', outcome: 'executable', planFrozen: true }],
+      safeNextAction: 'none',
+    } as const;
+
+    const semantic = incidentSummaryFromDecisionSummary({
+      ...base,
+      selectedPlan: { tier: 'semantic', planFrozen: true, reviewRequired: true },
+    } as never);
+    expect(semantic.impact).toBe('The result requires review because semantic execution used an inferred business or dimension mapping.');
+    expect(semantic.impact).not.toContain('exploratory SQL');
+
+    const exploratory = incidentSummaryFromDecisionSummary({
+      ...base,
+      selectedPlan: { tier: 'exploratory_sql', planFrozen: true, reviewRequired: true },
+    } as never);
+    expect(exploratory.impact).toBe('The result is review-required because it used exploratory SQL.');
+  });
+
   it('OBS-016 renders the V6 decision story with the real pre-freeze and execution boundaries', () => {
     const rootSpan = root();
     const trace: AskTraceDataV1 = {
@@ -147,6 +178,42 @@ describe('AskTracePage presentation model', () => {
     expect(markup).toContain('cascade · governance gate · answer not produced.');
     expect(markup).toContain('Inspect the recorded decision and advanced evidence before retrying.');
     expect(markup).not.toContain('sql.execute');
+  });
+
+  it('OBS-017 prefers the concise V7 inspector over the noisy advanced decision path', () => {
+    const rootSpan = root();
+    const trace: AskTraceDataV1 = {
+      envelope: {
+        version: 1, traceId: '7'.repeat(32), rootSpanId: rootSpan.spanId, runId: 'run-v7-story', surface: 'browser', mode: 'ask', questionFingerprint: 'sha256:question',
+        status: 'completed', recordingStatus: 'complete', startedAt: rootSpan.startedAt, spanCount: 1, candidateDecisionCount: 4, droppedRecordCount: 0,
+      },
+      spans: [rootSpan], candidateDecisions: [], links: [],
+      runtimeDecisionSummary: {
+        version: 2, summaryFingerprint: '7'.repeat(64), runtimeMode: 'authoritative',
+        whatHappened: 'The Ask runtime completed a validated analytical answer.',
+        why: 'One qualified semantic path proved the requested tuple.',
+        impact: 'The result was executed and narrated from validated facts.',
+        nextAction: 'none', programTaskCount: 1, admittedCandidateCount: 8, toolCallCount: 2, executionAttempts: 1,
+      },
+      runtimeReceiptV7: {
+        version: 7,
+        inspector: {
+          understood: { questionKind: 'ranking', conversationBinding: 'prior_result', measureCount: 1, dimensionCount: 1, entityRequested: true, hasBoundFilter: true },
+          evidence: { admittedCandidateCount: 8, roleCount: 3, recoveryAttempted: false },
+          planning: { mode: 'initial_planner', plannerCalls: 1, verification: 'valid' },
+          route: { selectedTier: 'semantic', tierAttemptCount: 2, planFrozen: true, reviewRequired: false },
+          outcome: { connectionAttempted: true, executionAttempts: 1, factCount: 3, narration: 'fact_bound' },
+        },
+      } as never,
+    };
+
+    const markup = renderToStaticMarkup(createElement(TraceDecisionStory, { trace, t: themes.paper, onSelectSpan: () => undefined }));
+    expect(markup).toContain('Evidence');
+    expect(markup).toContain('8 qualified candidates across 3 roles.');
+    expect(markup).toContain('initial planner · 1 planner call · verification valid.');
+    expect(markup).toContain('2 tier attempts · semantic · frozen.');
+    expect(markup).toContain('fact bound.');
+    expect(markup).not.toContain('Decision path');
   });
 
   it('renders the recorded limited-Research incident with its branch-focused recovery action', () => {
@@ -681,5 +748,25 @@ describe('AskTracePage presentation model', () => {
     } as never).edges).toEqual(expect.arrayContaining([
       expect.objectContaining({ label: 'research branch' }),
     ]));
+  });
+
+  it('prefers a content-safe local lineage program over an analytical branch when opening Research evidence', () => {
+    const rootSpan = root();
+    const plan = root({ spanId: 'c'.repeat(16), ordinal: 1, parentSpanId: rootSpan.spanId, name: 'research.plan', stage: 'research' });
+    const analytical = root({ spanId: 'd'.repeat(16), ordinal: 2, parentSpanId: plan.spanId, name: 'research.validate', stage: 'research', payload: { kind: 'research', branchId: 'h1', evidenceKind: 'analytical_result', verdict: 'inconclusive' } });
+    const lineage = root({ spanId: 'e'.repeat(16), ordinal: 3, parentSpanId: plan.spanId, name: 'research.lineage', stage: 'research', payload: { kind: 'research', branchId: 'h2', evidenceKind: 'lineage_graph', lineageStatus: 'completed', lineageResolution: 'exact_id', upstreamNodeCount: 2, downstreamNodeCount: 1, lineageMaxDepth: 6, lineageMaxRoutes: 12, lineageMaxNodes: 96, lineageMaxEdges: 160, verdict: 'inconclusive' } });
+    const trace: AskTraceDataV1 = {
+      envelope: {
+        version: 1, traceId: 'a'.repeat(32), rootSpanId: rootSpan.spanId, runId: 'ask-lineage-run', surface: 'browser', mode: 'research', questionFingerprint: 'sha256:question',
+        status: 'completed', recordingStatus: 'complete', startedAt: rootSpan.startedAt, spanCount: 4, candidateDecisionCount: 0, droppedRecordCount: 0,
+      },
+      spans: [rootSpan, plan, analytical, lineage], candidateDecisions: [], links: [],
+    };
+    expect(researchFocusSpanForTrace(trace)?.spanId).toBe(lineage.spanId);
+    expect(lineageResearchStoryForSpan(lineage)).toContain('frozen local lineage graph');
+    expect(lineageResearchStoryForSpan(lineage)).toContain('non-causal evidence');
+    expect(lineageResearchStoryForSpan(analytical)).toBeUndefined();
+    expect(lineageResearchStoryForSpan(lineage)).not.toMatch(/orders\.gross_revenue|provider response|select /i);
+    expect(JSON.stringify(lineage.payload)).not.toMatch(/sql|provider|warehouse|orders\.gross_revenue/i);
   });
 });

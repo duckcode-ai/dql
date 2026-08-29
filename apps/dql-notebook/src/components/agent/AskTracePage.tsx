@@ -59,9 +59,52 @@ export function askTraceFocusFromSearch(search: string | undefined): 'research' 
  */
 export function researchFocusSpanForTrace(trace: AskTraceDataV1): AskTraceSpanV1 | undefined {
   const research = trace.spans.filter((span) => span.stage === 'research' || span.name.startsWith('research.'));
-  return research.find((span) => span.name === 'research.validate')
+  return research.find((span) => span.name === 'research.lineage')
+    ?? research.find((span) => span.name === 'research.validate')
     ?? research.find((span) => span.name === 'research.plan')
     ?? research[0];
+}
+
+/**
+ * A compact, receipt-bound explanation for the dedicated local lineage
+ * program. It deliberately uses only typed counts and outcome codes: no
+ * target text, graph content, provider payload, SQL, result rows, or causal
+ * conclusion may enter the trace page through this helper.
+ */
+export function lineageResearchStoryForSpan(span: AskTraceSpanV1 | undefined): string | undefined {
+  if (span?.name !== 'research.lineage' || span.payload.kind !== 'research' || span.payload.evidenceKind !== 'lineage_graph') {
+    return undefined;
+  }
+
+  const payload = span.payload;
+  const status = payload.lineageStatus ?? 'unavailable';
+  const upstream = typeof payload.upstreamNodeCount === 'number' ? payload.upstreamNodeCount : 0;
+  const downstream = typeof payload.downstreamNodeCount === 'number' ? payload.downstreamNodeCount : 0;
+  const bounds = [
+    typeof payload.lineageMaxDepth === 'number' ? `depth ${payload.lineageMaxDepth}` : undefined,
+    typeof payload.lineageMaxRoutes === 'number' ? `${payload.lineageMaxRoutes} routes` : undefined,
+    typeof payload.lineageMaxNodes === 'number' ? `${payload.lineageMaxNodes} nodes` : undefined,
+    typeof payload.lineageMaxEdges === 'number' ? `${payload.lineageMaxEdges} edges` : undefined,
+  ].filter((value): value is string => Boolean(value));
+  const bounded = bounds.length > 0 ? ` Bounded to ${bounds.join(', ')}.` : '';
+  const boundary = ' It is non-causal evidence about local structure only—not provider, SQL, warehouse, result, or causal evidence.';
+
+  if (status === 'completed') {
+    return `The frozen local lineage graph resolved the requested target and observed ${upstream} upstream and ${downstream} downstream nodes.${bounded}${boundary}`;
+  }
+  if (status === 'truncated') {
+    return `The frozen local lineage graph resolved the requested target, but the bounded traversal stopped before a complete structural view was available.${bounded}${boundary}`;
+  }
+  if (status === 'ambiguous') {
+    return `The frozen local lineage graph found more than one exact target. No broader search or query was attempted.${boundary}`;
+  }
+  if (status === 'missing') {
+    return `The frozen local lineage graph did not contain the exact requested target. No broader search or query was attempted.${boundary}`;
+  }
+  if (status === 'stale') {
+    return `The local lineage snapshot did not match the frozen Research snapshot, so structural evidence was not used.${boundary}`;
+  }
+  return `Local lineage evidence was unavailable for this Research branch. No broader search or query was attempted.${boundary}`;
 }
 
 function expandedThroughTraceSpan(trace: AskTraceDataV1, spanId: string, initial: Set<string>): Set<string> {
@@ -170,6 +213,7 @@ export function AskTracePage({ runId }: { runId: string }): JSX.Element {
   if (error && !trace) return <TraceFailure t={t} message={error} onBack={goBack} onRetry={() => window.location.reload()} />;
   if (!trace) return <TraceFailure t={t} message="No local trace data is available for this Ask run." onBack={goBack} onRetry={() => window.location.reload()} />;
   const researchFocus = requestedFocus === 'research' ? researchFocusSpanForTrace(trace) : undefined;
+  const lineageStory = lineageResearchStoryForSpan(researchFocus);
 
   return (
     <main style={{ flex: 1, minWidth: 0, overflow: 'auto', background: t.appBg, color: t.textPrimary, fontFamily: t.font }}>
@@ -185,7 +229,7 @@ export function AskTracePage({ runId }: { runId: string }): JSX.Element {
         <TraceHeader trace={trace} t={t} onRefresh={() => window.location.reload()} />
         {researchFocus ? (
           <div role="status" aria-live="polite" style={{ margin: '0 0 12px', padding: '9px 11px', border: `1px solid ${t.accent}`, borderRadius: 8, background: `${t.accent}0d`, color: t.textSecondary, fontSize: 12, lineHeight: 1.45 }}>
-            Research evidence selected. This trace retains the linked bounded branch verdicts and their local execution evidence.
+            {lineageStory ?? 'Research evidence selected. This trace retains bounded branch verdicts. A lineage branch records local structural evidence only; it never represents provider, SQL, warehouse, result, or causal evidence.'}
           </div>
         ) : null}
         <TraceDecisionStory trace={trace} t={t} onSelectSpan={selectIncidentSpan} />
@@ -581,7 +625,11 @@ export function incidentSummaryFromDecisionSummary(summary: NonNullable<AskTrace
         : 'The Ask completed without a terminal incident.',
       why: `The stored decision summary ${summary.summaryFingerprint.slice(0, 12)} recorded the selected plan and tier decisions.`,
       impact: summary.selectedPlan?.reviewRequired
-        ? 'The result is review-required because it used exploratory SQL.'
+        ? summary.selectedPlan.tier === 'semantic'
+          ? 'The result requires review because semantic execution used an inferred business or dimension mapping.'
+          : summary.selectedPlan.tier === 'exploratory_sql'
+            ? 'The result is review-required because it used exploratory SQL.'
+            : 'The result is review-required because the selected plan requires review.'
         : 'The recorded result retains its selected trust state.',
       howToFix: 'No recovery action is required.',
     };
@@ -646,6 +694,7 @@ function researchBranchPlanText(summary: NonNullable<NonNullable<AskTraceDataV1[
 export function TraceDecisionStory({ trace, t, onSelectSpan: _onSelectSpan }: { trace: AskTraceDataV1; t: Theme; onSelectSpan: (spanId: string) => void }): JSX.Element {
   const runtime = trace.runtimeDecisionSummary;
   const runtimeV6 = trace.runtimeReceiptV6;
+  const inspector = trace.runtimeReceiptV7?.inspector;
   if (runtime) {
     const attention = /did not complete|paused|blocked/i.test(runtime.whatHappened);
     const roleCoverage = runtimeV6?.roleCoverage?.length
@@ -653,31 +702,41 @@ export function TraceDecisionStory({ trace, t, onSelectSpan: _onSelectSpan }: { 
       : undefined;
     const planner = runtimeV6?.planning;
     const cascade = runtimeV6?.cascade;
-    const sections: Array<[string, string]> = [
-      ['What happened', runtime.whatHappened],
-      ['Why', runtime.why],
-      ['Impact', runtime.impact],
-      ['Role coverage', roleCoverage ?? `${runtime.admittedCandidateCount} qualified candidate${runtime.admittedCandidateCount === 1 ? '' : 's'} admitted.`],
-      ['Planner & verification', planner
-        ? `${planner.mode.replace(/_/g, ' ')} · ${planner.plannerCalls} planner call${planner.plannerCalls === 1 ? '' : 's'} · verification ${planner.verification.status.replace(/_/g, ' ')}.`
-        : `${runtime.runtimeMode} · ${runtime.programTaskCount} task${runtime.programTaskCount === 1 ? '' : 's'} · deterministic receipt.`],
-      ['Cascade & freeze', cascade
-        ? `${cascade.attempts.length} tier attempt${cascade.attempts.length === 1 ? '' : 's'} · ${cascade.selectedTier?.replace(/_/g, ' ') ?? 'no executable tier'}${cascade.planFrozen ? ' · frozen' : ' · not frozen'}.`
-        : `${runtime.selectedCompiler ?? 'none'} · no cascade receipt.`],
-      ['Connection & execution', runtimeV6
-        ? `${runtimeV6.connection.attempted ? 'connection attempted after freeze' : 'no connection attempted'} · ${runtimeV6.execution.attempts} execution attempt${runtimeV6.execution.attempts === 1 ? '' : 's'}.`
-        : `${runtime.selectedCompiler ?? 'none'} · ${runtime.executionAttempts} execution attempt${runtime.executionAttempts === 1 ? '' : 's'}.`],
-      ['Facts', runtimeV6
-        ? `${runtimeV6.facts.factCount} validated fact${runtimeV6.facts.factCount === 1 ? '' : 's'}${runtimeV6.facts.resultFingerprint ? ' bound to the result.' : '.'}`
-        : 'No V6 fact receipt was retained.'],
-      ...(runtimeV6?.origin
-        ? [['Origin boundary', `${runtimeV6.origin.boundary.replace(/_/g, ' ')} · ${runtimeV6.origin.origin.replace(/_/g, ' ')} · ${runtimeV6.origin.impact.replace(/_/g, ' ')}.`] as [string, string]]
-        : []),
-      ...(runtimeV6?.story?.length
-        ? [['Decision path', runtimeV6.story.map((step) => `${step.stage.replace(/_/g, ' ')}: ${step.status.replace(/_/g, ' ')}`).join(' · ')] as [string, string]]
-        : []),
-      ['Safe next action', safeActionInstruction(runtimeV6?.safeNextAction ?? runtime.nextAction)],
-    ];
+    const sections: Array<[string, string]> = inspector
+      ? [
+          ['What happened', runtime.whatHappened],
+          ['Why', runtime.why],
+          ['Evidence', `${inspector.evidence.admittedCandidateCount} qualified candidates across ${inspector.evidence.roleCount} role${inspector.evidence.roleCount === 1 ? '' : 's'}${inspector.evidence.recoveryAttempted ? '; one targeted recovery was attempted' : ''}.`],
+          ['Planner', `${inspector.planning.mode.replace(/_/g, ' ')} · ${inspector.planning.plannerCalls} planner call${inspector.planning.plannerCalls === 1 ? '' : 's'} · verification ${inspector.planning.verification.replace(/_/g, ' ')}.`],
+          ['Route', `${inspector.route.tierAttemptCount} tier attempt${inspector.route.tierAttemptCount === 1 ? '' : 's'} · ${inspector.route.selectedTier?.replace(/_/g, ' ') ?? 'no executable tier'}${inspector.route.planFrozen ? ' · frozen' : ' · not frozen'}${inspector.route.reviewRequired ? ' · review required' : ''}.`],
+          ['Answer outcome', `${inspector.outcome.connectionAttempted ? 'connection attempted' : 'no connection attempted'} · ${inspector.outcome.executionAttempts} execution attempt${inspector.outcome.executionAttempts === 1 ? '' : 's'} · ${inspector.outcome.factCount} validated fact${inspector.outcome.factCount === 1 ? '' : 's'} · ${inspector.outcome.narration.replace(/_/g, ' ')}.`],
+          ['Safe next action', safeActionInstruction(runtimeV6?.safeNextAction ?? runtime.nextAction)],
+        ]
+      : [
+          ['What happened', runtime.whatHappened],
+          ['Why', runtime.why],
+          ['Impact', runtime.impact],
+          ['Role coverage', roleCoverage ?? `${runtime.admittedCandidateCount} qualified candidate${runtime.admittedCandidateCount === 1 ? '' : 's'} admitted.`],
+          ['Planner & verification', planner
+            ? `${planner.mode.replace(/_/g, ' ')} · ${planner.plannerCalls} planner call${planner.plannerCalls === 1 ? '' : 's'} · verification ${planner.verification.status.replace(/_/g, ' ')}.`
+            : `${runtime.runtimeMode} · ${runtime.programTaskCount} task${runtime.programTaskCount === 1 ? '' : 's'} · deterministic receipt.`],
+          ['Cascade & freeze', cascade
+            ? `${cascade.attempts.length} tier attempt${cascade.attempts.length === 1 ? '' : 's'} · ${cascade.selectedTier?.replace(/_/g, ' ') ?? 'no executable tier'}${cascade.planFrozen ? ' · frozen' : ' · not frozen'}.`
+            : `${runtime.selectedCompiler ?? 'none'} · no cascade receipt.`],
+          ['Connection & execution', runtimeV6
+            ? `${runtimeV6.connection.attempted ? 'connection attempted after freeze' : 'no connection attempted'} · ${runtimeV6.execution.attempts} execution attempt${runtimeV6.execution.attempts === 1 ? '' : 's'}.`
+            : `${runtime.selectedCompiler ?? 'none'} · ${runtime.executionAttempts} execution attempt${runtime.executionAttempts === 1 ? '' : 's'}.`],
+          ['Facts', runtimeV6
+            ? `${runtimeV6.facts.factCount} validated fact${runtimeV6.facts.factCount === 1 ? '' : 's'}${runtimeV6.facts.resultFingerprint ? ' bound to the result.' : '.'}`
+            : 'No V6 fact receipt was retained.'],
+          ...(runtimeV6?.origin
+            ? [['Origin boundary', `${runtimeV6.origin.boundary.replace(/_/g, ' ')} · ${runtimeV6.origin.origin.replace(/_/g, ' ')} · ${runtimeV6.origin.impact.replace(/_/g, ' ')}.`] as [string, string]]
+            : []),
+          ...(runtimeV6?.story?.length
+            ? [['Decision path', runtimeV6.story.map((step) => `${step.stage.replace(/_/g, ' ')}: ${step.status.replace(/_/g, ' ')}`).join(' · ')] as [string, string]]
+            : []),
+          ['Safe next action', safeActionInstruction(runtimeV6?.safeNextAction ?? runtime.nextAction)],
+        ];
     return (
       <section aria-label="Ask decision story" style={{ margin: '0 0 14px', padding: '14px 16px', border: `1px solid ${attention ? t.warning : t.success}`, borderRadius: 11, background: t.cellBg }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: attention ? t.warning : t.success, fontSize: 13, fontWeight: 750 }}>

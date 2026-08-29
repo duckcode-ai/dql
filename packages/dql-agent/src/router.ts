@@ -71,6 +71,7 @@ import {
 import {
   buildDeterministicAnalyticalFrame,
   projectResolvedAnalyticalFrame,
+  proveSameSnapshotMetricflowRoleExtensionV1,
   resolveMetricCapabilityDimension,
 } from "./analytical-frame.js";
 import {
@@ -357,6 +358,7 @@ export function buildMeaningUserPrompt(
     aggregation: compactText(candidate.aggregation, 120),
     domain: compactText(candidate.domain, 120),
     semanticModel: compactText(candidate.semanticModel, 160),
+    dataType: compactText(candidate.dataType, 80),
     primaryEntity: compactText(candidate.primaryEntity, 160),
     dimensions: compactArray(candidate.dimensions, 16, 120),
     timeGrains: compactArray(candidate.timeGrains, 8, 80),
@@ -730,15 +732,21 @@ export function recordAskCandidateLifecycleV1(
       }
       if (packageIds.has(candidate.id)) {
         const reservedForRole = requestedRoles.has(role);
+        const unresolvedRoleAdmission = candidate.matchReasons.some((reason) =>
+          reason.startsWith(`candidate_for_unresolved_role:${role}:`));
         observer.recordCandidateDecision({
           ...common,
           decision: 'reserved',
-          reasonCode: candidate.exactMatch ? 'exact_name_match' : reservedForRole ? 'role_reserved' : 'fused_relevance_fill',
+          reasonCode: candidate.exactMatch ? 'exact_name_match'
+            : unresolvedRoleAdmission ? 'candidate_for_unresolved_role'
+              : reservedForRole ? 'role_reserved' : 'fused_relevance_fill',
         });
         observer.recordCandidateDecision({
           ...common,
           decision: 'admitted',
-          reasonCode: candidate.exactMatch ? 'exact_name_match' : reservedForRole ? 'role_reserved' : 'fused_relevance_fill',
+          reasonCode: candidate.exactMatch ? 'exact_name_match'
+            : unresolvedRoleAdmission ? 'candidate_for_unresolved_role'
+              : reservedForRole ? 'role_reserved' : 'fused_relevance_fill',
         });
       } else {
         const isNoisyEntityAttribute = hasRequestedEntityLabel
@@ -1052,6 +1060,101 @@ function relationshipSafetyAllowsExploratoryJoin(
 }
 
 type RelationshipJoinAuthority = 'governed' | 'exploratory';
+
+/**
+ * The only reusable relationship-proof classification for a snapshot card.
+ *
+ * `governed` is deliberately stricter than `exploratory`: the latter may
+ * close a review-required raw-SQL path, but it must never acquire governed
+ * trust merely because its fanout happens to be safe.  Callers still need to
+ * retain the original raw proof and revalidate it at compiler freeze time.
+ */
+export type RelationshipSafetyProofClassV1 = 'governed' | 'exploratory';
+
+/**
+ * The canonical, one-to-one proof mapping for a relationship evidence card.
+ *
+ * `relationshipEvidence` is deliberately rewritten to the safety record's
+ * canonical ID.  A retrieval card may use an approved alias, but a synthetic
+ * planner path must never serialize an arbitrary collection of raw aliases or
+ * neighboring proof records.
+ */
+export interface RelationshipSafetyProofSelectionV1 {
+  proofClass: RelationshipSafetyProofClassV1;
+  relationshipEvidence: string[];
+  relationshipSafety: AgentRelationshipSafetyEvidence[];
+}
+
+/**
+ * Resolve a card's complete same-snapshot relationship proof set.
+ *
+ * Every evidence edge must map to exactly one structured proof (an alias may
+ * perform that mapping); every supplied proof must be used by an evidence
+ * edge.  This rejects partial cards, unrelated safety records, and aliases
+ * that ambiguously name two proofs before a host-authored path card can carry
+ * them into planner context.  The router/compiler still revalidates the
+ * selected raw edges at freeze time.
+ */
+export function relationshipSafetyProofSelectionForCandidateV1(
+  candidate: Pick<AgentEvidenceCandidate, 'relationshipEvidence' | 'relationshipSafety'>,
+): RelationshipSafetyProofSelectionV1 | undefined {
+  const evidenceByIdentity = new Map<string, string>();
+  for (const rawEvidenceId of candidate.relationshipEvidence ?? []) {
+    const canonicalInput = rawEvidenceId.trim();
+    const identity = normalizedRelationshipIdentity(canonicalInput);
+    if (!identity) return undefined;
+    // Duplicate spellings of the same input identity do not create another
+    // edge.  They are canonicalized below to the matched safety ID.
+    if (!evidenceByIdentity.has(identity)) evidenceByIdentity.set(identity, canonicalInput);
+  }
+  if (evidenceByIdentity.size === 0) return undefined;
+
+  const proofs = candidate.relationshipSafety ?? [];
+  if (proofs.length === 0) return undefined;
+  const matchedProofIndexes = new Set<number>();
+  const matchedProofs: AgentRelationshipSafetyEvidence[] = [];
+  for (const evidenceIdentity of evidenceByIdentity.keys()) {
+    const matches = proofs
+      .map((safety, index) => ({ safety, index }))
+      .filter(({ safety }) => {
+        // A canonical record without an ID cannot be safely serialized even
+        // if a loose alias happens to match the retrieval edge.
+        if (!safety.id?.trim()) return false;
+        return relationshipSafetyIdentities(safety).includes(evidenceIdentity);
+      });
+    // One evidence edge must identify one and only one canonical proof.  A
+    // duplicate ID, duplicate alias, or conflicting alias is unsafe rather
+    // than a tie the path-card builder may resolve heuristically.
+    if (matches.length !== 1) return undefined;
+    const match = matches[0]!;
+    matchedProofIndexes.add(match.index);
+    if (!matchedProofs.some((proof) => proof === match.safety)) matchedProofs.push(match.safety);
+  }
+  // A card that carries an unrelated proof is not a compact proof set.  Do
+  // not silently discard it: the raw card may represent a stale/mixed
+  // snapshot and cannot become a trusted atomic planner path.
+  if (matchedProofIndexes.size !== proofs.length) return undefined;
+
+  const proofClass = matchedProofs.every((safety) => relationshipSafetyAllowsAutomaticJoin(safety))
+    ? 'governed' as const
+    : matchedProofs.every((safety) => relationshipSafetyAllowsExploratoryJoin(safety))
+      ? 'exploratory' as const
+      : undefined;
+  if (!proofClass) return undefined;
+
+  return {
+    proofClass,
+    relationshipEvidence: [...new Set(matchedProofs.map((safety) => safety.id.trim()))].sort(),
+    relationshipSafety: [...matchedProofs]
+      .sort((left, right) => left.id.localeCompare(right.id)),
+  };
+}
+
+export function relationshipSafetyProofClassForCandidateV1(
+  candidate: Pick<AgentEvidenceCandidate, 'relationshipEvidence' | 'relationshipSafety'>,
+): RelationshipSafetyProofClassV1 | undefined {
+  return relationshipSafetyProofSelectionForCandidateV1(candidate)?.proofClass;
+}
 
 function relationshipSafetyAllowsJoin(
   safety: AgentRelationshipSafetyEvidence,
@@ -4125,24 +4228,7 @@ function isSameSnapshotCategoricalExtensionForMetric(
   candidate: AgentEvidenceCandidate,
   metricCandidate: AgentEvidenceCandidate,
 ): boolean {
-  const extension = candidate.sameSnapshotRoleExtension;
-  if (!extension
-    || extension.version !== 1
-    || extension.role !== 'categorical_dimension'
-    || (extension.basis !== 'sole_metricflow_grouping_dimension'
-      && extension.basis !== 'exact_metricflow_grouping_dimension')
-    || candidate.kind !== 'semantic_member'
-    || (candidate.qualifiedId ?? candidate.id) !== extension.dimensionId) return false;
-  const metricIds = new Set([
-    metricCandidate.id,
-    metricCandidate.qualifiedId,
-    normalizeEvidenceAnalyticalCapability(metricCandidate).capability?.metricId,
-  ].filter((id): id is string => Boolean(id)));
-  if (!metricIds.has(extension.metricId)) return false;
-  const capability = normalizeEvidenceAnalyticalCapability(metricCandidate).capability;
-  return Boolean(capability?.dimensions.some((dimension) =>
-    dimension.dimensionId === extension.dimensionId
-    && dimension.supportedRoles.includes('group_by')));
+  return Boolean(proveSameSnapshotMetricflowRoleExtensionV1({ candidate, metricCandidate }));
 }
 
 /**
@@ -6004,13 +6090,7 @@ function sameSnapshotRoleTargetedMeaningExtensions(input: {
   const requestedCategoricalTerms = categoricalDimensionRequirementTerms(input.requirements);
   for (const candidate of input.clarificationCandidates) {
     const extension = candidate.sameSnapshotRoleExtension;
-    if (!extension
-      || extension.version !== 1
-      || extension.role !== 'categorical_dimension'
-      || (extension.basis !== 'sole_metricflow_grouping_dimension'
-        && extension.basis !== 'exact_metricflow_grouping_dimension')
-      || candidate.kind !== 'semantic_member'
-      || (candidate.qualifiedId ?? candidate.id) !== extension.dimensionId) continue;
+    if (!extension) continue;
     if (!requestedCategoricalTerms.some((requested) =>
       normalizeMetricPhrase(requested) === normalizeMetricPhrase(extension.requestedTerm))) continue;
     // A raw/dbt column can lexically satisfy "product category", but it is
@@ -6023,10 +6103,18 @@ function sameSnapshotRoleTargetedMeaningExtensions(input: {
     if (input.candidates.some((admitted) =>
       admitted.kind === 'semantic_member'
       && candidateMatchesCategoricalDimensionRequirement(admitted, [extension.requestedTerm]))) continue;
-    const sourceMetricAdmitted = input.candidates.some((admitted) =>
-      admitted.kind === 'semantic_metric'
-      && (admitted.id === extension.metricId || admitted.qualifiedId === extension.metricId));
-    if (!sourceMetricAdmitted) continue;
+    // The compact package may retain a metric card across reloads, but only
+    // its *current* normalized capability can authorize the companion
+    // grouping card. Reuse the router/compiler/workspace proof rather than
+    // accepting matching strings for metric/dimension identities.
+    const sourceMetricProof = input.candidates.flatMap((admitted) => {
+      const proof = proveSameSnapshotMetricflowRoleExtensionV1({
+        candidate,
+        metricCandidate: admitted,
+      });
+      return proof ? [proof] : [];
+    });
+    if (sourceMetricProof.length === 0) continue;
     const role = normalizeMetricPhrase(extension.requestedTerm);
     const values = extensionsByRole.get(role) ?? [];
     if (!values.some((value) => value.id === candidate.id)) values.push(candidate);

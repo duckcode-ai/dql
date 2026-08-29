@@ -270,6 +270,33 @@ describe('AGT-010 metadata meaning evidence lanes', () => {
     });
   });
 
+  it('AGT-049 retains authored semantic time type and granularity for Ask role classification', () => {
+    const question = 'Which region is this customer in?';
+    const plan = buildAnalysisQuestionPlan(question);
+    const openedDate = ranked({
+      objectKey: 'semantic:dimension:locations.opened_date',
+      objectType: 'semantic_dimension',
+      name: 'Opened Date',
+      fullName: 'semantic:dimension:locations.opened_date',
+      payload: {
+        qualifiedId: 'semantic:dimension:locations.opened_date',
+        type: 'time',
+        type_params: { time_granularity: 'day' },
+      },
+      score: 0.9,
+    }, 1, 0.9);
+
+    const evidence = toAgentRetrievalEvidence(
+      buildMeaningEvidencePackage(question, plan, [openedDate]),
+      plan,
+    );
+
+    expect(evidence.candidates[0]).toMatchObject({
+      dataType: 'time',
+      timeGrains: ['day'],
+    });
+  });
+
   it('preserves a retrieved semantic metric when exact dimensions fill the semantic class', () => {
     const question = 'Show actual rollover balance by region for last month.';
     const dimensions = Array.from({ length: 5 }, (_, index) => ranked({

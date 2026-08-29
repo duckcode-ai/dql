@@ -141,6 +141,19 @@ export class LineageGraph {
     return [...this.nodes.values()];
   }
 
+  /**
+   * Visit nodes in deterministic insertion order without materializing the
+   * graph. Returning `false` stops the walk and returns `false`; a completed
+   * visit returns `true`. Callers that need a cap/cancellation boundary must
+   * enforce it from the visitor rather than using `getAllNodes()`.
+   */
+  visitNodes(visitor: (node: LineageNode) => boolean | void): boolean {
+    for (const node of this.nodes.values()) {
+      if (visitor(node) === false) return false;
+    }
+    return true;
+  }
+
   /** Get all edges. */
   getAllEdges(): LineageEdge[] {
     return [...this.edges];

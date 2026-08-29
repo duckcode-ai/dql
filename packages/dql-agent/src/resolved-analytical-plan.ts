@@ -37,6 +37,7 @@ import {
   governedCapabilityDimensionHasFreshAutomaticRelationshipProofV1,
   semanticDimensionUsesExactAdapterGrouping,
 } from './relationship-proof.js';
+import { proveSameSnapshotMetricflowRoleExtensionV1 } from './analytical-frame.js';
 
 export type ResolvedPlanCapability =
   | 'certified_execution'
@@ -1953,15 +1954,14 @@ function sameSnapshotSemanticExtensionProvesFrozenTuple(input: {
     && metricAuthorityIds.has(binding.qualifiedId!))) return false;
 
   const declaredExtensionProvesTuple = input.candidates.some((candidate) => {
-    const extension = candidate.sameSnapshotRoleExtension;
-    if (!extension
-      || extension.version !== 1
-      || extension.role !== 'categorical_dimension'
-      || (extension.basis !== 'sole_metricflow_grouping_dimension'
-        && extension.basis !== 'exact_metricflow_grouping_dimension')
-      || !metricAuthorityIds.has(extension.metricId)
-      || (candidate.qualifiedId ?? candidate.id) !== extension.dimensionId) return false;
-    return input.dimensions.some((binding) => binding.qualifiedId === extension.dimensionId);
+    const proof = proveSameSnapshotMetricflowRoleExtensionV1({
+      candidate,
+      metricCandidate: execution,
+    });
+    if (!proof) return false;
+    const extension = candidate.sameSnapshotRoleExtension!;
+    return metricAuthorityIds.has(extension.metricId)
+      && input.dimensions.some((binding) => binding.qualifiedId === proof.dimension.dimensionId);
   });
   if (declaredExtensionProvesTuple) return true;
 

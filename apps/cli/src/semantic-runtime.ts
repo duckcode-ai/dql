@@ -721,6 +721,89 @@ export function qualifyForMetricFlow(
     }
   }
   const bindings: SemanticRuntimeBinding[] = [];
+
+  // MetricFlow 0.13 accepts an ORDER BY dimension only when it is the exact
+  // qualified item already selected in GROUP BY. The frozen Ask plan may keep
+  // its business-facing order-by identity (`customer_name`) while its selected
+  // grouping is the complete entity path
+  // (`order_id__customer__customer_name`). Resolve that order-by against the
+  // already-qualified grouping first. This is a narrow adapter boundary: it
+  // does not invent a member, path, or grouping and it declines duplicate leaf
+  // names rather than choosing one arbitrarily.
+  interface SelectedGroupingBinding {
+    runtimeReference: string;
+    entityPath: string[];
+  }
+  const selectedGroupingByExactReference = new Map<string, SelectedGroupingBinding>();
+  const ambiguousSelectedGroupingExactReferences = new Set<string>();
+  const selectedGroupingByLeafReference = new Map<string, SelectedGroupingBinding>();
+  const ambiguousSelectedGroupingLeafReferences = new Set<string>();
+  const normalizedReference = (value: string): string => value.trim().toLowerCase();
+  const referenceLeaf = (value: string): string => {
+    const parts = normalizedReference(value).split(/(?:__|\.)/).filter(Boolean);
+    return parts[parts.length - 1] ?? '';
+  };
+  const registerUniqueGrouping = (
+    bindingsByReference: Map<string, SelectedGroupingBinding>,
+    ambiguousReferences: Set<string>,
+    reference: string,
+    binding: SelectedGroupingBinding,
+  ): void => {
+    const key = normalizedReference(reference);
+    if (!key || ambiguousReferences.has(key)) return;
+    const existing = bindingsByReference.get(key);
+    if (!existing) {
+      bindingsByReference.set(key, binding);
+      return;
+    }
+    if (existing.runtimeReference !== binding.runtimeReference) {
+      bindingsByReference.delete(key);
+      ambiguousReferences.add(key);
+    }
+  };
+  const registerSelectedGrouping = (
+    source: string,
+    runtimeReference: string,
+    entityPath: string[],
+  ): void => {
+    const selection = parseSemanticDimensionSelection(source);
+    const binding = { runtimeReference, entityPath: [...entityPath] };
+    registerUniqueGrouping(
+      selectedGroupingByExactReference,
+      ambiguousSelectedGroupingExactReferences,
+      selection.reference,
+      binding,
+    );
+    registerUniqueGrouping(
+      selectedGroupingByExactReference,
+      ambiguousSelectedGroupingExactReferences,
+      runtimeReference,
+      binding,
+    );
+    for (const leaf of [referenceLeaf(selection.reference), referenceLeaf(runtimeReference)]) {
+      registerUniqueGrouping(
+        selectedGroupingByLeafReference,
+        ambiguousSelectedGroupingLeafReferences,
+        leaf,
+        binding,
+      );
+    }
+  };
+  const selectedGroupingForOrderBy = (name: string): SelectedGroupingBinding | undefined => {
+    const selection = parseSemanticDimensionSelection(name);
+    // An explicit path is a stronger authoring instruction than a selected
+    // grouping alias. MetricFlow qualification below retains that exact path.
+    if (selection.entityPath?.length || selection.reference === 'metric_time') return undefined;
+    const exact = normalizedReference(selection.reference);
+    if (!ambiguousSelectedGroupingExactReferences.has(exact)) {
+      const binding = selectedGroupingByExactReference.get(exact);
+      if (binding) return binding;
+    }
+    const leaf = referenceLeaf(selection.reference);
+    return leaf && !ambiguousSelectedGroupingLeafReferences.has(leaf)
+      ? selectedGroupingByLeafReference.get(leaf)
+      : undefined;
+  };
   const qualify = (name: string | undefined, role: SemanticRuntimeBindingRole): string | undefined => {
     if (!name) return name;
     const selection = parseSemanticDimensionSelection(name);
@@ -770,14 +853,37 @@ export function qualifyForMetricFlow(
       })()
     : undefined;
 
+  const dimensions = request.dimensions.map((dimension) => {
+    const bindingStart = bindings.length;
+    const runtimeReference = qualify(dimension, 'dimension') ?? dimension;
+    const binding = bindings.slice(bindingStart).find((candidate) => candidate.role === 'dimension');
+    registerSelectedGrouping(dimension, runtimeReference, binding?.entityPath ?? []);
+    return runtimeReference;
+  });
+  const orderBy = request.orderBy?.map((order) => {
+    const selectedGrouping = selectedGroupingForOrderBy(order.name);
+    if (selectedGrouping) {
+      const selection = parseSemanticDimensionSelection(order.name);
+      bindings.push({
+        role: 'order_by',
+        authoringReference: selection.reference,
+        runtimeReference: selectedGrouping.runtimeReference,
+        entityPath: [...selectedGrouping.entityPath],
+        status: 'resolved',
+      });
+      return { ...order, name: selectedGrouping.runtimeReference };
+    }
+    return { ...order, name: qualify(order.name, 'order_by') ?? order.name };
+  });
+
   return {
     warnings,
     bindings,
     request: {
       ...request,
-      dimensions: request.dimensions.map((d) => qualify(d, 'dimension') ?? d),
+      dimensions,
       ...(request.filters ? { filters: request.filters.map((f) => f.dimension ? { ...f, dimension: qualify(f.dimension, 'filter') } : f) } : {}),
-      ...(request.orderBy ? { orderBy: request.orderBy.map((o) => ({ ...o, name: qualify(o.name, 'order_by') ?? o.name })) } : {}),
+      ...(orderBy ? { orderBy } : {}),
       ...(timeDimension ? { timeDimension } : {}),
     },
   };

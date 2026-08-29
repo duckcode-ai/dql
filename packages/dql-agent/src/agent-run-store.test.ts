@@ -207,6 +207,23 @@ describe('SqliteAgentRunStore', () => {
         admittedCandidateIds: ['metric:revenue', 'dimension:customer_name'],
         excludedCandidates: [{ id: 'dimension:product_category', reasonCode: 'not_admitted' }],
         sourceCoverage: [],
+        // Role coverage is intentionally count-only observability. Simulate
+        // an untrusted persisted shape attempting to smuggle source labels or
+        // raw query-like text through the restart checkpoint.
+        roleCoverage: [{
+          role: 'metric',
+          candidateCount: 1,
+          sensitiveMember: 'Brittany Barrera',
+          rawLike: 'SELECT customer_name FROM customers',
+        }, {
+          role: 'categorical_dimension',
+          candidateCount: 2,
+          untrustedContext: 'product category',
+        }, {
+          role: 'customer=Brittany Barrera',
+          candidateCount: 99,
+          rawLike: 'customer=Brittany Barrera',
+        }] as never,
         tools: [{ version: 1, id: 'tool:candidate_extension', kind: 'candidate_extension', status: 'completed', candidateIds: ['dimension:product_category'], reasonCode: 'targeted_same_snapshot_admitted' }],
         targetedContext: { version: 1, status: 'admitted', candidateIds: ['dimension:product_category'], relationshipPathIds: [], reasonCode: 'targeted_same_snapshot_admitted' },
       },
@@ -268,6 +285,10 @@ describe('SqliteAgentRunStore', () => {
       conversationDelta: { version: 2, programId: 'program:restart-v2' },
       planningReceipt: { plannerCalls: 2, revisionCalls: 1, verification: { status: 'valid' } },
     });
+    expect(interrupted?.askAnalystState?.workspace.roleCoverage).toEqual([
+      { role: 'metric', candidateCount: 1 },
+      { role: 'categorical_dimension', candidateCount: 2 },
+    ]);
     // V2 continuation remains local durable state; the restart diagnostic is
     // still content-free and preserves the V1-V5 reader contract.
     expect(interrupted?.askAnalystState?.program.filters[0]?.value).toBe('Brittany Barrera');
@@ -278,6 +299,10 @@ describe('SqliteAgentRunStore', () => {
       cascade: { planFrozen: false },
       connection: { attempted: false },
       execution: { attempts: 0 },
+      roleCoverage: [
+        { role: 'metric', candidateCount: 1 },
+        { role: 'categorical_dimension', candidateCount: 2 },
+      ],
       story: expect.arrayContaining([
         expect.objectContaining({ stage: 'planner', status: 'completed' }),
         expect.objectContaining({ stage: 'verification', status: 'completed' }),
@@ -285,6 +310,12 @@ describe('SqliteAgentRunStore', () => {
       ]),
     });
     expect(JSON.stringify(interrupted?.diagnosticReceiptV6)).not.toContain('Brittany Barrera');
+    expect(JSON.stringify(interrupted?.askAnalystState?.workspace.roleCoverage)).not.toContain('SELECT customer_name');
+    expect(JSON.stringify(interrupted?.askAnalystState?.workspace.roleCoverage)).not.toContain('product category');
+    expect(JSON.stringify(interrupted?.askAnalystState?.workspace.roleCoverage)).not.toContain('customer=Brittany Barrera');
+    expect(JSON.stringify(interrupted?.diagnosticReceiptV6)).not.toContain('SELECT customer_name');
+    expect(JSON.stringify(interrupted?.diagnosticReceiptV6)).not.toContain('product category');
+    expect(JSON.stringify(interrupted?.diagnosticReceiptV6)).not.toContain('customer=Brittany Barrera');
     expect(interrupted?.artifacts[0]?.payload).toMatchObject({ diagnosticReceiptV6: { version: 6 } });
     reopened.close();
 

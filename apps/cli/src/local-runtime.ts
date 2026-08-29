@@ -372,6 +372,7 @@ import {
   type AgentRunTrustState,
   type AgentRunDiagnosticReceiptV5,
   type AgentRunDiagnosticReceiptV6,
+  type AgentRunDiagnosticReceiptV7,
   type NarrationIntegrityReceiptV1,
   type AgentRouteExecutorResult,
   type AgentRouteExecutor,
@@ -416,11 +417,13 @@ import {
   capResearchBranches,
   buildResearchEvidenceLedger,
   buildResearchEvidenceLedgerV2,
+  buildResearchEvidenceLedgerV3,
   buildResearchHypothesisPlanV2,
   inferResearchValidatorKind,
   buildAnalyticalTurnPlan,
   buildAnalyticalRequirementSeedV1,
   buildAnalyticalRequirementSet,
+  withAnalyticalPriorResultMemberBinding,
   resolveTopRankedRegionDependency,
   DEFAULT_ASK_ROW_EGRESS_POLICY,
   ZERO_ROW_EGRESS_POLICY,
@@ -432,12 +435,16 @@ import {
   type AnalyticalTaskDependencyResolution,
   type AnalyticalTurnPlanV1,
   type ConversationResultMemberSetV1,
+  type AgentSelectedResultBindingV1,
+  validateSelectedResultBinding,
   normalizeCanonicalQueryResult,
   normalizeAnalyticalExecutionFingerprint,
   normalizeAnalyticalExecutionReceipt,
+  type ResearchLineageEvidenceReceiptV1,
   createAgentRunCancellationError,
   isAgentRunUserCancellation,
 } from '@duckcodeailabs/dql-agent';
+import { runResearchLineageProgramV1 } from './research-lineage-program.js';
 import { addSqlResultFilter, dashboardFilterableResultColumns, filterableResultColumns, replaceBlockStudioSql } from './sql-result-filter.js';
 import { gatherProposeEnrichment } from './propose-enrich.js';
 import {
@@ -973,6 +980,27 @@ function agentRunString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function parseSelectedResultBinding(value: unknown): AgentSelectedResultBindingV1 | undefined {
+  const record = agentRunRecord(value);
+  if (!record || record.version !== 1) return undefined;
+  const sourceRunId = agentRunString(record.sourceRunId);
+  const sourceArtifactId = agentRunString(record.sourceArtifactId);
+  const canonicalColumn = agentRunString(record.canonicalColumn);
+  const bindingValue = agentRunString(record.value);
+  const rowFingerprint = agentRunString(record.rowFingerprint);
+  const resultFingerprint = agentRunString(record.resultFingerprint);
+  if (!sourceRunId || !sourceArtifactId || !canonicalColumn || !bindingValue || !rowFingerprint || !resultFingerprint) return undefined;
+  return {
+    version: 1,
+    sourceRunId,
+    sourceArtifactId,
+    canonicalColumn,
+    value: bindingValue,
+    rowFingerprint,
+    resultFingerprint,
+  };
+}
+
 /**
  * Catalog previews are display-only run-store joins; the trace store and
  * strict exports remain prompt-free. Returning a partially redacted arbitrary
@@ -1189,6 +1217,10 @@ export function parseAgentRunRequestBody(body: unknown): { request?: AgentRunReq
       : undefined;
   const workspaceContext = agentRunRecord(record.workspaceContext) ?? agentRunRecord(record.context);
   const signals = agentRunRecord(record.signals);
+  const selectedResultBinding = parseSelectedResultBinding(record.selectedResultBinding);
+  if (record.selectedResultBinding !== undefined && !selectedResultBinding) {
+    return { error: 'selectedResultBinding must be a complete version 1 result reference.' };
+  }
   const requestedMode = parseAgentRunRequestedMode(record.requestedMode) ?? parseAgentRunRequestedMode(record.mode);
   if (record.researchResultRowsOptIn !== undefined && typeof record.researchResultRowsOptIn !== 'boolean') {
     return { error: 'researchResultRowsOptIn must be a boolean.' };
@@ -1203,6 +1235,7 @@ export function parseAgentRunRequestBody(body: unknown): { request?: AgentRunReq
     request: {
       question,
       selectedEvidenceId: agentRunString(record.selectedEvidenceId),
+      ...(selectedResultBinding ? { selectedResultBinding } : {}),
       clarificationSourceQuestion: agentRunString(record.clarificationSourceQuestion),
       requestedMode,
       audience,
@@ -1530,6 +1563,12 @@ function canonicalPersistedTrustState(input: {
   trustState?: unknown;
   answerTier?: unknown;
 }): AgentRunTrustState | undefined {
+  // A frozen plan may deliberately execute an inferred-but-unique semantic
+  // substitution. Its physical result is useful, but the route has already
+  // recorded an explicit `review_required` authority boundary. Never upgrade
+  // that durable result marker merely because the semantic aggregation proof
+  // also passed while compiling it.
+  if (input.trustState === 'review_required') return 'review_required';
   if (input.answer) {
     return input.answer.kind === 'no_answer'
       ? 'blocked'
@@ -2151,6 +2190,96 @@ function markUnavailablePluralPriorResultSet(request: AgentRunRequest): void {
 }
 
 /**
+ * Carry a server-validated selected-result predicate into the same typed Ask
+ * seed that retrieval, planning, and the compiler consume. The browser never
+ * controls this data: callers invoke it only after durable local history or a
+ * persisted conversation envelope has proved the binding.
+ */
+function seedWithPriorResultMemberBinding(
+  seed: AnalyticalRequirementSeedV1,
+  binding: NonNullable<AgentRunRequest['priorResultMemberBinding']>,
+): AnalyticalRequirementSeedV1 {
+  const requirements = withAnalyticalPriorResultMemberBinding(seed.requirements, binding);
+  const filters = seed.queryIntent.filters.map((filter) => ({ ...filter }));
+  for (const value of binding.values) {
+    const alreadyPresent = filters.some((filter) =>
+      filter.field.trim().toLowerCase() === binding.displayDimension.trim().toLowerCase()
+      && filter.value.trim().toLowerCase() === value.trim().toLowerCase());
+    if (!alreadyPresent) filters.push({ field: binding.displayDimension, value });
+  }
+  return {
+    ...seed,
+    requirements,
+    queryIntent: {
+      ...seed.queryIntent,
+      filters,
+    },
+  };
+}
+
+/**
+ * Resolve a browser-selected result cell from durable local run storage. This
+ * remains valid after a notebook reload because the browser transmits only
+ * stable IDs/fingerprints; result values are accepted only after this host
+ * checks the persisted canonical result and artifact trust state.
+ */
+export function hydratePersistedSelectedResultBinding(
+  request: AgentRunRequest,
+  store: Pick<SqliteAgentRunStore, 'get'>,
+): void {
+  const binding = request.selectedResultBinding;
+  if (!binding || request.askAnalystTaskChild || request.researchBranch) return;
+  const fail = (code: string, message: string) => {
+    delete request.selectedResultBinding;
+    request.selectedResultBindingGap = { code, message };
+  };
+  const sourceRun = store.get(binding.sourceRunId);
+  if (!sourceRun) {
+    fail('PRIOR_RESULT_BINDING_UNAVAILABLE', 'The selected prior result is not available in this local run history.');
+    return;
+  }
+  const sourceArtifact = sourceRun.artifacts.find((artifact) => artifact.id === binding.sourceArtifactId);
+  if (!sourceArtifact || sourceArtifact.trustState === 'blocked') {
+    fail('PRIOR_RESULT_BINDING_UNAVAILABLE', 'The selected prior result artifact is unavailable or was not accepted.');
+    return;
+  }
+  const payload = agentRunRecord(sourceArtifact.payload);
+  const rawResult = agentRunRecord(payload?.result) ?? agentRunRecord(payload?.resultPreview);
+  const canonical = rawResult ? normalizeCanonicalQueryResult({
+    columns: rawResult.columns,
+    rows: rawResult.rows,
+    rowCount: rawResult.rowCount,
+    executionTime: rawResult.executionTime,
+    resultFingerprint: agentRunString(rawResult.resultFingerprint),
+    executionReceipt: rawResult.executionReceipt,
+    trustState: rawResult.trustState,
+    answerTier: rawResult.answerTier,
+  }) : undefined;
+  const validated = validateSelectedResultBinding(binding, canonical);
+  if (!validated.ok) {
+    fail(validated.code, validated.message);
+    return;
+  }
+  request.conversationBinding = 'prior_result';
+  const priorResultMemberBinding = {
+    version: 1 as const,
+    displayDimension: binding.canonicalColumn,
+    values: [binding.value],
+    sourceTurnId: binding.sourceRunId,
+    resultFingerprint: binding.resultFingerprint,
+  };
+  request.priorResultMemberBinding = priorResultMemberBinding;
+  const seed = request.hostRequirementSeed?.version === 1
+    && request.hostRequirementSeed.sourceQuestion === request.question
+    ? request.hostRequirementSeed
+    : buildAnalyticalRequirementSeedV1({ question: request.question });
+  request.hostRequirementSeed = {
+    ...seedWithPriorResultMemberBinding(seed, priorResultMemberBinding),
+    sourceQuestion: request.question,
+  };
+}
+
+/**
  * Materialize a plural prior-result reference before the authoritative Ask
  * runtime frames the request.  `buildAgentRunContextPack` also classifies
  * follow-ups for retrieval diagnostics, but it runs after the Ask runtime has
@@ -2198,31 +2327,20 @@ function hydratePersistedPriorResultMemberBinding(request: AgentRunRequest): voi
     ?? rawBinding.dimension;
   if (!displayDimension) return;
 
-  request.priorResultMemberBinding = {
-    version: 1,
+  const priorResultMemberBinding = {
+    version: 1 as const,
     displayDimension,
     values,
     ...(rawBinding.sourceTurnId ? { sourceTurnId: rawBinding.sourceTurnId } : {}),
   };
+  request.priorResultMemberBinding = priorResultMemberBinding;
   const seed = request.hostRequirementSeed?.version === 1
     && request.hostRequirementSeed.sourceQuestion === request.question
     ? request.hostRequirementSeed
     : buildAnalyticalRequirementSeedV1({ question: request.question });
-  const existingKeys = new Set(seed.queryIntent.filters.map((filter) =>
-    `${filter.field.trim().toLowerCase()}\u0000${filter.value.trim().toLowerCase()}`));
-  const carriedFilters = values.flatMap((value) => {
-    const key = `${displayDimension.trim().toLowerCase()}\u0000${value.toLowerCase()}`;
-    if (existingKeys.has(key)) return [];
-    existingKeys.add(key);
-    return [{ field: displayDimension, value }];
-  });
   request.hostRequirementSeed = {
-    ...seed,
+    ...seedWithPriorResultMemberBinding(seed, priorResultMemberBinding),
     sourceQuestion: request.question,
-    queryIntent: {
-      ...seed.queryIntent,
-      filters: [...seed.queryIntent.filters, ...carriedFilters],
-    },
   };
 }
 
@@ -3034,6 +3152,10 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
     return {
       providerEgressReceipts: [...this.receipts],
       providerRoundTrips: this.receipts.length,
+      // This request-local ledger observes the physical admission boundary.
+      // Provider readiness/preflight checks intentionally do not create a
+      // receipt, so a terminal merge must not resurrect them as round trips.
+      authoritativeProviderRoundTrips: true,
       toolCalls: 0,
       sqlExecutions: 0,
       repairs: 0,
@@ -3446,10 +3568,13 @@ export function mergeRunScopedProviderDispatchEvidence(
       ...(inheritedTelemetry?.stageDurationsMs ?? {}),
       total: Number.isFinite(elapsed) ? Math.min(86_400_000, elapsed) : 0,
     },
-    // `max`, never a sum: an AsyncLocal root ledger already observes every
-    // child provider send, while child telemetry is the fallback for direct
-    // executor/test paths that have no egress receipt ledger.
-    providerRoundTrips: Math.max(evidence.providerRoundTrips, inheritedTelemetry?.providerRoundTrips ?? 0),
+    // A request-scoped ledger is the physical-send authority: provider round
+    // trips must equal its receipt count, never the number of readiness or
+    // preflight trace spans. Older/direct executor evidence can omit that
+    // authority marker, in which case retain the existing telemetry fallback.
+    providerRoundTrips: evidence.authoritativeProviderRoundTrips
+      ? providerEgressReceipts.length
+      : Math.max(evidence.providerRoundTrips, inheritedTelemetry?.providerRoundTrips ?? 0),
     toolCalls: Math.max(evidence.toolCalls, inheritedTelemetry?.toolCalls ?? 0),
     sqlExecutions: Math.max(evidence.sqlExecutions, inheritedTelemetry?.sqlExecutions ?? 0),
     repairs: Math.max(evidence.repairs, inheritedTelemetry?.repairs ?? 0),
@@ -3488,6 +3613,11 @@ export function mergeRunScopedProviderDispatchEvidence(
       ? synchronizeResearchRuntimeReceiptV6(run.diagnosticReceiptV6, telemetry, diagnosticReceiptV5)
       : researchRootRuntimeReceiptV6(run, telemetry, diagnosticReceiptV5)
     : run.diagnosticReceiptV6;
+  // V7 is the Ask-only concise inspector. Research retains its dedicated V6
+  // aggregation path; it must not be reshaped into an Ask receipt here.
+  const diagnosticReceiptV7: AgentRunDiagnosticReceiptV7 | undefined = run.requestedMode === 'research'
+    ? undefined
+    : run.diagnosticReceiptV7;
   const artifacts = run.artifacts.map((artifact) => {
     if (!artifact.payload || typeof artifact.payload !== 'object' || Array.isArray(artifact.payload)) return artifact;
     const payload = artifact.payload as Record<string, unknown>;
@@ -3496,7 +3626,8 @@ export function mergeRunScopedProviderDispatchEvidence(
       && !('diagnosticReceiptV3' in payload)
       && !('diagnosticReceiptV4' in payload)
       && !('diagnosticReceiptV5' in payload)
-      && !('diagnosticReceiptV6' in payload)) return artifact;
+      && !('diagnosticReceiptV6' in payload)
+      && !('diagnosticReceiptV7' in payload)) return artifact;
     return {
       ...artifact,
       payload: {
@@ -3507,6 +3638,7 @@ export function mergeRunScopedProviderDispatchEvidence(
         ...(run.diagnosticReceiptV4 ? { diagnosticReceiptV4: run.diagnosticReceiptV4 } : {}),
         ...(diagnosticReceiptV5 ? { diagnosticReceiptV5 } : {}),
         ...(diagnosticReceiptV6 ? { diagnosticReceiptV6 } : {}),
+        ...(diagnosticReceiptV7 ? { diagnosticReceiptV7 } : {}),
       },
     };
   });
@@ -3519,6 +3651,7 @@ export function mergeRunScopedProviderDispatchEvidence(
     diagnosticReceiptV2,
     ...(diagnosticReceiptV5 ? { diagnosticReceiptV5 } : {}),
     ...(diagnosticReceiptV6 ? { diagnosticReceiptV6 } : {}),
+    ...(diagnosticReceiptV7 ? { diagnosticReceiptV7 } : {}),
   };
 }
 
@@ -4843,6 +4976,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const exactProviderFreePlan = routeDecision?.resolvedAnalyticalPlan?.mode === 'authoritative'
       && (routeDecision.resolvedAnalyticalPlan.capability === 'certified_execution'
         || routeDecision.resolvedAnalyticalPlan.capability === 'semantic_execution');
+    // A sole same-snapshot MetricFlow grouping may safely compile and execute
+    // while still being an inferred business substitution. The authoritative
+    // Ask runtime records that distinction on its frozen plan. Preserve it at
+    // the local DQL-artifact boundary so the physical `sql.execute` trace and
+    // the result artifact cannot disagree with the final review-required run.
+    const runtimeSemanticReviewRequired = route === 'semantic_answer'
+      && (routeDecision?.askAnalystDecision?.resolvedPlan?.reviewRequired === true
+        || routeDecision?.askAnalystDecision?.state.resolvedPlan?.reviewRequired === true);
     if (exactCertifiedProviderFreePlan
       || deterministicExploratoryProposal
       || ((!resolvedProvider || !runner) && exactProviderFreePlan)) {
@@ -5645,7 +5786,9 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         executeDqlArtifact: async (artifact) => {
           try {
             return await executeArtifactReferenceForAgent(
-              artifact,
+              runtimeSemanticReviewRequired
+                ? { ...artifact, trustState: 'review_required' }
+                : artifact,
               request.question,
               semanticConnection,
               semanticConnectionName,
@@ -6005,19 +6148,32 @@ function analyticalFailureSummary(
     // missing proof as governed caused the CLI to persist a successful badge
     // even though the answer artifact recorded insufficient context.
     const semantic = semanticAnswerHasPassedAggregationProof(governedAnswer);
+    // A semantic aggregation proof establishes that the compiled query is
+    // safe; it does not erase a frozen Ask plan's visible inferred-substitution
+    // boundary. Preserve the stricter result/artifact state throughout the
+    // answer card and reusable DQL contract.
+    const remainsReviewRequired = artifact.trustState === 'review_required'
+      || governedAnswer.result?.trustState === 'review_required';
+    const artifactTrustState = certified
+      ? 'certified' as const
+      : remainsReviewRequired
+        ? 'review_required' as const
+        : semantic
+          ? 'governed' as const
+          : 'review_required' as const;
     governedAnswer.dqlArtifact = {
       ...artifact,
       ...(invocation.parameters.length > 0 ? { parameters: invocation.parameters } : {}),
       ...(Object.keys(invocation.values).length > 0 ? { parameterValues: invocation.values } : {}),
       persistence: artifact.sourcePath ? 'saved' : 'transient',
-      trustState: certified ? 'certified' : semantic ? 'governed' : 'review_required',
+      trustState: artifactTrustState,
       ...(governedAnswer.result?.sql ? { compiledSql: governedAnswer.result.sql } : originalSql ? { compiledSql: originalSql } : {}),
       ...(governedAnswer.result?.executionReceipt ? { executionReceipt: governedAnswer.result.executionReceipt } : {}),
       ...(governedAnswer.result?.executableArtifact ? {
         executableArtifact: {
           ...governedAnswer.result.executableArtifact,
           kind: artifact.kind,
-          trustState: certified ? 'certified' : semantic ? 'governed' : 'review_required',
+          trustState: artifactTrustState,
         },
       } : {}),
     };
@@ -6233,6 +6389,7 @@ function analyticalFailureSummary(
       };
     }
     let governedAnswer: AgentAnswer;
+    let frozenSemanticReviewRequired = false;
     try {
       governedAnswer = await runGovernedAgentAnswerForRun(
         request,
@@ -6250,6 +6407,18 @@ function analyticalFailureSummary(
       if (frozenRoute && (frozenRoute !== route || (reportedRoute && reportedRoute !== frozenRoute))) {
         return frozenPlanRouteFailure(frozenRoute, routeDecision, reportedRoute);
       }
+      // The Ask runtime may authorize execution of one unique inferred semantic
+      // grouping, but its frozen plan deliberately retains a review boundary.
+      // The answer-loop graph reconstructs its aggregate result from source
+      // rows, so re-assert the host-owned frozen state before canonical result
+      // persistence and artifact attachment can otherwise derive `governed`
+      // from the semantic aggregation proof alone.
+      frozenSemanticReviewRequired = governedAnswer.route?.tier === 'semantic_metric'
+        && (routeDecision?.askAnalystDecision?.resolvedPlan?.reviewRequired === true
+          || routeDecision?.askAnalystDecision?.state.resolvedPlan?.reviewRequired === true);
+      if (frozenSemanticReviewRequired && governedAnswer.result) {
+        governedAnswer.result = { ...governedAnswer.result, trustState: 'review_required' };
+      }
       // Keep the canonical result contract on the answer itself, not only on
       // the narration preview. Conversation persistence, follow-up member
       // resolution, Apply, and the notebook table all read this payload; if a
@@ -6264,6 +6433,7 @@ function analyticalFailureSummary(
           answerTier: governedAnswer.route?.tier ?? governedAnswer.sourceTier,
           trustState: canonicalPersistedTrustState({
             answer: governedAnswer,
+            trustState: governedAnswer.result.trustState,
             answerTier: governedAnswer.route?.tier ?? governedAnswer.sourceTier,
           }),
         });
@@ -6526,7 +6696,13 @@ function analyticalFailureSummary(
     const semanticRouteClaimed = governedAnswer.route?.tier === 'semantic_metric';
     const semanticAggregationProofPassed = semanticAnswerHasPassedAggregationProof(governedAnswer);
     const semanticAggregationBlocked = semanticRouteClaimed && !semanticAggregationProofPassed;
-    const isSemantic = semanticRouteClaimed && semanticAggregationProofPassed;
+    // A safe semantic compilation normally earns governed trust. A frozen
+    // planner-declared inference is intentionally stricter: it may execute,
+    // but the resulting run/card/artifact remains review-required until the
+    // business vocabulary is explicitly modeled.
+    const isSemantic = semanticRouteClaimed
+      && semanticAggregationProofPassed
+      && !frozenSemanticReviewRequired;
     const requestedNotebookDataset = findMentionedNotebookDataset(
       request.question,
       datasetWorkspace.list(),
@@ -7695,6 +7871,15 @@ function analyticalFailureSummary(
           ledger: agentRunProviderEvidenceContext.getStore(),
         })
         : undefined;
+      // Bind structural lineage to the Research root *before* hypothesis
+      // planning can observe or outlive a changed manifest. The direct child
+      // later proves this same graph/signature is still current; it never
+      // reconstructs a graph from changed files and calls that new state root
+      // evidence.
+      const researchLineageSnapshot = projectSnapshot();
+      const researchExpectedSnapshotId = routeDecision?.resolvedAnalyticalPlan?.snapshotId
+        ?? researchLineageSnapshot.snapshotId;
+      const researchLineageRoot = captureResearchLineageRootSnapshotV1(projectRoot, semanticLayer);
       const researchPlanSpan = trace.startSpan({
         name: 'research.plan',
         stage: 'research',
@@ -7816,6 +8001,7 @@ function analyticalFailureSummary(
         error: string;
       }>();
       const researchBranchReceipts: ResearchBranchReceiptV1[] = [];
+      const researchLineageEvidenceByBranch = new Map<string, ResearchLineageEvidenceReceiptV1>();
       let researchWorkspaceError: string | undefined;
       // The notebook root is created before child execution. Keep its stable
       // identity outside the storage scope so a root deadline or user
@@ -7834,6 +8020,7 @@ function analyticalFailureSummary(
         branchBudgetMs: number;
         branchSpan?: string;
         hypothesisFingerprint: string;
+        evidenceKind: 'analytical_result' | 'lineage_graph';
       }>();
       let rootAbortReceiptPersisted = false;
 
@@ -7849,7 +8036,12 @@ function analyticalFailureSummary(
 
       const partialResearchLedgerSnapshot = () => {
         const runsById = new Map(researchRuns.map((run) => [run.id, run]));
-        const entries = researchBranchReceipts.slice(0, 6).map((receipt) => {
+        // V1/V2 define `observed` as a canonical query result. A structural
+        // lineage observation therefore belongs only in V3; never downgrade it
+        // to a bogus failed SQL branch or promote it as a data result.
+        const entries = researchBranchReceipts
+          .filter((receipt) => receipt.evidenceKind !== 'lineage_graph')
+          .slice(0, 6).map((receipt) => {
           const branch = runsById.get(receipt.childRunId);
           const branchContext = agentRunRecord(branch?.context)?.branch as Record<string, unknown> | undefined;
           const previewRecord = agentRunRecord((branch as { resultPreview?: unknown } | undefined)?.resultPreview);
@@ -7894,18 +8086,16 @@ function analyticalFailureSummary(
         const researchLedger = buildResearchEvidenceLedger({
           rootQuestion: request.question,
           planId: plan.rootPlanId,
-          snapshotId: routeDecision?.resolvedAnalyticalPlan?.snapshotId,
+          snapshotId: researchExpectedSnapshotId,
           entries,
           // The partial artifact is evidence for restart/review only; it is
           // never an accepted Research conclusion.
           stoppingReason: 'blocked',
         });
-        return {
-          researchLedger,
-          researchLedgerV2: buildResearchEvidenceLedgerV2({
+        const researchLedgerV2 = buildResearchEvidenceLedgerV2({
             rootQuestion: request.question,
             planId: plan.rootPlanId,
-            snapshotId: routeDecision?.resolvedAnalyticalPlan?.snapshotId,
+            snapshotId: researchExpectedSnapshotId,
             groundableBranchCount: groundableResearchBranchCount,
             entries: researchLedger.entries.map((entry) => ({
               ...entry,
@@ -7918,13 +8108,49 @@ function analyticalFailureSummary(
               counterEvidenceFactIds: [],
             })),
             stoppingReason: researchLedger.stoppingReason,
-          }),
+          });
+        const researchLedgerV3 = buildResearchEvidenceLedgerV3({
+          rootQuestionFingerprint: runtimeTraceFingerprint(request.question),
+          planId: plan.rootPlanId,
+          snapshotId: researchExpectedSnapshotId,
+          groundableBranchCount: groundableResearchBranchCount,
+          entries: [
+            ...researchLedgerV2.entries.map((entry) => ({
+              kind: 'analytical_result' as const,
+              index: researchBranchReceipts.find((receipt) => receipt.branchId === entry.branchId)?.index ?? Number.MAX_SAFE_INTEGER,
+              entry,
+              hypothesisFingerprint: researchBranchSpans.get(entry.branchId)?.hypothesisFingerprint,
+            })),
+            ...researchBranchReceipts.flatMap((receipt) => {
+              const lineageReceipt = researchLineageEvidenceByBranch.get(receipt.branchId);
+              if (!lineageReceipt) return [];
+              return [{
+                kind: 'lineage_graph' as const,
+                index: receipt.index,
+                id: receipt.childRunId,
+                branchId: receipt.branchId,
+                receipt: lineageReceipt,
+                hypothesisFingerprint: researchBranchSpans.get(receipt.branchId)?.hypothesisFingerprint,
+                status: receipt.state === 'skipped'
+                  ? 'skipped' as const
+                  : receipt.state === 'failed' || receipt.state === 'timed_out'
+                    ? 'failed' as const
+                    : 'observed' as const,
+              }];
+            }),
+          ],
+          stoppingReason: researchLedger.stoppingReason,
+        });
+        return {
+          researchLedger,
+          researchLedgerV2,
+          researchLedgerV3,
         };
       };
 
       const persistPartialResearchArtifact = (terminalReason: 'run_deadline' | 'cancelled') => {
         if (partialResearchArtifactPersisted || !researchRootRunId) return;
-        const { researchLedger, researchLedgerV2 } = partialResearchLedgerSnapshot();
+        const { researchLedger, researchLedgerV2, researchLedgerV3 } = partialResearchLedgerSnapshot();
         const childRunIds = [...new Set(researchBranchReceipts.map((receipt) => receipt.childRunId))];
         const branchTrace = researchBranchReceipts.map((receipt) => ({
           branchId: receipt.branchId,
@@ -7941,6 +8167,7 @@ function analyticalFailureSummary(
           researchBranchReceipts: [...researchBranchReceipts],
           researchLedger,
           researchLedgerV2,
+          researchLedgerV3,
           traceReference: trace.reference(),
           researchTrace: { branchTrace },
         }, researchRootRunId, 'blocked');
@@ -8010,6 +8237,7 @@ function analyticalFailureSummary(
                   verdict: 'failed',
                   stopReason: terminalReason,
                   branchBudgetMs: active.branchBudgetMs,
+                  evidenceKind: active.evidenceKind,
                 });
                 trace.finishSpan(active.branchSpan, {
                   outcome: userCancelled ? 'cancelled' : 'error',
@@ -8095,6 +8323,7 @@ function analyticalFailureSummary(
             ): Promise<ResearchBranchFinding> => {
               const step = branches[index]!;
               const branchId = step.hypothesisId;
+              const isLineageBranch = step.action.kind === 'check_lineage';
               // The planner asset is an evidence hint, not a client-selected
               // identifier.  Put it in the child question so the shared Ask
               // retriever can bind it against the child snapshot, rather than
@@ -8113,23 +8342,29 @@ function analyticalFailureSummary(
               // typed action before a child Ask sees it.  This keeps a time
               // comparison or breakdown tied to the root metric instead of
               // collapsing every branch to the target label/baseline metric.
-              const branchProjection = buildResearchBranchRequirementProjection({
-                action: step.action,
-                rootRequirementSeed: researchRootRequirementSeed,
-                rootPlan: routeDecision?.resolvedAnalyticalPlan,
-              });
-              const branchQuestion = branchProjection.question;
-              const branchRequirementSeed = branchProjection.requirementSeed;
+              const branchProjection = isLineageBranch
+                ? undefined
+                : buildResearchBranchRequirementProjection({
+                    action: step.action,
+                    rootRequirementSeed: researchRootRequirementSeed,
+                    rootPlan: routeDecision?.resolvedAnalyticalPlan,
+                  });
+              // A structural graph program has no analytical child question or
+              // host requirement seed. The parent question is retained only in
+              // the notebook record; it is never passed to the Ask router.
+              const branchQuestion = branchProjection?.question ?? request.question;
+              const branchRequirementSeed = branchProjection?.requirementSeed;
               const childId = `${created.id}:research:${index + 1}`;
               const hypothesisFingerprint = runtimeTraceFingerprint(`${step.thought}\u0000${step.expectation}`);
               const branchSpan = trace.startSpan({
-                name: 'research.validate',
+                name: isLineageBranch ? 'research.lineage' : 'research.validate',
                 stage: 'research',
                 reasonCode: branchBudget.stopReason ?? 'started',
                 payload: {
                   kind: 'research',
                   branchId,
                   hypothesisFingerprint,
+                  evidenceKind: isLineageBranch ? 'lineage_graph' : 'analytical_result',
                   ...(branchBudget.branchBudgetMs ? { branchBudgetMs: branchBudget.branchBudgetMs } : {}),
                   ...(branchBudget.stopReason ? { branchStopReason: branchBudget.stopReason } : {}),
                 },
@@ -8190,6 +8425,7 @@ function analyticalFailureSummary(
                   state: 'skipped',
                   verdict: 'skipped',
                   stopReason: 'budget_exhausted',
+                  evidenceKind: isLineageBranch ? 'lineage_graph' : 'analytical_result',
                 });
                 trace.finishSpan(branchSpan, {
                   outcome: 'skipped',
@@ -8221,8 +8457,99 @@ function analyticalFailureSummary(
                 branchBudgetMs: branchBudget.branchBudgetMs,
                 branchSpan,
                 hypothesisFingerprint,
+                evidenceKind: isLineageBranch ? 'lineage_graph' : 'analytical_result',
               });
               try {
+                if (isLineageBranch) {
+                  // `check_lineage` is intentionally not an Ask child. It
+                  // receives the one frozen Research snapshot and executes a
+                  // bounded structural graph program only. In particular, do
+                  // not call agentRunRouter, a provider, SQL compilation,
+                  // warehouse execution, or SQL repair from this branch.
+                  if (branchSignal.aborted) throw branchSignal.reason;
+                  const currentSnapshot = projectSnapshot();
+                  // The graph and its dql-manifest-inclusive fingerprint were
+                  // captured at the root. Detect drift before the direct
+                  // program starts, rather than rebuilding a child graph from
+                  // changed files. The program returns typed `stale` evidence
+                  // and does not traverse when this boundary is crossed.
+                  const lineageGraphDrifted = !researchLineageRootSnapshotIsCurrentV1(researchLineageRoot, projectRoot);
+                  const lineage = runResearchLineageProgramV1({
+                    graph: researchLineageRoot.graph,
+                    graphFingerprint: researchLineageRoot.graphFingerprint,
+                    target: step.action.target,
+                    expectedSnapshotId: researchExpectedSnapshotId,
+                    currentSnapshotId: currentSnapshot.snapshotId,
+                    snapshotFingerprint: researchLineageSnapshot.signature,
+                    snapshotStale: currentSnapshot.stale === true || lineageGraphDrifted,
+                    signal: branchSignal,
+                  });
+                  researchLineageEvidenceByBranch.set(branchId, lineage.receipt);
+                  storage.updateRun(child.id, {
+                    status: 'ready',
+                    summary: lineage.summary,
+                    recommendation: 'Review the structural lineage evidence before drawing business conclusions.',
+                    evidence: { version: 1, kind: 'lineage_graph', receipt: lineage.receipt },
+                    reviewStatus: 'needs_review',
+                    error: '',
+                  });
+                  const lineageRun = storage.getRun(child.id);
+                  if (lineageRun) researchRuns.push(withNotebookResearchChecklist(lineageRun));
+                  recordResearchBranchReceipt({
+                    version: 1,
+                    branchId,
+                    childRunId: child.id,
+                    index: index + 1,
+                    state: 'completed',
+                    verdict: 'inconclusive',
+                    stopReason: 'completed',
+                    branchBudgetMs: branchBudget.branchBudgetMs,
+                    evidenceKind: 'lineage_graph',
+                    lineageStatus: lineage.receipt.status,
+                  });
+                  const reasonCode = lineage.receipt.status === 'stale'
+                    ? 'source_stale' as const
+                    : lineage.receipt.status === 'unavailable'
+                      ? 'source_unavailable' as const
+                      : lineage.receipt.status === 'missing'
+                        ? 'source_empty' as const
+                        : lineage.receipt.status === 'ambiguous'
+                          ? 'cascade_ambiguous' as const
+                          : lineage.receipt.status === 'truncated'
+                            ? 'cap_reached' as const
+                            : 'completed' as const;
+                  trace.finishSpan(branchSpan, {
+                    outcome: lineage.receipt.status === 'stale' || lineage.receipt.status === 'unavailable'
+                      ? 'unavailable'
+                      : 'ok',
+                    reasonCode,
+                    payload: {
+                      kind: 'research',
+                      branchId,
+                      hypothesisFingerprint,
+                      evidenceKind: 'lineage_graph',
+                      verdict: 'inconclusive',
+                      branchBudgetMs: branchBudget.branchBudgetMs,
+                      branchStopReason: 'completed',
+                      lineageStatus: lineage.receipt.status,
+                      lineageResolution: lineage.receipt.resolution,
+                      upstreamNodeCount: lineage.receipt.upstreamNodeCount,
+                      downstreamNodeCount: lineage.receipt.downstreamNodeCount,
+                      upstreamRouteCount: lineage.receipt.upstreamPathCount,
+                      downstreamRouteCount: lineage.receipt.downstreamPathCount,
+                      lineageMaxDepth: lineage.receipt.maxDepth,
+                      lineageMaxRoutes: lineage.receipt.maxPaths,
+                      lineageMaxNodes: lineage.receipt.maxNodes,
+                      lineageMaxEdges: lineage.receipt.maxEdges,
+                      lineageTruncated: lineage.receipt.truncated,
+                    },
+                  });
+                  return {
+                    index,
+                    summary: lineage.summary,
+                    strength: lineage.receipt.status === 'completed' ? 0.25 : 0.1,
+                  };
+                }
                 const executed = await awaitResearchBranchDeadline((async () => {
                   /**
                    * A Research branch is a child Ask run, not a notebook-SQL
@@ -8355,6 +8682,7 @@ function analyticalFailureSummary(
                   verdict: branchFailed ? 'failed' : 'inconclusive',
                   stopReason: branchFailed ? 'execution_failed' : 'completed',
                   branchBudgetMs: branchBudget.branchBudgetMs,
+                  evidenceKind: 'analytical_result',
                 });
                 if (branchFailed) {
                   const message = branchRun.error
@@ -8444,6 +8772,7 @@ function analyticalFailureSummary(
                   verdict: 'failed',
                   stopReason,
                   branchBudgetMs: branchBudget.branchBudgetMs,
+                  evidenceKind: isLineageBranch ? 'lineage_graph' : 'analytical_result',
                 });
                 trace.finishSpan(branchSpan, {
                   outcome: userCancelled ? 'cancelled' : 'error',
@@ -8568,6 +8897,14 @@ function analyticalFailureSummary(
         ?? (researchRun as { resultPreview?: unknown } | undefined)?.resultPreview;
       const researchResultData = coerceNarrateResultData(researchResultPreview);
       const researchResultRecord = agentRunRecord(researchResultPreview);
+      const analyticalResearchRuns = researchRuns.filter((branch) => {
+        const branchContext = agentRunRecord(branch.context)?.branch as Record<string, unknown> | undefined;
+        const branchId = agentRunString(branchContext?.id);
+        const receipt = branchId
+          ? researchBranchReceipts.find((candidate) => candidate.branchId === branchId)
+          : undefined;
+        return receipt?.evidenceKind !== 'lineage_graph';
+      });
       // Keep each bounded research branch inspectable as an evidence ledger.
       // The notebook workspace remains the durable execution record; this
       // additive projection gives Ask/Research narration a stable list of
@@ -8576,8 +8913,8 @@ function analyticalFailureSummary(
       const researchLedger = buildResearchEvidenceLedger({
         rootQuestion: request.question,
         planId: plan.rootPlanId,
-        snapshotId: routeDecision?.resolvedAnalyticalPlan?.snapshotId,
-        entries: researchRuns.slice(0, 6).map((branch, index) => {
+        snapshotId: researchExpectedSnapshotId,
+        entries: analyticalResearchRuns.slice(0, 6).map((branch, index) => {
           const branchContext = agentRunRecord(branch.context)?.branch as Record<string, unknown> | undefined;
           const branchId = agentRunString(branchContext?.id) ?? `branch:${index + 1}`;
           const branchOutcome = researchBranchOutcomes.get(branchId);
@@ -8636,7 +8973,7 @@ function analyticalFailureSummary(
       const researchLedgerV2 = buildResearchEvidenceLedgerV2({
         rootQuestion: request.question,
         planId: plan.rootPlanId,
-        snapshotId: routeDecision?.resolvedAnalyticalPlan?.snapshotId,
+        snapshotId: researchExpectedSnapshotId,
         groundableBranchCount: groundableResearchBranchCount,
         entries: researchLedger.entries.map((entry, index) => ({
           ...entry,
@@ -8669,6 +9006,38 @@ function analyticalFailureSummary(
         })),
         stoppingReason: researchLedger.stoppingReason,
       });
+      const researchLedgerV3 = buildResearchEvidenceLedgerV3({
+        rootQuestionFingerprint: runtimeTraceFingerprint(request.question),
+        planId: plan.rootPlanId,
+        snapshotId: researchExpectedSnapshotId,
+        groundableBranchCount: groundableResearchBranchCount,
+        entries: [
+          ...researchLedgerV2.entries.map((entry) => ({
+            kind: 'analytical_result' as const,
+            index: researchBranchReceipts.find((receipt) => receipt.branchId === entry.branchId)?.index ?? Number.MAX_SAFE_INTEGER,
+            entry,
+            hypothesisFingerprint: researchBranchSpans.get(entry.branchId)?.hypothesisFingerprint,
+          })),
+          ...researchBranchReceipts.flatMap((receipt) => {
+            const lineageReceipt = researchLineageEvidenceByBranch.get(receipt.branchId);
+            if (!lineageReceipt) return [];
+            return [{
+              kind: 'lineage_graph' as const,
+              index: receipt.index,
+              id: receipt.childRunId,
+              branchId: receipt.branchId,
+              receipt: lineageReceipt,
+              hypothesisFingerprint: researchBranchSpans.get(receipt.branchId)?.hypothesisFingerprint,
+              status: receipt.state === 'skipped'
+                ? 'skipped' as const
+                : receipt.state === 'failed' || receipt.state === 'timed_out'
+                  ? 'failed' as const
+                  : 'observed' as const,
+            }];
+          }),
+        ],
+        stoppingReason: researchLedger.stoppingReason,
+      });
       for (const entry of researchLedgerV2.entries) {
         const branch = researchBranchSpans.get(entry.branchId);
         if (!branch) continue;
@@ -8696,6 +9065,10 @@ function analyticalFailureSummary(
         && !researchWorkspaceError
         && researchRuns.length > 0
         && researchRuns.every((run) => run.status === 'ready');
+      // A local lineage receipt can complement an analytical observation, but
+      // it is structural and explicitly non-causal. A mixed dossier therefore
+      // remains review-required even if every analytical child executed.
+      const researchIncludesLineageEvidence = researchLedgerV3.entries.some((entry) => entry.evidenceKind === 'lineage_graph');
       // Finalization has a reserved slice. It can always construct the
       // deterministic receipt-bound story, but a fresh provider narration may
       // not begin after its soft cutoff.
@@ -8716,25 +9089,49 @@ function analyticalFailureSummary(
         name: 'research.synthesize',
         stage: 'research',
         reasonCode: 'started',
-        payload: { kind: 'research', branchCount: researchLedgerV2.entries.length },
+        payload: { kind: 'research', branchCount: researchLedgerV3.entries.length },
       });
-      const researchStory = !needsClarification && researchLedgerV2.entries.length > 0
+      const researchStory = !needsClarification && researchLedgerV3.entries.length > 0
         ? synthesizeResearchNarrative({
           question: request.question,
-          branches: researchLedgerV2.entries.map((entry) => ({
-            statement: entry.hypothesis ?? entry.question,
-            produced: entry.status === 'observed',
-            verdict: entry.verdict,
-            counterEvidenceFactIds: entry.counterEvidenceFactIds,
-            ...(entry.error ? { summary: entry.error } : {}),
-            status: entry.status,
-          })),
+          branches: researchLedgerV3.entries.map((entry, index) => {
+            if (entry.evidenceKind === 'lineage_graph') {
+              const status = entry.lineageReceipt.status;
+              const summary = status === 'completed'
+                ? 'The local graph supplied structural dependency evidence only; it is not causal evidence.'
+                : status === 'truncated'
+                  ? 'The local structural graph evidence reached its bounded cap and is incomplete.'
+                  : status === 'stale'
+                    ? 'The frozen source snapshot was stale.'
+                    : status === 'ambiguous'
+                      ? 'The local graph could not choose one exact target.'
+                      : status === 'missing'
+                        ? 'The exact target was not present in the local graph.'
+                        : 'The local lineage graph was unavailable.';
+              return {
+                statement: `Structural lineage check ${index + 1}`,
+                produced: entry.status === 'observed',
+                verdict: entry.verdict,
+                counterEvidenceFactIds: entry.counterEvidenceFactIds,
+                summary,
+                status: entry.status,
+              };
+            }
+            const analytical = researchLedgerV2.entries.find((candidate) => candidate.branchId === entry.branchId);
+            return {
+              statement: analytical?.hypothesis ?? `Analytical evidence branch ${index + 1}`,
+              produced: entry.status === 'observed',
+              verdict: entry.verdict,
+              counterEvidenceFactIds: entry.counterEvidenceFactIds,
+              status: entry.status,
+            };
+          }),
         })
         : undefined;
       trace.finishSpan(researchSynthesisSpan, {
         outcome: 'ok',
         reasonCode: 'completed',
-        payload: { kind: 'research', branchCount: researchLedgerV2.entries.length },
+        payload: { kind: 'research', branchCount: researchLedgerV3.entries.length },
       });
       const summary = needsClarification
         ? 'Needs clarification before running deeper research.'
@@ -8762,7 +9159,7 @@ function analyticalFailureSummary(
         )
         && branchTimedOut;
       const scopePrefix = [
-        !needsClarification && researchLedgerV2.limitedScope
+        !needsClarification && researchLedgerV3.limitedScope
           ? 'Limited research scope: fewer than three groundable branches were available.'
           : undefined,
         allResearchBranchesBoundedOut
@@ -8788,7 +9185,9 @@ function analyticalFailureSummary(
         // limited-scope warning behind a generic "no executed result" line.
         answer: plan.followUp?.question ?? scopedSummary,
         status: needsClarification ? 'needs_clarification' : 'needs_review',
-        trustState: needsClarification ? 'not_applicable' : (researchExecutedCleanly ? 'grounded' : 'review_required'),
+        trustState: needsClarification
+          ? 'not_applicable'
+          : (researchExecutedCleanly && !researchIncludesLineageEvidence ? 'grounded' : 'review_required'),
         stopReason: needsClarification ? 'needs_clarification' : 'human_review_required',
         telemetry,
         artifacts: needsClarification
@@ -8798,6 +9197,7 @@ function analyticalFailureSummary(
               typedResearchPlan,
               researchLedger,
               researchLedgerV2,
+              researchLedgerV3,
               researchBranchReceipts,
               researchBudget: {
                 version: 1,
@@ -8858,12 +9258,12 @@ function analyticalFailureSummary(
           agentRunEvaluation(
             'research-scope',
             'Research scope',
-            !researchLedgerV2.limitedScope,
-            researchLedgerV2.limitedScope ? 'warning' : 'info',
-            researchLedgerV2.limitedScope
-              ? `Limited research scope: ${researchLedgerV2.groundableBranchCount} of at least 3 evidence-supported branches were available for this investigation.`
-              : `${researchLedgerV2.groundableBranchCount} groundable branches were retained with verdicts and counter-evidence slots.`,
-            { groundableBranchCount: researchLedgerV2.groundableBranchCount, limitedScope: researchLedgerV2.limitedScope },
+            !researchLedgerV3.limitedScope,
+            researchLedgerV3.limitedScope ? 'warning' : 'info',
+            researchLedgerV3.limitedScope
+              ? `Limited research scope: ${researchLedgerV3.groundableBranchCount} of at least 3 evidence-supported branches were available for this investigation.`
+              : `${researchLedgerV3.groundableBranchCount} groundable branches were retained with verdicts and counter-evidence slots.`,
+            { groundableBranchCount: researchLedgerV3.groundableBranchCount, limitedScope: researchLedgerV3.limitedScope },
           ),
         ],
         nextActions: needsClarification
@@ -9272,7 +9672,8 @@ function analyticalFailureSummary(
     // Persist only the server-produced binding classification on the ephemeral
     // run request. The engine/trace can explain why prior state was (or was
     // not) admitted without receiving any prior rows or prompt content.
-    request.conversationBinding = followUp?.binding ?? 'none';
+    request.conversationBinding = followUp?.binding
+      ?? (request.priorResultMemberBinding ? 'prior_result' : request.conversationBinding ?? 'none');
     // A plural deictic reference is a bounded prior-result set operation, not
     // a friendly hint. If the server-side thread cannot recover that set after
     // restart (for example a deliberately redacted legacy result), stop before
@@ -10390,8 +10791,9 @@ function analyticalFailureSummary(
         domain: artifact.source.match(/\bdomain\s*=\s*"([^"]+)"/i)?.[1],
         // Trust is owned by the route that froze this artifact. A governed
         // semantic artifact is not exploratory merely because it is not a
-        // certified block; only the explicit review-required artifact lane
-        // carries reviewRequired into the physical SQL span.
+        // certified block. A frozen, inferred semantic substitution is the
+        // narrow exception: it carries its explicit `review_required` marker
+        // into the physical SQL span and returned result.
         reviewRequired: artifact.trustState === 'review_required',
       },
       {
@@ -10404,6 +10806,10 @@ function analyticalFailureSummary(
     );
     return {
       ...result,
+      // Keep the execution result at the frozen plan's stricter trust state.
+      // `canonicalPersistedTrustState` consumes this marker while the attached
+      // DQL artifact keeps the same boundary for the card and Apply surface.
+      ...(artifact.trustState === 'review_required' ? { trustState: 'review_required' as const } : {}),
       dqlArtifact: {
         ...artifact,
         ...(invocation.parameters.length > 0 ? { parameters: invocation.parameters } : {}),
@@ -14482,6 +14888,7 @@ function analyticalFailureSummary(
         ...(run?.diagnosticReceiptV5?.summary ? { runtimeDecisionSummary: run.diagnosticReceiptV5.summary } : {}),
         ...(run?.diagnosticReceiptV5 ? { runtimeReceiptV5: run.diagnosticReceiptV5 } : {}),
         ...(run?.diagnosticReceiptV6 ? { runtimeReceiptV6: run.diagnosticReceiptV6 } : {}),
+        ...(run?.diagnosticReceiptV7 ? { runtimeReceiptV7: run.diagnosticReceiptV7 } : {}),
       }));
       return;
     }
@@ -14563,6 +14970,7 @@ function analyticalFailureSummary(
         ...(run?.diagnosticReceiptV5?.summary ? { runtimeDecisionSummary: run.diagnosticReceiptV5.summary } : {}),
         ...(run?.diagnosticReceiptV5 ? { runtimeReceiptV5: run.diagnosticReceiptV5 } : {}),
         ...(run?.diagnosticReceiptV6 ? { runtimeReceiptV6: run.diagnosticReceiptV6 } : {}),
+        ...(run?.diagnosticReceiptV7 ? { runtimeReceiptV7: run.diagnosticReceiptV7 } : {}),
       }));
       return;
     }
@@ -15298,6 +15706,11 @@ function analyticalFailureSummary(
           // immutable local member filter or a typed continuity gap.
           hydratePersistedPriorResultMemberBinding(parsed.request);
         }
+        // An explicit result selection is stronger than conversational prose:
+        // rebind it directly from durable run storage after any thread
+        // hydration, so it remains stable across reloads and cannot be
+        // overwritten by a best-effort text follow-up classifier.
+        hydratePersistedSelectedResultBinding(parsed.request, agentRunStore);
         // Threadless/public continuation JSON is deliberately non-authoritative.
         // If a plural deictic Ask cannot be rebound from a persisted member set,
         // fail closed before retrieval or planning rather than turning "those
@@ -35469,6 +35882,45 @@ function lineageSourceSignature(projectRoot: string): string {
   return hash.digest('hex');
 }
 
+/**
+ * Immutable structural evidence captured once for an explicit Research root.
+ * `lineageSourceSignature` includes `dql-manifest.json`, so a manifest edit
+ * between root planning and a child check is observable before any graph walk.
+ */
+export interface ResearchLineageRootSnapshotV1 {
+  graph?: InstanceType<typeof LineageGraph>;
+  graphFingerprint: string;
+  stableAtCapture: boolean;
+}
+
+export function captureResearchLineageRootSnapshotV1(
+  projectRoot: string,
+  semanticLayer: SemanticLayer | null | undefined,
+): ResearchLineageRootSnapshotV1 {
+  const before = lineageSourceSignature(projectRoot);
+  let graph: InstanceType<typeof LineageGraph> | undefined;
+  try {
+    graph = buildProjectLineageGraph(projectRoot, semanticLayer);
+  } catch {
+    // A graph build failure is represented as typed `unavailable` by the
+    // direct program; no raw parser/filesystem failure is persisted.
+  }
+  const after = lineageSourceSignature(projectRoot);
+  return {
+    ...(before === after && graph ? { graph } : {}),
+    graphFingerprint: before,
+    stableAtCapture: before === after,
+  };
+}
+
+/** True only while the root-captured graph still matches all lineage inputs. */
+export function researchLineageRootSnapshotIsCurrentV1(
+  snapshot: ResearchLineageRootSnapshotV1,
+  projectRoot: string,
+): boolean {
+  return snapshot.stableAtCapture && lineageSourceSignature(projectRoot) === snapshot.graphFingerprint;
+}
+
 /** UI-008: bounded compiler-owned Domain Knowledge Capsule response. */
 function canonicalDomainKnowledge(manifest: DQLManifest, domainId: string, snapshotId: string) {
   const graph = manifest.knowledgeGraph;
@@ -37466,6 +37918,14 @@ export interface ResearchBranchReceiptV1 {
   stopReason: ResearchBranchStopReasonV1;
   /** Present for an admitted child; skipped children never start provider/SQL work. */
   branchBudgetMs?: number;
+  /**
+   * Legacy receipts are analytical-result branches. A lineage receipt is an
+   * additive structural program with no provider, SQL, warehouse, or repair
+   * execution; readers that do not know this field retain the V1 behaviour.
+   */
+  evidenceKind?: 'analytical_result' | 'lineage_graph';
+  /** Present only for a content-safe `check_lineage` structural receipt. */
+  lineageStatus?: ResearchLineageEvidenceReceiptV1['status'];
 }
 
 /**

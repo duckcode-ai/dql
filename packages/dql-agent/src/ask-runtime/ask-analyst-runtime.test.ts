@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createAskAnalystRuntimeV1 } from './ask-analyst-runtime.js';
+import { buildAnalyticalRequirementSeedV1, evidenceCandidateRoles } from '../analytical-orchestration.js';
 import type { IntentDecision } from '../intent-controller.js';
 import type { AgentEvidenceCandidate, AgentRetrievalEvidence } from '../meaning-resolution.js';
 
@@ -235,6 +236,79 @@ describe('AskAnalystRuntimeV1', () => {
       orderCount.id,
     ]));
     expect(decision.meaningResolution?.recommendedRoute).toBe('exploratory');
+    expect(decision.askAnalystDecision?.state.workspace.tools).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'provider_meaning',
+        status: 'skipped',
+        reasonCode: 'deterministic_single_relation_physical_binding',
+      }),
+    ]));
+  });
+
+  it('AGT-036 keeps a typed prior-result lookup on one qualified relation without inventing a measure', async () => {
+    const relation: AgentEvidenceCandidate = {
+      id: 'dbt:model:dim_customers',
+      qualifiedId: 'dbt:model:dim_customers',
+      kind: 'dbt_model',
+      trustTier: 'exploratory',
+      name: 'dim_customers',
+      aliases: ['customers'],
+      relevanceScore: 1,
+      matchReasons: ['dbt manifest'],
+      compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:dim_customers'],
+    };
+    const customerName: AgentEvidenceCandidate = {
+      id: 'dbt:column:dim_customers.customer_name',
+      qualifiedId: 'dbt:column:dim_customers.customer_name',
+      kind: 'sql_column',
+      trustTier: 'exploratory',
+      name: 'customer_name',
+      aliases: ['customer', 'customer name'],
+      relevanceScore: 1,
+      matchReasons: ['runtime schema column'],
+      compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:dim_customers'],
+    };
+    const region: AgentEvidenceCandidate = {
+      id: 'dbt:column:dim_customers.region',
+      qualifiedId: 'dbt:column:dim_customers.region',
+      kind: 'sql_column',
+      trustTier: 'exploratory',
+      name: 'region',
+      aliases: ['region'],
+      relevanceScore: 1,
+      matchReasons: ['runtime schema column'],
+      compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:dim_customers'],
+    };
+    const planAnalytical = vi.fn();
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker: { decide: vi.fn(async () => semanticDecision()) },
+      planAnalytical,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot:customer-region',
+        candidates: [relation, customerName, region],
+        parsedIntent: { measures: [], dimensions: ['region'], filters: [] },
+      }),
+    });
+    const question = 'Which region does Brittany Barrera belong to?';
+    const decision = await runtime.decide({
+      question,
+      requestedMode: 'ask',
+      hostRequirementSeed: buildAnalyticalRequirementSeedV1({
+        question,
+        parsedIntent: { dimensions: ['region'], filters: [{ field: 'customer_name', value: 'Brittany Barrera' }] },
+      }),
+    });
+
+    expect(planAnalytical).not.toHaveBeenCalled();
+    expect(decision.meaningResolution?.recommendedRoute).toBe('exploratory');
+    expect(decision.meaningResolution?.selectedConceptIds).toEqual(expect.arrayContaining([
+      relation.id,
+      customerName.id,
+      region.id,
+    ]));
     expect(decision.askAnalystDecision?.state.workspace.tools).toEqual(expect.arrayContaining([
       expect.objectContaining({
         kind: 'provider_meaning',
@@ -878,8 +952,17 @@ describe('AskAnalystRuntimeV1', () => {
       id: 'dql:relationship:customer_order_item_product', kind: 'dql_modeling', trustTier: 'governed',
       name: 'customer order item product relationship', relevanceScore: 0.5, matchReasons: ['governed relationship'], compatibility: 'compatible',
       relationshipEvidence: ['dql:relationship:customer_order_item_product'],
+      relationshipSafety: [{
+        id: 'dql:relationship:customer_order_item_product',
+        from: 'semantic:entity:customers.customer_id',
+        to: 'semantic:entity:products.product',
+        keys: [{ from: 'customer_id', to: 'customer_id' }],
+        status: 'certified', staleCertification: false, cardinality: 'many_to_one', fanout: 'safe', automaticJoinAllowed: true,
+        certificationFingerprint: 'sha256:customer-order-item-product',
+        validation: { status: 'passed', checkedAt: '2026-08-28T00:00:00.000Z', queryFingerprint: 'sha256:customer-product-query', proofFingerprint: 'sha256:customer-product-proof' },
+      }],
     };
-    const planner = vi.fn(async (input: { plannerRequest: { candidates: Array<{ id: string; roles: string[] }>; planningMode: string } }) => {
+    const planner = vi.fn(async (input: { plannerRequest: { candidates: readonly { id: string; roles: string[] }[]; planningMode: string } }) => {
       expect(input.plannerRequest.planningMode).toBe('initial_planner');
       expect(input.plannerRequest.candidates).toHaveLength(5);
       expect(input.plannerRequest.candidates.some((candidate) => candidate.roles.includes('metric'))).toBe(true);
@@ -887,20 +970,22 @@ describe('AskAnalystRuntimeV1', () => {
       expect(input.plannerRequest.candidates.some((candidate) => candidate.roles.includes('entity_label'))).toBe(true);
       expect(input.plannerRequest.candidates.some((candidate) => candidate.roles.includes('categorical_dimension'))).toBe(true);
       expect(input.plannerRequest.candidates.some((candidate) => candidate.roles.includes('relationship'))).toBe(true);
+      const pathCardId = input.plannerRequest.candidates.find((candidate) =>
+        candidate.id.startsWith('dql:relationship_path:'))?.id ?? 'dql:relationship_path:missing';
       return {
         version: 1 as const,
-        selectedConceptIds: [revenue.id, customerKey.id, customerName.id, productName.id, relationship.id],
+        selectedConceptIds: [revenue.id, customerKey.id, customerName.id, productName.id, pathCardId],
         confidence: 'high' as const,
         tasks: [{
           version: 1 as const,
           taskId: 'task-1',
-          selectedConceptIds: [revenue.id, customerKey.id, customerName.id, productName.id, relationship.id],
+          selectedConceptIds: [revenue.id, customerKey.id, customerName.id, productName.id, pathCardId],
           roleBindings: {
             metric: [revenue.id],
             entity_key: [customerKey.id],
             entity_label: [customerName.id],
             categorical_dimension: [productName.id],
-            relationship: [relationship.id],
+            relationship: [pathCardId],
           },
           operations: ['aggregate', 'rank', 'group', 'project'] as const,
         }],
@@ -1146,28 +1231,41 @@ describe('AskAnalystRuntimeV1', () => {
       aliases: ['customer orders relationship'], relevanceScore: 0.9,
       matchReasons: ['governed relationship'], compatibility: 'compatible',
       relationshipEvidence: ['relationship:customers_orders'],
-    };
-    const planner = vi.fn(async () => ({
-      version: 1 as const,
-      selectedConceptIds: [tupleRevenue.id, customerKey.id, customerName.id, region.id, west.id, relationship.id],
-      tasks: [{
-        version: 1 as const,
-        taskId: 'task-1',
-        selectedConceptIds: [tupleRevenue.id, customerKey.id, customerName.id, region.id, west.id, relationship.id],
-        roleBindings: {
-          metric: [tupleRevenue.id],
-          entity_key: [customerKey.id],
-          entity_label: [customerName.id],
-          categorical_dimension: [region.id],
-          member: [west.id],
-          // A semantic metric may bind an authored time child; it does not
-          // authorize a time field outside the same snapshot.
-          time_dimension: [tupleRevenue.id],
-          relationship: [relationship.id],
-        },
-        operations: ['aggregate', 'filter', 'group', 'trend', 'rank', 'project'] as const,
+      relationshipSafety: [{
+        id: 'relationship:customers_orders',
+        from: 'semantic:entity:customers.customer_id',
+        to: 'semantic:entity:order',
+        keys: [{ from: 'customer_id', to: 'customer_id' }],
+        status: 'certified', staleCertification: false, cardinality: 'many_to_one', fanout: 'safe', automaticJoinAllowed: true,
+        certificationFingerprint: 'sha256:customers-orders',
+        validation: { status: 'passed', checkedAt: '2026-08-28T00:00:00.000Z', queryFingerprint: 'sha256:customers-orders-query', proofFingerprint: 'sha256:customers-orders-proof' },
       }],
-    }));
+    };
+    const planner = vi.fn(async (input: { plannerRequest: { candidates: readonly { id: string }[] } }) => {
+      const pathCardId = input.plannerRequest.candidates.find((candidate) =>
+        candidate.id.startsWith('dql:relationship_path:'))?.id ?? 'dql:relationship_path:missing';
+      return {
+        version: 1 as const,
+        selectedConceptIds: [tupleRevenue.id, customerKey.id, customerName.id, region.id, west.id, pathCardId],
+        tasks: [{
+          version: 1 as const,
+          taskId: 'task-1',
+          selectedConceptIds: [tupleRevenue.id, customerKey.id, customerName.id, region.id, west.id, pathCardId],
+          roleBindings: {
+            metric: [tupleRevenue.id],
+            entity_key: [customerKey.id],
+            entity_label: [customerName.id],
+            categorical_dimension: [region.id],
+            member: [west.id],
+            // A semantic metric may bind an authored time child; it does not
+            // authorize a time field outside the same snapshot.
+            time_dimension: [tupleRevenue.id],
+            relationship: [pathCardId],
+          },
+          operations: ['aggregate', 'filter', 'group', 'trend', 'rank', 'project'] as const,
+        }],
+      };
+    });
     const runtime = createAskAnalystRuntimeV1({
       compilerBroker: { decide: vi.fn(async () => semanticDecision()) },
       planAnalytical: planner,
@@ -1445,6 +1543,49 @@ describe('AskAnalystRuntimeV1', () => {
     expect(decision.reason).not.toMatch(/connection|sql execute/i);
   });
 
+  it('AGT-042 rejects an unretrieved same-named semantic dimension from another model', async () => {
+    const locationName: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:locations.location_name',
+      // This is the historical compact local-index representation. The
+      // planner must not be allowed to turn a terminal-name match from an
+      // unrelated model into this admitted card.
+      qualifiedId: 'semantic:uncategorized:dimension:location_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Location Name', aliases: ['region', 'location'], relevanceScore: 0.9,
+      matchReasons: ['semantic dimension'], compatibility: 'compatible',
+    };
+    const compilerBroker = { decide: vi.fn(async () => semanticDecision()) };
+    const unretrievedId = 'semantic:dimension:other.location_name';
+    const planner = vi.fn(async () => ({
+      version: 1 as const,
+      selectedConceptIds: [revenue.id, unretrievedId],
+      tasks: [{
+        version: 1 as const,
+        taskId: 'task-1',
+        selectedConceptIds: [revenue.id, unretrievedId],
+        roleBindings: { metric: [revenue.id], categorical_dimension: [unretrievedId] },
+        operations: ['aggregate', 'group'] as const,
+      }],
+    }));
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker,
+      planAnalytical: planner,
+      getEvidence: async () => ({
+        candidates: [revenue, locationName],
+        parsedIntent: { measures: ['revenue'], dimensions: ['region'], filters: [] },
+      }),
+    });
+
+    const decision = await runtime.decide({ question: 'show revenue by region', requestedMode: 'ask' });
+
+    // An outside identity is a policy boundary, not malformed output that
+    // merits a second provider continuation.
+    expect(planner).toHaveBeenCalledTimes(1);
+    expect(decision.terminalOutcome?.code).toBe('ANALYTICAL_POLICY_BLOCKED');
+    expect(decision.reason).toMatch(/valid selection from the 16-card package/i);
+    expect(compilerBroker.decide).not.toHaveBeenCalled();
+  });
+
   it('AGT-042 requires explicit business role bindings instead of repopulating them from the execution closure', async () => {
     const product: AgentEvidenceCandidate = {
       id: 'semantic:dimension:products.product_name',
@@ -1501,21 +1642,34 @@ describe('AskAnalystRuntimeV1', () => {
       name: 'Customer Product Relationship', aliases: ['customer product relationship'], relevanceScore: 0.8,
       matchReasons: ['governed relationship'], compatibility: 'compatible',
       relationshipEvidence: ['dql:relationship:customer_product'],
+      relationshipSafety: [{
+        id: 'dql:relationship:customer_product',
+        from: 'semantic:entity:customers.customer',
+        to: 'semantic:entity:products.product',
+        keys: [{ from: 'customer_id', to: 'customer_id' }],
+        status: 'certified', staleCertification: false, cardinality: 'many_to_one', fanout: 'safe', automaticJoinAllowed: true,
+        certificationFingerprint: 'sha256:customer-product',
+        validation: { status: 'passed', checkedAt: '2026-08-28T00:00:00.000Z', queryFingerprint: 'sha256:customer-product-query', proofFingerprint: 'sha256:customer-product-proof' },
+      }],
     };
     const compilerBroker = { decide: vi.fn(async () => semanticDecision()) };
     const runtime = createAskAnalystRuntimeV1({
       compilerBroker,
-      planAnalytical: async () => ({
-        version: 1,
-        selectedConceptIds: [revenue.id, region.id, relationship.id],
-        tasks: [{
+      planAnalytical: async (input) => {
+        const pathCardId = input.plannerRequest.candidates.find((candidate) =>
+          candidate.id.startsWith('dql:relationship_path:'))?.id ?? 'dql:relationship_path:missing';
+        return {
           version: 1,
-          taskId: 'task-1',
-          selectedConceptIds: [revenue.id, region.id, relationship.id],
-          roleBindings: { metric: [revenue.id], categorical_dimension: [region.id], relationship: [relationship.id] },
-          operations: ['aggregate', 'group'],
-        }],
-      }),
+          selectedConceptIds: [revenue.id, region.id, pathCardId],
+          tasks: [{
+            version: 1,
+            taskId: 'task-1',
+            selectedConceptIds: [revenue.id, region.id, pathCardId],
+            roleBindings: { metric: [revenue.id], categorical_dimension: [region.id], relationship: [pathCardId] },
+            operations: ['aggregate', 'group'],
+          }],
+        };
+      },
       getEvidence: async () => ({
         snapshotId: 'snapshot:two-dimensions',
         candidates: [revenue, region, productCategory, relationship],
@@ -1986,7 +2140,7 @@ describe('AskAnalystRuntimeV1', () => {
     expect(decision.terminalOutcome?.code).not.toBe('ANALYTICAL_MODELING_GAP');
   });
 
-  it('records an invalid planner response as planning validation, not empty targeted recovery or a provider outage', async () => {
+  it('AGT-041 corrects one invalid planner response on the same immutable package before reporting validation', async () => {
     const planner = vi.fn(async () => undefined);
     const runtime = createAskAnalystRuntimeV1({
       compilerBroker: { decide: vi.fn(async () => semanticDecision()) },
@@ -2000,16 +2154,25 @@ describe('AskAnalystRuntimeV1', () => {
 
     const decision = await runtime.decide({ question: 'show revenue by region', requestedMode: 'ask' });
 
-    expect(planner).toHaveBeenCalledTimes(1);
+    expect(planner).toHaveBeenCalledTimes(2);
+    expect(planner.mock.calls[1]?.[0]).toMatchObject({
+      feedback: { reasonCode: 'planner_output_invalid_retry' },
+      plannerRequest: {
+        planningMode: 'targeted_revision',
+        // A malformed-output correction is not a hidden extension: the
+        // provider sees the same original package, not a newly re-ranked set.
+        candidates: [expect.objectContaining({ id: revenue.id })],
+      },
+    });
     expect(decision).toMatchObject({
       action: 'block',
       terminalOutcome: { kind: 'modeling_gap', code: 'ANALYTICAL_MODELING_GAP' },
       askAnalystDecision: {
         state: {
           planningReceipt: {
-            mode: 'initial_planner',
-            plannerCalls: 1,
-            revisionCalls: 0,
+            mode: 'targeted_revision',
+            plannerCalls: 2,
+            revisionCalls: 1,
             verification: {
               status: 'invalid',
               missingRoles: [],
@@ -2018,7 +2181,7 @@ describe('AskAnalystRuntimeV1', () => {
           },
           workspace: {
             tools: expect.arrayContaining([
-              expect.objectContaining({ kind: 'provider_meaning', status: 'failed', reasonCode: 'planning.initial.failed' }),
+              expect.objectContaining({ kind: 'provider_meaning', status: 'failed', reasonCode: 'planning.revision.failed' }),
             ]),
           },
         },
@@ -2026,5 +2189,2354 @@ describe('AskAnalystRuntimeV1', () => {
     });
     expect(decision.providerFailure).toBeUndefined();
     expect(decision.reason).not.toMatch(/connection|sql execute/i);
+  });
+
+  it('AGT-041 sends a corrected valid proposal into the canonical semantic cascade', async () => {
+    const competingRevenue: AgentEvidenceCandidate = {
+      ...revenue,
+      id: 'semantic:metric:orders.booked_revenue',
+      qualifiedId: 'semantic:metric:orders.booked_revenue',
+      name: 'orders.booked_revenue',
+      aliases: ['revenue'],
+      exactMatch: false,
+      relevanceScore: 0.8,
+      analyticalCapability: semanticCapability('semantic:metric:orders.booked_revenue'),
+    };
+    const planner = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        version: 1 as const,
+        selectedConceptIds: [revenue.id],
+        tasks: [{
+          version: 1 as const,
+          taskId: 'task-1',
+          selectedConceptIds: [revenue.id],
+          roleBindings: { metric: [revenue.id] },
+          operations: ['aggregate', 'project'] as const,
+        }],
+      });
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker: { decide: vi.fn(async () => semanticDecision()) },
+      planAnalytical: planner,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot:corrected-planner',
+        candidates: [revenue, competingRevenue],
+        parsedIntent: { measures: ['revenue'], dimensions: [], filters: [] },
+      }),
+    });
+
+    const decision = await runtime.decide({ question: 'show revenue', requestedMode: 'ask' });
+
+    expect(planner).toHaveBeenCalledTimes(2);
+    expect(planner.mock.calls[1]?.[0]).toMatchObject({
+      feedback: { reasonCode: 'planner_output_invalid_retry' },
+      plannerRequest: { planningMode: 'targeted_revision' },
+    });
+    expect(decision.action).toBe('answer');
+    expect(decision.analyticalCascadeDecision).toMatchObject({ selectedTier: 'semantic', planFrozen: true });
+    expect(decision.askAnalystDecision?.state.planningReceipt).toMatchObject({
+      mode: 'targeted_revision', plannerCalls: 2, revisionCalls: 1,
+    });
+  });
+
+  it('AGT-041 keeps a same-snapshot role extension in the initial package while correcting malformed planner output once', async () => {
+    const product = {
+      id: 'semantic:dimension:products.product_name',
+      qualifiedId: 'semantic:dimension:products.product_name',
+      kind: 'semantic_member' as const,
+      semanticObjectType: 'dimension' as const,
+      trustTier: 'semantic' as const,
+      name: 'Product name',
+      aliases: ['product', 'product name'],
+      relevanceScore: 0.01,
+      matchReasons: ['same snapshot product grouping'],
+      compatibility: 'compatible' as const,
+      sameSnapshotRoleExtension: {
+        version: 1,
+        role: 'categorical_dimension',
+        requestedTerm: 'product',
+        metricId: revenue.id,
+        dimensionId: 'semantic:dimension:products.product_name',
+        basis: 'exact_metricflow_grouping_dimension',
+      },
+    } satisfies AgentEvidenceCandidate;
+    const revenueByProduct: AgentEvidenceCandidate = {
+      ...revenue,
+      analyticalCapability: {
+        ...semanticCapability(revenue.id),
+        primaryEntityId: 'semantic:entity:customers.customer',
+        defaultResultGrainId: 'semantic:entity:customers.customer',
+        resultGrainIds: ['semantic:entity:customers.customer'],
+        operations: ['group', 'rank'],
+        supportedOutputKinds: ['dimension', 'metric_value', 'rank'],
+        dimensions: [{
+          dimensionId: product.id,
+          entityId: 'semantic:entity:products.product',
+          label: 'Product name',
+          aliases: ['product', 'product name'],
+          supportedRoles: ['group_by'],
+          nativeGroupingReference: 'product__product_name',
+          nativeGroupingPath: ['product'],
+        }],
+      },
+    };
+    // A same-term metric competitor deliberately keeps this an ordinary
+    // planner turn instead of taking the deterministic single-metric shortcut.
+    const competingRevenue: AgentEvidenceCandidate = {
+      ...revenueByProduct,
+      id: 'semantic:metric:finance.revenue',
+      qualifiedId: 'semantic:metric:finance.revenue',
+      name: 'finance.revenue',
+      aliases: ['revenue'],
+      exactMatch: false,
+      relevanceScore: 0.02,
+    };
+    // Exact but role-irrelevant cards model a crowded initial package. The
+    // product grouping is low-relevance, but role-balanced admission must
+    // reserve it before relevance fillers consume all 16 planner cards.
+    const exactContext = Array.from({ length: 15 }, (_, index): AgentEvidenceCandidate => ({
+      id: `dbt:model:context_${index}`,
+      qualifiedId: `dbt:model:context_${index}`,
+      kind: 'dbt_model',
+      trustTier: 'exploratory',
+      name: `Context ${index}`,
+      relevanceScore: 0.99 - index / 100,
+      exactMatch: true,
+      matchReasons: ['exact non-role fixture'],
+      compatibility: 'compatible',
+    }));
+    let initialCandidateIds: string[] = [];
+    const planner = vi.fn(async (input: { plannerRequest: {
+      planningMode: string;
+      candidates: Array<{ id: string }>;
+      targetedCandidates?: Array<{ id: string }>;
+      verificationFeedback?: { reasonCode: string; missingRoles: string[] };
+    } }) => {
+      if (input.plannerRequest.planningMode === 'initial_planner') {
+        initialCandidateIds = input.plannerRequest.candidates.map((candidate) => candidate.id);
+        expect(initialCandidateIds).toHaveLength(16);
+        expect(initialCandidateIds).toContain(revenueByProduct.id);
+        expect(initialCandidateIds).toContain(product.id);
+        // The transport completed, but its content is malformed. The host
+        // gets one correction on this immutable, already role-complete
+        // package; it must not create a second retrieval/extension loop.
+        return undefined;
+      }
+      expect(input.plannerRequest.candidates.map((candidate) => candidate.id)).toEqual(initialCandidateIds);
+      expect(input.plannerRequest.targetedCandidates).toBeUndefined();
+      expect(input.plannerRequest.verificationFeedback).toMatchObject({
+        reasonCode: 'planner_output_invalid_retry',
+      });
+      return {
+        version: 1 as const,
+        selectedConceptIds: [revenueByProduct.id, product.id],
+        confidence: 'high' as const,
+        tasks: [{
+          version: 1 as const,
+          taskId: 'task-1',
+          selectedConceptIds: [revenueByProduct.id, product.id],
+          roleBindings: { metric: [revenueByProduct.id], categorical_dimension: [product.id] },
+          operations: ['aggregate', 'group'] as const,
+        }],
+      };
+    });
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker: { decide: vi.fn(async () => semanticDecision()) },
+      planAnalytical: planner,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot:malformed-plus-targeted',
+        candidates: [revenueByProduct, ...exactContext, competingRevenue, product],
+        parsedIntent: { measures: ['revenue'], dimensions: ['product'], filters: [] },
+      }),
+    });
+
+    const decision = await runtime.decide({ question: 'show revenue by product', requestedMode: 'ask' });
+
+    expect(planner).toHaveBeenCalledTimes(2);
+    expect(planner.mock.calls.map(([input]) => input.plannerRequest.planningMode)).toEqual([
+      'initial_planner',
+      'targeted_revision',
+    ]);
+    expect(decision).toMatchObject({
+      action: 'answer',
+      analyticalCascadeDecision: { selectedTier: 'semantic', planFrozen: true },
+      askAnalystDecision: {
+        state: {
+          planningReceipt: { mode: 'targeted_revision', plannerCalls: 2, revisionCalls: 1 },
+        },
+      },
+    });
+    expect(decision.askAnalystDecision?.state.workspace.targetedContext).toBeUndefined();
+  });
+
+  it('AGT-034 excludes stale or mismatched same-snapshot extensions before planner admission and role coverage', async () => {
+    const productDimensionId = 'semantic:dimension:products.product_name';
+    const metric: AgentEvidenceCandidate = {
+      ...revenue,
+      analyticalCapability: {
+        ...semanticCapability(revenue.id),
+        dimensions: [{
+          dimensionId: productDimensionId,
+          entityId: 'semantic:entity:products.product',
+          label: 'Product name',
+          aliases: ['product'],
+          supportedRoles: ['group_by'],
+          nativeGroupingReference: 'product__product_name',
+          nativeGroupingPath: ['product'],
+        }],
+      },
+    };
+    const competitor: AgentEvidenceCandidate = {
+      ...metric,
+      id: 'semantic:metric:finance.revenue',
+      qualifiedId: 'semantic:metric:finance.revenue',
+      name: 'finance.revenue',
+      aliases: ['revenue'],
+      exactMatch: false,
+      relevanceScore: 0.2,
+      analyticalCapability: {
+        ...metric.analyticalCapability!,
+        metricId: 'semantic:metric:finance.revenue',
+        measureIds: ['semantic:metric:finance.revenue:measure'],
+      },
+    };
+    const extension = (id: string, overrides: Partial<NonNullable<AgentEvidenceCandidate['sameSnapshotRoleExtension']>> = {}): AgentEvidenceCandidate => ({
+      id,
+      qualifiedId: productDimensionId,
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      trustTier: 'semantic',
+      name: 'Product name',
+      aliases: ['product'],
+      relevanceScore: 0.9,
+      matchReasons: ['untrusted persisted extension'],
+      compatibility: 'compatible',
+      sameSnapshotRoleExtension: {
+        version: 1,
+        role: 'categorical_dimension',
+        requestedTerm: 'product',
+        metricId: metric.analyticalCapability!.metricId,
+        dimensionId: productDimensionId,
+        basis: 'exact_metricflow_grouping_dimension',
+        ...overrides,
+      },
+    });
+    const invalidExtensions = [
+      extension('semantic:extension:wrong_metric', { metricId: 'semantic:metric:stale.revenue' }),
+      extension('semantic:extension:wrong_dimension', { dimensionId: 'semantic:dimension:other.product_name' }),
+      extension('semantic:extension:wrong_basis', { basis: 'legacy_lexical_alias' as never }),
+      { ...extension('semantic:extension:ineligible'), eligible: false },
+    ];
+    const plannerPackages: string[][] = [];
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker: { decide: vi.fn(async () => semanticDecision()) },
+      planAnalytical: vi.fn(async ({ plannerRequest }) => {
+        plannerPackages.push(plannerRequest.candidates.map((candidate) => candidate.id));
+        return undefined;
+      }),
+      getEvidence: async () => ({
+        snapshotId: 'snapshot:extension-proof-rejection',
+        // The wrong-metric wrapper appears in the ordinary retrieval pool,
+        // not only the clarification reserve. It must still be removed before
+        // lexical role balancing can present it as Product to the planner.
+        candidates: [metric, competitor, invalidExtensions[0]!],
+        clarificationCandidates: invalidExtensions,
+        parsedIntent: { measures: ['revenue'], dimensions: ['product'], filters: [] },
+      }),
+    });
+
+    const decision = await runtime.decide({ question: 'show revenue by product', requestedMode: 'ask' });
+
+    expect(plannerPackages).not.toEqual([]);
+    expect(plannerPackages.flat()).not.toEqual(expect.arrayContaining(invalidExtensions.map((candidate) => candidate.id)));
+    expect(decision.askAnalystDecision?.state.workspace.roleCoverage
+      ?.some((entry) => entry.role === 'categorical_dimension' && entry.candidateCount > 0)).toBe(false);
+  });
+
+  it('AGT-027/AGT-034 reserves a unique MetricFlow geography substitute and browser-selected customer path under the 16-card planner cap', async () => {
+    const customerKey: AgentEvidenceCandidate = {
+      id: 'semantic:entity:customers.customer', qualifiedId: 'semantic:entity:customers.customer',
+      kind: 'semantic_member', semanticObjectType: 'entity', trustTier: 'semantic',
+      name: 'Customer', aliases: ['customer', 'customer id'], relevanceScore: 0.91,
+      matchReasons: ['semantic entity'], compatibility: 'compatible',
+    };
+    const customerName: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:customers.customer_name', qualifiedId: 'semantic:dimension:customers.customer_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Customer Name', aliases: ['customer', 'customer name'], relevanceScore: 0.9,
+      matchReasons: ['semantic display dimension'], compatibility: 'compatible',
+    };
+    const locationDimensionId = 'semantic:dimension:locations.location_name';
+    // The snapshot does not expose a literal `region` field. It does expose
+    // the selected metric's one authored geographic grouping, intentionally
+    // low-ranked beneath 16 irrelevant context cards. Admission must retain
+    // it as an explicit review-required substitute rather than issuing a
+    // generic coverage gap.
+    const locationName: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:dimension:locations.location_name',
+      qualifiedId: 'semantic:uncategorized:dimension:locations.location_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Location Name', aliases: ['location', 'location name'], relevanceScore: 0.12,
+      matchReasons: ['semantic location dimension'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:locations'],
+    };
+    const locationsModel: AgentEvidenceCandidate = {
+      id: 'dbt:model:locations', qualifiedId: 'dbt:model:locations',
+      kind: 'dbt_model', trustTier: 'exploratory', name: 'locations', aliases: ['location'], relevanceScore: 0.11,
+      matchReasons: ['dbt manifest relation'], compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:locations'],
+    };
+    const metric: AgentEvidenceCandidate = {
+      ...revenue,
+      exactMatch: false,
+      relevanceScore: 0.88,
+      analyticalCapability: {
+        ...semanticCapability(revenue.id),
+        primaryEntityId: 'semantic:entity:order_items.order_item',
+        dimensions: [
+          {
+            dimensionId: customerName.id,
+            entityId: customerKey.id,
+            label: 'Customer Name', aliases: ['customer', 'customer name'],
+            supportedRoles: ['group_by', 'display', 'filter'],
+            relationshipPathIds: ['dql:relationship:order_to_customer'],
+            nativeGroupingReference: 'customer__customer_name',
+            nativeGroupingPath: ['customer'],
+          },
+          {
+            dimensionId: locationDimensionId,
+            entityId: 'semantic:entity:locations.location',
+            label: 'Location Name', aliases: ['location', 'location name'],
+            supportedRoles: ['group_by', 'display', 'filter'],
+            relationshipPathIds: ['dql:relationship:order_to_location'],
+            nativeGroupingReference: 'location__location_name',
+            nativeGroupingPath: ['location'],
+          },
+        ],
+      },
+    };
+    const competingMetric: AgentEvidenceCandidate = {
+      ...metric,
+      id: 'semantic:metric:finance.revenue',
+      qualifiedId: 'semantic:metric:finance.revenue',
+      name: 'finance.revenue',
+      relevanceScore: 0.87,
+    };
+    const relationship = (
+      id: string,
+      relevanceScore: number,
+      keyCount: number,
+      from: string,
+      to: string,
+    ): AgentEvidenceCandidate => ({
+      id, qualifiedId: id, kind: 'dql_modeling', trustTier: 'governed_sql',
+      name: id.replace('dql:relationship:', '').replaceAll('_', ' '), relevanceScore,
+      matchReasons: ['safe authored relationship'], compatibility: 'compatible', relationshipEvidence: [id],
+      relationshipSafety: [{
+        id,
+        from,
+        to,
+        keys: Array.from({ length: keyCount }, (_, index) => ({ from: `left_${index}`, to: `right_${index}` })),
+        status: 'certified',
+        staleCertification: false,
+        cardinality: 'many_to_one',
+        fanout: 'safe',
+        automaticJoinAllowed: true,
+        certificationFingerprint: `sha256:relationship:${id}`,
+        validation: {
+          status: 'passed',
+          checkedAt: '2026-08-28T00:00:00.000Z',
+          queryFingerprint: `sha256:query:${id}`,
+          proofFingerprint: `sha256:proof:${id}`,
+        },
+      }],
+    });
+    const orderItemsToOrder = relationship(
+      'dql:relationship:order_item_to_order',
+      0.85,
+      1,
+      'semantic:entity:order_items.order_item',
+      'semantic:entity:orders.order',
+    );
+    const orderToLocation = relationship(
+      'dql:relationship:order_to_location',
+      0.97,
+      1,
+      'semantic:entity:orders.order',
+      'semantic:entity:locations.location',
+    );
+    // The higher-relevance distractor would consume the edge budget before
+    // `order_to_customer` in the old relevance-only closure.
+    const orderToStatus = relationship(
+      'dql:relationship:order_to_status',
+      0.99,
+      1,
+      'semantic:entity:orders.order',
+      'semantic:entity:statuses.status',
+    );
+    const orderToCustomer = relationship(
+      'dql:relationship:order_to_customer',
+      0.6,
+      2,
+      'semantic:entity:orders.order',
+      customerKey.id,
+    );
+    let plannerCandidates: readonly { id: string; relationHints?: string[]; relationshipProofClass?: string }[] = [];
+    const planner = vi.fn(async (input: { plannerRequest: {
+      frame: { requirements: { entityTerms: string[]; entityDisplayTerms: string[]; memberTerms: string[]; priorResultMemberBinding?: unknown } };
+      candidates: readonly { id: string; relationHints?: string[]; relationshipProofClass?: string }[];
+    } }) => {
+      // The host predicate must not be included in provider planner context.
+      expect(input.plannerRequest.frame.requirements).toMatchObject({
+        entityTerms: expect.arrayContaining(['customer']),
+        entityDisplayTerms: expect.arrayContaining(['customer name']),
+      });
+      expect(input.plannerRequest.frame.requirements.memberTerms).not.toContain('melissa davis');
+      expect(input.plannerRequest.frame.requirements.priorResultMemberBinding).toBeUndefined();
+      plannerCandidates = input.plannerRequest.candidates;
+      const pathCardId = plannerCandidates.find((candidate) =>
+        candidate.id.startsWith('dql:relationship_path:'))?.id ?? 'dql:relationship_path:missing';
+      return {
+        version: 1 as const,
+        selectedConceptIds: [metric.id, customerKey.id, customerName.id, locationDimensionId, pathCardId],
+        confidence: 'high' as const,
+        tasks: [{
+          version: 1 as const,
+          taskId: 'task-1',
+          selectedConceptIds: [metric.id, customerKey.id, customerName.id, locationDimensionId, pathCardId],
+          roleBindings: {
+            metric: [metric.id],
+            entity_key: [customerKey.id],
+            entity_label: [customerName.id],
+            categorical_dimension: [locationDimensionId],
+            relationship: [pathCardId],
+          },
+          operations: ['aggregate', 'filter', 'group', 'project'] as const,
+        }],
+      };
+    });
+    // Fill the normal planner package to its cap. The closure can therefore
+    // survive only when it is admitted as one atomic relationship-path card.
+    const fillerContext = Array.from({ length: 16 }, (_, index): AgentEvidenceCandidate => ({
+      id: `dbt:model:context_${index}`,
+      qualifiedId: `dbt:model:context_${index}`,
+      kind: 'dbt_model',
+      trustTier: 'exploratory',
+      name: `Context ${index}`,
+      aliases: [`context ${index}`],
+      relevanceScore: 0.98 - index / 1000,
+      matchReasons: ['retrieved context'],
+      compatibility: 'compatible',
+    }));
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker: { decide: vi.fn(async () => semanticDecision()) },
+      planAnalytical: planner,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot:prior-customer-region',
+        candidates: [
+          metric,
+          competingMetric,
+          customerKey,
+          customerName,
+          locationName,
+          locationsModel,
+          orderToStatus,
+          orderToLocation,
+          orderItemsToOrder,
+          orderToCustomer,
+          ...fillerContext,
+        ],
+        parsedIntent: { measures: [], dimensions: ['region'], filters: [] },
+      }),
+    });
+    const question = 'Show revenue by region for her.';
+    const priorResultMemberBinding = {
+      version: 1 as const,
+      displayDimension: 'customer_name',
+      values: ['Melissa Davis'],
+      sourceTurnId: 'run:top-customers',
+      resultFingerprint: 'a'.repeat(64),
+    };
+    const decision = await runtime.decide({
+      question,
+      requestedMode: 'ask',
+      conversationBinding: 'prior_result',
+      priorResultMemberBinding,
+      hostRequirementSeed: buildAnalyticalRequirementSeedV1({
+        question,
+        parsedIntent: { measures: ['billing revenue'], dimensions: ['region'], filters: [] },
+        priorResultMemberBinding,
+      }),
+    });
+
+    expect(planner).toHaveBeenCalledTimes(1);
+    // The planner sees one host-owned path unit, not individually capped
+    // relationship cards. Its edge proof must remain whole even under a
+    // filled 16-card package.
+    expect(plannerCandidates).toHaveLength(16);
+    // The planner must receive the executable authored child, not a lexical
+    // `region` alias or a dropped low-relevance location card.
+    expect(plannerCandidates.map((candidate) => candidate.id)).toContain(locationDimensionId);
+    const pathCard = plannerCandidates.find((candidate) => candidate.id.startsWith('dql:relationship_path:'));
+    expect(pathCard?.relationshipProofClass).toBe('governed');
+    expect(pathCard?.relationHints).toEqual(expect.arrayContaining([
+      orderItemsToOrder.id,
+      orderToCustomer.id,
+      orderToLocation.id,
+    ]));
+    expect(plannerCandidates
+      .filter((candidate) => [orderItemsToOrder.id, orderToCustomer.id, orderToLocation.id].includes(candidate.id)))
+      .toEqual([]);
+    expect(decision.askAnalystDecision?.state.frame).toMatchObject({
+      conversation: { binding: 'prior_result' },
+      requirements: {
+        entityTerms: expect.arrayContaining(['Customer']),
+        entityDisplayTerms: expect.arrayContaining(['Customer Name']),
+        priorResultMemberBinding: {
+          displayDimension: 'customer_name', values: ['Melissa Davis'], sourceTurnId: 'run:top-customers',
+        },
+      },
+    });
+    expect(decision.askAnalystDecision?.state.program.filters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ fieldTerms: expect.arrayContaining(['customer_name']), value: 'Melissa Davis' }),
+    ]));
+    expect(decision.askAnalystDecision?.state.program.executionCandidateIds).toEqual(expect.arrayContaining([
+      orderItemsToOrder.id,
+      orderToCustomer.id,
+      orderToLocation.id,
+      locationsModel.id,
+    ]));
+    expect(decision.askAnalystDecision?.state.program.executionCandidateIds).not.toContain(orderToStatus.id);
+    // The inferred grouping is capability-qualified, so the canonical
+    // cascade freezes semantic execution rather than becoming a 0-attempt
+    // generic coverage gap or an unfiltered warehouse question.
+    expect(decision.analyticalCascadeDecision).toMatchObject({
+      selectedTier: 'semantic',
+      planFrozen: true,
+      attempts: [
+        expect.objectContaining({ tier: 'certified', outcome: 'unavailable', planFrozen: false }),
+        expect.objectContaining({ tier: 'semantic', outcome: 'executable', planFrozen: true }),
+      ],
+    });
+    expect(decision.askAnalystDecision?.state.workspace.roleCoverage).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'categorical_dimension', candidateCount: expect.any(Number) }),
+    ]));
+    expect(decision.askAnalystDecision?.taskExecutions?.[0]?.resolvedPlan).toMatchObject({ reviewRequired: true });
+    // The meaning receipt retains the stable source ID while the frozen
+    // capability/plan uses the qualified MetricFlow identity above.
+    expect(decision.meaningResolution?.selectedConceptIds).toContain(locationName.id);
+  });
+
+  it('AGT-034 carries a unique ordinary location substitute through one malformed-plan correction and the full safe relationship path', async () => {
+    const customerKey: AgentEvidenceCandidate = {
+      id: 'semantic:entity:customers.customer', qualifiedId: 'semantic:entity:customers.customer',
+      kind: 'semantic_member', semanticObjectType: 'entity', trustTier: 'semantic',
+      name: 'Customer', aliases: ['customer', 'customer id'], relevanceScore: 0.98,
+      matchReasons: ['semantic entity'], compatibility: 'compatible',
+    };
+    const customerName: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:customers.customer_name', qualifiedId: 'semantic:dimension:customers.customer_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Customer Name', aliases: ['customer', 'customer name'], relevanceScore: 0.97,
+      matchReasons: ['semantic display dimension'], compatibility: 'compatible',
+    };
+    // This reproduces the live index shape: it is a qualified, ordinary
+    // dimension (not a specially-tagged same-snapshot extension) and it is
+    // low relevance behind enough context to have been dropped by role_cap.
+    const locationName: AgentEvidenceCandidate = {
+      // The live provider returned this canonical MetricFlow identity even
+      // though the bounded planner card exposed the stable uncategorized ID.
+      // The runtime may adapt that one unique semantic-dimension identity;
+      // it must not perform a broad lexical alias lookup.
+      id: 'semantic:dimension:locations.location_name',
+      qualifiedId: 'semantic:uncategorized:dimension:location_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Location Name', aliases: ['location', 'location name'], relevanceScore: 0.1,
+      matchReasons: ['semantic uncategorized dimension'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:locations'],
+    };
+    // The historical failure let this high-relevance semantic model impersonate
+    // a categorical field because legacy indexes use `semantic_member` for
+    // both shapes. It is execution context only.
+    const customersModel: AgentEvidenceCandidate = {
+      id: 'semantic:model:customers', qualifiedId: 'semantic:model:customers',
+      kind: 'semantic_member', semanticObjectType: 'model', trustTier: 'semantic',
+      name: 'customers', aliases: ['customers'], relevanceScore: 0.99,
+      matchReasons: ['semantic model'], compatibility: 'compatible',
+    };
+    const locationsModel: AgentEvidenceCandidate = {
+      id: 'semantic:model:locations', qualifiedId: 'semantic:model:locations',
+      kind: 'semantic_member', semanticObjectType: 'model', trustTier: 'semantic',
+      name: 'locations', aliases: ['locations'], relevanceScore: 0.96,
+      matchReasons: ['semantic model'], compatibility: 'compatible',
+    };
+    const countryName: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:locations.country_name', qualifiedId: 'semantic:dimension:locations.country_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Country Name', aliases: ['country'], relevanceScore: 0.09,
+      matchReasons: ['semantic country dimension'], compatibility: 'compatible',
+    };
+    // The live failure retained an ordinary semantic time field beside
+    // Location Name. It must remain a time role even though older index rows
+    // represent both as `semantic_member` / `dimension`.
+    const openedDate: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:dimension:opened_date',
+      qualifiedId: 'semantic:uncategorized:dimension:opened_date',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Opened Date', aliases: ['opened date'], dataType: 'timestamp', timeGrains: ['day'], relevanceScore: 0.095,
+      // Reproduce stale authored metadata from a migrated index. The typed
+      // timestamp remains time-only and cannot create a false `region`
+      // alternative under the 16-card cap.
+      compatibilityFacts: ['roles categorical dimension'],
+      matchReasons: ['semantic time dimension'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:locations'],
+    };
+    const metric: AgentEvidenceCandidate = {
+      ...revenue,
+      exactMatch: false,
+      relevanceScore: 0.95,
+      analyticalCapability: {
+        ...semanticCapability(revenue.id),
+        primaryEntityId: 'semantic:entity:orders.order',
+        dimensions: [
+          {
+            dimensionId: customerName.id,
+            entityId: customerKey.id,
+            label: 'Customer Name', aliases: ['customer', 'customer name'],
+            supportedRoles: ['group_by', 'display', 'filter'],
+            relationshipPathIds: ['commerce::relationship::order_to_customer'],
+            nativeGroupingReference: 'customer__customer_name',
+            nativeGroupingPath: ['customer'],
+          },
+          {
+            dimensionId: locationName.id,
+            entityId: 'semantic:entity:locations.location',
+            label: 'Location Name', aliases: ['location', 'location name'],
+            supportedRoles: ['group_by', 'display', 'filter'],
+            relationshipPathIds: ['commerce::relationship::order_to_location'],
+            nativeGroupingReference: 'location__location_name',
+            nativeGroupingPath: ['location'],
+          },
+          // A second geography-capable child prevents the existing narrow
+          // sole-MetricFlow extension from pre-authorizing location_name.
+          // The planner must choose it from the ordinary role reservation.
+          {
+            dimensionId: countryName.id,
+            entityId: 'semantic:entity:locations.location',
+            label: 'Country Name', aliases: ['country'],
+            supportedRoles: ['group_by', 'display', 'filter'],
+            relationshipPathIds: ['commerce::relationship::order_to_location'],
+            nativeGroupingReference: 'location__country_name',
+            nativeGroupingPath: ['location'],
+          },
+        ],
+      },
+    };
+    const relationship = (
+      id: string,
+      from: string,
+      to: string,
+      relevanceScore: number,
+    ): AgentEvidenceCandidate => ({
+      id, qualifiedId: id, kind: 'dql_modeling', trustTier: 'governed_sql',
+      name: id.replace('commerce::relationship::', '').replaceAll('_', ' '),
+      aliases: [], relevanceScore, matchReasons: ['safe relationship'], compatibility: 'compatible',
+      relationshipEvidence: [id],
+      relationshipSafety: [{
+        id, from, to, keys: [{ from: 'id', to: 'id' }],
+        status: 'certified', staleCertification: false, cardinality: 'many_to_one',
+        fanout: 'safe', automaticJoinAllowed: true,
+        certificationFingerprint: `sha256:${id}`,
+        validation: {
+          status: 'passed', checkedAt: '2026-08-28T00:00:00.000Z',
+          queryFingerprint: `sha256:query:${id}`, proofFingerprint: `sha256:proof:${id}`,
+        },
+      }],
+    });
+    const orderToCustomer = relationship(
+      'commerce::relationship::order_to_customer',
+      'semantic:entity:orders.order',
+      customerKey.id,
+      0.92,
+    );
+    const orderToLocation = relationship(
+      'commerce::relationship::order_to_location',
+      'semantic:entity:orders.order',
+      'semantic:entity:locations.location',
+      0.91,
+    );
+    const fillerContext = Array.from({ length: 16 }, (_, index): AgentEvidenceCandidate => ({
+      id: `dbt:model:role_cap_context_${index}`,
+      qualifiedId: `dbt:model:role_cap_context_${index}`,
+      kind: 'dbt_model', trustTier: 'exploratory', name: `Context ${index}`,
+      aliases: [`context ${index}`], relevanceScore: 0.94 - index / 1_000,
+      matchReasons: ['live trace role_cap filler'], compatibility: 'compatible',
+    }));
+    let plannerCards: readonly {
+      id: string;
+      roles: readonly string[];
+      admissionReasonCode?: string;
+      unresolvedRoles?: readonly string[];
+      relationHints?: readonly string[];
+    }[] = [];
+    let plannerCalls = 0;
+    const planner = vi.fn(async (input: { plannerRequest: {
+      candidates: typeof plannerCards;
+      planningMode: string;
+      verificationFeedback?: { reasonCode: string };
+      targetedCandidates?: readonly unknown[];
+    } }) => {
+      plannerCalls += 1;
+      plannerCards = input.plannerRequest.candidates;
+      // Reproduce the captured run: the first provider response was empty,
+      // then the one bounded malformed-output correction received the same
+      // immutable 16-card package. A unique inferred location must prevent a
+      // separate targeted-context turn for a role already present.
+      if (plannerCalls === 1) return undefined;
+      expect(input.plannerRequest.planningMode).toBe('targeted_revision');
+      expect(input.plannerRequest.verificationFeedback?.reasonCode).toBe('planner_output_invalid_retry');
+      expect(input.plannerRequest.targetedCandidates).toBeUndefined();
+      const pathCardId = plannerCards.find((candidate) => candidate.id.startsWith('dql:relationship_path:'))?.id;
+      expect(pathCardId).toBeDefined();
+      return {
+        version: 1 as const,
+        selectedConceptIds: [metric.id, customerKey.id, customerName.id, locationName.id, pathCardId!],
+        confidence: 'high' as const,
+        tasks: [{
+          version: 1 as const,
+          taskId: 'task-1',
+          selectedConceptIds: [metric.id, customerKey.id, customerName.id, locationName.id, pathCardId!],
+          roleBindings: {
+            metric: [metric.id],
+            entity_key: [customerKey.id],
+            entity_label: [customerName.id],
+            categorical_dimension: [locationName.id],
+            relationship: [pathCardId!],
+          },
+          operations: ['aggregate', 'filter', 'group', 'project'] as const,
+        }],
+      };
+    });
+    const priorResultMemberBinding = {
+      version: 1 as const,
+      displayDimension: 'customer_name',
+      values: ['Brittany Barrera'],
+      sourceTurnId: 'run:990dffed',
+      resultFingerprint: 'b'.repeat(64),
+    };
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker: { decide: vi.fn(async () => semanticDecision()) },
+      planAnalytical: planner,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot:654155-live-replay',
+        candidates: [
+          metric, customerKey, customerName, locationName, openedDate,
+          customersModel, locationsModel, orderToCustomer, orderToLocation,
+          ...fillerContext,
+        ],
+        parsedIntent: { measures: ['billing revenue'], dimensions: ['region'], filters: [] },
+      }),
+    });
+
+    const decision = await runtime.decide({
+      question: 'Which region is Brittany Barrera in by revenue?',
+      requestedMode: 'ask',
+      conversationBinding: 'prior_result',
+      priorResultMemberBinding,
+      hostRequirementSeed: buildAnalyticalRequirementSeedV1({
+        question: 'Which region is Brittany Barrera in by revenue?',
+        parsedIntent: { measures: ['billing revenue'], dimensions: ['region'], filters: [] },
+        priorResultMemberBinding,
+      }),
+    });
+
+    expect(evidenceCandidateRoles(customersModel)).not.toContain('categorical_dimension');
+    expect(evidenceCandidateRoles(openedDate)).toContain('time_dimension');
+    expect(evidenceCandidateRoles(openedDate)).not.toContain('categorical_dimension');
+    expect(planner).toHaveBeenCalledTimes(2);
+    expect(plannerCards).toHaveLength(16);
+    // The verified frame now carries the host-owned inferred substitution as
+    // a review-required semantic output, rather than returning to the stale
+    // lexical `region` phrase after the task binding was accepted.
+    expect(decision.askAnalystDecision?.state.frame.requirements.dimensions)
+      .toContain('Location Name');
+    const locationCard = plannerCards.find((candidate) => candidate.id === locationName.qualifiedId);
+    expect(locationCard).toMatchObject({
+      roles: expect.arrayContaining(['categorical_dimension']),
+    });
+    expect(plannerCards.find((candidate) => candidate.id === openedDate.id)?.roles ?? [])
+      .not.toContain('categorical_dimension');
+    const customersModelCard = plannerCards.find((candidate) => candidate.id === customersModel.id);
+    expect(customersModelCard?.roles).not.toContain('categorical_dimension');
+    expect(customersModelCard?.admissionReasonCode).toBeUndefined();
+    const pathCard = plannerCards.find((candidate) => candidate.id.startsWith('dql:relationship_path:'));
+    expect(pathCard?.relationHints).toEqual(expect.arrayContaining([
+      orderToCustomer.id,
+      orderToLocation.id,
+    ]));
+    expect(decision.askAnalystDecision?.state.workspace.roleCoverage).toEqual(expect.arrayContaining([
+      // `Opened Date` is present in the 16-card snapshot but typed as time,
+      // so it cannot inflate the geographical role. The one remaining
+      // Location Name candidate is a recorded inferred substitution: it can
+      // be verified/executed, but its frozen plan remains review-required.
+      expect.objectContaining({ role: 'categorical_dimension', candidateCount: 1, state: 'proven' }),
+    ]));
+    expect(decision.askAnalystDecision?.state.program.filters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ fieldTerms: expect.arrayContaining(['customer_name']), value: 'Brittany Barrera' }),
+    ]));
+    expect(decision.askAnalystDecision?.state.program.relationshipRequirements).toEqual(expect.arrayContaining([
+      orderToCustomer.id,
+      orderToLocation.id,
+    ]));
+    // AGT-034: the verified handoff must carry the host-owned selected
+    // ordinary dimension and its one atomic path into the exact program the
+    // compiler receives; no raw relationship edge may reappear in the
+    // planner receipt after the 16-card role-cap pressure.
+    expect(decision.askAnalystDecision?.state.program.candidateIds).toEqual(expect.arrayContaining([
+      locationName.qualifiedId,
+      pathCard!.id,
+    ]));
+    expect(decision.askAnalystDecision?.state.program.planner.tasks[0]?.roleBindings).toMatchObject({
+      categorical_dimension: expect.arrayContaining([locationName.qualifiedId]),
+      relationship: [pathCard!.id],
+    });
+    // The compiler consumes the materialized program and freezes the
+    // semantic execution plan. The broker envelope can omit its legacy
+    // cascade receipt, so assert the canonical frozen plan carried by the
+    // Ask runtime rather than a compatibility-only outer field.
+    expect(decision.askAnalystDecision?.state.resolvedPlan).toMatchObject({
+      compiler: 'metricflow', planFrozen: true, reviewRequired: true,
+    });
+    expect(decision.askAnalystDecision?.state.planningReceipt?.verification.reasonCode)
+      .not.toBe('ordinary_role_inference_ambiguous');
+    expect(decision.askAnalystDecision?.state.planningReceipt).toMatchObject({
+      plannerCalls: 2,
+      revisionCalls: 1,
+      verification: { status: 'valid' },
+    });
+    expect(decision.resolvedAnalyticalPlan).toMatchObject({ capability: 'semantic_execution' });
+  });
+
+  it('AGT-049 reports a typed relationship coverage gap instead of offering cross-entity ordinary geography fields when every bridge is denied', async () => {
+    const customerKey: AgentEvidenceCandidate = {
+      id: 'semantic:entity:customers.customer', qualifiedId: 'semantic:entity:customers.customer',
+      kind: 'semantic_member', semanticObjectType: 'entity', trustTier: 'semantic',
+      name: 'Customer', aliases: ['customer', 'customer id'], relevanceScore: 0.92,
+      matchReasons: ['semantic entity'], compatibility: 'compatible',
+    };
+    const customerName: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:customers.customer_name', qualifiedId: 'semantic:dimension:customers.customer_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Customer Name', aliases: ['customer', 'customer name'], relevanceScore: 0.91,
+      matchReasons: ['semantic display dimension'], compatibility: 'compatible',
+    };
+    const locationName: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:dimension:locations.location_name',
+      qualifiedId: 'semantic:uncategorized:dimension:locations.location_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Location Name', aliases: ['location', 'location name'], relevanceScore: 0.3,
+      matchReasons: ['ordinary qualified location dimension'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:locations'],
+    };
+    const countryName: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:dimension:locations.country_name',
+      qualifiedId: 'semantic:uncategorized:dimension:locations.country_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Country Name', aliases: ['country'], relevanceScore: 0.29,
+      matchReasons: ['ordinary qualified country dimension'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:locations'],
+    };
+    const metric: AgentEvidenceCandidate = {
+      ...revenue,
+      exactMatch: false,
+      relevanceScore: 0.95,
+      analyticalCapability: {
+        ...semanticCapability(revenue.id),
+        primaryEntityId: 'semantic:entity:orders.order',
+        dimensions: [
+          {
+            dimensionId: customerName.id, entityId: customerKey.id,
+            label: 'Customer Name', aliases: ['customer', 'customer name'],
+            supportedRoles: ['group_by', 'display', 'filter'],
+            relationshipPathIds: ['dql:relationship:customer_to_location_denied'],
+            nativeGroupingReference: 'customer__customer_name', nativeGroupingPath: ['customer'],
+          },
+          {
+            dimensionId: locationName.id, entityId: 'semantic:entity:locations.location',
+            label: 'Location Name', aliases: ['location', 'location name'],
+            supportedRoles: ['group_by', 'display'],
+            relationshipPathIds: ['dql:relationship:customer_to_location_denied'],
+            nativeGroupingReference: 'location__location_name', nativeGroupingPath: ['location'],
+          },
+          {
+            dimensionId: countryName.id, entityId: 'semantic:entity:locations.location',
+            label: 'Country Name', aliases: ['country'],
+            supportedRoles: ['group_by', 'display'],
+            relationshipPathIds: ['dql:relationship:customer_to_location_denied'],
+            nativeGroupingReference: 'location__country_name', nativeGroupingPath: ['location'],
+          },
+        ],
+      },
+    };
+    // This card has a relationship-shaped name and complete endpoint data,
+    // but policy explicitly denies automatic use. It must improve neither
+    // ordinary-role reachability nor the planner's apparent geography choices.
+    const deniedRelationship: AgentEvidenceCandidate = {
+      id: 'dql:relationship:customer_to_location_denied',
+      qualifiedId: 'dql:relationship:customer_to_location_denied',
+      kind: 'dql_modeling', trustTier: 'governed_sql', name: 'customer to location denied',
+      aliases: ['customer location relationship'], relevanceScore: 0.99,
+      matchReasons: ['denied relationship evidence'], compatibility: 'compatible',
+      relationshipEvidence: ['dql:relationship:customer_to_location_denied'],
+      relationshipSafety: [{
+        id: 'dql:relationship:customer_to_location_denied',
+        from: customerKey.id,
+        to: 'semantic:entity:locations.location',
+        keys: [{ from: 'customer_id', to: 'customer_id' }],
+        status: 'certified', staleCertification: false, cardinality: 'many_to_one',
+        fanout: 'safe', automaticJoinAllowed: false,
+        certificationFingerprint: 'sha256:denied-customer-location',
+        validation: {
+          status: 'passed', checkedAt: '2026-08-28T00:00:00.000Z',
+          queryFingerprint: 'sha256:query:denied-customer-location',
+          proofFingerprint: 'sha256:proof:denied-customer-location',
+        },
+      }],
+    };
+    const evidence: AgentRetrievalEvidence = {
+      snapshotId: 'snapshot:ordinary-role-unsafe-relationship',
+      candidates: [metric, customerKey, customerName, locationName, countryName, deniedRelationship],
+      parsedIntent: { measures: ['revenue'], dimensions: ['region'], filters: [] },
+    };
+    const planner = vi.fn();
+    const compilerBroker = { decide: vi.fn(async () => semanticDecision()) };
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker,
+      planAnalytical: planner,
+      getEvidence: async () => evidence,
+    });
+    const question = 'Which region does customer Brittany Barrera belong to by revenue?';
+    const priorResultMemberBinding = {
+      version: 1 as const,
+      displayDimension: 'customer_name',
+      values: ['Brittany Barrera'],
+      sourceTurnId: 'run:ordinary-role-unsafe-relationship',
+      resultFingerprint: 'd'.repeat(64),
+    };
+
+    const decision = await runtime.decide({
+      question,
+      requestedMode: 'ask',
+      conversationBinding: 'prior_result',
+      priorResultMemberBinding,
+      hostRequirementSeed: buildAnalyticalRequirementSeedV1({
+        question,
+        parsedIntent: evidence.parsedIntent,
+        priorResultMemberBinding,
+      }),
+    });
+
+    expect(decision).toMatchObject({
+      action: 'block',
+      terminalOutcome: { code: 'ANALYTICAL_MODELING_GAP' },
+    });
+    expect(decision.reason).toContain('no complete safe relationship path');
+    expect(decision.clarificationOptions ?? []).toEqual([]);
+    expect(planner).not.toHaveBeenCalled();
+    expect(compilerBroker.decide).not.toHaveBeenCalled();
+    expect(decision.analyticalCascadeDecision).toBeUndefined();
+    expect(decision.askAnalystDecision?.taskExecutions).toBeUndefined();
+    expect(decision.askAnalystDecision?.state.workspace.plannerCandidateIds).not.toContain(locationName.id);
+    expect(decision.askAnalystDecision?.state.workspace.plannerCandidateIds).not.toContain(countryName.id);
+    expect(decision.askAnalystDecision?.state.planningReceipt).toMatchObject({
+      plannerCalls: 0,
+      revisionCalls: 0,
+      verification: {
+        status: 'invalid',
+        missingRoles: ['relationship'],
+        reasonCode: 'ordinary_role_relationship_unproven',
+      },
+    });
+  });
+
+  it('AGT-049 rejects a candidate-local customer-to-location bridge when the metric primary order entity is not connected', async () => {
+    const customerKey: AgentEvidenceCandidate = {
+      id: 'semantic:entity:customers.customer', qualifiedId: 'semantic:entity:customers.customer',
+      kind: 'semantic_member', semanticObjectType: 'entity', trustTier: 'semantic',
+      name: 'Customer', aliases: ['customer', 'customer id'], relevanceScore: 0.92,
+      matchReasons: ['semantic entity'], compatibility: 'compatible',
+    };
+    const customerName: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:customers.customer_name', qualifiedId: 'semantic:dimension:customers.customer_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Customer Name', aliases: ['customer', 'customer name'], relevanceScore: 0.91,
+      matchReasons: ['semantic display dimension'], compatibility: 'compatible',
+    };
+    const locationName: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:dimension:locations.location_name',
+      qualifiedId: 'semantic:uncategorized:dimension:locations.location_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Location Name', aliases: ['location', 'location name'], relevanceScore: 0.3,
+      matchReasons: ['ordinary qualified location dimension'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:locations'],
+    };
+    const countryName: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:dimension:locations.country_name',
+      qualifiedId: 'semantic:uncategorized:dimension:locations.country_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Country Name', aliases: ['country'], relevanceScore: 0.29,
+      matchReasons: ['ordinary qualified country dimension'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:locations'],
+    };
+    const partialPathId = 'dql:relationship:customer_to_location_only';
+    const metric: AgentEvidenceCandidate = {
+      ...revenue,
+      exactMatch: false,
+      relevanceScore: 0.95,
+      analyticalCapability: {
+        ...semanticCapability(revenue.id),
+        primaryEntityId: 'semantic:entity:orders.order',
+        dimensions: [
+          {
+            dimensionId: customerName.id, entityId: customerKey.id,
+            label: 'Customer Name', aliases: ['customer', 'customer name'],
+            supportedRoles: ['group_by', 'display', 'filter'],
+            relationshipPathIds: [partialPathId],
+            nativeGroupingReference: 'customer__customer_name', nativeGroupingPath: ['customer'],
+          },
+          {
+            dimensionId: locationName.id, entityId: 'semantic:entity:locations.location',
+            label: 'Location Name', aliases: ['location', 'location name'],
+            supportedRoles: ['group_by', 'display'],
+            relationshipPathIds: [partialPathId],
+            nativeGroupingReference: 'location__location_name', nativeGroupingPath: ['location'],
+          },
+          {
+            dimensionId: countryName.id, entityId: 'semantic:entity:locations.location',
+            label: 'Country Name', aliases: ['country'],
+            supportedRoles: ['group_by', 'display'],
+            relationshipPathIds: [partialPathId],
+            nativeGroupingReference: 'location__country_name', nativeGroupingPath: ['location'],
+          },
+        ],
+      },
+    };
+    // This edge is fully certified and safe, but it cannot close the route
+    // from the metric's `orders` primary entity. Candidate-local reachability
+    // from customer to location must not turn it into a clarification choice.
+    const customerToLocationOnly: AgentEvidenceCandidate = {
+      id: partialPathId, qualifiedId: partialPathId,
+      kind: 'dql_modeling', trustTier: 'governed_sql', name: 'customer to location',
+      aliases: ['customer location relationship'], relevanceScore: 0.99,
+      matchReasons: ['safe but partial relationship evidence'], compatibility: 'compatible',
+      relationshipEvidence: [partialPathId],
+      relationshipSafety: [{
+        id: partialPathId,
+        from: customerKey.id,
+        to: 'semantic:entity:locations.location',
+        keys: [{ from: 'customer_id', to: 'customer_id' }],
+        status: 'certified', staleCertification: false, cardinality: 'many_to_one',
+        fanout: 'safe', automaticJoinAllowed: true,
+        certificationFingerprint: 'sha256:customer-to-location-only',
+        validation: {
+          status: 'passed', checkedAt: '2026-08-28T00:00:00.000Z',
+          queryFingerprint: 'sha256:query:customer-to-location-only',
+          proofFingerprint: 'sha256:proof:customer-to-location-only',
+        },
+      }],
+    };
+    const evidence: AgentRetrievalEvidence = {
+      snapshotId: 'snapshot:ordinary-role-partial-closure',
+      candidates: [metric, customerKey, customerName, locationName, countryName, customerToLocationOnly],
+      parsedIntent: { measures: ['revenue'], dimensions: ['region'], filters: [] },
+    };
+    const planner = vi.fn();
+    const compilerBroker = { decide: vi.fn(async () => semanticDecision()) };
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker,
+      planAnalytical: planner,
+      getEvidence: async () => evidence,
+    });
+    const question = 'Which region does customer Brittany Barrera belong to by revenue?';
+    const priorResultMemberBinding = {
+      version: 1 as const,
+      displayDimension: 'customer_name',
+      values: ['Brittany Barrera'],
+      sourceTurnId: 'run:ordinary-role-partial-closure',
+      resultFingerprint: 'e'.repeat(64),
+    };
+
+    const decision = await runtime.decide({
+      question,
+      requestedMode: 'ask',
+      conversationBinding: 'prior_result',
+      priorResultMemberBinding,
+      hostRequirementSeed: buildAnalyticalRequirementSeedV1({
+        question,
+        parsedIntent: evidence.parsedIntent,
+        priorResultMemberBinding,
+      }),
+    });
+
+    expect(decision).toMatchObject({
+      action: 'block',
+      terminalOutcome: { code: 'ANALYTICAL_MODELING_GAP' },
+    });
+    expect(decision.reason).toContain('no complete safe relationship path');
+    expect(decision.clarificationOptions ?? []).toEqual([]);
+    expect(planner).not.toHaveBeenCalled();
+    expect(compilerBroker.decide).not.toHaveBeenCalled();
+    expect(decision.analyticalCascadeDecision).toBeUndefined();
+    expect(decision.askAnalystDecision?.taskExecutions).toBeUndefined();
+    expect(decision.askAnalystDecision?.state.planningReceipt).toMatchObject({
+      plannerCalls: 0,
+      verification: {
+        status: 'invalid',
+        missingRoles: ['relationship'],
+        reasonCode: 'ordinary_role_relationship_unproven',
+      },
+    });
+  });
+
+  it('AGT-049 permits a canonically same-entity ordinary field without a relationship closure', async () => {
+    const customerEntityId = 'semantic:entity:customers.customer';
+    const customerKey: AgentEvidenceCandidate = {
+      id: customerEntityId, qualifiedId: customerEntityId,
+      kind: 'semantic_member', semanticObjectType: 'entity', trustTier: 'semantic',
+      name: 'Customer', aliases: ['customer'], primaryEntity: customerEntityId,
+      relevanceScore: 0.93, matchReasons: ['canonical semantic customer entity'], compatibility: 'compatible',
+    };
+    const customerName: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:customers.customer_name', qualifiedId: 'semantic:dimension:customers.customer_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Customer Name', aliases: ['customer', 'customer name'], primaryEntity: customerEntityId,
+      relevanceScore: 0.92, matchReasons: ['canonical semantic customer display'], compatibility: 'compatible',
+    };
+    // `Location Name` is deliberately not an alias for `region`; it remains
+    // an inferred review-required output. Its source-authored primaryEntity
+    // nevertheless proves it is a field of the already-bound customer grain,
+    // so no relationship path is required.
+    const locationName: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:customers.location_name', qualifiedId: 'semantic:dimension:customers.location_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Location Name', aliases: ['location', 'location name'], primaryEntity: customerEntityId,
+      relevanceScore: 0.4, matchReasons: ['ordinary canonical customer location dimension'], compatibility: 'compatible',
+    };
+    const metric: AgentEvidenceCandidate = {
+      ...revenue,
+      exactMatch: false,
+      analyticalCapability: {
+        ...semanticCapability(revenue.id),
+        primaryEntityId: customerEntityId,
+        dimensions: [
+          {
+            dimensionId: customerName.id, entityId: customerEntityId,
+            label: 'Customer Name', aliases: ['customer', 'customer name'],
+            supportedRoles: ['group_by', 'display', 'filter'],
+            nativeGroupingReference: 'customer__customer_name', nativeGroupingPath: ['customer'],
+          },
+          {
+            dimensionId: locationName.id, entityId: customerEntityId,
+            label: 'Location Name', aliases: ['location', 'location name'],
+            supportedRoles: ['group_by', 'display'],
+            nativeGroupingReference: 'customer__location_name', nativeGroupingPath: ['customer'],
+          },
+        ],
+      },
+    };
+    const planner = vi.fn(async () => ({
+      version: 1 as const,
+      selectedConceptIds: [metric.id, customerKey.id, customerName.id, locationName.id],
+      confidence: 'high' as const,
+      tasks: [{
+        version: 1 as const,
+        taskId: 'task-1',
+        selectedConceptIds: [metric.id, customerKey.id, customerName.id, locationName.id],
+        roleBindings: {
+          metric: [metric.id],
+          entity_key: [customerKey.id],
+          entity_label: [customerName.id],
+          categorical_dimension: [locationName.id],
+        },
+        operations: ['aggregate', 'group', 'project'] as const,
+      }],
+    }));
+    const compilerBroker = { decide: vi.fn(async () => semanticDecision()) };
+    const evidence: AgentRetrievalEvidence = {
+      snapshotId: 'snapshot:ordinary-role-same-entity',
+      candidates: [metric, customerKey, customerName, locationName],
+      parsedIntent: { measures: ['revenue'], dimensions: ['region'], filters: [] },
+    };
+    const priorResultMemberBinding = {
+      version: 1 as const,
+      displayDimension: 'customer_name', values: ['Brittany Barrera'],
+      sourceTurnId: 'run:ordinary-role-same-entity', resultFingerprint: 'f'.repeat(64),
+    };
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker,
+      planAnalytical: planner,
+      getEvidence: async () => evidence,
+    });
+
+    const decision = await runtime.decide({
+      question: 'Which region does customer Brittany Barrera belong to by revenue?',
+      requestedMode: 'ask',
+      conversationBinding: 'prior_result',
+      priorResultMemberBinding,
+      hostRequirementSeed: buildAnalyticalRequirementSeedV1({
+        question: 'Which region does customer Brittany Barrera belong to by revenue?',
+        parsedIntent: evidence.parsedIntent,
+        priorResultMemberBinding,
+      }),
+    });
+
+    expect(planner).not.toHaveBeenCalled();
+    expect(compilerBroker.decide).not.toHaveBeenCalled();
+    expect(decision).toMatchObject({ action: 'answer' });
+    expect(decision.analyticalCascadeDecision).toMatchObject({ selectedTier: 'semantic', planFrozen: true });
+    expect(decision.askAnalystDecision?.taskExecutions?.[0]?.resolvedPlan).toMatchObject({ reviewRequired: true });
+  });
+
+  it('AGT-049 does not treat incidental customer words in an ordinary field identity as same-entity proof', async () => {
+    const customerEntityId = 'semantic:entity:customers.customer';
+    const locationEntityId = 'semantic:entity:locations.location';
+    const customerKey: AgentEvidenceCandidate = {
+      id: customerEntityId, qualifiedId: customerEntityId,
+      kind: 'semantic_member', semanticObjectType: 'entity', trustTier: 'semantic',
+      name: 'Customer', aliases: ['customer'], relevanceScore: 0.93,
+      matchReasons: ['canonical semantic customer entity'], compatibility: 'compatible',
+    };
+    const customerName: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:customers.customer_name', qualifiedId: 'semantic:dimension:customers.customer_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Customer Name', aliases: ['customer', 'customer name'], relevanceScore: 0.92,
+      matchReasons: ['canonical semantic customer display'], compatibility: 'compatible',
+    };
+    // These cards intentionally contain `customer` in every legacy text
+    // carrier. None supplies primaryEntity, endpoint, or an exact source
+    // relation of `customers`, so they must remain cross-entity and cannot
+    // bypass the missing orders -> location closure.
+    const incidentalLocation: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:dimension:customer_notes.location_name',
+      qualifiedId: 'semantic:uncategorized:dimension:customer_notes.location_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Customer Location Note', aliases: ['customer location'], relevanceScore: 0.4,
+      matchReasons: ['ordinary qualified geographic field'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:customer_notes'],
+    };
+    const incidentalCountry: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:dimension:customer_notes.country_name',
+      qualifiedId: 'semantic:uncategorized:dimension:customer_notes.country_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Customer Country Note', aliases: ['customer country'], relevanceScore: 0.39,
+      matchReasons: ['ordinary qualified geographic field'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:customer_notes'],
+    };
+    const metric: AgentEvidenceCandidate = {
+      ...revenue,
+      exactMatch: false,
+      analyticalCapability: {
+        ...semanticCapability(revenue.id),
+        primaryEntityId: 'semantic:entity:orders.order',
+        dimensions: [
+          {
+            dimensionId: customerName.id, entityId: customerEntityId,
+            label: 'Customer Name', aliases: ['customer', 'customer name'],
+            supportedRoles: ['group_by', 'display', 'filter'],
+            nativeGroupingReference: 'customer__customer_name', nativeGroupingPath: ['customer'],
+          },
+          {
+            dimensionId: incidentalLocation.id, entityId: locationEntityId,
+            label: 'Customer Location Note', aliases: ['customer location'],
+            supportedRoles: ['group_by', 'display'],
+            nativeGroupingReference: 'location__location_name', nativeGroupingPath: ['location'],
+          },
+          {
+            dimensionId: incidentalCountry.id, entityId: locationEntityId,
+            label: 'Customer Country Note', aliases: ['customer country'],
+            supportedRoles: ['group_by', 'display'],
+            nativeGroupingReference: 'location__country_name', nativeGroupingPath: ['location'],
+          },
+        ],
+      },
+    };
+    const evidence: AgentRetrievalEvidence = {
+      snapshotId: 'snapshot:ordinary-role-incidental-customer',
+      candidates: [metric, customerKey, customerName, incidentalLocation, incidentalCountry],
+      parsedIntent: { measures: ['revenue'], dimensions: ['region'], filters: [] },
+    };
+    const planner = vi.fn();
+    const compilerBroker = { decide: vi.fn(async () => semanticDecision()) };
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker,
+      planAnalytical: planner,
+      getEvidence: async () => evidence,
+    });
+    const priorResultMemberBinding = {
+      version: 1 as const,
+      displayDimension: 'customer_name', values: ['Brittany Barrera'],
+      sourceTurnId: 'run:ordinary-role-incidental-customer', resultFingerprint: 'a'.repeat(64),
+    };
+
+    const decision = await runtime.decide({
+      question: 'Which region does customer Brittany Barrera belong to by revenue?',
+      requestedMode: 'ask',
+      conversationBinding: 'prior_result',
+      priorResultMemberBinding,
+      hostRequirementSeed: buildAnalyticalRequirementSeedV1({
+        question: 'Which region does customer Brittany Barrera belong to by revenue?',
+        parsedIntent: evidence.parsedIntent,
+        priorResultMemberBinding,
+      }),
+    });
+
+    expect(decision).toMatchObject({ action: 'block', terminalOutcome: { code: 'ANALYTICAL_MODELING_GAP' } });
+    expect(decision.clarificationOptions ?? []).toEqual([]);
+    expect(planner).not.toHaveBeenCalled();
+    expect(compilerBroker.decide).not.toHaveBeenCalled();
+    expect(decision.askAnalystDecision?.taskExecutions).toBeUndefined();
+    expect(decision.askAnalystDecision?.state.planningReceipt).toMatchObject({
+      plannerCalls: 0,
+      verification: { reasonCode: 'ordinary_role_relationship_unproven' },
+    });
+  });
+
+  it('AGT-049 keeps package-qualified customer identities distinct when duplicate relation leaves lack a safe closure', async () => {
+    const billingCustomerId = 'semantic:entity:billing.customer';
+    const crmCustomerId = 'semantic:entity:crm.customer';
+    const billingCustomer: AgentEvidenceCandidate = {
+      id: billingCustomerId, qualifiedId: billingCustomerId,
+      kind: 'semantic_member', semanticObjectType: 'entity', trustTier: 'semantic',
+      name: 'Billing Customer', aliases: ['customer'], primaryEntity: billingCustomerId,
+      relevanceScore: 0.94, matchReasons: ['selected billing customer entity'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:pkg_a.customer'],
+    };
+    const billingCustomerName: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:billing.customer_name', qualifiedId: 'semantic:dimension:billing.customer_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Customer Name', aliases: ['customer', 'customer name'], primaryEntity: billingCustomerId,
+      relevanceScore: 0.93, matchReasons: ['billing customer display'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:pkg_a.customer'],
+    };
+    // This is a separate structured entity/relation even though its terminal
+    // identifier is also `customer`. It is intentionally not selected by the
+    // metric capability for this Ask turn.
+    const crmCustomer: AgentEvidenceCandidate = {
+      id: crmCustomerId, qualifiedId: crmCustomerId,
+      kind: 'semantic_member', semanticObjectType: 'entity', trustTier: 'semantic',
+      name: 'CRM Customer', aliases: ['customer'], primaryEntity: crmCustomerId,
+      relevanceScore: 0.92, matchReasons: ['unrelated crm customer entity'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:pkg_b.customer'],
+    };
+    const crmLocation: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:dimension:crm.location_name',
+      qualifiedId: 'semantic:uncategorized:dimension:crm.location_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Location Name', aliases: ['location', 'location name'], primaryEntity: crmCustomerId,
+      relevanceScore: 0.4, matchReasons: ['ordinary crm location field'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:pkg_b.customer'],
+    };
+    const metric: AgentEvidenceCandidate = {
+      ...revenue,
+      exactMatch: false,
+      analyticalCapability: {
+        ...semanticCapability(revenue.id),
+        primaryEntityId: 'semantic:entity:orders.order',
+        dimensions: [{
+          dimensionId: billingCustomerName.id, entityId: billingCustomerId,
+          label: 'Customer Name', aliases: ['customer', 'customer name'],
+          supportedRoles: ['group_by', 'display', 'filter'],
+          nativeGroupingReference: 'billing_customer__customer_name', nativeGroupingPath: ['billing_customer'],
+        }],
+      },
+    };
+    const evidence: AgentRetrievalEvidence = {
+      snapshotId: 'snapshot:namespace-collision-gap',
+      candidates: [metric, billingCustomer, billingCustomerName, crmCustomer, crmLocation],
+      parsedIntent: { measures: ['revenue'], dimensions: ['region'], filters: [] },
+    };
+    const planner = vi.fn();
+    const compilerBroker = { decide: vi.fn(async () => semanticDecision()) };
+    const priorResultMemberBinding = {
+      version: 1 as const, displayDimension: 'customer_name', values: ['Brittany Barrera'],
+      sourceTurnId: 'run:namespace-collision-gap', resultFingerprint: 'c'.repeat(64),
+    };
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker, planAnalytical: planner, getEvidence: async () => evidence,
+    });
+
+    const decision = await runtime.decide({
+      question: 'Which region does customer Brittany Barrera belong to by revenue?',
+      requestedMode: 'ask', conversationBinding: 'prior_result', priorResultMemberBinding,
+      hostRequirementSeed: buildAnalyticalRequirementSeedV1({
+        question: 'Which region does customer Brittany Barrera belong to by revenue?',
+        parsedIntent: evidence.parsedIntent, priorResultMemberBinding,
+      }),
+    });
+
+    expect(decision).toMatchObject({ action: 'block', terminalOutcome: { code: 'ANALYTICAL_MODELING_GAP' } });
+    expect(decision.clarificationOptions ?? []).toEqual([]);
+    expect(planner).not.toHaveBeenCalled();
+    expect(compilerBroker.decide).not.toHaveBeenCalled();
+    expect(decision.askAnalystDecision?.state.planningReceipt).toMatchObject({
+      plannerCalls: 0,
+      verification: { reasonCode: 'ordinary_role_relationship_unproven' },
+    });
+  });
+
+  it('AGT-049 preserves the exact intended namespaced entity despite an unrelated duplicate customer leaf', async () => {
+    const billingCustomerId = 'semantic:entity:billing.customer';
+    const crmCustomerId = 'semantic:entity:crm.customer';
+    const billingCustomer: AgentEvidenceCandidate = {
+      id: billingCustomerId, qualifiedId: billingCustomerId,
+      kind: 'semantic_member', semanticObjectType: 'entity', trustTier: 'semantic',
+      name: 'Billing Customer', aliases: ['customer'], primaryEntity: billingCustomerId,
+      relevanceScore: 0.94, matchReasons: ['selected billing customer entity'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:pkg_a.customer'],
+    };
+    const billingCustomerName: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:billing.customer_name', qualifiedId: 'semantic:dimension:billing.customer_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Customer Name', aliases: ['customer', 'customer name'], primaryEntity: billingCustomerId,
+      relevanceScore: 0.93, matchReasons: ['billing customer display'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:pkg_a.customer'],
+    };
+    const billingLocation: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:billing.location_name', qualifiedId: 'semantic:dimension:billing.location_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Location Name', aliases: ['location', 'location name'], primaryEntity: billingCustomerId,
+      relevanceScore: 0.42, matchReasons: ['billing location output'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:pkg_a.customer'],
+    };
+    const crmLocation: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:dimension:crm.location_name', qualifiedId: 'semantic:uncategorized:dimension:crm.location_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'CRM Location Name', aliases: ['crm location'], primaryEntity: crmCustomerId,
+      relevanceScore: 0.41, matchReasons: ['unrelated crm location'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:pkg_b.customer'],
+    };
+    const metric: AgentEvidenceCandidate = {
+      ...revenue,
+      exactMatch: false,
+      analyticalCapability: {
+        ...semanticCapability(revenue.id), primaryEntityId: billingCustomerId,
+        dimensions: [
+          {
+            dimensionId: billingCustomerName.id, entityId: billingCustomerId,
+            label: 'Customer Name', aliases: ['customer', 'customer name'],
+            supportedRoles: ['group_by', 'display', 'filter'],
+            nativeGroupingReference: 'billing_customer__customer_name', nativeGroupingPath: ['billing_customer'],
+          },
+          {
+            dimensionId: billingLocation.id, entityId: billingCustomerId,
+            label: 'Location Name', aliases: ['location', 'location name'],
+            supportedRoles: ['group_by', 'display'],
+            nativeGroupingReference: 'billing_customer__location_name', nativeGroupingPath: ['billing_customer'],
+          },
+        ],
+      },
+    };
+    const evidence: AgentRetrievalEvidence = {
+      snapshotId: 'snapshot:namespace-intended-entity',
+      candidates: [metric, billingCustomer, billingCustomerName, billingLocation, crmLocation],
+      parsedIntent: { measures: ['revenue'], dimensions: ['region'], filters: [] },
+    };
+    const planner = vi.fn();
+    const compilerBroker = { decide: vi.fn(async () => semanticDecision()) };
+    const priorResultMemberBinding = {
+      version: 1 as const, displayDimension: 'customer_name', values: ['Brittany Barrera'],
+      sourceTurnId: 'run:namespace-intended-entity', resultFingerprint: 'd'.repeat(64),
+    };
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker, planAnalytical: planner, getEvidence: async () => evidence,
+    });
+
+    const decision = await runtime.decide({
+      question: 'Which region does customer Brittany Barrera belong to by revenue?',
+      requestedMode: 'ask', conversationBinding: 'prior_result', priorResultMemberBinding,
+      hostRequirementSeed: buildAnalyticalRequirementSeedV1({
+        question: 'Which region does customer Brittany Barrera belong to by revenue?',
+        parsedIntent: evidence.parsedIntent, priorResultMemberBinding,
+      }),
+    });
+
+    expect(planner).not.toHaveBeenCalled();
+    expect(compilerBroker.decide).not.toHaveBeenCalled();
+    expect(decision).toMatchObject({ action: 'answer' });
+    expect(decision.analyticalCascadeDecision).toMatchObject({ selectedTier: 'semantic', planFrozen: true });
+    expect(decision.askAnalystDecision?.taskExecutions?.[0]?.resolvedPlan).toMatchObject({ reviewRequired: true });
+  });
+
+  it('AGT-049 binds ordinary entity proof to the selected exact billing revenue metric, never a lexical CRM revenue alternative', async () => {
+    const billingCustomerId = 'semantic:entity:billing.customer';
+    const crmCustomerId = 'semantic:entity:crm.customer';
+    const billingCustomer: AgentEvidenceCandidate = {
+      id: billingCustomerId, qualifiedId: billingCustomerId,
+      kind: 'semantic_member', semanticObjectType: 'entity', trustTier: 'semantic',
+      name: 'Billing Customer', aliases: ['customer'], primaryEntity: billingCustomerId,
+      relevanceScore: 0.94, matchReasons: ['billing customer entity'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:pkg_billing.customer'],
+    };
+    const billingCustomerName: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:billing.customer_name', qualifiedId: 'semantic:dimension:billing.customer_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Billing Customer Name', aliases: ['customer', 'customer name'], primaryEntity: billingCustomerId,
+      relevanceScore: 0.93, matchReasons: ['billing display dimension'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:pkg_billing.customer'],
+    };
+    const billingLocation: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:billing.location_name', qualifiedId: 'semantic:dimension:billing.location_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Billing Location Name', aliases: ['location', 'location name'], primaryEntity: billingCustomerId,
+      relevanceScore: 0.42, matchReasons: ['same-entity billing location'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:pkg_billing.customer'],
+    };
+    const crmLocation: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:dimension:crm.location_name', qualifiedId: 'semantic:uncategorized:dimension:crm.location_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'CRM Location Name', aliases: ['location', 'location name'], primaryEntity: crmCustomerId,
+      relevanceScore: 0.41, matchReasons: ['cross-entity CRM location'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:pkg_crm.customer'],
+    };
+    const billingRevenue: AgentEvidenceCandidate = {
+      ...revenue,
+      id: 'semantic:metric:billing.revenue', qualifiedId: 'semantic:metric:billing.revenue',
+      name: 'Billing Revenue', aliases: ['billing revenue', 'revenue'], exactMatch: true,
+      analyticalCapability: {
+        ...semanticCapability('semantic:metric:billing.revenue'), primaryEntityId: billingCustomerId,
+        dimensions: [
+          {
+            dimensionId: billingCustomerName.id, entityId: billingCustomerId,
+            label: 'Billing Customer Name', aliases: ['customer', 'customer name'],
+            supportedRoles: ['group_by', 'display', 'filter'],
+            nativeGroupingReference: 'billing_customer__customer_name', nativeGroupingPath: ['billing_customer'],
+          },
+          {
+            dimensionId: billingLocation.id, entityId: billingCustomerId,
+            label: 'Billing Location Name', aliases: ['location', 'location name'],
+            supportedRoles: ['group_by', 'display'],
+            nativeGroupingReference: 'billing_customer__location_name', nativeGroupingPath: ['billing_customer'],
+          },
+        ],
+      },
+    };
+    // This is intentionally a lexical retrieval competitor for the same
+    // human word "revenue". Its CRM entity must not join the billing entity
+    // context solely because both metric names match that word.
+    const crmRevenue: AgentEvidenceCandidate = {
+      ...revenue,
+      id: 'semantic:metric:crm.revenue', qualifiedId: 'semantic:metric:crm.revenue',
+      name: 'crm.revenue', aliases: ['revenue'], exactMatch: false,
+      analyticalCapability: {
+        ...semanticCapability('semantic:metric:crm.revenue'), primaryEntityId: crmCustomerId,
+        dimensions: [{
+          dimensionId: crmLocation.id, entityId: crmCustomerId,
+          label: 'CRM Location Name', aliases: ['location', 'location name'],
+          supportedRoles: ['group_by', 'display'],
+          nativeGroupingReference: 'crm_customer__location_name', nativeGroupingPath: ['crm_customer'],
+        }],
+      },
+    };
+    // The business phrase makes Billing Revenue the unique exact semantic
+    // metric while CRM Revenue remains a retrieved lexical `revenue` card.
+    // This exercises selected metric authority without relying on an explicit
+    // canonical identifier shortcut.
+    const question = 'Which region does customer Brittany Barrera belong to by billing revenue?';
+    const priorResultMemberBinding = {
+      version: 1 as const, displayDimension: 'customer_name', values: ['Brittany Barrera'],
+      sourceTurnId: 'run:selected-billing-metric', resultFingerprint: 'b'.repeat(64),
+    };
+    const requestFor = (candidates: AgentEvidenceCandidate[]) => ({
+      question,
+      requestedMode: 'ask' as const,
+      conversationBinding: 'prior_result' as const,
+      priorResultMemberBinding,
+      hostRequirementSeed: buildAnalyticalRequirementSeedV1({
+        question,
+        parsedIntent: { measures: ['billing revenue'], dimensions: ['region'], filters: [] },
+        priorResultMemberBinding,
+      }),
+      candidates,
+    });
+
+    // With only CRM's ordinary geographic field available, the selected
+    // billing metric cannot let it become the selected categorical output.
+    // There is no safe Billing-to-CRM closure, so it is a typed gap rather
+    // than a silent cross-namespace binding.
+    const blockedPlanner = vi.fn();
+    const blockedCompiler = { decide: vi.fn(async () => semanticDecision()) };
+    const blockedRuntime = createAskAnalystRuntimeV1({
+      compilerBroker: blockedCompiler,
+      planAnalytical: blockedPlanner,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot:selected-billing-crm-gap',
+        candidates: requestFor([]).candidates.concat([
+          billingRevenue, crmRevenue, billingCustomer, billingCustomerName, crmLocation,
+        ]),
+        parsedIntent: { measures: ['billing revenue'], dimensions: ['region'], filters: [] },
+      }),
+    });
+    const blockedInput = requestFor([]);
+    const blocked = await blockedRuntime.decide(blockedInput);
+
+    expect(blocked).toMatchObject({ action: 'block', terminalOutcome: { code: 'ANALYTICAL_MODELING_GAP' } });
+    expect(blocked.meaningResolution?.selectedConceptIds ?? []).not.toContain(crmRevenue.id);
+    expect(blocked.meaningResolution?.selectedConceptIds ?? []).not.toContain(crmLocation.id);
+    expect(blocked.clarificationOptions ?? []).toEqual([]);
+    expect(blockedPlanner).not.toHaveBeenCalled();
+    expect(blockedCompiler.decide).not.toHaveBeenCalled();
+    expect(blocked.askAnalystDecision?.state.planningReceipt).toMatchObject({
+      plannerCalls: 0,
+      verification: { reasonCode: 'ordinary_role_relationship_unproven' },
+    });
+
+    // The exact billing field remains a legal same-entity inferred output,
+    // even though the unrelated CRM revenue/location cards are still present.
+    const planner = vi.fn();
+    const compilerBroker = { decide: vi.fn(async () => semanticDecision()) };
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker,
+      planAnalytical: planner,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot:selected-billing-same-entity',
+        candidates: [billingRevenue, crmRevenue, billingCustomer, billingCustomerName, billingLocation, crmLocation],
+        parsedIntent: { measures: ['billing revenue'], dimensions: ['region'], filters: [] },
+      }),
+    });
+    const decision = await runtime.decide(requestFor([]));
+
+    expect(planner).not.toHaveBeenCalled();
+    expect(decision).toMatchObject({ action: 'answer' });
+    expect(decision.askAnalystDecision?.state.workspace.plannerCandidateIds).toContain(billingLocation.id);
+    expect(decision.askAnalystDecision?.state.workspace.plannerCandidateIds).not.toContain(crmLocation.id);
+    expect(decision.analyticalCascadeDecision).toMatchObject({ selectedTier: 'semantic', planFrozen: true });
+    expect(decision.askAnalystDecision?.taskExecutions?.[0]?.resolvedPlan).toMatchObject({ reviewRequired: true });
+  });
+
+  it('AGT-049 clarifies two ordinary safe geographic alternatives from the qualified workspace before a 16-card cap can make one look unique', async () => {
+    const customerKey: AgentEvidenceCandidate = {
+      id: 'semantic:entity:customers.customer', qualifiedId: 'semantic:entity:customers.customer',
+      kind: 'semantic_member', semanticObjectType: 'entity', trustTier: 'semantic',
+      name: 'Customer', aliases: ['customer', 'customer id'], relevanceScore: 0.92,
+      matchReasons: ['semantic entity'], compatibility: 'compatible',
+    };
+    const customerName: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:customers.customer_name', qualifiedId: 'semantic:dimension:customers.customer_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Customer Name', aliases: ['customer', 'customer name'], relevanceScore: 0.91,
+      matchReasons: ['semantic display dimension'], compatibility: 'compatible',
+    };
+    // These are ordinary, qualified catalog dimensions. Neither is tagged as
+    // a declared synonym for `region`; both must therefore become a stable
+    // clarification rather than a relevance-ranked planner choice.
+    const locationName: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:dimension:locations.location_name',
+      qualifiedId: 'semantic:uncategorized:dimension:locations.location_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Location Name', aliases: ['location', 'location name'], relevanceScore: 0.12,
+      matchReasons: ['ordinary qualified location dimension'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:locations'],
+    };
+    const countryName: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:dimension:locations.country_name',
+      qualifiedId: 'semantic:uncategorized:dimension:locations.country_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Country Name', aliases: ['country'], relevanceScore: 0.11,
+      matchReasons: ['ordinary qualified country dimension'], compatibility: 'compatible',
+      sourceObjects: ['dbt:model:locations'],
+    };
+    const metric: AgentEvidenceCandidate = {
+      ...revenue,
+      exactMatch: false,
+      relevanceScore: 0.95,
+      analyticalCapability: {
+        ...semanticCapability(revenue.id),
+        primaryEntityId: 'semantic:entity:orders.order',
+        dimensions: [
+          {
+            dimensionId: customerName.id, entityId: customerKey.id,
+            label: 'Customer Name', aliases: ['customer', 'customer name'],
+            supportedRoles: ['group_by', 'display', 'filter'],
+            relationshipPathIds: ['dql:relationship:order_to_customer'],
+            nativeGroupingReference: 'customer__customer_name', nativeGroupingPath: ['customer'],
+          },
+          {
+            dimensionId: locationName.id, entityId: 'semantic:entity:locations.location',
+            label: 'Location Name', aliases: ['location', 'location name'],
+            supportedRoles: ['group_by', 'display', 'filter'],
+            relationshipPathIds: ['dql:relationship:order_to_location'],
+            nativeGroupingReference: 'location__location_name', nativeGroupingPath: ['location'],
+          },
+          {
+            dimensionId: countryName.id, entityId: 'semantic:entity:locations.location',
+            label: 'Country Name', aliases: ['country'],
+            supportedRoles: ['group_by', 'display', 'filter'],
+            relationshipPathIds: ['dql:relationship:order_to_location'],
+            nativeGroupingReference: 'location__country_name', nativeGroupingPath: ['location'],
+          },
+        ],
+      },
+    };
+    const relationship = (id: string, from: string, to: string): AgentEvidenceCandidate => ({
+      id, qualifiedId: id, kind: 'dql_modeling', trustTier: 'governed_sql',
+      name: id.replace('dql:relationship:', '').replaceAll('_', ' '), relevanceScore: 0.9,
+      matchReasons: ['safe authored relationship'], compatibility: 'compatible', relationshipEvidence: [id],
+      relationshipSafety: [{
+        id, from, to, keys: [{ from: 'id', to: 'id' }], status: 'certified', staleCertification: false,
+        cardinality: 'many_to_one', fanout: 'safe', automaticJoinAllowed: true,
+        certificationFingerprint: `sha256:${id}`,
+        validation: {
+          status: 'passed', checkedAt: '2026-08-28T00:00:00.000Z',
+          queryFingerprint: `sha256:query:${id}`, proofFingerprint: `sha256:proof:${id}`,
+        },
+      }],
+    });
+    const orderToCustomer = relationship(
+      'dql:relationship:order_to_customer',
+      'semantic:entity:orders.order',
+      customerKey.id,
+    );
+    const orderToLocation = relationship(
+      'dql:relationship:order_to_location',
+      'semantic:entity:orders.order',
+      'semantic:entity:locations.location',
+    );
+    // Fifteen exact/pinned customer cards consume the naive planner budget.
+    // A relevance-only 16-card cut would leave room for only one geography
+    // field and incorrectly promote it as a unique inferred `region`.
+    // The runtime must inspect the qualified workspace first and surface both
+    // stable IDs as a pre-planner clarification.
+    const fillers = Array.from({ length: 15 }, (_, index): AgentEvidenceCandidate => ({
+      id: `dbt:model:ambiguity_customer_pin_${index}`,
+      qualifiedId: `dbt:model:ambiguity_customer_pin_${index}`,
+      kind: 'dbt_model', trustTier: 'exploratory', name: `Customer Pin ${index}`,
+      aliases: ['customer'], relevanceScore: 0.99 - index / 1_000,
+      exactMatch: true,
+      compatibilityFacts: ['roles entity key'],
+      matchReasons: ['exact pinned customer retrieval'], compatibility: 'compatible',
+    }));
+    const evidence: AgentRetrievalEvidence = {
+      snapshotId: 'snapshot:ordinary-role-ambiguity',
+      continuityFingerprint: 'sha256:ordinary-role-ambiguity',
+      candidates: [
+        metric, customerKey, customerName, locationName, countryName,
+        orderToCustomer, orderToLocation, ...fillers,
+      ],
+      parsedIntent: { measures: ['revenue'], dimensions: ['region'], filters: [] },
+    };
+    const planner = vi.fn();
+    const compilerBroker = { decide: vi.fn(async () => semanticDecision()) };
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker,
+      planAnalytical: planner,
+      getEvidence: async () => evidence,
+    });
+    const question = 'Which region is Brittany Barrera in by revenue?';
+    const priorResultMemberBinding = {
+      version: 1 as const,
+      displayDimension: 'customer_name',
+      values: ['Brittany Barrera'],
+      sourceTurnId: 'run:top-customers',
+      resultFingerprint: 'c'.repeat(64),
+    };
+    const hostRequirementSeed = buildAnalyticalRequirementSeedV1({
+      question,
+      parsedIntent: evidence.parsedIntent,
+      priorResultMemberBinding,
+    });
+
+    const initial = await runtime.decide({
+      question,
+      requestedMode: 'ask',
+      threadId: 'thread:ordinary-role-ambiguity',
+      conversationBinding: 'prior_result',
+      priorResultMemberBinding,
+      hostRequirementSeed,
+    });
+
+    expect(initial).toMatchObject({ action: 'clarify', requiresClarification: true });
+    expect(initial.clarificationOptions?.map((option) => option.id)).toEqual(expect.arrayContaining([
+      locationName.id,
+      countryName.id,
+    ]));
+    expect(planner).not.toHaveBeenCalled();
+    expect(compilerBroker.decide).not.toHaveBeenCalled();
+    expect(initial.analyticalCascadeDecision).toBeUndefined();
+    expect(initial.askAnalystDecision?.state.planningReceipt).toMatchObject({
+      plannerCalls: 0,
+      verification: { status: 'ambiguous', reasonCode: 'ordinary_role_inference_ambiguous' },
+    });
+    const plannerGeographyIds = initial.askAnalystDecision?.state.workspace.plannerCandidateIds
+      .filter((id) => [locationName.id, countryName.id].includes(id)) ?? [];
+    // The bounded package cannot safely retain both after the 15 pins. The
+    // clarification nevertheless has both choices because it was derived
+    // from the qualified workspace before planner truncation.
+    expect(plannerGeographyIds.length).toBeLessThan(2);
+    expect(initial.askAnalystDecision?.taskExecutions).toBeUndefined();
+    expect(initial.askAnalystDecision?.state.workspace.roleCoverage).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: 'categorical_dimension',
+        candidateCount: 2,
+        state: 'alternatives',
+      }),
+    ]));
+
+    // This recreates the server-owned persisted/reload envelope. It proves the
+    // original thread, turn, snapshot, and offered stable IDs; browser prose
+    // does not become a selection authority.
+    const selected = await runtime.decide({
+      question,
+      requestedMode: 'ask',
+      threadId: 'thread:ordinary-role-ambiguity',
+      selectedEvidenceId: locationName.id,
+      clarificationSourceQuestion: question,
+      conversationBinding: 'prior_result',
+      priorResultMemberBinding,
+      hostRequirementSeed,
+      conversationContext: {
+        conversationEnvelope: {
+          version: 1,
+          threadId: 'thread:ordinary-role-ambiguity',
+          recentTurns: [],
+          pendingClarification: {
+            sourceTurnId: 'turn:ordinary-role-ambiguity',
+            sourceQuestion: question,
+            question: 'Which geographic field should I use?',
+            selection: {
+              version: 1,
+              optionIds: [locationName.id, countryName.id],
+              ambiguityCandidateIds: [locationName.id, countryName.id],
+              snapshotId: evidence.snapshotId,
+              continuityFingerprint: evidence.continuityFingerprint,
+              requirements: hostRequirementSeed.requirements,
+            },
+          },
+        },
+        serverIssuedClarificationSelection: {
+          version: 1,
+          threadId: 'thread:ordinary-role-ambiguity',
+          sourceTurnId: 'turn:ordinary-role-ambiguity',
+          snapshotId: evidence.snapshotId,
+          continuityFingerprint: evidence.continuityFingerprint,
+        },
+      },
+    });
+
+    expect(planner).not.toHaveBeenCalled();
+    // The restored server-issued choice is a zero-provider identity binding;
+    // the canonical semantic cascade owns the frozen execution route.
+    expect(compilerBroker.decide).not.toHaveBeenCalled();
+    expect(selected.action).toBe('answer');
+    expect(selected.askAnalystDecision?.state.frame.conversation).toMatchObject({
+      binding: 'structured_clarification',
+      selectedStableId: locationName.id,
+    });
+    expect(selected.askAnalystDecision?.state.workspace.plannerCandidateIds).toContain(locationName.id);
+    expect(selected.askAnalystDecision?.state.workspace.plannerCandidateIds).not.toContain(countryName.id);
+    expect(selected.askAnalystDecision?.state.program.filters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ fieldTerms: expect.arrayContaining(['customer_name']), value: 'Brittany Barrera' }),
+    ]));
+    expect(selected.analyticalCascadeDecision).toMatchObject({ selectedTier: 'semantic', planFrozen: true });
+    expect(selected.askAnalystDecision?.taskExecutions?.[0]?.resolvedPlan).toMatchObject({ reviewRequired: true });
+  });
+
+  it('AGT-049 continues a persisted qualified SQL-column choice through one review-required exploratory path without replanning', async () => {
+    const customers: AgentEvidenceCandidate = {
+      id: 'dbt:model:customers', qualifiedId: 'dbt:model:customers',
+      kind: 'dbt_model', trustTier: 'exploratory', name: 'customers', aliases: ['customers'],
+      relevanceScore: 0.9, matchReasons: ['qualified physical relation'], compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:customers'],
+    };
+    const orders: AgentEvidenceCandidate = {
+      id: 'dbt:model:orders', qualifiedId: 'dbt:model:orders',
+      kind: 'dbt_model', trustTier: 'exploratory', name: 'orders', aliases: ['orders'],
+      relevanceScore: 0.89, matchReasons: ['qualified physical relation'], compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:orders'],
+    };
+    const locations: AgentEvidenceCandidate = {
+      id: 'dbt:model:locations', qualifiedId: 'dbt:model:locations',
+      kind: 'dbt_model', trustTier: 'exploratory', name: 'locations', aliases: ['locations'],
+      relevanceScore: 0.88, matchReasons: ['qualified physical relation'], compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:locations'],
+    };
+    const customerId: AgentEvidenceCandidate = {
+      id: 'runtime:column:customers.customer_id', qualifiedId: 'runtime:column:customers.customer_id',
+      kind: 'sql_column', trustTier: 'exploratory', name: 'customer_id', aliases: ['customer id'],
+      relevanceScore: 0.87, matchReasons: ['qualified physical customer key'], compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:customers'],
+    };
+    const customerName: AgentEvidenceCandidate = {
+      id: 'runtime:column:customers.customer_name', qualifiedId: 'runtime:column:customers.customer_name',
+      kind: 'sql_column', trustTier: 'exploratory', name: 'customer_name', aliases: ['customer', 'customer name'],
+      relevanceScore: 0.86, matchReasons: ['qualified physical customer label'], compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:customers'],
+    };
+    // Deliberately give both safe physical fields the same display label. The
+    // clarifier must retain their distinct qualified identities in the label
+    // rather than sending the user back to prose/position selection.
+    const locationName: AgentEvidenceCandidate = {
+      id: 'runtime:column:locations.location_name', qualifiedId: 'runtime:column:locations.location_name',
+      kind: 'sql_column', trustTier: 'exploratory', name: 'Location', aliases: ['location name'],
+      relevanceScore: 0.11, matchReasons: ['ordinary qualified location field'], compatibility: 'compatible',
+      compatibilityFacts: ['roles categorical dimension'], sourceObjects: ['runtime:relation:locations'],
+    };
+    const countryName: AgentEvidenceCandidate = {
+      id: 'runtime:column:locations.country_name', qualifiedId: 'runtime:column:locations.country_name',
+      kind: 'sql_column', trustTier: 'exploratory', name: 'Location', aliases: ['country name'],
+      relevanceScore: 0.1, matchReasons: ['ordinary qualified country field'], compatibility: 'compatible',
+      compatibilityFacts: ['roles categorical dimension'], sourceObjects: ['runtime:relation:locations'],
+    };
+    const relationship = (id: string, from: string, to: string): AgentEvidenceCandidate => ({
+      id, qualifiedId: id, kind: 'dql_modeling', trustTier: 'governed_sql',
+      name: id.replace('dql:relationship:', '').replaceAll('_', ' '), relevanceScore: 0.92,
+      matchReasons: ['same-snapshot safe relationship proof'], compatibility: 'compatible', relationshipEvidence: [id],
+      relationshipSafety: [{
+        id, from, to, keys: [{ from: 'id', to: 'id' }], status: 'certified', staleCertification: false,
+        cardinality: 'many_to_one', fanout: 'safe', automaticJoinAllowed: true,
+        certificationFingerprint: `sha256:${id}`,
+        validation: {
+          status: 'passed', checkedAt: '2026-08-28T00:00:00.000Z',
+          queryFingerprint: `sha256:query:${id}`, proofFingerprint: `sha256:proof:${id}`,
+        },
+      }],
+    });
+    const customerToOrder = relationship(
+      'dql:relationship:customer_to_order',
+      'runtime:relation:customers',
+      'runtime:relation:orders',
+    );
+    const orderToLocation = relationship(
+      'dql:relationship:order_to_location',
+      'runtime:relation:orders',
+      'runtime:relation:locations',
+    );
+    const fillers = Array.from({ length: 16 }, (_, index): AgentEvidenceCandidate => ({
+      id: `dbt:model:physical_ambiguity_context_${index}`,
+      qualifiedId: `dbt:model:physical_ambiguity_context_${index}`,
+      kind: 'dbt_model', trustTier: 'exploratory', name: `Context ${index}`,
+      aliases: [`context ${index}`], relevanceScore: 0.98 - index / 1_000,
+      matchReasons: ['16-card pressure filler'], compatibility: 'compatible',
+    }));
+    const evidence: AgentRetrievalEvidence = {
+      snapshotId: 'snapshot:physical-role-ambiguity',
+      continuityFingerprint: 'sha256:physical-role-ambiguity',
+      candidates: [
+        customers, orders, locations, customerId, customerName, locationName, countryName,
+        customerToOrder, orderToLocation, ...fillers,
+      ],
+      parsedIntent: { measures: [], dimensions: ['region'], filters: [] },
+    };
+    const planner = vi.fn();
+    const compilerBroker = { decide: vi.fn(async () => semanticDecision()) };
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker,
+      planAnalytical: planner,
+      getEvidence: async () => evidence,
+    });
+    const question = 'Which region is Brittany Barrera in?';
+    const priorResultMemberBinding = {
+      version: 1 as const,
+      displayDimension: 'customer_name',
+      values: ['Brittany Barrera'],
+      sourceTurnId: 'run:top-customers',
+      resultFingerprint: 'd'.repeat(64),
+    };
+    const hostRequirementSeed = buildAnalyticalRequirementSeedV1({
+      question,
+      parsedIntent: evidence.parsedIntent,
+      priorResultMemberBinding,
+    });
+
+    const initial = await runtime.decide({
+      question,
+      requestedMode: 'ask',
+      threadId: 'thread:physical-role-ambiguity',
+      conversationBinding: 'prior_result',
+      priorResultMemberBinding,
+      hostRequirementSeed,
+    });
+
+    expect(initial).toMatchObject({ action: 'clarify', requiresClarification: true });
+    expect(initial.clarificationOptions?.map((option) => option.id)).toEqual(expect.arrayContaining([
+      locationName.qualifiedId,
+      countryName.qualifiedId,
+    ]));
+    expect(initial.clarificationOptions?.every((option) => option.kind === 'sql_column')).toBe(true);
+    expect(new Set(initial.clarificationOptions?.map((option) => option.label)).size).toBe(2);
+    expect(planner).not.toHaveBeenCalled();
+    expect(compilerBroker.decide).not.toHaveBeenCalled();
+    expect(initial.analyticalCascadeDecision).toBeUndefined();
+    expect(initial.askAnalystDecision?.state.workspace.plannerCandidateIds.length).toBeLessThanOrEqual(16);
+    expect(initial.askAnalystDecision?.state.workspace.roleCoverage).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'categorical_dimension', state: 'alternatives' }),
+    ]));
+
+    const selected = await runtime.decide({
+      question,
+      requestedMode: 'ask',
+      threadId: 'thread:physical-role-ambiguity',
+      selectedEvidenceId: locationName.qualifiedId,
+      clarificationSourceQuestion: question,
+      conversationBinding: 'prior_result',
+      priorResultMemberBinding,
+      hostRequirementSeed,
+      conversationContext: {
+        conversationEnvelope: {
+          version: 1,
+          threadId: 'thread:physical-role-ambiguity',
+          recentTurns: [],
+          pendingClarification: {
+            sourceTurnId: 'turn:physical-role-ambiguity',
+            sourceQuestion: question,
+            question: 'Which geographic field should I use?',
+            selection: {
+              version: 1,
+              optionIds: [locationName.qualifiedId!, countryName.qualifiedId!],
+              ambiguityCandidateIds: [locationName.qualifiedId!, countryName.qualifiedId!],
+              snapshotId: evidence.snapshotId,
+              continuityFingerprint: evidence.continuityFingerprint,
+              requirements: hostRequirementSeed.requirements,
+            },
+          },
+        },
+        serverIssuedClarificationSelection: {
+          version: 1,
+          threadId: 'thread:physical-role-ambiguity',
+          sourceTurnId: 'turn:physical-role-ambiguity',
+          snapshotId: evidence.snapshotId,
+          continuityFingerprint: evidence.continuityFingerprint,
+        },
+      },
+    });
+
+    expect(planner).not.toHaveBeenCalled();
+    expect(compilerBroker.decide).not.toHaveBeenCalled();
+    expect(selected.action).toBe('answer');
+    expect(selected.requiresClarification).not.toBe(true);
+    expect(selected.askAnalystDecision?.state.frame.conversation).toMatchObject({
+      binding: 'structured_clarification',
+      selectedStableId: locationName.qualifiedId,
+    });
+    expect(selected.askAnalystDecision?.state.workspace.plannerCandidateIds).toContain(locationName.qualifiedId);
+    expect(selected.askAnalystDecision?.state.workspace.plannerCandidateIds).not.toContain(countryName.qualifiedId);
+    expect(selected.askAnalystDecision?.state.program.filters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ fieldTerms: expect.arrayContaining(['customer_name']), value: 'Brittany Barrera' }),
+    ]));
+    expect(selected.askAnalystDecision?.state.program.executionCandidateIds).toEqual(expect.arrayContaining([
+      customerToOrder.qualifiedId,
+      orderToLocation.qualifiedId,
+      locationName.qualifiedId,
+    ]));
+    expect(selected.analyticalCascadeDecision).toMatchObject({
+      selectedTier: 'exploratory_sql',
+      planFrozen: true,
+    });
+    expect(selected.askAnalystDecision?.taskExecutions?.[0]?.resolvedPlan).toMatchObject({
+      compiler: 'exploratory_sql',
+      reviewRequired: true,
+      planFrozen: true,
+    });
+    expect(selected.askAnalystDecision?.state.workspace.tools).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'provider_meaning',
+        status: 'skipped',
+        reasonCode: 'deterministic_structured_physical_continuation_binding',
+      }),
+    ]));
+  });
+
+  it('AGT-041 admits only canonically proven relationship path cards and preserves exploratory proof class', async () => {
+    const customerKey: AgentEvidenceCandidate = {
+      id: 'semantic:entity:customers.customer', qualifiedId: 'semantic:entity:customers.customer',
+      kind: 'semantic_member', semanticObjectType: 'entity', trustTier: 'semantic',
+      name: 'Customer', aliases: ['customer'], relevanceScore: 0.92,
+      matchReasons: ['semantic entity'], compatibility: 'compatible',
+    };
+    const customerName: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:customers.customer_name', qualifiedId: 'semantic:dimension:customers.customer_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Customer Name', aliases: ['customer', 'customer name'], relevanceScore: 0.91,
+      matchReasons: ['semantic display dimension'], compatibility: 'compatible',
+    };
+    const region: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:locations.region', qualifiedId: 'semantic:dimension:locations.region',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'Region', aliases: ['region', 'location'], relevanceScore: 0.9,
+      matchReasons: ['semantic location dimension'], compatibility: 'compatible',
+    };
+    const metric: AgentEvidenceCandidate = {
+      ...revenue,
+      exactMatch: false,
+      relevanceScore: 0.89,
+      analyticalCapability: {
+        ...semanticCapability(revenue.id),
+        primaryEntityId: customerKey.id,
+        dimensions: [
+          {
+            dimensionId: customerName.id, entityId: customerKey.id,
+            label: 'Customer Name', aliases: ['customer', 'customer name'],
+            supportedRoles: ['group_by', 'display', 'filter'],
+            relationshipPathIds: ['dql:relationship:customer_to_location'],
+          },
+          {
+            dimensionId: region.id, entityId: 'semantic:entity:locations.location',
+            label: 'Region', aliases: ['region', 'location'],
+            supportedRoles: ['group_by', 'display'],
+            relationshipPathIds: ['dql:relationship:customer_to_location'],
+          },
+        ],
+      },
+    };
+    const competingMetric: AgentEvidenceCandidate = {
+      ...metric,
+      id: 'semantic:metric:finance.revenue', qualifiedId: 'semantic:metric:finance.revenue',
+      name: 'finance.revenue', relevanceScore: 0.88,
+    };
+    type RelationshipSafety = NonNullable<AgentEvidenceCandidate['relationshipSafety']>[number];
+    const validSafety = (): RelationshipSafety => ({
+      id: 'dql:relationship:customer_to_location',
+      from: customerKey.id,
+      to: 'semantic:entity:locations.location',
+      keys: [{ from: 'customer_id', to: 'customer_id' }],
+      status: 'certified',
+      staleCertification: false,
+      cardinality: 'many_to_one',
+      fanout: 'safe',
+      automaticJoinAllowed: true,
+      certificationFingerprint: 'sha256:customer-location',
+      validation: {
+        status: 'passed', checkedAt: '2026-08-28T00:00:00.000Z',
+        queryFingerprint: 'sha256:customer-location-query', proofFingerprint: 'sha256:customer-location-proof',
+      },
+    });
+    const relationship = (input: { safety: RelationshipSafety | RelationshipSafety[]; evidence?: string[] }): AgentEvidenceCandidate => {
+      const safety = Array.isArray(input.safety) ? input.safety : [input.safety];
+      return {
+      id: 'dql:relationship:customer_to_location', qualifiedId: 'dql:relationship:customer_to_location',
+      kind: 'dql_modeling', trustTier: 'governed_sql',
+      name: 'Customer to location', aliases: ['customer location relationship'], relevanceScore: 0.95,
+      matchReasons: ['relationship fixture'], compatibility: 'compatible',
+      relationshipEvidence: input.evidence ?? [safety[0]!.id],
+      relationshipSafety: safety,
+      };
+    };
+    const plannerCardsFor = async (input: { safety: RelationshipSafety | RelationshipSafety[]; evidence?: string[] }) => {
+      let cards: readonly { id: string; trustTier: string; relationshipProofClass?: string; relationHints?: string[] }[] = [];
+      const runtime = createAskAnalystRuntimeV1({
+        compilerBroker: { decide: vi.fn(async () => semanticDecision()) },
+        planAnalytical: async (input) => {
+          cards = input.plannerRequest.candidates;
+          // The test exercises admission only. A malformed proposal safely
+          // stops before any compiler/execution path.
+          return undefined;
+        },
+        getEvidence: async () => ({
+          snapshotId: 'snapshot:relationship-proof',
+          candidates: [metric, competingMetric, customerKey, customerName, region, relationship(input)],
+          parsedIntent: { measures: ['revenue'], dimensions: ['customer', 'region'], filters: [] },
+        }),
+      });
+      await runtime.decide({ question: 'show revenue by customer and region', requestedMode: 'ask' });
+      return cards;
+    };
+    const governedCard = (await plannerCardsFor({ safety: validSafety() })).find((card) =>
+      card.id.startsWith('dql:relationship_path:'));
+    expect(governedCard).toMatchObject({ trustTier: 'governed', relationshipProofClass: 'governed' });
+
+    const exploratorySafety: RelationshipSafety = {
+      ...validSafety(),
+      status: 'draft',
+      certificationFingerprint: undefined,
+    };
+    const exploratoryCard = (await plannerCardsFor({ safety: exploratorySafety })).find((card) =>
+      card.id.startsWith('dql:relationship_path:'));
+    expect(exploratoryCard).toMatchObject({ trustTier: 'exploratory', relationshipProofClass: 'exploratory' });
+
+    // An alias may identify the same raw snapshot edge, but the planner card
+    // must serialize the matched proof's canonical relationship ID only.
+    const aliasedSafety: RelationshipSafety = {
+      ...validSafety(),
+      aliases: ['dql:relationship:customer_to_location_alias'],
+    };
+    const aliasCard = (await plannerCardsFor({
+      safety: aliasedSafety,
+      evidence: ['dql:relationship:customer_to_location_alias'],
+    })).find((card) => card.id.startsWith('dql:relationship_path:'));
+    expect(aliasCard).toMatchObject({
+      relationshipProofClass: 'governed',
+      relationHints: ['dql:relationship:customer_to_location'],
+    });
+
+    const rejectedProofs: Array<[string, RelationshipSafety]> = [
+      ['automatic join denied', { ...validSafety(), automaticJoinAllowed: false }],
+      ['stale certification', { ...validSafety(), staleCertification: true }],
+      ['draft without passed validation', { ...validSafety(), status: 'draft', validation: { ...validSafety().validation!, status: 'failed' } }],
+      ['unvalidated proof', { ...validSafety(), validation: undefined }],
+      ['invalid endpoints and keys', { ...validSafety(), from: '', keys: [{ from: '', to: 'customer_id' }] }],
+      ['unsafe cardinality', { ...validSafety(), cardinality: 'many_to_many' }],
+    ];
+    for (const [label, safety] of rejectedProofs) {
+      const cards = await plannerCardsFor({ safety });
+      expect(cards.some((card) => card.id.startsWith('dql:relationship_path:')), label).toBe(false);
+    }
+
+    const proof = validSafety();
+    const proofMappingRejects: Array<[string, { safety: RelationshipSafety[]; evidence: string[] }]> = [
+      ['proved plus unproved evidence edge', {
+        safety: [proof],
+        evidence: [proof.id, 'dql:relationship:unproved_edge'],
+      }],
+      ['unrelated extra proof', {
+        safety: [proof, { ...validSafety(), id: 'dql:relationship:unrelated_extra' }],
+        evidence: [proof.id],
+      }],
+      ['duplicate alias proof mapping', {
+        safety: [proof, { ...validSafety(), id: 'dql:relationship:duplicate_alias', aliases: [proof.id] }],
+        evidence: [proof.id],
+      }],
+    ];
+    for (const [label, input] of proofMappingRejects) {
+      const cards = await plannerCardsFor(input);
+      expect(cards.some((card) => card.id.startsWith('dql:relationship_path:')), label).toBe(false);
+    }
+  });
+
+  it('AGT-041 retains only the minimal safe relationship closure for a multi-relation Ask', async () => {
+    const customerKey: AgentEvidenceCandidate = {
+      id: 'semantic:entity:customers.customer_id',
+      qualifiedId: 'semantic:entity:customers.customer_id',
+      kind: 'semantic_member',
+      semanticObjectType: 'entity',
+      trustTier: 'semantic',
+      name: 'Customer ID',
+      aliases: ['customer key', 'customer id'],
+      relevanceScore: 0.8,
+      matchReasons: ['semantic entity'],
+      compatibility: 'compatible',
+    };
+    const customerName: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:customers.customer_name',
+      qualifiedId: 'semantic:dimension:customers.customer_name',
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      trustTier: 'semantic',
+      name: 'Customer name',
+      aliases: ['customer', 'customer name'],
+      relevanceScore: 0.79,
+      matchReasons: ['semantic display dimension'],
+      compatibility: 'compatible',
+    };
+    const productName: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:products.product_name',
+      qualifiedId: 'semantic:dimension:products.product_name',
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      trustTier: 'semantic',
+      name: 'Product name',
+      aliases: ['product', 'product name'],
+      relevanceScore: 0.78,
+      matchReasons: ['semantic grouping dimension'],
+      compatibility: 'compatible',
+    };
+    const relationship = (id: string, relevanceScore: number, edgeCount: number, fanout = 'safe'): AgentEvidenceCandidate => ({
+      id,
+      qualifiedId: id,
+      kind: 'dql_modeling',
+      trustTier: 'governed_sql',
+      name: id.replace('dql:relationship:', '').replaceAll('_', ' '),
+      aliases: ['customer product relationship'],
+      relevanceScore,
+      matchReasons: ['validated relationship closure'],
+      compatibility: 'compatible',
+      relationshipEvidence: [id],
+      relationshipSafety: [{
+        id,
+        from: 'semantic:entity:customers.customer',
+        to: 'semantic:entity:products.product',
+        keys: Array.from({ length: edgeCount }, (_, index) => ({
+          from: `customer_key_${index}`,
+          to: `customer_key_${index}`,
+        })),
+        status: 'certified',
+        staleCertification: false,
+        cardinality: 'many_to_one',
+        fanout,
+        automaticJoinAllowed: true,
+        certificationFingerprint: `sha256:relationship:${id}`,
+        validation: {
+          status: 'passed',
+          checkedAt: '2026-08-28T00:00:00.000Z',
+          queryFingerprint: `sha256:query:${id}`,
+          proofFingerprint: `sha256:proof:${id}`,
+        },
+      }],
+    });
+    const safeOne = relationship('dql:relationship:customers_orders', 0.91, 2);
+    const safeTwo = relationship('dql:relationship:orders_order_items', 0.9, 1);
+    const safeThree = relationship('dql:relationship:order_items_products', 0.89, 1);
+    const safeFour = relationship('dql:relationship:customers_accounts', 0.88, 1);
+    const unsafeFanout = relationship('dql:relationship:customers_products_unbounded', 0.99, 1, 'many_to_many');
+    const planner = vi.fn(async (input: { plannerRequest: {
+      candidates: readonly { id: string; relationHints?: string[] }[];
+    } }) => {
+      const pathCard = input.plannerRequest.candidates.find((candidate) =>
+        candidate.id.startsWith('dql:relationship_path:'));
+      expect(pathCard?.relationHints).toEqual([safeOne.id, safeTwo.id, safeThree.id]);
+      expect(input.plannerRequest.candidates
+        .filter((candidate) => [safeOne.id, safeTwo.id, safeThree.id, safeFour.id, unsafeFanout.id].includes(candidate.id)))
+        .toEqual([]);
+      return {
+        version: 1 as const,
+        selectedConceptIds: [revenue.id, customerKey.id, customerName.id, productName.id, pathCard!.id],
+        confidence: 'high' as const,
+        tasks: [{
+          version: 1 as const,
+          taskId: 'task-1',
+          selectedConceptIds: [revenue.id, customerKey.id, customerName.id, productName.id, pathCard!.id],
+          roleBindings: {
+            metric: [revenue.id],
+            entity_key: [customerKey.id],
+            entity_label: [customerName.id],
+            categorical_dimension: [productName.id],
+            relationship: [pathCard!.id],
+          },
+          operations: ['aggregate', 'group', 'project'] as const,
+        }],
+      };
+    });
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker: { decide: vi.fn(async () => semanticDecision()) },
+      planAnalytical: planner,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot:bounded-relationship-closure',
+        candidates: [
+          revenue,
+          customerKey,
+          customerName,
+          productName,
+          safeOne,
+          safeTwo,
+          safeThree,
+          safeFour,
+          unsafeFanout,
+        ],
+        parsedIntent: { measures: ['revenue'], dimensions: ['customer', 'product'], filters: [] },
+      }),
+    });
+
+    const decision = await runtime.decide({
+      question: 'show revenue by customer and product',
+      requestedMode: 'ask',
+    });
+
+    const closure = (decision.askAnalystDecision?.state.program.executionCandidateIds ?? [])
+      .filter((id) => id.startsWith('dql:relationship:'));
+    expect(closure).toEqual([safeOne.id, safeTwo.id, safeThree.id]);
+    expect(closure).not.toContain(safeFour.id);
+    expect(closure).not.toContain(unsafeFanout.id);
+    expect(closure).toHaveLength(3);
+    const edgeCounts = new Map([safeOne, safeTwo, safeThree, safeFour, unsafeFanout]
+      .map((candidate) => [candidate.id, candidate.relationshipSafety?.[0]?.keys.length ?? 0]));
+    expect(closure.reduce((total, id) => total + (edgeCounts.get(id) ?? 0), 0)).toBe(4);
   });
 });

@@ -39,6 +39,8 @@ export interface MetadataMeaningCandidate {
   definition?: string;
   formula?: string;
   semanticModel?: string;
+  /** Source-authored semantic/member or physical column type. */
+  dataType?: string;
   relevanceReasons: string[];
   compatibilityFacts: string[];
   businessShape: {
@@ -649,6 +651,7 @@ function agentCandidateFromMeaning(
       provenance: candidate.provenance,
       domain: candidate.domain,
       semanticModel: candidate.semanticModel,
+      dataType: candidate.dataType,
       primaryEntity: candidate.businessShape.entities[0],
       dimensions: dimensionLookupAliases(candidate.businessShape.dimensions),
       timeGrains: candidate.businessShape.timeGrains,
@@ -1397,6 +1400,24 @@ function candidateCard(
   retrievalLanes?: Array<{ lane: 'exact' | 'lexical' | 'vector' | 'graph' | 'conversation'; rank?: number }>,
 ): MetadataMeaningCandidate {
   const payload = object.payload ?? {};
+  const typeParams = recordValue(payload.typeParams) ?? recordValue(payload.type_params) ?? {};
+  const dataType = firstString(
+    payload.dataType,
+    payload.data_type,
+    payload.columnType,
+    payload.column_type,
+    payload.dimensionType,
+    payload.dimension_type,
+    payload.type,
+    typeParams.dataType,
+    typeParams.data_type,
+  );
+  const declaredTimeGrain = firstString(
+    payload.timeGranularity,
+    payload.time_granularity,
+    typeParams.timeGranularity,
+    typeParams.time_granularity,
+  );
   const analyticalCapability = normalizeMetricCapabilityContract(
     payload.analyticalCapability,
   );
@@ -1459,6 +1480,7 @@ function candidateCard(
       ? truncate(firstString(payload.formula, payload.expr, payload.sql), 320)
       : undefined,
     semanticModel: firstString(payload.semanticModel, payload.cube),
+    ...(dataType ? { dataType } : {}),
     relevanceReasons,
     compatibilityFacts,
     businessShape: {
@@ -1469,6 +1491,7 @@ function candidateCard(
       timeGrains: uniqueStrings([
         ...stringArray(payload.timeGrains),
         ...stringArray(payload.supportedTimeGrains),
+        declaredTimeGrain ?? '',
       ]).slice(0, 8),
       parameters: parameters.slice(0, 12),
       filters: stringArray(payload.allowedFilters).slice(0, 12),

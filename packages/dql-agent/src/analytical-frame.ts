@@ -649,6 +649,62 @@ export function resolveMetricCapabilityDimension(
   return capability ? resolveExactCapabilityDimension(selectedDimensionId, capability) : undefined;
 }
 
+/**
+ * Prove the narrowly-scoped same-snapshot MetricFlow extension contract.
+ *
+ * This is intentionally a pure capability check shared by the router,
+ * frozen-plan compiler gate, and Ask workspace admission.  An extension is
+ * not a lexical synonym: it is valid only when the currently eligible metric
+ * declares the exact (or protocol-alias-equivalent) semantic member as a
+ * `group_by` dimension in its normalized capability.  Keeping this one proof
+ * in front of every authority boundary prevents an old, mismatched, or
+ * hand-shaped card from entering the planner package and later looking like
+ * compiler-approved evidence.
+ */
+export function proveSameSnapshotMetricflowRoleExtensionV1(input: {
+  candidate: AgentEvidenceCandidate;
+  metricCandidate: AgentEvidenceCandidate;
+}): {
+  capability: MetricCapabilityContract;
+  dimension: MetricCapabilityContract['dimensions'][number];
+} | undefined {
+  const { candidate, metricCandidate } = input;
+  const extension = candidate.sameSnapshotRoleExtension;
+  if (!extension
+    || extension.version !== 1
+    || extension.role !== 'categorical_dimension'
+    || (extension.basis !== 'sole_metricflow_grouping_dimension'
+      && extension.basis !== 'exact_metricflow_grouping_dimension')
+    || !extension.requestedTerm.trim()
+    || !extension.metricId.trim()
+    || !extension.dimensionId.trim()
+    || candidate.kind !== 'semantic_member'
+    || (candidate.semanticObjectType !== undefined && candidate.semanticObjectType !== 'dimension')
+    || candidate.eligible === false
+    || candidate.compatibility === 'incompatible'
+    || metricCandidate.kind !== 'semantic_metric'
+    || metricCandidate.eligible === false
+    || metricCandidate.compatibility === 'incompatible') return undefined;
+
+  const capability = normalizeMetricCapabilityContract(metricCandidate.analyticalCapability);
+  if (!capability) return undefined;
+  const metricAuthorityIds = new Set([
+    metricCandidate.id,
+    metricCandidate.qualifiedId,
+    capability.metricId,
+    ...capability.measureIds,
+  ].filter((id): id is string => Boolean(id)));
+  if (!metricAuthorityIds.has(extension.metricId)) return undefined;
+
+  const candidateIdentity = candidate.qualifiedId ?? candidate.id;
+  if (!sameCapabilityDimensionIdentity(candidateIdentity, extension.dimensionId)) return undefined;
+  const dimension = resolveExactCapabilityDimension(extension.dimensionId, capability);
+  if (!dimension
+    || !sameCapabilityDimensionIdentity(dimension.dimensionId, extension.dimensionId)
+    || !dimension.supportedRoles.includes('group_by')) return undefined;
+  return { capability, dimension };
+}
+
 function resolveDimensionTerm(requested: string, capability: MetricCapabilityContract, candidates: AgentEvidenceCandidate[]): MetricCapabilityContract['dimensions'] {
   const candidateIds = new Set<string>();
   for (const candidate of candidates) {

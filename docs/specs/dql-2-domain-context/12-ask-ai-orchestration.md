@@ -61,6 +61,35 @@ change the Cloud theme, App, Block, or Modeling surfaces.
   interrupted branch is typed `run_deadline` or `cancelled`, while an ordinary
   child execution failure is typed `execution_failed`, never `completed`
   (`AGT-033`, `OBS-005`, `OBS-012`).
+- `check_lineage` is a separate, zero-call structural Research program. It
+  resolves only one exact ID, exact name, or canonical qualified alias in the
+  frozen root snapshot, then traverses the already-local lineage graph with
+  fixed depth, path, node, and edge caps. An unqualified exact display-name
+  lookup is a cancellable, non-materializing bounded scan: it is accepted only
+  after the scan proves uniqueness, and an exhausted work/candidate cap is
+  typed `unavailable`, never a first-match selection. It never enters the analytical
+  router, provider, SQL compiler, warehouse, or repair path. Missing,
+  ambiguous, stale, truncated, and unavailable states are typed structural
+  outcomes, not query failures or a reason to fall through to a broader
+  search. A graph edge establishes dependency context only; it never supports
+  a causal business claim (`AGT-016`, `AGT-033`, `AGT-040`).
+- A qualified target is never widened to a bare leaf/display-name match in a
+  different model or domain. The root captures both the graph and a
+  `dql-manifest`-inclusive source signature; a changed signature makes each
+  later lineage child stale before traversal. One shared bounded traversal
+  budget owns its retained nodes, edges, terminal-route path count, predicates,
+  and structural fingerprint across both directions; upstream and downstream
+  routes draw from the same path allowance.
+- `ResearchEvidenceLedgerV3` adds a content-safe lineage-receipt entry beside
+  V1/V2 analytical-result entries. The lineage entry has bounded counts and
+  opaque fingerprints, but no SQL, rows, result fingerprint, provider payload,
+  graph labels, paths, or target text. Existing V1/V2 readers continue to
+  receive analytical-result entries only, so a graph walk cannot be mistaken
+  for a data execution (`AGT-033`, `OBS-012`).
+- A Research root containing any V3 lineage entry remains
+  `review_required`/`needs_review`, including when another child has a
+  successful analytical result. Structural evidence is never sufficient to
+  promote the root to `grounded`.
 
 ## Trust and repair boundary
 
@@ -79,13 +108,16 @@ only normal zero-call exception.
 ## Evidence in this implementation
 
 - Core orchestration types, canonicalization, context fusion, task graph, and
-  research ledger: `packages/dql-agent/src/analytical-orchestration.ts` and
-  `analytical-orchestration.test.ts`.
+  V1/V2/V3 research ledgers: `packages/dql-agent/src/analytical-orchestration.ts`
+  and `analytical-orchestration.test.ts`.
 - Router meaning-call budget and ranking guard: `packages/dql-agent/src/router.ts`.
 - Pre-freeze recovery and typed coverage gaps/research ledger: `packages/dql-agent/src/agent-run-engine.ts` and `apps/cli/src/local-runtime.ts`.
 - Conversational member resolution and attribute generation: `apps/cli/src/llm/providers/dql-agent-provider.ts` and `packages/dql-agent/src/answer-loop.ts`.
 - Canonical result rendering/persistence: `apps/dql-notebook/src/api/client.ts`,
   `UnifiedAgentRunPanel.tsx`, and `AgentAnswerCard.tsx`.
+- Bounded local lineage Research program and zero-call contract:
+  `apps/cli/src/research-lineage-program.ts`, its focused tests, and the
+  `research.lineage` branch in `apps/cli/src/local-runtime.ts`.
 
 The focused package tests and production builds are implementer evidence. The
 designated built-CLI fixture and independent verifier still own `verified` status.

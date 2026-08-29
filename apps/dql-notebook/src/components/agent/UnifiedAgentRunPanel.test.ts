@@ -39,6 +39,7 @@ let askRunCaptureWarning: typeof UnifiedAgentRunPanelModule.askRunCaptureWarning
 let askFailureOriginTyped: typeof UnifiedAgentRunPanelModule.askFailureOrigin;
 let askFailurePresentation: typeof UnifiedAgentRunPanelModule.ASK_FAILURE_PRESENTATION;
 let extractResult: typeof UnifiedAgentRunPanelModule.extractResult;
+let selectedResultBindingForSelection: typeof UnifiedAgentRunPanelModule.selectedResultBindingForSelection;
 let resolveComposerRequestedMode: typeof UnifiedAgentRunPanelModule.resolveComposerRequestedMode;
 let researchResultRowsOptInForRun: typeof UnifiedAgentRunPanelModule.researchResultRowsOptInForRun;
 let researchToolRowsConsentTitle: typeof UnifiedAgentRunPanelModule.RESEARCH_TOOL_ROWS_CONSENT_TITLE;
@@ -86,6 +87,7 @@ beforeAll(async () => {
     askFailureOriginTyped = module.askFailureOrigin;
     askFailurePresentation = module.ASK_FAILURE_PRESENTATION;
     extractResult = module.extractResult;
+    selectedResultBindingForSelection = module.selectedResultBindingForSelection;
     resolveComposerRequestedMode = module.resolveComposerRequestedMode;
     researchResultRowsOptInForRun = module.researchResultRowsOptInForRun;
     researchToolRowsConsentTitle = module.RESEARCH_TOOL_ROWS_CONSENT_TITLE;
@@ -258,6 +260,36 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
       ],
     } as any;
     expect(researchVerdictSummaryForRun(run)?.compactLabel).toBe('Limited research scope · 2 failed');
+  });
+
+  it('prefers the additive V3 ledger and labels local lineage as non-causal rather than query execution', () => {
+    const payload = JSON.parse(JSON.stringify({
+      researchLedgerV2: {
+        version: 2,
+        groundableBranchCount: 1,
+        limitedScope: true,
+        entries: [{ branchId: 'legacy', verdict: 'failed' }],
+      },
+      researchLedgerV3: {
+        version: 3,
+        groundableBranchCount: 2,
+        limitedScope: true,
+        entries: [
+          { branchId: 'lineage', evidenceKind: 'lineage_graph', verdict: 'inconclusive' },
+          { branchId: 'analytics', evidenceKind: 'analytical_result', verdict: 'failed' },
+        ],
+      },
+    })) as Record<string, unknown>;
+
+    expect(researchVerdictSummary(payload)).toMatchObject({
+      branchCount: 2,
+      groundableBranchCount: 2,
+      lineageBranchCount: 1,
+      verdicts: { inconclusive: 1, failed: 1 },
+      compactLabel: 'Limited research scope · 1 inconclusive · 1 failed',
+    });
+    expect(researchVerdictSummary(payload)?.detail).toContain('1 structural lineage check was local-only and non-causal.');
+    expect(researchVerdictSummary(payload)?.detail).not.toMatch(/SQL execution|provider result/i);
   });
 
   it('names the exact App page used by the added-result confirmation', () => {
@@ -1260,6 +1292,59 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
     expect(askArtifactMeta(run.artifacts[0], run.artifacts[0].payload)).toContain('certified block');
   });
 
+  it('AGT-005/UI-012 labels a frozen semantic compiler failure as compile, never connection or AI-generated', () => {
+    const payload = {
+      analyticalFailure: {
+        code: 'COMPILATION_FAILED',
+        phase: 'compilation',
+      },
+      semanticExecutionTrace: {
+        adapter: 'metricflow-cli',
+        status: 'failed',
+        failure: {
+          code: 'SEMANTIC_COMPILATION_FAILED',
+          phase: 'compilation',
+        },
+      },
+    };
+    const run = { status: 'blocked', artifacts: [{ payload }] } as never;
+
+    expect(askArtifactMeta({ kind: 'answer', trustState: 'blocked' } as never, payload))
+      .toBe('Answer · semantic compilation failed');
+    expect(askFailureOriginTyped(run)).toBe('compile');
+    expect(askFailurePresentation.compile.hint).toContain('did not reach the warehouse');
+    expect(askFailurePresentation.compile.hint).not.toContain('connection');
+  });
+
+  it('AGT-005/UI-012 preserves semantic compilation attribution from trace-only and V4 terminal receipts', () => {
+    const traceOnlyPayload = {
+      semanticExecutionTrace: {
+        adapter: 'metricflow-cli',
+        status: 'failed',
+        failure: {
+          code: 'SEMANTIC_COMPILATION_FAILED',
+          phase: 'compilation',
+        },
+      },
+    };
+    const v4TerminalPayload = {
+      diagnosticReceiptV4: {
+        version: 4,
+        terminalIncident: {
+          code: 'COMPILATION_FAILED',
+          boundary: 'semantic.compile',
+        },
+      },
+    };
+
+    for (const payload of [traceOnlyPayload, v4TerminalPayload]) {
+      const run = { status: 'blocked', artifacts: [{ payload }] } as never;
+      expect(askArtifactMeta({ kind: 'answer', trustState: 'blocked' } as never, payload))
+        .toBe('Answer · semantic compilation failed');
+      expect(askFailureOriginTyped(run)).toBe('compile');
+    }
+  });
+
   it('opens the technical inspector on DQL before SQL, lineage, or trust', () => {
     const artifact = {
       id: 'answer-1',
@@ -1870,5 +1955,55 @@ describe('failure card origin and detail', () => {
       'I found more than one governed dimension for “account”: Billing Account or Service Account. Choose one before I run the query.',
     );
     expect(askFailureDetail(run)).not.toBe('Agent run is blocked.');
+  });
+
+  it('AGT-027 carries a selected table cell as a stable result binding, not appended Regarding prose', async () => {
+    const artifact = {
+      id: 'answer:customers',
+      kind: 'answer',
+      title: 'Customers',
+      trustState: 'governed',
+      payload: {
+        result: {
+          columns: ['customer_name', 'revenue'],
+          rows: [{ customer_name: 'Melissa Davis', revenue: 1411 }],
+          rowCount: 1,
+          resultFingerprint: 'a'.repeat(64),
+        },
+      },
+    } as any;
+    const run = { id: 'run:customers', artifacts: [artifact] } as any;
+    const binding = await selectedResultBindingForSelection({
+      selectedText: 'Melissa Davis', run, artifact,
+    });
+    expect(binding).toMatchObject({
+      version: 1,
+      sourceRunId: 'run:customers',
+      sourceArtifactId: 'answer:customers',
+      canonicalColumn: 'customer_name',
+      value: 'Melissa Davis',
+      resultFingerprint: 'a'.repeat(64),
+    });
+    expect(binding?.rowFingerprint).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it('AGT-040 explains an inferred sole MetricFlow grouping as review-required', () => {
+    expect(trustExplainer({
+      status: 'needs_review',
+      stopReason: 'human_review_required',
+      route: 'semantic_answer',
+      trustState: 'review_required',
+      diagnosticReceiptV7: {
+        version: 7,
+        inspector: {
+          understood: { questionKind: 'aggregation', conversationBinding: 'none', measureCount: 1, dimensionCount: 1, entityRequested: false, hasBoundFilter: false },
+          evidence: { admittedCandidateCount: 2, roleCount: 2, recoveryAttempted: false },
+          planning: { mode: 'initial_planner', plannerCalls: 1, verification: 'valid' },
+          route: { selectedTier: 'semantic', tierAttemptCount: 2, planFrozen: true, reviewRequired: true },
+          outcome: { connectionAttempted: true, executionAttempts: 1, factCount: 1, narration: 'fact_bound' },
+        },
+      },
+      artifacts: [],
+    } as any)).toContain('sole declared MetricFlow grouping');
   });
 });

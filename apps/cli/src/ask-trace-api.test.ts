@@ -1580,18 +1580,73 @@ describe('local Ask trace API errors (OBS-009)', () => {
       state?: string;
       verdict?: string;
       stopReason?: string;
+      evidenceKind?: string;
+      lineageStatus?: string;
     }> | undefined;
     const ledger = researchArtifact?.payload?.researchLedgerV2 as {
       groundableBranchCount?: number;
       limitedScope?: boolean;
       entries?: Array<{ verdict?: string }>;
     } | undefined;
+    const ledgerV3 = researchArtifact?.payload?.researchLedgerV3 as {
+      groundableBranchCount?: number;
+      limitedScope?: boolean;
+      entries?: Array<{
+        evidenceKind?: string;
+        verdict?: string;
+        resultFingerprint?: string;
+        executionReceipt?: unknown;
+        lineageReceipt?: {
+          zeroCallCounters?: {
+            providerCalls?: number;
+            sqlExecutions?: number;
+            warehouseExecutions?: number;
+            repairAttempts?: number;
+          };
+        };
+      }>;
+    } | undefined;
     expect(body.run.route).toBe('research');
+    // V2 is deliberately analytical-result-only for backwards compatibility:
+    // a structural graph walk cannot masquerade as an execution receipt. V3
+    // carries the mixed dossier while retaining the root's two planned,
+    // groundable branches and limited-scope conclusion.
     expect(ledger).toMatchObject({ groundableBranchCount: 2, limitedScope: true });
-    expect(ledger?.entries).toHaveLength(2);
-    expect(ledger?.entries?.map((entry) => entry.verdict)).toEqual(['failed', 'failed']);
+    expect(ledger?.entries).toHaveLength(1);
+    expect(ledger?.entries?.map((entry) => entry.verdict)).toEqual(['failed']);
+    expect(ledgerV3).toMatchObject({ groundableBranchCount: 2, limitedScope: true });
+    expect(ledgerV3?.entries).toHaveLength(2);
+    expect(ledgerV3?.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ evidenceKind: 'analytical_result', verdict: 'failed' }),
+      expect.objectContaining({
+        evidenceKind: 'lineage_graph',
+        verdict: 'inconclusive',
+        lineageReceipt: expect.objectContaining({
+          zeroCallCounters: {
+            providerCalls: 0,
+            sqlExecutions: 0,
+            warehouseExecutions: 0,
+            repairAttempts: 0,
+          },
+        }),
+      }),
+    ]));
+    const lineageEntry = ledgerV3?.entries?.find((entry) => entry.evidenceKind === 'lineage_graph');
+    expect(lineageEntry?.resultFingerprint).toBeUndefined();
+    expect(lineageEntry?.executionReceipt).toBeUndefined();
     expect(branchReceipts).toEqual(expect.arrayContaining([
-      expect.objectContaining({ state: 'failed', verdict: 'failed', stopReason: 'execution_failed' }),
+      expect.objectContaining({
+        evidenceKind: 'analytical_result',
+        state: 'failed',
+        verdict: 'failed',
+        stopReason: 'execution_failed',
+      }),
+      expect.objectContaining({
+        evidenceKind: 'lineage_graph',
+        state: 'completed',
+        verdict: 'inconclusive',
+        stopReason: 'completed',
+      }),
     ]));
     // Ask renders answer ahead of summary, so the limited-scope statement must
     // survive there instead of being hidden behind the generic no-result text.
@@ -1615,21 +1670,28 @@ describe('local Ask trace API errors (OBS-009)', () => {
     const verdicts = trace?.spans
       .filter((span) => span.name === 'research.validate')
       .map((span) => span.payload?.verdict);
-    expect(verdicts).toEqual(['failed', 'failed']);
+    // The structural branch has its own trace stage and never becomes a V2
+    // analytical validation failure merely because a provider is unavailable.
+    expect(verdicts).toEqual(['failed']);
     expect(trace?.spans
       .filter((span) => span.name === 'research.validate')
       .map((span) => ({ reasonCode: span.reasonCode, branchStopReason: span.payload?.branchStopReason })))
-      .toEqual([
-        { reasonCode: 'execution_failed', branchStopReason: 'execution_failed' },
-        { reasonCode: 'execution_failed', branchStopReason: 'execution_failed' },
-      ]);
+      .toEqual([{ reasonCode: 'execution_failed', branchStopReason: 'execution_failed' }]);
+    expect(trace?.spans).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: 'research.lineage',
+        payload: expect.objectContaining({ evidenceKind: 'lineage_graph', verdict: 'inconclusive' }),
+      }),
+    ]));
     expect(trace?.links.filter((link) => link.kind === 'research_branch')).toHaveLength(2);
     // The durable receipt, branch trace span, and child link are a single
     // content-safe record of partial Research progress; no branch is merely a
-    // presentation row without a corresponding lifecycle span.
+    // presentation row without a corresponding lifecycle span. Structural
+    // lineage has a dedicated lifecycle stage, rather than being relabeled as
+    // a failed analytical validation.
     expect(branchReceipts?.map((receipt) => receipt.branchId)).toEqual(
       trace?.spans
-        .filter((span) => span.name === 'research.validate')
+        .filter((span) => span.name === 'research.validate' || span.name === 'research.lineage')
         .map((span) => (span.payload as { branchId?: string } | undefined)?.branchId),
     );
     expect(branchReceipts?.map((receipt) => receipt.childRunId)).toEqual(

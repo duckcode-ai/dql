@@ -456,7 +456,7 @@ describe("AgentRunEngine", () => {
     expect(run.diagnosticReceiptV3?.cascade?.attempts).toEqual(cascade.attempts);
   });
 
-  it('AGT-035/API-015/OBS-015 persists one Ask runtime state and fact-bound decision story', async () => {
+  it('AGT-035/API-015/OBS-015 persists one ordinary Ask auto-mode runtime state and fact-bound decision story', async () => {
     const requirements = {
       version: 1 as const,
       measures: ['revenue'],
@@ -466,7 +466,9 @@ describe("AgentRunEngine", () => {
       memberTerms: ['Brittany Barrera'],
     };
     const state = {
-      version: 1 as const,
+      // The ordinary-role ambiguity is emitted by the V2 retrieval-first
+      // runtime; V1 remains readable but cannot carry the planning receipt.
+      version: 2 as const,
       mode: 'authoritative' as const,
       phase: 'compiled' as const,
       frame: {
@@ -566,7 +568,7 @@ describe("AgentRunEngine", () => {
       },
     });
 
-    const run = await engine.run({ question: 'revenue', requestedMode: 'ask' });
+    const run = await engine.run({ question: 'revenue', requestedMode: 'auto' });
 
     expect(run.diagnosticReceiptV5).toMatchObject({
       version: 5,
@@ -588,6 +590,15 @@ describe("AgentRunEngine", () => {
         expect.objectContaining({ stage: 'execution', status: 'completed' }),
         expect.objectContaining({ stage: 'facts', status: 'completed' }),
       ]),
+    });
+    expect(run.diagnosticReceiptV7).toMatchObject({
+      version: 7,
+      inspector: {
+        understood: { questionKind: 'aggregation', measureCount: 1, hasBoundFilter: true },
+        planning: { mode: 'deterministic_binding', plannerCalls: 0, verification: 'valid' },
+        route: { selectedTier: 'semantic', tierAttemptCount: 2, planFrozen: true, reviewRequired: false },
+        outcome: { connectionAttempted: true, executionAttempts: 1, factCount: 2, narration: 'fact_bound' },
+      },
     });
     expect(run.businessAnswer?.factIds).toHaveLength(2);
     expect(run.answer).toContain('Brittany Barrera');
@@ -1034,6 +1045,64 @@ describe("AgentRunEngine", () => {
       payload: { kind: 'result', failureCode: 'COMPILATION_FAILED', safeAction: 'edit_dql' },
     });
     expect(spans.some((span) => span.name === 'sql.execute')).toBe(false);
+  });
+
+  it('AGT-005 keeps a serialized MetricFlow compiler receipt out of the connection-failure path', async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-serialized-semantic-compiler-failure',
+      now: fixedClock(),
+      router: { decide: () => frozenSemanticDecision() },
+      executors: {
+        semantic_answer: () => ({
+          answer: 'No answer was produced.',
+          status: 'blocked',
+          trustState: 'blocked',
+          stopReason: 'blocked',
+          artifacts: [{
+            id: 'semantic-runtime-compile-failure',
+            kind: 'answer',
+            title: 'Semantic compilation could not complete',
+            trustState: 'blocked',
+            // Some old provider-tool serialization paths retained this
+            // compiler receipt but lost the outer analyticalFailure wrapper.
+            // It remains a typed pre-SQL compiler failure, not a connection.
+            payload: {
+              semanticExecutionTrace: {
+                adapter: 'metricflow-cli',
+                status: 'failed',
+                failure: {
+                  code: 'SEMANTIC_COMPILATION_FAILED',
+                  phase: 'compilation',
+                  message: 'MetricFlow requires the exact selected group-by item in order_by.',
+                  safeActions: ['edit_dql'],
+                },
+              },
+            },
+          }],
+          evaluations: [],
+          nextActions: [],
+          telemetry: {
+            version: 1,
+            stageDurationsMs: { provider: 11, total: 11 },
+            providerRoundTrips: 1,
+            toolCalls: 0,
+            sqlExecutions: 0,
+            repairs: 0,
+            egressReceipts: 1,
+          },
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: 'top customers by revenue', requestedMode: 'ask' });
+
+    expect(run.diagnosticReceiptV4?.summary.terminalIncident).toMatchObject({
+      code: 'COMPILATION_FAILED',
+      boundary: 'semantic.compile',
+      origin: 'semantic_compiler',
+      impact: 'execution_not_attempted',
+    });
+    expect(run.diagnosticReceiptV4?.summary.terminalIncident?.code).not.toBe('ANALYTICAL_EXECUTION_FAILED');
   });
 
   it('AGT-031 persists one same-plan exploratory repair without reopening routing', async () => {
@@ -3063,6 +3132,63 @@ describe("clarification continuations", () => {
     expect(run.clarificationOptions).toEqual(clarificationOptions);
   });
 
+  it('AGT-049 describes a pre-planner inferred-field ambiguity without claiming executable meanings', async () => {
+    const clarificationOptions = [
+      { id: 'semantic:dimension:locations.location_name', label: 'Location Name', kind: 'semantic_dimension' as const },
+      { id: 'semantic:dimension:locations.country_name', label: 'Country Name', kind: 'semantic_dimension' as const },
+    ];
+    const state = {
+      // The ordinary-role ambiguity is emitted by the V2 retrieval-first
+      // runtime; V1 remains readable but cannot carry the planning receipt.
+      version: 2 as const,
+      mode: 'authoritative' as const,
+      phase: 'clarify' as const,
+      frame: {
+        version: 3 as const,
+        questionFingerprint: 'sha256:ordinary-role-ambiguity',
+        kind: 'lookup' as const,
+        requirements: { version: 1 as const, measures: [], dimensions: ['region'], entityTerms: ['customer'], entityDisplayTerms: ['customer name'], memberTerms: [] },
+        conversation: { binding: 'prior_result' as const },
+      },
+      mission: { version: 1 as const, mode: 'ask' as const, taskLimit: 3, planningContinuationLimit: 2, tasks: [], hypotheses: [] },
+      workspace: {
+        version: 2 as const,
+        admittedCandidateIds: clarificationOptions.map((option) => option.id),
+        excludedCandidates: [], sourceCoverage: [], tools: [],
+        roleCoverage: [{ role: 'categorical_dimension' as const, candidateCount: 2, state: 'alternatives' as const }],
+      },
+      program: { version: 2 as const, id: 'program:ordinary-role-ambiguity', frameFingerprint: 'sha256:ordinary-role-ambiguity', taskIds: [], candidateIds: clarificationOptions.map((option) => option.id), executionCandidateIds: [], plannerCandidateIds: clarificationOptions.map((option) => option.id), workspaceCandidateIds: clarificationOptions.map((option) => option.id), requiredRoles: ['categorical_dimension' as const], filters: [], relationshipRequirements: [], outputs: { measures: [], dimensions: ['region'], entityDisplayTerms: ['customer name'], assertions: ['all_requested_dimensions' as const, 'result_contract' as const] }, planner: { version: 1 as const, tasks: [], missingInformation: [] } },
+      planningReceipt: {
+        version: 1 as const, mode: 'deterministic_binding' as const, plannerCalls: 0, revisionCalls: 0,
+        verification: { version: 1 as const, status: 'ambiguous' as const, missingRoles: ['categorical_dimension' as const], candidateIds: clarificationOptions.map((option) => option.id), reasonCode: 'ordinary_role_inference_ambiguous' },
+      },
+      conversationDelta: { version: 1 as const, sourceQuestionFingerprint: 'sha256:ordinary-role-ambiguity', partialFrame: { kind: 'lookup' as const, requirements: { version: 1 as const, measures: [], dimensions: ['region'], entityTerms: ['customer'], entityDisplayTerms: ['customer name'], memberTerms: [] } } },
+      planningContinuations: 0, toolCalls: 0, executionAttempts: 0, repairAttempts: 0,
+    } as never;
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-ordinary-role-ambiguity',
+      now: fixedClock(),
+      router: { decide: () => ({
+        action: 'clarify', confidence: 1, followsUp: true, source: 'heuristic',
+        reason: 'Choose one qualified field; no query was executed.',
+        requiresClarification: true,
+        clarifyingQuestion: 'Which geographic field should I use for “region”?',
+        clarificationOptions,
+        askAnalystDecision: { version: 1, mode: 'authoritative', state },
+      }) },
+    });
+
+    const run = await engine.run({ question: 'Which region is Brittany Barrera in?', requestedMode: 'ask' });
+
+    expect(run.status).toBe('needs_clarification');
+    expect(run.diagnosticReceiptV5?.summary).toMatchObject({
+      whatHappened: 'The Ask runtime paused because inferred candidate fields need one business choice.',
+      why: 'The snapshot retained multiple safe inferred fields for one requested role, so DQL did not choose or execute a query.',
+      executionAttempts: 0,
+    });
+    expect(run.diagnosticReceiptV5?.summary.whatHappened).not.toContain('validated executable meanings materially differ');
+  });
+
   it("AGT-014 preserves entity-path options discovered by the selected semantic executor", async () => {
     const clarificationOptions = [{
       id: "semantic-path:report_date:bcm_ccu_pc",
@@ -3785,6 +3911,120 @@ describe("AgentRunEngine — conversation route", () => {
     });
     expect(run.summary).toBe('Created review-required agent output.');
     expect(run.summary).not.toBe('Agent run is blocked.');
+  });
+
+  it('AGT-029 dispatches an authoritative Ask coverage decision without legacy gap rescue', async () => {
+    let generatedCalls = 0;
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-authoritative-coverage-boundary',
+      now: fixedClock(),
+      router: {
+        decide: () => ({
+          action: 'block',
+          confidence: 1,
+          followsUp: false,
+          source: 'heuristic',
+          reason: 'The canonical Ask runtime recorded the pre-freeze coverage result.',
+          terminalOutcome: {
+            kind: 'modeling_gap',
+            code: 'ANALYTICAL_MODELING_GAP',
+            message: 'The canonical Ask cascade did not select an executable plan.',
+            candidateIds: [],
+          },
+          analyticalCascadeDecision: safeExploratoryCascade(),
+          // The engine must dispatch this canonical state as-is. If it applied
+          // its legacy rescue, this test would invoke generated_answer and
+          // manufacture a second cascade decision.
+          askAnalystDecision: {
+            version: 1,
+            mode: 'authoritative',
+            state: {
+              version: 1,
+              mode: 'authoritative',
+              phase: 'blocked',
+              frame: {
+                version: 3,
+                questionFingerprint: 'sha256:authoritative-coverage-boundary',
+                kind: 'analytical',
+                requirements: {
+                  version: 1,
+                  measures: ['revenue'],
+                  dimensions: [],
+                  entityTerms: [],
+                  entityDisplayTerms: [],
+                  memberTerms: [],
+                },
+                conversation: { binding: 'none' },
+              },
+              mission: {
+                version: 1,
+                mode: 'ask',
+                taskLimit: 1,
+                planningContinuationLimit: 1,
+                tasks: [],
+                hypotheses: [],
+              },
+              workspace: {
+                version: 1,
+                snapshotId: 'snapshot:authoritative-coverage-boundary',
+                sourceCoverage: [],
+                admittedCandidateIds: [],
+                excludedCandidates: [],
+                tools: [],
+              },
+              program: {
+                version: 1,
+                id: 'program:authoritative-coverage-boundary',
+                frameFingerprint: 'sha256:authoritative-coverage-boundary',
+                taskIds: [],
+                candidateIds: [],
+                executionCandidateIds: [],
+                requiredRoles: [],
+                filters: [],
+                relationshipRequirements: [],
+                outputs: {
+                  measures: ['revenue'],
+                  dimensions: [],
+                  entityDisplayTerms: [],
+                  assertions: ['all_requested_measures', 'result_contract'],
+                },
+              },
+              conversationDelta: {
+                version: 1,
+                sourceQuestionFingerprint: 'sha256:authoritative-coverage-boundary',
+                partialFrame: {
+                  kind: 'analytical',
+                  requirements: {
+                    version: 1,
+                    measures: ['revenue'],
+                    dimensions: [],
+                    entityTerms: [],
+                    entityDisplayTerms: [],
+                    memberTerms: [],
+                  },
+                },
+              },
+              planningContinuations: 0,
+              toolCalls: 0,
+              executionAttempts: 0,
+              repairAttempts: 0,
+            } as never,
+          },
+        }),
+      },
+      executors: {
+        generated_answer: () => {
+          generatedCalls += 1;
+          return { answer: 'This legacy fallback must not run.' };
+        },
+      },
+    });
+
+    const run = await engine.run({ question: 'Rank workspaces by cost', requestedMode: 'ask' });
+
+    expect(generatedCalls).toBe(0);
+    expect(run).toMatchObject({ route: 'blocked', status: 'blocked', trustState: 'blocked' });
+    expect(run.summary).toContain('canonical Ask cascade');
   });
 
   it('does not ask a clarification the user has already answered', async () => {

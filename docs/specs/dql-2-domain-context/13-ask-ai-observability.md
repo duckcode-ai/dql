@@ -87,6 +87,23 @@ events, and synthesis evidence. A branch has a typed verdict of `supported`,
 `contradicted`, `inconclusive`, `failed`, or `skipped`; rows or correlation do
 not by themselves prove causality.
 
+`research.lineage` is a distinct content-safe, zero-call structural stage. Its
+payload may retain only a branch fingerprint, exact-resolution class, typed
+state, bounded upstream/downstream counts, caps, and truncation flag. It does
+not retain a target label, graph path, provider event, SQL, warehouse result,
+or causal conclusion. The concise Research inspector identifies such a branch
+as local structural evidence; the full trace keeps the typed stage for
+debugging without treating it as an analytical execution (`AGT-016`,
+`AGT-033`, `AGT-040`, `OBS-012`).
+
+The trace classifies a child as `stale` before traversal when the
+root-captured, `dql-manifest`-inclusive graph signature has changed. Qualified
+resolution is exact-authority-only; it does not reveal or select same-leaf
+objects from another model/domain. If a Research ledger contains lineage
+evidence beside an analytical result, the answer story remains
+`review_required`/`needs_review`, rather than presenting structural context as
+grounded data evidence.
+
 ## OBS-006 — provider diagnostics
 
 Provider spans preserve only redacted provider/model/base-origin fingerprints,

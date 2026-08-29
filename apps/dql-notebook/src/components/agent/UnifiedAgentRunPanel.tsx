@@ -57,6 +57,7 @@ import {
   type AskDecisionSummaryV2,
   type AskTraceDataV1,
   type AgentThinkingMode,
+  type AgentSelectedResultBinding,
   type AppBuildProposal,
   type AppStudioBuildDraft,
   type MixedSourceNotebookPlan,
@@ -423,7 +424,13 @@ export function UnifiedAgentRunPanel({
   const [inspector, setInspector] = useState<{ runId: string; artifactId: string; tab: AskInspectorTab } | null>(null);
   // Select-to-follow-up popover, anchored at a text selection inside a
   // [data-followup] zone (answer text or the inspector result table).
-  const [pop, setPop] = useState<{ text: string; source: 'answer' | 'table'; left: number; top: number } | null>(null);
+  const [pop, setPop] = useState<{
+    text: string;
+    source: 'answer' | 'table';
+    left: number;
+    top: number;
+    selectedResultBinding?: AgentSelectedResultBinding;
+  } | null>(null);
   const [popDraft, setPopDraft] = useState('');
   const popInputRef = useRef<HTMLInputElement>(null);
   const askScrollRef = useRef<HTMLDivElement | null>(null);
@@ -599,6 +606,7 @@ export function UnifiedAgentRunPanel({
     selectedEvidenceId?: string,
     clarificationSourceQuestion?: string,
     researchSourceRun?: AgentRun,
+    selectedResultBinding?: AgentSelectedResultBinding,
   ) => {
     const text = (textOverride ?? input).trim();
     if (!text || running) return;
@@ -667,6 +675,7 @@ export function UnifiedAgentRunPanel({
         question: text,
         ...(selectedEvidenceId ? { selectedEvidenceId } : {}),
         ...(clarificationSourceQuestion ? { clarificationSourceQuestion } : {}),
+        ...(selectedResultBinding ? { selectedResultBinding } : {}),
         requestedMode: activeMode,
         audience,
         selectedObject: selectedObject ?? (notebookPath ? { kind: 'notebook' as const, path: notebookPath } : undefined),
@@ -855,11 +864,14 @@ export function UnifiedAgentRunPanel({
   const sendFollowUp = useCallback((question: string) => {
     const q = question.trim();
     if (!q) return;
-    const quote = pop?.text?.trim();
+    const selectedResultBinding = pop?.selectedResultBinding;
     setPop(null);
     setPopDraft('');
     try { window.getSelection()?.removeAllRanges(); } catch { /* ignore */ }
-    void submit(quote ? `${q}\n\nRegarding: "${quote}"` : q);
+    // A selected result is server-revalidated by stable run/artifact/row
+    // fingerprints. Never append rendered text as `Regarding:` authority:
+    // prose is ambiguous, locale-formatted, and disappears on reload.
+    void submit(q, undefined, undefined, undefined, undefined, selectedResultBinding);
     requestAnimationFrame(() => {
       if (askScrollRef.current) askScrollRef.current.scrollTop = askScrollRef.current.scrollHeight;
     });
@@ -884,9 +896,20 @@ export function UnifiedAgentRunPanel({
         const rect = sel!.getRangeAt(0).getBoundingClientRect();
         const left = Math.max(12, Math.min(rect.left, window.innerWidth - 340));
         const top = rect.bottom + 176 > window.innerHeight ? Math.max(12, rect.top - 176) : rect.bottom + 8;
-        setPop({ text: text.slice(0, 220), source: (zone.getAttribute('data-followup') as 'answer' | 'table') || 'answer', left, top });
-        setPopDraft('');
-        requestAnimationFrame(() => popInputRef.current?.focus());
+        const source = (zone.getAttribute('data-followup') as 'answer' | 'table') || 'answer';
+        const runId = zone.getAttribute('data-followup-run-id');
+        const artifactId = zone.getAttribute('data-followup-artifact-id');
+        const sourceRun = runId ? items.find((item): item is Extract<ThreadItem, { kind: 'run' }> => item.kind === 'run' && item.run.id === runId)?.run : undefined;
+        const sourceArtifact = sourceRun && artifactId ? sourceRun.artifacts.find((artifact) => artifact.id === artifactId) : undefined;
+        void selectedResultBindingForSelection({
+          selectedText: text,
+          run: sourceRun,
+          artifact: sourceArtifact,
+        }).then((selectedResultBinding) => {
+          setPop({ text: text.slice(0, 220), source, left, top, ...(selectedResultBinding ? { selectedResultBinding } : {}) });
+          setPopDraft('');
+          requestAnimationFrame(() => popInputRef.current?.focus());
+        });
       }, 0);
     };
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setPop(null); };
@@ -896,7 +919,7 @@ export function UnifiedAgentRunPanel({
       document.removeEventListener('mouseup', onMouseUp);
       document.removeEventListener('keydown', onKeyDown);
     };
-  }, [askLayout]);
+  }, [askLayout, items]);
 
   // ── Redesigned Ask experience ─────────────────────────────────────────────
   if (askLayout) {
@@ -2143,7 +2166,19 @@ export function askArtifactMeta(artifact: AgentRunArtifact, payload: Record<stri
       ? `${(result.executionTime / 1000).toFixed(1)}s`
       : `${result.executionTime.toFixed(result.executionTime < 10 ? 1 : 0)}ms`);
   }
-  parts.push(artifact.trustState === 'certified' ? 'certified block' : artifact.trustState === 'governed' || artifact.trustState === 'grounded' ? 'governed' : 'AI-generated');
+  const compilationFailure = askCompilationFailureKind(payload);
+  const provenance = artifact.trustState === 'certified'
+    ? 'certified block'
+    : artifact.trustState === 'governed' || artifact.trustState === 'grounded'
+      ? 'governed'
+      : artifact.trustState === 'blocked'
+        ? compilationFailure === 'semantic'
+          ? 'semantic compilation failed'
+          : compilationFailure === 'generic'
+            ? 'compilation failed'
+            : 'blocked'
+        : 'AI-generated';
+  parts.push(provenance);
   return parts.join(' · ');
 }
 
@@ -2157,6 +2192,8 @@ export interface ResearchVerdictSummaryV1 {
   branchCount: number;
   groundableBranchCount: number;
   limitedScope: boolean;
+  /** Additive V3 distinction: structural lineage is not analytical execution. */
+  lineageBranchCount: number;
   verdicts: Record<'supported' | 'contradicted' | 'inconclusive' | 'failed' | 'skipped', number>;
   compactLabel: string;
   detail: string;
@@ -2165,7 +2202,10 @@ export interface ResearchVerdictSummaryV1 {
 const RESEARCH_VERDICTS = ['supported', 'contradicted', 'inconclusive', 'failed', 'skipped'] as const;
 
 export function researchVerdictSummary(payload: Record<string, unknown>): ResearchVerdictSummaryV1 | undefined {
-  const ledger = recordOf(payload.researchLedgerV2);
+  // V3 adds structural lineage evidence without teaching V1/V2 readers that a
+  // graph walk is a result execution.  Older persisted runs retain the exact
+  // V2 projection below.
+  const ledger = recordOf(payload.researchLedgerV3) ?? recordOf(payload.researchLedgerV2);
   if (!ledger) return undefined;
   const entries = Array.isArray(ledger.entries) ? ledger.entries : [];
   const verdicts: ResearchVerdictSummaryV1['verdicts'] = {
@@ -2182,6 +2222,7 @@ export function researchVerdictSummary(payload: Record<string, unknown>): Resear
     }
   }
   const branchCount = entries.length;
+  const lineageBranchCount = entries.filter((entry) => recordOf(entry)?.evidenceKind === 'lineage_graph').length;
   const groundableBranchCount = typeof ledger.groundableBranchCount === 'number'
     && Number.isFinite(ledger.groundableBranchCount)
     && ledger.groundableBranchCount >= 0
@@ -2199,10 +2240,13 @@ export function researchVerdictSummary(payload: Record<string, unknown>): Resear
   const compactLabel = limitedScope
     ? `Limited research scope · ${branchLabel}`
     : `Research branches · ${branchLabel}`;
+  const lineageDetail = lineageBranchCount > 0
+    ? ` ${lineageBranchCount} structural lineage ${lineageBranchCount === 1 ? 'check was' : 'checks were'} local-only and non-causal.`
+    : '';
   const detail = limitedScope
-    ? `Limited research scope: ${groundableBranchCount} of at least 3 evidence-supported branches were available. Verdicts: ${branchLabel}.`
-    : `${groundableBranchCount} evidence-supported branches were available. Verdicts: ${branchLabel}.`;
-  return { branchCount, groundableBranchCount, limitedScope, verdicts, compactLabel, detail };
+    ? `Limited research scope: ${groundableBranchCount} of at least 3 evidence-supported branches were available. Verdicts: ${branchLabel}.${lineageDetail}`
+    : `${groundableBranchCount} evidence-supported branches were available. Verdicts: ${branchLabel}.${lineageDetail}`;
+  return { branchCount, groundableBranchCount, limitedScope, lineageBranchCount, verdicts, compactLabel, detail };
 }
 
 export function researchVerdictSummaryForRun(run: AgentRun): ResearchVerdictSummaryV1 | undefined {
@@ -2229,6 +2273,45 @@ function recordOf(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
+}
+
+/**
+ * Legacy artifacts can lose the outer analytical-failure wrapper while
+ * serializing a semantic adapter failure. The semantic receipt and the V4
+ * terminal incident are both durable, typed pre-warehouse evidence, so use
+ * them to keep the compact Ask card and failure hint phase-specific.
+ */
+function askCompilationFailureKind(payload: Record<string, unknown>): 'semantic' | 'generic' | undefined {
+  const semanticTrace = recordOf(payload.semanticExecutionTrace);
+  const traceFailure = recordOf(semanticTrace?.failure);
+  if (
+    traceFailure?.phase === 'compilation'
+    && (traceFailure.code === 'SEMANTIC_COMPILATION_FAILED'
+      || traceFailure.code === 'COMPILATION_FAILED')
+  ) {
+    return 'semantic';
+  }
+
+  const v4Diagnostic = recordOf(payload.diagnosticReceiptV4);
+  const v4Terminal = recordOf(v4Diagnostic?.terminalIncident)
+    ?? recordOf(recordOf(v4Diagnostic?.summary)?.terminalIncident);
+  if (v4Terminal?.code === 'COMPILATION_FAILED') {
+    return v4Terminal.boundary === 'semantic.compile' ? 'semantic' : 'generic';
+  }
+
+  const analyticalFailure = recordOf(payload.analyticalFailure);
+  const failureCode = typeof analyticalFailure?.code === 'string'
+    ? analyticalFailure.code
+    : typeof payload.failureCode === 'string'
+      ? payload.failureCode
+      : undefined;
+  const failurePhase = typeof analyticalFailure?.phase === 'string'
+    ? analyticalFailure.phase
+    : undefined;
+  if (failureCode === 'COMPILATION_FAILED' && (failurePhase === undefined || failurePhase === 'compilation')) {
+    return semanticTrace ? 'semantic' : 'generic';
+  }
+  return undefined;
 }
 
 function lineageEntriesFromRun(run: AgentRun): AskLineageEntry[] {
@@ -2305,6 +2388,8 @@ function InlineAskResultCard({
   const card = (
     <section
       data-followup="table"
+      data-followup-run-id={run.id}
+      data-followup-artifact-id={artifact.id}
       aria-label={`${resultCardTitle(run, artifact)} result`}
       style={{
         border: `1px solid ${selected ? 'var(--accent)' : 'var(--border-default)'}`,
@@ -3353,6 +3438,10 @@ function AnalyticalHowAnswered({
           ['Outputs', outputs.map((item) => `${displayValue(item.id)} (${displayValue(item.kind)})`).join(', ')],
           ['Semantic metrics', stringList(semanticAuthoringRequest?.metrics).join(', ')],
           ['Semantic dimensions', stringList(semanticAuthoringRequest?.dimensions).join(', ')],
+          ['Review assumption', run.diagnosticReceiptV7?.inspector.route.reviewRequired
+            && run.diagnosticReceiptV7.inspector.route.selectedTier === 'semantic'
+            ? 'Sole declared MetricFlow grouping was inferred for the requested dimension; verify before reuse.'
+            : 'None'],
         ]} t={t} />
       </AnalyticalInspectorSection>
 
@@ -4418,6 +4507,10 @@ function AddToAppButton({
  */
 export function trustExplainer(run: AgentRun): string | null {
   if (run.status === 'cancelled' || run.stopReason === 'cancelled' || run.route === 'cancelled') return 'Stopped by user. No result was accepted.';
+  if (run.diagnosticReceiptV7?.inspector.route.reviewRequired
+    && run.diagnosticReceiptV7.inspector.route.selectedTier === 'semantic') {
+    return 'Review required: DQL used the sole declared MetricFlow grouping for the requested dimension. Verify this inferred business mapping before reuse.';
+  }
   if (run.trustState === 'certified') return 'Answered from a certified block.';
   if (run.route === 'dql_block_draft') return 'Prepared an ownerless review draft. Add it to Block Studio when you are ready to save it.';
   if (run.trustState === 'governed') return 'Built from governed metrics and dimensions.';
@@ -5372,6 +5465,64 @@ export function extractResult(payload: Record<string, unknown>): QueryResult | u
 }
 
 /**
+ * Build a reload-safe reference only when the selected rendered text maps to
+ * one unambiguous raw result cell. Formatting (for example "$1,651.00") is
+ * intentionally not reverse-parsed; in that case the follow-up remains plain
+ * language rather than inventing a filter from display text.
+ */
+export async function selectedResultBindingForSelection(input: {
+  selectedText: string;
+  run?: AgentRun;
+  artifact?: AgentRunArtifact;
+}): Promise<AgentSelectedResultBinding | undefined> {
+  const selectedText = input.selectedText.trim();
+  if (!selectedText || !input.run || !input.artifact) return undefined;
+  const result = extractResult(payloadOf(input.artifact));
+  if (!result?.resultFingerprint || !result.columns.length) return undefined;
+  const matches = result.rows.flatMap((row) => result.columns.flatMap((column) => {
+    const value = selectedResultBindingValue(row[column]);
+    return value === selectedText ? [{ column, value, row }] : [];
+  }));
+  if (matches.length !== 1) return undefined;
+  const match = matches[0]!;
+  const rowFingerprint = await browserStableFingerprint({
+    columns: result.columns,
+    row: Object.fromEntries(result.columns.map((column) => [column, match.row[column]])),
+  });
+  if (!rowFingerprint) return undefined;
+  return {
+    version: 1,
+    sourceRunId: input.run.id,
+    sourceArtifactId: input.artifact.id,
+    canonicalColumn: match.column,
+    value: match.value,
+    rowFingerprint,
+    resultFingerprint: result.resultFingerprint,
+  };
+}
+
+function selectedResultBindingValue(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'boolean') return String(value);
+  return undefined;
+}
+
+function browserStableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(browserStableStringify).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${browserStableStringify(record[key])}`).join(',')}}`;
+}
+
+async function browserStableFingerprint(value: unknown): Promise<string | undefined> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) return undefined;
+  const digest = await subtle.digest('SHA-256', new TextEncoder().encode(browserStableStringify(value)));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+/**
  * Recover the agent's intended chart configuration (type + x/y/color/palette) from
  * an answer artifact so the live result view honors it instead of auto-guessing —
  * parity with AgentAnswerCard. Falls back to `suggestedViz` for the chart type and
@@ -6166,7 +6317,8 @@ function askFailureOrigin(run: AgentRun): string {
     return 'cancel';
   }
   for (const artifact of run.artifacts ?? []) {
-    const payload = payloadOf(artifact) as {
+    const rawPayload = payloadOf(artifact);
+    const payload = rawPayload as {
       warehouseFailure?: { origin?: unknown };
       providerFailure?: { code?: unknown };
       refusalCode?: unknown;
@@ -6175,6 +6327,7 @@ function askFailureOrigin(run: AgentRun): string {
     } | undefined;
     const origin = payload?.warehouseFailure?.origin;
     const code = typeof payload?.analyticalFailure?.code === 'string' ? payload.analyticalFailure.code : '';
+    if (askCompilationFailureKind(rawPayload)) return 'compile';
     if (payload?.refusalCode === 'modeling_gap') return 'modeling_gap';
     if (payload?.aggregationSafetyProof?.status === 'blocked') return 'proof_integrity';
     if (['IDENTIFIER_SCOPE_INVALID', 'EXECUTION_TARGET_MISMATCH', 'SEMANTIC_TARGET_BINDING_MISSING', 'SEMANTIC_SOURCE_DRIFT'].includes(code)) return 'identity_integrity';

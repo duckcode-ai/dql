@@ -23,6 +23,8 @@ import type {
   AgentRunDiagnosticReceiptV5,
   AgentRunDiagnosticReceiptV6,
   AskAnalystState,
+  EvidenceCandidateRoleV1,
+  EvidenceRoleCoverageStateV1,
 } from './analytical-orchestration.js';
 
 export interface SqliteAgentRunStoreOptions {
@@ -38,6 +40,16 @@ export interface SqliteAgentRunStoreOptions {
 
 const DEFAULT_MAX_RUNS = 300;
 const DEFAULT_FULL_PAYLOAD_RUNS = 50;
+const EVIDENCE_CANDIDATE_ROLES: ReadonlySet<EvidenceCandidateRoleV1> = new Set([
+  'metric',
+  'entity_key',
+  'entity_label',
+  'categorical_dimension',
+  'time_dimension',
+  'member',
+  'relationship',
+  'context',
+]);
 
 export function resolveAgentRunRetention(env: NodeJS.ProcessEnv = process.env): number {
   const configured = Number(env.DQL_AGENT_RUN_RETENTION);
@@ -104,7 +116,8 @@ export class SqliteAgentRunStore implements AgentRunStore {
   }
 
   saveProgress(progress: AgentRunProgressV1): void {
-    const updatedAt = progress.lifecycle.updatedAt;
+    const persistedProgress = sanitizeProgressRoleCoverage(progress);
+    const updatedAt = persistedProgress.lifecycle.updatedAt;
     this.db.prepare(`
       INSERT INTO agent_runs (id, question, route, status, started_at, completed_at, compacted, payload_json, updated_at)
       VALUES (?, ?, ?, NULL, ?, NULL, 0, ?, ?)
@@ -119,11 +132,11 @@ export class SqliteAgentRunStore implements AgentRunStore {
         updated_at = excluded.updated_at
       WHERE agent_runs.completed_at IS NULL
     `).run(
-      progress.id,
-      progress.question,
-      progress.route ?? 'blocked',
-      progress.lifecycle.startedAt,
-      JSON.stringify(progress),
+      persistedProgress.id,
+      persistedProgress.question,
+      persistedProgress.route ?? 'blocked',
+      persistedProgress.lifecycle.startedAt,
+      JSON.stringify(persistedProgress),
       updatedAt,
     );
   }
@@ -462,10 +475,18 @@ function interruptedRuntimeReceiptV6(
       revisionCalls,
       verification,
     },
-    // Candidate roles/labels are intentionally not persisted in the restart
-    // projection. Empty is more truthful than rebuilding role counts from
-    // raw member/requirement terms after a process restart.
-    roleCoverage: [],
+    // V2 stores count-only admission coverage, so reload can retain the
+    // meaningful "required versus admitted" story without exposing labels,
+    // prompts, or result values. Older V1 states remain content-free.
+    roleCoverage: state.workspace.version === 2
+      ? (state.workspace.roleCoverage ?? [])
+        .filter((entry) => Number.isFinite(entry.candidateCount) && entry.candidateCount >= 0)
+        .map((entry) => ({
+          role: entry.role,
+          candidateCount: entry.candidateCount,
+          ...(entry.state === 'alternatives' || entry.state === 'proven' ? { state: entry.state } : {}),
+        }))
+      : [],
     cascade: {
       attempts: [],
       ...(state.resolvedPlan?.selectedTier ? { selectedTier: state.resolvedPlan.selectedTier } : {}),
@@ -480,7 +501,15 @@ function interruptedRuntimeReceiptV6(
     safeNextAction: receipt.summary.nextAction,
     story: [
       { stage: 'retrieval', status: state.workspace.snapshotId ? 'completed' : 'skipped', reasonCode: state.workspace.snapshotId ? 'persisted_snapshot' : 'snapshot_not_retained' },
-      { stage: 'role_coverage', status: 'skipped', reasonCode: 'content_free_restart_projection' },
+      {
+        stage: 'role_coverage',
+        status: state.workspace.version === 2 && (state.workspace.roleCoverage?.length ?? 0) > 0
+          ? 'completed'
+          : 'skipped',
+        reasonCode: state.workspace.version === 2 && (state.workspace.roleCoverage?.length ?? 0) > 0
+          ? 'persisted_role_admission_coverage'
+          : 'content_free_restart_projection',
+      },
       {
         stage: 'planner',
         status: plannerTool?.status === 'failed' ? 'blocked' : plannerCalls > 0 ? 'completed' : 'skipped',
@@ -594,6 +623,7 @@ function normalizeRunProviderEgressReceipts(run: AgentRun): AgentRun {
       ? artifact
       : { ...artifact, payload: { ...payload, diagnosticReceipt: normalizedDiagnosticReceipt } };
   });
+  const askAnalystState = sanitizeAskAnalystStateRoleCoverage(run.askAnalystState);
   return {
     ...run,
     ...(rootReceipts === undefined ? {} : { providerEgressReceipts: rootReceipts }),
@@ -601,16 +631,59 @@ function normalizeRunProviderEgressReceipts(run: AgentRun): AgentRun {
       ? {}
       : { diagnosticReceipt: diagnosticReceipt as AgentRun['diagnosticReceipt'] }),
     artifacts,
+    ...(askAnalystState === run.askAnalystState ? {} : { askAnalystState }),
   };
 }
 
 function parseProgress(payload: string): AgentRunProgressV1 | undefined {
   try {
     const value = JSON.parse(payload) as unknown;
-    return isAgentRunProgressRecord(value) ? value : undefined;
+    return isAgentRunProgressRecord(value) ? sanitizeProgressRoleCoverage(value) : undefined;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * V2 role coverage is an observability summary, not a payload lane. Persist
+ * only the typed count tuples so an injected label, raw query fragment, or
+ * result value cannot survive a restart through the Ask state or diagnostic
+ * projection. The rest of the local continuation state remains intact.
+ */
+function sanitizeAskAnalystStateRoleCoverage(
+  state: AskAnalystState | undefined,
+): AskAnalystState | undefined {
+  if (!state || state.version !== 2 || !Array.isArray(state.workspace.roleCoverage)) return state;
+  const roleCoverage = state.workspace.roleCoverage.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+    const record = entry as Record<string, unknown>;
+    if (typeof record.role !== 'string'
+      || !EVIDENCE_CANDIDATE_ROLES.has(record.role as EvidenceCandidateRoleV1)
+      || !Number.isFinite(record.candidateCount)
+      || Number(record.candidateCount) < 0) return [];
+    const coverageState: EvidenceRoleCoverageStateV1 | undefined = record.state === 'alternatives' || record.state === 'proven'
+      ? record.state
+      : undefined;
+    return [{
+      role: record.role as typeof entry.role,
+      candidateCount: Math.floor(Number(record.candidateCount)),
+      ...(coverageState ? { state: coverageState } : {}),
+    }];
+  });
+  return {
+    ...state,
+    workspace: {
+      ...state.workspace,
+      roleCoverage,
+    },
+  };
+}
+
+function sanitizeProgressRoleCoverage(progress: AgentRunProgressV1): AgentRunProgressV1 {
+  const askAnalystState = sanitizeAskAnalystStateRoleCoverage(progress.askAnalystState);
+  return askAnalystState === progress.askAnalystState
+    ? progress
+    : { ...progress, askAnalystState };
 }
 
 function isAgentRunRecord(value: unknown): value is AgentRun {

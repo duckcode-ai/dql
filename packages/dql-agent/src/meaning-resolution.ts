@@ -37,6 +37,11 @@ export type AgentEvidenceKind =
 
 export type AgentEvidenceTrustTier = "certified" | "semantic" | "governed_sql" | "exploratory";
 export type AgentEvidenceCompatibility = "compatible" | "partial" | "incompatible" | "unknown";
+/**
+ * Host-authored classification of a relationship path card. `exploratory`
+ * remains review-required and cannot be displayed or compiled as governed.
+ */
+export type AgentRelationshipProofClassV1 = 'governed' | 'exploratory';
 
 /**
  * Compact, snapshot-bound relationship proof carried beside raw evidence.
@@ -89,6 +94,13 @@ export interface AgentEvidenceCandidate {
   domain?: string;
   semanticModel?: string;
   primaryEntity?: string;
+  /**
+   * Source-authored semantic or physical value type. This is intentionally
+   * retained separately from the display name so Ask never treats a typed
+   * date/timestamp field as an ordinary categorical grouping just because
+   * older semantic indexes serialize every member as `dimension`.
+   */
+  dataType?: string;
   dimensions?: string[];
   timeGrains?: string[];
   requiredParameters?: string[];
@@ -98,6 +110,8 @@ export interface AgentEvidenceCandidate {
   relationshipEndpointIds?: string[];
   /** Structured relationship proof; IDs alone can never authorize a join. */
   relationshipSafety?: AgentRelationshipSafetyEvidence[];
+  /** Present only on a host-authored bounded relationship-path planner card. */
+  relationshipProofClass?: AgentRelationshipProofClassV1;
   /** Cross-source relevance score normalized to 0..1 by the retriever. */
   relevanceScore: number;
   matchReasons: string[];

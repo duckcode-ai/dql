@@ -17,6 +17,22 @@ describe('LineageGraph', () => {
     expect(graph.nodeCount).toBe(1);
   });
 
+  it('visits nodes in insertion order without materializing the graph and can stop early', () => {
+    const graph = new LineageGraph();
+    graph.addNode({ id: 'block:first', type: 'block', name: 'first' });
+    graph.addNode({ id: 'block:second', type: 'block', name: 'second' });
+    graph.addNode({ id: 'block:third', type: 'block', name: 'third' });
+    const visited: string[] = [];
+
+    const completed = graph.visitNodes((node) => {
+      visited.push(node.id);
+      return visited.length < 2;
+    });
+
+    expect(completed).toBe(false);
+    expect(visited).toEqual(['block:first', 'block:second']);
+  });
+
   it('adds edges and queries them', () => {
     const graph = new LineageGraph();
     graph.addNode({ id: 'table:orders', type: 'source_table', name: 'orders' });

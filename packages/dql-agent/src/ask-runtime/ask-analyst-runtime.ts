@@ -22,6 +22,7 @@ import {
   bindAskAnalystProgramMeaningV1,
   compileAskAnalyticalProgramV1,
   recordAskCandidateLifecycleV1,
+  relationshipSafetyProofSelectionForCandidateV1,
 } from '../router.js';
 import {
   mergeMeaningResolutionWithRequirementSeed,
@@ -34,12 +35,17 @@ import {
   type AgentRetrievalEvidence,
   type MeaningResolution,
 } from '../meaning-resolution.js';
-import { resolveMetricCapabilityDimension } from '../analytical-frame.js';
+import {
+  proveSameSnapshotMetricflowRoleExtensionV1,
+  resolveMetricCapabilityDimension,
+} from '../analytical-frame.js';
 import {
   buildAnalyticalRequirementSet,
   buildAnalyticalRequirementSeedV1,
+  withAnalyticalPriorResultMemberBinding,
   buildAnalyticalTaskGraph,
   classifyProviderFailure,
+  candidateMatchesCategoricalDimensionRequirement,
   evidenceCandidateRoles,
   inferAnalyticalTurnKind,
   selectRoleBalancedMeaningCandidates,
@@ -125,6 +131,21 @@ const MAX_INITIAL_PLANNER_CANDIDATES = 16;
 const MAX_TARGETED_CONTEXT_CANDIDATES = 4;
 /** Immutable initial package plus the one bounded targeted extension. */
 const MAX_REVISION_SELECTION_CANDIDATES = MAX_INITIAL_PLANNER_CANDIDATES + MAX_TARGETED_CONTEXT_CANDIDATES;
+/**
+ * Admission-only marker carried on a compact planner card. It deliberately
+ * does not assert an alias or selected business meaning: the planner may
+ * nominate the card, and the deterministic verifier then proves either an
+ * exact/declared match or one unique review-required substitution.
+ */
+const UNRESOLVED_ROLE_ADMISSION_PREFIX = 'candidate_for_unresolved_role';
+/**
+ * A qualified ordinary field is never a lexical alias for a business term.
+ * When the bounded package retains exactly one safe/reachable field for that
+ * term, however, record the host-proven substitution explicitly.  The
+ * compiler still receives a review-required plan and revalidates every
+ * relationship/semantic capability after the planner binds this card.
+ */
+const UNIQUE_INFERRED_ROLE_SUBSTITUTION_PREFIX = 'unique_inferred_role_substitution';
 
 /** Build the single authoritative Ask entrypoint. */
 export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): AskAnalystRuntimeV1 {
@@ -301,7 +322,14 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
       // question-grounded refinements. This is what lets a bounded planner
       // repair an inherited `owner email`/wrong metric selection with
       // qualified Customer/Revenue/Region cards.
-      const requirements = requirementsForPlannerVerification(inferredRequirements, request.question);
+      // A selected prior-result cell has already been validated by the local
+      // host. Preserve it as a typed requirement before retrieval/planning:
+      // reparsing "Which region does she belong to?" alone must not discard
+      // the customer predicate and widen the follow-up to every customer.
+      const requirements = withAnalyticalPriorResultMemberBinding(
+        requirementsForPlannerVerification(inferredRequirements, request.question, parsedIntent),
+        request.priorResultMemberBinding ?? inferredRequirements.priorResultMemberBinding,
+      );
       // The deterministic seed preserves user-owned filter/time literals, but
       // it is advisory for business metric/entity/dimension interpretation.
       // A stale inherited rank metric must not evict every differently-named
@@ -322,36 +350,72 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
       // then release at most 16 of those qualified cards to the planner.  A
       // relevance-only truncation here used to lose product/order evidence
       // while retaining a crowd of correlated revenue variants.
+      // A snapshot may carry a qualified MetricFlow child (`location_name`)
+      // for a business role the user named (`region`).  Recover that narrow
+      // same-snapshot declaration before either bounded admission layer.  It
+      // is not a lexical alias: the helper below only derives it from the
+      // selected metric's authored capability and keeps the review boundary.
+      // That matters under a full 16-card package: without this replacement,
+      // `location_name` is relevance-pruned before the planner can bind the
+      // requested output even though the safe customer-to-location path is
+      // already present.
+      const sameSnapshotRoleExtensionAdmission = evidence
+        ? sameSnapshotRoleExtensionAdmissionForRequirements({
+            candidates: evidence.candidates,
+            clarificationCandidates: evidence.clarificationCandidates ?? [],
+            requirements: admissionRequirements,
+          })
+        : { candidates: [], ambiguities: [], rejectedCandidateIds: [] };
+      const roleQualifiedSnapshotExtensions = sameSnapshotRoleExtensionAdmission.candidates;
+      // An extension wrapper is host-authored capability evidence, not an
+      // advisory alias. If a retrieved card carries one for the current role
+      // but it no longer proves against a current metric capability, keep it
+      // out of both workspace/planner admission. Retaining its raw card would
+      // let a stale extension bypass this proof through ordinary lexical role
+      // balancing and falsely inflate role coverage.
+      const snapshotCandidates = evidence
+        ? evidence.candidates.filter((candidate) => !sameSnapshotRoleExtensionAdmission.rejectedCandidateIds
+          .includes(stableCandidateId(candidate)))
+        : [];
+      const admissionSnapshotCandidates = evidence
+        ? snapshotCandidatesWithRoleExtensions(snapshotCandidates, roleQualifiedSnapshotExtensions)
+        : [];
+      const relationshipClosureTargets = evidence
+        ? relationshipClosureTargetsForRequirements(admissionSnapshotCandidates, admissionRequirements)
+        : undefined;
+      const relationshipClosureReceipt: BoundedRelationshipClosureReceiptV1 = evidence
+        && (admissionRequirements.dimensions.length > 1 || admissionRequirements.entityTerms.length > 0)
+        ? boundedRelationshipClosureReceipt(
+          admissionSnapshotCandidates,
+          targetRelationshipPathIds(admissionSnapshotCandidates, admissionRequirements),
+          relationshipClosureTargets,
+        )
+        : {
+            candidates: [],
+            endpointClosureRequired: false,
+            endpointClosureComplete: true,
+          };
+      const requiredRelationshipClosure = relationshipClosureReceipt.candidates;
+      // Relationship cards are structural proof, not three independent
+      // business choices.  The planner must select one complete, host-owned
+      // path card so the 16-card cap cannot retain a downstream location edge
+      // and an unrelated bridge while dropping the bound customer edge.  The
+      // raw closure stays in the 32-card execution workspace and is expanded
+      // there by the existing compiler boundary; this compact card never
+      // authorizes a join by itself.
+      const relationshipPathPlannerCard = relationshipClosureReceipt.endpointClosureComplete
+        ? plannerRelationshipPathCard(requiredRelationshipClosure)
+        : undefined;
       const roleBalancedWorkspace = evidence
         ? withExecutionSupportCandidates({
           workspace: selectRoleBalancedWorkspaceCandidates({
-              candidates: evidence.candidates,
+              candidates: admissionSnapshotCandidates,
               requirements: admissionRequirements,
             }),
-            snapshotCandidates: evidence.candidates,
+            snapshotCandidates: admissionSnapshotCandidates,
             requirements: admissionRequirements,
+            relationshipClosure: requiredRelationshipClosure,
           })
-        : [];
-      // The retriever may mint a small, same-snapshot capability extension
-      // for an explicit business role (for example `product category` mapped
-      // to a MetricFlow-native `order_items.product_type` grouping field).
-      // These cards are not a second retrieval source and are never invented
-      // by the planner: they carry the original metric/dimension capability
-      // proof.  Keep only extensions that prove a role currently required by
-      // the question, and admit at most four into the 32-card workspace.  A
-      // relevance-only workspace previously retained the generic short
-      // semantic card but dropped this qualified extension, causing the
-      // planner's valid `product category` selection to fail verification.
-      const roleQualifiedSnapshotExtensions = evidence
-        ? (evidence.clarificationCandidates ?? [])
-          .filter((candidate) => candidate.sameSnapshotRoleExtension
-            && candidate.eligible !== false
-            && candidate.compatibility !== 'incompatible'
-            && candidateSupportsRequiredRole(candidate, admissionRequirements))
-          .sort((left, right) => Number(Boolean(right.exactMatch)) - Number(Boolean(left.exactMatch))
-            || right.relevanceScore - left.relevanceScore
-            || stableCandidateId(left).localeCompare(stableCandidateId(right)))
-          .slice(0, 4)
         : [];
       // A provider is useful for unresolved business language, not a required
       // gate in front of a program that the snapshot can already prove.  Keep
@@ -365,6 +429,7 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
             evidence,
             requirements,
             requirementSeed,
+            relationshipClosure: requiredRelationshipClosure,
           })
         : undefined;
       const deterministicBinding = structuredContinuationBinding ?? (evidence
@@ -384,22 +449,98 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
         required: [
           ...canonicalSelections,
           ...(deterministicBinding?.candidates ?? []),
+          ...requiredRelationshipClosure,
           ...roleQualifiedSnapshotExtensions,
         ],
         requirements: admissionRequirements,
+      });
+      // Ordinary fallbacks may use a same-entity field without a relationship
+      // only when the snapshot proves that entity identity canonically.  Do
+      // not let an incidental `customer` token in a field alias, ID, or source
+      // object turn an otherwise cross-entity request into a same-entity one.
+      const ordinaryRoleEntityContext = canonicalOrdinaryRoleEntityContext({
+        candidates: workspaceCandidates,
+        requirements: admissionRequirements,
+        selectedStructuredEntityBindings: [
+          ...canonicalSelections,
+          ...(deterministicBinding?.candidates ?? []),
+        ],
+        // A metric identity is authority only after this Ask has selected it
+        // (canonical reference or deterministic binding), or when retrieval
+        // proves one exact metric.  Do not union capability entities from
+        // every lexical `revenue` candidate: billing revenue and CRM revenue
+        // may share a human measure word while requiring different joins.
+        selectedMetricBindings: [
+          ...canonicalSelections,
+          ...(deterministicBinding?.candidates ?? []),
+        ],
       });
       const roleBalanced = selectRoleBalancedMeaningCandidates({
         candidates: workspaceCandidates,
         requirements: admissionRequirements,
         maxCandidates: MAX_INITIAL_PLANNER_CANDIDATES,
       });
-      let admitted = [
-        ...canonicalSelections,
-        ...(deterministicBinding?.candidates ?? []),
-        ...roleBalanced,
-      ]
-        .filter((candidate, index, values) => values.findIndex((value) => stableCandidateId(value) === stableCandidateId(candidate)) === index)
-        .slice(0, MAX_INITIAL_PLANNER_CANDIDATES);
+      // Once a complete bounded relationship closure has a host-owned path
+      // card, do not spend planner slots on individual edges.  Keeping both
+      // representations would let relevance/card caps split the path again;
+      // execution still receives the original edges from `workspaceCandidates`.
+      const plannerRoleBalanced = relationshipPathPlannerCard
+        ? uniqueCandidates([
+            ...roleBalanced.filter((candidate) => !isRelationshipClosureCandidate(candidate)),
+            // Filtering raw closure edges out of the initial role-balanced
+            // projection must not silently shrink a full 16-card planner
+            // package. Backfill only with already-admitted non-relationship
+            // workspace cards; the path unit remains the sole relationship
+            // representation and no new source or authority is introduced.
+            ...workspaceCandidates.filter((candidate) => !isRelationshipClosureCandidate(candidate)),
+          ]).slice(0, MAX_INITIAL_PLANNER_CANDIDATES)
+        : roleBalanced;
+      // The compact planner package has a different job from the broader
+      // execution workspace.  After exact identity pins and the one atomic
+      // relationship-path card, reserve one qualified card for every
+      // unresolved requested role before relevance fillers.  In particular,
+      // a role-proven `location_name` must not be displaced by high-scoring
+      // context just because `region` did not appear in its physical name.
+      let admitted = admitRoleBalancedPlannerCandidates({
+        exactPins: [
+          ...canonicalSelections,
+          ...(deterministicBinding?.candidates ?? []),
+          ...plannerRoleBalanced.filter((candidate) => candidate.exactMatch
+            && candidateSupportsRequiredRole(candidate, admissionRequirements)),
+        ],
+        relationshipPath: relationshipPathPlannerCard,
+        rawRelationshipClosure: requiredRelationshipClosure,
+        relationshipClosureComplete: relationshipClosureReceipt.endpointClosureComplete,
+        ordinaryRoleEntityContext,
+        roleBalancedCandidates: plannerRoleBalanced,
+        workspaceCandidates,
+        requirements: admissionRequirements,
+        // A server-issued choice is a stable identity handoff, not a second
+        // natural-language interpretation. If that selected card is the
+        // unresolved categorical role, keep the competing fallback cards out
+        // of the planner package on the continuation turn. The compiler still
+        // rechecks the chosen qualified identity and all relationship proof.
+        structuredSelectedEvidenceId: structuredContinuationBinding && request.selectedEvidenceId
+          ? request.selectedEvidenceId
+          : undefined,
+      });
+      // Keep a sole qualified ordinary field distinguishable from a genuine
+      // ambiguity before the planner is called.  This does not select an
+      // execution route or silently rename the user's business term: it is a
+      // typed, same-snapshot substitution receipt that the planner must still
+      // bind and the verifier/compiler must still prove.  Without this
+      // promotion a lone `location_name` card remained an "alternative" and
+      // malformed/legacy planner output could ask targeted retrieval for the
+      // already-admitted `region` role.
+      admitted = promoteUniqueOrdinaryRoleInferenceCandidates({
+        admitted,
+        workspaceCandidates,
+        requirements: admissionRequirements,
+        relationshipClosure: requiredRelationshipClosure,
+        relationshipClosureComplete: relationshipClosureReceipt.endpointClosureComplete,
+        ordinaryRoleEntityContext,
+        relationshipPath: relationshipPathPlannerCard,
+      });
       // The original 16-card planner package stays immutable for the entire
       // ordinary Ask turn. A verifier-directed recovery may release <=4
       // *additional* cards for one revision, but it must never make room by
@@ -416,7 +557,7 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
       // workspace, planner, or execution candidate merely because it was
       // recorded. The workspace/plan caps remain enforced below.
       if (evidence) recordAskCandidateLifecycleV1(request, evidence, evidence.candidates, admitted);
-      let workspace = buildEvidenceWorkspace(evidence, workspaceCandidates, admitted, toolReceipts);
+      let workspace = buildEvidenceWorkspace(evidence, workspaceCandidates, admitted, toolReceipts, admissionRequirements);
       let program = buildProgram(frame, mission, admitted, workspaceCandidates, requirementSeed, {
         planningMode: deterministicBinding ? 'deterministic_binding' : canonicalSelections.length > 0 ? 'exact_fast_path' : 'initial_planner',
       });
@@ -451,6 +592,33 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
         ? deterministicDisplayKeyAmbiguity({
             question: request.question,
             binding: deterministicBinding,
+          })
+        : undefined;
+      const inferredRoleAmbiguity = !structuredContinuationBinding
+        ? sameSnapshotRoleAmbiguityForClarification(sameSnapshotRoleExtensionAdmission.ambiguities)
+        : undefined;
+      // Ordinary qualified fields (for example Location Name and Country
+      // Name) are deliberately admitted as candidates for the unresolved
+      // business term `region`, not silently treated as aliases. If more than
+      // one safe/reachable field survived the bounded role reservation, stop
+      // before provider planning. Otherwise the planner could pick one by
+      // relevance and turn a real business ambiguity into a false answer.
+      const ordinaryRoleInferenceAmbiguity = !structuredContinuationBinding
+        ? ordinaryRoleInferenceAmbiguityForClarification({
+            candidates: workspaceCandidates,
+            requirements: admissionRequirements,
+            relationshipClosure: requiredRelationshipClosure,
+            relationshipClosureComplete: relationshipClosureReceipt.endpointClosureComplete,
+            ordinaryRoleEntityContext,
+          })
+        : undefined;
+      const ordinaryRoleRelationshipGap = !structuredContinuationBinding
+        ? ordinaryRoleRelationshipCoverageGap({
+            candidates: workspaceCandidates,
+            requirements: admissionRequirements,
+            relationshipClosure: requiredRelationshipClosure,
+            relationshipClosureComplete: relationshipClosureReceipt.endpointClosureComplete,
+            ordinaryRoleEntityContext,
           })
         : undefined;
       if (displayKeyAmbiguity) {
@@ -496,6 +664,145 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
           meaningResolution: deterministicBinding?.resolution,
           retrievalEvidence: runtimeRetrievalEvidence(evidence, workspaceCandidates),
           askAnalystDecision: { version: 1, mode, state: clarificationState },
+        };
+      }
+
+      if (inferredRoleAmbiguity) {
+        const clarificationState = transitionState(initialState, 'clarify', {
+          workspace: {
+            ...initialState.workspace,
+            tools: [...initialState.workspace.tools, {
+              version: 1 as const,
+              id: 'tool:planner',
+              kind: 'provider_meaning' as const,
+              status: 'skipped' as const,
+              candidateIds: inferredRoleAmbiguity.options.map((option) => option.id),
+              reasonCode: 'same_snapshot_role_extension_ambiguous',
+            }].slice(0, MAX_TOOLS),
+          },
+          planningReceipt: {
+            version: 1,
+            mode: 'deterministic_binding',
+            plannerCalls: 0,
+            revisionCalls: 0,
+            verification: {
+              version: 1,
+              status: 'ambiguous',
+              missingRoles: ['categorical_dimension'],
+              candidateIds: inferredRoleAmbiguity.options.map((option) => option.id),
+              reasonCode: 'same_snapshot_role_extension_ambiguous',
+            },
+          },
+        });
+        checkpoint(request, clarificationState);
+        return {
+          ...base,
+          action: 'clarify',
+          confidence: 1,
+          followsUp: true,
+          category: 'unclear',
+          source: 'heuristic',
+          reason: 'More than one safe same-snapshot geography mapping could answer this request. Choose the intended business field once; no query was executed.',
+          requiresClarification: true,
+          clarifyingQuestion: inferredRoleAmbiguity.question,
+          clarificationOptions: inferredRoleAmbiguity.options,
+          retrievalEvidence: runtimeRetrievalEvidence(evidence, workspaceCandidates),
+          askAnalystDecision: { version: 1, mode, state: clarificationState },
+        };
+      }
+
+      if (ordinaryRoleInferenceAmbiguity) {
+        const clarificationState = transitionState(initialState, 'clarify', {
+          workspace: {
+            ...initialState.workspace,
+            roleCoverage: roleCoverageWithOrdinaryInferenceAmbiguity(
+              initialState.workspace.roleCoverage,
+              ordinaryRoleInferenceAmbiguity,
+            ),
+            tools: [...initialState.workspace.tools, {
+              version: 1 as const,
+              id: 'tool:planner',
+              kind: 'provider_meaning' as const,
+              status: 'skipped' as const,
+              candidateIds: ordinaryRoleInferenceAmbiguity.options.map((option) => option.id),
+              reasonCode: 'ordinary_role_inference_ambiguous',
+            }].slice(0, MAX_TOOLS),
+          },
+          planningReceipt: {
+            version: 1,
+            mode: 'deterministic_binding',
+            plannerCalls: 0,
+            revisionCalls: 0,
+            verification: {
+              version: 1,
+              status: 'ambiguous',
+              missingRoles: [ordinaryRoleInferenceAmbiguity.role],
+              candidateIds: ordinaryRoleInferenceAmbiguity.options.map((option) => option.id),
+              reasonCode: 'ordinary_role_inference_ambiguous',
+            },
+          },
+        });
+        checkpoint(request, clarificationState);
+        return {
+          ...base,
+          action: 'clarify',
+          confidence: 1,
+          followsUp: true,
+          category: 'unclear',
+          source: 'heuristic',
+          reason: `More than one safe ${ordinaryRoleInferenceAmbiguity.requestedTerm} field can answer this request. Choose the intended business field once; no query was executed.`,
+          requiresClarification: true,
+          clarifyingQuestion: ordinaryRoleInferenceAmbiguity.question,
+          clarificationOptions: ordinaryRoleInferenceAmbiguity.options,
+          retrievalEvidence: runtimeRetrievalEvidence(evidence, workspaceCandidates),
+          askAnalystDecision: { version: 1, mode, state: clarificationState },
+        };
+      }
+
+      if (ordinaryRoleRelationshipGap) {
+        const message = `The current metadata snapshot has ${ordinaryRoleRelationshipGap.requestedTerm} fields, but no complete safe relationship path from the requested entity to those fields. DQL did not infer a join, call the planner, or execute a query.`;
+        const blockedState = transitionState(initialState, 'blocked', {
+          workspace: {
+            ...initialState.workspace,
+            tools: [...initialState.workspace.tools, {
+              version: 1 as const,
+              id: 'tool:planner',
+              kind: 'provider_meaning' as const,
+              status: 'skipped' as const,
+              candidateIds: ordinaryRoleRelationshipGap.candidateIds,
+              reasonCode: 'ordinary_role_relationship_unproven',
+            }].slice(0, MAX_TOOLS),
+          },
+          planningReceipt: {
+            version: 1,
+            mode: 'deterministic_binding',
+            plannerCalls: 0,
+            revisionCalls: 0,
+            verification: {
+              version: 1,
+              status: 'invalid',
+              missingRoles: ['relationship'],
+              candidateIds: ordinaryRoleRelationshipGap.candidateIds,
+              reasonCode: 'ordinary_role_relationship_unproven',
+            },
+          },
+        });
+        checkpoint(request, blockedState);
+        return {
+          ...base,
+          action: 'block',
+          confidence: 1,
+          followsUp: false,
+          source: 'heuristic',
+          category: 'data_lookup',
+          reason: message,
+          terminalOutcome: {
+            kind: 'modeling_gap',
+            code: 'ANALYTICAL_MODELING_GAP',
+            message,
+            candidateIds: ordinaryRoleRelationshipGap.candidateIds,
+          },
+          askAnalystDecision: { version: 1, mode, state: blockedState },
         };
       }
 
@@ -663,21 +970,117 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
             requirementSeed.queryIntent.measures,
           )
         : invalidPlannerResolution('The planner did not return a valid selection from the 16-card package.');
+      // One continuation budget may repair malformed output and retrieve the
+      // one verifier-proven missing role together.  Discover that bounded
+      // extension *before* spending the correction call so the two recovery
+      // mechanisms cannot consume two planner turns.
+      let recoveryAssessment = !validResolution.ok
+        ? verifierDirectedMalformedPlannerRecovery({
+            proposal: plannerProposal,
+            plannerCandidates: admitted,
+            requirements,
+          })
+        : undefined;
+      let targetedExtension = evidence && recoveryAssessment?.request
+        ? admitTargetedSameSnapshotExtension({
+            recovery: recoveryAssessment.request,
+            plannerCandidates: admitted,
+            workspaceCandidates,
+            requirements: admissionRequirements,
+          })
+        : undefined;
+      // A completed provider call with malformed/incomplete structured output
+      // is neither a metadata absence nor a provider outage. Give it one
+      // bounded correction on the same immutable 16-card package, then feed
+      // the corrected typed program through the existing canonical cascade.
+      // This is deliberately distinct from verifier-directed *extension*: no
+      // hidden candidates are released and no second retrieval loop starts.
+      if (!validResolution.ok
+        && providerMeaningRequired
+        && plannerCalls < MAX_PLANNING_CONTINUATIONS
+        && !targetedExtension
+        && (!plannerProposal || !plannerProposalReferencesOutsideCandidates(plannerProposal, admitted))) {
+        const correctionFeedback: ProgramVerificationFeedbackV1 = {
+          ...verificationFeedbackFromInvalidResolution(validResolution, stableCandidateIds(admitted).slice(0, MAX_INITIAL_PLANNER_CANDIDATES)),
+          reasonCode: 'planner_output_invalid_retry',
+        };
+        try {
+          const correction = await resolveRuntimePlanner({
+            options,
+            request,
+            evidence,
+            candidates: admitted,
+            workspaceCandidates,
+            requirementSeed,
+            frame,
+            mission,
+            planningMode: 'targeted_revision',
+            feedback: correctionFeedback,
+          });
+          if (correction.attempted) {
+            plannerProposal = correction.proposal;
+            rawResolution = correction.resolution;
+            plannerCalls += 1;
+            plannerRevisionCalls = 1;
+            plannerAttempted = true;
+            resolution = rawResolution
+              ? mergeRuntimePlannerResolution({
+                  seed: requirementSeed,
+                  resolution: rawResolution,
+                  candidates: admitted,
+                  plannerControlled: Boolean(plannerProposal),
+                })
+              : undefined;
+            if (resolution && plannerProposal) {
+              resolution = {
+                ...resolution,
+                questionType: questionTypeFromPlannerProposal(plannerProposal, requirementSeed.sourceQuestion),
+              };
+            }
+            validResolution = resolution
+              ? validateMeaningResolution(
+                  resolution,
+                  admitted,
+                  requirementSeed.queryIntent.measures,
+                )
+              : invalidPlannerResolution('The bounded planner correction did not return a valid selection from the 16-card package.');
+          }
+        } catch (error) {
+          const failed = runtimeMeaningFailureDecision({
+            mode,
+            initialState,
+            providerAttempted: true,
+            reason: 'The configured AI provider could not correct the bounded analytical plan. No query was executed.',
+            providerError: error,
+            planningReceipt: {
+              version: 1,
+              mode: 'targeted_revision',
+              plannerCalls: plannerCalls + 1,
+              revisionCalls: 1,
+              verification: correctionFeedback,
+            },
+          });
+          checkpoint(request, failed.askAnalystDecision!.state);
+          return failed;
+        }
+      }
       // Recovery is verifier-directed. The initial planner can mention only a
       // missing role plus normalized search terms and already-admitted related
       // cards; it cannot name a hidden #17+ workspace identity. The verifier
       // proves that exactly one required business role is truly absent, then
       // the host searches the immutable 32-card workspace and admits at most
       // four matching cards for one revision.
-      const recoveryAssessment = validResolution.ok
-        ? verifierDirectedTargetedRecovery({
-            proposal: plannerProposal,
-            resolution: validResolution.resolution,
-            plannerCandidates: admitted,
-            requirements,
-            mission,
-          })
-        : undefined;
+      if (!targetedExtension) {
+        recoveryAssessment = validResolution.ok
+          ? verifierDirectedTargetedRecovery({
+              proposal: plannerProposal,
+              resolution: validResolution.resolution,
+              plannerCandidates: admitted,
+              requirements,
+              mission,
+            })
+          : undefined;
+      }
       if (recoveryAssessment?.invalidReason) {
         const failed = runtimeMeaningFailureDecision({
           mode,
@@ -697,14 +1100,14 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
         checkpoint(request, failed.askAnalystDecision!.state);
         return failed;
       }
-      const targetedExtension = evidence && recoveryAssessment?.request
-        ? admitTargetedSameSnapshotExtension({
-            recovery: recoveryAssessment.request,
-            plannerCandidates: admitted,
-            workspaceCandidates,
-            requirements: admissionRequirements,
-          })
-        : undefined;
+      if (!targetedExtension && evidence && recoveryAssessment?.request) {
+        targetedExtension = admitTargetedSameSnapshotExtension({
+          recovery: recoveryAssessment.request,
+          plannerCandidates: admitted,
+          workspaceCandidates,
+          requirements: admissionRequirements,
+        });
+      }
       if (recoveryAssessment?.request && !targetedExtension) {
         const failed = runtimeMeaningFailureDecision({
           mode,
@@ -727,6 +1130,7 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
         return failed;
       }
       if (targetedExtension) {
+        const combinedMalformedPlannerRecovery = !validResolution.ok;
         // Preserve the first accepted proposal as immutable revision context.
         // The target cards below are the only newly released identities; the
         // revision is not a second general 16-card planning pass.
@@ -751,7 +1155,7 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
             candidateIds: targetedExtension.candidateIds,
             reasonCode: targetedExtension.reasonCode,
           },
-        ], targetedExtension.targetedContext);
+        ], admissionRequirements, targetedExtension.targetedContext);
         program = buildProgram(frame, mission, verificationCandidates, workspaceCandidates, requirementSeed, {
           planningMode: 'targeted_revision',
           plannerProposal,
@@ -778,11 +1182,14 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
               feedback: {
                 ...recoveryAssessment!.feedback,
                 candidateIds: targetedExtension.candidateIds,
-                reasonCode: 'verifier_role_targeted_extension_admitted',
+                reasonCode: combinedMalformedPlannerRecovery
+                  ? 'planner_output_invalid_retry_with_targeted_context'
+                  : 'verifier_role_targeted_extension_admitted',
               },
               ...(priorPlannerProposal ? { priorProposal: priorPlannerProposal } : {}),
               ...(priorSelectedConceptIds.length ? { priorSelectedConceptIds } : {}),
               ...(targetedCandidates.length ? { targetedCandidates } : {}),
+              ...(combinedMalformedPlannerRecovery ? { includeInitialCandidatesWithTargetedContext: true } : {}),
             });
             if (revision.attempted) {
               plannerProposal = revision.proposal;
@@ -806,7 +1213,9 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
                 verification: {
                   ...recoveryAssessment!.feedback,
                   candidateIds: targetedExtension.candidateIds,
-                  reasonCode: 'verifier_role_targeted_extension_admitted',
+                  reasonCode: combinedMalformedPlannerRecovery
+                    ? 'planner_output_invalid_retry_with_targeted_context'
+                    : 'verifier_role_targeted_extension_admitted',
                 },
               },
             });
@@ -882,7 +1291,21 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
         checkpoint(request, failed.askAnalystDecision!.state);
         return failed;
       }
-      const verifiedMission = missionForVerifiedPlanner(mission, verifiedPlanner.value.tasks);
+      // The planner verifier has already proved these task bindings against
+      // the immutable candidate package. Preserve that tuple across the
+      // legacy meaning-resolution adapter: otherwise a host-owned inferred
+      // dimension or an atomic relationship-path can be present in verified
+      // task bindings yet disappear from the compiler-facing program.
+      const verifiedPlannerTasks = materializeVerifiedPlannerTaskHandoff({
+        tasks: verifiedPlanner.value.tasks,
+        admitted: verificationCandidates,
+      });
+      const verifiedResolution = materializeVerifiedPlannerResolution({
+        resolution: validResolution.resolution,
+        tasks: verifiedPlannerTasks,
+        admitted: verificationCandidates,
+      });
+      const verifiedMission = missionForVerifiedPlanner(mission, verifiedPlannerTasks);
       if (!verifiedMission) {
         const failed = runtimeMeaningFailureDecision({
           mode,
@@ -901,7 +1324,20 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
         checkpoint(request, failed.askAnalystDecision!.state);
         return failed;
       }
-      const verifiedRequirements = verifiedPlanner.value.requirements;
+      // Recompute the compiler-facing requirement tuple from the same
+      // materialized task receipt. The earlier verifier result remains the
+      // authority for acceptance; this prevents a compatibility resolution
+      // that omitted the host-owned inferred dimension from restoring the
+      // source phrase (for example `region`) after task verification.
+      const verifiedRequirements = requirementsForVerifiedPlanner({
+        requirements,
+        selectedCandidates: verificationCandidates.filter((candidate) =>
+          verifiedResolution.selectedConceptIds.includes(candidate.id)
+          || verifiedResolution.selectedConceptIds.includes(stableCandidateId(candidate))),
+        tasks: verifiedPlannerTasks,
+        operations: new Set(verifiedPlannerTasks.flatMap((task) => task.operations)),
+        question: request.question,
+      }) ?? verifiedPlanner.value.requirements;
       // Rebuild the compiler-facing seed from the verifier-approved planner
       // tuple.  Filters/member literals and declared temporal constraints stay
       // user-owned, while metric/entity/display/dimension/ranking bindings are
@@ -918,10 +1354,10 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
             evidence,
             candidates: verificationCandidates,
             requirementSeed: verifiedRequirementSeed,
-            resolution: validResolution.resolution,
+            resolution: verifiedResolution,
           })
-        : validResolution.resolution;
-      const boundResolution = (Boolean(deterministicBinding) || (plannerCalls > 0 && Boolean(plannerProposal)))
+        : verifiedResolution;
+      const boundResolutionWithSeed = (Boolean(deterministicBinding) || (plannerCalls > 0 && Boolean(plannerProposal)))
         ? {
             ...frameBoundResolution,
             // Router compatibility code reads this carrier again while it
@@ -936,6 +1372,16 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
             },
           }
         : frameBoundResolution;
+      // Reapply the verifier-owned task receipt after the compatibility
+      // binder. This is intentionally an identity-only handoff: it cannot
+      // retrieve, select a new relationship, or change the verified business
+      // operation. It simply keeps the compiler/cascade on the exact tuple
+      // already accepted by verification.
+      const boundResolution = materializeVerifiedPlannerResolution({
+        resolution: boundResolutionWithSeed,
+        tasks: verifiedPlannerTasks,
+        admitted: verificationCandidates,
+      });
       const boundValidation = validateMeaningResolution(
         boundResolution,
         verificationCandidates,
@@ -979,7 +1425,7 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
         planningMode: verifiedFrame.planningMode,
         plannerProposal,
         resolution: boundValidation.resolution,
-        verifiedPlannerTasks: verifiedPlanner.value.tasks,
+        verifiedPlannerTasks,
         ...(targetedExtension ? { targetedContext: targetedExtension.targetedContext } : {}),
       });
       initialState = transitionState(initialState, 'program_ready', {
@@ -1025,7 +1471,10 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
         verifiedRequirements,
         verifiedRequirementSeed,
         plannerProposal,
-        verifiedPlanner: verifiedPlanner.value,
+        verifiedPlanner: {
+          ...verifiedPlanner.value,
+          tasks: verifiedPlannerTasks,
+        },
         resolution: boundValidation.resolution,
         requirementSeed,
         targetedContext: targetedExtension?.targetedContext,
@@ -1208,6 +1657,13 @@ async function resolveRuntimePlanner(input: {
   priorSelectedConceptIds?: string[];
   /** Cards newly admitted by the verifier; never more than four. */
   targetedCandidates?: AgentEvidenceCandidate[];
+  /**
+   * The sole continuation may repair malformed planner output *and* admit one
+   * verifier-proven missing role. In that combined case the planner needs the
+   * original package plus the at-most-four newly admitted cards; this is a
+   * bounded union, never a second reranked retrieval package.
+   */
+  includeInitialCandidatesWithTargetedContext?: boolean;
 }): Promise<{ proposal?: AnalyticalPlannerProposalV1; resolution?: MeaningResolution; attempted: boolean }> {
   // A selectedEvidenceId is client ingress, not meaning authority. The only
   // zero-call structured path is deterministicStructuredContinuationBinding,
@@ -1227,16 +1683,19 @@ async function resolveRuntimePlanner(input: {
     ...(input.priorProposal ? { priorProposal: input.priorProposal } : {}),
     ...(input.priorSelectedConceptIds?.length ? { priorSelectedConceptIds: input.priorSelectedConceptIds } : {}),
     ...(input.targetedCandidates?.length ? { targetedCandidates: input.targetedCandidates } : {}),
+    ...(input.includeInitialCandidatesWithTargetedContext ? { includeInitialCandidatesWithTargetedContext: true } : {}),
   });
   // `plannerRequest` is the provider contract, but preserve that boundary for
   // compatibility hosts that still inspect `candidates` on the callback. A
   // targeted revision receives only its <=4 additions; immutable original
   // selections travel as prior proposal/IDs, never as a re-ranked package.
   const providerVisibleCandidates = input.planningMode === 'targeted_revision' && input.targetedCandidates?.length
-    ? input.targetedCandidates.slice(0, MAX_TARGETED_CONTEXT_CANDIDATES)
+    ? input.includeInitialCandidatesWithTargetedContext
+      ? input.candidates.slice(0, MAX_REVISION_SELECTION_CANDIDATES)
+      : input.targetedCandidates.slice(0, MAX_TARGETED_CONTEXT_CANDIDATES)
     : input.candidates.slice(0, MAX_INITIAL_PLANNER_CANDIDATES);
   if (input.options.planAnalytical) {
-    const proposal = await input.options.planAnalytical({
+    const providerProposal = await input.options.planAnalytical({
       request: input.request,
       evidence: input.evidence,
       candidates: providerVisibleCandidates,
@@ -1244,8 +1703,17 @@ async function resolveRuntimePlanner(input: {
       plannerRequest,
       ...(input.feedback ? { feedback: input.feedback } : {}),
     });
-    if (!proposal) return { attempted: true };
+    if (!providerProposal) return { attempted: true };
+    const proposal = normalizePlannerProposalCandidateIdentities(providerProposal, input.candidates);
+    // `targeted_revision` also carries the single malformed-output
+    // correction above. That correction intentionally reuses the original
+    // package and has no prior semantic proposal to preserve. A real
+    // same-snapshot extension still must preserve the prior selected meaning
+    // and may expose only its verifier-admitted cards.
+    const isMalformedOutputCorrection = input.feedback?.reasonCode === 'planner_output_invalid_retry'
+      || input.feedback?.reasonCode === 'planner_output_invalid_retry_with_targeted_context';
     if (input.planningMode === 'targeted_revision'
+      && !isMalformedOutputCorrection
       && (!input.priorProposal
         || !input.priorSelectedConceptIds?.length
         || !input.feedback
@@ -1312,9 +1780,12 @@ function buildPlannerRequest(input: {
   priorProposal?: AnalyticalPlannerProposalV1;
   priorSelectedConceptIds?: string[];
   targetedCandidates?: AgentEvidenceCandidate[];
+  includeInitialCandidatesWithTargetedContext?: boolean;
 }): AnalyticalPlannerRequestV1 {
   const releasedCandidates = input.planningMode === 'targeted_revision' && input.targetedCandidates?.length
-    ? input.targetedCandidates.slice(0, MAX_TARGETED_CONTEXT_CANDIDATES)
+    ? input.includeInitialCandidatesWithTargetedContext
+      ? input.candidates.slice(0, MAX_REVISION_SELECTION_CANDIDATES)
+      : input.targetedCandidates.slice(0, MAX_TARGETED_CONTEXT_CANDIDATES)
     : input.candidates.slice(0, MAX_INITIAL_PLANNER_CANDIDATES);
   return {
     version: 1,
@@ -1323,7 +1794,11 @@ function buildPlannerRequest(input: {
     questionFingerprint: input.frame.questionFingerprint,
     frame: {
       kind: input.frame.kind,
-      requirements: input.frame.requirements,
+      // A validated selected-result predicate is a local execution boundary,
+      // not provider context. The planner still sees the typed customer
+      // entity/display role needed to choose a region path, but it neither
+      // receives the selected literal nor has to bind it as a member card.
+      requirements: plannerSafeRequirements(input.frame.requirements),
       conversation: input.frame.conversation,
       planningMode: input.frame.planningMode,
     },
@@ -1364,7 +1839,21 @@ function buildPlannerRequest(input: {
   };
 }
 
+function plannerSafeRequirements(requirements: AnalyticalRequirementSetV1): AnalyticalRequirementSetV1 {
+  const binding = requirements.priorResultMemberBinding;
+  if (!binding) return requirements;
+  const bindingValues = new Set(binding.values.map(normalizePlannerAdmissionText).filter(Boolean));
+  const { priorResultMemberBinding: _binding, ...safe } = requirements;
+  return {
+    ...safe,
+    memberTerms: safe.memberTerms.filter((term) => !bindingValues.has(normalizePlannerAdmissionText(term))),
+  };
+}
+
 function toPlannerCandidateCard(candidate: AgentEvidenceCandidate): AnalyticalPlannerCandidateCardV1 {
+  const unresolvedRoles = candidateUnresolvedRoleAdmissions(candidate)
+    .map((admission) => admission.role)
+    .filter((role, index, roles) => roles.indexOf(role) === index);
   return {
       version: 1,
       id: stableCandidateId(candidate),
@@ -1378,7 +1867,12 @@ function toPlannerCandidateCard(candidate: AgentEvidenceCandidate): AnalyticalPl
           : candidate.trustTier === 'governed_sql' ? 'governed'
             : 'exploratory',
       exactMatch: candidate.exactMatch === true,
+      ...(unresolvedRoles.length ? {
+        admissionReasonCode: 'candidate_for_unresolved_role' as const,
+        unresolvedRoles,
+      } : {}),
       ...(candidate.relationshipEvidence?.length ? { relationHints: candidate.relationshipEvidence.slice(0, 3) } : {}),
+      ...(candidate.relationshipProofClass ? { relationshipProofClass: candidate.relationshipProofClass } : {}),
   };
 }
 
@@ -1581,6 +2075,58 @@ interface VerifierDirectedTargetedRecoveryV1 {
   securityViolation?: boolean;
 }
 
+/**
+ * A malformed planner response has no trusted role bindings to inspect, but
+ * the host can still see whether the immutable initial package lacks exactly
+ * one required role.  That gives the one continuation permission to repair
+ * the response and admit one same-snapshot card together.  It never accepts
+ * a planner-supplied hidden ID or turns a multi-role absence into a retry.
+ */
+function verifierDirectedMalformedPlannerRecovery(input: {
+  proposal?: AnalyticalPlannerProposalV1;
+  plannerCandidates: AgentEvidenceCandidate[];
+  requirements: AnalyticalRequirementSetV1;
+}): VerifierDirectedTargetedRecoveryV1 | undefined {
+  if (input.proposal && plannerProposalReferencesOutsideCandidates(input.proposal, input.plannerCandidates)) {
+    return undefined;
+  }
+  const missingRoles = requiredRoles(input.requirements).filter((role) => !input.plannerCandidates.some((candidate) => {
+    if (!candidateCanBindPlannerRole(candidate, role)) return false;
+    if (role === 'relationship') return evidenceCandidateRoles(candidate).includes('relationship');
+    if (role === 'time_dimension') return candidateCanBindPlannerRole(candidate, role);
+    const requiredTerms = plannerRequiredTermsForRole(input.requirements, role);
+    return requiredTerms.length === 0
+      ? evidenceCandidateRoles(candidate).includes(role)
+      : requiredTerms.some((term) => {
+          if (candidateMatchesPlannerRequirementTerm(candidate, term)) return true;
+          // A sole safe ordinary field has already been admitted as a typed
+          // inferred substitution. It is not a reason to launch targeted
+          // retrieval for the same role just because its physical label does
+          // not literally contain the user term (for example region ->
+          // location_name). The bounded planner correction below receives
+          // this exact card and must still bind it.
+          return role === 'categorical_dimension'
+            && candidateHasUniqueInferredRoleSubstitution(candidate, { role, terms: [term] });
+        });
+  }));
+  if (missingRoles.length !== 1) return undefined;
+  const missingRole = missingRoles[0]!;
+  return {
+    request: {
+      version: 1,
+      missingRoles: [missingRole],
+      searchTerms: targetedSearchTermsForRole(input.requirements, missingRole),
+    },
+    feedback: {
+      version: 1,
+      status: 'needs_targeted_context',
+      missingRoles: [missingRole],
+      candidateIds: stableCandidateIds(input.plannerCandidates).slice(0, MAX_INITIAL_PLANNER_CANDIDATES),
+      reasonCode: 'malformed_planner_output_role_targeted_extension_required',
+    },
+  };
+}
+
 function verifyPlannerInterpretation(input: {
   proposal?: AnalyticalPlannerProposalV1;
   resolution: MeaningResolution;
@@ -1624,6 +2170,7 @@ function verifyPlannerInterpretation(input: {
         mission: input.mission,
         requirements: input.requirements,
         selectedCandidates,
+        plannerCandidates: input.candidates,
       })
     : [];
   if (missingBusinessRoles.length > 0) {
@@ -1730,6 +2277,7 @@ function verifierDirectedTargetedRecovery(input: {
         mission: input.mission,
         requirements: input.requirements,
         selectedCandidates,
+        plannerCandidates: input.plannerCandidates,
       })
     : [];
   const feedback = (roles: EvidenceCandidateRoleV1[], reasonCode: string): ProgramVerificationFeedbackV1 => ({
@@ -1802,6 +2350,8 @@ function missingRequiredPlannerBusinessRoles(input: {
   mission: AnalyticalMissionV1;
   requirements: AnalyticalRequirementSetV1;
   selectedCandidates: AgentEvidenceCandidate[];
+  /** The immutable planner package, including unresolved-role reservations. */
+  plannerCandidates: AgentEvidenceCandidate[];
 }): EvidenceCandidateRoleV1[] {
   if (input.mission.mode !== 'ask') return [];
   const missionById = new Map(input.mission.tasks.map((task) => [task.id, task]));
@@ -1827,6 +2377,7 @@ function missingRequiredPlannerBusinessRoles(input: {
           role,
           task,
           candidates: selectedForTask,
+          plannerCandidates: input.plannerCandidates,
           requirements: taskRequirements,
         })) missing.add(role);
       }
@@ -1846,6 +2397,7 @@ function plannerTaskRoleCoversExplicitRequirements(input: {
   role: EvidenceCandidateRoleV1;
   task: AnalyticalProgramV2['planner']['tasks'][number];
   candidates: AgentEvidenceCandidate[];
+  plannerCandidates: AgentEvidenceCandidate[];
   requirements: AnalyticalRequirementSetV1;
 }): boolean {
   const ids = new Set(input.task.roleBindings[input.role] ?? []);
@@ -1864,8 +2416,22 @@ function plannerTaskRoleCoversExplicitRequirements(input: {
   // A relationship is structural evidence rather than a phrase match. Its
   // safe path/cardinality validation remains with the compiler broker.
   if (input.role === 'relationship' || requiredTerms.length === 0) return true;
-  return requiredTerms.every((term) => bound.some((candidate) =>
-    candidateMatchesPlannerRequirementTerm(candidate, term)));
+  return requiredTerms.every((term) => {
+    if (bound.some((candidate) => candidateMatchesPlannerRequirementTerm(candidate, term))) return true;
+    // An ordinary qualified field can be offered to the planner for an
+    // unresolved business term (for example `locations.location_name` for
+    // “region”), but it never becomes an alias merely by admission. The
+    // selected field is valid only when it was the *sole* role-compatible
+    // candidate retained for that exact term. Two candidates remain a real
+    // ambiguity and are handled as a clarification below.
+    if (input.role !== 'categorical_dimension') return false;
+    const slot: PlannerAdmissionSlotV1 = { role: input.role, terms: [term] };
+    const selectedInferred = bound.filter((candidate) => candidateHasUniqueInferredRoleSubstitution(candidate, slot));
+    const admittedInferred = input.plannerCandidates.filter((candidate) => candidateHasUniqueInferredRoleSubstitution(candidate, slot));
+    return selectedInferred.length === 1
+      && admittedInferred.length === 1
+      && stableCandidateId(selectedInferred[0]!) === stableCandidateId(admittedInferred[0]!);
+  });
 }
 
 function plannerRequiredTermsForRole(
@@ -2264,8 +2830,13 @@ function requirementsForPlannerAdmission(
 function requirementsForPlannerVerification(
   requirements: AnalyticalRequirementSetV1,
   question: string,
+  parsedIntent?: AgentRetrievalEvidence['parsedIntent'],
 ): AnalyticalRequirementSetV1 {
-  const lexical = buildAnalyticalRequirementSet({ question });
+  // A same-snapshot parser may have recognized a current-question role such
+  // as `region` even when a host seed was reconstructed only to carry a
+  // selected prior-result binding. Keep that role if it is demonstrably in
+  // the current wording; do not revive stale terms from older turns.
+  const lexical = buildAnalyticalRequirementSet({ question, parsedIntent });
   const grounded = (terms: readonly string[]) => terms.filter((term) => questionMentionsRequirementTerm(question, term));
   const entityDisplayTerms = uniqueStrings([
     ...lexical.entityDisplayTerms,
@@ -2584,12 +3155,12 @@ function plannerProposalReferencesOutsideCandidates(
 ): boolean {
   const allowed = new Set(candidates.flatMap((candidate) => [candidate.id, stableCandidateId(candidate)]));
   const references = [
-    ...proposal.selectedConceptIds,
-    ...proposal.tasks.flatMap((task) => [
-      ...task.selectedConceptIds,
-      ...Object.values(task.roleBindings ?? {}).flatMap((ids) => ids ?? []),
+    ...(Array.isArray(proposal.selectedConceptIds) ? proposal.selectedConceptIds : []),
+    ...(Array.isArray(proposal.tasks) ? proposal.tasks : []).flatMap((task) => [
+      ...(Array.isArray(task.selectedConceptIds) ? task.selectedConceptIds : []),
+      ...Object.values(task.roleBindings ?? {}).flatMap((ids) => Array.isArray(ids) ? ids : []),
     ]),
-  ];
+  ].filter((id): id is string => typeof id === 'string');
   return references.some((id) => !allowed.has(id));
 }
 
@@ -2695,6 +3266,7 @@ interface DeterministicProgramBindingV1 {
     | 'deterministic_certified_binding'
     | 'deterministic_semantic_binding'
     | 'deterministic_structured_continuation_binding'
+    | 'deterministic_structured_physical_continuation_binding'
     | 'deterministic_single_relation_physical_binding';
   /** Complete means the immutable snapshot already proves every requested role. */
   complete?: boolean;
@@ -2761,11 +3333,63 @@ function candidateMatchesStableIdentity(candidate: AgentEvidenceCandidate, ident
     .some((value) => value === identity);
 }
 
+function normalizePlannerCandidateIdentity(
+  identity: string,
+  candidates: readonly AgentEvidenceCandidate[],
+): string {
+  const direct = candidates.filter((candidate) => candidateMatchesStableIdentity(candidate, identity));
+  if (direct.length === 1) return stableCandidateId(direct[0]!);
+  if (direct.length > 1) return identity;
+  // A legacy local semantic index may represent *the same full qualified
+  // dimension* with either `semantic:dimension:` or
+  // `semantic:uncategorized:dimension:`. This is a narrow, explicit
+  // same-snapshot protocol equivalence. Do not fall back to a terminal field
+  // name: `semantic:dimension:other.location_name` is not evidence that the
+  // admitted `locations.location_name` card was selected.
+  const equivalent = candidates.filter((candidate) =>
+    candidate.kind === 'semantic_member'
+    && candidate.semanticObjectType === 'dimension'
+    && candidate.eligible !== false
+    && candidate.compatibility !== 'incompatible'
+    && [candidate.id, candidate.qualifiedId]
+      .filter((candidateIdentity): candidateIdentity is string => Boolean(candidateIdentity))
+      .some((candidateIdentity) => sameMetricflowDimensionIdentity(candidateIdentity, identity)));
+  return equivalent.length === 1 ? stableCandidateId(equivalent[0]!) : identity;
+}
+
+function normalizePlannerProposalCandidateIdentities(
+  proposal: AnalyticalPlannerProposalV1,
+  candidates: readonly AgentEvidenceCandidate[],
+): AnalyticalPlannerProposalV1 {
+  const normalizeIds = (ids: readonly string[] | undefined): string[] =>
+    uniqueStableIds((ids ?? []).map((identity) => normalizePlannerCandidateIdentity(identity, candidates)));
+  return {
+    ...proposal,
+    selectedConceptIds: normalizeIds(proposal.selectedConceptIds),
+    tasks: proposal.tasks.map((task) => ({
+      ...task,
+      selectedConceptIds: normalizeIds(task.selectedConceptIds),
+      roleBindings: Object.fromEntries(Object.entries(task.roleBindings ?? {})
+        .map(([role, ids]) => [role, normalizeIds(ids)])) as Partial<Record<EvidenceCandidateRoleV1, string[]>>,
+    })),
+    ...(proposal.recovery ? {
+      recovery: {
+        ...proposal.recovery,
+        ...(proposal.recovery.relatedCandidateIds ? { relatedCandidateIds: normalizeIds(proposal.recovery.relatedCandidateIds) } : {}),
+        ...(proposal.recovery.candidateIds ? { candidateIds: normalizeIds(proposal.recovery.candidateIds) } : {}),
+        ...(proposal.recovery.relationshipPathIds ? { relationshipPathIds: normalizeIds(proposal.recovery.relationshipPathIds) } : {}),
+      },
+    } : {}),
+  };
+}
+
 function deterministicStructuredContinuationBinding(input: {
   request: AgentRunRequest;
   evidence: AgentRetrievalEvidence;
   requirements: AnalyticalRequirementSetV1;
   requirementSeed: ReturnType<typeof buildAnalyticalRequirementSeedV1>;
+  /** The host-owned, same-snapshot closure reserved before clarification. */
+  relationshipClosure: readonly AgentEvidenceCandidate[];
 }): DeterministicProgramBindingV1 | undefined {
   const continuation = serverIssuedContinuation(input.request);
   const selectedId = input.request.selectedEvidenceId?.trim();
@@ -2783,6 +3407,22 @@ function deterministicStructuredContinuationBinding(input: {
     && continuation.continuityFingerprint === input.evidence.continuityFingerprint,
   );
   if (!sameSnapshot && !sameContinuity) return undefined;
+  // A server-issued ordinary-field option is a stable qualified physical
+  // identity, not a new language interpretation.  It cannot be replayed by
+  // alias: the current snapshot must still expose the exact column identity
+  // that the server offered.  The helper below resolves only the remaining
+  // retrieved fields and already-proven relationship closure; it never mints
+  // a relation, column, or join from the selected label.
+  const selectedPhysicalColumn = input.evidence.candidates.find((candidate) =>
+    candidate.kind === 'sql_column'
+    && Boolean(candidate.qualifiedId?.trim())
+    && stableCandidateId(candidate) === selectedId);
+  if (selectedPhysicalColumn) {
+    return deterministicStructuredPhysicalContinuationBinding({
+      ...input,
+      selected: selectedPhysicalColumn,
+    });
+  }
   // A dimension click may not choose a metric. Bind it only when the original
   // request names exactly one metric with one complete authored capability.
   if (input.requirements.measures.length !== 1) return undefined;
@@ -2817,8 +3457,25 @@ function deterministicStructuredContinuationBinding(input: {
   // A capability child can be represented by a normalized retrieval card or
   // may exist only as the server-issued authored child. Both are safe only
   // after the exact option/snapshot/capability proof above.
+  // A structured clarification can choose the sole MetricFlow-native
+  // geographic grouping that was presented for an unresolved business word
+  // such as `region`. Preserve that authored substitution on the stable
+  // selection rather than reparsing the word on the next turn. The resolved
+  // plan will then carry its existing visible review-required boundary.
+  const inferredRoleExtension = soleGeographicMetricflowExtension(
+    metric,
+    capabilityDimension,
+    categoricalTermsForRuntime(input.requirements).map(normalizeStableTerm).filter(Boolean),
+  );
   const selected: AgentEvidenceCandidate = retrieved
-    ? { ...retrieved, id: selectedId, qualifiedId: capabilityDimension.dimensionId }
+    ? {
+        ...retrieved,
+        id: selectedId,
+        qualifiedId: capabilityDimension.dimensionId,
+        ...(!retrieved.sameSnapshotRoleExtension && inferredRoleExtension
+          ? { sameSnapshotRoleExtension: inferredRoleExtension }
+          : {}),
+      }
     : {
         id: selectedId,
         qualifiedId: capabilityDimension.dimensionId,
@@ -2832,6 +3489,7 @@ function deterministicStructuredContinuationBinding(input: {
         compatibility: 'compatible',
         eligible: true,
         matchReasons: ['server-issued snapshot capability binding'],
+        ...(inferredRoleExtension ? { sameSnapshotRoleExtension: inferredRoleExtension } : {}),
       };
   return {
     candidates: [metric, selected],
@@ -2844,6 +3502,188 @@ function deterministicStructuredContinuationBinding(input: {
     }),
     reasonCode: 'deterministic_structured_continuation_binding',
   };
+}
+
+/**
+ * Consume a server-issued ordinary physical-field choice without treating the
+ * chosen business label as a raw-SQL authority. The initial clarification
+ * already proved that this exact qualified column was one of the safe,
+ * reachable alternatives for one unresolved categorical term. On reload we
+ * prove it again against the current snapshot, resolve every other required
+ * physical field by exact qualified metadata, and require the previously
+ * reserved relationship closure to connect the selected relations.
+ *
+ * This is deliberately narrower than the ordinary single-relation physical
+ * fast path: it exists only for an authenticated clarification continuation,
+ * never guesses a raw relation/column, and always remains review-required via
+ * the unresolved-role admission receipt applied below.
+ */
+function deterministicStructuredPhysicalContinuationBinding(input: {
+  request: AgentRunRequest;
+  evidence: AgentRetrievalEvidence;
+  requirements: AnalyticalRequirementSetV1;
+  requirementSeed: ReturnType<typeof buildAnalyticalRequirementSeedV1>;
+  relationshipClosure: readonly AgentEvidenceCandidate[];
+  selected: AgentEvidenceCandidate;
+}): DeterministicProgramBindingV1 | undefined {
+  const selectedId = input.request.selectedEvidenceId?.trim();
+  if (!selectedId
+    || input.selected.kind !== 'sql_column'
+    || input.selected.eligible === false
+    || input.selected.compatibility === 'incompatible'
+    // The server issued a qualified column ID. Aliases are useful for
+    // retrieval, but must never replay a client-provided leaf/alias after a
+    // restart into a physical execution program.
+    || stableCandidateId(input.selected) !== selectedId
+    || !input.selected.qualifiedId?.trim()
+    || !evidenceCandidateRoles(input.selected).includes('categorical_dimension')) return undefined;
+
+  const unresolvedTerms = categoricalTermsForRuntime(input.requirements)
+    .filter((term) => !candidateMatchesPlannerRequirementTerm(input.selected, term)
+      && !candidateMatchesCategoricalDimensionRequirement(input.selected, [term]));
+  // One selected option can resolve one explicit ordinary fallback only. A
+  // multi-dimensional request must retain its normal planner/clarification
+  // path rather than allowing the click to hide a second unknown mapping.
+  if (unresolvedTerms.length !== 1) return undefined;
+
+  const relations = input.evidence.candidates.filter((candidate) =>
+    (candidate.kind === 'dbt_model' || candidate.kind === 'dbt_source' || candidate.kind === 'sql_table')
+    && candidate.eligible !== false
+    && candidate.compatibility !== 'incompatible');
+  const columns = input.evidence.candidates.filter((candidate) =>
+    candidate.kind === 'sql_column'
+    && candidate.eligible !== false
+    && candidate.compatibility !== 'incompatible');
+  if (relations.length === 0 || columns.length === 0) return undefined;
+
+  type PhysicalRequirement = {
+    term: string;
+    role: 'measure' | 'display' | 'filter' | 'time';
+  };
+  const requirements: PhysicalRequirement[] = [
+    ...input.requirements.measures.map((term) => ({ term, role: 'measure' as const })),
+    ...input.requirements.dimensions
+      .filter((term) => normalizePlannerAdmissionText(term) !== normalizePlannerAdmissionText(unresolvedTerms[0]!))
+      .map((term) => ({ term, role: 'display' as const })),
+    ...input.requirements.entityTerms.map((term) => ({ term, role: 'display' as const })),
+    ...input.requirements.entityDisplayTerms.map((term) => ({ term, role: 'display' as const })),
+    ...(input.requirements.outputTerms ?? []).map((term) => ({ term, role: 'display' as const })),
+    ...input.requirementSeed.queryIntent.filters.map((filter) => ({ term: filter.field, role: 'filter' as const })),
+    ...(input.requirements.time?.grain ? [{ term: input.requirements.time.grain, role: 'time' as const }] : []),
+  ].filter((requirement, index, all) => Boolean(requirement.term.trim())
+    && all.findIndex((other) => other.term === requirement.term && other.role === requirement.role) === index);
+
+  const selectedColumns = [input.selected];
+  for (const requirement of requirements) {
+    const column = uniqueBestPhysicalColumn(requirement.term, requirement.role, columns);
+    if (!column) return undefined;
+    if (!selectedColumns.some((candidate) => stableCandidateId(candidate) === stableCandidateId(column))) {
+      selectedColumns.push(column);
+    }
+  }
+
+  const relationGroups = new Map<string, AgentEvidenceCandidate[]>();
+  for (const relation of relations) {
+    const key = physicalRelationKey(relation);
+    if (!key) continue;
+    const group = relationGroups.get(key) ?? [];
+    group.push(relation);
+    relationGroups.set(key, group);
+  }
+  const selectedRelations: AgentEvidenceCandidate[] = [];
+  for (const column of selectedColumns) {
+    const matchingGroups = [...relationGroups.values()]
+      .filter((group) => physicalColumnBelongsToRelation(column, group));
+    // If a physical column has two distinct relation homes in this snapshot,
+    // choosing one would be a raw relation guess. Return to the existing
+    // bounded planner/clarification path instead.
+    if (matchingGroups.length !== 1) return undefined;
+    const relation = canonicalPhysicalRelation(matchingGroups[0]!);
+    if (!relation) return undefined;
+    if (!selectedRelations.some((candidate) => physicalRelationKey(candidate) === physicalRelationKey(relation))) {
+      selectedRelations.push(relation);
+    }
+  }
+  if (!relationshipClosureConnectsPhysicalRelations(selectedRelations, input.relationshipClosure)) return undefined;
+
+  const candidates = uniqueCandidates([
+    ...selectedRelations,
+    ...selectedColumns,
+  ]);
+  return {
+    candidates,
+    resolution: deterministicResolution({
+      request: input.request,
+      seed: input.requirementSeed,
+      candidates,
+      recommendedExecutionId: input.selected.id,
+      recommendedRoute: 'exploratory',
+    }),
+    reasonCode: 'deterministic_structured_physical_continuation_binding',
+  };
+}
+
+/** Choose one already-qualified representation of the same physical relation. */
+function canonicalPhysicalRelation(candidates: readonly AgentEvidenceCandidate[]): AgentEvidenceCandidate | undefined {
+  return [...candidates]
+    .sort((left, right) => Number(Boolean(right.exactMatch)) - Number(Boolean(left.exactMatch))
+      || physicalRelationKindRank(left) - physicalRelationKindRank(right)
+      || stableCandidateId(left).localeCompare(stableCandidateId(right)))[0];
+}
+
+function physicalRelationKindRank(candidate: AgentEvidenceCandidate): number {
+  return candidate.kind === 'dbt_model' ? 0
+    : candidate.kind === 'dbt_source' ? 1
+      : 2;
+}
+
+/**
+ * A multi-relation physical continuation is legal only when the same closure
+ * already proves a connected path between every selected relation. This reads
+ * the canonical safety proof, rather than friendly relationship names or
+ * arbitrary evidence IDs, so a selected column cannot smuggle in a join.
+ */
+function relationshipClosureConnectsPhysicalRelations(
+  relations: readonly AgentEvidenceCandidate[],
+  closure: readonly AgentEvidenceCandidate[],
+): boolean {
+  if (relations.length <= 1) return true;
+  if (closure.length === 0) return false;
+  const graph = new Map<string, Set<string>>();
+  const connect = (left: string, right: string): void => {
+    if (!left || !right) return;
+    const leftEdges = graph.get(left) ?? new Set<string>();
+    leftEdges.add(right);
+    graph.set(left, leftEdges);
+    const rightEdges = graph.get(right) ?? new Set<string>();
+    rightEdges.add(left);
+    graph.set(right, rightEdges);
+  };
+  for (const candidate of closure) {
+    const selection = relationshipCandidateProofSelection(candidate);
+    if (!selection?.relationshipSafety?.length) return false;
+    for (const safety of selection.relationshipSafety) {
+      const from = normalizePhysicalBindingText(safety.from ?? '');
+      const to = normalizePhysicalBindingText(safety.to ?? '');
+      if (!from || !to) return false;
+      connect(from, to);
+    }
+  }
+  const relationReferences = relations.map((relation) => physicalRelationReferences(relation));
+  if (relationReferences.some((references) => references.length === 0)) return false;
+  const start = relationReferences[0]!.find((reference) => graph.has(reference));
+  if (!start) return false;
+  const reachable = new Set<string>([start]);
+  const queue = [start];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    for (const next of graph.get(current) ?? []) {
+      if (reachable.has(next)) continue;
+      reachable.add(next);
+      queue.push(next);
+    }
+  }
+  return relationReferences.every((references) => references.some((reference) => reachable.has(reference)));
 }
 
 /**
@@ -3124,11 +3964,22 @@ function deterministicSemanticRoleExtensions(
   const genericRankDisplayRequest = Boolean(requirements.ranking)
     && categoricalTerms.some((term) => term === 'name' || term === 'names');
   const dimensions = metric.analyticalCapability?.dimensions ?? [];
-  const capabilityDimensionFor = (candidate: AgentEvidenceCandidate) => dimensions.find((dimension) =>
-    [candidate.id, candidate.qualifiedId, ...(candidate.aliases ?? [])]
-      .filter((identity): identity is string => Boolean(identity))
-      .some((identity) => sameMetricflowDimensionIdentity(identity, dimension.dimensionId)
-        || dimension.aliases?.includes(identity)));
+  const capabilityDimensionFor = (candidate: AgentEvidenceCandidate) => dimensions.find((dimension) => {
+    const canonicalCandidateIds = [candidate.id, candidate.qualifiedId]
+      .filter((identity): identity is string => Boolean(identity));
+    if (canonicalCandidateIds.some((identity) =>
+      sameMetricflowDimensionIdentity(identity, dimension.dimensionId))) return true;
+    // Local indexes may retain the old semantic-qualified registry key while
+    // MetricFlow declares the newer full child ID. Preserve that narrow
+    // compatibility bridge only for an *exact shared semantic-qualified
+    // alias*. A plain business alias such as `location` is never membership:
+    // billing.location_name and crm.location_name can both carry it.
+    const semanticAliases = (candidate.aliases ?? []).filter((identity) =>
+      /^semantic:[A-Za-z0-9_.:-]+$/.test(identity));
+    return semanticAliases.some((identity) => (dimension.aliases ?? []).some((dimensionAlias) =>
+      /^semantic:[A-Za-z0-9_.:-]+$/.test(dimensionAlias)
+      && sameMetricflowDimensionIdentity(identity, dimensionAlias)));
+  });
   return candidates
     // Older persisted/local index rows may predate the explicit
     // `semanticObjectType` discriminator. Exact capability membership below
@@ -3433,8 +4284,13 @@ function deterministicSingleRelationPhysicalBinding(input: {
     Boolean(requirement.term.trim())
     && all.findIndex((other) => other.term === requirement.term && other.role === requirement.role) === index);
   // Do not turn a generic conversation or a row selection with no concrete
-  // field requirement into a physical program.
-  if (termRequirements.length === 0 || input.requirements.measures.length === 0) return undefined;
+  // field requirement into a physical program. A lookup/projection follow-up
+  // (for example, "which region does this customer belong to?") is still a
+  // valid analytical request even though it has no aggregation measure. It is
+  // safe only when every projected/filter field is uniquely qualified on one
+  // relation; the exploratory compiler remains the authority for read-only
+  // SQL validation, authorization, and review-required trust.
+  if (termRequirements.length === 0) return undefined;
 
   const groupedRelations = new Map<string, AgentEvidenceCandidate[]>();
   for (const relation of relations) {
@@ -3443,7 +4299,7 @@ function deterministicSingleRelationPhysicalBinding(input: {
     group.push(relation);
     groupedRelations.set(key, group);
   }
-  const completePrograms: Array<{ relation: AgentEvidenceCandidate; selected: AgentEvidenceCandidate[]; measure: AgentEvidenceCandidate }> = [];
+  const completePrograms: Array<{ relation: AgentEvidenceCandidate; selected: AgentEvidenceCandidate[]; primary: AgentEvidenceCandidate }> = [];
   for (const relationGroup of groupedRelations.values()) {
     const relation = relationGroup[0]!;
     const relationColumns = columns.filter((column) => physicalColumnBelongsToRelation(column, relationGroup));
@@ -3459,13 +4315,25 @@ function deterministicSingleRelationPhysicalBinding(input: {
       selected.push(column);
     }
     if (!complete) continue;
-    const measure = uniqueBestPhysicalColumn(input.requirements.measures[0]!, 'measure', relationColumns);
-    if (!measure) continue;
+    let primary = input.requirements.measures.length > 0
+      ? uniqueBestPhysicalColumn(input.requirements.measures[0]!, 'measure', relationColumns)
+      : undefined;
+    if (!primary) {
+      for (const requirement of termRequirements) {
+        if (requirement.role !== 'display') continue;
+        const display = uniqueBestPhysicalColumn(requirement.term, 'display', relationColumns);
+        if (display) {
+          primary = display;
+          break;
+        }
+      }
+    }
+    if (!primary) continue;
     completePrograms.push({
       relation,
       selected: [relation, ...selected].filter((candidate, index, values) =>
         values.findIndex((value) => stableCandidateId(value) === stableCandidateId(candidate)) === index),
-      measure,
+      primary,
     });
   }
   // Multiple independently complete relations are material ambiguity. Do not
@@ -3478,7 +4346,7 @@ function deterministicSingleRelationPhysicalBinding(input: {
       request: input.request,
       seed: input.requirementSeed,
       candidates: program.selected,
-      recommendedExecutionId: program.measure.id,
+      recommendedExecutionId: program.primary.id,
       recommendedRoute: 'exploratory',
     }),
     reasonCode: 'deterministic_single_relation_physical_binding',
@@ -3760,7 +4628,9 @@ function compileVerifiedAskTasks(input: {
       requirements: input.verifiedRequirements,
       mode: 'authoritative',
     });
-    const resolvedPlan = resolvedPlanFromDecision(taskProgram.id, compilerDecision);
+    const resolvedPlan = resolvedPlanFromDecision(taskProgram.id, compilerDecision, {
+      reviewRequired: hasSelectedInferredRoleSubstitution(input.resolution, input.admitted),
+    });
     if (!resolvedPlan?.planFrozen || compilerDecision.action === 'clarify' || compilerDecision.terminalOutcome) {
       return {
         ok: false,
@@ -3913,7 +4783,9 @@ function compileVerifiedAskTasks(input: {
       requirements: taskRequirements,
       mode: 'authoritative',
     });
-    const resolvedPlan = resolvedPlanFromDecision(taskProgram.id, compilerDecision);
+    const resolvedPlan = resolvedPlanFromDecision(taskProgram.id, compilerDecision, {
+      reviewRequired: hasSelectedInferredRoleSubstitution(validation.resolution, input.admitted),
+    });
     if (!resolvedPlan?.planFrozen || compilerDecision.action === 'clarify' || compilerDecision.terminalOutcome) {
       return {
         ok: false,
@@ -4159,6 +5031,7 @@ function buildEvidenceWorkspace(
   workspaceCandidates: AgentEvidenceCandidate[],
   admitted: AgentEvidenceCandidate[],
   tools: EvidenceWorkspaceV1['tools'],
+  requirements: AnalyticalRequirementSetV1,
   targetedContext?: TargetedContextResultV1,
 ): EvidenceWorkspaceV2 {
   const admittedIds = stableCandidateIds(admitted);
@@ -4196,6 +5069,7 @@ function buildEvidenceWorkspace(
     workspaceCandidateIds: stableCandidateIds(workspaceCandidates).slice(0, 32),
     plannerCandidateIds: admittedIds.slice(0, 16),
     admittedCandidateIds: admittedIds.slice(0, 16),
+    roleCoverage: roleCoverageForAdmittedCandidates(requirements, admitted),
     excludedCandidates: excludedCandidates.slice(0, 32),
     tools: tools.slice(0, MAX_TOOLS),
     ...(targetedContext ? { targetedContext } : {}),
@@ -4279,6 +5153,1278 @@ function categoricalTermsForRuntime(requirements: AnalyticalRequirementSetV1): s
     term === entity || term === `${entity} name`));
 }
 
+type SameSnapshotRoleExtensionAdmissionV1 = {
+  candidates: AgentEvidenceCandidate[];
+  ambiguities: Array<{ requestedTerm: string; candidates: AgentEvidenceCandidate[] }>;
+  /** Same-snapshot wrappers for a requested role that failed current proof. */
+  rejectedCandidateIds: string[];
+};
+
+/**
+ * Recover only a snapshot-authored, metric-capability extension before the
+ * bounded role selector runs. A physical `location_name` does not become a
+ * `region` synonym here: the selected metric must declare exactly one safe
+ * geographic MetricFlow grouping. When more than one such grouping exists,
+ * preserve the unresolved business term and let the caller clarify instead
+ * of silently aliasing a geography field.
+ */
+function sameSnapshotRoleExtensionAdmissionForRequirements(input: {
+  candidates: AgentEvidenceCandidate[];
+  clarificationCandidates: AgentEvidenceCandidate[];
+  requirements: AnalyticalRequirementSetV1;
+}): SameSnapshotRoleExtensionAdmissionV1 {
+  const requestedTerms = [...new Set(categoricalTermsForRuntime(input.requirements)
+    .map(normalizeStableTerm)
+    .filter(Boolean))];
+  if (requestedTerms.length === 0) return { candidates: [], ambiguities: [], rejectedCandidateIds: [] };
+  const metricTerms = input.requirements.ranking?.metricTerms.length
+    ? input.requirements.ranking.metricTerms
+    : input.requirements.measures;
+  const metrics = metricTerms.length === 0
+    ? []
+    : input.candidates.filter((candidate) => candidate.kind === 'semantic_metric'
+      && candidate.eligible !== false
+      && candidate.compatibility !== 'incompatible'
+      && Boolean(candidate.analyticalCapability)
+      && metricTerms.some((term) => candidateMatchesPlannerRequirementTerm(candidate, term)));
+  const declaredExtensions = input.clarificationCandidates.filter((candidate) =>
+    metrics.some((metric) => Boolean(proveSameSnapshotMetricflowRoleExtensionV1({
+      candidate,
+      metricCandidate: metric,
+    }))));
+  const rejectedCandidateIds = input.candidates
+    .filter((candidate) => {
+      const requestedTerm = normalizeStableTerm(candidate.sameSnapshotRoleExtension?.requestedTerm ?? '');
+      return requestedTerm.length > 0
+        && requestedTerms.includes(requestedTerm)
+        && !metrics.some((metric) => Boolean(proveSameSnapshotMetricflowRoleExtensionV1({
+          candidate,
+          metricCandidate: metric,
+        })));
+    })
+    .map(stableCandidateId);
+  const admitted: AgentEvidenceCandidate[] = [];
+  const ambiguities: SameSnapshotRoleExtensionAdmissionV1['ambiguities'] = [];
+  for (const requestedTerm of requestedTerms) {
+    // A direct qualified business dimension remains authoritative. This
+    // recovery path exists only for a role that raw admission cannot prove.
+    const direct = input.candidates.some((candidate) =>
+      evidenceCandidateRoles(candidate).includes('categorical_dimension')
+      && candidateMatchesPlannerRequirementTerm(candidate, requestedTerm));
+    if (direct) continue;
+    const recovered = metrics.flatMap((metric) =>
+      deterministicSemanticRoleExtensions(metric, input.candidates, input.requirements)
+        .filter((candidate) => Boolean(proveSameSnapshotMetricflowRoleExtensionV1({
+          candidate,
+          metricCandidate: metric,
+        }))))
+      .filter((candidate) => normalizeStableTerm(candidate.sameSnapshotRoleExtension?.requestedTerm ?? '') === requestedTerm);
+    const candidates = uniqueCandidates([
+      ...declaredExtensions.filter((candidate) =>
+        normalizeStableTerm(candidate.sameSnapshotRoleExtension?.requestedTerm ?? '') === requestedTerm),
+      ...recovered,
+    ]).sort((left, right) => Number(Boolean(right.exactMatch)) - Number(Boolean(left.exactMatch))
+      || right.relevanceScore - left.relevanceScore
+      || stableCandidateId(left).localeCompare(stableCandidateId(right)));
+    if (candidates.length === 1) {
+      admitted.push(candidates[0]!);
+    } else if (candidates.length > 1) {
+      ambiguities.push({ requestedTerm, candidates: candidates.slice(0, 3) });
+    }
+  }
+  return {
+    candidates: uniqueCandidates(admitted),
+    ambiguities,
+    rejectedCandidateIds: [...new Set(rejectedCandidateIds)],
+  };
+}
+
+/**
+ * Replace a raw same-snapshot card with its qualified extension rather than
+ * appending both. The role selector deduplicates by source ID, so appending
+ * would otherwise reintroduce the unqualified raw card and lose the authored
+ * `requestedTerm` declaration before the 32-card workspace is built.
+ */
+function snapshotCandidatesWithRoleExtensions(
+  candidates: AgentEvidenceCandidate[],
+  extensions: AgentEvidenceCandidate[],
+): AgentEvidenceCandidate[] {
+  const bySourceId = new Map(extensions.map((candidate) => [candidate.id, candidate] as const));
+  const knownSourceIds = new Set(candidates.map((candidate) => candidate.id));
+  return uniqueCandidates([
+    ...candidates.map((candidate) => bySourceId.get(candidate.id) ?? candidate),
+    ...extensions.filter((candidate) => !knownSourceIds.has(candidate.id)),
+  ]);
+}
+
+function sameSnapshotRoleAmbiguityForClarification(
+  ambiguities: SameSnapshotRoleExtensionAdmissionV1['ambiguities'],
+): {
+  question: string;
+  options: NonNullable<IntentDecision['clarificationOptions']>;
+} | undefined {
+  const ambiguity = ambiguities[0];
+  if (!ambiguity || ambiguity.candidates.length < 2) return undefined;
+  const options = ambiguity.candidates.map((candidate) => ({
+    id: stableCandidateId(candidate),
+    label: humanizeCandidateLabel(candidate.name),
+    description: `Use ${humanizeCandidateLabel(candidate.name)} as the ${ambiguity.requestedTerm} grouping.`,
+    kind: 'semantic_dimension' as const,
+  }));
+  const labels = new Set(options.map((option) => normalizeStableTerm(option.label)));
+  if (labels.size < 2) return undefined;
+  return {
+    question: `Which geographic field should I use for “${ambiguity.requestedTerm}”?`,
+    options,
+  };
+}
+
+type OrdinaryRoleInferenceAmbiguityV1 = {
+  role: EvidenceCandidateRoleV1;
+  requestedTerm: string;
+  options: NonNullable<IntentDecision['clarificationOptions']>;
+  question: string;
+};
+
+type OrdinaryRoleInferenceGroupV1 = {
+  role: EvidenceCandidateRoleV1;
+  requestedTerm: string;
+  candidates: AgentEvidenceCandidate[];
+};
+
+/**
+ * Ordinary qualified fallbacks have deliberately weaker authority than an
+ * authored semantic alias.  Group their admission receipts once so the
+ * ambiguity, sole-substitution, verifier, and observability paths cannot
+ * disagree about the exact same bounded candidate set.
+ */
+function ordinaryRoleInferenceGroups(input: {
+  /** The qualified 32-card execution workspace, before planner truncation. */
+  candidates: readonly AgentEvidenceCandidate[];
+  requirements: AnalyticalRequirementSetV1;
+  relationshipClosure: readonly AgentEvidenceCandidate[];
+  /** Canonical metric-primary endpoint proof, not candidate-local reachability. */
+  relationshipClosureComplete: boolean;
+  /** Canonical entity/relation context derived from this same snapshot. */
+  ordinaryRoleEntityContext: OrdinaryRoleEntityContextV1;
+}): OrdinaryRoleInferenceGroupV1[] {
+  const groups: OrdinaryRoleInferenceGroupV1[] = [];
+  for (const slot of plannerAdmissionSlots(input.requirements)) {
+    // The contract is intentionally narrow. Other unresolved roles retain
+    // their existing verifier/clarification behavior; categorical fallbacks
+    // are the only ordinary fields that can otherwise become a silent
+    // business synonym such as region -> country/location.
+    if (slot.role !== 'categorical_dimension') continue;
+    const requestedTerm = slot.terms[0];
+    if (!requestedTerm) continue;
+    // A literal/declared match is the normal governed path. Do not create an
+    // ordinary-inference ambiguity beside a field the snapshot already
+    // explicitly models for the requested business term.
+    if (input.candidates.some((candidate) =>
+      candidateServesPlannerAdmissionSlot(candidate, slot)
+      || candidateMatchesCategoricalDimensionRequirement(candidate, slot.terms))) continue;
+    const candidates = input.candidates
+      .filter((candidate) => !candidate.sameSnapshotRoleExtension
+        && candidateCanResolveUnresolvedPlannerSlot(candidate, slot, input.ordinaryRoleEntityContext)
+        && ordinaryRoleCandidateIsSafeAndReachable(
+          candidate,
+          input.relationshipClosure,
+          input.ordinaryRoleEntityContext,
+          input.relationshipClosureComplete,
+        ))
+      .filter((candidate, index, values) =>
+        values.findIndex((item) => stableCandidateId(item) === stableCandidateId(candidate)) === index)
+      .sort((left, right) => stableCandidateId(left).localeCompare(stableCandidateId(right)));
+    if (candidates.length > 0) {
+      groups.push({
+        role: slot.role,
+        requestedTerm,
+        candidates,
+      });
+    }
+  }
+  return groups.sort((left, right) => left.requestedTerm.localeCompare(right.requestedTerm));
+}
+
+/**
+ * Mark exactly-one ordinary candidates as explicit inferred substitutions.
+ * This is a local receipt, not an alias: only planner-bound selections pass
+ * verification and all resulting plans remain review-required.
+ */
+function promoteUniqueOrdinaryRoleInferenceCandidates(input: {
+  admitted: AgentEvidenceCandidate[];
+  workspaceCandidates: readonly AgentEvidenceCandidate[];
+  requirements: AnalyticalRequirementSetV1;
+  relationshipClosure: readonly AgentEvidenceCandidate[];
+  relationshipClosureComplete: boolean;
+  ordinaryRoleEntityContext: OrdinaryRoleEntityContextV1;
+  /** The already-proven compact closure, if this inferred field is cross-entity. */
+  relationshipPath?: AgentEvidenceCandidate;
+}): AgentEvidenceCandidate[] {
+  const substitutions = ordinaryRoleInferenceGroups({
+    candidates: input.workspaceCandidates,
+    requirements: input.requirements,
+    relationshipClosure: input.relationshipClosure,
+    relationshipClosureComplete: input.relationshipClosureComplete,
+    ordinaryRoleEntityContext: input.ordinaryRoleEntityContext,
+  })
+    .filter((group) => group.candidates.length === 1);
+  if (substitutions.length === 0) return input.admitted;
+
+  // The role-balanced package may have reserved the ordinary candidate, but
+  // older/live snapshots can still present the raw relationship edges and
+  // enough context cards to cap it out.  Materialize the one host-proven
+  // candidate rather than asking a later verifier to recover an already
+  // qualified role.  When it needs a cross-entity bridge, use the one atomic
+  // path card and remove only its raw closure edges from the planner package;
+  // execution continues to hydrate those canonical edges from the workspace.
+  let selected = [...input.admitted];
+  const needsRelationshipPath = substitutions.some((substitution) =>
+    ordinaryRoleCandidateRequiresRelationship(substitution.candidates[0]!, input.ordinaryRoleEntityContext));
+  if (needsRelationshipPath && input.relationshipPath) {
+    const closureIds = new Set(input.relationshipClosure.map(stableCandidateId));
+    const firstClosureIndex = selected.findIndex((candidate) => closureIds.has(stableCandidateId(candidate)));
+    const hasPath = selected.some((candidate) => candidateMatchesStableIdentity(candidate, stableCandidateId(input.relationshipPath!)));
+    if (!hasPath) {
+      selected = selected.filter((candidate) => !closureIds.has(stableCandidateId(candidate)));
+      const insertionIndex = firstClosureIndex < 0 ? selected.length : Math.min(firstClosureIndex, selected.length);
+      selected.splice(insertionIndex, 0, input.relationshipPath);
+    }
+  }
+
+  const addHostOwnedCandidate = (candidate: AgentEvidenceCandidate): void => {
+    const existingIndex = selected.findIndex((item) => stableCandidateId(item) === stableCandidateId(candidate));
+    if (existingIndex >= 0) {
+      selected[existingIndex] = candidate;
+      return;
+    }
+    if (selected.length < MAX_INITIAL_PLANNER_CANDIDATES) {
+      selected.push(candidate);
+      return;
+    }
+    // Exact pins, required-role cards, and the host-owned relationship path
+    // are not relevance fillers. Replace only a trailing non-required card;
+    // if none exists, keep the immutable package rather than evicting a
+    // proved business requirement.
+    for (let index = selected.length - 1; index >= 0; index -= 1) {
+      const current = selected[index]!;
+      if (current.exactMatch
+        || candidateSupportsRequiredRole(current, input.requirements)
+        || current.id.startsWith('dql:relationship_path:')) continue;
+      selected[index] = candidate;
+      return;
+    }
+  };
+
+  for (const substitution of substitutions) {
+    const ordinaryCandidate = substitution.candidates[0]!;
+    addHostOwnedCandidate(markCandidateForUniqueInferredRoleSubstitution(ordinaryCandidate, {
+      role: substitution.role,
+      terms: [substitution.requestedTerm],
+    }));
+  }
+  return uniqueCandidates(selected).slice(0, MAX_INITIAL_PLANNER_CANDIDATES);
+}
+
+/**
+ * The ordinary fallback lane deliberately has less authority than a declared
+ * semantic alias. It can reserve qualified, reachable fields for a planner,
+ * but it cannot choose between two such fields. This gate runs only after the
+ * 16-card admission has made the competing alternatives explicit and before a
+ * provider, cascade, or connection can observe them.
+ */
+function ordinaryRoleInferenceAmbiguityForClarification(input: {
+  candidates: readonly AgentEvidenceCandidate[];
+  requirements: AnalyticalRequirementSetV1;
+  relationshipClosure: readonly AgentEvidenceCandidate[];
+  relationshipClosureComplete: boolean;
+  ordinaryRoleEntityContext: OrdinaryRoleEntityContextV1;
+}): OrdinaryRoleInferenceAmbiguityV1 | undefined {
+  const ambiguity = ordinaryRoleInferenceGroups(input)
+    .filter((group) => group.candidates.length >= 2)
+    [0];
+  if (!ambiguity) return undefined;
+  const sortedCandidates = [...ambiguity.candidates]
+    .sort((left, right) => stableCandidateId(left).localeCompare(stableCandidateId(right)));
+  const labelCounts = new Map<string, number>();
+  for (const candidate of sortedCandidates) {
+    const normalized = normalizeStableTerm(humanizeCandidateLabel(candidate.name));
+    labelCounts.set(normalized, (labelCounts.get(normalized) ?? 0) + 1);
+  }
+  const options = sortedCandidates.map((candidate) => {
+    const baseLabel = humanizeCandidateLabel(candidate.name);
+    const duplicate = (labelCounts.get(normalizeStableTerm(baseLabel)) ?? 0) > 1;
+    // UI labels are presentation only. When two snapshot columns share a
+    // leaf name, append the already-qualified stable identifier so the user
+    // can make an informed server-issued selection without inventing a new
+    // identifier or relying on opaque position/order.
+    const label = duplicate
+      ? `${baseLabel} (${safeClarificationCandidateQualifier(candidate)})`
+      : baseLabel;
+    return {
+      id: stableCandidateId(candidate),
+      label,
+      description: `Use ${label} as the ${ambiguity.requestedTerm} grouping.`,
+      kind: candidate.kind === 'sql_column' ? 'sql_column' as const : 'semantic_dimension' as const,
+    };
+  });
+  // Stable IDs are continuation authority, but labels must also be visually
+  // unambiguous. A duplicate label would force the user back into prose and
+  // defeat the typed selected-evidence binding on restart.
+  if (new Set(options.map((option) => normalizeStableTerm(option.label))).size < 2) return undefined;
+  return {
+    role: ambiguity.role,
+    requestedTerm: ambiguity.requestedTerm,
+    question: `Which geographic field should I use for “${ambiguity.requestedTerm}”?`,
+    options,
+  };
+}
+
+type OrdinaryRoleRelationshipCoverageGapV1 = {
+  role: EvidenceCandidateRoleV1;
+  requestedTerm: string;
+  candidateIds: string[];
+};
+
+/**
+ * An ordinary fallback is never a license to infer a cross-entity join. If
+ * retrieval found qualified geographic fields but every bridge from the
+ * requested entity is denied, stale, unsafe, or incomplete, surface that
+ * typed coverage gap before the planner sees an apparent choice. This keeps
+ * a missing safe path distinct from a genuine choice between two safe fields.
+ */
+function ordinaryRoleRelationshipCoverageGap(input: {
+  candidates: readonly AgentEvidenceCandidate[];
+  requirements: AnalyticalRequirementSetV1;
+  relationshipClosure: readonly AgentEvidenceCandidate[];
+  relationshipClosureComplete: boolean;
+  ordinaryRoleEntityContext: OrdinaryRoleEntityContextV1;
+}): OrdinaryRoleRelationshipCoverageGapV1 | undefined {
+  for (const slot of plannerAdmissionSlots(input.requirements)) {
+    if (slot.role !== 'categorical_dimension') continue;
+    const requestedTerm = slot.terms[0];
+    if (!requestedTerm) continue;
+    // A literal/declared field follows the normal verified cascade. This gate
+    // is only for ordinary candidate-for-unresolved-role admission.
+    if (input.candidates.some((candidate) =>
+      candidateServesPlannerAdmissionSlot(candidate, slot)
+      || candidateMatchesCategoricalDimensionRequirement(candidate, slot.terms))) continue;
+    const ordinaryCandidates = input.candidates
+      .filter((candidate) => !candidate.sameSnapshotRoleExtension
+        && candidateCanResolveUnresolvedPlannerSlot(candidate, slot, input.ordinaryRoleEntityContext))
+      .filter((candidate, index, values) =>
+        values.findIndex((item) => stableCandidateId(item) === stableCandidateId(candidate)) === index);
+    const crossEntityCandidates = ordinaryCandidates.filter((candidate) =>
+      ordinaryRoleCandidateRequiresRelationship(candidate, input.ordinaryRoleEntityContext));
+    if (crossEntityCandidates.length === 0) continue;
+    // A same-entity field is already a safe ordinary candidate without a
+    // bridge; likewise, one cross-entity candidate with a complete canonical
+    // closure remains eligible for normal unique/ambiguity handling.
+    if (ordinaryCandidates.some((candidate) => ordinaryRoleCandidateIsSafeAndReachable(
+      candidate,
+      input.relationshipClosure,
+      input.ordinaryRoleEntityContext,
+      input.relationshipClosureComplete,
+    ))) continue;
+    return {
+      role: slot.role,
+      requestedTerm,
+      candidateIds: crossEntityCandidates
+        .map(stableCandidateId)
+        .sort()
+        .slice(0, 8),
+    };
+  }
+  return undefined;
+}
+
+function safeClarificationCandidateQualifier(candidate: AgentEvidenceCandidate): string {
+  const stableId = stableCandidateId(candidate).trim();
+  const terminal = stableId.split(/[:/]/).at(-1)?.trim();
+  return terminal && terminal !== candidate.name ? terminal : stableId;
+}
+
+type MetricCapabilityDimensionV1 = NonNullable<AgentEvidenceCandidate['analyticalCapability']>['dimensions'][number];
+
+/**
+ * Canonical same-snapshot entity proof used by the ordinary fallback lane.
+ * Textual retrieval identity is intentionally absent: `customer` in a name,
+ * alias, ID, or source-object substring is not proof that a field belongs to
+ * the bound customer entity.  We admit same-entity fallbacks only from exact
+ * metric capability entity IDs, candidate primary entities, or structured
+ * canonical relation references.
+ */
+type OrdinaryRoleEntityContextV1 = {
+  hasRequestedEntity: boolean;
+  /**
+   * More than one metric identity could satisfy the requested measure and no
+   * exact/structured choice selected one. An ordinary field may not bypass
+   * the closure gate in that state merely because one relation leaf matches.
+   */
+  metricIdentityAmbiguous: boolean;
+  requestedEntityIds: ReadonlySet<string>;
+  requestedSourceRelations: ReadonlySet<string>;
+  candidateEntityIds: ReadonlyMap<string, ReadonlySet<string>>;
+  /** Exact authored display dimensions for the bound entity, never token overlap. */
+  requestedEntityDisplayCandidateIds: ReadonlySet<string>;
+  /** Canonical closure endpoints indexed by structured source relation. */
+  endpointIdsBySourceRelation: ReadonlyMap<string, ReadonlySet<string>>;
+};
+
+function canonicalEntityIdentity(value: string | undefined): string | undefined {
+  const normalized = normalizePlannerAdmissionText(value ?? '');
+  return normalized || undefined;
+}
+
+function canonicalIdentifierLeaf(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const namespaceLeaf = value.split(':').filter(Boolean).at(-1) ?? value;
+  const objectLeaf = namespaceLeaf.split(/[./]/).filter(Boolean).at(-1) ?? namespaceLeaf;
+  return canonicalEntityIdentity(objectLeaf);
+}
+
+function canonicalSourceRelationReference(value: string | undefined): string | undefined {
+  const raw = value?.trim();
+  if (!raw) return undefined;
+  const match = /^(?:dbt|runtime|sql):(model|source|relation|table|column):(.+)$/i.exec(raw);
+  if (!match) return undefined;
+  const kind = match[1]!.toLowerCase();
+  let relation = match[2]!.trim();
+  if (kind === 'column') {
+    const separator = relation.lastIndexOf('.');
+    if (separator <= 0) return undefined;
+    relation = relation.slice(0, separator);
+  }
+  // Preserve every source-authored namespace segment. A terminal relation is
+  // not globally unique: `pkg_a.customer` and `pkg_b.customer` must never be
+  // treated as the same relation merely because both end in `customer`.
+  // Segments are normalized for comparison, while `::` keeps their structured
+  // boundaries intact in the local receipt.
+  const segments = relation.split('.').map((segment) => segment.trim()).filter(Boolean);
+  if (segments.length === 0) return undefined;
+  const normalized = segments.map((segment, index) => {
+    const tokens = normalizedIdentityTokens(segment)
+      .map((token) => index === segments.length - 1 ? singularIdentityToken(token) : token);
+    return tokens.join(' ');
+  }).filter(Boolean);
+  return normalized.length === segments.length ? normalized.join('::') : undefined;
+}
+
+function canonicalSourceRelationLeaf(reference: string): string | undefined {
+  const leaf = reference.split('::').at(-1)?.trim();
+  return leaf || undefined;
+}
+
+function canonicalSourceRelationPhrase(reference: string): string {
+  return normalizePlannerAdmissionText(reference.replaceAll('::', ' '));
+}
+
+function canonicalSourceRelationReferences(candidate: AgentEvidenceCandidate): Set<string> {
+  const values = [
+    ...(candidate.sourceObjects ?? []),
+    ...(PHYSICAL_EXECUTION_KINDS.has(candidate.kind) ? [candidate.id, candidate.qualifiedId ?? ''] : []),
+  ];
+  return new Set(values
+    .map(canonicalSourceRelationReference)
+    .filter((value): value is string => Boolean(value)));
+}
+
+function intrinsicCanonicalEntityIds(candidate: AgentEvidenceCandidate): Set<string> {
+  const ids = new Set<string>();
+  const add = (value: string | undefined) => {
+    const normalized = canonicalEntityIdentity(value);
+    if (normalized) ids.add(normalized);
+  };
+  add(candidate.primaryEntity);
+  for (const endpointId of candidate.relationshipEndpointIds ?? []) add(endpointId);
+  if (candidate.semanticObjectType === 'entity') add(candidate.qualifiedId ?? candidate.id);
+  return ids;
+}
+
+function candidateMatchesCapabilityDimensionExactly(
+  candidate: AgentEvidenceCandidate,
+  dimension: MetricCapabilityDimensionV1,
+): boolean {
+  const dimensionId = canonicalEntityIdentity(dimension.dimensionId);
+  if (!dimensionId) return false;
+  return [
+    candidate.id,
+    candidate.qualifiedId,
+    ...(candidate.dimensions ?? []),
+    candidate.sameSnapshotRoleExtension?.dimensionId,
+  ].some((identity) => canonicalEntityIdentity(identity) === dimensionId);
+}
+
+function capabilityDimensionMatchesRequestedEntityTerm(
+  dimension: MetricCapabilityDimensionV1,
+  requestedTerms: ReadonlySet<string>,
+): boolean {
+  const identities = [
+    canonicalIdentifierLeaf(dimension.dimensionId),
+    canonicalEntityIdentity(dimension.label),
+    ...(dimension.aliases ?? []).map(canonicalEntityIdentity),
+  ].filter((identity): identity is string => Boolean(identity));
+  return identities.some((identity) => requestedTerms.has(identity));
+}
+
+function capabilityDimensionMatchesRequestedEntityDisplayTerm(
+  dimension: MetricCapabilityDimensionV1,
+  requestedTerms: ReadonlySet<string>,
+): boolean {
+  const identities = [
+    canonicalIdentifierLeaf(dimension.dimensionId),
+    canonicalEntityIdentity(dimension.label),
+    ...(dimension.aliases ?? []).map(canonicalEntityIdentity),
+  ].filter((identity): identity is string => Boolean(identity));
+  return identities.some((identity) => requestedTerms.has(identity));
+}
+
+function metricMatchesOrdinaryEntityRequirements(
+  candidate: AgentEvidenceCandidate,
+  requirements: AnalyticalRequirementSetV1,
+): boolean {
+  if (candidate.kind !== 'semantic_metric' || !candidate.analyticalCapability) return false;
+  const metricTerms = requirements.ranking?.metricTerms.length
+    ? requirements.ranking.metricTerms
+    : requirements.measures;
+  return metricTerms.some((term) => candidateMatchesPlannerRequirementTerm(candidate, term));
+}
+
+type OrdinaryMetricBindingSelectionV1 = {
+  metrics: AgentEvidenceCandidate[];
+  ambiguous: boolean;
+};
+
+/**
+ * Choose the metric authority used only for the ordinary-role same-entity
+ * proof. This does not choose an execution route. It prevents a retrieval
+ * pool containing `billing.revenue` and `crm.revenue` from making both
+ * customer entities look selected because they share the word "revenue".
+ */
+function ordinaryMetricBindingsForEntityContext(input: {
+  candidates: readonly AgentEvidenceCandidate[];
+  requirements: AnalyticalRequirementSetV1;
+  selectedMetricBindings?: readonly AgentEvidenceCandidate[];
+}): OrdinaryMetricBindingSelectionV1 {
+  const matching = input.candidates.filter((candidate) =>
+    metricMatchesOrdinaryEntityRequirements(candidate, input.requirements));
+  const selected = uniqueCandidates((input.selectedMetricBindings ?? [])
+    .filter((candidate) => candidate.kind === 'semantic_metric'
+      && candidate.eligible !== false
+      && candidate.compatibility !== 'incompatible'
+      && metricMatchesOrdinaryEntityRequirements(candidate, input.requirements)));
+  // A structured/canonical selection is explicit Ask authority. Multiple
+  // selected metrics remain legal only if their capability mappings later
+  // resolve to the same requested entity; that comparison happens below.
+  if (selected.length > 0) {
+    return { metrics: selected, ambiguous: false };
+  }
+  const exact = matching.filter((candidate) => candidate.exactMatch === true);
+  if (exact.length === 1) return { metrics: exact, ambiguous: false };
+  if (exact.length > 1) return { metrics: [], ambiguous: true };
+  if (matching.length === 1) return { metrics: matching, ambiguous: false };
+  return { metrics: [], ambiguous: matching.length > 1 };
+}
+
+function canonicalOrdinaryRoleEntityContext(input: {
+  candidates: readonly AgentEvidenceCandidate[];
+  requirements: AnalyticalRequirementSetV1;
+  /** Only server-selected structured entity cards may add an entity outside a metric capability. */
+  selectedStructuredEntityBindings?: readonly AgentEvidenceCandidate[];
+  /** Explicit/canonical Ask metric selections may identify the bound metric. */
+  selectedMetricBindings?: readonly AgentEvidenceCandidate[];
+}): OrdinaryRoleEntityContextV1 {
+  const requestedEntityTerms = input.requirements.entityTerms.length > 0
+    ? input.requirements.entityTerms
+    : input.requirements.entityDisplayTerms;
+  if (requestedEntityTerms.length === 0) {
+    return {
+      hasRequestedEntity: false,
+      metricIdentityAmbiguous: false,
+      requestedEntityIds: new Set(),
+      requestedSourceRelations: new Set(),
+      candidateEntityIds: new Map(),
+      requestedEntityDisplayCandidateIds: new Set(),
+      endpointIdsBySourceRelation: new Map(),
+    };
+  }
+  const normalizedRequestedTerms = new Set(requestedEntityTerms
+    .map(canonicalEntityIdentity)
+    .filter((term): term is string => Boolean(term)));
+  const requestedRelationTerms = new Set([...normalizedRequestedTerms]
+    .map((term) => normalizedIdentityTokens(term).map(singularIdentityToken).join(' '))
+    .filter(Boolean));
+  const candidateEntityIds = new Map<string, Set<string>>();
+  const candidateSourceRelations = new Map<string, Set<string>>();
+  const addCandidateEntityId = (candidate: AgentEvidenceCandidate, value: string | undefined): void => {
+    const normalized = canonicalEntityIdentity(value);
+    if (!normalized) return;
+    const ids = candidateEntityIds.get(stableCandidateId(candidate)) ?? new Set<string>();
+    ids.add(normalized);
+    candidateEntityIds.set(stableCandidateId(candidate), ids);
+  };
+  for (const candidate of input.candidates) {
+    for (const entityId of intrinsicCanonicalEntityIds(candidate)) addCandidateEntityId(candidate, entityId);
+    candidateSourceRelations.set(stableCandidateId(candidate), canonicalSourceRelationReferences(candidate));
+  }
+
+  const sourceRelationsByLeaf = new Map<string, Set<string>>();
+  const allSourceRelations = new Set<string>();
+  for (const sourceRelations of candidateSourceRelations.values()) {
+    for (const relation of sourceRelations) {
+      allSourceRelations.add(relation);
+      const leaf = canonicalSourceRelationLeaf(relation);
+      if (!leaf) continue;
+      const identities = sourceRelationsByLeaf.get(leaf) ?? new Set<string>();
+      identities.add(relation);
+      sourceRelationsByLeaf.set(leaf, identities);
+    }
+  }
+
+  const metricBindingSelection = ordinaryMetricBindingsForEntityContext(input);
+  const boundMetricCandidates = metricBindingSelection.metrics;
+  const requestedEntityIds = new Set<string>();
+  const metricBoundEntityIds = new Set<string>();
+  for (const metric of boundMetricCandidates) {
+    const matchedEntityIds = new Set<string>();
+    for (const dimension of metric.analyticalCapability!.dimensions) {
+      if (capabilityDimensionMatchesRequestedEntityTerm(dimension, normalizedRequestedTerms)) {
+        const entityId = canonicalEntityIdentity(dimension.entityId);
+        if (entityId) matchedEntityIds.add(entityId);
+      }
+      for (const candidate of input.candidates) {
+        if (candidateMatchesCapabilityDimensionExactly(candidate, dimension)) {
+          addCandidateEntityId(candidate, dimension.entityId);
+        }
+      }
+    }
+    // A metric capability is the authoritative entity binding, but two
+    // capability children with the same human `customer` label are still
+    // distinct entities (`billing.customer` vs `crm.customer`). Do not turn
+    // that unresolved business ambiguity into two requested entities by leaf
+    // text; an explicit structured entity selection is required instead.
+    if (matchedEntityIds.size === 1) {
+      metricBoundEntityIds.add([...matchedEntityIds][0]!);
+    }
+  }
+  // Multiple explicitly selected metrics can share one business entity. That
+  // remains a canonical same-entity fact. Different capability entities do
+  // not: retain the ambiguity/closure gate instead of treating both as the
+  // user's requested customer.
+  const metricIdentityAmbiguous = metricBindingSelection.ambiguous || metricBoundEntityIds.size > 1;
+  if (!metricIdentityAmbiguous && metricBoundEntityIds.size === 1) {
+    requestedEntityIds.add([...metricBoundEntityIds][0]!);
+  }
+
+  // A server-issued structured entity card is also canonical authority. Do
+  // not inspect arbitrary retrieved entity IDs, names, aliases, or leaves:
+  // `billing.customer` and `crm.customer` are not interchangeable merely
+  // because both expose the terminal text `customer`.
+  for (const selected of input.selectedStructuredEntityBindings ?? []) {
+    if (selected.semanticObjectType !== 'entity') continue;
+    const entityId = canonicalEntityIdentity(selected.primaryEntity ?? selected.qualifiedId ?? selected.id);
+    if (entityId) {
+      requestedEntityIds.add(entityId);
+    }
+  }
+
+  // An entity display key must be an exact authored capability dimension of
+  // the already-bound entity. Do not use broad textual matching here: a field
+  // like `customer_notes.location_name` has both words but is not the
+  // customer's display key and must still pass the cross-entity closure gate.
+  const normalizedRequestedDisplayTerms = new Set((input.requirements.entityDisplayTerms.length > 0
+    ? input.requirements.entityDisplayTerms
+    : input.requirements.entityTerms)
+    .map(canonicalEntityIdentity)
+    .filter((term): term is string => Boolean(term)));
+  const requestedEntityDisplayCandidateIds = new Set<string>();
+  for (const metric of boundMetricCandidates) {
+    for (const dimension of metric.analyticalCapability!.dimensions) {
+      const dimensionEntityId = canonicalEntityIdentity(dimension.entityId);
+      if (!dimensionEntityId || !requestedEntityIds.has(dimensionEntityId)
+        || !capabilityDimensionMatchesRequestedEntityDisplayTerm(dimension, normalizedRequestedDisplayTerms)) continue;
+      for (const candidate of input.candidates) {
+        if (candidateMatchesCapabilityDimensionExactly(candidate, dimension)) {
+          requestedEntityDisplayCandidateIds.add(stableCandidateId(candidate));
+        }
+      }
+    }
+  }
+
+  const requestedSourceRelations = new Set<string>();
+  for (const requestedRelationTerm of requestedRelationTerms) {
+    const fullMatches = [...allSourceRelations]
+      .filter((relation) => canonicalSourceRelationPhrase(relation) === requestedRelationTerm);
+    if (fullMatches.length === 1) {
+      requestedSourceRelations.add(fullMatches[0]!);
+      continue;
+    }
+    // A user/business term has only a relation leaf. It may identify that
+    // leaf only when the same immutable snapshot proves there is one full
+    // structured relation with it. Namespace collisions intentionally remain
+    // unresolved and therefore require a safe closure or a clarification.
+    const leafMatches = sourceRelationsByLeaf.get(requestedRelationTerm);
+    if (leafMatches?.size === 1) requestedSourceRelations.add([...leafMatches][0]!);
+  }
+  for (const candidate of input.candidates) {
+    const sourceRelations = candidateSourceRelations.get(stableCandidateId(candidate)) ?? new Set<string>();
+    const entityIds = candidateEntityIds.get(stableCandidateId(candidate)) ?? new Set<string>();
+    if ([...entityIds].some((entityId) => requestedEntityIds.has(entityId))) {
+      for (const relation of sourceRelations) requestedSourceRelations.add(relation);
+    }
+  }
+
+  // A physical field may not carry a semantic primaryEntity. If a structured
+  // source relation is already mapped by another same-snapshot field/model to
+  // a canonical entity, inherit only that exact relation mapping—not words.
+  const entityIdsBySourceRelation = new Map<string, Set<string>>();
+  for (const candidate of input.candidates) {
+    const entityIds = candidateEntityIds.get(stableCandidateId(candidate)) ?? new Set<string>();
+    if (entityIds.size === 0) continue;
+    for (const relation of candidateSourceRelations.get(stableCandidateId(candidate)) ?? []) {
+      const mapped = entityIdsBySourceRelation.get(relation) ?? new Set<string>();
+      for (const entityId of entityIds) mapped.add(entityId);
+      entityIdsBySourceRelation.set(relation, mapped);
+    }
+  }
+  for (const candidate of input.candidates) {
+    for (const relation of candidateSourceRelations.get(stableCandidateId(candidate)) ?? []) {
+      for (const entityId of entityIdsBySourceRelation.get(relation) ?? []) {
+        addCandidateEntityId(candidate, entityId);
+      }
+    }
+  }
+  // Physical-only Ask snapshots do not always retain a semantic entity ID.
+  // Relationship proof endpoints still carry a structured runtime/dbt relation
+  // identity, so index those exact endpoints by relation. This preserves a
+  // canonical customer-table -> order-table -> location-table closure without
+  // falling back to candidate-name or alias token matching.
+  const endpointIdsBySourceRelation = new Map<string, Set<string>>();
+  for (const relationship of input.candidates) {
+    const proof = relationshipCandidateProofSelection(relationship);
+    if (!proof) continue;
+    for (const safety of proof.relationshipSafety) {
+      for (const endpoint of [safety.from, safety.to]) {
+        const relation = canonicalSourceRelationReference(endpoint);
+        const endpointId = canonicalEntityIdentity(endpoint);
+        if (!relation || !endpointId) continue;
+        const endpointIds = endpointIdsBySourceRelation.get(relation) ?? new Set<string>();
+        endpointIds.add(endpointId);
+        endpointIdsBySourceRelation.set(relation, endpointIds);
+      }
+    }
+  }
+  return {
+    hasRequestedEntity: true,
+    metricIdentityAmbiguous,
+    requestedEntityIds,
+    requestedSourceRelations,
+    candidateEntityIds,
+    requestedEntityDisplayCandidateIds,
+    endpointIdsBySourceRelation,
+  };
+}
+
+function ordinaryRoleCandidateRequiresRelationship(
+  candidate: AgentEvidenceCandidate,
+  context: OrdinaryRoleEntityContextV1,
+): boolean {
+  // No requested/bound entity means there is no cross-entity predicate to
+  // prove at this admission boundary. The later compiler still owns any join
+  // required by a selected metric or program.
+  if (!context.hasRequestedEntity) return false;
+  // A lexical measure match is not a metric binding. Until a single exact or
+  // structured metric identity wins, a field cannot claim same-entity merely
+  // from its own source relation; the later planner/compiler may resolve a
+  // safe full closure, but ordinary inference must not collapse it here.
+  if (context.metricIdentityAmbiguous) return true;
+  const candidateEntityIds = context.candidateEntityIds.get(stableCandidateId(candidate)) ?? new Set<string>();
+  if ([...candidateEntityIds].some((entityId) => context.requestedEntityIds.has(entityId))) return false;
+  const candidateSourceRelations = canonicalSourceRelationReferences(candidate);
+  if ([...candidateSourceRelations].some((relation) => context.requestedSourceRelations.has(relation))) return false;
+  // Unknown canonical identity is cross-entity by default. A raw token such
+  // as `customer` in `customer_notes`, an alias, or a source substring is not
+  // enough to elide the canonical closure requirement.
+  return true;
+}
+
+function ordinaryRoleClosureConnectsCandidate(
+  candidate: AgentEvidenceCandidate,
+  closure: readonly AgentEvidenceCandidate[],
+  context: OrdinaryRoleEntityContextV1,
+): boolean {
+  if (!context.hasRequestedEntity || closure.length === 0) return false;
+  const starts = new Set(context.requestedEntityIds);
+  for (const relation of context.requestedSourceRelations) {
+    for (const endpointId of context.endpointIdsBySourceRelation.get(relation) ?? []) starts.add(endpointId);
+  }
+  const targets = new Set(context.candidateEntityIds.get(stableCandidateId(candidate)) ?? []);
+  for (const relation of canonicalSourceRelationReferences(candidate)) {
+    for (const endpointId of context.endpointIdsBySourceRelation.get(relation) ?? []) targets.add(endpointId);
+  }
+  if (starts.size === 0 || targets.size === 0) return false;
+  const graph = new Map<string, Set<string>>();
+  const connect = (from: string, to: string): void => {
+    const fromNeighbors = graph.get(from) ?? new Set<string>();
+    fromNeighbors.add(to);
+    graph.set(from, fromNeighbors);
+    const toNeighbors = graph.get(to) ?? new Set<string>();
+    toNeighbors.add(from);
+    graph.set(to, toNeighbors);
+  };
+  for (const relationship of closure) {
+    // `boundedRelationshipClosure` already applied this canonical proof gate.
+    // Keep the defensive check here so a future caller cannot turn a raw
+    // relationship card into ordinary-role admission evidence.
+    if (relationshipCandidateHasUnsafeFanout(relationship)) return false;
+    const proof = relationshipCandidateProofSelection(relationship);
+    if (!proof?.relationshipSafety.length) return false;
+    for (const safety of proof.relationshipSafety) {
+      const from = normalizePlannerAdmissionText(safety.from ?? '');
+      const to = normalizePlannerAdmissionText(safety.to ?? '');
+      if (!from || !to) return false;
+      connect(from, to);
+    }
+  }
+  const pending = [...starts];
+  const visited = new Set(pending);
+  while (pending.length > 0) {
+    const current = pending.shift()!;
+    if (targets.has(current)) return true;
+    for (const next of graph.get(current) ?? []) {
+      if (!visited.has(next)) {
+        visited.add(next);
+        pending.push(next);
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * A role-reserved fallback can be offered only when it was already qualified
+ * and either belongs to the requested entity itself or is connected to that
+ * entity by a complete, canonical same-snapshot closure. An empty closure is
+ * therefore safe only for same-entity requests; it is not proof that a
+ * cross-entity relation was unnecessary. This is admission evidence, not a
+ * join authorization: compiler/cascade safety still owns execution after a
+ * choice.
+ */
+function ordinaryRoleCandidateIsSafeAndReachable(
+  candidate: AgentEvidenceCandidate,
+  closure: readonly AgentEvidenceCandidate[],
+  context: OrdinaryRoleEntityContextV1,
+  relationshipClosureComplete: boolean,
+): boolean {
+  if (candidate.eligible === false || candidate.compatibility === 'incompatible') return false;
+  if (!evidenceCandidateRoles(candidate).includes('categorical_dimension')) return false;
+  if (!ordinaryRoleCandidateRequiresRelationship(candidate, context)) return true;
+  if (!relationshipClosureComplete) return false;
+  return ordinaryRoleClosureConnectsCandidate(candidate, closure, context);
+}
+
+type PlannerAdmissionSlotV1 = {
+  role: EvidenceCandidateRoleV1;
+  terms: string[];
+};
+
+type UnresolvedRoleAdmissionV1 = {
+  role: EvidenceCandidateRoleV1;
+  term: string;
+};
+
+function unresolvedRoleAdmissionMarker(input: UnresolvedRoleAdmissionV1): string {
+  const term = normalizePlannerAdmissionText(input.term) || 'unspecified';
+  return `${UNRESOLVED_ROLE_ADMISSION_PREFIX}:${input.role}:${term}`;
+}
+
+/**
+ * A host-owned receipt for the one safe ordinary fallback that remained after
+ * the role-balanced package was assembled.  It is deliberately distinct from
+ * the admission marker above: the latter means "show alternatives to the
+ * planner", while this one means "the package contained exactly one safe
+ * candidate for this role".  It is still an inferred business mapping and is
+ * therefore review-required after verification; it is not a metadata alias.
+ */
+function uniqueInferredRoleSubstitutionMarker(input: UnresolvedRoleAdmissionV1): string {
+  const term = normalizePlannerAdmissionText(input.term) || 'unspecified';
+  return `${UNIQUE_INFERRED_ROLE_SUBSTITUTION_PREFIX}:${input.role}:${term}`;
+}
+
+/**
+ * The marker is deliberately a compact, host-owned admission receipt rather
+ * than a candidate alias. It may travel to the planner card, but no consumer
+ * may treat it as a semantic equivalence without the verifier below proving a
+ * unique selected substitution.
+ */
+function candidateUnresolvedRoleAdmissions(candidate: Pick<AgentEvidenceCandidate, 'matchReasons'>): UnresolvedRoleAdmissionV1[] {
+  const prefix = `${UNRESOLVED_ROLE_ADMISSION_PREFIX}:`;
+  return (candidate.matchReasons ?? []).flatMap((reason) => {
+    if (!reason.startsWith(prefix)) return [];
+    const [, role, ...termParts] = reason.split(':');
+    const term = termParts.join(':').trim();
+    return isEvidenceCandidateRole(role) && term
+      ? [{ role, term }]
+      : [];
+  });
+}
+
+function candidateUniqueInferredRoleSubstitutions(
+  candidate: Pick<AgentEvidenceCandidate, 'matchReasons'>,
+): UnresolvedRoleAdmissionV1[] {
+  const prefix = `${UNIQUE_INFERRED_ROLE_SUBSTITUTION_PREFIX}:`;
+  return (candidate.matchReasons ?? []).flatMap((reason) => {
+    if (!reason.startsWith(prefix)) return [];
+    const [, role, ...termParts] = reason.split(':');
+    const term = termParts.join(':').trim();
+    return isEvidenceCandidateRole(role) && term
+      ? [{ role, term }]
+      : [];
+  });
+}
+
+function candidateHasUnresolvedRoleAdmission(
+  candidate: Pick<AgentEvidenceCandidate, 'matchReasons'>,
+  slot: PlannerAdmissionSlotV1,
+): boolean {
+  const expectedTerms = new Set(slot.terms.map(normalizePlannerAdmissionText).filter(Boolean));
+  return candidateUnresolvedRoleAdmissions(candidate).some((admission) =>
+    admission.role === slot.role
+    && (expectedTerms.size === 0 || expectedTerms.has(normalizePlannerAdmissionText(admission.term))));
+}
+
+function candidateHasUniqueInferredRoleSubstitution(
+  candidate: Pick<AgentEvidenceCandidate, 'matchReasons'>,
+  slot: PlannerAdmissionSlotV1,
+): boolean {
+  const expectedTerms = new Set(slot.terms.map(normalizePlannerAdmissionText).filter(Boolean));
+  return candidateUniqueInferredRoleSubstitutions(candidate).some((substitution) =>
+    substitution.role === slot.role
+    && (expectedTerms.size === 0 || expectedTerms.has(normalizePlannerAdmissionText(substitution.term))));
+}
+
+function markCandidateForUnresolvedRoleAdmission(
+  candidate: AgentEvidenceCandidate,
+  slot: PlannerAdmissionSlotV1,
+): AgentEvidenceCandidate {
+  const markers = slot.terms.length
+    ? slot.terms.map((term) => unresolvedRoleAdmissionMarker({ role: slot.role, term }))
+    : [unresolvedRoleAdmissionMarker({ role: slot.role, term: 'unspecified' })];
+  return {
+    ...candidate,
+    matchReasons: uniqueStrings([...candidate.matchReasons, ...markers]),
+  };
+}
+
+function markCandidateForUniqueInferredRoleSubstitution(
+  candidate: AgentEvidenceCandidate,
+  slot: PlannerAdmissionSlotV1,
+): AgentEvidenceCandidate {
+  const markers = slot.terms.length
+    ? slot.terms.map((term) => uniqueInferredRoleSubstitutionMarker({ role: slot.role, term }))
+    : [uniqueInferredRoleSubstitutionMarker({ role: slot.role, term: 'unspecified' })];
+  return {
+    ...candidate,
+    matchReasons: uniqueStrings([...candidate.matchReasons, ...markers]),
+  };
+}
+
+/**
+ * A role-compatible candidate can be shown to the planner when the snapshot
+ * does not have a literal/declared match for the user's business term. This
+ * is intentionally weaker than `candidateServesPlannerAdmissionSlot`: it
+ * only reserves a qualified field for interpretation, it never supplies a
+ * hidden synonym. In particular semantic models/entities cannot impersonate
+ * categorical fields just because older indexes use `semantic_member` for
+ * several object classes.
+ */
+function candidateCanResolveUnresolvedPlannerSlot(
+  candidate: AgentEvidenceCandidate,
+  slot: PlannerAdmissionSlotV1,
+  ordinaryRoleEntityContext?: OrdinaryRoleEntityContextV1,
+): boolean {
+  if (!stableCandidateId(candidate).trim()
+    || candidate.eligible === false
+    || candidate.compatibility === 'incompatible'
+    || !evidenceCandidateRoles(candidate).includes(slot.role)) return false;
+  if (slot.role !== 'categorical_dimension') return true;
+  // A selected entity display key is commonly represented as a semantic
+  // dimension too (`customer_name`). Keep it out of an unrelated ordinary
+  // breakdown only when the metric capability proves it is the exact display
+  // field of the bound entity. A coincidental `customer` and `name` token in
+  // an arbitrary field is not display-key proof and must remain subject to
+  // the canonical cross-entity closure gate.
+  if (ordinaryRoleEntityContext?.requestedEntityDisplayCandidateIds.has(stableCandidateId(candidate))
+    && !candidateServesPlannerAdmissionSlot(candidate, slot)) return false;
+  return candidate.semanticObjectType === 'dimension'
+    || (candidate.kind === 'semantic_member' && candidate.semanticObjectType === undefined)
+    || candidate.kind === 'sql_column';
+}
+
+function candidateTermOverlapScore(candidate: AgentEvidenceCandidate, terms: readonly string[]): number {
+  const identity = candidateIdentityTerms(candidate);
+  return terms.reduce((score, term) => {
+    const tokens = normalizePlannerAdmissionText(term).split(' ').filter((token) => token.length > 2);
+    return score + tokens.filter((token) => identity.includes(token)).length;
+  }, 0);
+}
+
+function candidateRetrievalPriority(candidate: AgentEvidenceCandidate): number {
+  const lanePriority: Record<NonNullable<AgentEvidenceCandidate['retrievalLanes']>[number]['lane'], number> = {
+    exact: 5,
+    lexical: 4,
+    vector: 3,
+    graph: 2,
+    conversation: 1,
+  };
+  return Math.max(0, ...(candidate.retrievalLanes ?? []).map((lane) =>
+    lanePriority[lane.lane] * 1_000 - Math.min(999, lane.rank ?? 999)));
+}
+
+/**
+ * Reachability is a tie-breaker only. It keeps an ordinary qualified
+ * `locations.location_name` field ahead of unrelated dimensions when the
+ * existing bounded customer-to-location proof already reaches it; it neither
+ * mints a relationship nor authorizes a join.
+ */
+function candidateRelationshipReachabilityScore(
+  candidate: AgentEvidenceCandidate,
+  closure: readonly AgentEvidenceCandidate[],
+): number {
+  const identity = candidateIdentityTerms(candidate);
+  const endpoints = closure.flatMap((relationship) => [
+    ...(relationship.relationshipEndpointIds ?? []),
+    ...(relationshipCandidateProofSelection(relationship)?.relationshipSafety ?? [])
+      .flatMap((safety) => [safety.from ?? '', safety.to ?? '']),
+  ]).map(normalizePlannerAdmissionText).filter(Boolean);
+  return endpoints.reduce((score, endpoint) => {
+    const tokens = endpoint.split(' ').filter((token) => token.length > 2);
+    return score + (tokens.some((token) => identity.includes(token)) ? 1 : 0);
+  }, 0);
+}
+
+function compareUnresolvedRoleAdmissionCandidates(
+  slot: PlannerAdmissionSlotV1,
+  closure: readonly AgentEvidenceCandidate[],
+): (left: AgentEvidenceCandidate, right: AgentEvidenceCandidate) => number {
+  const exactOrDeclared = (candidate: AgentEvidenceCandidate): number => {
+    if (candidateServesPlannerAdmissionSlot(candidate, slot)) return 2;
+    if (slot.role === 'categorical_dimension'
+      && candidateMatchesCategoricalDimensionRequirement(candidate, slot.terms)) return 1;
+    return 0;
+  };
+  return (left, right) => exactOrDeclared(right) - exactOrDeclared(left)
+    || candidateTermOverlapScore(right, slot.terms) - candidateTermOverlapScore(left, slot.terms)
+    || candidateRetrievalPriority(right) - candidateRetrievalPriority(left)
+    || candidateRelationshipReachabilityScore(right, closure) - candidateRelationshipReachabilityScore(left, closure)
+    || right.relevanceScore - left.relevanceScore
+    || stableCandidateId(left).localeCompare(stableCandidateId(right));
+}
+
+/**
+ * Express each explicit business term as an admission slot. `region` and
+ * `product category` are both categorical dimensions, but they must not
+ * compete for one generic categorical role reservation.
+ */
+function plannerAdmissionSlots(requirements: AnalyticalRequirementSetV1): PlannerAdmissionSlotV1[] {
+  const slots: PlannerAdmissionSlotV1[] = [];
+  const addTerms = (role: EvidenceCandidateRoleV1, terms: readonly string[]) => {
+    for (const term of [...new Set(terms.map((value) => value.trim()).filter(Boolean))]) {
+      slots.push({ role, terms: [term] });
+    }
+  };
+  addTerms('metric', requirements.ranking?.metricTerms.length
+    ? requirements.ranking.metricTerms
+    : requirements.measures);
+  addTerms('entity_key', requirements.entityTerms);
+  addTerms('entity_label', requirements.entityDisplayTerms.length
+    ? requirements.entityDisplayTerms
+    : requirements.entityTerms);
+  addTerms('categorical_dimension', categoricalTermsForRuntime(requirements));
+  if (requirements.time) slots.push({ role: 'time_dimension', terms: [] });
+  if (requirements.memberTerms.length && !requirements.priorResultMemberBinding) addTerms('member', requirements.memberTerms);
+  if (requirements.dimensions.length > 1 || requirements.entityTerms.length > 0) {
+    slots.push({ role: 'relationship', terms: [] });
+  }
+  return slots;
+}
+
+function candidateServesPlannerAdmissionSlot(
+  candidate: AgentEvidenceCandidate,
+  slot: PlannerAdmissionSlotV1,
+): boolean {
+  if (!evidenceCandidateRoles(candidate).includes(slot.role)) return false;
+  if (slot.role === 'relationship' || slot.role === 'time_dimension') return true;
+  return slot.terms.some((term) => candidateMatchesPlannerRequirementTerm(candidate, term));
+}
+
+/**
+ * Keep planner admission role-balanced even after protected exact identities
+ * and an atomic relationship-path card are inserted. This is intentionally a
+ * projection of the immutable workspace, not a second retrieval or route.
+ */
+function admitRoleBalancedPlannerCandidates(input: {
+  exactPins: AgentEvidenceCandidate[];
+  relationshipPath?: AgentEvidenceCandidate;
+  rawRelationshipClosure: AgentEvidenceCandidate[];
+  relationshipClosureComplete: boolean;
+  ordinaryRoleEntityContext: OrdinaryRoleEntityContextV1;
+  roleBalancedCandidates: AgentEvidenceCandidate[];
+  workspaceCandidates: AgentEvidenceCandidate[];
+  requirements: AnalyticalRequirementSetV1;
+  /** A server-issued categorical choice suppresses only its competing fallback cards. */
+  structuredSelectedEvidenceId?: string;
+}): AgentEvidenceCandidate[] {
+  const selected: AgentEvidenceCandidate[] = [];
+  const add = (candidate: AgentEvidenceCandidate | undefined): void => {
+    if (!candidate) return;
+    const existingIndex = selected.findIndex((item) => stableCandidateId(item) === stableCandidateId(candidate));
+    if (existingIndex >= 0) {
+      // The role-reservation receipt is host-owned admission context. A
+      // later relevance-fill pass reuses the original snapshot card, but it
+      // must not erase that receipt and make the planner/trace claim the
+      // raw field was a declared business alias.
+      if (candidateUnresolvedRoleAdmissions(selected[existingIndex]!).length > 0
+        && candidateUnresolvedRoleAdmissions(candidate).length === 0) return;
+      selected[existingIndex] = candidate;
+      return;
+    }
+    if (selected.length >= MAX_INITIAL_PLANNER_CANDIDATES) return;
+    selected.push(candidate);
+  };
+  for (const candidate of input.exactPins) add(candidate);
+  if (input.relationshipPath) add(input.relationshipPath);
+  else for (const candidate of input.rawRelationshipClosure) add(candidate);
+
+  const closureIds = new Set(input.rawRelationshipClosure.map(stableCandidateId));
+  const plannerCandidates = uniqueCandidates([
+    ...input.roleBalancedCandidates,
+    ...input.workspaceCandidates,
+  ]).filter((candidate) => !input.relationshipPath || !closureIds.has(stableCandidateId(candidate)));
+  const candidateCanBeReservedForSlot = (
+    candidate: AgentEvidenceCandidate,
+    slot: PlannerAdmissionSlotV1,
+  ): boolean => candidateCanResolveUnresolvedPlannerSlot(candidate, slot, input.ordinaryRoleEntityContext)
+    && (slot.role !== 'categorical_dimension'
+      || ordinaryRoleCandidateIsSafeAndReachable(
+        candidate,
+        input.rawRelationshipClosure,
+        input.ordinaryRoleEntityContext,
+        input.relationshipClosureComplete,
+      ));
+  // A final relevance fill must not reintroduce a qualified field that the
+  // role reservation deliberately rejected for lack of a complete safe
+  // cross-entity closure. It may remain execution-context evidence, but it
+  // is neither a planner choice nor an inferred business mapping.
+  const unsafeOrdinaryFallbackIds = new Set(plannerCandidates
+    .filter((candidate) => !plannerAdmissionSlots(input.requirements).some((slot) =>
+      candidateServesPlannerAdmissionSlot(candidate, slot)
+      || candidateMatchesCategoricalDimensionRequirement(candidate, slot.terms)))
+    .filter((candidate) => plannerAdmissionSlots(input.requirements).some((slot) =>
+      slot.role === 'categorical_dimension'
+      && candidateCanResolveUnresolvedPlannerSlot(candidate, slot, input.ordinaryRoleEntityContext)
+      && !ordinaryRoleCandidateIsSafeAndReachable(
+        candidate,
+        input.rawRelationshipClosure,
+        input.ordinaryRoleEntityContext,
+        input.relationshipClosureComplete,
+      )))
+    .map(stableCandidateId));
+  const suppressedByStructuredSelection = new Set<string>();
+  for (const slot of plannerAdmissionSlots(input.requirements)) {
+    if (selected.some((candidate) => candidateServesPlannerAdmissionSlot(candidate, slot))) continue;
+    const selectedContinuationCandidate = input.structuredSelectedEvidenceId
+      ? plannerCandidates.find((candidate) =>
+          candidateMatchesStableIdentity(candidate, input.structuredSelectedEvidenceId!)
+          && candidateCanBeReservedForSlot(candidate, slot)
+          && !candidateServesPlannerAdmissionSlot(candidate, slot))
+      : undefined;
+    if (selectedContinuationCandidate) {
+      add(markCandidateForUnresolvedRoleAdmission(selectedContinuationCandidate, slot));
+      for (const candidate of plannerCandidates) {
+        if (stableCandidateId(candidate) !== stableCandidateId(selectedContinuationCandidate)
+          && candidateCanBeReservedForSlot(candidate, slot)
+          && !candidateServesPlannerAdmissionSlot(candidate, slot)) {
+          suppressedByStructuredSelection.add(stableCandidateId(candidate));
+        }
+      }
+      continue;
+    }
+    // A literal or snapshot-declared term match remains the primary path.
+    // When that has no qualified card, reserve up to two *role-compatible*
+    // fields for the planner. The marker makes their uncertainty explicit;
+    // it does not turn a physical location field into a `region` alias.
+    const unresolved = plannerCandidates
+      .filter((candidate) => candidateCanBeReservedForSlot(candidate, slot))
+      .sort(compareUnresolvedRoleAdmissionCandidates(slot, input.rawRelationshipClosure))
+      .slice(0, 2);
+    for (const candidate of unresolved) {
+      add(markCandidateForUnresolvedRoleAdmission(candidate, slot));
+    }
+  }
+  for (const candidate of plannerCandidates) {
+    if (!suppressedByStructuredSelection.has(stableCandidateId(candidate))
+      && !unsafeOrdinaryFallbackIds.has(stableCandidateId(candidate))) add(candidate);
+  }
+  return selected;
+}
+
+function roleCoverageForAdmittedCandidates(
+  requirements: AnalyticalRequirementSetV1,
+  admitted: AgentEvidenceCandidate[],
+): NonNullable<EvidenceWorkspaceV2['roleCoverage']> {
+  const grouped = new Map<EvidenceCandidateRoleV1, PlannerAdmissionSlotV1[]>();
+  for (const slot of plannerAdmissionSlots(requirements)) {
+    const existing = grouped.get(slot.role) ?? [];
+    existing.push(slot);
+    grouped.set(slot.role, existing);
+  }
+  return [...grouped.entries()]
+    .map(([role, slots]) => {
+      const provenCount = admitted.filter((candidate) =>
+        slots.some((slot) => candidateServesPlannerAdmissionSlot(candidate, slot))).length;
+      const inferredCount = admitted.filter((candidate) =>
+        slots.some((slot) => candidateHasUniqueInferredRoleSubstitution(candidate, slot))).length;
+      const alternativeCount = admitted.filter((candidate) =>
+        slots.some((slot) => candidateHasUnresolvedRoleAdmission(candidate, slot))
+          && !slots.some((slot) => candidateHasUniqueInferredRoleSubstitution(candidate, slot))).length;
+      return {
+        role,
+        candidateCount: provenCount + inferredCount + alternativeCount,
+        // A candidate-for-unresolved-role receipt explicitly records an
+        // alternative, not a fact that the user’s business term was modeled.
+        // A sole candidate is different: it remains an inferred mapping, but
+        // it is an executable choice for the planner and must not be reported
+        // as unresolved alternatives in the trace.
+        state: provenCount === 0 && inferredCount === 0 && alternativeCount > 0
+          ? 'alternatives' as const
+          : 'proven' as const,
+      };
+    })
+    .sort((left, right) => left.role.localeCompare(right.role));
+}
+
+/**
+ * Clarification alternatives may intentionally live in the qualified
+ * workspace rather than the capped planner package.  Record their real count
+ * in the persisted receipt so a role-cap exclusion is never misreported as
+ * one inferred/executable field or a metadata absence.
+ */
+function roleCoverageWithOrdinaryInferenceAmbiguity(
+  coverage: EvidenceWorkspaceV2['roleCoverage'] | undefined,
+  ambiguity: OrdinaryRoleInferenceAmbiguityV1,
+): NonNullable<EvidenceWorkspaceV2['roleCoverage']> {
+  const retained = (coverage ?? []).filter((item) => item.role !== ambiguity.role);
+  return [
+    ...retained,
+    {
+      role: ambiguity.role,
+      candidateCount: ambiguity.options.length,
+      state: 'alternatives' as const,
+    },
+  ].sort((left, right) => left.role.localeCompare(right.role));
+}
+
 function candidateSupportsRequiredRole(candidate: AgentEvidenceCandidate, requirements: AnalyticalRequirementSetV1): boolean {
   const identity = candidateIdentityTerms(candidate);
   const matches = (terms: readonly string[]) => terms.some((term) => {
@@ -4306,8 +6452,31 @@ function withExecutionSupportCandidates(input: {
   workspace: AgentEvidenceCandidate[];
   snapshotCandidates: AgentEvidenceCandidate[];
   requirements: AnalyticalRequirementSetV1;
+  relationshipClosure?: AgentEvidenceCandidate[];
 }): AgentEvidenceCandidate[] {
-  const terms = requirementIdentityTerms(input.requirements);
+  // A capability-proven inferred role may use a different physical label
+  // (`location_name` for the requested `region`). Its model/entity remains
+  // compiler-only context, but must survive the 32-card workspace cap so the
+  // frozen semantic/relational compiler can validate the complete path.
+  const inferredRoleSupportTerms = input.workspace
+    .filter((candidate) => Boolean(candidate.sameSnapshotRoleExtension)
+      || candidateUniqueInferredRoleSubstitutions(candidate).length > 0)
+    .flatMap((candidate) => [
+      candidate.id,
+      candidate.qualifiedId,
+      candidate.name,
+      ...(candidate.aliases ?? []),
+      ...(candidate.sourceObjects ?? []),
+      candidate.sameSnapshotRoleExtension?.dimensionId,
+      candidate.sameSnapshotRoleExtension?.metricId,
+    ])
+    .filter((value): value is string => Boolean(value))
+    .flatMap((value) => normalizePlannerAdmissionText(value).split(' '))
+    .filter((value) => value.length > 2);
+  const terms = uniqueStrings([
+    ...requirementIdentityTerms(input.requirements),
+    ...inferredRoleSupportTerms,
+  ]);
   const support = input.snapshotCandidates
     .filter((candidate) => PHYSICAL_EXECUTION_KINDS.has(candidate.kind)
       && candidate.eligible !== false
@@ -4320,9 +6489,439 @@ function withExecutionSupportCandidates(input: {
       || right.relevanceScore - left.relevanceScore
       || stableCandidateId(left).localeCompare(stableCandidateId(right)))
     .slice(0, 8);
-  const critical = input.workspace.filter((candidate) => candidate.exactMatch || candidateSupportsRequiredRole(candidate, input.requirements));
-  const ordered = [...critical, ...support, ...input.workspace];
+  // Relationship cards are evidence, not join authority.  Keep only the
+  // smallest proven closure (<=3 paths / <=4 key edges), and discard explicit
+  // unsafe fanout before it reaches a planner or compiler.  The compiler still
+  // performs final cardinality/authorization validation at freeze time.
+  const requiresRelationshipClosure = input.requirements.dimensions.length > 1
+    || input.requirements.entityTerms.length > 0;
+  const relationshipClosure = requiresRelationshipClosure
+    ? input.relationshipClosure ?? boundedRelationshipClosure(
+      input.snapshotCandidates,
+      targetRelationshipPathIds(input.snapshotCandidates, input.requirements),
+    )
+    : [];
+  const permittedRelationshipIds = new Set(relationshipClosure.map(stableCandidateId));
+  const retainRelationship = (candidate: AgentEvidenceCandidate) => !requiresRelationshipClosure
+    || !isRelationshipClosureCandidate(candidate)
+    || permittedRelationshipIds.has(stableCandidateId(candidate));
+  const critical = input.workspace
+    .filter(retainRelationship)
+    .filter((candidate) => candidate.exactMatch || candidateSupportsRequiredRole(candidate, input.requirements));
+  const ordered = [...critical, ...relationshipClosure, ...support.filter(retainRelationship), ...input.workspace.filter(retainRelationship)];
   return uniqueCandidates(ordered).slice(0, 32);
+}
+
+function isRelationshipClosureCandidate(candidate: AgentEvidenceCandidate): boolean {
+  return evidenceCandidateRoles(candidate).includes('relationship')
+    && (candidate.relationshipEvidence?.length ?? 0) > 0;
+}
+
+function relationshipCandidatePathIds(candidate: AgentEvidenceCandidate): string[] {
+  return relationshipCandidateProofSelection(candidate)?.relationshipEvidence ?? [];
+}
+
+function relationshipCandidateEdgeCount(candidate: AgentEvidenceCandidate): number {
+  const provedEdges = (relationshipCandidateProofSelection(candidate)?.relationshipSafety ?? [])
+    .reduce((count, safety) => count + Math.max(1, safety.keys.length), 0);
+  return Math.max(1, provedEdges || relationshipCandidatePathIds(candidate).length);
+}
+
+function relationshipCandidateHasUnsafeFanout(candidate: AgentEvidenceCandidate): boolean {
+  return (candidate.relationshipSafety ?? []).some((safety) => /unsafe|unbounded|many[ _-]*to[ _-]*many/i.test(safety.fanout ?? ''));
+}
+
+function relationshipCandidateProofSelection(candidate: AgentEvidenceCandidate) {
+  return relationshipSafetyProofSelectionForCandidateV1(candidate);
+}
+
+function relationshipCandidateProofClass(candidate: AgentEvidenceCandidate): 'governed' | 'exploratory' | undefined {
+  return relationshipCandidateProofSelection(candidate)?.proofClass;
+}
+
+function relationshipCandidateSupportsPathId(candidate: AgentEvidenceCandidate, pathId: string): boolean {
+  const normalizedPathId = normalizePlannerAdmissionText(pathId);
+  if (!normalizedPathId) return false;
+  const selection = relationshipCandidateProofSelection(candidate);
+  if (!selection) return false;
+  return (candidate.relationshipEvidence ?? []).some((evidenceId) =>
+    normalizePlannerAdmissionText(evidenceId) === normalizedPathId)
+    || selection.relationshipEvidence.some((evidenceId) =>
+      normalizePlannerAdmissionText(evidenceId) === normalizedPathId);
+}
+
+function relationshipCandidateEndpointPairs(candidate: AgentEvidenceCandidate): Array<readonly [string, string]> {
+  return (relationshipCandidateProofSelection(candidate)?.relationshipSafety ?? [])
+    .map((safety) => [
+      normalizePlannerAdmissionText(safety.from ?? ''),
+      normalizePlannerAdmissionText(safety.to ?? ''),
+    ] as const)
+    .filter(([from, to]) => Boolean(from && to));
+}
+
+function relationshipPathCardinality(candidates: AgentEvidenceCandidate[]): {
+  pathCount: number;
+  edgeCount: number;
+} {
+  return {
+    pathCount: new Set(candidates.flatMap(relationshipCandidatePathIds)).size,
+    edgeCount: candidates.reduce((total, candidate) => total + relationshipCandidateEdgeCount(candidate), 0),
+  };
+}
+
+/**
+ * Find the smallest same-snapshot connector from a metric primary entity to a
+ * requested cross-entity output. Existing closure cards are zero-cost
+ * traversal; only newly added cards count against the bounded closure. If the
+ * endpoint graph is incomplete, return no bridge and leave the compiler to
+ * reject the incomplete path rather than inferring a relationship from names.
+ */
+function safeRelationshipBridgeCandidates(input: {
+  selected: AgentEvidenceCandidate[];
+  ordered: AgentEvidenceCandidate[];
+  primaryEntityId: string;
+  targetEntityId: string;
+}): AgentEvidenceCandidate[] | undefined {
+  const start = normalizePlannerAdmissionText(input.primaryEntityId);
+  const target = normalizePlannerAdmissionText(input.targetEntityId);
+  if (!start || !target || start === target) return [];
+  type Edge = { next: string; candidate: AgentEvidenceCandidate; selected: boolean };
+  const graph = new Map<string, Edge[]>();
+  const connect = (from: string, to: string, candidate: AgentEvidenceCandidate, selected: boolean): void => {
+    const add = (left: string, right: string) => {
+      const edges = graph.get(left) ?? [];
+      edges.push({ next: right, candidate, selected });
+      graph.set(left, edges);
+    };
+    add(from, to);
+    add(to, from);
+  };
+  const selectedIds = new Set(input.selected.map(stableCandidateId));
+  for (const candidate of input.ordered) {
+    const selected = selectedIds.has(stableCandidateId(candidate));
+    for (const [from, to] of relationshipCandidateEndpointPairs(candidate)) {
+      connect(from, to, candidate, selected);
+    }
+  }
+  if (!graph.has(start) || !graph.has(target)) return undefined;
+  type SearchState = { node: string; additions: AgentEvidenceCandidate[] };
+  const queue: SearchState[] = [{ node: start, additions: [] }];
+  const bestCost = new Map<string, number>([[start, 0]]);
+  while (queue.length > 0) {
+    queue.sort((left, right) => left.additions.length - right.additions.length
+      || left.additions.map(stableCandidateId).join('|').localeCompare(right.additions.map(stableCandidateId).join('|'))
+      || left.node.localeCompare(right.node));
+    const current = queue.shift()!;
+    if (current.node === target) return current.additions;
+    for (const edge of graph.get(current.node) ?? []) {
+      const additions = edge.selected || current.additions.some((candidate) => stableCandidateId(candidate) === stableCandidateId(edge.candidate))
+        ? current.additions
+        : [...current.additions, edge.candidate];
+      const cost = additions.length;
+      if (cost > 3) continue;
+      const priorCost = bestCost.get(edge.next);
+      if (priorCost !== undefined && priorCost <= cost) continue;
+      bestCost.set(edge.next, cost);
+      queue.push({ node: edge.next, additions });
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Present a complete safe relationship closure as one planner card. The card
+ * is a host-authored grouping of already-qualified evidence; it is never an
+ * independently inferred join and execution still hydrates the original
+ * relationship candidates from the immutable 32-card workspace.
+ */
+function plannerRelationshipPathCard(closure: AgentEvidenceCandidate[]): AgentEvidenceCandidate | undefined {
+  if (closure.length === 0) return undefined;
+  const { pathCount, edgeCount } = relationshipPathCardinality(closure);
+  const proofSelections = closure.map(relationshipCandidateProofSelection);
+  const proofClasses = proofSelections.map((selection) => selection?.proofClass);
+  if (pathCount === 0 || pathCount > 3 || edgeCount > 4
+    || closure.some(relationshipCandidateHasUnsafeFanout)
+    || proofClasses.some((proofClass) => !proofClass)) return undefined;
+  const relationshipProofClass = proofClasses.every((proofClass) => proofClass === 'governed')
+    ? 'governed' as const
+    : 'exploratory' as const;
+  // Planner context carries only the canonical edge IDs and exact matched
+  // proof subset.  Raw execution candidates remain in the immutable workspace
+  // and are revalidated by the compiler after the planner selects this card.
+  const pathIds: string[] = [];
+  const relationshipSafety = [] as NonNullable<AgentEvidenceCandidate['relationshipSafety']>;
+  const seenCanonicalPathIds = new Set<string>();
+  for (const selection of proofSelections) {
+    if (!selection) return undefined;
+    for (const safety of selection.relationshipSafety) {
+      const canonicalPathId = safety.id.trim();
+      const canonicalIdentity = canonicalPathId.toLowerCase();
+      if (!canonicalIdentity || seenCanonicalPathIds.has(canonicalIdentity)) return undefined;
+      seenCanonicalPathIds.add(canonicalIdentity);
+      pathIds.push(canonicalPathId);
+      relationshipSafety.push(safety);
+    }
+  }
+  pathIds.sort();
+  const relationshipEndpointIds = uniqueStrings(closure.flatMap((candidate) => candidate.relationshipEndpointIds ?? []));
+  const id = `dql:relationship_path:${fingerprint(pathIds.join('|')).slice(0, 24)}`;
+  return {
+    id,
+    qualifiedId: id,
+    kind: 'dql_modeling',
+    trustTier: relationshipProofClass === 'governed' ? 'governed_sql' : 'exploratory',
+    name: `${relationshipProofClass === 'governed' ? 'Safe' : 'Review-required'} relationship path (${pathIds.length} ${pathIds.length === 1 ? 'edge' : 'edges'})`,
+    aliases: [relationshipProofClass === 'governed' ? 'safe relationship path' : 'review-required relationship path'],
+    definition: relationshipProofClass === 'governed'
+      ? 'Host-owned bounded governed relationship closure. The compiler revalidates every supplied edge from the same snapshot.'
+      : 'Host-owned bounded exploratory relationship closure. It remains review-required and the compiler revalidates every supplied edge from the same snapshot.',
+    relevanceScore: Math.max(...closure.map((candidate) => candidate.relevanceScore)),
+    matchReasons: ['host-owned complete safe relationship closure'],
+    compatibility: 'compatible',
+    eligible: true,
+    relationshipEvidence: pathIds,
+    relationshipProofClass,
+    ...(relationshipEndpointIds.length ? { relationshipEndpointIds } : {}),
+    ...(relationshipSafety.length ? { relationshipSafety } : {}),
+  };
+}
+
+/**
+ * Extract only snapshot-authored relationship paths needed by the requested
+ * entity/display/categorical roles. This is an admission reservation, not a
+ * join inference: the frozen compiler still validates cardinality, fanout,
+ * authorization, and the complete execution relation graph.
+ */
+function targetRelationshipPathIds(
+  candidates: AgentEvidenceCandidate[],
+  requirements: AnalyticalRequirementSetV1,
+): Set<string> {
+  const terms = uniqueStrings([
+    ...requirements.entityTerms,
+    ...requirements.entityDisplayTerms,
+    ...categoricalTermsForRuntime(requirements),
+  ].map(normalizePlannerAdmissionText)).filter(Boolean);
+  const paths = new Set<string>();
+  for (const candidate of candidates) {
+    const capability = candidate.analyticalCapability;
+    if (!capability) continue;
+    for (const dimension of capability.dimensions) {
+      const identities = [
+        dimension.dimensionId,
+        dimension.entityId,
+        dimension.label ?? '',
+        ...(dimension.aliases ?? []),
+      ].map(normalizePlannerAdmissionText).filter(Boolean);
+      if (!terms.some((term) => identities.some((identity) =>
+        runtimeRequirementMatchesDimension(term, identity)))) continue;
+      for (const path of dimension.relationshipPathIds ?? []) {
+        if (path.trim()) paths.add(path);
+      }
+    }
+  }
+  return paths;
+}
+
+interface RelationshipClosureTargets {
+  primaryEntityId: string;
+  targetEntityIds: string[];
+}
+
+/**
+ * The metric capability supplies the only safe starting entity for a
+ * relationship closure. Use the highest-ranked qualified metric that serves
+ * the current measure, then retain only its requested cross-entity targets.
+ * This is admission evidence, not a planner-selected route or inferred join:
+ * the compiler still validates every path after the planner selects it.
+ */
+function relationshipClosureTargetsForRequirements(
+  candidates: AgentEvidenceCandidate[],
+  requirements: AnalyticalRequirementSetV1,
+): RelationshipClosureTargets | undefined {
+  const metricTerms = requirements.ranking?.metricTerms.length
+    ? requirements.ranking.metricTerms
+    : requirements.measures;
+  if (metricTerms.length === 0) return undefined;
+  const metric = candidates
+    .filter((candidate) => candidate.kind === 'semantic_metric'
+      && candidate.eligible !== false
+      && candidate.compatibility !== 'incompatible'
+      && Boolean(candidate.analyticalCapability?.primaryEntityId)
+      && metricTerms.some((term) => candidateMatchesPlannerRequirementTerm(candidate, term)))
+    .sort((left, right) => Number(Boolean(right.exactMatch)) - Number(Boolean(left.exactMatch))
+      || right.relevanceScore - left.relevanceScore
+      || stableCandidateId(left).localeCompare(stableCandidateId(right)))[0];
+  const capability = metric?.analyticalCapability;
+  if (!capability?.primaryEntityId) return undefined;
+  const terms = uniqueStrings([
+    ...requirements.entityTerms,
+    ...requirements.entityDisplayTerms,
+    ...categoricalTermsForRuntime(requirements),
+  ].map(normalizePlannerAdmissionText)).filter(Boolean);
+  const targetEntityIds = uniqueStrings(capability.dimensions
+    .filter((dimension) => {
+      const identities = [
+        dimension.dimensionId,
+        dimension.entityId,
+        dimension.label ?? '',
+        ...(dimension.aliases ?? []),
+      ].map(normalizePlannerAdmissionText).filter(Boolean);
+      return terms.some((term) => identities.some((identity) =>
+        runtimeRequirementMatchesDimension(term, identity)));
+    })
+    .map((dimension) => dimension.entityId)
+    .filter((entityId) => normalizePlannerAdmissionText(entityId) !== normalizePlannerAdmissionText(capability.primaryEntityId)));
+  return targetEntityIds.length > 0
+    ? { primaryEntityId: capability.primaryEntityId, targetEntityIds }
+    : undefined;
+}
+
+function runtimeRequirementMatchesDimension(term: string, identity: string): boolean {
+  if (!term || !identity) return false;
+  if (identity.includes(term) || term.includes(identity)) return true;
+  // Region is a business role rather than a universal physical column name.
+  // Permit the already-existing narrow geographic vocabulary only while
+  // reserving authored capability relationship paths; it never names a join
+  // or changes the selected dimension authority.
+  const geographicTerm = /^(?:region|geography|geographic)$/.test(term);
+  return geographicTerm
+    && /\b(?:region|geograph(?:y|ic)|location|country|state|province|city|territory)\b/.test(identity);
+}
+
+type BoundedRelationshipClosureReceiptV1 = {
+  /** The selected metric has one or more output entities beyond its primary entity. */
+  endpointClosureRequired: boolean;
+  /**
+   * Every requested output entity is connected to the metric primary entity
+   * by the bounded canonical-safe relationship closure.
+   */
+  endpointClosureComplete: boolean;
+  candidates: AgentEvidenceCandidate[];
+};
+
+function boundedRelationshipClosure(
+  candidates: AgentEvidenceCandidate[],
+  requiredPathIds: ReadonlySet<string> = new Set(),
+  targets?: RelationshipClosureTargets,
+): AgentEvidenceCandidate[] {
+  return boundedRelationshipClosureReceipt(candidates, requiredPathIds, targets).candidates;
+}
+
+function boundedRelationshipClosureReceipt(
+  candidates: AgentEvidenceCandidate[],
+  requiredPathIds: ReadonlySet<string> = new Set(),
+  targets?: RelationshipClosureTargets,
+): BoundedRelationshipClosureReceiptV1 {
+  const selected: AgentEvidenceCandidate[] = [];
+  const selectedPaths = new Set<string>();
+  let selectedEdges = 0;
+  const ordered = candidates
+    .filter((candidate) => candidate.eligible !== false
+      && candidate.compatibility !== 'incompatible'
+      && isRelationshipClosureCandidate(candidate)
+      && !relationshipCandidateHasUnsafeFanout(candidate)
+      // Reuse the router/compiler's exact same-snapshot relationship proof
+      // contract. A friendly relation name or a `fanout: safe` string alone
+      // cannot become an atomic planner path.
+      && relationshipCandidateProofClass(candidate) !== undefined)
+    .sort((left, right) => Number(Boolean(right.exactMatch)) - Number(Boolean(left.exactMatch))
+      || right.relevanceScore - left.relevanceScore
+      || stableCandidateId(left).localeCompare(stableCandidateId(right)));
+  const addIfBounded = (candidate: AgentEvidenceCandidate): boolean => {
+    const paths = relationshipCandidatePathIds(candidate);
+    const newPaths = paths.filter((path) => !selectedPaths.has(path));
+    const edgeCount = relationshipCandidateEdgeCount(candidate);
+    if (selected.length >= 3 || selectedPaths.size + newPaths.length > 3 || selectedEdges + edgeCount > 4) return false;
+    selected.push(candidate);
+    for (const path of paths) selectedPaths.add(path);
+    selectedEdges += edgeCount;
+    return true;
+  };
+  // First cover every authored path that connects the bound entity/display
+  // predicate to the requested output role. Relevance may fill the remaining
+  // budget only after this minimal safe closure is retained.
+  const pending = new Set(requiredPathIds);
+  while (pending.size > 0) {
+    const next = ordered
+      .filter((candidate) => !selected.includes(candidate))
+      .map((candidate) => {
+        // Capability metadata may use an approved alias while the planner
+        // card serializes the safety proof's canonical ID.  Match required
+        // paths against the raw same-snapshot aliases, but count/cardinality
+        // only from the canonical proof selection above.
+        const coveredPaths = [...pending].filter((path) => relationshipCandidateSupportsPathId(candidate, path));
+        return { candidate, coveredPaths, coverage: coveredPaths.length };
+      })
+      .filter((entry) => entry.coverage > 0)
+      .sort((left, right) => right.coverage - left.coverage
+        || Number(Boolean(right.candidate.exactMatch)) - Number(Boolean(left.candidate.exactMatch))
+        || right.candidate.relevanceScore - left.candidate.relevanceScore
+        || stableCandidateId(left.candidate).localeCompare(stableCandidateId(right.candidate)))[0];
+    if (!next || !addIfBounded(next.candidate)) break;
+    for (const path of next.coveredPaths) pending.delete(path);
+  }
+  // A role-targeted endpoint graph takes precedence over generic relationship
+  // relevance.  When the metric starts at order items and the Ask needs a
+  // bound customer plus a location, the missing order-items -> order bridge is
+  // structural proof, not a lower-ranked optional card.  Conversely, do not
+  // fill an incomplete endpoint closure with an unrelated high-relevance path:
+  // that would recreate the old role-cap split under a different ordering.
+  const canUseEndpointProof = Boolean(
+    targets && ordered.some((candidate) => relationshipCandidateEndpointPairs(candidate).length > 0),
+  );
+  // A target requirement is incomplete until canonical endpoint proof shows
+  // every target is reachable from the metric primary entity.  In particular,
+  // a candidate-local customer -> location edge cannot prove an orders ->
+  // customer -> location analytical route just because the local endpoints
+  // happen to connect to each other.
+  const endpointClosureRequired = Boolean(targets);
+  let endpointClosureComplete = !endpointClosureRequired;
+  if (targets && canUseEndpointProof) {
+    for (const targetEntityId of [...new Set(targets.targetEntityIds)].sort()) {
+      const bridge = safeRelationshipBridgeCandidates({
+        selected,
+        ordered,
+        primaryEntityId: targets.primaryEntityId,
+        targetEntityId,
+      });
+      if (!bridge) {
+        endpointClosureComplete = false;
+        continue;
+      }
+      for (const candidate of bridge) {
+        if (selected.includes(candidate)) continue;
+        if (!addIfBounded(candidate)) {
+          endpointClosureComplete = false;
+          break;
+        }
+      }
+    }
+    endpointClosureComplete = targets.targetEntityIds.every((targetEntityId) => {
+      const bridge = safeRelationshipBridgeCandidates({
+        selected,
+        ordered,
+        primaryEntityId: targets.primaryEntityId,
+        targetEntityId,
+      });
+      return bridge !== undefined && bridge.length === 0;
+    });
+  }
+  // Preserve the conservative relevance fallback only when there are no
+  // endpoint requirements, or after the requested endpoint closure is
+  // already complete. An endpoint requirement without canonical endpoint
+  // proof is incomplete, not an invitation to fill the path with a
+  // relevance-ranked relationship card.
+  if (endpointClosureComplete) {
+    for (const candidate of ordered) {
+      if (selected.includes(candidate)) continue;
+      addIfBounded(candidate);
+    }
+  }
+  return {
+    candidates: selected,
+    endpointClosureRequired,
+    endpointClosureComplete,
+  };
 }
 
 function ensureWorkspaceCandidatePresence(input: {
@@ -4509,9 +7108,22 @@ function buildProgram(
     targetedContext?: TargetedContextResultV1;
   } = {},
 ): AnalyticalProgramV2 {
-  const selectedCandidateIds = options.resolution?.selectedConceptIds?.length
+  // Build task receipts before candidate selection. A verifier-approved task
+  // is the authoritative typed handoff, while a MeaningResolution is a
+  // compatibility carrier that may have a narrower selectedConceptIds list.
+  // Unioning the already-verified task bindings prevents a selected inferred
+  // output or complete relationship path from vanishing before cascade.
+  const fallbackSelectedCandidateIds = options.resolution?.selectedConceptIds?.length
     ? options.resolution.selectedConceptIds
     : stableCandidateIds(admitted);
+  let plannerTasks = options.verifiedPlannerTasks
+    ?? normalizePlannerTasks(options.plannerProposal, admitted.filter((candidate) =>
+      fallbackSelectedCandidateIds.includes(candidate.id) || fallbackSelectedCandidateIds.includes(stableCandidateId(candidate))), mission.tasks);
+  plannerTasks = materializeVerifiedPlannerTaskHandoff({ tasks: plannerTasks, admitted });
+  const selectedCandidateIds = uniqueStableIds([
+    ...fallbackSelectedCandidateIds,
+    ...plannerTaskSelectionIds(plannerTasks),
+  ]);
   // A normal planner selection is bounded by its 16-card package. A single
   // verifier-directed recovery can retain those original selections and add
   // up to four cards, so the frozen meaning tuple may contain at most 20
@@ -4526,6 +7138,29 @@ function buildProgram(
   const executionCandidateIds = stableCandidateIds(snapshotCandidates).slice(0, 32);
   const roles = new Set<EvidenceCandidateRoleV1>(requiredRoles(frame.requirements));
   const selectedCandidates = admitted.filter((candidate) => candidateIds.includes(candidate.id) || candidateIds.includes(stableCandidateId(candidate)));
+  const boundRelationshipIds = uniqueStableIds(plannerTasks
+    .flatMap((task) => task.roleBindings.relationship ?? []));
+  const selectedRelationshipCandidates = uniqueCandidates([
+    ...admitted,
+    ...snapshotCandidates,
+  ].filter((candidate) => {
+    if (!evidenceCandidateRoles(candidate).includes('relationship')) return false;
+    const selectedByConcept = candidateIds.includes(candidate.id)
+      || candidateIds.includes(stableCandidateId(candidate));
+    const selectedByRelationshipBinding = boundRelationshipIds.some((id) =>
+      candidateMatchesStableIdentity(candidate, id)
+      || relationshipCandidateSupportsPathId(candidate, id));
+    return selectedByConcept || selectedByRelationshipBinding;
+  }));
+  // A compact relationship-path card is the authoritative planner unit for a
+  // complete bounded closure. Its canonical proof IDs must survive into the
+  // frozen program even when a raw relationship card retained in the broader
+  // workspace uses only a legacy alias. This is receipt completeness, not a
+  // new join authority: the path card exists only after canonical proof
+  // validation and the compiler revalidates its hydrated raw edges.
+  const relationshipRequirements = uniqueStableIds([
+    ...selectedRelationshipCandidates.flatMap((candidate) => relationshipCandidatePathIds(candidate)),
+  ]).sort();
   const plannerOperations = new Set(inputPlannerOperations(options.plannerProposal));
   for (const candidate of selectedCandidates) {
     for (const role of evidenceCandidateRoles(candidate)) roles.add(role);
@@ -4547,14 +7182,14 @@ function buildProgram(
       value: filter.value,
     })),
     fiscalPeriod: frame.requirements.time?.fiscalPeriod,
-    relationships: snapshotCandidates.flatMap((candidate) => candidate.relationshipEvidence ?? []),
+    relationships: relationshipRequirements,
     // Identity, capability, policy, and compiler choice remain deterministic,
     // but the accepted planner interpretation is part of the immutable
     // program. A different operation/role binding/assumption must not reuse
     // the old frozen program fingerprint.
     planner: {
       mode: options.planningMode ?? frame.planningMode,
-      tasks: (options.verifiedPlannerTasks ?? normalizePlannerTasks(options.plannerProposal, selectedCandidates, mission.tasks)).map((task) => ({
+      tasks: plannerTasks.map((task) => ({
         taskId: task.taskId,
         ...(task.coveredTaskIds ? { coveredTaskIds: [...task.coveredTaskIds].sort() } : {}),
         selectedConceptIds: [...task.selectedConceptIds].sort(),
@@ -4608,7 +7243,7 @@ function buildProgram(
       kind: frame.kind === 'comparison' || plannerOperations.has('compare') ? 'segment' : 'none',
       terms: frame.kind === 'comparison' || plannerOperations.has('compare') ? [...frame.requirements.dimensions] : [],
     },
-    relationshipRequirements: [...new Set(snapshotCandidates.flatMap((candidate) => candidate.relationshipEvidence ?? []))].sort(),
+    relationshipRequirements,
     outputs: {
       measures: [...frame.requirements.measures],
       dimensions: [...frame.requirements.dimensions],
@@ -4624,7 +7259,7 @@ function buildProgram(
     },
     planner: {
       version: 1,
-      tasks: options.verifiedPlannerTasks ?? normalizePlannerTasks(options.plannerProposal, selectedCandidates, mission.tasks),
+      tasks: plannerTasks,
       ...(options.plannerProposal?.confidence ? { confidence: options.plannerProposal.confidence } : {}),
       missingInformation: [...new Set(options.plannerProposal?.missingInformation ?? [])].slice(0, 8),
     },
@@ -4666,6 +7301,122 @@ function normalizePlannerTasks(
   }));
 }
 
+/**
+ * A verified task carries the complete typed program tuple. Keep every task
+ * selection and role binding in one deterministic list so callers do not
+ * accidentally treat MeaningResolution.selectedConceptIds as a second, less
+ * complete source of truth.
+ */
+function plannerTaskSelectionIds(tasks: AnalyticalProgramV2['planner']['tasks']): string[] {
+  return uniqueStableIds(tasks.flatMap((task) => [
+    ...task.selectedConceptIds,
+    ...Object.values(task.roleBindings).flatMap((ids) => ids ?? []),
+  ]));
+}
+
+function canonicalPlannerCandidateId(
+  identity: string,
+  candidates: readonly AgentEvidenceCandidate[],
+): string {
+  const matches = candidates.filter((candidate) => candidateMatchesStableIdentity(candidate, identity));
+  // A planner task already passed identity verification. Retain an unknown
+  // value rather than guessing between aliases; the normal validator will
+  // reject it if it is not a supplied stable identity.
+  return matches.length === 1 ? stableCandidateId(matches[0]!) : identity;
+}
+
+/**
+ * Planner cards deliberately expose snapshot-stable/qualified IDs, while the
+ * legacy MeaningResolution validator keys its authority map by candidate.id.
+ * Keep that representation boundary explicit: immutable planner programs may
+ * retain the qualified card identity, but the resolution that flows through
+ * the verifier/compiler must use the one admitted candidate's authoritative
+ * ID.  This is an identity conversion only; ambiguous aliases remain
+ * unchanged and are rejected by the normal validator.
+ */
+function resolvedPlannerCandidateAuthorityId(
+  identity: string,
+  candidates: readonly AgentEvidenceCandidate[],
+): string {
+  const matches = candidates.filter((candidate) => candidateMatchesStableIdentity(candidate, identity));
+  return matches.length === 1 ? matches[0]!.id : identity;
+}
+
+function normalizedRelationshipPathId(value: string): string {
+  return normalizePlannerAdmissionText(value);
+}
+
+/**
+ * Translate a verifier-approved set of individual canonical edge IDs into
+ * the one host-owned relationship-path card only when it contains *all* of
+ * that card's canonical proof edges. The raw edges remain execution context;
+ * this prevents an incomplete or unrelated edge from being smuggled into the
+ * frozen planner program.
+ */
+function materializeVerifiedPlannerTaskHandoff(input: {
+  tasks: AnalyticalProgramV2['planner']['tasks'];
+  admitted: readonly AgentEvidenceCandidate[];
+}): AnalyticalProgramV2['planner']['tasks'] {
+  const pathCards = input.admitted.filter((candidate) =>
+    candidate.id.startsWith('dql:relationship_path:')
+    && relationshipCandidatePathIds(candidate).length > 0);
+  return input.tasks.map((task) => {
+    const roleBindings = Object.fromEntries(Object.entries(task.roleBindings).map(([role, ids]) => [
+      role,
+      uniqueStableIds((ids ?? []).map((id) => canonicalPlannerCandidateId(id, input.admitted))),
+    ])) as Partial<Record<EvidenceCandidateRoleV1, string[]>>;
+    const relationshipBindings = roleBindings.relationship ?? [];
+    const selectedPathCards = pathCards.filter((path) => {
+      if (relationshipBindings.some((id) => candidateMatchesStableIdentity(path, id))) return true;
+      const canonicalEdges = relationshipCandidatePathIds(path);
+      return canonicalEdges.length > 0
+        && canonicalEdges.every((edge) => relationshipBindings.some((id) =>
+          normalizedRelationshipPathId(id) === normalizedRelationshipPathId(edge)));
+    });
+    if (selectedPathCards.length > 0) {
+      const coveredEdgeIds = new Set(selectedPathCards
+        .flatMap((path) => relationshipCandidatePathIds(path))
+        .map(normalizedRelationshipPathId));
+      roleBindings.relationship = uniqueStableIds([
+        ...relationshipBindings.filter((id) => !coveredEdgeIds.has(normalizedRelationshipPathId(id))),
+        ...selectedPathCards.map(stableCandidateId),
+      ]);
+    }
+    const selectedConceptIds = uniqueStableIds([
+      ...task.selectedConceptIds.map((id) => canonicalPlannerCandidateId(id, input.admitted))
+        .filter((id) => !selectedPathCards.some((path) =>
+          relationshipCandidatePathIds(path).some((edge) =>
+            normalizedRelationshipPathId(edge) === normalizedRelationshipPathId(id)))),
+      ...Object.values(roleBindings).flatMap((ids) => ids ?? []),
+    ]);
+    return {
+      ...task,
+      selectedConceptIds,
+      roleBindings,
+    };
+  });
+}
+
+/**
+ * The compatibility meaning carrier is allowed to be narrower than the
+ * planner task; the frozen compiler program is not. This identity-only union
+ * is applied after task verification and again after legacy frame binding.
+ */
+function materializeVerifiedPlannerResolution(input: {
+  resolution: MeaningResolution;
+  tasks: AnalyticalProgramV2['planner']['tasks'];
+  admitted: readonly AgentEvidenceCandidate[];
+}): MeaningResolution {
+  const selectedConceptIds = uniqueStableIds([
+    ...input.resolution.selectedConceptIds.map((id) => resolvedPlannerCandidateAuthorityId(id, input.admitted)),
+    ...plannerTaskSelectionIds(input.tasks).map((id) => resolvedPlannerCandidateAuthorityId(id, input.admitted)),
+  ]);
+  return selectedConceptIds.length === input.resolution.selectedConceptIds.length
+    && selectedConceptIds.every((id, index) => id === input.resolution.selectedConceptIds[index])
+    ? input.resolution
+    : { ...input.resolution, selectedConceptIds };
+}
+
 function requiredRoles(requirements: AnalyticalRequirementSetV1): EvidenceCandidateRoleV1[] {
   const roles = new Set<EvidenceCandidateRoleV1>();
   if (requirements.measures.length || requirements.ranking?.metricTerms.length) roles.add('metric');
@@ -4673,12 +7424,30 @@ function requiredRoles(requirements: AnalyticalRequirementSetV1): EvidenceCandid
   if (requirements.entityDisplayTerms.length) roles.add('entity_label');
   if (requirements.dimensions.length) roles.add('categorical_dimension');
   if (requirements.time) roles.add('time_dimension');
-  if (requirements.memberTerms.length) roles.add('member');
+  // A prior-result member is already an immutable host predicate. Requiring a
+  // separate member card would make a safe browser-selected follow-up fail
+  // before the planner could choose its customer/location path.
+  if (requirements.memberTerms.length && !requirements.priorResultMemberBinding) roles.add('member');
   if (requirements.dimensions.length > 1 || requirements.entityTerms.length) roles.add('relationship');
   return [...roles];
 }
 
-function resolvedPlanFromDecision(programId: string, decision: IntentDecision): ResolvedAnalyticalPlanV2 | undefined {
+function hasSelectedInferredRoleSubstitution(
+  resolution: MeaningResolution,
+  candidates: AgentEvidenceCandidate[],
+): boolean {
+  const selected = new Set(resolution.selectedConceptIds);
+  return candidates.some((candidate) =>
+    (selected.has(candidate.id) || selected.has(stableCandidateId(candidate)))
+    && (candidate.sameSnapshotRoleExtension?.basis === 'sole_metricflow_grouping_dimension'
+      || candidateUnresolvedRoleAdmissions(candidate).length > 0));
+}
+
+function resolvedPlanFromDecision(
+  programId: string,
+  decision: IntentDecision,
+  options: { reviewRequired?: boolean } = {},
+): ResolvedAnalyticalPlanV2 | undefined {
   const plan = decision.resolvedAnalyticalPlan;
   const cascade = decision.analyticalCascadeDecision;
   const capability = plan?.capability;
@@ -4695,7 +7464,10 @@ function resolvedPlanFromDecision(programId: string, decision: IntentDecision): 
     compiler,
     ...(selectedTier ? { selectedTier } : {}),
     planFrozen: cascade?.planFrozen ?? plan?.capability !== 'blocked',
-    reviewRequired: compiler === 'exploratory_sql',
+    // A host-proven sole MetricFlow grouping substitution is safe enough to
+    // execute, but it is still an inferred business mapping. Preserve its
+    // visible review boundary even when the resulting compiler is semantic.
+    reviewRequired: compiler === 'exploratory_sql' || options.reviewRequired === true,
     ...(plan?.fingerprint ? { planFingerprint: plan.fingerprint } : {}),
   };
 }

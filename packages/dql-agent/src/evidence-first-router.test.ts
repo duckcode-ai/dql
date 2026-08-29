@@ -1904,6 +1904,119 @@ describe("AGT-009/AGT-010 evidence-first hybrid routing", () => {
     });
   });
 
+  it('AGT-034 admits only the exact current MetricFlow grouping from targeted clarification cards', async () => {
+    const revenue = jaffleMetric(
+      'semantic:metric:order_items.revenue',
+      'order_items.revenue',
+      ['revenue'],
+      true,
+    );
+    const productDimensionId = 'semantic:dimension:order_items.product_type';
+    const productCategoryDimensionId = 'semantic:dimension:order_items.product_category';
+    revenue.analyticalCapability = {
+      ...revenue.analyticalCapability!,
+      dimensions: [{
+        dimensionId: productDimensionId,
+        entityId: 'order_item',
+        label: 'Product Type',
+        aliases: ['product category'],
+        // The field exists in this capability but is not a MetricFlow
+        // grouping. Matching extension/metric strings alone must not admit it.
+        supportedRoles: ['filter'],
+      }, {
+        dimensionId: productCategoryDimensionId,
+        entityId: 'order_item',
+        label: 'Product Category',
+        aliases: ['product category'],
+        supportedRoles: ['group_by'],
+        nativeGroupingReference: 'order_item__product_category',
+        nativeGroupingPath: ['order_item'],
+      }],
+    };
+    const nonGroupable = candidate({
+      id: 'semantic:extension:non_groupable_product_type',
+      qualifiedId: productDimensionId,
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      trustTier: 'semantic',
+      name: 'Product Type',
+      aliases: ['product category'],
+      relevanceScore: 0.9,
+      sameSnapshotRoleExtension: {
+        version: 1,
+        role: 'categorical_dimension',
+        requestedTerm: 'product category',
+        metricId: revenue.id,
+        dimensionId: productDimensionId,
+        basis: 'exact_metricflow_grouping_dimension',
+      },
+    });
+    const mismatched = candidate({
+      id: 'semantic:extension:mismatched_product_type',
+      qualifiedId: 'semantic:dimension:other.product_type',
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      trustTier: 'semantic',
+      name: 'Other Product Type',
+      aliases: ['product category'],
+      relevanceScore: 0.89,
+      sameSnapshotRoleExtension: {
+        version: 1,
+        role: 'categorical_dimension',
+        requestedTerm: 'product category',
+        metricId: revenue.id,
+        dimensionId: 'semantic:dimension:other.product_type',
+        basis: 'exact_metricflow_grouping_dimension',
+      },
+    });
+    const exactGrouping = candidate({
+      id: 'semantic:extension:exact_product_category',
+      qualifiedId: productCategoryDimensionId,
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      trustTier: 'semantic',
+      name: 'Product Category',
+      aliases: ['product category'],
+      relevanceScore: 0.88,
+      sameSnapshotRoleExtension: {
+        version: 1,
+        role: 'categorical_dimension',
+        requestedTerm: 'product category',
+        metricId: revenue.id,
+        dimensionId: productCategoryDimensionId,
+        basis: 'exact_metricflow_grouping_dimension',
+      },
+    });
+    const resolveMeaning = vi.fn(async () => resolved({
+      selectedConceptIds: [],
+      recommendedExecutionId: undefined,
+      queryIntent: { measures: [], dimensions: [], filters: [] },
+      confidence: 'low',
+      missingInformation: ['Product category is not groupable for revenue.'],
+      recommendedRoute: 'clarify',
+      emptyCandidateBinding: true,
+    }));
+    const router = createHybridRouter({
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot-targeted-extension-proof',
+        sourceFingerprint: 'sha256:targeted-extension-proof',
+        parsedIntent: { measures: ['revenue'], dimensions: ['product category'], filters: [] },
+        candidates: [revenue],
+        clarificationCandidates: [nonGroupable, mismatched, exactGrouping],
+      }),
+    });
+
+    await router.decide(request('Show revenue by product category'));
+
+    expect(resolveMeaning).toHaveBeenCalledTimes(1);
+    const packageIds = resolveMeaning.mock.calls[0]?.[0].candidates.map((candidate) => candidate.id) ?? [];
+    expect(packageIds).toContain(revenue.id);
+    expect(packageIds).toContain(exactGrouping.id);
+    expect(packageIds).not.toContain(nonGroupable.id);
+    expect(packageIds).not.toContain(mismatched.id);
+  });
+
   it('AGT-034 keeps a new customer/product-category question self-contained and freezes complete semantic roles', async () => {
     const revenue = jaffleMetric(
       'semantic:metric:orders.revenue',

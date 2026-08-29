@@ -150,6 +150,13 @@ export type AgentTurn =
 export interface ProviderDispatchTerminalEvidence {
   providerEgressReceipts: ProviderEgressReceiptV1[];
   providerRoundTrips: number;
+  /**
+   * When set, the host captured the complete request-scoped egress ledger.
+   * Its receipt count is the sole authority for provider round trips; readiness
+   * checks and other non-dispatch trace spans must never inflate that count.
+   * Omitted evidence remains readable for direct executor/test compatibility.
+   */
+  authoritativeProviderRoundTrips?: boolean;
   toolCalls: number;
   sqlExecutions: number;
   repairs: number;

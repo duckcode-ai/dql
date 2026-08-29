@@ -200,6 +200,47 @@ describe('shared semantic runtime selector', () => {
     expect(result).toMatchObject({ engine: 'metricflow-cli', sql: 'SELECT revenue_ratio FROM metricflow_compiled' });
   });
 
+  it('AGT-005/API-007 sends the frozen qualified group-by identity to MetricFlow order-by', async () => {
+    mkdirSync(join(root, 'target'), { recursive: true });
+    writeFileSync(join(root, 'target', 'semantic_manifest.json'), '{}');
+    const bin = join(root, 'mf');
+    const argsPath = join(root, 'mf-args.txt');
+    writeFileSync(bin, [
+      '#!/bin/sh',
+      'if [ "$1" = "--version" ]; then printf "%s\\n" "0.13.0"; exit 0; fi',
+      `printf "%s\\n" "$*" > '${argsPath.replace(/'/g, "'\\''")}'`,
+      'printf "%s\\n" "SELECT customer_name, total_bcm FROM metricflow_compiled"',
+    ].join('\n'));
+    chmodSync(bin, 0o755);
+    process.env.DQL_METRICFLOW_BIN = bin;
+    const frozenGrouping = 'order_id__customer__customer_name';
+    const semanticLayer = new SemanticLayer({
+      metrics: [{ name: 'total_bcm', label: 'Total BCM', description: '', domain: 'bcm', sql: 'SUM(bcm_amount)', type: 'sum', table: 'bcm_hdr', cube: 'bcm_hdr' }],
+      dimensions: [{ name: 'customer_name', label: 'Customer', description: '', sql: 'customer_name', type: 'string', table: 'bcm_hdr', cube: 'bcm_hdr', qualifiedName: frozenGrouping, entityLink: 'customer' }],
+    });
+
+    const result = await compileSemanticRuntimeQuery({
+      metrics: ['total_bcm'],
+      dimensions: [frozenGrouping],
+      orderBy: [{ name: 'customer_name', direction: 'desc' }],
+      engine: 'metricflow-cli',
+    }, {
+      projectRoot: root,
+      projectConfig: { dbt: { projectDir: '.' } },
+      detectedProvider: 'dbt',
+      semanticLayer,
+    });
+
+    expect(result?.runtimeRequest).toMatchObject({
+      dimensions: [frozenGrouping],
+      orderBy: [{ name: frozenGrouping, direction: 'desc' }],
+    });
+    const args = readFileSync(argsPath, 'utf8');
+    expect(args).toContain(`--group-by ${frozenGrouping}`);
+    expect(args).toContain(`--order -${frozenGrouping}`);
+    expect(args).not.toContain('--order -customer_name');
+  });
+
   it('API-007 preserves a selected runtime compiler failure as a stable error', async () => {
     mkdirSync(join(root, 'target'), { recursive: true });
     writeFileSync(join(root, 'target', 'semantic_manifest.json'), '{}');
@@ -359,6 +400,30 @@ describe('qualifyForMetricFlow (Phase 3 boundary)', () => {
     }, bcmLayer());
     expect(request.dimensions).toEqual(['bcm_hdr__customer_name']);
     expect(request.orderBy?.[0]?.name).toBe('bcm_hdr__customer_name');
+  });
+
+  it('AGT-005/API-007 keeps a bare MetricFlow order-by bound to the frozen qualified group-by', async () => {
+    const { qualifyForMetricFlow } = await import('./semantic-runtime.js');
+    // This mirrors the built-CLI failure: the router had already frozen the
+    // complete relationship identity, while the planner retained the readable
+    // leaf name for ranking. MetricFlow 0.13 requires the exact selected
+    // group-by member in order_by.
+    const frozenGrouping = 'order_id__customer__customer_name';
+    const { request, bindings } = qualifyForMetricFlow({
+      metrics: ['total_bcm'],
+      dimensions: [frozenGrouping],
+      orderBy: [{ name: 'customer_name', direction: 'desc' }],
+    }, bcmLayer());
+
+    expect(request.dimensions).toEqual([frozenGrouping]);
+    expect(request.orderBy).toEqual([{ name: frozenGrouping, direction: 'desc' }]);
+    expect(bindings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: 'order_by',
+        authoringReference: 'customer_name',
+        runtimeReference: frozenGrouping,
+      }),
+    ]));
   });
 
   it('passes through unresolvable names and metric_time untouched', async () => {

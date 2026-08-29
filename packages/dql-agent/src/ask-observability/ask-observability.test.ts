@@ -83,6 +83,27 @@ describe('AskTraceSqliteStoreV1 and observer', () => {
     expect(() => assertSafeTraceValue({ kind: 'stage', sql: 'SELECT customer_email FROM customers' })).toThrow('ASK_TRACE_UNSAFE_PAYLOAD');
   });
 
+  it('accepts a content-safe lineage Research payload without graph paths or target text', () => {
+    expect(() => assertSafeTraceValue({
+      kind: 'research',
+      branchId: 'h1',
+      hypothesisFingerprint: 'sha256:lineage-hypothesis',
+      evidenceKind: 'lineage_graph',
+      verdict: 'inconclusive',
+      lineageStatus: 'completed',
+      lineageResolution: 'exact_name',
+      upstreamNodeCount: 2,
+      downstreamNodeCount: 1,
+      upstreamRouteCount: 1,
+      downstreamRouteCount: 1,
+      lineageMaxDepth: 6,
+      lineageMaxRoutes: 12,
+      lineageMaxNodes: 96,
+      lineageMaxEdges: 160,
+      lineageTruncated: false,
+    })).not.toThrow();
+  });
+
   it('returns an explicit no-op observer when local storage cannot initialize', () => {
     const { store } = fixtureStore();
     const observer = createAskTraceObserverV1({ store, runId: 'run-unavailable', surface: 'cli', mode: 'ask', questionFingerprint: 'sha256:unavailable' });
@@ -1145,6 +1166,115 @@ describe('Ask trace portable bundles', () => {
       safeNextAction: 'inspect_failure',
     });
     expect((runtimeV6 as Record<string, unknown>).origin).toEqual({ boundary: 'provider', origin: 'provider', impact: 'answer_not_produced' });
+  });
+
+  it('AGT-049 preserves ordinary-role ambiguity and alternatives through V6/V7 trace receipts', () => {
+    const { store, observer } = memoryObserver({ runId: 'run-ordinary-role-ambiguity' });
+    observer.finalize({ status: 'completed', terminalOutcome: 'needs_clarification' });
+    const trace = store.getByRun('run-ordinary-role-ambiguity')!;
+    const receipt = {
+      runId: 'run-ordinary-role-ambiguity',
+      finalStopReason: 'ordinary_role_inference_ambiguous',
+      planning: {
+        version: 1,
+        mode: 'deterministic_binding',
+        plannerCalls: 0,
+        revisionCalls: 0,
+        verification: {
+          version: 1,
+          status: 'ambiguous',
+          missingRoles: ['categorical_dimension'],
+          candidateIds: ['semantic:dimension:location_name', 'semantic:dimension:country_name'],
+          reasonCode: 'ordinary_role_inference_ambiguous',
+        },
+      },
+      roleCoverage: [{ role: 'categorical_dimension', candidateCount: 2, state: 'alternatives' }],
+      cascade: { attempts: [], planFrozen: false },
+      connection: { attempted: false },
+      execution: { attempts: 0 },
+      facts: { factCount: 0 },
+      safeNextAction: 'inspect_failure',
+      story: [
+        { stage: 'retrieval', status: 'completed', reasonCode: 'snapshot_acquired' },
+        { stage: 'role_coverage', status: 'completed', reasonCode: 'ordinary_role_inference_ambiguous' },
+        { stage: 'planner', status: 'skipped', reasonCode: 'ordinary_role_inference_ambiguous' },
+        { stage: 'verification', status: 'blocked', reasonCode: 'ordinary_role_inference_ambiguous' },
+      ],
+    };
+    const bundle = createAskTracePortableBundleV1(trace, {
+      profile: 'strict',
+      provenance: 'recorded',
+      runReceipt: {
+        id: 'run-ordinary-role-ambiguity',
+        diagnosticReceiptV6: { version: 6, ...receipt },
+        diagnosticReceiptV7: {
+          version: 7,
+          ...receipt,
+          inspector: {
+            understood: { questionKind: 'breakdown', conversationBinding: 'prior_result', measureCount: 1, dimensionCount: 1, entityRequested: true, hasBoundFilter: true },
+            evidence: { admittedCandidateCount: 2, roleCount: 1, recoveryAttempted: false },
+            planning: { mode: 'deterministic_binding', plannerCalls: 0, verification: 'ambiguous' },
+            route: { tierAttemptCount: 0, planFrozen: false, reviewRequired: false },
+            outcome: { connectionAttempted: false, executionAttempts: 0, factCount: 0, narration: 'not_applicable' },
+          },
+        },
+      },
+    });
+    const v6 = bundle.runReceipt.runtimeReceiptV6 as {
+      planning?: { verification?: { reasonCode?: string } };
+      roleCoverage?: Array<{ role: string; candidateCount: number; state?: string }>;
+      story?: Array<{ reasonCode?: string }>;
+    };
+    const v7 = bundle.runReceipt.runtimeReceiptV7 as typeof v6;
+    expect(v6.planning?.verification?.reasonCode).toBe('ordinary_role_inference_ambiguous');
+    expect(v6.roleCoverage).toEqual([{ role: 'categorical_dimension', candidateCount: 2, state: 'alternatives' }]);
+    expect(v6.story?.some((step) => step.reasonCode === 'ordinary_role_inference_ambiguous')).toBe(true);
+    // V7 inherits the V6 decision evidence before adding its concise inspector.
+    expect(v7.planning?.verification?.reasonCode).toBe('ordinary_role_inference_ambiguous');
+    expect(v7.roleCoverage).toEqual([{ role: 'categorical_dimension', candidateCount: 2, state: 'alternatives' }]);
+  });
+
+  it('OBS-017 strictly allowlists the V7 concise inspector', () => {
+    const { store, observer } = memoryObserver({ runId: 'run-v7-allowlist' });
+    observer.finalize({ status: 'completed', trustState: 'governed', selectedTier: 'semantic' });
+    const trace = store.getByRun('run-v7-allowlist')!;
+    const privateValue = 'sk_v7_member_abcdefghijklmnop';
+    const bundle = createAskTracePortableBundleV1(trace, {
+      profile: 'strict',
+      provenance: 'recorded',
+      runReceipt: {
+        id: 'run-v7-allowlist',
+        diagnosticReceiptV7: {
+          version: 7,
+          runId: 'run-v7-allowlist',
+          finalStopReason: 'governed_semantic_answer',
+          roleCoverage: [],
+          cascade: { attempts: [], selectedTier: 'semantic', planFrozen: true },
+          connection: { attempted: true },
+          execution: { attempts: 1 },
+          facts: { factCount: 1 },
+          safeNextAction: 'none',
+          story: [],
+          inspector: {
+            understood: { questionKind: 'lookup', conversationBinding: 'prior_result', measureCount: 0, dimensionCount: 1, entityRequested: true, hasBoundFilter: true, rawMember: privateValue },
+            evidence: { admittedCandidateCount: 3, roleCount: 2, recoveryAttempted: false, rawMember: privateValue },
+            planning: { mode: 'deterministic_binding', plannerCalls: 0, verification: 'valid', rawMember: privateValue },
+            route: { selectedTier: 'semantic', tierAttemptCount: 2, planFrozen: true, reviewRequired: false, rawMember: privateValue },
+            outcome: { connectionAttempted: true, executionAttempts: 1, factCount: 1, narration: 'fact_bound', rawMember: privateValue },
+          },
+        },
+      },
+    });
+
+    expect(JSON.stringify(bundle)).not.toContain(privateValue);
+    expect(bundle.runReceipt.runtimeReceiptV7).toMatchObject({
+      version: 7,
+      inspector: {
+        understood: { questionKind: 'lookup', conversationBinding: 'prior_result', hasBoundFilter: true },
+        route: { selectedTier: 'semantic', planFrozen: true },
+        outcome: { narration: 'fact_bound', factCount: 1 },
+      },
+    });
   });
 
   it('requires confirmation and scans support-provided reviewed prose before export', () => {

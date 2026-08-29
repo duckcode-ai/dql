@@ -11,6 +11,7 @@ import {
   buildCoverageGap,
   buildResearchEvidenceLedger,
   buildResearchEvidenceLedgerV2,
+  buildResearchEvidenceLedgerV3,
   buildResearchHypothesisPlanV2,
   canonicalResultBindingValue,
   canonicalResultRowFingerprint,
@@ -67,6 +68,20 @@ describe('conversational analytical orchestration contracts', () => {
     expect(requirements.measures).toEqual(['revenue']);
     expect(requirements.dimensions).toEqual(['region']);
     expect(requirements.dimensions).not.toContain('sales based on the region');
+  });
+
+  it('AGT-034 removes only an exact measure-as-dimension duplicate', () => {
+    const requirements = buildAnalyticalRequirementSet({
+      question: 'Show revenue by region',
+      parsedIntent: {
+        measures: ['revenue'],
+        // This is the failure shape from an over-broad retrieval/parser
+        // package: the explicit measure appears in both role lanes.
+        dimensions: ['revenue', 'region'],
+      },
+    });
+    expect(requirements.measures).toEqual(['revenue']);
+    expect(requirements.dimensions).toEqual(['region']);
   });
 
   it('AGT-034 preserves the customer, revenue, product-category, and default-top-ten tuple', () => {
@@ -277,6 +292,86 @@ describe('conversational analytical orchestration contracts', () => {
     })).toEqual(['metric', 'entity_label']);
   });
 
+  it('AGT-049 keeps authored time dimensions out of ordinary categorical/geographic inference', () => {
+    const semanticTime = {
+      id: 'semantic:dimension:locations.opened_date',
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      name: 'Opened Date',
+      dataType: 'time',
+      timeGrains: ['day'],
+    } as const;
+    const physicalTimestamp = {
+      id: 'runtime:column:locations.opened_at',
+      kind: 'sql_column',
+      name: 'Opened At',
+      dataType: 'timestamp_ntz',
+      // A stale index role must not overturn the authoritative physical type.
+      compatibilityFacts: ['roles categorical dimension'],
+    } as const;
+    const legacyDate = {
+      id: 'semantic:dimension:locations.opened_date',
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      name: 'Opened Date',
+      // Legacy index cards have no type, so the safe date-name fallback must
+      // still dominate a contradictory authored categorical declaration.
+      compatibilityFacts: ['roles categorical dimension'],
+    } as const;
+    const location = {
+      id: 'semantic:dimension:locations.location_name',
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      name: 'Location Name',
+      dataType: 'varchar',
+    } as const;
+    // Model/metric-wide supported grains can be inherited by ordinary cards
+    // in older snapshots. They are not evidence that Customer/Owner/Sentiment
+    // themselves are temporal fields.
+    const customerEntity = {
+      id: 'semantic:entity:customers.customer',
+      kind: 'semantic_member',
+      semanticObjectType: 'entity',
+      name: 'Customer',
+      timeGrains: ['month'],
+    } as const;
+    const customerName = {
+      id: 'semantic:dimension:customers.customer_name',
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      name: 'Customer Name',
+      timeGrains: ['month'],
+    } as const;
+    const ownerEmail = {
+      id: 'runtime:column:accounts.owner_email',
+      kind: 'sql_column',
+      name: 'Account Owner Email',
+      dataType: 'varchar',
+      timeGrains: ['month'],
+    } as const;
+    const sentiment = {
+      id: 'runtime:column:accounts.sentiment',
+      kind: 'sql_column',
+      name: 'Account Sentiment Rating',
+      dataType: 'varchar',
+      timeGrains: ['month'],
+    } as const;
+
+    for (const candidate of [semanticTime, physicalTimestamp, legacyDate]) {
+      expect(evidenceCandidateRoles(candidate)).toContain('time_dimension');
+      expect(evidenceCandidateRoles(candidate)).not.toContain('categorical_dimension');
+    }
+    expect(evidenceCandidateRoles(location)).toContain('categorical_dimension');
+    expect(evidenceCandidateRoles(location)).not.toContain('time_dimension');
+    for (const candidate of [customerEntity, customerName, ownerEmail, sentiment]) {
+      expect(evidenceCandidateRoles(candidate)).not.toContain('time_dimension');
+    }
+    expect(evidenceCandidateRoles(customerEntity)).toContain('entity_key');
+    expect(evidenceCandidateRoles(customerName)).toContain('entity_label');
+    expect(evidenceCandidateRoles(ownerEmail)).toContain('categorical_dimension');
+    expect(evidenceCandidateRoles(sentiment)).toContain('categorical_dimension');
+  });
+
   it('AGT-010 keeps the context planner top-10 bound visibly defaulted when the user gave no count', () => {
     const requirements = buildAnalyticalRequirementSet({
       question: 'Who are the top BCM customers who have highest revenue?',
@@ -453,6 +548,48 @@ describe('conversational analytical orchestration contracts', () => {
       }],
     });
     expect(plannedButFailed).toMatchObject({ groundableBranchCount: 3, limitedScope: false });
+  });
+
+  it('AGT-016/033 keeps structural lineage evidence separate from analytical result fingerprints in V3', () => {
+    const resultFingerprint = 'a'.repeat(64);
+    const analytical = buildResearchEvidenceLedgerV2({
+      rootQuestion: 'Why did revenue change?',
+      entries: [{
+        id: 'branch:metric', branchId: 'metric', question: 'Metric evidence', status: 'observed',
+        resultFingerprint, receipts: [resultFingerprint], facts: ['metric observation'],
+        verdict: 'inconclusive', counterEvidenceFactIds: [],
+      }],
+    });
+    const mixed = buildResearchEvidenceLedgerV3({
+      rootQuestionFingerprint: 'q'.repeat(64),
+      groundableBranchCount: 2,
+      entries: [
+        { kind: 'analytical_result', index: 2, entry: analytical.entries[0]! },
+        {
+          kind: 'lineage_graph', index: 1, id: 'branch:lineage', branchId: 'lineage',
+          receipt: {
+            version: 1,
+            evidenceKind: 'lineage_graph',
+            graphFingerprint: 'g'.repeat(64), targetFingerprint: 't'.repeat(64),
+            status: 'completed', resolution: 'exact_id', candidateCount: 1, targetType: 'metric',
+            upstreamNodeCount: 2, downstreamNodeCount: 1, upstreamPathCount: 1, downstreamPathCount: 1,
+            traversedNodeCount: 3, traversedEdgeCount: 3, maxDepth: 6, maxPaths: 12, maxNodes: 96, maxEdges: 160,
+            truncated: false, structuralFingerprint: 's'.repeat(64),
+            validator: { version: 1, kind: 'structural_dependency', evaluated: true, outcome: 'dependency_observed', nonCausal: true },
+            zeroCallCounters: { providerCalls: 0, sqlExecutions: 0, warehouseExecutions: 0, repairAttempts: 0 },
+          },
+        },
+      ],
+    });
+    expect(mixed).toMatchObject({ version: 3, rootQuestionFingerprint: 'q'.repeat(64), limitedScope: true });
+    expect(mixed.entries.map((entry) => entry.evidenceKind)).toEqual(['lineage_graph', 'analytical_result']);
+    const lineage = mixed.entries[0]!;
+    expect(lineage).toMatchObject({
+      evidenceKind: 'lineage_graph', status: 'observed', verdict: 'inconclusive',
+      lineageReceipt: expect.objectContaining({ validator: expect.objectContaining({ nonCausal: true }) }),
+    });
+    expect(lineage).not.toHaveProperty('resultFingerprint');
+    expect(JSON.stringify(lineage)).not.toContain(resultFingerprint);
   });
 
   it('AGT-020 bounds typed research hypotheses without inventing missing branches', () => {

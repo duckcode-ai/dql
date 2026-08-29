@@ -1310,6 +1310,30 @@ export interface AgentRunDiagnosticReceiptV6 extends Omit<AgentRunDiagnosticRece
   }>;
 }
 
+/** Compact Ask inspector. V1-V6 remain readable when this receipt is absent. */
+export interface AgentRunDiagnosticReceiptV7 extends Omit<AgentRunDiagnosticReceiptV6, 'version'> {
+  version: 7;
+  inspector: {
+    understood: {
+      questionKind: string;
+      conversationBinding: string;
+      measureCount: number;
+      dimensionCount: number;
+      entityRequested: boolean;
+      hasBoundFilter: boolean;
+    };
+    evidence: { admittedCandidateCount: number; roleCount: number; recoveryAttempted: boolean };
+    planning: { mode: string; plannerCalls: number; verification: string };
+    route: { selectedTier?: string; tierAttemptCount: number; planFrozen: boolean; reviewRequired: boolean };
+    outcome: {
+      connectionAttempted: boolean;
+      executionAttempts: number;
+      factCount: number;
+      narration: 'fact_bound' | 'result_without_facts' | 'not_applicable';
+    };
+  };
+}
+
 /**
  * Narrow persisted Ask envelope used by reader-facing surfaces. The complete
  * local continuation is server-owned; the browser only needs this stable
@@ -1486,6 +1510,8 @@ export interface AskTraceDataV1 {
   runtimeReceiptV5?: AgentRunDiagnosticReceiptV5;
   /** Same redacted V6 decision story returned by the full trace API. */
   runtimeReceiptV6?: AgentRunDiagnosticReceiptV6;
+  /** Same redacted V7 concise inspector returned by the full trace API. */
+  runtimeReceiptV7?: AgentRunDiagnosticReceiptV7;
 }
 
 export interface AskTraceStoreStatusV1 {
@@ -1551,6 +1577,7 @@ export interface AgentRun {
   diagnosticReceiptV4?: AgentRunDiagnosticReceiptV4;
   diagnosticReceiptV5?: AgentRunDiagnosticReceiptV5;
   diagnosticReceiptV6?: AgentRunDiagnosticReceiptV6;
+  diagnosticReceiptV7?: AgentRunDiagnosticReceiptV7;
   businessAnswer?: AgentRunBusinessAnswerV1;
   /** Persisted server-owned runtime checkpoint; client consumes the narrow stable shape only. */
   askAnalystState?: AskAnalystRuntimeStateV1;
@@ -1637,6 +1664,21 @@ export interface DqlArtifactInvocationResponse extends CertifiedBlockInvocationR
 export type AgentRunAudience = 'stakeholder' | 'analyst';
 
 /**
+ * A reader-selected result cell. This is a stable reference to a persisted
+ * server result, not conversational prose. The local host validates all six
+ * fields before it may affect an Ask follow-up after reload or restart.
+ */
+export interface AgentSelectedResultBinding {
+  version: 1;
+  sourceRunId: string;
+  sourceArtifactId: string;
+  canonicalColumn: string;
+  value: string;
+  rowFingerprint: string;
+  resultFingerprint: string;
+}
+
+/**
  * The chat-composer "thinking" selection. `auto` (default) lets the engine adapt
  * effort + verification depth to the question shape; the manual modes trade speed
  * against rigor for the whole thread. Sent per run as `thinkingMode`.
@@ -1646,6 +1688,7 @@ export type AgentThinkingMode = 'auto' | 'low' | 'medium' | 'high';
 export interface CreateAgentRunInput {
   question: string;
   selectedEvidenceId?: string;
+  selectedResultBinding?: AgentSelectedResultBinding;
   /** Original analytical question for an identifier-bound clarification choice. */
   clarificationSourceQuestion?: string;
   requestedMode?: AgentRunRequestedMode;

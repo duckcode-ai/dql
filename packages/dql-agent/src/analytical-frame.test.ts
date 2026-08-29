@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { buildDeterministicAnalyticalFrame, resolveMetricCapabilityDimension } from './analytical-frame.js';
+import {
+  buildDeterministicAnalyticalFrame,
+  proveSameSnapshotMetricflowRoleExtensionV1,
+  resolveMetricCapabilityDimension,
+} from './analytical-frame.js';
 import type { AgentEvidenceCandidate, AgentRetrievalEvidence } from './meaning-resolution.js';
 
 function bcmMetric(overrides: Partial<AgentEvidenceCandidate> = {}): AgentEvidenceCandidate {
@@ -271,5 +275,72 @@ describe('deterministic analytical frame temporal intent', () => {
       metric,
       'semantic:uncategorized:dimension:other_locations.location_name',
     )).toBeUndefined();
+  });
+
+  it('AGT-034 admits a same-snapshot extension only through its current MetricFlow capability proof', () => {
+    const dimensionId = 'semantic:dimension:account_revenue.account_name';
+    const metric = bcmMetric();
+    const extension: AgentEvidenceCandidate = {
+      id: dimensionId,
+      qualifiedId: dimensionId,
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      trustTier: 'semantic',
+      name: 'Account Name',
+      aliases: ['account'],
+      relevanceScore: 0.8,
+      matchReasons: ['same snapshot capability child'],
+      compatibility: 'compatible',
+      sameSnapshotRoleExtension: {
+        version: 1,
+        role: 'categorical_dimension',
+        requestedTerm: 'account',
+        metricId: metric.analyticalCapability!.metricId,
+        dimensionId,
+        basis: 'exact_metricflow_grouping_dimension',
+      },
+    };
+
+    expect(proveSameSnapshotMetricflowRoleExtensionV1({ candidate: extension, metricCandidate: metric }))
+      .toMatchObject({ dimension: { dimensionId } });
+
+    expect(proveSameSnapshotMetricflowRoleExtensionV1({
+      candidate: {
+        ...extension,
+        sameSnapshotRoleExtension: {
+          ...extension.sameSnapshotRoleExtension!,
+          metricId: 'semantic:metric:stale.other_metric',
+        },
+      },
+      metricCandidate: metric,
+    })).toBeUndefined();
+    expect(proveSameSnapshotMetricflowRoleExtensionV1({
+      candidate: {
+        ...extension,
+        sameSnapshotRoleExtension: {
+          ...extension.sameSnapshotRoleExtension!,
+          dimensionId: 'semantic:dimension:other.account_name',
+        },
+      },
+      metricCandidate: metric,
+    })).toBeUndefined();
+    expect(proveSameSnapshotMetricflowRoleExtensionV1({
+      candidate: {
+        ...extension,
+        sameSnapshotRoleExtension: {
+          ...extension.sameSnapshotRoleExtension!,
+          basis: 'unverified_legacy_basis' as never,
+        },
+      },
+      metricCandidate: metric,
+    })).toBeUndefined();
+    expect(proveSameSnapshotMetricflowRoleExtensionV1({
+      candidate: { ...extension, eligible: false },
+      metricCandidate: metric,
+    })).toBeUndefined();
+    expect(proveSameSnapshotMetricflowRoleExtensionV1({
+      candidate: extension,
+      metricCandidate: { ...metric, eligible: false },
+    })).toBeUndefined();
   });
 });

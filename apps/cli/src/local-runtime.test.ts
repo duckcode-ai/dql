@@ -14,6 +14,10 @@ import {
   buildResearchBranchRequirementProjection,
   researchChildTelemetryForRoot,
   mergeRunScopedProviderDispatchEvidence,
+  agentRunProviderDispatchBudgetForMode,
+  RunScopedProviderDispatchEvidence,
+  createProviderDispatchTrace,
+  preflightAskAnalyticalPlannerProvider,
   awaitResearchBranchDeadline,
   RESEARCH_BRANCH_FINALIZATION_RESERVE_MS,
   RESEARCH_MAX_CONCURRENT_BRANCHES,
@@ -83,6 +87,7 @@ import {
   extractAgentValueSearchTerms,
   extractBlockInvariants,
   formatLocalQueryRuntimeError,
+  hydratePersistedSelectedResultBinding,
   getConnectorInstallStatuses,
   assertConnectionNodeCompatibility,
   ensureConnectorInstalledForStartup,
@@ -120,6 +125,8 @@ import {
   serializeJSON,
   staticResponseCacheControl,
   startLocalServer,
+  captureResearchLineageRootSnapshotV1,
+  researchLineageRootSnapshotIsCurrentV1,
   validateBlockStudioSource,
   validateConnectionForTest,
 } from './local-runtime.js';
@@ -132,6 +139,7 @@ import {
 import { getRunner } from './llm/index.js';
 import { resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
 import { CassetteStore } from './commands/agent-eval-cassette.js';
+import { runResearchLineageProgramV1 } from './research-lineage-program.js';
 import { afterEach } from 'vitest';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -152,10 +160,12 @@ import {
   recordRuntimeSchemaSnapshot,
   SqliteAgentRunStore,
   assertProviderPayloadAllowed,
+  attachAskTraceObserverV1,
   prepareProviderContextForDispatch,
   DEFAULT_ASK_ROW_EGRESS_POLICY,
   RESEARCH_ROW_EGRESS_POLICY,
   ZERO_ROW_EGRESS_POLICY,
+  canonicalResultRowFingerprint,
   normalizeCanonicalQueryResult,
   qualifyAuthorizationReferences,
   resolveTopRankedRegionDependency,
@@ -165,7 +175,7 @@ import {
   validateFrozenRequiredOutputProjection,
   validateSqlAgainstLocalContext,
 } from '@duckcodeailabs/dql-agent';
-import type { AgentRouteExecutorResult, AgentRun, AgentRunRequest, AskTraceObserverV1 } from '@duckcodeailabs/dql-agent';
+import type { AgentProvider, AgentRouteExecutorResult, AgentRun, AgentRunRequest, AskTraceObserverV1 } from '@duckcodeailabs/dql-agent';
 import type { DatabaseConnector, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
 import type { ResearchBranchReceiptV1 } from './local-runtime.js';
 import { saveTestedSemanticRuntimeSettings } from './semantic-runtime-settings.js';
@@ -3258,6 +3268,103 @@ describe('agent run runtime API', () => {
     expect(parsed.request?.runId).toBeUndefined();
   });
 
+  it('AGT-027 rehydrates a browser-shaped selected result binding from persisted local history after reload', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-selected-result-binding-'));
+    tempDirs.push(projectRoot);
+    const result = normalizeCanonicalQueryResult({
+      columns: ['customer_name', 'revenue'],
+      rows: [{ customer_name: 'Melissa Davis', revenue: 1411 }],
+      rowCount: 1,
+      trustState: 'certified',
+      answerTier: 'certified',
+      resultFingerprint: 'a'.repeat(64),
+    });
+    const sourceRun: AgentRun = {
+      id: 'run:top-customers',
+      question: 'Who are the top customers by revenue?',
+      requestedMode: 'ask',
+      route: 'certified_answer',
+      status: 'completed',
+      trustState: 'certified',
+      stopReason: 'certified_answer_found',
+      startedAt: '2026-08-28T12:00:00.000Z',
+      completedAt: '2026-08-28T12:00:01.000Z',
+      summary: 'Top customers by revenue.',
+      steps: [],
+      artifacts: [{
+        id: 'answer:top-customers',
+        kind: 'answer',
+        title: 'Top customers',
+        trustState: 'certified',
+        payload: { result },
+      }],
+      evaluations: [],
+      events: [],
+      nextActions: [],
+      repairAttempts: 0,
+    };
+    const binding = {
+      version: 1 as const,
+      sourceRunId: sourceRun.id,
+      sourceArtifactId: sourceRun.artifacts[0]!.id,
+      canonicalColumn: 'customer_name',
+      value: 'Melissa Davis',
+      rowFingerprint: canonicalResultRowFingerprint(result, result.rows[0]!),
+      resultFingerprint: result.resultFingerprint,
+    };
+    const persisted = new SqliteAgentRunStore({ path: defaultAgentRunSqlitePath(projectRoot) });
+    persisted.save(sourceRun);
+    persisted.close();
+
+    const parsed = parseAgentRunRequestBody({
+      question: 'Which region does she belong to?',
+      requestedMode: 'ask',
+      // This is the browser/API transport shape. It carries stable references,
+      // not an authoritative client-side "Regarding" prose append.
+      selectedResultBinding: binding,
+    });
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.request?.selectedResultBinding).toEqual(binding);
+
+    const reloaded = new SqliteAgentRunStore({ path: defaultAgentRunSqlitePath(projectRoot) });
+    try {
+      hydratePersistedSelectedResultBinding(parsed.request!, reloaded);
+    } finally {
+      reloaded.close();
+    }
+
+    expect(parsed.request).toMatchObject({
+      conversationBinding: 'prior_result',
+      priorResultMemberBinding: {
+        version: 1,
+        displayDimension: 'customer_name',
+        values: ['Melissa Davis'],
+        sourceTurnId: sourceRun.id,
+        resultFingerprint: result.resultFingerprint,
+      },
+      hostRequirementSeed: {
+        sourceQuestion: 'Which region does she belong to?',
+        requirements: {
+          entityTerms: expect.arrayContaining(['customer']),
+          entityDisplayTerms: expect.arrayContaining(['customer name']),
+          memberTerms: expect.arrayContaining(['melissa davis']),
+          priorResultMemberBinding: {
+            version: 1,
+            displayDimension: 'customer_name',
+            values: ['Melissa Davis'],
+            sourceTurnId: sourceRun.id,
+            resultFingerprint: result.resultFingerprint,
+          },
+        },
+        queryIntent: {
+          filters: [expect.objectContaining({ field: 'customer_name', value: 'Melissa Davis' })],
+        },
+      },
+    });
+    expect(parsed.request?.selectedResultBindingGap).toBeUndefined();
+    expect(JSON.stringify(parsed.request)).not.toContain('Regarding');
+  });
+
   it('AGT-011 strips forged structured-selection envelopes at HTTP ingress', () => {
     const parsed = parseAgentRunRequestBody({
       question: 'show total CCU count',
@@ -5457,6 +5564,12 @@ block "customer_profile" {
           planning: { mode: 'deterministic_binding', plannerCalls: 0 },
           cascade: { selectedTier: 'semantic', planFrozen: true },
         },
+        diagnosticReceiptV7: {
+          inspector: {
+            route: { selectedTier: 'semantic', planFrozen: true, reviewRequired: false },
+            outcome: { executionAttempts: 1, narration: 'fact_bound' },
+          },
+        },
       });
       // Runtime-schema/preflight probes may use the same injected executor;
       // the authoritative execution boundary is the trace span and the
@@ -5467,6 +5580,7 @@ block "customer_profile" {
       const traceResponse = await fetch(`http://127.0.0.1:${port}/api/ask-traces/${traceId}`);
       const trace = await traceResponse.json() as any;
       expect(trace.decisionSummary).toEqual(payload.run.diagnosticReceiptV4?.summary);
+      expect(trace.runtimeReceiptV7).toEqual(payload.run.diagnosticReceiptV7);
       expect(trace.spans.filter((span: { name?: string }) => span.name === 'provider.attempt')).toHaveLength(0);
       expect(trace.spans.filter((span: { name?: string }) => span.name === 'sql.execute')).toHaveLength(1);
     } finally {
@@ -6382,7 +6496,7 @@ block "customer_profile" {
     }
   });
 
-  it('AGT-034 uses real local retrieval to bind sales to revenue and admit the sole same-snapshot geographic MetricFlow grouping', async () => {
+  it('AGT-034 executes the sole same-snapshot geographic MetricFlow grouping as a visible review-required substitution', async () => {
     // This is deliberately a disposable copy of the sanitized Jaffle fixture,
     // not a hand-built AgentRetrievalEvidence injection. It exercises the
     // local manifest -> catalog/index -> role-balanced meaning package ->
@@ -6925,11 +7039,15 @@ block "customer_profile" {
         terminalIncident: payload.run.diagnosticReceiptV3?.terminalIncident,
         cascade: payload.run.diagnosticReceiptV3?.cascade,
         steps: payload.run.steps,
-      }, null, 2)).toBe('completed');
+      }, null, 2)).toBe('needs_review');
       expect(payload.run).toMatchObject({
         route: 'semantic_answer',
-        status: 'completed',
-        trustState: 'governed',
+        // `region` is not a declared physical/semantic field in this fixture.
+        // The host may execute the uniquely declared MetricFlow geography
+        // child, but it must never silently present that inferred vocabulary
+        // substitution as a fully governed answer.
+        status: 'needs_review',
+        trustState: 'review_required',
         diagnosticReceiptV3: {
           cascade: { selectedTier: 'semantic', planFrozen: true },
         },
@@ -6939,8 +7057,9 @@ block "customer_profile" {
         },
       });
       // Revenue plus the sole same-snapshot MetricFlow region grouping is a
-      // uniquely proven tuple. It is a legal zero-provider semantic fast
-      // path, not an implicit meaning-model fallback.
+      // uniquely proven executable tuple. It remains zero-provider, but the
+      // sole geographic grouping is an explicitly visible assumption rather
+      // than an implicit meaning-model fallback.
       expect(meaningSelections).toHaveLength(0);
       const meaningDispatches = providerFetch.mock.calls.filter(([, init]) => {
         const body = JSON.parse(String((init as RequestInit | undefined)?.body ?? '{}')) as {
@@ -6960,6 +7079,31 @@ block "customer_profile" {
         attempted: false,
         skipReason: 'ordinary_ask',
       });
+      expect(payload.run.routeDecision?.assumptions).toEqual([
+        expect.objectContaining({
+          about: 'dimension',
+          chose: expect.stringContaining('location_name'),
+          because: expect.stringContaining('sole same-snapshot MetricFlow grouping field'),
+        }),
+      ]);
+      expect(payload.run.routeDecision?.resolvedAnalyticalPlan).toMatchObject({
+        mode: 'authoritative',
+      });
+      expect(payload.run.askAnalystState?.resolvedPlan).toMatchObject({
+        compiler: 'metricflow',
+        planFrozen: true,
+        reviewRequired: true,
+      });
+      expect(payload.run.diagnosticReceiptV4?.summary?.selectedPlan).toMatchObject({
+        tier: 'semantic',
+        planFrozen: true,
+        reviewRequired: true,
+      });
+      expect(payload.run.diagnosticReceiptV7?.inspector?.route).toMatchObject({
+        selectedTier: 'semantic',
+        planFrozen: true,
+        reviewRequired: true,
+      });
       const traceId = payload.run.traceReference?.traceId;
       expect(traceId).toMatch(/^[a-f0-9]{32}$/);
       let traceDetail: any;
@@ -6975,7 +7119,15 @@ block "customer_profile" {
       expect(traceDetail?.spans.filter((span: { name?: string }) => span.name === 'provider.attempt')).toHaveLength(0);
       expect(traceDetail?.spans.find((span: { name?: string }) => span.name === 'sql.execute')?.payload).toMatchObject({
         kind: 'sql',
-        execution: { reviewRequired: false },
+        // The trace is a reader-facing, receipt-backed explanation of the
+        // same explicit assumption: execution happened, but only after DQL
+        // marked the sole MetricFlow geography substitution for review.
+        execution: { reviewRequired: true },
+      });
+      expect(traceDetail?.runtimeReceiptV7?.inspector?.route).toMatchObject({
+        selectedTier: 'semantic',
+        planFrozen: true,
+        reviewRequired: true,
       });
       // Runtime metadata probes share the same QueryExecutor seam, but only
       // one frozen semantic statement may cross the analytical execution
@@ -6992,7 +7144,7 @@ block "customer_profile" {
       expect(payload.run.artifacts[0]?.payload?.result).toMatchObject({
         columns: ['location_name', 'revenue'],
         rowCount: 1,
-        trustState: 'governed',
+        trustState: 'review_required',
       });
       // Keep the router boundary observable: the frame must be attached
       // before resolved-plan binding, not reconstructed after a V1 plan has
@@ -7061,11 +7213,23 @@ block "customer_profile" {
       expect(emptyMeaningBindingCalls).toBe(0);
       expect(emptyBindingPayload.run).toMatchObject({
         route: 'semantic_answer',
-        status: 'completed',
-        trustState: 'governed',
+        status: 'needs_review',
+        trustState: 'review_required',
         diagnosticReceiptV3: {
           cascade: { selectedTier: 'semantic', planFrozen: true },
         },
+      });
+      expect(emptyBindingPayload.run.routeDecision?.assumptions).toEqual([
+        expect.objectContaining({
+          about: 'dimension',
+          chose: expect.stringContaining('location_name'),
+          because: expect.stringContaining('sole same-snapshot MetricFlow grouping field'),
+        }),
+      ]);
+      expect(emptyBindingPayload.run.askAnalystState?.resolvedPlan).toMatchObject({
+        compiler: 'metricflow',
+        planFrozen: true,
+        reviewRequired: true,
       });
       expect(emptyBindingPayload.run.telemetry).toMatchObject({
         sqlExecutions: 1,
@@ -8141,6 +8305,310 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
     expect(new Set([lookup.question, compare.question, breakdown.question]).size).toBe(3);
   });
 
+  it('runs a check_lineage Research branch through the local graph only, with no child router, provider, SQL, warehouse, or repair call', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-research-lineage-runtime-'));
+    tempDirs.push(projectRoot);
+    copyResearchRuntimeFixture(projectRoot);
+    saveProviderSettings(projectRoot, {
+      id: 'openai',
+      enabled: true,
+      apiKey: 'sk-research-lineage-test',
+      baseUrl: 'https://research-lineage.example.test/v1',
+      model: 'research-lineage-test',
+    });
+
+    const nativeFetch = globalThis.fetch;
+    const providerFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (!String(input).startsWith('https://research-lineage.example.test/')) return nativeFetch(input, init);
+      const body = JSON.parse(String(init?.body ?? '{}')) as { messages?: Array<{ role?: string; content?: string }> };
+      const system = body.messages?.find((message) => message.role === 'system')?.content ?? '';
+      if (!system.includes('You plan a data investigation.')) {
+        throw new Error(`Unexpected provider use outside Research hypothesis planning: ${system.slice(0, 80)}`);
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          hypotheses: [1, 2, 3].map((index) => ({
+            statement: `Structural hypothesis ${index} uses the governed revenue block.`,
+            priorConfidence: 0.9 - (index * 0.1),
+            target: 'Revenue by Acquisition Channel',
+            action: 'check_lineage',
+            expectation: 'Whether the frozen local graph has structural dependencies for the exact block.',
+          })),
+        }) } }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', providerFetch);
+    const executeQuery = vi.fn(async () => ({ columns: [], rows: [], rowCount: 0 }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        connection: { driver: 'file' },
+        executor: { executeQuery } as unknown as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'Research the lineage of the governed revenue block.',
+          requestedMode: 'research',
+        }),
+      });
+      const body = await response.json() as { run?: AgentRun; error?: string };
+      expect(response.status, body.error).toBe(201);
+      const artifact = body.run?.artifacts.find((candidate) => candidate.kind === 'research_run');
+      const payload = artifact?.payload as {
+        researchBranchReceipts?: ResearchBranchReceiptV1[];
+        researchLedger?: { entries?: Array<Record<string, unknown>> };
+        researchLedgerV2?: { entries?: Array<Record<string, unknown>> };
+        researchLedgerV3?: { entries?: Array<Record<string, unknown>> };
+      } | undefined;
+      const receipts = payload?.researchBranchReceipts ?? [];
+
+      // Root hypothesis planning may use the provider adapter's bounded
+      // transport retry. The lineage children must not trigger a different
+      // provider prompt (or any physical data execution): the mock above
+      // rejects every provider call that is not the root planning prompt, and
+      // the trace below proves no generic child validation path ran.
+      expect(providerFetch).toHaveBeenCalled();
+      expect(executeQuery).not.toHaveBeenCalled();
+      expect(receipts).toHaveLength(3);
+      expect(receipts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ evidenceKind: 'lineage_graph', lineageStatus: 'completed', state: 'completed', stopReason: 'completed' }),
+      ]));
+      expect(payload?.researchLedger?.entries).toEqual([]);
+      expect(payload?.researchLedgerV2?.entries).toEqual([]);
+      expect(payload?.researchLedgerV3?.entries).toHaveLength(3);
+      expect(payload?.researchLedgerV3?.entries).toEqual(expect.arrayContaining([
+        expect.objectContaining({ evidenceKind: 'lineage_graph', verdict: 'inconclusive', lineageReceipt: expect.objectContaining({
+          zeroCallCounters: { providerCalls: 0, sqlExecutions: 0, warehouseExecutions: 0, repairAttempts: 0 },
+        }) }),
+      ]));
+      expect(JSON.stringify(payload?.researchLedgerV3)).not.toContain('resultFingerprint');
+      const traceId = body.run?.traceReference?.traceId;
+      expect(traceId).toMatch(/^[a-f0-9]{32}$/);
+
+      let trace: { spans?: Array<{ name?: string; payload?: Record<string, unknown> }> } | undefined;
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const traceResponse = await fetch(`http://127.0.0.1:${port}/api/ask-traces/${traceId}`);
+        if (traceResponse.status === 200) {
+          const candidate = await traceResponse.json() as typeof trace;
+          trace = candidate;
+          if (candidate?.spans?.filter((span) => span.name === 'research.lineage').length === 3) {
+            break;
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(trace?.spans?.filter((span) => span.name === 'research.lineage')).toHaveLength(3);
+      expect(trace?.spans?.some((span) => span.name === 'research.validate')).toBe(false);
+      expect(trace?.spans?.find((span) => span.name === 'research.lineage')?.payload).toMatchObject({
+        evidenceKind: 'lineage_graph', lineageMaxDepth: 6, lineageMaxRoutes: 12, lineageMaxNodes: 96, lineageMaxEdges: 160,
+      });
+      expect(JSON.stringify(trace?.spans?.filter((span) => span.name === 'research.lineage'))).not.toMatch(/Revenue by Acquisition Channel|sql|warehouse/i);
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
+  it('freezes the dql-manifest lineage graph at the Research root and rejects manifest drift before child traversal', () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-research-lineage-root-freeze-'));
+    tempDirs.push(projectRoot);
+    copyResearchRuntimeFixture(projectRoot);
+    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/dbt-first-commerce');
+    const manifestPath = join(projectRoot, 'dql-manifest.json');
+    cpSync(join(fixtureRoot, 'dql-manifest.json'), manifestPath);
+
+    const rootCapture = captureResearchLineageRootSnapshotV1(projectRoot, undefined);
+    expect(rootCapture.stableAtCapture).toBe(true);
+    expect(researchLineageRootSnapshotIsCurrentV1(rootCapture, projectRoot)).toBe(true);
+    const rootGraph = rootCapture.graph;
+    expect(rootGraph).toBeDefined();
+    if (!rootGraph) throw new Error('expected a root-captured lineage graph');
+    const incoming = vi.spyOn(rootGraph, 'getIncomingEdges');
+    const outgoing = vi.spyOn(rootGraph, 'getOutgoingEdges');
+
+    // This is the regression boundary: the root graph has already been
+    // captured, then the emitted DQL manifest changes before a child starts.
+    // Source-signature capture includes this file even though the normal
+    // project snapshot need not rebuild its manifest for every child.
+    writeFileSync(manifestPath, `${readFileSync(manifestPath, 'utf8')}\n`);
+    expect(researchLineageRootSnapshotIsCurrentV1(rootCapture, projectRoot)).toBe(false);
+
+    const result = runResearchLineageProgramV1({
+      graph: rootGraph,
+      graphFingerprint: rootCapture.graphFingerprint,
+      target: 'Revenue by Acquisition Channel',
+      expectedSnapshotId: 'research-root-snapshot',
+      currentSnapshotId: 'research-root-snapshot',
+      snapshotStale: !researchLineageRootSnapshotIsCurrentV1(rootCapture, projectRoot),
+    });
+    expect(result.receipt).toMatchObject({ status: 'stale', resolution: 'stale' });
+    expect(incoming).not.toHaveBeenCalled();
+    expect(outgoing).not.toHaveBeenCalled();
+  });
+
+  it('keeps a mixed analytical and lineage Research dossier review-required even when its analytical child executes cleanly', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-research-mixed-lineage-trust-'));
+    tempDirs.push(projectRoot);
+    copyResearchRuntimeFixture(projectRoot);
+    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/dbt-first-commerce');
+    const manifestPath = join(projectRoot, 'dql-manifest.json');
+    cpSync(join(fixtureRoot, 'dql-manifest.json'), manifestPath);
+    let manifestMutatedBetweenRootAndChild = false;
+    saveProviderSettings(projectRoot, {
+      id: 'openai',
+      enabled: true,
+      apiKey: 'sk-research-mixed-lineage-trust-test',
+      baseUrl: 'https://research-mixed-lineage.example.test/v1',
+      model: 'research-mixed-lineage-test',
+    });
+
+    const nativeFetch = globalThis.fetch;
+    const providerFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (!String(input).startsWith('https://research-mixed-lineage.example.test/')) return nativeFetch(input, init);
+      const body = JSON.parse(String(init?.body ?? '{}')) as { messages?: Array<{ role?: string; content?: string }> };
+      const system = body.messages?.find((message) => message.role === 'system')?.content ?? '';
+      if (system.includes('You plan a data investigation.')) {
+        // The root captured the graph before Research hypothesis planning. A
+        // manifest change here must make the later `check_lineage` child
+        // stale rather than rebuild a fresh graph and call it root evidence.
+        if (!manifestMutatedBetweenRootAndChild) {
+          writeFileSync(manifestPath, `${readFileSync(manifestPath, 'utf8')}\n`);
+          manifestMutatedBetweenRootAndChild = true;
+        }
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            hypotheses: [
+              {
+                statement: 'Gross revenue has a receipt-backed governed observation.',
+                priorConfidence: 0.9,
+                target: 'orders.gross_revenue',
+                action: 'lookup_metric',
+                expectation: 'The frozen semantic metric executes once.',
+              },
+              {
+                statement: 'The governed acquisition block has local structural dependencies.',
+                priorConfidence: 0.7,
+                target: 'Revenue by Acquisition Channel',
+                action: 'check_lineage',
+                expectation: 'The frozen local graph has bounded structural context only.',
+              },
+            ],
+          }) } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (system.includes('bounded analytical planner for DQL Ask')) {
+        const request = JSON.parse(body.messages?.find((message) => message.role === 'user')?.content ?? '{}') as {
+          candidateCards?: Array<{ id: string; roles?: string[] }>;
+          taskOptions?: Array<{ id: string }>;
+        };
+        const candidate = (request.candidateCards ?? []).find((card) => card.id === 'semantic:metric:orders.gross_revenue');
+        const selectedConceptIds = candidate ? [candidate.id] : [];
+        const roleBindings = candidate
+          ? Object.fromEntries((candidate.roles ?? []).map((role) => [role, [candidate.id]]))
+          : {};
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({
+            version: 1,
+            selectedConceptIds,
+            confidence: candidate ? 'high' : 'low',
+            tasks: [{
+              version: 1,
+              taskId: request.taskOptions?.[0]?.id ?? 'task-1',
+              coveredTaskIds: [request.taskOptions?.[0]?.id ?? 'task-1'],
+              selectedConceptIds,
+              roleBindings,
+              operations: ['aggregate', 'project'],
+            }],
+          }) } }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'Bounded mixed Research narration.' } }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', providerFetch);
+
+    const executeQuery = vi.fn(async (sql: string) => {
+      if (/information_schema\.tables/i.test(sql)) {
+        return {
+          columns: ['table_schema', 'table_name'],
+          rows: [{ table_schema: 'commerce', table_name: 'fct_orders' }],
+          rowCount: 1,
+        };
+      }
+      if (/gross_revenue/i.test(sql)) {
+        return {
+          columns: ['gross_revenue'],
+          rows: [{ gross_revenue: 1 }],
+          rowCount: 1,
+          executionReceipt: { version: 1, runId: 'mixed-lineage-observation', resultFingerprint: 'd'.repeat(64) },
+        };
+      }
+      return { columns: [], rows: [], rowCount: 0 };
+    });
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        connection: { driver: 'file' },
+        executor: { executeQuery } as unknown as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: 'Research gross revenue.',
+          requestedMode: 'research',
+          workspaceContext: {
+            researchSource: {
+              runId: 'mixed-lineage-baseline',
+              sql: 'SELECT 1 AS root_baseline_must_not_execute',
+              trustState: 'review_required',
+            },
+          },
+        }),
+      });
+      const body = await response.json() as { run?: AgentRun; error?: string };
+      expect(response.status, body.error).toBe(201);
+      const artifact = body.run?.artifacts.find((candidate) => candidate.kind === 'research_run');
+      const payload = artifact?.payload as {
+        researchLedgerV3?: { entries?: Array<{ evidenceKind?: string; resultFingerprint?: string }> };
+        researchRuns?: Array<{ status?: string; resultPreview?: { resultFingerprint?: string }; evidence?: { kind?: string } }>;
+      } | undefined;
+      expect(executeQuery).toHaveBeenCalled();
+      expect(manifestMutatedBetweenRootAndChild).toBe(true);
+      expect(payload?.researchLedgerV3?.entries).toEqual(expect.arrayContaining([
+        // The root contract is about mixed evidence, not an executor-owned
+        // result fingerprint. The analytical receipt remains result-bound and
+        // the structural receipt never carries a result fingerprint.
+        expect.objectContaining({ evidenceKind: 'analytical_result', resultFingerprint: expect.any(String) }),
+        expect.objectContaining({ evidenceKind: 'lineage_graph', lineageReceipt: expect.objectContaining({
+          status: 'stale', resolution: 'stale',
+        }) }),
+      ]));
+      expect(payload?.researchRuns?.some((run) => run.status === 'ready' && run.evidence?.kind !== 'lineage_graph')).toBe(true);
+      expect(payload?.researchRuns).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          status: 'ready',
+          evidence: expect.objectContaining({ kind: 'lineage_graph' }),
+        }),
+      ]));
+      // The structural child cannot be promoted into a grounded root answer.
+      expect(body.run).toMatchObject({ status: 'needs_review', trustState: 'review_required' });
+      expect(artifact).toMatchObject({ trustState: 'review_required' });
+    } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
   it('gives a five-branch Research plan a bounded concurrent-wave h1 window and preserves finalization time when h1 is slow', async () => {
     // Mirrors the packaged five-hypothesis failure: after planning consumed
     // ~16.5s, h1 must receive a realistic first-wave window rather than an
@@ -8457,15 +8925,15 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
     }
   });
 
-  it('records an all-branch Research timeout as a limited investigation with a branch-specific V4 recovery action', async () => {
+  it('keeps a timed-out analytical Research branch separate from local lineage evidence', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-research-all-timeout-'));
     tempDirs.push(projectRoot);
     copyResearchRuntimeFixture(projectRoot);
-    // The first template branch is a uniquely-proven metric lookup, while the
-    // lineage child needs the Simple Ask planner to bind that same qualified
-    // metric. Supply a provider-neutral planner response so both admitted
-    // branches reach their own bounded SQL attempt; the timeout assertion must
-    // not be satisfied by an unrelated preflight failure.
+    // The template admits one analytical metric branch and one direct lineage
+    // branch. Supply the analytical planner response so the timeout cannot be
+    // satisfied by an unrelated preflight failure. The lineage branch must
+    // remain a local zero-call structural observation instead of masquerading
+    // as another timed-out analytical query.
     saveProviderSettings(projectRoot, {
       id: 'openai',
       enabled: true,
@@ -8481,8 +8949,8 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
       };
       const system = body.messages?.find((message) => message.role === 'system')?.content ?? '';
       if (system.includes('You plan a data investigation.')) {
-        // Keep the deterministic two-branch fixture so each branch has an
-        // independently inspectable timeout receipt.
+        // Keep the deterministic two-branch fixture: analytical metric plus
+        // the independently inspectable direct lineage observation.
         return new Response(JSON.stringify({
           choices: [{ message: { content: JSON.stringify({ hypotheses: [] }) } }],
         }), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -8558,37 +9026,151 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
       });
       const body = await response.json() as { run?: AgentRun; error?: string };
       expect(response.status, body.error).toBe(201);
-      // This fixture admits two executable hypotheses. The Research contract
+      // This fixture admits two grounded hypotheses. The Research contract
       // labels fewer than three groundable branches as limited scope while
-      // retaining the branch-specific timeout receipts below.
+      // retaining the distinct analytical timeout and lineage receipts below.
       expect(body.run?.answer).toContain('Limited research scope: fewer than three groundable branches were available');
       const artifact = body.run?.artifacts.find((candidate) => candidate.kind === 'research_run');
-      const receipts = ((artifact?.payload as { researchBranchReceipts?: ResearchBranchReceiptV1[] } | undefined)?.researchBranchReceipts ?? []);
-      expect(receipts.length).toBeGreaterThan(0);
-      expect(
-        receipts.every((receipt) => receipt.stopReason === 'research_branch_timeout' || receipt.stopReason === 'budget_exhausted'),
-      ).toBe(true);
-      expect(receipts.some((receipt) => receipt.stopReason === 'research_branch_timeout')).toBe(true);
-      expect(body.run?.diagnosticReceiptV4?.summary).toMatchObject({
-        terminalIncident: {
-          code: 'RESEARCH_BRANCH_TIMEOUT',
-          boundary: 'run',
-          safeAction: 'inspect_research_failures',
-        },
-        safeNextAction: 'inspect_research_failures',
+      const researchPayload = artifact?.payload as {
+        researchBranchReceipts?: ResearchBranchReceiptV1[];
+        researchBudget?: {
+          branchTimedOut?: boolean;
+          allResearchBranchesBoundedOut?: boolean;
+        };
+        researchLedgerV2?: {
+          version?: number;
+          groundableBranchCount?: number;
+          limitedScope?: boolean;
+          entries?: Array<{
+            status?: string;
+            verdict?: string;
+            resultFingerprint?: string;
+            receiptFingerprints?: string[];
+          }>;
+        };
+        researchLedgerV3?: {
+          version?: number;
+          groundableBranchCount?: number;
+          limitedScope?: boolean;
+          entries?: Array<{
+            evidenceKind?: string;
+            status?: string;
+            verdict?: string;
+            resultFingerprint?: string;
+            executionReceipt?: unknown;
+            lineageReceipt?: {
+              status?: string;
+              zeroCallCounters?: {
+                providerCalls?: number;
+                sqlExecutions?: number;
+                warehouseExecutions?: number;
+                repairAttempts?: number;
+              };
+            };
+          }>;
+        };
+      } | undefined;
+      const receipts = researchPayload?.researchBranchReceipts ?? [];
+      const analyticalReceipts = receipts.filter((receipt) => receipt.evidenceKind !== 'lineage_graph');
+      const lineageReceipts = receipts.filter((receipt) => receipt.evidenceKind === 'lineage_graph');
+      expect(analyticalReceipts).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          evidenceKind: 'analytical_result',
+          state: 'timed_out',
+          verdict: 'failed',
+          stopReason: 'research_branch_timeout',
+        }),
+      ]));
+      expect(lineageReceipts).toEqual([
+        expect.objectContaining({
+          evidenceKind: 'lineage_graph',
+          state: 'completed',
+          verdict: 'inconclusive',
+          stopReason: 'completed',
+        }),
+      ]);
+      expect(researchPayload?.researchBudget).toMatchObject({
+        branchTimedOut: true,
+        allResearchBranchesBoundedOut: false,
       });
+      // V1/V2 retain query-result semantics and therefore exclude the local
+      // graph walk. V3 is additive and carries both evidence kinds without
+      // giving a structural observation a result or SQL receipt.
+      expect(researchPayload?.researchLedgerV2).toMatchObject({
+        version: 2,
+        groundableBranchCount: 2,
+        limitedScope: true,
+      });
+      expect(researchPayload?.researchLedgerV2?.entries).toEqual([
+        expect.objectContaining({ status: 'failed', verdict: 'failed' }),
+      ]);
+      expect(researchPayload?.researchLedgerV3).toMatchObject({
+        version: 3,
+        groundableBranchCount: 2,
+        limitedScope: true,
+      });
+      const lineageEntry = researchPayload?.researchLedgerV3?.entries?.find((entry) => entry.evidenceKind === 'lineage_graph');
+      expect(researchPayload?.researchLedgerV3?.entries).toEqual(expect.arrayContaining([
+        expect.objectContaining({ evidenceKind: 'analytical_result', status: 'failed', verdict: 'failed' }),
+        expect.objectContaining({ evidenceKind: 'lineage_graph', status: 'observed', verdict: 'inconclusive' }),
+      ]));
+      expect(lineageEntry?.lineageReceipt?.zeroCallCounters).toEqual({
+        providerCalls: 0,
+        sqlExecutions: 0,
+        warehouseExecutions: 0,
+        repairAttempts: 0,
+      });
+      expect(lineageEntry?.resultFingerprint).toBeUndefined();
+      expect(lineageEntry?.executionReceipt).toBeUndefined();
+      expect(body.run).toMatchObject({ status: 'needs_review', trustState: 'review_required' });
+      // A timed-out analytical branch is a typed limitation, not a root
+      // terminal incident, because the direct lineage program completed and
+      // the root retained a review-required limited dossier.
+      expect(body.run?.diagnosticReceiptV4?.summary).toMatchObject({
+        safeNextAction: 'none',
+      });
+      expect(body.run?.diagnosticReceiptV4?.summary?.terminalIncident).toBeUndefined();
       const traceId = body.run?.traceReference?.traceId;
       expect(traceId).toMatch(/^[a-f0-9]{32}$/);
-      let trace: { decisionSummary?: unknown } | undefined;
+      let trace: {
+        decisionSummary?: unknown;
+        spans?: Array<{
+          name?: string;
+          reasonCode?: string;
+          payload?: {
+            evidenceKind?: string;
+            verdict?: string;
+            branchStopReason?: string;
+          };
+        }>;
+      } | undefined;
       for (let attempt = 0; attempt < 30; attempt += 1) {
         const traceResponse = await fetch(`http://127.0.0.1:${port}/api/ask-traces/${traceId}`);
         if (traceResponse.status === 200) {
-          trace = await traceResponse.json() as { decisionSummary?: unknown };
+          trace = await traceResponse.json() as typeof trace;
           break;
         }
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
       expect(trace?.decisionSummary).toEqual(body.run?.diagnosticReceiptV4?.summary);
+      expect(trace?.spans).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          name: 'research.validate',
+          reasonCode: 'research_branch_timeout',
+          payload: expect.objectContaining({
+            verdict: 'failed',
+            branchStopReason: 'research_branch_timeout',
+          }),
+        }),
+        expect.objectContaining({
+          name: 'research.lineage',
+          payload: expect.objectContaining({
+            evidenceKind: 'lineage_graph',
+            verdict: 'inconclusive',
+            branchStopReason: 'completed',
+          }),
+        }),
+      ]));
     } finally {
       timeoutSpy.mockRestore();
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
@@ -8930,7 +9512,114 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
     });
   });
 
-  it('propagates failed frozen Research child SQL attempts into the canonical root trace without inventing result facts', async () => {
+  it('counts only one physical provider dispatch after two readiness preflights', async () => {
+    // Readiness has trace value, but it is not an egress attempt. This mirrors
+    // a packaged Ask run where two independent planner-readiness checks happen
+    // before exactly one provider request is admitted through the root ledger.
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-provider-roundtrip-ledger-'));
+    tempDirs.push(projectRoot);
+    const trace = traceRecorder();
+    const request = attachAskTraceObserverV1({
+      runId: 'research-provider-roundtrip-ledger',
+      question: 'Research revenue lineage.',
+      requestedMode: 'research' as const,
+    }, trace.observer);
+    const available = vi.fn(async () => true);
+    const generate = vi.fn(async (
+      _messages: Parameters<AgentProvider['generate']>[0],
+      options?: Parameters<AgentProvider['generate']>[1],
+    ) => {
+      options?.onProviderDispatch?.({
+        provider: 'openai',
+        operation: 'generate',
+        attemptIndex: 1,
+        envelope: { messages: [{ role: 'user', content: 'redacted research planner request' }] },
+      });
+      options?.onProviderDispatchComplete?.({
+        provider: 'openai',
+        operation: 'generate',
+        attemptIndex: 1,
+        outcome: 'ok',
+        settlement: 'transport',
+        httpStatus: 200,
+      });
+      return '{}';
+    });
+    const provider: AgentProvider = { name: 'openai', available, generate };
+
+    await preflightAskAnalyticalPlannerProvider({ projectRoot, request, provider });
+    await preflightAskAnalyticalPlannerProvider({ projectRoot, request, provider });
+
+    const ledger = new RunScopedProviderDispatchEvidence(
+      agentRunProviderDispatchBudgetForMode('research'),
+    );
+    const providerTrace = createProviderDispatchTrace({
+      observer: trace.observer,
+      phase: 'planning',
+      purpose: 'answer_generation',
+      admit: (event) => ledger.observe(event, {
+        purpose: 'answer_generation',
+        dispatchPhase: 'planning',
+        planningKind: 'research_hypothesis',
+        optIn: false,
+      }),
+    });
+    await provider.generate([{ role: 'user', content: 'planner request' }], providerTrace.options);
+    providerTrace.settle('ok');
+
+    expect(available).toHaveBeenCalledTimes(2);
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(trace.spans.filter((span) => span.name === 'provider.preflight')).toHaveLength(2);
+    expect(trace.spans.filter((span) => span.name === 'provider.attempt')).toHaveLength(1);
+
+    const root = {
+      id: 'research-provider-roundtrip-root',
+      question: 'Research revenue lineage.',
+      requestedMode: 'research',
+      route: 'research',
+      status: 'needs_review',
+      trustState: 'review_required',
+      stopReason: 'human_review_required',
+      startedAt: '2026-08-28T00:00:00.000Z',
+      completedAt: '2026-08-28T00:00:01.000Z',
+      steps: [],
+      summary: 'One admitted provider request completed.',
+      artifacts: [],
+      evaluations: [],
+      events: [],
+      nextActions: [],
+      repairAttempts: 0,
+      // Deliberately emulate the stale inherited value from preflight timing.
+      // The run-scoped receipt ledger must override it at terminal merge.
+      telemetry: {
+        version: 1,
+        stageDurationsMs: { provider: 2, total: 1_000 },
+        providerRoundTrips: 2,
+        toolCalls: 0,
+        sqlExecutions: 0,
+        repairs: 0,
+        egressReceipts: 0,
+      },
+    } as unknown as AgentRun;
+    const merged = mergeRunScopedProviderDispatchEvidence(root, ledger.snapshot());
+
+    expect(merged.providerEgressReceipts).toHaveLength(1);
+    expect(merged.telemetry).toMatchObject({ providerRoundTrips: 1, egressReceipts: 1 });
+    expect(merged.diagnosticReceiptV2).toMatchObject({
+      telemetry: { providerRoundTrips: 1, egressReceipts: 1 },
+      providerEgressReceiptFingerprints: [expect.stringMatching(/^[a-f0-9]{64}$/)],
+    });
+    // V5 deliberately does not duplicate physical transport counters; its V6
+    // overlay is the receipt carrying the terminal runtime telemetry.
+    expect(merged.diagnosticReceiptV5).toMatchObject({ version: 5, finalStopReason: 'human_review_required' });
+    expect(merged.diagnosticReceiptV5).not.toHaveProperty('telemetry');
+    expect(merged.diagnosticReceiptV6).toMatchObject({
+      version: 6,
+      telemetry: { providerRoundTrips: 1, egressReceipts: 1 },
+    });
+  });
+
+  it('counts only analytical Research SQL while retaining zero-SQL lineage evidence in the root trace', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-research-failed-child-telemetry-'));
     tempDirs.push(projectRoot);
     copyResearchRuntimeFixture(projectRoot);
@@ -8962,18 +9651,18 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
                 expectation: 'The governed gross-revenue result is available.',
               },
               {
-                statement: 'Missing evidence remains a typed coverage gap.',
+                statement: 'The metric has bounded structural lineage evidence.',
                 priorConfidence: 0.5,
-                target: 'Missing Research Evidence',
-                action: 'lookup_block',
-                expectation: 'No ungrounded SQL is generated for an absent block.',
+                target: 'orders.gross_revenue',
+                action: 'check_lineage',
+                expectation: 'The local graph can expose structural dependencies without a query.',
               },
               {
-                statement: 'A second missing asset remains unexecuted.',
+                statement: 'A second structural lineage pass can confirm graph limits independently.',
                 priorConfidence: 0.4,
-                target: 'Missing Relationship Evidence',
-                action: 'lookup_block',
-                expectation: 'A second absent block does not create a physical query.',
+                target: 'orders.gross_revenue',
+                action: 'check_lineage',
+                expectation: 'A bounded graph observation remains non-causal and requires no SQL.',
               },
             ],
           }) } }],
@@ -9041,33 +9730,105 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
       const payload = await response.json() as { run?: any; error?: string };
       expect(response.status, payload.error).toBe(201);
       const researchArtifact = payload.run?.artifacts?.find((artifact: any) => artifact.kind === 'research_run');
-      const failedChild = (researchArtifact?.payload?.researchRuns ?? []).find((run: any) =>
+      const researchRuns = researchArtifact?.payload?.researchRuns ?? [];
+      const branchReceipts = researchArtifact?.payload?.researchBranchReceipts ?? [];
+      const researchLedgerV2 = researchArtifact?.payload?.researchLedgerV2;
+      const researchLedgerV3 = researchArtifact?.payload?.researchLedgerV3;
+      const failedChild = researchRuns.find((run: any) =>
         run.status === 'error' && run.evidence?.agentEvidence?.runtimeCounters?.sqlExecutions === 1,
       );
+      const analyticalRuns = researchRuns.filter((run: any) => run.evidence?.kind !== 'lineage_graph');
+      const lineageRuns = researchRuns.filter((run: any) => run.evidence?.kind === 'lineage_graph');
       expect(executedSql.join('\n')).toContain('gross_revenue');
       expect(failedChild).toMatchObject({
         status: 'error',
         evidence: { agentEvidence: { runtimeCounters: { sqlExecutions: 1 } } },
       });
       expect(failedChild?.resultPreview?.resultFingerprint).toBeUndefined();
-      // This live root plan independently admits two gross-revenue child
-      // hypotheses. The count below is two distinct child IDs, not a
-      // fingerprint/counter double-count. The unit contract above covers the
-      // one-child terminal case exactly.
-      expect((researchArtifact?.payload?.researchRuns ?? []).filter((run: any) =>
+      // Only the analytical child reaches the physical SQL boundary. The two
+      // direct graph branches remain persisted Research evidence, but must
+      // never inherit query counters, result fingerprints, or SQL receipts.
+      expect(analyticalRuns).toHaveLength(1);
+      expect(researchRuns.filter((run: any) =>
         run.evidence?.agentEvidence?.runtimeCounters?.sqlExecutions === 1,
-      )).toHaveLength(2);
-      expect(payload.run?.telemetry).toMatchObject({ sqlExecutions: 2 });
+      )).toHaveLength(1);
+      expect(lineageRuns).toHaveLength(2);
+      expect(lineageRuns).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          status: 'ready',
+          evidence: expect.objectContaining({
+            kind: 'lineage_graph',
+            receipt: expect.objectContaining({
+              zeroCallCounters: expect.objectContaining({
+                providerCalls: 0,
+                sqlExecutions: 0,
+                warehouseExecutions: 0,
+                repairAttempts: 0,
+              }),
+            }),
+          }),
+        }),
+      ]));
+      expect(lineageRuns.every((run: any) =>
+        run.resultPreview?.resultFingerprint === undefined
+        && run.resultPreview?.executionReceipt === undefined
+        && run.evidence?.agentEvidence?.runtimeCounters?.sqlExecutions === undefined,
+      )).toBe(true);
+      expect(branchReceipts).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          evidenceKind: 'analytical_result',
+          state: 'failed',
+          verdict: 'failed',
+          stopReason: 'execution_failed',
+        }),
+        expect.objectContaining({
+          evidenceKind: 'lineage_graph',
+          state: 'completed',
+          verdict: 'inconclusive',
+          stopReason: 'completed',
+        }),
+      ]));
+      // V2 remains analytical-result-only. V3 has the complete mixed dossier
+      // and makes the graph-only entries explicitly non-query evidence.
+      expect(researchLedgerV2).toMatchObject({
+        version: 2,
+        groundableBranchCount: 3,
+        limitedScope: false,
+      });
+      expect(researchLedgerV2?.entries).toEqual([
+        expect.objectContaining({ status: 'failed', verdict: 'failed' }),
+      ]);
+      expect(researchLedgerV3).toMatchObject({
+        version: 3,
+        groundableBranchCount: 3,
+        limitedScope: false,
+      });
+      const lineageLedgerEntries = (researchLedgerV3?.entries ?? []).filter((entry: any) => entry.evidenceKind === 'lineage_graph');
+      expect(researchLedgerV3?.entries).toEqual(expect.arrayContaining([
+        expect.objectContaining({ evidenceKind: 'analytical_result', status: 'failed', verdict: 'failed' }),
+        expect.objectContaining({ evidenceKind: 'lineage_graph', status: 'observed', verdict: 'inconclusive' }),
+      ]));
+      expect(lineageLedgerEntries).toHaveLength(2);
+      expect(lineageLedgerEntries.every((entry: any) =>
+        entry.resultFingerprint === undefined
+        && entry.executionReceipt === undefined
+        && entry.lineageReceipt?.zeroCallCounters?.providerCalls === 0
+        && entry.lineageReceipt?.zeroCallCounters?.sqlExecutions === 0
+        && entry.lineageReceipt?.zeroCallCounters?.warehouseExecutions === 0
+        && entry.lineageReceipt?.zeroCallCounters?.repairAttempts === 0,
+      )).toBe(true);
+      expect(payload.run).toMatchObject({ status: 'needs_review', trustState: 'review_required' });
+      expect(payload.run?.telemetry).toMatchObject({ sqlExecutions: 1 });
       expect(payload.run?.diagnosticReceiptV2).toMatchObject({
-        telemetry: expect.objectContaining({ sqlExecutions: 2 }),
+        telemetry: expect.objectContaining({ sqlExecutions: 1 }),
       });
       expect(payload.run?.diagnosticReceiptV5).toMatchObject({
-        state: { counters: { executionAttempts: 2 } },
-        summary: { executionAttempts: 2 },
+        state: { counters: { executionAttempts: 1 } },
+        summary: { executionAttempts: 1 },
       });
       expect(payload.run?.diagnosticReceiptV6).toMatchObject({
-        telemetry: expect.objectContaining({ sqlExecutions: 2 }),
-        execution: { attempts: 2 },
+        telemetry: expect.objectContaining({ sqlExecutions: 1 }),
+        execution: { attempts: 1 },
         facts: { factCount: 0 },
       });
       const traceId = payload.run?.traceReference?.traceId;
@@ -9076,13 +9837,23 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
       const trace = await traceResponse.json() as any;
       expect(traceResponse.status).toBe(200);
       expect(trace?.runtimeReceiptV6).toMatchObject({
-        telemetry: expect.objectContaining({ sqlExecutions: 2 }),
-        execution: { attempts: 2 },
+        telemetry: expect.objectContaining({ sqlExecutions: 1 }),
+        execution: { attempts: 1 },
         facts: { factCount: 0 },
       });
       expect(trace?.spans).toEqual(expect.arrayContaining([
         expect.objectContaining({ name: 'sql.execute', outcome: 'error' }),
+        expect.objectContaining({
+          name: 'research.lineage',
+          payload: expect.objectContaining({
+            evidenceKind: 'lineage_graph',
+            verdict: 'inconclusive',
+            branchStopReason: 'completed',
+          }),
+        }),
       ]));
+      expect(trace?.spans.filter((span: { name?: string }) => span.name === 'sql.execute')).toHaveLength(1);
+      expect(trace?.spans.filter((span: { name?: string }) => span.name === 'research.lineage')).toHaveLength(2);
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
@@ -9103,6 +9874,25 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
       && artifact.trustState === 'blocked'
       && (artifact.payload as { partial?: unknown } | undefined)?.partial === true,
   );
+
+  const expectedPartialResearchBranchTrace = (
+    branch: { childRunId: string; spanId?: string },
+    receipts: Array<{ childRunId: string; evidenceKind?: string; lineageStatus?: string }>,
+    terminalReason: 'run_deadline' | 'cancelled',
+  ) => {
+    const receipt = receipts.find((candidate) => candidate.childRunId === branch.childRunId);
+    if (receipt?.evidenceKind === 'lineage_graph') {
+      // A direct structural child can complete before the root terminates. Its
+      // typed graph outcome—not the root cancellation—is the truthful span
+      // reason. This fixture intentionally proves the missing-target branch.
+      return expect.objectContaining({
+        spanId: branch.spanId,
+        name: 'research.lineage',
+        reasonCode: receipt.lineageStatus === 'missing' ? 'source_empty' : expect.any(String),
+      });
+    }
+    return expect.objectContaining({ spanId: branch.spanId, name: 'research.validate', reasonCode: terminalReason });
+  };
 
   it('persists a minimal partial Research root artifact across a root deadline during an active branch', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-research-root-deadline-'));
@@ -9160,8 +9950,14 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
           terminalReason: 'run_deadline',
           rootResearchRunId: expect.any(String),
           childRunIds: expect.any(Array),
-          researchBranchReceipts: expect.arrayContaining([expect.objectContaining({ state: 'failed', stopReason: 'run_deadline' })]),
+          researchBranchReceipts: expect.arrayContaining([
+            expect.objectContaining({ state: 'failed', stopReason: 'run_deadline' }),
+            // A local graph can truthfully return a typed missing target. It
+            // still completes as a zero-call structural observation.
+            expect.objectContaining({ state: 'completed', evidenceKind: 'lineage_graph', lineageStatus: 'missing' }),
+          ]),
           researchLedgerV2: expect.objectContaining({ version: 2, stoppingReason: 'blocked' }),
+          researchLedgerV3: expect.objectContaining({ version: 3, stoppingReason: 'blocked' }),
           traceReference: expect.objectContaining({ traceId: expect.any(String) }),
           researchTrace: expect.objectContaining({ branchTrace: expect.arrayContaining([expect.objectContaining({ kind: 'research_branch', spanId: expect.any(String) })]) }),
         }),
@@ -9170,10 +9966,13 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
         childRunIds?: string[];
         traceReference?: { traceId?: string };
         researchTrace?: { branchTrace?: Array<{ childRunId: string; spanId?: string; kind: string }> };
+        researchBranchReceipts?: Array<{ childRunId: string; evidenceKind?: string; lineageStatus?: string }>;
       };
       const deadlineChildRunIds = deadlinePayload.childRunIds ?? [];
       const deadlineTraceId = deadlinePayload.traceReference?.traceId;
       const deadlineBranchTrace = deadlinePayload.researchTrace?.branchTrace ?? [];
+      const deadlineReceiptsByChildId = new Map((deadlinePayload.researchBranchReceipts ?? [])
+        .map((receipt) => [receipt.childRunId, receipt]));
       // Both fixture hypotheses start in the first bounded wave. A root
       // deadline must persist each active child rather than retaining only the
       // first serial branch from the pre-wave scheduler.
@@ -9204,7 +10003,11 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
       expect(reloaded.status).toBe(200);
       const persistedArtifact = partialResearchArtifact(persisted.run);
       expect(persistedArtifact).toMatchObject({
-        payload: expect.objectContaining({ terminalReason: 'run_deadline', researchLedgerV2: expect.objectContaining({ version: 2 }) }),
+        payload: expect.objectContaining({
+          terminalReason: 'run_deadline',
+          researchLedgerV2: expect.objectContaining({ version: 2 }),
+          researchLedgerV3: expect.objectContaining({ version: 3, stoppingReason: 'blocked' }),
+        }),
       });
       // Restart parity covers the durable branch record and the root trace,
       // not just the serialized root artifact. The child and span identities
@@ -9216,9 +10019,12 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
       for (const childRunId of deadlineChildRunIds) {
         const deadlineChild = await fetch(`http://127.0.0.1:${reloadedPort}/api/notebook/research/${encodeURIComponent(childRunId)}`);
         expect(deadlineChild.status).toBe(200);
-        expect(await deadlineChild.json()).toMatchObject({
-          run: { id: childRunId, status: 'error' },
-        });
+        const child = await deadlineChild.json() as { run?: AgentRun };
+        const lineageChild = deadlineReceiptsByChildId.get(childRunId)?.evidenceKind === 'lineage_graph';
+        expect(child).toMatchObject({ run: { id: childRunId, status: lineageChild ? 'ready' : 'error' } });
+        if (lineageChild) {
+          expect((child.run as (AgentRun & { evidence?: unknown }) | undefined)?.evidence).toMatchObject({ kind: 'lineage_graph' });
+        }
       }
       let deadlineTrace: any;
       for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -9234,7 +10040,7 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
         expect.objectContaining({ kind: 'research_branch', targetRunId: childRunId }),
       )));
       expect(deadlineTrace?.spans).toEqual(expect.arrayContaining(deadlineBranchTrace.map((branch) =>
-        expect.objectContaining({ spanId: branch.spanId, name: 'research.validate', reasonCode: 'run_deadline' }),
+        expectedPartialResearchBranchTrace(branch, deadlinePayload.researchBranchReceipts ?? [], 'run_deadline'),
       )));
     } finally {
       timeoutSpy.mockRestore();
@@ -9299,18 +10105,25 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
           terminalReason: 'cancelled',
           rootResearchRunId: expect.any(String),
           childRunIds: expect.any(Array),
-          researchBranchReceipts: expect.arrayContaining([expect.objectContaining({ state: 'failed', stopReason: 'cancelled' })]),
+          researchBranchReceipts: expect.arrayContaining([
+            expect.objectContaining({ state: 'failed', stopReason: 'cancelled' }),
+            expect.objectContaining({ state: 'completed', evidenceKind: 'lineage_graph', lineageStatus: 'missing' }),
+          ]),
           researchLedgerV2: expect.objectContaining({ version: 2, stoppingReason: 'blocked' }),
+          researchLedgerV3: expect.objectContaining({ version: 3, stoppingReason: 'blocked' }),
         }),
       });
       const cancellationPayload = artifact!.payload as {
         childRunIds?: string[];
         traceReference?: { traceId?: string };
         researchTrace?: { branchTrace?: Array<{ childRunId: string; spanId?: string; kind: string }> };
+        researchBranchReceipts?: Array<{ childRunId: string; evidenceKind?: string; lineageStatus?: string }>;
       };
       const cancellationChildRunIds = cancellationPayload.childRunIds ?? [];
       const cancellationTraceId = cancellationPayload.traceReference?.traceId;
       const cancellationBranchTrace = cancellationPayload.researchTrace?.branchTrace ?? [];
+      const cancellationReceiptsByChildId = new Map((cancellationPayload.researchBranchReceipts ?? [])
+        .map((receipt) => [receipt.childRunId, receipt]));
       expect(cancellationChildRunIds).toHaveLength(2);
       expect(new Set(cancellationChildRunIds).size).toBe(2);
       expect(cancellationTraceId).toMatch(/^[a-f0-9]{32}$/);
@@ -9338,7 +10151,11 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
       expect(reloaded.status).toBe(200);
       const persistedArtifact = partialResearchArtifact(persisted.run);
       expect(persistedArtifact).toMatchObject({
-        payload: expect.objectContaining({ terminalReason: 'cancelled', researchBranchReceipts: expect.arrayContaining([expect.objectContaining({ stopReason: 'cancelled' })]) }),
+        payload: expect.objectContaining({
+          terminalReason: 'cancelled',
+          researchBranchReceipts: expect.arrayContaining([expect.objectContaining({ stopReason: 'cancelled' })]),
+          researchLedgerV3: expect.objectContaining({ version: 3, stoppingReason: 'blocked' }),
+        }),
       });
       const persistedPayload = persistedArtifact!.payload as typeof cancellationPayload;
       expect(persistedPayload.childRunIds).toEqual(cancellationChildRunIds);
@@ -9346,9 +10163,12 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
       for (const childRunId of cancellationChildRunIds) {
         const cancellationChild = await fetch(`http://127.0.0.1:${reloadedPort}/api/notebook/research/${encodeURIComponent(childRunId)}`);
         expect(cancellationChild.status).toBe(200);
-        expect(await cancellationChild.json()).toMatchObject({
-          run: { id: childRunId, status: 'error' },
-        });
+        const child = await cancellationChild.json() as { run?: AgentRun };
+        const lineageChild = cancellationReceiptsByChildId.get(childRunId)?.evidenceKind === 'lineage_graph';
+        expect(child).toMatchObject({ run: { id: childRunId, status: lineageChild ? 'ready' : 'error' } });
+        if (lineageChild) {
+          expect((child.run as (AgentRun & { evidence?: unknown }) | undefined)?.evidence).toMatchObject({ kind: 'lineage_graph' });
+        }
       }
       let cancellationTrace: any;
       for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -9364,7 +10184,7 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
         expect.objectContaining({ kind: 'research_branch', targetRunId: childRunId }),
       )));
       expect(cancellationTrace?.spans).toEqual(expect.arrayContaining(cancellationBranchTrace.map((branch) =>
-        expect.objectContaining({ spanId: branch.spanId, name: 'research.validate', reasonCode: 'cancelled' }),
+        expectedPartialResearchBranchTrace(branch, cancellationPayload.researchBranchReceipts ?? [], 'cancelled'),
       )));
     } finally {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
