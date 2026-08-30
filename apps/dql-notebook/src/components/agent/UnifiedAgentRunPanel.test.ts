@@ -50,6 +50,8 @@ let InspectorDecisionStory: typeof UnifiedAgentRunPanelModule.InspectorDecisionS
 let ResearchPartialFailureRepair: typeof UnifiedAgentRunPanelModule.ResearchPartialFailureRepair;
 let InspectorDecisionSummaryUnavailable: typeof UnifiedAgentRunPanelModule.InspectorDecisionSummaryUnavailable;
 let inspectorLegacySummaryNotice: typeof UnifiedAgentRunPanelModule.CANONICAL_DECISION_SUMMARY_UNAVAILABLE;
+let analyticalTaskOutcomePresentation: typeof UnifiedAgentRunPanelModule.analyticalTaskOutcomePresentation;
+let AnalyticalTaskOutcomeList: typeof UnifiedAgentRunPanelModule.AnalyticalTaskOutcomeList;
 
 beforeAll(async () => {
     vi.stubGlobal('window', { location: { origin: 'http://localhost' } });
@@ -98,9 +100,66 @@ beforeAll(async () => {
     ResearchPartialFailureRepair = module.ResearchPartialFailureRepair;
     InspectorDecisionSummaryUnavailable = module.InspectorDecisionSummaryUnavailable;
     inspectorLegacySummaryNotice = module.CANONICAL_DECISION_SUMMARY_UNAVAILABLE;
+    analyticalTaskOutcomePresentation = module.analyticalTaskOutcomePresentation;
+    AnalyticalTaskOutcomeList = module.AnalyticalTaskOutcomeList;
 });
 
 describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
+
+  it('AGT-036 renders a successful independent Ask task beside a typed failed or dependency-blocked sibling', () => {
+    const outcomes = [{
+      version: 1 as const,
+      taskId: 'task-1',
+      status: 'completed' as const,
+      trustState: 'governed' as const,
+      summary: 'Revenue result validated.',
+      resultFingerprint: 'result:task-1',
+    }, {
+      version: 1 as const,
+      taskId: 'task-2',
+      status: 'dependency_blocked' as const,
+      trustState: 'blocked' as const,
+      summary: 'The child needs the parent result.',
+      dependencyTaskIds: ['task-1'],
+      failure: { version: 1 as const, code: 'DEPENDENCY_BLOCKED', message: 'The child needs the parent result.', phase: 'dependency' as const },
+    }];
+    const markup = renderToStaticMarkup(createElement(AnalyticalTaskOutcomeList, {
+      outcomes,
+      summary: {
+        version: 1,
+        status: 'partial',
+        trustState: 'governed',
+        taskCount: 2,
+        successfulTaskIds: ['task-1'],
+        failedTaskIds: [],
+        dependencyBlockedTaskIds: ['task-2'],
+      },
+      t: themes.paper,
+    }));
+    expect(markup).toContain('Analytical tasks · 1 of 2 completed');
+    expect(markup).toContain('task-1');
+    expect(markup).toContain('Completed');
+    expect(markup).toContain('task-2');
+    expect(markup).toContain('Dependency blocked');
+    expect(markup).toContain('Waiting for task-1');
+    expect(analyticalTaskOutcomePresentation({
+      version: 1,
+      taskId: 'task-gap',
+      status: 'gap',
+      trustState: 'blocked',
+      summary: 'No safe region field.',
+      failure: { version: 1, code: 'TASK_COMPILER_UNAVAILABLE', message: 'No safe region field.', phase: 'planning' },
+    })).toMatchObject({ glyph: '!', label: 'Needs coverage', tone: 'warning' });
+  });
+
+  it('AGT-036 ignores malformed persisted V3 task receipts instead of rendering or throwing', () => {
+    const markup = renderToStaticMarkup(createElement(AnalyticalTaskOutcomeList, {
+      outcomes: { taskId: 'not-an-array' } as unknown,
+      summary: { status: 'partial', taskCount: 'two' } as unknown,
+      t: themes.paper,
+    }));
+    expect(markup).toBe('');
+  });
 
   it('OBS-014 gives old inspector runs the same canonical-summary-unavailable notice as full trace', () => {
     const markup = renderToStaticMarkup(createElement(InspectorDecisionSummaryUnavailable, { t: themes.paper }));
@@ -1847,6 +1906,81 @@ describe('failure card origin and detail', () => {
     expect(askFailureOrigin(runWith({}, {
       diagnosticReceipt: { failure: { code: 'AI_PROVIDER_FAILURE', message: 'provider unavailable' } },
     }))).toBe('provider');
+  });
+
+  it('UI-012 presents a recorded SQL execution incident before a legacy grounding compatibility code', () => {
+    const run = runWith({
+      refusalCode: 'grounding_gap',
+      executionError: 'connection reset by peer',
+    }, {
+      diagnosticReceiptV4: {
+        version: 4,
+        terminalIncident: {
+          version: 1,
+          code: 'ANALYTICAL_EXECUTION_FAILED',
+          boundary: 'sql.execute',
+          origin: 'warehouse',
+          impact: 'execution_failed',
+          safeAction: 'retry_same_plan',
+        },
+      },
+    });
+
+    expect(askFailureOrigin(run)).toBe('execution');
+    expect(ASK_FAILURE_PRESENTATION.execution.title).toBe('The selected query did not complete');
+    expect(ASK_FAILURE_PRESENTATION.execution.title).not.toMatch(/context|metadata/i);
+    expect(askFailureOrigin(runWith({
+      refusalCode: 'execution_error',
+      executionError: 'connection reset by peer',
+    }))).toBe('execution');
+  });
+
+  it('UI-012 keeps typed compilation and result validation out of the execution card', () => {
+    const compilation = runWith({
+      refusalCode: 'execution_error',
+      executionError: 'adapter rejected the selected group-by item',
+      analyticalFailure: { code: 'COMPILATION_FAILED', phase: 'compilation' },
+    }, {
+      diagnosticReceiptV4: {
+        version: 4,
+        terminalIncident: {
+          version: 1,
+          code: 'COMPILATION_FAILED',
+          boundary: 'semantic.compile',
+          origin: 'semantic_compiler',
+          impact: 'execution_not_attempted',
+          safeAction: 'edit_dql',
+        },
+      },
+    });
+    const resultValidation = runWith({
+      refusalCode: 'execution_error',
+      executionError: 'the returned columns were rejected',
+      analyticalFailure: { code: 'RESULT_CONTRACT_MISMATCH', phase: 'result_validation' },
+    }, {
+      diagnosticReceiptV4: {
+        version: 4,
+        terminalIncident: {
+          version: 1,
+          code: 'RESULT_CONTRACT_MISMATCH',
+          boundary: 'result.validate',
+          origin: 'result_validator',
+          impact: 'answer_not_produced',
+          safeAction: 'inspect_failure',
+        },
+      },
+    });
+    const execution = runWith({
+      refusalCode: 'grounding_gap',
+      executionError: 'connection reset by peer',
+      analyticalFailure: { code: 'EXECUTION_FAILED', phase: 'execution' },
+    });
+
+    expect(askFailureOrigin(compilation)).toBe('compile');
+    expect(askFailureOrigin(resultValidation)).toBe('result_contract');
+    expect(askFailureOrigin(execution)).toBe('execution');
+    expect(ASK_FAILURE_PRESENTATION.compile.title).not.toMatch(/connection|query did not complete/i);
+    expect(ASK_FAILURE_PRESENTATION.result_contract.title).not.toMatch(/connection|query did not complete/i);
   });
 
   it('UI-011 distinguishes an internal dispatch budget from a provider outage', () => {

@@ -245,6 +245,379 @@ describe('AskAnalystRuntimeV1', () => {
     ]));
   });
 
+  it('AGT-051 binds an exact safe physical member value into one review-required exploratory program when semantic evidence is absent', async () => {
+    const relation: AgentEvidenceCandidate = {
+      id: 'dbt:model:orders',
+      qualifiedId: 'dbt:model:orders',
+      kind: 'dbt_model',
+      trustTier: 'exploratory',
+      name: 'orders',
+      aliases: ['orders'],
+      relevanceScore: 1,
+      matchReasons: ['qualified dbt relation'],
+      compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:analytics.orders'],
+    };
+    const revenueColumn: AgentEvidenceCandidate = {
+      id: 'dbt:column:orders.revenue',
+      qualifiedId: 'dbt:column:orders.revenue',
+      kind: 'sql_column',
+      trustTier: 'exploratory',
+      name: 'revenue',
+      aliases: ['revenue'],
+      relevanceScore: 1,
+      matchReasons: ['qualified physical measure'],
+      compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:analytics.orders'],
+    };
+    const regionColumn: AgentEvidenceCandidate = {
+      id: 'dbt:column:orders.region',
+      qualifiedId: 'dbt:column:orders.region',
+      kind: 'sql_column',
+      trustTier: 'exploratory',
+      name: 'region',
+      aliases: ['region'],
+      relevanceScore: 0.99,
+      matchReasons: ['qualified physical categorical column'],
+      compatibility: 'compatible',
+      compatibilityFacts: ['roles categorical dimension'],
+      sourceObjects: ['runtime:relation:analytics.orders'],
+      safeValueEvidence: [{
+        version: 1,
+        relation: 'analytics.orders',
+        column: 'region',
+        value: 'Philadelphia',
+        normalizedValue: 'philadelphia',
+      }],
+    };
+    const resolveMeaning = vi.fn();
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker: { decide: vi.fn(async () => semanticDecision()) },
+      resolveMeaning,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot:physical-philadelphia',
+        candidates: [relation, revenueColumn, regionColumn],
+        parsedIntent: { measures: ['revenue'], dimensions: [], filters: [] },
+      }),
+    });
+
+    const decision = await runtime.decide({
+      question: 'Show revenue in Philadelphia',
+      requestedMode: 'ask',
+    });
+
+    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(decision.action).toBe('answer');
+    expect(decision.analyticalCascadeDecision).toMatchObject({
+      selectedTier: 'exploratory_sql',
+      planFrozen: true,
+    });
+    expect(decision.askAnalystDecision?.state.program.filters).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        fieldTerms: [regionColumn.id],
+        value: 'Philadelphia',
+        operator: 'equals',
+      }),
+    ]));
+    expect(decision.askAnalystDecision?.taskExecutions?.[0]?.resolvedPlan).toMatchObject({
+      compiler: 'exploratory_sql',
+      reviewRequired: true,
+      planFrozen: true,
+    });
+  });
+
+  it('AGT-051 probes one cold exact literal then admits a bounded exploratory closure without provider egress', async () => {
+    const customers: AgentEvidenceCandidate = {
+      id: 'dbt:model:customers', qualifiedId: 'dbt:model:customers', kind: 'dbt_model',
+      trustTier: 'exploratory', name: 'customers', aliases: ['customers'], relevanceScore: 1,
+      exactMatch: true, matchReasons: ['exact customer relation'], compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:customers'],
+    };
+    const customerName: AgentEvidenceCandidate = {
+      id: 'runtime:column:customers.customer_name', qualifiedId: 'runtime:column:customers.customer_name',
+      kind: 'sql_column', trustTier: 'exploratory', name: 'customer_name', aliases: ['customer', 'customer name'],
+      relevanceScore: 0.99, exactMatch: true, matchReasons: ['exact customer display field'], compatibility: 'compatible',
+      compatibilityFacts: ['roles entity label'], sourceObjects: ['runtime:relation:customers'],
+    };
+    const locations: AgentEvidenceCandidate = {
+      id: 'dbt:model:locations', qualifiedId: 'dbt:model:locations', kind: 'dbt_model',
+      trustTier: 'exploratory', name: 'locations', aliases: ['locations'], relevanceScore: 0.01,
+      matchReasons: ['qualified location relation'], compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:locations'],
+    };
+    // This intentionally has no categorical-role fact. Its exact observed
+    // value, qualified identity, and path proof—not its lexical label—are the
+    // permitted literal binding evidence.
+    const locationName: AgentEvidenceCandidate = {
+      id: 'runtime:column:locations.location_name', qualifiedId: 'runtime:column:locations.location_name',
+      kind: 'sql_column', trustTier: 'exploratory', name: 'location_name', aliases: ['location name'],
+      relevanceScore: 0.01, matchReasons: ['qualified location value field'], compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:locations'],
+      // The local host, not retrieval or the planner, owns this opaque
+      // single-use probe token. Field metadata stays in the host registry.
+      hostLiteralProbeToken: 'host-test-location-probe',
+    };
+    const customerLocation: AgentEvidenceCandidate = {
+      id: 'dql:relationship:customer_location', qualifiedId: 'dql:relationship:customer_location',
+      kind: 'dql_modeling', trustTier: 'governed_sql', name: 'customer location relationship',
+      aliases: ['customer location relationship'], relevanceScore: 0.02,
+      matchReasons: ['declared draft relationship proof'], compatibility: 'compatible',
+      relationshipEvidence: ['dql:relationship:customer_location'],
+      relationshipSafety: [{
+        id: 'dql:relationship:customer_location',
+        from: 'runtime:relation:customers', to: 'runtime:relation:locations',
+        keys: [{ from: 'location_id', to: 'location_id' }], status: 'draft', staleCertification: false,
+        cardinality: 'many_to_one', fanout: 'safe', automaticJoinAllowed: false,
+        exploratoryJoinAllowed: true, exploratoryPathFingerprint: 'path:customer-location',
+      }],
+    };
+    // More than the execution-workspace cap of irrelevant cards ensures the
+    // location relation/value are below the initial fused selection.
+    const filler = Array.from({ length: 36 }, (_, index): AgentEvidenceCandidate => ({
+      id: `dbt:model:context_${index}`, qualifiedId: `dbt:model:context_${index}`,
+      kind: 'dbt_model', trustTier: 'exploratory', name: `Context ${index}`,
+      aliases: [`context ${index}`], relevanceScore: 0.9 - index / 1_000,
+      matchReasons: ['irrelevant workspace pressure'], compatibility: 'compatible',
+      sourceObjects: [`runtime:relation:context_${index}`],
+    }));
+    const resolveMeaning = vi.fn();
+    const getEvidence = vi.fn(async (): Promise<AgentRetrievalEvidence> => ({
+      snapshotId: 'snapshot:below-cap-philadelphia',
+      // `revenue` deliberately creates an early deterministic semantic
+      // binding. It does not prove the current Philadelphia predicate, so it
+      // must not suppress the one host literal probe/closure below.
+      candidates: [revenue, customers, customerName, ...filler, locations, locationName, customerLocation],
+      parsedIntent: { measures: ['revenue'], dimensions: [], filters: [] },
+    }));
+    const probeLiteralGrounding = vi.fn(async () => {
+      return { version: 1 as const, status: 'matched' as const, candidateId: locationName.id, reasonCode: 'exact_value_probe_match' };
+    });
+    expect(evidenceCandidateRoles(locationName)).toEqual(['context']);
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker: { decide: vi.fn(async () => semanticDecision()) },
+      resolveMeaning,
+      getEvidence,
+      probeLiteralGrounding,
+      allowDeterministicNaturalLanguageBinding: true,
+    });
+
+    const decision = await runtime.decide({
+      question: 'Show revenue for customers in Philadelphia',
+      requestedMode: 'ask',
+    });
+
+    expect(resolveMeaning).not.toHaveBeenCalled();
+    expect(getEvidence).toHaveBeenCalledTimes(1);
+    expect(probeLiteralGrounding).toHaveBeenCalledTimes(1);
+    expect(decision.action).toBe('answer');
+    expect(decision.analyticalCascadeDecision?.selectedTier).toBe('exploratory_sql');
+    expect(decision.askAnalystDecision?.taskExecutions?.[0]?.resolvedPlan).toMatchObject({
+      reviewRequired: true,
+      planFrozen: true,
+    });
+    expect(decision.askAnalystDecision?.state.workspace.workspaceCandidateIds).toHaveLength(32);
+    expect(decision.askAnalystDecision?.state.workspace.targetedContext).toMatchObject({
+      status: 'admitted',
+      reasonCode: 'same_snapshot_literal_role_extension_exploratory',
+      // The first-class enrichment admitted the exact configured field into
+      // the regular workspace before closure assembly; the closure only adds
+      // the owning relation/path that remained outside that cap.
+      candidateIds: expect.arrayContaining([locations.qualifiedId]),
+      relationshipPathIds: ['dql:relationship:customer_location'],
+    });
+    expect(decision.askAnalystDecision?.state.workspace.workspaceCandidateIds).toEqual(expect.arrayContaining([
+      locationName.qualifiedId,
+    ]));
+    expect(decision.askAnalystDecision?.state.workspace.tools).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'tool:literal_role_extension',
+        kind: 'candidate_extension',
+        status: 'completed',
+        reasonCode: 'same_snapshot_literal_role_extension_exploratory',
+      }),
+      expect.objectContaining({
+        id: 'tool:literal_grounding_probe',
+        status: 'completed',
+        reasonCode: 'literal_grounding_exact_match',
+      }),
+    ]));
+    const toolIds = decision.askAnalystDecision?.state.workspace.tools.map((tool) => tool.id) ?? [];
+    expect(toolIds.indexOf('tool:literal_grounding_probe')).toBeGreaterThan(toolIds.indexOf('tool:retrieve_snapshot'));
+    expect(toolIds.indexOf('tool:literal_grounding_probe')).toBeLessThan(toolIds.indexOf('tool:literal_role_extension'));
+    expect(decision.askAnalystDecision?.state.program.filters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ fieldTerms: [locationName.qualifiedId], value: 'philadelphia', operator: 'equals' }),
+    ]));
+    // The local trace/tool surface never retains the probe literal, SQL, or
+    // warehouse rows. Only the selected candidate identity and status remain.
+    expect(JSON.stringify(decision.askAnalystDecision?.state.workspace.tools)).not.toContain('Philadelphia');
+
+    const foreignBroker = { decide: vi.fn(async () => semanticDecision()) };
+    const foreignProbe = vi.fn(async () => ({
+      version: 1 as const,
+      status: 'matched' as const,
+      candidateId: 'runtime:column:other.location_name',
+      reasonCode: 'foreign_candidate',
+    }));
+    const foreign = await createAskAnalystRuntimeV1({
+      compilerBroker: foreignBroker,
+      getEvidence,
+      probeLiteralGrounding: foreignProbe,
+      allowDeterministicNaturalLanguageBinding: true,
+    }).decide({ question: 'Show revenue for customers in Philadelphia', requestedMode: 'ask' });
+    expect(foreign.action).not.toBe('answer');
+    expect(foreign.askAnalystDecision?.state.workspace.targetedContext).toBeUndefined();
+    expect(foreign.askAnalystDecision?.state.workspace.tools).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'tool:literal_grounding_probe', reasonCode: 'literal_grounding_invalid_match' }),
+    ]));
+    expect(foreignBroker.decide).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['no match', { status: 'no_match' as const, reasonCode: 'exact_value_probe_no_match' }],
+    ['disabled', { status: 'disabled' as const, reasonCode: 'runtime_value_grounding_disabled' }],
+    ['unavailable', { status: 'unavailable' as const, reasonCode: 'literal_probe_execution_unavailable' }],
+    ['invalid capability', { status: 'denied' as const, reasonCode: 'literal_probe_capability_denied' }],
+    ['ambiguous capability', { status: 'ambiguous' as const, reasonCode: 'literal_probe_capability_ambiguous' }],
+  ])('AGT-051 keeps a cold literal %s result pre-freeze and never falls back to a broad route', async (_label, probeResult) => {
+    const customers: AgentEvidenceCandidate = {
+      id: 'dbt:model:customers', qualifiedId: 'dbt:model:customers', kind: 'dbt_model',
+      trustTier: 'exploratory', name: 'customers', aliases: ['customers'], relevanceScore: 1,
+      exactMatch: true, matchReasons: ['exact customer relation'], compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:customers'],
+    };
+    const customerName: AgentEvidenceCandidate = {
+      id: 'runtime:column:customers.customer_name', qualifiedId: 'runtime:column:customers.customer_name',
+      kind: 'sql_column', trustTier: 'exploratory', name: 'customer_name', aliases: ['customer', 'customer name'],
+      relevanceScore: 0.99, exactMatch: true, matchReasons: ['exact customer display field'], compatibility: 'compatible',
+      compatibilityFacts: ['roles entity label'], sourceObjects: ['runtime:relation:customers'],
+    };
+    const locationName: AgentEvidenceCandidate = {
+      id: 'runtime:column:locations.location_name', qualifiedId: 'runtime:column:locations.location_name',
+      kind: 'sql_column', trustTier: 'exploratory', name: 'location_name', aliases: ['location name'],
+      relevanceScore: 0.1, matchReasons: ['configured physical value field'], compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:locations'], hostLiteralProbeToken: 'opaque-negative-probe-token',
+    };
+    const planner = vi.fn(async () => undefined);
+    const compilerBroker = { decide: vi.fn(async () => semanticDecision()) };
+    const probeLiteralGrounding = vi.fn(async () => ({ version: 1 as const, ...probeResult }));
+    const decision = await createAskAnalystRuntimeV1({
+      compilerBroker,
+      planAnalytical: planner,
+      probeLiteralGrounding,
+      allowDeterministicNaturalLanguageBinding: true,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot:cold-literal-negative',
+        candidates: [revenue, customers, customerName, locationName],
+        parsedIntent: { measures: ['revenue'], dimensions: [], filters: [] },
+      }),
+    }).decide({ question: 'Show revenue for customers in Philadelphia', requestedMode: 'ask' });
+
+    expect(probeLiteralGrounding).toHaveBeenCalledTimes(1);
+    expect(compilerBroker.decide).not.toHaveBeenCalled();
+    expect(decision.askAnalystDecision?.state.phase).toBe('blocked');
+    expect(decision.askAnalystDecision?.state.resolvedPlan?.planFrozen ?? false).toBe(false);
+    expect(decision.analyticalCascadeDecision?.selectedTier).toBeUndefined();
+    // Opaque capability material cannot leak into durable/planner state even
+    // when the host declines the probe before a generated route exists.
+    expect(JSON.stringify(decision.askAnalystDecision)).not.toContain('opaque-negative-probe-token');
+  });
+
+  it('AGT-051 leaves ambiguous or unsafe below-cap literal closures as a typed pre-freeze gap', async () => {
+    const customer: AgentEvidenceCandidate = {
+      id: 'dbt:model:customers', qualifiedId: 'dbt:model:customers', kind: 'dbt_model',
+      trustTier: 'exploratory', name: 'customers', aliases: ['customers'], relevanceScore: 1,
+      exactMatch: true, matchReasons: ['exact customer relation'], compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:customers'],
+    };
+    const customerName: AgentEvidenceCandidate = {
+      id: 'runtime:column:customers.customer_name', qualifiedId: 'runtime:column:customers.customer_name',
+      kind: 'sql_column', trustTier: 'exploratory', name: 'customer_name', aliases: ['customer'], relevanceScore: 0.99,
+      exactMatch: true, matchReasons: ['exact customer display field'], compatibility: 'compatible',
+      compatibilityFacts: ['roles entity label'], sourceObjects: ['runtime:relation:customers'],
+    };
+    const locations: AgentEvidenceCandidate = {
+      id: 'dbt:model:locations', qualifiedId: 'dbt:model:locations', kind: 'dbt_model',
+      trustTier: 'exploratory', name: 'locations', aliases: ['locations'], relevanceScore: 0.01,
+      matchReasons: ['qualified location relation'], compatibility: 'compatible', sourceObjects: ['runtime:relation:locations'],
+    };
+    const literal = (id: string): AgentEvidenceCandidate => ({
+      id, qualifiedId: id, kind: 'sql_column', trustTier: 'exploratory', name: id.split('.').at(-1) ?? id,
+      aliases: ['location'], relevanceScore: 0.01, matchReasons: ['qualified value field'], compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:locations'],
+      safeValueEvidence: [{ version: 1, relation: 'locations', column: id.split('.').at(-1) ?? id, value: 'Philadelphia', normalizedValue: 'philadelphia' }],
+    });
+    const unsafePath: AgentEvidenceCandidate = {
+      id: 'dql:relationship:unsafe_customer_location', qualifiedId: 'dql:relationship:unsafe_customer_location',
+      kind: 'dql_modeling', trustTier: 'governed_sql', name: 'unsafe customer location relationship', relevanceScore: 0.02,
+      matchReasons: ['unsafe relationship'], compatibility: 'compatible', relationshipEvidence: ['dql:relationship:unsafe_customer_location'],
+      relationshipSafety: [{
+        id: 'dql:relationship:unsafe_customer_location', from: 'runtime:relation:customers', to: 'runtime:relation:locations',
+        keys: [{ from: 'location_id', to: 'location_id' }], status: 'certified', staleCertification: false,
+        cardinality: 'many_to_many', fanout: 'unsafe', automaticJoinAllowed: false,
+        validation: { status: 'passed', checkedAt: '2026-08-29T00:00:00.000Z' },
+      }],
+    };
+    // One evidence card can still hide two distinct safe physical joins. The
+    // literal extension must not collapse those paths merely because the card
+    // itself has one stable ID.
+    const twoSafePhysicalPathsInOneCard: AgentEvidenceCandidate = {
+      id: 'dql:relationship:two_customer_location_paths', qualifiedId: 'dql:relationship:two_customer_location_paths',
+      kind: 'dql_modeling', trustTier: 'governed_sql', name: 'two customer location paths', relevanceScore: 0.02,
+      matchReasons: ['two certified safe relationship proofs'], compatibility: 'compatible',
+      relationshipEvidence: [
+        'dql:relationship:customer_location_by_id',
+        'dql:relationship:customer_location_by_code',
+      ],
+      relationshipSafety: [
+        {
+          id: 'dql:relationship:customer_location_by_id', from: 'runtime:relation:customers', to: 'runtime:relation:locations',
+          keys: [{ from: 'location_id', to: 'location_id' }], status: 'certified', staleCertification: false,
+          cardinality: 'many_to_one', fanout: 'safe', automaticJoinAllowed: true,
+          certificationFingerprint: 'sha256:customer-location-id',
+          validation: {
+            status: 'passed', checkedAt: '2026-08-29T00:00:00.000Z',
+            queryFingerprint: 'sha256:customer-location-id-query', proofFingerprint: 'sha256:customer-location-id-proof',
+          },
+        },
+        {
+          id: 'dql:relationship:customer_location_by_code', from: 'runtime:relation:customers', to: 'runtime:relation:locations',
+          keys: [{ from: 'location_code', to: 'location_code' }], status: 'certified', staleCertification: false,
+          cardinality: 'many_to_one', fanout: 'safe', automaticJoinAllowed: true,
+          certificationFingerprint: 'sha256:customer-location-code',
+          validation: {
+            status: 'passed', checkedAt: '2026-08-29T00:00:00.000Z',
+            queryFingerprint: 'sha256:customer-location-code-query', proofFingerprint: 'sha256:customer-location-code-proof',
+          },
+        },
+      ],
+    };
+    const filler = Array.from({ length: 36 }, (_, index): AgentEvidenceCandidate => ({
+      id: `dbt:model:context_${index}`, qualifiedId: `dbt:model:context_${index}`,
+      kind: 'dbt_model', trustTier: 'exploratory', name: `Context ${index}`, aliases: [`context ${index}`],
+      relevanceScore: 0.9 - index / 1_000, matchReasons: ['workspace pressure'], compatibility: 'compatible',
+      sourceObjects: [`runtime:relation:context_${index}`],
+    }));
+    for (const candidates of [
+      [customer, customerName, ...filler, locations, literal('runtime:column:locations.location_name'), literal('runtime:column:locations.city_name')],
+      [customer, customerName, ...filler, locations, literal('runtime:column:locations.location_name'), unsafePath],
+      [customer, customerName, ...filler, locations, literal('runtime:column:locations.location_name'), twoSafePhysicalPathsInOneCard],
+    ]) {
+      const broker = { decide: vi.fn(async () => semanticDecision()) };
+      const runtime = createAskAnalystRuntimeV1({
+        compilerBroker: broker,
+        getEvidence: async () => ({ snapshotId: 'snapshot:unsafe-or-ambiguous', candidates, parsedIntent: { measures: [], dimensions: [], filters: [] } }),
+      });
+      const decision = await runtime.decide({ question: 'Who are the customers in Philadelphia?', requestedMode: 'ask' });
+      expect(decision.action).not.toBe('answer');
+      expect(decision.askAnalystDecision?.state.workspace.targetedContext).toBeUndefined();
+      expect(decision.askAnalystDecision?.state.workspace.tools.some((tool) => tool.id === 'tool:literal_role_extension')).toBe(false);
+      expect(broker.decide).not.toHaveBeenCalled();
+      expect(decision.askAnalystDecision?.state.phase).toBe('blocked');
+      expect(decision.askAnalystDecision?.state.resolvedPlan?.planFrozen ?? false).toBe(false);
+      expect(decision.askAnalystDecision?.state.planningReceipt?.verification.status).toBe('invalid');
+    }
+  });
+
   it('AGT-036 keeps a typed prior-result lookup on one qualified relation without inventing a measure', async () => {
     const relation: AgentEvidenceCandidate = {
       id: 'dbt:model:dim_customers',
@@ -283,9 +656,11 @@ describe('AskAnalystRuntimeV1', () => {
       sourceObjects: ['runtime:relation:dim_customers'],
     };
     const planAnalytical = vi.fn();
+    const probeLiteralGrounding = vi.fn();
     const runtime = createAskAnalystRuntimeV1({
       compilerBroker: { decide: vi.fn(async () => semanticDecision()) },
       planAnalytical,
+      probeLiteralGrounding,
       getEvidence: async () => ({
         snapshotId: 'snapshot:customer-region',
         candidates: [relation, customerName, region],
@@ -303,6 +678,10 @@ describe('AskAnalystRuntimeV1', () => {
     });
 
     expect(planAnalytical).not.toHaveBeenCalled();
+    // The current proper name is already bound by the host-issued predicate;
+    // it must not trigger a new warehouse-value probe or clear the direct
+    // one-relation program.
+    expect(probeLiteralGrounding).not.toHaveBeenCalled();
     expect(decision.meaningResolution?.recommendedRoute).toBe('exploratory');
     expect(decision.meaningResolution?.selectedConceptIds).toEqual(expect.arrayContaining([
       relation.id,
@@ -1015,9 +1394,12 @@ describe('AskAnalystRuntimeV1', () => {
     });
     expect(decision.reason).not.toMatch(/connection|sql execute/i);
     expect(decision.askAnalystDecision?.state).toMatchObject({
-      version: 2,
+      // V3 is the intentional authoritative planner/compiler handoff. The
+      // planner receipt remains V1 for additive JSON compatibility, while
+      // the persisted Ask state and immutable program carry V3 provenance.
+      version: 3,
       planningMode: 'initial_planner',
-      program: { version: 2 },
+      program: { version: 3 },
     });
     expect(decision.askAnalystDecision?.state.workspace.tools).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: 'provider_meaning', reasonCode: 'planning.initial.completed' }),
@@ -1543,6 +1925,127 @@ describe('AskAnalystRuntimeV1', () => {
     expect(decision.reason).not.toMatch(/connection|sql execute/i);
   });
 
+  it('AGT-042 rejects an unretrieved foreign physical field despite an admitted same-named qualified column', async () => {
+    const admittedProductPrice: AgentEvidenceCandidate = {
+      id: 'dbt:column:order_items.product_price',
+      qualifiedId: 'order_items.product_price',
+      kind: 'sql_column',
+      trustTier: 'exploratory',
+      name: 'product_price',
+      aliases: ['product price'],
+      relevanceScore: 0.9,
+      matchReasons: ['qualified physical output'],
+      compatibility: 'compatible',
+      sourceObjects: ['runtime:relation:order_items'],
+    };
+    const compilerBroker = { decide: vi.fn(async () => semanticDecision()) };
+    const unretrievedId = 'other_items.product_price';
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker,
+      planAnalytical: async () => ({
+        version: 1,
+        selectedConceptIds: [revenue.id, unretrievedId],
+        tasks: [{
+          version: 1,
+          taskId: 'task-1',
+          selectedConceptIds: [revenue.id, unretrievedId],
+          roleBindings: { metric: [revenue.id], categorical_dimension: [unretrievedId] },
+          operations: ['aggregate', 'group'],
+        }],
+      }),
+      getEvidence: async () => ({
+        candidates: [revenue, admittedProductPrice],
+        parsedIntent: { measures: ['revenue'], dimensions: ['product price'], filters: [] },
+      }),
+    });
+
+    const decision = await runtime.decide({ question: 'show revenue by product price', requestedMode: 'ask' });
+
+    expect(decision.terminalOutcome?.code).toBe('ANALYTICAL_POLICY_BLOCKED');
+    expect(decision.reason).toMatch(/valid selection from the 16-card package/i);
+    expect(compilerBroker.decide).not.toHaveBeenCalled();
+  });
+
+  it('AGT-042 materializes a planner-qualified divergent candidate identity to its admitted local identity before compilation', async () => {
+    // The planner card exposes the fully-qualified MetricFlow identity, but
+    // the local snapshot retains a different stable storage ID. This is the
+    // normal V3 handoff boundary: a qualified selection must resolve to this
+    // one admitted card before the legacy compiler compatibility carrier is
+    // built. It must not be treated as an unretrieved foreign candidate.
+    const admittedRegion: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:orders.region',
+      qualifiedId: 'semantic:uncategorized:dimension:orders.region',
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      trustTier: 'semantic',
+      name: 'orders.region',
+      aliases: ['region'],
+      relevanceScore: 0.9,
+      matchReasons: ['qualified semantic grouping dimension'],
+      compatibility: 'compatible',
+    };
+    const revenueByRegion: AgentEvidenceCandidate = {
+      ...revenue,
+      analyticalCapability: {
+        ...semanticCapability(revenue.id),
+        dimensions: [{
+          dimensionId: admittedRegion.qualifiedId!,
+          entityId: 'semantic:entity:order',
+          label: 'Region',
+          aliases: ['region'],
+          supportedRoles: ['group_by', 'display'],
+        }],
+        operations: ['filter', 'group'],
+        supportedOutputKinds: ['metric_value', 'dimension'],
+        resultGrainIds: ['semantic:entity:order'],
+      },
+    };
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker: { decide: vi.fn(async () => semanticDecision()) },
+      planAnalytical: async () => ({
+        version: 1,
+        selectedConceptIds: [revenueByRegion.qualifiedId!, admittedRegion.qualifiedId!],
+        tasks: [{
+          version: 1,
+          taskId: 'task-1',
+          selectedConceptIds: [revenueByRegion.qualifiedId!, admittedRegion.qualifiedId!],
+          roleBindings: {
+            metric: [revenueByRegion.qualifiedId!],
+            categorical_dimension: [admittedRegion.qualifiedId!],
+          },
+          operations: ['aggregate', 'group', 'project'],
+        }],
+      }),
+      getEvidence: async () => ({
+        snapshotId: 'snapshot:qualified-divergent-region',
+        candidates: [revenueByRegion, admittedRegion],
+        parsedIntent: { measures: ['revenue'], dimensions: ['region'], filters: [] },
+      }),
+    });
+
+    const decision = await runtime.decide({ question: 'show revenue by region', requestedMode: 'ask' });
+
+    expect(decision.action).toBe('answer');
+    // Program V3 retains the qualified identity that the planner saw.
+    expect(decision.askAnalystDecision?.state.program.planner.tasks[0]?.selectedConceptIds)
+      .toContain(admittedRegion.qualifiedId);
+    // The compiler compatibility carrier is keyed by admitted local IDs.
+    expect(decision.meaningResolution?.selectedConceptIds).toEqual(expect.arrayContaining([
+      revenueByRegion.id,
+      admittedRegion.id,
+    ]));
+    expect(decision.meaningResolution?.selectedConceptIds).not.toContain(admittedRegion.qualifiedId);
+    expect(decision.askAnalystDecision?.taskExecutions?.[0]).toMatchObject({
+      meaningResolution: {
+        selectedConceptIds: expect.arrayContaining([
+          revenueByRegion.id,
+          admittedRegion.id,
+        ]),
+      },
+      resolvedPlan: { planFrozen: true },
+    });
+  });
+
   it('AGT-042 rejects an unretrieved same-named semantic dimension from another model', async () => {
     const locationName: AgentEvidenceCandidate = {
       id: 'semantic:dimension:locations.location_name',
@@ -1874,6 +2377,73 @@ describe('AskAnalystRuntimeV1', () => {
     expect(decision.askAnalystDecision?.taskExecutions?.map((task) => task.taskId)).toEqual(['task-1', 'task-2']);
     expect(decision.askAnalystDecision?.frozenPlan?.steps.map((step) => step.askAnalystTaskId)).toEqual(['task-1', 'task-2']);
     expect(planner).toHaveBeenCalledTimes(1);
+  });
+
+  it('AGT-036 retains an executable independent task when a sibling cannot compile', async () => {
+    const unavailableBookedRevenue: AgentEvidenceCandidate = {
+      ...revenue,
+      id: 'semantic:metric:orders.booked_revenue',
+      qualifiedId: 'semantic:metric:orders.booked_revenue',
+      name: 'orders.booked_revenue',
+      aliases: ['booked revenue'],
+      exactMatch: false,
+      relevanceScore: 0.8,
+      analyticalCapability: semanticCapability('semantic:metric:orders.booked_revenue'),
+    };
+    const compilerBroker = {
+      decide: vi.fn(async () => semanticDecision()),
+    };
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker,
+      planAnalytical: async () => ({
+        version: 1 as const,
+        selectedConceptIds: [revenue.id, unavailableBookedRevenue.id],
+        tasks: [revenue.id, unavailableBookedRevenue.id].map((metricId, index) => ({
+          version: 1 as const,
+          taskId: `task-${index + 1}`,
+          selectedConceptIds: [metricId],
+          roleBindings: { metric: [metricId] },
+          operations: ['aggregate', 'project'] as const,
+        })),
+      }),
+      getEvidence: async () => ({
+        snapshotId: 'snapshot:compound-partial',
+        candidates: [revenue, unavailableBookedRevenue],
+        parsedIntent: { measures: ['revenue', 'booked revenue'], dimensions: [], filters: [] },
+        diagnostics: {
+          tierReadiness: {
+            semanticCompiler: 'ready',
+            physicalSchema: 'unavailable',
+            semanticCandidateReadiness: [
+              { candidateId: revenue.id, status: 'ready' as const },
+              { candidateId: unavailableBookedRevenue.id, status: 'unavailable' as const },
+            ],
+          },
+        },
+      }),
+    });
+
+    const decision = await runtime.decide({
+      question: 'show revenue; show booked revenue',
+      requestedMode: 'ask',
+    });
+
+    expect(decision.action).toBe('answer');
+    expect(decision.askAnalystDecision?.taskExecutions?.map((task) => task.taskId)).toEqual(['task-1']);
+    expect(decision.askAnalystDecision?.taskOutcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ taskId: 'task-2', status: 'gap', trustState: 'blocked' }),
+    ]));
+    // Compilation has an eligible task-1 program but no executed result.
+    // The engine owns the first success receipt after the child checkpoint.
+    expect(decision.askAnalystDecision?.taskOutcomeSummary).toMatchObject({
+      status: 'blocked',
+      trustState: 'blocked',
+      successfulTaskIds: [],
+      failedTaskIds: ['task-2'],
+      dependencyBlockedTaskIds: [],
+    });
+    expect(decision.askAnalystDecision?.frozenPlan?.steps.map((step) => step.askAnalystTaskId)).toEqual(['task-1']);
+    expect(compilerBroker.decide).not.toHaveBeenCalled();
   });
 
   it('AGT-036 rejects a planner that returns only task-1 of two independent ordinary Ask clauses', async () => {
@@ -2900,18 +3470,21 @@ describe('AskAnalystRuntimeV1', () => {
       expect(pathCardId).toBeDefined();
       return {
         version: 1 as const,
-        selectedConceptIds: [metric.id, customerKey.id, customerName.id, locationName.id, pathCardId!],
+        // The provider selects business meaning only.  It must not need to
+        // choose a relationship path: the authoritative host derives a
+        // complete safe path from the frozen same-snapshot closure after this
+        // verification succeeds.
+        selectedConceptIds: [metric.id, customerKey.id, customerName.id, locationName.id],
         confidence: 'high' as const,
         tasks: [{
           version: 1 as const,
           taskId: 'task-1',
-          selectedConceptIds: [metric.id, customerKey.id, customerName.id, locationName.id, pathCardId!],
+          selectedConceptIds: [metric.id, customerKey.id, customerName.id, locationName.id],
           roleBindings: {
             metric: [metric.id],
             entity_key: [customerKey.id],
             entity_label: [customerName.id],
             categorical_dimension: [locationName.id],
-            relationship: [pathCardId!],
           },
           operations: ['aggregate', 'filter', 'group', 'project'] as const,
         }],
@@ -2943,6 +3516,18 @@ describe('AskAnalystRuntimeV1', () => {
       requestedMode: 'ask',
       conversationBinding: 'prior_result',
       priorResultMemberBinding,
+      // A local host produced this shape-only anchor from a completed prior
+      // result.  It is not a provider-selected meaning and must survive the
+      // V3 handoff independently of the member filter below.
+      trustedTaskAnchor: {
+        version: 1,
+        kind: 'analytical_shape',
+        values: [],
+        measures: ['billing revenue'],
+        dimensions: ['customer_name', 'region'],
+        sourceTurnId: 'turn:top-customers',
+        resultFingerprint: 'a'.repeat(64),
+      },
       hostRequirementSeed: buildAnalyticalRequirementSeedV1({
         question: 'Which region is Brittany Barrera in by revenue?',
         parsedIntent: { measures: ['billing revenue'], dimensions: ['region'], filters: [] },
@@ -2988,18 +3573,47 @@ describe('AskAnalystRuntimeV1', () => {
       orderToCustomer.id,
       orderToLocation.id,
     ]));
-    // AGT-034: the verified handoff must carry the host-owned selected
-    // ordinary dimension and its one atomic path into the exact program the
-    // compiler receives; no raw relationship edge may reappear in the
-    // planner receipt after the 16-card role-cap pressure.
+    // AGT-034 / AGT-050: the verified handoff must carry the host-owned
+    // selected ordinary dimension and its one atomic path into the exact
+    // program the compiler receives. The provider does not bind a join path;
+    // it is a canonical host receipt so no raw relationship edge may reappear
+    // in the planner receipt after the 16-card role-cap pressure.
     expect(decision.askAnalystDecision?.state.program.candidateIds).toEqual(expect.arrayContaining([
       locationName.qualifiedId,
       pathCard!.id,
     ]));
+    expect(decision.askAnalystDecision?.state.program).toMatchObject({
+      version: 3,
+      relationshipPaths: [expect.objectContaining({
+        candidateId: pathCard!.id,
+        relationshipEvidence: expect.arrayContaining([
+          orderToCustomer.id,
+          orderToLocation.id,
+        ]),
+      })],
+      // A V3 program retains current-turn/filter atoms and the host-validated
+      // successful-task anchor independently of planner/legacy resolution.
+      inputAtoms: expect.arrayContaining([
+        expect.objectContaining({ role: 'filter', term: 'customer_name', source: 'current_question' }),
+        expect.objectContaining({ role: 'filter', term: 'Brittany Barrera', source: 'current_question' }),
+      ]),
+      trustedTaskAnchors: expect.arrayContaining([expect.objectContaining({
+        displayDimension: 'customer_name',
+        values: ['Brittany Barrera'],
+        sourceTurnId: 'run:990dffed',
+      }), expect.objectContaining({
+        kind: 'analytical_shape',
+        values: [],
+        measures: ['billing revenue'],
+        dimensions: ['customer_name', 'region'],
+        sourceTurnId: 'turn:top-customers',
+        resultFingerprint: 'a'.repeat(64),
+      })]),
+    });
     expect(decision.askAnalystDecision?.state.program.planner.tasks[0]?.roleBindings).toMatchObject({
       categorical_dimension: expect.arrayContaining([locationName.qualifiedId]),
-      relationship: [pathCard!.id],
     });
+    expect(decision.askAnalystDecision?.state.program.planner.tasks[0]?.roleBindings.relationship).toBeUndefined();
     // The compiler consumes the materialized program and freezes the
     // semantic execution plan. The broker envelope can omit its legacy
     // cascade receipt, so assert the canonical frozen plan carried by the

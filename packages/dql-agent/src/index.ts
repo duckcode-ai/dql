@@ -75,6 +75,7 @@ export {
   buildAnalyticalCascadeDecision,
   buildAnalyticalRequirementSeedV1,
   buildAnalyticalRequirementSet,
+  currentQuestionLiteralMemberTerms,
   withAnalyticalPriorResultMemberBinding,
   buildAnalyticalTurnPlan,
   buildCoverageGap,
@@ -107,7 +108,12 @@ export { evaluateAnalyticalRequestPolicy } from './analytical-request-policy.js'
 export type { AnalyticalRequestPolicyDecision } from './analytical-request-policy.js';
 /** V1.15 authoritative Ask entrypoint; legacy router is its compiler broker. */
 export { createAskAnalystRuntimeV1 } from './ask-runtime/ask-analyst-runtime.js';
-export type { AskAnalystRuntimeOptionsV1, AskAnalystRuntimeV1 } from './ask-runtime/ask-analyst-runtime.js';
+export type {
+  AskAnalystRuntimeOptionsV1,
+  AskAnalystRuntimeV1,
+  AskLiteralGroundingProbeRequestV1,
+  AskLiteralGroundingProbeResultV1,
+} from './ask-runtime/ask-analyst-runtime.js';
 /** Local-only, additive Ask/Research execution tracing (OBS-001..OBS-010). */
 export * from './ask-observability/index.js';
 export type {
@@ -129,7 +135,11 @@ export type {
   AnalyticalTaskOutputContractV1,
   AnalyticalTaskStatus,
   AnalyticalTaskV1,
+  AnalyticalTaskFailureV1,
   AnalyticalTaskOutcomeV1,
+  AnalyticalTaskOutcomeStatusV1,
+  AnalyticalTaskOutcomeSummaryV1,
+  AnalyticalTaskOutcomeTrustStateV1,
   AnalyticalTurnAnswerV1,
   AnalyticalTurnKind,
   AnalyticalTurnPlanV1,
@@ -155,12 +165,20 @@ export type {
   EvidenceWorkspaceV2,
   AnalyticalProgramV1,
   AnalyticalProgramV2,
+  AnalyticalProgramV3,
+  AnalyticalPlannerBusinessRoleV2,
+  AnalyticalPlannerTaskV2,
+  AnalyticalPlannerInterpretationV2,
+  CanonicalRelationshipPathReceiptV1,
+  AnalyticalInputAtomV1,
+  TrustedAnalyticalTaskAnchorV1,
   AnalyticalProgram,
   ResolvedAnalyticalPlanV2,
   AskAnalystConversationDeltaV1,
   AskAnalystConversationDeltaV2,
   AskAnalystStateV1,
   AskAnalystStateV2,
+  AskAnalystStateV3,
   AskAnalystState,
   BusinessAnswerV1,
   BusinessAnswerV2,

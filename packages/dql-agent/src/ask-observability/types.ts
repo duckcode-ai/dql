@@ -218,6 +218,7 @@ export type CandidateDecisionReasonV1 =
   | 'candidate_for_unresolved_role'
   | 'fused_relevance_fill'
   | 'same_snapshot_extension'
+  | 'configured_runtime_value_grounding_pin'
   | 'relationship_closure'
   | 'model_selected'
   | 'model_rejected'

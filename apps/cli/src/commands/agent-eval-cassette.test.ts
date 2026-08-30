@@ -236,6 +236,24 @@ describe('withCassette', () => {
     expect(available).not.toHaveBeenCalled();
   });
 
+  it('preserves a provider-owned typed readiness failure in record mode', async () => {
+    const readinessFailure = Object.assign(
+      new Error('Saved OAuth session expired and same-provider CLI is unavailable.'),
+      { code: 'CLAUDE_OAUTH_CLI_UNAVAILABLE' },
+    );
+    const provider = {
+      ...stubProvider({ available: async () => false }),
+      getReadinessFailure: vi.fn(() => readinessFailure),
+    } as AgentProvider & { getReadinessFailure: () => Error & { code: string } };
+    const recorder = withCassette(provider, new CassetteStore(dir), 'record') as AgentProvider & {
+      getReadinessFailure?: () => Error | undefined;
+    };
+
+    expect(await recorder.available()).toBe(false);
+    expect(recorder.getReadinessFailure?.()).toBe(readinessFailure);
+    expect(provider.getReadinessFailure).toHaveBeenCalledTimes(1);
+  });
+
   it('passes live mode straight through', async () => {
     const provider = stubProvider();
     expect(withCassette(provider, new CassetteStore(dir), 'live')).toBe(provider);

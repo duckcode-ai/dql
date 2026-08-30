@@ -3,10 +3,16 @@ import {
   applyRequestedTopNToExploratorySql,
   parseAiModelingOperations,
   buildAgentValueProbeSql,
+  buildAgentExactValueProbeSql,
+  agentLiteralProbeTarget,
+  attestExploratoryRelationshipEvidence,
   agentRunDeadlineMs,
   exploratoryProbeContradiction,
   probeableExploratoryJoins,
   agentAnswerHasExecutionFailure,
+  agentAnswerHasExecutionBoundaryFailure,
+  projectAnswerExecutionFailureForRun,
+  projectTerminalAnalyticalFailureForRun,
   persistedAnalyticalGapWitness,
   analyticalFreshnessObservedThrough,
   analyticalFailedRunFromAgentRun,
@@ -17,6 +23,7 @@ import {
   agentRunProviderDispatchBudgetForMode,
   RunScopedProviderDispatchEvidence,
   createProviderDispatchTrace,
+  createLocalLiteralProbeCapabilityRegistryV1,
   preflightAskAnalyticalPlannerProvider,
   awaitResearchBranchDeadline,
   RESEARCH_BRANCH_FINALIZATION_RESERVE_MS,
@@ -87,6 +94,7 @@ import {
   extractAgentValueSearchTerms,
   extractBlockInvariants,
   formatLocalQueryRuntimeError,
+  hydratePersistedPriorResultMemberBinding,
   hydratePersistedSelectedResultBinding,
   getConnectorInstallStatuses,
   assertConnectionNodeCompatibility,
@@ -108,6 +116,8 @@ import {
   resolveDefaultLLMProvider,
   resolveGovernedAnswerRunner,
   resolveAgentRuntimeValueGrounding,
+  pinConfiguredRuntimeValueGroundingEvidence,
+  AGENT_RUNTIME_VALUE_GROUNDING_PIN_REASON,
   resolveDbtMacrosForExecution,
   resolveProjectRelativeSqlPaths,
   runtimeSchemaSnapshotForAgentConnection,
@@ -138,17 +148,22 @@ import {
 } from './settings/provider-settings.js';
 import { getRunner } from './llm/index.js';
 import { resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
-import { CassetteStore } from './commands/agent-eval-cassette.js';
+import { CassetteStore, withCassette } from './commands/agent-eval-cassette.js';
 import { runResearchLineageProgramV1 } from './research-lineage-program.js';
+import { ClaudeOAuthProvider } from './providers/oauth/claude-oauth.js';
+import { setClaudeCredentials } from './providers/oauth/oauth-store.js';
+import { ClaudeCodeCliProvider } from './providers/subscription-cli.js';
 import { afterEach } from 'vitest';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import type { Server } from 'node:http';
-import { createWarehouseTargetIdentity, loadSemanticLayerFromDir, SemanticLayer } from '@duckcodeailabs/dql-core';
+import { buildManifest, createWarehouseTargetIdentity, loadSemanticLayerFromDir, SemanticLayer } from '@duckcodeailabs/dql-core';
+import type { DQLManifest } from '@duckcodeailabs/dql-core';
 import type { AggregationSafetyProofV1 } from '@duckcodeailabs/dql-core';
 import {
   createAnalyticalFailure,
@@ -171,11 +186,23 @@ import {
   resolveTopRankedRegionDependency,
   buildAnalyticalRequirementSeedV1,
   buildLocalContextPack,
+  acquireActiveKnowledgeSnapshot,
+  ensureMetadataCatalogFresh,
   toAgentRetrievalEvidence,
   validateFrozenRequiredOutputProjection,
   validateSqlAgainstLocalContext,
 } from '@duckcodeailabs/dql-agent';
-import type { AgentProvider, AgentRouteExecutorResult, AgentRun, AgentRunRequest, AskTraceObserverV1 } from '@duckcodeailabs/dql-agent';
+import type {
+  AgentAnswer,
+  AgentEvidenceCandidate,
+  AgentProvider,
+  AgentRetrievalEvidence,
+  AgentRouteExecutorResult,
+  AgentRun,
+  AgentRunRequest,
+  AskTraceObserverV1,
+  MetadataObject,
+} from '@duckcodeailabs/dql-agent';
 import type { DatabaseConnector, QueryExecutor, QueryResult } from '@duckcodeailabs/dql-connectors';
 import type { ResearchBranchReceiptV1 } from './local-runtime.js';
 import { saveTestedSemanticRuntimeSettings } from './semantic-runtime-settings.js';
@@ -186,6 +213,111 @@ const askObservabilityOfficeFixture = resolve(
   dirname(fileURLToPath(import.meta.url)),
   '../test/fixtures/ask-observability-office',
 );
+
+describe('local cold-literal probe capability registry', () => {
+  const request = (): AgentRunRequest => ({
+    runId: 'server-issued-run',
+    question: 'Who are the customers in Philadelphia?',
+    requestedMode: 'ask',
+  });
+  const candidate = (id = 'dbt:column:locations.location_name'): AgentEvidenceCandidate => ({
+    id,
+    qualifiedId: id,
+    kind: 'sql_column',
+    trustTier: 'exploratory',
+    name: 'location_name',
+    relevanceScore: 1,
+    matchReasons: ['host configured literal probe'],
+    compatibility: 'compatible',
+    sourceObjects: ['dbt:relation:jaffle_shop.dev.locations'],
+  });
+  const issue = (registry: ReturnType<typeof createLocalLiteralProbeCapabilityRegistryV1>, owner: AgentRunRequest, field = candidate()) =>
+    registry.issue({
+      request: owner,
+      snapshotId: 'snapshot:one',
+      candidate: field,
+      relation: 'jaffle_shop.dev.locations',
+      column: 'location_name',
+    })!;
+  const consume = (
+    registry: ReturnType<typeof createLocalLiteralProbeCapabilityRegistryV1>,
+    token: unknown,
+    owner: AgentRunRequest,
+    field = candidate(),
+    snapshotId = 'snapshot:one',
+    activeSnapshotId = snapshotId,
+    relation = 'jaffle_shop.dev.locations',
+    column = 'location_name',
+  ) =>
+    registry.consume({
+      token,
+      request: owner,
+      snapshotId,
+      activeSnapshotId,
+      candidate: field,
+      relation,
+      column,
+    });
+
+  it('accepts only one exact server-held opaque probe token and consumes it before execution', () => {
+    const registry = createLocalLiteralProbeCapabilityRegistryV1({ mint: () => 'opaque-literal-token' });
+    const owner = request();
+    const token = issue(registry, owner);
+    const execute = vi.fn();
+    if (consume(registry, token, owner)) execute();
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(consume(registry, token, owner)).toBe(false);
+  });
+
+  it('denies stale, forged, copied, and candidate-mismatched tokens before any probe execution', () => {
+    const execute = vi.fn();
+    const denied = (attempt: () => boolean) => {
+      if (attempt()) execute();
+    };
+
+    {
+      const registry = createLocalLiteralProbeCapabilityRegistryV1({ mint: () => 'forged-token' });
+      const owner = request();
+      issue(registry, owner);
+      denied(() => consume(registry, 'not-issued', owner));
+    }
+    {
+      const registry = createLocalLiteralProbeCapabilityRegistryV1({ mint: () => 'copied-token' });
+      const owner = request();
+      const token = issue(registry, owner);
+      // Same run ID is insufficient: the token is also bound to the original
+      // in-process request object that obtained the immutable snapshot.
+      denied(() => consume(registry, token, { ...owner }));
+    }
+    {
+      const registry = createLocalLiteralProbeCapabilityRegistryV1({ mint: () => 'candidate-token' });
+      const owner = request();
+      const token = issue(registry, owner);
+      denied(() => consume(registry, token, owner, candidate('dbt:column:locations.city_name')));
+    }
+    {
+      const registry = createLocalLiteralProbeCapabilityRegistryV1({ mint: () => 'stale-token' });
+      const owner = request();
+      const token = issue(registry, owner);
+      denied(() => consume(registry, token, owner, candidate(), 'snapshot:two'));
+    }
+    {
+      const registry = createLocalLiteralProbeCapabilityRegistryV1({ mint: () => 'changed-active-snapshot-token' });
+      const owner = request();
+      const token = issue(registry, owner);
+      denied(() => consume(registry, token, owner, candidate(), 'snapshot:one', 'snapshot:two'));
+    }
+    {
+      const registry = createLocalLiteralProbeCapabilityRegistryV1({ mint: () => 'field-mismatch-token' });
+      const owner = request();
+      const token = issue(registry, owner);
+      denied(() => consume(registry, token, owner, candidate(), 'snapshot:one', 'snapshot:one', 'jaffle_shop.dev.locations', 'city_name'));
+    }
+
+    expect(execute).not.toHaveBeenCalled();
+  });
+});
 
 describe('repair target generation identity (API-007)', () => {
   it('detects same-name connection drift without hashing secrets into the identity', () => {
@@ -1036,6 +1168,55 @@ describe('local runtime network boundary', () => {
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
   });
+
+  it('keeps the local runtime available when project watching emits EMFILE asynchronously', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-project-watcher-emfile-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    mkdirSync(join(projectRoot, 'blocks'), { recursive: true });
+    mkdirSync(join(projectRoot, 'apps'), { recursive: true });
+    const makeWatcher = () => Object.assign(new EventEmitter(), { close: vi.fn() });
+    const firstWatcher = makeWatcher();
+    const secondWatcher = makeWatcher();
+    const watcherFactory = vi.fn(() => {
+      const watcher = watcherFactory.mock.calls.length === 1 ? firstWatcher : secondWatcher;
+      return watcher;
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+        // The host-only seam is deliberately exercised with emitter-backed
+        // FSWatcher equivalents: `fs.watch` reports EMFILE after startup.
+        projectWatcherFactory: watcherFactory as never,
+      });
+      expect(watcherFactory).toHaveBeenCalledTimes(2);
+
+      firstWatcher.emit('error', Object.assign(new Error('too many open files'), { code: 'EMFILE' }));
+      // A queued duplicate error after `close()` stays contained too.
+      firstWatcher.emit('error', Object.assign(new Error('too many open files'), { code: 'EMFILE' }));
+      secondWatcher.emit('error', Object.assign(new Error('too many open files'), { code: 'EMFILE' }));
+
+      const health = await fetch(`http://127.0.0.1:${port}/api/health`);
+      expect(health.status).toBe(200);
+      expect(firstWatcher.close).toHaveBeenCalledTimes(1);
+      expect(secondWatcher.close).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('EMFILE'));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('persisted local state remain available'));
+    } finally {
+      warn.mockRestore();
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+    // Server cleanup remains idempotent after failed watchers remove themselves.
+    expect(firstWatcher.close).toHaveBeenCalledTimes(1);
+    expect(secondWatcher.close).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('warehouse metadata scope runtime API (CTX-005, PERF-002, API-006, SEC-003)', () => {
@@ -1282,6 +1463,38 @@ describe('unified provider draft testing (CFG-004)', () => {
       expect(requests[2].headers.get('authorization')).toBe('Bearer stored-redacted-secret');
       expect(disabledBody).not.toContain('stored-redacted-secret');
     } finally {
+      await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
+    }
+  });
+
+  it('tests a ready Claude Code CLI when no browser OAuth credential exists', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-provider-claude-cli-test-'));
+    tempDirs.push(projectRoot);
+    writeFileSync(join(projectRoot, 'dql.config.json'), '{}\n');
+    const cliAvailable = vi.spyOn(ClaudeCodeCliProvider.prototype, 'available').mockResolvedValue(true);
+    const cliGenerate = vi.spyOn(ClaudeCodeCliProvider.prototype, 'generate').mockResolvedValue('OK');
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: {} as QueryExecutor,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/settings/providers/test`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: 'claude-code' }),
+      });
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({ ok: true, message: expect.stringContaining('responded') });
+      expect(cliAvailable).toHaveBeenCalledTimes(1);
+      expect(cliGenerate).toHaveBeenCalledTimes(1);
+    } finally {
+      cliAvailable.mockRestore();
+      cliGenerate.mockRestore();
       await new Promise<void>((resolve) => server ? server.close(() => resolve()) : resolve());
     }
   });
@@ -2877,6 +3090,7 @@ describe('agent run runtime API', () => {
             columns: ['product_name', 'location_name', 'revenue'],
             rows,
             rowCount: 10,
+            resultFingerprint: 'd'.repeat(64),
           },
         },
       }],
@@ -2889,6 +3103,7 @@ describe('agent run runtime API', () => {
     expect(turn.agentRunId).toBe('run_member_memory');
     expect(turn.result?.rowsSample).toHaveLength(10);
     expect(turn.result?.dimensionValues?.product_name).toContain('flame impala');
+    expect(turn.result?.resultFingerprint).toBe('d'.repeat(64));
     expect(turn.result?.memberSets).toEqual(expect.arrayContaining([
       expect.objectContaining({
         version: 1,
@@ -3076,6 +3291,166 @@ describe('agent run runtime API', () => {
     expect(agentAnswerHasExecutionFailure({ executionError: 'DuckDB lock conflict' })).toBe(true);
     expect(agentAnswerHasExecutionFailure({ executionError: '   ' })).toBe(false);
     expect(agentAnswerHasExecutionFailure({})).toBe(false);
+  });
+
+  it('UI-012 projects a legacy grounding compatibility code to execution after a query failure', () => {
+    const raw = {
+      kind: 'no_answer',
+      text: 'The selected governed query did not complete.',
+      refusalCode: 'grounding_gap',
+      executionError: 'connection reset by peer',
+      route: { tier: 'generated_sql', label: 'Exploratory SQL' },
+    };
+
+    const projected = projectAnswerExecutionFailureForRun(raw as AgentAnswer);
+
+    expect(projected).toMatchObject({
+      refusalCode: 'execution_error',
+      executionError: 'connection reset by peer',
+      route: { tier: 'generated_sql', label: 'Exploratory SQL' },
+    });
+    // Projection is a run/UI compatibility boundary; the detailed source
+    // answer remains immutable for its existing incident evidence.
+    expect(raw.refusalCode).toBe('grounding_gap');
+  });
+
+  it('UI-012 preserves typed compiler and result-validation incidents despite legacy execution text', () => {
+    const compilation = {
+      kind: 'no_answer',
+      text: 'The frozen semantic plan could not compile.',
+      refusalCode: 'grounding_gap',
+      executionError: 'adapter rejected the selected group-by item',
+      analyticalFailure: {
+        version: 1,
+        code: 'COMPILATION_FAILED',
+        phase: 'compilation',
+        message: 'The frozen semantic plan could not compile.',
+        recoverability: 'none',
+        failedBindings: [],
+        safeActions: ['edit_dql'],
+      },
+    } as unknown as AgentAnswer;
+    const resultValidation = {
+      kind: 'no_answer',
+      text: 'The result did not match the frozen plan.',
+      refusalCode: 'grounding_gap',
+      executionError: 'result contract rejected the returned fields',
+      analyticalFailure: {
+        version: 1,
+        code: 'RESULT_CONTRACT_MISMATCH',
+        phase: 'result_validation',
+        message: 'The result did not match the frozen plan.',
+        recoverability: 'none',
+        failedBindings: [],
+        safeActions: ['inspect_failure'],
+      },
+    } as unknown as AgentAnswer;
+
+    for (const answer of [compilation, resultValidation]) {
+      expect(agentAnswerHasExecutionBoundaryFailure(answer)).toBe(false);
+      expect(projectAnswerExecutionFailureForRun(answer)).toBe(answer);
+      expect(answer.refusalCode).toBe('grounding_gap');
+    }
+  });
+
+  it('UI-012 projects a typed execution incident, but only at the execution boundary', () => {
+    const execution = {
+      kind: 'no_answer',
+      text: 'The selected query did not complete.',
+      refusalCode: 'grounding_gap',
+      executionError: 'connection reset by peer',
+      analyticalFailure: {
+        version: 1,
+        code: 'EXECUTION_FAILED',
+        phase: 'execution',
+        message: 'The selected query did not complete.',
+        recoverability: 'retry_same_plan',
+        failedBindings: [],
+        safeActions: ['retry_same_plan'],
+      },
+    } as unknown as AgentAnswer;
+
+    expect(agentAnswerHasExecutionBoundaryFailure(execution)).toBe(true);
+    expect(projectAnswerExecutionFailureForRun(execution).refusalCode).toBe('execution_error');
+  });
+
+  it('UI-012 keeps frozen semantic compilation and result validation out of local execution evaluations', () => {
+    const frozenSemanticCompilation = {
+      kind: 'no_answer',
+      text: 'The frozen semantic plan could not compile.',
+      refusalCode: 'grounding_gap',
+      executionError: 'MetricFlow rejected the selected group-by item.',
+      analyticalFailure: {
+        version: 1,
+        code: 'COMPILATION_FAILED',
+        phase: 'compilation',
+        message: 'The frozen semantic plan could not compile.',
+        recoverability: 'none',
+        failedBindings: [],
+        safeActions: ['edit_dql'],
+      },
+    } as unknown as AgentAnswer;
+    const resultValidation = {
+      kind: 'no_answer',
+      text: 'The result did not match the frozen plan.',
+      refusalCode: 'grounding_gap',
+      executionError: 'The frozen result contract rejected the returned fields.',
+      analyticalFailure: {
+        version: 1,
+        code: 'RESULT_CONTRACT_MISMATCH',
+        phase: 'result_validation',
+        message: 'The result did not match the frozen plan.',
+        recoverability: 'none',
+        failedBindings: [],
+        safeActions: ['inspect_failure'],
+      },
+    } as unknown as AgentAnswer;
+
+    expect(projectTerminalAnalyticalFailureForRun(frozenSemanticCompilation)).toMatchObject({
+      answer: { refusalCode: 'grounding_gap' },
+      executionFailure: false,
+      fallbackReason: 'COMPILATION_FAILED',
+      title: 'DQL could not compile the frozen plan',
+    });
+    expect(projectTerminalAnalyticalFailureForRun(resultValidation)).toMatchObject({
+      answer: { refusalCode: 'grounding_gap' },
+      executionFailure: false,
+      fallbackReason: 'RESULT_CONTRACT_MISMATCH',
+      title: 'The query result did not match the frozen plan',
+    });
+  });
+
+  it('UI-012 retains true and legacy execution projections in the local runtime terminal carrier', () => {
+    const typedExecution = {
+      kind: 'no_answer',
+      text: 'The selected query did not complete.',
+      refusalCode: 'grounding_gap',
+      executionError: 'connection reset by peer',
+      analyticalFailure: {
+        version: 1,
+        code: 'EXECUTION_FAILED',
+        phase: 'execution',
+        message: 'The selected query did not complete.',
+        recoverability: 'retry_same_plan',
+        failedBindings: [],
+        safeActions: ['retry_same_plan'],
+      },
+    } as unknown as AgentAnswer;
+    const legacyExecution = {
+      kind: 'no_answer',
+      text: 'The selected query did not complete.',
+      refusalCode: 'grounding_gap',
+      executionError: 'connection reset by peer',
+    } as unknown as AgentAnswer;
+
+    for (const answer of [typedExecution, legacyExecution]) {
+      expect(projectTerminalAnalyticalFailureForRun(answer)).toMatchObject({
+        answer: { refusalCode: 'execution_error' },
+        executionFailure: true,
+        fallbackReason: 'execution_error',
+        title: 'The selected query did not complete on the current connection',
+      });
+    }
   });
 
   it('retains relationship repair authority only from a persisted router witness', () => {
@@ -3363,6 +3738,138 @@ describe('agent run runtime API', () => {
     });
     expect(parsed.request?.selectedResultBindingGap).toBeUndefined();
     expect(JSON.stringify(parsed.request)).not.toContain('Regarding');
+  });
+
+  it('AGT-051 creates a host-only analytical-shape anchor for an explicit additive result follow-up', () => {
+    const request = {
+      question: 'add region here',
+      requestedMode: 'ask',
+      threadId: 'thread-shape-anchor',
+      conversationContext: {
+        threadId: 'thread-shape-anchor',
+        conversationEnvelope: { threadId: 'thread-shape-anchor' },
+        activeTurnId: 'turn-top-customers',
+        turns: [{
+          id: 'turn-top-customers',
+          question: 'Who are the top customers by revenue?',
+          route: 'certified_answer',
+          trustLabel: 'certified',
+          runStatus: 'completed',
+          requestedMeasures: ['revenue'],
+          requestedDimensions: ['customer_name'],
+          contract: { measures: ['revenue'], dimensions: ['customer_name'] },
+          result: {
+            columns: ['customer_name', 'revenue'],
+            rowsSample: [['Melissa Davis', 1411]],
+            measureColumns: ['revenue'],
+            resultFingerprint: 'a'.repeat(64),
+          },
+        }],
+      },
+    } as AgentRunRequest;
+
+    hydratePersistedPriorResultMemberBinding(request);
+
+    expect(request).toMatchObject({
+      conversationBinding: 'prior_result',
+      trustedTaskAnchor: {
+        version: 1,
+        kind: 'analytical_shape',
+        values: [],
+        measures: ['revenue'],
+        dimensions: expect.arrayContaining(['customer_name', 'region']),
+        sourceTurnId: 'turn-top-customers',
+        resultFingerprint: 'a'.repeat(64),
+      },
+      hostRequirementSeed: {
+        sourceQuestion: 'add region here',
+        requirements: {
+          measures: expect.arrayContaining(['revenue']),
+          dimensions: expect.arrayContaining(['customer_name', 'region']),
+          entityTerms: expect.arrayContaining(['customer']),
+          entityDisplayTerms: expect.arrayContaining(['customer name']),
+        },
+      },
+    });
+    expect(JSON.stringify(request.trustedTaskAnchor)).not.toContain('Melissa Davis');
+
+    const parsed = parseAgentRunRequestBody({
+      question: 'add region here',
+      trustedTaskAnchor: request.trustedTaskAnchor,
+    });
+    expect(parsed.request?.trustedTaskAnchor).toBeUndefined();
+  });
+
+  it('AGT-051 rejects a failed or blocked prior turn as an analytical-shape anchor', () => {
+    for (const status of ['blocked', 'needs_clarification'] as const) {
+      const request = {
+        question: 'add region here',
+        requestedMode: 'ask',
+        threadId: 'thread-shape-anchor-failed',
+        conversationContext: {
+          threadId: 'thread-shape-anchor-failed',
+          conversationEnvelope: { threadId: 'thread-shape-anchor-failed' },
+          activeTurnId: 'turn-failed',
+          turns: [{
+            id: 'turn-failed',
+            question: 'Who are the top customers by revenue?',
+            route: status === 'blocked' ? 'blocked' : 'clarify',
+            trustLabel: 'blocked',
+            runStatus: status,
+            refusalCode: 'grounding_gap',
+            requestedMeasures: ['revenue'],
+            requestedDimensions: ['customer_name'],
+            result: {
+              columns: ['customer_name', 'revenue'],
+              rowsSample: [['Melissa Davis', 1411]],
+              measureColumns: ['revenue'],
+              resultFingerprint: 'b'.repeat(64),
+            },
+          }],
+        },
+      } as AgentRunRequest;
+
+      hydratePersistedPriorResultMemberBinding(request);
+      expect(request.trustedTaskAnchor, status).toBeUndefined();
+      expect(request.hostRequirementSeed, status).toBeUndefined();
+    }
+  });
+
+  it('AGT-051 keeps a non-additive `show … here` question fresh instead of inheriting a successful result shape', () => {
+    const request = {
+      // `here` alone is not a shape-continuation instruction. The user asked
+      // for a new analytical result, so revenue/customer_name from the prior
+      // completed result must not leak into its V3 program.
+      question: 'show total orders here',
+      requestedMode: 'ask',
+      threadId: 'thread-shape-anchor-fresh',
+      conversationContext: {
+        threadId: 'thread-shape-anchor-fresh',
+        conversationEnvelope: { threadId: 'thread-shape-anchor-fresh' },
+        activeTurnId: 'turn-top-customers',
+        turns: [{
+          id: 'turn-top-customers',
+          question: 'Who are the top customers by revenue?',
+          route: 'certified_answer',
+          trustLabel: 'certified',
+          runStatus: 'completed',
+          requestedMeasures: ['revenue'],
+          requestedDimensions: ['customer_name'],
+          result: {
+            columns: ['customer_name', 'revenue'],
+            rowsSample: [['Melissa Davis', 1411]],
+            measureColumns: ['revenue'],
+            resultFingerprint: 'c'.repeat(64),
+          },
+        }],
+      },
+    } as AgentRunRequest;
+
+    hydratePersistedPriorResultMemberBinding(request);
+
+    expect(request.conversationBinding).toBe('none');
+    expect(request.trustedTaskAnchor).toBeUndefined();
+    expect(request.hostRequirementSeed).toBeUndefined();
   });
 
   it('AGT-011 strips forged structured-selection envelopes at HTTP ingress', () => {
@@ -5583,6 +6090,57 @@ block "customer_profile" {
       expect(trace.runtimeReceiptV7).toEqual(payload.run.diagnosticReceiptV7);
       expect(trace.spans.filter((span: { name?: string }) => span.name === 'provider.attempt')).toHaveLength(0);
       expect(trace.spans.filter((span: { name?: string }) => span.name === 'sql.execute')).toHaveLength(1);
+    } finally {
+      await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
+    }
+  });
+
+  it('UI-012 preserves a frozen semantic result-contract rejection through the local Ask executor', async () => {
+    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/jaffle-semantic');
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-semantic-result-contract-'));
+    tempDirs.push(projectRoot);
+    cpSync(fixtureRoot, projectRoot, { recursive: true });
+    rmSync(join(projectRoot, '.dql', 'cache'), { recursive: true, force: true });
+    const executeQuery = vi.fn(async (sql: string) => ({
+      // The frozen semantic plan requests customer_name + order_count. A
+      // wrong result shape is a result-contract rejection after execution,
+      // not a query-execution failure.
+      columns: ['wrong_column'],
+      rows: [{ wrong_column: 3 }],
+      rowCount: 1,
+      sql,
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery } as unknown as QueryExecutor,
+        connection: { driver: 'file' },
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'what is the order count for each customer?', requestedMode: 'ask' }),
+      });
+      const payload = await response.json() as { run: any };
+
+      expect(response.status, JSON.stringify(payload)).toBe(201);
+      expect(payload.run).toMatchObject({ status: 'blocked', trustState: 'blocked' });
+      expect(payload.run.artifacts[0]).toMatchObject({
+        title: 'The query result did not match the frozen plan',
+        payload: {
+          analyticalFailure: { code: 'RESULT_CONTRACT_MISMATCH', phase: 'result_validation' },
+        },
+      });
+      expect(payload.run.telemetry?.fallbackReason).toBe('RESULT_CONTRACT_MISMATCH');
+      expect(payload.run.evaluations?.some((evaluation: { id?: string }) => evaluation.id === 'query-execution')).toBe(false);
+      expect(payload.run.evaluations?.some((evaluation: { id?: string }) => evaluation.id === 'execution-error')).toBe(false);
+      expect(payload.run.diagnosticReceiptV4?.summary?.terminalIncident).toMatchObject({
+        code: 'RESULT_CONTRACT_MISMATCH',
+        boundary: 'result.validate',
+      });
     } finally {
       await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
     }
@@ -9619,6 +10177,44 @@ describe('bounded Research child evidence (AGT-016 / AGT-033)', () => {
     });
   });
 
+  it('projects an expired Claude OAuth session plus unavailable CLI as a redacted authentication preflight failure', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-provider-stale-claude-oauth-'));
+    tempDirs.push(projectRoot);
+    setClaudeCredentials(projectRoot, {
+      type: 'claude',
+      access_token: 'expired-access',
+      refresh_token: 'expired-refresh',
+      expired: new Date(Date.now() - 60_000).toISOString(),
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('revoked', { status: 401 })));
+    const cliAvailable = vi.spyOn(ClaudeCodeCliProvider.prototype, 'available').mockResolvedValue(false);
+    try {
+      await expect(preflightAskAnalyticalPlannerProvider({
+        projectRoot,
+        request: {
+          runId: 'stale-claude-oauth-preflight',
+          question: 'Show revenue.',
+          requestedMode: 'ask',
+        },
+        provider: withCassette(
+          new ClaudeOAuthProvider({ projectRoot }),
+          new CassetteStore(join(projectRoot, '.dql', 'eval-cassettes')),
+          'record',
+        ),
+      })).rejects.toMatchObject({
+        code: 'CLAUDE_OAUTH_CLI_UNAVAILABLE',
+        providerDiagnostic: {
+          phase: 'preflight',
+          cause: 'authentication',
+          retryable: false,
+          safeAction: 'fix_provider_configuration',
+        },
+      });
+    } finally {
+      cliAvailable.mockRestore();
+    }
+  });
+
   it('counts only analytical Research SQL while retaining zero-SQL lineage evidence in the root trace', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-research-failed-child-telemetry-'));
     tempDirs.push(projectRoot);
@@ -12986,6 +13582,15 @@ describe('runtime value grounding policy', () => {
     }
     expect(isAgentValueProbeColumn({ name: 'product_category', type: 'VARCHAR' })).toBe(true);
   });
+
+  it('requires a fully qualified physical relation plus column for literal probes', () => {
+    expect(resolveAgentRuntimeValueGrounding({
+      agent: { runtimeValueGrounding: { mode: 'safe_automatic', searchSafeColumns: ['customers.customer_name'] } },
+    })).toMatchObject({ mode: 'disabled' });
+    expect(resolveAgentRuntimeValueGrounding({
+      agent: { runtimeValueGrounding: { mode: 'safe_automatic', searchSafeColumns: ['main.customers.customer_name'] } },
+    })).toMatchObject({ mode: 'safe_automatic' });
+  });
 });
 
 describe('buildAgentValueProbeSql', () => {
@@ -13008,6 +13613,539 @@ describe('buildAgentValueProbeSql', () => {
     expect(sql).not.toContain("LIKE '%enterprise");
     expect(sql).not.toContain("ESCAPE '\\\\'");
     expect(sql).toContain('LIMIT 25');
+  });
+});
+
+describe('cold Ask literal probe boundary', () => {
+  it('builds an exact existence probe without returning warehouse values', () => {
+    const sql = buildAgentExactValueProbeSql(
+      { relation: 'main.locations', name: 'locations', columns: [{ name: 'location_name', type: 'VARCHAR' }] },
+      'location_name',
+      'Philadelphia',
+      { driver: 'file', filepath: ':memory:' },
+    );
+    expect(sql).toContain('SELECT 1 AS dql_literal_match');
+    expect(sql).toContain("= 'philadelphia'");
+    expect(sql).toContain('LIMIT 1');
+    expect(sql).not.toContain('SELECT DISTINCT');
+    expect(sql).not.toContain('LIKE');
+    expect(sql).not.toContain(' AS value');
+  });
+
+  it('accepts one explicit qualified physical relation, never a bare candidate leaf', () => {
+    expect(agentLiteralProbeTarget({
+      id: 'runtime:column:locations.location_name',
+      qualifiedId: 'runtime:column:locations.location_name',
+      kind: 'sql_column', trustTier: 'exploratory', name: 'location_name', relevanceScore: 1,
+      matchReasons: [], compatibility: 'compatible', sourceObjects: ['runtime:relation:main.locations'],
+    })).toMatchObject({ table: { relation: 'main.locations' }, column: { name: 'location_name' } });
+    expect(agentLiteralProbeTarget({
+      id: 'runtime:column:locations.location_name',
+      qualifiedId: 'runtime:column:locations.location_name',
+      kind: 'sql_column', trustTier: 'exploratory', name: 'location_name', relevanceScore: 1,
+      matchReasons: [], compatibility: 'compatible', sourceObjects: ['locations'],
+    })).toBeUndefined();
+  });
+
+  it('pins one exact configured dbt field and owner before the fused cap so the cold literal probe has one target', () => {
+    const belowFusedCap = Array.from({ length: 80 }, (_, index): AgentEvidenceCandidate => ({
+      id: `dbt:model:noise_${index}`,
+      qualifiedId: `dbt:model:noise_${index}`,
+      kind: 'dbt_model',
+      trustTier: 'exploratory',
+      name: `noise_${index}`,
+      relevanceScore: 0.8,
+      matchReasons: ['fused retrieval'],
+      compatibility: 'unknown',
+      eligible: true,
+      sourceObjects: [`dbt:relation:jaffle_shop.dev.noise_${index}`],
+    }));
+    const evidence: AgentRetrievalEvidence = {
+      snapshotId: 'snapshot:cold-literal',
+      candidates: belowFusedCap,
+      parsedIntent: { measures: [], dimensions: [], filters: [] },
+    };
+    const policy = resolveAgentRuntimeValueGrounding({
+      agent: {
+        runtimeValueGrounding: {
+          mode: 'safe_automatic',
+          searchSafeColumns: ['jaffle_shop.dev.locations.location_name'],
+        },
+      },
+    });
+    const pinned = pinConfiguredRuntimeValueGroundingEvidence({
+      evidence,
+      question: 'Who are the customers in Philadelphia?',
+      policy,
+      catalogObjects: [
+        {
+          objectKey: 'semantic:dimension:location_name',
+          objectType: 'semantic_dimension',
+          name: 'location_name',
+          fullName: 'semantic.location_name',
+          payload: { relation: 'jaffle_shop.dev.locations' },
+        },
+        {
+          objectKey: 'dbt:column:locations.location_name',
+          objectType: 'dbt_column',
+          name: 'location_name',
+          fullName: 'locations.location_name',
+          status: 'dbt_catalog',
+          payload: {
+            model: 'locations',
+            relation: 'jaffle_shop.dev.locations',
+            type: 'VARCHAR',
+          },
+        },
+        {
+          objectKey: 'dbt:model:locations',
+          objectType: 'dbt_model',
+          name: 'locations',
+          fullName: 'jaffle_shop.dev.locations',
+          status: 'dbt_catalog',
+          payload: { relation: 'jaffle_shop.dev.locations' },
+        },
+      ],
+    });
+
+    expect(pinned.candidates).toHaveLength(82);
+    expect(pinned.candidates.slice(0, 2)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'dbt:model:locations',
+        sourceObjects: ['dbt:relation:jaffle_shop.dev.locations'],
+        matchReasons: [AGENT_RUNTIME_VALUE_GROUNDING_PIN_REASON],
+      }),
+      expect.objectContaining({
+        id: 'dbt:column:locations.location_name',
+        kind: 'sql_column',
+        sourceObjects: ['dbt:relation:jaffle_shop.dev.locations'],
+        matchReasons: [AGENT_RUNTIME_VALUE_GROUNDING_PIN_REASON],
+      }),
+    ]));
+    expect(pinned.candidates.slice(0, 2).some((candidate) => candidate.id === 'semantic:dimension:location_name')).toBe(false);
+    const probeTargets = pinned.candidates
+      .map(agentLiteralProbeTarget)
+      .filter((target): target is NonNullable<typeof target> => Boolean(target))
+      .filter((target) => target.table.relation === 'jaffle_shop.dev.locations');
+    expect(probeTargets).toHaveLength(1);
+    expect(probeTargets[0]?.column.name).toBe('location_name');
+  });
+
+  it('runs one host literal probe from real pinned Ask evidence before a broad deterministic fit can freeze', async () => {
+    // This is intentionally a real local server/project journey rather than
+    // a synthetic runtime candidate list. The certified block is an exact
+    // broad revenue/customer fit but has no Philadelphia predicate; the
+    // immutable evidence builder must pin the configured physical field, and
+    // the authoritative runtime must probe it once before it can select the
+    // review-required exploratory closure.
+    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/jaffle-semantic');
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-cold-literal-real-evidence-'));
+    tempDirs.push(projectRoot);
+    cpSync(fixtureRoot, projectRoot, { recursive: true });
+    rmSync(join(projectRoot, '.dql', 'cache'), { recursive: true, force: true });
+    rmSync(join(projectRoot, '.dql', 'local'), { recursive: true, force: true });
+
+    const manifestPath = join(projectRoot, 'target', 'manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, any>;
+    manifest.nodes['model.jaffle_shop.dim_customers'].columns.location_id = {
+      name: 'location_id', data_type: 'number', description: 'Declared customer location key.',
+    };
+    manifest.nodes['model.jaffle_shop.locations'] = {
+      resource_type: 'model',
+      name: 'locations',
+      alias: 'locations',
+      database: 'jaffle_shop',
+      schema: 'dev',
+      description: 'Customer locations with an approved categorical location name.',
+      depends_on: { nodes: [] },
+      tags: ['locations'],
+      original_file_path: 'models/locations.sql',
+      config: { materialized: 'table' },
+      columns: {
+        location_id: { name: 'location_id', data_type: 'number', description: 'Location key.' },
+        location_name: { name: 'location_name', data_type: 'text', description: 'Location display name.' },
+      },
+    };
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+    const configPath = join(projectRoot, 'dql.config.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+    config.agent = {
+      runtimeValueGrounding: {
+        mode: 'safe_automatic',
+        searchSafeColumns: ['jaffle_shop.dev.locations.location_name'],
+      },
+    };
+    writeFileSync(configPath, JSON.stringify(config, null, 2));
+    mkdirSync(join(projectRoot, 'domains', 'commerce', 'modeling'), { recursive: true });
+    writeFileSync(join(projectRoot, 'domains', 'commerce', 'modeling', 'cold-literal-location.dql.yaml'), `
+entities:
+  - id: customer
+    dbt_model: model.jaffle_shop.dim_customers
+    business_name: Customer
+    analytical_role: dimension
+    grain: customer_id
+    keys: [customer_id]
+    status: certified
+    owner: commerce@fixture.test
+  - id: location
+    dbt_model: model.jaffle_shop.locations
+    business_name: Location
+    analytical_role: dimension
+    grain: location_id
+    keys: [location_id]
+    status: certified
+    owner: commerce@fixture.test
+relationships:
+  - id: customer_to_location
+    from: customer
+    to: location
+    keys: [{ from: location_id, to: location_id }]
+    cardinality: many_to_one
+    fanout: safe
+    status: draft
+    owner: commerce@fixture.test
+`);
+    mkdirSync(join(projectRoot, 'blocks'), { recursive: true });
+    writeFileSync(join(projectRoot, 'blocks', 'customer_revenue.dql'), `
+block "customer_revenue" {
+  domain = "commerce"
+  type = "custom"
+  status = "certified"
+  description = "Revenue by customer."
+  owner = "commerce@fixture.test"
+  grain = "one row per customer"
+  entities = ["Customer"]
+  outputs = ["customer_name", "revenue"]
+  dimensions = ["customer_name"]
+  examples = [{ question = "Show revenue for customers in Philadelphia" }]
+  query = """
+    SELECT customer_name, lifetime_spend AS revenue
+    FROM jaffle_shop.dev.dim_customers
+  """
+}
+`);
+    // The real production path pins against the immutable active metadata
+    // snapshot. Rebuild it after adding the below-cutoff physical column so
+    // this exercise uses the same `buildAgentRunEvidence` lease boundary as a
+    // freshly indexed local project, rather than a synthetic candidate list.
+    await ensureMetadataCatalogFresh(projectRoot, { force: true });
+    let coldRelationship: MetadataObject | undefined;
+    let actualAttestedRelationship: AgentEvidenceCandidate['relationshipSafety'] | undefined;
+    const activeSnapshot = acquireActiveKnowledgeSnapshot(projectRoot);
+    try {
+      const coldCatalogObjects = activeSnapshot.catalog.listAllObjects({
+        objectTypes: ['dbt_column', 'dbt_model', 'dbt_source'],
+      });
+      coldRelationship = activeSnapshot.catalog.listAllObjects({
+        objectTypes: ['relationship'],
+      }).find((object) => object.name === 'customer_to_location');
+      expect(coldCatalogObjects).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          objectType: 'dbt_column',
+          name: 'location_name',
+          payload: expect.objectContaining({ relation: 'jaffle_shop.dev.locations' }),
+        }),
+      ]));
+      const pinnedColdEvidence = pinConfiguredRuntimeValueGroundingEvidence({
+        evidence: {
+          snapshotId: activeSnapshot.snapshotId,
+          candidates: [],
+          parsedIntent: { measures: [], dimensions: [], filters: [] },
+        },
+        question: 'Show revenue for customers in Philadelphia',
+        policy: resolveAgentRuntimeValueGrounding(config),
+        catalogObjects: coldCatalogObjects,
+      });
+      expect(pinnedColdEvidence.candidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'dbt:column:locations.location_name' }),
+      ]));
+      const directPack = await buildLocalContextPack(projectRoot, {
+        question: 'Show revenue for customers in Philadelphia',
+        surface: 'notebook',
+        limit: 80,
+      });
+      expect(directPack.knowledgeLens.snapshotId).toBe(activeSnapshot.snapshotId);
+      const actualPrePinEvidence = toAgentRetrievalEvidence(
+        directPack.retrievalDiagnostics.meaningEvidence!,
+        directPack.questionPlan,
+        {
+          snapshotId: directPack.knowledgeLens.snapshotId,
+          sourceFingerprint: directPack.freshness.fingerprint ?? undefined,
+          knowledgeLens: directPack.knowledgeLens,
+          contextObjects: directPack.objects,
+          retrievalLanes: directPack.retrievalDiagnostics.lanes,
+          preferSnapshotCandidates: true,
+        },
+      );
+      const actualPinnedEvidence = pinConfiguredRuntimeValueGroundingEvidence({
+        evidence: actualPrePinEvidence,
+        question: 'Show revenue for customers in Philadelphia',
+        policy: resolveAgentRuntimeValueGrounding(config),
+        catalogObjects: coldCatalogObjects,
+        literalProbeToken: 'host-opaque-test-token',
+      });
+      const actualPinnedColumn = actualPinnedEvidence.candidates.find((candidate) =>
+        candidate.id === 'dbt:column:locations.location_name');
+      expect(agentLiteralProbeTarget(actualPinnedColumn!)).toMatchObject({
+        table: { relation: 'jaffle_shop.dev.locations' },
+        column: { name: 'location_name' },
+      });
+      expect(actualPinnedColumn?.safeValueEvidence ?? []).toEqual([]);
+      // The transient host token is opaque. The relation/column binding is
+      // retained only in the local process registry, never on the card.
+      expect(actualPinnedColumn?.hostLiteralProbeToken).toBe('host-opaque-test-token');
+      const actualManifest = buildManifest({ projectRoot, dbtManifestPath: manifestPath });
+      const actualAttestedEvidence = attestExploratoryRelationshipEvidence(actualPinnedEvidence, actualManifest);
+      const duplicateAttestedCarriers = actualAttestedEvidence.candidates.filter((candidate) =>
+        candidate.relationshipSafety?.some((safety) =>
+          safety.id === 'commerce::relationship::customer_to_location'
+          && safety.exploratoryJoinAllowed === true));
+      // The catalog intentionally projects this one declared physical edge
+      // through multiple cards (model/entity/block/column). They must remain
+      // one canonical proof sequence; a different key/path is covered by the
+      // AGT-051 negative runtime case.
+      expect(new Set(duplicateAttestedCarriers.map((candidate) => candidate.id)).size).toBeGreaterThan(1);
+      actualAttestedRelationship = actualAttestedEvidence.candidates.find((candidate) =>
+        [candidate.id, candidate.qualifiedId, ...(candidate.relationshipEvidence ?? [])]
+          .includes('commerce::relationship::customer_to_location'))?.relationshipSafety;
+      expect(actualAttestedRelationship, JSON.stringify({
+        relationships: actualManifest.modeling?.relationships,
+        entities: actualManifest.modeling?.entities,
+        candidate: actualPinnedEvidence.candidates.find((candidate) =>
+          [candidate.id, candidate.qualifiedId, ...(candidate.relationshipEvidence ?? [])]
+            .includes('commerce::relationship::customer_to_location')),
+      }, null, 2)).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          exploratoryJoinAllowed: true,
+          from: 'jaffle_shop.dev.dim_customers',
+          to: 'jaffle_shop.dev.locations',
+        }),
+      ]));
+    } finally {
+      activeSnapshot.release();
+    }
+
+    const executeQuery = vi.fn(async (sql: string) => {
+      if (sql.includes('dql_literal_match')) {
+        return { columns: ['dql_literal_match'], rows: [{ dql_literal_match: 1 }], rowCount: 1, sql };
+      }
+      return { columns: ['customer_name', 'revenue'], rows: [{ customer_name: 'Ada', revenue: 100 }], rowCount: 1, sql };
+    });
+    const generatedExecutor = vi.fn(() => ({
+      summary: 'Validated exploratory customer revenue result.',
+      answer: 'Ada has $100 in revenue.',
+      status: 'needs_review' as const,
+      trustState: 'review_required' as const,
+      stopReason: 'human_review_required' as const,
+      artifacts: [{
+        id: 'answer:cold-literal',
+        kind: 'answer' as const,
+        title: 'Review-required exploratory answer',
+        trustState: 'review_required' as const,
+        payload: {
+          kind: 'uncertified',
+          certification: 'not_applicable',
+          reviewStatus: 'review_required',
+          text: 'Ada has $100 in revenue.',
+          result: {
+            columns: ['customer_name', 'revenue'],
+            rows: [{ customer_name: 'Ada', revenue: 100 }],
+            rowCount: 1,
+          },
+        },
+      }],
+      evaluations: [],
+      nextActions: [],
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery } as unknown as QueryExecutor,
+        connection: { driver: 'duckdb', filepath: ':memory:' },
+        preferredPort: 0,
+        requireMeaningCallForNaturalLanguage: false,
+        captureServer: (created) => { server = created; },
+        agentRunExecutors: { generated_answer: generatedExecutor },
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const response = await fetch(`${base}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'Show revenue for customers in Philadelphia', requestedMode: 'ask' }),
+      });
+      const payload = await response.json() as { run: any };
+      const literalProbeCalls = executeQuery.mock.calls.filter(([sql]) => String(sql).includes('dql_literal_match'));
+      const compiledPlan = payload.run?.routeDecision?.resolvedAnalyticalPlan;
+      const failureContext = JSON.stringify({
+        route: payload.run?.route,
+        status: payload.run?.status,
+        trustState: payload.run?.trustState,
+        analyticalFailure: payload.run?.analyticalFailure,
+        failure: payload.run?.failure,
+        literalProbeCalls: literalProbeCalls.length,
+        tools: payload.run?.diagnosticReceiptV5?.state?.workspace?.tools,
+        targetedContext: payload.run?.askAnalystState?.workspace?.targetedContext,
+        compiledPlan,
+      }, null, 2);
+
+      expect(response.status, JSON.stringify(payload)).toBe(201);
+      expect(payload.run.route, failureContext).toBe('generated_answer');
+      expect(payload.run.status, failureContext).toBe('needs_review');
+      expect(payload.run.trustState, failureContext).toBe('review_required');
+      expect(payload.run.telemetry, failureContext).toMatchObject({ providerRoundTrips: 0 });
+      expect(JSON.stringify(payload.run), failureContext).not.toContain('hostLiteralProbeToken');
+      expect(payload.run.diagnosticReceiptV3?.cascade, failureContext).toMatchObject({
+        selectedTier: 'exploratory_sql',
+        planFrozen: true,
+      });
+      // The cold literal probe may only promote its exact selected physical
+      // field. This asserts the V3 program -> legacy compiler carrier handoff
+      // rather than accepting a generated route that silently omits the
+      // Philadelphia predicate.
+      expect(compiledPlan, failureContext).toMatchObject({
+        recommendedRoute: 'exploratory',
+        capability: 'bounded_exploration',
+      });
+      expect(compiledPlan?.query?.dimensions, failureContext).toEqual(expect.arrayContaining([
+        expect.objectContaining({ requested: 'location_name', qualifiedId: 'locations.location_name', status: 'resolved' }),
+      ]));
+      expect(compiledPlan?.query?.filters, failureContext).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          field: 'locations.location_name',
+          value: 'philadelphia',
+          binding: expect.objectContaining({ qualifiedId: 'locations.location_name', status: 'resolved' }),
+        }),
+      ]));
+      expect(generatedExecutor).toHaveBeenCalledTimes(1);
+      expect(literalProbeCalls).toHaveLength(1);
+      expect(payload.run.diagnosticReceiptV5?.state?.workspace?.tools).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'tool:literal_grounding_probe', status: 'completed', reasonCode: 'literal_grounding_exact_match' }),
+      ]));
+      const traceId = payload.run.traceReference?.traceId;
+      expect(traceId).toMatch(/^[a-f0-9]{32}$/);
+      const trace = await fetch(`${base}/api/ask-traces/${traceId}`).then((item) => item.json()) as any;
+      expect(trace.spans.filter((span: { name?: string }) => span.name === 'provider.attempt')).toHaveLength(0);
+      expect(trace.spans.filter((span: { name?: string }) => span.name === 'snapshot.acquire')).toHaveLength(1);
+    } finally {
+      await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
+    }
+  });
+
+  it('refuses missing, sensitive, ambiguous, or unconfigured catalog fields for cold literal pins', () => {
+    const evidence: AgentRetrievalEvidence = {
+      snapshotId: 'snapshot:cold-literal-negative',
+      candidates: [],
+      parsedIntent: { measures: [], dimensions: [], filters: [] },
+    };
+    const locationColumn = {
+      objectKey: 'dbt:column:locations.location_name',
+      objectType: 'dbt_column',
+      name: 'location_name',
+      fullName: 'locations.location_name',
+      payload: { model: 'locations', relation: 'jaffle_shop.dev.locations', type: 'VARCHAR' },
+    } satisfies MetadataObject;
+    const owner = {
+      objectKey: 'dbt:model:locations',
+      objectType: 'dbt_model',
+      name: 'locations',
+      fullName: 'jaffle_shop.dev.locations',
+      payload: { relation: 'jaffle_shop.dev.locations' },
+    } satisfies MetadataObject;
+    const pin = (searchSafeColumns: string[], catalogObjects: MetadataObject[]) =>
+      pinConfiguredRuntimeValueGroundingEvidence({
+        evidence,
+        question: 'Who are the customers in Philadelphia?',
+        policy: resolveAgentRuntimeValueGrounding({
+          agent: { runtimeValueGrounding: { mode: 'safe_automatic', searchSafeColumns } },
+        }),
+        catalogObjects,
+      });
+
+    expect(pin(['jaffle_shop.dev.locations.other_name'], [locationColumn, owner]).candidates).toEqual([]);
+    expect(pin([
+      'jaffle_shop.dev.locations.location_name',
+      'jaffle_shop.dev.locations.region_name',
+    ], [locationColumn, owner]).candidates).toEqual([]);
+    expect(pin(['jaffle_shop.dev.locations.location_name'], [owner]).candidates).toEqual([]);
+    expect(pin(['jaffle_shop.dev.locations.location_email'], [
+      { ...locationColumn, objectKey: 'dbt:column:locations.location_email', name: 'location_email', fullName: 'locations.location_email', payload: { ...locationColumn.payload, type: 'VARCHAR' } },
+      owner,
+    ]).candidates).toEqual([]);
+    expect(pin(['jaffle_shop.dev.locations.location_name'], [
+      { ...locationColumn, payload: { ...locationColumn.payload, relation: 'foreign.dev.locations' } },
+      owner,
+    ]).candidates).toEqual([]);
+  });
+
+  it('attests only the exact manifest-planned draft edge, not a same-ID key or endpoint collision', () => {
+    const manifest = {
+      manifestVersion: 3,
+      modeling: {
+        entities: {
+          customer: { id: 'customer', localId: 'customer', qualifiedId: 'commerce::entity::customer', dbtUniqueId: 'model.test.customers' },
+          location: { id: 'location', localId: 'location', qualifiedId: 'commerce::entity::location', dbtUniqueId: 'model.test.locations' },
+        },
+        relationships: {
+          customer_location: {
+            id: 'customer_location', localId: 'customer_location', qualifiedId: 'customer_location',
+            from: 'customer', to: 'location', keys: [{ from: 'location_id', to: 'location_id' }],
+            cardinality: 'many_to_one', fanout: 'safe', status: 'draft', crossDomain: false,
+            staleCertification: false, automaticJoinAllowed: false, sourcePath: 'modeling.dql', fingerprint: 'relationship-fingerprint',
+          },
+        },
+      },
+      dbtProvenance: {
+        nodes: {
+          'model.test.customers': { relation: 'main.customers' },
+          'model.test.locations': { relation: 'main.locations' },
+        },
+      },
+    } as unknown as DQLManifest;
+    const candidate = (from: string, to: string, keys: Array<{ from: string; to: string }>): AgentEvidenceCandidate => ({
+      id: 'dql:relationship:customer_location', qualifiedId: 'dql:relationship:customer_location',
+      kind: 'dql_modeling', trustTier: 'governed_sql', name: 'customer location', relevanceScore: 1,
+      matchReasons: [], compatibility: 'compatible', relationshipEvidence: ['customer_location'],
+      relationshipSafety: [{
+        id: 'customer_location', from, to, keys, status: 'draft', cardinality: 'many_to_one', fanout: 'safe', automaticJoinAllowed: false,
+      }],
+    });
+    const evidenceFor = (relationship: AgentEvidenceCandidate): AgentRetrievalEvidence => ({
+      snapshotId: 'snapshot:literal', candidates: [relationship], parsedIntent: { measures: [], dimensions: [], filters: [] },
+    });
+
+    const exact = attestExploratoryRelationshipEvidence(
+      evidenceFor(candidate('runtime:relation:main.customers', 'runtime:relation:main.locations', [{ from: 'location_id', to: 'location_id' }])),
+      manifest,
+    );
+    expect(exact.candidates[0]?.relationshipSafety?.[0]).toMatchObject({
+      exploratoryJoinAllowed: true,
+      exploratoryPathFingerprint: expect.any(String),
+    });
+    // Metadata relationship cards use canonical entity endpoints, while the
+    // runtime closure needs physical relations. The host may bridge that
+    // representation only through this exact manifest edge and key sequence.
+    const logical = attestExploratoryRelationshipEvidence(
+      evidenceFor(candidate('commerce::entity::customer', 'commerce::entity::location', [{ from: 'location_id', to: 'location_id' }])),
+      manifest,
+    );
+    expect(logical.candidates[0]?.relationshipSafety?.[0]).toMatchObject({
+      from: 'main.customers',
+      to: 'main.locations',
+      keys: [{ from: 'location_id', to: 'location_id' }],
+      exploratoryJoinAllowed: true,
+      exploratoryPathFingerprint: expect.any(String),
+    });
+    for (const mismatch of [
+      candidate('runtime:relation:main.customers', 'runtime:relation:main.locations', [{ from: 'billing_location_id', to: 'location_id' }]),
+      candidate('runtime:relation:main.orders', 'runtime:relation:main.locations', [{ from: 'location_id', to: 'location_id' }]),
+      candidate('commerce::entity::customer', 'commerce::entity::location', [{ from: 'billing_location_id', to: 'location_id' }]),
+      candidate('commerce::entity::customer', 'commerce::entity::other_location', [{ from: 'location_id', to: 'location_id' }]),
+    ]) {
+      const denied = attestExploratoryRelationshipEvidence(evidenceFor(mismatch), manifest);
+      expect(denied.candidates[0]?.relationshipSafety?.[0]?.exploratoryJoinAllowed).toBeUndefined();
+    }
   });
 });
 

@@ -113,6 +113,23 @@ describe("defaultAgentRunGates", () => {
       .toBeUndefined();
   });
 
+  it("keeps an execution refusal terminal instead of relabeling it as a new lookup", () => {
+    const evaluations = gateFor("generated_answer", {
+      answer: "The selected query did not complete.",
+      answerRefusalCode: "execution_error",
+      artifacts: [{
+        id: "execution",
+        kind: "answer",
+        title: "Execution failed",
+        trustState: "blocked",
+        payload: { executionError: "connection reset by peer", refusalCode: "execution_error" },
+      }],
+    });
+    expect(evaluations.find((evaluation) => evaluation.id === "execution-error")?.passed).toBe(false);
+    expect(evaluations.find((evaluation) => evaluation.id === "grounding")?.repairAction)
+      .toBeUndefined();
+  });
+
   it("answer gate does not duplicate a terminal grounding evaluation from the executor", () => {
     const evaluations = gateFor("generated_answer", {
       answer: "I could not compose a governed query.",

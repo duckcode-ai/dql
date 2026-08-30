@@ -24,6 +24,7 @@ import {
   getClaudeCredentials,
   clearOAuthProvider,
 } from './oauth-store.js';
+import { ClaudeCodeCliProvider } from '../subscription-cli.js';
 
 let root: string;
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'dql-oauth-')); });
@@ -89,6 +90,59 @@ describe('oauth token store', () => {
 });
 
 describe('ClaudeOAuthProvider request', () => {
+  it('uses a healthy Claude Code CLI for readiness when a saved OAuth session cannot refresh', async () => {
+    setClaudeCredentials(root, {
+      type: 'claude',
+      access_token: 'expired-access',
+      refresh_token: 'expired-refresh',
+      expired: new Date(Date.now() - 60_000).toISOString(),
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('revoked', { status: 401 })));
+    const cliAvailable = vi.spyOn(ClaudeCodeCliProvider.prototype, 'available').mockResolvedValue(true);
+    try {
+      const provider = new ClaudeOAuthProvider({ projectRoot: root });
+      await expect(provider.available()).resolves.toBe(true);
+      expect(cliAvailable).toHaveBeenCalledTimes(1);
+      expect(provider.getReadinessFailure()).toBeUndefined();
+    } finally {
+      cliAvailable.mockRestore();
+    }
+  });
+
+  it('keeps a stale OAuth failure typed when the same-provider CLI fallback is unavailable', async () => {
+    setClaudeCredentials(root, {
+      type: 'claude',
+      access_token: 'expired-access',
+      refresh_token: 'expired-refresh',
+      expired: new Date(Date.now() - 60_000).toISOString(),
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('revoked', { status: 401 })));
+    const cliAvailable = vi.spyOn(ClaudeCodeCliProvider.prototype, 'available').mockResolvedValue(false);
+    try {
+      const provider = new ClaudeOAuthProvider({ projectRoot: root });
+      await expect(provider.available()).resolves.toBe(false);
+      expect(provider.getReadinessFailure()).toMatchObject({ code: 'CLAUDE_OAUTH_CLI_UNAVAILABLE' });
+    } finally {
+      cliAvailable.mockRestore();
+    }
+  });
+
+  it('keeps a valid OAuth session preferred over the Claude Code CLI', async () => {
+    setClaudeCredentials(root, {
+      type: 'claude',
+      access_token: 'valid-access',
+      refresh_token: 'valid-refresh',
+      expired: new Date(Date.now() + 3.6e6).toISOString(),
+    });
+    const cliAvailable = vi.spyOn(ClaudeCodeCliProvider.prototype, 'available').mockResolvedValue(true);
+    try {
+      await expect(new ClaudeOAuthProvider({ projectRoot: root }).available()).resolves.toBe(true);
+      expect(cliAvailable).not.toHaveBeenCalled();
+    } finally {
+      cliAvailable.mockRestore();
+    }
+  });
+
   it('sends Bearer + oauth beta headers + Claude Code preamble + effort thinking', async () => {
     setClaudeCredentials(root, { type: 'claude', access_token: 'TOK', refresh_token: 'REF', expired: new Date(Date.now() + 3.6e6).toISOString() });
     let captured: { headers: Record<string, string>; body: any } | undefined;

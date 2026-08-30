@@ -18,6 +18,7 @@ import {
   type AgentEvidenceKind,
   type AgentRetrievalEvidence,
   type AgentRelationshipSafetyEvidence,
+  type AgentSafeValueEvidenceV1,
 } from '../meaning-resolution.js';
 import type { KnowledgeLens } from '../domain-context.js';
 
@@ -560,6 +561,10 @@ export function toAgentRetrievalEvidence(
       maxRelevance,
       candidate.retrievalLanes ?? optionLaneMembership.get(candidate.objectKey),
     ));
+  // Keep runtime-value proof attached to the exact qualified physical column
+  // that owns it. The provider never receives these values; the Ask compiler
+  // can use them only after a planner has selected that categorical field.
+  attachSafeValueEvidence(candidates, options.contextObjects ?? []);
   const trustedBindings = trustedMemberBindingEvidence(
     questionPlan,
     candidates,
@@ -671,6 +676,73 @@ function agentCandidateFromMeaning(
       exactMatch: candidate.relevanceReasons.includes("exact name or alias"),
       ...(retrievalLanes?.length ? { retrievalLanes } : {}),
   };
+}
+
+/**
+ * Attach a bounded, snapshot-local runtime-value observation to its qualified
+ * physical column.  This is stricter than lexical matching: both the physical
+ * relation and the terminal column must agree.  It lets a later deterministic
+ * compiler bind `in Philadelphia` to one selected SQL column without making
+ * the literal or a source-table guess visible to the planner.
+ */
+function attachSafeValueEvidence(
+  candidates: AgentEvidenceCandidate[],
+  objects: MetadataObject[],
+): void {
+  const values = objects.flatMap((object): AgentSafeValueEvidenceV1[] => {
+    if (object.objectType !== 'runtime_value') return [];
+    const relation = firstString(object.payload?.relation);
+    const column = firstString(object.payload?.column);
+    const value = firstString(object.payload?.value);
+    const normalizedValue = firstString(object.payload?.normalizedValue)
+      ?? (value ? normalizeText(value) : undefined);
+    if (!relation || !column || !value || !normalizedValue) return [];
+    return [{ version: 1, relation, column, value, normalizedValue }];
+  });
+  if (values.length === 0) return;
+
+  for (const candidate of candidates) {
+    if (candidate.kind !== 'sql_column') continue;
+    const matching = values.filter((value) =>
+      physicalCandidateColumnMatches(candidate, value.column)
+      && physicalCandidateRelationMatches(candidate, value.relation));
+    if (matching.length === 0) continue;
+    const deduped = new Map<string, AgentSafeValueEvidenceV1>();
+    for (const value of matching) {
+      const key = [
+        canonicalPhysicalRelation(value.relation),
+        normalizeIdentifier(value.column),
+        normalizeText(value.normalizedValue),
+      ].join('|');
+      if (!deduped.has(key)) deduped.set(key, value);
+    }
+    candidate.safeValueEvidence = [...deduped.values()]
+      .sort((left, right) => left.relation.localeCompare(right.relation)
+        || left.column.localeCompare(right.column)
+        || left.normalizedValue.localeCompare(right.normalizedValue));
+  }
+}
+
+function physicalCandidateColumnMatches(candidate: AgentEvidenceCandidate, column: string): boolean {
+  const expected = normalizeIdentifier(column);
+  return [candidate.name, ...(candidate.aliases ?? [])]
+    .some((value) => normalizeIdentifier(value) === expected);
+}
+
+function physicalCandidateRelationMatches(candidate: AgentEvidenceCandidate, relation: string): boolean {
+  const expected = canonicalPhysicalRelation(relation);
+  // A qualified physical source relation is mandatory. Do not infer one from
+  // a display name or a loose candidate ID, because that would allow a value
+  // observation from another table to authorize a filter.
+  return (candidate.sourceObjects ?? []).some((source) => {
+    const actual = canonicalPhysicalRelation(source);
+    return actual === expected || actual.endsWith(`.${expected}`) || expected.endsWith(`.${actual}`);
+  });
+}
+
+function canonicalPhysicalRelation(value: string): string {
+  return normalizeRelation(value)
+    .replace(/^(?:runtime:relation:|dbt:model:|dbt:source:|sql:table:)/, '');
 }
 
 function trustedMemberBindingEvidence(

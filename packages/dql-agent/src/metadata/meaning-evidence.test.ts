@@ -248,6 +248,75 @@ describe('AGT-010 metadata meaning evidence lanes', () => {
       .toBe(evidence.candidates.length);
   });
 
+  it('AGT-051 attaches a same-snapshot runtime value only to its qualified physical column', () => {
+    const question = 'Show revenue in Philadelphia';
+    const evidence = toAgentRetrievalEvidence({
+      candidates: [{
+        objectKey: 'dbt:column:orders.region',
+        qualifiedId: 'dbt:column:orders.region',
+        evidenceClass: 'sql',
+        trustTier: 'exploratory',
+        classRank: 1,
+        relevanceScore: 1,
+        name: 'region',
+        aliases: ['sales region'],
+        objectType: 'dbt_column',
+        relevanceReasons: ['exact column'],
+        compatibilityFacts: ['roles categorical dimension'],
+        businessShape: {
+          entities: [], dimensions: ['region'], timeGrains: [], parameters: [], filters: [], outputs: [],
+          sourceRelations: ['runtime:relation:analytics.orders'],
+        },
+        ambiguityPeerIds: [],
+      }, {
+        // The same leaf on a different relation must not inherit the value.
+        objectKey: 'dbt:column:accounts.region',
+        qualifiedId: 'dbt:column:accounts.region',
+        evidenceClass: 'sql',
+        trustTier: 'exploratory',
+        classRank: 1,
+        relevanceScore: 0.9,
+        name: 'region',
+        aliases: ['account region'],
+        objectType: 'dbt_column',
+        relevanceReasons: ['related column'],
+        compatibilityFacts: ['roles categorical dimension'],
+        businessShape: {
+          entities: [], dimensions: ['region'], timeGrains: [], parameters: [], filters: [], outputs: [],
+          sourceRelations: ['runtime:relation:analytics.accounts'],
+        },
+        ambiguityPeerIds: [],
+      }],
+      byEvidenceClass: { certified: [], semantic: [], sql: [] },
+      ambiguousGroups: [],
+    }, buildAnalysisQuestionPlan(question), {
+      contextObjects: [{
+        objectKey: 'runtime:value:orders.region:philadelphia',
+        objectType: 'runtime_value',
+        name: 'region = Philadelphia',
+        payload: {
+          relation: 'analytics.orders',
+          column: 'region',
+          value: 'Philadelphia',
+          normalizedValue: 'philadelphia',
+        },
+      }],
+    });
+
+    expect(evidence.candidates.find((candidate) => candidate.id === 'dbt:column:orders.region'))
+      .toMatchObject({
+        safeValueEvidence: [{
+          version: 1,
+          relation: 'analytics.orders',
+          column: 'region',
+          value: 'Philadelphia',
+          normalizedValue: 'philadelphia',
+        }],
+      });
+    expect(evidence.candidates.find((candidate) => candidate.id === 'dbt:column:accounts.region')?.safeValueEvidence)
+      .toBeUndefined();
+  });
+
   it('preserves actual vector and graph memberships from the snapshot through provider evidence', () => {
     const question = 'Which customer accounts have the highest revenue?';
     const plan = buildAnalysisQuestionPlan(question);

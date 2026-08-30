@@ -3477,10 +3477,14 @@ function isDrilldownFollowUp(question: string, _priorTerms: string[] = []): bool
   // make a fresh request inherit the prior answer's filters and measures.
   const explicitPriorResultOperation = /\b(?:top|bottom)\s+\d+\s+of\s+(?:these|those|them|the\s+(?:prior|previous)?\s*results?)\b/.test(lower)
     || /\b(?:average|sum|total|compare)\s+(?:of|across)\s+(?:these|those|them|the\s+(?:prior|previous)?\s*results?)\b/.test(lower);
-  if (!deicticDrilldown && !explicitPriorResultOperation && !(explicitDrillVerb && (hasDeicticReference || resultStateReference))) return false;
+  // An additive projection is explicitly anchored to the result on screen.
+  // It still has no authority without a completed host-persisted result; the
+  // local runtime checks that boundary before it can preserve prior shape.
+  const explicitResultProjectionAugmentation = /\b(?:add|include|also\s+(?:show|include))\s+(?:the\s+)?[a-z][a-z0-9_ -]{0,48}\s+(?:here|there|too|as\s+well)\b/.test(lower);
+  if (!deicticDrilldown && !explicitPriorResultOperation && !explicitResultProjectionAugmentation && !(explicitDrillVerb && (hasDeicticReference || resultStateReference))) return false;
   // Bare definitions should not inherit a prior result merely because they
   // contain a pronoun. An explicit result operation remains authoritative.
-  return explicitPriorResultOperation || !/\b(what is|what are|define|definition|meaning of)\b/.test(lower);
+  return explicitPriorResultOperation || explicitResultProjectionAugmentation || !/\b(what is|what are|define|definition|meaning of)\b/.test(lower);
 }
 
 /**

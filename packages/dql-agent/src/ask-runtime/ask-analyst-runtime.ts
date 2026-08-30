@@ -42,6 +42,7 @@ import {
 import {
   buildAnalyticalRequirementSet,
   buildAnalyticalRequirementSeedV1,
+  currentQuestionLiteralMemberTerms,
   withAnalyticalPriorResultMemberBinding,
   buildAnalyticalTaskGraph,
   classifyProviderFailure,
@@ -52,8 +53,17 @@ import {
   selectRoleBalancedWorkspaceCandidates,
   type AnalyticalHypothesisV1,
   type AnalyticalMissionV1,
+  type AnalyticalTaskOutcomeSummaryV1,
+  type AnalyticalTaskOutcomeTrustStateV1,
+  type AnalyticalTaskOutcomeV1,
   type AnalyticalProgram,
   type AnalyticalProgramV2,
+  type AnalyticalProgramV3,
+  type AnalyticalPlannerBusinessRoleV2,
+  type AnalyticalPlannerInterpretationV2,
+  type CanonicalRelationshipPathReceiptV1,
+  type AnalyticalInputAtomV1,
+  type TrustedAnalyticalTaskAnchorV1,
   type AnalyticalPlannerCandidateCardV1,
   type AnalyticalPlannerProposalV1,
   type AnalyticalPlannerRequestV1,
@@ -65,6 +75,7 @@ import {
   type AskAnalystRuntimeModeV1,
   type AskAnalystState,
   type AskAnalystStateV2,
+  type AskAnalystStateV3,
   type BusinessQuestionFrameV4,
   type ContextSourceCoverageV1,
   type EvidenceCandidateRoleV1,
@@ -108,6 +119,15 @@ export interface AskAnalystRuntimeOptionsV1 {
     feedback?: import('../analytical-orchestration.js').ProgramVerificationFeedbackV1;
   }) => Promise<AnalyticalPlannerProposalV1 | undefined>;
   /**
+   * Host-owned, exact current-literal grounding. This is deliberately outside
+   * retrieval and the planner: a local host may check one explicitly
+   * allowlisted physical categorical field on its current connection when an
+   * immutable snapshot has no retained runtime-value evidence. The callback
+   * may return only a status and one already-admitted snapshot candidate ID;
+   * it must never return SQL, warehouse rows, aliases, or new candidates.
+   */
+  probeLiteralGrounding?: (input: AskLiteralGroundingProbeRequestV1) => Promise<AskLiteralGroundingProbeResultV1>;
+  /**
    * Host-only compatibility seam for offline fixtures and deliberate local
    * provider-free deployments. When enabled, one uniquely exact semantic
    * measure may bind without a meaning call. It never resolves competing
@@ -115,6 +135,29 @@ export interface AskAnalystRuntimeOptionsV1 {
    */
   allowDeterministicNaturalLanguageBinding?: boolean;
   now?: () => number;
+}
+
+/** Host-only request; neither the client nor the planner can manufacture it. */
+export interface AskLiteralGroundingProbeRequestV1 {
+  version: 1;
+  /** Host-owned run context; the probe uses only its current execution target. */
+  request: AgentRunRequest;
+  snapshotId?: string;
+  /** Current-question literal only; it is never persisted in the probe receipt. */
+  literal: string;
+  /** Qualified physical candidates from the already-frozen retrieval snapshot. */
+  candidates: readonly AgentEvidenceCandidate[];
+  signal?: AbortSignal;
+}
+
+/** Redacted result of one exact host-side value probe. */
+export interface AskLiteralGroundingProbeResultV1 {
+  version: 1;
+  status: 'matched' | 'disabled' | 'unavailable' | 'no_match' | 'ambiguous' | 'denied';
+  /** Required only for matched; must identify exactly one supplied candidate. */
+  candidateId?: string;
+  /** Safe machine classification only; no queried value or row content. */
+  reasonCode: string;
 }
 
 export interface AskAnalystRuntimeV1 extends AgentRouter {
@@ -196,6 +239,7 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
         };
         const program = buildProgram(frame, mission, [], [], requirementSeed, {
           planningMode: 'deterministic_binding',
+          trustedTaskAnchor: request.trustedTaskAnchor,
         });
         const state = transitionState(buildState({
           mode,
@@ -261,7 +305,9 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
             reasonCode: 'shadow_preserves_legacy_decision',
           }],
         };
-        const program = buildProgram(frame, mission, [], [], requirementSeed);
+        const program = buildProgram(frame, mission, [], [], requirementSeed, {
+          trustedTaskAnchor: request.trustedTaskAnchor,
+        });
         const state = transitionState(buildState({ mode, phase: 'framed', frame, mission, workspace, program }), 'program_ready');
         checkpoint(request, state);
         const legacyDecision = await options.compilerBroker.decide(request);
@@ -345,6 +391,27 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
         ...(evidence?.fiscalCalendar ? { fiscalCalendar: evidence.fiscalCalendar } : {}),
       });
       const mission = buildMission(request, requirements, frame.kind, requirementSeed);
+      // Cold member grounding is host evidence enrichment, not a late
+      // closure-side fallback.  Run it immediately after the one immutable
+      // retrieval snapshot is available and before role ambiguity,
+      // deterministic binding, or provider planning can select a broad route.
+      // The host can attest only one exact configured physical column and
+      // returns no SQL, rows, or values.  Every later stage consumes the same
+      // enriched snapshot; there is no second retrieval/provider loop.
+      const literalGroundingEnrichment = evidence
+        ? await enrichFreshCurrentLiteralGroundingEvidence({
+            request,
+            evidence,
+            requirements,
+            canonicalSelections,
+            hasTrustedStructuredContinuation: Boolean(serverIssuedContinuation(request)),
+            probeLiteralGrounding: options.probeLiteralGrounding,
+          })
+        : undefined;
+      if (literalGroundingEnrichment) {
+        evidence = literalGroundingEnrichment.evidence;
+        if (literalGroundingEnrichment.receipt) toolReceipts.push(literalGroundingEnrichment.receipt);
+      }
       // The raw source pool is immutable retrieval backing only.  Before any
       // provider call, own a role-balanced 32-card execution workspace and
       // then release at most 16 of those qualified cards to the planner.  A
@@ -395,7 +462,8 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
             endpointClosureRequired: false,
             endpointClosureComplete: true,
           };
-      const requiredRelationshipClosure = relationshipClosureReceipt.candidates;
+      let requiredRelationshipClosure = relationshipClosureReceipt.candidates;
+      let relationshipClosureComplete = relationshipClosureReceipt.endpointClosureComplete;
       // Relationship cards are structural proof, not three independent
       // business choices.  The planner must select one complete, host-owned
       // path card so the 16-card cap cannot retain a downstream location edge
@@ -403,15 +471,23 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
       // raw closure stays in the 32-card execution workspace and is expanded
       // there by the existing compiler boundary; this compact card never
       // authorizes a join by itself.
-      const relationshipPathPlannerCard = relationshipClosureReceipt.endpointClosureComplete
+      let relationshipPathPlannerCard = relationshipClosureReceipt.endpointClosureComplete
         ? plannerRelationshipPathCard(requiredRelationshipClosure)
         : undefined;
+      // Keep the pre-support role-balanced set separately. The support pass
+      // may add compiler-only physical context, but it must not pretend that
+      // such a card was admitted for the current literal/member role. The
+      // bounded extension below compares against this exact 32-card admission
+      // baseline before promoting a below-cap field to a reviewed predicate.
+      const initialRoleBalancedWorkspace = evidence
+        ? selectRoleBalancedWorkspaceCandidates({
+            candidates: admissionSnapshotCandidates,
+            requirements: admissionRequirements,
+          })
+        : [];
       const roleBalancedWorkspace = evidence
         ? withExecutionSupportCandidates({
-          workspace: selectRoleBalancedWorkspaceCandidates({
-              candidates: admissionSnapshotCandidates,
-              requirements: admissionRequirements,
-            }),
+            workspace: initialRoleBalancedWorkspace,
             snapshotCandidates: admissionSnapshotCandidates,
             requirements: admissionRequirements,
             relationshipClosure: requiredRelationshipClosure,
@@ -432,7 +508,7 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
             relationshipClosure: requiredRelationshipClosure,
           })
         : undefined;
-      const deterministicBinding = structuredContinuationBinding ?? (evidence
+      let deterministicBinding = structuredContinuationBinding ?? (evidence
         ? deterministicUniqueProgramBinding({
             request,
             evidence,
@@ -441,6 +517,76 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
             allowDeterministicNaturalLanguageBinding: options.allowDeterministicNaturalLanguageBinding === true,
           })
         : undefined);
+      // A role-balanced 32-card workspace is intentionally not a raw search
+      // dump. A current literal can still have exactly one qualified physical
+      // field/value proof below that cap. Recover it only from this immutable
+      // snapshot when the initial workspace cannot bind the literal, one
+      // qualified relation owns the field, and a compact certified closure
+      // reaches the already-admitted entity relation. This is host-only
+      // capability verification, not a second retrieval or provider loop.
+      // A broad deterministic certified/semantic binding can prove a route
+      // while still omitting a literal the reader supplied in this turn.  It
+      // is not authorized to suppress the one host-owned literal probe in
+      // that case: doing so would silently widen `customers in Philadelphia`
+      // to all customers just because a customer/revenue program also fit.
+      // Only an exact semantic-member or qualified physical safe-value proof
+      // on the deterministic binding itself may skip this bounded extension.
+      // Literal recovery is deliberately narrower than literal extraction.
+      // Proper-name extraction also preserves a member atom for a typed
+      // prior-result follow-up and for a host-owned explicit filter. Those
+      // are already bound predicates, not a new warehouse-value lookup. Do
+      // not clear their deterministic program merely because the underlying
+      // card does not repeat the literal in safe-value evidence.
+      //
+      // The one host probe remains required for a genuinely fresh, unbound
+      // current-question literal (for example Philadelphia) even when a
+      // broad certified/semantic program also fits. It is not a fallback for
+      // canonical IDs, server-issued clarification selections, or a known
+      // same-snapshot business ambiguity.
+      const freshLiteralGroundingRequired = requiresFreshCurrentLiteralGrounding({
+        request,
+        requirements,
+        canonicalSelections,
+        hasTrustedStructuredContinuation: Boolean(serverIssuedContinuation(request)),
+      });
+      const deterministicBindingProvesLiteral = !freshLiteralGroundingRequired
+        || (deterministicBinding
+          ? deterministicBindingProvesCurrentQuestionLiterals({
+              question: request.question,
+              binding: deterministicBinding,
+            })
+          : false);
+      const literalClosureAttempt = evidence && freshLiteralGroundingRequired && !deterministicBindingProvesLiteral
+        ? sameSnapshotLiteralClosureExtension({
+            request,
+            requirements,
+            requirementSeed,
+            snapshotCandidates: admissionSnapshotCandidates,
+            initialWorkspaceCandidates: initialRoleBalancedWorkspace,
+          })
+        : undefined;
+      const literalClosureExtension = literalClosureAttempt;
+      if (literalClosureExtension) {
+        deterministicBinding = literalClosureExtension.binding;
+        requiredRelationshipClosure = literalClosureExtension.relationshipClosure;
+        relationshipClosureComplete = true;
+        relationshipPathPlannerCard = plannerRelationshipPathCard(requiredRelationshipClosure);
+        toolReceipts.push({
+          version: 1,
+          id: 'tool:literal_role_extension',
+          kind: 'candidate_extension',
+          status: 'completed',
+          candidateIds: literalClosureExtension.targetedContext.candidateIds,
+          reasonCode: literalClosureExtension.targetedContext.reasonCode,
+        });
+      } else if (freshLiteralGroundingRequired && deterministicBinding && !deterministicBindingProvesLiteral) {
+        // A deterministic binding that did not prove the current predicate
+        // cannot become a fallback after a disabled/no-match/ambiguous probe.
+        // Keep the literal atom in the verified frame and let the ordinary
+        // coverage path report a typed pre-freeze gap instead of executing a
+        // broader query.
+        deterministicBinding = undefined;
+      }
       // Explicit canonical references are stable identity bindings. Retain the
       // complete compatible set before role-balanced fill so two explicitly
       // named metrics cannot collapse into one provider/clarification choice.
@@ -510,7 +656,7 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
         ],
         relationshipPath: relationshipPathPlannerCard,
         rawRelationshipClosure: requiredRelationshipClosure,
-        relationshipClosureComplete: relationshipClosureReceipt.endpointClosureComplete,
+        relationshipClosureComplete,
         ordinaryRoleEntityContext,
         roleBalancedCandidates: plannerRoleBalanced,
         workspaceCandidates,
@@ -537,7 +683,7 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
         workspaceCandidates,
         requirements: admissionRequirements,
         relationshipClosure: requiredRelationshipClosure,
-        relationshipClosureComplete: relationshipClosureReceipt.endpointClosureComplete,
+        relationshipClosureComplete,
         ordinaryRoleEntityContext,
         relationshipPath: relationshipPathPlannerCard,
       });
@@ -557,9 +703,20 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
       // workspace, planner, or execution candidate merely because it was
       // recorded. The workspace/plan caps remain enforced below.
       if (evidence) recordAskCandidateLifecycleV1(request, evidence, evidence.candidates, admitted);
-      let workspace = buildEvidenceWorkspace(evidence, workspaceCandidates, admitted, toolReceipts, admissionRequirements);
+      let workspace = buildEvidenceWorkspace(
+        evidence,
+        workspaceCandidates,
+        admitted,
+        toolReceipts,
+        admissionRequirements,
+        literalClosureExtension?.targetedContext,
+      );
       let program = buildProgram(frame, mission, admitted, workspaceCandidates, requirementSeed, {
         planningMode: deterministicBinding ? 'deterministic_binding' : canonicalSelections.length > 0 ? 'exact_fast_path' : 'initial_planner',
+        trustedTaskAnchor: request.trustedTaskAnchor,
+        relationshipClosure: requiredRelationshipClosure,
+        ...(relationshipPathPlannerCard ? { relationshipPathCard: relationshipPathPlannerCard } : {}),
+        ...(literalClosureExtension ? { targetedContext: literalClosureExtension.targetedContext } : {}),
       });
       const framedState = buildState({
         mode,
@@ -588,13 +745,20 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
       // This deliberately examines only the tiny deterministic binding, not
       // the 32-card workspace. A relevance-pruned or unrelated candidate may
       // never manufacture a clarification option.
-      const displayKeyAmbiguity = !structuredContinuationBinding
+      // A catalog-proven exact certified block is itself the authoritative
+      // business tuple.  Generic raw/semantic alternatives may still be
+      // useful retrieval evidence, but they may not reopen an ambiguity after
+      // that complete immutable tuple has been selected.  The certified
+      // compiler remains the authority that validates its declared outputs
+      // before freezing the plan.
+      const exactCertifiedProgram = deterministicBinding?.reasonCode === 'deterministic_certified_binding';
+      const displayKeyAmbiguity = !structuredContinuationBinding && !exactCertifiedProgram
         ? deterministicDisplayKeyAmbiguity({
             question: request.question,
             binding: deterministicBinding,
           })
         : undefined;
-      const inferredRoleAmbiguity = !structuredContinuationBinding
+      const inferredRoleAmbiguity = !structuredContinuationBinding && !exactCertifiedProgram
         ? sameSnapshotRoleAmbiguityForClarification(sameSnapshotRoleExtensionAdmission.ambiguities)
         : undefined;
       // Ordinary qualified fields (for example Location Name and Country
@@ -603,21 +767,21 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
       // one safe/reachable field survived the bounded role reservation, stop
       // before provider planning. Otherwise the planner could pick one by
       // relevance and turn a real business ambiguity into a false answer.
-      const ordinaryRoleInferenceAmbiguity = !structuredContinuationBinding
+      const ordinaryRoleInferenceAmbiguity = !structuredContinuationBinding && !exactCertifiedProgram
         ? ordinaryRoleInferenceAmbiguityForClarification({
             candidates: workspaceCandidates,
             requirements: admissionRequirements,
             relationshipClosure: requiredRelationshipClosure,
-            relationshipClosureComplete: relationshipClosureReceipt.endpointClosureComplete,
+            relationshipClosureComplete,
             ordinaryRoleEntityContext,
           })
         : undefined;
-      const ordinaryRoleRelationshipGap = !structuredContinuationBinding
+      const ordinaryRoleRelationshipGap = !structuredContinuationBinding && !exactCertifiedProgram
         ? ordinaryRoleRelationshipCoverageGap({
             candidates: workspaceCandidates,
             requirements: admissionRequirements,
             relationshipClosure: requiredRelationshipClosure,
-            relationshipClosureComplete: relationshipClosureReceipt.endpointClosureComplete,
+            relationshipClosureComplete,
             ordinaryRoleEntityContext,
           })
         : undefined;
@@ -1159,6 +1323,9 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
         program = buildProgram(frame, mission, verificationCandidates, workspaceCandidates, requirementSeed, {
           planningMode: 'targeted_revision',
           plannerProposal,
+          trustedTaskAnchor: request.trustedTaskAnchor,
+          relationshipClosure: requiredRelationshipClosure,
+          ...(relationshipPathPlannerCard ? { relationshipPathCard: relationshipPathPlannerCard } : {}),
           targetedContext: targetedExtension.targetedContext,
         });
         initialState = transitionState(initialState, 'program_ready', { workspace, program });
@@ -1344,9 +1511,14 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
       // now the qualified canonical cards that passed role verification.  This
       // is the only point at which a planner may correct an incomplete parser
       // frame; it never gains join, policy, grain, compiler, or SQL authority.
-      const verifiedRequirementSeed = requirementSeedForVerifiedPlanner({
-        seed: requirementSeed,
+      const verifiedRequirementSeed = requirementSeedWithVerifiedMemberBindings({
+        seed: requirementSeedForVerifiedPlanner({
+          seed: requirementSeed,
+          requirements: verifiedRequirements,
+        }),
         requirements: verifiedRequirements,
+        tasks: verifiedPlannerTasks,
+        candidates: verificationCandidates,
       });
       const frameBoundResolution = evidence
         ? bindAskAnalystProgramMeaningV1({
@@ -1424,9 +1596,14 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
       program = buildProgram(verifiedFrame, verifiedMission, verificationCandidates, workspaceCandidates, verifiedRequirementSeed, {
         planningMode: verifiedFrame.planningMode,
         plannerProposal,
+        trustedTaskAnchor: request.trustedTaskAnchor,
+        relationshipClosure: requiredRelationshipClosure,
+        ...(relationshipPathPlannerCard ? { relationshipPathCard: relationshipPathPlannerCard } : {}),
         resolution: boundValidation.resolution,
         verifiedPlannerTasks,
-        ...(targetedExtension ? { targetedContext: targetedExtension.targetedContext } : {}),
+        ...(targetedExtension?.targetedContext ?? literalClosureExtension?.targetedContext
+          ? { targetedContext: targetedExtension?.targetedContext ?? literalClosureExtension?.targetedContext }
+          : {}),
       });
       initialState = transitionState(initialState, 'program_ready', {
         frame: verifiedFrame,
@@ -1477,7 +1654,7 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
         },
         resolution: boundValidation.resolution,
         requirementSeed,
-        targetedContext: targetedExtension?.targetedContext,
+        targetedContext: targetedExtension?.targetedContext ?? literalClosureExtension?.targetedContext,
       });
       if (!compiledTasks.ok) {
         // A task-local compiler state may describe only task-1.  Keep the
@@ -1506,10 +1683,16 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
         checkpoint(request, failed);
         return {
           ...compiledTasks.decision,
-          askAnalystDecision: { version: 1, mode, state: failed },
+          askAnalystDecision: {
+            version: 1,
+            mode,
+            state: failed,
+            ...(compiledTasks.value?.taskOutcomes.length ? { taskOutcomes: compiledTasks.value.taskOutcomes } : {}),
+            ...(compiledTasks.value?.taskOutcomeSummary ? { taskOutcomeSummary: compiledTasks.value.taskOutcomeSummary } : {}),
+          },
         };
       }
-      const taskExecutions = compiledTasks.value;
+      const { taskExecutions, taskOutcomes, taskOutcomeSummary } = compiledTasks.value;
       const compilerDecision = taskExecutions[0]!.compilerDecision;
       const resolvedPlan = taskExecutions[0]!.resolvedPlan;
       const frozenPlan = frozenTaskPlan(
@@ -1581,6 +1764,8 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
           resolvedPlan,
           frozenPlan,
           taskExecutions,
+          ...(taskOutcomes.length ? { taskOutcomes } : {}),
+          ...(taskOutcomeSummary ? { taskOutcomeSummary } : {}),
         },
       };
     },
@@ -2090,11 +2275,24 @@ function verifierDirectedMalformedPlannerRecovery(input: {
   if (input.proposal && plannerProposalReferencesOutsideCandidates(input.proposal, input.plannerCandidates)) {
     return undefined;
   }
-  const missingRoles = requiredRoles(input.requirements).filter((role) => !input.plannerCandidates.some((candidate) => {
-    if (!candidateCanBindPlannerRole(candidate, role)) return false;
-    if (role === 'relationship') return evidenceCandidateRoles(candidate).includes('relationship');
-    if (role === 'time_dimension') return candidateCanBindPlannerRole(candidate, role);
+  const relationshipProvenByHost = plannerPackageHasCanonicalRelationshipReceipt(input.plannerCandidates);
+  // Relationship closure is compiler-owned structural proof. A provider
+  // planner never needs to select a path card *when the host has already
+  // admitted one complete canonical receipt*. When no such receipt exists,
+  // relationship remains a missing role; otherwise a malformed plan with two
+  // gaps can be misclassified as a one-role recovery and hide the real
+  // planner-verification failure.
+  const missingRoles = requiredRoles(input.requirements)
+    .filter((role) => role !== 'relationship' || !relationshipProvenByHost)
+    .filter((role) => !input.plannerCandidates.some((candidate) => {
     const requiredTerms = plannerRequiredTermsForRole(input.requirements, role);
+    // A physical categorical column is not a generic member card. It can
+    // nevertheless prove this one current literal when safe-value evidence
+    // from the same snapshot is exact and qualified.
+    if (role === 'member'
+      && requiredTerms.some((term) => physicalSafeValueBindings(candidate, term).length > 0)) return true;
+    if (!candidateCanBindPlannerRole(candidate, role)) return false;
+    if (role === 'time_dimension') return candidateCanBindPlannerRole(candidate, role);
     return requiredTerms.length === 0
       ? evidenceCandidateRoles(candidate).includes(role)
       : requiredTerms.some((term) => {
@@ -2108,7 +2306,7 @@ function verifierDirectedMalformedPlannerRecovery(input: {
           return role === 'categorical_dimension'
             && candidateHasUniqueInferredRoleSubstitution(candidate, { role, terms: [term] });
         });
-  }));
+    }));
   if (missingRoles.length !== 1) return undefined;
   const missingRole = missingRoles[0]!;
   return {
@@ -2356,6 +2554,7 @@ function missingRequiredPlannerBusinessRoles(input: {
   if (input.mission.mode !== 'ask') return [];
   const missionById = new Map(input.mission.tasks.map((task) => [task.id, task]));
   const missing = new Set<EvidenceCandidateRoleV1>();
+  const relationshipProvenByHost = plannerPackageHasCanonicalRelationshipReceipt(input.plannerCandidates);
   for (const task of input.tasks) {
     // A merged compatible task must prove each source clause, while ordinary
     // multi-task Ask proves one frozen tuple per task. In neither case may a
@@ -2372,7 +2571,12 @@ function missingRequiredPlannerBusinessRoles(input: {
       }
       const taskRequirements = requirementsForPlannerVerification(input.requirements, missionTask.question);
       for (const role of requiredRoles(taskRequirements)) {
-        if (role === 'relationship' && !selectedBusinessCardsRequireRelationship(task, selectedForTask)) continue;
+        // Relationship is established by the frozen host closure and proven
+        // again by the compiler, but only after a complete canonical receipt
+        // has actually been admitted. A missing closure must still block a
+        // one-role recovery rather than masking a malformed compound plan.
+        if (role === 'relationship'
+          && (relationshipProvenByHost || !selectedBusinessCardsRequireRelationship(task, selectedForTask))) continue;
         if (!plannerTaskRoleCoversExplicitRequirements({
           role,
           task,
@@ -2384,6 +2588,15 @@ function missingRequiredPlannerBusinessRoles(input: {
     }
   }
   return [...missing];
+}
+
+/** A relationship role is host-satisfied only by the compact complete path
+ * receipt. Individual raw edges can be partial or unrelated and must never
+ * suppress an otherwise-required relationship gap. */
+function plannerPackageHasCanonicalRelationshipReceipt(candidates: readonly AgentEvidenceCandidate[]): boolean {
+  return candidates.some((candidate) => candidate.id.startsWith('dql:relationship_path:')
+    && relationshipCandidatePathIds(candidate).length > 0
+    && Boolean(relationshipCandidateProofSelection(candidate)));
 }
 
 /**
@@ -2400,6 +2613,15 @@ function plannerTaskRoleCoversExplicitRequirements(input: {
   plannerCandidates: AgentEvidenceCandidate[];
   requirements: AnalyticalRequirementSetV1;
 }): boolean {
+  if (input.role === 'member') {
+    const requiredTerms = plannerRequiredTermsForRole(input.requirements, input.role);
+    const memberIds = new Set(input.task.roleBindings.member ?? []);
+    return requiredTerms.every((term) => input.candidates.some((candidate) =>
+      ((memberIds.has(candidate.id) || memberIds.has(stableCandidateId(candidate)))
+        && evidenceCandidateRoles(candidate).includes('member')
+        && candidateMatchesPlannerRequirementTerm(candidate, term))
+      || physicalSafeValueBindings(candidate, term).length > 0));
+  }
   const ids = new Set(input.task.roleBindings[input.role] ?? []);
   const bound = input.candidates.filter((candidate) =>
     (ids.has(candidate.id) || ids.has(stableCandidateId(candidate)))
@@ -2538,7 +2760,7 @@ function plannerTaskCanProveMergedCoverage(
   const selectedIds = new Set(task.selectedConceptIds);
   const taskCandidates = selectedCandidates.filter((candidate) =>
     selectedIds.has(candidate.id) || selectedIds.has(stableCandidateId(candidate)));
-  return requiredRoles(requirements).every((role) => {
+  return requiredRoles(requirements).filter((role) => role !== 'relationship').every((role) => {
     const bound = task.roleBindings[role] ?? [];
     return bound.some((id) => taskCandidates.some((candidate) =>
       (candidate.id === id || stableCandidateId(candidate) === id)
@@ -3092,7 +3314,7 @@ function workspaceWithPlannerReceipt(
 
 function runtimeMeaningFailureDecision(input: {
   mode: AskAnalystRuntimeModeV1;
-  initialState: AskAnalystStateV2;
+  initialState: AskAnalystStateV3;
   reason: string;
   providerAttempted?: boolean;
   providerError?: unknown;
@@ -3267,7 +3489,9 @@ interface DeterministicProgramBindingV1 {
     | 'deterministic_semantic_binding'
     | 'deterministic_structured_continuation_binding'
     | 'deterministic_structured_physical_continuation_binding'
-    | 'deterministic_single_relation_physical_binding';
+    | 'deterministic_single_relation_physical_binding'
+    | 'deterministic_same_snapshot_literal_closure_binding'
+    | 'deterministic_same_snapshot_literal_exploratory_closure_binding';
   /** Complete means the immutable snapshot already proves every requested role. */
   complete?: boolean;
 }
@@ -3333,11 +3557,41 @@ function candidateMatchesStableIdentity(candidate: AgentEvidenceCandidate, ident
     .some((value) => value === identity);
 }
 
+/**
+ * Resolve an identity carried by a planner card without turning a display
+ * alias into authority over a retrieved physical object. Planner cards use
+ * snapshot-stable qualified IDs while legacy MeaningResolution indexes
+ * candidates by their local object key. A qualified physical column can
+ * legitimately share an alias with a semantic metric, so alias matching
+ * before an exact object key or qualified identity made a trusted V3
+ * selection appear ambiguous during the compatibility handoff.
+ *
+ * Keep the precedence deliberately narrow and deterministic:
+ *
+ * 1. an exact local candidate ID;
+ * 2. an exact qualified candidate ID;
+ * 3. one unique legacy alias.
+ *
+ * Multiple exact matches remain ambiguous and callers retain the original
+ * value for the normal validator to reject. This is identity conversion
+ * only; it never admits an unretrieved foreign ID.
+ */
+function candidatesForPlannerIdentity(
+  identity: string,
+  candidates: readonly AgentEvidenceCandidate[],
+): AgentEvidenceCandidate[] {
+  const byLocalId = candidates.filter((candidate) => candidate.id === identity);
+  if (byLocalId.length > 0) return byLocalId;
+  const byQualifiedId = candidates.filter((candidate) => candidate.qualifiedId === identity);
+  if (byQualifiedId.length > 0) return byQualifiedId;
+  return candidates.filter((candidate) => (candidate.aliases ?? []).some((alias) => alias === identity));
+}
+
 function normalizePlannerCandidateIdentity(
   identity: string,
   candidates: readonly AgentEvidenceCandidate[],
 ): string {
-  const direct = candidates.filter((candidate) => candidateMatchesStableIdentity(candidate, identity));
+  const direct = candidatesForPlannerIdentity(identity, candidates);
   if (direct.length === 1) return stableCandidateId(direct[0]!);
   if (direct.length > 1) return identity;
   // A legacy local semantic index may represent *the same full qualified
@@ -4272,13 +4526,31 @@ function deterministicSingleRelationPhysicalBinding(input: {
   const columns = input.candidates.filter((candidate) => candidate.kind === 'sql_column');
   if (relations.length === 0 || columns.length === 0) return undefined;
 
-  const termRequirements: Array<{ term: string; role: 'measure' | 'display' | 'filter' | 'time' }> = [
+  // A parser/host filter is already an explicit field/value predicate.  Keep
+  // its value as a V3 input atom for lossless provenance, but do not require a
+  // second safe-value lookup for the same value.  Doing so made a normal
+  // `customer_name = Brittany Barrera` lookup look as though `Brittany
+  // Barrera` were an unbound fresh literal, which unnecessarily sent the
+  // direct one-relation path back through planning.
+  const alreadyBoundFilterValues = new Set(input.requirementSeed.queryIntent.filters
+    .map((filter) => normalizePlannerAdmissionText(filter.value))
+    .filter(Boolean));
+  const termRequirements: Array<{ term: string; role: 'measure' | 'display' | 'filter' | 'time' | 'member_literal' }> = [
     ...input.requirements.measures.map((term) => ({ term, role: 'measure' as const })),
     ...input.requirements.dimensions.map((term) => ({ term, role: 'display' as const })),
     ...input.requirements.entityTerms.map((term) => ({ term, role: 'display' as const })),
     ...input.requirements.entityDisplayTerms.map((term) => ({ term, role: 'display' as const })),
     ...(input.requirements.outputTerms ?? []).map((term) => ({ term, role: 'display' as const })),
     ...input.requirementSeed.queryIntent.filters.map((filter) => ({ term: filter.field, role: 'filter' as const })),
+    // A literal is a physical filter requirement only after the snapshot
+    // proves it on one qualified categorical column. This lets the direct
+    // single-relation fast path retain `Philadelphia` instead of compiling a
+    // broad revenue query and later blocking at the V3 literal guard.
+    ...(!input.requirements.priorResultMemberBinding
+      ? input.requirements.memberTerms
+        .filter((term) => !alreadyBoundFilterValues.has(normalizePlannerAdmissionText(term)))
+        .map((term) => ({ term, role: 'member_literal' as const }))
+      : []),
     ...(input.requirements.time?.grain ? [{ term: input.requirements.time.grain, role: 'time' as const }] : []),
   ].filter((requirement, index, all) =>
     Boolean(requirement.term.trim())
@@ -4307,7 +4579,9 @@ function deterministicSingleRelationPhysicalBinding(input: {
     const selected: AgentEvidenceCandidate[] = [];
     let complete = true;
     for (const requirement of termRequirements) {
-      const column = uniqueBestPhysicalColumn(requirement.term, requirement.role, relationColumns);
+      const column = requirement.role === 'member_literal'
+        ? uniquePhysicalSafeValueColumn(requirement.term, relationColumns)
+        : uniqueBestPhysicalColumn(requirement.term, requirement.role, relationColumns);
       if (!column) {
         complete = false;
         break;
@@ -4351,6 +4625,798 @@ function deterministicSingleRelationPhysicalBinding(input: {
     }),
     reasonCode: 'deterministic_single_relation_physical_binding',
   };
+}
+
+/** One exact safe-value field is sufficient; two fields are a typed ambiguity. */
+function uniquePhysicalSafeValueColumn(
+  term: string,
+  columns: readonly AgentEvidenceCandidate[],
+): AgentEvidenceCandidate | undefined {
+  const matching = columns.filter((candidate) => physicalSafeValueBindings(candidate, term).length > 0);
+  return matching.length === 1 ? matching[0] : undefined;
+}
+
+/**
+ * A deterministic route may skip literal recovery only when the selected
+ * program itself proves every literal introduced by the current question.
+ *
+ * This deliberately does not treat a matching entity, metric, or broad
+ * certified block as proof of a predicate.  A semantic-member card is a
+ * concrete member identity; a physical field requires its exact
+ * same-snapshot safe-value observation.  Everything else must reach the
+ * bounded host probe/closure path before it can freeze.
+ */
+function deterministicBindingProvesCurrentQuestionLiterals(input: {
+  question: string;
+  binding: DeterministicProgramBindingV1;
+}): boolean {
+  const literals = currentQuestionLiteralMemberTerms(input.question);
+  if (literals.length === 0) return true;
+  return literals.every((literal) => input.binding.candidates.some((candidate) =>
+    qualifiedPhysicalSafeValueBindings(candidate, literal).length > 0
+    || (candidate.kind === 'semantic_member' && candidateMatchesFilterValue(candidate, literal))));
+}
+
+/**
+ * Decide whether the current turn needs the one bounded host value probe.
+ *
+ * `currentQuestionLiteralMemberTerms` intentionally retains proper names and
+ * predicate text for lossless conversational framing. It does not itself say
+ * that the term needs warehouse grounding: a server-owned prior-result member
+ * binding, explicit host filter, canonical selection, or verified structured
+ * continuation already establishes a different safe authority. Clearing a
+ * deterministic program in those cases reintroduced planner calls for
+ * ordinary follow-ups and clarification clicks.
+ */
+function requiresFreshCurrentLiteralGrounding(input: {
+  request: AgentRunRequest;
+  requirements: AnalyticalRequirementSetV1;
+  canonicalSelections: readonly AgentEvidenceCandidate[];
+  hasTrustedStructuredContinuation: boolean;
+}): boolean {
+  const currentLiterals = currentQuestionLiteralMemberTerms(input.request.question)
+    .map(normalizePlannerAdmissionText)
+    .filter(Boolean);
+  if (currentLiterals.length !== 1) return false;
+  const literal = currentLiterals[0]!;
+  // A literal must first be a current analytical member atom. This prevents
+  // conversational prose retained by the frame from turning into a probe.
+  if (!input.requirements.memberTerms
+    .map(normalizePlannerAdmissionText)
+    .filter(Boolean)
+    .includes(literal)) return false;
+  if (input.requirements.priorResultMemberBinding) return false;
+  if (input.canonicalSelections.length > 0) return false;
+  if (input.hasTrustedStructuredContinuation) return false;
+  // Only a host-issued seed filter carries binding authority here. A
+  // retrieval/parser filter may be incomplete or guessed, so it must still
+  // go through the literal proof path rather than widening a fresh request.
+  const hostFilterValues = input.request.hostRequirementSeed?.queryIntent.filters
+    .map((filter) => normalizePlannerAdmissionText(filter.value))
+    .filter(Boolean) ?? [];
+  return !hostFilterValues.includes(literal);
+}
+
+interface LiteralGroundingEnrichmentV1 {
+  evidence: AgentRetrievalEvidence;
+  freshLiteralRequired: boolean;
+  /** Deliberately redacted: candidate identities and stage outcome only. */
+  receipt?: EvidenceWorkspaceV1['tools'][number];
+}
+
+/**
+ * Run the one optional host exact-value probe as evidence enrichment, before
+ * route selection.  The candidate must already be in the immutable snapshot
+ * and carry a host-issued capability from the local project's fully-qualified
+ * allowlist.  Nothing in this helper chooses a business meaning, join, or
+ * execution tier; it only attaches the current-question literal to one
+ * already-qualified physical field after the host confirms an exact match.
+ */
+async function enrichFreshCurrentLiteralGroundingEvidence(input: {
+  request: AgentRunRequest;
+  evidence: AgentRetrievalEvidence;
+  requirements: AnalyticalRequirementSetV1;
+  canonicalSelections: readonly AgentEvidenceCandidate[];
+  hasTrustedStructuredContinuation: boolean;
+  probeLiteralGrounding?: AskAnalystRuntimeOptionsV1['probeLiteralGrounding'];
+}): Promise<LiteralGroundingEnrichmentV1> {
+  const literals = currentQuestionLiteralMemberTerms(input.request.question)
+    .map(normalizePlannerAdmissionText)
+    .filter(Boolean);
+  const freshLiteralRequired = requiresFreshCurrentLiteralGrounding({
+    request: input.request,
+    requirements: input.requirements,
+    canonicalSelections: input.canonicalSelections,
+    hasTrustedStructuredContinuation: input.hasTrustedStructuredContinuation,
+  });
+  const literal = literals.length === 1 ? literals[0]! : undefined;
+  if (!literal || !freshLiteralRequired) {
+    const reasonCode = literal
+      ? literalGroundingSkipReason({
+          request: input.request,
+          requirements: input.requirements,
+          canonicalSelections: input.canonicalSelections,
+          hasTrustedStructuredContinuation: input.hasTrustedStructuredContinuation,
+        })
+      : undefined;
+    return {
+      evidence: stripHostLiteralProbeTokens(input.evidence),
+      freshLiteralRequired,
+      ...(reasonCode ? { receipt: literalGroundingSkippedReceipt(reasonCode) } : {}),
+    };
+  }
+
+  // A retained safe-value observation is already sufficient evidence. It is
+  // intentionally preferred over a host probe so a warm value index remains
+  // zero-I/O and cannot be overwritten by a connection outcome.
+  const alreadyGrounded = input.evidence.candidates.filter((candidate) =>
+    qualifiedPhysicalSafeValueBindings(candidate, literal).length > 0);
+  if (alreadyGrounded.length === 1) {
+    return {
+      evidence: stripHostLiteralProbeTokens(input.evidence),
+      freshLiteralRequired,
+      receipt: literalGroundingSkippedReceipt(
+        'literal_grounding_already_proven',
+        [stableCandidateId(alreadyGrounded[0]!)],
+      ),
+    };
+  }
+  if (alreadyGrounded.length > 1) {
+    return {
+      evidence: stripHostLiteralProbeTokens(input.evidence),
+      freshLiteralRequired,
+      receipt: literalGroundingSkippedReceipt(
+        'literal_grounding_existing_evidence_ambiguous',
+        alreadyGrounded.map(stableCandidateId),
+      ),
+    };
+  }
+
+  // The local host mints this capability only for an exactly-qualified,
+  // allowlisted, probe-safe catalog field. A generic retrieved SQL column is
+  // never sufficient—even when its label happens to look categorical.
+  const declaredProbeCapabilities = input.evidence.candidates.filter((candidate) =>
+    typeof candidate.hostLiteralProbeToken === 'string' && candidate.hostLiteralProbeToken.trim().length > 0);
+  const probeCandidates = declaredProbeCapabilities.filter(isHostLiteralProbeCandidate);
+  if (probeCandidates.length !== 1) {
+    return {
+      evidence: stripHostLiteralProbeTokens(input.evidence),
+      freshLiteralRequired,
+      receipt: literalGroundingSkippedReceipt(
+        probeCandidates.length === 0
+          ? declaredProbeCapabilities.length > 0
+            ? 'literal_grounding_host_capability_invalid'
+            : 'literal_grounding_no_host_capability'
+          : 'literal_grounding_capability_ambiguous',
+        (probeCandidates.length > 0 ? probeCandidates : declaredProbeCapabilities).map(stableCandidateId),
+      ),
+    };
+  }
+  if (!input.probeLiteralGrounding) {
+    return {
+      evidence: stripHostLiteralProbeTokens(input.evidence),
+      freshLiteralRequired,
+      receipt: literalGroundingProbeReceipt(
+        { version: 1, status: 'unavailable', reasonCode: 'host_probe_unavailable' },
+        [],
+      ),
+    };
+  }
+
+  let probe: AskLiteralGroundingProbeResultV1;
+  try {
+    probe = await input.probeLiteralGrounding({
+      version: 1,
+      request: input.request,
+      ...(input.evidence.snapshotId ? { snapshotId: input.evidence.snapshotId } : {}),
+      literal,
+      candidates: probeCandidates,
+      ...(input.request.signal ? { signal: input.request.signal } : {}),
+    });
+  } catch {
+    probe = { version: 1, status: 'unavailable', reasonCode: 'host_probe_unavailable' };
+  }
+  const matched = probe.status === 'matched' && probe.candidateId
+    ? probeCandidates.filter((candidate) => candidateMatchesLiteralProbeIdentity(candidate, probe.candidateId!))
+    : [];
+  const receipt = literalGroundingProbeReceipt(probe, matched);
+  if (probe.status !== 'matched' || matched.length !== 1) {
+    return { evidence: stripHostLiteralProbeTokens(input.evidence), freshLiteralRequired, receipt };
+  }
+
+  const matchedField = matched[0]!;
+  const boundField = withHostExactLiteralProbeEvidence(matchedField, literal);
+  const replace = (candidate: AgentEvidenceCandidate): AgentEvidenceCandidate =>
+    candidateMatchesLiteralProbeIdentity(candidate, matchedField.id) ? boundField : candidate;
+  return {
+    evidence: {
+      ...input.evidence,
+      candidates: input.evidence.candidates.map(replace).map(stripHostLiteralProbeToken),
+      ...(input.evidence.clarificationCandidates
+        ? { clarificationCandidates: input.evidence.clarificationCandidates.map(replace).map(stripHostLiteralProbeToken) }
+        : {}),
+    },
+    freshLiteralRequired,
+    receipt,
+  };
+}
+
+function literalGroundingSkipReason(input: {
+  request: AgentRunRequest;
+  requirements: AnalyticalRequirementSetV1;
+  canonicalSelections: readonly AgentEvidenceCandidate[];
+  hasTrustedStructuredContinuation: boolean;
+}): string | undefined {
+  if (input.requirements.priorResultMemberBinding) return 'literal_grounding_prior_result_bound';
+  if (input.canonicalSelections.length > 0) return 'literal_grounding_canonical_selection';
+  if (input.hasTrustedStructuredContinuation) return 'literal_grounding_structured_continuation';
+  const hostFilterValues = input.request.hostRequirementSeed?.queryIntent.filters
+    .map((filter) => normalizePlannerAdmissionText(filter.value))
+    .filter(Boolean) ?? [];
+  const literals = currentQuestionLiteralMemberTerms(input.request.question)
+    .map(normalizePlannerAdmissionText)
+    .filter(Boolean);
+  return literals.length === 1 && hostFilterValues.includes(literals[0]!)
+    ? 'literal_grounding_host_filter_bound'
+    : undefined;
+}
+
+function literalGroundingSkippedReceipt(
+  reasonCode: string,
+  candidateIds: string[] = [],
+): EvidenceWorkspaceV1['tools'][number] {
+  return {
+    version: 1,
+    id: 'tool:literal_grounding_probe',
+    kind: 'candidate_extension',
+    status: 'skipped',
+    candidateIds: uniqueStrings(candidateIds).slice(0, 4),
+    reasonCode,
+  };
+}
+
+/**
+ * One bounded recovery for a literal that was retrieved but fell below the
+ * initial role-balanced 32-card workspace.  This is deliberately not a
+ * second search: it reads only the immutable retrieval snapshot and requires
+ * an exact safe-value observation, one qualified relation home, one already
+ * visible entity display field, and one complete governed relationship path.
+ *
+ * The returned cards are promoted through the normal workspace/program
+ * materialization path, so compiler validation remains the final authority.
+ * If any identity, value, or path is ambiguous, this returns `undefined` and
+ * the ordinary typed coverage gap remains in force.
+ */
+interface SameSnapshotLiteralClosureExtensionV1 {
+  binding: DeterministicProgramBindingV1;
+  relationshipClosure: AgentEvidenceCandidate[];
+  targetedContext: TargetedContextResultV1;
+}
+
+function sameSnapshotLiteralClosureExtension(input: {
+  request: AgentRunRequest;
+  requirements: AnalyticalRequirementSetV1;
+  requirementSeed: ReturnType<typeof buildAnalyticalRequirementSeedV1>;
+  snapshotCandidates: readonly AgentEvidenceCandidate[];
+  initialWorkspaceCandidates: readonly AgentEvidenceCandidate[];
+}): SameSnapshotLiteralClosureExtensionV1 | undefined {
+  // A prior result filter is already server-bound. This extension only solves
+  // one lossless literal that the current question itself supplied.
+  if (input.requirements.priorResultMemberBinding || input.requirements.memberTerms.length !== 1) return undefined;
+  const literal = input.requirements.memberTerms[0]?.trim();
+  if (!literal) return undefined;
+
+  const eligible = input.snapshotCandidates.filter((candidate) =>
+    candidate.eligible !== false && candidate.compatibility !== 'incompatible');
+  const initialLiteralFields = input.initialWorkspaceCandidates
+    .filter((candidate) => qualifiedPhysicalSafeValueBindings(candidate, literal).length > 0);
+  const extensionCandidates = [...eligible];
+  // First-class enrichment can promote the exact host-attested field into the
+  // normal role-balanced workspace. That is intentional: the closure still
+  // has to assemble its relation/path program from the same snapshot rather
+  // than assuming the generic deterministic binder noticed the new predicate.
+  // Two initial fields are a typed ambiguity, never a relevance tiebreak.
+  const literalFields = initialLiteralFields.length > 0
+    ? uniqueCandidates(initialLiteralFields)
+    : extensionCandidates.filter((candidate) =>
+      candidate.kind === 'sql_column'
+      && Boolean(candidate.qualifiedId?.trim())
+      && qualifiedPhysicalSafeValueBindings(candidate, literal).length > 0);
+  if (literalFields.length !== 1) return undefined;
+  const literalField = literalFields[0]!;
+
+  const literalRelation = uniqueQualifiedPhysicalRelationForColumn(literalField, extensionCandidates);
+  if (!literalRelation) return undefined;
+
+  const displayTerms = input.requirements.entityDisplayTerms.length > 0
+    ? input.requirements.entityDisplayTerms
+    : input.requirements.entityTerms;
+  const physicalDisplayCandidates = input.initialWorkspaceCandidates
+    .filter((candidate) => candidate.kind === 'sql_column')
+    .map((candidate) => bindColumnToUniqueDeclaredPhysicalOwner(candidate, input.initialWorkspaceCandidates))
+    .filter((candidate): candidate is AgentEvidenceCandidate => Boolean(candidate));
+  const displayFields = uniqueCandidates(displayTerms
+    .map((term) => uniqueBestPhysicalColumn(
+      term,
+      'display',
+      physicalDisplayCandidates,
+    ))
+    .filter((candidate): candidate is AgentEvidenceCandidate => Boolean(candidate)));
+  // Parser variants can retain both `customer` and `customer name` as
+  // display terms. They are compatible only when they resolve to the same
+  // qualified field; distinct fields remain a real business ambiguity.
+  if (displayFields.length !== 1) return undefined;
+  const displayField = displayFields[0]!;
+  const displayRelation = uniqueQualifiedPhysicalRelationForColumn(displayField, input.initialWorkspaceCandidates);
+  if (!displayRelation || physicalRelationKey(displayRelation) === physicalRelationKey(literalRelation)) {
+    return undefined;
+  }
+
+  const relationshipClosure = uniquePhysicalRelationshipClosure({
+    source: displayRelation,
+    target: literalRelation,
+    candidates: extensionCandidates,
+    acceptedProofClasses: ['governed', 'exploratory'],
+  });
+  if (!relationshipClosure
+    || !relationshipClosureConnectsPhysicalRelations([displayRelation, literalRelation], relationshipClosure.candidates)) return undefined;
+  const cardinality = relationshipPathCardinality(relationshipClosure.candidates);
+  if (cardinality.pathCount === 0 || cardinality.pathCount > 3 || cardinality.edgeCount > 4) return undefined;
+
+  const initialIds = new Set(input.initialWorkspaceCandidates.map(stableCandidateId));
+  const targetedCandidates = uniqueCandidates([
+    literalRelation,
+    literalField,
+    ...relationshipClosure.candidates,
+  ]).filter((candidate) => !initialIds.has(stableCandidateId(candidate)));
+  // The same cap as verifier-directed targeted context applies. The source
+  // entity/display field must have been in the existing workspace already;
+  // otherwise this would become a broad re-admission instead of a repair.
+  // A host-configured cold-literal pin is deliberately admitted before the
+  // 32-card cap. After its exact probe succeeds, all closure cards may
+  // therefore already be in the initial workspace. That is a normal
+  // same-snapshot recovery, not a reason to discard the newly verified
+  // predicate. Only a *new* extension beyond the cap is refused.
+  if (targetedCandidates.length > MAX_TARGETED_CONTEXT_CANDIDATES) return undefined;
+
+  // Preserve the narrow host proof on the extension-local card so the
+  // existing literal compiler bridge can materialize its exact field/value
+  // predicate. This is not a retrieval synonym: it is emitted only after the
+  // qualified safe-value observation and one complete path above succeeded.
+  const boundLiteralField: AgentEvidenceCandidate = {
+    ...literalField,
+    compatibilityFacts: uniqueStrings([
+      ...(literalField.compatibilityFacts ?? []),
+      'roles categorical dimension',
+    ]),
+  };
+  const selected = uniqueCandidates([
+    displayRelation,
+    displayField,
+    literalRelation,
+    boundLiteralField,
+    ...relationshipClosure.candidates,
+  ]);
+  const exploratory = relationshipClosure.proofClass === 'exploratory';
+  return {
+    binding: {
+        candidates: selected,
+        resolution: deterministicResolution({
+          request: input.request,
+          seed: input.requirementSeed,
+          candidates: selected,
+          recommendedExecutionId: displayField.id,
+          recommendedRoute: 'exploratory',
+        }),
+        reasonCode: exploratory
+          ? 'deterministic_same_snapshot_literal_exploratory_closure_binding'
+          : 'deterministic_same_snapshot_literal_closure_binding',
+    },
+    relationshipClosure: relationshipClosure.candidates,
+    targetedContext: {
+        version: 1,
+        status: 'admitted',
+        candidateIds: targetedCandidates.map(stableCandidateId),
+        relationshipPathIds: uniqueStrings(relationshipClosure.candidates.flatMap(relationshipCandidatePathIds)).slice(0, 3),
+        reasonCode: exploratory
+          ? 'same_snapshot_literal_role_extension_exploratory'
+          : 'same_snapshot_literal_role_extension',
+    },
+  };
+}
+
+function candidateMatchesLiteralProbeIdentity(candidate: AgentEvidenceCandidate, identity: string): boolean {
+  const normalized = identity.trim();
+  return Boolean(normalized) && [candidate.id, candidate.qualifiedId, stableCandidateId(candidate)]
+    .filter((value): value is string => Boolean(value))
+    .some((value) => value === normalized);
+}
+
+function isHostLiteralProbeCandidate(candidate: AgentEvidenceCandidate): boolean {
+  const token = candidate.hostLiteralProbeToken;
+  if (!token?.trim()
+    || candidate.kind !== 'sql_column'
+    || !candidate.qualifiedId?.trim()
+    || candidate.eligible === false
+    || candidate.compatibility === 'incompatible') return false;
+  const roles = evidenceCandidateRoles(candidate);
+  if (roles.includes('metric') || roles.includes('time_dimension')) return false;
+  // The token authorizes no metadata on its own. It is merely a lookup key
+  // for the local host registry. Keep the runtime-side check structural so a
+  // malformed card cannot solicit a probe, while the host later binds the
+  // token to this exact source relation and column before constructing SQL.
+  return qualifiedPhysicalSourceRelationReferences(candidate).length === 1
+    && Boolean(candidate.name.trim());
+}
+
+function withHostExactLiteralProbeEvidence(
+  candidate: AgentEvidenceCandidate,
+  literal: string,
+): AgentEvidenceCandidate {
+  // The host registry bound the opaque token to exactly one physical source
+  // relation and column before it returned `matched`. Preserve the candidate's
+  // already-qualified source identity here; no relation/column capability
+  // metadata travels through the Ask runtime.
+  const relation = qualifiedPhysicalSourceRelationReferences(candidate)[0]
+    ?? stableCandidateId(candidate);
+  const column = candidate.name.trim() || stableCandidateId(candidate).split('.').at(-1) || 'value';
+  const withoutToken = stripHostLiteralProbeToken(candidate);
+  return {
+    ...withoutToken,
+    compatibilityFacts: uniqueStrings([
+      ...(candidate.compatibilityFacts ?? []),
+      'roles categorical dimension',
+    ]),
+    safeValueEvidence: [
+      ...(candidate.safeValueEvidence ?? []),
+      {
+      version: 1,
+      relation,
+      column,
+      // This is the user-supplied current literal, not a warehouse value.
+      value: literal,
+      normalizedValue: normalizePlannerAdmissionText(literal),
+      },
+    ],
+  };
+}
+
+/**
+ * Probe tokens are transport-only host capabilities. They must never reach
+ * the role-balanced workspace, planner cards, checkpoint state, trace, or a
+ * persisted run—even if the probe was skipped or denied.
+ */
+function stripHostLiteralProbeToken(candidate: AgentEvidenceCandidate): AgentEvidenceCandidate {
+  if (!candidate.hostLiteralProbeToken) return candidate;
+  const { hostLiteralProbeToken: _token, ...withoutToken } = candidate;
+  return withoutToken;
+}
+
+function stripHostLiteralProbeTokens(evidence: AgentRetrievalEvidence): AgentRetrievalEvidence {
+  return {
+    ...evidence,
+    candidates: evidence.candidates.map(stripHostLiteralProbeToken),
+    ...(evidence.clarificationCandidates
+      ? { clarificationCandidates: evidence.clarificationCandidates.map(stripHostLiteralProbeToken) }
+      : {}),
+  };
+}
+
+function literalGroundingProbeReceipt(
+  probe: AskLiteralGroundingProbeResultV1,
+  matched: readonly AgentEvidenceCandidate[],
+): EvidenceWorkspaceV1['tools'][number] {
+  const status = probe.status === 'matched'
+    ? matched.length === 1 ? 'completed' as const : 'failed' as const
+    : probe.status === 'unavailable' ? 'failed' as const
+    : 'skipped' as const;
+  const reasonCode: Record<AskLiteralGroundingProbeResultV1['status'], string> = {
+    matched: matched.length === 1 ? 'literal_grounding_exact_match' : 'literal_grounding_invalid_match',
+    disabled: 'literal_grounding_disabled',
+    unavailable: 'literal_grounding_unavailable',
+    no_match: 'literal_grounding_no_match',
+    ambiguous: 'literal_grounding_ambiguous',
+    denied: 'literal_grounding_denied',
+  };
+  return {
+    version: 1,
+    id: 'tool:literal_grounding_probe',
+    kind: 'candidate_extension',
+    status,
+    candidateIds: matched.length === 1 ? [stableCandidateId(matched[0]!)] : [],
+    reasonCode: reasonCode[probe.status],
+  };
+}
+
+/** Resolve a physical column to exactly one qualified same-snapshot relation. */
+function uniqueQualifiedPhysicalRelationForColumn(
+  column: AgentEvidenceCandidate,
+  candidates: readonly AgentEvidenceCandidate[],
+): AgentEvidenceCandidate | undefined {
+  // Resolve ownership only through a fully-qualified physical source object.
+  // Candidate IDs commonly expose a leaf (`locations`) for display and
+  // retrieval matching; using that leaf here can make two different schemas
+  // look like one relation, or make duplicate catalog representations look
+  // ambiguous. The literal bridge is allowed to use a relation only when its
+  // source-authored catalog/schema/table reference exactly matches the
+  // selected field's own qualified source reference.
+  const columnReferences = new Set(qualifiedPhysicalSourceRelationReferences(column));
+  if (columnReferences.size !== 1) return undefined;
+  const groups = new Map<string, AgentEvidenceCandidate[]>();
+  for (const candidate of candidates) {
+    if ((candidate.kind !== 'dbt_model' && candidate.kind !== 'dbt_source' && candidate.kind !== 'sql_table')
+      || !candidate.qualifiedId?.trim()
+      ) continue;
+    const relationReferences = qualifiedPhysicalSourceRelationReferences(candidate)
+      .filter((reference) => columnReferences.has(reference));
+    if (relationReferences.length !== 1) continue;
+    const key = relationReferences[0]!;
+    const group = groups.get(key) ?? [];
+    group.push(candidate);
+    groups.set(key, group);
+  }
+  if (groups.size !== 1) return undefined;
+  return canonicalPhysicalRelation([...groups.values()][0]!);
+}
+
+/**
+ * Return only source-authored catalog/schema/table identities suitable for
+ * binding a physical column to an owner relation. This deliberately rejects
+ * candidate IDs and one-segment leaves: those remain useful for retrieval but
+ * are not authority to join or filter a physical relation.
+ */
+function qualifiedPhysicalSourceRelationReferences(candidate: AgentEvidenceCandidate): string[] {
+  return uniqueStrings((candidate.sourceObjects ?? [])
+    .map(canonicalQualifiedPhysicalSourceRelationReference)
+    .filter((value): value is string => Boolean(value)));
+}
+
+function canonicalQualifiedPhysicalSourceRelationReference(value: string): string | undefined {
+  const raw = value.trim().replace(/[`"\[\]]/g, '');
+  if (!raw) return undefined;
+  const typed = /^(?:dbt|runtime|sql):(model|source|relation|table):(.+)$/i.exec(raw);
+  const relation = typed ? typed[2]!.trim() : raw;
+  // `sourceObjects` may contain a raw fully qualified database relation after
+  // a catalog adapter has removed its type prefix. Keep that equivalent to the
+  // typed form, but never turn `locations` or a friendly candidate ID into a
+  // physical owner identity.
+  if (/^(?:dbt|runtime|sql):(column|model|source|relation|table):/i.test(relation)) return undefined;
+  const segments = relation.split('.').map((segment) => segment.trim()).filter(Boolean);
+  // A typed runtime/dbt relation marker is already an immutable physical
+  // identity in compact adapters that expose only one relation segment. A raw
+  // one-segment source remains a leaf and is deliberately rejected.
+  if (segments.length < (typed ? 1 : 2)) return undefined;
+  const normalized = segments.map((segment, index) => normalizedIdentityTokens(segment)
+    .map((token) => index === segments.length - 1 ? singularIdentityToken(token) : token)
+    .join(' '))
+    .filter(Boolean);
+  return normalized.length === segments.length ? normalized.join('::') : undefined;
+}
+
+/**
+ * A local runtime column can retain a table leaf (`dim_customers`) while the
+ * same immutable workspace carries its one declared qualified dbt owner. For
+ * the literal extension only, recover that source binding when all of the
+ * following are true: the leaf is unambiguous, the owner has an exact
+ * qualified source object, and that source is an endpoint of an already
+ * attested relationship proof. This does not treat a block/card identity as a
+ * relation and does not infer a relationship from lexical similarity.
+ */
+function bindColumnToUniqueDeclaredPhysicalOwner(
+  column: AgentEvidenceCandidate,
+  candidates: readonly AgentEvidenceCandidate[],
+): AgentEvidenceCandidate | undefined {
+  const exactReferences = qualifiedPhysicalSourceRelationReferences(column);
+  if (exactReferences.length === 1) return column;
+  if (exactReferences.length > 1) return undefined;
+  const leafs = uniqueStrings((column.sourceObjects ?? [])
+    .filter((value) => !canonicalQualifiedPhysicalSourceRelationReference(value))
+    .map(canonicalUnqualifiedPhysicalRelationLeaf)
+    .filter((value): value is string => Boolean(value)));
+  if (leafs.length !== 1) return undefined;
+  const leaf = leafs[0]!;
+  const declaredEndpoints = new Set(candidates.flatMap((candidate) =>
+    (relationshipCandidateProofSelection(candidate)?.relationshipSafety ?? [])
+      .flatMap((safety) => [safety.from, safety.to])
+      .map((endpoint) => canonicalQualifiedPhysicalSourceRelationReference(endpoint ?? ''))
+      .filter((endpoint): endpoint is string => Boolean(endpoint))));
+  if (declaredEndpoints.size === 0) return undefined;
+  const owners = candidates
+    .filter((candidate) => candidate.kind === 'dbt_model' || candidate.kind === 'dbt_source' || candidate.kind === 'sql_table')
+    .flatMap((candidate) => qualifiedPhysicalSourceRelationReferences(candidate)
+      .filter((reference) => canonicalQualifiedPhysicalSourceRelationLeaf(reference) === leaf)
+      .filter((reference) => declaredEndpoints.has(reference))
+      .map((reference) => ({ candidate, reference })));
+  const uniqueOwners = new Map<string, { candidate: AgentEvidenceCandidate; reference: string }>();
+  for (const owner of owners) {
+    if (!uniqueOwners.has(owner.reference)) uniqueOwners.set(owner.reference, owner);
+  }
+  if (uniqueOwners.size !== 1) return undefined;
+  const owner = [...uniqueOwners.values()][0]!;
+  const sourceObject = (owner.candidate.sourceObjects ?? []).find((value) =>
+    canonicalQualifiedPhysicalSourceRelationReference(value) === owner.reference);
+  if (!sourceObject) return undefined;
+  return {
+    ...column,
+    sourceObjects: [sourceObject],
+    compatibilityFacts: uniqueStrings([
+      ...(column.compatibilityFacts ?? []),
+      'host-owned exact qualified physical owner binding',
+    ]),
+  };
+}
+
+function canonicalQualifiedPhysicalSourceRelationLeaf(reference: string): string | undefined {
+  return reference.split('::').at(-1)?.trim() || undefined;
+}
+
+function canonicalUnqualifiedPhysicalRelationLeaf(value: string): string | undefined {
+  const raw = value.trim().replace(/[`"\[\]]/g, '');
+  if (!raw || raw.includes('.') || /:/.test(raw)) return undefined;
+  const normalized = normalizedIdentityTokens(raw)
+    .map(singularIdentityToken)
+    .join(' ')
+    .trim();
+  return normalized || undefined;
+}
+
+/**
+ * Find exactly one short, host-proven physical path between two relations.
+ * A governed proof remains governed. A host-attested declared draft/review
+ * proof is a distinct exploratory disposition and can only feed the
+ * review-required compiler path. Candidate identity is deliberately
+ * insufficient: two safe keys inside one card are still two competing paths.
+ */
+function uniquePhysicalRelationshipClosure(input: {
+  source: AgentEvidenceCandidate;
+  target: AgentEvidenceCandidate;
+  candidates: readonly AgentEvidenceCandidate[];
+  acceptedProofClasses: ReadonlyArray<'governed' | 'exploratory'>;
+}): { candidates: AgentEvidenceCandidate[]; proofClass: 'governed' | 'exploratory' } | undefined {
+  const starts = new Set(physicalRelationReferences(input.source));
+  const targets = new Set(physicalRelationReferences(input.target));
+  if (starts.size === 0 || targets.size === 0) return undefined;
+  type Edge = {
+    next: string;
+    candidate: AgentEvidenceCandidate;
+    /** Canonical proof identity, distinct even when one card has two keys. */
+    proofIdentity: string;
+    proofClass: 'governed' | 'exploratory';
+  };
+  const graph = new Map<string, Edge[]>();
+  const connect = (
+    from: string,
+    to: string,
+    candidate: AgentEvidenceCandidate,
+    proofIdentity: string,
+    proofClass: 'governed' | 'exploratory',
+  ): void => {
+    const add = (left: string, right: string): void => {
+      const edges = graph.get(left) ?? [];
+      edges.push({ next: right, candidate, proofIdentity, proofClass });
+      graph.set(left, edges);
+    };
+    add(from, to);
+    add(to, from);
+  };
+  for (const candidate of input.candidates) {
+    const proof = relationshipCandidateProofSelection(candidate);
+    if (!proof
+      || !input.acceptedProofClasses.includes(proof.proofClass)
+      || relationshipCandidateHasUnsafeFanout(candidate)) continue;
+    for (const safety of proof.relationshipSafety) {
+      const from = normalizePhysicalBindingText(safety.from ?? '');
+      const to = normalizePhysicalBindingText(safety.to ?? '');
+      if (!from || !to) continue;
+      connect(from, to, candidate, canonicalPhysicalRelationshipProofIdentity(safety), proof.proofClass);
+    }
+  }
+  const paths = new Map<string, {
+    candidates: AgentEvidenceCandidate[];
+    proofClass: 'governed' | 'exploratory';
+    /**
+     * A carrier is selected only after the physical proof sequence has been
+     * proven equivalent.  This remains a deterministic tie-breaker, never a
+     * source of join authority.
+     */
+    carrierSignature: string;
+  }>();
+  const visit = (node: string, path: Edge[], seenNodes: Set<string>): void => {
+    if (targets.has(node)) {
+      const canonical = uniqueCandidates(path.map((edge) => edge.candidate));
+      if (canonical.length > 0) {
+        // The source-to-target traversal makes the sequence ordered. Each
+        // component is a canonical physical edge plus its proof/key identity,
+        // preventing multiple safe edges in one card from being collapsed.
+        const proofClass = path.every((edge) => edge.proofClass === 'governed') ? 'governed' as const : 'exploratory' as const;
+        const proofSequence = path.map((edge) => edge.proofIdentity).join(' -> ');
+        const carrierSignature = canonical.map((candidate) => stableCandidateId(candidate)).join(' -> ');
+        const existing = paths.get(proofSequence);
+        // Model/entity/block/column cards can project one exact declared
+        // physical proof.  They are equivalent only because the canonical
+        // endpoint/key/proof sequence above matched; choose one stable carrier
+        // after that equivalence is established.  A distinct key, endpoint,
+        // proof fingerprint, or real path has a distinct proofSequence and is
+        // still ambiguous.
+        if (!existing || carrierSignature.localeCompare(existing.carrierSignature) < 0) {
+          paths.set(proofSequence, { candidates: canonical, proofClass, carrierSignature });
+        }
+      }
+      return;
+    }
+    if (path.length >= 4 || paths.size > 1) return;
+    for (const edge of graph.get(node) ?? []) {
+      if (seenNodes.has(edge.next)) continue;
+      const nextPath = [...path, edge];
+      const nextCandidates = uniqueCandidates(nextPath.map((step) => step.candidate));
+      // The extension retains no more than three relationship cards and four
+      // physical key edges. Reusing one multi-edge card is allowed only for a
+      // single unambiguous physical proof sequence.
+      if (nextCandidates.length > 3 || nextPath.length > 4) continue;
+      const nextNodes = new Set(seenNodes);
+      nextNodes.add(edge.next);
+      visit(edge.next, nextPath, nextNodes);
+      if (paths.size > 1) return;
+    }
+  };
+  for (const start of starts) {
+    if (!graph.has(start)) continue;
+    visit(start, [], new Set([start]));
+    if (paths.size > 1) return undefined;
+  }
+  return paths.size === 1 ? [...paths.values()][0] : undefined;
+}
+
+/** Compatibility wrapper for existing governed-only closure callers. */
+function uniqueGovernedPhysicalRelationshipClosure(input: {
+  source: AgentEvidenceCandidate;
+  target: AgentEvidenceCandidate;
+  candidates: readonly AgentEvidenceCandidate[];
+}): AgentEvidenceCandidate[] | undefined {
+  return uniquePhysicalRelationshipClosure({ ...input, acceptedProofClasses: ['governed'] })?.candidates;
+}
+
+/**
+ * Stable identity for one directional-agnostic physical safety edge. The
+ * enclosing path retains source-to-target ordering; the edge itself is
+ * canonicalized so reverse traversal through the same proof is not a second
+ * path. Keys and proof fingerprints remain part of identity because those are
+ * the actual join authority, not the friendly relationship-card identity.
+ */
+function canonicalPhysicalRelationshipProofIdentity(
+  safety: NonNullable<ReturnType<typeof relationshipCandidateProofSelection>>['relationshipSafety'][number],
+): string {
+  const from = normalizePhysicalBindingText(safety.from ?? '');
+  const to = normalizePhysicalBindingText(safety.to ?? '');
+  const reverse = from > to;
+  const endpoints = [from, to].sort().join('~');
+  // A reverse carrier represents the same physical edge only when it also
+  // reverses each declared key.  Preserve key order: two multi-key joins with
+  // the same fields in a different declared sequence are not silently merged.
+  const keys = safety.keys
+    .map((key) => [
+      normalizePhysicalBindingText(reverse ? key.to ?? '' : key.from ?? ''),
+      normalizePhysicalBindingText(reverse ? key.from ?? '' : key.to ?? ''),
+    ].join('='))
+    .join('&');
+  // Prefer host-minted path/proof fingerprints.  A legacy proof with no
+  // fingerprint retains its canonical safety ID as a conservative fallback;
+  // unrelated same-key legacy relationships therefore remain ambiguous.
+  const stableProofFingerprint = [
+    safety.exploratoryPathFingerprint,
+    safety.validation?.proofFingerprint,
+    safety.certificationFingerprint,
+    safety.validation?.queryFingerprint,
+  ].map((value) => normalizePhysicalBindingText(value ?? '')).find(Boolean)
+    ?? `legacy id ${normalizePhysicalBindingText(safety.id ?? '')}`;
+  const proof = [
+    stableProofFingerprint,
+    normalizePhysicalBindingText(safety.status ?? ''),
+    normalizePhysicalBindingText(safety.cardinality ?? ''),
+    normalizePhysicalBindingText(safety.fanout ?? ''),
+    safety.automaticJoinAllowed === true ? 'automatic' : 'manual',
+  ].join('~');
+  return `${endpoints}|${keys}|${proof}`;
 }
 
 function deterministicResolution(input: {
@@ -4506,12 +5572,29 @@ function frozenTaskPlan(
   };
 }
 
+interface CompiledAskTasksV2 {
+  /** Only these immutable programs may enter the engine execution queue. */
+  taskExecutions: AskAnalystTaskExecutionV1[];
+  /** Pre-freeze task failures/blocked dependencies retained for finalization. */
+  taskOutcomes: AnalyticalTaskOutcomeV1[];
+  /** Compiler-time summary; engine replaces it with execution-final evidence. */
+  taskOutcomeSummary?: AnalyticalTaskOutcomeSummaryV1;
+}
+
+type CompileVerifiedAskTasksResult =
+  | { ok: true; value: CompiledAskTasksV2 }
+  | { ok: false; decision: IntentDecision; state?: AskAnalystStateV3; value?: CompiledAskTasksV2 };
+
 /**
- * Compile every accepted ordinary Ask task before freezing the first one.
- * This is deliberately all-or-nothing: a compound request either has one
- * independently verified/frozen program per accepted task, or remains a
- * pre-freeze typed gap.  It never reports task-1 as a complete answer while
- * silently dropping task-2.
+ * Compile every accepted ordinary Ask task before freezing any task for that
+ * task's executor.  Independent task failures remain typed pre-freeze gaps,
+ * while a dependent task is explicitly `dependency_blocked`.  The returned
+ * executions are the only programs the engine may run; it never reparses a
+ * failed clause or silently moves it into Research.
+ *
+ * The existing one-program branch is intentionally preserved for an atomic
+ * compatible multi-metric request (`coveredTaskIds`): it must still prove the
+ * entire tuple before it can execute once.
  */
 function compileVerifiedAskTasks(input: {
   base: IntentDecision;
@@ -4519,10 +5602,10 @@ function compileVerifiedAskTasks(input: {
   evidence: AgentRetrievalEvidence | undefined;
   workspaceCandidates: AgentEvidenceCandidate[];
   admitted: AgentEvidenceCandidate[];
-  initialState: AskAnalystStateV2;
+  initialState: AskAnalystStateV3;
   mission: AnalyticalMissionV1;
   verifiedFrame: BusinessQuestionFrameV4;
-  program: AnalyticalProgramV2;
+  program: AnalyticalProgramV3;
   verifiedRequirements: AnalyticalRequirementSetV1;
   verifiedRequirementSeed: ReturnType<typeof buildAnalyticalRequirementSeedV1>;
   plannerProposal: AnalyticalPlannerProposalV1 | undefined;
@@ -4530,7 +5613,7 @@ function compileVerifiedAskTasks(input: {
   resolution: MeaningResolution;
   requirementSeed: ReturnType<typeof buildAnalyticalRequirementSeedV1>;
   targetedContext?: TargetedContextResultV1;
-}): { ok: true; value: AskAnalystTaskExecutionV1[] } | { ok: false; decision: IntentDecision; state?: AskAnalystStateV2 } {
+}): CompileVerifiedAskTasksResult {
   if (!input.evidence) {
     return {
       ok: false,
@@ -4546,6 +5629,11 @@ function compileVerifiedAskTasks(input: {
       },
     };
   }
+  // A persisted server-issued choice is authoritative only as an identity
+  // handoff.  When it selects an otherwise unresolved ordinary role, retain
+  // that weaker business-mapping boundary on the compiled plan.  A raw client
+  // `selectedEvidenceId` cannot reach this point as structured state.
+  const structuredOrdinaryRoleSelection = input.verifiedFrame.conversation.binding === 'structured_clarification';
   // Preserve the established one-task compiler bridge exactly. The task
   // compiler decomposition below is only necessary when a planner accepted
   // multiple independently executable tasks.
@@ -4553,10 +5641,15 @@ function compileVerifiedAskTasks(input: {
     const task = input.verifiedPlanner.tasks[0]!;
     const missionTask = input.mission.tasks.find((candidate) => candidate.id === task.taskId);
     if (!missionTask) return taskCompilationFailure(input, `task:${task.taskId}:mission_unverified`);
-    const taskRequirementSeed = requirementSeedForVerifiedPlanner({
-      seed: input.verifiedRequirementSeed,
+    const taskRequirementSeed = requirementSeedWithVerifiedMemberBindings({
+      seed: requirementSeedForVerifiedPlanner({
+        seed: input.verifiedRequirementSeed,
+        requirements: input.verifiedRequirements,
+        sourceQuestion: missionTask.question,
+      }),
       requirements: input.verifiedRequirements,
-      sourceQuestion: missionTask.question,
+      tasks: [task],
+      candidates: input.admitted,
     });
     const taskRequest: AgentRunRequest = {
       ...input.request,
@@ -4583,8 +5676,13 @@ function compileVerifiedAskTasks(input: {
     const taskProgram = buildProgram(taskFrame, taskMission, input.admitted, input.workspaceCandidates, taskRequirementSeed, {
       planningMode: taskFrame.planningMode,
       plannerProposal: input.plannerProposal,
+      trustedTaskAnchor: input.request.trustedTaskAnchor,
       resolution: input.resolution,
       verifiedPlannerTasks: [task],
+      relationshipClosure: relationshipClosureForProgram(input.program, input.workspaceCandidates),
+      ...(relationshipPathCardForProgram(input.program, input.admitted)
+        ? { relationshipPathCard: relationshipPathCardForProgram(input.program, input.admitted) }
+        : {}),
       ...(input.targetedContext ? { targetedContext: input.targetedContext } : {}),
     });
     const taskState = transitionState(input.initialState, 'program_ready', {
@@ -4603,15 +5701,21 @@ function compileVerifiedAskTasks(input: {
         programId: taskProgram.id,
       },
     });
+    const compilerResolution = compilerCompatibilityResolutionForProgram({
+      program: taskProgram,
+      fallback: input.resolution,
+      requirementSeed: taskRequirementSeed,
+      candidates: input.admitted,
+    });
     const compilerEvidence = evidenceForVerifiedPlanner(input.evidence, taskRequirementSeed);
-    const tierReadiness = tierReadinessFromEvidence(compilerEvidence, taskRequest, input.resolution);
+    const tierReadiness = tierReadinessFromEvidence(compilerEvidence, taskRequest, compilerResolution);
     const compilerDecision = compileAskAnalyticalProgramV1({
       base: input.base,
       request: {
         ...taskRequest,
         askAnalystState: taskState,
         askAnalystProgram: taskProgram,
-        askAnalystMeaningResolution: input.resolution,
+        askAnalystMeaningResolution: compilerResolution,
         askAnalystTierReadiness: tierReadiness,
         hostRequirementSeed: taskRequirementSeed,
         askAnalystEvidence: compilerEvidence,
@@ -4624,12 +5728,14 @@ function compileVerifiedAskTasks(input: {
       // metrics/dimensions part of the selected semantic meaning.
       candidates: meaningCandidatesForProgram(taskProgram, input.admitted),
       executionCandidates: executionCandidatesForProgram(taskProgram, input.workspaceCandidates),
-      resolution: input.resolution,
+      resolution: compilerResolution,
       requirements: input.verifiedRequirements,
       mode: 'authoritative',
     });
     const resolvedPlan = resolvedPlanFromDecision(taskProgram.id, compilerDecision, {
-      reviewRequired: hasSelectedInferredRoleSubstitution(input.resolution, input.admitted),
+      reviewRequired: hasSelectedInferredRoleSubstitution(compilerResolution, input.admitted, {
+        structuredOrdinaryRoleSelection,
+      }),
     });
     if (!resolvedPlan?.planFrozen || compilerDecision.action === 'clarify' || compilerDecision.terminalOutcome) {
       return {
@@ -4642,36 +5748,60 @@ function compileVerifiedAskTasks(input: {
     }
     return {
       ok: true,
-      value: [{
-        version: 1,
-        taskId: task.taskId,
-        state: transitionState(taskState, 'compiled', { resolvedPlan }),
-        program: taskProgram,
-        meaningResolution: input.resolution,
-        requirementSeed: taskRequirementSeed,
-        tierReadiness,
-        compilerDecision,
-        resolvedPlan,
-      }],
+      value: {
+        taskExecutions: [{
+          version: 1,
+          taskId: task.taskId,
+          state: transitionState(taskState, 'compiled', { resolvedPlan }),
+          program: taskProgram,
+          meaningResolution: compilerResolution,
+          requirementSeed: taskRequirementSeed,
+          tierReadiness,
+          compilerDecision,
+          resolvedPlan,
+          ...((missionTask.dependencies ?? []).length ? { dependencyTaskIds: [...(missionTask.dependencies ?? [])] } : {}),
+          compiledTrustState: compiledTrustStateForPlan(resolvedPlan),
+        }],
+        // Preserve single-task reader behavior: no new compound summary is
+        // serialized for old or atomic one-program Ask turns.
+        taskOutcomes: [],
+      },
     };
   }
   const taskExecutions: AskAnalystTaskExecutionV1[] = [];
-  for (const verifiedTask of input.verifiedPlanner.tasks) {
+  const taskOutcomes: AnalyticalTaskOutcomeV1[] = [];
+  const failedTaskIds = new Set<string>();
+  // Dependencies are server-derived from the mission and always point to a
+  // preceding task today; ordering by mission position keeps this safe if the
+  // planner response serializes compatible independent tasks differently.
+  const verifiedTasks = [...input.verifiedPlanner.tasks].sort((left, right) =>
+    input.mission.tasks.findIndex((task) => task.id === left.taskId)
+    - input.mission.tasks.findIndex((task) => task.id === right.taskId));
+  for (const verifiedTask of verifiedTasks) {
     const missionTask = input.mission.tasks.find((task) => task.id === verifiedTask.taskId);
     if (!missionTask) {
-      return {
-        ok: false,
-        decision: {
-          action: 'block', confidence: 1, followsUp: false, source: 'heuristic',
-          reason: 'The planner proposed a task outside the bounded ordinary Ask mission.',
-          terminalOutcome: {
-            kind: 'policy_blocked',
-            code: 'ANALYTICAL_POLICY_BLOCKED',
-            message: 'The planner proposed a task outside the bounded ordinary Ask mission.',
-            candidateIds: [],
-          },
+      // This cannot be an independent partial result: a planner named an
+      // out-of-mission task. Preserve the old fail-closed policy boundary.
+      return taskCompilationFailure(input, `task:${verifiedTask.taskId}:mission_unverified`);
+    }
+    const failedDependencies = (missionTask.dependencies ?? []).filter((taskId) => failedTaskIds.has(taskId));
+    if (failedDependencies.length > 0) {
+      taskOutcomes.push({
+        version: 1,
+        taskId: missionTask.id,
+        status: 'dependency_blocked',
+        trustState: 'blocked',
+        summary: 'This task was not compiled because a required task did not produce a safe executable program.',
+        failure: {
+          version: 1,
+          code: 'DEPENDENCY_BLOCKED',
+          message: 'A prerequisite task did not produce a safe executable program.',
+          phase: 'dependency',
         },
-      };
+        dependencyTaskIds: failedDependencies,
+      });
+      failedTaskIds.add(missionTask.id);
+      continue;
     }
     const taskSelectionIds = uniqueStableIds([
       ...verifiedTask.selectedConceptIds,
@@ -4687,12 +5817,23 @@ function compileVerifiedAskTasks(input: {
       question: missionTask.question,
     });
     if (!taskRequirements) {
-      return taskCompilationFailure(input, `task:${verifiedTask.taskId}:requirements_unverified`);
+      taskOutcomes.push(taskPlanningFailureOutcome({
+        taskId: missionTask.id,
+        code: 'TASK_REQUIREMENTS_UNVERIFIED',
+        message: 'This independent task did not retain a complete verified analytical requirement set.',
+      }));
+      failedTaskIds.add(missionTask.id);
+      continue;
     }
-    const taskRequirementSeed = requirementSeedForVerifiedPlanner({
-      seed: input.requirementSeed,
+    const taskRequirementSeed = requirementSeedWithVerifiedMemberBindings({
+      seed: requirementSeedForVerifiedPlanner({
+        seed: input.requirementSeed,
+        requirements: taskRequirements,
+        sourceQuestion: missionTask.question,
+      }),
       requirements: taskRequirements,
-      sourceQuestion: missionTask.question,
+      tasks: [verifiedTask],
+      candidates: taskCandidates,
     });
     const taskRequest: AgentRunRequest = {
       ...input.request,
@@ -4729,7 +5870,15 @@ function compileVerifiedAskTasks(input: {
       taskRequirementSeed.queryIntent.measures,
       { requirements: taskRequirements },
     );
-    if (!validation.ok) return taskCompilationFailure(input, `task:${verifiedTask.taskId}:meaning_unverified`);
+    if (!validation.ok) {
+      taskOutcomes.push(taskPlanningFailureOutcome({
+        taskId: missionTask.id,
+        code: 'TASK_MEANING_UNVERIFIED',
+        message: validation.reason,
+      }));
+      failedTaskIds.add(missionTask.id);
+      continue;
+    }
     const taskMission: AnalyticalMissionV1 = {
       ...input.mission,
       tasks: [missionTask],
@@ -4743,8 +5892,13 @@ function compileVerifiedAskTasks(input: {
     const taskProgram = buildProgram(taskFrame, taskMission, input.admitted, input.workspaceCandidates, taskRequirementSeed, {
       planningMode: taskFrame.planningMode,
       plannerProposal: input.plannerProposal,
+      trustedTaskAnchor: input.request.trustedTaskAnchor,
       resolution: validation.resolution,
       verifiedPlannerTasks: [verifiedTask],
+      relationshipClosure: relationshipClosureForProgram(input.program, input.workspaceCandidates),
+      ...(relationshipPathCardForProgram(input.program, input.admitted)
+        ? { relationshipPathCard: relationshipPathCardForProgram(input.program, input.admitted) }
+        : {}),
       ...(input.targetedContext ? { targetedContext: input.targetedContext } : {}),
     });
     const taskState = transitionState(input.initialState, 'program_ready', {
@@ -4763,14 +5917,20 @@ function compileVerifiedAskTasks(input: {
         programId: taskProgram.id,
       },
     });
-    const tierReadiness = tierReadinessFromEvidence(taskCompilerEvidence, taskRequest, validation.resolution);
+    const compilerResolution = compilerCompatibilityResolutionForProgram({
+      program: taskProgram,
+      fallback: validation.resolution,
+      requirementSeed: taskRequirementSeed,
+      candidates: input.admitted,
+    });
+    const tierReadiness = tierReadinessFromEvidence(taskCompilerEvidence, taskRequest, compilerResolution);
     const compilerDecision = compileAskAnalyticalProgramV1({
       base: input.base,
       request: {
         ...taskRequest,
         askAnalystState: taskState,
         askAnalystProgram: taskProgram,
-        askAnalystMeaningResolution: validation.resolution,
+        askAnalystMeaningResolution: compilerResolution,
         askAnalystTierReadiness: tierReadiness,
         hostRequirementSeed: taskRequirementSeed,
         askAnalystEvidence: taskCompilerEvidence,
@@ -4779,44 +5939,63 @@ function compileVerifiedAskTasks(input: {
       program: taskProgram,
       candidates: meaningCandidatesForProgram(taskProgram, input.admitted),
       executionCandidates: executionCandidatesForProgram(taskProgram, input.workspaceCandidates),
-      resolution: validation.resolution,
+      resolution: compilerResolution,
       requirements: taskRequirements,
       mode: 'authoritative',
     });
     const resolvedPlan = resolvedPlanFromDecision(taskProgram.id, compilerDecision, {
-      reviewRequired: hasSelectedInferredRoleSubstitution(validation.resolution, input.admitted),
+      reviewRequired: hasSelectedInferredRoleSubstitution(compilerResolution, input.admitted, {
+        structuredOrdinaryRoleSelection,
+      }),
     });
     if (!resolvedPlan?.planFrozen || compilerDecision.action === 'clarify' || compilerDecision.terminalOutcome) {
-      return {
-        ok: false,
-        decision: compilerDecision,
-        state: transitionState(taskState, compilerDecision.action === 'clarify' ? 'clarify' : 'blocked', {
-          ...(resolvedPlan ? { resolvedPlan } : {}),
+      const policyBlocked = compilerDecision.terminalOutcome?.kind === 'policy_blocked';
+      taskOutcomes.push({
+        ...taskPlanningFailureOutcome({
+          taskId: missionTask.id,
+          code: compilerDecision.terminalOutcome?.code
+            ?? (compilerDecision.action === 'clarify' ? 'TASK_REQUIRES_CLARIFICATION' : 'TASK_COMPILER_UNAVAILABLE'),
+          message: compilerDecision.reason || 'No safe compiler plan was available for this task.',
+          status: policyBlocked ? 'blocked' : 'gap',
         }),
-      };
+        ...(resolvedPlan ? { trustState: compiledTrustStateForPlan(resolvedPlan) } : {}),
+      });
+      failedTaskIds.add(missionTask.id);
+      continue;
     }
     taskExecutions.push({
       version: 1,
       taskId: missionTask.id,
       state: transitionState(taskState, 'compiled', { resolvedPlan }),
       program: taskProgram,
-      meaningResolution: validation.resolution,
+      meaningResolution: compilerResolution,
       requirementSeed: taskRequirementSeed,
       tierReadiness,
       compilerDecision,
       resolvedPlan,
+      ...((missionTask.dependencies ?? []).length ? { dependencyTaskIds: [...(missionTask.dependencies ?? [])] } : {}),
+      compiledTrustState: compiledTrustStateForPlan(resolvedPlan),
     });
   }
-  return taskExecutions.length === input.mission.tasks.length
-    ? { ok: true, value: taskExecutions }
-    : taskCompilationFailure(input, 'ordinary_ask_task_execution_incomplete');
+  const summary = taskCompilationSummary(input.mission, taskExecutions, taskOutcomes);
+  if (taskExecutions.length > 0) {
+    return {
+      ok: true,
+      value: { taskExecutions, taskOutcomes, taskOutcomeSummary: summary },
+    };
+  }
+  const failed = taskCompilationFailure(input, 'ordinary_ask_no_executable_task');
+  return {
+    ...failed,
+    value: { taskExecutions, taskOutcomes, taskOutcomeSummary: summary },
+  };
 }
 
 function taskCompilationFailure(
   input: Pick<Parameters<typeof compileVerifiedAskTasks>[0], 'base'>,
   reasonCode: string,
 ): { ok: false; decision: IntentDecision } {
-  const message = `The bounded Ask plan could not verify every accepted task before execution (${reasonCode}). No partial result was run.`;
+  const message = `The bounded Ask plan could not verify an executable task (${reasonCode}).`;
   return {
     ok: false,
     decision: {
@@ -4835,6 +6014,66 @@ function taskCompilationFailure(
       analyticalCascadeDecision: undefined,
       resolvedAnalyticalPlan: undefined,
     },
+  };
+}
+
+function taskPlanningFailureOutcome(input: {
+  taskId: string;
+  code: string;
+  message: string;
+  status?: 'gap' | 'blocked';
+}): AnalyticalTaskOutcomeV1 {
+  return {
+    version: 1,
+    taskId: input.taskId,
+    status: input.status ?? 'gap',
+    trustState: 'blocked',
+    summary: input.message,
+    failure: {
+      version: 1,
+      code: input.code,
+      message: input.message,
+      phase: 'planning',
+    },
+  };
+}
+
+function compiledTrustStateForPlan(
+  plan: ResolvedAnalyticalPlanV2,
+): AnalyticalTaskOutcomeTrustStateV1 {
+  if (plan.compiler === 'certified') return 'certified';
+  if (plan.compiler === 'metricflow' || plan.compiler === 'governed_relational') return 'governed';
+  if (plan.compiler === 'exploratory_sql') return 'review_required';
+  return 'blocked';
+}
+
+/** Compiler-time state only. The engine replaces it with task execution facts. */
+function taskCompilationSummary(
+  mission: AnalyticalMissionV1,
+  _taskExecutions: AskAnalystTaskExecutionV1[],
+  taskOutcomes: AnalyticalTaskOutcomeV1[],
+): AnalyticalTaskOutcomeSummaryV1 {
+  // A compiler has only proved that a task can be attempted.  It has not
+  // produced an immutable result artifact yet.  In particular, do not let a
+  // restart between compilation and the first executor checkpoint advertise a
+  // task as completed.  The agent-run engine replaces this provisional
+  // summary with execution-final receipts after each child reaches a terminal
+  // step.
+  const successfulTaskIds: string[] = [];
+  const failedTaskIds = taskOutcomes
+    .filter((outcome) => outcome.status !== 'dependency_blocked')
+    .map((outcome) => outcome.taskId);
+  const dependencyBlockedTaskIds = taskOutcomes
+    .filter((outcome) => outcome.status === 'dependency_blocked')
+    .map((outcome) => outcome.taskId);
+  return {
+    version: 1,
+    status: 'blocked',
+    trustState: 'blocked',
+    taskCount: mission.tasks.length,
+    successfulTaskIds,
+    failedTaskIds,
+    dependencyBlockedTaskIds,
   };
 }
 
@@ -6145,8 +7384,10 @@ function candidateCanResolveUnresolvedPlannerSlot(
 ): boolean {
   if (!stableCandidateId(candidate).trim()
     || candidate.eligible === false
-    || candidate.compatibility === 'incompatible'
-    || !evidenceCandidateRoles(candidate).includes(slot.role)) return false;
+    || candidate.compatibility === 'incompatible') return false;
+  if (slot.role === 'member'
+    && slot.terms.some((term) => physicalSafeValueBindings(candidate, term).length > 0)) return true;
+  if (!evidenceCandidateRoles(candidate).includes(slot.role)) return false;
   if (slot.role !== 'categorical_dimension') return true;
   // A selected entity display key is commonly represented as a semantic
   // dimension too (`customer_name`). Keep it out of an unrelated ordinary
@@ -6253,6 +7494,11 @@ function candidateServesPlannerAdmissionSlot(
   candidate: AgentEvidenceCandidate,
   slot: PlannerAdmissionSlotV1,
 ): boolean {
+  if (!stableCandidateId(candidate).trim()
+    || candidate.eligible === false
+    || candidate.compatibility === 'incompatible') return false;
+  if (slot.role === 'member'
+    && slot.terms.some((term) => physicalSafeValueBindings(candidate, term).length > 0)) return true;
   if (!evidenceCandidateRoles(candidate).includes(slot.role)) return false;
   if (slot.role === 'relationship' || slot.role === 'time_dimension') return true;
   return slot.terms.some((term) => candidateMatchesPlannerRequirementTerm(candidate, term));
@@ -6436,6 +7682,8 @@ function candidateSupportsRequiredRole(candidate: AgentEvidenceCandidate, requir
     || (roles.includes('entity_key') && matches(requirements.entityTerms))
     || (roles.includes('entity_label') && matches([...requirements.entityTerms, ...requirements.entityDisplayTerms]))
     || (roles.includes('categorical_dimension') && matches(categoricalTermsForRuntime(requirements)))
+    || (roles.includes('categorical_dimension')
+      && requirements.memberTerms.some((term) => physicalSafeValueBindings(candidate, term).length > 0))
     || (roles.includes('time_dimension') && Boolean(requirements.time))
     || (roles.includes('member') && matches(requirements.memberTerms))
     || (roles.includes('relationship') && (requirements.dimensions.length > 1 || requirements.entityTerms.length > 0));
@@ -7104,22 +8352,41 @@ function buildProgram(
     plannerProposal?: AnalyticalPlannerProposalV1;
     /** Already role/operation-verified planner interpretation. */
     verifiedPlannerTasks?: AnalyticalProgramV2['planner']['tasks'];
+    /**
+     * Host-derived same-snapshot relationship closure. This is deliberately
+     * separate from planner tasks: relationship proof is compiler evidence,
+     * not a model-selected business meaning.
+     */
+    relationshipClosure?: readonly AgentEvidenceCandidate[];
+    /** Existing compact card, when admission already built one. */
+    relationshipPathCard?: AgentEvidenceCandidate;
+    /** Host-validated successful-result continuity, never provider prose. */
+    trustedTaskAnchor?: TrustedAnalyticalTaskAnchorV1;
     resolution?: MeaningResolution;
     targetedContext?: TargetedContextResultV1;
   } = {},
-): AnalyticalProgramV2 {
-  // Build task receipts before candidate selection. A verifier-approved task
-  // is the authoritative typed handoff, while a MeaningResolution is a
-  // compatibility carrier that may have a narrower selectedConceptIds list.
-  // Unioning the already-verified task bindings prevents a selected inferred
-  // output or complete relationship path from vanishing before cascade.
-  const fallbackSelectedCandidateIds = options.resolution?.selectedConceptIds?.length
-    ? options.resolution.selectedConceptIds
-    : stableCandidateIds(admitted);
+): AnalyticalProgramV3 {
+  // Build task receipts before candidate selection. Once the provider's
+  // candidate/role/operation proposal has passed deterministic verification,
+  // that receipt is the authoritative meaning handoff. A MeaningResolution is
+  // only a compatibility adapter for existing compilers and is specifically
+  // not allowed to add, remove, or replace the frozen V3 tuple.
+  const hasVerifiedPlannerTasks = Boolean(options.verifiedPlannerTasks?.length);
+  const fallbackSelectedCandidateIds = hasVerifiedPlannerTasks
+    ? []
+    : options.resolution?.selectedConceptIds?.length
+      ? options.resolution.selectedConceptIds
+      : stableCandidateIds(admitted);
   let plannerTasks = options.verifiedPlannerTasks
     ?? normalizePlannerTasks(options.plannerProposal, admitted.filter((candidate) =>
       fallbackSelectedCandidateIds.includes(candidate.id) || fallbackSelectedCandidateIds.includes(stableCandidateId(candidate))), mission.tasks);
   plannerTasks = materializeVerifiedPlannerTaskHandoff({ tasks: plannerTasks, admitted });
+  // A V3 business program cannot retain a legacy relationship selection in
+  // either a role binding or `selectedConceptIds`. The host-owned receipt
+  // below is the sole path authority; leaving the old ID in this list would
+  // let the compatibility MeaningResolution turn a join into business
+  // meaning again.
+  plannerTasks = plannerBusinessTaskHandoff({ tasks: plannerTasks, admitted });
   const selectedCandidateIds = uniqueStableIds([
     ...fallbackSelectedCandidateIds,
     ...plannerTaskSelectionIds(plannerTasks),
@@ -7138,37 +8405,37 @@ function buildProgram(
   const executionCandidateIds = stableCandidateIds(snapshotCandidates).slice(0, 32);
   const roles = new Set<EvidenceCandidateRoleV1>(requiredRoles(frame.requirements));
   const selectedCandidates = admitted.filter((candidate) => candidateIds.includes(candidate.id) || candidateIds.includes(stableCandidateId(candidate)));
-  const boundRelationshipIds = uniqueStableIds(plannerTasks
-    .flatMap((task) => task.roleBindings.relationship ?? []));
-  const selectedRelationshipCandidates = uniqueCandidates([
-    ...admitted,
-    ...snapshotCandidates,
-  ].filter((candidate) => {
-    if (!evidenceCandidateRoles(candidate).includes('relationship')) return false;
-    const selectedByConcept = candidateIds.includes(candidate.id)
-      || candidateIds.includes(stableCandidateId(candidate));
-    const selectedByRelationshipBinding = boundRelationshipIds.some((id) =>
-      candidateMatchesStableIdentity(candidate, id)
-      || relationshipCandidateSupportsPathId(candidate, id));
-    return selectedByConcept || selectedByRelationshipBinding;
-  }));
-  // A compact relationship-path card is the authoritative planner unit for a
-  // complete bounded closure. Its canonical proof IDs must survive into the
-  // frozen program even when a raw relationship card retained in the broader
-  // workspace uses only a legacy alias. This is receipt completeness, not a
-  // new join authority: the path card exists only after canonical proof
-  // validation and the compiler revalidates its hydrated raw edges.
-  const relationshipRequirements = uniqueStableIds([
-    ...selectedRelationshipCandidates.flatMap((candidate) => relationshipCandidatePathIds(candidate)),
-  ]).sort();
+  // The old runtime made the provider choose a relationship path card, then
+  // replayed that choice through MeaningResolution. This coupled a business
+  // planning answer to join serialization and produced false pre-freeze gaps
+  // even when retrieval had already proven a complete safe closure. V3 mints
+  // a canonical receipt directly from the frozen host closure instead.
+  const relationshipPaths = canonicalRelationshipPathReceipts({
+    closure: options.relationshipClosure ?? [],
+    ...(options.relationshipPathCard ? { pathCard: options.relationshipPathCard } : {}),
+  });
+  const relationshipRequirements = uniqueStableIds(
+    relationshipPaths.flatMap((path) => path.relationshipEvidence),
+  ).sort();
+  const relationshipPathCandidateIds = relationshipPaths.map((path) => path.candidateId);
+  const frozenCandidateIds = uniqueStableIds([
+    ...candidateIds,
+    ...relationshipPathCandidateIds,
+  ]).slice(0, MAX_REVISION_SELECTION_CANDIDATES + 3);
   const plannerOperations = new Set(inputPlannerOperations(options.plannerProposal));
   for (const candidate of selectedCandidates) {
     for (const role of evidenceCandidateRoles(candidate)) roles.add(role);
   }
+  const programFilters = requirementSeedWithVerifiedMemberBindings({
+    seed: requirementSeed,
+    requirements: frame.requirements,
+    tasks: plannerTasks,
+    candidates: selectedCandidates,
+  }).queryIntent.filters;
   const fingerprintInput = {
     frame: frame.questionFingerprint,
     taskIds: mission.tasks.map((task) => task.id),
-    candidateIds,
+    candidateIds: frozenCandidateIds,
     executionCandidateIds,
     requiredRoles: [...roles].sort(),
     measures: frame.requirements.measures,
@@ -7176,7 +8443,7 @@ function buildProgram(
     entityDisplayTerms: frame.requirements.entityDisplayTerms,
     timeGrain: frame.requirements.time?.grain,
     limit: frame.requirements.ranking?.limit,
-    filters: requirementSeed.queryIntent.filters.map((filter) => ({
+    filters: programFilters.map((filter) => ({
       field: filter.field,
       operator: 'equals',
       value: filter.value,
@@ -7203,16 +8470,16 @@ function buildProgram(
     },
   };
   return {
-    version: 2,
+    version: 3,
     id: `program:${fingerprint(JSON.stringify(fingerprintInput)).slice(0, 24)}`,
     frameFingerprint: frame.questionFingerprint,
     taskIds: fingerprintInput.taskIds,
-    candidateIds,
+    candidateIds: frozenCandidateIds,
     executionCandidateIds,
     plannerCandidateIds: stableCandidateIds(admitted).slice(0, MAX_INITIAL_PLANNER_CANDIDATES),
     workspaceCandidateIds: executionCandidateIds,
     requiredRoles: fingerprintInput.requiredRoles as EvidenceCandidateRoleV1[],
-    filters: requirementSeed.queryIntent.filters.map((filter) => ({
+    filters: programFilters.map((filter) => ({
       fieldTerms: [filter.field],
       // `value` is the immutable literal/member binding. `memberIds` is kept
       // for qualified semantic-member IDs when one was admitted, but a raw
@@ -7257,13 +8524,140 @@ function buildProgram(
         'result_contract',
       ],
     },
-    planner: {
-      version: 1,
+    planner: plannerInterpretationV2({
       tasks: plannerTasks,
-      ...(options.plannerProposal?.confidence ? { confidence: options.plannerProposal.confidence } : {}),
-      missingInformation: [...new Set(options.plannerProposal?.missingInformation ?? [])].slice(0, 8),
-    },
+      planningMode: options.planningMode ?? frame.planningMode,
+      proposal: options.plannerProposal,
+      verified: hasVerifiedPlannerTasks,
+    }),
+    relationshipPaths,
+    inputAtoms: inputAtomsForProgram(programFilters, frame.requirements),
+    trustedTaskAnchors: trustedTaskAnchorsForProgram(frame.requirements, options.trustedTaskAnchor),
   };
+}
+
+/**
+ * Turn the verified V1 provider/legacy task shape into the frozen Planner V2
+ * receipt. `relationship` is intentionally stripped: no planner output is a
+ * join instruction, and compiler-side V3 relationship receipts retain the
+ * only allowed path proof.
+ */
+function plannerInterpretationV2(input: {
+  tasks: AnalyticalProgramV2['planner']['tasks'];
+  planningMode: AskPlanningModeV1;
+  proposal?: AnalyticalPlannerProposalV1;
+  verified: boolean;
+}): AnalyticalPlannerInterpretationV2 {
+  const source: AnalyticalPlannerInterpretationV2['source'] = input.verified
+    ? input.planningMode === 'deterministic_binding' || input.planningMode === 'exact_fast_path'
+      ? 'deterministic'
+      : 'provider'
+    : 'legacy_adapter';
+  return {
+    version: 2,
+    source,
+    tasks: input.tasks.map((task) => {
+      const roleBindings = Object.fromEntries(Object.entries(task.roleBindings)
+        .filter(([role]) => role !== 'relationship')
+        .map(([role, ids]) => [role, uniqueStableIds(ids ?? [])])) as Partial<Record<AnalyticalPlannerBusinessRoleV2, string[]>>;
+      return {
+        taskId: task.taskId,
+        ...(task.coveredTaskIds ? { coveredTaskIds: uniqueStableIds(task.coveredTaskIds) } : {}),
+        selectedConceptIds: uniqueStableIds(task.selectedConceptIds),
+        roleBindings,
+        operations: [...task.operations],
+        ...(task.preferredCompiler ? { preferredCompiler: task.preferredCompiler } : {}),
+        assumptions: [...task.assumptions],
+      };
+    }),
+    ...(input.proposal?.confidence ? { confidence: input.proposal.confidence } : {}),
+    missingInformation: [...new Set(input.proposal?.missingInformation ?? [])].slice(0, 8),
+  };
+}
+
+/**
+ * Build a complete, canonical relationship receipt from host-owned evidence.
+ * A raw edge card is acceptable only when its proof mapping is complete; when
+ * a compact path card exists it becomes the durable receipt identity.
+ */
+function canonicalRelationshipPathReceipts(input: {
+  closure: readonly AgentEvidenceCandidate[];
+  pathCard?: AgentEvidenceCandidate;
+}): CanonicalRelationshipPathReceiptV1[] {
+  const candidate = input.pathCard ?? plannerRelationshipPathCard([...input.closure]);
+  const selection = candidate ? relationshipCandidateProofSelection(candidate) : undefined;
+  if (!candidate || !selection) return [];
+  return [{
+    version: 1,
+    candidateId: stableCandidateId(candidate),
+    proofClass: selection.proofClass,
+    relationshipEvidence: uniqueStableIds(selection.relationshipEvidence).sort(),
+  }];
+}
+
+function inputAtomsForProgram(
+  filters: Array<{ field: string; value: string }>,
+  requirements: AnalyticalRequirementSetV1,
+): AnalyticalInputAtomV1[] {
+  const atoms: AnalyticalInputAtomV1[] = [];
+  const append = (role: AnalyticalInputAtomV1['role'], terms: readonly string[], source: AnalyticalInputAtomV1['source'] = 'current_question') => {
+    for (const term of terms) {
+      const value = term.trim();
+      if (value) atoms.push({ version: 1, source, role, term: value, required: true });
+    }
+  };
+  append('metric', requirements.measures);
+  append('metric', requirements.ranking?.metricTerms ?? []);
+  append('entity_key', requirements.entityTerms);
+  append('entity_label', requirements.entityDisplayTerms);
+  append('categorical_dimension', requirements.dimensions);
+  append('member', requirements.memberTerms.filter((value) => !requirements.priorResultMemberBinding?.values.includes(value)));
+  append('time_dimension', requirements.time?.fiscalPeriod ? [requirements.time.fiscalPeriod] : []);
+  append('filter', filters.flatMap((filter) => [filter.field, filter.value]));
+  const seen = new Set<string>();
+  return atoms.filter((atom) => {
+    const key = `${atom.source}|${atom.role}|${normalizePlannerAdmissionText(atom.term)}`;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function trustedTaskAnchorsForProgram(
+  requirements: AnalyticalRequirementSetV1,
+  explicit?: TrustedAnalyticalTaskAnchorV1,
+): TrustedAnalyticalTaskAnchorV1[] {
+  const anchors: TrustedAnalyticalTaskAnchorV1[] = [];
+  if (explicit && (explicit.values.length > 0 || explicit.measures?.length || explicit.dimensions?.length)) {
+    anchors.push({
+      ...explicit,
+      values: uniqueStableIds(explicit.values),
+      ...(explicit.measures ? { measures: uniqueStableIds(explicit.measures) } : {}),
+      ...(explicit.dimensions ? { dimensions: uniqueStableIds(explicit.dimensions) } : {}),
+    });
+  }
+  const binding = requirements.priorResultMemberBinding;
+  if (binding && binding.displayDimension.trim() && binding.values.length > 0) {
+    anchors.push({
+      version: 1,
+      kind: 'member_binding',
+      displayDimension: binding.displayDimension,
+      values: uniqueStableIds(binding.values),
+      ...(binding.sourceTurnId ? { sourceTurnId: binding.sourceTurnId } : {}),
+      ...(binding.resultFingerprint ? { resultFingerprint: binding.resultFingerprint } : {}),
+    });
+  }
+  const seen = new Set<string>();
+  return anchors.filter((anchor) => {
+    const key = JSON.stringify({
+      kind: anchor.kind ?? 'member_binding', displayDimension: anchor.displayDimension,
+      values: anchor.values, measures: anchor.measures, dimensions: anchor.dimensions,
+      sourceTurnId: anchor.sourceTurnId, resultFingerprint: anchor.resultFingerprint,
+    });
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function inputPlannerOperations(proposal: AnalyticalPlannerProposalV1 | undefined): AnalyticalPlannerOperationV1[] {
@@ -7318,7 +8712,7 @@ function canonicalPlannerCandidateId(
   identity: string,
   candidates: readonly AgentEvidenceCandidate[],
 ): string {
-  const matches = candidates.filter((candidate) => candidateMatchesStableIdentity(candidate, identity));
+  const matches = candidatesForPlannerIdentity(identity, candidates);
   // A planner task already passed identity verification. Retain an unknown
   // value rather than guessing between aliases; the normal validator will
   // reject it if it is not a supplied stable identity.
@@ -7338,7 +8732,7 @@ function resolvedPlannerCandidateAuthorityId(
   identity: string,
   candidates: readonly AgentEvidenceCandidate[],
 ): string {
-  const matches = candidates.filter((candidate) => candidateMatchesStableIdentity(candidate, identity));
+  const matches = candidatesForPlannerIdentity(identity, candidates);
   return matches.length === 1 ? matches[0]!.id : identity;
 }
 
@@ -7398,6 +8792,169 @@ function materializeVerifiedPlannerTaskHandoff(input: {
 }
 
 /**
+ * Project a V1 verified task into Planner V2 business authority. Relationship
+ * cards/edge aliases are deliberately stripped from both binding lanes before
+ * compiler entry; V3 carries those facts only as host-minted receipts.
+ */
+function plannerBusinessTaskHandoff(input: {
+  tasks: AnalyticalProgramV2['planner']['tasks'];
+  admitted: readonly AgentEvidenceCandidate[];
+}): AnalyticalProgramV2['planner']['tasks'] {
+  const relationshipIdentities = new Set<string>();
+  for (const candidate of input.admitted) {
+    if (!evidenceCandidateRoles(candidate).includes('relationship')) continue;
+    relationshipIdentities.add(normalizePlannerAdmissionText(candidate.id));
+    relationshipIdentities.add(normalizePlannerAdmissionText(stableCandidateId(candidate)));
+    for (const edge of relationshipCandidatePathIds(candidate)) {
+      relationshipIdentities.add(normalizePlannerAdmissionText(edge));
+    }
+  }
+  const isRelationshipIdentity = (id: string): boolean => relationshipIdentities.has(normalizePlannerAdmissionText(id));
+  return input.tasks.map((task) => {
+    const roleBindings = Object.fromEntries(
+      Object.entries(task.roleBindings)
+        .filter(([role]) => role !== 'relationship')
+        .map(([role, ids]) => {
+          const retained = uniqueStableIds((ids ?? []).filter((id) => !isRelationshipIdentity(id)));
+          return [role, retained];
+        }),
+    ) as Partial<Record<EvidenceCandidateRoleV1, string[]>>;
+    return {
+      ...task,
+      selectedConceptIds: uniqueStableIds([
+        ...task.selectedConceptIds.filter((id) => !isRelationshipIdentity(id)),
+        ...Object.values(roleBindings).flatMap((ids) => ids ?? []),
+      ]),
+      roleBindings,
+    };
+  });
+}
+
+/**
+ * A selected semantic member can turn a lossless current-question literal
+ * into one qualified field/value predicate only when its identity encodes a
+ * concrete semantic dimension. There is intentionally no lexical fallback:
+ * unknown member-to-field mappings remain a pre-freeze coverage gap instead
+ * of allowing a broad certified/semantic answer.
+ */
+function semanticMemberDimensionField(candidate: AgentEvidenceCandidate): string | undefined {
+  // `semantic_member` is the normalized evidence kind. Older persisted
+  // candidates did not carry a separate `semanticObjectType: member` tag, so
+  // the qualified identity is the compatible proof of a concrete member.
+  if (candidate.kind !== 'semantic_member') return undefined;
+  const identity = stableCandidateId(candidate);
+  const match = /^semantic:member:([a-z0-9_]+(?:\.[a-z0-9_]+)+)\.([a-z0-9_-]+)$/i.exec(identity);
+  if (!match?.[1]) return undefined;
+  return match[1];
+}
+
+interface VerifiedLiteralFilterBindingV1 {
+  field: string;
+  value: string;
+}
+
+/**
+ * A qualified physical categorical field can bind a current literal only from
+ * same-snapshot safe-value evidence attached by the metadata adapter. This is
+ * deliberately stricter than candidate-name similarity: the planner must
+ * have selected the field, the observed value must match exactly, and all
+ * surviving bindings must point to one field/value pair. That permits a safe
+ * review-required exploratory path without turning an unknown or ambiguous
+ * value into a broad query.
+ */
+function physicalSafeValueBindings(
+  candidate: AgentEvidenceCandidate,
+  term: string,
+): VerifiedLiteralFilterBindingV1[] {
+  if (candidate.kind !== 'sql_column'
+    || !candidate.qualifiedId?.trim()
+    || !evidenceCandidateRoles(candidate).includes('categorical_dimension')) return [];
+  return qualifiedPhysicalSafeValueBindings(candidate, term);
+}
+
+/**
+ * The extension-only raw physical proof. It cannot grant normal admission on
+ * its own; callers must first establish a unique entity/path closure and then
+ * mark the resulting local program card as a categorical predicate.
+ */
+function qualifiedPhysicalSafeValueBindings(
+  candidate: AgentEvidenceCandidate,
+  term: string,
+): VerifiedLiteralFilterBindingV1[] {
+  if (candidate.kind !== 'sql_column' || !candidate.qualifiedId?.trim()) return [];
+  const roles = evidenceCandidateRoles(candidate);
+  if (roles.includes('metric') || roles.includes('time_dimension')) return [];
+  const normalized = normalizePlannerAdmissionText(term);
+  const bindings = new Map<string, VerifiedLiteralFilterBindingV1>();
+  for (const evidence of candidate.safeValueEvidence ?? []) {
+    if (normalizePlannerAdmissionText(evidence.normalizedValue) !== normalized
+      && normalizePlannerAdmissionText(evidence.value) !== normalized) continue;
+    const binding = { field: stableCandidateId(candidate), value: evidence.value.trim() || term };
+    // Multiple observations of the same value on the same selected qualified
+    // field are equivalent; a second selected field remains ambiguous below.
+    bindings.set(`${binding.field}|${normalizePlannerAdmissionText(binding.value)}`, binding);
+  }
+  return [...bindings.values()];
+}
+
+/**
+ * Add only planner-selected, qualified literal bindings to the seed. Existing
+ * current-question filters win verbatim. A semantic member binds through its
+ * encoded dimension; a physical categorical field binds only through its
+ * attached same-snapshot safe-value evidence. This makes a missing parser
+ * filter (for example Philadelphia) visible to the compiler while preserving
+ * the invariant that a model never invents a physical field from prose alone.
+ */
+function requirementSeedWithVerifiedMemberBindings(input: {
+  seed: ReturnType<typeof buildAnalyticalRequirementSeedV1>;
+  requirements: AnalyticalRequirementSetV1;
+  tasks: AnalyticalProgramV2['planner']['tasks'];
+  candidates: readonly AgentEvidenceCandidate[];
+}): ReturnType<typeof buildAnalyticalRequirementSeedV1> {
+  const filters = input.seed.queryIntent.filters.map((filter) => ({ ...filter }));
+  const selectedMemberIds = new Set(uniqueStableIds(input.tasks.flatMap((task) => task.roleBindings.member ?? [])));
+  const selectedCategoricalIds = new Set(uniqueStableIds(input.tasks.flatMap((task) => task.roleBindings.categorical_dimension ?? [])));
+  const selectedLiteralCandidates = input.candidates.filter((candidate) =>
+    selectedMemberIds.has(candidate.id)
+    || selectedMemberIds.has(stableCandidateId(candidate))
+    || selectedCategoricalIds.has(candidate.id)
+    || selectedCategoricalIds.has(stableCandidateId(candidate)));
+  const normalize = (value: string) => normalizePlannerAdmissionText(value);
+  for (const term of input.requirements.memberTerms) {
+    // Prior-result predicates are already host-bound and copied into the seed
+    // before the planner. They do not need a semantic member card.
+    if (input.requirements.priorResultMemberBinding?.values.some((value) => normalize(value) === normalize(term))) continue;
+    if (filters.some((filter) => normalize(filter.value) === normalize(term))) continue;
+    const semanticBindings = selectedLiteralCandidates
+      .filter((candidate) => candidateMatchesFilterValue(candidate, term))
+      .flatMap((candidate): VerifiedLiteralFilterBindingV1[] => {
+        const field = semanticMemberDimensionField(candidate);
+        return field ? [{ field, value: candidate.name.trim() || term }] : [];
+      });
+    const physicalBindings = selectedLiteralCandidates
+      .flatMap((candidate) => physicalSafeValueBindings(candidate, term));
+    const bindings = [...semanticBindings, ...physicalBindings];
+    const uniqueBindings = new Map<string, VerifiedLiteralFilterBindingV1>();
+    for (const binding of bindings) {
+      uniqueBindings.set(`${binding.field}|${normalize(binding.value)}`, binding);
+    }
+    // Exactly one verified field/value pair is required. A value observed on
+    // zero or multiple selected columns stays as a current-question atom and
+    // therefore becomes a typed pre-freeze gap rather than an unsafe filter.
+    if (uniqueBindings.size !== 1) continue;
+    const binding = [...uniqueBindings.values()][0]!;
+    filters.push(binding);
+  }
+  return {
+    ...input.seed,
+    queryIntent: {
+      ...input.seed.queryIntent,
+      filters,
+    },
+  };
+}
+
+/**
  * The compatibility meaning carrier is allowed to be narrower than the
  * planner task; the frozen compiler program is not. This identity-only union
  * is applied after task verification and again after legacy frame binding.
@@ -7415,6 +8972,104 @@ function materializeVerifiedPlannerResolution(input: {
     && selectedConceptIds.every((id, index) => id === input.resolution.selectedConceptIds[index])
     ? input.resolution
     : { ...input.resolution, selectedConceptIds };
+}
+
+/**
+ * Build the legacy compiler carrier directly from the frozen V3 program.
+ * The carrier exists only because the existing safe compilers speak
+ * MeaningResolution; candidate selection, route nomination, filters, and
+ * question type are overwritten from Program V3. The legacy value can retain
+ * only additive compatibility frame metadata, never business selection
+ * authority.
+ */
+function compilerCompatibilityResolutionForProgram(input: {
+  program: AnalyticalProgramV3;
+  fallback: MeaningResolution;
+  requirementSeed: ReturnType<typeof buildAnalyticalRequirementSeedV1>;
+  candidates: readonly AgentEvidenceCandidate[];
+}): MeaningResolution {
+  // Program V3 retains qualified planner identities so the frozen compiler
+  // can reconstruct the exact capability. The legacy compatibility carrier
+  // must instead publish the one admitted source ID for each identity: that
+  // keeps the user-visible meaning receipt stable and prevents an adapter
+  // from treating a qualified MetricFlow alias as a newly invented concept.
+  const selectedConceptIds = uniqueStableIds(input.program.planner.tasks
+    .flatMap((task) => [
+      ...task.selectedConceptIds,
+      ...Object.values(task.roleBindings).flatMap((ids) => ids ?? []),
+    ])
+    .map((id) => resolvedPlannerCandidateAuthorityId(id, input.candidates)));
+  const selected = input.candidates.filter((candidate) =>
+    selectedConceptIds.includes(candidate.id) || selectedConceptIds.includes(stableCandidateId(candidate)));
+  // A V3 deterministic literal closure has already selected one exact
+  // physical execution carrier.  Do not re-rank that frozen identity below a
+  // contextual certified block: doing so changes the route back to certified
+  // and leaves the literal column outside the compiler binding set.  The
+  // fallback identity is accepted only when it resolves to exactly one
+  // selected snapshot card by local/qualified identity -- aliases and lexical
+  // names never become compiler authority here.
+  const selectedFallbackExecution = input.fallback.recommendedExecutionId
+    ? (() => {
+        const local = selected.filter((candidate) => candidate.id === input.fallback.recommendedExecutionId);
+        if (local.length === 1) return local[0];
+        if (local.length > 1) return undefined;
+        const qualified = selected.filter((candidate) => candidate.qualifiedId === input.fallback.recommendedExecutionId);
+        return qualified.length === 1 ? qualified[0] : undefined;
+      })()
+    : undefined;
+  const exploratoryPhysicalClosure = input.program.relationshipPaths
+    .some((path) => path.proofClass === 'exploratory');
+  const primary = selectedFallbackExecution
+    ?? selected.find((candidate) => candidate.kind === 'certified_block')
+    ?? selected.find((candidate) => candidate.kind === 'semantic_metric')
+    ?? selected.find((candidate) => candidate.kind === 'dql_modeling')
+    ?? selected[0];
+  const operations = new Set(input.program.planner.tasks.flatMap((task) => task.operations));
+  const questionType: MeaningResolution['questionType'] = operations.has('rank') ? 'ranking'
+    : operations.has('trend') ? 'trend'
+      : operations.has('compare') ? 'comparison'
+        : questionTypeFromText(input.requirementSeed.sourceQuestion);
+  const recommendedRoute: MeaningResolution['recommendedRoute'] = exploratoryPhysicalClosure
+    && primary?.kind === 'sql_column'
+    ? 'exploratory'
+    : primary?.kind === 'certified_block' ? 'certified'
+    : primary?.kind === 'semantic_metric' ? 'semantic'
+      : primary?.kind === 'dql_modeling' ? 'governed_sql'
+        : primary ? 'exploratory' : 'clarify';
+  return {
+    ...input.fallback,
+    interpretedQuestion: input.requirementSeed.sourceQuestion,
+    questionType,
+    selectedConceptIds,
+    ...(primary ? { recommendedExecutionId: stableCandidateId(primary) } : { recommendedExecutionId: undefined }),
+    queryIntent: {
+      ...input.requirementSeed.queryIntent,
+      filters: input.requirementSeed.queryIntent.filters.map((filter) => ({ ...filter })),
+    },
+    rejectedCandidates: [],
+    recommendedRoute,
+    hostRequirementSeed: input.requirementSeed,
+  };
+}
+
+function relationshipClosureForProgram(
+  program: AnalyticalProgramV3,
+  candidates: readonly AgentEvidenceCandidate[],
+): AgentEvidenceCandidate[] {
+  const expected = new Set(program.relationshipRequirements.map(normalizePlannerAdmissionText));
+  if (expected.size === 0) return [];
+  return candidates.filter((candidate) => {
+    const proof = relationshipCandidateProofSelection(candidate);
+    return proof?.relationshipEvidence.some((id) => expected.has(normalizePlannerAdmissionText(id))) === true;
+  });
+}
+
+function relationshipPathCardForProgram(
+  program: AnalyticalProgramV3,
+  candidates: readonly AgentEvidenceCandidate[],
+): AgentEvidenceCandidate | undefined {
+  const ids = new Set(program.relationshipPaths.map((path) => normalizePlannerAdmissionText(path.candidateId)));
+  return candidates.find((candidate) => ids.has(normalizePlannerAdmissionText(stableCandidateId(candidate))));
 }
 
 function requiredRoles(requirements: AnalyticalRequirementSetV1): EvidenceCandidateRoleV1[] {
@@ -7435,12 +9090,28 @@ function requiredRoles(requirements: AnalyticalRequirementSetV1): EvidenceCandid
 function hasSelectedInferredRoleSubstitution(
   resolution: MeaningResolution,
   candidates: AgentEvidenceCandidate[],
+  options: { structuredOrdinaryRoleSelection?: boolean } = {},
 ): boolean {
   const selected = new Set(resolution.selectedConceptIds);
+  // `candidate_for_unresolved_role` only records that the compact package
+  // preserved a candidate while the question was still unresolved.  It is
+  // not an inference once the planner binds the qualified semantic identity
+  // and the compiler proves the resulting MetricFlow program.  Treating that
+  // admission receipt as review-required downgraded fully proven semantic
+  // answers such as revenue by the metric's declared product grouping.
+  //
+  // Keep the actual inferred-mapping boundaries visible: a host-selected sole
+  // geographic MetricFlow substitute, one safe ordinary-field substitute
+  // marked explicitly after ambiguity resolution, or a server-issued
+  // structured choice for an unresolved ordinary role.  The last case is
+  // deliberately limited to the verified structured-continuation boundary;
+  // it does not turn an arbitrary client ID into review-required authority.
   return candidates.some((candidate) =>
     (selected.has(candidate.id) || selected.has(stableCandidateId(candidate)))
     && (candidate.sameSnapshotRoleExtension?.basis === 'sole_metricflow_grouping_dimension'
-      || candidateUnresolvedRoleAdmissions(candidate).length > 0));
+      || candidateUniqueInferredRoleSubstitutions(candidate).length > 0
+      || (options.structuredOrdinaryRoleSelection
+        && candidateUnresolvedRoleAdmissions(candidate).length > 0)));
 }
 
 function resolvedPlanFromDecision(
@@ -7478,11 +9149,11 @@ function buildState(input: {
   frame: BusinessQuestionFrameV4;
   mission: AnalyticalMissionV1;
   workspace: EvidenceWorkspaceV2;
-  program: AnalyticalProgramV2;
+  program: AnalyticalProgramV3;
   resolvedPlan?: ResolvedAnalyticalPlanV2;
-}): AskAnalystStateV2 {
+}): AskAnalystStateV3 {
   return {
-    version: 2,
+    version: 3,
     mode: input.mode,
     phase: input.phase,
     frame: input.frame,
@@ -7519,8 +9190,8 @@ function buildState(input: {
 function transitionState(
   state: AskAnalystState,
   next: AskAnalystState['phase'],
-  patch: Partial<Omit<AskAnalystStateV2, 'version' | 'mode' | 'phase'>> = {},
-): AskAnalystStateV2 {
+  patch: Partial<Omit<AskAnalystStateV3, 'version' | 'mode' | 'phase'>> = {},
+): AskAnalystStateV3 {
   const allowed: Record<AskAnalystState['phase'], AskAnalystState['phase'][]> = {
     framed: ['framed', 'evidence_ready', 'program_ready', 'clarify', 'blocked'],
     evidence_ready: ['evidence_ready', 'program_ready', 'clarify', 'blocked'],
@@ -7533,7 +9204,7 @@ function transitionState(
   if (!allowed[state.phase].includes(next)) {
     throw new Error(`Invalid AskAnalystRuntimeV1 transition: ${state.phase} -> ${next}`);
   }
-  return { ...state, ...patch, version: 2, phase: next } as AskAnalystStateV2;
+  return { ...state, ...patch, version: 3, phase: next } as AskAnalystStateV3;
 }
 
 function stableCandidateIds(candidates: AgentEvidenceCandidate[]): string[] {

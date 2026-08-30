@@ -53,6 +53,8 @@ import {
   type AgentRunStepStatus,
   type AgentRunStopReason,
   type AgentRunTrustState,
+  type AnalyticalTaskOutcomeSummaryV1,
+  type AnalyticalTaskOutcomeV1,
   type AskDecisionSummaryV1,
   type AskDecisionSummaryV2,
   type AskTraceDataV1,
@@ -1831,6 +1833,88 @@ function ExpandableList<T>({ items, t, renderItem, cap = 4 }: {
   );
 }
 
+export function analyticalTaskOutcomePresentation(outcome: AnalyticalTaskOutcomeV1): {
+  glyph: '✓' | '↳' | '!';
+  label: string;
+  detail: string;
+  tone: 'success' | 'warning' | 'muted';
+} {
+  const summary = outcome.summary
+    ?? (typeof outcome.gap?.message === 'string' ? outcome.gap.message : undefined)
+    ?? 'Task outcome recorded.';
+  if (outcome.status === 'completed' || outcome.status === 'partial') {
+    return { glyph: '✓', label: outcome.status === 'partial' ? 'Partial result' : 'Completed', detail: summary, tone: 'success' };
+  }
+  if (outcome.status === 'dependency_blocked') {
+    const dependencies = outcome.dependencyTaskIds?.length
+      ? ` Waiting for ${outcome.dependencyTaskIds.join(', ')}.`
+      : '';
+    return { glyph: '↳', label: 'Dependency blocked', detail: `${summary}${dependencies}`, tone: 'muted' };
+  }
+  const failureCode = outcome.failure?.code ? ` (${outcome.failure.code})` : '';
+  return { glyph: '!', label: outcome.status === 'gap' ? 'Needs coverage' : 'Blocked', detail: `${summary}${failureCode}`, tone: 'warning' };
+}
+
+export function AnalyticalTaskOutcomeList({
+  outcomes,
+  summary,
+  t,
+}: {
+  // Persisted runs are local JSON. Keep the renderer defensive even if a
+  // caller bypasses the store's V3 receipt normalizer.
+  outcomes?: unknown;
+  summary?: unknown;
+  t: Theme;
+}): JSX.Element | null {
+  const safeOutcomes = Array.isArray(outcomes)
+    ? outcomes.filter(isAnalyticalTaskOutcomeForDisplay)
+    : [];
+  const safeSummary = isAnalyticalTaskOutcomeSummaryForDisplay(summary) ? summary : undefined;
+  // Keep the established single-task answer surface unchanged; this compact
+  // receipt is only additional context for compound Ask outcomes.
+  if (safeOutcomes.length < 2) return null;
+  const heading = safeSummary
+    ? safeSummary.status === 'completed'
+      ? `Analytical tasks · ${safeSummary.taskCount} completed`
+      : safeSummary.status === 'partial'
+        ? `Analytical tasks · ${safeSummary.successfulTaskIds.length} of ${safeSummary.taskCount} completed`
+        : 'Analytical tasks · no completed task'
+    : 'Analytical tasks';
+  return (
+    <div style={{ display: 'grid', gap: 5, padding: '8px 10px', border: `1px solid ${t.cellBorder}`, borderRadius: 8, background: t.cellBg }}>
+      <div style={{ fontSize: 10.5, fontWeight: 800, color: t.textMuted, textTransform: 'uppercase', letterSpacing: 0.4 }}>{heading}</div>
+      {safeOutcomes.map((outcome) => {
+        const presentation = analyticalTaskOutcomePresentation(outcome);
+        const color = presentation.tone === 'success' ? t.success : presentation.tone === 'muted' ? t.textMuted : t.warning;
+        return (
+          <div key={outcome.taskId} style={{ display: 'flex', gap: 7, alignItems: 'flex-start', fontSize: 11.5, color: t.textSecondary }}>
+            <span style={{ color, fontWeight: 800 }}>{presentation.glyph}</span>
+            <span><strong>{outcome.taskId}</strong> · <strong>{presentation.label}</strong> · {presentation.detail}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function isAnalyticalTaskOutcomeForDisplay(value: unknown): value is AnalyticalTaskOutcomeV1 {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.taskId === 'string'
+    && (record.status === 'completed' || record.status === 'partial' || record.status === 'gap'
+      || record.status === 'blocked' || record.status === 'dependency_blocked');
+}
+
+function isAnalyticalTaskOutcomeSummaryForDisplay(value: unknown): value is AnalyticalTaskOutcomeSummaryV1 {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (record.status === 'completed' || record.status === 'partial' || record.status === 'blocked')
+    && typeof record.taskCount === 'number'
+    && Array.isArray(record.successfulTaskIds)
+    && Array.isArray(record.failedTaskIds)
+    && Array.isArray(record.dependencyBlockedTaskIds);
+}
+
 function RunCard({
   run,
   t,
@@ -1941,25 +2025,11 @@ function RunCard({
       ) : null}
       {acceptedAskAnswer(run) ? <div style={answerBoxStyle(t)}><StructuredAnswerText text={cleanAnswerText(acceptedAskAnswer(run)!)} t={t} /></div> : null}
 
-      {run.analyticalTaskOutcomes && run.analyticalTaskOutcomes.length > 1 ? (
-        <div style={{ display: 'grid', gap: 5, padding: '8px 10px', border: `1px solid ${t.cellBorder}`, borderRadius: 8, background: t.cellBg }}>
-          <div style={{ fontSize: 10.5, fontWeight: 800, color: t.textMuted, textTransform: 'uppercase', letterSpacing: 0.4 }}>Analytical tasks</div>
-          {run.analyticalTaskOutcomes.map((outcome) => {
-            const status = typeof outcome.status === 'string' ? outcome.status : 'gap';
-            const summary = typeof outcome.summary === 'string'
-              ? outcome.summary
-              : typeof (outcome.gap as Record<string, unknown> | undefined)?.message === 'string'
-                ? String((outcome.gap as Record<string, unknown>).message)
-                : 'Task outcome recorded.';
-            return (
-              <div key={String(outcome.taskId)} style={{ display: 'flex', gap: 7, alignItems: 'flex-start', fontSize: 11.5, color: t.textSecondary }}>
-                <span style={{ color: status === 'completed' ? t.success : t.warning, fontWeight: 800 }}>{status === 'completed' ? '✓' : '!'}</span>
-                <span><strong>{String(outcome.taskId)}</strong> · {summary}</span>
-              </div>
-            );
-          })}
-        </div>
-      ) : null}
+      <AnalyticalTaskOutcomeList
+        outcomes={run.analyticalTaskOutcomes}
+        summary={run.analyticalTaskOutcomeSummary}
+        t={t}
+      />
 
       <ClarificationChoiceList run={run} t={t} onSelect={onSelectClarification} />
 
@@ -6245,6 +6315,10 @@ const ASK_FAILURE_PRESENTATION: Record<string, { title: string; hint: string }> 
     title: 'The warehouse rejected the query',
     hint: 'The SQL reached your warehouse and it refused. The message below is the driver\u2019s own.',
   },
+  execution: {
+    title: 'The selected query did not complete',
+    hint: 'DQL froze the selected plan and began execution, but the current connection could not complete it. Review the connection or warehouse state, then retry.',
+  },
   dql_compilation: {
     title: 'DQL could not build a reusable block',
     hint: 'The query itself is fine \u2014 only saving this answer as a block is affected.',
@@ -6316,12 +6390,23 @@ function askFailureOrigin(run: AgentRun): string {
   if (run.status === 'cancelled' || run.stopReason === 'cancelled' || run.route === 'cancelled' || run.diagnosticReceipt?.failure?.code === 'RUN_CANCELLED') {
     return 'cancel';
   }
+  // V4 is the canonical receipt for terminal Ask incidents. It must win over
+  // a legacy compatibility refusal code carried in an answer artifact: after
+  // `sql.execute`, this is no longer a retrieval/grounding problem.
+  const terminalIncident = run.diagnosticReceiptV4?.terminalIncident;
+  if (terminalIncident?.code === 'ANALYTICAL_EXECUTION_FAILED' && terminalIncident.boundary === 'sql.execute') {
+    return 'execution';
+  }
+  if (terminalIncident?.code === 'RESULT_CONTRACT_MISMATCH' && terminalIncident.boundary === 'result.validate') {
+    return 'result_contract';
+  }
   for (const artifact of run.artifacts ?? []) {
     const rawPayload = payloadOf(artifact);
     const payload = rawPayload as {
       warehouseFailure?: { origin?: unknown };
       providerFailure?: { code?: unknown };
       refusalCode?: unknown;
+      executionError?: unknown;
       analyticalFailure?: { code?: unknown; phase?: unknown };
       aggregationSafetyProof?: { status?: unknown };
     } | undefined;
@@ -6337,6 +6422,17 @@ function askFailureOrigin(run: AgentRun): string {
     if (code === 'EXECUTION_CANCELLED') return 'cancel';
     if (['COMPILATION_FAILED', 'DIALECT_ERROR', 'SEMANTIC_ADAPTER_NOT_READY'].includes(code)) return 'compile';
     if (typeof origin === 'string' && origin in ASK_FAILURE_PRESENTATION) return origin;
+    // `executionError` is a legacy display carrier. A typed compiler or
+    // result-validation failure can retain the same string without crossing
+    // the SQL execution boundary, so only use it when the payload has no
+    // typed analytical failure. Typed execution remains an execution card.
+    const hasTypedAnalyticalFailure = payload?.analyticalFailure !== undefined;
+    const typedExecutionFailure = hasTypedAnalyticalFailure
+      && payload?.analyticalFailure?.phase === 'execution';
+    const legacyExecutionFailure = !hasTypedAnalyticalFailure
+      && (payload?.refusalCode === 'execution_error'
+        || (typeof payload?.executionError === 'string' && payload.executionError.trim().length > 0));
+    if (typedExecutionFailure || legacyExecutionFailure) return 'execution';
     if (payload?.providerFailure?.code === 'orchestration_budget_exhausted'
       || payload?.providerFailure?.code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED') return 'orchestration_budget';
     if (payload?.providerFailure || payload?.refusalCode === 'provider_error') return 'provider';

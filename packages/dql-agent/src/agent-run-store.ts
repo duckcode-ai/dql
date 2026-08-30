@@ -15,13 +15,20 @@ import { dirname, join } from 'node:path';
 import { normalizeProviderEgressReceiptV1 } from '@duckcodeailabs/dql-core';
 import type {
   AgentRun,
+  AgentRunArtifact,
   AgentRunDiagnosticReceiptV1,
   AgentRunProgressV1,
   AgentRunStore,
 } from './agent-run-engine.js';
 import type {
+  AnalyticalCoverageGapV1,
   AgentRunDiagnosticReceiptV5,
   AgentRunDiagnosticReceiptV6,
+  AnalyticalTaskFailureV1,
+  AnalyticalTaskOutcomeStatusV1,
+  AnalyticalTaskOutcomeSummaryV1,
+  AnalyticalTaskOutcomeTrustStateV1,
+  AnalyticalTaskOutcomeV1,
   AskAnalystState,
   EvidenceCandidateRoleV1,
   EvidenceRoleCoverageStateV1,
@@ -49,6 +56,12 @@ const EVIDENCE_CANDIDATE_ROLES: ReadonlySet<EvidenceCandidateRoleV1> = new Set([
   'member',
   'relationship',
   'context',
+]);
+const ANALYTICAL_TASK_OUTCOME_STATUSES: ReadonlySet<AnalyticalTaskOutcomeStatusV1> = new Set([
+  'completed', 'partial', 'gap', 'blocked', 'dependency_blocked',
+]);
+const ANALYTICAL_TASK_OUTCOME_TRUST_STATES: ReadonlySet<AnalyticalTaskOutcomeTrustStateV1> = new Set([
+  'certified', 'governed', 'review_required', 'blocked', 'not_applicable',
 ]);
 
 export function resolveAgentRunRetention(env: NodeJS.ProcessEnv = process.env): number {
@@ -188,12 +201,16 @@ export class SqliteAgentRunStore implements AgentRunStore {
         const userCancelled = progress.lifecycle.state === 'cancelling'
           || progress.events.some((event) => event.type === 'run.cancelled');
         const route = progress.route ?? (userCancelled ? 'cancelled' : 'blocked');
+        const retainedArtifacts = retainedInterruptedArtifacts(progress, userCancelled);
+        const retainedIndependentResult = retainedArtifacts.some((artifact) => artifact.trustState !== 'blocked');
         const failure: AgentRunDiagnosticReceiptV1['failure'] = {
           code: userCancelled ? 'RUN_CANCELLED' : 'RUN_INTERRUPTED',
           phase: progress.lifecycle.phase,
           message: userCancelled
             ? 'Stopped by user.'
-            : 'The local DQL runtime restarted before this agent run completed. No result was accepted.',
+            : retainedIndependentResult
+              ? 'The local DQL runtime restarted before this agent run completed. Completed independent task results remain available for inspection.'
+              : 'The local DQL runtime restarted before this agent run completed. No result was accepted.',
           recoverable: !userCancelled,
           safeActions: userCancelled ? [] : ['retry_same_request'],
         };
@@ -204,7 +221,7 @@ export class SqliteAgentRunStore implements AgentRunStore {
           route,
           plan: progress.plan,
           steps: progress.steps,
-          artifacts: progress.artifacts,
+          artifacts: retainedArtifacts,
           evaluations: progress.evaluations,
           failure,
         };
@@ -238,8 +255,8 @@ export class SqliteAgentRunStore implements AgentRunStore {
           steps: progress.steps,
           summary: failure.message,
           artifacts: userCancelled
-            ? progress.artifacts
-            : [...progress.artifacts.filter((artifact) => artifact.trustState === 'blocked'), diagnosticArtifact],
+            ? retainedArtifacts
+            : [...retainedArtifacts, diagnosticArtifact],
           evaluations: [
             ...progress.evaluations,
             userCancelled
@@ -281,6 +298,12 @@ export class SqliteAgentRunStore implements AgentRunStore {
           ...(runtimeReceipt ? { diagnosticReceiptV5: runtimeReceipt } : {}),
           ...(runtimeReceiptV6 ? { diagnosticReceiptV6: runtimeReceiptV6 } : {}),
           ...(progress.askAnalystState ? { askAnalystState: progress.askAnalystState } : {}),
+          ...(progress.analyticalTaskOutcomes?.length
+            ? { analyticalTaskOutcomes: progress.analyticalTaskOutcomes }
+            : {}),
+          ...(progress.analyticalTaskOutcomeSummary
+            ? { analyticalTaskOutcomeSummary: progress.analyticalTaskOutcomeSummary }
+            : {}),
           ...(progress.traceReference ? { traceReference: progress.traceReference } : {}),
           lifecycle: {
             ...progress.lifecycle,
@@ -433,7 +456,7 @@ function interruptedRuntimeReceiptV6(
   receipt: AgentRunDiagnosticReceiptV5,
 ): AgentRunDiagnosticReceiptV6 {
   const state = progress.askAnalystState!;
-  const planning = state.version === 2
+  const planning = state.version === 2 || state.version === 3
     ? state.planningReceipt
     : undefined;
   const plannerTool = state.workspace.tools.find((tool) => tool.kind === 'provider_meaning');
@@ -624,14 +647,29 @@ function normalizeRunProviderEgressReceipts(run: AgentRun): AgentRun {
       : { ...artifact, payload: { ...payload, diagnosticReceipt: normalizedDiagnosticReceipt } };
   });
   const askAnalystState = sanitizeAskAnalystStateRoleCoverage(run.askAnalystState);
+  const taskReceipts = sanitizeTaskOutcomeReceipts({
+    outcomes: (run as unknown as Record<string, unknown>).analyticalTaskOutcomes,
+    summary: (run as unknown as Record<string, unknown>).analyticalTaskOutcomeSummary,
+    steps: run.steps,
+  });
+  // Do not spread untrusted V3 receipts back onto the returned object. Older
+  // V1/V2 runs simply omit the additive fields; malformed V3 JSON is stripped
+  // or reduced to a blocked receipt before the notebook/API can render it.
+  const {
+    analyticalTaskOutcomes: _rawTaskOutcomes,
+    analyticalTaskOutcomeSummary: _rawTaskOutcomeSummary,
+    ...durableRun
+  } = run;
   return {
-    ...run,
+    ...durableRun,
     ...(rootReceipts === undefined ? {} : { providerEgressReceipts: rootReceipts }),
     ...(diagnosticReceipt === (run as unknown as Record<string, unknown>).diagnosticReceipt
       ? {}
       : { diagnosticReceipt: diagnosticReceipt as AgentRun['diagnosticReceipt'] }),
     artifacts,
     ...(askAnalystState === run.askAnalystState ? {} : { askAnalystState }),
+    ...(taskReceipts.outcomes ? { analyticalTaskOutcomes: taskReceipts.outcomes } : {}),
+    ...(taskReceipts.summary ? { analyticalTaskOutcomeSummary: taskReceipts.summary } : {}),
   };
 }
 
@@ -653,7 +691,7 @@ function parseProgress(payload: string): AgentRunProgressV1 | undefined {
 function sanitizeAskAnalystStateRoleCoverage(
   state: AskAnalystState | undefined,
 ): AskAnalystState | undefined {
-  if (!state || state.version !== 2 || !Array.isArray(state.workspace.roleCoverage)) return state;
+  if (!state || (state.version !== 2 && state.version !== 3) || !Array.isArray(state.workspace.roleCoverage)) return state;
   const roleCoverage = state.workspace.roleCoverage.flatMap((entry) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
     const record = entry as Record<string, unknown>;
@@ -681,9 +719,272 @@ function sanitizeAskAnalystStateRoleCoverage(
 
 function sanitizeProgressRoleCoverage(progress: AgentRunProgressV1): AgentRunProgressV1 {
   const askAnalystState = sanitizeAskAnalystStateRoleCoverage(progress.askAnalystState);
-  return askAnalystState === progress.askAnalystState
-    ? progress
-    : { ...progress, askAnalystState };
+  const taskReceipts = sanitizeTaskOutcomeReceipts({
+    outcomes: (progress as unknown as Record<string, unknown>).analyticalTaskOutcomes,
+    summary: (progress as unknown as Record<string, unknown>).analyticalTaskOutcomeSummary,
+    steps: progress.steps,
+  });
+  const {
+    analyticalTaskOutcomes: _rawTaskOutcomes,
+    analyticalTaskOutcomeSummary: _rawTaskOutcomeSummary,
+    ...durableProgress
+  } = progress;
+  return {
+    ...durableProgress,
+    ...(askAnalystState === progress.askAnalystState ? {} : { askAnalystState }),
+    ...(taskReceipts.outcomes ? { analyticalTaskOutcomes: taskReceipts.outcomes } : {}),
+    ...(taskReceipts.summary ? { analyticalTaskOutcomeSummary: taskReceipts.summary } : {}),
+  };
+}
+
+interface SanitizedTaskOutcomeReceiptsV1 {
+  outcomes?: AnalyticalTaskOutcomeV1[];
+  summary?: AnalyticalTaskOutcomeSummaryV1;
+}
+
+function isDurableString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= 1_000;
+}
+
+function durableStringList(value: unknown, maxItems = 32): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter(isDurableString).map((item) => item.trim()))].slice(0, maxItems);
+}
+
+function durableRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function taskReceiptTrustForArtifact(value: unknown): AnalyticalTaskOutcomeTrustStateV1 | undefined {
+  if (value === 'grounded') return 'governed';
+  return ANALYTICAL_TASK_OUTCOME_TRUST_STATES.has(value as AnalyticalTaskOutcomeTrustStateV1)
+    ? value as AnalyticalTaskOutcomeTrustStateV1
+    : undefined;
+}
+
+interface CanonicalTaskResultProofV1 {
+  resultFingerprint: string;
+  trustState: AnalyticalTaskOutcomeTrustStateV1;
+}
+
+function canonicalTaskResultProofForArtifact(value: unknown): CanonicalTaskResultProofV1 | undefined {
+  const artifact = durableRecord(value);
+  const trustState = taskReceiptTrustForArtifact(artifact?.trustState);
+  if (!artifact || artifact.kind !== 'answer' || !trustState || trustState === 'blocked') return undefined;
+  const payload = durableRecord(artifact.payload);
+  const result = durableRecord(payload?.result);
+  const fingerprint = result?.resultFingerprint;
+  if (!result || !isDurableString(fingerprint)
+    || !Array.isArray(result.columns) || result.columns.length === 0
+    || !Array.isArray(result.rows)) return undefined;
+  return { resultFingerprint: fingerprint, trustState };
+}
+
+function canonicalTaskResultProofsByTask(steps: unknown): ReadonlyMap<string, ReadonlyMap<string, AnalyticalTaskOutcomeTrustStateV1>> {
+  const byTask = new Map<string, Map<string, AnalyticalTaskOutcomeTrustStateV1>>();
+  if (!Array.isArray(steps)) return byTask;
+  for (const rawStep of steps) {
+    const step = durableRecord(rawStep);
+    const taskId = step?.askAnalystTaskId;
+    if (!step || !isDurableString(taskId) || !Array.isArray(step.artifacts)) continue;
+    const proofs = step.artifacts
+      .map(canonicalTaskResultProofForArtifact)
+      .filter((proof): proof is CanonicalTaskResultProofV1 => Boolean(proof));
+    if (proofs.length > 0) {
+      const byFingerprint = new Map<string, AnalyticalTaskOutcomeTrustStateV1>();
+      for (const proof of proofs) {
+        const existing = byFingerprint.get(proof.resultFingerprint);
+        byFingerprint.set(proof.resultFingerprint, existing
+          ? leastTrustedTaskReceiptState([existing, proof.trustState])
+          : proof.trustState);
+      }
+      byTask.set(taskId, byFingerprint);
+    }
+  }
+  return byTask;
+}
+
+function sanitizeTaskOutcomeFailure(value: unknown): AnalyticalTaskFailureV1 | undefined {
+  const failure = durableRecord(value);
+  if (!failure || !isDurableString(failure.code) || !isDurableString(failure.message)) return undefined;
+  if (failure.phase !== 'planning' && failure.phase !== 'execution' && failure.phase !== 'dependency') return undefined;
+  return { version: 1, code: failure.code, message: failure.message, phase: failure.phase };
+}
+
+function sanitizeTaskOutcomeGap(value: unknown): AnalyticalCoverageGapV1 | undefined {
+  const gap = durableRecord(value);
+  const allowedCodes = new Set<AnalyticalCoverageGapV1['code']>([
+    'MISSING_MEASURE', 'MISSING_DIMENSION', 'MISSING_ATTRIBUTE', 'MISSING_RELATIONSHIP',
+    'MISSING_RUNTIME_CAPABILITY', 'RESULT_CONTRACT_MISMATCH', 'PROVIDER_UNAVAILABLE',
+    'EXECUTION_FAILED', 'AMBIGUOUS_MEANING', 'POLICY_BLOCKED',
+  ]);
+  const allowedPhases = new Set<AnalyticalCoverageGapV1['phase']>([
+    'retrieval', 'meaning', 'planning', 'compilation', 'execution', 'presentation',
+  ]);
+  const allowedRoutes = new Set<AnalyticalCoverageGapV1['attemptedRoutes'][number]>([
+    'certified', 'semantic', 'governed_relational', 'generated', 'research',
+  ]);
+  if (!gap || !allowedCodes.has(gap.code as AnalyticalCoverageGapV1['code'])
+    || !allowedPhases.has(gap.phase as AnalyticalCoverageGapV1['phase'])
+    || !isDurableString(gap.message) || typeof gap.recoverable !== 'boolean'
+    || typeof gap.planFrozen !== 'boolean') return undefined;
+  const attemptedRoutes = Array.isArray(gap.attemptedRoutes)
+    ? gap.attemptedRoutes.filter((route): route is AnalyticalCoverageGapV1['attemptedRoutes'][number] =>
+        typeof route === 'string' && allowedRoutes.has(route as AnalyticalCoverageGapV1['attemptedRoutes'][number]))
+    : [];
+  return {
+    version: 1,
+    code: gap.code as AnalyticalCoverageGapV1['code'],
+    phase: gap.phase as AnalyticalCoverageGapV1['phase'],
+    message: gap.message,
+    searchedSources: durableStringList(gap.searchedSources),
+    attemptedRoutes,
+    missing: durableStringList(gap.missing),
+    recoverable: gap.recoverable,
+    planFrozen: gap.planFrozen,
+    nextActions: durableStringList(gap.nextActions),
+  };
+}
+
+function leastTrustedTaskReceiptState(states: AnalyticalTaskOutcomeTrustStateV1[]): AnalyticalTaskOutcomeTrustStateV1 {
+  if (states.length === 0) return 'blocked';
+  const score: Record<AnalyticalTaskOutcomeTrustStateV1, number> = {
+    certified: 4, governed: 3, review_required: 2, not_applicable: 1, blocked: 0,
+  };
+  return states.reduce((least, candidate) => score[candidate] < score[least] ? candidate : least);
+}
+
+/**
+ * Read local V3 task receipts as untrusted JSON. Successful status is valid
+ * only when the same task step contains a canonical immutable result artifact
+ * with the advertised fingerprint. This also keeps V1/V2 records readable:
+ * absent additive fields remain absent.
+ */
+function sanitizeTaskOutcomeReceipts(input: {
+  outcomes: unknown;
+  summary: unknown;
+  steps: unknown;
+}): SanitizedTaskOutcomeReceiptsV1 {
+  const rawSummary = durableRecord(input.summary);
+  const rawOutcomes = Array.isArray(input.outcomes) ? input.outcomes : undefined;
+  if (!rawOutcomes && !rawSummary) return {};
+  const canonicalByTask = canonicalTaskResultProofsByTask(input.steps);
+  const outcomes: AnalyticalTaskOutcomeV1[] = [];
+  const seenTaskIds = new Set<string>();
+  for (const rawOutcome of rawOutcomes ?? []) {
+    const outcome = durableRecord(rawOutcome);
+    const taskId = outcome?.taskId;
+    const status = outcome?.status;
+    if (!outcome || !isDurableString(taskId)
+      || !ANALYTICAL_TASK_OUTCOME_STATUSES.has(status as AnalyticalTaskOutcomeStatusV1)
+      || seenTaskIds.has(taskId)) continue;
+    seenTaskIds.add(taskId);
+    const persistedTrustState = ANALYTICAL_TASK_OUTCOME_TRUST_STATES.has(outcome.trustState as AnalyticalTaskOutcomeTrustStateV1)
+      ? outcome.trustState as AnalyticalTaskOutcomeTrustStateV1
+      : undefined;
+    const requestedSuccess = status === 'completed' || status === 'partial';
+    const resultFingerprint = isDurableString(outcome.resultFingerprint) ? outcome.resultFingerprint : undefined;
+    const canonicalTrustState = resultFingerprint
+      ? canonicalByTask.get(taskId)?.get(resultFingerprint)
+      : undefined;
+    const canonicalResult = Boolean(canonicalTrustState);
+    if (requestedSuccess && !canonicalResult) {
+      outcomes.push({
+        version: 1,
+        taskId,
+        status: 'blocked',
+        trustState: 'blocked',
+        summary: 'This persisted task result has no matching immutable canonical artifact.',
+        failure: {
+          version: 1,
+          code: 'TASK_RESULT_ARTIFACT_UNVERIFIED',
+          message: 'This persisted task result has no matching immutable canonical artifact.',
+          phase: 'execution',
+        },
+      });
+      continue;
+    }
+    const trustState = canonicalTrustState
+      ? persistedTrustState
+        ? leastTrustedTaskReceiptState([persistedTrustState, canonicalTrustState])
+        : canonicalTrustState
+      : persistedTrustState ?? 'blocked';
+    outcomes.push({
+      version: 1,
+      taskId,
+      status: status as AnalyticalTaskOutcomeStatusV1,
+      trustState,
+      ...(isDurableString(outcome.summary) ? { summary: outcome.summary } : {}),
+      ...(canonicalResult && resultFingerprint ? { resultFingerprint } : {}),
+      ...(sanitizeTaskOutcomeGap(outcome.gap) ? { gap: sanitizeTaskOutcomeGap(outcome.gap) } : {}),
+      ...(sanitizeTaskOutcomeFailure(outcome.failure) ? { failure: sanitizeTaskOutcomeFailure(outcome.failure) } : {}),
+      ...(status === 'dependency_blocked' ? { dependencyTaskIds: durableStringList(outcome.dependencyTaskIds) } : {}),
+    });
+  }
+  const requestedTaskCount = typeof rawSummary?.taskCount === 'number' && Number.isFinite(rawSummary.taskCount)
+    ? Math.max(0, Math.min(100, Math.floor(rawSummary.taskCount)))
+    : 0;
+  // Preserve an execution-pending compiler checkpoint only when it makes no
+  // success claim. It becomes execution-final after the first child step.
+  const mayKeepEmptySummary = outcomes.length === 0
+    && requestedTaskCount > 0
+    && durableStringList(rawSummary?.successfulTaskIds).length === 0;
+  if (outcomes.length === 0 && !mayKeepEmptySummary) return {};
+  const successfulTaskIds = outcomes
+    .filter((outcome) => outcome.status === 'completed' || outcome.status === 'partial')
+    .map((outcome) => outcome.taskId);
+  const failedTaskIds = outcomes
+    .filter((outcome) => outcome.status !== 'completed' && outcome.status !== 'partial' && outcome.status !== 'dependency_blocked')
+    .map((outcome) => outcome.taskId);
+  const dependencyBlockedTaskIds = outcomes
+    .filter((outcome) => outcome.status === 'dependency_blocked')
+    .map((outcome) => outcome.taskId);
+  const taskCount = Math.max(requestedTaskCount, outcomes.length);
+  const summary: AnalyticalTaskOutcomeSummaryV1 = {
+    version: 1,
+    status: successfulTaskIds.length === 0
+      ? 'blocked'
+      : failedTaskIds.length > 0 || dependencyBlockedTaskIds.length > 0 || successfulTaskIds.length < taskCount
+        ? 'partial'
+        : 'completed',
+    trustState: leastTrustedTaskReceiptState(outcomes
+      .filter((outcome) => outcome.status === 'completed' || outcome.status === 'partial')
+      .map((outcome) => outcome.trustState ?? 'blocked')),
+    taskCount,
+    successfulTaskIds,
+    failedTaskIds,
+    dependencyBlockedTaskIds,
+  };
+  return {
+    ...(outcomes.length > 0 ? { outcomes } : {}),
+    summary,
+  };
+}
+
+/**
+ * A restart never turns an in-flight Ask into a completed parent answer, but
+ * it must not erase a completed independent child whose canonical result was
+ * checkpointed before the interruption. Keep only blocked diagnostics plus
+ * artifact/result pairs proved by the V3 task receipt.
+ */
+function retainedInterruptedArtifacts(
+  progress: AgentRunProgressV1,
+  userCancelled: boolean,
+): AgentRunArtifact[] {
+  if (userCancelled) return progress.artifacts;
+  const retainedIds = new Set(progress.artifacts
+    .filter((artifact) => artifact.trustState === 'blocked')
+    .map((artifact) => artifact.id));
+  for (const outcome of progress.analyticalTaskOutcomes ?? []) {
+    if ((outcome.status !== 'completed' && outcome.status !== 'partial') || !outcome.resultFingerprint) continue;
+    const step = progress.steps.find((candidate) => candidate.askAnalystTaskId === outcome.taskId);
+    const artifact = step?.artifacts.find((candidate) =>
+      canonicalTaskResultProofForArtifact(candidate)?.resultFingerprint === outcome.resultFingerprint);
+    if (artifact) retainedIds.add(artifact.id);
+  }
+  return progress.artifacts.filter((artifact) => retainedIds.has(artifact.id));
 }
 
 function isAgentRunRecord(value: unknown): value is AgentRun {

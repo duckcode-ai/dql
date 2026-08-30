@@ -67,6 +67,13 @@ export interface ConversationTurnResult {
   rowsSample?: unknown[][];
   dimensionValues?: Record<string, string[]>;
   /**
+   * Content-free identity of the canonical executed result.  Unlike a member
+   * set, this remains available for a successful result that has no recognised
+   * display entity (for example a grouped aggregate).  It is local continuity
+   * evidence only and is absent from legacy persisted rows.
+   */
+  resultFingerprint?: string;
+  /**
    * Bounded, typed entity sets projected from an executed result. These are
    * local conversation continuity material: they let a later question such as
    * "which of those customers" bind to the displayed set after a restart
@@ -613,11 +620,16 @@ function capTurnResult(result: ConversationTurnResult | undefined): Conversation
         ...(resultFingerprint ? { resultFingerprint } : {}),
       }];
     });
+  const resultFingerprint = typeof result.resultFingerprint === 'string'
+    && /^[a-f0-9]{64}$/i.test(result.resultFingerprint)
+    ? result.resultFingerprint.toLowerCase()
+    : undefined;
   return {
     columns,
     rowsSample,
     dimensionValues,
     ...(memberSets?.length ? { memberSets } : {}),
+    ...(resultFingerprint ? { resultFingerprint } : {}),
     measureColumns: result.measureColumns?.slice(0, MAX_COLUMNS),
     rowCount: result.rowCount,
   };

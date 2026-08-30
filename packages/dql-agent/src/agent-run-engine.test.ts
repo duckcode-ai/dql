@@ -18,8 +18,10 @@ import {
   createAgentRunCancellationError,
   type AgentRouteExecutorResult,
   type AgentRunEvent,
+  type AgentRunProgressV1,
   type AgentRunPlanner,
   type AgentRunRoute,
+  type AgentRunStore,
 } from "./agent-run-engine.js";
 import { defaultAgentRunGates } from "./agent-run-gates.js";
 import { decideAgentAction, type IntentDecision } from "./intent-controller.js";
@@ -827,6 +829,197 @@ describe("AgentRunEngine", () => {
     expect(failedRun).toMatchObject({ status: 'blocked', trustState: 'blocked' });
     expect(failedRun.answer).toContain('No partial result was accepted');
     expect(failedRun.answer).not.toContain('Task 2 must remain');
+
+    // V2 task-outcome semantics are deliberately opt-in.  An authoritative
+    // ordinary Ask with independently frozen children must retain a completed
+    // sibling when another independent child fails, rather than reusing the
+    // legacy all-or-nothing aggregate above.  The compact outcome summary is
+    // host-owned; a client cannot mint it through an executor response.
+    const partialDecision = {
+      ...decision,
+      askAnalystDecision: {
+        ...decision.askAnalystDecision!,
+        taskOutcomeSummary: {
+          version: 1 as const,
+          // Compiler-time summaries carry no execution success. The engine
+          // checkpoints task-2 only after its canonical result artifact.
+          status: 'blocked' as const,
+          trustState: 'blocked' as const,
+          taskCount: 2,
+          successfulTaskIds: [],
+          failedTaskIds: [],
+          dependencyBlockedTaskIds: [],
+        },
+        taskOutcomes: [],
+      },
+    };
+    const partialCalls: string[] = [];
+    const partialEngine = new AgentRunEngine({
+      idGenerator: () => 'run-compound-authoritative-partial',
+      now: fixedClock(),
+      router: { decide: () => partialDecision },
+      executors: {
+        semantic_answer: ({ request }) => {
+          const taskId = request.askAnalystTaskChild?.taskId ?? 'missing';
+          partialCalls.push(taskId);
+          if (taskId === 'task-1') {
+            return {
+              status: 'blocked' as const,
+              trustState: 'blocked' as const,
+              summary: 'Task 1 could not execute.',
+            };
+          }
+          return {
+            answer: 'Task 2 completed independently.',
+            trustState: 'governed' as const,
+            artifacts: [{
+              id: 'answer:task-2:partial', kind: 'answer' as const, title: 'Task 2', trustState: 'governed' as const,
+              payload: { result: { columns: ['revenue'], rows: [{ revenue: 2 }], rowCount: 1, resultFingerprint: 'result:task-2:partial', answerTier: 'semantic_metric' } },
+            }],
+          };
+        },
+      },
+    });
+    const partialRun = await partialEngine.run({ question: 'show revenue; show revenue again', requestedMode: 'ask' });
+    expect(partialCalls).toEqual(['task-1', 'task-2']);
+    expect(partialRun).toMatchObject({ status: 'completed', trustState: 'governed' });
+    expect(partialRun.analyticalTaskOutcomeSummary).toMatchObject({
+      status: 'partial', trustState: 'governed', successfulTaskIds: ['task-2'], failedTaskIds: ['task-1'],
+    });
+    expect(partialRun.analyticalTaskOutcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ taskId: 'task-1', status: 'blocked', trustState: 'blocked' }),
+      expect.objectContaining({ taskId: 'task-2', status: 'completed', trustState: 'governed' }),
+    ]));
+    expect(partialRun.artifacts.map((artifact) => artifact.id)).toContain('answer:task-2:partial');
+    expect(partialRun.answer).not.toContain('No partial result was accepted');
+
+    {
+      // AGT-036: compilation must checkpoint no success before task 1, then
+      // persist task 1's canonical result before the later child begins.
+      const checkpoints: AgentRunProgressV1[] = [];
+      const checkpointStore: AgentRunStore = {
+        save: () => undefined,
+        get: () => undefined,
+        saveProgress: (snapshot) => {
+          checkpoints.push(JSON.parse(JSON.stringify(snapshot)) as AgentRunProgressV1);
+        },
+      };
+      const checkpointEngine = new AgentRunEngine({
+        idGenerator: () => 'run-compound-checkpoint',
+        now: fixedClock(),
+        store: checkpointStore,
+        router: { decide: () => partialDecision },
+        executors: {
+          semantic_answer: ({ request }) => {
+            const taskId = request.askAnalystTaskChild?.taskId;
+            return taskId === 'task-1'
+              ? {
+                  answer: 'Task 1 completed.',
+                  trustState: 'governed' as const,
+                  artifacts: [{
+                    id: 'answer:task-1:checkpoint', kind: 'answer' as const, title: 'Task 1', trustState: 'governed' as const,
+                    payload: { result: { columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1, resultFingerprint: 'result:task-1:checkpoint' } },
+                  }],
+                }
+              : { status: 'blocked' as const, trustState: 'blocked' as const, summary: 'Task 2 stopped for this checkpoint test.' };
+          },
+        },
+      });
+      await checkpointEngine.run({ question: 'show revenue; show revenue again', requestedMode: 'ask' });
+
+      const preExecution = checkpoints.find((snapshot) =>
+        snapshot.analyticalTaskOutcomeSummary?.taskCount === 2
+        && snapshot.steps.length === 0);
+      expect(preExecution?.analyticalTaskOutcomeSummary?.successfulTaskIds).toEqual([]);
+      const afterTaskOne = checkpoints.find((snapshot) =>
+        snapshot.analyticalTaskOutcomes?.some((outcome) =>
+          outcome.taskId === 'task-1'
+          && outcome.status === 'completed'
+          && outcome.resultFingerprint === 'result:task-1:checkpoint'));
+      expect(afterTaskOne?.artifacts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'answer:task-1:checkpoint' }),
+      ]));
+      expect(afterTaskOne?.analyticalTaskOutcomeSummary?.successfulTaskIds).toEqual(['task-1']);
+    }
+
+    {
+      // AGT-036: review-required prose alone is not a successful task.
+      const reviewOnlyEngine = new AgentRunEngine({
+        idGenerator: () => 'run-compound-review-only',
+        now: fixedClock(),
+        router: { decide: () => partialDecision },
+        executors: {
+          semantic_answer: ({ request }) => request.askAnalystTaskChild?.taskId === 'task-1'
+            ? {
+                answer: 'Generated SQL is ready for review.',
+                status: 'needs_review' as const,
+                trustState: 'review_required' as const,
+              }
+            : {
+                status: 'blocked' as const,
+                trustState: 'blocked' as const,
+                summary: 'The second task did not execute.',
+              },
+        },
+      });
+      const reviewOnlyRun = await reviewOnlyEngine.run({ question: 'show revenue; show revenue again', requestedMode: 'ask' });
+      expect(reviewOnlyRun).toMatchObject({ status: 'blocked', trustState: 'blocked' });
+      expect(reviewOnlyRun.analyticalTaskOutcomeSummary).toMatchObject({
+        status: 'blocked', successfulTaskIds: [], failedTaskIds: ['task-1', 'task-2'],
+      });
+      expect(reviewOnlyRun.analyticalTaskOutcomes).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          taskId: 'task-1', status: 'blocked',
+          failure: expect.objectContaining({ code: 'TASK_EXECUTION_RESULT_MISSING' }),
+        }),
+      ]));
+    }
+
+    // A dependent child is not an independent fallback.  When its parent did
+    // not complete, the engine must retain the child's typed
+    // `dependency_blocked` outcome without invoking the child executor.
+    const dependentSecond = {
+      ...second,
+      state: {
+        ...second.state,
+        mission: {
+          ...second.state.mission,
+          tasks: second.state.mission.tasks.map((task) => ({ ...task, dependencies: ['task-1'] })),
+        },
+      },
+    };
+    const dependencyDecision = {
+      ...partialDecision,
+      askAnalystDecision: {
+        ...partialDecision.askAnalystDecision,
+        state: first.state,
+        taskExecutions: [first, dependentSecond],
+      },
+    };
+    const dependencyCalls: string[] = [];
+    const dependencyEngine = new AgentRunEngine({
+      idGenerator: () => 'run-compound-authoritative-dependency',
+      now: fixedClock(),
+      router: { decide: () => dependencyDecision },
+      executors: {
+        semantic_answer: ({ request }) => {
+          const taskId = request.askAnalystTaskChild?.taskId ?? 'missing';
+          dependencyCalls.push(taskId);
+          return taskId === 'task-1'
+            ? { status: 'blocked' as const, trustState: 'blocked' as const, summary: 'Task 1 could not execute.' }
+            : { answer: 'This dependent child must not run.', trustState: 'governed' as const };
+        },
+      },
+    });
+    const dependencyRun = await dependencyEngine.run({ question: 'show revenue; then show it by region', requestedMode: 'ask' });
+    expect(dependencyCalls).toEqual(['task-1']);
+    expect(dependencyRun).toMatchObject({ status: 'blocked', trustState: 'blocked' });
+    expect(dependencyRun.analyticalTaskOutcomeSummary).toMatchObject({
+      status: 'blocked', successfulTaskIds: [], failedTaskIds: ['task-1'], dependencyBlockedTaskIds: ['task-2'],
+    });
+    expect(dependencyRun.analyticalTaskOutcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ taskId: 'task-2', status: 'dependency_blocked', dependencyTaskIds: ['task-1'] }),
+    ]));
   });
 
   it('rejects an arbitrary executor answer and facts when the final answer artifact has no canonical result', async () => {
@@ -1045,6 +1238,63 @@ describe("AgentRunEngine", () => {
       payload: { kind: 'result', failureCode: 'COMPILATION_FAILED', safeAction: 'edit_dql' },
     });
     expect(spans.some((span) => span.name === 'sql.execute')).toBe(false);
+  });
+
+  it('OBS-014 preserves a frozen semantic result-contract rejection as result validation, not execution', async () => {
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-frozen-semantic-result-validation-failure',
+      now: fixedClock(),
+      router: { decide: () => frozenSemanticDecision() },
+      executors: {
+        semantic_answer: () => ({
+          answer: 'The returned result was not accepted.',
+          status: 'blocked',
+          trustState: 'blocked',
+          stopReason: 'blocked',
+          artifacts: [{
+            id: 'semantic-result-validation-failure',
+            kind: 'answer',
+            title: 'Semantic result did not match the frozen plan',
+            trustState: 'blocked',
+            payload: {
+              analyticalFailure: {
+                version: 1,
+                code: 'RESULT_CONTRACT_MISMATCH',
+                phase: 'result_validation',
+                message: 'The returned result was not accepted.',
+                safeActions: ['inspect_failure'],
+              },
+              // Legacy answer-loop compatibility payloads can carry this
+              // redacted string after a result rejection. V4 must still keep
+              // the result-validation boundary.
+              executionError: 'The frozen result contract rejected the returned fields.',
+            },
+          }],
+          evaluations: [],
+          nextActions: [],
+          telemetry: {
+            version: 1,
+            stageDurationsMs: { execution: 7, total: 7 },
+            providerRoundTrips: 0,
+            toolCalls: 0,
+            sqlExecutions: 1,
+            repairs: 0,
+            egressReceipts: 0,
+          },
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: 'revenue by region', requestedMode: 'ask' });
+
+    expect(run.diagnosticReceiptV4?.summary.terminalIncident).toMatchObject({
+      code: 'RESULT_CONTRACT_MISMATCH',
+      boundary: 'result.validate',
+      origin: 'result_validator',
+      impact: 'answer_not_produced',
+      safeAction: 'inspect_failure',
+    });
+    expect(run.diagnosticReceiptV4?.summary.terminalIncident?.code).not.toBe('ANALYTICAL_EXECUTION_FAILED');
   });
 
   it('AGT-005 keeps a serialized MetricFlow compiler receipt out of the connection-failure path', async () => {

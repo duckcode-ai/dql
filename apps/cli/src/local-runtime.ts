@@ -215,11 +215,14 @@ import {
   buildBlockBusinessFingerprint,
   buildBlockSqlFingerprints,
   buildAnalysisQuestionPlan,
+  buildMeaningEvidencePackage,
   composeSemanticQueryForQuestion,
   aggregationIntegrityIssuesForSql,
   buildAggregationSafetyProof,
   buildLocalContextPack,
+  acquireActiveKnowledgeSnapshot,
   applyContextPackCompatibility,
+  currentQuestionLiteralMemberTerms,
   toAgentRetrievalEvidence,
   prepareConversationPath,
   defaultMemoryPath,
@@ -259,6 +262,7 @@ import {
   createLlmAgentRunPlanner,
   createAskAnalystRuntimeV1,
   createHybridRouter,
+  planAnalyticalPath,
   computeResultStats,
   buildDeterministicDashboardStory,
   synthesizeAnswer,
@@ -378,8 +382,11 @@ import {
   type AgentRouteExecutor,
   type AgentEvidenceCandidate,
   type AgentRetrievalEvidence,
+  type AskLiteralGroundingProbeRequestV1,
+  type AskLiteralGroundingProbeResultV1,
   type AnalyticalRequirementSeedV1,
   type AnalyticalRequirementSetV1,
+  type TrustedAnalyticalTaskAnchorV1,
   type ResolvedAnalyticalPlan,
   type ContextSourceCoverageV1,
   type ProviderFailureDiagnosticV1,
@@ -790,6 +797,11 @@ export interface LocalServerOptions {
     request: AgentRunRequest;
   }) => AgentProvider | null | Promise<AgentProvider | null>;
   /**
+   * Host-only watcher seam for local-runtime tests and embeddings. Production
+   * uses `fs.watch`; browser/MCP input can never select a watcher or its scope.
+   */
+  projectWatcherFactory?: typeof watch;
+  /**
    * Per-runtime capability minted by the local CLI launcher. Only a matching
    * request header may label a trace as `cli`; public JSON never carries this
    * authority and browser/MCP requests remain their own server-owned surface.
@@ -867,6 +879,115 @@ export function createLocalCliAskTraceCapabilityRegistryV1(
       // prevents copied local headers from relabelling later browser requests.
       records.delete(input.capability);
       return 'cli';
+    },
+  };
+}
+
+/**
+ * Opaque host-only capability for one cold exact-literal grounding probe.
+ * Unlike the trace-header capability above, this is never returned through an
+ * HTTP response: the runtime holds the token only long enough to invoke its
+ * local callback and strips it before any planner, trace, receipt, or store
+ * projection. The registry owns the physical field details.
+ */
+export const CLI_ASK_LITERAL_PROBE_CAPABILITY_TTL_MS = 45_000;
+
+interface LocalLiteralProbeCapabilityRecordV1 {
+  request: AgentRunRequest;
+  runId?: string;
+  snapshotId: string;
+  candidateId: string;
+  candidateQualifiedId: string;
+  relation: string;
+  column: string;
+  expiresAtMs: number;
+}
+
+export interface LocalLiteralProbeCapabilityRegistryV1 {
+  issue(input: {
+    request: AgentRunRequest;
+    snapshotId: string;
+    candidate: AgentEvidenceCandidate;
+    relation: string;
+    column: string;
+    token?: string;
+    nowMs?: number;
+  }): string | undefined;
+  consume(input: {
+    token: unknown;
+    request: AgentRunRequest;
+    snapshotId?: string;
+    activeSnapshotId?: string;
+    candidate: AgentEvidenceCandidate;
+    relation: string;
+    column: string;
+    nowMs?: number;
+  }): boolean;
+}
+
+/**
+ * The local process holds the only mapping from an opaque token to its exact
+ * request, snapshot, candidate identity, and physical field. `consume` is
+ * intentionally fail-closed and deletes a successful authorization before
+ * the caller can construct or execute the probe SQL.
+ */
+export function createLocalLiteralProbeCapabilityRegistryV1(
+  options: { now?: () => number; mint?: () => string } = {},
+): LocalLiteralProbeCapabilityRegistryV1 {
+  const records = new Map<string, LocalLiteralProbeCapabilityRecordV1>();
+  const now = options.now ?? Date.now;
+  const mint = options.mint ?? randomUUID;
+  const purge = (at: number) => {
+    for (const [token, record] of records) {
+      if (record.expiresAtMs <= at) records.delete(token);
+    }
+  };
+  const canonicalRelation = (value: string) => normalizeAgentSafeColumnReference(value);
+  const canonicalColumn = (value: string) => normalizeAgentSafeColumnReference(value);
+  return {
+    issue(input) {
+      const issuedAt = input.nowMs ?? now();
+      purge(issuedAt);
+      if (!input.snapshotId.trim()
+        || !input.candidate.id.trim()
+        || !input.candidate.qualifiedId?.trim()
+        || !input.relation.trim()
+        || !input.column.trim()) return undefined;
+      const token = input.token ?? mint();
+      if (!token.trim()) return undefined;
+      records.set(token, {
+        request: input.request,
+        ...(input.request.runId ? { runId: input.request.runId } : {}),
+        snapshotId: input.snapshotId,
+        candidateId: input.candidate.id,
+        candidateQualifiedId: input.candidate.qualifiedId,
+        relation: canonicalRelation(input.relation),
+        column: canonicalColumn(input.column),
+        expiresAtMs: issuedAt + CLI_ASK_LITERAL_PROBE_CAPABILITY_TTL_MS,
+      });
+      return token;
+    },
+    consume(input) {
+      const at = input.nowMs ?? now();
+      purge(at);
+      if (typeof input.token !== 'string' || !input.token.trim()) return false;
+      const record = records.get(input.token);
+      if (!record || record.expiresAtMs <= at) return false;
+      // A copied token must not cross a request object or engine-issued run.
+      // Identity comparison intentionally supplements the stable run ID: an
+      // in-process retry/copy cannot replay another request's token.
+      if (record.request !== input.request
+        || record.runId !== input.request.runId
+        || record.snapshotId !== input.snapshotId
+        || record.snapshotId !== input.activeSnapshotId
+        || record.candidateId !== input.candidate.id
+        || record.candidateQualifiedId !== input.candidate.qualifiedId
+        || record.relation !== canonicalRelation(input.relation)
+        || record.column !== canonicalColumn(input.column)) return false;
+      // Delete before SQL construction/execution: the capability is one-use
+      // even if the connector subsequently returns no-match or fails.
+      records.delete(input.token);
+      return true;
     },
   };
 }
@@ -1656,6 +1777,91 @@ export function agentAnswerHasExecutionFailure(
 }
 
 /**
+ * An error-shaped compatibility string is not enough to rewrite an Ask
+ * failure into an execution incident when the producer retained a typed
+ * analytical boundary. Compiler and result-contract failures can carry the
+ * same redacted string for legacy display, but neither statement reached the
+ * SQL execution failure boundary. Old payloads without a typed failure retain
+ * the legacy compatibility projection.
+ */
+export function agentAnswerHasExecutionBoundaryFailure(
+  governedAnswer: Pick<AgentAnswer, 'executionError' | 'analyticalFailure'>,
+): boolean {
+  return governedAnswer.analyticalFailure
+    ? governedAnswer.analyticalFailure.phase === 'execution'
+    : agentAnswerHasExecutionFailure(governedAnswer);
+}
+
+/**
+ * Keep the producer's original refusal evidence intact, but never present a
+ * post-freeze execution failure as a retrieval gap. Older answer-loop paths
+ * used `grounding_gap` as their compatibility code even after a connector or
+ * SQL attempt failed. The runtime is the presentation/persistence boundary,
+ * so it projects that one case to the additive execution code without
+ * changing the frozen plan, selected route, or source answer.
+ */
+export function projectAnswerExecutionFailureForRun(answer: AgentAnswer): AgentAnswer {
+  if (!agentAnswerHasExecutionBoundaryFailure(answer) || answer.refusalCode === 'execution_error') return answer;
+  return { ...answer, refusalCode: 'execution_error' };
+}
+
+/**
+ * Persist the narrowest available terminal reason. Typed analytical failures
+ * outrank legacy compatibility refusal codes so a compiler or result-contract
+ * incident cannot be summarized as a grounding gap merely because its answer
+ * payload also carries an old `executionError` field.
+ */
+function terminalFallbackReasonForAnswer(answer: AgentAnswer): string | undefined {
+  if (answer.analyticalFailure?.phase === 'execution') return 'execution_error';
+  if (answer.analyticalFailure) return answer.analyticalFailure.code;
+  return answer.refusalCode;
+}
+
+/** A user-facing terminal heading must follow the producer's typed boundary. */
+export function terminalFailureTitleForAnswer(
+  answer: Pick<AgentAnswer, 'refusalCode' | 'analyticalFailure'>,
+): string {
+  if (answer.analyticalFailure?.phase === 'compilation') {
+    return 'DQL could not compile the frozen plan';
+  }
+  if (answer.analyticalFailure?.phase === 'result_validation') {
+    return 'The query result did not match the frozen plan';
+  }
+  switch (answer.refusalCode) {
+    case 'policy_blocked': return 'Blocked by a governance policy';
+    case 'modeling_gap': return 'Not modeled yet';
+    case 'grounding_gap': return 'Not enough context to answer safely';
+    case 'model_declined': return 'The assistant declined to answer';
+    case 'provider_error': return 'The AI provider did not respond';
+    case 'execution_error': return 'The selected query did not complete on the current connection';
+    case 'ambiguous': return 'Needs one detail before running';
+    default: return 'No answer was produced';
+  }
+}
+
+/**
+ * One local-runtime projection supplies all terminal presentation/evaluation
+ * consumers. This prevents an execution-shaped legacy string from making the
+ * title, telemetry, or evaluation disagree with the typed failure boundary.
+ */
+export function projectTerminalAnalyticalFailureForRun(answer: AgentAnswer): {
+  answer: AgentAnswer;
+  executionFailure: boolean;
+  fallbackReason?: string;
+  title: string;
+} {
+  const projected = projectAnswerExecutionFailureForRun(answer);
+  return {
+    answer: projected,
+    executionFailure: agentAnswerHasExecutionBoundaryFailure(answer),
+    ...(terminalFallbackReasonForAnswer(projected)
+      ? { fallbackReason: terminalFallbackReasonForAnswer(projected) }
+      : {}),
+    title: terminalFailureTitleForAnswer(projected),
+  };
+}
+
+/**
  * Return only a router/producer-issued analytical gap witness.
  *
  * `terminalOutcome.kind === 'modeling_gap'` is deliberately insufficient to
@@ -2075,6 +2281,7 @@ async function conversationContextFromThread(
             rowsSample: turn.result.rowsSample,
             dimensionValues: turn.result.dimensionValues,
             memberSets: turn.result.memberSets,
+            resultFingerprint: turn.result.resultFingerprint,
             measureColumns: turn.result.measureColumns,
             rowCount: turn.result.rowCount,
           })
@@ -2280,6 +2487,134 @@ export function hydratePersistedSelectedResultBinding(
 }
 
 /**
+ * An additive projection has to name its connection to the displayed result.
+ * A bare "show revenue by region" is a fresh Ask, while "add region here" is
+ * an explicit request to retain the successful result's analytical shape.
+ * Keeping this intentionally narrow prevents a coincidental shared word from
+ * replaying an unrelated prior plan.
+ */
+function isExplicitAnalyticalShapeContinuation(question: string): boolean {
+  return /\b(?:add|include|also\s+(?:show|include))\s+(?:the\s+)?[a-z][a-z0-9_ -]{0,48}\s+(?:here|there|too|as\s+well)\b/i.test(question);
+}
+
+function stableConversationResultFingerprint(result: Record<string, unknown>): string | undefined {
+  const direct = agentRunString(result.resultFingerprint)?.toLowerCase();
+  if (direct && /^[a-f0-9]{64}$/.test(direct)) return direct;
+  // Turns persisted before the direct result-level field still retain a
+  // content-free fingerprint on their bounded entity member set. Reuse it
+  // only when every retained set agrees, never by inventing one from rows.
+  const fingerprints = Array.from(new Set((Array.isArray(result.memberSets) ? result.memberSets : [])
+    .map((set) => agentRunRecord(set))
+    .map((set) => agentRunString(set?.resultFingerprint)?.toLowerCase())
+    .filter((value): value is string => Boolean(value && /^[a-f0-9]{64}$/.test(value)))));
+  return fingerprints.length === 1 ? fingerprints[0] : undefined;
+}
+
+function boundedAnalyticalShapeTerms(values: Array<string | undefined>, max = 8): string[] {
+  const seen = new Set<string>();
+  const terms: string[] = [];
+  for (const value of values) {
+    const trimmed = value?.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase().replace(/[_.:/-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    terms.push(trimmed);
+    if (terms.length >= max) break;
+  }
+  return terms;
+}
+
+/**
+ * Derive a narrow, host-only analytical-shape anchor from a completed result.
+ * No prose, SQL, rows, provider output, or browser fields become authority:
+ * only the locally persisted source turn, its result fingerprint, and bounded
+ * task shape are carried to the V3 program.
+ */
+function trustedAnalyticalShapeAnchorFromFollowUp(
+  request: AgentRunRequest,
+  context: Record<string, unknown> | undefined,
+  followUp: ReturnType<typeof resolveAgentFollowUpContext>,
+): TrustedAnalyticalTaskAnchorV1 | undefined {
+  if (!isExplicitAnalyticalShapeContinuation(request.question)
+    || followUp?.binding !== 'prior_result') return undefined;
+  const sourceTurnId = agentRunString(followUp.sourceTurnId) ?? agentRunString(context?.activeTurnId);
+  if (!sourceTurnId) return undefined;
+  const source = (Array.isArray(context?.turns) ? context.turns : [])
+    .map((turn) => agentRunRecord(turn))
+    .find((turn) => agentRunString(turn?.id) === sourceTurnId);
+  // A provisional, failed, blocked, clarification, or cancelled turn must
+  // never become an analytical-shape source. This is deliberately stricter
+  // than generic conversational context: the continuation changes execution.
+  if (!source || agentRunString(source.runStatus) !== 'completed'
+    || !isTrustedConversationTurn(source as Parameters<typeof isTrustedConversationTurn>[0])
+    || !conversationTurnHasUsefulResult(source)) return undefined;
+  const result = agentRunRecord(source.result);
+  if (!result) return undefined;
+  const resultFingerprint = stableConversationResultFingerprint(result);
+  if (!resultFingerprint) return undefined;
+
+  const contract = agentRunRecord(source.contract);
+  const measures = boundedAnalyticalShapeTerms([
+    ...(conversationStringArray(source.requestedMeasures) ?? []),
+    ...(conversationStringArray(contract?.measures) ?? []),
+    ...(conversationStringArray(result.measureColumns) ?? []),
+  ]);
+  // A result with no identified metric cannot safely supply an analytical
+  // shape. The next turn remains a fresh Ask rather than inheriting a random
+  // projection from a row-oriented result.
+  if (measures.length === 0) return undefined;
+  const dimensions = boundedAnalyticalShapeTerms([
+    ...(conversationStringArray(source.requestedDimensions) ?? []),
+    ...(conversationStringArray(contract?.dimensions) ?? []),
+    ...(conversationStringArray(followUp.dimensions) ?? []),
+  ]);
+  return {
+    version: 1,
+    kind: 'analytical_shape',
+    values: [],
+    measures,
+    ...(dimensions.length ? { dimensions } : {}),
+    sourceTurnId,
+    resultFingerprint,
+  };
+}
+
+function seedWithTrustedAnalyticalShapeAnchor(
+  seed: AnalyticalRequirementSeedV1,
+  anchor: TrustedAnalyticalTaskAnchorV1,
+): AnalyticalRequirementSeedV1 {
+  const measures = boundedAnalyticalShapeTerms([
+    ...seed.requirements.measures,
+    ...(anchor.measures ?? []),
+  ]);
+  const dimensions = boundedAnalyticalShapeTerms([
+    ...seed.requirements.dimensions,
+    ...(anchor.dimensions ?? []),
+  ]);
+  const displayTerms = dimensions
+    .map((dimension) => dimension.replace(/[_.:/-]+/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter((dimension) => /\b(?:name|label|email)\b$/i.test(dimension));
+  const entityTerms = displayTerms
+    .map((dimension) => dimension.replace(/\b(?:name|label|email)\b$/i, '').trim())
+    .filter(Boolean);
+  return buildAnalyticalRequirementSeedV1({
+    question: seed.sourceQuestion,
+    requirements: {
+      ...seed.requirements,
+      measures,
+      dimensions,
+      entityTerms: boundedAnalyticalShapeTerms([...seed.requirements.entityTerms, ...entityTerms]),
+      entityDisplayTerms: boundedAnalyticalShapeTerms([...seed.requirements.entityDisplayTerms, ...displayTerms]),
+      outputTerms: boundedAnalyticalShapeTerms([
+        ...(seed.requirements.outputTerms ?? []),
+        ...dimensions,
+      ]),
+    },
+  });
+}
+
+/**
  * Materialize a plural prior-result reference before the authoritative Ask
  * runtime frames the request.  `buildAgentRunContextPack` also classifies
  * follow-ups for retrieval diagnostics, but it runs after the Ask runtime has
@@ -2290,10 +2625,10 @@ export function hydratePersistedSelectedResultBinding(
  * This is intentionally an HTTP-host boundary: it accepts only the
  * server-reconstructed conversation envelope for the requested persisted
  * thread. Browser conversation JSON cannot supply this filter, a prior member
- * set, or a host requirement seed. The values remain local execution context;
- * they are never copied into provider prompts.
+ * set, a shape anchor, or a host requirement seed. The values remain local
+ * execution context; they are never copied into provider prompts.
  */
-function hydratePersistedPriorResultMemberBinding(request: AgentRunRequest): void {
+export function hydratePersistedPriorResultMemberBinding(request: AgentRunRequest): void {
   if (!request.threadId || request.askAnalystTaskChild || request.researchBranch) return;
   const context = request.conversationContext;
   const envelope = agentRunRecord(context?.conversationEnvelope);
@@ -2310,6 +2645,16 @@ function hydratePersistedPriorResultMemberBinding(request: AgentRunRequest): voi
     return;
   }
   if (followUp?.binding !== 'prior_result') return;
+
+  const trustedTaskAnchor = trustedAnalyticalShapeAnchorFromFollowUp(request, context, followUp);
+  if (trustedTaskAnchor) {
+    request.trustedTaskAnchor = trustedTaskAnchor;
+    const seed = request.hostRequirementSeed?.version === 1
+      && request.hostRequirementSeed.sourceQuestion === request.question
+      ? request.hostRequirementSeed
+      : buildAnalyticalRequirementSeedV1({ question: request.question });
+    request.hostRequirementSeed = seedWithTrustedAnalyticalShapeAnchor(seed, trustedTaskAnchor);
+  }
 
   const rawBinding = followUp.memberBindings?.find((binding) =>
     binding.source === 'prior_result' && binding.values.length > 0);
@@ -2559,6 +2904,7 @@ export function conversationTurnInputFromRun(run: AgentRun): ConversationTurnInp
           rowsSample,
           dimensionValues,
           ...(memberSets?.length ? { memberSets } : {}),
+          ...(resultFingerprint ? { resultFingerprint } : {}),
           measureColumns,
           rowCount: typeof rowCountRaw === 'number' ? rowCountRaw : rows.length || undefined,
         }
@@ -4122,11 +4468,16 @@ async function executePreparedArtifactTraceBoundary<T>(input: {
 
 export async function startLocalServer(opts: LocalServerOptions): Promise<number> {
   const { rootDir, executor, connection: rawConnection, preferredPort, projectRoot = process.cwd() } = opts;
+  const projectWatcherFactory: typeof watch = opts.projectWatcherFactory ?? watch;
   const bindHost = opts.host ?? process.env.DQL_HOST ?? '127.0.0.1';
   const loopback = bindHost === '127.0.0.1' || bindHost === 'localhost' || bindHost === '::1';
   const authToken = opts.authToken ?? process.env.DQL_SERVER_TOKEN;
   const trustedCliTraceToken = opts.trustedCliTraceToken;
   const cliAskTraceCapabilities = createLocalCliAskTraceCapabilityRegistryV1();
+  // Process-local and deliberately non-persistent. Its opaque tokens are
+  // attached only to the transient retrieval candidate that the runtime will
+  // immediately consume/strip before any planner or trace projection.
+  const literalProbeCapabilities = createLocalLiteralProbeCapabilityRegistryV1();
   // An ephemeral `dql agent ask` runtime receives its one-shot capability from
   // its parent process. Register it through the same short-lived, scoped
   // registry used by an already-running loopback runtime's challenge endpoint.
@@ -6331,7 +6682,7 @@ function analyticalFailureSummary(
         ...(error || answer?.kind === 'no_answer' ? {
           gap: childResults.find((candidate) => candidate.task.id === task.id)?.dependencyGap ?? buildCoverageGap({
             code: answer?.refusalCode === 'ambiguous' ? 'AMBIGUOUS_MEANING' : 'EXECUTION_FAILED',
-            phase: answer?.executionError ? 'execution' : 'meaning',
+            phase: answer && agentAnswerHasExecutionBoundaryFailure(answer) ? 'execution' : 'meaning',
             message: error ?? answer?.answer ?? answer?.text ?? 'The task did not produce an accepted analytical result.',
             searchedSources: routeDecision?.retrievalEvidence?.candidateIds ?? [],
             attemptedRoutes: ['certified', 'semantic', 'governed_relational', 'generated'],
@@ -6714,10 +7065,18 @@ function analyticalFailureSummary(
       || governedAnswer.dqlArtifact?.kind === 'certified_block'
     ));
     const isExploratory = Boolean(governedAnswer.exploratoryCandidate);
-    const isExecutionFailure = agentAnswerHasExecutionFailure(governedAnswer);
+    // An older answer-loop compatibility carrier could retain grounding_gap
+    // after SQL/connection execution had already failed. Keep the source
+    // answer unchanged for its detailed evidence, but make every durable
+    // run-facing projection name the actual post-freeze boundary.
+    const terminalFailureProjection = projectTerminalAnalyticalFailureForRun(governedAnswer);
+    const isExecutionFailure = terminalFailureProjection.executionFailure;
+    const projectedTerminalAnswer = terminalFailureProjection.answer;
     const isGroundingGap = governedAnswer.kind === 'no_answer'
       && (governedAnswer.refusalCode === 'grounding_gap' || governedAnswer.refusalCode === 'modeling_gap')
-      && !isExploratory;
+      && !isExploratory
+      && !isExecutionFailure
+      && !governedAnswer.analyticalFailure;
     const isProviderError = governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'provider_error';
     const isAnalyticalFailure = Boolean(governedAnswer.analyticalFailure);
     // AGT-004: a rejected attribution/export/proof policy is a deliberate
@@ -6777,7 +7136,7 @@ function analyticalFailureSummary(
     // Grounding/compiler gaps are terminal review states with their evidence trace;
     // provider outages are blocked so the UI can offer an explicit retry.
     const needsClarification = governedAnswer.kind === 'no_answer'
-      && !isGroundingGap && !isProviderError && !isModelDeclined && !isPolicyBlocked;
+      && !isTerminalFailure && !isGroundingGap && !isProviderError && !isModelDeclined && !isPolicyBlocked;
     // A run that ASKED THE USER A QUESTION is a clarify turn, whatever route it
     // would have taken had it answered. Persisting the resolved analytical route
     // instead (`generated_answer`) meant the engine's clarification-continuation
@@ -7074,12 +7433,12 @@ function analyticalFailureSummary(
           }] : []),
         ];
     const runDispatchEvidence = agentRunProviderEvidenceContext.getStore()?.snapshot(
-      governedAnswer.refusalCode ?? 'none',
+      terminalFailureProjection.fallbackReason ?? 'none',
     );
     const finalProviderEgressReceipts = runDispatchEvidence?.providerEgressReceipts
       ?? providerEgressReceipts;
     const finalTelemetry = agentRunTelemetryForAnswer(
-      governedAnswer,
+      projectedTerminalAnswer,
       finalProviderEgressReceipts,
       Date.now() - runStartedAtMs,
       narrationDurationMs,
@@ -7092,7 +7451,7 @@ function analyticalFailureSummary(
     return {
       resolvedRoute,
       answerRefusalCode: governedAnswer.kind === 'no_answer'
-        ? governedAnswer.refusalCode
+        ? projectedTerminalAnswer.refusalCode
         : semanticAggregationBlocked
           ? 'policy_blocked'
           : undefined,
@@ -7117,8 +7476,8 @@ function analyticalFailureSummary(
             // Was 'Failed governed analytical run' — internal orchestration state
             // used as the card heading a user reads. It names our pipeline, not
             // what happened to their question.
-            terminalFailureTitle(governedAnswer),
-            governedAnswer,
+            terminalFailureProjection.title,
+            projectedTerminalAnswer,
             governedAnswer.sourceCertifiedBlock ?? governedAnswer.block?.name,
             'blocked',
           )]
@@ -7280,7 +7639,7 @@ function analyticalFailureSummary(
             },
           ),
         ] : []),
-        ...(governedAnswer.executionError ? [
+        ...(isExecutionFailure && governedAnswer.executionError ? [
           agentRunEvaluation('execution-error', 'Execution error', false, 'warning', governedAnswer.executionError),
         ] : []),
         // Keep only the content-free receipt codes in the durable inspection
@@ -7309,25 +7668,6 @@ function analyticalFailureSummary(
         ? { analyticalExecutionRepairFreeze: governedAnswer.exploratoryRepairExecutionFreeze }
         : {}),
     };
-  };
-
-  /**
-   * A heading for a run that ended without an answer, in the user's terms.
-   *
-   * Says WHICH stage stopped, because "it failed" and "it was stopped before
-   * running" call for different next moves: one is worth retrying, the other
-   * needs the question or the model changed.
-   */
-  const terminalFailureTitle = (answer: { refusalCode?: string }): string => {
-    switch (answer.refusalCode) {
-      case 'policy_blocked': return 'Blocked by a governance policy';
-      case 'modeling_gap': return 'Not modeled yet';
-      case 'grounding_gap': return 'Not enough context to answer safely';
-      case 'model_declined': return 'The assistant declined to answer';
-      case 'provider_error': return 'The AI provider did not respond';
-      case 'ambiguous': return 'Needs one detail before running';
-      default: return 'No answer was produced';
-    }
   };
 
   const conversationRunExecutor: AgentRouteExecutor = async ({ request, routeDecision, emitAnswerDelta }) => {
@@ -9646,6 +9986,15 @@ function analyticalFailureSummary(
   // lookup, and governed execution for the lifetime of a request. This removes
   // both positional catalog truncation and the previous duplicate retrieval pass.
   const preparedAgentContextPacks = new WeakMap<AgentRunRequest, LocalContextPack>();
+  // The catalog snapshot and compiled DQL manifest have intentionally distinct
+  // snapshot-ID namespaces. Keep the manifest selected at the *same request
+  // start* beside the pack instead of comparing those unrelated IDs later.
+  // The current manifest service must still report the same ID before this
+  // carrier is used, and execution reasserts that ID before it can run.
+  const preparedAgentManifestSnapshots = new WeakMap<AgentRunRequest, {
+    snapshotId: string;
+    manifest: DQLManifest;
+  }>();
   // The candidate-ID meaning call is the sole model-owned relevance decision
   // for an ordinary Ask.  Do not attach the optional raw-provider cross
   // encoder here: it bypasses the request-scoped dispatch ledger and can turn
@@ -9762,6 +10111,22 @@ function analyticalFailureSummary(
           })
         : undefined,
     }).then((pack) => {
+      // Do not associate a catalog pack with a manifest if project inputs
+      // changed while retrieval was assembling it. In that case the normal
+      // no-attestation path remains fail-closed and the later execution
+      // boundary will require a fresh request/snapshot.
+      // Refresh from the project inputs rather than reading the service's last
+      // cached value. `buildLocalContextPack` and the metadata catalog use
+      // their own snapshot identifiers, so a cached manifest can be older
+      // even when the source files which defined this request have not
+      // changed. Recomputing the manifest source fingerprint is the one
+      // authoritative freshness check for this request-scoped carrier.
+      if (projectSnapshot().snapshotId === snapshot.snapshotId) {
+        preparedAgentManifestSnapshots.set(request, {
+          snapshotId: snapshot.snapshotId,
+          manifest: snapshot.manifest,
+        });
+      }
       preparedAgentContextPacks.set(request, pack);
       pendingAgentContextPacks.delete(request);
       return pack;
@@ -9915,7 +10280,7 @@ function analyticalFailureSummary(
         },
       };
     }
-    const evidence = toAgentRetrievalEvidence(meaningEvidence, pack.questionPlan, {
+    let evidence = toAgentRetrievalEvidence(meaningEvidence, pack.questionPlan, {
       snapshotId: pack.knowledgeLens.snapshotId,
       sourceFingerprint: pack.freshness.fingerprint ?? undefined,
       knowledgeLens: pack.knowledgeLens,
@@ -9930,6 +10295,69 @@ function analyticalFailureSummary(
       // relevance-only package can prune it.
       preferSnapshotCandidates: true,
     });
+    // The pack's fused snapshot is intentionally bounded, but an operator may
+    // have explicitly authorized one exact physical categorical field for a
+    // cold literal-existence probe. Re-open only the same immutable snapshot
+    // and retain that field plus its owning relation before Ask applies the
+    // 32/16 role caps. This is not another retrieval or provider loop.
+    const runtimeValueGrounding = resolveAgentRuntimeValueGrounding(projectConfig);
+    if (runtimeValueGrounding.mode === 'safe_automatic') {
+      try {
+        const snapshotLease = acquireActiveKnowledgeSnapshot(projectRoot);
+        try {
+          if (snapshotLease.snapshotId === pack.knowledgeLens.snapshotId) {
+            const pinnedEvidence = pinConfiguredRuntimeValueGroundingEvidence({
+              evidence,
+              question: request.question,
+              policy: runtimeValueGrounding,
+              catalogObjects: snapshotLease.catalog.listAllObjects({
+                objectTypes: ['dbt_column', 'dbt_model', 'dbt_source'],
+              }),
+            });
+            // The initial pin merely retains a configured physical catalog
+            // card in the same immutable evidence snapshot. Only after that
+            // card is present can this server mint a transient opaque token
+            // bound to its exact request/run/snapshot/field identity. The
+            // token never carries relation/column metadata and is stripped by
+            // the Ask runtime before planner/trace/persistence projections.
+            const probeCandidates = pinnedEvidence.candidates
+              .map((candidate) => ({ candidate, target: agentLiteralProbeTarget(candidate) }))
+              .filter((item): item is { candidate: AgentEvidenceCandidate; target: NonNullable<ReturnType<typeof agentLiteralProbeTarget>> } =>
+                Boolean(item.target)
+                && isAgentValueProbeColumn(item.target!.column)
+                && isExplicitlySearchSafeAgentColumn(item.target!.table, item.target!.column, runtimeValueGrounding.searchSafeColumns));
+            if (request.runId && probeCandidates.length === 1) {
+              const probeCandidate = probeCandidates[0]!;
+              const token = literalProbeCapabilities.issue({
+                request,
+                snapshotId: snapshotLease.snapshotId,
+                candidate: probeCandidate.candidate,
+                relation: probeCandidate.target.table.relation,
+                column: probeCandidate.target.column.name,
+              });
+              evidence = token
+                ? pinConfiguredRuntimeValueGroundingEvidence({
+                    evidence: pinnedEvidence,
+                    question: request.question,
+                    policy: runtimeValueGrounding,
+                    catalogObjects: snapshotLease.catalog.listAllObjects({
+                      objectTypes: ['dbt_column', 'dbt_model', 'dbt_source'],
+                    }),
+                    literalProbeToken: token,
+                  })
+                : pinnedEvidence;
+            } else {
+              evidence = pinnedEvidence;
+            }
+          }
+        } finally {
+          snapshotLease.release();
+        }
+      } catch {
+        // An unavailable active snapshot cannot widen the existing evidence.
+        // The normal bounded snapshot/coverage path remains authoritative.
+      }
+    }
     // Preserve real snapshot/lane outcomes for the router receipt. These are
     // not reconstructed later from candidate IDs: a source with no selected
     // card can be empty, stale, errored, or intentionally skipped.
@@ -9968,7 +10396,22 @@ function analyticalFailureSummary(
     ];
     // `compatible` is declared immediately below. Build IDs from the adapter
     // output first, then retain them unchanged through compatibility filtering.
-    const compatible = applyContextPackCompatibility(evidence, pack, request.selectedEvidenceId);
+    const compatibleBase = applyContextPackCompatibility(evidence, pack, request.selectedEvidenceId);
+    // The project snapshot is already frozen by buildAgentRunContextPack. A
+    // declared draft/review path may become an exploratory candidate only
+    // when that *same* immutable manifest proves it structurally safe. This
+    // is a host attestation, not a metadata mutation or a planner hint.
+    const requestManifestSnapshot = preparedAgentManifestSnapshots.get(request);
+    // Reassert source freshness before admitting the request-scoped manifest
+    // carrier. The context pack's knowledge-lens ID belongs to a different
+    // namespace and must never be used as a manifest compatibility test.
+    const currentSnapshot = projectSnapshot();
+    const compatible = attestExploratoryRelationshipEvidence(
+      compatibleBase,
+      requestManifestSnapshot && currentSnapshot.snapshotId === requestManifestSnapshot.snapshotId
+        ? requestManifestSnapshot.manifest
+        : undefined,
+    );
     for (const descriptor of sourceDescriptors) {
       const ids = compatible.candidates
         .filter(descriptor.matches)
@@ -10195,6 +10638,101 @@ function analyticalFailureSummary(
     getEvidence: buildAgentRunEvidence,
     getCatalogContext: buildRankedAgentRunCatalogContext,
   });
+  // Cold runtime-value indexes are common immediately after a project opens.
+  // This is deliberately a *single* host-owned exact existence check, not a
+  // value-search tool: it may operate only on one already-qualified snapshot
+  // field that the project explicitly allowlists, and it returns no row/value
+  // payload to the Ask runtime or trace.
+  const probeAskLiteralGrounding = async (
+    input: AskLiteralGroundingProbeRequestV1,
+  ): Promise<AskLiteralGroundingProbeResultV1> => {
+    if (input.signal?.aborted) {
+      return { version: 1, status: 'denied', reasonCode: 'literal_probe_cancelled' };
+    }
+    const grounding = resolveAgentRuntimeValueGrounding(projectConfig);
+    if (grounding.mode !== 'safe_automatic') {
+      return { version: 1, status: 'disabled', reasonCode: 'runtime_value_grounding_disabled' };
+    }
+    // The token carries no relation, column, or query authority. It names one
+    // server-held record only; reject copied/forged/multiple tokens before a
+    // target is even constructed.
+    const tokenCandidates = input.candidates.filter((candidate) =>
+      typeof candidate.hostLiteralProbeToken === 'string' && candidate.hostLiteralProbeToken.trim().length > 0);
+    if (tokenCandidates.length !== 1) {
+      return {
+        version: 1,
+        status: tokenCandidates.length > 1 ? 'ambiguous' : 'denied',
+        reasonCode: tokenCandidates.length > 1 ? 'literal_probe_capability_ambiguous' : 'literal_probe_capability_missing',
+      };
+    }
+    const candidate = tokenCandidates[0]!;
+    let snapshotLease: ReturnType<typeof acquireActiveKnowledgeSnapshot> | undefined;
+    try {
+      // Validate the frozen metadata snapshot before target construction. A
+      // request that raced an index refresh must re-retrieve; it may not reuse
+      // an opaque token against the new catalog.
+      snapshotLease = acquireActiveKnowledgeSnapshot(projectRoot);
+      if (!input.snapshotId || snapshotLease.snapshotId !== input.snapshotId) {
+        return { version: 1, status: 'denied', reasonCode: 'literal_probe_snapshot_stale' };
+      }
+      const target = agentLiteralProbeTarget(candidate);
+      if (!target
+        || !isAgentValueProbeColumn(target.column)
+        || !isExplicitlySearchSafeAgentColumn(target.table, target.column, grounding.searchSafeColumns)) {
+        return { version: 1, status: 'denied', reasonCode: 'literal_probe_capability_target_invalid' };
+      }
+      // The registry validates request object + engine-issued run ID +
+      // immutable snapshot + exact candidate IDs + physical relation/column.
+      // It consumes the nonce before any connection or SQL work.
+      const authorized = literalProbeCapabilities.consume({
+        token: candidate.hostLiteralProbeToken,
+        request: input.request,
+        snapshotId: input.snapshotId,
+        activeSnapshotId: snapshotLease.snapshotId,
+        candidate,
+        relation: target.table.relation,
+        column: target.column.name,
+      });
+      if (!authorized) {
+        return { version: 1, status: 'denied', reasonCode: 'literal_probe_capability_denied' };
+      }
+      // Reassert active-snapshot continuity immediately before the connection
+      // boundary. A metadata refresh after target construction still means no
+      // SQL for this one-shot token.
+      const currentLease = acquireActiveKnowledgeSnapshot(projectRoot);
+      try {
+        if (currentLease.snapshotId !== snapshotLease.snapshotId) {
+          return { version: 1, status: 'denied', reasonCode: 'literal_probe_snapshot_changed' };
+        }
+      } finally {
+        currentLease.release();
+      }
+      let targetConnection: ConnectionConfig;
+      try {
+        targetConnection = await resolveAgentRunExecutionConnection(input.request);
+      } catch {
+        return { version: 1, status: 'unavailable', reasonCode: 'literal_probe_connection_unavailable' };
+      }
+      try {
+        const result = await withAgentValueProbeTimeout(
+          executor.executeQuery(
+            buildAgentExactValueProbeSql(target.table, target.column.name, input.literal, targetConnection),
+            [],
+            runtimeVariables({}),
+            targetConnection,
+          ),
+          2_000,
+        );
+        return result.rows.length > 0
+          ? { version: 1, status: 'matched', candidateId: candidate.id, reasonCode: 'exact_value_probe_match' }
+          : { version: 1, status: 'no_match', reasonCode: 'exact_value_probe_no_match' };
+      } catch {
+        return { version: 1, status: 'unavailable', reasonCode: 'literal_probe_execution_unavailable' };
+      }
+    } finally {
+      snapshotLease?.release();
+    }
+  };
   // V1.15 has one Ask entrypoint. The existing hybrid router survives only as
   // its safe compiler broker; it receives the runtime-owned snapshot/frame and
   // cannot acquire another source of meaning. Shadow records the same state
@@ -10203,6 +10741,7 @@ function analyticalFailureSummary(
     mode: opts.askAnalystRuntimeMode ?? 'authoritative',
     getEvidence: buildAgentRunEvidence,
     compilerBroker: agentRunCompilerBroker,
+    probeLiteralGrounding: probeAskLiteralGrounding,
     // Test/offline hosts may explicitly opt out of a provider meaning call.
     // The runtime still accepts only a uniquely exact semantic binding and
     // leaves all remaining ambiguity/coverage/relationship decisions to its
@@ -13042,6 +13581,40 @@ function analyticalFailureSummary(
   const sseClients = new Set<ServerResponse>();
   const projectWatchers: Array<ReturnType<typeof watch>> = [];
   let runtimeClosing = false;
+  let watcherWarningEmitted = false;
+
+  const closeProjectWatcher = (watcher: ReturnType<typeof watch>) => {
+    const index = projectWatchers.indexOf(watcher);
+    if (index >= 0) projectWatchers.splice(index, 1);
+    try { watcher.close(); } catch { /* watcher already closed or unavailable */ }
+  };
+
+  /**
+   * `fs.watch()` reports descriptor exhaustion asynchronously. The synchronous
+   * creation try/catch below cannot catch that emitter error, so contain it at
+   * the watcher boundary. Watching only feeds hot refresh; it is never the
+   * authority for persisted project or run state, which remains available.
+   */
+  const registerProjectWatcher = (watcher: ReturnType<typeof watch>, scope: string) => {
+    projectWatchers.push(watcher);
+    let watcherFailed = false;
+    // Keep the listener installed after the first failure. A queued second
+    // `error` event after `close()` must not become a new unhandled exception.
+    watcher.on('error', (error: unknown) => {
+      if (watcherFailed) return;
+      watcherFailed = true;
+      closeProjectWatcher(watcher);
+      if (runtimeClosing || watcherWarningEmitted) return;
+      watcherWarningEmitted = true;
+      const code = error && typeof error === 'object' && (error as { code?: unknown }).code === 'EMFILE'
+        ? 'EMFILE'
+        : 'unavailable';
+      // Do not include a project path or the raw OS error: both can be noisy or
+      // sensitive. One bounded warning is enough to explain the degraded hot
+      // refresh without masking a healthy local server or durable persistence.
+      console.warn(`[dql] Project file watching was degraded (${code}) for ${scope}; automatic refresh is unavailable for that source, but the server and persisted local state remain available. Restart DQL to resume watching.`);
+    });
+  };
 
   // Watch all Git-owned authoring roots. Domain Packages are recursive and are
   // the canonical home for modeling, skills, blocks, notebooks, Apps, and evals.
@@ -13050,7 +13623,7 @@ function analyticalFailureSummary(
       const watchDir = join(projectRoot, dir);
       if (!existsSync(watchDir)) continue;
       try {
-        const watcher = watch(watchDir, { persistent: false, recursive: true }, (eventType, filename) => {
+        const watcher = projectWatcherFactory(watchDir, { persistent: false, recursive: true }, (eventType, filename) => {
           if (runtimeClosing) return;
           if (!filename) return;
           const path = `${dir}/${filename}`;
@@ -13073,7 +13646,7 @@ function analyticalFailureSummary(
             }).catch(() => { /* reload errors are non-fatal */ });
           }
         });
-        projectWatchers.push(watcher);
+        registerProjectWatcher(watcher, 'project authoring');
       } catch { /* dir not watchable */ }
     }
     // A dbt repository commonly keeps its shared Skills folder beside the DQL
@@ -13083,7 +13656,7 @@ function analyticalFailureSummary(
     const defaultSkillsRoot = join(projectRoot, 'skills');
     if (existsSync(configuredSkillsRoot) && resolve(configuredSkillsRoot) !== resolve(defaultSkillsRoot)) {
       try {
-        const watcher = watch(configuredSkillsRoot, { persistent: false, recursive: true }, (eventType, filename) => {
+        const watcher = projectWatcherFactory(configuredSkillsRoot, { persistent: false, recursive: true }, (eventType, filename) => {
           if (runtimeClosing || !filename) return;
           const path = relative(projectRoot, join(configuredSkillsRoot, String(filename))).replace(/\\/g, '/');
           invalidateAgentProjectState(projectRoot);
@@ -13093,13 +13666,13 @@ function analyticalFailureSummary(
             try { client.write(`event: change\ndata: ${payload}\n\n`); } catch { sseClients.delete(client); }
           }
         });
-        projectWatchers.push(watcher);
+        registerProjectWatcher(watcher, 'configured skills');
       } catch { /* configured Skills folder is not watchable */ }
     }
     const configuredDbtManifest = resolveDbtManifestPath(projectRoot, projectConfig);
     if (configuredDbtManifest && existsSync(dirname(configuredDbtManifest))) {
       try {
-        const watcher = watch(dirname(configuredDbtManifest), { persistent: false }, (_eventType, filename) => {
+        const watcher = projectWatcherFactory(dirname(configuredDbtManifest), { persistent: false }, (_eventType, filename) => {
           if (runtimeClosing) return;
           if (!filename || !['manifest.json', 'catalog.json', 'semantic_manifest.json', 'run_results.json'].includes(String(filename))) return;
           invalidateAgentProjectState(projectRoot);
@@ -13115,7 +13688,7 @@ function analyticalFailureSummary(
             }
           }).catch(() => { /* artifact reload errors are exposed in diagnostics */ });
         });
-        projectWatchers.push(watcher);
+        registerProjectWatcher(watcher, 'dbt artifacts');
       } catch { /* dbt artifact directory not watchable */ }
     }
   }
@@ -24561,7 +25134,7 @@ table: ${table}${tagList}
 
   server.once('close', () => {
     runtimeClosing = true;
-    for (const watcher of projectWatchers) watcher.close();
+    for (const watcher of [...projectWatchers]) closeProjectWatcher(watcher);
     projectWatchers.length = 0;
     unsubscribeOperationEvents();
     projectRefreshCoordinator.close();
@@ -27885,7 +28458,9 @@ function agentRunTelemetryForAnswer(
     repairs: Math.max(engineRepairAttempts, counters?.repairs ?? 0),
     egressReceipts: egressReceipts.length,
     ...(typeof warehouseDurationMs === 'number' ? { warehouseDurationMs: Math.max(0, warehouseDurationMs) } : {}),
-    ...(answer.refusalCode ? { fallbackReason: answer.refusalCode } : {}),
+    ...(terminalFallbackReasonForAnswer(answer)
+      ? { fallbackReason: terminalFallbackReasonForAnswer(answer) }
+      : {}),
   };
 }
 
@@ -34353,6 +34928,18 @@ type AskPlannerPreflightError = Error & {
   providerDiagnostic: ProviderFailureDiagnosticV1;
 };
 
+/**
+ * Generic providers expose boolean readiness. A server-owned subscription
+ * adapter may additionally retain a redacted reason for a false result; keep
+ * that detail at the preflight boundary rather than guessing from a bare
+ * `available() === false`.
+ */
+function providerReadinessFailure(provider: AgentProvider): Error | undefined {
+  const candidate = provider as AgentProvider & { getReadinessFailure?: () => unknown };
+  const failure = candidate.getReadinessFailure?.();
+  return failure instanceof Error ? failure : undefined;
+}
+
 function plannerProviderSettingsId(provider: AgentProvider | null | undefined): ProviderSettingsId | undefined {
   switch (provider?.name) {
     case 'claude': return 'anthropic';
@@ -34483,7 +35070,13 @@ export async function preflightAskAnalyticalPlannerProvider(input: {
   }
   try {
     const ready = await input.provider.available();
-    if (!ready) throw providerPreflightError({ projectRoot: input.projectRoot, provider: input.provider });
+    if (!ready) {
+      throw providerPreflightError({
+        projectRoot: input.projectRoot,
+        provider: input.provider,
+        error: providerReadinessFailure(input.provider),
+      });
+    }
     observer.finishSpan(initialSpan, {
       outcome: 'ok',
       reasonCode: 'completed',
@@ -39149,18 +39742,16 @@ function deterministicExploratoryProposalFromRuntime(
   // nevertheless immutable, and is the authoritative signal for a
   // provider-free single-relation physical program. Prefer it, retaining the
   // V1 tool receipt as a backwards-compatible fallback for persisted runs.
-  const hasV2DeterministicReceipt = state.version === 2
-    && state.planningMode === 'deterministic_binding'
-    && (state.planningReceipt?.plannerCalls === 0
-      || state.workspace.tools.some((tool) =>
-        tool.kind === 'provider_meaning'
-          && tool.status === 'skipped'
-          && tool.reasonCode === 'deterministic_single_relation_physical_binding'));
+  const v3State = state.version === 3 ? state : undefined;
+  const hasDeterministicPlanningReceipt = v3State?.planningMode === 'deterministic_binding'
+    && v3State.planningReceipt?.mode === 'deterministic_binding'
+    && v3State.planningReceipt.plannerCalls === 0
+    && v3State.planningReceipt.verification.status === 'valid';
   const hasLegacyDeterministicReceipt = state.workspace.tools.some((tool) =>
     tool.kind === 'provider_meaning'
       && tool.status === 'skipped'
       && tool.reasonCode === 'deterministic_single_relation_physical_binding');
-  const deterministicBinding = hasV2DeterministicReceipt || hasLegacyDeterministicReceipt;
+  const deterministicBinding = hasDeterministicPlanningReceipt || hasLegacyDeterministicReceipt;
   if (!deterministicBinding) return undefined;
 
   const program = state.program;
@@ -39922,6 +40513,13 @@ export interface AgentRuntimeValueGroundingPolicy {
 }
 
 /**
+ * Trace-only provenance for the two host-added catalog cards below. This is
+ * not a planner hint or an execution capability: it explains why an exact
+ * physical field was retained when ordinary fused ranking did not select it.
+ */
+export const AGENT_RUNTIME_VALUE_GROUNDING_PIN_REASON = 'host configured runtime value grounding pin';
+
+/**
  * Resolve the project-admin boundary for live value lookup. An absent/malformed
  * policy is deliberately disabled; a broad table or wildcard cannot make an
  * unknown column search-safe.
@@ -39934,7 +40532,11 @@ export function resolveAgentRuntimeValueGrounding(config: ProjectConfig): AgentR
   const searchSafeColumns = new Set(
     (configured.searchSafeColumns ?? [])
       .map(normalizeAgentSafeColumnReference)
-      .filter((value) => value.split('.').length >= 2 && !value.includes('*')),
+      // A bare `table.column` can name different objects in multiple schemas.
+      // Literal probes require the operator to name the complete physical
+      // relation plus column; this is an authorization boundary, not a
+      // convenience matcher.
+      .filter((value) => value.split('.').length >= 3 && !value.includes('*')),
   );
   return searchSafeColumns.size > 0
     ? { mode: 'safe_automatic', searchSafeColumns }
@@ -39951,11 +40553,145 @@ function isExplicitlySearchSafeAgentColumn(
   searchSafeColumns: ReadonlySet<string>,
 ): boolean {
   const qualified = normalizeAgentSafeColumnReference(`${table.relation}.${column.name}`);
-  const relationParts = table.relation.split('.').filter(Boolean);
-  const shortQualified = normalizeAgentSafeColumnReference(
-    `${relationParts.slice(-1)[0] ?? table.relation}.${column.name}`,
-  );
-  return searchSafeColumns.has(qualified) || searchSafeColumns.has(shortQualified);
+  return searchSafeColumns.has(qualified);
+}
+
+/**
+ * Preserve one explicitly configured physical categorical field in the Ask
+ * evidence snapshot before the runtime applies its 32/16 role-balanced caps.
+ *
+ * A cold runtime-value index is not evidence that a literal is absent. The
+ * host may therefore retain exactly one catalog column that an operator named
+ * in `runtimeValueGrounding`, together with exactly one owning dbt relation.
+ * It does not retain a semantic dimension as a value authority, infer a field
+ * from the question, or broaden a configuration with multiple candidate
+ * fields. The later exact value probe and relationship/compiler gates remain
+ * the only ways this card can become a filter or executable plan.
+ */
+export function pinConfiguredRuntimeValueGroundingEvidence(input: {
+  evidence: AgentRetrievalEvidence;
+  question: string;
+  policy: AgentRuntimeValueGroundingPolicy;
+  catalogObjects: readonly MetadataObject[];
+  /**
+   * Ephemeral host token issued by the local server registry after this exact
+   * catalog field was verified. It is opaque: relation/column authority stays
+   * in the registry and the Ask runtime strips this token before projection.
+   */
+  literalProbeToken?: string;
+}): AgentRetrievalEvidence {
+  const literals = currentQuestionLiteralMemberTerms(input.question);
+  if (input.policy.mode !== 'safe_automatic' || literals.length !== 1) return input.evidence;
+
+  // There is no safe host choice between two configured physical fields. A
+  // question literal alone cannot decide whether a project means city, sales
+  // region, account segment, or another allowed categorical field.
+  const configuredFields = [...input.policy.searchSafeColumns];
+  if (configuredFields.length !== 1) return input.evidence;
+  const configuredField = configuredFields[0]!;
+  const separator = configuredField.lastIndexOf('.');
+  if (separator <= 0 || separator === configuredField.length - 1) return input.evidence;
+  const configuredRelation = configuredField.slice(0, separator);
+  const configuredColumn = configuredField.slice(separator + 1);
+
+  const exactRelation = (object: MetadataObject): string | undefined => {
+    const relation = object.payload?.relation;
+    return typeof relation === 'string' && relation.trim().length > 0
+      ? relation.trim()
+      : undefined;
+  };
+  const eligible = (object: MetadataObject): boolean => !/\b(?:deleted|disabled|archived|invalid|conflict)\b/i.test(object.status ?? '');
+  const relationMatches = (relation: string | undefined): relation is string =>
+    Boolean(relation) && normalizeAgentSafeColumnReference(relation!) === configuredRelation;
+
+  // Limit authority to physical dbt catalog columns. An identically named
+  // semantic dimension can describe the business concept but never proves a
+  // warehouse value is safe to probe.
+  const columns = input.catalogObjects.filter((object) => {
+    if (object.objectType !== 'dbt_column' || !eligible(object)) return false;
+    const relation = exactRelation(object);
+    const dataType = typeof object.payload?.type === 'string' ? object.payload.type : undefined;
+    return relationMatches(relation)
+      && normalizeAgentSafeColumnReference(object.name) === configuredColumn
+      && isAgentValueProbeColumn({ name: object.name, ...(dataType ? { type: dataType } : {}) });
+  });
+  if (columns.length !== 1) return input.evidence;
+  const column = columns[0]!;
+  const relation = exactRelation(column);
+  if (!relation) return input.evidence;
+
+  const owningRelations = input.catalogObjects.filter((object) =>
+    (object.objectType === 'dbt_model' || object.objectType === 'dbt_source')
+    && eligible(object)
+    && relationMatches(exactRelation(object)));
+  if (owningRelations.length !== 1) return input.evidence;
+  const owner = owningRelations[0]!;
+  const declaredOwner = typeof column.payload?.model === 'string' ? column.payload.model.trim() : '';
+  if (declaredOwner && normalizeAgentSafeColumnReference(declaredOwner) !== normalizeAgentSafeColumnReference(owner.name)) {
+    return input.evidence;
+  }
+  const literalProbeToken = input.literalProbeToken?.trim() || undefined;
+
+  const cardFor = (object: MetadataObject, kind: AgentEvidenceCandidate['kind']): AgentEvidenceCandidate => {
+    const dataType = typeof object.payload?.type === 'string' ? object.payload.type : undefined;
+    return {
+      id: object.objectKey,
+      qualifiedId: object.fullName ?? object.objectKey,
+      kind,
+      trustTier: 'exploratory',
+      name: object.name,
+      ...(object.description ? { definition: object.description } : {}),
+      ...(dataType ? { dataType } : {}),
+      // Keep the exact configured physical relation, not a leaf/table guess.
+      sourceObjects: [`dbt:relation:${relation}`],
+      relevanceScore: 1,
+      matchReasons: [AGENT_RUNTIME_VALUE_GROUNDING_PIN_REASON],
+      compatibility: 'unknown',
+      eligible: true,
+      ...(kind === 'sql_column' && literalProbeToken ? { hostLiteralProbeToken: literalProbeToken } : {}),
+    };
+  };
+  const pins = [
+    cardFor(owner, owner.objectType === 'dbt_source' ? 'dbt_source' : 'dbt_model'),
+    cardFor(column, 'sql_column'),
+  ];
+  // A weak runtime-schema card can share a friendly/qualified leaf with the
+  // configured catalog column while omitting the exact physical relation
+  // reference that `agentLiteralProbeTarget` requires. Treating that as the
+  // pin already being present left the field visible in source coverage but
+  // unreachable by the host-only probe. Deduplicate only a structurally
+  // equivalent card: same kind/name and the one exact configured relation.
+  // This cannot broaden authority because `relation`/`column` above were
+  // already matched against the server-owned fully-qualified allowlist.
+  const structurallyEquivalentPins = (pin: AgentEvidenceCandidate): AgentEvidenceCandidate[] =>
+    input.evidence.candidates.filter((candidate) => {
+      if (candidate.kind !== pin.kind
+        || candidate.eligible === false
+        || candidate.compatibility === 'incompatible'
+        || normalizeAgentSafeColumnReference(candidate.name) !== normalizeAgentSafeColumnReference(pin.name)) return false;
+      const references = (candidate.sourceObjects ?? [])
+        .map((source) => /^(?:(?:runtime|dbt):relation|dbt:(?:model|source)|sql:table):(.+)$/i.exec(source.trim())?.[1])
+        .filter((source): source is string => Boolean(source))
+        .map(normalizeAgentSafeColumnReference);
+      return references.length === 1 && references[0] === normalizeAgentSafeColumnReference(relation);
+    });
+  const matchingColumns = structurallyEquivalentPins(pins[1]!);
+  const existingCandidates = matchingColumns.length > 0
+    ? input.evidence.candidates.map((candidate) => matchingColumns.includes(candidate)
+      ? literalProbeToken ? { ...candidate, hostLiteralProbeToken: literalProbeToken } : candidate
+      : candidate)
+    : input.evidence.candidates;
+  const missing = pins.filter((candidate) => structurallyEquivalentPins(candidate).length === 0);
+  if (missing.length === 0 && existingCandidates === input.evidence.candidates) return input.evidence;
+
+  // Prepend so the lifecycle projection retains the explicit pin even when
+  // the pre-existing fused snapshot already occupies its 80-card trace cap.
+  // The Ask runtime still owns its independent 32-card workspace and 16-card
+  // planner package caps.
+  return {
+    ...input.evidence,
+    candidates: [...missing, ...existingCandidates],
+  };
 }
 
 function rankAgentValueProbeColumns(
@@ -40026,6 +40762,61 @@ export function buildAgentValueProbeSql(
   ].join('\n');
 }
 
+/**
+ * One host-owned literal check used only after the immutable Ask snapshot has
+ * already selected a qualified physical column. Unlike the advisory value
+ * search above, this returns no values: the caller learns only whether the
+ * current literal exists exactly once on this approved field.
+ */
+export function buildAgentExactValueProbeSql(
+  table: AgentSchemaTable,
+  column: string,
+  literal: string,
+  connection: ConnectionConfig,
+): string {
+  const normalized = literal.toLowerCase().replace(/\s+/g, ' ').trim();
+  const relation = quoteAgentRelation(table.relation, connection);
+  const identifier = quoteAgentIdentifier(column, connection);
+  const castValue = `LOWER(CAST(${identifier} AS ${agentTextCastType(connection.driver)}))`;
+  return [
+    'SELECT 1 AS dql_literal_match',
+    `FROM ${relation}`,
+    `WHERE ${identifier} IS NOT NULL AND ${castValue} = ${sqlStringLiteral(normalized)}`,
+    'LIMIT 1',
+  ].join('\n');
+}
+
+/**
+ * Resolve a planner-admitted raw field back to exactly one physical relation.
+ * This deliberately accepts only explicit runtime/dbt relation references;
+ * a semantic model name or a bare table leaf is not a warehouse target.
+ */
+export function agentLiteralProbeTarget(
+  candidate: AgentEvidenceCandidate,
+): { table: AgentSchemaTable; column: AgentSchemaTable['columns'][number] } | undefined {
+  if (candidate.kind !== 'sql_column' || !candidate.qualifiedId?.trim()) return undefined;
+  const references = uniqueStrings((candidate.sourceObjects ?? [])
+    .map((source) => {
+      const match = /^(?:(?:runtime|dbt):relation|dbt:(?:model|source)|sql:table):(.+)$/i.exec(source.trim());
+      return match?.[1]?.trim() ?? '';
+    })
+    .filter(Boolean));
+  if (references.length !== 1) return undefined;
+  const column = candidate.name.trim();
+  if (!column) return undefined;
+  const relation = references[0]!;
+  return {
+    table: {
+      relation,
+      name: relation.split('.').filter(Boolean).at(-1) ?? relation,
+      source: 'immutable Ask snapshot qualified physical relation',
+      columns: [{ name: column, ...(candidate.dataType ? { type: candidate.dataType } : {}) }],
+      columnCompleteness: 'partial',
+    },
+    column: { name: column, ...(candidate.dataType ? { type: candidate.dataType } : {}) },
+  };
+}
+
 function agentTextCastType(driver?: string): string {
   switch (driver) {
     case 'bigquery':
@@ -40082,6 +40873,195 @@ function uniqueStrings(values: string[]): string[] {
     output.push(value);
   }
   return output;
+}
+
+/**
+ * Mark only a declared, same-snapshot exploratory path that the canonical
+ * analytical policy has accepted. The marker is deliberately host-local: no
+ * indexed card, provider proposal, client request, or persisted result can
+ * raise a draft edge to this state. The router still keeps it
+ * review-required because `automaticJoinAllowed` remains false.
+ */
+export function attestExploratoryRelationshipEvidence(
+  evidence: AgentRetrievalEvidence,
+  manifest: DQLManifest | undefined,
+): AgentRetrievalEvidence {
+  const relationships = Object.values(manifest?.modeling?.relationships ?? {});
+  if (relationships.length === 0) return evidence;
+  let changed = false;
+  const candidates = evidence.candidates.map((candidate) => {
+    const safety = candidate.relationshipSafety;
+    if (!safety?.length) return candidate;
+    const attested = safety.map((proof) => {
+      // An identity is only a lookup key. The actual authorization binds the
+      // physical endpoints and ordered keys from the retrieved proof to the
+      // edge selected by the immutable manifest policy. A same-ID card with
+      // different keys/endpoints is therefore a no-op, never an attestation.
+      //
+      // The catalog relationship projection intentionally carries canonical
+      // *entity* endpoints (for example `commerce::entity::customer`), while
+      // the exploratory compiler operates on the manifest's physical dbt
+      // relations. A host may bridge those two representations only through
+      // this same immutable manifest: the canonical entity pair and ordered
+      // key sequence must first match the declared relationship, then the
+      // selected manifest edge supplies the exact physical endpoints. This is
+      // not a name/leaf fallback and cannot attest an arbitrary retrieved
+      // relationship card.
+      const matches = relationships.flatMap((relationship) => {
+        if (!relationshipSafetyMatchesManifestRelationship(proof, relationship)) return [];
+        const plan = planAnalyticalPath(manifest!, {
+          entityIds: [relationship.from, relationship.to],
+        });
+        const exploratoryPath = plan.exploratoryPath;
+        if (plan.disposition !== 'exploratory_candidate' || !exploratoryPath?.fingerprint) return [];
+        const matchingEdges = exploratoryPath.edges.filter((value) =>
+          normalizedAgentRelationshipIdentity(value.relationshipId) === normalizedAgentRelationshipIdentity(relationship.id)
+          || normalizedAgentRelationshipIdentity(value.relationshipId) === normalizedAgentRelationshipIdentity(relationship.qualifiedId));
+        // An ID that appears on two physical edges is not sufficient
+        // authority. The proof must bind exactly one ordered edge/key sequence
+        // in the selected path.
+        if (matchingEdges.length !== 1) return [];
+        const edge = matchingEdges[0]!;
+        const physicalMatch = relationshipSafetyMatchesPlannedPhysicalEdge(proof, edge);
+        const logicalOrientation = physicalMatch
+          ? undefined
+          : relationshipSafetyMatchesManifestEntityEdge(proof, relationship, manifest!);
+        if (!physicalMatch && !logicalOrientation) return [];
+        return [{
+          fingerprint: exploratoryPath.fingerprint,
+          // Normalize an entity-endpoint catalog proof to the manifest's
+          // exact physical edge before it enters the exploratory closure. The
+          // path fingerprint below binds this marker to the selected complete
+          // manifest path, while the copied keys bind the compiler to the
+          // physical join predicate it must validate.
+          physicalProof: physicalMatch
+            ? proof
+            : {
+              ...proof,
+              from: logicalOrientation === 'forward' ? edge.fromRelation : edge.toRelation,
+              to: logicalOrientation === 'forward' ? edge.toRelation : edge.fromRelation,
+              keys: edge.keys.map((key) => logicalOrientation === 'forward'
+                ? ({ from: key.from, to: key.to })
+                : ({ from: key.to, to: key.from })),
+            },
+        }];
+      });
+      if (matches.length !== 1) return proof;
+      const match = matches[0]!;
+      changed = true;
+      return {
+        ...match.physicalProof,
+        exploratoryJoinAllowed: true,
+        // Bind the marker to the complete selected path, not just its friendly
+        // relationship ID. The runtime cannot reuse it after a manifest path
+        // or key sequence changes.
+        exploratoryPathFingerprint: match.fingerprint,
+      };
+    });
+    return attested.some((proof, index) => proof !== safety[index])
+      ? { ...candidate, relationshipSafety: attested }
+      : candidate;
+  });
+  return changed ? { ...evidence, candidates } : evidence;
+}
+
+function relationshipSafetyMatchesManifestRelationship(
+  safety: NonNullable<AgentEvidenceCandidate['relationshipSafety']>[number],
+  relationship: NonNullable<DQLManifest['modeling']>['relationships'][string],
+): boolean {
+  const safetyIdentities = new Set([
+    safety.id,
+    ...(safety.aliases ?? []),
+  ].map(normalizedAgentRelationshipIdentity).filter(Boolean));
+  const relationshipIdentities = [relationship.id, relationship.localId, relationship.qualifiedId]
+    .map(normalizedAgentRelationshipIdentity)
+    .filter(Boolean);
+  return relationshipIdentities.some((identity) => safetyIdentities.has(identity));
+}
+
+/**
+ * Match the catalog's canonical modeling endpoints to exactly the manifest
+ * relationship that owns a planned physical edge. This accepts only complete
+ * qualified/local entity identities; it never falls back to a display name or
+ * relation leaf. Reverse orientation is allowed only with the reversed
+ * ordered key sequence.
+ */
+function relationshipSafetyMatchesManifestEntityEdge(
+  safety: NonNullable<AgentEvidenceCandidate['relationshipSafety']>[number],
+  relationship: NonNullable<DQLManifest['modeling']>['relationships'][string],
+  manifest: DQLManifest,
+): 'forward' | 'reverse' | undefined {
+  const fromIdentities = manifestEntityIdentitySet(manifest, relationship.from);
+  const toIdentities = manifestEntityIdentitySet(manifest, relationship.to);
+  const safetyFrom = normalizedAgentLogicalIdentity(safety.from ?? '');
+  const safetyTo = normalizedAgentLogicalIdentity(safety.to ?? '');
+  if (!safetyFrom || !safetyTo || fromIdentities.size === 0 || toIdentities.size === 0) return undefined;
+  if (fromIdentities.has(safetyFrom)
+    && toIdentities.has(safetyTo)
+    && orderedAgentKeySignature(safety.keys) === orderedAgentKeySignature(relationship.keys)) {
+    return 'forward';
+  }
+  if (fromIdentities.has(safetyTo)
+    && toIdentities.has(safetyFrom)
+    && orderedAgentKeySignature(safety.keys, true) === orderedAgentKeySignature(relationship.keys)) {
+    return 'reverse';
+  }
+  return undefined;
+}
+
+function manifestEntityIdentitySet(manifest: DQLManifest, key: string): Set<string> {
+  const entity = manifest.modeling?.entities[key];
+  return new Set([
+    key,
+    entity?.id,
+    entity?.localId,
+    entity?.qualifiedId,
+  ].map((value) => normalizedAgentLogicalIdentity(value ?? '')).filter(Boolean));
+}
+
+function relationshipSafetyMatchesPlannedPhysicalEdge(
+  safety: NonNullable<AgentEvidenceCandidate['relationshipSafety']>[number],
+  edge: { fromRelation?: string; toRelation?: string; keys: Array<{ from: string; to: string }> },
+): boolean {
+  const safetyFrom = canonicalAgentPhysicalReference(safety.from ?? '');
+  const safetyTo = canonicalAgentPhysicalReference(safety.to ?? '');
+  const edgeFrom = canonicalAgentPhysicalReference(edge.fromRelation ?? '');
+  const edgeTo = canonicalAgentPhysicalReference(edge.toRelation ?? '');
+  if (!safetyFrom || !safetyTo || !edgeFrom || !edgeTo) return false;
+  const forward = safetyFrom === edgeFrom
+    && safetyTo === edgeTo
+    && orderedAgentKeySignature(safety.keys) === orderedAgentKeySignature(edge.keys);
+  const reverse = safetyFrom === edgeTo
+    && safetyTo === edgeFrom
+    && orderedAgentKeySignature(safety.keys, true) === orderedAgentKeySignature(edge.keys);
+  return forward || reverse;
+}
+
+function canonicalAgentPhysicalReference(value: string): string {
+  return value.trim()
+    .replace(/^(?:runtime:relation:|dbt:relation:|dbt:model:|dbt:source:|sql:table:)/i, '')
+    .replace(/[`"\[\]]/g, '')
+    .toLowerCase();
+}
+
+/** Canonical modeling identities intentionally retain their namespaces. */
+function normalizedAgentLogicalIdentity(value: string): string {
+  return value.trim().replace(/[`"\[\]]/g, '').toLowerCase();
+}
+
+function orderedAgentKeySignature(
+  keys: readonly { from: string; to: string }[],
+  reverse = false,
+): string {
+  return keys.map((key) => {
+    const from = canonicalAgentPhysicalReference(reverse ? key.to : key.from);
+    const to = canonicalAgentPhysicalReference(reverse ? key.from : key.to);
+    return `${from}=${to}`;
+  }).join('|');
+}
+
+function normalizedAgentRelationshipIdentity(value: string): string {
+  return value.trim().replace(/[`"\[\]]/g, '').toLowerCase();
 }
 
 function agentSchemaTokens(value: string): Set<string> {

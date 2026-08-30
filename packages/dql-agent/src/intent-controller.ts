@@ -22,6 +22,8 @@ import type { ResolvedAnalyticalPlan } from './resolved-analytical-plan.js';
 import type {
   AnalyticalCascadeDecisionV1,
   AnalyticalCoverageGapV1,
+  AnalyticalTaskOutcomeSummaryV1,
+  AnalyticalTaskOutcomeV1,
   AnalyticalProgram,
   AskAnalystState,
   BusinessAnswer,
@@ -197,6 +199,13 @@ export interface IntentDecision {
      * verbatim; it may not reuse task-1's meaning/cascade for task-2.
      */
     taskExecutions?: AskAnalystTaskExecutionV1[];
+    /**
+     * Additive V2 task receipt.  New authoritative compound Ask turns use it
+     * to retain independently completed siblings; older persisted decisions
+     * omit it and therefore keep their historical all-or-nothing behavior.
+     */
+    taskOutcomes?: AnalyticalTaskOutcomeV1[];
+    taskOutcomeSummary?: AnalyticalTaskOutcomeSummaryV1;
   };
 }
 
@@ -225,6 +234,10 @@ export interface AskAnalystTaskExecutionV1 {
   };
   compilerDecision: Omit<IntentDecision, 'askAnalystDecision'>;
   resolvedPlan: ResolvedAnalyticalPlanV2;
+  /** Server-derived prerequisite tasks; never accepted from client ingress. */
+  dependencyTaskIds?: string[];
+  /** Potential trust at compiler freeze; execution retains the final trust in task outcomes. */
+  compiledTrustState?: AnalyticalTaskOutcomeSummaryV1['trustState'];
 }
 
 /** A confident match means a certified block or governed metric clearly fits. */

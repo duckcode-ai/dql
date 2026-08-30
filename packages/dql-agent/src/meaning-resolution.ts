@@ -65,6 +65,16 @@ export interface AgentRelationshipSafetyEvidence {
   fanout?: string;
   staleCertification?: boolean;
   automaticJoinAllowed?: boolean;
+  /**
+   * Host-minted attestation for one declared, structurally-safe draft/review
+   * edge.  It is intentionally distinct from `automaticJoinAllowed`: this
+   * can only authorize the review-required exploratory compiler, never a
+   * governed relational plan.  Retrieval/LLM payloads must not manufacture
+   * this field.
+   */
+  exploratoryJoinAllowed?: boolean;
+  /** Opaque host path fingerprint paired with exploratoryJoinAllowed. */
+  exploratoryPathFingerprint?: string;
   certificationFingerprint?: string;
   evidenceExpiresAt?: string;
   validation?: {
@@ -73,6 +83,22 @@ export interface AgentRelationshipSafetyEvidence {
     queryFingerprint?: string;
     proofFingerprint?: string;
   };
+}
+
+/**
+ * One snapshot-local proof that a concrete categorical value was observed on
+ * a qualified physical column.  This is deliberately host-only execution
+ * evidence: it is not a retrieval synonym, a provider card, or permission to
+ * search arbitrary values.  A compiler may turn it into a filter only when
+ * the selected qualified column and the current-question literal agree
+ * exactly and uniquely.
+ */
+export interface AgentSafeValueEvidenceV1 {
+  version: 1;
+  relation: string;
+  column: string;
+  value: string;
+  normalizedValue: string;
 }
 
 export interface AgentEvidenceCandidate {
@@ -110,6 +136,20 @@ export interface AgentEvidenceCandidate {
   relationshipEndpointIds?: string[];
   /** Structured relationship proof; IDs alone can never authorize a join. */
   relationshipSafety?: AgentRelationshipSafetyEvidence[];
+  /**
+   * Snapshot-local observed values for a qualified physical categorical
+   * column.  This field is never included in a provider meaning card; it is
+   * retained only for deterministic literal-to-field binding after a planner
+   * selects the candidate.
+   */
+  safeValueEvidence?: AgentSafeValueEvidenceV1[];
+  /**
+   * Opaque, host-minted, single-use authorization for one exact-value probe.
+   * It has no field metadata and is stripped before planner, trace, receipt,
+   * or persistence projections. The local host resolves it against its
+   * request/snapshot/candidate registry before it can construct SQL.
+   */
+  hostLiteralProbeToken?: string;
   /** Present only on a host-authored bounded relationship-path planner card. */
   relationshipProofClass?: AgentRelationshipProofClassV1;
   /** Cross-source relevance score normalized to 0..1 by the retriever. */

@@ -1210,9 +1210,9 @@ export interface AskResearchBranchSummaryV1 {
 
 export interface AskTerminalIncidentV1 {
   version: 1;
-  code: 'INTERNAL_EXPLORATORY_AUTHORIZATION_STATE_MISMATCH' | 'CONNECTION_NOT_CONFIGURED' | 'COMPILATION_FAILED' | 'ANALYTICAL_EXECUTION_FAILED' | 'ANALYTICAL_COVERAGE_GAP' | 'PROVIDER_FAILURE' | 'RESEARCH_BRANCH_TIMEOUT' | 'RESEARCH_RUN_DEADLINE' | 'CANCELLED';
-  boundary: 'plan.compile' | 'semantic.compile' | 'sql.authorize' | 'sql.execute' | 'provider' | 'cascade' | 'run';
-  origin: 'internal_invariant' | 'governance_gate' | 'semantic_compiler' | 'plan_compiler' | 'provider' | 'warehouse' | 'unknown';
+  code: 'INTERNAL_EXPLORATORY_AUTHORIZATION_STATE_MISMATCH' | 'CONNECTION_NOT_CONFIGURED' | 'COMPILATION_FAILED' | 'RESULT_CONTRACT_MISMATCH' | 'ANALYTICAL_EXECUTION_FAILED' | 'ANALYTICAL_COVERAGE_GAP' | 'PROVIDER_FAILURE' | 'RESEARCH_BRANCH_TIMEOUT' | 'RESEARCH_RUN_DEADLINE' | 'CANCELLED';
+  boundary: 'plan.compile' | 'semantic.compile' | 'sql.authorize' | 'sql.execute' | 'result.validate' | 'provider' | 'cascade' | 'run';
+  origin: 'internal_invariant' | 'governance_gate' | 'semantic_compiler' | 'plan_compiler' | 'result_validator' | 'provider' | 'warehouse' | 'unknown';
   impact: 'execution_not_attempted' | 'execution_failed' | 'answer_not_produced' | 'run_cancelled';
   safeAction:
     | 'export_redacted_trace'
@@ -1368,8 +1368,43 @@ export interface AgentRunBusinessAnswerV1 {
   trustState: AgentRunTrustState;
   factIds: string[];
   resultFingerprint?: string;
+  /** Additive ordinary-Ask task receipt; absent on older persisted runs. */
+  taskOutcomeSummary?: AnalyticalTaskOutcomeSummaryV1;
   answer?: string;
   limitations: string[];
+}
+
+/** Additive V2 ordinary-Ask task receipts. Older run JSON deliberately omits these. */
+export type AnalyticalTaskOutcomeTrustStateV1 = 'certified' | 'governed' | 'review_required' | 'blocked' | 'not_applicable';
+export type AnalyticalTaskOutcomeStatusV1 = 'completed' | 'partial' | 'gap' | 'blocked' | 'dependency_blocked';
+
+export interface AnalyticalTaskFailureV1 {
+  version: 1;
+  code: string;
+  message: string;
+  phase: 'planning' | 'execution' | 'dependency';
+}
+
+export interface AnalyticalTaskOutcomeV1 {
+  version: 1;
+  taskId: string;
+  status: AnalyticalTaskOutcomeStatusV1;
+  trustState?: AnalyticalTaskOutcomeTrustStateV1;
+  summary?: string;
+  resultFingerprint?: string;
+  gap?: Record<string, unknown>;
+  failure?: AnalyticalTaskFailureV1;
+  dependencyTaskIds?: string[];
+}
+
+export interface AnalyticalTaskOutcomeSummaryV1 {
+  version: 1;
+  status: 'completed' | 'partial' | 'blocked';
+  trustState: AnalyticalTaskOutcomeTrustStateV1;
+  taskCount: number;
+  successfulTaskIds: string[];
+  failedTaskIds: string[];
+  dependencyBlockedTaskIds: string[];
 }
 
 /** Content-free persisted outcome of the answer narration stage. */
@@ -1401,7 +1436,8 @@ export interface AgentRunProgressV1 {
   events: AgentRunEvent[];
   lifecycle: AgentRunLifecycleV1;
   analyticalTurnPlan?: Record<string, unknown>;
-  analyticalTaskOutcomes?: Array<Record<string, unknown>>;
+  analyticalTaskOutcomes?: AnalyticalTaskOutcomeV1[];
+  analyticalTaskOutcomeSummary?: AnalyticalTaskOutcomeSummaryV1;
   /** OBS-001: compact pointer only; full trace detail is fetched by run id. */
   traceReference?: AgentRunTraceReferenceV1;
 }
@@ -1597,7 +1633,8 @@ export interface AgentRun {
     revision?: number;
   };
   analyticalTurnPlan?: Record<string, unknown>;
-  analyticalTaskOutcomes?: Array<Record<string, unknown>>;
+  analyticalTaskOutcomes?: AnalyticalTaskOutcomeV1[];
+  analyticalTaskOutcomeSummary?: AnalyticalTaskOutcomeSummaryV1;
 }
 
 export type AgentRunStateResponse =

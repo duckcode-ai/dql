@@ -1243,6 +1243,7 @@ describe('drilldown classification', () => {
       'Revenue for enterprise accounts',
       'List customers where status is active',
       'Compare margin across channels',
+      'show total orders here',
     ]) {
       expect(__test__.isDrilldownFollowUp(question, []), question).toBe(false);
     }
@@ -1255,6 +1256,7 @@ describe('drilldown classification', () => {
       'show the drivers of the decline',
       'slice this by segment',
       'show me their orders',
+      'add region here',
     ]) {
       expect(__test__.isDrilldownFollowUp(question, []), question).toBe(true);
     }

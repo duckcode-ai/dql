@@ -495,4 +495,5 @@ describe("AGT-010 meaning-resolution evidence boundary", () => {
       reason: 'The resolver referenced evidence that was not retrieved: semantic:metric:invented',
     });
   });
+
 });

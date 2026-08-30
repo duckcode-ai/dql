@@ -219,9 +219,29 @@ export function buildResolvedAnalyticalPlan(
     byLegacyId.set(candidate.id, candidate);
   }
   const selectedCandidates = input.resolution.selectedConceptIds
-    .flatMap((id) => byLegacyId.get(id) ? [byLegacyId.get(id)!] : []);
+    .flatMap((id) => {
+      // V3 programs retain a stable qualified field identity while the legacy
+      // carrier normally stores the local candidate ID.  Resolve only an
+      // exact local identity first, then one exact qualified identity.  This
+      // preserves a host-bound physical filter field such as
+      // `dbt:column:locations.location_name` / `locations.location_name`
+      // through the compiler bridge without treating an alias or leaf name as
+      // authority over a different relation.
+      const local = byLegacyId.get(id);
+      if (local) return [local];
+      const qualified = input.candidates.filter((candidate) => candidate.qualifiedId === id);
+      return qualified.length === 1 ? qualified : [];
+    });
   const executionCandidate = input.resolution.recommendedExecutionId
-    ? byLegacyId.get(input.resolution.recommendedExecutionId)
+    // V3 programs carry the canonical execution authority, while legacy
+    // selected concepts retain the local index ID for backwards-readable
+    // receipts.  A certified block commonly has both (`dql:block:*` and
+    // `domain::block::*`). Resolve either exact identity here; otherwise the
+    // compiler carrier loses the selected execution authority and rebinds a
+    // complete certified tuple through unrelated semantic cards.
+    ? input.candidates.find((candidate) =>
+      candidate.id === input.resolution.recommendedExecutionId
+      || candidate.qualifiedId === input.resolution.recommendedExecutionId)
     : selectedCandidates[0];
   const bindingCandidates = input.resolution.recommendedRoute === 'certified' && executionCandidate
     // A deterministically compatible certified block has already proved the
@@ -286,6 +306,14 @@ export function buildResolvedAnalyticalPlan(
   // contextual semantic field for a block output the block never promised.
   const hostCertifiedProjectionTerms = new Set([
     ...(input.resolution.hostRequirementSeed?.queryIntent.dimensions ?? []),
+    // The host requirement seed retains the business entity separately from
+    // its display label.  For a block that has already passed the exact-tuple
+    // gate, both are projections of the block's own declared output (for
+    // example `customer` -> `customer_name`).  Leaving the entity out here
+    // re-bound it through a generic semantic card during the compatibility
+    // carrier handoff, so a proven certified customer profile became blocked
+    // after its zero-call fast path had selected it.
+    ...(input.resolution.hostRequirementSeed?.requirements.entityTerms ?? []),
     ...(input.resolution.hostRequirementSeed?.requirements.entityDisplayTerms ?? []),
     ...(input.resolution.hostRequirementSeed?.requirements.outputTerms ?? []),
   ].map(normalize).filter(Boolean));

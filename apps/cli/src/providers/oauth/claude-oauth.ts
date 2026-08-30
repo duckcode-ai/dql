@@ -308,6 +308,12 @@ export class ClaudeOAuthProvider implements AgentProvider {
   private readonly maxTokens: number;
   private readonly cliModel?: string;
   private cliFallback?: ClaudeCodeCliProvider;
+  /**
+   * A readiness failure is intentionally redacted and only exposed to the
+   * server-owned preflight boundary.  `AgentProvider.available()` remains a
+   * boolean because providers are consumed by generic agent surfaces too.
+   */
+  private readinessFailure?: Error & { code?: string };
 
   constructor(opts: { projectRoot: string; model?: string }) {
     this.manager = new ClaudeOAuthManager(opts.projectRoot);
@@ -317,8 +323,31 @@ export class ClaudeOAuthProvider implements AgentProvider {
     this.maxTokens = 32768;
   }
 
+  private cliFallbackProvider(): ClaudeCodeCliProvider {
+    if (!this.cliFallback) this.cliFallback = new ClaudeCodeCliProvider({ model: this.cliModel });
+    return this.cliFallback;
+  }
+
+  /**
+   * Readiness must mirror generation: a stored OAuth record is preferred, but
+   * an expired or unrefreshable record must not hide a healthy, same-provider
+   * Claude Code CLI login.  This is not cross-provider failover.
+   */
   async available(): Promise<boolean> {
-    return this.manager.isAuthenticated();
+    this.readinessFailure = undefined;
+    if (await this.manager.isAuthenticated()) return true;
+    if (!claudeOAuthConnected(this.projectRoot)) return false;
+    if (await this.cliFallbackProvider().available().catch(() => false)) return true;
+    this.readinessFailure = Object.assign(
+      new Error('The saved Claude OAuth session could not be refreshed and the Claude Code CLI is not ready.'),
+      { code: 'CLAUDE_OAUTH_CLI_UNAVAILABLE' },
+    );
+    return false;
+  }
+
+  /** Typed, redacted context for a false `available()` result. */
+  getReadinessFailure(): Error | undefined {
+    return this.readinessFailure;
   }
 
   async generate(messages: AgentMessage[], options: ProviderRunOptions = {}): Promise<string> {
@@ -328,9 +357,9 @@ export class ClaudeOAuthProvider implements AgentProvider {
       // honor the OAuth-first, CLI-fallback contract. With no credential at all,
       // prompt to sign in.
       if (claudeOAuthConnected(this.projectRoot)) {
-        if (!this.cliFallback) this.cliFallback = new ClaudeCodeCliProvider({ model: this.cliModel });
-        if (await this.cliFallback.available()) {
-          return this.cliFallback.generate(messages, options);
+        const cliFallback = this.cliFallbackProvider();
+        if (await cliFallback.available()) {
+          return cliFallback.generate(messages, options);
         }
       }
       throw new Error('Your Claude subscription session expired. Open Settings → Claude subscription and click "Sign in with Claude" again.');

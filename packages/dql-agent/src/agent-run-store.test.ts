@@ -381,6 +381,323 @@ describe('SqliteAgentRunStore', () => {
     restarted.close();
   });
 
+  it('round-trips V3 relationship paths, current-question atoms, trusted anchors, and checkpointed partial task outcomes across an interrupted restart', () => {
+    const path = join(tmp(), 'runs.sqlite');
+    const store = new SqliteAgentRunStore({ path });
+    const initial = progress('orphan-v3-program');
+    initial.askAnalystState = {
+      version: 3,
+      mode: 'authoritative',
+      phase: 'program_ready',
+      planningMode: 'deterministic_binding',
+      plannerRevisionCount: 0,
+      frame: {
+        version: 4,
+        questionFingerprint: 'sha256:question-v3',
+        kind: 'ranking',
+        planningMode: 'deterministic_binding',
+        requirements: {
+          measures: ['revenue'], dimensions: ['customer_name', 'region'], entityTerms: ['customer'],
+          entityDisplayTerms: ['customer_name'], memberTerms: ['Philadelphia'], outputTerms: [],
+        },
+        conversation: { binding: 'prior_result' },
+      },
+      mission: {
+        version: 1,
+        mode: 'ask',
+        taskLimit: 3,
+        planningContinuationLimit: 2,
+        tasks: [{ id: 'task-1', kind: 'ranking', question: 'add region here', dependencies: [] }],
+        hypotheses: [],
+      },
+      workspace: {
+        version: 2,
+        snapshotId: 'snapshot:v3',
+        sourceFingerprint: 'sha256:snapshot-v3',
+        workspaceCandidateIds: ['metric:revenue', 'dimension:customer_name', 'dimension:region'],
+        plannerCandidateIds: ['metric:revenue', 'dimension:customer_name', 'dimension:region'],
+        admittedCandidateIds: ['metric:revenue', 'dimension:customer_name', 'dimension:region'],
+        excludedCandidates: [],
+        sourceCoverage: [],
+        tools: [],
+      },
+      program: {
+        version: 3,
+        id: 'program:restart-v3',
+        frameFingerprint: 'sha256:question-v3',
+        taskIds: ['task-1'],
+        candidateIds: ['metric:revenue', 'dimension:customer_name', 'dimension:region', 'dql:path:customer-region'],
+        executionCandidateIds: ['metric:revenue', 'dimension:customer_name', 'dimension:region', 'dql:path:customer-region'],
+        plannerCandidateIds: ['metric:revenue', 'dimension:customer_name', 'dimension:region'],
+        workspaceCandidateIds: ['metric:revenue', 'dimension:customer_name', 'dimension:region', 'dql:path:customer-region'],
+        requiredRoles: ['metric', 'entity_label', 'categorical_dimension', 'member'],
+        filters: [{ fieldTerms: ['dimension:region'], memberIds: [], value: 'Philadelphia', operator: 'equals' }],
+        relationshipRequirements: ['dql:relationship:customer-to-region'],
+        relationshipPaths: [{
+          version: 1,
+          candidateId: 'dql:path:customer-region',
+          proofClass: 'governed',
+          relationshipEvidence: ['dql:relationship:customer-to-region'],
+        }],
+        inputAtoms: [{ version: 1, source: 'current_question', role: 'member', term: 'Philadelphia', required: true }],
+        trustedTaskAnchors: [{
+          version: 1,
+          kind: 'analytical_shape',
+          values: [],
+          measures: ['revenue'],
+          dimensions: ['customer_name'],
+          sourceTurnId: 'turn:top-customers',
+          resultFingerprint: 'a'.repeat(64),
+        }],
+        outputs: {
+          measures: ['revenue'], dimensions: ['customer_name', 'region'], entityDisplayTerms: ['customer_name'],
+          assertions: ['all_requested_measures', 'all_requested_dimensions', 'safe_relationship_closure', 'result_contract'],
+        },
+        planner: {
+          version: 2,
+          source: 'deterministic',
+          tasks: [{
+            taskId: 'task-1',
+            selectedConceptIds: ['metric:revenue', 'dimension:customer_name', 'dimension:region'],
+            roleBindings: {
+              metric: ['metric:revenue'],
+              entity_label: ['dimension:customer_name'],
+              categorical_dimension: ['dimension:region'],
+            },
+            operations: ['aggregate', 'group', 'rank'],
+            assumptions: ['top defaults to 10'],
+          }],
+          missingInformation: [],
+        },
+      },
+      conversationDelta: {
+        version: 2,
+        sourceQuestionFingerprint: 'sha256:question-v3',
+        programId: 'program:restart-v3',
+        partialFrame: {
+          kind: 'ranking',
+          planningMode: 'deterministic_binding',
+          requirements: {
+            measures: ['revenue'], dimensions: ['customer_name', 'region'], entityTerms: ['customer'],
+            entityDisplayTerms: ['customer_name'], memberTerms: ['Philadelphia'], outputTerms: [],
+          },
+        },
+      },
+      planningReceipt: {
+        version: 1,
+        mode: 'deterministic_binding',
+        plannerCalls: 0,
+        revisionCalls: 0,
+        verification: {
+          version: 1,
+          status: 'valid',
+          missingRoles: [],
+          candidateIds: ['metric:revenue', 'dimension:customer_name', 'dimension:region'],
+          reasonCode: 'program_verified',
+        },
+      },
+      planningContinuations: 0,
+      toolCalls: 0,
+      executionAttempts: 0,
+      repairAttempts: 0,
+    } as never;
+    // V2 ordinary-Ask task receipts are additive progress state. They must
+    // survive an interrupted V3 runtime restart so an independently completed
+    // child is not hidden behind a later planning/execution gap.
+    const completedTaskArtifact = {
+      id: 'answer:task-1',
+      kind: 'answer' as const,
+      title: 'Task 1 result',
+      trustState: 'governed' as const,
+      payload: {
+        result: {
+          columns: ['revenue'],
+          rows: [{ revenue: 1 }],
+          rowCount: 1,
+          resultFingerprint: 'result:task-1',
+        },
+      },
+    };
+    initial.artifacts = [completedTaskArtifact];
+    initial.steps = [{
+      id: 'orphan-v3-program:step:1',
+      index: 1,
+      route: 'semantic_answer',
+      askAnalystTaskId: 'task-1',
+      goal: 'Task 1',
+      successCriteria: [],
+      status: 'passed',
+      attempts: 1,
+      summary: 'The first task completed.',
+      evaluations: [],
+      artifacts: [completedTaskArtifact],
+    }] as never;
+    initial.analyticalTaskOutcomes = [{
+      version: 1,
+      taskId: 'task-1',
+      status: 'completed',
+      trustState: 'governed',
+      summary: 'The first task completed.',
+      resultFingerprint: 'result:task-1',
+    }, {
+      version: 1,
+      taskId: 'task-2',
+      status: 'dependency_blocked',
+      trustState: 'blocked',
+      summary: 'The second task requires task-1 output.',
+      dependencyTaskIds: ['task-1'],
+      failure: {
+        version: 1,
+        code: 'DEPENDENCY_BLOCKED',
+        message: 'The second task requires task-1 output.',
+        phase: 'dependency',
+      },
+    }];
+    initial.analyticalTaskOutcomeSummary = {
+      version: 1,
+      status: 'partial',
+      trustState: 'governed',
+      taskCount: 2,
+      successfulTaskIds: ['task-1'],
+      failedTaskIds: [],
+      dependencyBlockedTaskIds: ['task-2'],
+    };
+    store.saveProgress(initial);
+    store.close();
+
+    const reopened = new SqliteAgentRunStore({ path });
+    const interrupted = reopened.get('orphan-v3-program');
+    expect(interrupted?.askAnalystState).toMatchObject({
+      version: 3,
+      program: {
+        version: 3,
+        id: 'program:restart-v3',
+        relationshipPaths: [expect.objectContaining({
+          candidateId: 'dql:path:customer-region',
+          relationshipEvidence: ['dql:relationship:customer-to-region'],
+        })],
+        inputAtoms: [expect.objectContaining({
+          source: 'current_question', role: 'member', term: 'Philadelphia', required: true,
+        })],
+        trustedTaskAnchors: [expect.objectContaining({
+          kind: 'analytical_shape',
+          sourceTurnId: 'turn:top-customers',
+          resultFingerprint: 'a'.repeat(64),
+        })],
+      },
+    });
+    expect(interrupted?.analyticalTaskOutcomeSummary).toMatchObject({
+      status: 'partial', trustState: 'governed', successfulTaskIds: ['task-1'], dependencyBlockedTaskIds: ['task-2'],
+    });
+    expect(interrupted?.analyticalTaskOutcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ taskId: 'task-1', status: 'completed', resultFingerprint: 'result:task-1' }),
+      expect.objectContaining({ taskId: 'task-2', status: 'dependency_blocked', dependencyTaskIds: ['task-1'] }),
+    ]));
+    expect(interrupted?.artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'answer:task-1' }),
+    ]));
+    // Local continuation state remains durable, while observer-facing restart
+    // receipts remain content-free and never reveal the literal or anchor.
+    expect(JSON.stringify(interrupted?.diagnosticReceiptV6)).not.toContain('Philadelphia');
+    expect(JSON.stringify(interrupted?.diagnosticReceiptV6)).not.toContain('turn:top-customers');
+    reopened.close();
+  });
+
+  it('keeps V1/V2 runs readable and rejects malformed V3 task receipts at the local store boundary', () => {
+    const store = new SqliteAgentRunStore({ path: join(tmp(), 'runs.sqlite') });
+    const legacy = progress('legacy-without-v3-task-receipts');
+    store.saveProgress(legacy);
+    expect(store.getProgress(legacy.id)?.analyticalTaskOutcomes).toBeUndefined();
+    expect(store.getProgress(legacy.id)?.analyticalTaskOutcomeSummary).toBeUndefined();
+
+    const canonicalArtifact = {
+      id: 'answer:valid-task',
+      kind: 'answer' as const,
+      title: 'Valid task result',
+      trustState: 'governed' as const,
+      payload: { result: {
+        columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1,
+        resultFingerprint: 'result:valid-task',
+      } },
+    };
+    const malformed = progress('malformed-v3-task-receipts') as AgentRunProgressV1 & Record<string, unknown>;
+    malformed.artifacts = [canonicalArtifact];
+    malformed.steps = [{
+      id: 'malformed-v3-task-receipts:step:1', index: 1, route: 'semantic_answer', askAnalystTaskId: 'valid-task',
+      goal: 'Valid task', successCriteria: [], status: 'passed', attempts: 1,
+      evaluations: [], artifacts: [canonicalArtifact],
+    }] as never;
+    malformed.analyticalTaskOutcomes = [{
+      version: 1, taskId: 'valid-task', status: 'completed', trustState: 'governed',
+      resultFingerprint: 'result:valid-task',
+    }] as never;
+    // These would otherwise let an edited local JSON record invent a second
+    // successful task or make the Notebook call `.map` on a non-array value.
+    (malformed as Record<string, unknown>).analyticalTaskOutcomes = [
+      ...malformed.analyticalTaskOutcomes!,
+      { version: 2, taskId: 'forged-task', status: 'completed', resultFingerprint: 'result:forged' },
+      'not-a-task-receipt',
+    ];
+    (malformed as Record<string, unknown>).analyticalTaskOutcomeSummary = {
+      version: 1, status: 'completed', trustState: 'governed', taskCount: 2,
+      successfulTaskIds: ['valid-task', 'forged-task'], failedTaskIds: [], dependencyBlockedTaskIds: [],
+    };
+    store.saveProgress(malformed);
+    const normalized = store.getProgress(malformed.id);
+    expect(normalized?.analyticalTaskOutcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ taskId: 'valid-task', status: 'completed', resultFingerprint: 'result:valid-task' }),
+      expect.objectContaining({
+        taskId: 'forged-task', status: 'blocked',
+        failure: expect.objectContaining({ code: 'TASK_RESULT_ARTIFACT_UNVERIFIED' }),
+      }),
+    ]));
+    expect(normalized?.analyticalTaskOutcomeSummary).toMatchObject({
+      status: 'partial', successfulTaskIds: ['valid-task'], failedTaskIds: ['forged-task'], taskCount: 2,
+    });
+    store.close();
+  });
+
+  it('never elevates a persisted task trust above its canonical exploratory result artifact', () => {
+    const path = join(tmp(), 'runs.sqlite');
+    const store = new SqliteAgentRunStore({ path });
+    const initial = progress('review-required-task-trust');
+    const exploratoryArtifact = {
+      id: 'answer:exploratory-task',
+      kind: 'answer' as const,
+      title: 'Exploratory result',
+      trustState: 'review_required' as const,
+      payload: { result: {
+        columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1,
+        resultFingerprint: 'result:exploratory-task',
+      } },
+    };
+    initial.artifacts = [exploratoryArtifact];
+    initial.steps = [{
+      id: 'review-required-task-trust:step:1', index: 1, route: 'generated_answer', askAnalystTaskId: 'task-1',
+      goal: 'Exploratory task', successCriteria: [], status: 'needs_review', attempts: 1,
+      evaluations: [], artifacts: [exploratoryArtifact],
+    }] as never;
+    initial.analyticalTaskOutcomes = [{
+      version: 1, taskId: 'task-1', status: 'completed',
+      // A local JSON edit must never upgrade a review-required execution.
+      trustState: 'certified', resultFingerprint: 'result:exploratory-task',
+    }];
+    initial.analyticalTaskOutcomeSummary = {
+      version: 1, status: 'completed', trustState: 'certified', taskCount: 1,
+      successfulTaskIds: ['task-1'], failedTaskIds: [], dependencyBlockedTaskIds: [],
+    };
+    store.saveProgress(initial);
+    store.close();
+
+    const reopened = new SqliteAgentRunStore({ path });
+    const interrupted = reopened.get('review-required-task-trust');
+    expect(interrupted?.analyticalTaskOutcomes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ taskId: 'task-1', trustState: 'review_required' }),
+    ]));
+    expect(interrupted?.analyticalTaskOutcomeSummary).toMatchObject({ trustState: 'review_required' });
+    reopened.close();
+  });
+
   it('preserves a user cancellation as cancelled across restart', () => {
     const path = join(tmp(), 'runs.sqlite');
     const store = new SqliteAgentRunStore({ path });

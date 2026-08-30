@@ -403,6 +403,17 @@ export function withCassette(
     },
   };
 
+  // Readiness remains provider-owned.  The generic AgentProvider interface is
+  // deliberately boolean-only, but subscription adapters may expose a
+  // redacted typed cause after `available() === false`.  Preserve that optional
+  // server-side hook in record/replay wrappers so preflight does not degrade a
+  // real OAuth/CLI failure into an untyped configuration gap.
+  const readinessProvider = provider as AgentProvider & { getReadinessFailure?: () => Error | undefined };
+  if (readinessProvider.getReadinessFailure) {
+    (wrapped as AgentProvider & { getReadinessFailure?: () => Error | undefined }).getReadinessFailure =
+      () => readinessProvider.getReadinessFailure?.();
+  }
+
   if (provider.generateWithTools) {
     wrapped.generateWithTools = async (
       messages: AgentMessage[],

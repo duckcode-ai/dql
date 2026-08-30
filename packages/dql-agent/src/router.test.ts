@@ -543,4 +543,95 @@ describe('frozen Ask compiler closures', () => {
     for (const scoped of scopedMetrics) expect(decision.meaningResolution?.selectedConceptIds).not.toContain(scoped.id);
     expect(decision.terminalOutcome?.candidateIds).toEqual([genericOrders.id, customerName.id]);
   });
+
+  it('AGT-051 returns a typed pre-freeze gap for unknown or ambiguous physical member values instead of broadening generated SQL', () => {
+    const physicalColumn = (id: string): AgentEvidenceCandidate => ({
+      id,
+      qualifiedId: id,
+      kind: 'sql_column',
+      trustTier: 'exploratory',
+      name: 'region',
+      aliases: ['region'],
+      relevanceScore: 1,
+      matchReasons: ['qualified physical categorical column'],
+      compatibility: 'compatible',
+      compatibilityFacts: ['roles categorical dimension'],
+      sourceObjects: ['runtime:relation:orders'],
+      safeValueEvidence: [{
+        version: 1,
+        relation: 'orders',
+        column: 'region',
+        value: 'Philadelphia',
+        normalizedValue: 'philadelphia',
+      }],
+    });
+    for (const fixture of [{
+      name: 'unknown',
+      literal: 'Boston',
+      candidates: [physicalColumn('dbt:column:orders.region')],
+    }, {
+      name: 'ambiguous',
+      literal: 'Philadelphia',
+      candidates: [
+        physicalColumn('dbt:column:orders.region'),
+        physicalColumn('dbt:column:orders.sales_region'),
+      ],
+    }]) {
+      const program = {
+        version: 3,
+        id: `program:${fixture.name}-literal`,
+        frameFingerprint: 'sha256:literal',
+        taskIds: ['task:1'],
+        candidateIds: fixture.candidates.map((candidate) => candidate.id),
+        executionCandidateIds: fixture.candidates.map((candidate) => candidate.id),
+        plannerCandidateIds: fixture.candidates.map((candidate) => candidate.id),
+        workspaceCandidateIds: fixture.candidates.map((candidate) => candidate.id),
+        requiredRoles: ['member'],
+        filters: [],
+        relationshipRequirements: [],
+        relationshipPaths: [],
+        inputAtoms: [{ version: 1, source: 'current_question', role: 'member', term: fixture.literal, required: true }],
+        trustedTaskAnchors: [],
+        outputs: { measures: [], dimensions: [], entityDisplayTerms: [], assertions: ['result_contract'] },
+        planner: { version: 2, source: 'deterministic', tasks: [], missingInformation: [] },
+      } as never;
+      const requirements: AnalyticalRequirementSetV1 = {
+        version: 1,
+        measures: [], dimensions: [], entityTerms: [], entityDisplayTerms: [], memberTerms: [fixture.literal.toLowerCase()],
+      };
+      const decision = compileAskAnalyticalProgramV1({
+        base: { action: 'answer', confidence: 1, followsUp: false, source: 'heuristic', reason: 'base' },
+        request: { question: `show revenue in ${fixture.literal}`, requestedMode: 'ask' },
+        evidence: {
+          snapshotId: `snapshot:${fixture.name}-literal`,
+          candidates: fixture.candidates,
+          parsedIntent: { measures: [], dimensions: [], filters: [] },
+        },
+        program,
+        candidates: fixture.candidates,
+        executionCandidates: fixture.candidates,
+        resolution: {
+          interpretedQuestion: `show revenue in ${fixture.literal}`,
+          questionType: 'value',
+          selectedConceptIds: fixture.candidates.map((candidate) => candidate.id),
+          queryIntent: { measures: [], dimensions: [], filters: [] },
+          rejectedCandidates: [], confidence: 'high', missingInformation: [], recommendedRoute: 'exploratory',
+        },
+        requirements,
+      });
+
+      expect(decision.action, fixture.name).toBe('block');
+      expect(decision.terminalOutcome, fixture.name).toMatchObject({
+        kind: 'modeling_gap',
+        code: 'ANALYTICAL_MODELING_GAP',
+        gap: { code: 'MISSING_ATTRIBUTE' },
+      });
+      expect(decision.analyticalCascadeDecision, fixture.name).toMatchObject({
+        planFrozen: false,
+        stopReason: 'coverage_gap',
+      });
+      expect(decision.analyticalCascadeDecision?.attempts.find((attempt) => attempt.tier === 'exploratory_sql')?.outcome, fixture.name)
+        .toBe('unavailable');
+    }
+  });
 });

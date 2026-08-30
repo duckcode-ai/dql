@@ -36,7 +36,7 @@ describe('conversationTurnTrust', () => {
   // The reported bug: "I couldn't find the answer" was persisted as
   // `needs_review`, identical to a good answer, and every trust check passed it.
   it('does NOT trust a grounding or modeling gap', () => {
-    for (const refusalCode of ['grounding_gap', 'modeling_gap', 'model_declined', 'policy_blocked', 'provider_error']) {
+    for (const refusalCode of ['grounding_gap', 'modeling_gap', 'model_declined', 'policy_blocked', 'provider_error', 'execution_error']) {
       const turn = {
         runStatus: 'needs_review',
         trustLabel: 'review_required',

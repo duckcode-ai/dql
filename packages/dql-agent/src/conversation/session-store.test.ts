@@ -143,6 +143,7 @@ describe('ConversationStore', () => {
         columns: Array.from({ length: 40 }, (_, i) => `col_${i}`),
         rowsSample: Array.from({ length: 20 }, () => ['Food', 240877]),
         dimensionValues: { category: Array.from({ length: 40 }, (_, i) => `value_${i}`) },
+        resultFingerprint: 'f'.repeat(64),
         memberSets: [{
           version: 1,
           entity: 'product',
@@ -171,6 +172,7 @@ describe('ConversationStore', () => {
       resultFingerprint: 'e'.repeat(64),
     })]);
     expect(stored.result?.memberSets?.[0]?.displayValues).toHaveLength(24);
+    expect(stored.result?.resultFingerprint).toBe('f'.repeat(64));
     expect(stored.result?.rowCount).toBe(2);
     expect(stored.contract).toEqual({ measures: ['revenue'], dimensions: ['category'] });
     expect(stored.sourceCertifiedBlock).toBe('food_vs_drink_revenue');

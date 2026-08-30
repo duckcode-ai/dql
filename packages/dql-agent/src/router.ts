@@ -686,9 +686,13 @@ export function recordAskCandidateLifecycleV1(
         || left.lane.localeCompare(right.lane));
     const lane = lanes?.[0]?.lane;
     const laneRank = lanes?.[0]?.rank;
-    const initialReason = candidate.exactMatch
-      ? 'exact_name_match' as const
-      : 'unknown' as const;
+    const configuredRuntimeValueGroundingPin = candidate.matchReasons
+      .includes('host configured runtime value grounding pin');
+    const initialReason = configuredRuntimeValueGroundingPin
+      ? 'configured_runtime_value_grounding_pin' as const
+      : candidate.exactMatch
+        ? 'exact_name_match' as const
+        : 'unknown' as const;
     const compatibilityCode = candidate.compatibility === 'compatible' ? 'compatible' as const
       : candidate.compatibility === 'incompatible' ? 'operation_unsupported' as const
         : 'unknown' as const;
@@ -737,16 +741,18 @@ export function recordAskCandidateLifecycleV1(
         observer.recordCandidateDecision({
           ...common,
           decision: 'reserved',
-          reasonCode: candidate.exactMatch ? 'exact_name_match'
-            : unresolvedRoleAdmission ? 'candidate_for_unresolved_role'
-              : reservedForRole ? 'role_reserved' : 'fused_relevance_fill',
+          reasonCode: configuredRuntimeValueGroundingPin ? 'configured_runtime_value_grounding_pin'
+            : candidate.exactMatch ? 'exact_name_match'
+              : unresolvedRoleAdmission ? 'candidate_for_unresolved_role'
+                : reservedForRole ? 'role_reserved' : 'fused_relevance_fill',
         });
         observer.recordCandidateDecision({
           ...common,
           decision: 'admitted',
-          reasonCode: candidate.exactMatch ? 'exact_name_match'
-            : unresolvedRoleAdmission ? 'candidate_for_unresolved_role'
-              : reservedForRole ? 'role_reserved' : 'fused_relevance_fill',
+          reasonCode: configuredRuntimeValueGroundingPin ? 'configured_runtime_value_grounding_pin'
+            : candidate.exactMatch ? 'exact_name_match'
+              : unresolvedRoleAdmission ? 'candidate_for_unresolved_role'
+                : reservedForRole ? 'role_reserved' : 'fused_relevance_fill',
         });
       } else {
         const isNoisyEntityAttribute = hasRequestedEntityLabel
@@ -1037,6 +1043,33 @@ function relationshipSafetyAllowsExploratoryJoin(
   const lifecycleAllowsExploration = safety.status === 'certified'
     || safety.status === 'validated'
     || safety.status === 'draft';
+  // A local runtime may mint this *after* it has evaluated the immutable DQL
+  // relationship graph. It is not a weaker spelling of automaticJoinAllowed:
+  // it can only admit a declared same-domain draft/review edge to the
+  // review-required exploratory compiler. Keep generic retrieved evidence on
+  // the stricter validated/automatic route below.
+  const hostAttestedExploratory = safety.exploratoryJoinAllowed === true
+    && Boolean(safety.exploratoryPathFingerprint?.trim());
+  const lifecycleAllowsHostAttestedExploration = safety.status === 'draft'
+    || safety.status === 'evaluated'
+    || safety.status === 'review'
+    || safety.status === 'reviewed';
+  const keysAreUsable = safety.keys.length > 0
+    && safety.keys.every((key) => Boolean(key.from.trim() && key.to.trim()));
+  if (hostAttestedExploratory) {
+    if (!lifecycleAllowsHostAttestedExploration
+      || safety.staleCertification === true
+      || safety.fanout !== 'safe'
+      || !['one_to_one', 'one_to_many', 'many_to_one'].includes(safety.cardinality ?? '')
+      || !safety.from?.trim()
+      || !safety.to?.trim()
+      || !keysAreUsable) return false;
+    if (!requiredJoinKey) return true;
+    const normalizedKey = normalizeMetricPhrase(requiredJoinKey);
+    return safety.keys.some((key) =>
+      metricTermsMatch(normalizeMetricPhrase(key.from), normalizedKey)
+      || metricTermsMatch(normalizeMetricPhrase(key.to), normalizedKey));
+  }
   if (!lifecycleAllowsExploration
     || safety.staleCertification === true
     || safety.automaticJoinAllowed !== true
@@ -1050,8 +1083,7 @@ function relationshipSafetyAllowsExploratoryJoin(
     || !validation.proofFingerprint?.trim()
     || !Number.isFinite(checkedAt)
     || expirationInvalid
-    || safety.keys.length === 0
-    || safety.keys.some((key) => !key.from.trim() || !key.to.trim())) return false;
+    || !keysAreUsable) return false;
   if (!requiredJoinKey) return true;
   const normalizedKey = normalizeMetricPhrase(requiredJoinKey);
   return safety.keys.some((key) =>
@@ -2579,6 +2611,23 @@ export function compileAskAnalyticalProgramV1(input: {
   if (!validProgramFilterBindings(input.program, seedFilters)) {
     return immutableProgramBlocked(input.base, 'The immutable Ask program did not retain valid field, operator, and value bindings for every requested filter.');
   }
+  const unboundCurrentQuestionLiterals = unboundProgramV3CurrentQuestionLiterals(input.program);
+  if (unboundCurrentQuestionLiterals.length > 0) {
+    // This is a normal pre-freeze analytical coverage gap, not an immutable
+    // program corruption or policy breach. The current question named a
+    // value, but no single selected qualified field/value binding survived
+    // verification. Reporting it as a typed gap prevents an unknown or
+    // ambiguous literal from broadening the SQL while preserving the ordinary
+    // cascade vocabulary for repair and trace rendering.
+    return currentQuestionLiteralCoverageGapDecision({
+      base: input.base,
+      evidence: input.evidence,
+      executionCandidates,
+      requirements: input.requirements,
+      program: input.program,
+      literals: unboundCurrentQuestionLiterals,
+    });
+  }
   const programIds = new Set(input.program.candidateIds);
   // The compiler receives the full frozen 32-card execution closure for
   // relationship/physical compilation, but only the program's verified
@@ -2725,6 +2774,100 @@ function validProgramFilterBindings(
     .flat()
     .sort();
   return expected.length === actual.length && expected.every((value, index) => value === actual[index]);
+}
+
+/**
+ * V3 carries raw current-turn atoms specifically so an incomplete parser or
+ * compatibility adapter cannot erase a literal and allow a broad certified
+ * block to look complete. A literal must be represented by a frozen predicate
+ * before any compiler can select a tier. Prior-result anchors are distinct
+ * host-bound continuity evidence and therefore have their own source.
+ */
+function unboundProgramV3CurrentQuestionLiterals(program: AnalyticalProgram): string[] {
+  if (program.version !== 3) return [];
+  const normalize = (value: string) => value.trim().toLowerCase();
+  const frozenValues = new Set(program.filters.map((filter) => normalize(filter.value)));
+  const trustedValues = new Set(program.trustedTaskAnchors
+    .filter((anchor) => anchor.kind === 'member_binding' || anchor.kind === undefined)
+    .flatMap((anchor) => anchor.values)
+    .map(normalize));
+  return program.inputAtoms
+    .filter((atom) => atom.source === 'current_question' && atom.role === 'member')
+    .map((atom) => atom.term)
+    .filter((term) => !frozenValues.has(normalize(term)) && !trustedValues.has(normalize(term)));
+}
+
+/**
+ * A missing/ambiguous literal binding is an answerability gap, not evidence
+ * that the already-built program was tampered with. Keep it pre-freeze and
+ * show the actual terminal cause, so Ask can safely explain why it did not
+ * generate a broad exploratory query.
+ */
+function currentQuestionLiteralCoverageGapDecision(input: {
+  base: IntentDecision;
+  evidence: AgentRetrievalEvidence;
+  executionCandidates: AgentEvidenceCandidate[];
+  requirements: AnalyticalRequirementSetV1;
+  program: AnalyticalProgram;
+  literals: string[];
+}): IntentDecision {
+  const normalize = (value: string) => value.trim().toLowerCase();
+  const literalSet = new Set(input.literals.map(normalize));
+  const matchingColumns = input.executionCandidates.filter((candidate) =>
+    candidate.kind === 'sql_column'
+    && evidenceCandidateRoles(candidate).includes('categorical_dimension')
+    && (candidate.safeValueEvidence ?? []).some((evidence) =>
+      literalSet.has(normalize(evidence.normalizedValue)) || literalSet.has(normalize(evidence.value))));
+  const qualifiedColumnIds = [...new Set(matchingColumns.map((candidate) => candidate.qualifiedId ?? candidate.id))].sort();
+  const ambiguity = qualifiedColumnIds.length > 1;
+  const literalLabel = input.literals.map((literal) => `“${literal}”`).join(', ');
+  const message = ambiguity
+    ? `The current-question value ${literalLabel} matched multiple qualified categorical fields in this metadata snapshot, so DQL did not choose or broaden a generated SQL filter.`
+    : `The current-question value ${literalLabel} was not verified on one selected qualified categorical field in this metadata snapshot, so DQL did not broaden a generated SQL filter.`;
+  const candidateIds = qualifiedColumnIds.length > 0
+    ? qualifiedColumnIds
+    : [...new Set(input.program.candidateIds)].sort();
+  const coverage = sourceCoverageFromEvidence(input.evidence, input.executionCandidates);
+  const attempts: CascadeTierAttemptV1[] = [
+    { version: 1, tier: 'certified', outcome: 'ineligible', candidateIds: coverage.find((item) => item.source === 'certified')?.candidateIds ?? [], reason: 'A current-question literal is not bound in the frozen program.', planFrozen: false },
+    { version: 1, tier: 'semantic', outcome: 'ineligible', candidateIds: coverage.find((item) => item.source === 'semantic')?.candidateIds ?? [], reason: 'No selected semantic member binding proved the current literal.', planFrozen: false },
+    { version: 1, tier: 'governed_relational', outcome: 'unavailable', candidateIds: coverage.find((item) => item.source === 'governed_relational')?.candidateIds ?? [], reason: 'A relationship cannot bind an unverified literal value by itself.', planFrozen: false },
+    { version: 1, tier: 'exploratory_sql', outcome: 'unavailable', candidateIds: qualifiedColumnIds, reason: ambiguity ? 'More than one qualified physical field matched the literal.' : 'No selected qualified physical field had exact safe-value evidence for the literal.', planFrozen: false },
+    { version: 1, tier: 'clarify_or_gap', outcome: 'unavailable', candidateIds, reason: message, planFrozen: false },
+  ];
+  return {
+    ...input.base,
+    action: 'block',
+    confidence: 1,
+    followsUp: false,
+    source: 'heuristic',
+    category: 'data_lookup',
+    depth: 'quick',
+    reason: message,
+    requiresClarification: false,
+    retrievalEvidence: retrievalTrace(input.evidence, input.executionCandidates),
+    resolvedAnalyticalPlan: undefined,
+    analyticalCascadeDecision: buildAnalyticalCascadeDecision({
+      requirements: input.requirements,
+      sourceCoverage: coverage,
+      attempts,
+      planFrozen: false,
+      stopReason: 'coverage_gap',
+    }),
+    terminalOutcome: {
+      kind: 'modeling_gap',
+      code: 'ANALYTICAL_MODELING_GAP',
+      message,
+      candidateIds,
+      gap: {
+        code: 'MISSING_ATTRIBUTE',
+        missing: ambiguity
+          ? ['one unambiguous qualified categorical field for the current-question value']
+          : ['one qualified categorical field with exact safe-value evidence for the current-question value'],
+        witnessCandidateIds: candidateIds,
+      },
+    },
+  };
 }
 
 /**
@@ -4669,7 +4812,13 @@ export function bindAskAnalystProgramMeaningV1(input: {
   // from the authoritative program, limited to this same candidate package.
   // The verifier/compiler still prove the metric's capability, grain, and
   // relationship closure before freeze.
-  const allowed = new Set(compilerFramingCandidates.flatMap((candidate) => [
+  // The MetricFlow framing subset is allowed to shape legacy metric/grouping
+  // metadata, but it is not the authority boundary for a V3 selection. A
+  // verified planner can legitimately retain a qualified physical output or
+  // context field beside its semantic metric. Keep those already-admitted
+  // identities through the compatibility carrier; they remain subject to the
+  // immutable compiler program's physical/semantic safety proof below.
+  const allowed = new Set(input.candidates.flatMap((candidate) => [
     candidate.id,
     candidate.qualifiedId ?? candidate.id,
   ]));

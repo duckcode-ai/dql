@@ -801,6 +801,18 @@ function resolveEntityDisplayTerm(input: {
       : dimension.supportedRoles.includes('display'))
     && (input.entityTerms.length === 0 || input.entityTerms.some((entityTerm) =>
       termsMatch(normalize(dimension.entityId), entityTerm))));
+  // A requirement seed can carry the full capability-qualified display
+  // identity after local retrieval (`customers.customer_name`).  Prefer that
+  // exact identity before the friendly-label matcher below: an older local
+  // index may also expose the unscoped display alias (`customer_name`) as a
+  // second card, but it is not a second business meaning when the selected
+  // capability identifies one exact native child.  This is intentionally an
+  // identifier comparison, never a leaf-name fallback across models.
+  const normalizedRequested = normalize(input.requested);
+  const exactQualifiedMatches = nativeEntityDimensions.filter((dimension) =>
+    normalize(dimension.dimensionId) === normalizedRequested
+    || (dimension.aliases ?? []).some((alias) => normalize(alias) === normalizedRequested));
+  if (exactQualifiedMatches.length > 0) return exactQualifiedMatches;
   const exactDisplayMatches = nativeEntityDimensions.filter((dimension) =>
     dimensionMatchesTerm(dimension, input.requested));
   if (exactDisplayMatches.length > 0) return exactDisplayMatches;
@@ -887,7 +899,12 @@ function phraseAppears(question: string, phrase: string): boolean {
     .split(' ')
     .map(singularize)
     .filter((token) => token.length >= 3 && !['name', 'dimension'].includes(token));
-  return significant.length > 0 && significant.some((token) => questionTokens.has(token));
+  // Candidate aliases such as `customer name` must not be promoted into a
+  // separately requested dimension merely because the question says
+  // `customer`.  The host seed already owns the display role. Requiring every
+  // meaningful token makes this an explicit phrase-presence check while
+  // retaining singular/plural normalization.
+  return significant.length > 0 && significant.every((token) => questionTokens.has(token));
 }
 
 function termsMatch(left: string, right: string): boolean {

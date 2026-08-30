@@ -51,11 +51,14 @@ import {
   type AskResearchBranchSummaryV1,
   type AskTerminalIncidentV1,
   type AnalyticalRequirementSeedV1,
+  type TrustedAnalyticalTaskAnchorV1,
   type AgentRunDiagnosticReceiptV3,
   type ProviderFailureDiagnosticV1,
   type ExploratoryExecutionFreezeV1,
   type AgentSelectedResultBindingV1,
   type AnalyticalTaskOutcomeV1,
+  type AnalyticalTaskOutcomeSummaryV1,
+  type AnalyticalTaskOutcomeTrustStateV1,
   type AnalyticalTurnPlanV1,
   normalizeCanonicalQueryResult,
 } from './analytical-orchestration.js';
@@ -403,6 +406,12 @@ export interface AgentRunRequest {
    */
   hostRequirementSeed?: AnalyticalRequirementSeedV1;
   /**
+   * Host-only shape continuity from one completed, result-backed Ask turn.
+   * HTTP/MCP parsers must never accept this: it is emitted only after the
+   * local conversation store proves the source turn and result fingerprint.
+   */
+  trustedTaskAnchor?: TrustedAnalyticalTaskAnchorV1;
+  /**
    * Host-only Ask Analyst state. The authoritative runtime creates this before
    * the legacy compiler broker runs; public JSON parsers must never hydrate it.
    */
@@ -671,6 +680,8 @@ export interface AgentRun {
   /** Turn-level clause graph and per-clause outcomes for conversational analytics. */
   analyticalTurnPlan?: AnalyticalTurnPlanV1;
   analyticalTaskOutcomes?: AnalyticalTaskOutcomeV1[];
+  /** Additive compound-Ask status; legacy runs omit this field. */
+  analyticalTaskOutcomeSummary?: AnalyticalTaskOutcomeSummaryV1;
   /** Additive local trace reference; detailed evidence stays in ask-observability.sqlite. */
   traceReference?: AgentRunTraceReferenceV1;
 }
@@ -699,6 +710,7 @@ export interface AgentRunProgressV1 {
   lifecycle: AgentRunLifecycleV1;
   analyticalTurnPlan?: AnalyticalTurnPlanV1;
   analyticalTaskOutcomes?: AnalyticalTaskOutcomeV1[];
+  analyticalTaskOutcomeSummary?: AnalyticalTaskOutcomeSummaryV1;
   /** Typed local continuation checkpoint; not part of public trace export. */
   askAnalystState?: AskAnalystState;
   /** Allows restart finalization/UI to find the local trace without shipping spans. */
@@ -759,7 +771,7 @@ export interface AgentRouteExecutorResult {
    * decline (`model_declined`) or grounding gap without inspecting prose. Absent
    * for any successful answer.
    */
-  answerRefusalCode?: 'grounding_gap' | 'modeling_gap' | 'ambiguous' | 'model_declined' | 'provider_error' | 'policy_blocked';
+  answerRefusalCode?: 'grounding_gap' | 'modeling_gap' | 'ambiguous' | 'model_declined' | 'provider_error' | 'policy_blocked' | 'execution_error';
   artifacts?: AgentRunArtifact[];
   evaluations?: AgentRunEvaluation[];
   nextActions?: AgentRunNextAction[];
@@ -1495,7 +1507,12 @@ export class AgentRunEngine {
     } catch {
       traceObserver = noOpAskTraceObserverV1;
     }
-    request = attachAskTraceObserverV1({ ...request }, traceObserver);
+    // The engine-owned ID is available before retrieval/routing. Bind it to
+    // this internal request object now so request-scoped host capabilities
+    // (for example one cold-literal probe) can never be minted against an
+    // anonymous or browser-supplied identity. Public ingress still strips any
+    // caller-provided `runId` before the engine chooses this value.
+    request = attachAskTraceObserverV1({ ...request, runId }, traceObserver);
     // Continuity is relationship evidence, not new routing input. Keep only
     // stable run IDs and one-way fingerprints so a trace can explain why this
     // turn reused a clarification/result/derived plan without persisting chat
@@ -1584,6 +1601,22 @@ export class AgentRunEngine {
         artifacts: [...progress.artifacts],
         evaluations: [...progress.evaluations],
         events: [...progress.events],
+        ...(progress.analyticalTaskOutcomes
+          ? { analyticalTaskOutcomes: progress.analyticalTaskOutcomes.map((outcome) => ({
+              ...outcome,
+              ...(outcome.dependencyTaskIds ? { dependencyTaskIds: [...outcome.dependencyTaskIds] } : {}),
+            })) }
+          : {}),
+        ...(progress.analyticalTaskOutcomeSummary
+          ? {
+              analyticalTaskOutcomeSummary: {
+                ...progress.analyticalTaskOutcomeSummary,
+                successfulTaskIds: [...progress.analyticalTaskOutcomeSummary.successfulTaskIds],
+                failedTaskIds: [...progress.analyticalTaskOutcomeSummary.failedTaskIds],
+                dependencyBlockedTaskIds: [...progress.analyticalTaskOutcomeSummary.dependencyBlockedTaskIds],
+              },
+            }
+          : {}),
         ...(progress.askAnalystState ? { askAnalystState: progress.askAnalystState } : {}),
       };
       checkpointQueue = checkpointQueue.then(async () => {
@@ -1853,15 +1886,27 @@ export class AgentRunEngine {
         ...step,
         route: answerAnywayRoute(constrainRouteForAudience(step.route, audience), request, audience, routeDecision),
       }));
-      // A multi-task authoritative Ask is an all-or-nothing frozen task queue.
-      // It is not a legacy compound plan that can silently omit later tasks or
-      // substitute a freshly parsed child graph.  The runtime supplied every
-      // accepted task before the first compiler freeze; reject an inconsistent
-      // handoff before executing any part of it.
+      // A multi-task authoritative Ask has one frozen task queue.  V2 task
+      // outcome receipts may retain an independent sibling when another task
+      // fails; persisted pre-V2 decisions deliberately retain the historical
+      // all-or-nothing aggregate below.  Neither mode may silently omit a
+      // task or substitute a freshly parsed child graph.
       const authoritativeTaskExecutions = authoritativeAsk
         ? routeDecision.askAnalystDecision?.taskExecutions ?? []
         : [];
-      const authoritativeCompoundAsk = authoritativeTaskExecutions.length > 1;
+      const initialTaskOutcomes = authoritativeAsk
+        ? routeDecision.askAnalystDecision?.taskOutcomes ?? []
+        : [];
+      const initialTaskOutcomeSummary = authoritativeAsk
+        ? routeDecision.askAnalystDecision?.taskOutcomeSummary
+        : undefined;
+      const authoritativePartialOutcomeMode = Boolean(
+        initialTaskOutcomeSummary
+        && initialTaskOutcomeSummary.taskCount > 1,
+      );
+      const authoritativeCompoundAsk = authoritativeTaskExecutions.length > 1 || authoritativePartialOutcomeMode;
+      if (initialTaskOutcomes.length > 0) progress.analyticalTaskOutcomes = initialTaskOutcomes;
+      if (initialTaskOutcomeSummary) progress.analyticalTaskOutcomeSummary = initialTaskOutcomeSummary;
       const authoritativeTaskIds = new Set(authoritativeTaskExecutions.map((task) => task.taskId));
       const authoritativeQueueIds = queue
         .map((step) => step.askAnalystTaskId)
@@ -1874,7 +1919,7 @@ export class AgentRunEngine {
       );
       if (!authoritativeQueueValid) {
         throw Object.assign(
-          new Error('The authoritative Ask runtime did not supply one frozen execution step for every accepted task. No partial task was executed.'),
+          new Error('The authoritative Ask runtime did not supply one frozen execution step for every executable task.'),
           { code: 'ASK_ANALYST_TASK_PLAN_MISMATCH' },
         );
       }
@@ -1888,6 +1933,29 @@ export class AgentRunEngine {
       // non-answer step (e.g. a research/draft step that emits only an artifact)
       // must not drop the data answer an earlier step already computed.
       let bestAnswerResult: AgentRouteExecutorResult | undefined;
+      /** Dependencies skipped after a parent execution failure. */
+      const runtimeDependencyBlockedTaskIds = new Map<string, string[]>();
+      // Compiler receipts describe what can be attempted, never what has
+      // executed.  Persist an execution-only aggregate before task 1 starts,
+      // and again after every task reaches a terminal step.  That makes an
+      // interrupted local run recoverable without advertising compiled tasks
+      // as completed work.
+      const checkpointAuthoritativeTaskOutcomes = () => {
+        if (!authoritativePartialOutcomeMode) return;
+        const aggregate = aggregateAuthoritativeTaskOutcomes({
+          initialTaskOutcomes,
+          taskExecutions: authoritativeTaskExecutions,
+          steps: executedSteps,
+          dependencyBlockedTaskIds: runtimeDependencyBlockedTaskIds,
+          taskCount: initialTaskOutcomeSummary?.taskCount,
+          finalized: false,
+        });
+        progress.analyticalTaskOutcomes = aggregate.outcomes;
+        progress.analyticalTaskOutcomeSummary = aggregate.summary;
+        progress.steps = [...executedSteps];
+        persistProgress();
+      };
+      checkpointAuthoritativeTaskOutcomes();
 
       // The runtime bounds ordinary Ask to three accepted tasks.  Once it
       // accepts a compound mission, every frozen child must receive one
@@ -1957,6 +2025,69 @@ export class AgentRunEngine {
               }
             : { route, goal: planned.goal },
         });
+
+        // V2 compound Ask treats a task dependency as an execution boundary,
+        // not a reason to reinterpret or replan the child.  A dependent child
+        // may use its predecessor only after that predecessor produced an
+        // accepted result.  Independent siblings continue to their own frozen
+        // programs after a failure; this branch is deliberately restricted to
+        // the additive V2 receipt so pre-V2 persisted compound runs preserve
+        // their historical all-or-nothing behavior.
+        const dependencyTaskIds = taskExecution
+          ? taskExecution.dependencyTaskIds
+            ?? taskExecution.state.mission.tasks.find((task) => task.id === taskExecution.taskId)?.dependencies
+            ?? []
+          : [];
+        const unmetDependencyIds = authoritativePartialOutcomeMode && taskExecution
+          ? dependencyTaskIds.filter((dependencyTaskId) => !hasAcceptedAuthoritativeTaskResult(
+              executedSteps.find((step) => step.askAnalystTaskId === dependencyTaskId),
+            ))
+          : [];
+        if (taskExecution && unmetDependencyIds.length > 0) {
+          runtimeDependencyBlockedTaskIds.set(taskExecution.taskId, unmetDependencyIds);
+          const summary = 'This task was not executed because a required task did not complete successfully.';
+          const dependencyStep: AgentRunStep = {
+            id: stepId,
+            index: stepCount,
+            route,
+            ...(planned.askAnalystTaskId ? { askAnalystTaskId: planned.askAnalystTaskId } : {}),
+            goal: planned.goal,
+            successCriteria: planned.successCriteria,
+            status: 'blocked',
+            attempts: 0,
+            summary,
+            evaluations: [{
+              id: `task-dependency:${taskExecution.taskId}`,
+              label: 'Task dependency',
+              passed: false,
+              severity: 'blocking',
+              message: summary,
+              evidence: { dependencyTaskIds: unmetDependencyIds },
+            }],
+            artifacts: [],
+          };
+          executedSteps.push(dependencyStep);
+          const dependencyOutcome: StepOutcome = {
+            status: 'blocked',
+            trustState: 'blocked',
+            artifacts: [],
+            stopReason: 'blocked',
+            summary,
+          };
+          finalStep = dependencyStep;
+          finalResult = { status: 'blocked', trustState: 'blocked', summary };
+          finalOutcome = dependencyOutcome;
+          checkpointAuthoritativeTaskOutcomes();
+          emit({
+            type: 'step.completed',
+            message: `Step ${stepCount} dependency blocked.`,
+            route,
+            status: 'blocked',
+            trustState: 'blocked',
+            payload: { stepId, status: 'blocked', dependencyTaskIds: unmetDependencyIds },
+          });
+          continue;
+        }
 
         let attempt = 0;
         let repairHint: string | undefined;
@@ -2166,6 +2297,7 @@ export class AgentRunEngine {
             evaluations,
             artifacts: [],
           });
+          checkpointAuthoritativeTaskOutcomes();
           emit({
             type: "step.completed",
             message: `Step ${stepCount} escalated to ${escalation.route.replaceAll("_", " ")}.`,
@@ -2215,6 +2347,11 @@ export class AgentRunEngine {
             payload: artifact,
           });
         }
+        // Artifact events above are the immutable result proof. Checkpoint the
+        // task only after that proof has joined persisted progress; a restart
+        // between task siblings can then retain a completed independent result
+        // and mark only its dependents as blocked.
+        checkpointAuthoritativeTaskOutcomes();
         emit({
           type: "step.completed",
           message: `Step ${stepCount} ${step.status}.`,
@@ -2256,7 +2393,17 @@ export class AgentRunEngine {
         // Otherwise continue to the next planned step (if any remain).
       }
 
-      const authoritativeCompoundFailure = authoritativeCompoundAsk
+      const authoritativeTaskOutcomeAggregate = authoritativePartialOutcomeMode
+        ? aggregateAuthoritativeTaskOutcomes({
+            initialTaskOutcomes,
+            taskExecutions: authoritativeTaskExecutions,
+            steps: executedSteps,
+            dependencyBlockedTaskIds: runtimeDependencyBlockedTaskIds,
+            taskCount: initialTaskOutcomeSummary?.taskCount,
+            finalized: true,
+          })
+        : undefined;
+      const authoritativeCompoundFailure = authoritativeCompoundAsk && !authoritativePartialOutcomeMode
         ? compoundAskFailureForFrozenTasks({
             expectedTaskIds: [...authoritativeTaskIds],
             plan,
@@ -2276,6 +2423,7 @@ export class AgentRunEngine {
         finalOutcome,
         clarifyOutcome,
         bestAnswerResult,
+        ...(authoritativeTaskOutcomeAggregate ? { authoritativeTaskOutcomeAggregate } : {}),
         ...(authoritativeCompoundFailure ? { authoritativeCompoundFailure } : {}),
         budgetUsage: cascadeBudgetTrace(budgets),
         events,
@@ -2504,6 +2652,7 @@ export class AgentRunEngine {
     finalOutcome?: StepOutcome;
     clarifyOutcome?: { step: AgentRunStep; question?: string };
     bestAnswerResult?: AgentRouteExecutorResult;
+    authoritativeTaskOutcomeAggregate?: AuthoritativeTaskOutcomeAggregateV1;
     authoritativeCompoundFailure?: AuthoritativeCompoundFailureV1;
     budgetUsage: CascadeBudgetTrace;
     events: AgentRunEvent[];
@@ -2512,6 +2661,65 @@ export class AgentRunEngine {
     const repairAttempts = input.budgetUsage.usage.laneExecutionAttemptsUsed;
     const escalationAttempts = input.budgetUsage.usage.engineEscalationsUsed;
     const completedAt = this.timestamp();
+
+    if (input.authoritativeTaskOutcomeAggregate) {
+      const aggregate = input.authoritativeTaskOutcomeAggregate;
+      const successfulSteps = input.steps.filter((step) => {
+        const taskId = step.askAnalystTaskId;
+        return taskId
+          ? aggregate.summary.successfulTaskIds.includes(taskId)
+          : false;
+      });
+      const lastSuccessfulStep = [...successfulSteps].reverse()[0];
+      const route = lastSuccessfulStep?.resolvedRoute ?? lastSuccessfulStep?.route ?? 'blocked';
+      const hasSuccessfulTask = aggregate.summary.successfulTaskIds.length > 0;
+      const status: AgentRunStatus = !hasSuccessfulTask
+        ? 'blocked'
+        : aggregate.summary.trustState === 'review_required'
+          ? 'needs_review'
+          : 'completed';
+      const artifacts = input.steps.flatMap((step) => step.artifacts);
+      const evaluations = input.steps.flatMap((step) => step.evaluations);
+      const partialSummary = taskOutcomeAggregateSummaryText(aggregate.summary);
+      return {
+        id: input.runId,
+        question: input.request.question,
+        requestedMode: input.requestedMode,
+        conversationBinding: input.request.conversationBinding ?? traceConversationBinding(input.request, undefined),
+        route,
+        status,
+        trustState: aggregate.summary.trustState,
+        stopReason: status === 'blocked'
+          ? 'blocked'
+          : aggregate.summary.trustState === 'review_required'
+            ? 'generated_review_required'
+            : 'governed_compound_answer',
+        startedAt: input.startedAt,
+        completedAt,
+        selectedObject: input.request.selectedObject,
+        executionTarget: input.request.executionTarget,
+        routeDecision: input.routeDecision,
+        plan: input.plan,
+        steps: input.steps,
+        summary: partialSummary,
+        answer: partialSummary,
+        answerKind: 'governed',
+        artifacts,
+        evaluations,
+        events: input.events,
+        nextActions: applyAudienceToNextActions(
+          defaultNextActions(route, status),
+          resolveAudience(input.request),
+          status,
+        ),
+        repairAttempts,
+        escalationAttempts,
+        budgetUsage: input.budgetUsage,
+        analyticalTaskOutcomes: aggregate.outcomes,
+        analyticalTaskOutcomeSummary: aggregate.summary,
+        ...authoringDerivationFromRequest(input.request),
+      };
+    }
 
     if (input.authoritativeCompoundFailure) {
       const failure = input.authoritativeCompoundFailure;
@@ -2738,6 +2946,242 @@ interface AuthoritativeCompoundFailureV1 {
   failedTaskIds: string[];
   missingTaskIds: string[];
   message: string;
+}
+
+/**
+ * Execution-final receipt for the additive V2 ordinary-Ask task contract.
+ * It is deliberately separate from `AuthoritativeCompoundFailureV1`: old
+ * persisted compound decisions do not opt in merely by deserializing beside
+ * this newer code.
+ */
+interface AuthoritativeTaskOutcomeAggregateV1 {
+  outcomes: AnalyticalTaskOutcomeV1[];
+  summary: AnalyticalTaskOutcomeSummaryV1;
+}
+
+function canonicalTaskResultArtifactForStep(step: AgentRunStep | undefined): {
+  resultFingerprint: string;
+} | undefined {
+  if (!step) return undefined;
+  for (const artifact of step.artifacts) {
+    if (artifact.kind !== 'answer' || artifact.trustState === 'blocked') continue;
+    const payload = objectRecordForResultFacts(artifact.payload);
+    const result = objectRecordForResultFacts(payload?.result);
+    const fingerprint = stringForResultFacts(result?.resultFingerprint);
+    if (!result || !fingerprint) continue;
+    const canonical = canonicalResultForFactProjection(result);
+    if (!canonical || canonical.columns.length === 0 || canonical.resultFingerprint !== fingerprint) continue;
+    return { resultFingerprint: fingerprint };
+  }
+  return undefined;
+}
+
+function hasAcceptedAuthoritativeTaskResult(step: AgentRunStep | undefined): boolean {
+  if (step?.status !== 'passed' && step?.status !== 'repaired' && step?.status !== 'needs_review') return false;
+  // A generated/review-required response becomes an accepted independent task
+  // only once the immutable canonical result artifact is present.  Narrative
+  // text alone is not evidence that a query executed.
+  return Boolean(canonicalTaskResultArtifactForStep(step));
+}
+
+function aggregateAuthoritativeTaskOutcomes(input: {
+  initialTaskOutcomes: AnalyticalTaskOutcomeV1[];
+  taskExecutions: AskAnalystTaskExecutionV1[];
+  steps: AgentRunStep[];
+  dependencyBlockedTaskIds: ReadonlyMap<string, string[]>;
+  taskCount?: number;
+  /** False while a run is in-flight: unattempted tasks are still pending. */
+  finalized?: boolean;
+}): AuthoritativeTaskOutcomeAggregateV1 {
+  const outcomeByTaskId = new Map<string, AnalyticalTaskOutcomeV1>();
+  for (const outcome of input.initialTaskOutcomes) {
+    // Each compiler task is authoritative exactly once. Preserve a planning
+    // gap/dependency receipt while permitting a matching executable task to
+    // replace only its own provisional status after it actually runs.
+    outcomeByTaskId.set(outcome.taskId, {
+      ...outcome,
+      ...(outcome.dependencyTaskIds ? { dependencyTaskIds: [...outcome.dependencyTaskIds] } : {}),
+    });
+  }
+  const orderedTaskIds = [
+    ...input.taskExecutions.map((task) => task.taskId),
+    ...input.initialTaskOutcomes.map((outcome) => outcome.taskId),
+  ].filter((taskId, index, all) => all.indexOf(taskId) === index);
+
+  for (const taskExecution of input.taskExecutions) {
+    const taskId = taskExecution.taskId;
+    const dependencyTaskIds = input.dependencyBlockedTaskIds.get(taskId);
+    if (dependencyTaskIds?.length) {
+      outcomeByTaskId.set(taskId, {
+        version: 1,
+        taskId,
+        status: 'dependency_blocked',
+        trustState: 'blocked',
+        summary: 'This task was not executed because a required task did not complete successfully.',
+        failure: {
+          version: 1,
+          code: 'DEPENDENCY_BLOCKED',
+          message: 'A prerequisite task did not complete successfully.',
+          phase: 'dependency',
+        },
+        dependencyTaskIds: [...dependencyTaskIds],
+      });
+      continue;
+    }
+    const step = input.steps.find((candidate) => candidate.askAnalystTaskId === taskId);
+    if (!step) {
+      if (!input.finalized) continue;
+      outcomeByTaskId.set(taskId, {
+        version: 1,
+        taskId,
+        status: 'blocked',
+        trustState: 'blocked',
+        summary: 'This task did not receive its required frozen execution attempt.',
+        failure: {
+          version: 1,
+          code: 'TASK_EXECUTION_MISSING',
+          message: 'This task did not receive its required frozen execution attempt.',
+          phase: 'execution',
+        },
+      });
+      continue;
+    }
+    if (hasAcceptedAuthoritativeTaskResult(step)) {
+      const trustState = taskOutcomeTrustForExecutedStep(step, taskExecution);
+      const resultFingerprint = taskResultFingerprintForStep(step);
+      outcomeByTaskId.set(taskId, {
+        version: 1,
+        taskId,
+        status: 'completed',
+        trustState,
+        summary: step.summary,
+        ...(resultFingerprint ? { resultFingerprint } : {}),
+      });
+      continue;
+    }
+    const isClarification = step.status === 'clarify';
+    const acceptedWithoutCanonicalResult = step.status === 'passed'
+      || step.status === 'repaired'
+      || step.status === 'needs_review';
+    const message = acceptedWithoutCanonicalResult
+      ? 'This task did not produce an immutable canonical result artifact.'
+      : step.summary ?? (isClarification
+      ? 'This task requires a business clarification before it can run.'
+      : 'This task did not complete its frozen execution.');
+    outcomeByTaskId.set(taskId, {
+      version: 1,
+      taskId,
+      status: isClarification ? 'gap' : 'blocked',
+      trustState: 'blocked',
+      summary: message,
+      failure: {
+        version: 1,
+        code: acceptedWithoutCanonicalResult
+          ? 'TASK_EXECUTION_RESULT_MISSING'
+          : isClarification ? 'TASK_REQUIRES_CLARIFICATION' : 'TASK_EXECUTION_FAILED',
+        message,
+        phase: 'execution',
+      },
+    });
+  }
+
+  const outcomes = orderedTaskIds
+    .map((taskId) => outcomeByTaskId.get(taskId))
+    .filter((outcome): outcome is AnalyticalTaskOutcomeV1 => Boolean(outcome));
+  const successfulTaskIds = outcomes
+    .filter((outcome) => outcome.status === 'completed' || outcome.status === 'partial')
+    .map((outcome) => outcome.taskId);
+  const failedTaskIds = outcomes
+    .filter((outcome) => outcome.status !== 'completed' && outcome.status !== 'partial' && outcome.status !== 'dependency_blocked')
+    .map((outcome) => outcome.taskId);
+  const dependencyBlockedTaskIds = outcomes
+    .filter((outcome) => outcome.status === 'dependency_blocked')
+    .map((outcome) => outcome.taskId);
+  const successfulTrustStates = outcomes
+    .filter((outcome) => outcome.status === 'completed' || outcome.status === 'partial')
+    .map((outcome) => outcome.trustState ?? 'blocked');
+  const taskCount = Math.max(input.taskCount ?? 0, outcomes.length);
+  return {
+    outcomes,
+    summary: {
+      version: 1,
+      status: successfulTaskIds.length === 0
+        ? 'blocked'
+        : failedTaskIds.length || dependencyBlockedTaskIds.length || successfulTaskIds.length < taskCount
+          ? 'partial'
+          : 'completed',
+      trustState: leastTrustedExecutedTaskOutcomeState(successfulTrustStates),
+      taskCount,
+      successfulTaskIds,
+      failedTaskIds,
+      dependencyBlockedTaskIds,
+    },
+  };
+}
+
+function taskOutcomeTrustForExecutedStep(
+  step: AgentRunStep,
+  taskExecution: AskAnalystTaskExecutionV1,
+): AnalyticalTaskOutcomeTrustStateV1 {
+  const artifactStates = step.artifacts
+    .map((artifact) => normalizeTaskOutcomeTrustState(artifact.trustState))
+    .filter((state): state is AnalyticalTaskOutcomeTrustStateV1 => Boolean(state));
+  const compiledState = taskExecution.compiledTrustState
+    ?? taskOutcomeTrustStateForCompiler(taskExecution.resolvedPlan.compiler);
+  // A review-required compiler is never elevated merely because an adapter
+  // artifact used the older `governed` label.
+  if (step.status === 'needs_review' || compiledState === 'review_required') return 'review_required';
+  return leastTrustedExecutedTaskOutcomeState([...artifactStates, compiledState]);
+}
+
+function normalizeTaskOutcomeTrustState(
+  trustState: AgentRunTrustState,
+): AnalyticalTaskOutcomeTrustStateV1 | undefined {
+  if (trustState === 'grounded') return 'governed';
+  return trustState === 'certified'
+    || trustState === 'governed'
+    || trustState === 'review_required'
+    || trustState === 'blocked'
+    || trustState === 'not_applicable'
+    ? trustState
+    : undefined;
+}
+
+function taskOutcomeTrustStateForCompiler(
+  compiler: AskAnalystTaskExecutionV1['resolvedPlan']['compiler'],
+): AnalyticalTaskOutcomeTrustStateV1 {
+  if (compiler === 'certified') return 'certified';
+  if (compiler === 'metricflow' || compiler === 'governed_relational') return 'governed';
+  if (compiler === 'exploratory_sql') return 'review_required';
+  return 'blocked';
+}
+
+function leastTrustedExecutedTaskOutcomeState(
+  states: AnalyticalTaskOutcomeTrustStateV1[],
+): AnalyticalTaskOutcomeTrustStateV1 {
+  if (states.length === 0) return 'blocked';
+  const score: Record<AnalyticalTaskOutcomeTrustStateV1, number> = {
+    certified: 4,
+    governed: 3,
+    review_required: 2,
+    not_applicable: 1,
+    blocked: 0,
+  };
+  return states.reduce((least, candidate) => score[candidate] < score[least] ? candidate : least);
+}
+
+function taskResultFingerprintForStep(step: AgentRunStep): string | undefined {
+  return canonicalTaskResultArtifactForStep(step)?.resultFingerprint;
+}
+
+function taskOutcomeAggregateSummaryText(summary: AnalyticalTaskOutcomeSummaryV1): string {
+  if (summary.status === 'completed') {
+    return `All ${summary.taskCount} independent analytical task${summary.taskCount === 1 ? '' : 's'} completed.`;
+  }
+  if (summary.status === 'partial') {
+    return `${summary.successfulTaskIds.length} of ${summary.taskCount} independent analytical task${summary.taskCount === 1 ? '' : 's'} completed. The remaining task receipts explain what needs attention.`;
+  }
+  return 'No independently executable analytical task completed. Review the task receipts for the recorded gaps or dependency blocks.';
 }
 
 /**
@@ -4323,6 +4767,8 @@ function businessAnswerForRun(run: AgentRun): BusinessAnswer {
     ? deterministicTerminalAnswerForRun(run)
     : run.status === 'needs_clarification'
       ? 'One business choice is required before DQL can run this question.'
+      : run.analyticalTaskOutcomeSummary?.status === 'partial'
+        ? taskOutcomeAggregateSummaryText(run.analyticalTaskOutcomeSummary)
       : 'The query completed, but no fact-linked narrative was retained. Open the result to review the validated data.';
   return {
     version: 1,
@@ -4330,11 +4776,14 @@ function businessAnswerForRun(run: AgentRun): BusinessAnswer {
     trustState: run.trustState === 'grounded' ? 'governed' : run.trustState,
     factIds: [...factIds].sort(),
     ...(resultFingerprint ? { resultFingerprint } : {}),
+    ...(run.analyticalTaskOutcomeSummary ? { taskOutcomeSummary: run.analyticalTaskOutcomeSummary } : {}),
     answer: acceptedNarrative?.text ?? deterministicAnswer,
     limitations: run.status === 'blocked'
       ? ['No executable result was accepted.']
       : run.status === 'needs_clarification'
         ? ['A materially different executable business meaning requires a choice.']
+        : run.analyticalTaskOutcomeSummary?.status === 'partial'
+          ? ['One or more independent analytical tasks did not complete; inspect the retained task receipts.']
         : factsOnly
           ? []
           : ['Narrative is deterministic because no validated analytical fact set was retained.'],
@@ -4359,6 +4808,8 @@ function deterministicTerminalAnswerForRun(run: AgentRun): string {
       return 'The AI provider could not complete this Ask step. Check provider readiness, then retry.';
     case 'COMPILATION_FAILED':
       return 'DQL selected a governed plan but could not compile it for the current target. Review the semantic target, then retry.';
+    case 'RESULT_CONTRACT_MISMATCH':
+      return 'The query ran, but its result did not match the frozen plan. Review the result contract and trace, then retry.';
     case 'ANALYTICAL_COVERAGE_GAP':
       return 'DQL could not prove one safe analytical path from the current metadata snapshot. Review the available modeled fields, then retry.';
     case 'ANALYTICAL_EXECUTION_FAILED':
@@ -4378,7 +4829,7 @@ function diagnosticReceiptV5ForRun(
   const legacy = run.diagnosticReceiptV4?.summary;
   const selectedCompiler = state.resolvedPlan?.compiler;
   const ordinaryRoleInferenceAmbiguity = run.status === 'needs_clarification'
-    && state.version === 2
+    && (state.version === 2 || state.version === 3)
     && state.planningReceipt?.verification?.reasonCode === 'ordinary_role_inference_ambiguous';
   const whatHappened = run.status === 'blocked'
     ? 'The Ask runtime did not complete an executable analytical answer.'
@@ -4453,7 +4904,7 @@ function diagnosticReceiptV6ForRun(
   const planFrozen = state.resolvedPlan?.planFrozen === true || cascade?.planFrozen === true;
   const executionAttempts = state.executionAttempts;
   const connectionAttempted = planFrozen && (executionAttempts > 0 || terminalConnectionSetupFailureForRun(run));
-  const persistedPlanning = state.version === 2 ? state.planningReceipt : undefined;
+  const persistedPlanning = state.version === 2 || state.version === 3 ? state.planningReceipt : undefined;
   // A failed dispatch is still a planner call. Older persisted V2 state could
   // be checkpointed before its receipt incremented, while the tool boundary
   // was already durable. Prefer that boundary to avoid a V6/UI story which
@@ -5003,6 +5454,21 @@ function terminalIncidentForRun(
       safeAction: compilationFailure.safeAction,
     };
   }
+  // Result validation is a distinct post-execution boundary. The statement
+  // may have run successfully, but its rows were deliberately rejected
+  // against the immutable plan; do not rewrite that evidence as a connection
+  // or SQL execution failure merely because both happen after plan freeze.
+  const resultValidationFailure = terminalResultValidationFailureForRun(run);
+  if (resultValidationFailure) {
+    return {
+      version: 1,
+      code: 'RESULT_CONTRACT_MISMATCH',
+      boundary: 'result.validate',
+      origin: 'result_validator',
+      impact: 'answer_not_produced',
+      safeAction: resultValidationFailure.safeAction,
+    };
+  }
   const warehouseFailure = terminalWarehouseFailureForRun(run);
   if (warehouseFailure) {
     return {
@@ -5114,6 +5580,28 @@ function terminalCompilationFailureForRun(
         safeAction: terminalIncidentSafeAction(traceFailureRecord.safeActions) ?? 'inspect_failure',
       };
     }
+  }
+  return undefined;
+}
+
+/**
+ * A validated result-contract rejection is neither a compiler failure nor a
+ * warehouse failure. Read only the producer-owned typed failure so malformed
+ * or legacy error text cannot manufacture this incident.
+ */
+function terminalResultValidationFailureForRun(
+  run: AgentRun,
+): { safeAction: AskTerminalIncidentV1['safeAction'] } | undefined {
+  for (const artifact of run.artifacts) {
+    const payload = artifact.payload;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) continue;
+    const failure = (payload as Record<string, unknown>).analyticalFailure;
+    if (!failure || typeof failure !== 'object' || Array.isArray(failure)) continue;
+    const failureRecord = failure as Record<string, unknown>;
+    if (failureRecord.code !== 'RESULT_CONTRACT_MISMATCH' || failureRecord.phase !== 'result_validation') continue;
+    return {
+      safeAction: terminalIncidentSafeAction(failureRecord.safeActions) ?? 'inspect_failure',
+    };
   }
   return undefined;
 }

@@ -17,6 +17,7 @@ import {
   canonicalResultRowFingerprint,
   capResearchBranches,
   classifyProviderFailure,
+  currentQuestionLiteralMemberTerms,
   evidenceCandidateRoles,
   fuseContextCandidates,
   normalizeCanonicalQueryResult,
@@ -68,6 +69,31 @@ describe('conversational analytical orchestration contracts', () => {
     expect(requirements.measures).toEqual(['revenue']);
     expect(requirements.dimensions).toEqual(['region']);
     expect(requirements.dimensions).not.toContain('sales based on the region');
+  });
+
+  it('AGT-051 preserves explicit current-question member literals when a retriever omits its filter', () => {
+    // Title casing in a normal analytical request is not evidence of a
+    // member value. These used to create fake member requirements and block
+    // every downstream SQL tier before it could inspect qualified columns.
+    expect(currentQuestionLiteralMemberTerms('Show Revenue by Region')).toEqual([]);
+    expect(currentQuestionLiteralMemberTerms('Top Customers by Revenue')).toEqual([]);
+    expect(currentQuestionLiteralMemberTerms('Who are the Top Customers?')).toEqual([]);
+    expect(currentQuestionLiteralMemberTerms('Show revenue in Philadelphia')).toEqual(['philadelphia']);
+    expect(currentQuestionLiteralMemberTerms('Which region is Brittany Barrera in by revenue?'))
+      .toContain('brittany barrera');
+
+    const requirements = buildAnalyticalRequirementSet({
+      question: 'Show revenue in Philadelphia',
+      parsedIntent: { measures: ['revenue'], dimensions: [], filters: [] },
+    });
+    expect(requirements.memberTerms).toContain('philadelphia');
+
+    const namedRequirements = buildAnalyticalRequirementSet({
+      question: 'Which region is Brittany Barrera in by revenue?',
+      parsedIntent: { measures: ['revenue'], dimensions: ['region'], filters: [] },
+    });
+    expect(namedRequirements.memberTerms).toContain('brittany barrera');
+    expect(namedRequirements.memberTerms).not.toContain('by revenue');
   });
 
   it('AGT-034 removes only an exact measure-as-dimension duplicate', () => {

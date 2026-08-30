@@ -233,7 +233,8 @@ const answerGate: AgentRunGate = (context: AgentRunGateContext): AgentRunEvaluat
   // instruction to spend another provider call on a different orchestration lane.
   const isTerminalRefusal = result.answerRefusalCode === "model_declined"
     || result.answerRefusalCode === "grounding_gap"
-    || result.answerRefusalCode === "modeling_gap";
+    || result.answerRefusalCode === "modeling_gap"
+    || result.answerRefusalCode === "execution_error";
   const hasAnswer = !isTerminalRefusal && (
     nonEmptyString(result.answer)
     ?? nonEmptyString(payload?.answer)

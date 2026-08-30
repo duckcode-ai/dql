@@ -98,14 +98,66 @@ export interface AnalyticalTaskV1 {
   inheritedBindings: Array<{ id: string; value: string; source: 'conversation' | 'result' | 'user' }>;
 }
 
+/**
+ * Trust projected for one task outcome.  This is intentionally the same
+ * local-first vocabulary used by the canonical answer, but it is declared
+ * independently so task receipts remain readable without importing the run
+ * engine (and old JSON records remain valid).
+ */
+export type AnalyticalTaskOutcomeTrustStateV1 =
+  | 'certified'
+  | 'governed'
+  | 'review_required'
+  | 'blocked'
+  | 'not_applicable';
+
+/** Finalized state for one bounded Ask clause or Research branch. */
+export type AnalyticalTaskOutcomeStatusV1 =
+  | 'completed'
+  | 'partial'
+  | 'gap'
+  | 'blocked'
+  /** A child was deliberately not executed because its required parent failed. */
+  | 'dependency_blocked';
+
+/** Typed, content-safe failure retained per task rather than collapsed into the root. */
+export interface AnalyticalTaskFailureV1 {
+  version: 1;
+  code: string;
+  message: string;
+  phase: 'planning' | 'execution' | 'dependency';
+}
+
 /** Durable, content-only outcome for one independent clause/branch. */
 export interface AnalyticalTaskOutcomeV1 {
   version: 1;
   taskId: string;
-  status: 'completed' | 'partial' | 'gap' | 'blocked';
+  status: AnalyticalTaskOutcomeStatusV1;
+  /** Present once a compiler or executor established task-local provenance. */
+  trustState?: AnalyticalTaskOutcomeTrustStateV1;
   summary?: string;
   resultFingerprint?: string;
   gap?: AnalyticalCoverageGapV1;
+  /** Typed cause when the task did not produce an independent result. */
+  failure?: AnalyticalTaskFailureV1;
+  /** Parent task IDs that prevented this child from executing. */
+  dependencyTaskIds?: string[];
+}
+
+/**
+ * Additive turn-level task receipt for ordinary Ask.  The run's historical
+ * terminal status stays wire-compatible; this summary distinguishes a
+ * completed, partial, or fully blocked multi-task answer without hiding any
+ * independently validated sibling result.
+ */
+export interface AnalyticalTaskOutcomeSummaryV1 {
+  version: 1;
+  status: 'completed' | 'partial' | 'blocked';
+  trustState: AnalyticalTaskOutcomeTrustStateV1;
+  taskCount: number;
+  successfulTaskIds: string[];
+  failedTaskIds: string[];
+  dependencyBlockedTaskIds: string[];
 }
 
 export interface AnalyticalCoverageGapV1 {
@@ -453,6 +505,64 @@ export function currentQuestionGroundedParsedIntent(
   };
 }
 
+/**
+ * Preserve a small set of explicit current-question literals even when a
+ * retriever did not emit a parser filter. This is deliberately not a value
+ * search or synonym engine: it records only quoted values, capitalized proper
+ * names, and values introduced by an explicit predicate phrase. The planner
+ * must still bind each term to an admitted, qualified member/dimension card
+ * before it can become an executable filter.
+ *
+ * Without this host-owned atom, "customers in Philadelphia" could reach a
+ * broad certified fit after retrieval silently omitted the parser filter.
+ */
+export function currentQuestionLiteralMemberTerms(question: string): string[] {
+  const literals: string[] = [];
+  const append = (
+    value: string | undefined,
+    source: 'quoted' | 'predicate' | 'proper_name' = 'predicate',
+  ): void => {
+    const trimmed = (value ?? '').trim()
+      .replace(/^(?:the\s+)/i, '')
+      .replace(/[?.!,;:]+$/g, '')
+      .trim();
+    const normalized = normalizeRequirementTerm(trimmed);
+    if (!normalized || isTemporalTerm(normalized)) return;
+    // Do not mistake grammatical/analytical words for a member literal.
+    if (/^(?:by|with|and|or|for|where|that|which|who|having|have)\b/i.test(normalized)) return;
+    if (/^(?:show|who|what|which|where|when|why|how|top|bottom|highest|lowest|revenue|sales|customers?|accounts?|products?|orders?|regions?|categories?|category|region|customer|account|product|order)$/i.test(normalized)) return;
+    // A two-word title-cased fragment is not automatically a proper name.
+    // Sentence-leading analytical phrases such as `Show Revenue` and `Top
+    // Customers` otherwise become fake member atoms, then falsely demand a
+    // member field before the compiler can reach a safe physical fallback.
+    // Quoted text remains an explicit reader literal; only heuristic proper
+    // name extraction applies this conservative vocabulary guard.
+    if (source === 'proper_name') {
+      const words = normalized.split(/\s+/);
+      if (words.some((word) => /^(?:show|list|give|find|get|top|bottom|highest|lowest|revenue|sales|customer|customers|account|accounts|product|products|order|orders|region|regions|category|categories|metric|metrics|amount|count|total|average|avg|monthly|daily|yearly)$/i.test(word))) return;
+    }
+    literals.push(trimmed);
+  };
+
+  // A reader can make a value unambiguous with quotes regardless of casing.
+  for (const match of question.matchAll(/["“]([^"”]{2,96})["”]/g)) append(match[1], 'quoted');
+
+  // Keep a literal only when the question itself supplies a predicate-like
+  // construction. The bounded lookahead avoids swallowing "by revenue" or a
+  // second clause into the value.
+  const predicate = /\b(?:in|from|at|named|called)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9'/-]*(?:\s+[A-Za-z][A-Za-z0-9'/-]*){0,3})(?=\s*(?:\b(?:by|with|and|or|for|where|that|which|who|having|have)\b|[?.!,;]|$))/gi;
+  for (const match of question.matchAll(predicate)) append(match[1], 'predicate');
+
+  // Proper names such as "Brittany Barrera" are a member requirement even
+  // when the reader phrases an attribute lookup rather than a SQL-style
+  // predicate. Single capitalized words are intentionally handled only by the
+  // predicate branch above so sentence-leading generic words do not become
+  // fake filters.
+  for (const match of question.matchAll(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b/g)) append(match[1], 'proper_name');
+
+  return uniqueRequirementTerms(literals);
+}
+
 export type ContextSourceCoverageStatusV1 = 'available' | 'empty' | 'stale' | 'unavailable' | 'errored' | 'skipped';
 
 /** Source coverage is distinct from a missing capability.  A bounded package
@@ -557,6 +667,8 @@ export interface AskTerminalIncidentV1 {
     | 'CONNECTION_NOT_CONFIGURED'
     /** A frozen plan failed before any statement reached the warehouse. */
     | 'COMPILATION_FAILED'
+    /** The executed rows did not satisfy the immutable frozen result contract. */
+    | 'RESULT_CONTRACT_MISMATCH'
     | 'ANALYTICAL_EXECUTION_FAILED'
     | 'ANALYTICAL_COVERAGE_GAP'
     | 'PROVIDER_FAILURE'
@@ -565,8 +677,8 @@ export interface AskTerminalIncidentV1 {
     /** Explicit Research exhausted its root deadline before finalization. */
     | 'RESEARCH_RUN_DEADLINE'
     | 'CANCELLED';
-  boundary: 'plan.compile' | 'semantic.compile' | 'sql.authorize' | 'sql.execute' | 'provider' | 'cascade' | 'run';
-  origin: 'internal_invariant' | 'governance_gate' | 'semantic_compiler' | 'plan_compiler' | 'provider' | 'warehouse' | 'unknown';
+  boundary: 'plan.compile' | 'semantic.compile' | 'sql.authorize' | 'sql.execute' | 'result.validate' | 'provider' | 'cascade' | 'run';
+  origin: 'internal_invariant' | 'governance_gate' | 'semantic_compiler' | 'plan_compiler' | 'result_validator' | 'provider' | 'warehouse' | 'unknown';
   impact: 'execution_not_attempted' | 'execution_failed' | 'answer_not_produced' | 'run_cancelled';
   safeAction:
     | 'export_redacted_trace'
@@ -936,6 +1048,8 @@ export interface BusinessAnswerV1 {
   /** The accepted answer text, already visible in the corresponding artifact. */
   answer?: string;
   limitations: string[];
+  /** Additive per-task aggregate; omitted by legacy/single-task records. */
+  taskOutcomeSummary?: AnalyticalTaskOutcomeSummaryV1;
 }
 
 /**
@@ -1210,6 +1324,91 @@ export interface AnalyticalProgramV2 extends Omit<AnalyticalProgramV1, 'version'
   };
 }
 
+/**
+ * Planner V2 is the post-verification business interpretation.  The provider
+ * V1 wire format remains readable during rollout, but a frozen program does
+ * not preserve a provider-selected relationship/join binding: relationship
+ * closure is compiler-owned evidence, not business meaning.
+ */
+export type AnalyticalPlannerBusinessRoleV2 = Exclude<EvidenceCandidateRoleV1, 'relationship'>;
+
+export interface AnalyticalPlannerTaskV2 {
+  taskId: string;
+  coveredTaskIds?: string[];
+  selectedConceptIds: string[];
+  roleBindings: Partial<Record<AnalyticalPlannerBusinessRoleV2, string[]>>;
+  operations: AnalyticalPlannerOperationV1[];
+  preferredCompiler?: AnalyticalPlannerTaskProposalV1['preferredCompiler'];
+  assumptions: string[];
+}
+
+export interface AnalyticalPlannerInterpretationV2 {
+  version: 2;
+  /** The source is diagnostic only; it cannot change authority after verify. */
+  source: 'provider' | 'deterministic' | 'legacy_adapter';
+  tasks: AnalyticalPlannerTaskV2[];
+  confidence?: AnalyticalPlannerProposalV1['confidence'];
+  missingInformation: string[];
+}
+
+/**
+ * One host-derived safe relationship closure.  `candidateId` refers to the
+ * compact same-snapshot path card; `relationshipEvidence` contains only its
+ * canonical proof IDs.  A planner never selects either value.
+ */
+export interface CanonicalRelationshipPathReceiptV1 {
+  version: 1;
+  candidateId: string;
+  proofClass: 'governed' | 'exploratory';
+  relationshipEvidence: string[];
+}
+
+/**
+ * Lossless typed inputs that survive planner/legacy adapter conversions. The
+ * words remain local program data; diagnostic projections expose counts only.
+ */
+export interface AnalyticalInputAtomV1 {
+  version: 1;
+  source: 'current_question' | 'trusted_successful_task';
+  role: Exclude<EvidenceCandidateRoleV1, 'relationship' | 'context'> | 'filter';
+  term: string;
+  required: true;
+}
+
+/** A host-validated anchor from a successful prior task/result. */
+export interface TrustedAnalyticalTaskAnchorV1 {
+  version: 1;
+  /**
+   * `member_binding` retains a validated selected result value.
+   * `analytical_shape` retains only a successful task's metric/projection
+   * shape for an explicit additive follow-up such as "add region here".
+   * Neither form is provider supplied.
+   */
+  kind?: 'member_binding' | 'analytical_shape';
+  displayDimension?: string;
+  values: string[];
+  /** Existing successful-task shape; no rows or free-form prior answer. */
+  measures?: string[];
+  dimensions?: string[];
+  sourceTurnId?: string;
+  resultFingerprint?: string;
+}
+
+/**
+ * The authoritative frozen Ask contract. V1/V2 remain valid persisted JSON
+ * readers; all new authoritative turns construct V3 before compiler entry.
+ */
+export interface AnalyticalProgramV3 extends Omit<AnalyticalProgramV2, 'version' | 'planner'> {
+  version: 3;
+  planner: AnalyticalPlannerInterpretationV2;
+  /** Compiler-owned path receipts; never provider-selected join instructions. */
+  relationshipPaths: CanonicalRelationshipPathReceiptV1[];
+  /** Current-turn atoms cannot be erased by a compatibility MeaningResolution. */
+  inputAtoms: AnalyticalInputAtomV1[];
+  /** Validated prior-result anchors are distinct from free-text member guesses. */
+  trustedTaskAnchors: TrustedAnalyticalTaskAnchorV1[];
+}
+
 export interface AskAnalystConversationDeltaV2 extends Omit<AskAnalystConversationDeltaV1, 'version' | 'partialFrame'> {
   version: 2;
   partialFrame: Pick<BusinessQuestionFrameV4, 'kind' | 'requirements' | 'planningMode'>;
@@ -1225,6 +1424,12 @@ export interface AskAnalystStateV2 extends Omit<AskAnalystStateV1, 'version' | '
   planningMode: AskPlanningModeV1;
   plannerRevisionCount: number;
   planningReceipt?: AskAnalystPlanningReceiptV1;
+}
+
+/** New authoritative state; V2 remains readable for interrupted old runs. */
+export interface AskAnalystStateV3 extends Omit<AskAnalystStateV2, 'version' | 'program'> {
+  version: 3;
+  program: AnalyticalProgramV3;
 }
 
 export interface AskAnalystPlanningReceiptV1 {
@@ -1324,8 +1529,8 @@ export interface AgentRunDiagnosticReceiptV7 extends Omit<AgentRunDiagnosticRece
 }
 
 /** New runtime values are V2; V1 values remain readable from old JSON runs. */
-export type AskAnalystState = AskAnalystStateV1 | AskAnalystStateV2;
-export type AnalyticalProgram = AnalyticalProgramV1 | AnalyticalProgramV2;
+export type AskAnalystState = AskAnalystStateV1 | AskAnalystStateV2 | AskAnalystStateV3;
+export type AnalyticalProgram = AnalyticalProgramV1 | AnalyticalProgramV2 | AnalyticalProgramV3;
 export type BusinessQuestionFrame = BusinessQuestionFrameV3 | BusinessQuestionFrameV4;
 export type BusinessAnswer = BusinessAnswerV1 | BusinessAnswerV2;
 
@@ -1401,6 +1606,12 @@ export type RoleBalancedEvidenceCandidate = {
   dimensions?: string[];
   timeGrains?: string[];
   relationshipEvidence?: string[];
+  /**
+   * Host-only runtime-value proof attached to one qualified physical column.
+   * It is intentionally structural here so the retrieval selector can reserve
+   * the field for a current literal without exposing values to a provider.
+   */
+  safeValueEvidence?: Array<{ normalizedValue?: string; value?: string }>;
   relevanceScore?: number;
   exactMatch?: boolean;
   compatibility?: string;
@@ -1896,7 +2107,14 @@ export function buildAnalyticalRequirementSet(input: {
     dimensions,
     entityTerms,
     entityDisplayTerms,
-    memberTerms: uniqueRequirementTerms((parsed?.filters ?? []).map((filter) => filter.value)),
+    // A parser filter is useful but not the sole authority for an explicit
+    // current-turn member. Preserve bounded literal atoms too; downstream
+    // planning must still bind them to qualified snapshot evidence before a
+    // field/value predicate can be frozen.
+    memberTerms: uniqueRequirementTerms([
+      ...(parsed?.filters ?? []).map((filter) => filter.value),
+      ...currentQuestionLiteralMemberTerms(question),
+    ]),
     ...(explicitOutputTerms(question).length > 0 ? { outputTerms: explicitOutputTerms(question) } : {}),
     ...(/\bindividual\b/i.test(question) ? { grain: 'individual' as const } : {}),
     ...(ranking
@@ -2233,6 +2451,8 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
       && candidateMatchesTerms(candidate, categoricalTerms, { categoricalDimension: true })) return true;
     if (roles.includes('member') && input.requirements.memberTerms.length > 0
       && candidateMatchesTerms(candidate, input.requirements.memberTerms)) return true;
+    if (roles.includes('categorical_dimension') && input.requirements.memberTerms.length > 0
+      && candidateHasSafeValueForMemberTerms(candidate, input.requirements.memberTerms)) return true;
     if (roles.includes('relationship')
       && (input.requirements.dimensions.length > 1 || input.requirements.entityTerms.length > 0)) return true;
     return false;
@@ -2266,7 +2486,10 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
     for (const candidate of ranked) {
       if (admitted >= limit || selected.length >= max) break;
       const roles = evidenceCandidateRoles(candidate);
-      if (!roles.includes(role)) continue;
+      const safePhysicalMember = role === 'member'
+        && roles.includes('categorical_dimension')
+        && candidateHasSafeValueForMemberTerms(candidate, terms);
+      if (!roles.includes(role) && !safePhysicalMember) continue;
       // "top accounts" needs the account display key, not any field whose
       // label happens to contain account. Once a display candidate is
       // available, owner/e-mail/sentiment attributes are neither the entity
@@ -2291,7 +2514,8 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
       // For entity labels, role is more important than a lexical owner/email
       // hit. For all other roles, prefer an identity matching the requested
       // business term but retain a role candidate when the request is terse.
-      if (terms.length > 0 && !candidateMatchesTerms(candidate, terms, { categoricalDimension: categorical === true })
+      if (terms.length > 0 && !safePhysicalMember
+        && !candidateMatchesTerms(candidate, terms, { categoricalDimension: categorical === true })
         && role !== 'time_dimension' && role !== 'relationship' && role !== 'entity_label') continue;
       add(candidate);
       admitted += 1;
@@ -2301,6 +2525,19 @@ export function selectRoleBalancedMeaningCandidates<T extends RoleBalancedEviden
     for (const candidate of ranked) add(candidate);
   }
   return selected;
+}
+
+/** Exact snapshot-value equality only; no lexical/synonym member matching. */
+function candidateHasSafeValueForMemberTerms(
+  candidate: RoleBalancedEvidenceCandidate,
+  terms: readonly string[],
+): boolean {
+  const values = candidate.safeValueEvidence ?? [];
+  return terms.some((term) => {
+    const normalized = normalizeRequirementTerm(term);
+    return Boolean(normalized) && values.some((value) =>
+      normalizeRequirementTerm(value.normalizedValue ?? value.value ?? '') === normalized);
+  });
 }
 
 /**

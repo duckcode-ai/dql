@@ -40,10 +40,10 @@ const EXPECTED_TEST_FILES = 153;
 // full initial package plus #17 targeted extension), and explicit
 // filter/time/ranking regressions, plus the certified profile and exact
 // semantic order-count fast paths, and durable failed-planner V6 receipt
-// regressions, total 2,138
+// regressions, total 2,187
 // non-skipped tests; a
 // future accidental skip must not be hidden by a broad package pass.
-const EXPECTED_TESTS = 2138;
+const EXPECTED_TESTS = 2187;
 
 function discoverTestFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
