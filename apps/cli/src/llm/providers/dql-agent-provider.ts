@@ -567,6 +567,28 @@ function v2SafeCard(
     ...(candidate.primaryEntity ? { primaryEntity: candidate.primaryEntity } : {}),
     ...(candidate.dataType ? { dataType: candidate.dataType } : {}),
     ...(candidate.dimensions?.length ? { dimensions: candidate.dimensions.slice(0, 16) } : {}),
+    // `dimensions` above are display labels, and they read exactly like
+    // identifiers — so a model breaking a metric down by "customer" sent that,
+    // and was refused. Worse, a label can be genuinely unresolvable: two
+    // entities declared `customer` on different models collide on runtime
+    // name, so DQL drops both and nothing that label names is reachable.
+    // Publish the identifiers the compiler will actually accept, alongside the
+    // labels, so the breakdown can be built rather than guessed.
+    ...(candidate.dimensions?.length && workspace
+      ? (() => {
+        const ids = candidate.dimensions.slice(0, 16).flatMap((label) => {
+          const resolved = resolveV2SemanticCapabilityReference({
+            reference: label,
+            role: 'dimension',
+            candidates: workspace.candidates ?? [],
+            capabilities: workspace.semanticCapabilities,
+          });
+          return resolved ? [resolved] : [];
+        });
+        const unique = [...new Set(ids)];
+        return unique.length ? { compatibleDimensionIds: unique } : {};
+      })()
+      : {}),
     ...(candidate.timeGrains?.length ? { timeGrains: candidate.timeGrains.slice(0, 8) } : {}),
     ...(candidate.sourceObjects?.length ? { sourceObjects: candidate.sourceObjects.slice(0, 12) } : {}),
     ...(candidate.relationshipEvidence?.length ? { relationshipEvidence: candidate.relationshipEvidence.slice(0, 8) } : {}),
@@ -791,11 +813,35 @@ function resolveV2SemanticCapabilityReference(input: {
   const bestAuthority = matches.reduce<number | undefined>((current, match) => (
     current === undefined || match.authority < current ? match.authority : current
   ), undefined);
-  if (bestAuthority === undefined) return undefined;
-  const best = [...new Set(matches
-    .filter((match) => match.authority === bestAuthority)
-    .map((match) => match.candidateId))];
-  return best.length === 1 ? best[0] : undefined;
+  if (bestAuthority !== undefined) {
+    const best = [...new Set(matches
+      .filter((match) => match.authority === bestAuthority)
+      .map((match) => match.candidateId))];
+    if (best.length === 1) return best[0];
+  }
+
+  // Last resort: a DECLARED alias of exactly one admitted candidate.
+  //
+  // People — and models reading a card whose `dimensions` are display labels —
+  // say "customer", not `semantic:uncategorized:dimension:customers.customer_name`.
+  // Aliases were only consulted for references that already looked like
+  // identifiers, so a business label matched nothing and the turn was refused
+  // while the field it named sat admitted in the same snapshot.
+  //
+  // This resolves a NAME the modeler themselves attached to a candidate the
+  // host already admitted for this role, and only when exactly one candidate
+  // claims it. Ambiguity stays ambiguous, and nothing outside the admitted set
+  // becomes reachable — so this widens what can be SAID, never what can be RUN.
+  const aliasMatches = [...new Set(input.candidates.flatMap((candidate) => {
+    const candidateId = v2CandidateId(candidate);
+    const capability = input.capabilities!.get(candidateId);
+    if (!v2SemanticCapabilityMatchesCandidate(capability, candidate, input.role)) return [];
+    const names = [candidate.name, ...(candidate.aliases ?? [])]
+      .filter((name): name is string => typeof name === 'string')
+      .map(normalizeV2SemanticRuntimeName);
+    return names.includes(runtimeName) ? [candidateId] : [];
+  }))];
+  return aliasMatches.length === 1 ? aliasMatches[0] : undefined;
 }
 
 type V2MetricTimeCompatibility =
@@ -7318,6 +7364,7 @@ function normalizePriorValueDimension(value: string): string {
 
 export const __test__ = {
   agenticLaneForRequest,
+  resolveV2SemanticCapabilityReference,
   orchestratorPolicyForRequest,
   applyTopicShiftGuard,
   isDrilldownFollowUp,

@@ -5963,3 +5963,86 @@ describe('App copilot context: the app\'s own drafts', () => {
     expect(() => renderExtraContext(req)).not.toThrow();
   });
 });
+
+/**
+ * A model reading a semantic card sees `dimensions: ["customer"]` — display
+ * labels — but `compile_and_run_semantic` accepts only admitted candidate IDs.
+ * Aliases were consulted only for references that already looked like
+ * identifiers, so a business label resolved to nothing and the turn was
+ * refused while the field it named sat admitted in the same snapshot.
+ */
+describe('semantic capability reference resolution', () => {
+  const handle = (candidateId: string, runtimeName: string, roles: Array<'metric' | 'dimension' | 'time_dimension' | 'filter_dimension'>) => ({
+    version: 1 as const,
+    candidateId,
+    runtimeName,
+    engines: [],
+    roles,
+    fingerprint: 'fp',
+    isCurrent: () => true,
+  });
+  const customerName = {
+    id: 'semantic:uncategorized:dimension:customers.customer_name',
+    qualifiedId: 'semantic:uncategorized:dimension:customers.customer_name',
+    kind: 'semantic_member' as const,
+    semanticObjectType: 'dimension' as const,
+    trustTier: 'semantic' as const,
+    name: 'customer_name',
+    aliases: ['customer', 'customer name'],
+    relevanceScore: 1,
+    matchReasons: ['entity label'],
+    compatibility: 'compatible' as const,
+  };
+  // The gate re-derives this from the candidate, so the fixture must too.
+  const fingerprintFor = (candidate: Parameters<typeof askV2SemanticCandidateAuthorityFingerprint>[0]): string =>
+    askV2SemanticCandidateAuthorityFingerprint(candidate);
+  const capabilities = new Map([
+    [customerName.id, { ...handle(customerName.id, 'customer_name', ['dimension', 'filter_dimension']), fingerprint: fingerprintFor(customerName) }],
+  ]);
+
+  it('resolves a business label to the one admitted dimension that declares it', () => {
+    expect(__test__.resolveV2SemanticCapabilityReference({
+      reference: 'customer',
+      role: 'dimension',
+      candidates: [customerName],
+      capabilities,
+    })).toBe(customerName.id);
+  });
+
+  it('still resolves the exact identifier and the runtime name', () => {
+    for (const reference of [customerName.id, 'customer_name']) {
+      expect(__test__.resolveV2SemanticCapabilityReference({
+        reference, role: 'dimension', candidates: [customerName], capabilities,
+      }), reference).toBe(customerName.id);
+    }
+  });
+
+  // Widening what can be SAID must never widen what can be RUN.
+  it('leaves an ambiguous label unresolved rather than choosing one', () => {
+    const other = {
+      ...customerName,
+      id: 'semantic:uncategorized:dimension:orders.customer_label',
+      qualifiedId: 'semantic:uncategorized:dimension:orders.customer_label',
+      name: 'customer_label',
+    };
+    const both = new Map([
+      [customerName.id, { ...handle(customerName.id, 'customer_name', ['dimension']), fingerprint: fingerprintFor(customerName) }],
+      [other.id, { ...handle(other.id, 'customer_label', ['dimension']), fingerprint: fingerprintFor(other) }],
+    ]);
+    expect(__test__.resolveV2SemanticCapabilityReference({
+      reference: 'customer', role: 'dimension', candidates: [customerName, other], capabilities: both,
+    })).toBeUndefined();
+  });
+
+  it('never resolves a label to a candidate admitted for a different role', () => {
+    expect(__test__.resolveV2SemanticCapabilityReference({
+      reference: 'customer', role: 'metric', candidates: [customerName], capabilities,
+    })).toBeUndefined();
+  });
+
+  it('never resolves a label no admitted candidate claims', () => {
+    expect(__test__.resolveV2SemanticCapabilityReference({
+      reference: 'region', role: 'dimension', candidates: [customerName], capabilities,
+    })).toBeUndefined();
+  });
+});
