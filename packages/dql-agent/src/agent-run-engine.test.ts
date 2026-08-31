@@ -28,6 +28,15 @@ import { decideAgentAction, type IntentDecision } from "./intent-controller.js";
 import { createHybridRouter } from './router.js';
 import type { AgentEvidenceCandidate } from './meaning-resolution.js';
 import type { AskTraceObserverV1 } from './ask-observability/index.js';
+import {
+  finishAskAgentV2Turn,
+  createAskV2ExecutionCapabilityV1,
+  mintAskV2ExecutionReceiptV1,
+  observeAskAgentV2Tool,
+  type AskAgentStateV4,
+  type AskV2ExecutionCapabilityV1,
+  type AskV2ExecutionReceipt,
+} from './ask-runtime/ask-agent-runtime-v2.js';
 
 /** Router-owned proof used by engine-boundary tests; do not synthesize routes from IDs. */
 function safeExploratoryCascade() {
@@ -611,6 +620,496 @@ describe("AgentRunEngine", () => {
     const exported = JSON.stringify(run.diagnosticReceiptV5);
     expect(exported).not.toContain('Brittany Barrera');
     expect(exported).not.toContain('Revenue is 42.');
+  });
+
+  it('OBS-017 persists the authoritative V2 tool receipt without re-entering the V1 analyst story', async () => {
+    const metricId = 'semantic:metric:revenue';
+    const v2State = {
+      version: 4,
+      mode: 'authoritative_v2',
+      turnClass: 'analytics',
+      snapshotId: 'snapshot:v2-semantic',
+      retainedCandidateIds: [metricId],
+      initialCandidateIds: [metricId],
+      expansionCandidateIds: [],
+      contextCoverage: [{
+        version: 2,
+        source: 'semantic',
+        status: 'available',
+        admittedCandidateCount: 1,
+        excludedCandidateCount: 3,
+        reasonCodes: ['SOURCE_AVAILABLE'],
+      }],
+      excludedCandidateCount: 3,
+      exclusionReasonCodes: ['WORKSPACE_CANDIDATE_CAP'],
+      relationshipPathHandles: [],
+      conversation: { version: 2, availableResultHandleIds: [] },
+      observations: [{
+        version: 1,
+        tool: 'compile_and_run_semantic',
+        outcome: 'executed',
+        tier: 'semantic',
+        reasonCode: 'ASK_V2_VALIDATED_RESULT',
+        candidateIds: [metricId],
+        planId: 'ask-v2:semantic:snapshot:v2-semantic',
+        frozen: true,
+        origin: 'execution',
+      }],
+      tierAttempts: [{
+        version: 2,
+        tier: 'semantic',
+        outcome: 'executed',
+        reasonCode: 'ASK_V2_VALIDATED_RESULT',
+        candidateIds: [metricId],
+        frozen: true,
+      }],
+      resolvedPlan: {
+        version: 3,
+        id: 'ask-v2:semantic:snapshot:v2-semantic',
+        snapshotId: 'snapshot:v2-semantic',
+        tier: 'semantic',
+        candidateIds: [metricId],
+        frozen: true,
+        reviewRequired: false,
+        fingerprint: 'sha256:v2-semantic',
+      },
+      terminal: 'completed',
+      terminalOutcome: {
+        version: 2,
+        kind: 'finish_answer',
+        reasonCode: 'ASK_V2_VALIDATED_RESULT',
+        origin: 'execution',
+      },
+    } satisfies AskAgentStateV4;
+    const decision = frozenSemanticDecision();
+    decision.askAgentV2Decision = {
+      version: 2,
+      mode: 'authoritative_v2',
+      state: v2State,
+    };
+    const store = new InMemoryAgentRunStore();
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-ask-v2-observability',
+      now: fixedClock(),
+      store,
+      router: { decide: () => decision },
+      executors: {
+        semantic_answer: () => ({
+          answerTier: 'semantic_metric',
+          status: 'completed',
+          trustState: 'governed',
+          artifacts: [{
+            id: 'answer:v2-semantic',
+            kind: 'answer',
+            title: 'Revenue',
+            trustState: 'governed',
+            payload: {
+              result: {
+                columns: ['revenue'],
+                rows: [{ revenue: 42 }],
+                rowCount: 1,
+                resultFingerprint: 'result:v2-semantic',
+                answerTier: 'semantic_metric',
+              },
+            },
+          }],
+        }),
+      },
+    });
+
+    const run = await engine.run({ question: 'revenue', requestedMode: 'ask' });
+
+    expect(run.diagnosticReceiptV5).toBeUndefined();
+    expect(run.diagnosticReceiptV8).toMatchObject({
+      version: 8,
+      mode: 'authoritative_v2',
+      objective: 'analytics',
+      planFrozen: true,
+      terminalOutcome: { kind: 'finish_answer', origin: 'execution' },
+      contextCoverage: [expect.objectContaining({ source: 'semantic', admittedCandidateCount: 1, excludedCandidateCount: 3 })],
+      excludedCandidateCount: 3,
+      outcome: { connectionAttempted: true, executionAttempts: 1 },
+    });
+    expect(run.diagnosticReceiptV8?.exclusionReasonCodes).toEqual(['WORKSPACE_CANDIDATE_CAP']);
+    expect(run.diagnosticReceiptV8?.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'executed', tier: 'semantic' }),
+    ]));
+    expect(run.artifacts.every((artifact) => artifact.payload.diagnosticReceiptV8 === run.diagnosticReceiptV8)).toBe(true);
+    expect(store.get(run.id)?.diagnosticReceiptV8).toEqual(run.diagnosticReceiptV8);
+    expect(JSON.stringify(run.diagnosticReceiptV8)).not.toContain('result:v2-semantic');
+  });
+
+  it('AGT-047 retains a validated authoritative V2 result instead of invoking the legacy repair lifecycle', async () => {
+    const candidateId = 'certified:customer_profile';
+    const state = {
+      version: 4,
+      mode: 'authoritative_v2',
+      turnClass: 'analytics',
+      snapshotId: 'snapshot:v2-customer-profile',
+      sourceFingerprint: 'source:v2-customer-profile',
+      retainedCandidateIds: [candidateId],
+      initialCandidateIds: [candidateId],
+      expansionCandidateIds: [],
+      relationshipPathHandles: [],
+      conversation: { version: 2, availableResultHandleIds: [] },
+      observations: [],
+      tierStates: {
+        certified: {
+          version: 1,
+          status: 'complete',
+          candidateIds: [candidateId],
+          reasonCode: 'CERTIFIED_COMPLETE_FOR_REQUEST',
+        },
+      },
+      exactCertifiedCandidateId: candidateId,
+    } satisfies AskAgentStateV4;
+    const decision: IntentDecision = {
+      action: 'answer',
+      confidence: 1,
+      followsUp: false,
+      source: 'heuristic',
+      reason: 'The host captured one complete certified candidate from the immutable snapshot.',
+      askAgentV2Decision: { version: 2, mode: 'authoritative_v2', state },
+    };
+    const replan = vi.fn(() => {
+      throw new Error('A completed V2 result must not invoke the legacy replan lifecycle.');
+    });
+    const executeCertified = vi.fn(({ request }: { request: { askAgentV2ExecutionCapability?: AskV2ExecutionCapabilityV1 } }) => {
+      observeAskAgentV2Tool(state, {
+        version: 1,
+        tool: 'run_certified',
+        outcome: 'eligible',
+        tier: 'certified',
+        reasonCode: 'ASK_V2_EXECUTION_AUTHORIZED',
+        candidateIds: [candidateId],
+        planId: 'ask-v2:certified:customer-profile',
+        executionAuthorized: true,
+        inputFingerprint: 'sha256:v2-customer-profile',
+        origin: 'freeze',
+      });
+      observeAskAgentV2Tool(state, {
+        version: 1,
+        tool: 'run_certified',
+        outcome: 'executed',
+        tier: 'certified',
+        reasonCode: 'CERTIFIED_EXECUTED',
+        candidateIds: [candidateId],
+        planId: 'ask-v2:certified:customer-profile',
+        origin: 'execution',
+      });
+      finishAskAgentV2Turn(state, {
+        version: 2,
+        kind: 'finish_answer',
+        reasonCode: 'CERTIFIED_EXECUTED',
+        origin: 'execution',
+      });
+      const result = {
+        columns: ['customer_name', 'lifetime_spend'],
+        rows: [{ customer_name: 'Customer 1', lifetime_spend: 1_000 }],
+        rowCount: 1,
+        resultFingerprint: 'result:v2-customer-profile',
+        answerTier: 'certified_block',
+      };
+      const askAgentV2ExecutionReceipt = mintAskV2ExecutionReceiptV1({
+        state,
+        capability: request.askAgentV2ExecutionCapability,
+        result,
+      });
+      return {
+        status: 'completed' as const,
+        trustState: 'certified' as const,
+        answerTier: 'certified_block',
+        answer: 'Untrusted executor prose.',
+        result,
+        askAgentV2Outcome: {
+          version: 2 as const,
+          kind: 'finish_answer' as const,
+          reasonCode: 'CERTIFIED_EXECUTED',
+          origin: 'execution' as const,
+        },
+        ...(askAgentV2ExecutionReceipt ? { askAgentV2ExecutionReceipt } : {}),
+        artifacts: [{
+          id: 'answer:v2-customer-profile',
+          kind: 'answer' as const,
+          title: 'Customer profile',
+          trustState: 'certified' as const,
+          payload: {
+              result,
+          },
+        }],
+      };
+    });
+    const engine = new AgentRunEngine({
+      idGenerator: () => 'run-v2-certifed-terminal',
+      now: fixedClock(),
+      router: { decide: () => decision },
+      planner: {
+        plan: vi.fn(() => ({
+          source: 'deterministic' as const,
+          rationale: 'Execute the host-selected certified answer.',
+          steps: [{
+            id: 'certified:customer-profile',
+            route: 'certified_answer' as const,
+            goal: 'Who are the top customers?',
+            successCriteria: ['Preserve the frozen V2 result.'],
+          }],
+        })),
+        replan,
+      },
+      // Model the legacy post-execution gate which used to trigger a repair
+      // after a valid V2 result. The V2 terminal boundary must supersede it.
+      gates: {
+        certified_answer: () => [{
+          id: 'legacy-post-execution-repair',
+          label: 'Legacy post-execution repair',
+          passed: false,
+          severity: 'warning',
+          message: 'The old generic evaluator would request another run.',
+          suggestedRepair: 'Retry the same artifact.',
+        }],
+      },
+      executors: { certified_answer: executeCertified },
+    });
+
+    const run = await engine.run({
+      question: 'who are the top customers',
+      requestedMode: 'ask',
+    });
+
+    expect(executeCertified).toHaveBeenCalledTimes(1);
+    expect(replan).not.toHaveBeenCalled();
+    expect(run).toMatchObject({
+      route: 'certified_answer',
+      status: 'completed',
+      trustState: 'certified',
+      stopReason: 'certified_answer_found',
+      diagnosticReceiptV8: {
+        mode: 'authoritative_v2',
+        terminalOutcome: { kind: 'finish_answer', reasonCode: 'CERTIFIED_EXECUTED' },
+        outcome: { connectionAttempted: true, executionAttempts: 1, factCount: 2 },
+      },
+    });
+    expect(run.evaluations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'ask-v2-terminal-result', passed: true }),
+    ]));
+    expect(run.businessAnswer).toMatchObject({
+      mode: 'facts_only',
+      trustState: 'certified',
+      resultFingerprint: 'result:v2-customer-profile',
+    });
+    expect(run.answer).toContain('Customer 1');
+    expect(run.answer).not.toContain('Untrusted executor prose.');
+  });
+
+  it('AGT-047 rejects forged, stale, legacy, and pre-freeze V2 receipts before they can bypass generic gates', async () => {
+    const candidateId = 'certified:customer_profile';
+    const result = {
+      columns: ['customer_name', 'lifetime_spend'],
+      rows: [{ customer_name: 'Customer 1', lifetime_spend: 1_000 }],
+      rowCount: 1,
+      resultFingerprint: 'result:v2-receipt-integrity',
+      answerTier: 'certified_block',
+    };
+    const createState = (): AskAgentStateV4 => ({
+      version: 4,
+      mode: 'authoritative_v2',
+      turnClass: 'analytics',
+      snapshotId: 'snapshot:v2-receipt-integrity',
+      sourceFingerprint: 'source:v2-receipt-integrity',
+      retainedCandidateIds: [candidateId],
+      initialCandidateIds: [candidateId],
+      expansionCandidateIds: [],
+      relationshipPathHandles: [],
+      conversation: { version: 2, availableResultHandleIds: [] },
+      observations: [],
+      tierStates: {
+        certified: {
+          version: 1,
+          status: 'complete',
+          candidateIds: [candidateId],
+          reasonCode: 'CERTIFIED_COMPLETE_FOR_REQUEST',
+        },
+      },
+      exactCertifiedCandidateId: candidateId,
+    });
+    const terminalState = (): AskAgentStateV4 => ({
+      ...createState(),
+      observations: [
+        {
+          version: 1,
+          tool: 'run_certified',
+          outcome: 'eligible',
+          tier: 'certified',
+          reasonCode: 'ASK_V2_EXECUTION_AUTHORIZED',
+          candidateIds: [candidateId],
+          planId: 'ask-v2:certified:receipt-integrity',
+          frozen: true,
+          executionAuthorized: true,
+          inputFingerprint: 'sha256:receipt-integrity-plan',
+          origin: 'freeze',
+        },
+        {
+          version: 1,
+          tool: 'run_certified',
+          outcome: 'executed',
+          tier: 'certified',
+          reasonCode: 'CERTIFIED_EXECUTED',
+          candidateIds: [candidateId],
+          planId: 'ask-v2:certified:receipt-integrity',
+          origin: 'execution',
+        },
+      ],
+      resolvedPlan: {
+        version: 3,
+        id: 'ask-v2:certified:receipt-integrity',
+        snapshotId: 'snapshot:v2-receipt-integrity',
+        tier: 'certified',
+        candidateIds: [candidateId],
+        frozen: true,
+        reviewRequired: false,
+        fingerprint: 'sha256:receipt-integrity-plan',
+      },
+      terminal: 'completed',
+      terminalOutcome: {
+        version: 2,
+        kind: 'finish_answer',
+        reasonCode: 'CERTIFIED_EXECUTED',
+        origin: 'execution',
+      },
+    });
+    const scenarios: Array<{
+      name: string;
+      receipt: (capability: AskV2ExecutionCapabilityV1) => AskV2ExecutionReceipt | undefined;
+    }> = [
+      {
+        name: 'forged',
+        receipt: (capability) => ({
+          version: 1,
+          mode: 'authoritative_v2',
+          capabilityId: capability.id,
+          runId: capability.runId,
+          snapshotId: capability.snapshotId,
+          sourceFingerprint: capability.sourceFingerprint,
+          retainedCandidateFingerprint: capability.retainedCandidateFingerprint,
+          planId: 'ask-v2:certified:receipt-integrity',
+          planFingerprint: 'sha256:receipt-integrity-plan',
+          tier: 'certified',
+          candidateIds: [candidateId],
+          resultFingerprint: result.resultFingerprint,
+          frozen: true,
+          executed: true,
+        }),
+      },
+      {
+        name: 'stale',
+        receipt: () => {
+          const staleState = terminalState();
+          const staleCapability = createAskV2ExecutionCapabilityV1({
+            id: 'capability:stale',
+            runId: 'run:stale',
+            state: staleState,
+          });
+          return mintAskV2ExecutionReceiptV1({ state: staleState, capability: staleCapability, result });
+        },
+      },
+      {
+        name: 'legacy',
+        receipt: () => ({
+          version: 1,
+          mode: 'authoritative_v2',
+          snapshotId: 'snapshot:v2-receipt-integrity',
+          planId: 'ask-v2:certified:receipt-integrity',
+          tier: 'certified',
+          candidateIds: [candidateId],
+          frozen: true,
+          executed: true,
+        }),
+      },
+      {
+        name: 'pre-freeze',
+        receipt: (capability) => ({
+          version: 1,
+          mode: 'authoritative_v2',
+          capabilityId: capability.id,
+          runId: capability.runId,
+          snapshotId: capability.snapshotId,
+          sourceFingerprint: capability.sourceFingerprint,
+          retainedCandidateFingerprint: capability.retainedCandidateFingerprint,
+          planId: 'ask-v2:certified:receipt-integrity',
+          planFingerprint: 'sha256:receipt-integrity-plan',
+          tier: 'certified',
+          candidateIds: [candidateId],
+          resultFingerprint: result.resultFingerprint,
+          frozen: false,
+          executed: false,
+        } as unknown as AskV2ExecutionReceipt),
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const state = createState();
+      const decision: IntentDecision = {
+        action: 'answer',
+        confidence: 1,
+        followsUp: false,
+        source: 'heuristic',
+        reason: `Receipt-integrity ${scenario.name} scenario.`,
+        askAgentV2Decision: { version: 2, mode: 'authoritative_v2', state },
+      };
+      const genericGate = vi.fn(() => [{
+        id: 'generic-gate-must-run',
+        label: 'Generic gate',
+        passed: true,
+        severity: 'info' as const,
+        message: 'No server-attested V2 receipt was accepted.',
+      }]);
+      const engine = new AgentRunEngine({
+        idGenerator: () => `run-v2-${scenario.name}`,
+        now: fixedClock(),
+        router: { decide: () => decision },
+        planner: {
+          plan: () => ({
+            source: 'deterministic' as const,
+            rationale: 'Exercise the certified executor boundary.',
+            steps: [{
+              id: 'certified:receipt-integrity',
+              route: 'certified_answer' as const,
+              goal: 'Receipt integrity',
+              successCriteria: ['Run generic gate when the receipt is not server-attested.'],
+            }],
+          }),
+        },
+        gates: { certified_answer: genericGate },
+        executors: {
+          certified_answer: ({ request }) => ({
+            status: 'completed',
+            trustState: 'certified',
+            answerTier: 'certified_block',
+            answer: 'Executor-provided prose must not establish V2 authority.',
+            result,
+            askAgentV2Outcome: {
+              version: 2,
+              kind: 'finish_answer',
+              reasonCode: 'CERTIFIED_EXECUTED',
+              origin: 'execution',
+            },
+            askAgentV2ExecutionReceipt: scenario.receipt(request.askAgentV2ExecutionCapability!),
+            artifacts: [{
+              id: `answer:v2-${scenario.name}`,
+              kind: 'answer',
+              title: 'Receipt integrity',
+              trustState: 'certified',
+              payload: { result },
+            }],
+          }),
+        },
+      });
+      const run = await engine.run({ question: 'who are the top customers', requestedMode: 'ask' });
+      expect(genericGate, scenario.name).toHaveBeenCalledTimes(1);
+      expect(run.evaluations, scenario.name).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'ask-v2-terminal-result' }),
+      ]));
+    }
   });
 
   it('AGT-036 executes every independently frozen ordinary Ask task with its task-local program', async () => {

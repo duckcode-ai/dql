@@ -8,6 +8,56 @@ change the Cloud theme, App, Block, or Modeling surfaces.
 
 ## Turn contract
 
+## Ask Agent Runtime V2 amendment
+
+`AskAgentRuntimeV2` supersedes deterministic **business-meaning authority**
+for V2 free-text turns only. It does not weaken qualified identity, snapshot,
+relationship, MetricFlow, SQL, authorization, or trust invariants.
+
+1. A free-text turn first retrieves one immutable workspace: up to 128
+   server-side candidates, 24 role-balanced initial cards, and at most two
+   12-card same-snapshot expansions. The agent sees no raw credentials, paths,
+   provider response, or hidden reasoning (`CTX-009`, `AGT-047`).
+2. The bounded agent selects only the next canonical tool and qualified handles.
+   It cannot recurse through `ask_dql`/`answer_question`, choose a trust label,
+   invent IDs, or execute a wider snapshot. Canonical tools are certified,
+   semantic, relational/DQL, exploratory-SQL, context, value-search,
+   clarification, and finish tools (`AGT-048`, `API-017`).
+   For `compile_and_run_semantic`, the agent selects only admitted metric,
+   dimension, filter, time, and grain bindings. The local host resolves the one
+   configured, target-ready semantic adapter before exposing an executable
+   capability; adapter/engine is not a model-facing tool argument. A missing
+   selected host engine is a pre-freeze `SEMANTIC_ENGINE_UNAVAILABLE`
+   observation, while stale legacy `engine` arguments are ignored and cannot
+   trigger a retry loop (`AGT-047`).
+3. Pre-freeze misses are typed observations. The tool kernel enforces certified
+   → semantic → governed relational → exploratory priority and refuses a later
+   tier when an earlier complete tier exists. Once executable, a route freezes;
+   one same-plan repair is allowed and no downgrade or re-interpretation is
+   permitted (`AGT-049`, `AGT-050`).
+4. General, definition, and business-context turns can answer from retrieved
+   context without a warehouse. Result follow-ups retain typed plan/result/
+   member handles; an ambiguous pronoun produces one stable clarification
+   rather than a repeated reparse. A definition or business-context answer
+   that claims governed context completes only through the host-issued
+   `finish_answer` control with retained retrieved-evidence IDs; otherwise it
+   remains an ungrounded conversational response (`AGT-047`, `AGT-051`).
+5. Explicit Research uses the same kernel with separate 120-second/branch
+   budgets and receipt-backed verdicts. It does not silently enter Research
+   from ordinary analytical wording (`AGT-052`).
+6. Default remote provider egress is facts, aggregates, schema, and
+   fingerprints. Rows require an explicit project setting; local and opted-in
+   remote rows are capped at 20×20/400 cells (`AGT-053`, `PERF-004`).
+
+V1 remains readable and is available only through an explicit `legacy_v1`
+operator mode. `shadow_v2` never serves a V2 result. Stage 1 exposes the
+runtime/receipt contracts and host seam. The current implementation also
+persists the V8 decision story into the existing local trace API and Notebook
+trace detail, and projects the existing bounded Research ledger as V4. Those
+additive readers do not make a trace, export, or Research projection an
+execution authority. Built-CLI designated-fixture and independent verification
+remain required (`AGT-054`, `OBS-017`, `E2E-025`).
+
 1. Retrieval builds one immutable, bounded context pack. Certified blocks,
    semantic members/metrics, governed relational metadata, business context,
    runtime schema, and trusted conversation state are retrieved in parallel and

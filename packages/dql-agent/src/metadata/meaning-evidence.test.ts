@@ -366,6 +366,43 @@ describe('AGT-010 metadata meaning evidence lanes', () => {
     });
   });
 
+  it('AGT-047 retains declared MetricFlow granularities for a snapshot-bound Ask time capability', () => {
+    const question = 'Show revenue by month using the revenue semantic metric.';
+    const plan = buildAnalysisQuestionPlan(question);
+    const metricTime = ranked({
+      objectKey: 'semantic:commerce:dimension:order_item.metric_time',
+      objectType: 'semantic_dimension',
+      name: 'metric_time',
+      fullName: 'semantic:commerce:dimension:order_item.metric_time',
+      payload: {
+        // The old leaf-only ID remains a bounded backward alias; the
+        // registry-owned ID is the capability the V2 workspace must retain.
+        qualifiedId: 'semantic:uncategorized:dimension:metric_time',
+        registryQualifiedId: 'semantic:commerce:dimension:order_item.metric_time',
+        aliases: ['semantic:uncategorized:dimension:metric_time'],
+        localId: 'metric_time',
+        type: 'time',
+        // This is the exact KG representation produced for a MetricFlow time
+        // dimension. It must survive into V2 validation; a name is not proof.
+        granularities: ['day', 'month', 'year'],
+      },
+      score: 0.9,
+    }, 1, 0.9);
+
+    const evidence = toAgentRetrievalEvidence(
+      buildMeaningEvidencePackage(question, plan, [metricTime]),
+      plan,
+    );
+
+    expect(evidence.candidates[0]).toMatchObject({
+      id: 'semantic:commerce:dimension:order_item.metric_time',
+      qualifiedId: 'semantic:commerce:dimension:order_item.metric_time',
+      aliases: expect.arrayContaining(['semantic:uncategorized:dimension:metric_time']),
+      semanticRuntimeName: 'metric_time',
+      timeGrains: ['day', 'month', 'year'],
+    });
+  });
+
   it('preserves a retrieved semantic metric when exact dimensions fill the semantic class', () => {
     const question = 'Show actual rollover balance by region for last month.';
     const dimensions = Array.from({ length: 5 }, (_, index) => ranked({

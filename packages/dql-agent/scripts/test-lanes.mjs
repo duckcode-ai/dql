@@ -29,21 +29,33 @@ const HEAVY_TEST_FILES = [
   'src/metadata/catalog.test.ts',
   'src/project-state.test.ts',
 ];
+// The authoritative V2 kernel is a release-critical Ask surface. Keep an
+// explicit discovery assertion so a future glob or lane refactor cannot omit
+// its regression suite while still producing a superficially complete count.
+const REQUIRED_TEST_FILES = [
+  'src/ask-runtime/ask-agent-runtime-v2.test.ts',
+];
 // Keep this audited set explicit: new Ask analytical-frame and observability
 // regressions must participate in the same serial package gate rather than
 // being silently omitted from the receipt audit.
-const EXPECTED_TEST_FILES = 153;
+const EXPECTED_TEST_FILES = 154;
 // Keep the aggregate receipt exact. The current Ask routing, semantic-proof,
 // trace, product-category, exploratory-output, governed-proof, compound
 // metric-binding, V6 decision-story, V2 continuation persistence, and the
 // final bounded Ask planner/execution, constrained recovery (including a
-// full initial package plus #17 targeted extension), and explicit
-// filter/time/ranking regressions, plus the certified profile and exact
-// semantic order-count fast paths, and durable failed-planner V6 receipt
-// regressions, total 2,187
-// non-skipped tests; a
+// full initial package plus #17 targeted extension), explicit
+// filter/time/ranking regressions, the authoritative V2 runtime suite,
+// certified profile, exact semantic order-count fast paths, durable
+// failed-planner V6 receipt regressions, and controller-progress recovery
+// across text/OpenAI/Claude transports, including terminal-control
+// clarification, native budget-stop, and post-execution terminalization
+// regressions, including model-qualified MetricFlow time-capability identity
+// coverage, including immutable certified-completeness reload and semantic
+// execution-readiness regressions, plus the exact-certified fast-path
+// lifecycle/provenance regression, total 2,261 non-skipped
+// tests; a
 // future accidental skip must not be hidden by a broad package pass.
-const EXPECTED_TESTS = 2187;
+const EXPECTED_TESTS = 2261;
 
 function discoverTestFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -92,6 +104,7 @@ function assertAggregate({ ordinary, heavy }) {
   const uniquePaths = new Set(paths);
   const heavyPaths = new Set(HEAVY_TEST_FILES.map((file) => realpathSync(join(packageRoot, file))));
   const discoveredPaths = new Set(discoverTestFiles(join(packageRoot, 'src')).map((file) => realpathSync(file)));
+  const requiredPaths = REQUIRED_TEST_FILES.map((file) => realpathSync(join(packageRoot, file)));
 
   const failures = [];
   if (discoveredPaths.size !== EXPECTED_TEST_FILES) {
@@ -102,6 +115,9 @@ function assertAggregate({ ordinary, heavy }) {
   }
   if (paths.some((path) => !discoveredPaths.has(path)) || [...discoveredPaths].some((path) => !uniquePaths.has(path))) {
     failures.push('Vitest file receipts do not exactly match the discovered test-file set');
+  }
+  if (requiredPaths.some((path) => !discoveredPaths.has(path) || !uniquePaths.has(path))) {
+    failures.push('required Ask V2 test files were not included exactly once in the package lanes');
   }
   if (summaries[0].paths.some((path) => heavyPaths.has(path))
     || heavyPaths.size !== summaries[1].paths.length

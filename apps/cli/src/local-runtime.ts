@@ -184,6 +184,11 @@ import {
   verifyFinalSql,
   attachAskTraceObserverV1,
   askTraceObserverForV1,
+  askAgentV2WorkspaceMatches,
+  finishAskAgentV2Turn,
+  observeAskAgentV2Tool,
+  type AskToolObservationV1,
+  type AskRuntimeModeV2,
   type AgenticSqlExecutionCapabilityV1,
   type AskTraceObserverV1,
   type ExploratoryExecutionAuthorizationAttemptV1,
@@ -193,6 +198,7 @@ import {
 import { applyEvalCassette, createDqlAgentProviderRunner, createEvalCassetteReplayProvider, createGovernedTextProvider, resolveAgentFollowUpContext } from './llm/providers/dql-agent-provider.js';
 import type {
   AgentConversationContext,
+  AgentRunRequest as LlmAgentRunRequest,
   AgentRunner as LLMAgentRunner,
   ProviderDispatchTerminalEvidence,
   ProviderDispatchEvidenceSink,
@@ -215,6 +221,8 @@ import {
   buildBlockBusinessFingerprint,
   buildBlockSqlFingerprints,
   buildAnalysisQuestionPlan,
+  buildCertifiedBlockInvocationInput,
+  certifiedBlockProvesRequestedTopN,
   buildMeaningEvidencePackage,
   composeSemanticQueryForQuestion,
   aggregationIntegrityIssuesForSql,
@@ -261,6 +269,7 @@ import {
   defaultAgentRunGates,
   createLlmAgentRunPlanner,
   createAskAnalystRuntimeV1,
+  createAskAgentRuntimeV2,
   createHybridRouter,
   planAnalyticalPath,
   computeResultStats,
@@ -377,6 +386,7 @@ import {
   type AgentRunDiagnosticReceiptV5,
   type AgentRunDiagnosticReceiptV6,
   type AgentRunDiagnosticReceiptV7,
+  type AgentRunDiagnosticReceiptV8,
   type NarrationIntegrityReceiptV1,
   type AgentRouteExecutorResult,
   type AgentRouteExecutor,
@@ -425,6 +435,7 @@ import {
   buildResearchEvidenceLedger,
   buildResearchEvidenceLedgerV2,
   buildResearchEvidenceLedgerV3,
+  projectResearchEvidenceLedgerV4,
   buildResearchHypothesisPlanV2,
   inferResearchValidatorKind,
   buildAnalyticalTurnPlan,
@@ -443,6 +454,20 @@ import {
   type AnalyticalTurnPlanV1,
   type ConversationResultMemberSetV1,
   type AgentSelectedResultBindingV1,
+  type AskAgentRuntimeWorkspaceBridgeV2,
+  type AskAgentToolWorkspaceV2,
+  type AskAgentStateV4,
+  type AskV2ExecutionReceipt,
+  type AskCertifiedArtifactHandleV1,
+  type AskFrozenResearchChildHandleV1,
+  type AskSemanticEngineV1,
+  type AskSemanticRuntimeSelectionV1,
+  type AskSemanticCapabilityHandleV1,
+  type AskTierStateV1,
+  type AskRelationshipPathHandleV1,
+  type ResearchEvidenceLedgerV4,
+  askV2SemanticCandidateAuthorityFingerprint,
+  askV2ExecutableSemanticRoles,
   validateSelectedResultBinding,
   normalizeCanonicalQueryResult,
   normalizeAnalyticalExecutionFingerprint,
@@ -569,6 +594,7 @@ import {
   getSemanticRuntimeSettings,
   saveTestedSemanticRuntimeSettings,
   saveSemanticRuntimePreference,
+  type SemanticRuntimePreference,
   type SemanticRuntimeSettingsInput,
 } from './semantic-runtime-settings.js';
 import { observeWarehouseTargetIdentity } from './semantic-execution/connection-identity.js';
@@ -787,6 +813,8 @@ export interface LocalServerOptions {
   requireMeaningCallForNaturalLanguage?: boolean;
   /** Whole-runtime rollout control; never accepted from browser/MCP payloads. */
   askAnalystRuntimeMode?: 'legacy' | 'shadow' | 'authoritative';
+  /** V2 is the default Ask ingress; V1 remains an explicit operator rollback. */
+  askAgentRuntimeMode?: AskAgentRuntimeMode;
   /**
    * Host-only Ask-planner provider seam for deterministic local-runtime
    * integration tests.  It is never read from HTTP/MCP payloads and does not
@@ -807,6 +835,32 @@ export interface LocalServerOptions {
    * authority and browser/MCP requests remain their own server-owned surface.
    */
   trustedCliTraceToken?: string;
+}
+
+/**
+ * The Ask rollout mode is an operator-owned server setting.  It is never
+ * parsed from an Ask HTTP/MCP payload, but the built CLI may select it at
+ * startup so an operator can run an explicit authoritative canary.
+ */
+export const ASK_AGENT_RUNTIME_MODES = [
+  'legacy_v1',
+  'shadow_v2',
+  'authoritative_v2',
+] as const satisfies readonly AskRuntimeModeV2[];
+
+export type AskAgentRuntimeMode = typeof ASK_AGENT_RUNTIME_MODES[number];
+
+export function resolveAskAgentRuntimeMode(
+  value: unknown,
+  options: { legacyFallback?: boolean } = {},
+): AskAgentRuntimeMode {
+  if (value === undefined) return options.legacyFallback ? 'legacy_v1' : 'shadow_v2';
+  if (typeof value === 'string' && (ASK_AGENT_RUNTIME_MODES as readonly string[]).includes(value)) {
+    return value as AskAgentRuntimeMode;
+  }
+  throw new Error(
+    `Invalid Ask runtime mode "${typeof value === 'string' ? value : String(value)}". Expected one of: ${ASK_AGENT_RUNTIME_MODES.join(', ')}.`,
+  );
 }
 
 /** One-time local capability lifetime. It is never persisted or sent to a provider. */
@@ -1183,6 +1237,37 @@ function askTraceScenarioLabel(run: Pick<AgentRun, 'requestedMode' | 'route'>): 
     conversation: 'Conversation',
   };
   return labels[run.route] ?? 'Ask run';
+}
+
+/**
+ * The SQLite trace envelope is intentionally small and may have been written
+ * before the V2 terminal receipt was attached to the AgentRun. Project only
+ * receipt-owned scalar facts at this API boundary so a completed V2 run does
+ * not display stale V1 placeholders such as "No executable tier".
+ */
+function projectAuthoritativeV8TraceEnvelope<T extends {
+  selectedTier?: string;
+  candidateDecisionCount: number;
+  trustState?: string;
+}>(envelope: T, run: AgentRun | undefined): T {
+  const receipt = run?.diagnosticReceiptV8;
+  if (receipt?.mode !== 'authoritative_v2') return envelope;
+  const selectedTier = receipt.tierAttempts.find((attempt) => attempt.frozen)?.tier
+    ?? receipt.tierAttempts.find((attempt) => attempt.outcome === 'executed')?.tier
+    ?? (receipt.planFrozen ? run?.routeDecision?.askAgentV2Decision?.state.resolvedPlan?.tier : undefined)
+    // An unfrozen authoritative V2 run has no selected executable plan. Its
+    // controller-owned progression may be shown, but an eligible inspection
+    // is not route authority and must never win over a later unavailable tier.
+    ?? receipt.controllerTier;
+  return {
+    ...envelope,
+    selectedTier,
+    // V8 owns the bounded admission count for authoritative Ask.  Legacy
+    // candidate decisions can describe a wider pre-V2 retrieval path, so
+    // merging them would misstate the actual planner workspace.
+    candidateDecisionCount: receipt.initialCandidateCount,
+    ...(run?.trustState ? { trustState: run.trustState } : {}),
+  } as T;
 }
 
 /**
@@ -1823,6 +1908,9 @@ export function terminalFailureTitleForAnswer(
 ): string {
   if (answer.analyticalFailure?.phase === 'compilation') {
     return 'DQL could not compile the frozen plan';
+  }
+  if (answer.analyticalFailure?.phase === 'validation') {
+    return 'The selected governed inputs need correction';
   }
   if (answer.analyticalFailure?.phase === 'result_validation') {
     return 'The query result did not match the frozen plan';
@@ -3174,6 +3262,10 @@ export interface AgentRunProviderDispatchBudget {
   generationGroup: number;
   narration: number;
   repair: number;
+  /** Authoritative Ask V2's first LLM-controlled tool turn. */
+  agentControl?: number;
+  /** Authoritative Ask V2 tool observations/follow-up turns after control. */
+  toolFollowup?: number;
 }
 
 /**
@@ -3217,19 +3309,21 @@ export function agentRunProviderDispatchBudgetForMode(
     };
   }
   return {
-    // One interpretation (candidate-ID meaning OR legacy classification), one
-    // initial analytical planner, one verifier-directed same-snapshot planner
-    // revision, one SQL generation transport, and exactly one eligible
-    // frozen-plan correction.  The narrowly typed revision cap below keeps
-    // this from becoming a general Ask retry budget.
-    total: 5,
+    // Legacy V1 keeps its existing phase limits.  Authoritative Ask V2 uses
+    // the additive agent-control/tool-followup phases below: one initial
+    // control turn plus up to four bounded discovery/execution follow-ups and
+    // one post-result narration control. The run-wide cap remains six
+    // regardless of transport.
+    total: 6,
     classification: 1,
     meaningResolution: 1,
     planning: 1,
     planningRevision: 1,
     generationGroup: 1,
-    narration: 0,
+    narration: 1,
     repair: 1,
+    agentControl: 1,
+    toolFollowup: 4,
   };
 }
 
@@ -3387,6 +3481,10 @@ export class RunScopedProviderDispatchEvidence implements ProviderDispatchEviden
         ? this.policy.repair
         : context.dispatchPhase === 'narration'
           ? this.policy.narration
+          : context.dispatchPhase === 'agent_control'
+            ? (this.policy.agentControl ?? 0)
+            : context.dispatchPhase === 'tool_followup'
+              ? (this.policy.toolFollowup ?? 0)
           : this.policy.generationGroup;
     // Category-only classification is a legacy/no-evidence fallback, not an
     // alternate route into analytical binding. A run must record one or the
@@ -3535,6 +3633,8 @@ function providerTracePhase(phase: ProviderDispatchPhaseV1): ProviderFailureDiag
     case 'generation': return 'generation';
     case 'repair': return 'repair';
     case 'narration': return 'narration';
+    case 'agent_control': return 'agent_control';
+    case 'tool_followup': return 'tool_followup';
     default: return 'unknown';
   }
 }
@@ -3964,6 +4064,10 @@ export function mergeRunScopedProviderDispatchEvidence(
   const diagnosticReceiptV7: AgentRunDiagnosticReceiptV7 | undefined = run.requestedMode === 'research'
     ? undefined
     : run.diagnosticReceiptV7;
+  // V8 is the V2 tool-runtime receipt. Unlike the V7 compact inspector it is
+  // valid for an explicit Research root as well, because it records only
+  // bounded tool/candidate identities and no branch prose or result data.
+  const diagnosticReceiptV8: AgentRunDiagnosticReceiptV8 | undefined = run.diagnosticReceiptV8;
   const artifacts = run.artifacts.map((artifact) => {
     if (!artifact.payload || typeof artifact.payload !== 'object' || Array.isArray(artifact.payload)) return artifact;
     const payload = artifact.payload as Record<string, unknown>;
@@ -3973,7 +4077,8 @@ export function mergeRunScopedProviderDispatchEvidence(
       && !('diagnosticReceiptV4' in payload)
       && !('diagnosticReceiptV5' in payload)
       && !('diagnosticReceiptV6' in payload)
-      && !('diagnosticReceiptV7' in payload)) return artifact;
+      && !('diagnosticReceiptV7' in payload)
+      && !('diagnosticReceiptV8' in payload)) return artifact;
     return {
       ...artifact,
       payload: {
@@ -3985,6 +4090,7 @@ export function mergeRunScopedProviderDispatchEvidence(
         ...(diagnosticReceiptV5 ? { diagnosticReceiptV5 } : {}),
         ...(diagnosticReceiptV6 ? { diagnosticReceiptV6 } : {}),
         ...(diagnosticReceiptV7 ? { diagnosticReceiptV7 } : {}),
+        ...(diagnosticReceiptV8 ? { diagnosticReceiptV8 } : {}),
       },
     };
   });
@@ -3998,6 +4104,7 @@ export function mergeRunScopedProviderDispatchEvidence(
     ...(diagnosticReceiptV5 ? { diagnosticReceiptV5 } : {}),
     ...(diagnosticReceiptV6 ? { diagnosticReceiptV6 } : {}),
     ...(diagnosticReceiptV7 ? { diagnosticReceiptV7 } : {}),
+    ...(diagnosticReceiptV8 ? { diagnosticReceiptV8 } : {}),
   };
 }
 
@@ -4466,8 +4573,99 @@ async function executePreparedArtifactTraceBoundary<T>(input: {
   }
 }
 
+/**
+ * Physical relationship evidence is captured by the immutable retrieval
+ * snapshot, then selected by opaque path handle.  Keep the ID derivation and
+ * compiled-SQL verification outside the server closure so the same exact
+ * predicate can be tested without opening a connection.
+ */
+export interface AskV2PhysicalRelationshipPath {
+  leftRelation: string;
+  leftColumn: string;
+  rightRelation: string;
+  rightColumn: string;
+}
+
+function normalizeAskV2JoinIdentifier(value: string | undefined): string {
+  return (value ?? '')
+    .trim()
+    .split('.')
+    .map((part) => part.trim().replace(/^["`\[]|["`\]]$/g, '').toLowerCase())
+    .filter(Boolean)
+    .join('.');
+}
+
+export function askV2RelationshipPathHandleId(path: AskV2PhysicalRelationshipPath): string {
+  const edgeIds = [
+    `${path.leftRelation}.${path.leftColumn}`,
+    `${path.rightRelation}.${path.rightColumn}`,
+  ].map((edge) => `edge:${createHash('sha256').update(edge).digest('hex').slice(0, 24)}`);
+  return `relationship-path:${createHash('sha256').update(edgeIds.join('|')).digest('hex').slice(0, 24)}`;
+}
+
+/**
+ * Reject a compiled governed-relational query unless every physical join is
+ * exactly one of the immutable paths selected by the V2 tool.  The caller has
+ * already validated all referenced relations and columns against its scoped
+ * context pack; this function owns the non-interchangeable join-edge proof.
+ */
+export function assertAskV2BoundRelationshipPathsForSql(input: {
+  sql: string;
+  relationshipPathIds: readonly string[];
+  paths: readonly AskV2PhysicalRelationshipPath[];
+  dialect?: string;
+}): void {
+  const analysis = analyzeSqlReferences(input.sql, input.dialect);
+  if (!analysis.parsed) {
+    throw analyticalError('The governed V2 program could not be parsed to bind its relationship path, so it was not executed.', {
+      origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+    });
+  }
+  if (analysis.tables.length <= 1) return;
+  if (input.relationshipPathIds.length === 0) {
+    throw analyticalError('A governed V2 program that uses multiple relations requires an admitted relationship-path handle, so it was not executed.', {
+      origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+    });
+  }
+  const selected = input.paths.filter((path) => input.relationshipPathIds.includes(askV2RelationshipPathHandleId(path)));
+  if (selected.length === 0 || analysis.joins.length === 0) {
+    throw analyticalError('The governed V2 program did not prove its compiled join against an admitted relationship path, so it was not executed.', {
+      origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+    });
+  }
+  const matchesPath = (join: typeof analysis.joins[number], path: AskV2PhysicalRelationshipPath): boolean => {
+    const leftRelation = normalizeAskV2JoinIdentifier(join.leftRelation);
+    const rightRelation = normalizeAskV2JoinIdentifier(join.rightRelation);
+    const leftColumn = normalizeAskV2JoinIdentifier(join.leftColumn);
+    const rightColumn = normalizeAskV2JoinIdentifier(join.rightColumn);
+    const pathLeftRelation = normalizeAskV2JoinIdentifier(path.leftRelation);
+    const pathRightRelation = normalizeAskV2JoinIdentifier(path.rightRelation);
+    const pathLeftColumn = normalizeAskV2JoinIdentifier(path.leftColumn);
+    const pathRightColumn = normalizeAskV2JoinIdentifier(path.rightColumn);
+    return (leftRelation === pathLeftRelation
+      && rightRelation === pathRightRelation
+      && leftColumn === pathLeftColumn
+      && rightColumn === pathRightColumn)
+      || (leftRelation === pathRightRelation
+        && rightRelation === pathLeftRelation
+        && leftColumn === pathRightColumn
+        && rightColumn === pathLeftColumn);
+  };
+  if (analysis.joins.some((join) => !selected.some((path) => matchesPath(join, path)))) {
+    throw analyticalError('The governed V2 program used a join that is outside the selected immutable relationship-path closure, so it was not executed.', {
+      origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+    });
+  }
+}
+
 export async function startLocalServer(opts: LocalServerOptions): Promise<number> {
   const { rootDir, executor, connection: rawConnection, preferredPort, projectRoot = process.cwd() } = opts;
+  // Validate before creating listeners, project state, or a connection.  A
+  // malformed embedding/CLI option must fail safely rather than silently
+  // starting an ambiguous rollout mode.
+  const askAgentRuntimeMode = resolveAskAgentRuntimeMode(opts.askAgentRuntimeMode, {
+    legacyFallback: opts.askAnalystRuntimeMode !== undefined,
+  });
   const projectWatcherFactory: typeof watch = opts.projectWatcherFactory ?? watch;
   const bindHost = opts.host ?? process.env.DQL_HOST ?? '127.0.0.1';
   const loopback = bindHost === '127.0.0.1' || bindHost === 'localhost' || bindHost === '::1';
@@ -5282,13 +5480,23 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     });
   };
 
+  type GovernedAgentAnswerForRun = AgentAnswer & {
+    /**
+     * The only V2 execution carrier that crosses the provider-runner clone
+     * boundary. It is minted from the terminal state held by that clone after
+     * an execution tool returns; callers must not reconstruct it from a route,
+     * answer prose, or their original (pre-execution) request object.
+     */
+    askAgentV2ExecutionReceipt?: AskV2ExecutionReceipt;
+  };
+
   async function runGovernedAgentAnswerForRun(
     request: AgentRunRequest,
     repair?: { attempt: number; repairHint?: string },
     route: AgentRunRoute = 'generated_answer',
     onProgress?: (message: string) => void,
     routeDecision?: IntentDecision,
-  ): Promise<AgentAnswer> {
+  ): Promise<GovernedAgentAnswerForRun> {
     return runGovernedAgentAnswerForRunInner(request, repair, route, onProgress, routeDecision);
   }
 
@@ -5298,7 +5506,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     route: AgentRunRoute = 'generated_answer',
     onProgress?: (message: string) => void,
     routeDecision?: IntentDecision,
-  ): Promise<AgentAnswer> {
+  ): Promise<GovernedAgentAnswerForRun> {
     const researchBranch = request.researchBranch;
     const isResearchChild = researchBranch?.childRunId === request.runId
       && Boolean(researchBranch?.rootRunId)
@@ -5312,6 +5520,22 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
     const governed = resolveGovernedAnswerRunner(projectRoot, requestedProvider);
     let resolvedProvider = governed?.provider ?? null;
     let runner = governed?.runner ?? null;
+    // Host-only test/embedding seam: authoritative V2's agent-control
+    // transport must use the same injected provider readiness boundary as the
+    // previous planner seam.  This is never derived from browser/MCP input and
+    // never changes a configured production runner.
+    if (request.askAgentRuntimeMode === 'authoritative_v2'
+      && opts.askAnalyticalPlannerProviderFactory) {
+      const injected = await opts.askAnalyticalPlannerProviderFactory({ projectRoot, request });
+      if (injected) {
+        const injectedProvider = governedRunnerProviderForCassette(injected.name) ?? 'ollama';
+        resolvedProvider = injectedProvider;
+        runner = createDqlAgentProviderRunner(injectedProvider, injected);
+      } else {
+        resolvedProvider = null;
+        runner = null;
+      }
+    }
     // A one-relation physical program can be compiled deterministically from
     // the runtime's already-qualified identifiers. This is deliberately much
     // narrower than general raw-SQL generation: no filters, joins, time
@@ -5324,9 +5548,52 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       && routeDecision.resolvedAnalyticalPlan.capability === 'certified_execution'
       && routeDecision.analyticalCascadeDecision?.selectedTier === 'certified'
       && routeDecision.analyticalCascadeDecision.planFrozen === true;
+    // V2 captures the exact Tier 1 proof in the same immutable retrieval
+    // workspace that the provider/tool runner receives.  Unlike the legacy
+    // check above, this does not depend on a V1 resolved plan or route
+    // decision: the host will recheck the snapshot and artifact at execution.
+    const exactV2CertifiedProviderFreePlan = (() => {
+      const state = request.askAgentV2State;
+      const bridge = request.askAgentV2Workspace;
+      if (request.askAgentRuntimeMode !== 'authoritative_v2'
+        || !state?.exactCertifiedCandidateId
+        || !askAgentV2WorkspaceMatches(state, bridge)) return false;
+      const workspace = bridge?.getToolWorkspace?.();
+      const candidateId = state.exactCertifiedCandidateId;
+      const questionPlan = buildAnalysisQuestionPlan(request.question);
+      const completeCandidateIds = [...new Set(workspace?.certifiedCompleteCandidateIds ?? [])];
+      const artifact = workspace?.certifiedArtifacts?.get(candidateId);
+      const captured = artifact && typeof artifact === 'object'
+        && (artifact as AskCertifiedArtifactHandleV1).version === 1
+        ? (artifact as AskCertifiedArtifactHandleV1).artifact as KGNode
+        : undefined;
+      return Boolean(
+        workspace?.version === 1
+        && workspace.tierStates?.certified?.status === 'complete'
+        && completeCandidateIds.includes(candidateId)
+        && completeCandidateIds.length === 1
+        && workspace.tierStates.certified.candidateIds.includes(candidateId)
+        && state.retainedCandidateIds.includes(candidateId)
+        && captured
+        && certifiedBlockProvesRequestedTopN(captured, questionPlan, {
+          exactCertifiedQuestionMatch: workspace.exactCertifiedQuestionCandidateIds?.includes(candidateId) === true,
+          uniqueCompleteCertifiedFit: true,
+          hostEnforcedRowLimit: workspace.certifiedHostEnforcesInvocationRowLimit === true
+            ? buildCertifiedBlockInvocationInput(captured, questionPlan, request.question).rowLimit
+            : undefined,
+        }),
+      );
+    })();
     const exactProviderFreePlan = routeDecision?.resolvedAnalyticalPlan?.mode === 'authoritative'
       && (routeDecision.resolvedAnalyticalPlan.capability === 'certified_execution'
         || routeDecision.resolvedAnalyticalPlan.capability === 'semantic_execution');
+    // Research may fan out from one root plan, but an already-frozen child
+    // tuple is explicitly a zero-call path. Do not let the mere presence of a
+    // configured narrator/provider re-open that child with a second planning
+    // or narration dispatch. The immutable child RAP still owns execution and
+    // the normal compiler/connection checks; this only removes redundant LLM
+    // egress after its route was proved from the child snapshot.
+    const frozenResearchChildProviderFreePlan = isResearchChild && exactProviderFreePlan;
     // A sole same-snapshot MetricFlow grouping may safely compile and execute
     // while still being an inferred business substitution. The authoritative
     // Ask runtime records that distinction on its frozen plan. Preserve it at
@@ -5336,13 +5603,15 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       && (routeDecision?.askAnalystDecision?.resolvedPlan?.reviewRequired === true
         || routeDecision?.askAnalystDecision?.state.resolvedPlan?.reviewRequired === true);
     if (exactCertifiedProviderFreePlan
+      || exactV2CertifiedProviderFreePlan
       || deterministicExploratoryProposal
+      || frozenResearchChildProviderFreePlan
       || ((!resolvedProvider || !runner) && exactProviderFreePlan)) {
       const deterministicProvider: AgentProvider = {
         name: 'ollama',
         available: async () => true,
         generate: async () => {
-          throw Object.assign(new Error('Exact certified execution must not dispatch a provider.'), {
+          throw Object.assign(new Error('A frozen governed execution must not dispatch a provider.'), {
             code: 'EXACT_ROUTE_PROVIDER_DISPATCH_FORBIDDEN',
           });
         },
@@ -5356,11 +5625,47 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       // still a real readiness failure and must be visible as such rather than
       // manufactured later by the engine from an executor outcome.
       const trace = askTraceObserverForV1(request);
-      const diagnostic = classifyProviderFailure({
+      const classifiedDiagnostic = classifyProviderFailure({
         message: error.message,
         code: error.code,
         phase: 'preflight',
       });
+      // There is no adapter-provided authentication evidence on the absent
+      // provider path.  Keep the historic error code for compatibility, but
+      // persist the V2 observation as an honest configuration/readiness gap
+      // rather than telling a user to rotate credentials that were never
+      // attempted. An explicit invalid provider still keeps model-not-found.
+      const diagnostic: ProviderFailureDiagnosticV1 = !requestedProvider
+        ? {
+            ...classifiedDiagnostic,
+            cause: 'unknown',
+            retryable: false,
+            safeAction: 'fix_provider_configuration',
+          }
+        : classifiedDiagnostic;
+      if (request.askAgentRuntimeMode === 'authoritative_v2' && request.askAgentV2State) {
+        observeAskAgentV2Tool(request.askAgentV2State, {
+          version: 1,
+          tool: 'finish_answer',
+          outcome: 'error',
+          reasonCode: `provider_${diagnostic.cause}`,
+          candidateIds: [],
+          origin: 'provider',
+          provider: {
+            phase: diagnostic.phase,
+            cause: diagnostic.cause,
+            retryable: diagnostic.retryable,
+            safeAction: diagnostic.safeAction,
+          },
+        } satisfies AskToolObservationV1);
+        finishAskAgentV2Turn(request.askAgentV2State, {
+          version: 2,
+          kind: 'provider_failure',
+          reasonCode: `provider_${diagnostic.cause}`,
+          safeAction: diagnostic.safeAction,
+          origin: 'provider',
+        });
+      }
       const span = trace.startSpan({
         name: 'provider.preflight',
         stage: 'provider',
@@ -5386,7 +5691,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       });
       throw error;
     }
-    let governedAnswer: AgentAnswer | undefined;
+    let governedAnswer: GovernedAgentAnswerForRun | undefined;
     // The answer loop intentionally owns its own user-facing execution
     // failure. Some tool adapters serialize that error before returning the
     // governed answer, which means the non-enumerable analytical error tag is
@@ -5781,9 +6086,329 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
       }
       return result;
     };
-    await agentRunAskTraceContext.run(askTraceObserverForV1(request), async () => runner.run(
-      attachAskTraceObserverV1({
+    // Authoritative V2 intentionally has its own capability/freeze boundary.
+    // Do not route this through `routeDecision`, `selectedExploratoryAttempt`,
+    // or `resolvedAnalyticalPlan`: those are V1 interpretation artifacts and
+    // would make a V2 tool call silently depend on the old deterministic path.
+    let v2ExploratoryAuthorization: {
+      initial?: {
+        sqlFingerprint: string;
+        planFingerprint: string;
+        selectedCandidateIds: string[];
+        expectedOutputIds: string[];
+        result: { capability: AgenticSqlExecutionCapabilityV1; freeze: ExploratoryExecutionFreezeV1 };
+      };
+      repair?: {
+        sqlFingerprint: string;
+        planFingerprint: string;
+        selectedCandidateIds: string[];
+        expectedOutputIds: string[];
+        result: { capability: AgenticSqlExecutionCapabilityV1; freeze: ExploratoryExecutionFreezeV1 };
+      };
+    } | undefined;
+    // Governed relational execution has the same host-owned freeze boundary
+    // as exploratory SQL.  It deliberately records no compiler result here:
+    // the authorization is an immutable capability over the snapshot closure,
+    // selected atomic paths, output bindings, and connection target.  The
+    // compiler/executor below may fail, but cannot reopen V1 routing or widen
+    // this V2 plan.
+    let v2DqlAuthorization: {
+      initial?: {
+        planId: string;
+        planFingerprint: string;
+        candidateIds: string[];
+        expectedOutputIds: string[];
+        relationshipPathIds: string[];
+        targetFingerprint?: string;
+      };
+      repair?: {
+        planId: string;
+        planFingerprint: string;
+        candidateIds: string[];
+        expectedOutputIds: string[];
+        relationshipPathIds: string[];
+        targetFingerprint?: string;
+      };
+    } | undefined;
+    const v2ExecutionWorkspace = (candidateIds: readonly string[], pathIds: readonly string[] = []) => {
+      const state = request.askAgentV2State;
+      const bridge = request.askAgentV2Workspace;
+      const workspace = bridge?.getToolWorkspace?.();
+      const contextPack = bridge?.getContextPack?.() as LocalContextPack | undefined;
+      const fail = (message: string, code = 'ask_v2_snapshot_or_closure_invalid'): never => {
+        throw analyticalError(message, { origin: 'governance_gate', stage: 'validation', code });
+      };
+      if (!state || state.mode !== 'authoritative_v2' || !workspace || workspace.version !== 1 || !contextPack) {
+        return fail('The V2 execution workspace was not available for this Ask run.');
+      }
+      if (!state.snapshotId || !state.sourceFingerprint
+        || workspace.snapshotId !== state.snapshotId
+        || workspace.sourceFingerprint !== state.sourceFingerprint
+        || bridge?.snapshotId !== state.snapshotId
+        || bridge?.sourceFingerprint !== state.sourceFingerprint
+        || contextPack.knowledgeLens.snapshotId !== state.snapshotId) {
+        return fail('The V2 execution workspace no longer matches the immutable retrieval snapshot.', 'snapshot_drift');
+      }
+      const snapshotId = state.snapshotId;
+      const admitted = new Set(workspace.candidates.slice(0, 128).map((candidate) => candidate.qualifiedId ?? candidate.id));
+      if (candidateIds.length === 0 || candidateIds.some((id) => !admitted.has(id))) {
+        return fail('The V2 execution request included an identifier outside the admitted snapshot closure.');
+      }
+      const byPath = new Map(workspace.relationshipPathHandles.map((path) => [path.id, path] as const));
+      const paths = pathIds.map((id) => byPath.get(id));
+      if (paths.some((path) => !path) || paths.some((path) => path!.snapshotId && path!.snapshotId !== state.snapshotId)) {
+        return fail('The V2 execution request included a relationship path outside the immutable snapshot closure.');
+      }
+      const closureIds = [...new Set([
+        ...candidateIds,
+        ...paths.flatMap((path) => path?.candidateIds ?? []),
+      ])];
+      const scoped = scopeContextPackToExploratoryCandidateClosure(contextPack, closureIds);
+      if (!scoped) return fail('The admitted V2 identifiers did not prove a physical relation closure for execution.');
+      return { state, snapshotId, workspace, contextPack, scoped, closureIds, paths: paths as AskRelationshipPathHandleV1[] };
+    };
+    const prepareAskV2ExploratorySqlExecution = async (input: {
+      version: 2;
+      sql: string;
+      expectedOutputIds: string[];
+      selectedCandidateIds: string[];
+      snapshotId?: string;
+      planFingerprint: string;
+      repair?: boolean;
+    }): Promise<{ capability: AgenticSqlExecutionCapabilityV1; freeze: ExploratoryExecutionFreezeV1 }> => {
+      if (input.version !== 2 || !request.runId || !semanticConnection) {
+        throw analyticalError('The V2 exploratory request could not bind a local run and connection.', {
+          origin: 'host', stage: 'validation', code: 'exploratory_authorization_state_mismatch',
+        });
+      }
+      const selectedCandidateIds = [...new Set(input.selectedCandidateIds)].sort();
+      const expectedOutputIds = [...new Set(input.expectedOutputIds)].sort();
+      const selection = [...new Set([...selectedCandidateIds, ...expectedOutputIds])];
+      const workspace = v2ExecutionWorkspace(selection);
+      if (input.snapshotId !== workspace.state.snapshotId) {
+        throw analyticalError('The V2 exploratory request did not carry the active immutable snapshot identity.', {
+          origin: 'governance_gate', stage: 'validation', code: 'snapshot_drift',
+        });
+      }
+      projectSnapshot();
+      projectSnapshots.assertCurrent(runProjectSnapshot.snapshotId);
+      const validation = validateAuthorizedSqlReferences(input.sql, workspace.scoped, {
+        ...(semanticDriver ? { dialect: semanticDriver } : {}),
+        runtimeSchema: buildAgentSchemaContextFromContextPack(request.question, workspace.scoped, { includeUnscored: true, limit: 80 }),
+      });
+      if (!validation.ok) {
+        throw analyticalError('The V2 exploratory SQL did not pass read-only snapshot/closure validation, so it was not executed.', {
+          origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+        });
+      }
+      const target = await observeWarehouseTargetIdentity(executor, semanticConnection);
+      const sqlFingerprint = executionFingerprint(input.sql);
+      const isRepair = input.repair === true;
+      if (isRepair) {
+        if (!v2ExploratoryAuthorization?.initial) {
+          throw analyticalError('The V2 exploratory repair did not bind to an initial frozen proposal.', {
+            origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+          });
+        }
+        const previous = v2ExploratoryAuthorization.initial;
+        if (previous.planFingerprint !== input.planFingerprint
+          || JSON.stringify(previous.selectedCandidateIds) !== JSON.stringify(selectedCandidateIds)
+          || JSON.stringify(previous.expectedOutputIds) !== JSON.stringify(expectedOutputIds)) {
+          throw analyticalError('The V2 exploratory repair did not preserve the frozen targets and output bindings.', {
+            origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+          });
+        }
+        if (v2ExploratoryAuthorization.repair) {
+          throw analyticalError('Only one same-plan V2 exploratory repair is permitted.', {
+            origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+          });
+        }
+      } else if (v2ExploratoryAuthorization?.initial) {
+        throw analyticalError('A V2 exploratory plan cannot be replaced after it has frozen.', {
+          origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+        });
+      }
+      const planId = `ask-v2:exploratory:${input.planFingerprint.slice(-32)}`;
+      const capability = createAgenticSqlExecutionCapability({
+        sql: input.sql,
+        proven: [
+          ...validation.referencedRelations.map((identifier) => ({ identifier, evidence: 'schema_tool' as const })),
+          ...qualifyAuthorizationReferences(input.sql, {
+            relations: validation.referencedRelations,
+            columns: validation.referencedColumns,
+          }).map((identifier) => ({ identifier, evidence: 'schema_tool' as const })),
+        ],
+        runId: request.runId,
+        executionId: `${request.runId}:ask-v2:exploratory:${isRepair ? 'repair:' : ''}${sqlFingerprint.slice(0, 16)}`,
+        snapshotId: runProjectSnapshot.snapshotId,
+        planId,
+        targetFingerprint: target.identityFingerprint,
+        bindings: { sqlParams: [], variables: {} },
+        exploratoryAuthorizationAttempt: isRepair
+          ? { version: 1, index: 1, parentSqlFingerprint: v2ExploratoryAuthorization!.initial!.result.freeze.sqlFingerprint }
+          : { version: 1, index: 0 },
+      });
+      if (!capability) {
+        throw analyticalError('DQL could not mint the V2 exploratory execution capability.', {
+          origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+        });
+      }
+      const result = {
+        capability,
+        freeze: {
+          version: 1 as const,
+          selectedTier: 'exploratory_sql' as const,
+          planId,
+          planFingerprint: input.planFingerprint,
+          snapshotId: workspace.snapshotId,
+          targetFingerprint: target.identityFingerprint,
+          sqlFingerprint: capability.candidateSqlFingerprint,
+          candidateIds: workspace.closureIds,
+          authorization: 'capability_minted' as const,
+          authorizationAttempt: isRepair
+            ? { version: 1 as const, index: 1 as const, parentSqlFingerprint: v2ExploratoryAuthorization!.initial!.result.freeze.sqlFingerprint }
+            : { version: 1 as const, index: 0 as const },
+        },
+      };
+      v2ExploratoryAuthorization ??= {};
+      const authorization = { sqlFingerprint, planFingerprint: input.planFingerprint, selectedCandidateIds, expectedOutputIds, result };
+      if (isRepair) v2ExploratoryAuthorization.repair = authorization;
+      else v2ExploratoryAuthorization.initial = authorization;
+      return result;
+    };
+    const authorizeAskV2DqlArtifact = async (input: {
+      version: 2;
+      candidateIds: string[];
+      expectedOutputIds: string[];
+      relationshipPathIds: string[];
+      snapshotId?: string;
+      planFingerprint: string;
+      repair?: boolean;
+    }): Promise<{ planId: string; targetFingerprint?: string }> => {
+      if (input.version !== 2 || !request.runId || !semanticConnection) {
+        throw analyticalError('The V2 governed relational request could not bind a local run and connection.', {
+          origin: 'host', stage: 'validation', code: 'governed_relational_authorization_state_mismatch',
+        });
+      }
+      const candidateIds = [...new Set(input.candidateIds)].sort();
+      const expectedOutputIds = [...new Set(input.expectedOutputIds)].sort();
+      const relationshipPathIds = [...new Set(input.relationshipPathIds)].sort();
+      const workspace = v2ExecutionWorkspace([...candidateIds, ...expectedOutputIds], relationshipPathIds);
+      if (input.snapshotId !== workspace.state.snapshotId) {
+        throw analyticalError('The V2 governed relational request did not carry the active immutable snapshot identity.', {
+          origin: 'governance_gate', stage: 'validation', code: 'snapshot_drift',
+        });
+      }
+      projectSnapshot();
+      projectSnapshots.assertCurrent(runProjectSnapshot.snapshotId);
+      const target = await observeWarehouseTargetIdentity(executor, semanticConnection);
+      const same = (left: readonly string[], right: readonly string[]) => left.length === right.length
+        && left.every((value, index) => value === right[index]);
+      const repair = input.repair === true;
+      const previous = v2DqlAuthorization?.initial;
+      if (repair) {
+        if (!previous
+          || previous.planFingerprint !== input.planFingerprint
+          || !same(previous.candidateIds, candidateIds)
+          || !same(previous.expectedOutputIds, expectedOutputIds)
+          || !same(previous.relationshipPathIds, relationshipPathIds)) {
+          throw analyticalError('The V2 governed relational repair did not preserve the frozen targets, bindings, and relationship closure.', {
+            origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+          });
+        }
+        if (v2DqlAuthorization?.repair) {
+          throw analyticalError('Only one same-plan V2 governed relational repair is permitted.', {
+            origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+          });
+        }
+      } else if (previous) {
+        throw analyticalError('A V2 governed relational plan cannot be replaced after it has frozen.', {
+          origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+        });
+      }
+      const authorization = {
+        planId: previous?.planId ?? `ask-v2:governed:${input.planFingerprint.slice(-32)}`,
+        planFingerprint: input.planFingerprint,
+        candidateIds,
+        expectedOutputIds,
+        relationshipPathIds,
+        targetFingerprint: target.identityFingerprint,
+      };
+      v2DqlAuthorization ??= {};
+      if (repair) v2DqlAuthorization.repair = authorization;
+      else v2DqlAuthorization.initial = authorization;
+      return {
+        planId: authorization.planId,
+        ...(authorization.targetFingerprint ? { targetFingerprint: authorization.targetFingerprint } : {}),
+      };
+    };
+    const executeAskV2DqlArtifact = async (input: {
+      version: 2;
+      artifact: DqlArtifactReference;
+      candidateIds: string[];
+      expectedOutputIds: string[];
+      relationshipPathIds: string[];
+      snapshotId?: string;
+      planFingerprint: string;
+      authorizationPlanId?: string;
+      repair?: boolean;
+    }): Promise<AgentResultPayload> => {
+      if (input.version !== 2 || input.snapshotId !== request.askAgentV2State?.snapshotId) {
+        throw analyticalError('The governed V2 request did not carry the active immutable snapshot identity.', {
+          origin: 'governance_gate', stage: 'validation', code: 'snapshot_drift',
+        });
+      }
+      const authorization = input.repair === true
+        ? v2DqlAuthorization?.repair
+        : v2DqlAuthorization?.initial;
+      const sorted = (values: readonly string[]) => [...new Set(values)].sort();
+      if (!authorization
+        || authorization.planId !== input.authorizationPlanId
+        || authorization.planFingerprint !== input.planFingerprint
+        || JSON.stringify(authorization.candidateIds) !== JSON.stringify(sorted(input.candidateIds))
+        || JSON.stringify(authorization.expectedOutputIds) !== JSON.stringify(sorted(input.expectedOutputIds))
+        || JSON.stringify(authorization.relationshipPathIds) !== JSON.stringify(sorted(input.relationshipPathIds))) {
+        throw analyticalError('The V2 governed relational compiler did not receive the host-minted frozen authorization.', {
+          origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+        });
+      }
+      const selection = [...new Set([...input.candidateIds, ...input.expectedOutputIds])];
+      const workspace = v2ExecutionWorkspace(selection, input.relationshipPathIds);
+      projectSnapshot();
+      projectSnapshots.assertCurrent(runProjectSnapshot.snapshotId);
+      const qualifiedSchemaContext = buildAgentSchemaContextFromContextPack(request.question, workspace.scoped, { includeUnscored: true, limit: 80 });
+      // Validate the program's ultimately compiled physical join plan against
+      // exactly the path handles the V2 tool selected.  The actual assertion
+      // runs in the compiler executor below, after DQL has produced SQL.
+      return executeArtifactReferenceForAgent(
+        runtimeSemanticReviewRequired ? { ...input.artifact, trustState: 'review_required' } : input.artifact,
+        request.question,
+        semanticConnection,
+        semanticConnectionName,
+        {
+          contextPack: workspace.scoped,
+          candidateIds: workspace.closureIds,
+          relationshipPathIds: input.relationshipPathIds,
+          qualifiedSchemaContext,
+          assertRelationshipPaths: (sql) => assertAskV2BoundRelationshipPathsForSql({
+            sql,
+            relationshipPathIds: input.relationshipPathIds,
+            paths: workspace.contextPack.retrievalDiagnostics.selectedJoinPaths ?? [],
+            ...(semanticDriver ? { dialect: semanticDriver } : {}),
+          }),
+        },
+      );
+    };
+    // `attachAskTraceObserverV1` deliberately clones the request so the
+    // provider runner cannot mutate the engine's immutable input. Retain that
+    // server-owned clone: an authoritative V2 tool execution advances its
+    // state there, not on the caller's request object.
+    const runnerRequest: LlmAgentRunRequest = attachAskTraceObserverV1({
         provider: resolvedProvider,
+        ...(request.askAgentRuntimeMode ? { askAgentRuntimeMode: request.askAgentRuntimeMode } : {}),
+        ...(request.askAgentV2State ? { askAgentV2State: request.askAgentV2State } : {}),
+        ...(request.askAgentV2ExecutionCapability ? { askAgentV2ExecutionCapability: request.askAgentV2ExecutionCapability } : {}),
+        ...(request.askAgentV2Workspace ? { askAgentV2Workspace: request.askAgentV2Workspace } : {}),
         // The server materializes this only from the persisted thread before
         // Ask framing. It prevents the legacy answer-loop adapter from
         // treating a constrained "those customers" follow-up as a local
@@ -5791,7 +6416,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         ...(request.priorResultMemberBinding
           ? { skipCrossResultComputation: true }
           : {}),
-        ...(exactCertifiedProviderFreePlan || deterministicExploratoryProposal
+        ...(exactCertifiedProviderFreePlan || exactV2CertifiedProviderFreePlan || deterministicExploratoryProposal || frozenResearchChildProviderFreePlan
           ? { providerPreflightRequired: false }
           : {}),
         ...(deterministicExploratoryProposal ? { deterministicExploratoryProposal } : {}),
@@ -5818,11 +6443,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         reasoningEffort,
         ...(analysisDepth ? { analysisDepth } : {}),
         // A child remains a normal Ask cascade for routing and frozen-plan
-        // authority, but every physical provider transport belongs to its
-        // explicit Research root's ledger/trace budget. This prevents a
-        // concurrent child from inheriting the ordinary Ask one-meaning cap.
-        orchestrationMode: route === 'research' || isResearchChild ? 'research' : 'ask',
-        allowProviderSemanticMemberSelection: route === 'research' || isResearchChild,
+        // authority. A child whose tuple is already frozen is an explicit
+        // zero-call Research path, however: marking it as `research` here
+        // would enable the legacy Research turn planner and issue a second
+        // provider dispatch before the frozen semantic/certified execution.
+        // Non-frozen children retain the root Research ledger and its wider
+        // physical-dispatch budget.
+        orchestrationMode: route === 'research' || (isResearchChild && !frozenResearchChildProviderFreePlan) ? 'research' : 'ask',
+        allowProviderSemanticMemberSelection: route === 'research' || (isResearchChild && !frozenResearchChildProviderFreePlan),
         researchResultRowsOptIn: (request.requestedMode === 'research' || isResearchChild)
           && request.researchResultRowsOptIn === true,
         projectRoot,
@@ -6030,10 +6658,52 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
         // an unambiguous FROM/JOIN leaf already present in the artifact and it
         // never supplies a missing table, join, or column.
         executeCertifiedBlock: async (node, invocation) => {
-          const frozenCertifiedPlan = routeDecision?.analyticalCascadeDecision?.planFrozen === true
+          const legacyFrozenCertifiedPlan = routeDecision?.analyticalCascadeDecision?.planFrozen === true
             && routeDecision.analyticalCascadeDecision.selectedTier === 'certified'
             && routeDecision.resolvedAnalyticalPlan?.capability === 'certified_execution';
-          if (frozenCertifiedPlan) {
+          let v2FrozenContextPack: LocalContextPack | undefined;
+          const v2FrozenCertifiedPlan = (() => {
+            const state = request.askAgentV2State;
+            const bridge = request.askAgentV2Workspace;
+            if (request.askAgentRuntimeMode !== 'authoritative_v2'
+              || !state?.resolvedPlan?.frozen
+              || state.resolvedPlan.tier !== 'certified'
+              || !state.exactCertifiedCandidateId
+              || !askAgentV2WorkspaceMatches(state, bridge)) return false;
+            const workspace = bridge?.getToolWorkspace?.();
+            const context = bridge?.getContextPack?.() as LocalContextPack | undefined;
+            const candidateId = state.exactCertifiedCandidateId;
+            const artifact = workspace?.certifiedArtifacts?.get(candidateId);
+            if (!workspace || workspace.version !== 1 || !context
+              || workspace.snapshotId !== state.snapshotId
+              || workspace.sourceFingerprint !== state.sourceFingerprint
+              || context.knowledgeLens.snapshotId !== state.snapshotId
+              || !workspace.certifiedCompleteCandidateIds?.includes(candidateId)
+              || !workspace.tierStates?.certified?.candidateIds.includes(candidateId)
+              || !state.resolvedPlan.candidateIds.includes(candidateId)
+              || !state.retainedCandidateIds.includes(candidateId)
+              || !artifact
+              || typeof artifact !== 'object'
+              || (artifact as AskCertifiedArtifactHandleV1).version !== 1
+              || typeof (artifact as AskCertifiedArtifactHandleV1).isCurrent !== 'function'
+              || !(artifact as AskCertifiedArtifactHandleV1).isCurrent()) {
+              throw analyticalError(
+                'The captured certified artifact no longer matches this immutable Ask snapshot. Refresh before retrying.',
+                { origin: 'governance_gate', stage: 'validation', code: 'snapshot_drift' },
+              );
+            }
+            const captured = (artifact as AskCertifiedArtifactHandleV1).artifact as Partial<KGNode> | undefined;
+            if (!captured || captured.kind !== 'block' || captured.nodeId !== node.nodeId) {
+              throw analyticalError(
+                'The certified execution request did not match the captured immutable artifact.',
+                { origin: 'governance_gate', stage: 'validation', code: 'certified_artifact_mismatch' },
+              );
+            }
+            v2FrozenContextPack = context;
+            return true;
+          })();
+          const frozenCertifiedPlan = legacyFrozenCertifiedPlan || v2FrozenCertifiedPlan;
+          if (legacyFrozenCertifiedPlan) {
             const plan = routeDecision.resolvedAnalyticalPlan!;
             const retrievedSourceFingerprint = routeDecision.retrievalEvidence?.sourceFingerprint;
             const retrievedSnapshotId = routeDecision.retrievalEvidence?.snapshotId;
@@ -6071,8 +6741,14 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
               );
             }
           }
+          if (v2FrozenCertifiedPlan && !v2FrozenContextPack) {
+            throw analyticalError(
+              'The captured V2 certified execution context is unavailable for this immutable snapshot.',
+              { origin: 'governance_gate', stage: 'validation', code: 'snapshot_drift' },
+            );
+          }
           const certifiedSchemaContext = frozenCertifiedPlan
-            ? buildFrozenCertifiedSchemaContext(preparedContextPack, runProjectSnapshot.manifest)
+            ? buildFrozenCertifiedSchemaContext(v2FrozenContextPack ?? preparedContextPack, runProjectSnapshot.manifest)
             : preparedQualifiedSchemaContext;
           try {
             return await executeCertifiedBlockForAgent(
@@ -6106,6 +6782,7 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           }
         },
         prepareExploratorySqlExecution,
+        prepareAskV2ExploratorySqlExecution,
         executeAgenticGeneratedSql: async (capability, sql, artifact) => {
           if (!agenticExecutionCapabilityGate.consume(capability)) {
             throw analyticalError('This analyst execution capability was already consumed; DQL did not retry it with stale proof.', {
@@ -6149,6 +6826,8 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             throw error;
           }
         },
+        authorizeAskV2DqlArtifact,
+        executeAskV2DqlArtifact,
         getSchemaContext: (question, preparedContextPack) => getSchemaContextForAgent(
           question,
           preparedContextPack,
@@ -6158,11 +6837,13 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
             : undefined,
         ),
         probeNamedRelations: (relations) => probeNamedRelationsForAgent(relations, semanticConnection),
-      }, askTraceObserverForV1(request)),
+      }, askTraceObserverForV1(request));
+    const runnerTerminal = await agentRunAskTraceContext.run(askTraceObserverForV1(request), async () => runner.run(
+      runnerRequest,
       (turn) => {
         if (turn.kind === 'thinking') onProgress?.(turn.text);
         if (turn.kind === 'tool_result' && turn.id === 'governed_answer') {
-          governedAnswer = turn.output as AgentAnswer;
+          governedAnswer = turn.output as GovernedAgentAnswerForRun;
         }
         if (turn.kind === 'error') {
           providerError = turn.message;
@@ -6180,6 +6861,16 @@ export async function startLocalServer(opts: LocalServerOptions): Promise<number
           ...(providerBoundaryDiagnostic ? { providerDiagnostic: providerBoundaryDiagnostic } : {}),
         },
       );
+    }
+    // The runner owns the execution-state clone. It returns the exact
+    // server-minted receipt after a terminal V2 execution; the original
+    // request/route decision remain immutable planning inputs.
+    const askV2ExecutionReceipt = runnerTerminal?.askAgentV2ExecutionReceipt;
+    if (askV2ExecutionReceipt) {
+      governedAnswer = {
+        ...governedAnswer,
+        askAgentV2ExecutionReceipt: askV2ExecutionReceipt,
+      };
     }
     if (frozenExecutionSetupFailure && !governedAnswer.observabilityExecutionFailure) {
       // Preserve the fact captured at the actual pre-execution setup
@@ -6739,7 +7430,7 @@ function analyticalFailureSummary(
         analyticalTaskOutcomes: outcomes,
       };
     }
-    let governedAnswer: AgentAnswer;
+    let governedAnswer: GovernedAgentAnswerForRun;
     let frozenSemanticReviewRequired = false;
     try {
       governedAnswer = await runGovernedAgentAnswerForRun(
@@ -6813,7 +7504,11 @@ function analyticalFailureSummary(
       // relationship. The answer loop exposes a non-executed candidate only for
       // that narrow case; the host owns bounded probe/execution and never
       // weakens the final governed-SQL guard.
-      if (governedAnswer.exploratoryCandidate) {
+      // Authoritative V2 owns exploratory validation, capability minting and
+      // its single repair in its tool kernel. Re-entering this legacy host
+      // helper would create a second SQL/execution path after V2 selected its
+      // terminal tool outcome.
+      if (governedAnswer.exploratoryCandidate && !governedAnswer.askAgentV2Outcome) {
         const explorationSchema = governedAnswer.contextPack?.allowedSqlContext.relations.map((table) => ({
           relation: table.relation,
           name: table.name,
@@ -7072,6 +7767,78 @@ function analyticalFailureSummary(
     const terminalFailureProjection = projectTerminalAnalyticalFailureForRun(governedAnswer);
     const isExecutionFailure = terminalFailureProjection.executionFailure;
     const projectedTerminalAnswer = terminalFailureProjection.answer;
+    // The V2 kernel records the redacted readiness/dispatch classification at
+    // the physical provider boundary. Preserve that exact observation on the
+    // run route decision through the executor-result seam; do not reclassify
+    // its reader-facing error text below.
+    // The engine may scope a child request while retaining the turn-level V2
+    // decision object. Read the same authoritative state that will be
+    // persisted on that decision if the scoped request did not retain its
+    // optional carrier; never infer a provider failure from text.
+    // The request and route decision remain immutable plan inputs. They may
+    // describe a V2 provider failure, but they are never execution proof: the
+    // provider runner advances a cloned request. Successful V2 execution
+    // therefore crosses this boundary only through the server-minted receipt
+    // returned on `governedAnswer` above.
+    const v2StateCandidates = [
+      request.askAgentV2State,
+      routeDecision?.askAgentV2Decision?.state,
+    ].filter((state): state is AskAgentStateV4 => Boolean(state));
+    // The agentic provider wrapper may normalize a V2 terminal into a legacy
+    // `no_answer` envelope before this adapter sees it.  The V2 state is the
+    // durable kernel receipt in that case, so it must be the fallback carrier
+    // for the terminal outcome as well as for its detailed observation.  This
+    // keeps a child/scoped request from silently dropping a readiness failure
+    // while its parent still persists the same state on the route decision.
+    const v2Outcome = governedAnswer.askAgentV2Outcome
+      ?? v2StateCandidates.find((state) => state.terminalOutcome)?.terminalOutcome;
+    // Provider/error projection may still need a non-execution terminal
+    // state. It is intentionally never allowed to mint an execution receipt.
+    const v2ReceiptState = v2StateCandidates.find((state) => (
+        state.terminalOutcome?.kind === v2Outcome?.kind
+        && state.terminalOutcome?.origin === v2Outcome?.origin
+      ))
+      ?? v2StateCandidates[0];
+    // A V2 observation names a physical connection attempt only once the
+    // execution boundary actually returned or threw.  Retrieval, provider
+    // planning, validation, and capability minting are not connections. This
+    // prevents a coverage gap from offering the misleading database-retry
+    // action that the built CLI exposed.
+    const v2ConnectionAttempted = Boolean(v2ReceiptState?.observations.some((observation) =>
+      observation.origin === 'execution'
+      && (observation.outcome === 'executed' || observation.outcome === 'error')));
+    // The engine consumes this exact returned carrier. Never reconstruct one
+    // from stale request/decision state, reader-facing text, route names, or
+    // result rows.
+    const v2ExecutionReceipt = governedAnswer.askAgentV2ExecutionReceipt;
+    const v2ProviderObservation = v2Outcome?.kind === 'provider_failure'
+      ? v2ReceiptState?.observations.find((observation) => observation.provider)?.provider
+      : undefined;
+    // V8 distinguishes the agent-control and tool-follow-up provider phases.
+    // V1 readers deliberately have a smaller phase vocabulary, so retain the
+    // exact V2 phase in the receipt/state and project those two new phases to
+    // the closest legacy reader boundary rather than widening the old contract.
+    const v2ProviderFailurePhase: ProviderFailureDiagnosticV1['phase'] | undefined =
+      v2ProviderObservation?.phase === 'agent_control' || v2ProviderObservation?.phase === 'tool_followup'
+        ? 'generation'
+        : v2ProviderObservation?.phase;
+    const v2ProviderFailureSafeAction: ProviderFailureDiagnosticV1['safeAction'] =
+      v2ProviderObservation?.safeAction === 'retry_same_provider'
+      || v2ProviderObservation?.safeAction === 'fix_provider_configuration'
+      || v2ProviderObservation?.safeAction === 'wait_and_retry'
+      || v2ProviderObservation?.safeAction === 'inspect_run'
+      || v2ProviderObservation?.safeAction === 'none'
+        ? v2ProviderObservation.safeAction
+        : 'inspect_run';
+    const v2ProviderFailure: ProviderFailureDiagnosticV1 | undefined = v2ProviderObservation && v2ProviderFailurePhase
+      ? {
+        version: 1,
+        ...v2ProviderObservation,
+        phase: v2ProviderFailurePhase,
+        safeAction: v2ProviderFailureSafeAction,
+      }
+      : undefined;
+    const v2TerminalFailure = Boolean(v2Outcome && v2Outcome.kind !== 'finish_answer' && v2Outcome.kind !== 'clarification');
     const isGroundingGap = governedAnswer.kind === 'no_answer'
       && (governedAnswer.refusalCode === 'grounding_gap' || governedAnswer.refusalCode === 'modeling_gap')
       && !isExploratory
@@ -7085,7 +7852,7 @@ function analyticalFailureSummary(
     // more provider calls retrying the same incompatible candidate.
     const isPolicyBlocked = (governedAnswer.kind === 'no_answer' && governedAnswer.refusalCode === 'policy_blocked')
       || semanticAggregationBlocked;
-    const isTerminalFailure = isProviderError || isExecutionFailure || isAnalyticalFailure || isPolicyBlocked;
+    const isTerminalFailure = v2TerminalFailure || isProviderError || isExecutionFailure || isAnalyticalFailure || isPolicyBlocked;
     // The model tried to compose a governed query and declined despite having usable
     // context (e.g. it wasn't confident about a multi-table join). The answer loop
     // has already spent its one evidence-aware repair. Keep this terminal and
@@ -7096,7 +7863,7 @@ function analyticalFailureSummary(
     // consume the typed evaluation and make one bounded cascade decision. Frozen
     // certified/semantic plans and provider/policy/execution failures remain
     // fail-closed.
-    const canRecoverPreFreezeGap = (isGroundingGap || isModelDeclined)
+    const canRecoverPreFreezeGap = !v2Outcome && (isGroundingGap || isModelDeclined)
       && route === 'generated_answer'
       && (request.requestedMode === undefined || request.requestedMode === 'auto' || request.requestedMode === 'ask')
       && routeDecision?.resolvedAnalyticalPlan?.mode !== 'authoritative';
@@ -7135,8 +7902,9 @@ function analyticalFailureSummary(
     // Only a genuinely AMBIGUOUS question is surfaced as "needs clarification".
     // Grounding/compiler gaps are terminal review states with their evidence trace;
     // provider outages are blocked so the UI can offer an explicit retry.
-    const needsClarification = governedAnswer.kind === 'no_answer'
-      && !isTerminalFailure && !isGroundingGap && !isProviderError && !isModelDeclined && !isPolicyBlocked;
+    const needsClarification = v2Outcome?.kind === 'clarification'
+      || (!v2Outcome && governedAnswer.kind === 'no_answer'
+        && !isTerminalFailure && !isGroundingGap && !isProviderError && !isModelDeclined && !isPolicyBlocked);
     // A run that ASKED THE USER A QUESTION is a clarify turn, whatever route it
     // would have taken had it answered. Persisting the resolved analytical route
     // instead (`generated_answer`) meant the engine's clarification-continuation
@@ -7352,7 +8120,16 @@ function analyticalFailureSummary(
     // status as a perfectly good uncertified answer. Every downstream trust
     // check then treated the refusal as a usable turn, which is how one failed
     // answer poisoned every later question in the thread.
-    const status: AgentRunStatus = isTerminalFailure
+    const v2ResultCompleted = Boolean(v2Outcome?.kind === 'finish_answer' && governedAnswer.result);
+    const status: AgentRunStatus = v2Outcome
+      ? v2TerminalFailure
+        ? 'blocked'
+        : v2Outcome.kind === 'clarification'
+          ? 'needs_clarification'
+          : v2ResultCompleted && (governedAnswer.certification === 'certified' || governedAnswer.kind === 'certified')
+            ? 'completed'
+            : 'needs_review'
+      : isTerminalFailure
       ? 'blocked'
       : needsClarification
         ? 'needs_clarification'
@@ -7361,7 +8138,17 @@ function analyticalFailureSummary(
           : isCertified || isSemantic
             ? 'completed'
             : 'needs_review';
-    const trustState: AgentRunTrustState = isTerminalFailure
+    const trustState: AgentRunTrustState = v2Outcome
+      ? v2TerminalFailure
+        ? 'blocked'
+        : v2Outcome.kind === 'clarification'
+          ? 'not_applicable'
+          : canonicalPersistedTrustState({
+              answer: governedAnswer,
+              trustState: governedAnswer.result?.trustState,
+              answerTier: governedAnswer.result?.answerTier ?? governedAnswer.route?.tier ?? governedAnswer.sourceTier,
+            }) ?? 'review_required'
+      : isTerminalFailure
       ? 'blocked'
       : needsClarification
         ? 'not_applicable'
@@ -7372,7 +8159,15 @@ function analyticalFailureSummary(
               : isSemantic
                 ? 'governed'
                 : 'review_required';
-    const stopReason: AgentRunStopReason = isTerminalFailure
+    const stopReason: AgentRunStopReason = v2Outcome
+      ? v2TerminalFailure
+        ? 'blocked'
+        : v2Outcome.kind === 'clarification'
+          ? 'needs_clarification'
+          : governedAnswer.certification === 'certified' || governedAnswer.kind === 'certified'
+            ? 'certified_answer_found'
+            : 'human_review_required'
+      : isTerminalFailure
       ? 'blocked'
       : needsClarification
         ? 'needs_clarification'
@@ -7398,15 +8193,25 @@ function analyticalFailureSummary(
             : [{ id: 'review-analytical-failure', label: 'Review the plan, DQL, SQL, and safe repair actions', route: 'blocked' }]
       : isProviderError
         ? [{ id: 'retry-after-provider', label: 'Retry after fixing the AI provider', route: 'generated_answer' }]
-        : isPolicyBlocked
-          ? [
+      : isPolicyBlocked
+        ? [
               ...(governedAnswer.dqlArtifact
                 ? [{ id: 'edit_dql', label: 'Open DQL to repair', route: 'dql_block_draft' as const, artifactKind: 'dql_block_draft' as const }]
                 : []),
               ...(sql
                 ? [{ id: 'open_sql_notebook', label: 'Open SQL in Notebook', route: 'sql_cell' as const, artifactKind: 'sql_cell' as const }]
-                : []),
+              : []),
             ]
+        : v2Outcome && !v2ConnectionAttempted
+          ? [{
+              id: v2Outcome.kind === 'execution_failure' && v2Outcome.origin === 'validation'
+                ? 'refresh-snapshot'
+                : 'inspect-recorded-context',
+              label: v2Outcome.kind === 'execution_failure' && v2Outcome.origin === 'validation'
+                ? 'Refresh the governed snapshot before retrying'
+                : 'Review retrieved context and candidate decisions',
+              route: 'blocked',
+            }]
         : [{ id: 'retry-after-connection', label: 'Retry after fixing the database connection', route: 'generated_answer' }];
     const nextActions: AgentRunNextAction[] = needsClarification
       ? [{ id: 'clarify', label: 'Clarify question', route: 'generated_answer' }]
@@ -7450,12 +8255,18 @@ function analyticalFailureSummary(
     }
     return {
       resolvedRoute,
+      ...(v2Outcome
+        ? { askAgentV2Outcome: v2Outcome }
+        : {}),
+      ...(v2ExecutionReceipt ? { askAgentV2ExecutionReceipt: v2ExecutionReceipt } : {}),
+      ...(v2ProviderFailure ? { providerFailure: v2ProviderFailure } : {}),
       answerRefusalCode: governedAnswer.kind === 'no_answer'
         ? projectedTerminalAnswer.refusalCode
         : semanticAggregationBlocked
           ? 'policy_blocked'
           : undefined,
       answerTier: governedAnswer.route?.tier,
+      ...(governedAnswer.result ? { result: governedAnswer.result } : {}),
       summary: isTerminalFailure
         ? analyticalFailureSummary(governedAnswer.analyticalFailure)
           ?? governedAnswer.executionError
@@ -8184,6 +8995,22 @@ function analyticalFailureSummary(
     skill_draft: skillAuthoringRunExecutor,
     research: async (researchContext) => {
       const { runId, request, routeDecision, emit } = researchContext;
+      // Explicit authoritative-V2 Research has one owner: the V2 Research
+      // tool handler in `createDqlAgentProviderRunner`.  Letting this route
+      // enter the historical dossier planner first bypasses the immutable V2
+      // workspace (including host-frozen child capabilities), and means the
+      // root planner never receives its one permitted provider dispatch.  The
+      // answer executor is only a host bridge here: it preserves the
+      // `research` route and supplies the V2 state/workspace to the provider
+      // runner; its V2 policy asserts that the legacy controller is never
+      // called.  Shadow and legacy Research deliberately keep the established
+      // research executor below.
+      if (
+        request.askAgentRuntimeMode === 'authoritative_v2'
+        && routeDecision?.askAgentV2Decision?.state.turnClass === 'research'
+      ) {
+        return answerRunExecutor(researchContext);
+      }
       const trace = askTraceObserverForV1(request);
       const metrics = loadSemanticMetrics(projectRoot);
       let blocks = collectPlanBlocks(projectRoot, { certifiedOnly: true });
@@ -8481,16 +9308,18 @@ function analyticalFailureSummary(
           ],
           stoppingReason: researchLedger.stoppingReason,
         });
+        const researchLedgerV4: ResearchEvidenceLedgerV4 = projectResearchEvidenceLedgerV4(researchLedgerV3);
         return {
           researchLedger,
           researchLedgerV2,
           researchLedgerV3,
+          researchLedgerV4,
         };
       };
 
       const persistPartialResearchArtifact = (terminalReason: 'run_deadline' | 'cancelled') => {
         if (partialResearchArtifactPersisted || !researchRootRunId) return;
-        const { researchLedger, researchLedgerV2, researchLedgerV3 } = partialResearchLedgerSnapshot();
+        const { researchLedger, researchLedgerV2, researchLedgerV3, researchLedgerV4 } = partialResearchLedgerSnapshot();
         const childRunIds = [...new Set(researchBranchReceipts.map((receipt) => receipt.childRunId))];
         const branchTrace = researchBranchReceipts.map((receipt) => ({
           branchId: receipt.branchId,
@@ -8508,6 +9337,7 @@ function analyticalFailureSummary(
           researchLedger,
           researchLedgerV2,
           researchLedgerV3,
+          researchLedgerV4,
           traceReference: trace.reference(),
           researchTrace: { branchTrace },
         }, researchRootRunId, 'blocked');
@@ -8890,6 +9720,15 @@ function analyticalFailureSummary(
                     strength: lineage.receipt.status === 'completed' ? 0.25 : 0.1,
                   };
                 }
+                // Do not even enter the child router when its fair-share
+                // signal has already expired. An async IIFE starts executing
+                // before `awaitResearchBranchDeadline` can observe that
+                // signal, which previously admitted a branch planner/provider
+                // transport after the branch had been rejected. That spent
+                // root Research budget without producing an executable child
+                // receipt.
+                if (branchSignal.aborted) throw branchSignal.reason
+                  ?? new DOMException('The Research branch deadline elapsed.', 'TimeoutError');
                 const executed = await awaitResearchBranchDeadline((async () => {
                   /**
                    * A Research branch is a child Ask run, not a notebook-SQL
@@ -9378,6 +10217,7 @@ function analyticalFailureSummary(
         ],
         stoppingReason: researchLedger.stoppingReason,
       });
+      const researchLedgerV4: ResearchEvidenceLedgerV4 = projectResearchEvidenceLedgerV4(researchLedgerV3);
       for (const entry of researchLedgerV2.entries) {
         const branch = researchBranchSpans.get(entry.branchId);
         if (!branch) continue;
@@ -9538,6 +10378,7 @@ function analyticalFailureSummary(
               researchLedger,
               researchLedgerV2,
               researchLedgerV3,
+              researchLedgerV4,
               researchBranchReceipts,
               researchBudget: {
                 version: 1,
@@ -10164,8 +11005,13 @@ function analyticalFailureSummary(
     const connectorInstalled = Boolean(targetConnection && getConnectorInstallStatuses(projectRoot)
       .find((status) => status.driver === targetConnection.driver)?.installed);
     const targetIdentity = targetConnection ? configuredWarehouseTargetIdentity(targetConnection) : undefined;
+    // Keep the established V1 readiness picture broad. V2 narrows executable
+    // authority later, at its private capability bridge. Applying the V2
+    // object-type boundary here would rewrite the legacy cascade before it
+    // reaches its existing semantic compiler/freeze path.
     const semanticCandidates = candidates.filter((candidate) =>
       candidate.kind === 'semantic_metric' || candidate.kind === 'semantic_member' || candidate.trustTier === 'semantic');
+    const v2SemanticCandidates = candidates.filter((candidate) => Boolean(askV2ExecutableSemanticRoles(candidate)));
     const semanticAdapterIds = (candidate: AgentEvidenceCandidate): string[] =>
       candidate.analyticalCapability?.executionCapabilities
         .flatMap((capability) => capability.route === 'semantic' && typeof capability.adapterId === 'string'
@@ -10235,6 +11081,48 @@ function analyticalFailureSummary(
           ? 'ready' as const
           : 'unavailable' as const,
       }));
+    const askV2SemanticCandidateReadiness = v2SemanticCandidates.map((candidate) => {
+      const candidateId = candidate.qualifiedId ?? candidate.id;
+      const nativeCompilerProven = nativeReadyCandidateIds.has(candidateId);
+      // `nativeCompilerProven` is a host-owned capability attestation. It is
+      // intentionally added before readiness intersection, not inferred from
+      // a model's display/runtime field or a provider argument.
+      const advertised = [...new Set([
+        ...askV2SemanticEnginesForCandidate(candidate),
+        ...(nativeCompilerProven ? ['native' as const] : []),
+      ])];
+      const engines = advertised.filter((engine) => {
+        if (engine === 'native') {
+          // A metric may use the in-process compiler only when the loaded
+          // layer proves that exact metric. Dimensions accompany the selected
+          // metric and therefore retain native only as a target-bound handle.
+          return candidate.kind !== 'semantic_metric' || nativeReadyCandidateIds.has(candidateId)
+            ? adapterReadyForCandidate('native')
+            : false;
+        }
+        return adapterReadyForCandidate(engine);
+      });
+      return {
+        candidateId,
+        status: engines.length > 0 ? 'ready' as const : 'unavailable' as const,
+        engines,
+        ...(nativeCompilerProven ? { nativeCompilerProven: true } : {}),
+      };
+    });
+    // The configured semantic runtime is selected by the local host before a
+    // provider sees an executable capability.  A model selects metric/time
+    // bindings, never an adapter. `active` already implements the project
+    // preference (dbt Cloud -> MetricFlow -> native for auto) and the target
+    // readiness rules from semantic-runtime.ts. Candidate capture below still
+    // intersects this choice with each exact metric's ready engines.
+    const askV2SemanticRuntime: AskSemanticRuntimeSelectionV1 = {
+      version: 1,
+      preference: (semanticRuntime?.preference ?? getSemanticRuntimeSettings(projectRoot).preference) as SemanticRuntimePreference,
+      ...(semanticRuntime?.active ? { selectedEngine: semanticRuntime.active as AskSemanticEngineV1 } : {}),
+      readiness: semanticRuntime?.active && askV2SemanticCandidateReadiness.some((candidate) => (
+        candidate.status === 'ready' && candidate.engines.includes(semanticRuntime.active as AskSemanticEngineV1)
+      )) ? 'ready' : 'unavailable',
+    };
     const readiness = {
       ...probeAskTierReadinessV1({
       targetConfigured,
@@ -10246,6 +11134,10 @@ function analyticalFailureSummary(
       ...(targetIdentity ? { targetFingerprint: targetIdentity.identityFingerprint } : {}),
       }),
       ...(semanticCandidateReadiness.length > 0 ? { semanticCandidateReadiness } : {}),
+      // Kept private to the V2 workspace bridge below. The public/legacy
+      // diagnostic preserves its pre-existing metric readiness semantics.
+      ...(askV2SemanticCandidateReadiness.length > 0 ? { askV2SemanticCandidateReadiness } : {}),
+      askV2SemanticRuntime,
     };
     // `agentRunExecutors` is an explicit host-owned execution boundary used
     // by embedders and deterministic local tests. A supplied semantic executor
@@ -10266,19 +11158,695 @@ function analyticalFailureSummary(
   const buildAgentRunEvidence = async (request: AgentRunRequest): Promise<AgentRetrievalEvidence> => {
     const startedAt = Date.now();
     const pack = await buildAgentRunContextPack(request);
+    // The V2 workspace must describe the connection the execution boundary
+    // will actually receive, not a caller label or a later result-normalizing
+    // fallback.  A missing/unresolvable target simply withholds the physical
+    // row-bound capability; the normal execution path retains its own typed
+    // setup error and safe recovery action.
+    let certifiedExecutionConnection: ConnectionConfig | undefined;
+    try {
+      certifiedExecutionConnection = await resolveAgentRunExecutionConnection(request);
+    } catch {
+      certifiedExecutionConnection = undefined;
+    }
+    // Explicit Research captures a structural lineage root at the same
+    // retrieval boundary. The V2 provider can choose a lineage branch, but it
+    // receives only an opaque callback result; it cannot rebuild a newer graph
+    // or turn this program into a SQL/provider detour.
+    const v2ResearchLineageRoot = request.requestedMode === 'research'
+      ? captureResearchLineageRootSnapshotV1(projectRoot, semanticLayer)
+      : undefined;
+    const v2ResearchLineageSnapshotId = pack.knowledgeLens.snapshotId;
+    // V2 retrieves exactly once.  The engine copies this server-owned bridge
+    // to the provider request, whose closure still points at the immutable
+    // original pack even though the engine creates a shallow request wrapper.
+    // It is function-bearing and therefore cannot arrive from browser/MCP JSON
+    // or leak into a persisted run document.
+    let relationshipPathHandles: AskRelationshipPathHandleV1[] = (pack.retrievalDiagnostics.selectedJoinPaths ?? [])
+      .slice(0, 8)
+      .map((path) => {
+        const edgeIds = [
+          `${path.leftRelation}.${path.leftColumn}`,
+          `${path.rightRelation}.${path.rightColumn}`,
+        ].slice(0, 12).map((edge) => `edge:${createHash('sha256').update(edge).digest('hex').slice(0, 24)}`);
+        return {
+          version: 1 as const,
+          id: `relationship-path:${createHash('sha256').update(edgeIds.join('|')).digest('hex').slice(0, 24)}`,
+          edgeIds,
+          snapshotId: pack.knowledgeLens.snapshotId,
+        };
+      });
+    let workspaceEvidence: AgentRetrievalEvidence | undefined;
+    // Bind executable certified artifacts while the retrieval snapshot is
+    // current.  V2 tools receive this map only through the function-bearing
+    // request bridge; they must never re-search the mutable KG at execution
+    // time.  The map values remain host-only and are not persisted or sent to
+    // the provider.
+    const certifiedArtifacts = new Map<string, AskCertifiedArtifactHandleV1>();
+    // Resolve opaque admitted semantic evidence IDs through this immutable
+    // host capability immediately before a real MetricFlow/dbt compiler call.
+    // The adapter never receives an evidence ID as a semantic field name.
+    const semanticCapabilities = new Map<string, AskSemanticCapabilityHandleV1>();
+    const semanticCapabilityCollisionIds = new Set<string>();
+    // Research receives only capabilities the host has already frozen from
+    // this request's snapshot.  It must never synthesize a child from a
+    // generic certified/semantic retrieval card merely because the card looks
+    // relevant to a provider.
+    const frozenResearchChildren = new Map<string, AskFrozenResearchChildHandleV1>();
+    const captureToolWorkspace = (evidence: AgentRetrievalEvidence): AgentRetrievalEvidence => {
+      const normalizePathSubject = (value: string): string => value
+        .trim().replace(/^["`\[]|["`\]]$/g, '').toLowerCase();
+      const candidatePathIds = (leftRelation: string, rightRelation: string): string[] => {
+        const left = normalizePathSubject(leftRelation);
+        const right = normalizePathSubject(rightRelation);
+        return evidence.candidates.slice(0, 128).flatMap((candidate) => {
+          const subjects = [candidate.name, ...(candidate.sourceObjects ?? [])]
+            .map(normalizePathSubject);
+          return subjects.some((subject) => subject === left || subject === right || subject.endsWith(`.${left}`) || subject.endsWith(`.${right}`))
+            ? [candidate.qualifiedId ?? candidate.id]
+            : [];
+        }).filter((id, index, ids) => ids.indexOf(id) === index).slice(0, 24);
+      };
+      // Relationship handles are captured from this one pack and augmented
+      // with the exact admitted relation/column card identities they cover.
+      // The V2 DQL tool validates both the atomic handle and these IDs; it
+      // never reconstructs a join from a later mutable catalog lookup.
+      relationshipPathHandles = relationshipPathHandles.map((handle, index) => {
+        const path = pack.retrievalDiagnostics.selectedJoinPaths?.[index];
+        return path ? {
+          ...handle,
+          candidateIds: candidatePathIds(path.leftRelation, path.rightRelation),
+        } : handle;
+      });
+      const boundEvidence: AgentRetrievalEvidence = {
+        ...evidence,
+        relationshipPathHandles,
+      };
+      // The manifest and retrieval-catalog snapshot IDs intentionally live
+      // in different namespaces. Comparing either one directly to the other
+      // made every V2 semantic capability look stale, even though both were
+      // captured from the same request. Bind each namespace independently at
+      // capture, then re-check both immediately before a compiler/executor
+      // can consume the opaque capability.
+      const capturedManifestSnapshotId = projectSnapshot().snapshotId;
+      const isBoundEvidenceCurrent = (): boolean => {
+        try {
+          if (projectSnapshot().snapshotId !== capturedManifestSnapshotId) return false;
+          const lease = acquireActiveKnowledgeSnapshot(projectRoot);
+          try {
+            return lease.snapshotId === boundEvidence.snapshotId;
+          } finally {
+            lease.release();
+          }
+        } catch {
+          return false;
+        }
+      };
+      workspaceEvidence = boundEvidence;
+      certifiedArtifacts.clear();
+      semanticCapabilities.clear();
+      semanticCapabilityCollisionIds.clear();
+      frozenResearchChildren.clear();
+      const capturedSemanticCapabilities = captureAskV2SemanticCapabilities({
+        candidates: boundEvidence.candidates,
+        snapshotId: boundEvidence.snapshotId,
+        isCurrent: isBoundEvidenceCurrent,
+        semanticCandidateReadiness: (boundEvidence.diagnostics?.tierReadiness as {
+          askV2SemanticCandidateReadiness?: ReadonlyArray<{
+            candidateId: string;
+            status: 'ready' | 'unavailable' | 'unknown';
+            engines?: ReadonlyArray<AskSemanticEngineV1>;
+            nativeCompilerProven?: boolean;
+          }>;
+          askV2SemanticRuntime?: AskSemanticRuntimeSelectionV1;
+        } | undefined)?.askV2SemanticCandidateReadiness,
+        semanticRuntime: (boundEvidence.diagnostics?.tierReadiness as {
+          askV2SemanticRuntime?: AskSemanticRuntimeSelectionV1;
+        } | undefined)?.askV2SemanticRuntime,
+      });
+      for (const [candidateId, handle] of capturedSemanticCapabilities.capabilities) {
+        semanticCapabilities.set(candidateId, handle);
+      }
+      for (const candidateId of capturedSemanticCapabilities.collisionIds) {
+        semanticCapabilityCollisionIds.add(candidateId);
+      }
+      let capturedManifest: ReturnType<typeof buildManifest> | undefined;
+      try {
+        capturedManifest = buildManifest({ projectRoot });
+        const kg = new KGStore(defaultKgPath(projectRoot));
+        try {
+          for (const candidate of boundEvidence.candidates.slice(0, 128)) {
+            if (candidate.kind !== 'certified_block' || candidate.trustTier !== 'certified') continue;
+            const identities = [candidate.id, candidate.qualifiedId, `block:${candidate.name}`]
+              .filter((identity): identity is string => Boolean(identity));
+            const node = identities.map((identity) => kg.getNode(identity)).find((entry): entry is KGNode => entry?.kind === 'block');
+            if (!node) continue;
+            const manifestBlock = pack.knowledgeLens.snapshotId
+              ? capturedManifest.blocks[node.name || candidate.name]
+              : undefined;
+            const sourcePath = manifestBlock?.filePath;
+            const capturedSource = sourcePath && existsSync(join(projectRoot, sourcePath))
+              ? readFileSync(join(projectRoot, sourcePath), 'utf-8')
+              : JSON.stringify({ nodeId: node.nodeId, name: node.name, kind: node.kind, sourcePath: sourcePath ?? null });
+            const revisionFingerprint = executionFingerprint(capturedSource);
+            const handle: AskCertifiedArtifactHandleV1 = {
+              version: 1,
+              artifact: node,
+              revisionFingerprint,
+              isCurrent: () => {
+                try {
+                  // Re-read the immutable source and snapshot immediately at
+                  // pre-freeze/execute. A content mutation or snapshot refresh
+                  // invalidates the handle; V2 never re-searches a newer KG.
+                  if (!isBoundEvidenceCurrent()) return false;
+                  const currentSource = sourcePath && existsSync(join(projectRoot, sourcePath))
+                    ? readFileSync(join(projectRoot, sourcePath), 'utf-8')
+                    : JSON.stringify({ nodeId: node.nodeId, name: node.name, kind: node.kind, sourcePath: sourcePath ?? null });
+                  return executionFingerprint(currentSource) === revisionFingerprint;
+                } catch {
+                  return false;
+                }
+              },
+            };
+            for (const identity of identities) certifiedArtifacts.set(identity, handle);
+          }
+        } finally {
+          kg.close();
+        }
+      } catch {
+        // A missing local KG means no certified artifact is bound to this
+        // snapshot.  The tool reports that typed availability fact instead of
+        // falling back to a fresh search.
+      }
+
+      // A frozen Research child is an execution capability, not a shortcut
+      // around planning.  Mint it only when this same immutable retrieval
+      // snapshot proved a complete certified tuple, captured the block source
+      // revision, and can bind every required parameter without provider input.
+      // There is deliberately no semantic child here yet: the live workspace
+      // currently carries semantic *candidate* capabilities, but no
+      // host-frozen complete semantic program. Promoting a generic metric card
+      // would violate the same rule this code enforces for certified blocks.
+      if (request.requestedMode === 'research'
+        && boundEvidence.snapshotId
+        && boundEvidence.sourceFingerprint
+        && capturedManifest) {
+        const certifiedFitKeys = new Set(
+          pack.retrievalDiagnostics.certifiedCandidateFits
+            .filter((fit) => fit.action === 'certified_answer')
+            .map((fit) => fit.objectKey),
+        );
+        for (const candidate of boundEvidence.candidates.slice(0, 128)) {
+          const candidateId = candidate.qualifiedId ?? candidate.id;
+          if (candidate.kind !== 'certified_block'
+            || candidate.trustTier !== 'certified'
+            || !candidateId
+            || ![candidate.id, candidate.qualifiedId].some((identity) => identity && certifiedFitKeys.has(identity))) {
+            continue;
+          }
+          const artifact = certifiedArtifacts.get(candidateId);
+          const node = artifact?.artifact;
+          if (!artifact
+            || !node
+            || typeof node !== 'object'
+            || (node as { kind?: unknown }).kind !== 'block') {
+            continue;
+          }
+          const block = node as KGNode;
+          const manifestBlock = capturedManifest.blocks[block.name || candidate.name];
+          if (!manifestBlock || manifestBlock.status !== 'certified') continue;
+          const parameters: Record<string, string | number | boolean | null> = {};
+          let parametersBound = true;
+          for (const parameter of manifestBlock.parameters ?? []) {
+            if (parameter.required) {
+              parametersBound = false;
+              break;
+            }
+            if (parameter.default === undefined) continue;
+            if (typeof parameter.default === 'string'
+              || typeof parameter.default === 'number'
+              || typeof parameter.default === 'boolean'
+              || parameter.default === null) {
+              parameters[parameter.name] = parameter.default;
+              continue;
+            }
+            // Arrays/objects/dates need a provider-selected business binding.
+            // They stay on the ordinary provider-driven Research branch.
+            parametersBound = false;
+            break;
+          }
+          if (!parametersBound) continue;
+          const planFingerprint = `sha256:${executionFingerprint(stableExecutionValue({
+            snapshotId: boundEvidence.snapshotId,
+            sourceFingerprint: boundEvidence.sourceFingerprint,
+            tier: 'certified',
+            candidateIds: [candidateId],
+            parameters,
+            trustState: 'certified',
+            artifactRevisionFingerprint: artifact.revisionFingerprint,
+          }))}`;
+          const id = `research:frozen:certified:${executionFingerprint(planFingerprint).slice(0, 24)}`;
+          const isCurrent = () => isBoundEvidenceCurrent() && artifact.isCurrent();
+          const binding: AskFrozenResearchChildHandleV1['binding'] = {
+            version: 1,
+            parameters: { ...parameters },
+            trustState: 'certified',
+            planFingerprint,
+            artifactRevisionFingerprint: artifact.revisionFingerprint,
+          };
+          frozenResearchChildren.set(id, {
+            version: 1,
+            id,
+            snapshotId: boundEvidence.snapshotId,
+            sourceFingerprint: boundEvidence.sourceFingerprint,
+            tier: 'certified',
+            candidateIds: [candidateId],
+            binding,
+            isCurrent,
+            execute: async (root) => {
+              if (root.mode !== 'authoritative_v2'
+                || root.snapshotId !== boundEvidence.snapshotId
+                || root.sourceFingerprint !== boundEvidence.sourceFingerprint
+                || !root.retainedCandidateIds.includes(candidateId)) {
+                throw new Error('Frozen Research child no longer matches the active V2 root snapshot.');
+              }
+              const child: AskAgentStateV4 = {
+                ...root,
+                turnClass: 'analytics',
+                retainedCandidateIds: [...root.retainedCandidateIds],
+                initialCandidateIds: [...root.initialCandidateIds],
+                expansionCandidateIds: [...root.expansionCandidateIds],
+                relationshipPathHandles: root.relationshipPathHandles.map((path) => ({
+                  ...path,
+                  edgeIds: [...path.edgeIds],
+                  ...(path.candidateIds ? { candidateIds: [...path.candidateIds] } : {}),
+                })),
+                conversation: {
+                  ...root.conversation,
+                  availableResultHandleIds: [...root.conversation.availableResultHandleIds],
+                },
+                observations: [],
+                tierAttempts: [],
+                tierStates: {
+                  certified: {
+                    version: 1,
+                    status: 'complete',
+                    candidateIds: [candidateId],
+                    reasonCode: 'RESEARCH_FROZEN_CERTIFIED_TUPLE',
+                    safeNextTools: ['run_certified'],
+                  },
+                },
+                candidatePlan: undefined,
+                resolvedPlan: undefined,
+                researchLedgerV4: undefined,
+                terminal: undefined,
+                terminalOutcome: undefined,
+              };
+              const fail = (reasonCode: string, origin: 'freeze' | 'execution' | 'validation'): {
+                state: AskAgentStateV4;
+                answer: AgentAnswer;
+              } => {
+                observeAskAgentV2Tool(child, {
+                  version: 1,
+                  tool: 'run_certified',
+                  tier: 'certified',
+                  outcome: 'error',
+                  reasonCode,
+                  candidateIds: [candidateId],
+                  planId: child.resolvedPlan?.id,
+                  origin,
+                });
+                finishAskAgentV2Turn(child, {
+                  version: 2,
+                  kind: 'execution_failure',
+                  reasonCode,
+                  origin,
+                  safeAction: 'inspect_recorded_observations_then_retry',
+                });
+                const text = 'The selected root-frozen certified Research child did not complete on the current connection.';
+                return {
+                  state: child,
+                  answer: {
+                    kind: 'no_answer',
+                    sourceTier: 'no_answer',
+                    certification: 'analyst_review_required',
+                    reviewStatus: 'analyst_review_required',
+                    refusalCode: 'execution_error',
+                    text,
+                    answer: text,
+                    citations: [],
+                    considered: [],
+                    askAgentV2Outcome: {
+                      version: 2,
+                      kind: 'execution_failure',
+                      reasonCode,
+                      origin,
+                      safeAction: 'inspect_recorded_observations_then_retry',
+                    },
+                  },
+                };
+              };
+              observeAskAgentV2Tool(child, {
+                version: 1,
+                tool: 'inspect_certified_candidates',
+                tier: 'certified',
+                outcome: 'eligible',
+                reasonCode: 'RESEARCH_FROZEN_CERTIFIED_CAPABILITY_AVAILABLE',
+                candidateIds: [candidateId],
+                origin: 'retrieval',
+              });
+              // This child capability was already authorized from the root's
+              // immutable snapshot. Persist that exact frozen plan before the
+              // compiler/executor boundary so the generic V2 child validator
+              // can prove it is executing the selected capability rather than
+              // treating a successful block call as an unbound replay.
+              child.resolvedPlan = {
+                version: 3,
+                id: `ask-v2:research:certified:${planFingerprint.slice(-24)}`,
+                snapshotId: boundEvidence.snapshotId,
+                tier: 'certified',
+                candidateIds: [candidateId],
+                frozen: true,
+                reviewRequired: false,
+                bindingFingerprint: planFingerprint,
+                fingerprint: planFingerprint,
+              };
+              observeAskAgentV2Tool(child, {
+                version: 1,
+                tool: 'run_certified',
+                tier: 'certified',
+                outcome: 'eligible',
+                reasonCode: 'RESEARCH_FROZEN_CERTIFIED_AUTHORIZED',
+                candidateIds: [candidateId],
+                planId: `ask-v2:research:certified:${planFingerprint.slice(-24)}`,
+                executionAuthorized: true,
+                inputFingerprint: planFingerprint,
+                outputFingerprint: artifact.revisionFingerprint,
+                origin: 'freeze',
+              });
+              if (!isCurrent()) return fail('RESEARCH_FROZEN_CERTIFIED_ARTIFACT_STALE', 'freeze');
+              try {
+                const snapshot = projectSnapshot();
+                if (snapshot.snapshotId !== capturedManifestSnapshotId) {
+                  return fail('RESEARCH_FROZEN_CERTIFIED_ARTIFACT_STALE', 'freeze');
+                }
+                // This capability lives in retrieval construction rather
+                // than the ordinary answer executor, so it must resolve its
+                // own host-selected target here.  Do not capture the
+                // answer-executor's lexical `semanticConnection`: it is not
+                // in scope for a root-frozen Research child and would turn an
+                // otherwise valid immutable artifact into a pre-adapter
+                // runtime error.  The request itself is server-owned, and the
+                // active root above already proved it still belongs to this
+                // snapshot before this execution capability is consumed.
+                const childExecutionConnection = await resolveAgentRunExecutionConnection(request);
+                const childExecutionConnectionName = request.executionTarget?.target === 'connection'
+                  ? request.executionTarget.connectionName
+                  : undefined;
+                const result = await executeCertifiedBlockForAgent(
+                  block,
+                  { question: request.question, parameters: { ...binding.parameters } },
+                  childExecutionConnection,
+                  childExecutionConnectionName,
+                  buildFrozenCertifiedSchemaContext(pack, snapshot.manifest),
+                  true,
+                );
+                const completed = {
+                  ...result,
+                  trustState: 'certified' as const,
+                  answerTier: 'certified_block',
+                };
+                const resultFingerprint = completed.executionReceipt?.resultFingerprint
+                  ?? completed.resultFingerprint
+                  ?? executionFingerprint(stableExecutionValue({
+                    columns: completed.columns,
+                    rowCount: completed.rowCount,
+                    artifactRevisionFingerprint: artifact.revisionFingerprint,
+                  }));
+                observeAskAgentV2Tool(child, {
+                  version: 1,
+                  tool: 'run_certified',
+                  tier: 'certified',
+                  outcome: 'executed',
+                  reasonCode: 'RESEARCH_FROZEN_CERTIFIED_RESULT_VALIDATED',
+                  candidateIds: [candidateId],
+                  planId: child.resolvedPlan?.id,
+                  outputFingerprint: resultFingerprint,
+                  origin: 'execution',
+                });
+                finishAskAgentV2Turn(child, {
+                  version: 2,
+                  kind: 'finish_answer',
+                  reasonCode: 'RESEARCH_FROZEN_CERTIFIED_RESULT_VALIDATED',
+                  origin: 'execution',
+                });
+                const text = `The root-frozen certified Research child completed with ${completed.rowCount} row${completed.rowCount === 1 ? '' : 's'}.`;
+                return {
+                  state: child,
+                  answer: {
+                    kind: 'certified',
+                    sourceTier: 'certified_artifact',
+                    certification: 'certified',
+                    reviewStatus: 'certified',
+                    text,
+                    answer: text,
+                    block,
+                    result: completed,
+                    citations: [],
+                    considered: [],
+                    askAgentV2Outcome: {
+                      version: 2,
+                      kind: 'finish_answer',
+                      reasonCode: 'RESEARCH_FROZEN_CERTIFIED_RESULT_VALIDATED',
+                      origin: 'execution',
+                    },
+                  },
+                };
+              } catch (error) {
+                const detail = analyticalErrorDetail(error);
+                return fail(
+                  detail?.code
+                    ? `RESEARCH_FROZEN_CERTIFIED_${detail.code.toUpperCase()}`
+                    : 'RESEARCH_FROZEN_CERTIFIED_EXECUTION_FAILED',
+                  detail?.stage === 'bind' || detail?.stage === 'validation' ? 'validation' : 'execution',
+                );
+              }
+            },
+          });
+        }
+      }
+      return boundEvidence;
+    };
+    const workspaceBridge: AskAgentRuntimeWorkspaceBridgeV2 = {
+      version: 2,
+      snapshotId: pack.knowledgeLens.snapshotId,
+      ...(pack.freshness.fingerprint ? { sourceFingerprint: pack.freshness.fingerprint } : {}),
+      relationshipPathHandles,
+      // Tier 1 presence is not enough to block semantic fallback. This is
+      // the host-owned execution readiness for the exact captured snapshot;
+      // the provider adapter still verifies its invocation callback and the
+      // artifact rechecks immediately before freeze.
+      isCertifiedExecutionAvailable: () => Boolean(certifiedExecutionConnection),
+      getContextPack: () => pack,
+      getToolWorkspace: () => {
+        const evidence = workspaceEvidence;
+        if (!evidence) return undefined;
+        // Certified artifact presence alone is intentionally not enough to
+        // execute it.  Capture the exact fit decision produced by this same
+        // immutable context pack, then translate only matching candidate
+        // identities into the tool workspace.  The V2 certified tool must
+        // consume this list rather than doing a mutable KG/catalog lookup.
+        const certifiedFitKeys = new Set(
+          pack.retrievalDiagnostics.certifiedCandidateFits
+            // `action` is the legacy catalog route winner. V2 must instead
+            // receive every independently complete snapshot fit so it can
+            // require *one* unambiguous certified tuple before skipping a
+            // planner turn. The action fallback keeps older persisted/test
+            // packs readable while fresh retrieval supplies completeForRequest.
+            .filter((fit) => fit.completeForRequest === true || fit.action === 'certified_answer')
+            .map((fit) => fit.objectKey),
+        );
+        const directCertifiedQuestionContracts = new Map(
+          pack.retrievalDiagnostics.certifiedCandidateFits
+            .filter((fit) => fit.directQuestionContract)
+            .map((fit) => [fit.objectKey, fit.directQuestionContract] as const),
+        );
+        const certifiedCompleteCandidateIds = evidence.candidates
+          .filter((candidate) => candidate.kind === 'certified_block'
+            && [candidate.id, candidate.qualifiedId].some((identity) => identity && certifiedFitKeys.has(identity)))
+          .map((candidate) => candidate.qualifiedId ?? candidate.id);
+        // Preserve direct authored-question evidence separately for receipts
+        // and the strict legacy path. Authoritative V2 may also use an
+        // implicit authored ranking when this bridge exposes exactly one
+        // independently complete certified fit from the immutable snapshot
+        // and the host proves the primary outer order plus frozen row bound.
+        // Explicit measures still have to prove themselves against the first
+        // outer ORDER BY expression.
+        // The catalog fit is keyed by its stable metadata object key while
+        // V2 execution state uses the qualified candidate ID. Translate the
+        // direct question contract at this one server-owned bridge; never
+        // compare namespace prefixes or recover it from a mutable KG later.
+        const exactCertifiedQuestionCandidateIds = certifiedCompleteCandidateIds.filter((candidateId) => {
+          const candidate = evidence.candidates.find((item) => (item.qualifiedId ?? item.id) === candidateId);
+          return Boolean(candidate
+            && [candidate.id, candidate.qualifiedId]
+              .some((identity) => identity && directCertifiedQuestionContracts.has(identity)));
+        });
+        const semanticIds = [...semanticCapabilities.keys()];
+        const executableMetricIds = semanticIds.filter((candidateId) =>
+          semanticCapabilities.get(candidateId)?.roles.includes('metric')
+          && Boolean(semanticCapabilities.get(candidateId)?.selectedEngine));
+        const advertisedMetricIds = semanticIds.filter((candidateId) =>
+          semanticCapabilities.get(candidateId)?.roles.includes('metric'));
+        const relationalIds = evidence.candidates
+          .filter((candidate) => candidate.kind === 'dql_modeling'
+            || candidate.kind === 'dbt_model'
+            || candidate.kind === 'dbt_source'
+            || candidate.kind === 'sql_column'
+            || candidate.kind === 'sql_table'
+            || (candidate.relationshipEvidence?.length ?? 0) > 0)
+          .map((candidate) => candidate.qualifiedId ?? candidate.id);
+        const readiness = evidence.diagnostics?.tierReadiness;
+        const tierStates: AskAgentToolWorkspaceV2['tierStates'] = {
+          certified: {
+            version: 1,
+            status: certifiedCompleteCandidateIds.length > 0 ? 'complete' : certifiedArtifacts.size > 0 ? 'available' : 'unavailable',
+            candidateIds: certifiedCompleteCandidateIds,
+            reasonCode: certifiedCompleteCandidateIds.length > 0 ? 'CERTIFIED_COMPLETE_FOR_REQUEST' : certifiedArtifacts.size > 0 ? 'CERTIFIED_CONTEXT_ONLY' : 'CERTIFIED_UNAVAILABLE',
+            ...(certifiedCompleteCandidateIds.length > 0 ? { safeNextTools: ['run_certified'] } : {}),
+          },
+          semantic: {
+            version: 1,
+            status: semanticIds.length === 0
+              ? 'unavailable'
+              : advertisedMetricIds.length > 0 && executableMetricIds.length === 0
+                ? 'ineligible'
+                : 'available',
+            candidateIds: semanticIds,
+            reasonCode: semanticIds.length === 0
+              ? 'SEMANTIC_CANDIDATES_EMPTY'
+              : advertisedMetricIds.length > 0 && executableMetricIds.length === 0
+                ? 'SEMANTIC_ENGINE_UNAVAILABLE'
+                : 'SEMANTIC_CANDIDATES_AVAILABLE',
+          },
+          governed_relational: {
+            version: 1,
+            status: relationalIds.length > 0 || relationshipPathHandles.length > 0 ? 'available' : 'unavailable',
+            candidateIds: relationalIds,
+            reasonCode: relationalIds.length > 0 || relationshipPathHandles.length > 0 ? 'GOVERNED_RELATIONAL_CONTEXT_AVAILABLE' : 'GOVERNED_RELATIONAL_CONTEXT_EMPTY',
+          },
+        };
+        return {
+          version: 1 as const,
+          snapshotId: evidence.snapshotId,
+          sourceFingerprint: evidence.sourceFingerprint,
+          candidates: evidence.candidates.slice(0, 128),
+          relationshipPathHandles: (evidence.relationshipPathHandles ?? relationshipPathHandles).map((path) => ({
+            version: 1 as const,
+            id: path.id,
+            edgeIds: path.edgeIds,
+            ...(path.candidateIds?.length ? { candidateIds: path.candidateIds } : {}),
+            ...(evidence.snapshotId ? { snapshotId: evidence.snapshotId } : {}),
+          })),
+          certifiedArtifacts,
+          semanticCapabilities,
+          ...(evidence.diagnostics?.tierReadiness && (evidence.diagnostics.tierReadiness as {
+            askV2SemanticRuntime?: AskSemanticRuntimeSelectionV1;
+          }).askV2SemanticRuntime
+            ? { semanticRuntime: (evidence.diagnostics.tierReadiness as {
+              askV2SemanticRuntime: AskSemanticRuntimeSelectionV1;
+            }).askV2SemanticRuntime }
+            : {}),
+          // Fiscal text is executable only when the same immutable snapshot
+          // declares the calendar, period field, and date role. The provider
+          // receives neither this host-only structure nor an invitation to
+          // invent a calendar; the V2 semantic adapter validates it before
+          // compiler authorization.
+          ...(evidence.fiscalCalendar ? { fiscalCalendar: evidence.fiscalCalendar } : {}),
+          ...(semanticCapabilityCollisionIds.size > 0
+            ? { semanticCapabilityCollisionIds: [...semanticCapabilityCollisionIds].sort() }
+            : {}),
+          ...(frozenResearchChildren.size > 0 ? { frozenResearchChildren } : {}),
+          certifiedCompleteCandidateIds,
+          ...(exactCertifiedQuestionCandidateIds.length > 0 ? { exactCertifiedQuestionCandidateIds } : {}),
+          // This is a server-owned capability, not a claim inferred from the
+          // result. It is true only when this resolved execution target can
+          // append a read-only outer LIMIT before the connector returns rows.
+          // File and other non-rewriting targets still receive host-side
+          // truncation after execution, but that is not sufficient evidence
+          // to certify an otherwise unbounded top-N request.
+          certifiedHostEnforcesInvocationRowLimit: supportsTrailingAnalyticalRowBound(certifiedExecutionConnection?.driver),
+          tierStates,
+          businessContext: {
+            available: Boolean(pack.domainBriefing || pack.objects.length),
+            objectCount: pack.objects.length,
+            cards: pack.objects
+              .filter((object) => ['term', 'business_view', 'domain', 'skill', 'relationship', 'contract'].includes(object.objectType))
+              .slice(0, 24)
+              .map((object) => ({
+                id: object.objectKey,
+                name: object.name,
+                ...(object.description ? { description: object.description } : {}),
+                kind: object.objectType,
+              })),
+          },
+          ...(v2ResearchLineageRoot ? {
+            runDedicatedLineageProgram: (input: {
+              snapshotId?: string;
+              targetCandidateIds: string[];
+              relationshipPathIds: string[];
+            }) => {
+              const target = input.targetCandidateIds.length === 1 ? input.targetCandidateIds[0]! : '';
+              const current = projectSnapshot();
+              const stale = input.snapshotId !== v2ResearchLineageSnapshotId
+                || current.snapshotId !== v2ResearchLineageSnapshotId
+                || !researchLineageRootSnapshotIsCurrentV1(v2ResearchLineageRoot, projectRoot);
+              const lineage = runResearchLineageProgramV1({
+                graph: v2ResearchLineageRoot.graph,
+                graphFingerprint: v2ResearchLineageRoot.graphFingerprint,
+                target,
+                expectedSnapshotId: v2ResearchLineageSnapshotId,
+                currentSnapshotId: current.snapshotId,
+                snapshotFingerprint: v2ResearchLineageRoot.graphFingerprint,
+                snapshotStale: stale,
+              });
+              const receipt = lineage.receipt;
+              const evidenceFingerprint = receipt.structuralFingerprint ?? receipt.targetFingerprint;
+              return {
+                status: receipt.status,
+                evidenceHandleIds: evidenceFingerprint ? [`lineage:${evidenceFingerprint}`] : [],
+                ...(receipt.validator.evaluated && evidenceFingerprint
+                  ? { validatorEvidenceHandleIds: [`lineage-validator:${evidenceFingerprint}`] }
+                  : {}),
+                receiptFingerprint: executionFingerprint(JSON.stringify({
+                  snapshotId: receipt.snapshotId,
+                  graphFingerprint: receipt.graphFingerprint,
+                  targetFingerprint: receipt.targetFingerprint,
+                  status: receipt.status,
+                  resolution: receipt.resolution,
+                  structuralFingerprint: receipt.structuralFingerprint,
+                })),
+              };
+            },
+          } : {}),
+        };
+      },
+    };
+    request.askAgentV2Workspace = workspaceBridge;
     const meaningEvidence = pack.retrievalDiagnostics.meaningEvidence;
     if (!meaningEvidence) {
       const readiness = await askTierReadinessForEvidence(request, [], false);
-      return {
+      return captureToolWorkspace({
         snapshotId: pack.knowledgeLens.snapshotId,
         sourceFingerprint: pack.freshness.fingerprint ?? undefined,
         knowledgeLens: pack.knowledgeLens,
         candidates: [],
+        relationshipPathHandles,
         diagnostics: {
           durationMs: Date.now() - startedAt,
           tierReadiness: readiness,
         },
-      };
+      });
     }
     let evidence = toAgentRetrievalEvidence(meaningEvidence, pack.questionPlan, {
       snapshotId: pack.knowledgeLens.snapshotId,
@@ -10446,8 +12014,9 @@ function analyticalFailureSummary(
     const physicalSchemaAvailable = sourceCoverage.some((coverage) =>
       (coverage.source === 'runtime_schema' || coverage.source === 'dbt_manifest') && coverage.status === 'available');
     const readiness = await askTierReadinessForEvidence(request, compatible.candidates, physicalSchemaAvailable);
-    return {
+    return captureToolWorkspace({
       ...compatible,
+      relationshipPathHandles,
       continuityFingerprint: askEvidenceContinuityFingerprint(compatible),
       diagnostics: {
         ...compatible.diagnostics,
@@ -10457,7 +12026,7 @@ function analyticalFailureSummary(
         // semantic mismatch to independently grounded physical exploration.
         tierReadiness: readiness,
       },
-    };
+    });
   };
 
   const buildRankedAgentRunCatalogContext = async (request: AgentRunRequest): Promise<string> => {
@@ -10737,7 +12306,10 @@ function analyticalFailureSummary(
   // its safe compiler broker; it receives the runtime-owned snapshot/frame and
   // cannot acquire another source of meaning. Shadow records the same state
   // without a second execution, while legacy remains a host-only rollback.
-  const agentRunRouter = createAskAnalystRuntimeV1({
+  // V1 remains the explicit operator rollback/compiler comparison.  V2 uses
+  // this only in `legacy_v1`/`shadow_v2`; authoritative V2 does not let the
+  // deterministic candidate verifier own business interpretation.
+  const askAnalystRuntimeV1 = createAskAnalystRuntimeV1({
     mode: opts.askAnalystRuntimeMode ?? 'authoritative',
     getEvidence: buildAgentRunEvidence,
     compilerBroker: agentRunCompilerBroker,
@@ -10806,6 +12378,18 @@ function analyticalFailureSummary(
       }
     },
   });
+  // The rollout selection is server-owned. It is copied onto each internal
+  // AgentRun request immediately before the engine runs so the engine can
+  // distinguish the authoritative-V2 Research entry from the legacy forced
+  // `requestedMode: research` shortcut. Public JSON parsing never accepts
+  // this field.
+  const agentRunRouter = askAgentRuntimeMode === 'legacy_v1'
+    ? askAnalystRuntimeV1
+    : createAskAgentRuntimeV2({
+      mode: askAgentRuntimeMode,
+      getEvidence: buildAgentRunEvidence,
+      legacyRouter: askAnalystRuntimeV1,
+    });
 
   // P0: one row per run with retention + old-run compaction. The legacy JSON
   // store rewrote the entire file (123 MB observed) twice per answered question;
@@ -11021,6 +12605,17 @@ function analyticalFailureSummary(
       reviewRequired?: boolean;
       /** Same-snapshot physical relations admitted by the frozen Ask plan. */
       qualifiedSchemaContext?: AgentSchemaTable[];
+      /**
+       * Authoritative V2 governed-DQL closure.  This is host-only and is
+       * populated from immutable candidate/path handles, not provider text.
+       */
+      askV2Closure?: {
+        contextPack: LocalContextPack;
+        candidateIds: string[];
+        relationshipPathIds: string[];
+        /** Host-only proof for compiled joins selected through V2 path handles. */
+        assertRelationshipPaths?: (sql: string) => void;
+      };
     } = {},
     invocationInput?: {
       question?: string;
@@ -11115,6 +12710,24 @@ function analyticalFailureSummary(
           activeConnection.driver,
         )
       : compiledSql;
+
+    if (metadata.askV2Closure) {
+      const closureValidation = validateAuthorizedSqlReferences(executableSql, metadata.askV2Closure.contextPack, {
+        ...(activeConnection.driver ? { dialect: activeConnection.driver } : {}),
+        runtimeSchema: metadata.qualifiedSchemaContext,
+      });
+      if (!closureValidation.ok) {
+        throw analyticalError('The governed DQL program referenced a relation or column outside its immutable V2 closure, so it was not executed.', {
+          origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+        });
+      }
+      if (closureValidation.referencedRelations.length > 1 && metadata.askV2Closure.relationshipPathIds.length === 0) {
+        throw analyticalError('A governed DQL program that joins multiple relations requires one admitted relationship-path handle, so it was not executed.', {
+          origin: 'governance_gate', stage: 'validation', code: 'unauthorized_sql',
+        });
+      }
+      metadata.askV2Closure.assertRelationshipPaths?.(executableSql);
+    }
 
     const app = loadRuntimeApp(projectRoot, activePersonaAppId());
     const sourceDomain = metadata.domain ?? source.match(/\bdomain\s*=\s*"([^"]+)"/i)?.[1];
@@ -11255,6 +12868,12 @@ function analyticalFailureSummary(
       reviewRequired: false,
       ...(qualifiedSchemaContext?.length ? { qualifiedSchemaContext } : {}),
     }, invocationInput, executionConnection, executionConnectionName);
+    // Use the resolved invocation returned by the compiler, rather than only
+    // caller-supplied values. This keeps an exact V2 certified execution
+    // replayable and makes declared defaults visible as the applied inputs.
+    const resolvedParameterValues = Object.fromEntries(
+      (result.parameters ?? []).map((parameter) => [parameter.name, parameter.value]),
+    );
     return {
       ...result,
       dqlArtifact: {
@@ -11270,8 +12889,10 @@ function analyticalFailureSummary(
           executableArtifact: { ...result.executableArtifact, kind: 'certified_block', trustState: 'certified' },
         } : {}),
         ...(invocationInput?.rowLimit ? { limit: invocationInput.rowLimit } : {}),
-        ...(invocationInput?.parameters && Object.keys(invocationInput.parameters).length > 0
-          ? { parameterValues: invocationInput.parameters }
+        ...(Object.keys(resolvedParameterValues).length > 0
+          ? { parameterValues: resolvedParameterValues }
+          : invocationInput?.parameters && Object.keys(invocationInput.parameters).length > 0
+            ? { parameterValues: invocationInput.parameters }
           : {}),
       },
     };
@@ -11315,6 +12936,13 @@ function analyticalFailureSummary(
     question: string,
     executionConnection?: ConnectionConfig,
     executionConnectionName?: string,
+    askV2Closure?: {
+      contextPack: LocalContextPack;
+      candidateIds: string[];
+      relationshipPathIds: string[];
+      qualifiedSchemaContext: AgentSchemaTable[];
+      assertRelationshipPaths?: (sql: string) => void;
+    },
   ): Promise<AgentResultPayload> => {
     const invocation = prepareBlockInvocation({
       source: artifact.source,
@@ -11334,6 +12962,15 @@ function analyticalFailureSummary(
         // narrow exception: it carries its explicit `review_required` marker
         // into the physical SQL span and returned result.
         reviewRequired: artifact.trustState === 'review_required',
+        ...(askV2Closure ? {
+          qualifiedSchemaContext: askV2Closure.qualifiedSchemaContext,
+          askV2Closure: {
+            contextPack: askV2Closure.contextPack,
+            candidateIds: askV2Closure.candidateIds,
+            relationshipPathIds: askV2Closure.relationshipPathIds,
+            ...(askV2Closure.assertRelationshipPaths ? { assertRelationshipPaths: askV2Closure.assertRelationshipPaths } : {}),
+          },
+        } : {}),
       },
       {
         question,
@@ -14221,7 +15858,13 @@ function analyticalFailureSummary(
         searchSafeColumnCount: healthValueGrounding.searchSafeColumns.size,
       });
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(serializeJSON({ status: 'ok', version: runtimeVersion, versionStatus, retrievalHealth }));
+      res.end(serializeJSON({
+        status: 'ok',
+        version: runtimeVersion,
+        versionStatus,
+        retrievalHealth,
+        askRuntimeMode: askAgentRuntimeMode,
+      }));
       return;
     }
 
@@ -15422,9 +17065,10 @@ function analyticalFailureSummary(
         if (!run) return trace;
         const questionPreview = askTraceQuestionPreview(run.question);
         return {
-          ...trace,
+          ...projectAuthoritativeV8TraceEnvelope(trace, run),
           ...(questionPreview ? { questionPreview } : {}),
           scenarioLabel: askTraceScenarioLabel(run),
+          ...(run.askAgentRuntimeMode ? { runtimeMode: run.askAgentRuntimeMode } : {}),
         };
       }));
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -15451,17 +17095,23 @@ function analyticalFailureSummary(
         return;
       }
       const run = await agentRunStore.get(runId);
+      const projectedTrace = {
+        ...trace,
+        envelope: projectAuthoritativeV8TraceEnvelope(trace.envelope, run),
+      };
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       // The canonical Ask story is persisted on the AgentRun, not rebuilt from
       // spans. Join it only at this local API boundary so trace storage never
       // becomes prompt/result retention and old runs explicitly omit it.
       res.end(serializeJSON({
-        ...trace,
+        ...projectedTrace,
         ...(run?.diagnosticReceiptV4?.summary ? { decisionSummary: run.diagnosticReceiptV4.summary } : {}),
         ...(run?.diagnosticReceiptV5?.summary ? { runtimeDecisionSummary: run.diagnosticReceiptV5.summary } : {}),
         ...(run?.diagnosticReceiptV5 ? { runtimeReceiptV5: run.diagnosticReceiptV5 } : {}),
         ...(run?.diagnosticReceiptV6 ? { runtimeReceiptV6: run.diagnosticReceiptV6 } : {}),
         ...(run?.diagnosticReceiptV7 ? { runtimeReceiptV7: run.diagnosticReceiptV7 } : {}),
+        ...(run?.diagnosticReceiptV8 ? { runtimeReceiptV8: run.diagnosticReceiptV8 } : {}),
+        ...(run?.askAgentRuntimeMode ? { runtimeMode: run.askAgentRuntimeMode } : {}),
       }));
       return;
     }
@@ -15536,14 +17186,20 @@ function analyticalFailureSummary(
         return;
       }
       const run = await agentRunStore.get(trace.envelope.runId);
+      const projectedTrace = {
+        ...trace,
+        envelope: projectAuthoritativeV8TraceEnvelope(trace.envelope, run),
+      };
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(serializeJSON({
-        ...trace,
+        ...projectedTrace,
         ...(run?.diagnosticReceiptV4?.summary ? { decisionSummary: run.diagnosticReceiptV4.summary } : {}),
         ...(run?.diagnosticReceiptV5?.summary ? { runtimeDecisionSummary: run.diagnosticReceiptV5.summary } : {}),
         ...(run?.diagnosticReceiptV5 ? { runtimeReceiptV5: run.diagnosticReceiptV5 } : {}),
         ...(run?.diagnosticReceiptV6 ? { runtimeReceiptV6: run.diagnosticReceiptV6 } : {}),
         ...(run?.diagnosticReceiptV7 ? { runtimeReceiptV7: run.diagnosticReceiptV7 } : {}),
+        ...(run?.diagnosticReceiptV8 ? { runtimeReceiptV8: run.diagnosticReceiptV8 } : {}),
+        ...(run?.askAgentRuntimeMode ? { runtimeMode: run.askAgentRuntimeMode } : {}),
       }));
       return;
     }
@@ -16298,6 +17954,11 @@ function analyticalFailureSummary(
         // so no client-provided string can bind a SQL capability or operation.
         const runId = randomUUID();
         parsed.request.runId = runId;
+        // This is host-selected rollout state, never user ingress. In
+        // particular, it lets `AgentRunEngine` route explicit Research through
+        // the authoritative V2 kernel once while retaining legacy/shadow
+        // forced-mode behavior unchanged.
+        parsed.request.askAgentRuntimeMode = askAgentRuntimeMode;
         const runController = new AbortController();
         activeAgentRunControllers.set(runId, runController);
         let streamConnected = true;
@@ -28469,6 +30130,171 @@ function executionFingerprint(value: string): string {
 }
 
 /**
+ * Translate only server-authored semantic execution capability IDs into the
+ * public V2 compiler vocabulary.  This is deliberately not a fuzzy adapter
+ * lookup: provider/runtime field names, card labels, and opaque evidence IDs
+ * must never become an engine merely because they resemble one.
+ */
+function askV2SemanticEnginesForCandidate(candidate: AgentEvidenceCandidate): AskSemanticEngineV1[] {
+  const declared = candidate.analyticalCapability?.executionCapabilities
+    ?.filter((capability) => capability.route === 'semantic')
+    .flatMap((capability) => typeof capability.adapterId === 'string'
+      ? [capability.adapterId.trim().toLowerCase()]
+      : []) ?? [];
+  const engines = declared.flatMap((adapterId): AskSemanticEngineV1[] => {
+    if (adapterId === 'native' || adapterId === 'semantic-native') return ['native'];
+    if (adapterId === 'metricflow' || adapterId === 'metricflow-cli') return ['metricflow-cli'];
+    if (adapterId === 'dbt-cloud') return ['dbt-cloud'];
+    return [];
+  });
+  // Hand-authored/test-only cards without any route declaration can still be
+  // compiled by the local semantic compiler.  A card that declares an unknown
+  // semantic adapter is different: fail closed instead of silently routing it
+  // to native SQL.
+  if (engines.length === 0 && declared.length === 0) return ['native'];
+  return [...new Set(engines)].sort() as AskSemanticEngineV1[];
+}
+
+/**
+ * Captures the semantic compiler authority for one immutable Ask V2
+ * retrieval snapshot.  The map is keyed exclusively by the canonical
+ * qualified evidence ID advertised to the provider.  Legacy `id` values are
+ * intentionally never aliases: one card's legacy ID may equal another
+ * card's qualified ID, which would otherwise let a provider select A and
+ * compile B's runtime field.
+ *
+ * A repeated canonical ID is treated as an ambiguous snapshot defect unless
+ * the cards prove the exact same owner + semantic identity. Exact duplicate
+ * cards de-duplicate to one capability; distinct owners/runtime definitions
+ * are removed rather than resolved by insertion order. The tool adapter
+ * retains a typed collision marker and requires a fresh snapshot before a
+ * truly ambiguous capability can execute.
+ */
+export function captureAskV2SemanticCapabilities(input: {
+  candidates: readonly AgentEvidenceCandidate[];
+  snapshotId?: string;
+  isCurrent: () => boolean;
+  /**
+   * Server-selected runtime from the project settings/readiness probe. The
+   * capability may expose it only when this exact candidate is ready for it.
+   */
+  semanticRuntime?: AskSemanticRuntimeSelectionV1;
+  /** Exact target-bound engines captured during retrieval readiness. */
+  semanticCandidateReadiness?: ReadonlyArray<{
+    candidateId: string;
+    status: 'ready' | 'unavailable' | 'unknown';
+    engines?: ReadonlyArray<AskSemanticEngineV1>;
+    nativeCompilerProven?: boolean;
+  }>;
+}): {
+  capabilities: Map<string, AskSemanticCapabilityHandleV1>;
+  collisionIds: string[];
+} {
+  const capabilities = new Map<string, AskSemanticCapabilityHandleV1>();
+  const collisions = new Set<string>();
+  const semanticCandidates = input.candidates.slice(0, 128).filter((candidate) =>
+    Boolean(askV2ExecutableSemanticRoles(candidate)));
+  const readinessByCandidateId = new Map(
+    (input.semanticCandidateReadiness ?? []).map((readiness) => [readiness.candidateId, readiness] as const),
+  );
+  const candidatesByCanonicalId = new Map<string, AgentEvidenceCandidate[]>();
+  for (const candidate of semanticCandidates) {
+    const candidateId = candidate.qualifiedId?.trim();
+    if (!candidateId) continue;
+    const existing = candidatesByCanonicalId.get(candidateId) ?? [];
+    existing.push(candidate);
+    candidatesByCanonicalId.set(candidateId, existing);
+  }
+  const duplicateAuthorityFingerprint = (candidate: AgentEvidenceCandidate): string | undefined => {
+    // A duplicate retrieval card is harmless only when the immutable snapshot
+    // proves the complete compiler authority is identical. The fingerprint
+    // includes the owning semantic model, runtime name, declared grains, and
+    // the full MetricFlow/dbt capability (including time dimensions). A
+    // weaker owner/name/grain comparison can admit one card while the provider
+    // later resolves another card with the same opaque ID but different
+    // execution authority.
+    const owner = candidate.semanticModel?.trim()
+      || candidate.analyticalCapability?.semanticModelId?.trim()
+      || [...new Set((candidate.sourceObjects ?? []).map((value) => value.trim()).filter(Boolean))].sort().join('|');
+    return owner ? askV2SemanticCandidateAuthorityFingerprint(candidate) : undefined;
+  };
+  const admittedSemanticCandidates: AgentEvidenceCandidate[] = [];
+  for (const [candidateId, grouped] of candidatesByCanonicalId) {
+    if (grouped.length === 1) {
+      admittedSemanticCandidates.push(grouped[0]!);
+      continue;
+    }
+    const identities = grouped.map(duplicateAuthorityFingerprint);
+    const firstIdentity = identities[0];
+    if (!firstIdentity || identities.some((identity) => identity !== firstIdentity)) {
+      collisions.add(candidateId);
+      continue;
+    }
+    // Exact duplicate retrieval cards for the same owner/identity share one
+    // host capability. This is a de-duplication, never a last-write winner.
+    admittedSemanticCandidates.push(grouped[0]!);
+  }
+  for (const candidate of admittedSemanticCandidates) {
+    // V2 capability authority begins with the qualified identity.  A legacy
+    // record without one remains retrieval context but cannot be compiled via
+    // the V2 semantic tool.
+    const candidateId = candidate.qualifiedId?.trim();
+    if (!candidateId || collisions.has(candidateId)) continue;
+    const runtimeName = (candidate.semanticRuntimeName ?? candidate.name).trim();
+    if (!runtimeName) continue;
+    const roles = askV2ExecutableSemanticRoles(candidate);
+    if (!roles) continue;
+    const readiness = readinessByCandidateId.get(candidateId);
+    const advertisedEngines = [...new Set([
+      ...askV2SemanticEnginesForCandidate(candidate),
+      ...(readiness?.nativeCompilerProven ? ['native' as const] : []),
+    ])];
+    // Older persisted snapshots did not record per-engine readiness. Preserve
+    // their already-captured capability contract, but a current explicit
+    // readiness record must reduce (never widen) the advertised engines.
+    const engines = !readiness
+      ? advertisedEngines
+      : readiness.status !== 'ready'
+        ? []
+        : readiness.engines === undefined
+          ? advertisedEngines
+          : advertisedEngines.filter((engine) => readiness.engines!.includes(engine));
+    // New V2 workspaces always use the project-selected engine. Keep the
+    // one-engine fallback only for old, already-captured workspaces that did
+    // not persist this additive host selection; never choose among multiple
+    // engines on behalf of a provider.
+    const selectedEngine = input.semanticRuntime?.selectedEngine
+      && engines.includes(input.semanticRuntime.selectedEngine)
+      ? input.semanticRuntime.selectedEngine
+      : input.semanticRuntime === undefined && engines.length === 1
+        ? engines[0]
+        : undefined;
+    const handle: AskSemanticCapabilityHandleV1 = {
+      version: 1,
+      candidateId,
+      runtimeName,
+      engines,
+      ...(selectedEngine ? { selectedEngine } : {}),
+      roles,
+      // The provider verifies this exact same complete authority fingerprint
+      // before it resolves an opaque ID. Do not include the snapshot here:
+      // freshness is the separate `isCurrent` boundary.
+      fingerprint: askV2SemanticCandidateAuthorityFingerprint(candidate),
+      isCurrent: input.isCurrent,
+    };
+    if (capabilities.has(candidateId)) {
+      // Remove the first handle as well: no consumer should be able to use an
+      // arbitrary winner from a duplicate canonical identity.
+      capabilities.delete(candidateId);
+      collisions.add(candidateId);
+      continue;
+    }
+    capabilities.set(candidateId, handle);
+  }
+  return { capabilities, collisionIds: [...collisions].sort() };
+}
+
+/**
  * Opaque browser-cache identity for local Ask conversations.  A browser origin
  * is not a project boundary: a user can stop one `dql notebook` process and
  * start a different project on the same port.  The client therefore receives
@@ -29946,6 +31772,11 @@ const TRAILING_LIMIT_DIALECTS = new Set([
   'databricks', 'trino', 'presto', 'clickhouse', 'mysql', 'mariadb', 'sqlite', 'athena',
 ]);
 
+/** Whether this resolved target can enforce a safe trailing row bound in SQL. */
+function supportsTrailingAnalyticalRowBound(dialect: string | undefined): boolean {
+  return typeof dialect === 'string' && TRAILING_LIMIT_DIALECTS.has(dialect.toLowerCase());
+}
+
 export type AnalyticalRowBoundOutcome = 'appended' | 'existing' | 'skipped';
 
 export interface AnalyticalRowBoundResult {
@@ -29976,7 +31807,7 @@ export function buildRowBoundedSql(
 ): AnalyticalRowBoundResult {
   const trimmed = sql.trim().replace(/;\s*$/, '').trim();
   if (!rowLimit) return { sql: trimmed, outcome: 'skipped', reason: 'no row bound requested' };
-  if (!TRAILING_LIMIT_DIALECTS.has(dialect.toLowerCase())) {
+  if (!supportsTrailingAnalyticalRowBound(dialect)) {
     return { sql: trimmed, outcome: 'skipped', reason: `trailing LIMIT is not portable on ${dialect}` };
   }
 

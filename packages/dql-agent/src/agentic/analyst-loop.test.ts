@@ -194,6 +194,21 @@ describe('createAnalystLaneHandler', () => {
     expect(legacy).toHaveBeenCalledTimes(1);
   });
 
+  it('AGT-054 does not re-enter legacy interpretation after an authoritative V2 tool gap', async () => {
+    const legacy = vi.fn(async () => answer);
+    const handler = createAnalystLaneHandler({
+      legacy,
+      authoritativeV2: true,
+      buildDeps: () => undefined,
+    });
+    const result = await handler(input(scripted([''])));
+    expect(legacy).not.toHaveBeenCalled();
+    expect(result.askAgentV2Outcome).toMatchObject({
+      kind: 'gap',
+      reasonCode: 'no_final_sql',
+    });
+  });
+
   it('hands exact verified SQL to legacy only as a server-only forced proposal', async () => {
     // The legacy loop still owns trust labels, citations, narration, and
     // execution, but it cannot regenerate a replacement for analyst SQL.

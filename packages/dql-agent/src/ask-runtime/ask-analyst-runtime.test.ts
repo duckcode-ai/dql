@@ -861,6 +861,53 @@ describe('AskAnalystRuntimeV1', () => {
     ]));
   });
 
+  it('AGT-035 does not collapse a generic count alias with a materially distinct measure', async () => {
+    const customerName: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:dimension:customers.customer_name',
+      qualifiedId: 'semantic:uncategorized:dimension:customers.customer_name',
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'customers.customer_name', aliases: ['customer', 'customer name'],
+      relevanceScore: 1, matchReasons: ['authored display dimension'], compatibility: 'compatible',
+    };
+    const orderCountMeasure: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:measure:orders.order_count',
+      qualifiedId: 'semantic:uncategorized:measure:orders.order_count',
+      kind: 'semantic_member', semanticObjectType: 'measure', trustTier: 'semantic',
+      name: 'orders.order_count', aliases: ['order count'],
+      relevanceScore: 1, matchReasons: ['authored semantic measure'], compatibility: 'compatible',
+    };
+    const ordersMetric: AgentEvidenceCandidate = {
+      ...revenue,
+      id: 'semantic:orders:orders', qualifiedId: 'semantic:orders:orders',
+      name: 'orders.orders', aliases: ['orders'], definition: 'Count of orders.',
+      analyticalCapability: {
+        ...semanticCapability('semantic:orders:orders'),
+        measureIds: [orderCountMeasure.qualifiedId!],
+        dimensions: [{
+          dimensionId: customerName.qualifiedId!, entityId: 'semantic:entity:customers.customer',
+          label: 'Customer Name', aliases: ['customer', 'customer name'],
+          supportedRoles: ['group_by', 'display'],
+        }],
+      },
+    };
+    const planAnalytical = vi.fn(async () => undefined);
+    const runtime = createAskAnalystRuntimeV1({
+      compilerBroker: { decide: vi.fn(async () => semanticDecision()) },
+      planAnalytical,
+      getEvidence: async () => ({
+        snapshotId: 'snapshot:count-and-revenue',
+        candidates: [orderCountMeasure, ordersMetric, customerName, revenue],
+        parsedIntent: { measures: ['count', 'revenue'], dimensions: ['customer'], filters: [] },
+      }),
+    });
+
+    await runtime.decide({ question: 'show count and revenue for each customer', requestedMode: 'ask' });
+
+    // A distinct business metric is an interpretation/compatibility problem;
+    // it must not inherit the narrow parser-duplicate count shortcut.
+    expect(planAnalytical).toHaveBeenCalled();
+  });
+
   it('AGT-011 clarifies a generic top-names semantic binding before planner or compiler execution', async () => {
     const accountName: AgentEvidenceCandidate = {
       id: 'semantic:uncategorized:dimension:account_revenue.account_name',

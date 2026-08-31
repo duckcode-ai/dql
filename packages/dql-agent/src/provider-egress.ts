@@ -98,6 +98,9 @@ export function resolveProviderResultRowEgressPolicy(input: {
 export interface ProviderPayloadGuardPolicy {
   allowResultRows: boolean;
   maxResultRows: number;
+  /** Optional host caps used by Ask V2's local bounded-row transport. */
+  maxResultColumns?: number;
+  maxResultCells?: number;
   purpose: ProviderEgressPurpose;
 }
 
@@ -417,6 +420,16 @@ export function assertProviderPayloadAllowed(
       code: 'PROVIDER_RESULT_ROWS_LIMIT_EXCEEDED',
     });
   }
+  if (typeof policy.maxResultColumns === 'number' && shape.columnCount > policy.maxResultColumns) {
+    throw Object.assign(new Error(`Provider egress blocked ${shape.columnCount} result columns; the per-run limit is ${policy.maxResultColumns}.`), {
+      code: 'PROVIDER_RESULT_COLUMNS_LIMIT_EXCEEDED',
+    });
+  }
+  if (typeof policy.maxResultCells === 'number' && shape.resultRowCount * shape.columnCount > policy.maxResultCells) {
+    throw Object.assign(new Error(`Provider egress blocked a result payload exceeding ${policy.maxResultCells} cells.`), {
+      code: 'PROVIDER_RESULT_CELLS_LIMIT_EXCEEDED',
+    });
+  }
   return shape;
 }
 
@@ -426,8 +439,14 @@ export function stripProviderResultRows(value: unknown, depth = 0): unknown {
 }
 
 /** Bound every untrusted row container against one shared remaining allowance. */
-export function boundProviderResultRows(value: unknown, maxRows: number): BoundedProviderResultRows {
+export function boundProviderResultRows(
+  value: unknown,
+  maxRows: number,
+  maxColumns = Number.MAX_SAFE_INTEGER,
+  maxCells = Number.MAX_SAFE_INTEGER,
+): BoundedProviderResultRows {
   let remaining = Math.max(0, Math.floor(maxRows));
+  let remainingCells = Math.max(0, Math.floor(maxCells));
   let resultRowCount = 0;
   let columnCount = 0;
   let exhausted = false;
@@ -440,10 +459,18 @@ export function boundProviderResultRows(value: unknown, maxRows: number): Bounde
     }
     if (Array.isArray(candidate)) {
       if (providerMetadata.has(candidate)) return candidate;
-      const kept = candidate.slice(0, remaining);
+      const kept: unknown[] = [];
+      for (const row of candidate) {
+        if (remaining <= 0 || remainingCells <= 0) { exhausted = true; break; }
+        const boundedRow = boundProviderResultRowColumns(row, maxColumns, remainingCells);
+        if (boundedRow.cellCount === 0) { exhausted = true; break; }
+        kept.push(boundedRow.value);
+        remaining -= 1;
+        remainingCells -= boundedRow.cellCount;
+        columnCount = Math.max(columnCount, boundedRow.columnCount);
+        if (boundedRow.truncated) exhausted = true;
+      }
       resultRowCount += kept.length;
-      columnCount = Math.max(columnCount, resultRowColumnCount(kept));
-      remaining -= kept.length;
       if (kept.length < candidate.length) exhausted = true;
       return kept;
     }
@@ -455,12 +482,37 @@ export function boundProviderResultRows(value: unknown, maxRows: number): Bounde
     if (depth === 0 && exhausted) {
       bounded.providerEgressNotice = {
         code: 'PROVIDER_RESULT_ROWS_CUMULATIVE_LIMIT',
-        message: 'The per-run Research result-row allowance is exhausted; no additional rows were disclosed.',
+        message: 'The per-run result egress allowance is exhausted; no additional rows were disclosed.',
       };
     }
     return bounded;
   };
   return { value: visit(value, 0), shape: { resultRowCount, columnCount }, exhausted };
+}
+
+function boundProviderResultRowColumns(row: unknown, maxColumns: number, remainingCells: number): {
+  value: unknown;
+  cellCount: number;
+  columnCount: number;
+  truncated: boolean;
+} {
+  const limit = Math.max(0, Math.min(maxColumns, remainingCells));
+  if (Array.isArray(row)) {
+    const value = row.slice(0, limit);
+    return { value, cellCount: value.length, columnCount: value.length, truncated: value.length < row.length };
+  }
+  if (isPlainRecord(row)) {
+    const entries = Object.entries(row).slice(0, limit);
+    return {
+      value: Object.fromEntries(entries),
+      cellCount: entries.length,
+      columnCount: entries.length,
+      truncated: entries.length < Object.keys(row).length,
+    };
+  }
+  return limit > 0
+    ? { value: row, cellCount: 1, columnCount: 1, truncated: false }
+    : { value: undefined, cellCount: 0, columnCount: 0, truncated: true };
 }
 
 function stripProviderValue(value: unknown, depth: number, seen: Set<object>): unknown {

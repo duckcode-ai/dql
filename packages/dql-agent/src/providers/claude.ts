@@ -2,6 +2,8 @@ import type {
   AgentProvider,
   AgentMessage,
   AgentToolDefinition,
+  NativeToolLoopStop,
+  NativeToolLoopResult,
   ProviderToolLoopOptions,
   ProviderRunOptions,
   ProviderDispatchOperation,
@@ -151,7 +153,7 @@ export class ClaudeProvider implements AgentProvider {
     messages: AgentMessage[],
     tools: AgentToolDefinition[],
     options: ProviderToolLoopOptions = {},
-  ): Promise<string> {
+  ): Promise<NativeToolLoopResult> {
     if (!this.apiKey) {
       throw new Error('claude: ANTHROPIC_API_KEY is not set');
     }
@@ -163,16 +165,22 @@ export class ClaudeProvider implements AgentProvider {
       .map((m) => ({ role: m.role, content: m.content }));
     const model = options.model ?? this.defaultModel;
     const toolMap = new Map(tools.map((tool) => [tool.name, tool]));
-    const toolDefs = tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      input_schema: tool.inputSchema,
-    }));
     const dispatchLimit = Math.max(1, Math.min(30, options.maxProviderDispatches ?? DEFAULT_PROVIDER_DISPATCH_LIMIT));
-    const maxToolCalls = Math.max(0, Math.min(dispatchLimit <= 2 ? 4 : 30, options.maxToolCalls ?? 8));
+    const requestedToolBudget = Math.max(0, Math.min(dispatchLimit <= 2 ? 4 : 30, options.maxToolCalls ?? 8));
+    // The V2 controller can reserve the last physical provider send for one
+    // host-approved terminal action. Preserve the legacy native-loop budget
+    // semantics when no live policy is supplied.
+    const dynamicToolPolicy = Boolean(options.getCurrentToolPolicy);
+    const ordinaryToolBudget = dynamicToolPolicy
+      ? Math.min(requestedToolBudget, Math.max(0, dispatchLimit - 1))
+      : requestedToolBudget;
     let toolCallsUsed = 0;
     let lastText = '';
     let dispatches = 0;
+    const requiresPostExecutionFinish = dynamicToolPolicy
+      && tools.some((tool) => tool.name === 'finish_answer');
+    let requiredActionSignature = '';
+    let requiredActionProseRetries = 0;
     const dispatch = {
       operation: 'generate_with_tools' as const,
       options,
@@ -207,24 +215,69 @@ export class ClaudeProvider implements AgentProvider {
     };
 
     for (;;) {
-      const res = await postMessages(
-        `${this.baseUrl}/v1/messages`,
-        {
-          'x-api-key': this.apiKey,
-          'anthropic-version': '2023-06-01',
-          'content-type': 'application/json',
-        },
-        {
-          model,
-          max_tokens: options.maxTokens ?? 1024,
-          temperature: options.temperature ?? 0.2,
-          system: system || undefined,
-          messages: turns,
-          tools: toolDefs,
-        },
-        anthropicReasoning(model, options),
-        dispatch,
-      );
+      const currentPolicy = nativeToolPolicy(options, tools);
+      const nextRequiredActionSignature = [...currentPolicy.terminalActionToolNames].sort().join('|');
+      if (nextRequiredActionSignature !== requiredActionSignature) {
+        requiredActionSignature = nextRequiredActionSignature;
+        requiredActionProseRetries = 0;
+      }
+      const narrationControlRound = currentPolicy.terminalActionToolNames.has('finish_answer');
+      // A clarification is its own host terminal; only a selected execution
+      // action consumes the final post-result narration reserve.
+      const terminalExecutionAction = [...currentPolicy.terminalActionToolNames]
+        .some((name) => !isAskV2TerminalControlTool(name));
+      const reservePostExecutionNarration = requiresPostExecutionFinish && terminalExecutionAction;
+      // Keep the last physical tool-followup for the controller-selected
+      // execution action and the final physical send for finish/narration.
+      // This is host-owned progress accounting only; the model still chooses
+      // among the snapshot-bound terminal tools the kernel exposes.
+      const finalExecutionActionRound = !narrationControlRound
+        && dispatches >= Math.max(0, dispatchLimit - (reservePostExecutionNarration ? 2 : 1));
+      const terminalActionRound = dynamicToolPolicy
+        && currentPolicy.terminalActionToolNames.size > 0
+        && (toolCallsUsed >= ordinaryToolBudget
+          || (narrationControlRound ? dispatches >= dispatchLimit - 1 : finalExecutionActionRound));
+      if (dynamicToolPolicy && toolCallsUsed >= ordinaryToolBudget && !terminalActionRound) {
+        return forcedFinal();
+      }
+      const roundTools = terminalActionRound
+        ? currentPolicy.tools.filter((tool) => currentPolicy.terminalActionToolNames.has(tool.name))
+        : currentPolicy.tools;
+      const roundToolMap = new Map(roundTools.map((tool) => [tool.name, tool]));
+      const roundToolDefs = roundTools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        input_schema: tool.inputSchema,
+      }));
+      const roundSystem = [system, currentPolicy.instruction].filter((value): value is string => Boolean(value)).join('\n\n') || undefined;
+      let res: Response;
+      try {
+        res = await postMessages(
+          `${this.baseUrl}/v1/messages`,
+          {
+            'x-api-key': this.apiKey,
+            'anthropic-version': '2023-06-01',
+            'content-type': 'application/json',
+          },
+          {
+            model,
+            max_tokens: options.maxTokens ?? 1024,
+            temperature: options.temperature ?? 0.2,
+            system: roundSystem,
+            messages: turns,
+            tools: roundToolDefs,
+            ...(dynamicToolPolicy && currentPolicy.terminalActionToolNames.size === 1
+              ? { tool_choice: { type: 'tool', name: [...currentPolicy.terminalActionToolNames][0]! } }
+              : {}),
+          },
+          anthropicReasoning(model, options),
+          dispatch,
+        );
+      } catch (error) {
+        const terminal = nativeToolLoopStopForError(error, toolCallsUsed);
+        if (terminal) return terminal;
+        throw error;
+      }
       if (!res.ok) {
         const body = await res.text().catch(() => res.statusText);
         throw new Error(`claude: ${res.status} ${body}`);
@@ -237,22 +290,52 @@ export class ClaudeProvider implements AgentProvider {
         .filter((block) => block.type === 'text')
         .map((block) => block.text ?? '')
         .join('');
-      if (text) lastText = text;
       const toolUses = blocks.filter((block): block is { type: string; id: string; name: string; input?: unknown } =>
         block.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string'
       );
-      if (toolUses.length === 0) return text || lastText;
-      if (toolCallsUsed + toolUses.length > maxToolCalls) {
+      if (toolUses.length === 0) {
+        // Do not let prose bypass a host-required V2 execution/terminal
+        // action. The next send exposes only the narrowed safe action.
+        if (dynamicToolPolicy && currentPolicy.terminalActionToolNames.size > 0) {
+          // No retry may be invented after the last admitted physical send.
+          // Preserve that as a budget terminal (and retain a validated
+          // result); `invalid_tool_response` is reserved for two ignored
+          // narrowed actions while a retry remained available.
+          if (dispatches >= dispatchLimit) {
+            return nativeToolLoopStop('provider_dispatch_budget_exhausted', '', toolCallsUsed);
+          }
+          if (requiredActionProseRetries >= 1) {
+            return nativeToolLoopStop('invalid_tool_response', '', toolCallsUsed);
+          }
+          requiredActionProseRetries += 1;
+          turns.push({
+            role: 'user',
+            content: `Controller progression required. Call exactly one of: ${[...currentPolicy.terminalActionToolNames].join(', ')}. Do not answer in prose.`,
+          });
+          continue;
+        }
+        if (text) lastText = text;
+        return text || lastText;
+      }
+      if (text) lastText = text;
+      const roundToolBudget = terminalActionRound ? ordinaryToolBudget + 1 : ordinaryToolBudget;
+      const invalidTerminalAction = terminalActionRound && (
+        toolUses.length !== 1 || !currentPolicy.terminalActionToolNames.has(toolUses[0]!.name)
+      );
+      if (invalidTerminalAction || toolCallsUsed + toolUses.length > roundToolBudget) {
         options.onToolCall?.({
           name: 'tool_budget_exhausted',
           input: {
             requestedToolCalls: toolUses.map((call) => call.name),
-            maxToolCalls,
+            maxToolCalls: roundToolBudget,
             toolCallsUsed,
           },
           output: { error: `Tool-call budget exhausted after ${toolCallsUsed} call(s).` },
           isError: true,
         });
+        if (dynamicToolPolicy) {
+          return nativeToolLoopStop('tool_budget_exhausted', '', toolCallsUsed);
+        }
         // Graceful final turn: instead of dead-ending on whatever stray text the
         // model last emitted, ask it to answer NOW from what the prior tool calls
         // already returned — with `tools` OMITTED from the request so it physically
@@ -276,32 +359,62 @@ export class ClaudeProvider implements AgentProvider {
       const toolResults: Array<Record<string, unknown>> = [];
       for (const call of toolUses) {
         toolCallsUsed += 1;
-        const tool = toolMap.get(call.name);
+        const tool = roundToolMap.get(call.name) ?? (dynamicToolPolicy ? undefined : toolMap.get(call.name));
         let output: unknown;
         let isError = false;
+        let deadlineStop: NativeToolLoopResult | undefined;
         const toolStartedAt = Date.now();
         if (!tool) {
           output = { error: `Unknown tool: ${call.name}` };
           isError = true;
         } else {
           try {
-            assertMayStartToolCall(options);
+            assertMayStartToolCall(options, call.name);
             output = await tool.run(call.input ?? {});
           } catch (err) {
-            output = { error: err instanceof Error ? err.message : String(err) };
+            const code = toolLoopErrorCode(err);
+            output = {
+              error: err instanceof Error ? err.message : String(err),
+              ...(code ? { code } : {}),
+            };
             isError = true;
+            deadlineStop = nativeToolLoopStopForError(err, toolCallsUsed);
           }
         }
         options.onToolCall?.({ name: call.name, input: call.input ?? {}, output, isError, durationMs: Date.now() - toolStartedAt });
+        if (deadlineStop) return deadlineStop;
         toolResults.push({
           type: 'tool_result',
           tool_use_id: call.id,
           content: compactToolOutput(output),
           is_error: isError,
         });
+        // A completed Ask V2 host control already contains the answer or
+        // stable clarification. A rejected control has no `finished` marker
+        // and must instead become the next controller observation.
+        if (isAskV2TerminalControlTool(call.name) && !isError && isFinishedToolOutput(output)) {
+          return text || lastText;
+        }
+      }
+      if (terminalActionRound) {
+        const terminalCall = toolUses[0];
+        if (terminalCall && isAskV2TerminalControlTool(terminalCall.name)) {
+          return nativeToolLoopStop('tool_budget_exhausted', '', toolCallsUsed);
+        }
+        // A narrowed execution action is not the conversational terminal.
+        // Continue once so the resulting live policy can require and receive
+        // the bounded finish_answer/narration control.
+        if (reservePostExecutionNarration) {
+          turns.push({ role: 'user', content: toolResults });
+          continue;
+        }
+        return text || lastText;
       }
       turns.push({ role: 'user', content: toolResults });
-      if (dispatchLimit <= 2) {
+      // Keep the historical short-loop prose final only for static tool
+      // surfaces. Ask V2's live policy uses the last send for a bounded
+      // terminal tool action (for example semantic execution).
+      if (dispatchLimit <= 2 && !dynamicToolPolicy) {
         try {
           const finalText = await forcedFinal();
           return finalText || lastText || JSON.stringify({
@@ -366,12 +479,75 @@ export class ClaudeProvider implements AgentProvider {
   }
 }
 
-function assertMayStartToolCall(options: ProviderToolLoopOptions): void {
+function assertMayStartToolCall(options: ProviderToolLoopOptions, toolName?: string): void {
+  // finish_answer is host-local terminal control after an already admitted
+  // provider response; it must not be treated as a fresh discovery branch.
+  if (toolName === 'finish_answer') return;
   if (options.mayStartToolCall?.() === false) {
     throw Object.assign(new Error('The run soft target elapsed before this tool branch could start.'), {
       code: 'RUN_SOFT_TARGET_EXCEEDED',
     });
   }
+}
+
+/**
+ * Only the canonical V2 terminal control may end a native tool loop early.
+ * A generic `{ finished: true }` from a retrieval/execution tool is not a
+ * terminal authority, so the check stays intentionally narrow at the caller.
+ */
+function isFinishedToolOutput(value: unknown): boolean {
+  return Boolean(value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && (value as { finished?: unknown }).finished === true);
+}
+
+function isAskV2TerminalControlTool(name: string): boolean {
+  return name === 'finish_answer' || name === 'request_clarification';
+}
+
+function nativeToolLoopStop(
+  kind: NativeToolLoopStop['kind'],
+  text: string,
+  toolCalls: number,
+): NativeToolLoopResult {
+  return { version: 1, kind, text, toolCalls };
+}
+
+function toolLoopErrorCode(error: unknown): string | undefined {
+  const code = error && typeof error === 'object' && 'code' in error
+    ? (error as { code?: unknown }).code
+    : undefined;
+  return typeof code === 'string' ? code : undefined;
+}
+
+function nativeToolLoopStopForError(error: unknown, toolCalls: number): NativeToolLoopResult | undefined {
+  const code = toolLoopErrorCode(error);
+  if (code === 'RUN_SOFT_TARGET_EXCEEDED') {
+    return nativeToolLoopStop('run_soft_target_exceeded', '', toolCalls);
+  }
+  if (code === 'RUN_DEADLINE_INSUFFICIENT') {
+    return nativeToolLoopStop('run_deadline_insufficient', '', toolCalls);
+  }
+  if (code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED') {
+    return nativeToolLoopStop('provider_dispatch_budget_exhausted', '', toolCalls);
+  }
+  return undefined;
+}
+
+/** Resolve the host's current V2 policy immediately before a native send. */
+function nativeToolPolicy(
+  options: ProviderToolLoopOptions,
+  tools: readonly AgentToolDefinition[],
+): { tools: AgentToolDefinition[]; terminalActionToolNames: Set<string>; instruction?: string } {
+  const policy = options.getCurrentToolPolicy?.();
+  const allowed = new Set(policy?.allowedToolNames ?? tools.map((tool) => tool.name));
+  const enabled = tools.filter((tool) => allowed.has(tool.name));
+  return {
+    tools: enabled,
+    terminalActionToolNames: new Set((policy?.terminalActionToolNames ?? []).filter((name) => allowed.has(name))),
+    ...(policy?.instruction?.trim() ? { instruction: policy.instruction.trim() } : {}),
+  };
 }
 
 /** Consume an SSE stream, invoking `onData` with each `data:` payload (skips [DONE]). */

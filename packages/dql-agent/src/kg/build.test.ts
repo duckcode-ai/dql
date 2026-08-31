@@ -554,7 +554,9 @@ describe('buildKGFromManifest', () => {
     const graph = buildKGFromSemanticLayer(layer);
     const metric = graph.nodes.find((node) => node.nodeId === 'metric:orders.revenue');
     expect(metric?.payload?.analyticalCapability).toMatchObject({
-      metricId: 'semantic:sales:revenue',
+      // MetricFlow execution carries the canonical metric-qualified identity;
+      // the legacy domain-scoped value remains a retrieval alias only.
+      metricId: 'semantic:metric:orders.revenue',
       semanticModelId: 'semantic:sales:model:orders',
       primaryEntityId: 'semantic:sales:entity:orders.order',
       defaultResultGrainId: 'semantic:sales:entity:orders.order',
@@ -594,6 +596,118 @@ describe('buildKGFromManifest', () => {
         'semantic:sales:measure:orders.order_count',
       ]),
     });
+  });
+
+  it('AGT-047 keeps Jaffle-shaped MetricFlow metric_time axes model-qualified through the semantic KG', () => {
+    const layer = new SemanticLayer();
+    const models = ['customers', 'orders', 'locations', 'order_item'] as const;
+    for (const model of models) {
+      layer.addCube({
+        name: model,
+        label: model,
+        description: '',
+        domain: 'commerce',
+        sql: `select * from ${model}`,
+        table: model,
+        measures: [],
+        dimensions: [],
+        timeDimensions: [{
+          // MetricFlow synthesizes this same runtime field for every semantic
+          // model. The owner, not the leaf, is the compiler capability.
+          name: 'metric_time',
+          label: 'Metric time',
+          description: '',
+          sql: 'metric_time',
+          type: 'time',
+          table: model,
+          cube: model,
+          entityLink: model,
+          isTimeDimension: true,
+          granularities: ['day', 'month', 'year'],
+          qualifiedName: `${model}__metric_time`,
+        }],
+        joins: [],
+        preAggregations: [],
+        segments: [],
+      });
+      layer.addEntity({
+        name: model,
+        label: model,
+        description: '',
+        type: 'primary',
+        expr: `${model}_id`,
+        table: model,
+        cube: model,
+        domain: 'commerce',
+      });
+      layer.addSemanticModel({
+        name: model,
+        label: model,
+        description: '',
+        table: model,
+        domain: 'commerce',
+        entities: [model],
+        measures: model === 'order_item' ? ['revenue_measure'] : [],
+        dimensions: [],
+        timeDimensions: ['metric_time'],
+      });
+    }
+    layer.addMeasure({
+      name: 'revenue_measure',
+      label: 'Revenue',
+      description: '',
+      agg: 'sum',
+      expr: 'revenue',
+      table: 'order_item',
+      cube: 'order_item',
+      domain: 'commerce',
+      aggTimeDimension: 'metric_time',
+    });
+    layer.addMetric({
+      name: 'revenue',
+      label: 'Revenue',
+      description: '',
+      sql: 'revenue_measure',
+      type: 'simple',
+      metricType: 'simple',
+      aggregation: 'sum',
+      table: 'order_item',
+      cube: 'order_item',
+      domain: 'commerce',
+      aggTimeDimension: 'metric_time',
+      typeParams: { measure: { name: 'revenue_measure' } },
+    });
+
+    const graph = buildKGFromSemanticLayer(layer);
+    const metricTimeNodes = graph.nodes
+      .filter((node) => node.kind === 'dimension' && node.name.endsWith('.metric_time'))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    const metricTimeIds = metricTimeNodes.map((node) => node.payload?.qualifiedId);
+
+    expect(metricTimeIds).toEqual([
+      'semantic:commerce:dimension:customers.metric_time',
+      'semantic:commerce:dimension:locations.metric_time',
+      'semantic:commerce:dimension:order_item.metric_time',
+      'semantic:commerce:dimension:orders.metric_time',
+    ]);
+    expect(new Set(metricTimeIds).size).toBe(4);
+    expect(metricTimeNodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: 'order_item.metric_time',
+        payload: expect.objectContaining({
+          registryQualifiedId: 'semantic:commerce:dimension:order_item.metric_time',
+          aliases: expect.arrayContaining(['semantic:commerce:dimension:metric_time']),
+        }),
+      }),
+    ]));
+    const revenueCapability = graph.nodes.find((node) => node.nodeId === 'metric:order_item.revenue')
+      ?.payload?.analyticalCapability as { timeDimensions?: Array<{ dimensionId: string; supportedGrains?: string[] }> } | undefined;
+    expect(revenueCapability?.timeDimensions).toEqual([
+      expect.objectContaining({
+        dimensionId: 'semantic:commerce:dimension:order_item.metric_time',
+        supportedGrains: ['day', 'month', 'year'],
+      }),
+    ]);
   });
 
   it('AGT-012 admits only exact non-ambiguous native cross-model grouping paths', () => {

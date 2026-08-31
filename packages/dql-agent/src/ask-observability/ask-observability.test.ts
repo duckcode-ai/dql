@@ -1277,6 +1277,128 @@ describe('Ask trace portable bundles', () => {
     });
   });
 
+  it('OBS-017 exports the V8 tool receipt as pseudonymous typed evidence without rows, SQL, prompts, or provider payloads', () => {
+    const { store, observer } = memoryObserver({ runId: 'run-v8-allowlist' });
+    observer.finalize({ status: 'blocked', terminalOutcome: 'blocked' });
+    const trace = store.getByRun('run-v8-allowlist')!;
+    const privateValue = 'Melissa Davis';
+    const privateSecret = 'sk_v8_secret_abcdefghijklmnop';
+    const bundle = createAskTracePortableBundleV1(trace, {
+      profile: 'strict',
+      provenance: 'recorded',
+      runReceipt: {
+        id: 'run-v8-allowlist',
+        diagnosticReceiptV8: {
+          version: 8,
+          mode: 'authoritative_v2',
+          turnClass: 'analytics',
+          snapshotId: 'snapshot:office',
+          retainedCandidateCount: 24,
+          initialCandidateCount: 24,
+          expansionCount: 1,
+          objective: 'analytics',
+          contextCoverage: [{ version: 2, source: 'semantic', status: 'available', admittedCandidateCount: 2, excludedCandidateCount: 0, reasonCodes: ['SOURCE_AVAILABLE', privateValue] }],
+          excludedCandidateCount: 0,
+          exclusionReasonCodes: ['WORKSPACE_CANDIDATE_CAP', privateSecret],
+          observations: [{
+            version: 1,
+            tool: 'compile_and_run_semantic',
+            outcome: 'ineligible',
+            tier: 'semantic',
+            reasonCode: 'SEMANTIC_TUPLE_INCOMPLETE',
+            candidateIds: [`semantic:metric:${privateValue}`],
+            planId: `plan:${privateValue}`,
+            inputFingerprint: privateSecret,
+            outputFingerprint: privateValue,
+            origin: 'validation',
+            rawSql: 'SELECT * FROM private.customers',
+            provider: { phase: 'agent_control', cause: 'gateway', retryable: true, safeAction: 'retry_same_plan', rawResponse: privateSecret },
+          }],
+          tierAttempts: [{ version: 2, tier: 'semantic', outcome: 'ineligible', reasonCode: 'SEMANTIC_TUPLE_INCOMPLETE', candidateIds: [`semantic:metric:${privateValue}`], frozen: false }],
+          planFrozen: false,
+          terminalOutcome: { version: 2, kind: 'gap', reasonCode: 'ANALYTICAL_COVERAGE_GAP', origin: 'validation', safeAction: 'review_recorded_observations_then_retry' },
+          outcome: { connectionAttempted: false, executionAttempts: 0, factCount: 0, narration: 'not_retained' },
+          toolDurationMs: 8,
+          finalStopReason: 'ANALYTICAL_COVERAGE_GAP',
+        },
+      },
+    });
+    const receipt = bundle.runReceipt.runtimeReceiptV8 as Record<string, unknown>;
+    const serialized = JSON.stringify(bundle);
+    expect(receipt).toMatchObject({ version: 8, mode: 'authoritative_v2', turnClass: 'analytics' });
+    expect(serialized).not.toContain(privateValue);
+    expect(serialized).not.toContain(privateSecret);
+    expect(serialized).not.toContain('SELECT * FROM');
+    expect((receipt.observations as Array<Record<string, unknown>>)[0]).not.toHaveProperty('rawSql');
+    expect((receipt.observations as Array<Record<string, unknown>>)[0]).not.toHaveProperty('rawResponse');
+  });
+
+  it('OBS-017 retains an unfrozen V8 controller tier in both the canonical envelope and strict portable receipt', () => {
+    const { store, observer } = memoryObserver({ runId: 'run-v8-controller-tier-portable' });
+    const receipt = {
+      version: 8 as const,
+      mode: 'authoritative_v2' as const,
+      turnClass: 'analytics' as const,
+      snapshotId: 'snapshot:v8-controller-tier',
+      retainedCandidateCount: 48,
+      initialCandidateCount: 24,
+      expansionCount: 1,
+      objective: 'analytics' as const,
+      contextCoverage: [],
+      excludedCandidateCount: 0,
+      exclusionReasonCodes: [],
+      observations: [],
+      tierAttempts: [
+        { version: 2 as const, tier: 'semantic' as const, outcome: 'unavailable' as const, reasonCode: 'SEMANTIC_EXECUTION_UNAVAILABLE', candidateIds: [], frozen: false },
+        { version: 2 as const, tier: 'governed_relational' as const, outcome: 'unavailable' as const, reasonCode: 'GOVERNED_RELATIONAL_EXECUTION_UNAVAILABLE', candidateIds: [], frozen: false },
+      ],
+      // No plan is frozen, but the live controller has already advanced to
+      // the only remaining lower-tier action. A stale V1 cascade must not
+      // overwrite this value in storage or portable support evidence.
+      controllerTier: 'exploratory_sql' as const,
+      semanticRuntime: {
+        version: 1 as const,
+        preference: 'metricflow-cli' as const,
+        selectedEngine: 'metricflow-cli' as const,
+        readiness: 'unavailable' as const,
+      },
+      planFrozen: false,
+      terminalOutcome: { version: 2 as const, kind: 'gap' as const, reasonCode: 'ASK_V2_TOOL_PROGRESSION_REQUIRED', origin: 'agent_control' as const },
+      outcome: { connectionAttempted: false, executionAttempts: 0, factCount: 0, narration: 'not_retained' as const },
+      activity: { providerDispatches: 5, toolCalls: 5, executionAttempts: 0, repairs: 0 },
+      toolDurationMs: 5,
+      finalStopReason: 'ASK_V2_TOOL_PROGRESSION_REQUIRED',
+    };
+    const run = {
+      id: 'run-v8-controller-tier-portable',
+      status: 'blocked',
+      trustState: 'blocked',
+      completedAt: '2026-08-31T12:00:01.000Z',
+      artifacts: [],
+      diagnosticReceiptV8: receipt,
+    };
+    finalizeAgentRunTraceV1(observer, run as never);
+
+    const trace = store.getByRun('run-v8-controller-tier-portable')!;
+    expect(trace.envelope.selectedTier).toBe('exploratory_sql');
+    const strict = createAskTracePortableBundleV1(trace, {
+      profile: 'strict',
+      provenance: 'recorded',
+      runReceipt: run,
+    });
+    expect(strict.trace.envelope.selectedTier).toBe('exploratory_sql');
+    expect(strict.runReceipt.runtimeReceiptV8).toMatchObject({
+      version: 8,
+      controllerTier: 'exploratory_sql',
+      semanticRuntime: {
+        preference: 'metricflow-cli',
+        selectedEngine: 'metricflow-cli',
+        readiness: 'unavailable',
+      },
+      planFrozen: false,
+    });
+  });
+
   it('requires confirmation and scans support-provided reviewed prose before export', () => {
     const { store, observer } = memoryObserver({ runId: 'run-support' });
     observer.finalize({ status: 'completed' });

@@ -1249,6 +1249,26 @@ function relationshipEndpointMatchesEntityTerms(
   return entityTerms.some((term) => metricTermsMatch(normalizedEndpoint, normalizeMetricPhrase(term)));
 }
 
+/**
+ * Modeling files commonly use local entity IDs for relationship endpoints while
+ * candidate cards retain the domain-qualified entity identity.  Relationship
+ * safety is only meaningful inside the declared relationship's domain, so
+ * bridge that representation here rather than falling back to an unscoped
+ * leaf-name match.  This helper is used exclusively by the attribution-policy
+ * graph below; it never authorizes a join.
+ */
+function scopedRelationshipEndpointIdentity(
+  endpoint: string | undefined,
+  relationship: AgentRelationshipSafetyEvidence,
+): string {
+  const normalizedEndpoint = normalizedRelationshipIdentity(endpoint ?? '');
+  if (!normalizedEndpoint || normalizedEndpoint.includes('::entity::')) return normalizedEndpoint;
+  const relationshipIdentity = relationshipSafetyIdentities(relationship)
+    .find((identity) => identity.includes('::relationship::'));
+  const domainPrefix = relationshipIdentity?.split('::relationship::')[0];
+  return domainPrefix ? `${domainPrefix}::entity::${normalizedEndpoint}` : normalizedEndpoint;
+}
+
 function relationshipGraphReaches(
   starts: ReadonlySet<string>,
   targets: ReadonlySet<string>,
@@ -1257,8 +1277,8 @@ function relationshipGraphReaches(
   if (starts.size === 0 || targets.size === 0) return false;
   const graph = new Map<string, Set<string>>();
   for (const relationship of relationships) {
-    const from = normalizedRelationshipIdentity(relationship.from ?? '');
-    const to = normalizedRelationshipIdentity(relationship.to ?? '');
+    const from = scopedRelationshipEndpointIdentity(relationship.from, relationship);
+    const to = scopedRelationshipEndpointIdentity(relationship.to, relationship);
     if (!from || !to) continue;
     const fromNeighbors = graph.get(from) ?? new Set<string>();
     fromNeighbors.add(to);
@@ -1319,8 +1339,8 @@ export function attributionRequiredRelationshipGapDecision(input: {
 
   const attributed = attributionRequired.find((relationship) => {
     const endpoints = [
-      normalizedRelationshipIdentity(relationship.from ?? ''),
-      normalizedRelationshipIdentity(relationship.to ?? ''),
+      scopedRelationshipEndpointIdentity(relationship.from, relationship),
+      scopedRelationshipEndpointIdentity(relationship.to, relationship),
     ].filter(Boolean);
     const requestedSignalEndpoints = new Set(endpoints.filter((endpoint) =>
       relationshipEndpointMatchesQuestionConcept(endpoint, input.request.question)));
@@ -1332,7 +1352,15 @@ export function attributionRequiredRelationshipGapDecision(input: {
     const allReachable = relationshipGraphReaches(requestedSignalEndpoints, targetEndpoints, relationships);
     const safeRelationships = relationships.filter((candidate) => relationshipSafetyAllowsAutomaticJoin(candidate));
     const safelyReachable = relationshipGraphReaches(requestedSignalEndpoints, targetEndpoints, safeRelationships);
-    return allReachable && !safelyReachable;
+    if (safelyReachable) return false;
+    if (allReachable) return true;
+    // The compact route workspace may omit an otherwise-safe continuation
+    // edge, but it must not erase a declared attribution boundary for the
+    // exact signal the user named.  We have already established a direct,
+    // snapshot-bound match for that signal and a requested entity.  Returning
+    // a typed modeling gap is safer than presenting unrelated metric choices
+    // or attempting an unapproved attribution join.
+    return true;
   });
   if (!attributed) return undefined;
 
@@ -4336,6 +4364,7 @@ function preventDegenerateRankingResolution(
   if (hasExplicitRankingMeasure(question, evidence)) return resolution;
   const selected = candidates.find((candidate) =>
     candidate.id === resolution.recommendedExecutionId
+    || candidate.qualifiedId === resolution.recommendedExecutionId
     || resolution.selectedConceptIds.includes(candidate.id),
   );
   if (!selected || !isDegenerateRankingMetric(question, evidence, selected)) return resolution;
@@ -4605,7 +4634,14 @@ function directResolution(
       .map((item) => item.id)
       .concat(selectedDimensionConceptIds, hostBoundDimensionConceptIds)
       .filter((id, index, all) => all.indexOf(id) === index),
-    recommendedExecutionId: candidate.id,
+    // Meaning receipts retain the source-qualified identity selected from the
+    // immutable workspace.  The frozen semantic compiler plan may normalize
+    // that handle to its canonical execution ID later, but rewriting it here
+    // breaks the provenance link between the model/meaning choice and the
+    // selected semantic evidence card.
+    recommendedExecutionId: candidate.kind === 'semantic_metric'
+      ? candidate.qualifiedId ?? candidate.id
+      : candidate.id,
     queryIntent: { ...queryIntentWithSelectedDimensions, filters: canonicalFilters },
     rejectedCandidates: [],
     confidence: "high",

@@ -152,6 +152,236 @@ describe('runAgenticToolLoop — text protocol (no native tools)', () => {
     expect(provider.calls[0]!.map((message) => message.content).join('\n')).toContain('at most 3 tool call');
   });
 
+  it('uses the reserved final dispatch for canonical Ask V2 finish_answer after five ordinary tools', async () => {
+    const provider = new ScriptedTextProvider([
+      '```json\n{"tool":"one","input":{}}\n```',
+      '```json\n{"tool":"two","input":{}}\n```',
+      '```json\n{"tool":"three","input":{}}\n```',
+      '```json\n{"tool":"four","input":{}}\n```',
+      '```json\n{"tool":"five","input":{}}\n```',
+      '```json\n{"tool":"finish_answer","input":{"answer":"validated result"}}\n```',
+    ]);
+    const observed: string[] = [];
+    const result = await runTextProtocolToolLoopDetailed(
+      provider,
+      [{ role: 'user', content: 'q' }],
+      [
+        echoTool('one', { ok: 1 }), echoTool('two', { ok: 2 }), echoTool('three', { ok: 3 }),
+        echoTool('four', { ok: 4 }), echoTool('five', { ok: 5 }), echoTool('finish_answer', { finished: true }),
+      ],
+      {
+        maxToolCalls: 8,
+        maxProviderDispatches: 6,
+        onToolCall: (event) => observed.push(event.name),
+      },
+    );
+
+    expect(result).toMatchObject({ stop: 'final', toolCalls: 6 });
+    expect(provider.calls).toHaveLength(6);
+    expect(observed).toEqual(['one', 'two', 'three', 'four', 'five', 'finish_answer']);
+  });
+
+  it('publishes a live narrowed tool policy to text follow-ups and reserves the final send for its terminal action', async () => {
+    let semanticReady = false;
+    const provider = new ScriptedTextProvider([
+      '```json\n{"tool":"inspect_semantic","input":{}}\n```',
+      // The text provider receives an updated allowed-tool instruction after
+      // the inspection and may use the last controller send for execution.
+      '```json\n{"tool":"compile_semantic","input":{}}\n```',
+    ]);
+    const result = await runTextProtocolToolLoopDetailed(
+      provider,
+      [{ role: 'user', content: 'revenue by month' }],
+      [
+        {
+          name: 'inspect_semantic', description: 'inspect semantic', inputSchema: { type: 'object' },
+          run: async () => {
+            semanticReady = true;
+            return { compatible: true };
+          },
+        },
+        echoTool('compile_semantic', { executed: true }),
+      ],
+      {
+        maxToolCalls: 8,
+        maxProviderDispatches: 2,
+        getCurrentToolPolicy: () => semanticReady
+          ? {
+              allowedToolNames: ['compile_semantic'],
+              terminalActionToolNames: ['compile_semantic'],
+              instruction: 'Semantic evidence is sufficient. Compile now.',
+            }
+          : { allowedToolNames: ['inspect_semantic'] },
+      },
+    );
+
+    expect(result).toMatchObject({ stop: 'final', toolCalls: 2 });
+    expect(provider.calls).toHaveLength(2);
+    expect(provider.calls[1]!.map((message) => message.content).join('\n')).toContain('only: compile_semantic');
+  });
+
+  it('feeds a rejected Ask V2 finish control into the reserved semantic action instead of stopping early', async () => {
+    let phase: 'inspect' | 'rejected_finish' | 'execute' | 'narrate' = 'inspect';
+    const provider = new ScriptedTextProvider([
+      '```json\n{"tool":"inspect_semantic","input":{}}\n```',
+      '```json\n{"tool":"finish_answer","input":{"answer":"too early"}}\n```',
+      '```json\n{"tool":"compile_and_run_semantic","input":{}}\n```',
+      '```json\n{"tool":"finish_answer","input":{"answer":"result ready"}}\n```',
+    ]);
+    const seen: string[] = [];
+    let semanticExecutions = 0;
+    const result = await runTextProtocolToolLoopDetailed(
+      provider,
+      [{ role: 'user', content: 'revenue by month' }],
+      [
+        {
+          name: 'inspect_semantic', description: 'inspect admitted semantic context', inputSchema: { type: 'object' },
+          run: async () => {
+            phase = 'rejected_finish';
+            return { compatible: true };
+          },
+        },
+        {
+          name: 'finish_answer', description: 'finish only after a validated result', inputSchema: { type: 'object' },
+          run: async () => {
+            if (phase === 'rejected_finish') {
+              phase = 'execute';
+              return {
+                ok: false,
+                reasonCode: 'ASK_V2_TOOL_PROGRESSION_REQUIRED',
+                safeNextTools: ['compile_and_run_semantic'],
+              };
+            }
+            return { finished: true, hasResult: true };
+          },
+        },
+        {
+          name: 'compile_and_run_semantic', description: 'compile admitted semantic selection', inputSchema: { type: 'object' },
+          run: async () => {
+            semanticExecutions += 1;
+            phase = 'narrate';
+            return { executed: true };
+          },
+        },
+      ],
+      {
+        // The semantic action and its host-required finish receive separate
+        // physical sends after the rejected finish proposal.
+        maxToolCalls: 8,
+        maxProviderDispatches: 4,
+        getCurrentToolPolicy: () => phase === 'inspect'
+          ? { allowedToolNames: ['inspect_semantic'] }
+          : phase === 'rejected_finish'
+            ? { allowedToolNames: ['finish_answer'] }
+            : phase === 'narrate'
+              ? { allowedToolNames: ['finish_answer'], terminalActionToolNames: ['finish_answer'] }
+            : {
+                allowedToolNames: ['compile_and_run_semantic'],
+                terminalActionToolNames: ['compile_and_run_semantic'],
+                instruction: 'The prior finish was rejected. Compile semantic now.',
+              },
+        onToolCall: ({ name }) => seen.push(name),
+      },
+    );
+
+    expect(result).toMatchObject({ stop: 'final', toolCalls: 4 });
+    expect(semanticExecutions).toBe(1);
+    expect(seen).toEqual(['inspect_semantic', 'finish_answer', 'compile_and_run_semantic', 'finish_answer']);
+    expect(provider.calls).toHaveLength(4);
+    expect(provider.calls[2]!.map((message) => message.content).join('\n')).toContain('Final controller action for this phase. Call exactly one of: compile_and_run_semantic');
+  });
+
+  it('discards prose and re-dispatches the required semantic action instead of treating it as a final answer', async () => {
+    let phase: 'inspect' | 'execute' | 'narrate' = 'inspect';
+    const provider = new ScriptedTextProvider([
+      '```json\n{"tool":"inspect_semantic","input":{}}\n```',
+      'Revenue looks ready, so I would answer now.',
+      '```json\n{"tool":"compile_and_run_semantic","input":{}}\n```',
+      '```json\n{"tool":"finish_answer","input":{"answer":"result ready"}}\n```',
+    ]);
+    let semanticExecutions = 0;
+    const result = await runTextProtocolToolLoopDetailed(
+      provider,
+      [{ role: 'user', content: 'revenue by month' }],
+      [
+        {
+          name: 'inspect_semantic', description: 'inspect admitted semantic context', inputSchema: { type: 'object' },
+          run: async () => {
+            phase = 'execute';
+            return { compatible: true };
+          },
+        },
+        {
+          name: 'compile_and_run_semantic', description: 'compile admitted semantic selection', inputSchema: { type: 'object' },
+          run: async () => {
+            semanticExecutions += 1;
+            phase = 'narrate';
+            return { executed: true };
+          },
+        },
+        {
+          name: 'finish_answer', description: 'host-required result narration', inputSchema: { type: 'object' },
+          run: async () => ({ finished: true, hasResult: true }),
+        },
+      ],
+      {
+        maxToolCalls: 8,
+        maxProviderDispatches: 4,
+        getCurrentToolPolicy: () => phase === 'inspect'
+          ? { allowedToolNames: ['inspect_semantic'] }
+          : phase === 'narrate'
+            ? { allowedToolNames: ['finish_answer'], terminalActionToolNames: ['finish_answer'] }
+          : {
+              allowedToolNames: ['compile_and_run_semantic'],
+              terminalActionToolNames: ['compile_and_run_semantic'],
+              instruction: 'Compile semantic now.',
+            },
+      },
+    );
+
+    expect(result).toMatchObject({ stop: 'final', toolCalls: 3 });
+    expect(semanticExecutions).toBe(1);
+    expect(provider.calls).toHaveLength(4);
+    const finalPrompt = provider.calls[2]!.map((message) => message.content).join('\n');
+    expect(finalPrompt).toContain('Controller progression required');
+    expect(finalPrompt).not.toContain('Revenue looks ready');
+  });
+
+  it('returns a precise dispatch-budget stop when required semantic action receives prose on the final send', async () => {
+    let phase: 'inspect' | 'execute' = 'inspect';
+    const provider = new ScriptedTextProvider([
+      '```json\n{"tool":"inspect_semantic","input":{}}\n```',
+      'I will answer in prose instead of compiling.',
+    ]);
+    const result = await runTextProtocolToolLoopDetailed(
+      provider,
+      [{ role: 'user', content: 'revenue by month' }],
+      [
+        {
+          name: 'inspect_semantic', description: 'inspect admitted semantic context', inputSchema: { type: 'object' },
+          run: async () => {
+            phase = 'execute';
+            return { compatible: true };
+          },
+        },
+        echoTool('compile_and_run_semantic', { executed: true }),
+      ],
+      {
+        maxToolCalls: 8,
+        maxProviderDispatches: 2,
+        getCurrentToolPolicy: () => phase === 'inspect'
+          ? { allowedToolNames: ['inspect_semantic'] }
+          : {
+              allowedToolNames: ['compile_and_run_semantic'],
+              terminalActionToolNames: ['compile_and_run_semantic'],
+            },
+      },
+    );
+
+    expect(result).toMatchObject({ stop: 'provider_dispatch_budget_exhausted', toolCalls: 1 });
+    expect(provider.calls).toHaveLength(2);
+  });
+
   it('preserves the physical observer and blocks a second subscription/Ollama text dispatch at cap one', async () => {
     const provider = new ScriptedTextProvider([
       '```json\n{"tool":"t","input":{}}\n```',

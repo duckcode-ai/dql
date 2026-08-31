@@ -249,3 +249,39 @@ pre-freeze verification/recovery failures remain `meaning_validation` or
 coverage incidents. They are not rendered as connection or SQL-execution
 failures. V1–V5 receipts continue to render through their compatible summary
 paths.
+
+## OBS-017 — V2 tool-runtime decision story and receipt projection
+
+`AgentRunDiagnosticReceiptV8` is an additive, terminal-persistence projection
+of the authoritative V2 tool runtime. It records only the typed objective,
+count-only source coverage and bounded-workspace exclusions, tool
+observations, tier attempts, freeze state, execution/fact counts, redacted
+provider phase/cause, safe action, fingerprints, and durations. An excluded
+candidate is reported as outside the bounded workspace with a stable reason
+code; it is never rendered as absent or unmodeled.
+
+The existing **How it was answered** and `/ask/traces/:runId` detail select V8
+before legacy summaries when the run is `authoritative_v2`. Their default story
+is intentionally compact: **Objective**, **Context coverage**, **LLM and tool
+decisions**, **Validation and correction**, **Cascade and freeze**,
+**Connection and execution**, **Facts and narration**, **Failure boundary**,
+and **Safe next action**. The existing trace catalog remains the sole Govern
+entry point; answer-side links and catalog rows open the same run-ID detail.
+
+Only the local Advanced evidence view may show sanitized qualified IDs, stable
+reason codes, one-way fingerprints, and timings. It does not reveal a prompt,
+question, SQL/DQL text, result row/value, physical path, credential, raw
+provider response, or hidden reasoning. Strict portable exports apply a second
+allowlist projection and pseudonymize V8 identifiers. Generated DQL/SQL stays
+outside the default receipt and strict export because it can contain customer
+literals or schema paths; a reviewed support workflow remains a separate
+operator action rather than an automatic diagnostic export.
+
+`ResearchEvidenceLedgerV4` is a read-compatible projection of the existing
+bounded V3 ledger, not a second Research planner. It retains at most six
+branch verdicts (`supported`, `contradicted`, `inconclusive`, `failed`, or
+`skipped`) with opaque evidence handles. A `lineage_graph` branch is marked as
+dedicated structural lineage evidence and cannot be substituted for an
+analytical result or causal proof. V1–V7 AgentRun receipts and V1–V3 Research
+ledgers remain readable. This implements the contract projection only;
+designated-fixture built-CLI and independent UI verification remain required.

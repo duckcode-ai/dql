@@ -327,6 +327,17 @@ describe('conversational analytical orchestration contracts', () => {
       dataType: 'time',
       timeGrains: ['day'],
     } as const;
+    // MetricFlow commonly calls its primary time field `metric_time`. Its
+    // typed semantic-dimension declaration must outrank that lexical token;
+    // otherwise V2 treats it as a measure and cannot validate `by month`.
+    const metricFlowTime = {
+      id: 'semantic:dimension:order_item.metric_time',
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      name: 'order_item.metric_time',
+      dataType: 'date',
+      timeGrains: ['day', 'month'],
+    } as const;
     const physicalTimestamp = {
       id: 'runtime:column:locations.opened_at',
       kind: 'sql_column',
@@ -383,9 +394,10 @@ describe('conversational analytical orchestration contracts', () => {
       timeGrains: ['month'],
     } as const;
 
-    for (const candidate of [semanticTime, physicalTimestamp, legacyDate]) {
+    for (const candidate of [semanticTime, metricFlowTime, physicalTimestamp, legacyDate]) {
       expect(evidenceCandidateRoles(candidate)).toContain('time_dimension');
       expect(evidenceCandidateRoles(candidate)).not.toContain('categorical_dimension');
+      expect(evidenceCandidateRoles(candidate)).not.toContain('metric');
     }
     expect(evidenceCandidateRoles(location)).toContain('categorical_dimension');
     expect(evidenceCandidateRoles(location)).not.toContain('time_dimension');

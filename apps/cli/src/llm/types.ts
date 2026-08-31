@@ -26,6 +26,10 @@ import type {
   NarrationIntegrityReceiptV1,
   ProviderFailureDiagnosticV1,
   ConversationResultMemberSetV1,
+  AskAgentStateV4,
+  AskAgentRuntimeWorkspaceBridgeV2,
+  AskV2ExecutionCapabilityV1,
+  AskV2ExecutionReceipt,
 } from '@duckcodeailabs/dql-agent';
 import type { DQLManifest, ProviderDispatchPhaseV1, ProviderEgressPurpose, ProviderEgressReceiptV1 } from '@duckcodeailabs/dql-core';
 
@@ -191,6 +195,18 @@ export interface ProviderDispatchEvidenceSink {
 export interface AgentRunRequest {
   provider: ProviderId;
   /**
+   * Host-only V2 Ask ingress handoff.  It is copied from the package run
+   * engine after immutable retrieval and cannot be selected by browser/MCP
+   * request JSON.  The provider adapter uses it only to enable the bounded
+   * tool loop; SQL/trust/execution remain host-owned.
+   */
+  askAgentRuntimeMode?: 'legacy_v1' | 'shadow_v2' | 'authoritative_v2';
+  askAgentV2State?: AskAgentStateV4;
+  /** Process-local engine capability; public request parsers never hydrate it. */
+  askAgentV2ExecutionCapability?: AskV2ExecutionCapabilityV1;
+  /** Host-only function-bearing bridge to the retrieval snapshot; never JSON. */
+  askAgentV2Workspace?: AskAgentRuntimeWorkspaceBridgeV2;
+  /**
    * Server-owned continuation guard. A persisted plural prior-result member
    * binding is a filter on a newly frozen program, not permission for the
    * legacy cross-result arithmetic shortcut. HTTP ingress never accepts it.
@@ -272,6 +288,23 @@ export interface AgentRunRequest {
     capability: AgenticSqlExecutionCapabilityV1;
     freeze: ExploratoryExecutionFreezeV1;
   }>;
+  /**
+   * V2-only exploratory execution admission. Unlike the V1 callback above it
+   * is bound exclusively to the immutable Ask V2 snapshot/workspace and must
+   * not consult a legacy route decision or resolved analytical plan.
+   */
+  prepareAskV2ExploratorySqlExecution?: (input: {
+    version: 2;
+    sql: string;
+    expectedOutputIds: string[];
+    selectedCandidateIds: string[];
+    snapshotId?: string;
+    planFingerprint: string;
+    repair?: boolean;
+  }) => Promise<{
+    capability: AgenticSqlExecutionCapabilityV1;
+    freeze: ExploratoryExecutionFreezeV1;
+  }>;
   /** Server-only generated execution capability; never accepted from a client payload. */
   executeAgenticGeneratedSql?: (
     capability: AgenticSqlExecutionCapabilityV1,
@@ -279,6 +312,41 @@ export interface AgentRunRequest {
     artifact?: AgentDqlArtifactReference,
   ) => Promise<AgentResultPayload>;
   executeDqlArtifact?: (artifact: AgentDqlArtifactReference) => Promise<AgentResultPayload>;
+  /**
+   * V2-only governed-relational authorization. It mints a request-scoped
+   * execution binding before the DQL compiler is invoked. The binding is
+   * derived only from the immutable V2 workspace, selected qualified IDs,
+   * atomic relationship paths, and connection policy; it never reads V1
+   * route decisions or resolved plans.
+   */
+  authorizeAskV2DqlArtifact?: (input: {
+    version: 2;
+    candidateIds: string[];
+    expectedOutputIds: string[];
+    relationshipPathIds: string[];
+    snapshotId?: string;
+    planFingerprint: string;
+    repair?: boolean;
+  }) => Promise<{
+    planId: string;
+    targetFingerprint?: string;
+  }>;
+  /**
+   * V2-only governed relational executor. The local host validates the
+   * admitted relation/path closure after compilation and before execution.
+   */
+  executeAskV2DqlArtifact?: (input: {
+    version: 2;
+    artifact: AgentDqlArtifactReference;
+    candidateIds: string[];
+    expectedOutputIds: string[];
+    relationshipPathIds: string[];
+    snapshotId?: string;
+    planFingerprint: string;
+    /** Host-minted authorization from authorizeAskV2DqlArtifact. */
+    authorizationPlanId?: string;
+    repair?: boolean;
+  }) => Promise<AgentResultPayload>;
   getSchemaContext?: (question: string, contextPack?: LocalContextPack) => Promise<AgentSchemaTable[]>;
   /**
    * Bounded, equality-predicated lookup of specific relations the model
@@ -334,8 +402,21 @@ export interface AgentRunRequest {
   preparedContextPack?: LocalContextPack;
 }
 
+/** Additive server-only result returned by a runner after its final turn. */
+export interface AgentRunnerTerminalResult {
+  /**
+   * Present only after the authoritative V2 runtime has frozen and executed
+   * one snapshot-bound plan. Legacy and unsuccessful V2 runs remain void-like.
+   */
+  askAgentV2ExecutionReceipt?: AskV2ExecutionReceipt;
+}
+
 export interface AgentRunner {
-  run(req: AgentRunRequest, emit: (turn: AgentTurn) => void, signal: AbortSignal): Promise<void>;
+  run(
+    req: AgentRunRequest,
+    emit: (turn: AgentTurn) => void,
+    signal: AbortSignal,
+  ): Promise<AgentRunnerTerminalResult | void>;
 }
 
 /**

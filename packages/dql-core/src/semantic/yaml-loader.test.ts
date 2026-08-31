@@ -169,6 +169,10 @@ describe('loadSemanticLayerFromDir', () => {
     expect(layer.getCube('orders')?.measures.map((metric) => metric.name)).toContain('order_total');
     expect(layer.listSegments('finance').map((segment) => segment.name)).toEqual(['high_value_orders']);
     expect(layer.listPreAggregations('finance').map((preAggregation) => preAggregation.name)).toEqual(['orders_daily_rollup']);
+    expect(layer.getTimeDimension('ordered_at')).toMatchObject({
+      isTimeDimension: true,
+      granularities: ['day', 'month'],
+    });
     expect(layer.listDomains()).toEqual(['finance']);
     expect(layer.listTags()).toContain('finance');
   });

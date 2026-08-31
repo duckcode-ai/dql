@@ -11,6 +11,15 @@ describe('parseArgs', () => {
     expect(parsed.flags.outDir).toBe('out');
   });
 
+  it('preserves the notebook Ask runtime mode for launch-time validation', () => {
+    const parsed = parseArgs(['notebook', '.', '--ask-runtime-mode', 'authoritative_v2']);
+    expect(parsed.flags.askRuntimeMode).toBe('authoritative_v2');
+
+    // The parser does not silently coerce an absent value into the safe
+    // default. The notebook startup validator will reject this explicit error.
+    expect(parseArgs(['notebook', '.', '--ask-runtime-mode']).flags.askRuntimeMode).toBe('');
+  });
+
   it('collects extra positionals and new-block flags', () => {
     const parsed = parseArgs(['new', 'block', 'Revenue', 'by', 'Segment', '--chart', 'line', '--domain', 'finance', '--owner', 'demo', '--pattern', 'ranking', '--query-only']);
     expect(parsed.command).toBe('new');

@@ -1,6 +1,7 @@
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { buildManifest } from '@duckcodeailabs/dql-core';
 import { __test__, createDqlAgentProviderRunner, createEvalCassetteReplayProvider, renderAppContextForPrompt, renderExtraContext, resolveEffectiveQuestion } from './dql-agent-provider.js';
@@ -23,15 +24,171 @@ import {
   type AskTraceObserverV1,
   type AgentMessage,
   type AgentProvider,
+  type AgentEvidenceCandidate,
+  type AskAgentStateV4,
+  type AskFrozenResearchChildHandleV1,
+  type AskAgentRuntimeWorkspaceBridgeV2,
+  type AskAgentToolWorkspaceV2,
+  type AskSemanticCapabilityHandleV1,
+  askV2SemanticCandidateAuthorityFingerprint,
+  askV2ExecutableSemanticRoles,
+  createAskToolKernelV2,
+  type AgentRunBudget,
   type ProviderToolLoopOptions,
+  OpenAIProvider,
+  ClaudeProvider,
 } from '@duckcodeailabs/dql-agent';
 import {
   agentRunProviderDispatchBudgetForMode,
   RunScopedProviderDispatchEvidence,
+  askV2RelationshipPathHandleId,
+  assertAskV2BoundRelationshipPathsForSql,
+  captureAskV2SemanticCapabilities,
 } from '../../local-runtime.js';
+
+// Vitest may be launched from the repository root, a package root, or an
+// ephemeral Codex worktree.  Provider integration fixtures are package-owned;
+// anchor them to this test module instead of `process.cwd()` so a caller's
+// workspace discovery cannot accidentally select a stale `.claude/worktrees`
+// directory or a missing root-level `test/` tree.
+const providerFixtureRoot = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '../../../test/fixtures/jaffle-supply-chain',
+);
 
 function req(messages: Array<{ role: 'user' | 'assistant'; content: string }>): AgentRunRequest {
   return { provider: 'ollama', messages, projectRoot: '/tmp/x' } as AgentRunRequest;
+}
+
+function askV2State(candidates: AgentEvidenceCandidate[], turnClass: AskAgentStateV4['turnClass'] = 'analytics'): AskAgentStateV4 {
+  const ids = candidates.map((candidate) => candidate.qualifiedId ?? candidate.id);
+  return {
+    version: 4,
+    mode: 'authoritative_v2',
+    turnClass,
+    snapshotId: 'snapshot:v2-test',
+    sourceFingerprint: 'sha256:v2-test',
+    retainedCandidateIds: ids,
+    initialCandidateIds: ids.slice(0, 24),
+    expansionCandidateIds: [],
+    relationshipPathHandles: [],
+    conversation: { version: 2, availableResultHandleIds: [] },
+    observations: [],
+    tierAttempts: [],
+  };
+}
+
+function askV2Workspace(candidates: AgentEvidenceCandidate[], options: {
+  paths?: AskAgentStateV4['relationshipPathHandles'];
+  certifiedArtifacts?: ReadonlyMap<string, unknown>;
+  certifiedCompleteCandidateIds?: readonly string[];
+  certifiedExecutionAvailable?: boolean;
+  contextPack?: unknown;
+  tierStates?: AskAgentToolWorkspaceV2['tierStates'];
+  semanticCapabilities?: AskAgentToolWorkspaceV2['semanticCapabilities'];
+  semanticCapabilityCollisionIds?: AskAgentToolWorkspaceV2['semanticCapabilityCollisionIds'];
+  semanticRuntime?: AskAgentToolWorkspaceV2['semanticRuntime'];
+  fiscalCalendar?: AskAgentToolWorkspaceV2['fiscalCalendar'];
+  businessContext?: AskAgentToolWorkspaceV2['businessContext'];
+  runDedicatedLineageProgram?: NonNullable<AskAgentToolWorkspaceV2['runDedicatedLineageProgram']>;
+  frozenResearchChildren?: AskAgentToolWorkspaceV2['frozenResearchChildren'];
+} = {}): AskAgentRuntimeWorkspaceBridgeV2 {
+  const semanticCapabilities = options.semanticCapabilities ?? new Map(
+    candidates
+      .flatMap((candidate) => {
+        const id = candidate.qualifiedId ?? candidate.id;
+        const roles = askV2ExecutableSemanticRoles(candidate);
+        if (!roles) return [];
+        return [[id, {
+          version: 1 as const,
+          candidateId: id,
+          runtimeName: candidate.name,
+          engines: ['native'] as const,
+          roles,
+          fingerprint: askV2SemanticCandidateAuthorityFingerprint(candidate),
+          isCurrent: () => true,
+        }]];
+      }),
+  );
+  return {
+    version: 2,
+    snapshotId: 'snapshot:v2-test',
+    sourceFingerprint: 'sha256:v2-test',
+    ...(options.certifiedExecutionAvailable === undefined
+      ? {}
+      : { isCertifiedExecutionAvailable: () => options.certifiedExecutionAvailable === true }),
+    getContextPack: () => options.contextPack ?? {},
+    getToolWorkspace: () => ({
+      version: 1,
+      snapshotId: 'snapshot:v2-test',
+      sourceFingerprint: 'sha256:v2-test',
+      candidates,
+      relationshipPathHandles: options.paths ?? [],
+      certifiedArtifacts: options.certifiedArtifacts,
+      semanticCapabilities,
+      semanticRuntime: options.semanticRuntime,
+      fiscalCalendar: options.fiscalCalendar,
+      semanticCapabilityCollisionIds: options.semanticCapabilityCollisionIds,
+      certifiedCompleteCandidateIds: options.certifiedCompleteCandidateIds,
+      tierStates: options.tierStates,
+      runDedicatedLineageProgram: options.runDedicatedLineageProgram,
+      frozenResearchChildren: options.frozenResearchChildren,
+      businessContext: options.businessContext ?? { available: false, objectCount: 0 },
+    }),
+  };
+}
+
+function textToolProvider(responses: string[]): AgentProvider {
+  let index = 0;
+  return {
+    name: 'ollama',
+    available: async () => true,
+    generate: async () => responses[index++] ?? 'Research branch completed without an executable result.',
+  };
+}
+
+function v2RunnerContextPack(question: string) {
+  return {
+    id: 'pack:v2-provider-dispatch',
+    question,
+    focusObjectKey: null,
+    mode: 'question',
+    questionPlan: buildAnalysisQuestionPlan(question),
+    objects: [],
+    skills: [],
+    knowledgeLens: { snapshotId: 'snapshot:v2-test' },
+    edges: [],
+    queryRuns: [],
+    citations: [],
+    evidenceSummaries: [],
+    warnings: [],
+    routeDecision: { route: 'generated_sql' },
+    evidenceRoles: [],
+    allowedSqlContext: { relations: [], sourceBlockSql: [] },
+    missingContext: [],
+    conflicts: [],
+    appliedHints: [],
+    retrievalDiagnostics: { strategy: 'sqlite_fts', lanes: [], selectedObjects: 0, selectedEvidence: [] },
+  };
+}
+
+function v2NarrationTestBudget(input: {
+  discoveryOpen: () => boolean;
+  narrationOpen: () => boolean;
+}): AgentRunBudget {
+  const controller = new AbortController();
+  return {
+    startedAtMs: 0,
+    hardDeadlineMs: 45_000,
+    hardSignal: controller.signal,
+    mode: 'ask',
+    elapsedMs: () => 0,
+    remainingMs: () => 45_000,
+    softTargetMs: () => 15_000,
+    mayStartDiscovery: () => input.discoveryOpen(),
+    narrationSoftTargetMs: () => 38_000,
+    mayStartNarration: () => input.narrationOpen(),
+  };
 }
 
 async function customerExploratoryClosure(projectRoot: string, question: string) {
@@ -179,6 +336,25 @@ describe('answer-loop tool surface', () => {
       .toBe('research');
   });
 
+  it('AGT-054 enables the bounded agentic tool lane for a server-owned V2 Ask even when project config is legacy', () => {
+    const ordinary = __test__.orchestratorPolicyForRequest({
+      ...req([{ role: 'user', content: 'top customers by revenue' }]),
+      askAgentRuntimeMode: 'authoritative_v2',
+      orchestrationMode: 'ask',
+    });
+    expect(ordinary.mode).toBe('agentic');
+    expect(ordinary.lanes).toEqual(new Set(['ask_v2']));
+    expect(ordinary.maxIterations).toBe(8);
+
+    const research = __test__.orchestratorPolicyForRequest({
+      ...req([{ role: 'user', content: 'research revenue drivers' }]),
+      askAgentRuntimeMode: 'authoritative_v2',
+      orchestrationMode: 'research',
+    });
+    expect(research.lanes).toEqual(new Set(['research']));
+    expect(research.maxIterations).toBe(24);
+  });
+
   it('defaults Research row tools off and enables only the bounded tools on explicit opt-in', () => {
     const tools = __test__.buildAnswerLoopTools('/tmp/dql-agent-provider-tools');
     const names = tools.map((tool) => tool.name);
@@ -236,14 +412,3375 @@ describe('answer-loop tool surface', () => {
   });
 });
 
+describe('authoritative Ask V2 snapshot tool controller', () => {
+  it.each([
+    ['compiler', false, true],
+    ['generated-SQL executor', true, false],
+  ])('does not commit semantic when the host is missing its %s', async (_missing, hasCompiler, hasExecutor) => {
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', kind: 'semantic_metric',
+      semanticObjectType: 'metric', trustTier: 'semantic', name: 'orders.revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const execute = vi.fn(async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }));
+    const state = askV2State([metric]);
+
+    await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 3 })({
+      question: 'show revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric]),
+      ...(hasCompiler ? { semanticQueryCompiler: compile } : {}),
+      ...(hasExecutor ? { executeGeneratedSql: execute } : {}),
+    } as never);
+
+    expect(state.controllerTier).toBeUndefined();
+    expect(state.tierStates?.semantic).toMatchObject({
+      status: 'unavailable',
+      reasonCode: 'SEMANTIC_EXECUTION_UNAVAILABLE',
+      candidateIds: [metric.qualifiedId],
+    });
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'inspect_semantic_candidates',
+        outcome: 'unavailable',
+        reasonCode: 'SEMANTIC_EXECUTION_UNAVAILABLE',
+      }),
+    ]));
+    expect(compile).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['missing executor', (): boolean => true, false],
+    ['stale artifact', (): boolean => false, true],
+  ] as const)('continues from a %s certified fit to a runnable semantic capability before freeze', async (label, currentArtifact, provideCertifiedExecutor) => {
+    const certified: AgentEvidenceCandidate = {
+      id: 'block:top-customers', qualifiedId: 'block:top-customers', kind: 'certified_block',
+      trustTier: 'certified', name: 'top customers', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', kind: 'semantic_metric',
+      semanticObjectType: 'metric', trustTier: 'semantic', name: 'orders.revenue', relevanceScore: 0.9, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const execute = vi.fn(async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }));
+    const executeCertifiedBlock = vi.fn(async () => ({ columns: ['customer'], rows: [{ customer: 'Ada' }], rowCount: 1 }));
+    const state = askV2State([certified, metric]);
+
+    const answer = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 6 })({
+      question: 'show revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"run_certified","input":{"candidateId":"block:top-customers"}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:orders.revenue"]}}\n```',
+        '```json\n{"tool":"finish_answer","input":{"answer":"Revenue is available."}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace([certified, metric], {
+        certifiedArtifacts: new Map([['block:top-customers', {
+          version: 1,
+          artifact: { kind: 'block', nodeId: 'block:top-customers', name: 'top customers' },
+          revisionFingerprint: 'sha256:top-customers',
+          isCurrent: currentArtifact,
+        }]]),
+        certifiedCompleteCandidateIds: ['block:top-customers'],
+      }),
+      ...(provideCertifiedExecutor ? { executeCertifiedBlock } : {}),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: execute,
+    } as never);
+
+    expect(label).toBeDefined();
+    expect(executeCertifiedBlock).not.toHaveBeenCalled();
+    expect(compile).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(answer.result?.answerTier).toBe('semantic_metric');
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'inspect_certified_candidates',
+        outcome: 'unavailable',
+        reasonCode: provideCertifiedExecutor ? 'CERTIFIED_ARTIFACT_STALE' : 'CERTIFIED_EXECUTOR_UNAVAILABLE',
+      }),
+      expect.objectContaining({
+        tool: 'run_certified',
+        outcome: 'unavailable',
+        reasonCode: provideCertifiedExecutor ? 'CERTIFIED_ARTIFACT_STALE' : 'CERTIFIED_EXECUTOR_UNAVAILABLE',
+      }),
+    ]));
+  });
+
+  it('does not expose or terminally accept clarification without host-issued material choices', async () => {
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', kind: 'semantic_metric',
+      semanticObjectType: 'metric', trustTier: 'semantic', name: 'orders.revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const state = askV2State([metric]);
+    await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 3 })({
+      question: 'show revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"request_clarification","input":{"message":"Which revenue?","options":[{"id":"invented","label":"Invented"},{"id":"also-invented","label":"Also invented"}]}}\n```',
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        'No executable result.',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric]),
+    } as never);
+
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'request_clarification',
+        outcome: 'ineligible',
+        reasonCode: 'ASK_V2_CLARIFICATION_NOT_MATERIALLY_AMBIGUOUS',
+      }),
+    ]));
+    expect(state.terminal).not.toBe('clarification');
+  });
+
+  it('rejects empty, partial, and invented clarification choices before accepting the exact host-issued set', async () => {
+    const first: AgentEvidenceCandidate = {
+      id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', kind: 'semantic_metric',
+      semanticObjectType: 'metric', trustTier: 'semantic', name: 'orders.revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const second: AgentEvidenceCandidate = {
+      id: 'semantic:metric:orders.gross_revenue', qualifiedId: 'semantic:metric:orders.gross_revenue', kind: 'semantic_metric',
+      semanticObjectType: 'metric', trustTier: 'semantic', name: 'orders.gross_revenue', relevanceScore: 0.9, matchReasons: ['related'], compatibility: 'compatible',
+    };
+    const state = askV2State([first, second]);
+    const choices = [
+      { version: 1 as const, id: 'choice:net', label: 'Net revenue', candidateIds: [first.qualifiedId!], resultFingerprint: 'sha256:net' },
+      { version: 1 as const, id: 'choice:gross', label: 'Gross revenue', candidateIds: [second.qualifiedId!], resultFingerprint: 'sha256:gross' },
+    ];
+    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const execute = vi.fn(async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }));
+    const answer = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 5 })({
+      question: 'show revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"request_clarification","input":{"message":"Which revenue?","options":[{"id":"choice:net","label":"Net revenue"}]}}\n```',
+        '```json\n{"tool":"request_clarification","input":{"message":"Which revenue?","options":[{"id":"choice:net","label":"Net revenue"},{"id":"invented","label":"Invented"}]}}\n```',
+        '```json\n{"tool":"request_clarification","input":{"message":"Which revenue?","options":[{"id":"choice:net","label":"Changed label"},{"id":"choice:gross","label":"Changed label"}]}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace([first, second], {
+        tierStates: {
+          certified: { version: 1, status: 'unavailable', candidateIds: [], reasonCode: 'CERTIFIED_CANDIDATES_EMPTY' },
+          semantic: { version: 1, status: 'ambiguous', candidateIds: [first.qualifiedId!, second.qualifiedId!], reasonCode: 'SEMANTIC_MEANINGS_AMBIGUOUS', clarificationChoices: choices },
+        },
+      }),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: execute,
+    } as never);
+
+    expect(state.observations.filter((observation) => (
+      observation.tool === 'request_clarification'
+      && observation.reasonCode === 'ASK_V2_CLARIFICATION_OPTIONS_INVALID'
+    ))).toHaveLength(2);
+    expect(answer.clarificationOptions).toEqual([
+      { id: 'choice:net', label: 'Net revenue' },
+      { id: 'choice:gross', label: 'Gross revenue' },
+    ]);
+    expect(state.terminal).toBe('clarification');
+  });
+
+  it('re-dispatches a prose-only semantic controller turn to the required compiler action', async () => {
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', kind: 'semantic_metric',
+      semanticObjectType: 'metric', trustTier: 'semantic', name: 'orders.revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const execute = vi.fn(async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }));
+    const calls: AgentMessage[][] = [];
+    let index = 0;
+    const provider: AgentProvider = {
+      name: 'ollama',
+      available: async () => true,
+      generate: async (messages) => {
+        calls.push(messages);
+        return [
+          '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+          '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+          'I can answer without running MetricFlow.',
+          '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:orders.revenue"]}}\n```',
+          '```json\n{"tool":"finish_answer","input":{"answer":"Revenue is ready."}}\n```',
+        ][index++] ?? '';
+      },
+    };
+    const state = askV2State([metric]);
+    const answer = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 6 })({
+      question: 'show revenue',
+      provider,
+      askAgentV2Workspace: askV2Workspace([metric]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: execute,
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(answer.result?.answerTier).toBe('semantic_metric');
+    expect(calls).toHaveLength(5);
+    const finalPrompt = calls[3]!.map((message) => message.content).join('\n');
+    expect(finalPrompt).toContain('Controller progression required');
+    expect(finalPrompt).not.toContain('I can answer without running MetricFlow.');
+    expect(answer.text).toBe('Revenue is ready.');
+  });
+
+  it.each([
+    ['OpenAI', () => new OpenAIProvider({ apiKey: 'test', baseUrl: 'https://example.test/v1', model: 'gpt-test' })],
+    ['Claude', () => new ClaudeProvider({ apiKey: 'test', baseUrl: 'https://example.test/anthropic', model: 'claude-test' })],
+  ])('%s preserves a native final-action budget stop as ASK_TOOL_BUDGET_EXHAUSTED in the V2 lane', async (kind, createProvider) => {
+    const candidate: AgentEvidenceCandidate = {
+      id: 'block:top-customers', qualifiedId: 'block:top-customers', kind: 'certified_block',
+      trustTier: 'certified', name: 'top customers', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => kind === 'OpenAI'
+      ? new Response(JSON.stringify({ choices: [{ message: { content: null, tool_calls: [{ id: 'wrong', type: 'function', function: { name: 'invented_tool', arguments: '{}' } }] } }] }), { status: 200 })
+      : new Response(JSON.stringify({ content: [{ type: 'tool_use', id: 'wrong', name: 'invented_tool', input: {} }] }), { status: 200 })));
+    try {
+      const state = askV2State([candidate]);
+      // This is host-owned tuple state, not a provider claim. It deliberately
+      // narrows the first physical native send to `run_certified`.
+      state.tierStates = {
+        certified: { version: 1, status: 'complete', candidateIds: [candidate.qualifiedId!], reasonCode: 'CERTIFIED_COMPLETE_FOR_REQUEST' },
+      };
+      const answer = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 1 })({
+        question: 'who are the top customers',
+        provider: createProvider(),
+        askAgentV2Workspace: askV2Workspace([candidate], {
+          certifiedArtifacts: new Map([['block:top-customers', {
+            version: 1,
+            artifact: { kind: 'block', nodeId: 'block:top-customers', name: 'top customers' },
+            revisionFingerprint: 'sha256:top-customers',
+            isCurrent: () => true,
+          }]]),
+          certifiedCompleteCandidateIds: ['block:top-customers'],
+          certifiedExecutionAvailable: true,
+        }),
+        executeCertifiedBlock: vi.fn(async () => ({ columns: ['customer'], rows: [{ customer: 'Ada' }], rowCount: 1 })),
+      } as never);
+
+      expect(answer.kind).toBe('no_answer');
+      expect(state.observations).toEqual(expect.arrayContaining([
+        expect.objectContaining({ tool: 'finish_answer', outcome: 'error', reasonCode: 'ASK_TOOL_BUDGET_EXHAUSTED', origin: 'agent_control' }),
+      ]));
+      expect(state.terminalOutcome).toMatchObject({ kind: 'budget_exhausted', reasonCode: 'ASK_TOOL_BUDGET_EXHAUSTED', origin: 'agent_control' });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('requires a host finish after the snapshot-bound certified artifact executes and discards provider prose', async () => {
+    const candidate: AgentEvidenceCandidate = {
+      id: 'block:top-customers', qualifiedId: 'block:top-customers', kind: 'certified_block',
+      trustTier: 'certified', name: 'top customers', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const executeCertifiedBlock = vi.fn(async () => ({ columns: ['customer'], rows: [{ customer: 'Ada' }], rowCount: 1 }));
+    const state = askV2State([candidate]);
+    const calls: AgentMessage[][] = [];
+    let call = 0;
+    const result = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 4 })({
+      question: 'who are the top customers',
+      provider: {
+        name: 'ollama',
+        available: async () => true,
+        generate: async (messages: AgentMessage[]) => {
+          calls.push(messages);
+          return [
+            '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+            '```json\n{"tool":"run_certified","input":{"candidateId":"block:top-customers"}}\n```',
+            'The certified result is complete.',
+            '```json\n{"tool":"finish_answer","input":{"answer":"The certified result is ready."}}\n```',
+          ][call++] ?? '';
+        },
+      },
+      askAgentV2Workspace: askV2Workspace([candidate], {
+        certifiedArtifacts: new Map([['block:top-customers', {
+          version: 1,
+          artifact: { kind: 'block', nodeId: 'block:top-customers', name: 'top customers' },
+          revisionFingerprint: 'sha256:top-customers',
+          isCurrent: () => true,
+        }]]),
+        certifiedCompleteCandidateIds: ['block:top-customers'],
+      }),
+      executeCertifiedBlock,
+    } as never);
+
+    expect(executeCertifiedBlock).toHaveBeenCalledOnce();
+    expect(result.result?.answerTier).toBe('certified_block');
+    expect(result.text).toBe('The certified result is ready.');
+    expect(calls).toHaveLength(4);
+    expect(calls[3]!.map((message) => message.content).join('\n')).toContain('Controller progression required');
+    expect(calls[3]!.map((message) => message.content).join('\n')).not.toContain('The certified result is complete.');
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'run_certified', outcome: 'executed', candidateIds: ['block:top-customers'] }),
+      expect.objectContaining({ tool: 'finish_answer', outcome: 'eligible', reasonCode: 'ASK_V2_RESULT_NARRATED' }),
+    ]));
+  });
+
+  it('preserves a validated certified result with deterministic facts when the final provider dispatch fails', async () => {
+    const candidate: AgentEvidenceCandidate = {
+      id: 'block:top-customers', qualifiedId: 'block:top-customers', kind: 'certified_block',
+      trustTier: 'certified', name: 'top customers', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const state = askV2State([candidate]);
+    let call = 0;
+    const result = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 4 })({
+      question: 'who are the top customers',
+      provider: {
+        name: 'ollama',
+        available: async () => true,
+        generate: async () => {
+          const next = call++;
+          if (next === 0) return '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```';
+          if (next === 1) return '```json\n{"tool":"run_certified","input":{"candidateId":"block:top-customers"}}\n```';
+          throw new Error('narration transport unavailable');
+        },
+      },
+      askAgentV2Workspace: askV2Workspace([candidate], {
+        certifiedArtifacts: new Map([['block:top-customers', {
+          version: 1,
+          artifact: { kind: 'block', nodeId: 'block:top-customers', name: 'top customers' },
+          revisionFingerprint: 'sha256:top-customers',
+          isCurrent: () => true,
+        }]]),
+        certifiedCompleteCandidateIds: ['block:top-customers'],
+      }),
+      executeCertifiedBlock: vi.fn(async () => ({ columns: ['customer'], rows: [{ customer: 'Ada' }], rowCount: 1 })),
+    } as never);
+
+    expect(result.kind).toBe('certified');
+    expect(result.certification).toBe('certified');
+    expect(result.result).toMatchObject({ rowCount: 1, answerTier: 'certified_block' });
+    expect(result.text).toContain('validated certified query completed with 1 row');
+    expect(result.askAgentV2Outcome).toMatchObject({
+      kind: 'finish_answer',
+      reasonCode: 'ASK_V2_RESULT_PRESERVED_AFTER_NARRATION_FAILURE',
+      origin: 'narration',
+    });
+    expect(state.terminalOutcome).toMatchObject({
+      kind: 'finish_answer',
+      reasonCode: 'ASK_V2_RESULT_PRESERVED_AFTER_NARRATION_FAILURE',
+    });
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'finish_answer', outcome: 'error', reasonCode: 'ASK_V2_PROVIDER_AGENT_CONTROL_FAILED', origin: 'provider' }),
+    ]));
+  });
+
+  it('preserves a validated text-protocol result with a deadline-specific V8 narration receipt', async () => {
+    const candidate: AgentEvidenceCandidate = {
+      id: 'block:top-customers', qualifiedId: 'block:top-customers', kind: 'certified_block',
+      trustTier: 'certified', name: 'top customers', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const state = askV2State([candidate]);
+    let call = 0;
+    const result = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 4 })({
+      question: 'who are the top customers',
+      provider: {
+        name: 'ollama',
+        available: async () => true,
+        generate: async () => {
+          const next = call++;
+          if (next === 0) return '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```';
+          if (next === 1) return '```json\n{"tool":"run_certified","input":{"candidateId":"block:top-customers"}}\n```';
+          throw Object.assign(new Error('The run soft target elapsed before narration could begin.'), {
+            code: 'RUN_SOFT_TARGET_EXCEEDED',
+          });
+        },
+      },
+      askAgentV2Workspace: askV2Workspace([candidate], {
+        certifiedArtifacts: new Map([['block:top-customers', {
+          version: 1,
+          artifact: { kind: 'block', nodeId: 'block:top-customers', name: 'top customers' },
+          revisionFingerprint: 'sha256:top-customers',
+          isCurrent: () => true,
+        }]]),
+        certifiedCompleteCandidateIds: ['block:top-customers'],
+      }),
+      executeCertifiedBlock: vi.fn(async () => ({ columns: ['customer'], rows: [{ customer: 'Ada' }], rowCount: 1 })),
+    } as never);
+
+    expect(result.kind).toBe('certified');
+    expect(result.result).toMatchObject({ rowCount: 1, answerTier: 'certified_block' });
+    expect(result.text).toContain('validated certified query completed with 1 row');
+    expect(result.askAgentV2Outcome).toMatchObject({
+      kind: 'finish_answer',
+      reasonCode: 'ASK_V2_RESULT_PRESERVED_AFTER_NARRATION_DEADLINE',
+      origin: 'narration',
+      safeAction: 'review_validated_result',
+    });
+    expect(state.terminalOutcome).toMatchObject({
+      kind: 'finish_answer',
+      reasonCode: 'ASK_V2_RESULT_PRESERVED_AFTER_NARRATION_DEADLINE',
+      origin: 'narration',
+    });
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'finish_answer',
+        outcome: 'error',
+        reasonCode: 'RUN_SOFT_TARGET_EXCEEDED',
+        origin: 'narration',
+        provider: expect.objectContaining({ phase: 'narration', cause: 'run_deadline', safeAction: 'review_validated_result' }),
+      }),
+    ]));
+  });
+
+  it.each([
+    ['OpenAI', () => new OpenAIProvider({ apiKey: 'test', baseUrl: 'https://example.test/v1', model: 'gpt-test' })],
+    ['Claude', () => new ClaudeProvider({ apiKey: 'test', baseUrl: 'https://example.test/anthropic', model: 'claude-test' })],
+  ])('%s preserves a validated certified result when the final native narration turn exhausts its dispatch budget', async (kind, createProvider) => {
+    const candidate: AgentEvidenceCandidate = {
+      id: 'block:top-customers', qualifiedId: 'block:top-customers', kind: 'certified_block',
+      trustTier: 'certified', name: 'top customers', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    let send = 0;
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      send += 1;
+      if (send === 1) {
+        return kind === 'OpenAI'
+          ? new Response(JSON.stringify({ choices: [{ message: {
+            content: null,
+            tool_calls: [{ id: 'certified_1', type: 'function', function: { name: 'run_certified', arguments: '{"candidateId":"block:top-customers"}' } }],
+          } }] }), { status: 200, headers: { 'content-type': 'application/json' } })
+          : new Response(JSON.stringify({ content: [{
+            type: 'tool_use', id: 'certified_1', name: 'run_certified', input: { candidateId: 'block:top-customers' },
+          }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return kind === 'OpenAI'
+        ? new Response(JSON.stringify({ choices: [{ message: { content: 'The query is complete.', tool_calls: [] } }] }), { status: 200, headers: { 'content-type': 'application/json' } })
+        : new Response(JSON.stringify({ content: [{ type: 'text', text: 'The query is complete.' }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }));
+    try {
+      const state = askV2State([candidate]);
+      // Match the live host boundary: a complete certified tier becomes
+      // executable only after its snapshot-bound candidate inspection has
+      // been recorded.  The native provider should therefore spend its first
+      // physical send on the execution and reserve the second for finish.
+      state.observations.push({
+        version: 1,
+        tool: 'inspect_certified_candidates',
+        outcome: 'eligible',
+        reasonCode: 'CERTIFIED_COMPLETE_FOR_REQUEST',
+        candidateIds: [candidate.qualifiedId!],
+        tier: 'certified',
+        origin: 'retrieval',
+      });
+      state.tierStates = {
+        certified: { version: 1, status: 'complete', candidateIds: [candidate.qualifiedId!], reasonCode: 'CERTIFIED_COMPLETE_FOR_REQUEST' },
+      };
+      const result = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 2 })({
+        question: 'who are the top customers',
+        provider: createProvider(),
+        askAgentV2Workspace: askV2Workspace([candidate], {
+          certifiedArtifacts: new Map([['block:top-customers', {
+            version: 1,
+            artifact: { kind: 'block', nodeId: 'block:top-customers', name: 'top customers' },
+            revisionFingerprint: 'sha256:top-customers',
+            isCurrent: () => true,
+          }]]),
+          certifiedCompleteCandidateIds: ['block:top-customers'],
+        }),
+        executeCertifiedBlock: vi.fn(async () => ({ columns: ['customer'], rows: [{ customer: 'Ada' }], rowCount: 1 })),
+      } as never);
+
+      expect(send).toBe(2);
+      expect(result.kind).toBe('certified');
+      expect(result.result).toMatchObject({ rowCount: 1, answerTier: 'certified_block' });
+      expect(result.text).toContain('validated certified query completed with 1 row');
+      expect(result.askAgentV2Outcome).toMatchObject({
+        kind: 'finish_answer',
+        reasonCode: 'ASK_V2_RESULT_PRESERVED_AFTER_NARRATION_FAILURE',
+      });
+      expect(state.observations).toEqual(expect.arrayContaining([
+        expect.objectContaining({ tool: 'finish_answer', outcome: 'error', reasonCode: 'ASK_PROVIDER_DISPATCH_BUDGET_EXHAUSTED', origin: 'provider' }),
+      ]));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('fails closed when a certified artifact changes after the snapshot capture and before freeze', async () => {
+    const candidate: AgentEvidenceCandidate = {
+      id: 'block:top-customers', qualifiedId: 'block:top-customers', kind: 'certified_block',
+      trustTier: 'certified', name: 'top customers', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const executeCertifiedBlock = vi.fn();
+    let currentReads = 0;
+    const state = askV2State([candidate]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'who are the top customers',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        // The host rechecks this callback immediately before calling the
+        // executor; this transition models a concurrent artifact mutation.
+        '```json\n{"tool":"run_certified","input":{"candidateId":"block:top-customers"}}\n```',
+        'no result',
+      ]),
+      askAgentV2Workspace: askV2Workspace([candidate], {
+        certifiedArtifacts: new Map([['block:top-customers', {
+          version: 1,
+          artifact: { kind: 'block', nodeId: 'block:top-customers', name: 'top customers' },
+          revisionFingerprint: 'sha256:top-customers',
+          // The first read validates the immutable artifact during
+          // inspection; the second is the pre-tool availability guard. Make
+          // the third, immediately-before-freeze recheck fail so this test
+          // exercises the race it names rather than an earlier unavailable
+          // capability state.
+          isCurrent: () => ++currentReads < 3,
+        }]]),
+        certifiedCompleteCandidateIds: ['block:top-customers'],
+      }),
+      executeCertifiedBlock,
+    } as never);
+
+    expect(executeCertifiedBlock).not.toHaveBeenCalled();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'run_certified', outcome: 'unavailable', reasonCode: 'CERTIFIED_ARTIFACT_STALE' }),
+    ]));
+  });
+
+  it('does not let an admitted but context-only certified block freeze tier one', async () => {
+    const candidate: AgentEvidenceCandidate = {
+      id: 'block:customer-profile', qualifiedId: 'block:customer-profile', kind: 'certified_block',
+      trustTier: 'certified', name: 'customer profile', relevanceScore: 1, matchReasons: ['related'], compatibility: 'compatible',
+    };
+    const executeCertifiedBlock = vi.fn();
+    const state = askV2State([candidate]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'top customers by product revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"run_certified","input":{"candidateId":"block:customer-profile"}}\n```',
+        'no result',
+      ]),
+      askAgentV2Workspace: askV2Workspace([candidate], {
+        certifiedArtifacts: new Map([['block:customer-profile', { kind: 'block', nodeId: 'block:customer-profile', name: 'customer profile' }]]),
+        certifiedCompleteCandidateIds: [],
+      }),
+      executeCertifiedBlock,
+    } as never);
+
+    expect(executeCertifiedBlock).not.toHaveBeenCalled();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'run_certified', outcome: 'ineligible', reasonCode: 'CERTIFIED_TUPLE_NOT_PROVEN_BY_SNAPSHOT' }),
+    ]));
+  });
+
+  it('preserves the admitted canonical semantic metric ID and does not consume a V1 plan', async () => {
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:account_revenue.revenue',
+      qualifiedId: 'semantic:metric:account_revenue.revenue',
+      kind: 'semantic_metric',
+      semanticObjectType: 'metric',
+      trustTier: 'semantic',
+      name: 'account_revenue.revenue',
+      relevanceScore: 1,
+      matchReasons: ['exact'],
+      compatibility: 'compatible',
+    };
+    const state = askV2State([metric]);
+    const compile = vi.fn(async (selection: { metrics: string[] }) => {
+      expect(selection.metrics).toEqual(['account_revenue.revenue']);
+      return { sql: 'select 1 as revenue', engine: 'native' as const };
+    });
+    const result = await __test__.createAskV2LaneHandler(state)({
+      question: 'show revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:account_revenue.revenue"]}}\n```',
+        'semantic result finished',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }),
+      // If the V2 controller accidentally read a V1 plan this deliberately
+      // incompatible field would become visible in the assertion above.
+      resolvedAnalyticalPlan: { planId: 'legacy-plan' } as never,
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    expect(result.result?.answerTier).toBe('semantic_metric');
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'executed', candidateIds: ['semantic:metric:account_revenue.revenue'] }),
+    ]));
+  });
+
+  it('normalizes declared semantic time/filter bindings before freezing the compiler plan', async () => {
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', kind: 'semantic_metric', semanticObjectType: 'metric',
+      trustTier: 'semantic', name: 'orders.revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const orderedAt: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:orders.ordered_at', qualifiedId: 'semantic:dimension:orders.ordered_at', kind: 'semantic_member',
+      trustTier: 'semantic', name: 'orders.ordered_at', timeGrains: ['day', 'month'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const category: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:products.category', qualifiedId: 'semantic:dimension:products.category', kind: 'semantic_member',
+      trustTier: 'semantic', name: 'products.category', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const compile = vi.fn(async (selection: Record<string, unknown>) => {
+      expect(selection).toMatchObject({
+        metrics: ['orders.revenue'],
+        timeDimension: { name: 'orders.ordered_at', granularity: 'month' },
+        filters: [{ dimension: 'products.category', operator: '=', values: ['beverage'] }],
+      });
+      return { sql: 'select 1 as revenue', engine: 'native' as const };
+    });
+    const state = askV2State([metric, orderedAt, category]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'show beverage revenue by month',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:orders.revenue"],"timeDimensionId":"semantic:dimension:orders.ordered_at","timeGrain":"MONTH","filters":[{"dimensionId":"semantic:dimension:products.category","value":"beverage"}]}}\n```',
+        'semantic result finished',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric, orderedAt, category]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }),
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    expect(state.resolvedPlan).toMatchObject({ frozen: true, tier: 'semantic' });
+  });
+
+  it('AGT-047 completes an omitted explicit month binding from one admitted metric-compatible time capability', async () => {
+    const metricId = 'semantic:metric:order_item.revenue';
+    const timeId = 'semantic:commerce:dimension:order_item.metric_time';
+    const metric: AgentEvidenceCandidate = {
+      id: metricId, qualifiedId: metricId, kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic',
+      name: 'revenue', semanticRuntimeName: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      analyticalCapability: {
+        executionCapabilities: [{ route: 'semantic', adapterId: 'metricflow' }],
+        timeDimensions: [{ dimensionId: timeId }],
+      } as never,
+    };
+    const metricTime: AgentEvidenceCandidate = {
+      id: timeId, qualifiedId: timeId, kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'metric_time', semanticRuntimeName: 'metric_time', timeGrains: ['day', 'month'],
+      relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const candidates = [metric, metricTime];
+    const captured = captureAskV2SemanticCapabilities({
+      candidates,
+      snapshotId: 'snapshot:semantic-month-completion-text',
+      isCurrent: () => true,
+    });
+    const compile = vi.fn(async (selection: Record<string, unknown>) => {
+      expect(selection).toMatchObject({
+        metrics: ['revenue'],
+        timeDimension: { name: 'metric_time', granularity: 'month' },
+        engine: 'metricflow-cli',
+      });
+      return { sql: 'select 1 as revenue', engine: 'metricflow-cli' as const };
+    });
+    const execute = vi.fn(async () => ({
+      columns: ['metric_time', 'revenue'],
+      rows: [{ metric_time: '2026-01-01', revenue: 1 }],
+      rowCount: 1,
+    }));
+    const state = askV2State(candidates);
+    const answer = await __test__.createAskV2LaneHandler(state)({
+      question: 'Show revenue by month using the revenue semantic metric',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        // The real failure shape: the controller selects the exact metric but
+        // omits the required axis/grain. The host can complete only this one
+        // uniquely compatible, snapshot-admitted time binding.
+        `\`\`\`json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["${metricId}"]}}\n\`\`\``,
+        '```json\n{"tool":"finish_answer","input":{"answer":"Revenue is grouped by month."}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace(candidates, {
+        semanticCapabilities: captured.capabilities,
+        semanticCapabilityCollisionIds: captured.collisionIds,
+      }),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: execute,
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(answer.result).toMatchObject({ rowCount: 1, answerTier: 'semantic_metric' });
+    expect(state.resolvedPlan).toMatchObject({ frozen: true, tier: 'semantic', candidateIds: [metricId, timeId] });
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'compile_and_run_semantic',
+        outcome: 'eligible',
+        reasonCode: 'SEMANTIC_TIME_BINDING_COMPLETED',
+        candidateIds: [metricId, timeId],
+        origin: 'validation',
+        inputFingerprint: expect.stringMatching(/^sha256:/),
+        outputFingerprint: expect.stringMatching(/^sha256:/),
+      }),
+      expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'executed', reasonCode: 'SEMANTIC_RESULT_VALIDATED' }),
+    ]));
+    expect(answer.askAgentV2Outcome).toMatchObject({ kind: 'finish_answer' });
+  });
+
+  it('AGT-047 fills an omitted grain from the immutable question only after the controller selected one admitted axis', async () => {
+    const metricId = 'semantic:metric:orders.revenue';
+    const timeId = 'semantic:dimension:orders.metric_time';
+    const metric: AgentEvidenceCandidate = {
+      id: metricId, qualifiedId: metricId, kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic',
+      name: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      analyticalCapability: { timeDimensions: [{ dimensionId: timeId }] } as never,
+    };
+    const metricTime: AgentEvidenceCandidate = {
+      id: timeId, qualifiedId: timeId, kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'metric_time', timeGrains: ['day', 'month'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const compile = vi.fn(async (selection: Record<string, unknown>) => {
+      expect(selection.timeDimension).toEqual({ name: 'metric_time', granularity: 'month' });
+      return { sql: 'select 1 as revenue', engine: 'native' as const };
+    });
+    const state = askV2State([metric, metricTime]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'Show revenue by month',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        `\`\`\`json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["${metricId}"],"timeDimensionId":"${timeId}"}}\n\`\`\``,
+        '```json\n{"tool":"finish_answer","input":{"answer":"Revenue is grouped by month."}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric, metricTime]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }),
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'compile_and_run_semantic', outcome: 'eligible', reasonCode: 'SEMANTIC_TIME_BINDING_COMPLETED',
+        candidateIds: [metricId, timeId],
+      }),
+    ]));
+  });
+
+  it('AGT-047 rejects an omitted controller grain when the selected axis does not declare the immutable request grain', async () => {
+    const metricId = 'semantic:metric:orders.revenue';
+    const timeId = 'semantic:dimension:orders.metric_time';
+    const metric: AgentEvidenceCandidate = {
+      id: metricId, qualifiedId: metricId, kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic',
+      name: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      analyticalCapability: { timeDimensions: [{ dimensionId: timeId }] } as never,
+    };
+    const metricTime: AgentEvidenceCandidate = {
+      id: timeId, qualifiedId: timeId, kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'metric_time', timeGrains: ['month'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const compile = vi.fn();
+    const state = askV2State([metric, metricTime]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'Show revenue by quarter',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        `\`\`\`json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["${metricId}"],"timeDimensionId":"${timeId}"}}\n\`\`\``,
+        'No executable result.',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric, metricTime]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: vi.fn(),
+    } as never);
+
+    expect(compile).not.toHaveBeenCalled();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'ineligible', reasonCode: 'SEMANTIC_TIME_GRAIN_NOT_DECLARED' }),
+    ]));
+  });
+
+  it('AGT-047 rejects a controller grain that conflicts with the immutable user request before compiler authorization', async () => {
+    const metricId = 'semantic:metric:orders.revenue';
+    const timeId = 'semantic:dimension:orders.metric_time';
+    const metric: AgentEvidenceCandidate = {
+      id: metricId, qualifiedId: metricId, kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic',
+      name: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      analyticalCapability: { timeDimensions: [{ dimensionId: timeId }] } as never,
+    };
+    const metricTime: AgentEvidenceCandidate = {
+      id: timeId, qualifiedId: timeId, kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'metric_time', timeGrains: ['month', 'quarter'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const compile = vi.fn();
+    const state = askV2State([metric, metricTime]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'Show revenue by month',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        `\`\`\`json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["${metricId}"],"timeDimensionId":"${timeId}","timeGrain":"quarter"}}\n\`\`\``,
+        'No executable result.',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric, metricTime]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: vi.fn(),
+    } as never);
+
+    expect(compile).not.toHaveBeenCalled();
+    expect(state.resolvedPlan).toBeUndefined();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'ineligible', reasonCode: 'SEMANTIC_TIME_GRAIN_MISMATCH' }),
+    ]));
+  });
+
+  it('AGT-047 requires declared metric-to-time compatibility before completing a fully omitted time binding', async () => {
+    const metricId = 'semantic:metric:orders.revenue';
+    const timeId = 'semantic:dimension:orders.metric_time';
+    const metric: AgentEvidenceCandidate = {
+      id: metricId, qualifiedId: metricId, kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic',
+      name: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      // No timeDimensions declaration: the legacy explicit-axis path remains
+      // available, but the host may not choose an omitted axis for it.
+    };
+    const metricTime: AgentEvidenceCandidate = {
+      id: timeId, qualifiedId: timeId, kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'metric_time', timeGrains: ['month'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const compile = vi.fn();
+    const state = askV2State([metric, metricTime]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'Show revenue by month',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        `\`\`\`json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["${metricId}"]}}\n\`\`\``,
+        'No executable result.',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric, metricTime]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: vi.fn(),
+    } as never);
+
+    expect(compile).not.toHaveBeenCalled();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'compile_and_run_semantic', outcome: 'ineligible',
+        reasonCode: 'SEMANTIC_TIME_DIMENSION_COMPATIBILITY_UNDECLARED', safeAction: 'use:compile_and_run_semantic',
+      }),
+    ]));
+  });
+
+  it('AGT-047 does not repeat a persisted host time completion after reload', async () => {
+    const metricId = 'semantic:metric:orders.revenue';
+    const timeId = 'semantic:dimension:orders.metric_time';
+    const metric: AgentEvidenceCandidate = {
+      id: metricId, qualifiedId: metricId, kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic',
+      name: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      analyticalCapability: { timeDimensions: [{ dimensionId: timeId }] } as never,
+    };
+    const metricTime: AgentEvidenceCandidate = {
+      id: timeId, qualifiedId: timeId, kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'metric_time', timeGrains: ['month'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const state = askV2State([metric, metricTime]);
+    // A process reload receives this durable host-only normalization receipt.
+    // It must not charge a tool call, nor make the one correction available a
+    // second time for the same immutable snapshot/question.
+    state.observations.push({
+      version: 1,
+      tool: 'compile_and_run_semantic',
+      tier: 'semantic',
+      outcome: 'eligible',
+      reasonCode: 'SEMANTIC_TIME_BINDING_COMPLETED',
+      candidateIds: [metricId, timeId],
+      inputFingerprint: 'sha256:before-time-binding',
+      outputFingerprint: 'sha256:after-time-binding',
+      origin: 'validation',
+    });
+    const compile = vi.fn();
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'Show revenue by month',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        `\`\`\`json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["${metricId}"]}}\n\`\`\``,
+        'No executable result.',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric, metricTime]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: vi.fn(),
+    } as never);
+
+    expect(compile).not.toHaveBeenCalled();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'compile_and_run_semantic', outcome: 'unavailable',
+        reasonCode: 'SEMANTIC_TIME_BINDING_COMPLETION_EXHAUSTED',
+      }),
+    ]));
+  });
+
+  it('AGT-047 rejects supplied semantic time arguments for FY periods without the snapshot-declared fiscal calendar binding', async () => {
+    const metricId = 'semantic:metric:orders.revenue';
+    const timeId = 'semantic:dimension:orders.metric_time';
+    const fiscalId = 'semantic:dimension:orders.fiscal_period';
+    const metric: AgentEvidenceCandidate = {
+      id: metricId, qualifiedId: metricId, kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic',
+      name: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      analyticalCapability: { timeDimensions: [{ dimensionId: timeId }] } as never,
+    };
+    const metricTime: AgentEvidenceCandidate = {
+      id: timeId, qualifiedId: timeId, kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'metric_time', timeGrains: ['month'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const fiscalPeriod: AgentEvidenceCandidate = {
+      id: fiscalId, qualifiedId: fiscalId, kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'fiscal_period', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const compile = vi.fn();
+    const state = askV2State([metric, metricTime, fiscalPeriod]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'Show revenue by month for FY26',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        `\`\`\`json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["${metricId}"],"timeDimensionId":"${timeId}","timeGrain":"month","filters":[{"dimensionId":"${fiscalId}","value":"FY26"}]}}\n\`\`\``,
+        'No executable result.',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric, metricTime, fiscalPeriod]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: vi.fn(),
+    } as never);
+
+    expect(compile).not.toHaveBeenCalled();
+    expect(state.resolvedPlan).toBeUndefined();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'unavailable', reasonCode: 'SEMANTIC_FISCAL_CALENDAR_REQUIRED' }),
+    ]));
+  });
+
+  it('AGT-047 compiles a fiscal semantic request only with the declared calendar role and exact fiscal-period filter', async () => {
+    const metricId = 'semantic:metric:orders.revenue';
+    const timeId = 'semantic:dimension:orders.metric_time';
+    const fiscalId = 'semantic:dimension:orders.fiscal_period';
+    const metric: AgentEvidenceCandidate = {
+      id: metricId, qualifiedId: metricId, kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic',
+      name: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      analyticalCapability: { timeDimensions: [{ dimensionId: timeId }] } as never,
+    };
+    const metricTime: AgentEvidenceCandidate = {
+      id: timeId, qualifiedId: timeId, kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'metric_time', timeGrains: ['month'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const fiscalPeriod: AgentEvidenceCandidate = {
+      id: fiscalId, qualifiedId: fiscalId, kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'fiscal_period', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const compile = vi.fn(async (selection: Record<string, unknown>) => {
+      expect(selection).toMatchObject({
+        timeDimension: { name: 'metric_time', granularity: 'month' },
+        filters: [{ dimension: 'fiscal_period', operator: '=', values: ['FY26'] }],
+      });
+      return { sql: 'select 1 as revenue', engine: 'native' as const };
+    });
+    const state = askV2State([metric, metricTime, fiscalPeriod]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'Show revenue by month for FY26',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        `\`\`\`json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["${metricId}"],"timeDimensionId":"${timeId}","timeGrain":"month","filters":[{"dimensionId":"${fiscalId}","value":"FY26"}]}}\n\`\`\``,
+        '```json\n{"tool":"finish_answer","input":{"answer":"Revenue is grouped by fiscal month."}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric, metricTime, fiscalPeriod], {
+        fiscalCalendar: { id: 'semantic:calendar:fiscal', dateRoleId: timeId, fiscalPeriodFieldId: fiscalId },
+      }),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }),
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    expect(state.resolvedPlan).toMatchObject({ frozen: true, tier: 'semantic' });
+  });
+
+  it.each([
+    [
+      'a contradictory runtime-name duplicate for the same fiscal field',
+      [
+        { dimensionId: 'semantic:dimension:orders.fiscal_period', value: 'FY26' },
+        { dimensionId: 'fiscal_period', value: 'FY27' },
+      ],
+    ],
+    [
+      'an identical legacy-alias duplicate for the same fiscal field',
+      [
+        { dimensionId: 'semantic:dimension:orders.fiscal_period', value: 'FY26' },
+        { dimensionId: 'semantic:legacy:orders.fiscal_period', value: 'FY26' },
+      ],
+    ],
+    [
+      'a single fiscal-period value that conflicts with the immutable FY token',
+      [{ dimensionId: 'semantic:dimension:orders.fiscal_period', value: 'FY27' }],
+    ],
+  ])('AGT-047 rejects %s before fiscal semantic compilation', async (_case, filters) => {
+    const metricId = 'semantic:metric:orders.revenue';
+    const timeId = 'semantic:dimension:orders.metric_time';
+    const fiscalId = 'semantic:dimension:orders.fiscal_period';
+    const metric: AgentEvidenceCandidate = {
+      id: metricId, qualifiedId: metricId, kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic',
+      name: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      analyticalCapability: { timeDimensions: [{ dimensionId: timeId }] } as never,
+    };
+    const metricTime: AgentEvidenceCandidate = {
+      id: timeId, qualifiedId: timeId, kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'metric_time', timeGrains: ['month'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const fiscalPeriod: AgentEvidenceCandidate = {
+      id: fiscalId, qualifiedId: fiscalId, aliases: ['semantic:legacy:orders.fiscal_period'],
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'fiscal_period', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const compile = vi.fn();
+    const state = askV2State([metric, metricTime, fiscalPeriod]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'Show revenue by month for FY26',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        `\`\`\`json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["${metricId}"],"timeDimensionId":"${timeId}","timeGrain":"month","filters":${JSON.stringify(filters)}}}\n\`\`\``,
+        'No executable result.',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric, metricTime, fiscalPeriod], {
+        fiscalCalendar: { id: 'semantic:calendar:fiscal', dateRoleId: timeId, fiscalPeriodFieldId: fiscalId },
+      }),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: vi.fn(),
+    } as never);
+
+    expect(compile).not.toHaveBeenCalled();
+    expect(state.resolvedPlan).toBeUndefined();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'compile_and_run_semantic', outcome: 'ineligible',
+        reasonCode: 'SEMANTIC_FISCAL_FILTER_INVALID', origin: 'validation',
+      }),
+    ]));
+  });
+
+  it('AGT-047 maps only unique snapshot-bound MetricFlow runtime names to canonical IDs before validating month', async () => {
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:order_item.revenue', qualifiedId: 'semantic:metric:order_item.revenue',
+      kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic', name: 'revenue',
+      relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      // The semantic registry proves that this revenue metric's metric_time
+      // axis belongs to order_item; raw `metric_time` is not independently
+      // sufficient to choose among the four model-owned axes below.
+      analyticalCapability: {
+        timeDimensions: [{ dimensionId: 'semantic:commerce:dimension:order_item.metric_time' }],
+      } as never,
+    };
+    // The retrieval package can also expose a generic measure named revenue.
+    // A raw runtime-name tool argument must prefer the concrete metric, not
+    // create an ambiguous or accidental semantic selection.
+    const genericRevenue: AgentEvidenceCandidate = {
+      id: 'semantic:uncategorized:measure:revenue', qualifiedId: 'semantic:uncategorized:measure:revenue',
+      kind: 'semantic_member', semanticObjectType: 'measure', trustTier: 'semantic', name: 'revenue',
+      relevanceScore: 0.8, matchReasons: ['related'], compatibility: 'compatible',
+    };
+    const metricTime = (model: 'customers' | 'orders' | 'locations' | 'order_item'): AgentEvidenceCandidate => ({
+      id: `semantic:commerce:dimension:${model}.metric_time`,
+      qualifiedId: `semantic:commerce:dimension:${model}.metric_time`,
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      trustTier: 'semantic',
+      name: 'metric_time',
+      semanticRuntimeName: 'metric_time',
+      semanticModel: model,
+      sourceObjects: [model],
+      // The old snapshots may carry this only as an alias. It is safe to read
+      // only when it resolves uniquely after the metric's compatibility
+      // contract has reduced the admitted capability set.
+      aliases: ['semantic:uncategorized:dimension:metric_time'],
+      timeGrains: ['day', 'month'],
+      relevanceScore: 1,
+      matchReasons: ['exact'],
+      compatibility: 'compatible',
+    });
+    const metricTimes = [
+      metricTime('customers'),
+      metricTime('orders'),
+      metricTime('locations'),
+      metricTime('order_item'),
+    ];
+    const compile = vi.fn(async (selection: Record<string, unknown>) => {
+      expect(selection).toMatchObject({
+        metrics: ['revenue'],
+        timeDimension: { name: 'metric_time', granularity: 'month' },
+      });
+      return { sql: 'select 1 as revenue', engine: 'native' as const };
+    });
+    const execute = vi.fn(async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }));
+    const candidates = [metric, genericRevenue, ...metricTimes];
+    const captured = captureAskV2SemanticCapabilities({
+      candidates,
+      snapshotId: 'snapshot:metric-time-capabilities',
+      isCurrent: () => true,
+    });
+    const state = askV2State(candidates);
+    const answer = await __test__.createAskV2LaneHandler(state)({
+      question: 'Show revenue by month using the revenue semantic metric',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        // Native/text providers sometimes reflect the compiler-safe name in
+        // their tool call. The adapter may map only this exact capability
+        // name; it still freezes and receipts opaque snapshot IDs.
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["revenue"],"timeDimensionId":"metric_time","timeGrain":"month","engine":"native"}}\n```',
+        'semantic result finished',
+      ]),
+      askAgentV2Workspace: askV2Workspace(candidates, {
+        semanticCapabilities: captured.capabilities,
+        semanticCapabilityCollisionIds: captured.collisionIds,
+      }),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: execute,
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(captured.collisionIds).toEqual([]);
+    expect([...captured.capabilities.keys()].filter((id) => id.endsWith('.metric_time'))).toEqual([
+      'semantic:commerce:dimension:customers.metric_time',
+      'semantic:commerce:dimension:orders.metric_time',
+      'semantic:commerce:dimension:locations.metric_time',
+      'semantic:commerce:dimension:order_item.metric_time',
+    ]);
+    expect(answer.result?.answerTier).toBe('semantic_metric');
+    expect(state.resolvedPlan).toMatchObject({ frozen: true, tier: 'semantic' });
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'compile_and_run_semantic',
+        outcome: 'executed',
+        candidateIds: [
+          'semantic:metric:order_item.revenue',
+          'semantic:commerce:dimension:order_item.metric_time',
+        ],
+      }),
+    ]));
+  });
+
+  it('AGT-047 binds the unique host-advertised semantic engine when a text controller omits engine', async () => {
+    const metricId = 'semantic:metric:order_item.revenue';
+    const timeId = 'semantic:uncategorized:dimension:order_item.metric_time';
+    const metric: AgentEvidenceCandidate = {
+      id: metricId, qualifiedId: metricId, kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic',
+      name: 'revenue', semanticRuntimeName: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      analyticalCapability: {
+        executionCapabilities: [{ route: 'semantic', adapterId: 'metricflow' }],
+        timeDimensions: [{ dimensionId: timeId }],
+      } as never,
+    };
+    const metricTime: AgentEvidenceCandidate = {
+      id: timeId, qualifiedId: timeId, kind: 'semantic_member', trustTier: 'semantic',
+      name: 'metric_time', semanticRuntimeName: 'metric_time', timeGrains: ['day', 'month'],
+      relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const candidates = [metric, metricTime];
+    const captured = captureAskV2SemanticCapabilities({
+      candidates,
+      snapshotId: 'snapshot:semantic-engine-text',
+      isCurrent: () => true,
+      semanticRuntime: { version: 1, preference: 'auto', selectedEngine: 'metricflow-cli', readiness: 'ready' },
+    });
+    expect(captured.capabilities.get(metricId)?.engines).toEqual(['metricflow-cli']);
+    expect(captured.capabilities.get(metricId)?.selectedEngine).toBe('metricflow-cli');
+    const compile = vi.fn(async (selection: Record<string, unknown>) => {
+      expect(selection).toMatchObject({
+        metrics: ['revenue'],
+        timeDimension: { name: 'metric_time', granularity: 'month' },
+        engine: 'metricflow-cli',
+      });
+      return { sql: 'select 1 as revenue', engine: 'metricflow-cli' as const };
+    });
+    const execute = vi.fn(async () => ({ columns: ['metric_time', 'revenue'], rows: [{ metric_time: '2026-01-01', revenue: 1 }], rowCount: 1 }));
+    const state = askV2State(candidates);
+    const answer = await __test__.createAskV2LaneHandler(state)({
+      question: 'Show revenue by month using the revenue semantic metric',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        // The host must bind metricflow-cli from the immutable capability;
+        // the controller need not guess from a runtime name or display label.
+        `\`\`\`json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["${metricId}"],"timeDimensionId":"${timeId}","timeGrain":"month"}}\n\`\`\``,
+        '```json\n{"tool":"finish_answer","input":{"answer":"Revenue is grouped by month."}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace(candidates, {
+        semanticCapabilities: captured.capabilities,
+        semanticCapabilityCollisionIds: captured.collisionIds,
+        semanticRuntime: { version: 1, preference: 'auto', selectedEngine: 'metricflow-cli', readiness: 'ready' },
+      }),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: execute,
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(answer.result?.answerTier).toBe('semantic_metric');
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'executed', reasonCode: 'SEMANTIC_RESULT_VALIDATED' }),
+    ]));
+  });
+
+  it('AGT-047 ignores a legacy runtime-name engine argument and executes the host-selected semantic capability once', async () => {
+    const metricId = 'semantic:metric:order_item.revenue';
+    const timeId = 'semantic:uncategorized:dimension:order_item.metric_time';
+    const metric: AgentEvidenceCandidate = {
+      id: metricId, qualifiedId: metricId, kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic',
+      name: 'revenue', semanticRuntimeName: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      analyticalCapability: {
+        executionCapabilities: [{ route: 'semantic', adapterId: 'metricflow' }],
+        timeDimensions: [{ dimensionId: timeId }],
+      } as never,
+    };
+    const metricTime: AgentEvidenceCandidate = {
+      id: timeId, qualifiedId: timeId, kind: 'semantic_member', trustTier: 'semantic',
+      name: 'metric_time', semanticRuntimeName: 'metric_time', timeGrains: ['day', 'month'],
+      relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const candidates = [metric, metricTime];
+    const captured = captureAskV2SemanticCapabilities({
+      candidates,
+      snapshotId: 'snapshot:semantic-engine-retry',
+      isCurrent: () => true,
+    });
+    const compile = vi.fn(async (selection: Record<string, unknown>) => {
+      // The controller's raw runtime name `metric_time` cannot select the
+      // adapter. The first and only execution uses the immutable host choice.
+      expect(selection.engine).toBe('metricflow-cli');
+      return { sql: 'select 1 as revenue', engine: 'metricflow-cli' as const };
+    });
+    const execute = vi.fn(async () => ({ columns: ['metric_time', 'revenue'], rows: [{ metric_time: '2026-01-01', revenue: 1 }], rowCount: 1 }));
+    const state = askV2State(candidates);
+    const answer = await __test__.createAskV2LaneHandler(state)({
+      question: 'Show revenue by month using the revenue semantic metric',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        `\`\`\`json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["${metricId}"],"timeDimensionId":"${timeId}","timeGrain":"month","engine":"metric_time"}}\n\`\`\``,
+        '```json\n{"tool":"finish_answer","input":{"answer":"Revenue is grouped by month."}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace(candidates, {
+        semanticCapabilities: captured.capabilities,
+        semanticCapabilityCollisionIds: captured.collisionIds,
+      }),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: execute,
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(answer.result?.answerTier).toBe('semantic_metric');
+    expect(state.observations.filter((observation) => observation.tool === 'compile_and_run_semantic' && observation.outcome === 'executed')).toHaveLength(1);
+    expect(state.observations.some((observation) => observation.reasonCode === 'SEMANTIC_ENGINE_INVALID')).toBe(false);
+    expect(state.semanticRuntime).toMatchObject({ selectedEngine: 'metricflow-cli', readiness: 'ready' });
+  });
+
+  it('AGT-047 refuses a compiler result from a different frozen semantic engine before execution', async () => {
+    const metricId = 'semantic:metric:order_item.revenue';
+    const timeId = 'semantic:uncategorized:dimension:order_item.metric_time';
+    const metric: AgentEvidenceCandidate = {
+      id: metricId, qualifiedId: metricId, kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic',
+      name: 'revenue', semanticRuntimeName: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      analyticalCapability: {
+        executionCapabilities: [{ route: 'semantic', adapterId: 'native' }],
+        timeDimensions: [{ dimensionId: timeId }],
+      } as never,
+    };
+    const metricTime: AgentEvidenceCandidate = {
+      id: timeId, qualifiedId: timeId, kind: 'semantic_member', trustTier: 'semantic',
+      name: 'metric_time', semanticRuntimeName: 'metric_time', timeGrains: ['day', 'month'],
+      relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const candidates = [metric, metricTime];
+    const captured = captureAskV2SemanticCapabilities({
+      candidates,
+      snapshotId: 'snapshot:semantic-engine-target-mismatch',
+      isCurrent: () => true,
+      semanticRuntime: { version: 1, preference: 'native', selectedEngine: 'native', readiness: 'ready' },
+    });
+    const compile = vi.fn(async (selection: Record<string, unknown>) => {
+      expect(selection.engine).toBe('native');
+      // A compiler result is still untrusted with respect to the frozen host
+      // target. It must not route execution across engines.
+      return { sql: 'select 1 as revenue', engine: 'metricflow-cli' as const };
+    });
+    const execute = vi.fn(async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }));
+    const state = askV2State(candidates);
+    const answer = await __test__.createAskV2LaneHandler(state)({
+      question: 'Show revenue by month using the revenue semantic metric',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        `\`\`\`json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["${metricId}"],"timeDimensionId":"${timeId}","timeGrain":"month"}}\n\`\`\``,
+      ]),
+      askAgentV2Workspace: askV2Workspace(candidates, {
+        semanticCapabilities: captured.capabilities,
+        semanticCapabilityCollisionIds: captured.collisionIds,
+        semanticRuntime: { version: 1, preference: 'native', selectedEngine: 'native', readiness: 'ready' },
+      }),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: execute,
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
+    expect(state.resolvedPlan).toMatchObject({ frozen: true, tier: 'semantic' });
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'compile_and_run_semantic',
+        outcome: 'error',
+        reasonCode: 'SEMANTIC_EXECUTION_TARGET_MISMATCH',
+        origin: 'execution',
+      }),
+    ]));
+    expect(state.terminalOutcome).toMatchObject({
+      kind: 'execution_failure',
+      reasonCode: 'SEMANTIC_EXECUTION_TARGET_MISMATCH',
+      origin: 'execution',
+      safeAction: 'inspect_execution_target',
+    });
+    const v8 = createAskToolKernelV2(state).diagnosticReceipt();
+    expect(v8.terminalOutcome).toMatchObject({
+      kind: 'execution_failure',
+      reasonCode: 'SEMANTIC_EXECUTION_TARGET_MISMATCH',
+      origin: 'execution',
+      safeAction: 'inspect_execution_target',
+    });
+    expect(v8.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'compile_and_run_semantic',
+        outcome: 'error',
+        reasonCode: 'SEMANTIC_EXECUTION_TARGET_MISMATCH',
+        origin: 'execution',
+      }),
+    ]));
+    expect(answer.askAgentV2Outcome).toMatchObject({
+      kind: 'execution_failure',
+      reasonCode: 'SEMANTIC_EXECUTION_TARGET_MISMATCH',
+      origin: 'execution',
+      safeAction: 'inspect_execution_target',
+    });
+    expect(answer.text).toContain('did not match the frozen execution target');
+  });
+
+  it('AGT-047 keeps a multi-engine legacy capability pre-freeze unavailable when no host selection was captured', async () => {
+    const metricId = 'semantic:metric:order_item.revenue';
+    const timeId = 'semantic:uncategorized:dimension:order_item.metric_time';
+    const metric: AgentEvidenceCandidate = {
+      id: metricId, qualifiedId: metricId, kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic',
+      name: 'revenue', semanticRuntimeName: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      analyticalCapability: {
+        executionCapabilities: [
+          { route: 'semantic', adapterId: 'native' },
+          { route: 'semantic', adapterId: 'metricflow' },
+        ],
+        timeDimensions: [{ dimensionId: timeId }],
+      } as never,
+    };
+    const metricTime: AgentEvidenceCandidate = {
+      id: timeId, qualifiedId: timeId, kind: 'semantic_member', trustTier: 'semantic',
+      name: 'metric_time', semanticRuntimeName: 'metric_time', timeGrains: ['day', 'month'],
+      relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const candidates = [metric, metricTime];
+    const captured = captureAskV2SemanticCapabilities({ candidates, snapshotId: 'snapshot:semantic-engine-ambiguous', isCurrent: () => true });
+    expect(captured.capabilities.get(metricId)?.engines).toEqual(['metricflow-cli', 'native']);
+    const compile = vi.fn();
+    const state = askV2State(candidates);
+    const answer = await __test__.createAskV2LaneHandler(state)({
+      question: 'Show revenue by month using the revenue semantic metric',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        `\`\`\`json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["${metricId}"],"timeDimensionId":"${timeId}","timeGrain":"month"}}\n\`\`\``,
+      ]),
+      askAgentV2Workspace: askV2Workspace(candidates, {
+        semanticCapabilities: captured.capabilities,
+        semanticCapabilityCollisionIds: captured.collisionIds,
+      }),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: async () => ({ columns: [], rows: [], rowCount: 0 }),
+    } as never);
+
+    expect(compile).not.toHaveBeenCalled();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'compile_and_run_semantic', outcome: 'ineligible', reasonCode: 'SEMANTIC_ENGINE_UNAVAILABLE',
+        origin: 'validation',
+      }),
+    ]));
+    expect(answer.askAgentV2Outcome).toMatchObject({ reasonCode: 'SEMANTIC_ENGINE_UNAVAILABLE', origin: 'validation' });
+  });
+
+  it('AGT-047 refuses semantic model and saved-query name collisions before compilation', async () => {
+    const containers: AgentEvidenceCandidate[] = [
+      {
+        id: 'semantic:commerce:model:revenue', qualifiedId: 'semantic:commerce:model:revenue',
+        kind: 'semantic_member', semanticObjectType: 'model', trustTier: 'semantic',
+        name: 'revenue', semanticRuntimeName: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      },
+      {
+        id: 'semantic:commerce:saved_query:revenue', qualifiedId: 'semantic:commerce:saved_query:revenue',
+        kind: 'semantic_member', semanticObjectType: 'saved_query', trustTier: 'semantic',
+        name: 'revenue', semanticRuntimeName: 'revenue', relevanceScore: 0.9, matchReasons: ['related'], compatibility: 'compatible',
+      },
+    ];
+    const compile = vi.fn();
+    const state = askV2State(containers);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'show revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:commerce:model:revenue"]}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace(containers),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: vi.fn(),
+    } as never);
+
+    expect(compile).not.toHaveBeenCalled();
+    expect(state.resolvedPlan).toBeUndefined();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'inspect_semantic_candidates', outcome: 'unavailable', reasonCode: 'SEMANTIC_CANDIDATES_EMPTY',
+      }),
+      expect.objectContaining({
+        tool: 'compile_and_run_semantic', outcome: 'ineligible', reasonCode: 'SEMANTIC_IDENTIFIER_NOT_ADMITTED_TO_SNAPSHOT',
+      }),
+    ]));
+  });
+
+  it('AGT-047 records target-unavailable MetricFlow-only metrics as pre-freeze ineligible and permits a lower-tier inspection', async () => {
+    const metricId = 'semantic:metric:metricflow_revenue';
+    const metric: AgentEvidenceCandidate = {
+      id: metricId, qualifiedId: metricId, kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic',
+      name: 'metricflow_revenue', semanticRuntimeName: 'metricflow_revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      analyticalCapability: { executionCapabilities: [{ route: 'semantic', adapterId: 'metricflow' }] } as never,
+    };
+    const relational: AgentEvidenceCandidate = {
+      id: 'model:orders', qualifiedId: 'model:orders', kind: 'dbt_model', trustTier: 'governed_sql',
+      name: 'orders', relevanceScore: 0.8, matchReasons: ['related'], compatibility: 'compatible',
+    };
+    const captured = captureAskV2SemanticCapabilities({
+      candidates: [metric, relational], snapshotId: 'snapshot:metricflow-unavailable', isCurrent: () => true,
+      semanticRuntime: { version: 1, preference: 'metricflow-cli', selectedEngine: 'metricflow-cli', readiness: 'unavailable' },
+      semanticCandidateReadiness: [{ candidateId: metricId, status: 'unavailable', engines: [] }],
+    });
+    const compile = vi.fn();
+    const state = askV2State([metric, relational]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'show metricflow revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        `\`\`\`json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["${metricId}"]}}\n\`\`\``,
+        '```json\n{"tool":"inspect_relational_context","input":{}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric, relational], {
+        semanticCapabilities: captured.capabilities,
+        semanticCapabilityCollisionIds: captured.collisionIds,
+        semanticRuntime: { version: 1, preference: 'metricflow-cli', selectedEngine: 'metricflow-cli', readiness: 'unavailable' },
+      }),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: vi.fn(),
+    } as never);
+
+    expect(compile).not.toHaveBeenCalled();
+    expect(state.resolvedPlan).toBeUndefined();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'compile_and_run_semantic', outcome: 'ineligible', reasonCode: 'SEMANTIC_ENGINE_UNAVAILABLE', origin: 'validation',
+      }),
+      expect.objectContaining({ tool: 'inspect_relational_context', origin: 'retrieval' }),
+    ]));
+  });
+
+  it('AGT-047 executes the one target-ready native engine when MetricFlow is advertised but unavailable', async () => {
+    const metricId = 'semantic:metric:mixed_revenue';
+    const metric: AgentEvidenceCandidate = {
+      id: metricId, qualifiedId: metricId, kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic',
+      name: 'mixed_revenue', semanticRuntimeName: 'mixed_revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      analyticalCapability: {
+        executionCapabilities: [
+          { route: 'semantic', adapterId: 'native' },
+          { route: 'semantic', adapterId: 'metricflow' },
+        ],
+      } as never,
+    };
+    const captured = captureAskV2SemanticCapabilities({
+      candidates: [metric], snapshotId: 'snapshot:mixed-semantic-readiness', isCurrent: () => true,
+      semanticCandidateReadiness: [{ candidateId: metricId, status: 'ready', engines: ['native'] }],
+    });
+    const compile = vi.fn(async (selection: Record<string, unknown>) => {
+      expect(selection).toMatchObject({ metrics: ['mixed_revenue'], engine: 'native' });
+      return { sql: 'select 1 as revenue', engine: 'native' as const };
+    });
+    const state = askV2State([metric]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'show mixed revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        `\`\`\`json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["${metricId}"]}}\n\`\`\``,
+        '```json\n{"tool":"finish_answer","input":{"answer":"Revenue is available."}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric], {
+        semanticCapabilities: captured.capabilities,
+        semanticCapabilityCollisionIds: captured.collisionIds,
+      }),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }),
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    expect(captured.capabilities.get(metricId)?.engines).toEqual(['native']);
+    expect(state.resolvedPlan).toMatchObject({ frozen: true, tier: 'semantic' });
+  });
+
+  it('AGT-047 retains a post-freeze semantic execution failure when a legacy engine argument is ignored', async () => {
+    const metricId = 'semantic:metric:metricflow_revenue';
+    const metric: AgentEvidenceCandidate = {
+      id: metricId, qualifiedId: metricId, kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic',
+      name: 'metricflow_revenue', semanticRuntimeName: 'metricflow_revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      analyticalCapability: { executionCapabilities: [{ route: 'semantic', adapterId: 'native' }] } as never,
+    };
+    const captured = captureAskV2SemanticCapabilities({ candidates: [metric], snapshotId: 'snapshot:semantic-failure-precedence', isCurrent: () => true });
+    const state = askV2State([metric]);
+    const answer = await __test__.createAskV2LaneHandler(state)({
+      question: 'show revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        `\`\`\`json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["${metricId}"],"engine":"metricflow_revenue"}}\n\`\`\``,
+        `\`\`\`json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["${metricId}"]}}\n\`\`\``,
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric], {
+        semanticCapabilities: captured.capabilities,
+        semanticCapabilityCollisionIds: captured.collisionIds,
+      }),
+      semanticQueryCompiler: async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }),
+      executeGeneratedSql: async () => { throw new Error('connection lost'); },
+    } as never);
+
+    expect(state.resolvedPlan).toMatchObject({ frozen: true, tier: 'semantic' });
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'error', reasonCode: 'SEMANTIC_EXECUTION_FAILED', origin: 'execution' }),
+    ]));
+    expect(state.observations.some((observation) => observation.reasonCode === 'SEMANTIC_ENGINE_INVALID')).toBe(false);
+    expect(answer.askAgentV2Outcome).toMatchObject({ kind: 'execution_failure', reasonCode: 'SEMANTIC_EXECUTION_FAILED', origin: 'execution' });
+    expect(state.terminalOutcome).toMatchObject({ kind: 'execution_failure', reasonCode: 'SEMANTIC_EXECUTION_FAILED' });
+  });
+
+  it.each([
+    ['OpenAI', () => new OpenAIProvider({ apiKey: 'test', baseUrl: 'https://example.test/v1', model: 'gpt-test' })],
+    ['Claude', () => new ClaudeProvider({ apiKey: 'test', baseUrl: 'https://example.test/anthropic', model: 'claude-test' })],
+  ])('AGT-047 keeps semantic engine host-owned for the %s native tool protocol', async (kind, createProvider) => {
+    const metricId = 'semantic:metric:order_item.revenue';
+    const timeId = 'semantic:uncategorized:dimension:order_item.metric_time';
+    const metric: AgentEvidenceCandidate = {
+      id: metricId, qualifiedId: metricId, kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic',
+      name: 'revenue', semanticRuntimeName: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      analyticalCapability: {
+        executionCapabilities: [{ route: 'semantic', adapterId: 'metricflow' }],
+        timeDimensions: [{ dimensionId: timeId }],
+      } as never,
+    };
+    const metricTime: AgentEvidenceCandidate = {
+      id: timeId, qualifiedId: timeId, kind: 'semantic_member', trustTier: 'semantic',
+      name: 'metric_time', semanticRuntimeName: 'metric_time', timeGrains: ['day', 'month'],
+      relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const candidates = [metric, metricTime];
+    const captured = captureAskV2SemanticCapabilities({
+      candidates,
+      snapshotId: `snapshot:semantic-engine-${kind}`,
+      isCurrent: () => true,
+    });
+    let send = 0;
+    const advertisedEngineProperties: unknown[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+      send += 1;
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        tools?: Array<{ function?: { name?: string; parameters?: { properties?: { engine?: { enum?: unknown } } } }; name?: string; input_schema?: { properties?: { engine?: { enum?: unknown } } } }>;
+      };
+      const semanticTool = (body.tools ?? []).find((tool) => tool.function?.name === 'compile_and_run_semantic' || tool.name === 'compile_and_run_semantic');
+      if (semanticTool) {
+        advertisedEngineProperties.push(
+          semanticTool.function?.parameters?.properties?.engine
+          ?? semanticTool.input_schema?.properties?.engine,
+        );
+      }
+      const input = send === 1
+        ? {}
+        : send === 2
+          ? {}
+          : send === 3
+            // The controller selected the exact admitted axis but omitted its
+            // grain. The immutable user request supplies month; a stale
+            // engine field still cannot change the host-selected adapter.
+            ? { metricIds: [metricId], timeDimensionId: timeId, engine: 'metric_time' }
+            : { answer: 'Revenue is grouped by month.' };
+      const name = send === 1
+        ? 'inspect_certified_candidates'
+        : send === 2
+          ? 'inspect_semantic_candidates'
+          : send === 3
+            ? 'compile_and_run_semantic'
+            : 'finish_answer';
+      const block = kind === 'OpenAI'
+        ? { id: `tool_${send}`, type: 'function', function: { name, arguments: JSON.stringify(input) } }
+        : { type: 'tool_use', id: `tool_${send}`, name, input };
+      return kind === 'OpenAI'
+        ? new Response(JSON.stringify({ choices: [{ message: { content: null, tool_calls: [block] } }] }), { status: 200, headers: { 'content-type': 'application/json' } })
+        : new Response(JSON.stringify({ content: [block] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }));
+    try {
+      const compile = vi.fn(async (selection: Record<string, unknown>) => {
+        expect(selection).toMatchObject({
+          engine: 'metricflow-cli',
+          timeDimension: { name: 'metric_time', granularity: 'month' },
+        });
+        return { sql: 'select 1 as revenue', engine: 'metricflow-cli' as const };
+      });
+      const execute = vi.fn(async () => ({ columns: ['metric_time', 'revenue'], rows: [{ metric_time: '2026-01-01', revenue: 1 }], rowCount: 1 }));
+      const state = askV2State(candidates);
+      const answer = await __test__.createAskV2LaneHandler(state)({
+        question: 'Show revenue by month using the revenue semantic metric',
+        provider: createProvider(),
+        askAgentV2Workspace: askV2Workspace(candidates, {
+          semanticCapabilities: captured.capabilities,
+          semanticCapabilityCollisionIds: captured.collisionIds,
+        }),
+        semanticQueryCompiler: compile,
+        executeGeneratedSql: execute,
+      } as never);
+
+      expect(send).toBe(4);
+      expect(compile).toHaveBeenCalledOnce();
+      expect(execute).toHaveBeenCalledOnce();
+      expect(answer.result?.answerTier).toBe('semantic_metric');
+      expect(state.observations).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          tool: 'compile_and_run_semantic',
+          outcome: 'eligible',
+          reasonCode: 'SEMANTIC_TIME_BINDING_COMPLETED',
+          candidateIds: [metricId, timeId],
+        }),
+      ]));
+      expect(advertisedEngineProperties.length).toBeGreaterThan(0);
+      expect(advertisedEngineProperties.every((property) => property === undefined)).toBe(true);
+      expect(state.semanticRuntime).toMatchObject({ selectedEngine: 'metricflow-cli', readiness: 'ready' });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('AGT-047 returns typed ambiguity instead of choosing among two metric-compatible metric_time axes', async () => {
+    const firstTimeId = 'semantic:commerce:dimension:order_item.metric_time';
+    const secondTimeId = 'semantic:commerce:dimension:orders.metric_time';
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:order_item.revenue',
+      qualifiedId: 'semantic:metric:order_item.revenue',
+      kind: 'semantic_metric',
+      semanticObjectType: 'metric',
+      trustTier: 'semantic',
+      name: 'revenue',
+      relevanceScore: 1,
+      matchReasons: ['exact'],
+      compatibility: 'compatible',
+      analyticalCapability: {
+        timeDimensions: [{ dimensionId: firstTimeId }, { dimensionId: secondTimeId }],
+      } as never,
+    };
+    const metricTime = (id: string, model: string): AgentEvidenceCandidate => ({
+      id,
+      qualifiedId: id,
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      trustTier: 'semantic',
+      name: 'metric_time',
+      semanticRuntimeName: 'metric_time',
+      semanticModel: model,
+      sourceObjects: [model],
+      aliases: ['semantic:uncategorized:dimension:metric_time'],
+      timeGrains: ['day', 'month'],
+      relevanceScore: 1,
+      matchReasons: ['exact'],
+      compatibility: 'compatible',
+    });
+    const candidates = [metric, metricTime(firstTimeId, 'order_item'), metricTime(secondTimeId, 'orders')];
+    const captured = captureAskV2SemanticCapabilities({
+      candidates,
+      snapshotId: 'snapshot:metric-time-ambiguity',
+      isCurrent: () => true,
+    });
+    const compile = vi.fn();
+    const state = askV2State(candidates);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'Show revenue by month',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:order_item.revenue"],"timeDimensionId":"metric_time","timeGrain":"month"}}\n```',
+        'No executable result.',
+      ]),
+      askAgentV2Workspace: askV2Workspace(candidates, {
+        semanticCapabilities: captured.capabilities,
+        semanticCapabilityCollisionIds: captured.collisionIds,
+      }),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: vi.fn(),
+    } as never);
+
+    expect(compile).not.toHaveBeenCalled();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'compile_and_run_semantic',
+        outcome: 'ambiguous',
+        reasonCode: 'SEMANTIC_TIME_DIMENSION_AMBIGUOUS',
+      }),
+    ]));
+  });
+
+  it('AGT-047 does not complete an omitted time axis when the selected metric has two admitted month-capable axes', async () => {
+    const firstTimeId = 'semantic:commerce:dimension:order_item.metric_time';
+    const secondTimeId = 'semantic:commerce:dimension:orders.metric_time';
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:order_item.revenue', qualifiedId: 'semantic:metric:order_item.revenue',
+      kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic', name: 'revenue',
+      relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      analyticalCapability: {
+        timeDimensions: [{ dimensionId: firstTimeId }, { dimensionId: secondTimeId }],
+      } as never,
+    };
+    const time = (id: string, model: string): AgentEvidenceCandidate => ({
+      id, qualifiedId: id, kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic',
+      name: 'metric_time', semanticRuntimeName: 'metric_time', semanticModel: model, timeGrains: ['day', 'month'],
+      relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    });
+    const candidates = [metric, time(firstTimeId, 'order_item'), time(secondTimeId, 'orders')];
+    const captured = captureAskV2SemanticCapabilities({
+      candidates,
+      snapshotId: 'snapshot:semantic-month-completion-ambiguous',
+      isCurrent: () => true,
+    });
+    const compile = vi.fn();
+    const state = askV2State(candidates);
+    const answer = await __test__.createAskV2LaneHandler(state)({
+      question: 'Show revenue by month',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:order_item.revenue"]}}\n```',
+        'No executable result.',
+      ]),
+      askAgentV2Workspace: askV2Workspace(candidates, {
+        semanticCapabilities: captured.capabilities,
+        semanticCapabilityCollisionIds: captured.collisionIds,
+      }),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: vi.fn(),
+    } as never);
+
+    expect(compile).not.toHaveBeenCalled();
+    expect(state.resolvedPlan).toBeUndefined();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'compile_and_run_semantic',
+        outcome: 'ambiguous',
+        reasonCode: 'SEMANTIC_TIME_DIMENSION_AMBIGUOUS',
+        safeAction: 'use:compile_and_run_semantic',
+      }),
+    ]));
+    expect(answer.askAgentV2Outcome).toMatchObject({
+      kind: 'gap',
+      reasonCode: 'SEMANTIC_TIME_DIMENSION_AMBIGUOUS',
+      origin: 'validation',
+    });
+  });
+
+  it('keeps a canonical semantic metric bound to its own runtime name when another card reuses its legacy ID', async () => {
+    const first: AgentEvidenceCandidate = {
+      id: 'legacy:metric:revenue_a', qualifiedId: 'semantic:metric:revenue_a',
+      kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic', name: 'Revenue A', semanticRuntimeName: 'runtime_revenue_a',
+      relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const second: AgentEvidenceCandidate = {
+      // A legacy lookup collision must not make this card replace the first
+      // canonical capability. Their compiler runtime names are intentionally
+      // distinct so a rebinding would be observable.
+      id: first.qualifiedId!, qualifiedId: 'semantic:metric:revenue_b',
+      kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic', name: 'Revenue B', semanticRuntimeName: 'runtime_revenue_b',
+      relevanceScore: 0.9, matchReasons: ['related'], compatibility: 'compatible',
+    };
+    const captured = captureAskV2SemanticCapabilities({
+      candidates: [first, second],
+      snapshotId: 'snapshot:v2-test',
+      isCurrent: () => true,
+    });
+    const compile = vi.fn(async (selection: { metrics: string[] }) => {
+      expect(selection.metrics).toEqual(['runtime_revenue_a']);
+      return { sql: 'select 1 as revenue_a', engine: 'native' as const };
+    });
+    const execute = vi.fn(async () => ({ columns: ['revenue_a'], rows: [{ revenue_a: 1 }], rowCount: 1 }));
+    const state = askV2State([first, second]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'show revenue a',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:revenue_a"]}}\n```',
+        'semantic result finished',
+      ]),
+      askAgentV2Workspace: askV2Workspace([first, second], {
+        semanticCapabilities: captured.capabilities,
+      }),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: execute,
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(state.resolvedPlan).toMatchObject({ frozen: true, tier: 'semantic', candidateIds: [first.qualifiedId] });
+  });
+
+  it('rejects a mismatched semantic capability handle instead of rebinding an opaque ID through a legacy collision', async () => {
+    const first: AgentEvidenceCandidate = {
+      id: 'legacy:metric:revenue_a', qualifiedId: 'semantic:metric:revenue_a',
+      kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic', name: 'runtime_revenue_a',
+      relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const second: AgentEvidenceCandidate = {
+      // The legacy ID is deliberately the first candidate's canonical V2 ID.
+      id: first.qualifiedId!, qualifiedId: 'semantic:metric:revenue_b',
+      kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic', name: 'runtime_revenue_b',
+      relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const secondHandle: AskSemanticCapabilityHandleV1 = {
+      version: 1,
+      candidateId: second.qualifiedId!,
+      runtimeName: 'runtime_revenue_b',
+      engines: ['native'],
+      roles: ['metric'],
+      fingerprint: 'semantic-capability:revenue-b',
+      isCurrent: () => true,
+    };
+    const compile = vi.fn();
+    const state = askV2State([first, second]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'show revenue a',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:revenue_a"]}}\n```',
+        'no result',
+      ]),
+      askAgentV2Workspace: askV2Workspace([first, second], {
+        // Simulates a hostile/stale host map. The provider must reject this
+        // even if a map entry exists under the requested opaque key.
+        semanticCapabilities: new Map([[first.qualifiedId!, secondHandle]]),
+      }),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: vi.fn(),
+    } as never);
+
+    expect(compile).not.toHaveBeenCalled();
+    expect(state.resolvedPlan).toBeUndefined();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'compile_and_run_semantic',
+        outcome: 'ineligible',
+        reasonCode: 'SEMANTIC_CAPABILITY_NOT_BOUND_OR_STALE',
+      }),
+    ]));
+  });
+
+  it('withholds duplicate canonical IDs with divergent compiler authority instead of compiling an arbitrary handle', async () => {
+    const sharedId = 'semantic:metric:duplicate_revenue';
+    const first: AgentEvidenceCandidate = {
+      id: 'legacy:metric:duplicate-one', qualifiedId: sharedId,
+      kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic', name: 'runtime_revenue',
+      semanticRuntimeName: 'runtime_revenue', semanticModel: 'order_item', timeGrains: ['day', 'month'],
+      sourceObjects: ['order_item'],
+      analyticalCapability: {
+        semanticModelId: 'semantic:commerce:model:order_item',
+        timeDimensions: [{ dimensionId: 'semantic:commerce:dimension:order_item.metric_time' }],
+      } as never,
+      relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const second: AgentEvidenceCandidate = {
+      id: 'legacy:metric:duplicate-two', qualifiedId: sharedId,
+      // All short identity fields agree. Only the time-capability contract
+      // differs, which must still fail closed: compiling the retained first
+      // card while resolving this second card would be an authority split.
+      kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic', name: 'runtime_revenue',
+      semanticRuntimeName: 'runtime_revenue', semanticModel: 'order_item', timeGrains: ['day', 'month'],
+      sourceObjects: ['order_item'],
+      analyticalCapability: {
+        semanticModelId: 'semantic:commerce:model:order_item',
+        timeDimensions: [{ dimensionId: 'semantic:commerce:dimension:orders.metric_time' }],
+      } as never,
+      relevanceScore: 0.9, matchReasons: ['related'], compatibility: 'compatible',
+    };
+    const captured = captureAskV2SemanticCapabilities({
+      candidates: [first, second],
+      snapshotId: 'snapshot:divergent-duplicate-semantic-authority',
+      isCurrent: () => true,
+    });
+    const compile = vi.fn();
+    const state = askV2State([first, second]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'show duplicate revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        `\`\`\`json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["${sharedId}"]}}\n\`\`\``,
+        'no result',
+      ]),
+      askAgentV2Workspace: askV2Workspace([first, second], {
+        semanticCapabilities: captured.capabilities,
+        semanticCapabilityCollisionIds: captured.collisionIds,
+      }),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: vi.fn(),
+    } as never);
+
+    expect(compile).not.toHaveBeenCalled();
+    expect(captured.collisionIds).toEqual([sharedId]);
+    expect(captured.capabilities.has(sharedId)).toBe(false);
+    expect(state.resolvedPlan).toBeUndefined();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: 'compile_and_run_semantic',
+        outcome: 'unavailable',
+        reasonCode: 'SEMANTIC_CAPABILITY_ID_COLLISION',
+      }),
+    ]));
+  });
+
+  it('keeps malformed or undeclared semantic time/filter bindings pre-freeze and ineligible', async () => {
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', kind: 'semantic_metric', semanticObjectType: 'metric',
+      trustTier: 'semantic', name: 'orders.revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const orderedAt: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:orders.ordered_at', qualifiedId: 'semantic:dimension:orders.ordered_at', kind: 'semantic_member',
+      trustTier: 'semantic', name: 'orders.ordered_at', timeGrains: ['day', 'month'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const compile = vi.fn();
+    const state = askV2State([metric, orderedAt]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'show revenue by quarter',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:orders.revenue"],"timeDimensionId":"semantic:dimension:orders.ordered_at","timeGrain":"quarter","filters":[{"dimensionId":"semantic:dimension:orders.ordered_at","value":{"invalid":true}}]}}\n```',
+        'no result',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric, orderedAt]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: vi.fn(),
+    } as never);
+
+    expect(compile).not.toHaveBeenCalled();
+    expect(state.resolvedPlan).toBeUndefined();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'ineligible', reasonCode: 'SEMANTIC_FILTERS_INVALID', origin: 'validation' }),
+    ]));
+    expect(state.tierStates?.semantic).toMatchObject({ status: 'ineligible', reasonCode: 'SEMANTIC_FILTERS_INVALID' });
+  });
+
+  it('rejects an unsupported declared semantic grain before freeze', async () => {
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue', kind: 'semantic_metric', semanticObjectType: 'metric',
+      trustTier: 'semantic', name: 'orders.revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const orderedAt: AgentEvidenceCandidate = {
+      id: 'semantic:dimension:orders.ordered_at', qualifiedId: 'semantic:dimension:orders.ordered_at', kind: 'semantic_member',
+      trustTier: 'semantic', name: 'orders.ordered_at', timeGrains: ['day', 'month'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const state = askV2State([metric, orderedAt]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'show revenue by quarter',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:orders.revenue"],"timeDimensionId":"semantic:dimension:orders.ordered_at","timeGrain":"quarter"}}\n```',
+        'no result',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric, orderedAt]),
+      semanticQueryCompiler: vi.fn(),
+      executeGeneratedSql: vi.fn(),
+    } as never);
+
+    expect(state.resolvedPlan).toBeUndefined();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'ineligible', reasonCode: 'SEMANTIC_TIME_GRAIN_NOT_DECLARED', origin: 'validation' }),
+    ]));
+  });
+
+  it('AGT-047 rejects a generic inspection loop and still reserves execution plus narration after the immutable snapshot', async () => {
+    const metricTimeId = 'semantic:dimension:orders.metric_time';
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue',
+      kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic', name: 'orders.revenue',
+      relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      analyticalCapability: { timeDimensions: [{ dimensionId: metricTimeId }] } as never,
+    };
+    // This progression test is about redundant inspection, not guessing a
+    // missing time axis.  Give the host one admitted axis that explicitly
+    // proves the request's month grain, so its bounded completion can remain
+    // snapshot-bound while the controller still has to execute it.
+    const metricTime: AgentEvidenceCandidate = {
+      id: metricTimeId, qualifiedId: metricTimeId,
+      kind: 'semantic_member', semanticObjectType: 'dimension', trustTier: 'semantic', name: 'metric_time',
+      timeGrains: ['month'], relevanceScore: 0.9, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const state = askV2State([metric, metricTime]);
+    const compile = vi.fn(async (selection: { metrics: string[] }) => {
+      expect(selection.metrics).toEqual(['orders.revenue']);
+      return { sql: 'select 1 as revenue', engine: 'native' as const };
+    });
+    const execute = vi.fn(async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }));
+    const answer = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 6 })({
+      question: 'Show revenue by month using the revenue semantic metric',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_ask_context","input":{}}\n```',
+        // Generic business context is not new analytical evidence. The host
+        // rejects it and keeps the next controller action focused on tiers.
+        '```json\n{"tool":"inspect_business_context","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:orders.revenue"],"engine":"native"}}\n```',
+        '```json\n{"tool":"finish_answer","input":{"answer":"Revenue result is ready."}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric, metricTime]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: execute,
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(answer.result?.answerTier).toBe('semantic_metric');
+    expect(state.resolvedPlan).toMatchObject({ frozen: true, tier: 'semantic' });
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'inspect_business_context', outcome: 'denied', reasonCode: 'ASK_V2_TOOL_PROGRESSION_REQUIRED' }),
+      // Once the semantic inspector exposes one host-executable capability,
+      // a later certified inspector is an off-route, zero-budget observation;
+      // the next live controller turn still receives only semantic compile.
+      expect.objectContaining({ tool: 'inspect_certified_candidates', outcome: 'denied', reasonCode: 'ASK_V2_TOOL_PROGRESSION_REQUIRED' }),
+      expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'executed', reasonCode: 'SEMANTIC_RESULT_VALIDATED' }),
+      expect.objectContaining({ tool: 'finish_answer', outcome: 'eligible', reasonCode: 'ASK_V2_RESULT_NARRATED' }),
+    ]));
+  });
+
+  it('AGT-047 turns a rejected premature finish into the reserved semantic execution action', async () => {
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue',
+      kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic', name: 'orders.revenue',
+      relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const state = askV2State([metric]);
+    const compile = vi.fn(async () => ({ sql: 'select 1 as revenue', engine: 'native' as const }));
+    const execute = vi.fn(async () => ({ columns: ['revenue'], rows: [{ revenue: 1 }], rowCount: 1 }));
+    const answer = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 6 })({
+      question: 'Show revenue using the revenue semantic metric',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_ask_context","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        // This is a live-policy violation, not a completed answer. The
+        // following reserved controller send must receive semantic execution.
+        '```json\n{"tool":"finish_answer","input":{"answer":"too early"}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:orders.revenue"],"engine":"native"}}\n```',
+        '```json\n{"tool":"finish_answer","input":{"answer":"Revenue result is ready."}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: execute,
+    } as never);
+
+    expect(compile).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(answer.result?.answerTier).toBe('semantic_metric');
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'finish_answer', outcome: 'denied', reasonCode: 'ASK_V2_TOOL_PROGRESSION_REQUIRED' }),
+      expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'executed', reasonCode: 'SEMANTIC_RESULT_VALIDATED' }),
+    ]));
+  });
+
+  it('AGT-047 reports a precise provider invalid-tool terminal after one constrained semantic-action retry', async () => {
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue',
+      kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic', name: 'orders.revenue',
+      relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const state = askV2State([metric]);
+    const dispatchedMessages: AgentMessage[][] = [];
+    const responses = [
+      '```json\n{"tool":"inspect_ask_context","input":{}}\n```',
+      '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+      'I have enough context but will not call a tool.',
+      'I still will not call the required semantic tool.',
+    ];
+    let responseIndex = 0;
+    const answer = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 6 })({
+      question: 'Show revenue by month using the revenue semantic metric',
+      provider: {
+        name: 'ollama',
+        available: async () => true,
+        generate: async (messages: AgentMessage[]) => {
+          dispatchedMessages.push(messages);
+          return responses[responseIndex++] ?? '';
+        },
+      },
+      askAgentV2Workspace: askV2Workspace([metric]),
+      semanticQueryCompiler: vi.fn(),
+      executeGeneratedSql: vi.fn(),
+    } as never);
+
+    expect(state.controllerTier).toBe('semantic');
+    expect(dispatchedMessages).toHaveLength(4);
+    expect(dispatchedMessages[2]?.at(-1)?.content).toContain('compile_and_run_semantic');
+    expect(dispatchedMessages[3]?.at(-1)?.content).toContain('Controller progression required');
+    expect(answer.askAgentV2Outcome).toMatchObject({
+      kind: 'provider_failure',
+      reasonCode: 'ASK_V2_INVALID_TOOL_RESPONSE',
+      origin: 'provider',
+    });
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'finish_answer', outcome: 'error', reasonCode: 'ASK_V2_INVALID_TOOL_RESPONSE' }),
+    ]));
+    expect(answer.refusalCode).toBe('provider_error');
+    expect(answer.text).toContain('AI provider could not complete');
+  });
+
+  it('rejects invented IDs and preserves the snapshot-bound failure instead of re-searching', async () => {
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue',
+      kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic', name: 'orders.revenue',
+      relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const compile = vi.fn();
+    const state = askV2State([metric]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'show revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["semantic:metric:invented"]}}\n```',
+        'no result',
+      ]),
+      askAgentV2Workspace: askV2Workspace([metric]),
+      semanticQueryCompiler: compile,
+      executeGeneratedSql: async () => ({ columns: [], rows: [], rowCount: 0 }),
+    } as never);
+
+    expect(compile).not.toHaveBeenCalled();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'ineligible', reasonCode: 'SEMANTIC_IDENTIFIER_NOT_ADMITTED_TO_SNAPSHOT' }),
+    ]));
+  });
+
+  it('rejects a workspace from another snapshot before exposing cards or calling a compiler', async () => {
+    const metric: AgentEvidenceCandidate = {
+      id: 'semantic:metric:orders.revenue', qualifiedId: 'semantic:metric:orders.revenue',
+      kind: 'semantic_metric', semanticObjectType: 'metric', trustTier: 'semantic', name: 'orders.revenue',
+      relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const compile = vi.fn();
+    const state = askV2State([metric]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'show revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_ask_context","input":{}}\n```',
+        'no result',
+      ]),
+      askAgentV2Workspace: {
+        version: 2,
+        snapshotId: 'snapshot:other',
+        sourceFingerprint: 'sha256:v2-test',
+        getContextPack: () => ({}),
+        getToolWorkspace: () => ({
+          version: 1, snapshotId: 'snapshot:other', sourceFingerprint: 'sha256:v2-test', candidates: [metric], relationshipPathHandles: [],
+        }),
+      },
+      semanticQueryCompiler: compile,
+    } as never);
+
+    expect(compile).not.toHaveBeenCalled();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'inspect_ask_context', outcome: 'unavailable', reasonCode: 'V2_WORKSPACE_SNAPSHOT_MISMATCH' }),
+    ]));
+  });
+
+  it('requires earlier tier inspection before a SQL-first tool request', async () => {
+    const column: AgentEvidenceCandidate = {
+      id: 'sql:column:orders.revenue', qualifiedId: 'sql:column:orders.revenue', kind: 'sql_column',
+      trustTier: 'exploratory', name: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const state = askV2State([column]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'show revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"validate_and_run_sql","input":{"sql":"select revenue from orders","expectedOutputIds":["sql:column:orders.revenue"]}}\n```',
+        'no result',
+      ]),
+      askAgentV2Workspace: askV2Workspace([column]),
+    } as never);
+
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'validate_and_run_sql', outcome: 'denied', reasonCode: 'EARLIER_TIER_INSPECTION_REQUIRED' }),
+    ]));
+  });
+
+  it('AGT-050 freezes at the host authorization boundary before a connection failure and permits one same-plan repair only', async () => {
+    const column: AgentEvidenceCandidate = {
+      id: 'sql:column:orders.revenue', qualifiedId: 'sql:column:orders.revenue', kind: 'sql_column',
+      trustTier: 'exploratory', name: 'revenue', sourceObjects: ['analytics.orders'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const state = askV2State([column]);
+    const prepareAskV2ExploratorySqlExecution = vi.fn(async (request: { repair?: boolean; planFingerprint: string }) => ({
+      capability: { version: 1, candidateSqlFingerprint: `sql:${request.planFingerprint}` },
+      freeze: {
+        version: 1 as const,
+        selectedTier: 'exploratory_sql' as const,
+        planId: 'ask-v2:exploratory:host-freeze',
+        planFingerprint: request.planFingerprint,
+        snapshotId: 'snapshot:v2-test',
+        targetFingerprint: 'target:host-test',
+        sqlFingerprint: `sql:${request.planFingerprint}`,
+        candidateIds: ['sql:column:orders.revenue'],
+        authorization: 'capability_minted' as const,
+      },
+    }));
+    const executeAgenticGeneratedSql = vi.fn(async () => {
+      throw Object.assign(new Error('connection lost'), { code: 'connection_failed' });
+    });
+    const contextPack = {
+      id: 'ctx:host-freeze', question: 'show revenue', focusObjectKey: null, mode: 'question', trustLabel: 'mixed',
+      objects: [], edges: [], queryRuns: [], citations: [], evidenceSummaries: [], warnings: [], evidenceRoles: [],
+      routeDecision: { route: 'generated_sql', intent: 'analytics', reason: 'test', trustLabel: 'mixed', reviewStatus: 'draft_ready', selectedEvidence: [], missingContext: [], followUps: [] },
+      allowedSqlContext: { relations: [{ relation: 'analytics.orders', name: 'orders', source: 'test', columns: [{ name: 'revenue' }] }], sourceBlockSql: [] },
+      missingContext: [], conflicts: [], retrievalDiagnostics: { strategy: 'sqlite_fts', selectedObjects: 0, selectedEvidence: [], topRejected: [], certifiedCandidateFits: [], candidateConflicts: [] },
+      freshness: { catalogPath: '.dql/cache/metadata.sqlite', builtAt: null, fingerprint: null },
+    };
+    await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 9 })({
+      question: 'show revenue',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_relational_context","input":{}}\n```',
+        '```json\n{"tool":"validate_and_run_sql","input":{"sql":"select revenue from analytics.orders","expectedOutputIds":["sql:column:orders.revenue"]}}\n```',
+        // A cross-tier replacement is terminally denied after the first
+        // authorization, before a second compiler or connection can run.
+        '```json\n{"tool":"compile_and_run_semantic","input":{"metricIds":["sql:column:orders.revenue"]}}\n```',
+        '```json\n{"tool":"validate_and_run_sql","input":{"sql":"select revenue from analytics.orders","expectedOutputIds":["sql:column:orders.revenue"],"repair":true}}\n```',
+        // The same frozen repair may run once, but its next failure remains
+        // terminal. A third proposal cannot obtain a capability.
+        '```json\n{"tool":"validate_and_run_sql","input":{"sql":"select revenue from analytics.orders","expectedOutputIds":["sql:column:orders.revenue"],"repair":true}}\n```',
+        'no answer',
+      ]),
+      contextPack,
+      askAgentV2Workspace: askV2Workspace([column], { contextPack }),
+      prepareAskV2ExploratorySqlExecution,
+      executeAgenticGeneratedSql,
+    } as never);
+
+    expect(state.observations.map((observation) => `${observation.tool}:${observation.outcome}:${observation.reasonCode}`)).toEqual(expect.arrayContaining([
+      'validate_and_run_sql:eligible:ASK_V2_EXECUTION_AUTHORIZED',
+      'validate_and_run_sql:error:EXPLORATORY_EXECUTION_FAILED',
+    ]));
+    expect(prepareAskV2ExploratorySqlExecution).toHaveBeenCalledTimes(2);
+    expect(executeAgenticGeneratedSql).toHaveBeenCalledTimes(2);
+    expect(state.resolvedPlan).toMatchObject({
+      frozen: true,
+      tier: 'exploratory_sql',
+      candidateIds: ['sql:column:orders.revenue'],
+    });
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'validate_and_run_sql', outcome: 'eligible', executionAuthorized: true, samePlanRepair: false }),
+      expect.objectContaining({ tool: 'validate_and_run_sql', outcome: 'error', reasonCode: 'EXPLORATORY_EXECUTION_FAILED' }),
+      expect.objectContaining({ tool: 'compile_and_run_semantic', outcome: 'denied', reasonCode: 'POST_FREEZE_ROUTE_CHANGE_DENIED' }),
+      expect.objectContaining({ tool: 'validate_and_run_sql', outcome: 'eligible', executionAuthorized: true, samePlanRepair: true }),
+      expect.objectContaining({ tool: 'validate_and_run_sql', outcome: 'denied', reasonCode: 'ASK_REPAIR_BUDGET_EXHAUSTED' }),
+    ]));
+  });
+
+  it('executes governed relational DQL from admitted IDs and atomic paths without a V1 compilation', async () => {
+    const relation: AgentEvidenceCandidate = {
+      id: 'dbt:model:orders', qualifiedId: 'dbt:model:orders', kind: 'dbt_model', trustTier: 'governed_sql',
+      name: 'orders', sourceObjects: ['analytics.orders'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const path = {
+      version: 1 as const,
+      id: 'relationship-path:orders-customers',
+      edgeIds: ['edge:orders.customer_id', 'edge:customers.customer_id'],
+      candidateIds: ['dbt:model:orders'],
+      snapshotId: 'snapshot:v2-test',
+    };
+    const executeAskV2DqlArtifact = vi.fn(async (request: { artifact: { source: string }; relationshipPathIds: string[] }) => {
+      expect(request.artifact.source).toBe('from orders | summarize order_count = count()');
+      expect(request.relationshipPathIds).toEqual(['relationship-path:orders-customers']);
+      return { columns: ['order_count'], rows: [{ order_count: 1 }], rowCount: 1 };
+    });
+    const authorizeAskV2DqlArtifact = vi.fn(async (request: { relationshipPathIds: string[] }) => {
+      expect(request.relationshipPathIds).toEqual(['relationship-path:orders-customers']);
+      return { planId: 'ask-v2:governed:orders-customers', targetFingerprint: 'target:orders-customers' };
+    });
+    const state = askV2State([relation]);
+    state.relationshipPathHandles = [path];
+    const result = await __test__.createAskV2LaneHandler(state)({
+      question: 'show order count by customer',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_ask_context","input":{}}\n```',
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_dql","input":{"dqlProgram":"from orders | summarize order_count = count()","measureIds":["dbt:model:orders"],"expectedOutputIds":["dbt:model:orders"],"relationshipPathIds":["relationship-path:orders-customers"]}}\n```',
+        '```json\n{"tool":"finish_answer","input":{"answer":"Order count is ready."}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace([relation], { paths: [path] }),
+      authorizeAskV2DqlArtifact,
+      executeAskV2DqlArtifact,
+      // Absence is deliberate: authoritative V2 does not read a router
+      // compilation produced by the V1 deterministic cascade.
+    } as never);
+
+    expect(executeAskV2DqlArtifact).toHaveBeenCalledOnce();
+    expect(authorizeAskV2DqlArtifact).toHaveBeenCalledOnce();
+    expect(result.result?.answerTier).toBe('governed_relational');
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'compile_and_run_dql', outcome: 'executed', candidateIds: ['dbt:model:orders'] }),
+    ]));
+  });
+
+  it('AGT-047 commits governed relational execution when the controller inspects an admitted customer/revenue/region relation', async () => {
+    // This is a governed, pre-joined relation. It intentionally has no
+    // relationship path: the test proves that a relational inspector, rather
+    // than a semantic card or preloaded path handle, creates the V2 route
+    // commitment and exposes only DQL execution next.
+    const customerRevenueRegion: AgentEvidenceCandidate = {
+      id: 'dbt:model:customer_revenue_by_region', qualifiedId: 'dbt:model:customer_revenue_by_region',
+      kind: 'dbt_model', trustTier: 'governed_sql', name: 'customer_revenue_by_region',
+      sourceObjects: ['analytics.customer_revenue_by_region'], relevanceScore: 1,
+      matchReasons: ['customer revenue region'], compatibility: 'compatible',
+    };
+    const state = askV2State([customerRevenueRegion]);
+    const authorize = vi.fn(async (request: { candidateIds: string[]; relationshipPathIds: string[] }) => {
+      expect(request.candidateIds).toEqual(['dbt:model:customer_revenue_by_region']);
+      expect(request.relationshipPathIds).toEqual([]);
+      return { planId: 'ask-v2:governed:customer-revenue-region', targetFingerprint: 'target:customer-revenue-region' };
+    });
+    const execute = vi.fn(async () => ({
+      columns: ['customer_name', 'region', 'revenue'],
+      rows: [{ customer_name: 'Melissa Davis', region: 'West', revenue: 1411 }],
+      rowCount: 1,
+    }));
+
+    const answer = await __test__.createAskV2LaneHandler(state, { maxToolCalls: 8, maxProviderDispatches: 6 })({
+      question: 'who are the top customers by revenue by region?',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_ask_context","input":{}}\n```',
+        // This inspector owns the route choice; no semantic/certified
+        // inspection is allowed after it becomes executable.
+        '```json\n{"tool":"inspect_relational_context","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_dql","input":{"dqlProgram":"from customer_revenue_by_region | summarize revenue = sum(revenue) by customer_name, region | order by revenue desc","measureIds":["dbt:model:customer_revenue_by_region"],"expectedOutputIds":["dbt:model:customer_revenue_by_region"]}}\n```',
+        '```json\n{"tool":"finish_answer","input":{"answer":"Top customers by revenue and region are ready."}}\n```',
+      ]),
+      askAgentV2Workspace: askV2Workspace([customerRevenueRegion]),
+      authorizeAskV2DqlArtifact: authorize,
+      executeAskV2DqlArtifact: execute,
+    } as never);
+
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'inspect_relational_context', outcome: 'eligible' }),
+      expect.objectContaining({
+        tool: 'compile_and_run_dql', outcome: 'executed', reasonCode: 'GOVERNED_RELATIONAL_RESULT_VALIDATED',
+        candidateIds: ['dbt:model:customer_revenue_by_region'],
+      }),
+    ]));
+    expect(authorize).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(answer.result).toMatchObject({ answerTier: 'governed_relational', rowCount: 1 });
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'inspect_ask_context', outcome: 'eligible', reasonCode: 'initial_snapshot_context' }),
+      expect.objectContaining({ tool: 'compile_and_run_dql', outcome: 'executed', reasonCode: 'GOVERNED_RELATIONAL_RESULT_VALIDATED' }),
+      expect.objectContaining({ tool: 'finish_answer', outcome: 'eligible', reasonCode: 'ASK_V2_RESULT_NARRATED' }),
+    ]));
+  });
+
+  it('rejects a governed relational path that was not admitted with the snapshot', async () => {
+    const relation: AgentEvidenceCandidate = {
+      id: 'dbt:model:orders', qualifiedId: 'dbt:model:orders', kind: 'dbt_model', trustTier: 'governed_sql',
+      name: 'orders', sourceObjects: ['analytics.orders'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const path = { version: 1 as const, id: 'relationship-path:orders-customers', edgeIds: ['edge:orders.customer_id', 'edge:customers.customer_id'], candidateIds: ['dbt:model:orders'], snapshotId: 'snapshot:v2-test' };
+    const executeAskV2DqlArtifact = vi.fn();
+    const authorizeAskV2DqlArtifact = vi.fn();
+    const state = askV2State([relation]);
+    state.relationshipPathHandles = [path];
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'show order count by customer',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_relational_context","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_dql","input":{"dqlProgram":"from orders | summarize order_count = count()","measureIds":["dbt:model:orders"],"expectedOutputIds":["dbt:model:orders"],"relationshipPathIds":["relationship-path:invented"]}}\n```',
+        'no result',
+      ]),
+      askAgentV2Workspace: askV2Workspace([relation], { paths: [path] }),
+      authorizeAskV2DqlArtifact,
+      executeAskV2DqlArtifact,
+    } as never);
+
+    expect(authorizeAskV2DqlArtifact).not.toHaveBeenCalled();
+    expect(executeAskV2DqlArtifact).not.toHaveBeenCalled();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'compile_and_run_dql', outcome: 'ineligible', reasonCode: 'GOVERNED_RELATIONAL_IDENTIFIER_OR_PATH_NOT_ADMITTED' }),
+    ]));
+  });
+
+  it('permits one syntax-only governed-DQL repair and rejects widened or changed logical semantics before host execution', async () => {
+    const relation: AgentEvidenceCandidate = {
+      id: 'dbt:model:orders', qualifiedId: 'dbt:model:orders', kind: 'dbt_model', trustTier: 'governed_sql',
+      name: 'orders', sourceObjects: ['analytics.orders'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const physicalPath = {
+      leftRelation: 'analytics.orders',
+      leftColumn: 'customer_id',
+      rightRelation: 'analytics.customers',
+      rightColumn: 'customer_id',
+    };
+    const admittedPathId = askV2RelationshipPathHandleId(physicalPath);
+    const admittedPath = {
+      version: 1 as const,
+      id: admittedPathId,
+      edgeIds: ['edge:orders.customer_id', 'edge:customers.customer_id'],
+      candidateIds: ['dbt:model:orders'],
+      snapshotId: 'snapshot:v2-test',
+    };
+    const widenedPath = {
+      version: 1 as const,
+      id: 'relationship-path:orders-products',
+      edgeIds: ['edge:orders.product_id', 'edge:products.product_id'],
+      candidateIds: ['dbt:model:orders'],
+      snapshotId: 'snapshot:v2-test',
+    };
+    const executedPrograms: string[] = [];
+    const authorizeAskV2DqlArtifact = vi.fn(async () => ({
+      planId: 'ask-v2:governed:orders',
+      targetFingerprint: 'target:orders',
+    }));
+    const executeAskV2DqlArtifact = vi.fn(async (request: { artifact: { source: string } }) => {
+      executedPrograms.push(request.artifact.source);
+      // The production V2 host validates the compiled physical query against
+      // the frozen path closure. Model that boundary here rather than treating
+      // matching opaque IDs alone as proof that a repaired program is safe.
+      assertAskV2BoundRelationshipPathsForSql({
+        sql: `
+          SELECT orders.order_id
+          FROM analytics.orders AS orders
+          JOIN analytics.customers AS customers
+            ON orders.customer_id = customers.customer_id
+        `,
+        relationshipPathIds: [admittedPathId],
+        paths: [physicalPath],
+      });
+      if (executedPrograms.length === 1) {
+        throw Object.assign(new Error('The first DQL program did not compile.'), {
+          code: 'dql_syntax_invalid',
+          stage: 'validation',
+        });
+      }
+      return { columns: ['order_count'], rows: [{ order_count: 1 }], rowCount: 1 };
+    });
+    const state = askV2State([relation]);
+    state.relationshipPathHandles = [admittedPath, widenedPath];
+
+    const result = await __test__.createAskV2LaneHandler(state, {
+      maxToolCalls: 8,
+      // Three inspections, four tool proposals, and the final evidence-bound
+      // narration each consume a controller send. Keep the provider ceiling
+      // above that test choreography; the tool ceiling remains the contract
+      // under test.
+      maxProviderDispatches: 10,
+    })({
+      question: 'show order count by customer',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_relational_context","input":{}}\n```',
+        `\`\`\`json\n{"tool":"compile_and_run_dql","input":{"dqlProgram":"from orders | summarize order_count = count()","measureIds":["dbt:model:orders"],"expectedOutputIds":["dbt:model:orders"],"relationshipPathIds":["${admittedPathId}"]}}\n\`\`\``,
+        // This attempt widens the immutable relationship closure. It must be
+        // denied before the host is asked to mint a second capability.
+        `\`\`\`json\n{"tool":"compile_and_run_dql","input":{"dqlProgram":"from orders | join products on orders.product_id = products.product_id | summarize order_count = count()","measureIds":["dbt:model:orders"],"expectedOutputIds":["dbt:model:orders"],"relationshipPathIds":["${admittedPathId}","relationship-path:orders-products"],"repair":true}}\n\`\`\``,
+        // Same IDs/path do not make a changed filter a same-plan repair.
+        `\`\`\`json\n{"tool":"compile_and_run_dql","input":{"dqlProgram":"from orders | where order_id is not null | summarize order_count = count()","measureIds":["dbt:model:orders"],"expectedOutputIds":["dbt:model:orders"],"relationshipPathIds":["${admittedPathId}"],"repair":true}}\n\`\`\``,
+        // Nor can a repair change the aggregation/output contract.
+        `\`\`\`json\n{"tool":"compile_and_run_dql","input":{"dqlProgram":"from orders | summarize order_count = sum(order_id)","measureIds":["dbt:model:orders"],"expectedOutputIds":["dbt:model:orders"],"relationshipPathIds":["${admittedPathId}"],"repair":true}}\n\`\`\``,
+        // Parser/casing/whitespace presentation may change while the full
+        // normalized logical program remains identical.
+        `\`\`\`json\n{"tool":"compile_and_run_dql","input":{"dqlProgram":"FROM orders|SUMMARIZE order_count=count();","measureIds":["dbt:model:orders"],"expectedOutputIds":["dbt:model:orders"],"relationshipPathIds":["${admittedPathId}"],"repair":true}}\n\`\`\``,
+        'governed result finished',
+      ]),
+      askAgentV2Workspace: askV2Workspace([relation], { paths: [admittedPath, widenedPath] }),
+      authorizeAskV2DqlArtifact,
+      executeAskV2DqlArtifact,
+    } as never);
+
+    expect(result.result?.answerTier).toBe('governed_relational');
+    expect(executedPrograms).toEqual([
+      'from orders | summarize order_count = count()',
+      'FROM orders|SUMMARIZE order_count=count();',
+    ]);
+    // The widened path and changed logical program are rejected by the kernel
+    // before a second host capability can be minted. Only the syntax/casing
+    // repair retains the frozen plan.
+    expect(authorizeAskV2DqlArtifact).toHaveBeenCalledTimes(2);
+    expect(executeAskV2DqlArtifact).toHaveBeenCalledTimes(2);
+    expect(state.observations.filter((observation) =>
+      observation.tool === 'compile_and_run_dql'
+      && observation.outcome === 'denied'
+      && observation.reasonCode === 'POST_FREEZE_PLAN_MUTATION_DENIED')).toHaveLength(3);
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'compile_and_run_dql', outcome: 'error', reasonCode: 'GOVERNED_RELATIONAL_EXECUTION_FAILED' }),
+      expect.objectContaining({ tool: 'compile_and_run_dql', outcome: 'denied', reasonCode: 'POST_FREEZE_PLAN_MUTATION_DENIED' }),
+      expect.objectContaining({ tool: 'compile_and_run_dql', outcome: 'eligible', samePlanRepair: true, relationshipPathIds: [admittedPathId] }),
+      expect.objectContaining({ tool: 'compile_and_run_dql', outcome: 'executed', reasonCode: 'GOVERNED_RELATIONAL_RESULT_VALIDATED' }),
+    ]));
+  });
+
+  it('requires both V2 DQL authorization and execution capabilities before governed relational freeze', async () => {
+    const relation: AgentEvidenceCandidate = {
+      id: 'dbt:model:orders', qualifiedId: 'dbt:model:orders', kind: 'dbt_model', trustTier: 'governed_sql',
+      name: 'orders', sourceObjects: ['analytics.orders'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const executeAskV2DqlArtifact = vi.fn();
+    const state = askV2State([relation]);
+    await __test__.createAskV2LaneHandler(state)({
+      question: 'show order count',
+      provider: textToolProvider([
+        '```json\n{"tool":"inspect_certified_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_semantic_candidates","input":{}}\n```',
+        '```json\n{"tool":"inspect_relational_context","input":{}}\n```',
+        '```json\n{"tool":"compile_and_run_dql","input":{"dqlProgram":"from orders | summarize order_count = count()","measureIds":["dbt:model:orders"],"expectedOutputIds":["dbt:model:orders"]}}\n```',
+        'no result',
+      ]),
+      askAgentV2Workspace: askV2Workspace([relation], {
+        tierStates: {
+          governed_relational: {
+            version: 1,
+            status: 'available',
+            candidateIds: ['dbt:model:orders'],
+            reasonCode: 'GOVERNED_RELATIONAL_CONTEXT_AVAILABLE',
+          },
+        },
+      }),
+      executeAskV2DqlArtifact,
+    } as never);
+
+    expect(executeAskV2DqlArtifact).not.toHaveBeenCalled();
+    expect(state.resolvedPlan).toBeUndefined();
+    expect(state.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ tool: 'compile_and_run_dql', outcome: 'ineligible', reasonCode: 'GOVERNED_RELATIONAL_EXECUTION_UNAVAILABLE' }),
+    ]));
+  });
+
+  it('runs an explicit Research plan as independent V2 branches and keeps lineage dedicated', async () => {
+    const relation: AgentEvidenceCandidate = {
+      id: 'dbt:model:orders', qualifiedId: 'dbt:model:orders', kind: 'dbt_model', trustTier: 'exploratory',
+      name: 'orders', sourceObjects: ['analytics.orders'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const paths = [{ version: 1 as const, id: 'relationship-path:orders-customers', edgeIds: ['edge:orders.customer_id', 'edge:customers.customer_id'], candidateIds: ['dbt:model:orders'], snapshotId: 'snapshot:v2-test' }];
+    const state = askV2State([relation], 'research');
+    state.relationshipPathHandles = paths;
+    const answer = await __test__.createAskV2ResearchLaneHandler(state)({
+      question: 'Research order and customer behaviour',
+      provider: textToolProvider([
+        JSON.stringify({ hypotheses: [
+          { kind: 'analytical', question: 'show order count' },
+          { kind: 'lineage', question: 'inspect order customer lineage' },
+          { kind: 'analytical', question: 'show customers' },
+        ] }),
+        'No executable result was selected.',
+        'No executable result was selected.',
+      ]),
+      askAgentV2Workspace: askV2Workspace([relation], { paths }),
+    } as never);
+
+    expect(answer.askAgentV2Outcome).toMatchObject({ kind: 'finish_answer' });
+    expect(state.researchLedgerV4).toMatchObject({ version: 4, limitedScope: false });
+    expect(state.researchLedgerV4?.branches).toEqual(expect.arrayContaining([
+      expect.objectContaining({ lineageProgram: 'dedicated', evidenceHandleIds: ['relationship-path:orders-customers'] }),
+    ]));
+  });
+
+  it('does not promote an execution-only Research branch without a deterministic result receipt or facts', () => {
+    const relation: AgentEvidenceCandidate = {
+      id: 'dbt:model:orders', qualifiedId: 'dbt:model:orders', kind: 'dbt_model', trustTier: 'exploratory',
+      name: 'orders', sourceObjects: ['analytics.orders'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const child = askV2State([relation]);
+    child.observations.push({
+      version: 1,
+      tool: 'validate_and_run_sql',
+      outcome: 'executed',
+      reasonCode: 'EXPLORATORY_RESULT_VALIDATED',
+      candidateIds: ['dbt:model:orders'],
+      origin: 'execution',
+    });
+    const branch = __test__.askV2ResearchAnalyticalBranchReceipt({
+      id: 'research:branch:1',
+      child,
+      answer: {
+        kind: 'uncertified',
+        text: 'A transport said it executed.',
+        answer: 'A transport said it executed.',
+        citations: [],
+        considered: [],
+        result: { columns: ['order_id'], rows: [{ order_id: '1' }], rowCount: 1 },
+        askAgentV2Outcome: { version: 2, kind: 'finish_answer', reasonCode: 'ASK_V2_VALIDATED_RESULT', origin: 'execution' },
+      } as never,
+    });
+
+    expect(branch.verdict).toBe('inconclusive');
+    expect(branch.validatorEvidenceHandleIds).toBeUndefined();
+  });
+
+  it('records a supported Research branch only after receipt validation', () => {
+    const relation: AgentEvidenceCandidate = {
+      id: 'dbt:model:orders', qualifiedId: 'dbt:model:orders', kind: 'dbt_model', trustTier: 'exploratory',
+      name: 'orders', sourceObjects: ['analytics.orders'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const child = askV2State([relation]);
+    child.observations.push({
+      version: 1,
+      tool: 'validate_and_run_sql',
+      outcome: 'executed',
+      reasonCode: 'EXPLORATORY_RESULT_VALIDATED',
+      candidateIds: ['dbt:model:orders'],
+      origin: 'execution',
+    });
+    const fingerprint = 'a'.repeat(64);
+    const branch = __test__.askV2ResearchAnalyticalBranchReceipt({
+      id: 'research:branch:1',
+      child,
+      answer: {
+        kind: 'uncertified', text: 'Validated result.', answer: 'Validated result.', citations: [], considered: [],
+        result: {
+          columns: ['order_id'], rows: [{ order_id: '1' }], rowCount: 1, resultFingerprint: fingerprint,
+          executionReceipt: {
+            sourceFingerprint: 'b'.repeat(64),
+            compiledSqlFingerprint: 'c'.repeat(64),
+            parameterFingerprint: 'd'.repeat(64),
+            resultFingerprint: fingerprint,
+          },
+        },
+        askAgentV2Outcome: { version: 2, kind: 'finish_answer', reasonCode: 'ASK_V2_VALIDATED_RESULT', origin: 'execution' },
+      } as never,
+    });
+
+    expect(branch).toMatchObject({
+      verdict: 'supported',
+      validatorEvidenceHandleIds: [`receipt:${fingerprint}`],
+    });
+  });
+
+  it('runs the root-frozen dedicated lineage program and persists only its sanitized structural receipt handles', async () => {
+    const relation: AgentEvidenceCandidate = {
+      id: 'dbt:model:orders', qualifiedId: 'dbt:model:orders', kind: 'dbt_model', trustTier: 'exploratory',
+      name: 'orders', sourceObjects: ['analytics.orders'], relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const state = askV2State([relation], 'research');
+    const lineageProgram = vi.fn(() => ({
+      status: 'completed' as const,
+      evidenceHandleIds: ['lineage:structural-fingerprint'],
+      validatorEvidenceHandleIds: ['lineage-validator:structural-fingerprint'],
+      receiptFingerprint: 'sha256:lineage-receipt',
+    }));
+    await __test__.createAskV2ResearchLaneHandler(state)({
+      question: 'Research the lineage of orders',
+      provider: textToolProvider([
+        JSON.stringify({ hypotheses: [{ kind: 'lineage', question: 'inspect orders lineage' }] }),
+      ]),
+      askAgentV2Workspace: askV2Workspace([relation], { runDedicatedLineageProgram: lineageProgram }),
+    } as never);
+
+    expect(lineageProgram).toHaveBeenCalledWith(expect.objectContaining({
+      snapshotId: 'snapshot:v2-test',
+      targetCandidateIds: ['dbt:model:orders'],
+    }));
+    expect(state.researchLedgerV4?.branches).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        lineageProgram: 'dedicated',
+        evidenceHandleIds: ['lineage:structural-fingerprint'],
+        validatorEvidenceHandleIds: ['lineage-validator:structural-fingerprint'],
+        childReceiptFingerprint: 'sha256:lineage-receipt',
+      }),
+    ]));
+  });
+
+  it('runs root-frozen V2 certified and semantic Research children with zero child provider egress', async () => {
+    const semantic: AgentEvidenceCandidate = {
+      id: 'semantic:metric:revenue', qualifiedId: 'semantic:metric:revenue', kind: 'semantic_metric', semanticObjectType: 'metric',
+      trustTier: 'semantic', name: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const certified: AgentEvidenceCandidate = {
+      id: 'block:top-customers', qualifiedId: 'block:top-customers', kind: 'certified_block',
+      trustTier: 'certified', name: 'top customers', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const relation: AgentEvidenceCandidate = {
+      id: 'dbt:model:orders', qualifiedId: 'dbt:model:orders', kind: 'dbt_model',
+      trustTier: 'governed_sql', name: 'orders', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+    };
+    const state = askV2State([semantic, certified, relation], 'research');
+    const receipt = (seed: string) => ({
+      sourceFingerprint: `${seed}`.repeat(64).slice(0, 64),
+      compiledSqlFingerprint: `${seed === 'a' ? 'b' : 'd'}`.repeat(64).slice(0, 64),
+      parameterFingerprint: `${seed === 'a' ? 'c' : 'e'}`.repeat(64).slice(0, 64),
+      resultFingerprint: `${seed === 'a' ? 'f' : '9'}`.repeat(64).slice(0, 64),
+    });
+    const frozenChild = (id: string, tier: 'semantic' | 'certified', candidate: AgentEvidenceCandidate, seed: string) => {
+      const child = askV2State([semantic, certified, relation]);
+      const executionReceipt = receipt(seed);
+      const candidateId = candidate.qualifiedId ?? candidate.id;
+      child.resolvedPlan = {
+        version: 3,
+        id: `ask-v2:${tier}:${seed}`,
+        snapshotId: 'snapshot:v2-test',
+        tier,
+        candidateIds: [candidateId],
+        frozen: true,
+        reviewRequired: tier !== 'certified',
+        fingerprint: `plan:${seed}`,
+      };
+      child.observations.push({
+        version: 1,
+        tool: tier === 'certified' ? 'run_certified' : 'compile_and_run_semantic',
+        tier,
+        outcome: 'executed',
+        reasonCode: `${tier.toUpperCase()}_RESULT_VALIDATED`,
+        candidateIds: [candidateId],
+        origin: 'execution',
+      });
+      const execute = vi.fn(async () => ({
+        state: child,
+        answer: {
+          kind: tier === 'certified' ? 'certified' : 'uncertified',
+          text: `${tier} result`, answer: `${tier} result`, citations: [], considered: [],
+          result: {
+            columns: ['value'], rows: [{ value: 1 }], rowCount: 1,
+            resultFingerprint: executionReceipt.resultFingerprint,
+            executionReceipt,
+          },
+          askAgentV2Outcome: { version: 2, kind: 'finish_answer', reasonCode: 'ASK_V2_VALIDATED_RESULT', origin: 'execution' },
+        },
+      }));
+      const handle = {
+          version: 1 as const,
+          id,
+          snapshotId: 'snapshot:v2-test',
+          sourceFingerprint: 'sha256:v2-test',
+          tier,
+          candidateIds: [candidateId],
+          binding: {
+            version: 1 as const,
+            parameters: {},
+            trustState: (tier === 'certified' ? 'certified' : 'governed') as 'certified' | 'governed',
+            planFingerprint: `plan:${seed}`,
+            ...(tier === 'certified'
+              ? { artifactRevisionFingerprint: `artifact:${seed}` }
+              : { capabilityFingerprints: [`capability:${seed}`] }),
+          },
+          isCurrent: () => true,
+          execute,
+      } satisfies AskFrozenResearchChildHandleV1;
+      return {
+        handle,
+        execute,
+      };
+    };
+    const frozenSemantic = frozenChild('research:frozen:semantic', 'semantic', semantic, 'a');
+    const frozenCertified = frozenChild('research:frozen:certified', 'certified', certified, 'd');
+    const lineageProgram = vi.fn(() => ({
+      status: 'completed' as const,
+      evidenceHandleIds: ['lineage:orders'],
+      validatorEvidenceHandleIds: ['lineage-validator:orders'],
+      receiptFingerprint: 'sha256:lineage',
+    }));
+    let providerCalls = 0;
+    const provider: AgentProvider = {
+      name: 'ollama',
+      available: async () => true,
+      generate: async () => {
+        providerCalls += 1;
+        if (providerCalls > 1) throw new Error('a frozen Research child must not dispatch a provider');
+        return JSON.stringify({ hypotheses: [
+          { kind: 'analytical', question: 'validate revenue', frozenChildId: 'research:frozen:semantic' },
+          { kind: 'lineage', question: 'inspect orders lineage' },
+          { kind: 'analytical', question: 'validate top customers', frozenChildId: 'research:frozen:certified' },
+        ] });
+      },
+    };
+    const answer = await __test__.createAskV2ResearchLaneHandler(state)({
+      question: 'Research revenue and customers',
+      provider,
+      askAgentV2Workspace: askV2Workspace([semantic, certified, relation], {
+        frozenResearchChildren: new Map([
+          [frozenSemantic.handle.id, frozenSemantic.handle],
+          [frozenCertified.handle.id, frozenCertified.handle],
+        ]),
+        runDedicatedLineageProgram: lineageProgram,
+      }),
+    } as never);
+
+    // The one root plan is the only provider request. Both analytical
+    // children execute their immutable host capabilities, while lineage stays
+    // structural and receives no analytical result reuse.
+    expect(providerCalls).toBe(1);
+    expect(frozenSemantic.execute).toHaveBeenCalledOnce();
+    expect(frozenCertified.execute).toHaveBeenCalledOnce();
+    expect(lineageProgram).toHaveBeenCalledWith(expect.objectContaining({
+      snapshotId: 'snapshot:v2-test',
+      targetCandidateIds: ['dbt:model:orders'],
+    }));
+    expect(state.researchLedgerV4).toMatchObject({ version: 4, limitedScope: false });
+    expect(state.researchLedgerV4?.branches).toEqual(expect.arrayContaining([
+      expect.objectContaining({ verdict: 'supported', lineageProgram: 'not_run' }),
+      expect.objectContaining({ verdict: 'inconclusive', lineageProgram: 'dedicated', evidenceHandleIds: ['lineage:orders'] }),
+    ]));
+    expect(answer.text).toContain('Findings');
+    expect(answer.text).toContain('Counter-evidence');
+    expect(answer.text).toContain('Limitations');
+  });
+});
+
 describe('provider runner — analyst physical dispatch budget', () => {
+  it.each([
+    ['text', () => {
+      let calls = 0;
+      return {
+        get calls() { return calls; },
+        requestTools: (): string[] => [],
+        provider: {
+          name: 'ollama' as const,
+          available: async () => true,
+          generate: async () => [
+            '```json\\n{"tool":"inspect_business_context","input":{}}\\n```',
+            '```json\\n{"tool":"finish_answer","input":{"answer":"Revenue is recognized income after eligible customer orders are fulfilled.","evidenceIds":["context:revenue-definition"]}}\\n```',
+          ][calls++] ?? '',
+        } satisfies AgentProvider,
+        cleanup: (): void => undefined,
+      };
+    }],
+    ['OpenAI', () => {
+      let calls = 0;
+      const requestTools: string[][] = [];
+      vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+        calls += 1;
+        const body = JSON.parse(String(init?.body ?? '{}')) as {
+          tools?: Array<{ function?: { name?: string } }>;
+        };
+        requestTools.push((body.tools ?? []).flatMap((tool) => tool.function?.name ? [tool.function.name] : []));
+        const tool = calls === 1
+          ? { id: 'context_1', type: 'function', function: { name: 'inspect_business_context', arguments: '{}' } }
+          : {
+              id: 'finish_1',
+              type: 'function',
+              function: {
+                name: 'finish_answer',
+                arguments: '{"answer":"Revenue is recognized income after eligible customer orders are fulfilled.","evidenceIds":["context:revenue-definition"]}',
+              },
+            };
+        return new Response(JSON.stringify({ choices: [{ message: { content: null, tool_calls: [tool] } }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }));
+      return {
+        get calls() { return calls; },
+        requestTools: (): string[] => requestTools.at(-1) ?? [],
+        provider: new OpenAIProvider({ apiKey: 'test', baseUrl: 'https://example.test/v1', model: 'gpt-test' }),
+        cleanup: (): void => { vi.unstubAllGlobals(); },
+      };
+    }],
+    ['Claude', () => {
+      let calls = 0;
+      const requestTools: string[][] = [];
+      vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+        calls += 1;
+        const body = JSON.parse(String(init?.body ?? '{}')) as {
+          tools?: Array<{ name?: string }>;
+        };
+        requestTools.push((body.tools ?? []).flatMap((tool) => tool.name ? [tool.name] : []));
+        const block = calls === 1
+          ? { type: 'tool_use', id: 'context_1', name: 'inspect_business_context', input: {} }
+          : {
+              type: 'tool_use',
+              id: 'finish_1',
+              name: 'finish_answer',
+              input: {
+                answer: 'Revenue is recognized income after eligible customer orders are fulfilled.',
+                evidenceIds: ['context:revenue-definition'],
+              },
+            };
+        return new Response(JSON.stringify({ content: [block] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }));
+      return {
+        get calls() { return calls; },
+        requestTools: (): string[] => requestTools.at(-1) ?? [],
+        provider: new ClaudeProvider({ apiKey: 'test', baseUrl: 'https://example.test/anthropic', model: 'claude-test' }),
+        cleanup: (): void => { vi.unstubAllGlobals(); },
+      };
+    }],
+  ])('runs the evidence-bound business-context finish control in two sends (%s)', async (_transport, createTransport) => {
+    const transport = createTransport();
+    try {
+      const state = askV2State([], 'business_context');
+      const answer = await __test__.createAskV2LaneHandler(state, {
+        maxToolCalls: 4,
+        maxProviderDispatches: 2,
+      })({
+        question: 'What does revenue mean for this project?',
+        provider: transport.provider,
+        askAgentV2Workspace: askV2Workspace([], {
+          businessContext: {
+            available: true,
+            objectCount: 1,
+            cards: [{
+              id: 'context:revenue-definition',
+              name: 'Revenue definition',
+              description: 'Recognized income after eligible customer orders are fulfilled.',
+              kind: 'definition',
+            }],
+          },
+        }),
+      } as never);
+
+      expect(transport.calls).toBe(2);
+      if (_transport !== 'text') {
+        expect(transport.requestTools()).toEqual(['finish_answer']);
+      }
+      expect(state.observations).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          tool: 'inspect_business_context',
+          outcome: 'eligible',
+          candidateIds: ['context:revenue-definition'],
+        }),
+        expect.objectContaining({
+          tool: 'finish_answer',
+          outcome: 'eligible',
+          reasonCode: 'ASK_V2_CONTEXTUAL_ANSWER',
+          candidateIds: ['context:revenue-definition'],
+        }),
+      ]));
+      expect(answer).toMatchObject({
+        kind: 'uncertified',
+        sourceTier: 'business_context',
+        certification: 'governed',
+        reviewStatus: 'governed',
+        askAgentV2Outcome: {
+          kind: 'finish_answer',
+          reasonCode: 'ASK_V2_CONTEXTUAL_ANSWER',
+        },
+      });
+      expect(answer.text).toContain('Revenue is recognized income');
+    } finally {
+      transport.cleanup();
+    }
+  });
+
+  it.each([
+    ['text', () => {
+      let send = 0;
+      return {
+        provider: {
+          name: 'ollama' as const,
+          available: async () => true,
+          generate: async () => [
+            '```json\\n{"tool":"inspect_certified_candidates","input":{}}\\n```',
+            '```json\\n{"tool":"run_certified","input":{"candidateId":"block:top-customers"}}\\n```',
+            '```json\\n{"tool":"finish_answer","input":{"answer":"The certified result is ready."}}\\n```',
+          ][send++] ?? '',
+        } satisfies AgentProvider,
+        cleanup: (): void => undefined,
+      };
+    }],
+    ['OpenAI', () => {
+      let send = 0;
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        send += 1;
+        const tool = send === 1
+          ? { id: 'inspect_1', type: 'function', function: { name: 'inspect_certified_candidates', arguments: '{}' } }
+          : send === 2
+            ? { id: 'certified_1', type: 'function', function: { name: 'run_certified', arguments: '{"candidateId":"block:top-customers"}' } }
+            : { id: 'finish_1', type: 'function', function: { name: 'finish_answer', arguments: '{"answer":"The certified result is ready."}' } };
+        return new Response(JSON.stringify({ choices: [{ message: { content: null, tool_calls: [tool] } }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }));
+      return {
+        provider: new OpenAIProvider({ apiKey: 'test', baseUrl: 'https://example.test/v1', model: 'gpt-test' }),
+        cleanup: (): void => { vi.unstubAllGlobals(); },
+      };
+    }],
+    ['Claude', () => {
+      let send = 0;
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        send += 1;
+        const block = send === 1
+          ? { type: 'tool_use', id: 'inspect_1', name: 'inspect_certified_candidates', input: {} }
+          : send === 2
+            ? { type: 'tool_use', id: 'certified_1', name: 'run_certified', input: { candidateId: 'block:top-customers' } }
+            : { type: 'tool_use', id: 'finish_1', name: 'finish_answer', input: { answer: 'The certified result is ready.' } };
+        return new Response(JSON.stringify({ content: [block] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }));
+      return {
+        provider: new ClaudeProvider({ apiKey: 'test', baseUrl: 'https://example.test/anthropic', model: 'claude-test' }),
+        cleanup: (): void => { vi.unstubAllGlobals(); },
+      };
+    }],
+  ])('admits the required post-result finish control as narration after discovery closes (%s)', async (_transport, createTransport) => {
+    const root = mkdtempSync(join(tmpdir(), 'dql-v2-narration-phase-'));
+    const transport = createTransport();
+    try {
+      cpSync(providerFixtureRoot, root, { recursive: true });
+      const question = 'who are the top customers';
+      const candidate: AgentEvidenceCandidate = {
+        id: 'block:top-customers',
+        qualifiedId: 'block:top-customers',
+        kind: 'certified_block',
+        trustTier: 'certified',
+        name: 'top customers',
+        relevanceScore: 1,
+        matchReasons: ['exact'],
+        compatibility: 'compatible',
+      };
+      const state = askV2State([candidate]);
+      const workspace = askV2Workspace([candidate], {
+        contextPack: v2RunnerContextPack(question),
+        certifiedArtifacts: new Map([['block:top-customers', {
+          version: 1,
+          artifact: { kind: 'block', nodeId: 'block:top-customers', name: 'top customers' },
+          revisionFingerprint: 'sha256:top-customers',
+          isCurrent: () => true,
+        }]]),
+        certifiedCompleteCandidateIds: ['block:top-customers'],
+        certifiedExecutionAvailable: true,
+      });
+      let discoveryOpen = true;
+      const budget = v2NarrationTestBudget({
+        discoveryOpen: () => discoveryOpen,
+        narrationOpen: () => true,
+      });
+      const ledger = new RunScopedProviderDispatchEvidence(
+        agentRunProviderDispatchBudgetForMode('ask'),
+        budget,
+      );
+      const manifest = buildManifest({ projectRoot: root, dbtManifestPath: join(root, 'target', 'manifest.json') });
+      const executeCertifiedBlock = vi.fn(async () => {
+        // The final provider send must now be admitted through narration. If
+        // it remained a tool follow-up, this closed discovery window would
+        // reject it before the raw text/OpenAI/Claude provider is entered.
+        discoveryOpen = false;
+        return { columns: ['customer'], rows: [{ customer: 'Ada' }], rowCount: 1 };
+      });
+      const turns: Array<{ kind: string; [key: string]: unknown }> = [];
+
+      await createDqlAgentProviderRunner('ollama', transport.provider).run({
+        provider: 'ollama',
+        projectRoot: root,
+        agentRunId: `v2-narration-phase-${String(_transport).toLowerCase()}`,
+        askAgentRuntimeMode: 'authoritative_v2',
+        askAgentV2State: state,
+        askAgentV2Workspace: workspace,
+        providerPreflightRequired: false,
+        providerDispatchEvidenceSink: ledger,
+        projectSnapshot: { snapshotId: 'snapshot:v2-test', manifest },
+        messages: [{ role: 'user', content: question }],
+        executeCertifiedBlock,
+      }, (turn) => turns.push(turn as typeof turns[number]), new AbortController().signal);
+
+      expect(executeCertifiedBlock).toHaveBeenCalledOnce();
+      expect(ledger.snapshot().providerEgressReceipts.map((receipt) => receipt.dispatchPhase)).toEqual([
+        'agent_control',
+        'tool_followup',
+        'narration',
+      ]);
+      expect(ledger.snapshot().providerEgressReceipts.at(-1)).toMatchObject({
+        dispatchPhase: 'narration',
+        purpose: 'answer_generation',
+      });
+      expect(turns).toContainEqual(expect.objectContaining({
+        kind: 'tool_result',
+        id: 'governed_answer',
+        output: expect.objectContaining({ certification: 'certified', result: expect.objectContaining({ rowCount: 1 }) }),
+      }));
+    } finally {
+      transport.cleanup();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['text', () => {
+      let rawCalls = 0;
+      return {
+        get rawCalls() { return rawCalls; },
+        provider: {
+          name: 'ollama' as const,
+          available: async () => true,
+          generate: async () => {
+            rawCalls += 1;
+            return rawCalls === 1
+              ? '```json\\n{"tool":"inspect_certified_candidates","input":{}}\\n```'
+              : rawCalls === 2
+                ? '```json\\n{"tool":"run_certified","input":{"candidateId":"block:top-customers"}}\\n```'
+                : 'The narration deadline must reject before this provider call.';
+          },
+        } satisfies AgentProvider,
+        cleanup: (): void => undefined,
+      };
+    }],
+    ['OpenAI', () => {
+      let rawCalls = 0;
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        rawCalls += 1;
+        const tool = rawCalls === 1
+          ? { id: 'inspect_1', type: 'function', function: { name: 'inspect_certified_candidates', arguments: '{}' } }
+          : { id: 'certified_1', type: 'function', function: { name: 'run_certified', arguments: '{"candidateId":"block:top-customers"}' } };
+        return new Response(JSON.stringify({ choices: [{ message: { content: null, tool_calls: [tool] } }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }));
+      return {
+        get rawCalls() { return rawCalls; },
+        provider: new OpenAIProvider({ apiKey: 'test', baseUrl: 'https://example.test/v1', model: 'gpt-test' }),
+        cleanup: (): void => { vi.unstubAllGlobals(); },
+      };
+    }],
+    ['Claude', () => {
+      let rawCalls = 0;
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        rawCalls += 1;
+        const block = rawCalls === 1
+          ? { type: 'tool_use', id: 'inspect_1', name: 'inspect_certified_candidates', input: {} }
+          : { type: 'tool_use', id: 'certified_1', name: 'run_certified', input: { candidateId: 'block:top-customers' } };
+        return new Response(JSON.stringify({ content: [block] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }));
+      return {
+        get rawCalls() { return rawCalls; },
+        provider: new ClaudeProvider({ apiKey: 'test', baseUrl: 'https://example.test/anthropic', model: 'claude-test' }),
+        cleanup: (): void => { vi.unstubAllGlobals(); },
+      };
+    }],
+  ])('preserves a validated V2 result when the dedicated narration allowance has elapsed (%s)', async (_transport, createTransport) => {
+    const root = mkdtempSync(join(tmpdir(), 'dql-v2-narration-deadline-'));
+    const transport = createTransport();
+    try {
+      cpSync(providerFixtureRoot, root, { recursive: true });
+      const question = 'who are the top customers';
+      const candidate: AgentEvidenceCandidate = {
+        id: 'block:top-customers', qualifiedId: 'block:top-customers', kind: 'certified_block',
+        trustTier: 'certified', name: 'top customers', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      };
+      const state = askV2State([candidate]);
+      const workspace = askV2Workspace([candidate], {
+        contextPack: v2RunnerContextPack(question),
+        certifiedArtifacts: new Map([['block:top-customers', {
+          version: 1,
+          artifact: { kind: 'block', nodeId: 'block:top-customers', name: 'top customers' },
+          revisionFingerprint: 'sha256:top-customers',
+          isCurrent: () => true,
+        }]]),
+        certifiedCompleteCandidateIds: ['block:top-customers'],
+        certifiedExecutionAvailable: true,
+      });
+      let narrationOpen = true;
+      const ledger = new RunScopedProviderDispatchEvidence(
+        agentRunProviderDispatchBudgetForMode('ask'),
+        v2NarrationTestBudget({ discoveryOpen: () => true, narrationOpen: () => narrationOpen }),
+      );
+      const manifest = buildManifest({ projectRoot: root, dbtManifestPath: join(root, 'target', 'manifest.json') });
+      const turns: Array<{ kind: string; [key: string]: unknown }> = [];
+
+      await createDqlAgentProviderRunner('ollama', transport.provider).run({
+        provider: 'ollama',
+        projectRoot: root,
+        agentRunId: 'v2-narration-deadline',
+        askAgentRuntimeMode: 'authoritative_v2',
+        askAgentV2State: state,
+        askAgentV2Workspace: workspace,
+        providerPreflightRequired: false,
+        providerDispatchEvidenceSink: ledger,
+        projectSnapshot: { snapshotId: 'snapshot:v2-test', manifest },
+        messages: [{ role: 'user', content: question }],
+        executeCertifiedBlock: async () => {
+          narrationOpen = false;
+          return { columns: ['customer'], rows: [{ customer: 'Ada' }], rowCount: 1 };
+        },
+      }, (turn) => turns.push(turn as typeof turns[number]), new AbortController().signal);
+
+      // The wrapper rejects the third physical send before raw-provider entry;
+      // the result stays published with deterministic fact narration.
+      expect(transport.rawCalls).toBe(2);
+      expect(ledger.snapshot().providerEgressReceipts.map((receipt) => receipt.dispatchPhase)).toEqual([
+        'agent_control',
+        'tool_followup',
+      ]);
+      expect(state.observations).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          tool: 'finish_answer',
+          outcome: 'error',
+          reasonCode: 'RUN_SOFT_TARGET_EXCEEDED',
+          origin: 'narration',
+          provider: expect.objectContaining({ phase: 'narration', cause: 'run_deadline' }),
+        }),
+      ]));
+      expect(turns).toContainEqual(expect.objectContaining({
+        kind: 'tool_result',
+        id: 'governed_answer',
+        output: expect.objectContaining({
+          certification: 'certified',
+          result: expect.objectContaining({ rowCount: 1 }),
+          askAgentV2Outcome: expect.objectContaining({ reasonCode: 'ASK_V2_RESULT_PRESERVED_AFTER_NARRATION_DEADLINE' }),
+        }),
+      }));
+    } finally {
+      transport.cleanup();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('records one physical egress receipt before a callback-silent provider is entered', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dql-provider-callback-silent-'));
+    try {
+      cpSync(providerFixtureRoot, root, { recursive: true });
+      const configPath = join(root, 'dql.config.json');
+      const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+      config.agent = { orchestrator: { mode: 'agentic', lanes: ['generated'], maxIterations: 8, turnPlanning: true } };
+      writeFileSync(configPath, `${JSON.stringify(config)}\n`);
+      const manifest = buildManifest({ projectRoot: root, dbtManifestPath: join(root, 'target', 'manifest.json') });
+      const ledger = new RunScopedProviderDispatchEvidence(agentRunProviderDispatchBudgetForMode('ask'));
+      let rawCalls = 0;
+      const provider: AgentProvider = {
+        name: 'ollama',
+        available: async () => true,
+        // Subscription/custom providers are permitted not to invoke the
+        // optional callbacks. The wrapper, not this implementation, owns
+        // admission and receipt creation at the raw invocation boundary.
+        generate: async () => {
+          rawCalls += 1;
+          return '```json\n{"summary":"No executable data answer was selected."}\n```';
+        },
+      };
+      await createDqlAgentProviderRunner('ollama', provider).run({
+        provider: 'ollama',
+        projectRoot: root,
+        agentRunId: 'callback-silent-provider',
+        projectSnapshot: { snapshotId: 'snapshot:callback-silent', manifest },
+        providerPreflightRequired: false,
+        providerDispatchEvidenceSink: ledger,
+        preparedContextPack: {
+          id: 'pack:callback-silent', question: 'show order items', focusObjectKey: null, mode: 'question',
+          questionPlan: buildAnalysisQuestionPlan('show order items'), objects: [], skills: [],
+          knowledgeLens: { snapshotId: 'snapshot:callback-silent' }, edges: [], queryRuns: [], citations: [],
+          evidenceSummaries: [], warnings: [], routeDecision: { route: 'generated_sql' }, evidenceRoles: [],
+          allowedSqlContext: { relations: [{ relation: 'order_items', name: 'order_items', columns: [], source: 'test', columnCompleteness: 'complete' }], sourceBlockSql: [] },
+          missingContext: [], conflicts: [], appliedHints: [],
+          retrievalDiagnostics: { strategy: 'sqlite_fts', lanes: [], selectedObjects: 0, selectedEvidence: [] },
+        } as never,
+        messages: [{ role: 'user', content: 'show order items' }],
+      }, () => undefined, new AbortController().signal);
+
+      expect(rawCalls).toBe(1);
+      expect(ledger.snapshot().providerEgressReceipts).toEqual([
+        expect.objectContaining({ operation: 'generate', attemptIndex: 1, dispatchPhase: 'generation', purpose: 'answer_generation' }),
+      ]);
+      expect(ledger.snapshot().providerRoundTrips).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not double-count the first built-in dispatch callback after wrapper admission', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dql-provider-callback-dedup-'));
+    try {
+      cpSync(providerFixtureRoot, root, { recursive: true });
+      const configPath = join(root, 'dql.config.json');
+      const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+      config.agent = { orchestrator: { mode: 'agentic', lanes: ['generated'], maxIterations: 8, turnPlanning: true } };
+      writeFileSync(configPath, `${JSON.stringify(config)}\n`);
+      const manifest = buildManifest({ projectRoot: root, dbtManifestPath: join(root, 'target', 'manifest.json') });
+      const ledger = new RunScopedProviderDispatchEvidence(agentRunProviderDispatchBudgetForMode('ask'));
+      let rawCalls = 0;
+      const provider: AgentProvider = {
+        name: 'ollama',
+        available: async () => true,
+        generate: async (messages, options) => {
+          rawCalls += 1;
+          // This is the actual pre-wire callback shape emitted by built-in
+          // HTTP providers. It shares operation/attempt identity with the
+          // wrapper's synthetic admission and must not mint a second receipt.
+          options?.onProviderDispatch?.({
+            provider: 'ollama', operation: 'generate', attemptIndex: 1, envelope: { messages },
+          });
+          return '```json\n{"summary":"No executable data answer was selected."}\n```';
+        },
+      };
+      await createDqlAgentProviderRunner('ollama', provider).run({
+        provider: 'ollama',
+        projectRoot: root,
+        agentRunId: 'callback-dedup-provider',
+        projectSnapshot: { snapshotId: 'snapshot:callback-dedup', manifest },
+        providerPreflightRequired: false,
+        providerDispatchEvidenceSink: ledger,
+        preparedContextPack: {
+          id: 'pack:callback-dedup', question: 'show order items', focusObjectKey: null, mode: 'question',
+          questionPlan: buildAnalysisQuestionPlan('show order items'), objects: [], skills: [],
+          knowledgeLens: { snapshotId: 'snapshot:callback-dedup' }, edges: [], queryRuns: [], citations: [],
+          evidenceSummaries: [], warnings: [], routeDecision: { route: 'generated_sql' }, evidenceRoles: [],
+          allowedSqlContext: { relations: [{ relation: 'order_items', name: 'order_items', columns: [], source: 'test', columnCompleteness: 'complete' }], sourceBlockSql: [] },
+          missingContext: [], conflicts: [], appliedHints: [],
+          retrievalDiagnostics: { strategy: 'sqlite_fts', lanes: [], selectedObjects: 0, selectedEvidence: [] },
+        } as never,
+        messages: [{ role: 'user', content: 'show order items' }],
+      }, () => undefined, new AbortController().signal);
+
+      expect(rawCalls).toBe(1);
+      expect(ledger.snapshot().providerEgressReceipts).toHaveLength(1);
+      expect(ledger.snapshot().providerEgressReceipts[0]).toMatchObject({
+        operation: 'generate', attemptIndex: 1, dispatchPhase: 'generation', purpose: 'answer_generation',
+      });
+      expect(ledger.snapshot().providerRoundTrips).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('records production exploratory messages and replays them across fresh roots', async () => {
     const rootA = mkdtempSync(join(tmpdir(), 'dql-provider-exploratory-a-'));
     const rootB = mkdtempSync(join(tmpdir(), 'dql-provider-exploratory-b-'));
     const cassetteDir = mkdtempSync(join(tmpdir(), 'dql-provider-exploratory-cassette-'));
     const question = 'what is the order count for each customer?';
     const proposal = '```json\n{"summary":"Order count by customer.","sql":"SELECT customer_name AS customer_name, count_lifetime_orders AS count_lifetime_orders FROM jaffle_shop.dev.dim_customers ORDER BY customer_name","outputs":["customer_name","count_lifetime_orders"]}\n```';
-    const copiedFixture = join(process.cwd(), 'test', 'fixtures', 'jaffle-supply-chain');
+    const copiedFixture = providerFixtureRoot;
     const run = async (
       projectRoot: string,
       provider: AgentProvider,
@@ -449,7 +3986,7 @@ describe('provider runner — analyst physical dispatch budget', () => {
   it('rejects a same-snapshot provider proposal outside the router-selected exploratory relation closure before capability minting', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-provider-exploratory-outside-closure-'));
     try {
-      cpSync(join(process.cwd(), 'test', 'fixtures', 'jaffle-supply-chain'), projectRoot, { recursive: true });
+      cpSync(providerFixtureRoot, projectRoot, { recursive: true });
       const question = 'what is the order count for each customer?';
       const { contextPack, candidateIds, closure } = await customerExploratoryClosure(projectRoot, question);
       const manifest = buildManifest({ projectRoot, dbtManifestPath: join(projectRoot, 'target', 'manifest.json') });
@@ -508,7 +4045,7 @@ describe('provider runner — analyst physical dispatch budget', () => {
   it('fails closed before provider dispatch when a supplied exploratory closure has another snapshot', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-provider-exploratory-other-snapshot-'));
     try {
-      cpSync(join(process.cwd(), 'test', 'fixtures', 'jaffle-supply-chain'), projectRoot, { recursive: true });
+      cpSync(providerFixtureRoot, projectRoot, { recursive: true });
       const question = 'what is the order count for each customer?';
       const { contextPack, candidateIds, closure } = await customerExploratoryClosure(projectRoot, question);
       const manifest = buildManifest({ projectRoot, dbtManifestPath: join(projectRoot, 'target', 'manifest.json') });
@@ -572,7 +4109,7 @@ describe('provider runner — analyst physical dispatch budget', () => {
     // four tools plus a final response.
     const root = mkdtempSync(join(tmpdir(), 'dql-provider-runner-budget-'));
     try {
-      cpSync(join(process.cwd(), 'test', 'fixtures', 'jaffle-supply-chain'), root, { recursive: true });
+      cpSync(providerFixtureRoot, root, { recursive: true });
       const configPath = join(root, 'dql.config.json');
       const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
       // A stale/local config may still opt in to turn planning. Ordinary Ask
@@ -701,7 +4238,7 @@ describe('provider runner — analyst physical dispatch budget', () => {
   it('retries one transient same-provider ordinary Ask dispatch and preserves its physical receipt lineage', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dql-provider-runner-transient-retry-'));
     try {
-      cpSync(join(process.cwd(), 'test', 'fixtures', 'jaffle-supply-chain'), root, { recursive: true });
+      cpSync(providerFixtureRoot, root, { recursive: true });
       const configPath = join(root, 'dql.config.json');
       const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
       config.agent = { orchestrator: { mode: 'agentic', lanes: ['generated'], maxIterations: 8, turnPlanning: true } };
@@ -843,7 +4380,7 @@ describe('provider runner — analyst physical dispatch budget', () => {
   it('denies a second same-provider transient retry without attempting a third dispatch', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dql-provider-runner-second-retry-'));
     try {
-      cpSync(join(process.cwd(), 'test', 'fixtures', 'jaffle-supply-chain'), root, { recursive: true });
+      cpSync(providerFixtureRoot, root, { recursive: true });
       const configPath = join(root, 'dql.config.json');
       const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
       config.agent = { orchestrator: { mode: 'agentic', lanes: ['generated'], maxIterations: 8, turnPlanning: true } };
@@ -929,7 +4466,7 @@ describe('provider runner — analyst physical dispatch budget', () => {
   it('fails closed at the runner boundary when a non-authoritative Ask attempts to forge repair lifecycle metadata', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dql-provider-runner-forged-repair-'));
     try {
-      cpSync(join(process.cwd(), 'test', 'fixtures', 'jaffle-supply-chain'), root, { recursive: true });
+      cpSync(providerFixtureRoot, root, { recursive: true });
       const question = 'what is the order count for each customer?';
       const { contextPack, candidateIds, closure } = await customerExploratoryClosure(root, question);
       const manifest = buildManifest({ projectRoot: root, dbtManifestPath: join(root, 'target', 'manifest.json') });
@@ -1022,7 +4559,10 @@ describe('provider runner — analyst physical dispatch budget', () => {
         messages: [{ role: 'user', content: question }],
       }, trace), (turn) => turns.push(turn as typeof turns[number]), new AbortController().signal);
 
-      expect(rawCalls).toBe(2);
+      // The wrapper now admits every physical provider invocation before it
+      // reaches the provider. The forged repair is therefore denied before a
+      // second raw call can be made.
+      expect(rawCalls).toBe(1);
       expect(wireSends).toBe(1);
       expect(prepare).not.toHaveBeenCalled();
       expect(execute).not.toHaveBeenCalled();
@@ -1157,10 +4697,10 @@ describe('provider boundary diagnostics', () => {
         reasonCode: 'provider_preflight',
         payload: expect.objectContaining({
           kind: 'provider',
-          // An unreachable local Ollama process is a physical network
-          // readiness failure, never the generic authentication label that
-          // made office diagnostics misleading.
-          attempt: expect.objectContaining({ readiness: 'unavailable', cause: 'network', safeAction: 'retry_same_provider' }),
+          // A bare `available() === false` is a readiness/configuration fact,
+          // not proof of a physical network failure. Preserve the unknown
+          // cause so operators do not chase an invented transport error.
+          attempt: expect.objectContaining({ readiness: 'unavailable', cause: 'unknown', safeAction: 'fix_provider_configuration' }),
         }),
       }),
     })]);

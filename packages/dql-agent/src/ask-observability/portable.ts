@@ -388,6 +388,7 @@ function redactRunReceipt(value: unknown, trace: AskTraceDataV1, profile: AskTra
   const runtimeReceiptV5 = portableRuntimeReceiptV5(record.diagnosticReceiptV5, profile, salt);
   const runtimeReceiptV6 = portableRuntimeReceiptV6(record.diagnosticReceiptV6, profile, salt);
   const runtimeReceiptV7 = portableRuntimeReceiptV7(record.diagnosticReceiptV7, profile, salt);
+  const runtimeReceiptV8 = portableRuntimeReceiptV8(record.diagnosticReceiptV8, profile, salt);
   return {
     version: 1,
     traceReference: {
@@ -405,12 +406,176 @@ function redactRunReceipt(value: unknown, trace: AskTraceDataV1, profile: AskTra
     ...(runtimeReceiptV5 ? { runtimeReceiptV5 } : {}),
     ...(runtimeReceiptV6 ? { runtimeReceiptV6 } : {}),
     ...(runtimeReceiptV7 ? { runtimeReceiptV7 } : {}),
+    ...(runtimeReceiptV8 ? { runtimeReceiptV8 } : {}),
     telemetry: sanitizeTelemetry(record.telemetry),
     fingerprints: {
       plan: map(findFingerprint(record, 'planFingerprint'), 'plan'),
       sql: map(findFingerprint(record, 'sqlFingerprint'), 'sql'),
       result: map(findFingerprint(record, 'resultFingerprint'), 'result'),
     },
+  };
+}
+
+/**
+ * V8 is the bounded Ask-tool-runtime story. Strict exports retain its
+ * allowlisted enums, counts, timings, and pseudonymous identifiers only. In
+ * particular, this deliberately does not make generated DQL/SQL exportable:
+ * the local trace contract never retains query text, result rows, prompts,
+ * provider responses, credentials, or chain-of-thought.
+ */
+function portableRuntimeReceiptV8(value: unknown, profile: AskTraceExportProfileV1, salt: string): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const receipt = value as Record<string, unknown>;
+  if (receipt.version !== 8) return undefined;
+  const record = (candidate: unknown): Record<string, unknown> | undefined =>
+    candidate && typeof candidate === 'object' && !Array.isArray(candidate) ? candidate as Record<string, unknown> : undefined;
+  const count = (candidate: unknown, maximum = 10_000): number | undefined => typeof candidate === 'number' && Number.isFinite(candidate)
+    ? Math.max(0, Math.min(maximum, Math.floor(candidate)))
+    : undefined;
+  const identifier = (candidate: unknown, kind: string): string | undefined => typeof candidate === 'string' && candidate.length > 0 && candidate.length <= 256
+    ? (profile === 'strict' ? pseudo(candidate, salt, kind) : candidate)
+    : undefined;
+  const safeCode = (candidate: unknown): string => typeof candidate === 'string' && /^[A-Z][A-Z0-9_:-]{1,95}$/.test(candidate)
+    ? candidate
+    : 'UNRECOGNIZED_REASON';
+  const modes = new Set(['legacy_v1', 'shadow_v2', 'authoritative_v2']);
+  const turns = new Set(['analytics', 'definition', 'business_context', 'prior_result', 'general', 'clarification_response', 'research']);
+  const sources = new Set(['certified', 'semantic', 'governed_relational', 'dbt_manifest', 'runtime_schema', 'vector', 'conversation', 'business']);
+  const sourceStates = new Set(['available', 'empty', 'stale', 'unavailable', 'errored', 'skipped']);
+  const tools = new Set(['inspect_ask_context', 'inspect_conversation_result', 'inspect_business_context', 'inspect_certified_candidates', 'run_certified', 'inspect_semantic_candidates', 'compile_and_run_semantic', 'inspect_relational_context', 'compile_and_run_dql', 'validate_and_run_sql', 'search_values', 'request_clarification', 'finish_answer']);
+  const outcomes = new Set(['eligible', 'executed', 'ineligible', 'unavailable', 'ambiguous', 'needs_input', 'denied', 'error']);
+  const tiers = new Set(['certified', 'semantic', 'governed_relational', 'exploratory_sql']);
+  const origins = new Set(['retrieval', 'agent_control', 'tool', 'validation', 'freeze', 'execution', 'provider', 'narration']);
+  const terminalKinds = new Set(['finish_answer', 'clarification', 'gap', 'provider_failure', 'execution_failure', 'denied', 'budget_exhausted']);
+  const semanticEngines = new Set(['native', 'metricflow-cli', 'dbt-cloud']);
+  const providerPhases = new Set(['preflight', 'classification', 'meaning_resolution', 'planning', 'generation', 'repair', 'narration', 'agent_control', 'tool_followup', 'unknown']);
+  const providerCauses = new Set(['authentication', 'model_not_found', 'rate_limited', 'gateway', 'network', 'provider_timeout', 'run_deadline', 'admission_denied', 'dispatch_budget', 'cancelled', 'unknown']);
+  const narrations = new Set(['fact_bound', 'deterministic_fallback', 'not_retained', 'not_applicable']);
+  if (typeof receipt.mode !== 'string' || !modes.has(receipt.mode)
+    || typeof receipt.turnClass !== 'string' || !turns.has(receipt.turnClass)) return undefined;
+
+  const contextCoverage = Array.isArray(receipt.contextCoverage)
+    ? receipt.contextCoverage.flatMap((entry) => {
+        const item = record(entry);
+        if (!item || typeof item.source !== 'string' || !sources.has(item.source)
+          || typeof item.status !== 'string' || !sourceStates.has(item.status)) return [];
+        return [{
+          source: item.source,
+          status: item.status,
+          ...(count(item.admittedCandidateCount) !== undefined ? { admittedCandidateCount: count(item.admittedCandidateCount)! } : {}),
+          ...(count(item.excludedCandidateCount) !== undefined ? { excludedCandidateCount: count(item.excludedCandidateCount)! } : {}),
+          reasonCodes: Array.isArray(item.reasonCodes) ? item.reasonCodes.slice(0, 8).map(safeCode) : [],
+        }];
+      })
+    : [];
+  const observations = Array.isArray(receipt.observations)
+    ? receipt.observations.slice(0, 24).flatMap((entry) => {
+        const item = record(entry);
+        if (!item || typeof item.tool !== 'string' || !tools.has(item.tool)
+          || typeof item.outcome !== 'string' || !outcomes.has(item.outcome)) return [];
+        const provider = record(item.provider);
+        const safeProvider = provider && typeof provider.phase === 'string' && providerPhases.has(provider.phase)
+          && typeof provider.cause === 'string' && providerCauses.has(provider.cause)
+          && typeof provider.retryable === 'boolean'
+          ? { phase: provider.phase, cause: provider.cause, retryable: provider.retryable, safeAction: safeCode(provider.safeAction) }
+          : undefined;
+        return [{
+          tool: item.tool,
+          outcome: item.outcome,
+          ...(typeof item.tier === 'string' && tiers.has(item.tier) ? { tier: item.tier } : {}),
+          reasonCode: safeCode(item.reasonCode),
+          candidateIds: Array.isArray(item.candidateIds)
+            ? item.candidateIds.slice(0, 48).flatMap((id) => identifier(id, 'candidate') ? [identifier(id, 'candidate')!] : [])
+            : [],
+          ...(identifier(item.planId, 'plan') ? { planId: identifier(item.planId, 'plan') } : {}),
+          ...(typeof item.frozen === 'boolean' ? { frozen: item.frozen } : {}),
+          ...(typeof item.retryable === 'boolean' ? { retryable: item.retryable } : {}),
+          ...(typeof item.safeAction === 'string' ? { safeAction: safeCode(item.safeAction) } : {}),
+          ...(count(item.durationMs, 86_400_000) !== undefined ? { durationMs: count(item.durationMs, 86_400_000)! } : {}),
+          ...(identifier(item.inputFingerprint, 'input') ? { inputFingerprint: identifier(item.inputFingerprint, 'input') } : {}),
+          ...(identifier(item.outputFingerprint, 'output') ? { outputFingerprint: identifier(item.outputFingerprint, 'output') } : {}),
+          ...(typeof item.origin === 'string' && origins.has(item.origin) ? { origin: item.origin } : {}),
+          ...(safeProvider ? { provider: safeProvider } : {}),
+        }];
+      })
+    : [];
+  const tierAttempts = Array.isArray(receipt.tierAttempts)
+    ? receipt.tierAttempts.slice(0, 8).flatMap((entry) => {
+        const item = record(entry);
+        if (!item || typeof item.tier !== 'string' || !tiers.has(item.tier)
+          || typeof item.outcome !== 'string' || !outcomes.has(item.outcome)
+          || typeof item.frozen !== 'boolean') return [];
+        return [{
+          tier: item.tier,
+          outcome: item.outcome,
+          reasonCode: safeCode(item.reasonCode),
+          frozen: item.frozen,
+          candidateIds: Array.isArray(item.candidateIds)
+            ? item.candidateIds.slice(0, 48).flatMap((id) => identifier(id, 'candidate') ? [identifier(id, 'candidate')!] : [])
+            : [],
+          ...(count(item.durationMs, 86_400_000) !== undefined ? { durationMs: count(item.durationMs, 86_400_000)! } : {}),
+        }];
+      })
+    : [];
+  const terminal = record(receipt.terminalOutcome);
+  const safeTerminal = terminal && typeof terminal.kind === 'string' && terminalKinds.has(terminal.kind)
+    && typeof terminal.origin === 'string' && origins.has(terminal.origin)
+    ? {
+        kind: terminal.kind,
+        origin: terminal.origin,
+        reasonCode: safeCode(terminal.reasonCode),
+        ...(typeof terminal.safeAction === 'string' ? { safeAction: safeCode(terminal.safeAction) } : {}),
+      }
+    : undefined;
+  const outcome = record(receipt.outcome);
+  const safeOutcome = outcome && typeof outcome.connectionAttempted === 'boolean'
+    && typeof outcome.narration === 'string' && narrations.has(outcome.narration)
+    ? {
+        connectionAttempted: outcome.connectionAttempted,
+        executionAttempts: count(outcome.executionAttempts) ?? 0,
+        factCount: count(outcome.factCount) ?? 0,
+        narration: outcome.narration,
+      }
+    : { connectionAttempted: false, executionAttempts: 0, factCount: 0, narration: 'not_retained' };
+  const semanticRuntime = record(receipt.semanticRuntime);
+  const safeSemanticRuntime = semanticRuntime
+    && semanticRuntime.version === 1
+    && typeof semanticRuntime.preference === 'string'
+    && (semanticRuntime.preference === 'auto' || semanticEngines.has(semanticRuntime.preference))
+    && typeof semanticRuntime.readiness === 'string'
+    && (semanticRuntime.readiness === 'ready' || semanticRuntime.readiness === 'unavailable')
+    && (semanticRuntime.selectedEngine === undefined
+      || (typeof semanticRuntime.selectedEngine === 'string' && semanticEngines.has(semanticRuntime.selectedEngine)))
+    ? {
+        version: 1,
+        preference: semanticRuntime.preference,
+        ...(typeof semanticRuntime.selectedEngine === 'string' ? { selectedEngine: semanticRuntime.selectedEngine } : {}),
+        readiness: semanticRuntime.readiness,
+      }
+    : undefined;
+  return {
+    version: 8,
+    mode: receipt.mode,
+    turnClass: receipt.turnClass,
+    ...(identifier(receipt.snapshotId, 'snapshot') ? { snapshotId: identifier(receipt.snapshotId, 'snapshot') } : {}),
+    retainedCandidateCount: count(receipt.retainedCandidateCount) ?? 0,
+    initialCandidateCount: count(receipt.initialCandidateCount) ?? 0,
+    expansionCount: count(receipt.expansionCount) ?? 0,
+    objective: typeof receipt.objective === 'string' && turns.has(receipt.objective) ? receipt.objective : receipt.turnClass,
+    contextCoverage,
+    excludedCandidateCount: count(receipt.excludedCandidateCount) ?? 0,
+    exclusionReasonCodes: Array.isArray(receipt.exclusionReasonCodes) ? receipt.exclusionReasonCodes.slice(0, 8).map(safeCode) : [],
+    observations,
+    tierAttempts,
+    ...(typeof receipt.controllerTier === 'string' && tiers.has(receipt.controllerTier)
+      ? { controllerTier: receipt.controllerTier }
+      : {}),
+    ...(safeSemanticRuntime ? { semanticRuntime: safeSemanticRuntime } : {}),
+    planFrozen: receipt.planFrozen === true,
+    ...(safeTerminal ? { terminalOutcome: safeTerminal } : {}),
+    outcome: safeOutcome,
+    toolDurationMs: count(receipt.toolDurationMs, 86_400_000) ?? 0,
+    finalStopReason: safeCode(receipt.finalStopReason),
   };
 }
 

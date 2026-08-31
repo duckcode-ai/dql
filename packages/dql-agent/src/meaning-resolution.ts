@@ -119,6 +119,15 @@ export interface AgentEvidenceCandidate {
   provenance?: string;
   domain?: string;
   semanticModel?: string;
+  /**
+   * Host-captured compiler identity for a semantic object.  This is distinct
+   * from the user-facing qualified/display name: the V2 provider selects the
+   * opaque candidate ID, while the local MetricFlow/dbt adapter needs the
+   * authored local field name (for example `metric_time`).  It is populated
+   * only from the immutable semantic snapshot and is intentionally omitted
+   * from provider cards and persisted receipts.
+   */
+  semanticRuntimeName?: string;
   primaryEntity?: string;
   /**
    * Source-authored semantic or physical value type. This is intentionally
@@ -401,6 +410,17 @@ export interface AgentRetrievalEvidence {
     /** Required at execution time; optional here preserves older snapshots. */
     dateRoleId?: string;
   };
+  /**
+   * Atomic same-snapshot relationship paths reserved by the host.  These are
+   * identity-only cards for the planner; the local runtime retains the actual
+   * relation/edge definitions in an ephemeral workspace bridge.
+   */
+  relationshipPathHandles?: Array<{
+    id: string;
+    edgeIds: string[];
+    /** Snapshot-qualified relation/column cards covered by this atomic path. */
+    candidateIds?: string[];
+  }>;
   diagnostics?: {
     searchedKinds?: AgentEvidenceKind[];
     durationMs?: number;
@@ -425,6 +445,14 @@ export interface AgentRetrievalEvidence {
       semanticCandidateReadiness?: Array<{
         candidateId: string;
         status: 'ready' | 'unavailable' | 'unknown';
+        /** Target-bound semantic engines for this exact opaque candidate. */
+        engines?: Array<'native' | 'metricflow-cli' | 'dbt-cloud'>;
+        /**
+         * Host proof that this exact metric can use the in-process semantic
+         * compiler even when its imported adapter declaration names another
+         * engine. This is never user/provider supplied.
+         */
+        nativeCompilerProven?: boolean;
       }>;
       physicalSchema?: 'ready' | 'unavailable' | 'unknown';
       targetFingerprint?: string;
@@ -670,7 +698,16 @@ export function validateMeaningResolution(
   requestedMeasures: string[] = value.queryIntent.measures,
   options: { requirements?: AnalyticalRequirementSetV1 } = {},
 ): { ok: true; resolution: MeaningResolution } | { ok: false; reason: string } {
-  const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+  // `id` is the compiler's local canonical identity while `qualifiedId` is
+  // the immutable source/semantic handle that the planner and frozen meaning
+  // receipt may intentionally preserve.  Both are server-issued identities
+  // from this bounded snapshot; accepting the qualified handle here does not
+  // create a lexical alias surface or permit invented evidence.
+  const byId = new Map<string, AgentEvidenceCandidate>();
+  for (const candidate of candidates) {
+    byId.set(candidate.id, candidate);
+    if (candidate.qualifiedId) byId.set(candidate.qualifiedId, candidate);
+  }
   const selectedConceptIds = value.selectedConceptIds.length > 0
     ? value.selectedConceptIds
     : value.recommendedExecutionId

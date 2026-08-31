@@ -238,6 +238,7 @@ export function AskTracePage({ runId }: { runId: string }): JSX.Element {
             Advanced evidence
           </summary>
           <div style={{ marginTop: 8 }}>
+        {trace.runtimeReceiptV8 ? <V2AdvancedDecisionEvidence receipt={trace.runtimeReceiptV8} t={t} /> : null}
         <TraceTabs selected={tab} onSelect={setTab} t={t} />
         {tab === 'graph' ? (
           <div id="ask-trace-panel-graph" role="tabpanel" aria-labelledby="ask-trace-tab-graph" style={traceSplitLayout(isNarrow)}>
@@ -296,8 +297,36 @@ export function AskTracePage({ runId }: { runId: string }): JSX.Element {
   );
 }
 
+export function traceHeaderFacts(trace: AskTraceDataV1): {
+  selectedTier: string | undefined;
+  candidateCount: number;
+  candidateLabel: 'candidate admissions' | 'candidate decisions';
+} {
+  const { envelope } = trace;
+  const authoritativeV8 = trace.runtimeReceiptV8?.mode === 'authoritative_v2'
+    ? trace.runtimeReceiptV8
+    : undefined;
+  const authoritativeTier = authoritativeV8?.tierAttempts.find((attempt) => attempt.frozen)?.tier
+    ?? authoritativeV8?.tierAttempts.find((attempt) => attempt.outcome === 'executed')?.tier
+    ?? authoritativeV8?.controllerTier;
+  const selectedTier = authoritativeV8 ? authoritativeTier : envelope.selectedTier;
+  // V8 owns the bounded initial workspace for an authoritative run. The
+  // legacy envelope can contain a larger pre-V2 decision count, which must
+  // remain legacy-only instead of inflating the admission count shown here.
+  const candidateCount = authoritativeV8
+    ? authoritativeV8.initialCandidateCount
+    : envelope.candidateDecisionCount;
+  return {
+    selectedTier,
+    candidateCount,
+    candidateLabel: authoritativeV8 ? 'candidate admissions' : 'candidate decisions',
+  };
+}
+
 function TraceHeader({ trace, t, onRefresh }: { trace: AskTraceDataV1; t: Theme; onRefresh: () => void }): JSX.Element {
   const { envelope } = trace;
+  const runtimeMode = trace.runtimeReceiptV8?.mode ?? trace.runtimeMode;
+  const header = traceHeaderFacts(trace);
   const running = envelope.recordingStatus === 'recording';
   const issue = envelope.status === 'failed' || envelope.status === 'blocked' || envelope.status === 'interrupted';
   return (
@@ -312,7 +341,8 @@ function TraceHeader({ trace, t, onRefresh }: { trace: AskTraceDataV1; t: Theme;
         <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
           <StatusPill t={t} value={envelope.status} issue={issue} />
           <Pill t={t} icon={<ShieldCheck size={12} />}>{envelope.trustState ?? 'Trust not recorded'}</Pill>
-          <Pill t={t} icon={<GitBranch size={12} />}>{envelope.selectedTier ?? 'No executable tier'}</Pill>
+          {runtimeMode ? <Pill t={t} icon={<GitBranch size={12} />}>{askRuntimeModeLabel(runtimeMode)}</Pill> : null}
+          <Pill t={t} icon={<GitBranch size={12} />}>{header.selectedTier ?? 'No executable tier'}</Pill>
           <Pill t={t} icon={<Clock3 size={12} />}>{formatMs(envelope.durationMs)} </Pill>
           <button type="button" onClick={onRefresh} title="Refresh local trace evidence" style={iconButtonStyle(t)}>
             <RefreshCw size={13} className={running ? 'ask-trace-recording' : undefined} />
@@ -323,7 +353,7 @@ function TraceHeader({ trace, t, onRefresh }: { trace: AskTraceDataV1; t: Theme;
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12, fontSize: 11.5, color: t.textMuted }}>
         <span>{envelope.spanCount} recorded stages</span>
         <span aria-hidden="true">·</span>
-        <span>{envelope.candidateDecisionCount} candidate decisions</span>
+        <span>{header.candidateCount} {header.candidateLabel}</span>
         <span aria-hidden="true">·</span>
         <span>{recordingLabel(envelope.recordingStatus)}</span>
         {envelope.droppedRecordCount > 0 ? <span role="status">· {envelope.droppedRecordCount} bounded records omitted</span> : null}
@@ -333,6 +363,13 @@ function TraceHeader({ trace, t, onRefresh }: { trace: AskTraceDataV1; t: Theme;
       </div>
     </header>
   );
+}
+
+/** Keep shadow evidence visibly distinct from a serving authoritative run. */
+function askRuntimeModeLabel(mode: NonNullable<AskTraceDataV1['runtimeMode']>): string {
+  if (mode === 'authoritative_v2') return 'Authoritative V2 runtime';
+  if (mode === 'shadow_v2') return 'Shadow V2 observation · legacy V1 served answers';
+  return 'Legacy V1 runtime';
 }
 
 function TraceTabs({ selected, onSelect, t }: { selected: TraceTab; onSelect: (tab: TraceTab) => void; t: Theme }): JSX.Element {
@@ -382,6 +419,9 @@ export interface TraceIncidentSummaryV1 {
 }
 
 export function incidentSummaryForTrace(trace: AskTraceDataV1): TraceIncidentSummaryV1 {
+  // An authoritative V2 tool-runtime receipt owns its terminal boundary. Do
+  // not reconstruct a second business explanation from lower-level spans.
+  if (trace.runtimeReceiptV8?.mode === 'authoritative_v2') return incidentSummaryFromRuntimeReceiptV8(trace.runtimeReceiptV8);
   if (trace.runtimeDecisionSummary) return incidentSummaryFromRuntimeDecisionSummary(trace.runtimeDecisionSummary);
   // New runs carry one server-produced story. Do not build a competing generic
   // incident from spans; only legacy runs fall through to the compatibility
@@ -586,6 +626,52 @@ export function incidentSummaryForTrace(trace: AskTraceDataV1): TraceIncidentSum
   };
 }
 
+/** V8 terminal explanations are assembled only from allowlisted receipt fields. */
+export function incidentSummaryFromRuntimeReceiptV8(receipt: NonNullable<AskTraceDataV1['runtimeReceiptV8']>): TraceIncidentSummaryV1 {
+  const terminal = receipt.terminalOutcome;
+  const failed = terminal && terminal.kind !== 'finish_answer';
+  if (!failed) {
+    return {
+      state: 'healthy',
+      whatHappened: 'The bounded Ask tool runtime completed this answer.',
+      why: `${receipt.tierAttempts.length} ordered tier attempt${receipt.tierAttempts.length === 1 ? '' : 's'} were recorded before the final answer.`,
+      impact: receipt.outcome.executionAttempts > 0
+        ? 'The recorded plan reached execution; inspect the result and fact receipt for the validated answer.'
+        : 'This turn completed without a warehouse execution.',
+      howToFix: 'No recovery action is required for the recorded run.',
+    };
+  }
+  const boundary = terminal.origin.replace(/_/g, ' ');
+  const reason = terminal.reasonCode.replace(/_/g, ' ').toLowerCase();
+  const semanticToolContract = terminal.origin === 'validation'
+    && /^SEMANTIC_(?:ENGINE|TIME|FILTER|IDENTIFIER|CAPABILITY)_/.test(terminal.reasonCode);
+  return {
+    state: 'attention',
+    whatHappened: semanticToolContract
+      ? 'The Ask rejected the selected semantic tool binding before execution.'
+      : terminal.kind === 'clarification'
+      ? 'The Ask needs one business choice before it can continue.'
+      : terminal.kind === 'provider_failure'
+        ? 'The Ask stopped at the AI provider boundary.'
+        : terminal.kind === 'execution_failure'
+          ? 'The Ask stopped after the selected plan reached execution.'
+          : terminal.kind === 'denied'
+            ? 'The Ask stopped at a safety or authorization boundary.'
+            : terminal.kind === 'budget_exhausted'
+              ? 'The Ask reached its bounded work budget before it could complete.'
+              : 'The Ask did not find one safe executable route in the recorded workspace.',
+    why: `Terminal boundary: ${boundary}. Recorded reason: ${reason}.`,
+    impact: receipt.outcome.executionAttempts > 0
+      ? 'A selected plan was attempted, but no completed data answer was retained for this run.'
+      : semanticToolContract
+        ? 'No warehouse execution was started because the snapshot-bound semantic contract was not valid.'
+        : 'No warehouse execution was started for this run.',
+    howToFix: terminal.safeAction
+      ? safeActionInstruction(terminal.safeAction as Parameters<typeof safeActionInstruction>[0])
+      : 'Review the typed tool observations and source coverage, then retry only after the recorded gap is addressed.',
+  };
+}
+
 export function incidentSummaryFromRuntimeDecisionSummary(summary: NonNullable<AskTraceDataV1['runtimeDecisionSummary']>): TraceIncidentSummaryV1 {
   const attention = /did not complete|paused|blocked/i.test(summary.whatHappened);
   return {
@@ -690,8 +776,125 @@ function researchBranchPlanText(summary: NonNullable<NonNullable<AskTraceDataV1[
     .join(' · ')}.`;
 }
 
+/**
+ * Advanced V8 evidence is intentionally a compact structured audit: opaque
+ * qualified IDs, reason codes, fingerprints, and durations only. It never
+ * renders prompts, SQL/DQL text, rows, provider content, credentials, or
+ * chain-of-thought.
+ */
+function V2AdvancedDecisionEvidence({
+  receipt,
+  t,
+}: {
+  receipt: NonNullable<AskTraceDataV1['runtimeReceiptV8']>;
+  t: Theme;
+}): JSX.Element {
+  const entries = receipt.observations.map((observation, index) => ({
+    sequence: index + 1,
+    tool: observation.tool,
+    outcome: observation.outcome,
+    tier: observation.tier,
+    reasonCode: observation.reasonCode,
+    candidateIds: observation.candidateIds,
+    planId: observation.planId,
+    frozen: observation.frozen,
+    retryable: observation.retryable,
+    safeAction: observation.safeAction,
+    durationMs: observation.durationMs,
+    inputFingerprint: observation.inputFingerprint,
+    outputFingerprint: observation.outputFingerprint,
+    origin: observation.origin,
+    provider: observation.provider && {
+      phase: observation.provider.phase,
+      cause: observation.provider.cause,
+      retryable: observation.provider.retryable,
+      safeAction: observation.provider.safeAction,
+    },
+  }));
+  return (
+    <section aria-label="V2 advanced decision evidence" style={{ margin: '0 0 14px', padding: '12px 13px', border: `1px solid ${t.cellBorder}`, borderRadius: 9, background: t.cellBg }}>
+      <div style={{ color: t.textSecondary, fontSize: 12, fontWeight: 750 }}>V2 tool-runtime evidence</div>
+      <div style={{ marginTop: 4, color: t.textMuted, fontSize: 11.5, lineHeight: 1.45 }}>
+        Qualified IDs, source state, reason codes, structural fingerprints, and timings only. SQL/DQL text, result rows, prompts, credentials, provider responses, and hidden reasoning are not retained.
+      </div>
+      <pre style={{ margin: '10px 0 0', padding: 10, overflow: 'auto', maxHeight: 340, borderRadius: 7, background: t.appBg, color: t.textSecondary, fontSize: 10.5, lineHeight: 1.45, fontFamily: t.fontMono }}>
+        {JSON.stringify({
+          version: receipt.version,
+          mode: receipt.mode,
+          snapshotId: receipt.snapshotId,
+          contextCoverage: receipt.contextCoverage,
+          exclusions: {
+            count: receipt.excludedCandidateCount,
+            reasonCodes: receipt.exclusionReasonCodes,
+          },
+          tierAttempts: receipt.tierAttempts,
+          planFrozen: receipt.planFrozen,
+          terminalOutcome: receipt.terminalOutcome,
+          outcome: receipt.outcome,
+          activity: receipt.activity,
+          toolDurationMs: receipt.toolDurationMs,
+          finalStopReason: receipt.finalStopReason,
+          observations: entries,
+        }, null, 2)}
+      </pre>
+    </section>
+  );
+}
+
 /** The default top-to-bottom story for V4 runs. Old traces remain readable. */
 export function TraceDecisionStory({ trace, t, onSelectSpan: _onSelectSpan }: { trace: AskTraceDataV1; t: Theme; onSelectSpan: (spanId: string) => void }): JSX.Element {
+  const runtimeV8 = trace.runtimeReceiptV8;
+  if (runtimeV8?.mode === 'authoritative_v2') {
+    const terminal = runtimeV8.terminalOutcome;
+    const attention = Boolean(terminal && terminal.kind !== 'finish_answer');
+    const coverage = runtimeV8.contextCoverage.length > 0
+      ? runtimeV8.contextCoverage.map((entry) => `${entry.source.replace(/_/g, ' ')}: ${entry.status} (${entry.admittedCandidateCount} admitted${entry.excludedCandidateCount ? `, ${entry.excludedCandidateCount} outside workspace` : ''})`).join(' · ')
+      : 'No retrieval source coverage was retained for this older V2 run.';
+    // V8 activity is the one canonical counter source for compact prose. It
+    // is populated by the server's physical provider-egress wrapper, so a
+    // planner/provider observation cannot make the trace claim a send.
+    const toolCalls = runtimeV8.activity?.toolCalls ?? runtimeV8.observations.length;
+    const providerCalls = runtimeV8.activity?.providerDispatches ?? 0;
+    const executionAttempts = runtimeV8.activity?.executionAttempts ?? runtimeV8.outcome.executionAttempts;
+    const repairs = runtimeV8.activity?.repairs ?? 0;
+    const validation = runtimeV8.observations.filter((entry) => entry.origin === 'validation' || entry.outcome === 'ineligible' || entry.outcome === 'ambiguous' || entry.outcome === 'unavailable');
+    const corrections = runtimeV8.observations.filter((entry) => entry.retryable).length;
+    const selectedTier = runtimeV8.tierAttempts.find((entry) => entry.frozen)?.tier
+      ?? runtimeV8.tierAttempts.find((entry) => entry.outcome === 'executed')?.tier
+      ?? runtimeV8.controllerTier;
+    const sections: Array<[string, string]> = [
+      ['Objective', `${runtimeV8.objective.replace(/_/g, ' ')} turn · ${runtimeV8.mode.replace(/_/g, ' ')} runtime.`],
+      ['Context coverage', `${coverage}${runtimeV8.excludedCandidateCount ? ` Total workspace exclusions: ${runtimeV8.excludedCandidateCount} (${runtimeV8.exclusionReasonCodes.map((code) => code.replace(/_/g, ' ').toLowerCase()).join(', ')}).` : ''}`],
+      ['LLM & tool decisions', `${toolCalls} tool call${toolCalls === 1 ? '' : 's'} · ${providerCalls} physical provider dispatch${providerCalls === 1 ? '' : 'es'} · ${runtimeV8.expansionCount} same-snapshot expansion${runtimeV8.expansionCount === 1 ? '' : 's'}.`],
+      ['Validation & correction', `${validation.length} validation/coverage observation${validation.length === 1 ? '' : 's'} · ${Math.max(corrections, repairs)} bounded correction${Math.max(corrections, repairs) === 1 ? '' : 's'}.`],
+      ['Cascade & freeze', `${runtimeV8.tierAttempts.length} ordered tier attempt${runtimeV8.tierAttempts.length === 1 ? '' : 's'} · ${selectedTier?.replace(/_/g, ' ') ?? 'no executable tier'}${runtimeV8.planFrozen ? ' · frozen' : ' · not frozen'}.`],
+      ['Connection & execution', `${runtimeV8.outcome.connectionAttempted ? 'connection attempted' : 'no connection attempted'} · ${executionAttempts} execution attempt${executionAttempts === 1 ? '' : 's'}.`],
+      ['Facts & narration', `${runtimeV8.outcome.factCount} validated fact${runtimeV8.outcome.factCount === 1 ? '' : 's'} · ${runtimeV8.outcome.narration.replace(/_/g, ' ')}.`],
+      ['Failure boundary', terminal
+        ? `${terminal.origin.replace(/_/g, ' ')} · ${terminal.kind.replace(/_/g, ' ')} · ${terminal.reasonCode.replace(/_/g, ' ').toLowerCase()}.`
+        : 'No terminal failure was retained.'],
+      ['Safe next action', terminal?.safeAction
+        ? safeActionInstruction(terminal.safeAction as Parameters<typeof safeActionInstruction>[0])
+        : 'Inspect the validated result or continue with a grounded follow-up.'],
+    ];
+    return (
+      <section aria-label="Ask decision story" style={{ margin: '0 0 14px', padding: '14px 16px', border: `1px solid ${attention ? t.warning : t.success}`, borderRadius: 11, background: t.cellBg }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: attention ? t.warning : t.success, fontSize: 13, fontWeight: 750 }}>
+          {attention ? <AlertTriangle size={15} aria-hidden="true" /> : <CheckCircle2 size={15} aria-hidden="true" />}
+          Ask decision story
+          <span style={{ color: t.textMuted, fontFamily: t.fontMono, fontSize: 10.5, fontWeight: 500 }}>V8 · {runtimeV8.snapshotId ? shortId(runtimeV8.snapshotId) : 'snapshot unavailable'}</span>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 11, marginTop: 12 }}>
+          {sections.map(([label, value]) => (
+            <div key={label} style={{ minWidth: 0 }}>
+              <div style={{ color: t.textMuted, fontSize: 10.5, fontWeight: 750, letterSpacing: '.025em', textTransform: 'uppercase' }}>{label}</div>
+              <div style={{ marginTop: 4, color: t.textSecondary, fontSize: 12, lineHeight: 1.45 }}>{value}</div>
+            </div>
+          ))}
+        </div>
+      </section>
+    );
+  }
   const runtime = trace.runtimeDecisionSummary;
   const runtimeV6 = trace.runtimeReceiptV6;
   const inspector = trace.runtimeReceiptV7?.inspector;

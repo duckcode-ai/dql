@@ -24,6 +24,8 @@ import type {
   AgentMessage,
   AgentProvider,
   AgentToolDefinition,
+  NativeToolLoopStop,
+  ProviderCurrentToolPolicy,
   ProviderToolLoopOptions,
 } from '../providers/types.js';
 import { assertProviderPayloadAllowed, boundProviderResultRows } from '../provider-egress.js';
@@ -66,9 +68,11 @@ export async function runAgenticToolLoopDetailed(
   const usable = tools
     .filter((tool) => tool.name && tool.description)
     .map((tool) => guardToolOutput(tool, options, resultRowBudgetUsage));
-  const policyMessages: AgentMessage[] = options.toolPolicy
-    ? [{ role: 'system', content: options.toolPolicy }]
-    : [];
+  const initialToolPolicy = renderCurrentToolPolicy(options, usable);
+  const policyMessages: AgentMessage[] = [
+    ...(options.toolPolicy ? [{ role: 'system' as const, content: options.toolPolicy }] : []),
+    ...(initialToolPolicy ? [{ role: 'system' as const, content: initialToolPolicy }] : []),
+  ];
 
   if (usable.length === 0) {
     try {
@@ -83,8 +87,16 @@ export async function runAgenticToolLoopDetailed(
   // Native tool use owns its own loop; hand it the same policy + tools.
   if (provider.generateWithTools) {
     try {
+      const native = await provider.generateWithTools([...messages, ...policyMessages], usable, options);
+      if (isNativeToolLoopStop(native)) {
+        return {
+          text: native.text,
+          stop: native.kind,
+          toolCalls: native.toolCalls,
+        };
+      }
       return {
-        text: await provider.generateWithTools([...messages, ...policyMessages], usable, options),
+        text: native,
         stop: 'final',
         toolCalls: 0,
       };
@@ -98,6 +110,20 @@ export async function runAgenticToolLoopDetailed(
   return runTextProtocolToolLoopDetailed(provider, [...messages, ...policyMessages], usable, options);
 }
 
+function isNativeToolLoopStop(value: unknown): value is NativeToolLoopStop {
+  return Boolean(value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && (value as { version?: unknown }).version === 1
+    && ((value as { kind?: unknown }).kind === 'tool_budget_exhausted'
+      || (value as { kind?: unknown }).kind === 'provider_dispatch_budget_exhausted'
+      || (value as { kind?: unknown }).kind === 'invalid_tool_response'
+      || (value as { kind?: unknown }).kind === 'run_soft_target_exceeded'
+      || (value as { kind?: unknown }).kind === 'run_deadline_insufficient')
+    && typeof (value as { text?: unknown }).text === 'string'
+    && typeof (value as { toolCalls?: unknown }).toolCalls === 'number');
+}
+
 /**
  * Internal terminal state for the text transport.
  *
@@ -109,17 +135,72 @@ export async function runAgenticToolLoopDetailed(
  */
 export interface TextToolLoopResult {
   text: string;
-  stop: 'final' | 'tool_budget_exhausted' | 'provider_dispatch_budget_exhausted';
+  stop: 'final'
+    | 'tool_budget_exhausted'
+    | 'provider_dispatch_budget_exhausted'
+    | 'invalid_tool_response'
+    | 'run_soft_target_exceeded'
+    | 'run_deadline_insufficient';
   toolCalls: number;
 }
 
+function currentToolPolicy(
+  options: ProviderToolLoopOptions,
+  tools: readonly AgentToolDefinition[],
+): { policy?: ProviderCurrentToolPolicy; allowedToolNames: Set<string>; terminalActionToolNames: Set<string> } {
+  const policy = options.getCurrentToolPolicy?.();
+  const available = new Set(tools.map((tool) => tool.name));
+  const allowedToolNames = new Set(
+    (policy?.allowedToolNames ?? tools.map((tool) => tool.name))
+      .filter((name) => available.has(name)),
+  );
+  const terminalActionToolNames = new Set(
+    (policy?.terminalActionToolNames ?? [])
+      .filter((name) => allowedToolNames.has(name)),
+  );
+  return { policy, allowedToolNames, terminalActionToolNames };
+}
+
+/**
+ * Keep the text protocol honest about the same narrowing that native
+ * transports receive in their next API `tools` declaration.  This is a safe
+ * controller instruction, never hidden reasoning or mutable business context.
+ */
+function renderCurrentToolPolicy(
+  options: ProviderToolLoopOptions,
+  tools: readonly AgentToolDefinition[],
+): string | undefined {
+  const { policy, allowedToolNames, terminalActionToolNames } = currentToolPolicy(options, tools);
+  if (!policy) return undefined;
+  const allowed = [...allowedToolNames];
+  const terminal = [...terminalActionToolNames];
+  const instruction = policy.instruction?.trim();
+  return [
+    `Runtime tool availability update. You may call only: ${allowed.length ? allowed.join(', ') : 'no tools'}.`,
+    terminal.length ? `If this is the final controller turn, use only: ${terminal.join(', ')}.` : undefined,
+    instruction,
+  ].filter((part): part is string => Boolean(part)).join(' ');
+}
+
 function providerDispatchTerminal(error: unknown): TextToolLoopResult | undefined {
+  const code = toolLoopErrorCode(error);
+  if (code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED') {
+    return { text: '', stop: 'provider_dispatch_budget_exhausted', toolCalls: 0 };
+  }
+  if (code === 'RUN_SOFT_TARGET_EXCEEDED') {
+    return { text: '', stop: 'run_soft_target_exceeded', toolCalls: 0 };
+  }
+  if (code === 'RUN_DEADLINE_INSUFFICIENT') {
+    return { text: '', stop: 'run_deadline_insufficient', toolCalls: 0 };
+  }
+  return undefined;
+}
+
+function toolLoopErrorCode(error: unknown): string | undefined {
   const code = error && typeof error === 'object' && 'code' in error
     ? (error as { code?: unknown }).code
     : undefined;
-  return code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED'
-    ? { text: '', stop: 'provider_dispatch_budget_exhausted', toolCalls: 0 }
-    : undefined;
+  return typeof code === 'string' ? code : undefined;
 }
 
 function guardToolOutput(
@@ -137,10 +218,17 @@ function guardToolOutput(
       const budgetGroup = policy.resultRowBudgetGroupByTool?.[tool.name] ?? tool.name;
       const cumulativeLimit = policy.cumulativeResultRowBudgets?.[budgetGroup] ?? maxResultRows;
       const alreadyUsed = resultRowBudgetUsage.get(budgetGroup) ?? 0;
-      const bounded = boundProviderResultRows(output, Math.max(0, cumulativeLimit - alreadyUsed));
+      const bounded = boundProviderResultRows(
+        output,
+        Math.max(0, cumulativeLimit - alreadyUsed),
+        policy.maxResultColumns,
+        policy.maxResultCells,
+      );
       const shape = assertProviderPayloadAllowed(bounded.value, {
         allowResultRows: maxResultRows > 0,
         maxResultRows: Math.max(0, cumulativeLimit - alreadyUsed),
+        ...(typeof policy.maxResultColumns === 'number' ? { maxResultColumns: policy.maxResultColumns } : {}),
+        ...(typeof policy.maxResultCells === 'number' ? { maxResultCells: policy.maxResultCells } : {}),
         purpose: policy.purpose,
       });
       const cumulativeResultRowCount = alreadyUsed + shape.resultRowCount;
@@ -183,6 +271,13 @@ export async function runTextProtocolToolLoopDetailed(
   // composition instead of silently spending it on another observation.
   const dispatchLimit = Math.max(1, Math.min(30, options.maxProviderDispatches ?? (maxToolCalls + 1)));
   const effectiveToolBudget = Math.min(maxToolCalls, Math.max(0, dispatchLimit - 1));
+  // `onProviderDispatch` is an optional transport callback. Subscription and
+  // test providers can legitimately be callback-silent, so it cannot be the
+  // source of truth for whether this is the first model turn or a tool
+  // follow-up. Keep a local invocation count for the text protocol itself;
+  // the server-side wrapper remains the authority for physical admission and
+  // the hard send cap.
+  let providerTurns = 0;
   let physicalDispatches = 0;
   const outerObserver = options.onProviderDispatch;
   const runOptions: ProviderToolLoopOptions = {
@@ -204,29 +299,130 @@ export async function runTextProtocolToolLoopDetailed(
     // cannot physically leave room for its final response.
     { role: 'system', content: buildTextToolContract(tools, effectiveToolBudget) },
   ];
+  const initialPolicy = renderCurrentToolPolicy(options, tools);
+  if (initialPolicy) messages.push({ role: 'system', content: initialPolicy });
 
   let lastText = '';
   let toolCalls = 0;
+  let requiredActionSignature = '';
+  let requiredActionProseRetries = 0;
+  // Only canonical V2 lanes with a real host finish control need to reserve a
+  // physical send after execution. Generic tool users retain their historical
+  // final-action behavior at the cap.
+  const requiresPostExecutionFinish = Boolean(options.getCurrentToolPolicy)
+    && tools.some((tool) => tool.name === 'finish_answer');
   while (true) {
+    // Keep the physical Ask V2 budget meaningful.  With the standard six
+    // sends, the fifth send may be the controller-selected execution action
+    // and the sixth is reserved for the host-required finish/narration
+    // control.  This is a transport constraint only: the kernel still gives
+    // the model the candidate-bound execution choices.
+    const livePolicyBeforeDispatch = currentToolPolicy(options, tools);
+    const nextRequiredActionSignature = [...livePolicyBeforeDispatch.terminalActionToolNames].sort().join('|');
+    if (nextRequiredActionSignature !== requiredActionSignature) {
+      requiredActionSignature = nextRequiredActionSignature;
+      requiredActionProseRetries = 0;
+    }
+    const narrationControlRound = livePolicyBeforeDispatch.terminalActionToolNames.has('finish_answer');
+    // Only an execution action needs a second, post-result finish/narration
+    // send. A host-issued clarification is itself the terminal control, so
+    // reserving a phantom narration slot would prematurely reject a malformed
+    // clarification instead of returning its typed observation to the model.
+    const terminalExecutionAction = [...livePolicyBeforeDispatch.terminalActionToolNames]
+      .some((name) => !isAskV2TerminalControlTool(name));
+    const reservePostExecutionNarration = requiresPostExecutionFinish && terminalExecutionAction;
+    const finalExecutionActionRound = !narrationControlRound
+      && livePolicyBeforeDispatch.terminalActionToolNames.size > 0
+      && providerTurns >= Math.max(0, dispatchLimit - (reservePostExecutionNarration ? 2 : 1));
+    const terminalActionRound = livePolicyBeforeDispatch.terminalActionToolNames.size > 0
+      && (narrationControlRound
+        ? providerTurns >= Math.max(0, dispatchLimit - 1)
+        : finalExecutionActionRound);
+    if (terminalActionRound) {
+      messages.push({
+        role: 'system',
+        content: `Final controller action for this phase. Call exactly one of: ${[...livePolicyBeforeDispatch.terminalActionToolNames].join(', ')}. Do not inspect more context or answer in prose.`,
+      });
+    }
     let text: string;
     try {
-      text = await provider.generate(messages, runOptions);
+      // Authoritative Ask V2 labels its first model-controlled transport
+      // separately from later tool-follow-up transports.  This is only a
+      // server-owned accounting detail: it does not grant a different tool,
+      // route, or egress policy.  Keeping it here makes text-only providers
+      // truthful in the same way native multi-tool providers are.
+      // Once an execution has completed, the only remaining controller action
+      // is host-local finish_answer.  Account the request for that action from
+      // the narration allowance instead of treating it as more discovery.
+      const dispatchOptions = providerTurns > 0 && runOptions.dispatchPhase === 'agent_control'
+        ? {
+          ...runOptions,
+          dispatchPhase: narrationControlRound
+            ? 'narration' as const
+            : 'tool_followup' as const,
+        }
+        : runOptions;
+      providerTurns += 1;
+      text = await provider.generate(messages, dispatchOptions);
     } catch (error: unknown) {
-      const code = error && typeof error === 'object' && 'code' in error
-        ? (error as { code?: unknown }).code
-        : undefined;
-      if (code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED') {
-        return { text: lastText, stop: 'provider_dispatch_budget_exhausted', toolCalls };
-      }
+      const terminal = providerDispatchTerminal(error);
+      if (terminal) return { ...terminal, text: lastText, toolCalls };
       throw error;
     }
-    if (text.trim()) lastText = text;
     const requestedCall = parseTextToolCall(text);
-    if (!requestedCall) return { text: text || lastText, stop: 'final', toolCalls };
+    if (!requestedCall) {
+      const policy = livePolicyBeforeDispatch;
+      // A live V2 policy can require one concrete next action. A prose reply
+      // at this point is neither a valid answer nor a safe terminal: discard
+      // it and spend the next admissible controller send on the host-approved
+      // action only. This prevents a model from escaping the semantic/DQL/SQL
+      // boundary just by answering in prose after an inspection.
+      if (policy.terminalActionToolNames.size > 0) {
+        // One constrained retry is enough to distinguish a transient
+        // text-protocol miss from a provider that cannot honor a required
+        // host action. Do not burn the remaining Ask budget on repeated
+        // prose, and do not mislabel that transport fault as missing context.
+        // If the admitted physical send was already the last one, there is
+        // no constrained retry to attempt. Preserve the distinct transport
+        // boundary: a post-result narration can then retain deterministic
+        // facts, while a pre-freeze controller is told precisely that its
+        // dispatch reserve is exhausted. `invalid_tool_response` means the
+        // provider ignored the same narrowed action *twice*.
+        if (providerTurns >= dispatchLimit) {
+          return { text: '', stop: 'provider_dispatch_budget_exhausted', toolCalls };
+        }
+        if (requiredActionProseRetries >= 1) {
+          return { text: '', stop: 'invalid_tool_response', toolCalls };
+        }
+        requiredActionProseRetries += 1;
+        messages.push({
+          role: 'user',
+          content: `Controller progression required. Discard the prior prose and call exactly one of: ${[...policy.terminalActionToolNames].join(', ')}. Do not answer in prose.`,
+        });
+        continue;
+      }
+      if (text.trim()) lastText = text;
+      return { text: text || lastText, stop: 'final', toolCalls };
+    }
+    if (text.trim()) lastText = text;
     // A tool-shaped reply is not a final answer merely because the host has no
     // dispatch left for another observation. Keep this typed distinction so a
     // caller cannot mistake it for executable SQL or prose.
-    if (toolCalls >= effectiveToolBudget) {
+    // Ask V2 has two host-owned terminal controls.  They may use the reserved
+    // final dispatch only when the tool backend confirms the terminal result.
+    // A model can still propose either control too early; that rejected
+    // proposal is a normal pre-freeze observation which must reach the next
+    // controller turn rather than ending the loop as if an answer existed.
+    const isTerminalControlCall = isAskV2TerminalControlTool(requestedCall.name);
+    const responsePolicy = livePolicyBeforeDispatch;
+    if (terminalActionRound && !responsePolicy.terminalActionToolNames.has(requestedCall.name)) {
+      // The narrowed final-action send is not another discovery opportunity.
+      // Do not execute an out-of-policy request or spend the narration reserve
+      // trying to repair it. The lane projects this exact stop as
+      // provider/dispatch_budget rather than a metadata gap.
+      return { text: '', stop: 'provider_dispatch_budget_exhausted', toolCalls };
+    }
+    if (toolCalls >= effectiveToolBudget && !isTerminalControlCall) {
       return { text: text || lastText, stop: 'tool_budget_exhausted', toolCalls };
     }
     const call = requestedCall;
@@ -234,25 +430,145 @@ export async function runTextProtocolToolLoopDetailed(
     const tool = toolMap.get(call.name);
     let output: unknown;
     let isError = false;
+    let deadlineStop: TextToolLoopResult | undefined;
     const startedAt = Date.now();
     if (!tool) {
       output = { error: `Unknown tool: ${call.name}. Available: ${tools.map((t) => t.name).join(', ')}` };
       isError = true;
     } else {
       try {
-        assertMayStartToolCall(options);
+        assertMayStartToolCall(options, call.name);
         output = await tool.run(call.input ?? {});
       } catch (err) {
-        output = { error: err instanceof Error ? err.message : String(err) };
+        const code = toolLoopErrorCode(err);
+        output = {
+          error: err instanceof Error ? err.message : String(err),
+          ...(code ? { code } : {}),
+        };
         isError = true;
+        deadlineStop = providerDispatchTerminal(err);
       }
     }
     toolCalls += 1;
-    options.onToolCall?.({ name: call.name, input: call.input, output, isError, durationMs: Date.now() - startedAt });
+    // Tool-call observers are diagnostics only. In particular, Ask V2 records
+    // a terminal `finish_answer` through this callback; an observer bug must
+    // never turn an already-authorized execution into a second provider turn
+    // (or overwrite it as a planner/budget failure).
+    notifyToolCall(options, { name: call.name, input: call.input, output, isError, durationMs: Date.now() - startedAt });
+    if (deadlineStop) return { ...deadlineStop, text: lastText, toolCalls };
     messages.push({ role: 'assistant', content: text });
     messages.push({ role: 'user', content: renderObservation(call.name, output) });
+    const progressInstruction = renderCurrentToolPolicy(options, tools);
+    if (progressInstruction) messages.push({ role: 'system', content: progressInstruction });
+
+    // A *completed* terminal host control carries its final answer or stable
+    // clarification in the tool result.  Do not spend another provider send
+    // to ask the model to repeat it.  Crucially, a denied/ineligible terminal
+    // proposal does not have this marker: its safe-next-tool observation is
+    // fed into the next controller dispatch below.
+    if (isTerminalControlCall && !isError && isCompletedAskV2TerminalControlOutput(output)) {
+      return { text, stop: 'final', toolCalls };
+    }
+
+    // An execution action at the final tool-followup slot must leave the next
+    // physical send for `finish_answer`. A failed/ineligible final action has
+    // no safe room for a second discovery attempt, so preserve the precise
+    // dispatch-budget boundary rather than emitting a misleading coverage
+    // terminal. A completed execution loops once more for host narration.
+    if (terminalActionRound) {
+      const nowRequiresNarration = currentToolPolicy(options, tools).terminalActionToolNames.has('finish_answer');
+      if (isError || (isTerminalControlCall && !isCompletedAskV2TerminalControlOutput(output))) {
+        return { text, stop: 'provider_dispatch_budget_exhausted', toolCalls };
+      }
+      if (nowRequiresNarration) {
+        // The execution is validated and the next loop iteration emits the
+        // sixth, narration-phase physical send with only finish_answer exposed.
+        continue;
+      }
+      if (!reservePostExecutionNarration) return { text, stop: 'final', toolCalls };
+      return { text, stop: 'provider_dispatch_budget_exhausted', toolCalls };
+    }
 
     if (toolCalls >= effectiveToolBudget) {
+      const policy = currentToolPolicy(options, tools);
+      // A bounded Ask controller may reserve the last physical send for one
+      // terminal *action* (for example, semantic compilation) rather than
+      // prose. This remains model-controlled: the host only narrows the
+      // tool set after prior observations make repeated discovery unsafe or
+      // wasteful. Other tools cannot use this reserve.
+      if (policy.terminalActionToolNames.size > 0) {
+        messages.push({
+          role: 'user',
+          content: `Final controller action turn. Call exactly one of: ${[...policy.terminalActionToolNames].join(', ')}. Do not inspect more context or write a prose answer.`,
+        });
+        const finalDispatchOptions = providerTurns > 0 && runOptions.dispatchPhase === 'agent_control'
+          ? {
+            ...runOptions,
+            dispatchPhase: policy.terminalActionToolNames.has('finish_answer')
+              ? 'narration' as const
+              : 'tool_followup' as const,
+          }
+          : runOptions;
+        providerTurns += 1;
+        let finalText: string;
+        try {
+          finalText = await provider.generate(messages, finalDispatchOptions);
+        } catch (error) {
+          const terminal = providerDispatchTerminal(error);
+          if (terminal) return { ...terminal, text: lastText, toolCalls };
+          throw error;
+        }
+        if (!finalText.trim()) {
+          return { text: lastText, stop: 'provider_dispatch_budget_exhausted', toolCalls };
+        }
+        const terminalCall = parseTextToolCall(finalText);
+        if (!terminalCall || !policy.terminalActionToolNames.has(terminalCall.name)) {
+          return {
+            text: '',
+            stop: terminalCall ? 'tool_budget_exhausted' : 'provider_dispatch_budget_exhausted',
+            toolCalls,
+          };
+        }
+        const terminalTool = toolMap.get(terminalCall.name);
+        let terminalOutput: unknown;
+        let terminalError = false;
+        let terminalDeadlineStop: TextToolLoopResult | undefined;
+        const terminalStartedAt = Date.now();
+        if (!terminalTool) {
+          terminalOutput = { error: `Unknown terminal tool: ${terminalCall.name}` };
+          terminalError = true;
+        } else {
+          try {
+            assertMayStartToolCall(options, terminalCall.name);
+            terminalOutput = await terminalTool.run(terminalCall.input ?? {});
+          } catch (err) {
+            const code = toolLoopErrorCode(err);
+            terminalOutput = {
+              error: err instanceof Error ? err.message : String(err),
+              ...(code ? { code } : {}),
+            };
+            terminalError = true;
+            terminalDeadlineStop = providerDispatchTerminal(err);
+          }
+        }
+        toolCalls += 1;
+        notifyToolCall(options, {
+          name: terminalCall.name,
+          input: terminalCall.input,
+          output: terminalOutput,
+          isError: terminalError,
+          durationMs: Date.now() - terminalStartedAt,
+        });
+        if (terminalDeadlineStop) return { ...terminalDeadlineStop, text: lastText, toolCalls };
+        return {
+          text: finalText,
+          stop: terminalError || (isAskV2TerminalControlTool(terminalCall.name)
+            && !isCompletedAskV2TerminalControlOutput(terminalOutput))
+            ? 'tool_budget_exhausted'
+            : 'final',
+          toolCalls,
+        };
+      }
       messages.push({
         role: 'user',
         content: 'Tool budget reached — do not call any more tools. Answer now using only the tool results above, as a single ```json fenced object with summary, sql, viz, outputs.',
@@ -260,13 +576,24 @@ export async function runTextProtocolToolLoopDetailed(
       // The next iteration is the reserved final dispatch.  If the model
       // nevertheless emits a tool shape, `call` is deliberately disabled and
       // the caller receives that text as a typed terminal, not an execution.
-      const finalText = await provider.generate(messages, runOptions).catch((error: unknown) => {
-        const code = error && typeof error === 'object' && 'code' in error
-          ? (error as { code?: unknown }).code
-          : undefined;
-        if (code === 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED') return '';
+      const finalPolicy = currentToolPolicy(options, tools);
+      const finalDispatchOptions = providerTurns > 0 && runOptions.dispatchPhase === 'agent_control'
+        ? {
+          ...runOptions,
+          dispatchPhase: finalPolicy.terminalActionToolNames.has('finish_answer')
+            ? 'narration' as const
+            : 'tool_followup' as const,
+        }
+        : runOptions;
+      providerTurns += 1;
+      let finalText: string;
+      try {
+        finalText = await provider.generate(messages, finalDispatchOptions);
+      } catch (error) {
+        const terminal = providerDispatchTerminal(error);
+        if (terminal) return { ...terminal, text: lastText, toolCalls };
         throw error;
-      });
+      }
       if (!finalText.trim()) {
         return {
           text: lastText,
@@ -274,20 +601,103 @@ export async function runTextProtocolToolLoopDetailed(
           toolCalls,
         };
       }
+      const terminalCall = parseTextToolCall(finalText);
+      // The reserved composition dispatch may legally be an Ask V2 terminal
+      // control. Execute it locally only when it reports a completed terminal
+      // outcome. A premature/denied finish or clarification has consumed the
+      // final physical send, so preserve the precise budget stop rather than
+      // pretending that it produced a final answer.
+      if (terminalCall && isAskV2TerminalControlTool(terminalCall.name)) {
+        const terminalTool = toolMap.get(terminalCall.name);
+        let terminalOutput: unknown;
+        let terminalError = false;
+        let terminalDeadlineStop: TextToolLoopResult | undefined;
+        const terminalStartedAt = Date.now();
+        if (!terminalTool) {
+          terminalOutput = { error: 'Unknown tool: finish_answer' };
+          terminalError = true;
+        } else {
+          try {
+            assertMayStartToolCall(options, terminalCall.name);
+            terminalOutput = await terminalTool.run(terminalCall.input ?? {});
+          } catch (err) {
+            const code = toolLoopErrorCode(err);
+            terminalOutput = {
+              error: err instanceof Error ? err.message : String(err),
+              ...(code ? { code } : {}),
+            };
+            terminalError = true;
+            terminalDeadlineStop = providerDispatchTerminal(err);
+          }
+        }
+        toolCalls += 1;
+        notifyToolCall(options, {
+          name: terminalCall.name,
+          input: terminalCall.input,
+          output: terminalOutput,
+          isError: terminalError,
+          durationMs: Date.now() - terminalStartedAt,
+        });
+        if (terminalDeadlineStop) return { ...terminalDeadlineStop, text: lastText, toolCalls };
+        return {
+          text: finalText,
+          stop: terminalError || !isCompletedAskV2TerminalControlOutput(terminalOutput)
+            ? 'tool_budget_exhausted'
+            : 'final',
+          toolCalls,
+        };
+      }
       return {
         text: finalText,
-        stop: parseTextToolCall(finalText) ? 'tool_budget_exhausted' : 'final',
+        stop: terminalCall ? 'tool_budget_exhausted' : 'final',
         toolCalls,
       };
     }
   }
 }
 
-function assertMayStartToolCall(options: ProviderToolLoopOptions): void {
+/**
+ * Only explicit Ask V2 controls can terminate a transport early. Execution
+ * and retrieval tools may return useful `{ finished: true }`-shaped payloads
+ * for their own protocols, but they do not own final answer authority.
+ */
+function isAskV2TerminalControlTool(name: string): boolean {
+  return name === 'finish_answer' || name === 'request_clarification';
+}
+
+function isCompletedAskV2TerminalControlOutput(value: unknown): boolean {
+  return Boolean(value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && (value as { finished?: unknown }).finished === true);
+}
+
+function assertMayStartToolCall(options: ProviderToolLoopOptions, toolName?: string): void {
+  // finish_answer is a host-local terminal control following an already
+  // admitted provider response. It cannot start discovery or a warehouse
+  // operation, so the final control itself may consume the narration reserve.
+  if (toolName === 'finish_answer') return;
   if (options.mayStartToolCall?.() === false) {
     throw Object.assign(new Error('The run soft target elapsed before this tool branch could start.'), {
       code: 'RUN_SOFT_TARGET_EXCEEDED',
     });
+  }
+}
+
+/**
+ * Observability must be fail-open with respect to the bounded tool runtime.
+ * Provider/tool callbacks are outside the execution authority and cannot be
+ * allowed to reopen a finished response or alter its terminal result.
+ */
+function notifyToolCall(
+  options: ProviderToolLoopOptions,
+  event: { name: string; input: unknown; output: unknown; isError: boolean; durationMs: number },
+): void {
+  try {
+    options.onToolCall?.(event);
+  } catch {
+    // Receipt recording has its own error handling at the host boundary. The
+    // transport still has a valid, typed tool outcome to return to the caller.
   }
 }
 

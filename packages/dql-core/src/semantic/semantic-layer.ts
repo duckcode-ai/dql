@@ -2147,6 +2147,11 @@ export function parseCubeDefinition(raw: Record<string, unknown>): CubeDefinitio
       const validGranularities = ['day', 'week', 'month', 'quarter', 'year'];
       return {
         ...base,
+        // `time_dimensions` is an authored declaration, so it must retain
+        // time identity even when the YAML item does not redundantly set
+        // `is_time_dimension`.  Downstream KG/retrieval uses this to carry
+        // the declared granularities into the snapshot-bound Ask capability.
+        isTimeDimension: true,
         granularities: granRaw.map(String).filter((g) => validGranularities.includes(g)) as TimeDimensionDefinition['granularities'],
         primaryTime: Boolean((td as Record<string, unknown>).primary_time ?? (td as Record<string, unknown>).primaryTime ?? false),
       };

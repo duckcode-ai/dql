@@ -419,7 +419,7 @@ export function withCassette(
       messages: AgentMessage[],
       tools: AgentToolDefinition[],
       options?: ProviderToolLoopOptions,
-    ): Promise<string> => {
+    ): Promise<import('@duckcodeailabs/dql-agent').NativeToolLoopResult> => {
       const fingerprint = cassetteFingerprint({
         providerName: provider.name,
         operation: 'generate_with_tools',
@@ -451,6 +451,10 @@ export function withCassette(
         },
       }));
       const text = await provider.generateWithTools!(messages, recordingTools, options);
+      // A native V2 controller budget stop is not provider prose and must
+      // remain typed through the live lane. Do not serialize it as a normal
+      // cassette completion (which would erase the terminal cause on replay).
+      if (typeof text !== 'string') return text;
       store.put({
         key: fingerprint.key, operation: 'generate_with_tools', text, toolCalls: observed,
         providerName: provider.name, recordedAt: new Date().toISOString(),

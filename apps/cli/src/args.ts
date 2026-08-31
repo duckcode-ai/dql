@@ -16,6 +16,8 @@ export interface CLIFlags {
   port: number | null;
   /** HTTP bind host. Defaults to 127.0.0.1; set to 0.0.0.0 inside containers. */
   host?: string | null;
+  /** Server-owned Ask rollout mode for `dql notebook`; validated at launch. */
+  askRuntimeMode?: string;
   chart: string;
   domain: string;
   /** Model Area for context/model import authoring. */
@@ -180,6 +182,16 @@ export function parseArgs(argv: string[]): ParsedArgs {
       }
     } else if (arg === '--host' && i + 1 < argv.length) {
       flags.host = argv[++i];
+    } else if (arg === '--ask-runtime-mode') {
+      // Preserve an absent/invalid value for the notebook command's strict
+      // startup validator instead of silently falling back to another mode.
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith('--')) {
+        flags.askRuntimeMode = '';
+      } else {
+        flags.askRuntimeMode = value;
+        i += 1;
+      }
     } else if (arg === '--chart' && i + 1 < argv.length) {
       flags.chart = argv[++i];
     } else if (arg === '--domain' && i + 1 < argv.length) {

@@ -31,6 +31,7 @@ import type {
   ResolvedAnalyticalPlanV2,
 } from './analytical-orchestration.js';
 import type { AgentRunPlan } from './agent-run-engine.js';
+import type { AskAgentStateV4, AskRuntimeModeV2 } from './ask-runtime/ask-agent-runtime-v2.js';
 
 /** The high-level action the agent will take for a turn. */
 export type AgentAction = 'answer' | 'clarify' | 'investigate' | 'compose_app' | 'converse' | 'block';
@@ -207,6 +208,17 @@ export interface IntentDecision {
     taskOutcomes?: AnalyticalTaskOutcomeV1[];
     taskOutcomeSummary?: AnalyticalTaskOutcomeSummaryV1;
   };
+  /**
+   * V2 retrieval-first Ask handoff.  Unlike `askAnalystDecision`, this is not
+   * a deterministic business-meaning or compiler authority: it tells the
+   * engine/provider to enter the bounded tool runtime with the already
+   * acquired snapshot and to return pre-freeze misses as observations.
+   */
+  askAgentV2Decision?: {
+    version: 2;
+    mode: AskRuntimeModeV2;
+    state: AskAgentStateV4;
+  };
 }
 
 /**
@@ -228,6 +240,8 @@ export interface AskAnalystTaskExecutionV1 {
     semanticCandidateReadiness?: Array<{
       candidateId: string;
       status: 'ready' | 'unavailable' | 'unknown';
+      engines?: Array<'native' | 'metricflow-cli' | 'dbt-cloud'>;
+      nativeCompilerProven?: boolean;
     }>;
     physicalSchema: 'ready' | 'unavailable' | 'unknown';
     targetFingerprint?: string;

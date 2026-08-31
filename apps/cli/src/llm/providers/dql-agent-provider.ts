@@ -22,7 +22,11 @@ import {
   OllamaProvider,
   OpenAIProvider,
   answer,
+  createAnalyticalFailure,
   buildAnalysisQuestionPlan,
+  buildCertifiedBlockInvocationInput,
+  certifiedBlockProvesRequestedTopN,
+  buildAnalyticalRequirementSet,
   buildLocalContextPack,
   contextRetrievalBudgetForQuestion,
   ensureAgentProjectReady,
@@ -53,14 +57,43 @@ import {
   prepareServerOwnedProviderSchemaContext,
   projectEmbeddingProvider,
   answerAgentic,
+  trimCertifiedBlockResultToRequestedTopN,
+  runAgenticToolLoopDetailed,
+  ASK_V2_BUDGETS,
+  createAskToolKernelV2,
+  setAskV2TierState,
+  recordAskV2ResearchLedger,
+  evidenceCandidateRoles,
   qualifyAuthorizationReferences,
   scopeContextPackToExploratoryCandidateClosure,
   createAnalystLaneHandler,
+  askAgentV2WorkspaceMatches,
+  materializeAskV2WorkspaceTierTruth,
+  askV2SemanticCandidateAuthorityFingerprint,
+  askV2ExecutableSemanticRoles,
+  finishAskAgentV2Turn,
+  observeAskAgentV2Tool,
+  mintAskV2ExecutionReceiptV1,
+  defaultProviderResultEgressPolicyV2,
   parseProposal,
   renderContextValidationRefusalForUser,
   validateSqlAgainstLocalContext,
   resolveOrchestratorPolicy,
   type AgenticLane,
+  type OrchestratorPolicy,
+  type AskAgentStateV4,
+  type AskV2ExecutionCapabilityV1,
+  type AskV2ExecutionReceipt,
+  type AskAgentToolWorkspaceV2,
+  type AskSemanticCapabilityHandleV1,
+  type AskCertifiedArtifactHandleV1,
+  type AskToolNameV2,
+  type AskToolObservationV1,
+  type AskV2ResearchBranchReceiptInput,
+  type AgentEvidenceCandidate,
+  type AgentToolDefinition,
+  type AnswerLoopInput,
+  type KGNode,
 } from '@duckcodeailabs/dql-agent';
 import {
   CassetteStore,
@@ -335,6 +368,3356 @@ function createAskTraceToolCallback(observer: AskTraceObserverV1): TraceAwareToo
   let attemptIndex = 0;
   const callback: TraceAwareToolCallback = (event) => {
     recordPhysicalToolCallTrace(observer, event, ++attemptIndex);
+  };
+  Object.defineProperty(callback, ASK_TRACE_TOOL_CALLBACK, {
+    value: true,
+    enumerable: false,
+  });
+  return callback;
+}
+
+/** A redacted structural correlation, never a hash of values/rows/prompt text. */
+function v2ToolShapeFingerprint(value: unknown): string {
+  const shape = (candidate: unknown, depth = 0): unknown => {
+    if (depth > 4) return 'truncated';
+    if (candidate === null) return 'null';
+    if (Array.isArray(candidate)) return { array: candidate.length, sample: candidate.slice(0, 3).map((item) => shape(item, depth + 1)) };
+    if (typeof candidate === 'object') return {
+      object: Object.keys(candidate as Record<string, unknown>).sort().slice(0, 24),
+    };
+    return typeof candidate;
+  };
+  return runtimeFingerprint(JSON.stringify(shape(value)));
+}
+
+function v2CanonicalToolName(name: string): AskToolNameV2 {
+  if (name === 'search_semantic_layer') return 'inspect_semantic_candidates';
+  // A provider/tool-loop callback confirms only that a physical tool returned.
+  // It is not a successful compile or execution, so map it to inspection. The
+  // V2 controller alone records an execution after it has a bound result.
+  if (name === 'compile_semantic_query' || name === 'query_semantic_model') return 'inspect_semantic_candidates';
+  if (name === 'scan_manifest' || name === 'get_table_schema' || name === 'propose_cross_source_join') return 'inspect_relational_context';
+  if (name === 'validate_sql' || name === 'preview_query' || name === 'execute_local_analysis') return 'inspect_relational_context';
+  if (name === 'search_values') return 'search_values';
+  return 'inspect_ask_context';
+}
+
+function observeV2ToolCall(
+  state: AskAgentStateV4 | undefined,
+  event: Parameters<NonNullable<ProviderToolLoopOptions['onToolCall']>>[0],
+): void {
+  if (!state) return;
+  const tool = v2CanonicalToolName(event.name);
+  const structuredCode = event.output
+    && typeof event.output === 'object'
+    && !Array.isArray(event.output)
+    && typeof (event.output as { code?: unknown }).code === 'string'
+    ? (event.output as { code: string }).code
+    : undefined;
+  const deadline = structuredCode === 'RUN_SOFT_TARGET_EXCEEDED'
+    || structuredCode === 'RUN_DEADLINE_INSUFFICIENT';
+  // Native and text callbacks report only a physical tool boundary.  They are
+  // deliberately non-freezing: a successful tool transport is not proof that
+  // the candidate/compiler/result contract completed. The final result below
+  // records the only eligible/executed tier observation.
+  const observation: AskToolObservationV1 = {
+    version: 1,
+    tool,
+    // Availability is a source-level state. A successful physical call is an
+    // eligible observation; it never freezes a plan because the canonical
+    // execution tool records that only after connection/result validation.
+    outcome: event.isError ? 'error' : 'eligible',
+    reasonCode: deadline ? structuredCode : event.isError ? `tool_${event.name}_error` : `tool_${event.name}_completed`,
+    candidateIds: [],
+    ...(typeof event.durationMs === 'number' ? { durationMs: Math.max(0, event.durationMs) } : {}),
+    inputFingerprint: v2ToolShapeFingerprint(event.input),
+    ...(event.output === undefined ? {} : { outputFingerprint: v2ToolShapeFingerprint(event.output) }),
+    origin: deadline ? 'narration' : 'tool',
+    ...(deadline ? {
+      safeAction: 'review_validated_result',
+      provider: {
+        phase: 'narration' as const,
+        cause: 'run_deadline' as const,
+        retryable: false,
+        safeAction: 'review_validated_result',
+      },
+    } : {}),
+  };
+  observeAskAgentV2Tool(state, observation);
+}
+
+function v2TierForAnswer(result: AgentAnswer): {
+  tier?: 'certified' | 'semantic' | 'governed_relational' | 'exploratory_sql';
+  tool: AskToolNameV2;
+} {
+  const source = [result.result?.answerTier, result.route?.tier, result.sourceTier]
+    .filter((value): value is string => typeof value === 'string')
+    .join('|')
+    .toLowerCase();
+  if (source.includes('certified')) return { tier: 'certified', tool: 'run_certified' };
+  if (source.includes('semantic')) return { tier: 'semantic', tool: 'compile_and_run_semantic' };
+  if (source.includes('relational') || source.includes('dql')) return { tier: 'governed_relational', tool: 'compile_and_run_dql' };
+  if (source.includes('generated') || source.includes('exploratory') || source.includes('manifest')) {
+    return { tier: 'exploratory_sql', tool: 'validate_and_run_sql' };
+  }
+  return { tool: 'finish_answer' };
+}
+
+/** Persist one terminal V2 result without invoking a second routing/SQL path. */
+function finishV2AnswerFromResult(state: AskAgentStateV4 | undefined, result: AgentAnswer): void {
+  if (!state) return;
+  if (result.askAgentV2Outcome) {
+    finishAskAgentV2Turn(state, result.askAgentV2Outcome);
+    return;
+  }
+  if (result.kind === 'no_answer') {
+    finishAskAgentV2Turn(state, {
+      version: 2,
+      kind: result.observabilityExecutionFailure || result.executionError ? 'execution_failure' : 'gap',
+      reasonCode: result.refusalCode ?? 'ASK_V2_NO_ANSWER',
+      safeAction: result.observabilityExecutionFailure ? 'configure_connection' : 'review_recorded_observations_then_retry',
+      origin: result.observabilityExecutionFailure || result.executionError ? 'execution' : 'validation',
+    });
+    return;
+  }
+  // Definitions, general/context answers and provider narration have no
+  // warehouse result. They must not be marked as an executed analytical tier.
+  const hasValidatedResult = Boolean(result.result
+    && (typeof result.result.rowCount === 'number'
+      || typeof result.result.executionReceipt === 'object'
+      || Boolean(result.analyticalFacts)));
+  const route = v2TierForAnswer(result);
+  observeAskAgentV2Tool(state, {
+    version: 1,
+    tool: route.tool,
+    outcome: hasValidatedResult && route.tier ? 'executed' : 'eligible',
+    ...(route.tier ? { tier: route.tier } : {}),
+    reasonCode: 'ASK_V2_VALIDATED_RESULT',
+    candidateIds: state.resolvedPlan?.candidateIds ?? state.candidatePlan?.candidateIds ?? [],
+    ...(state.resolvedPlan?.id ? { planId: state.resolvedPlan.id } : {}),
+    origin: hasValidatedResult ? 'execution' : 'narration',
+  });
+  finishAskAgentV2Turn(state, {
+    version: 2,
+    kind: 'finish_answer',
+    reasonCode: 'ASK_V2_VALIDATED_RESULT',
+    origin: result.analyticalNarrative || !hasValidatedResult ? 'narration' : 'execution',
+  });
+}
+
+/**
+ * Mint the only runner-to-host V2 completion carrier at the point the
+ * provider-owned tool runtime has advanced its state. The caller must not try
+ * to recreate this from its original request because that request may be an
+ * immutable pre-execution copy used by the engine.
+ */
+function askV2ExecutionReceiptFromTerminalState(
+  state: AskAgentStateV4 | undefined,
+  capability: AskV2ExecutionCapabilityV1 | undefined,
+  result: AgentAnswer | undefined,
+): AskV2ExecutionReceipt | undefined {
+  return mintAskV2ExecutionReceiptV1({
+    state,
+    capability,
+    result: result?.result,
+  });
+}
+
+/**
+ * The V2 serving controller intentionally does not call `answer()`.
+ *
+ * `answer()` is the V1 business interpreter; using it after a V2 provider
+ * selects a tool would recreate the old double-routing failure (and can make a
+ * second SQL proposal).  This adapter exposes only snapshot-bound tools and
+ * calls the already-provided compiler/execution boundaries directly.  It is
+ * deliberately small: route intelligence is the provider's bounded tool
+ * choice; DQL validates identifiers, priority, SQL and execution authority.
+ */
+function v2CandidateId(candidate: AgentEvidenceCandidate): string {
+  return candidate.qualifiedId ?? candidate.id;
+}
+
+function v2WorkspaceForInput(
+  input: AnswerLoopInput,
+  state: AskAgentStateV4,
+): AskAgentToolWorkspaceV2 | undefined {
+  const bridge = input.askAgentV2Workspace;
+  const workspace = bridge?.getToolWorkspace?.();
+  if (!workspace || workspace.version !== 1) return undefined;
+  if (workspace.snapshotId !== state.snapshotId || workspace.sourceFingerprint !== state.sourceFingerprint) return undefined;
+  return workspace;
+}
+
+/** Provider-safe card projection. Values, paths, SQL, credentials, and raw rows stay host-only. */
+function v2SafeCard(
+  candidate: AgentEvidenceCandidate,
+  workspace?: AskAgentToolWorkspaceV2,
+): Record<string, unknown> {
+  return {
+    id: v2CandidateId(candidate),
+    kind: candidate.kind,
+    roles: evidenceCandidateRoles(candidate),
+    trustTier: candidate.trustTier,
+    name: candidate.name,
+    ...(candidate.definition ? { definition: candidate.definition } : {}),
+    ...(candidate.formula ? { formula: candidate.formula } : {}),
+    ...(candidate.aggregation ? { aggregation: candidate.aggregation } : {}),
+    ...(candidate.semanticModel ? { semanticModel: candidate.semanticModel } : {}),
+    ...(candidate.primaryEntity ? { primaryEntity: candidate.primaryEntity } : {}),
+    ...(candidate.dataType ? { dataType: candidate.dataType } : {}),
+    ...(candidate.dimensions?.length ? { dimensions: candidate.dimensions.slice(0, 16) } : {}),
+    ...(candidate.timeGrains?.length ? { timeGrains: candidate.timeGrains.slice(0, 8) } : {}),
+    ...(candidate.sourceObjects?.length ? { sourceObjects: candidate.sourceObjects.slice(0, 12) } : {}),
+    ...(candidate.relationshipEvidence?.length ? { relationshipEvidence: candidate.relationshipEvidence.slice(0, 8) } : {}),
+    compatibility: candidate.compatibility,
+    ...(candidate.compatibilityFacts?.length ? { compatibilityFacts: candidate.compatibilityFacts.slice(0, 8) } : {}),
+  };
+}
+
+function selectV2SemanticEngine(input: {
+  metricCapabilities: readonly AskSemanticCapabilityHandleV1[];
+}):
+  | { ok: true; engine: NonNullable<AskSemanticCapabilityHandleV1['selectedEngine']> }
+  | { ok: false; outcome: 'ineligible'; reasonCode: 'SEMANTIC_ENGINE_UNAVAILABLE' } {
+  // Metrics are the compiler authority, but engine selection belongs solely
+  // to the local host. New V2 handles carry `selectedEngine` from the
+  // project preference/readiness probe. For a pre-additive handle, retain the
+  // one-engine compatibility read only; never infer among several engines or
+  // accept a provider-supplied engine/display/runtime name.
+  const selected = input.metricCapabilities.map((capability) => (
+    capability.selectedEngine
+      ?? (capability.engines.length === 1 ? capability.engines[0] : undefined)
+  ));
+  if (selected.length === 0 || selected.some((engine) => !engine)) {
+    return { ok: false, outcome: 'ineligible', reasonCode: 'SEMANTIC_ENGINE_UNAVAILABLE' };
+  }
+  const engine = selected[0]!;
+  if (selected.some((candidateEngine) => candidateEngine !== engine)) {
+    // A multi-metric tuple must have one host-selected target. Do not ask the
+    // provider to arbitrate adapters: an unavailable semantic tier can safely
+    // advance before freeze.
+    return { ok: false, outcome: 'ineligible', reasonCode: 'SEMANTIC_ENGINE_UNAVAILABLE' };
+  }
+  return { ok: true, engine };
+}
+
+function v2StringArray(value: unknown, max = 24): string[] {
+  return Array.isArray(value)
+    ? [...new Set(value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0).map((entry) => entry.trim()))].slice(0, max)
+    : [];
+}
+
+/**
+ * Semantic bindings cross the provider boundary as opaque candidate IDs, but
+ * the compiler needs one normalized, snapshot-bound shape.  Do not silently
+ * drop malformed filters: doing so would freeze a plan different from the
+ * plan the controller asked to execute.
+ */
+function normalizeV2SemanticFilters(value: unknown):
+  | { ok: true; filters: Array<{ dimensionId: string; value: string | number | boolean }> }
+  | { ok: false; reasonCode: 'SEMANTIC_FILTERS_INVALID' } {
+  if (value === undefined) return { ok: true, filters: [] };
+  if (!Array.isArray(value) || value.length > 8) return { ok: false, reasonCode: 'SEMANTIC_FILTERS_INVALID' };
+  const filters: Array<{ dimensionId: string; value: string | number | boolean }> = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return { ok: false, reasonCode: 'SEMANTIC_FILTERS_INVALID' };
+    const record = entry as Record<string, unknown>;
+    const dimensionId = typeof record.dimensionId === 'string' ? record.dimensionId.trim() : '';
+    const filterValue = record.value;
+    if (!dimensionId
+      || (typeof filterValue !== 'string' && typeof filterValue !== 'number' && typeof filterValue !== 'boolean')) {
+      return { ok: false, reasonCode: 'SEMANTIC_FILTERS_INVALID' };
+    }
+    filters.push({ dimensionId, value: filterValue });
+  }
+  return { ok: true, filters };
+}
+
+/**
+ * A time grain is a declared property of the selected time capability.  The
+ * provider cannot introduce a convenient alias such as "monthly" or rely on
+ * an arbitrary candidate's default grain after choosing another candidate.
+ */
+function normalizeV2SemanticTimeBinding(input: {
+  timeDimensionId: unknown;
+  timeGrain: unknown;
+  /**
+   * A grain explicitly present in the immutable user turn. When an admitted
+   * axis was selected but the controller omitted its grain, this is the only
+   * host-owned value that may complete it; never default to another declared
+   * grain merely because it appears first on the card.
+   */
+  requiredTimeGrain?: V2RequestedTimeGrain;
+  resolveTimeCandidate: (id: string) => AgentEvidenceCandidate | undefined;
+}):
+  | { ok: true; timeId?: string; time?: AgentEvidenceCandidate; timeGrain?: string }
+  | { ok: false; reasonCode: 'SEMANTIC_TIME_DIMENSION_INVALID' | 'SEMANTIC_TIME_GRAIN_WITHOUT_TIME_DIMENSION' | 'SEMANTIC_TIME_GRAIN_NOT_DECLARED' | 'SEMANTIC_TIME_GRAIN_MISMATCH' } {
+  const suppliedTimeId = input.timeDimensionId;
+  const suppliedTimeGrain = input.timeGrain;
+  if (suppliedTimeGrain !== undefined && typeof suppliedTimeGrain !== 'string') {
+    return { ok: false, reasonCode: 'SEMANTIC_TIME_GRAIN_NOT_DECLARED' };
+  }
+  const requested = typeof suppliedTimeGrain === 'string' ? suppliedTimeGrain.trim().toLowerCase() : undefined;
+  if (suppliedTimeGrain !== undefined && !requested) return { ok: false, reasonCode: 'SEMANTIC_TIME_GRAIN_NOT_DECLARED' };
+  if (input.requiredTimeGrain && requested && requested !== input.requiredTimeGrain) {
+    return { ok: false, reasonCode: 'SEMANTIC_TIME_GRAIN_MISMATCH' };
+  }
+  if (suppliedTimeId === undefined || suppliedTimeId === null) {
+    if (suppliedTimeGrain !== undefined && suppliedTimeGrain !== null) {
+      return { ok: false, reasonCode: 'SEMANTIC_TIME_GRAIN_WITHOUT_TIME_DIMENSION' };
+    }
+    return { ok: true };
+  }
+  const timeId = typeof suppliedTimeId === 'string' ? suppliedTimeId.trim() : '';
+  if (!timeId) return { ok: false, reasonCode: 'SEMANTIC_TIME_DIMENSION_INVALID' };
+  const time = input.resolveTimeCandidate(timeId);
+  const declaredGrains = (time?.timeGrains ?? [])
+    .filter((grain): grain is string => typeof grain === 'string' && grain.trim().length > 0)
+    .map((grain) => grain.trim());
+  if (!time || declaredGrains.length === 0) return { ok: false, reasonCode: 'SEMANTIC_TIME_DIMENSION_INVALID' };
+  const required = input.requiredTimeGrain;
+  const expectedGrain = requested ?? required;
+  const timeGrain = expectedGrain
+    ? declaredGrains.find((grain) => grain.toLowerCase() === expectedGrain)
+    : declaredGrains[0];
+  if (!timeGrain) return { ok: false, reasonCode: 'SEMANTIC_TIME_GRAIN_NOT_DECLARED' };
+  // Persist the opaque snapshot candidate identity, never a provider-supplied
+  // runtime name.  The compiler resolves this canonical ID through the
+  // immutable capability below.
+  return { ok: true, timeId: v2CandidateId(time), time, timeGrain };
+}
+
+type V2SemanticCapabilityRole = 'metric' | 'dimension' | 'time_dimension' | 'filter_dimension';
+
+function normalizeV2SemanticRuntimeName(value: string): string {
+  return value.trim().toLocaleLowerCase();
+}
+
+function v2SemanticCandidateMatchesRole(
+  candidate: AgentEvidenceCandidate,
+  role: V2SemanticCapabilityRole,
+): boolean {
+  return askV2ExecutableSemanticRoles(candidate)?.includes(role) ?? false;
+}
+
+/**
+ * A V2 semantic handle is authoritative only for the exact retained card it
+ * captured. Candidate ID equality alone is insufficient: a malformed or
+ * stale snapshot can contain two cards under one opaque ID with different
+ * MetricFlow time-dimension or model contracts. The host withholds divergent
+ * duplicates; this recheck prevents the provider from resolving a different
+ * card than the one the host admitted.
+ */
+function v2SemanticCapabilityMatchesCandidate(
+  capability: AskSemanticCapabilityHandleV1 | undefined,
+  candidate: AgentEvidenceCandidate,
+  role: V2SemanticCapabilityRole,
+): capability is AskSemanticCapabilityHandleV1 {
+  const candidateId = v2CandidateId(candidate);
+  return Boolean(
+    capability
+      && capability.candidateId === candidateId
+      && capability.roles.includes(role)
+      && capability.isCurrent()
+      && v2SemanticCandidateMatchesRole(candidate, role)
+      && capability.fingerprint === askV2SemanticCandidateAuthorityFingerprint(candidate),
+  );
+}
+
+/**
+ * V2 normally receives opaque qualified IDs.  Some native/text tool callers
+ * still submit a compiler-facing runtime name from the safe card.  Accept
+ * only a unique, exact runtime-name match from the currently visible,
+ * snapshot-bound capability set; this is not alias or lexical resolution.
+ *
+ * When a concrete semantic metric and a generic semantic measure share a
+ * runtime name, prefer the concrete metric.  A tie at the same authority
+ * level remains ambiguous and is rejected pre-freeze.
+ */
+function resolveV2SemanticCapabilityReference(input: {
+  reference: string;
+  role: V2SemanticCapabilityRole;
+  candidates: readonly AgentEvidenceCandidate[];
+  capabilities: ReadonlyMap<string, AskSemanticCapabilityHandleV1> | undefined;
+}): string | undefined {
+  const reference = input.reference.trim();
+  if (!reference) return undefined;
+  if (!input.capabilities) return undefined;
+
+  const directMatches = [...new Set(input.candidates.flatMap((candidate) => {
+    const candidateId = v2CandidateId(candidate);
+    const capability = input.capabilities!.get(candidateId);
+    return candidateId === reference
+      && v2SemanticCapabilityMatchesCandidate(capability, candidate, input.role)
+      ? [candidateId]
+      : [];
+  }))];
+  if (directMatches.length === 1) return directMatches[0];
+
+  // Pre-V2 snapshots used a domain + leaf dimension identity, while current
+  // semantic cards use the owning model-qualified registry identity. Permit a
+  // persisted old opaque ID only when it resolves to exactly one currently
+  // admitted capability. A shared `metric_time` legacy alias stays ambiguous
+  // rather than selecting an arbitrary model's time axis.
+  if (reference.startsWith('semantic:')) {
+    const aliasMatches = input.candidates.flatMap((candidate) => {
+      const candidateId = v2CandidateId(candidate);
+      const capability = input.capabilities!.get(candidateId);
+      return v2SemanticCapabilityMatchesCandidate(capability, candidate, input.role)
+        && (candidate.aliases ?? []).some((alias) => alias === reference)
+        ? [candidateId]
+        : [];
+    });
+    const uniqueAliases = [...new Set(aliasMatches)];
+    if (uniqueAliases.length === 1) return uniqueAliases[0];
+  }
+
+  const runtimeName = normalizeV2SemanticRuntimeName(reference);
+  const matches = input.candidates.flatMap((candidate) => {
+    const candidateId = v2CandidateId(candidate);
+    const capability = input.capabilities!.get(candidateId);
+    if (!v2SemanticCapabilityMatchesCandidate(capability, candidate, input.role)
+      || normalizeV2SemanticRuntimeName(capability.runtimeName) !== runtimeName) return [];
+    const authority = input.role === 'metric'
+      ? candidate.kind === 'semantic_metric'
+        ? 0
+        : candidate.semanticObjectType === 'metric'
+          ? 1
+          : 2
+      : 0;
+    return [{ candidateId, authority }];
+  });
+  const bestAuthority = matches.reduce<number | undefined>((current, match) => (
+    current === undefined || match.authority < current ? match.authority : current
+  ), undefined);
+  if (bestAuthority === undefined) return undefined;
+  const best = [...new Set(matches
+    .filter((match) => match.authority === bestAuthority)
+    .map((match) => match.candidateId))];
+  return best.length === 1 ? best[0] : undefined;
+}
+
+type V2MetricTimeCompatibility =
+  | { constrained: false }
+  | { constrained: true; compatibleTimeIds: ReadonlySet<string> };
+
+type V2RequestedTimeGrain = 'day' | 'week' | 'month' | 'quarter' | 'year';
+
+interface V2ExplicitTimeRequirement {
+  grain?: V2RequestedTimeGrain;
+  fiscalPeriod?: string;
+  /** A fiscal token is not a reason to invent a calendar or date role. */
+  requiresDeclaredFiscalCalendar: boolean;
+}
+
+/**
+ * Read only the immutable user turn when deciding whether a missing semantic
+ * time binding can be mechanically completed. This deliberately does not
+ * inspect provider prose, a legacy plan, or a prior controller tool result.
+ */
+function v2ExplicitTimeRequirement(question: string): V2ExplicitTimeRequirement {
+  const time = buildAnalyticalRequirementSet({ question }).time;
+  return {
+    ...(time?.grain ? { grain: time.grain } : {}),
+    ...(time?.fiscalPeriod ? { fiscalPeriod: time.fiscalPeriod } : {}),
+    requiresDeclaredFiscalCalendar: time?.requiresDeclaredFiscalCalendar === true,
+  };
+}
+
+/** Canonical and retained legacy identities are safe equality aliases only. */
+function v2SemanticCandidateIdentityReferences(candidate: AgentEvidenceCandidate): ReadonlySet<string> {
+  return new Set([
+    v2CandidateId(candidate),
+    candidate.id,
+    candidate.qualifiedId ?? '',
+    ...(candidate.aliases ?? []),
+  ].map((value) => value.trim()).filter(Boolean));
+}
+
+/**
+ * Resolve a selected metric's declared time contract against the admitted
+ * cards. A registry migration can retain an old opaque time-card ID as an
+ * alias, but a runtime/display name is never enough to establish this link.
+ */
+function v2MetricCompatibleTimeCandidates(input: {
+  metrics: readonly AgentEvidenceCandidate[] | undefined;
+  candidates: readonly AgentEvidenceCandidate[];
+}): {
+  candidates: AgentEvidenceCandidate[];
+  /** True only when every selected metric declared at least one time axis. */
+  allMetricsDeclareTimeDimensions: boolean;
+} {
+  const timeCandidates = input.candidates.filter((candidate) => v2SemanticCandidateMatchesRole(candidate, 'time_dimension'));
+  if (!input.metrics?.length) return { candidates: timeCandidates, allMetricsDeclareTimeDimensions: false };
+  const declaredByMetric = input.metrics.map((metric) => [
+    ...new Set((metric.analyticalCapability?.timeDimensions ?? [])
+      .map((dimension) => dimension.dimensionId.trim())
+      .filter(Boolean)),
+  ]);
+  // Existing explicit controller bindings remain compatible with legacy
+  // semantic cards that did not retain metric-to-axis declarations. What
+  // they do not authorize is host selection of an omitted time axis: without
+  // a declaration there is no immutable proof that any candidate belongs to
+  // the selected metric.
+  if (declaredByMetric.some((ids) => ids.length === 0)) {
+    return { candidates: timeCandidates, allMetricsDeclareTimeDimensions: false };
+  }
+  return {
+    candidates: timeCandidates.filter((candidate) => {
+    const references = v2SemanticCandidateIdentityReferences(candidate);
+    return declaredByMetric.every((declared) => declared.some((id) => references.has(id)));
+    }),
+    allMetricsDeclareTimeDimensions: true,
+  };
+}
+
+/**
+ * The semantic registry, not a shared runtime name, proves which time axes a
+ * selected metric may use. A capability-less legacy metric retains the
+ * existing unconstrained path; once any selected metric supplies a declared
+ * time contract, every selected metric must agree on an admitted time ID.
+ */
+function v2MetricTimeCompatibility(
+  metrics: readonly AgentEvidenceCandidate[] | undefined,
+): V2MetricTimeCompatibility {
+  if (!metrics || metrics.length === 0) return { constrained: false };
+  const declared = metrics.map((metric) => [
+    ...new Set((metric.analyticalCapability?.timeDimensions ?? [])
+      .map((dimension) => dimension.dimensionId.trim())
+      .filter(Boolean)),
+  ]);
+  if (declared.every((ids) => ids.length === 0)) return { constrained: false };
+  if (declared.some((ids) => ids.length === 0)) {
+    return { constrained: true, compatibleTimeIds: new Set() };
+  }
+  const [first, ...rest] = declared;
+  const compatibleTimeIds = new Set(first);
+  for (const ids of rest) {
+    for (const id of compatibleTimeIds) {
+      if (!ids.includes(id)) compatibleTimeIds.delete(id);
+    }
+  }
+  return { constrained: true, compatibleTimeIds };
+}
+
+function v2ScalarBindings(value: unknown): Record<string, string | number | boolean | null> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const result: Record<string, string | number | boolean | null> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean' || item === null) result[key] = item;
+  }
+  return result;
+}
+
+function v2CertifiedArtifactHandle(value: unknown): AskCertifiedArtifactHandleV1 | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const candidate = value as Partial<AskCertifiedArtifactHandleV1>;
+  return candidate.version === 1
+    && typeof candidate.revisionFingerprint === 'string'
+    && typeof candidate.isCurrent === 'function'
+    ? candidate as AskCertifiedArtifactHandleV1
+    : undefined;
+}
+
+/**
+ * A complete certified fit is the one V2 ordinary-Ask zero-provider path.
+ *
+ * The host computes this from the immutable retrieval lease, captures the
+ * artifact at that time, and gives V2 one opaque candidate ID.  This helper
+ * deliberately does not look up the mutable KG, infer another block, or use
+ * a card count as proof.  If any part of the captured authority is missing we
+ * return undefined and let the normal bounded tool runtime decide the turn.
+ */
+function v2ExactCertifiedCandidate(
+  state: AskAgentStateV4 | undefined,
+  workspace: AskAgentToolWorkspaceV2 | undefined,
+  questionPlan?: ReturnType<typeof buildAnalysisQuestionPlan>,
+): {
+  candidateId: string;
+  candidate: AgentEvidenceCandidate;
+  artifact: AskCertifiedArtifactHandleV1;
+  invocation?: ReturnType<typeof buildCertifiedBlockInvocationInput>;
+} | undefined {
+  const candidateId = state?.exactCertifiedCandidateId;
+  const certifiedTier = state?.tierStates?.certified;
+  if (!candidateId || !workspace || certifiedTier?.status !== 'complete') return undefined;
+  const completeCandidateIds = [...new Set(certifiedTier.candidateIds)];
+  if (!state.retainedCandidateIds.includes(candidateId)
+    || completeCandidateIds.length !== 1
+    || completeCandidateIds[0] !== candidateId
+    || !workspace.certifiedCompleteCandidateIds?.includes(candidateId)) return undefined;
+  const candidate = workspace.candidates.find((value) => v2CandidateId(value) === candidateId);
+  const artifact = v2CertifiedArtifactHandle(workspace.certifiedArtifacts?.get(candidateId));
+  let artifactCurrent = false;
+  try {
+    artifactCurrent = artifact?.isCurrent() === true;
+  } catch {
+    artifactCurrent = false;
+  }
+  if (!candidate || candidate.kind !== 'certified_block' || candidate.trustTier !== 'certified' || !artifact || !artifactCurrent) return undefined;
+  const invocation = questionPlan
+    ? buildCertifiedBlockInvocationInput(artifact.artifact as KGNode, questionPlan, questionPlan.question)
+    : undefined;
+  if (questionPlan && !certifiedBlockProvesRequestedTopN(artifact.artifact as KGNode, questionPlan, {
+    exactCertifiedQuestionMatch: workspace.exactCertifiedQuestionCandidateIds?.includes(candidateId) === true,
+    uniqueCompleteCertifiedFit: true,
+    hostEnforcedRowLimit: workspace.certifiedHostEnforcesInvocationRowLimit === true
+      ? invocation?.rowLimit
+      : undefined,
+  })) return undefined;
+  return { candidateId, candidate, artifact, ...(invocation ? { invocation } : {}) };
+}
+
+/**
+ * Execute the one host-proven exact certified fit without opening a provider
+ * turn.  This is intentionally a small sibling of `run_certified`, not a
+ * call into the legacy answer loop: the same V2 kernel mints the immutable
+ * execution plan, checks the captured artifact immediately before execution,
+ * and records the actual result.  A post-freeze failure stays terminal; it
+ * cannot silently re-enter planning or fall through to generated SQL.
+ */
+async function executeAskV2ExactCertifiedFastPath(
+  input: AnswerLoopInput,
+  state: AskAgentStateV4 | undefined,
+): Promise<AgentAnswer | undefined> {
+  if (!state || state.mode !== 'authoritative_v2' || !input.executeCertifiedBlock) return undefined;
+  const workspace = v2WorkspaceForInput(input, state);
+  // An exact Tier 1 fit can skip a provider turn, but it cannot skip the
+  // certified artifact's declared input contract. Build the same typed
+  // invocation as the ordinary certified path before we freeze the plan so
+  // defaults, question-derived top-N values, and validation have one owner.
+  const questionPlan = buildAnalysisQuestionPlan(input.question, input.followUp);
+  const exact = v2ExactCertifiedCandidate(state, workspace, questionPlan);
+  if (!exact) return undefined;
+  const invocation = exact.invocation ?? buildCertifiedBlockInvocationInput(
+    exact.artifact.artifact as KGNode,
+    questionPlan,
+    input.question,
+  );
+
+  const kernel = createAskToolKernelV2(state);
+  const observe = (outcome: AskToolObservationV1['outcome'], reasonCode: string, extra: Partial<AskToolObservationV1> = {}) => {
+    observeAskAgentV2Tool(state, {
+      version: 1,
+      tool: 'run_certified',
+      outcome,
+      tier: 'certified',
+      reasonCode,
+      candidateIds: [exact.candidateId],
+      origin: extra.origin ?? 'execution',
+      ...extra,
+    });
+  };
+
+  // Tier 1 truth was materialized from the immutable workspace before this
+  // path was selected. It is provenance, not a synthetic `run_certified`
+  // invocation: adding an execution-tool observation here would consume the
+  // progression slot that belongs to the actual authorization/freeze/run.
+  const bindingFingerprint = v2ExecutionBindingFingerprint({
+    state,
+    tier: 'certified',
+    candidateIds: [exact.candidateId],
+    bindings: {
+      artifactRevision: exact.artifact.revisionFingerprint,
+      parameters: invocation.parameters ?? {},
+      parameterSources: invocation.parameterSources ?? {},
+      rowLimit: invocation.rowLimit ?? null,
+    },
+  });
+  const authorization = kernel.canCall('run_certified', {
+    candidateIds: [exact.candidateId],
+    bindingFingerprint,
+    // This is a server-owned exact-fit capability, never a provider-visible
+    // tool argument. The kernel rechecks the current unique Tier 1 tuple.
+    directExactCertifiedExecution: true,
+  });
+  if (!authorization.ok) {
+    observe('denied', authorization.reasonCode ?? 'ASK_V2_TOOL_DENIED', { origin: 'validation' });
+    finishAskAgentV2Turn(state, {
+      version: 2,
+      kind: 'denied',
+      reasonCode: authorization.reasonCode ?? 'ASK_V2_TOOL_DENIED',
+      safeAction: 'inspect_recorded_observations_then_retry',
+      origin: 'validation',
+    });
+    return askV2NoAnswer(input, 'denied', authorization.reasonCode ?? 'ASK_V2_TOOL_DENIED', 'validation');
+  }
+  if (!exact.artifact.isCurrent()) {
+    observe('denied', 'CERTIFIED_ARTIFACT_STALE', { origin: 'validation' });
+    finishAskAgentV2Turn(state, {
+      version: 2,
+      kind: 'denied',
+      reasonCode: 'CERTIFIED_ARTIFACT_STALE',
+      safeAction: 'refresh_metadata_then_retry',
+      origin: 'validation',
+    });
+    return askV2NoAnswer(input, 'denied', 'CERTIFIED_ARTIFACT_STALE', 'validation');
+  }
+
+  // This observation freezes the plan before compiler/connection work.  It
+  // must remain in the receipt if the executor fails.
+  observe('eligible', 'ASK_V2_EXECUTION_AUTHORIZED', {
+    planId: `ask-v2:certified:${bindingFingerprint.slice(-24)}`,
+    frozen: true,
+    executionAuthorized: true,
+    inputFingerprint: bindingFingerprint,
+    origin: 'freeze',
+  });
+  if (!exact.artifact.isCurrent()) {
+    observe('error', 'CERTIFIED_ARTIFACT_STALE', { origin: 'validation' });
+    finishAskAgentV2Turn(state, {
+      version: 2,
+      kind: 'execution_failure',
+      reasonCode: 'CERTIFIED_ARTIFACT_STALE',
+      safeAction: 'refresh_metadata_then_retry',
+      origin: 'validation',
+    });
+    return askV2NoAnswer(input, 'execution_failure', 'CERTIFIED_ARTIFACT_STALE', 'validation');
+  }
+  if (!input.executeCertifiedBlock || !exact.artifact.artifact || typeof exact.artifact.artifact !== 'object') {
+    observe('unavailable', 'CERTIFIED_EXECUTOR_UNAVAILABLE', { origin: 'execution' });
+    finishAskAgentV2Turn(state, {
+      version: 2,
+      kind: 'execution_failure',
+      reasonCode: 'CERTIFIED_EXECUTOR_UNAVAILABLE',
+      safeAction: 'check_connection_then_retry',
+      origin: 'execution',
+    });
+    return askV2NoAnswer(input, 'execution_failure', 'CERTIFIED_EXECUTOR_UNAVAILABLE', 'execution');
+  }
+  try {
+    const result = trimCertifiedBlockResultToRequestedTopN(
+      await input.executeCertifiedBlock(exact.artifact.artifact as KGNode, invocation),
+      questionPlan,
+    );
+    observe('executed', 'CERTIFIED_EXECUTED', {
+      // The terminal receipt binds the execution observation to the exact
+      // host-minted frozen plan. A candidate ID alone is only retrieval
+      // membership and cannot prove that this specific plan executed.
+      planId: state.resolvedPlan?.id,
+      origin: 'execution',
+    });
+    finishAskAgentV2Turn(state, {
+      version: 2,
+      kind: 'finish_answer',
+      reasonCode: 'CERTIFIED_EXECUTED',
+      origin: 'execution',
+    });
+    return askV2ExecutedAnswer(input, {
+      tier: 'certified',
+      result,
+      block: exact.artifact.artifact as KGNode,
+    }, `The certified query completed with ${result.rowCount} row${result.rowCount === 1 ? '' : 's'}.`);
+  } catch (error) {
+    const failure = v2ExecutionFailureFromError(error, 'CERTIFIED_EXECUTION_FAILED');
+    observe('error', failure.reasonCode, { origin: failure.origin });
+    finishAskAgentV2Turn(state, {
+      version: 2,
+      kind: 'execution_failure',
+      reasonCode: failure.reasonCode,
+      safeAction: failure.origin === 'validation' ? 'refresh_metadata_then_retry' : 'check_connection_then_retry',
+      origin: failure.origin,
+    });
+    return askV2NoAnswer(input, 'execution_failure', failure.reasonCode, failure.origin);
+  }
+}
+
+/**
+ * A V2 inspection reports the host's precomputed tuple state.  It must never
+ * derive completeness from a provider-visible card count; the card is only a
+ * safe explanation of the already-fixed host decision.
+ */
+function setV2TierStateFromWorkspace(
+  state: AskAgentStateV4,
+  workspace: AskAgentToolWorkspaceV2 | undefined,
+  tier: 'certified' | 'semantic' | 'governed_relational',
+  fallback: { status: 'complete' | 'available' | 'unavailable' | 'ineligible' | 'ambiguous'; candidateIds: string[]; reasonCode: string },
+): void {
+  const supplied = workspace?.tierStates?.[tier];
+  setAskV2TierState(state, tier, supplied
+    ? {
+        status: supplied.status,
+        candidateIds: supplied.candidateIds,
+        reasonCode: supplied.reasonCode,
+        ...(supplied.safeNextTools?.length ? { safeNextTools: supplied.safeNextTools } : {}),
+        ...(supplied.clarificationChoices?.length ? { clarificationChoices: supplied.clarificationChoices } : {}),
+      }
+    : fallback);
+}
+
+function v2ExecutionBindingFingerprint(input: {
+  state: AskAgentStateV4;
+  tier: 'certified' | 'semantic' | 'governed_relational' | 'exploratory_sql';
+  candidateIds: readonly string[];
+  pathIds?: readonly string[];
+  /** Redacted typed bindings, never the raw SQL/DQL source. */
+  bindings?: unknown;
+}): string {
+  return `sha256:${createHash('sha256').update(JSON.stringify({
+    snapshotId: input.state.snapshotId ?? '',
+    sourceFingerprint: input.state.sourceFingerprint ?? '',
+    tier: input.tier,
+    candidateIds: [...new Set(input.candidateIds)].sort(),
+    pathIds: [...new Set(input.pathIds ?? [])].sort(),
+    bindings: input.bindings ?? null,
+  })).digest('hex')}`;
+}
+
+/**
+ * Same-plan governed-DQL repair is deliberately stricter than matching opaque
+ * candidate and relationship IDs. A repaired program may change parser or
+ * dialect presentation only; it may not add a filter, aggregation, grouping,
+ * relation, alias, or output contract. Keep every non-comment token in this
+ * canonical form, including quoted literals and identifiers, so the hash is
+ * an equivalently strict logical-plan proof even before a compiler is invoked.
+ *
+ * This is not persisted as source text. The frozen binding records only its
+ * digest alongside snapshot-qualified IDs.
+ */
+function normalizedDqlLogicalProgram(source: string): string {
+  let output = '';
+  let pendingWhitespace = false;
+  let quote: 'single' | 'double' | 'backtick' | undefined;
+  let lineComment = false;
+  let blockComment = false;
+  const punctuation = new Set(['|', ',', '(', ')', '=', '<', '>', '+', '-', '*', '/', '.']);
+  const append = (value: string, preserveCase = false) => {
+    if (pendingWhitespace && output.length > 0
+      && !punctuation.has(output.at(-1)!) && !punctuation.has(value)) output += ' ';
+    pendingWhitespace = false;
+    output += preserveCase ? value : value.toLowerCase();
+  };
+  for (let index = 0; index < source.length; index += 1) {
+    const current = source[index]!;
+    const next = source[index + 1];
+    if (lineComment) {
+      if (current === '\n' || current === '\r') {
+        lineComment = false;
+        pendingWhitespace = true;
+      }
+      continue;
+    }
+    if (blockComment) {
+      if (current === '*' && next === '/') {
+        blockComment = false;
+        pendingWhitespace = true;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      output += current;
+      if (current === '\\' && next !== undefined) {
+        output += next;
+        index += 1;
+        continue;
+      }
+      if ((quote === 'single' && current === "'")
+        || (quote === 'double' && current === '"')
+        || (quote === 'backtick' && current === '`')) quote = undefined;
+      continue;
+    }
+    if (current === '-' && next === '-') {
+      lineComment = true;
+      index += 1;
+      continue;
+    }
+    if (current === '/' && next === '*') {
+      blockComment = true;
+      index += 1;
+      continue;
+    }
+    if (current === "'") {
+      append(current, true);
+      quote = 'single';
+      continue;
+    }
+    if (current === '"') {
+      append(current, true);
+      quote = 'double';
+      continue;
+    }
+    if (current === '`') {
+      append(current, true);
+      quote = 'backtick';
+      continue;
+    }
+    if (/\s/.test(current)) {
+      pendingWhitespace = true;
+      continue;
+    }
+    append(current);
+  }
+  // A harmless terminal separator is parser presentation, not a second DQL
+  // statement. All internal separators remain part of the strict proof.
+  return output.trim().replace(/;$/, '');
+}
+
+function v2GovernedDqlLogicalPlanFingerprint(input: {
+  dqlProgram: string;
+  measureIds: readonly string[];
+  dimensionIds: readonly string[];
+  outputIds: readonly string[];
+}): string {
+  return runtimeFingerprint(JSON.stringify({
+    // The complete canonical program retains operations, relations/columns,
+    // filters, grouping, aggregation, aliases, and output expressions.
+    program: normalizedDqlLogicalProgram(input.dqlProgram),
+    measureIds: [...new Set(input.measureIds)].sort(),
+    dimensionIds: [...new Set(input.dimensionIds)].sort(),
+    outputIds: [...new Set(input.outputIds)].sort(),
+  }));
+}
+
+function v2PlanFingerprint(input: {
+  state: AskAgentStateV4;
+  tier: 'governed_relational' | 'exploratory_sql';
+  candidateIds: readonly string[];
+  pathIds?: readonly string[];
+  sqlOrProgram: string;
+}): string {
+  // Kept for host-specific proposal correlation. The V2 frozen plan uses the
+  // binding fingerprint above so one syntax repair can retain its targets.
+  return `sha256:${createHash('sha256').update(JSON.stringify({
+    binding: v2ExecutionBindingFingerprint(input),
+    sqlOrProgramFingerprint: runtimeFingerprint(input.sqlOrProgram),
+  })).digest('hex')}`;
+}
+
+/**
+ * Keep a V2 host rejection attributable at the tool boundary without
+ * persisting the raw host message. An immutable-closure or relationship-path
+ * rejection must not be flattened into a generic warehouse failure, which
+ * would incorrectly suggest that retrying can widen a frozen plan.
+ */
+function v2ExecutionFailureFromError(
+  error: unknown,
+  fallback: string,
+): { reasonCode: string; origin: 'execution' | 'validation' } {
+  const detail = analyticalErrorDetail(error);
+  const code = typeof detail?.code === 'string' && /^[a-z0-9_]+$/i.test(detail.code)
+    ? `ASK_V2_${detail.code.toUpperCase()}`
+    : fallback;
+  return {
+    reasonCode: code,
+    origin: detail?.stage === 'validation' || detail?.stage === 'compile' ? 'validation' : 'execution',
+  };
+}
+
+/**
+ * The V2 serving controller intentionally does not call `answer()`.
+ *
+ * Every canonical tool consumes explicit, snapshot-qualified arguments.  The
+ * model owns business interpretation; this adapter owns identifier admission,
+ * priority, compiler/executor boundaries, and trusted receipts.  It never
+ * searches the mutable KG or reads a V1 precomputed route/plan.
+ */
+function createAskV2LaneHandler(
+  state: AskAgentStateV4,
+  limits?: { maxToolCalls?: number; maxProviderDispatches?: number },
+) {
+  return async (input: AnswerLoopInput): Promise<AgentAnswer> => {
+    // Reapply immutable Tier 1 tuple truth before a reloaded state creates a
+    // kernel or exposes a tool policy.  A persisted lower controllerTier is
+    // only a pre-freeze proposal; it cannot outrank a complete certified
+    // artifact from this exact workspace unless the user explicitly named a
+    // qualified semantic/DQL artifact.
+    const bridgeCertifiedExecutionAvailable = (() => {
+      try {
+        // Older in-memory bridges predate this additive readiness hook. Their
+        // actual host callback below remains the authority for those tests and
+        // legacy-compatible callers; live bridges always declare readiness.
+        return input.askAgentV2Workspace?.isCertifiedExecutionAvailable?.();
+      } catch {
+        return false;
+      }
+    })();
+    const workspace = materializeAskV2WorkspaceTierTruth(state, input.askAgentV2Workspace, {
+      question: input.question,
+      certifiedExecutionAvailable: Boolean(input.executeCertifiedBlock)
+        && (bridgeCertifiedExecutionAvailable === undefined || bridgeCertifiedExecutionAvailable === true),
+    }) ?? v2WorkspaceForInput(input, state);
+    const kernel = createAskToolKernelV2(state);
+    // The runtime setting is captured before the controller starts. Keep the
+    // redacted choice on live V2 state so V8 can explain semantic readiness
+    // without ever making an adapter a provider-controlled argument.
+    if (workspace?.semanticRuntime) state.semanticRuntime = { ...workspace.semanticRuntime };
+    let completed: AskV2CompletedExecution | undefined;
+    let clarification: { message: string; options: Array<{ id: string; label: string }> } | undefined;
+    let finalText: string | undefined;
+    let executionFailure: { reasonCode: string; origin: 'execution' | 'validation' } | undefined;
+    let inspectedBusinessContextIds: string[] = [];
+    // A missing time binding may be completed only once from the immutable
+    // current question and one admitted compatible capability. This is a
+    // mechanical normalization inside one semantic tool call, never a second
+    // model-selected meaning or an unbounded recovery loop.
+    // A persisted host-only completion still consumes the one permitted
+    // semantic-binding correction. It does *not* consume a provider tool
+    // budget (the kernel derives that separately), but a resumed request must
+    // not get a fresh chance to infer another axis or grain from the same
+    // immutable turn.
+    let semanticArgumentCompletionCount = state.observations.some((observation) => (
+      observation.tool === 'compile_and_run_semantic'
+      && observation.reasonCode === 'SEMANTIC_TIME_BINDING_COMPLETED'
+    )) ? 1 : 0;
+    const candidateIds = () => state.candidatePlan?.candidateIds ?? state.initialCandidateIds;
+    /**
+     * This is evaluated at the physical provider-send boundary, not when the
+     * tool loop starts. A provider may issue multiple native tool rounds from
+     * one `generateWithTools` call, so only the live host state can prove that
+     * the next send is the one post-execution narration control. General,
+     * contextual, inspection, and execution turns deliberately remain in
+     * agent-control/tool-followup accounting.
+     */
+    const requiredNarrationControl = (): boolean => {
+      if (!completed) return false;
+      const policy = kernel.toolPolicy();
+      const allowed = policy.allowedToolNames ?? [];
+      const terminal = policy.terminalActionToolNames ?? [];
+      return allowed.length === 1
+        && allowed[0] === 'finish_answer'
+        && terminal.length === 1
+        && terminal[0] === 'finish_answer'
+        && !state.observations.some((observation) => (
+          observation.tool === 'finish_answer'
+          && observation.outcome === 'eligible'
+          && observation.reasonCode === 'ASK_V2_RESULT_NARRATED'
+        ));
+    };
+    const observe = (tool: AskToolNameV2, outcome: AskToolObservationV1['outcome'], reasonCode: string, extra: Partial<AskToolObservationV1> = {}) => {
+      observeAskAgentV2Tool(state, {
+        version: 1,
+        tool,
+        outcome,
+        reasonCode,
+        candidateIds: extra.candidateIds ?? candidateIds(),
+        origin: extra.origin ?? 'tool',
+        ...extra,
+      });
+    };
+    const denied = (tool: AskToolNameV2, reasonCode: string, safeNextTools?: readonly AskToolNameV2[]) => ({
+      ok: false,
+      reasonCode,
+      tool,
+      ...(safeNextTools?.length ? { safeNextTools: [...new Set(safeNextTools)] } : {}),
+    });
+    /**
+     * A successful execution remains an answer even when the provider cannot
+     * complete its final narration/control turn.  Do not replace validated
+     * rows with a provider or dispatch-budget failure: retain the result,
+     * make the fallback narration from its validated result facts, and leave
+     * the exact narration incident in the V2 receipt.
+     */
+    const preserveCompletedResult = (
+      narrationFailureReason: string,
+      narrationFailureOrigin: 'agent_control' | 'provider' | 'narration',
+    ): AgentAnswer | undefined => {
+      if (!completed) return undefined;
+      const narrationDeadline = narrationFailureReason === 'RUN_SOFT_TARGET_EXCEEDED'
+        || narrationFailureReason === 'RUN_DEADLINE_INSUFFICIENT';
+      observe('finish_answer', 'error', narrationFailureReason, {
+        origin: narrationDeadline ? 'narration' : narrationFailureOrigin,
+        safeAction: 'review_validated_result',
+        ...(narrationDeadline ? {
+          provider: {
+            phase: 'narration' as const,
+            cause: 'run_deadline' as const,
+            retryable: false,
+            safeAction: 'review_validated_result',
+          },
+        } : {}),
+      });
+      const terminalOutcome: NonNullable<AgentAnswer['askAgentV2Outcome']> = {
+        version: 2,
+        kind: 'finish_answer',
+        reasonCode: narrationDeadline
+          ? 'ASK_V2_RESULT_PRESERVED_AFTER_NARRATION_DEADLINE'
+          : 'ASK_V2_RESULT_PRESERVED_AFTER_NARRATION_FAILURE',
+        origin: 'narration',
+        safeAction: 'review_validated_result',
+      };
+      finishAskAgentV2Turn(state, terminalOutcome);
+      return askV2ExecutedAnswer(
+        input,
+        completed,
+        deterministicAskV2ResultNarration(completed),
+        terminalOutcome,
+      );
+    };
+    /**
+     * Clarification choices are issued by the immutable host workspace, not
+     * synthesized from provider-visible cards. Distinct opaque fingerprints
+     * prove the choice would change the answer; missing or malformed choice
+     * evidence fails closed into normal tool progression.
+     */
+    const materialClarificationChoices = () => {
+      const tier = state.tierStates?.semantic;
+      if (tier?.status !== 'ambiguous') return [];
+      const retained = new Set(state.retainedCandidateIds);
+      const tierCandidates = new Set(tier.candidateIds);
+      const choices = (tier.clarificationChoices ?? []).filter((choice) => (
+        choice.version === 1
+        && Boolean(choice.id.trim())
+        && Boolean(choice.label.trim())
+        && Boolean(choice.resultFingerprint.trim())
+        && choice.candidateIds.length > 0
+        && choice.candidateIds.every((id) => retained.has(id) && tierCandidates.has(id))
+      ));
+      const ids = new Set(choices.map((choice) => choice.id));
+      const results = new Set(choices.map((choice) => choice.resultFingerprint));
+      return choices.length >= 2 && ids.size === choices.length && results.size === choices.length
+        ? choices
+        : [];
+    };
+    const authorizeExecution = (input: {
+      tool: Extract<AskToolNameV2, 'run_certified' | 'compile_and_run_semantic' | 'compile_and_run_dql' | 'validate_and_run_sql'>;
+      tier: 'certified' | 'semantic' | 'governed_relational' | 'exploratory_sql';
+      candidateIds: string[];
+      bindingFingerprint: string;
+      planId: string;
+      repair: boolean;
+      relationshipPathIds?: string[];
+      targetFingerprint?: string;
+    }): { ok: true } | { ok: false; reasonCode: string } => {
+      const allowed = kernel.canCall(input.tool, {
+        repair: input.repair,
+        candidateIds: input.candidateIds,
+        ...(input.relationshipPathIds ? { relationshipPathIds: input.relationshipPathIds } : {}),
+        bindingFingerprint: input.bindingFingerprint,
+      });
+      if (!allowed.ok) {
+        observe(input.tool, 'denied', allowed.reasonCode ?? 'ASK_V2_TOOL_DENIED', {
+          tier: input.tier,
+          candidateIds: input.candidateIds,
+          origin: 'validation',
+          ...(allowed.safeNextTools?.length ? { safeAction: `use:${allowed.safeNextTools.join(',')}` } : {}),
+        });
+        return { ok: false, reasonCode: allowed.reasonCode ?? 'ASK_V2_TOOL_DENIED' };
+      }
+      observe(input.tool, 'eligible', 'ASK_V2_EXECUTION_AUTHORIZED', {
+        tier: input.tier,
+        candidateIds: input.candidateIds,
+        planId: input.planId,
+        frozen: true,
+        executionAuthorized: true,
+        samePlanRepair: input.repair,
+        inputFingerprint: input.bindingFingerprint,
+        ...(input.relationshipPathIds?.length ? { relationshipPathIds: input.relationshipPathIds } : {}),
+        ...(input.targetFingerprint ? { outputFingerprint: input.targetFingerprint } : {}),
+        origin: 'freeze',
+      });
+      return { ok: true };
+    };
+    const visibleIds = () => new Set([
+      ...state.initialCandidateIds,
+      ...state.observations
+        .filter((item) => item.tool === 'inspect_ask_context')
+        .flatMap((item) => item.candidateIds),
+    ]);
+    const visibleCandidates = () => (workspace?.candidates ?? [])
+      .filter((candidate) => visibleIds().has(v2CandidateId(candidate)));
+    const resolveCandidates = (ids: string[], predicate?: (candidate: AgentEvidenceCandidate) => boolean): AgentEvidenceCandidate[] | undefined => {
+      if (ids.length === 0 || !workspace) return undefined;
+      const byId = new Map(visibleCandidates().map((candidate) => [v2CandidateId(candidate), candidate] as const));
+      const resolved = ids.map((id) => byId.get(id));
+      if (resolved.some((candidate) => !candidate) || (predicate && resolved.some((candidate) => !predicate(candidate!)))) return undefined;
+      return resolved as AgentEvidenceCandidate[];
+    };
+    const inspected = (tool: AskToolNameV2) => {
+      if (tool === 'inspect_relational_context') {
+        // The initial immutable context response includes the bounded atomic
+        // relationship-path handles. They are already part of the first
+        // provider package, so a separate rendering call is optional; the
+        // DQL tool still validates selected IDs and path closure before
+        // authorization. Requiring a repeat inspection here used an entire
+        // controller dispatch without adding immutable evidence.
+        return state.observations.some((observation) => (
+          observation.tool === 'inspect_relational_context'
+        )) || state.relationshipPathHandles.length > 0;
+      }
+      return state.observations.some((observation) => observation.tool === tool);
+    };
+    const requireInspections = (tool: AskToolNameV2, required: AskToolNameV2[]): boolean => {
+      // A live V2 controller commitment is made only by the matching
+      // host-backed inspector below.  Requiring it to spend later-tier
+      // inspection turns before the selected compiler can run was the source
+      // of semantic dispatch-budget failures.  The kernel still rejects an
+      // earlier *complete* tier before authorization/freeze.
+      const committedExecutionTool = state.controllerTier === 'certified'
+        ? 'run_certified'
+        : state.controllerTier === 'semantic'
+          ? 'compile_and_run_semantic'
+          : state.controllerTier === 'governed_relational'
+            ? 'compile_and_run_dql'
+            : state.controllerTier === 'exploratory_sql'
+              ? 'validate_and_run_sql'
+              : undefined;
+      if (committedExecutionTool === tool) return true;
+      if (required.every(inspected)) return true;
+      observe(tool, 'ineligible', 'REQUIRED_TIER_INSPECTION_MISSING', { origin: 'validation' });
+      return false;
+    };
+    const safeTool = (
+      name: AskToolNameV2,
+      description: string,
+      inputSchema: Record<string, unknown>,
+      run: (args: Record<string, unknown>) => Promise<unknown>,
+    ): AgentToolDefinition => ({
+      name,
+      description,
+      inputSchema,
+      run: async (value) => {
+        const args = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+        // Pass opaque relationship handles into the kernel even for a
+        // pre-execution validation call. This lets an invented/stale path
+        // reach the DQL validator for its exact no-execution diagnostic
+        // rather than being flattened into a generic live-policy denial.
+        const relationshipPathIds = v2StringArray(args.relationshipPathIds, 8);
+        const semanticCandidateIds = name === 'compile_and_run_semantic'
+          ? [
+              ...v2StringArray(args.metricIds, 8),
+              ...v2StringArray(args.dimensionIds, 16),
+              ...(typeof args.timeDimensionId === 'string' ? [args.timeDimensionId.trim()] : []),
+              ...(Array.isArray(args.filters)
+                ? args.filters.flatMap((filter) => filter && typeof filter === 'object' && !Array.isArray(filter)
+                  && typeof (filter as { dimensionId?: unknown }).dimensionId === 'string'
+                  ? [(filter as { dimensionId: string }).dimensionId.trim()]
+                  : [])
+                : []),
+            ].filter(Boolean)
+          : [];
+        const allowed = kernel.canCall(name, {
+          repair: args.repair === true,
+          expansion: args.expand === true,
+          ...(semanticCandidateIds.length ? { candidateIds: semanticCandidateIds } : {}),
+          ...(relationshipPathIds.length ? { relationshipPathIds } : {}),
+        });
+        if (!allowed.ok) {
+          const clarificationPreFreeze = name === 'request_clarification'
+            && (allowed.reasonCode === 'ASK_V2_CLARIFICATION_NOT_MATERIALLY_AMBIGUOUS'
+              || allowed.reasonCode === 'ASK_V2_TOOL_PROGRESSION_REQUIRED');
+          const redundantInspection = allowed.reasonCode === 'ASK_V2_REDUNDANT_INSPECTION';
+          observe(name, clarificationPreFreeze || redundantInspection ? 'ineligible' : 'denied', allowed.reasonCode ?? 'ASK_V2_TOOL_DENIED', {
+            origin: 'validation',
+            ...(allowed.safeNextTools?.length ? { safeAction: `use:${allowed.safeNextTools.join(',')}` } : {}),
+          });
+          return {
+            ...denied(name, allowed.reasonCode ?? 'ASK_V2_TOOL_DENIED', allowed.safeNextTools),
+          };
+        }
+        if (!workspace) {
+          observe(name, 'unavailable', 'V2_WORKSPACE_SNAPSHOT_MISMATCH', { origin: 'retrieval', candidateIds: [] });
+          return denied(name, 'V2_WORKSPACE_SNAPSHOT_MISMATCH');
+        }
+        try {
+          return await run(args);
+        } catch {
+          observe(name, 'error', 'ASK_V2_TOOL_BOUNDARY_ERROR', { origin: 'tool' });
+          return denied(name, 'ASK_V2_TOOL_BOUNDARY_ERROR');
+        }
+      },
+    });
+    const tools: AgentToolDefinition[] = [
+      safeTool('inspect_ask_context', 'Inspect safe, role-balanced cards from the immutable Ask snapshot. Use expand only when initial cards are insufficient.', {
+        type: 'object', properties: { expand: { type: 'boolean' } }, additionalProperties: false,
+      }, async (args) => {
+        const expansion = args.expand === true;
+        const offset = state.observations.filter((item) => item.tool === 'inspect_ask_context' && item.reasonCode === 'same_snapshot_extension').length * 12;
+        const ids = expansion ? state.expansionCandidateIds.slice(offset, offset + 12) : state.initialCandidateIds;
+        const cards = (workspace?.candidates ?? [])
+          .filter((candidate) => ids.includes(v2CandidateId(candidate)))
+          .map((candidate) => v2SafeCard(candidate, workspace));
+        observe('inspect_ask_context', cards.length ? 'eligible' : 'unavailable', expansion ? 'same_snapshot_extension' : 'initial_snapshot_context', { candidateIds: ids, origin: 'retrieval' });
+        return {
+          snapshotId: state.snapshotId,
+          cards,
+          relationshipPathHandles: state.relationshipPathHandles.map((path) => ({
+            id: path.id,
+            edgeIds: path.edgeIds,
+            ...(path.candidateIds?.length ? { candidateIds: path.candidateIds } : {}),
+          })),
+        };
+      }),
+      safeTool('inspect_conversation_result', 'Inspect trusted prior result bindings and selected member handles. Never infer a member from browser rows.', {
+        type: 'object', properties: {}, additionalProperties: false,
+      }, async () => {
+        observe('inspect_conversation_result', 'eligible', 'trusted_conversation_context', { candidateIds: state.conversation.availableResultHandleIds, origin: 'retrieval' });
+        return { selectedMemberId: state.conversation.selectedMemberId, selectedMemberBinding: state.conversation.selectedMemberBinding, availableResultHandleIds: state.conversation.availableResultHandleIds };
+      }),
+      safeTool('inspect_business_context', 'Inspect retrieved business definitions and context without executing a warehouse query.', {
+        type: 'object', properties: {}, additionalProperties: false,
+      }, async () => {
+        const business = workspace?.businessContext;
+        const cards = business?.cards?.slice(0, 24) ?? [];
+        inspectedBusinessContextIds = cards.map((card) => card.id);
+        observe('inspect_business_context', business?.available ? 'eligible' : 'unavailable', business?.available ? 'business_context_inspected' : 'business_context_empty', {
+          origin: 'retrieval',
+          candidateIds: inspectedBusinessContextIds,
+        });
+        return { available: business?.available ?? false, objectCount: business?.objectCount ?? 0, cards };
+      }),
+      safeTool('inspect_certified_candidates', 'Inspect admitted certified blocks before a semantic, governed relational, or SQL tool.', {
+        type: 'object', properties: {}, additionalProperties: false,
+      }, async () => {
+        const candidates = visibleCandidates().filter((candidate) => candidate.kind === 'certified_block' && candidate.trustTier === 'certified');
+        const ids = candidates.map(v2CandidateId);
+        // Tier 1 truth was materialized from the immutable handle + actual
+        // host execution callback before this policy exposed the inspector.
+        // Never overwrite it from a workspace card or stale complete-fit list:
+        // that was the path that reintroduced a non-executable certified
+        // block and trapped semantic fallback on reload.
+        const certifiedTier = state.tierStates?.certified;
+        const complete = new Set(certifiedTier?.status === 'complete' ? certifiedTier.candidateIds : []);
+        const executableComplete = complete.size > 0;
+        if (!state.controllerTier && executableComplete) state.controllerTier = 'certified';
+        const inspectionOutcome = certifiedTier?.status === 'ineligible'
+          ? 'ineligible'
+          : certifiedTier?.status === 'unavailable'
+            ? 'unavailable'
+            : ids.length > 0
+              ? 'eligible'
+              : 'unavailable';
+        observe(
+          'inspect_certified_candidates',
+          inspectionOutcome,
+          certifiedTier?.reasonCode ?? (ids.length ? 'CERTIFIED_CANDIDATES_AVAILABLE' : 'CERTIFIED_CANDIDATES_EMPTY'),
+          { candidateIds: ids, origin: 'retrieval' },
+        );
+        return {
+          cards: candidates.map((candidate) => ({
+            ...v2SafeCard(candidate, workspace),
+            // This says only whether the snapshot-proven output contract may
+            // freeze tier 1 for this turn. It does not expose raw fit text or
+            // let the provider promote a context-only block.
+            certifiedCompleteForRequest: complete.has(v2CandidateId(candidate)),
+          })),
+        };
+      }),
+      safeTool('run_certified', 'Run one snapshot-bound certified block with optional scalar bindings. The artifact is immutable and cannot be re-searched.', {
+        type: 'object', properties: {
+          candidateId: { type: 'string' },
+          bindings: { type: 'object', additionalProperties: { type: ['string', 'number', 'boolean', 'null'] } },
+          repair: { type: 'boolean' },
+        }, required: ['candidateId'], additionalProperties: false,
+      }, async (args) => {
+        if (!requireInspections('run_certified', ['inspect_certified_candidates'])) return denied('run_certified', 'REQUIRED_TIER_INSPECTION_MISSING');
+        // Re-materialize immediately before authorizing. An artifact may have
+        // gone stale after the inspector rendered it; while still pre-freeze
+        // that is an unavailable observation and the cascade may continue.
+        const certifiedWorkspace = materializeAskV2WorkspaceTierTruth(state, input.askAgentV2Workspace, {
+          question: input.question,
+          certifiedExecutionAvailable: Boolean(input.executeCertifiedBlock)
+            && (bridgeCertifiedExecutionAvailable === undefined || bridgeCertifiedExecutionAvailable === true),
+        }) ?? workspace;
+        const candidateId = typeof args.candidateId === 'string' ? args.candidateId : '';
+        const candidate = resolveCandidates([candidateId], (item) => item.kind === 'certified_block' && item.trustTier === 'certified')?.[0];
+        const artifact = candidate && certifiedWorkspace?.certifiedArtifacts?.get(candidateId);
+        const handle = v2CertifiedArtifactHandle(artifact);
+        const block = handle?.artifact && typeof handle.artifact === 'object' && (handle.artifact as { kind?: unknown }).kind === 'block'
+          ? handle.artifact as KGNode
+          // Backward-compatible in-memory test adapter only. The live V2 host
+          // supplies a revision-bearing handle, never this raw-node branch.
+          : artifact && typeof artifact === 'object' && (artifact as { kind?: unknown }).kind === 'block'
+            ? artifact as KGNode
+            : undefined;
+        const certifiedTier = state.tierStates?.certified;
+        const certifiedComplete = certifiedTier?.status === 'complete'
+          ? new Set(certifiedTier.candidateIds)
+          : new Set<string>();
+        if (!candidate || !certifiedComplete.has(candidateId) || !block || !input.executeCertifiedBlock || !handle || !handle.isCurrent()) {
+          const reason = !candidate
+            ? 'CERTIFIED_CANDIDATE_NOT_ADMITTED_TO_SNAPSHOT'
+            : !certifiedComplete.has(candidateId)
+              ? certifiedTier?.reasonCode ?? 'CERTIFIED_TUPLE_NOT_PROVEN_BY_SNAPSHOT'
+              : !handle || !block
+                ? 'CERTIFIED_ARTIFACT_NOT_BOUND_TO_SNAPSHOT'
+                : !handle.isCurrent()
+                ? 'CERTIFIED_ARTIFACT_STALE'
+                : 'CERTIFIED_EXECUTOR_UNAVAILABLE';
+          observe('run_certified', !candidate || reason === 'CERTIFIED_TUPLE_NOT_PROVEN_BY_SNAPSHOT' ? 'ineligible' : 'unavailable', reason, { candidateIds: candidateId ? [candidateId] : [], tier: 'certified', origin: 'validation' });
+          return denied('run_certified', reason);
+        }
+        try {
+          if (!handle.isCurrent()) {
+            observe('run_certified', 'denied', 'CERTIFIED_ARTIFACT_STALE', { tier: 'certified', candidateIds: [candidateId], origin: 'freeze' });
+            return denied('run_certified', 'CERTIFIED_ARTIFACT_STALE');
+          }
+          const bindings = v2ScalarBindings(args.bindings);
+          const repair = args.repair === true;
+          const bindingFingerprint = v2ExecutionBindingFingerprint({
+            state,
+            tier: 'certified',
+            candidateIds: [candidateId],
+            bindings: { artifactRevision: handle?.revisionFingerprint ?? candidateId, bindings: bindings ?? {} },
+          });
+          const authorization = authorizeExecution({
+            tool: 'run_certified',
+            tier: 'certified',
+            candidateIds: [candidateId],
+            bindingFingerprint,
+            planId: `ask-v2:certified:${bindingFingerprint.slice(-24)}`,
+            repair,
+            ...(handle ? { targetFingerprint: handle.revisionFingerprint } : {}),
+          });
+          if (!authorization.ok) return denied('run_certified', authorization.reasonCode);
+          const result = await input.executeCertifiedBlock(block, { question: input.question, ...(bindings ? { parameters: bindings } : {}) });
+          completed = { tier: 'certified', result: { ...result, trustState: 'certified', answerTier: 'certified_block' }, block };
+          observe('run_certified', 'executed', 'CERTIFIED_RESULT_VALIDATED', { tier: 'certified', candidateIds: [candidateId], origin: 'execution', planId: state.resolvedPlan?.id });
+          return { executed: true, tier: 'certified', rowCount: result.rowCount };
+        } catch {
+          executionFailure = { reasonCode: 'CERTIFIED_EXECUTION_FAILED', origin: 'execution' };
+          observe('run_certified', 'error', executionFailure.reasonCode, { tier: 'certified', candidateIds: [candidateId], origin: 'execution', planId: state.resolvedPlan?.id });
+          return denied('run_certified', executionFailure.reasonCode);
+        }
+      }),
+      safeTool('inspect_semantic_candidates', 'Inspect admitted semantic metrics, dimensions, compatibility, and time-grain definitions.', {
+        type: 'object', properties: {}, additionalProperties: false,
+      }, async () => {
+        const candidates = visibleCandidates().filter((candidate) => Boolean(askV2ExecutableSemanticRoles(candidate)));
+        const ids = candidates.map(v2CandidateId);
+        // Semantic route commitment requires more than a displayed card: one
+        // admitted metric must have a current, host-selected compiler target,
+        // a compiler, and the generated-SQL executor. Time/dimension cards
+        // remain available for context but cannot make a query executable.
+        // Do this at inspection time so a provider cannot spend its final
+        // controller turn on a semantic route the host cannot actually run.
+        const executableMetric = candidates.some((candidate) => {
+          const id = v2CandidateId(candidate);
+          const handle = workspace?.semanticCapabilities?.get(id);
+          return askV2ExecutableSemanticRoles(candidate)?.includes('metric') === true
+            && handle?.candidateId === id
+            && handle.roles.includes('metric')
+            && handle.isCurrent()
+            && Boolean(handle.selectedEngine ?? (handle.engines.length === 1 ? handle.engines[0] : undefined));
+        });
+        const hostExecutionReady = Boolean(input.semanticQueryCompiler && input.executeGeneratedSql);
+        const suppliedSemanticState = workspace?.tierStates?.semantic;
+        const semanticStatus = ids.length === 0
+          ? 'unavailable' as const
+          : !hostExecutionReady
+            ? 'unavailable' as const
+            : suppliedSemanticState?.status === 'ambiguous'
+              ? 'ambiguous' as const
+              : suppliedSemanticState?.status === 'unavailable' || suppliedSemanticState?.status === 'ineligible'
+                ? suppliedSemanticState.status
+            : !executableMetric
+              ? 'ineligible' as const
+              : suppliedSemanticState?.status === 'complete'
+                ? 'complete' as const
+                : 'available' as const;
+        const semanticReasonCode = ids.length === 0
+          ? 'SEMANTIC_CANDIDATES_EMPTY'
+          : !hostExecutionReady
+            ? 'SEMANTIC_EXECUTION_UNAVAILABLE'
+            : suppliedSemanticState?.status === 'ambiguous'
+              ? suppliedSemanticState.reasonCode
+              : suppliedSemanticState?.status === 'unavailable' || suppliedSemanticState?.status === 'ineligible'
+                ? suppliedSemanticState.reasonCode
+            : !executableMetric
+              ? 'SEMANTIC_ENGINE_UNAVAILABLE'
+              : suppliedSemanticState?.reasonCode ?? 'SEMANTIC_CANDIDATES_AVAILABLE';
+        setAskV2TierState(state, 'semantic', {
+          status: semanticStatus,
+          candidateIds: ids,
+          reasonCode: semanticReasonCode,
+          ...(semanticStatus === 'ambiguous' && suppliedSemanticState?.clarificationChoices?.length
+            ? { clarificationChoices: suppliedSemanticState.clarificationChoices }
+            : {}),
+          ...(semanticStatus === 'ambiguous' && suppliedSemanticState?.safeNextTools?.length
+            ? { safeNextTools: suppliedSemanticState.safeNextTools }
+            : {}),
+        });
+        // A reloaded pre-freeze semantic commitment is not authority when the
+        // current host lacks its compiler/executor. Leave the next policy to
+        // proceed through the same snapshot's relational/exploratory path.
+        if (!hostExecutionReady || !executableMetric || semanticStatus === 'ambiguous'
+          || semanticStatus === 'unavailable' || semanticStatus === 'ineligible') {
+          if (!state.resolvedPlan?.frozen && state.controllerTier === 'semantic') delete state.controllerTier;
+        } else if (!state.controllerTier && (semanticStatus === 'available' || semanticStatus === 'complete')) {
+          state.controllerTier = 'semantic';
+        }
+        observe('inspect_semantic_candidates', semanticStatus === 'available' || semanticStatus === 'complete' ? 'eligible' : semanticStatus, semanticReasonCode, { candidateIds: ids, origin: 'retrieval' });
+        return { cards: candidates.map((candidate) => v2SafeCard(candidate, workspace)) };
+      }),
+      safeTool('compile_and_run_semantic', 'Compile admitted semantic metric, dimension, time, and filter IDs through the configured MetricFlow/dbt compiler, then execute once. When the question requests day, week, month, quarter, or year, provide both the opaque admitted timeDimensionId and its declared timeGrain.', {
+        type: 'object', properties: {
+          metricIds: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 8 },
+          dimensionIds: { type: 'array', items: { type: 'string' }, maxItems: 16 },
+          timeDimensionId: { type: 'string', description: 'Required with timeGrain for an explicit time question; use one admitted opaque time-dimension ID.' },
+          timeGrain: { type: 'string', enum: ['day', 'week', 'month', 'quarter', 'year'], description: 'Required with timeDimensionId when the question asks for a time grain. It must be declared by that exact admitted time dimension.' },
+          filters: { type: 'array', items: { type: 'object', properties: { dimensionId: { type: 'string' }, value: { type: ['string', 'number', 'boolean'] } }, required: ['dimensionId', 'value'], additionalProperties: false }, maxItems: 8 },
+          limit: { type: 'integer', minimum: 1, maximum: 10000 }, repair: { type: 'boolean' },
+        }, required: ['metricIds'], additionalProperties: false,
+      }, async (args) => {
+        if (!requireInspections('compile_and_run_semantic', ['inspect_certified_candidates', 'inspect_semantic_candidates'])) return denied('compile_and_run_semantic', 'REQUIRED_TIER_INSPECTION_MISSING');
+        const semanticCapabilities = workspace?.semanticCapabilities;
+        const semanticCapabilityCollisionIds = new Set(workspace?.semanticCapabilityCollisionIds ?? []);
+        const directlyRequestedCollisionIds = [
+          ...v2StringArray(args.metricIds, 8),
+          ...v2StringArray(args.dimensionIds, 16),
+          ...(typeof args.timeDimensionId === 'string' ? [args.timeDimensionId.trim()] : []),
+          ...(Array.isArray(args.filters)
+            ? args.filters.flatMap((filter) => filter && typeof filter === 'object' && !Array.isArray(filter)
+              && typeof (filter as { dimensionId?: unknown }).dimensionId === 'string'
+              ? [(filter as { dimensionId: string }).dimensionId.trim()]
+              : [])
+            : []),
+        ].filter((candidateId) => semanticCapabilityCollisionIds.has(candidateId));
+        const directlyRequestedBindingMismatches = [
+          ...v2StringArray(args.metricIds, 8).map((reference) => ({ reference, role: 'metric' as const })),
+          ...v2StringArray(args.dimensionIds, 16).map((reference) => ({ reference, role: 'dimension' as const })),
+          ...(typeof args.timeDimensionId === 'string'
+            ? [{ reference: args.timeDimensionId.trim(), role: 'time_dimension' as const }]
+            : []),
+        ].flatMap(({ reference, role }) => visibleCandidates()
+          .filter((candidate) => v2CandidateId(candidate) === reference && v2SemanticCandidateMatchesRole(candidate, role))
+          .some((candidate) => !v2SemanticCapabilityMatchesCandidate(
+            semanticCapabilities?.get(v2CandidateId(candidate)),
+            candidate,
+            role,
+          ))
+          ? [reference]
+          : []);
+        const canonicalSemanticIds = (
+          references: readonly string[],
+          role: V2SemanticCapabilityRole,
+        ): string[] | undefined => {
+          const canonical = references.map((reference) => resolveV2SemanticCapabilityReference({
+            reference,
+            role,
+            candidates: visibleCandidates(),
+            capabilities: semanticCapabilities,
+          }));
+          return canonical.every((id): id is string => Boolean(id))
+            ? [...new Set(canonical)]
+            : undefined;
+        };
+        const metricIds = canonicalSemanticIds(v2StringArray(args.metricIds, 8), 'metric');
+        const dimensionIds = canonicalSemanticIds(v2StringArray(args.dimensionIds, 16), 'dimension');
+        const metricsForTime = metricIds
+          ? resolveCandidates(metricIds, (candidate) => v2SemanticCandidateMatchesRole(candidate, 'metric'))
+          : undefined;
+        const metricTimeCompatibility = v2MetricTimeCompatibility(metricsForTime);
+        // Compare a metric's declared time-dimension identities with canonical
+        // cards and their retained snapshot aliases. This accommodates a
+        // migration from legacy leaf IDs without treating runtime/display names
+        // as identity or picking one of several model-owned metric_time axes.
+        const compatibleTimeResolution = v2MetricCompatibleTimeCandidates({
+          metrics: metricsForTime,
+          candidates: visibleCandidates(),
+        });
+        const compatibleTimeCandidates = compatibleTimeResolution.candidates;
+        const compatibleTimeCandidateIds = new Set(compatibleTimeCandidates.map(v2CandidateId));
+        const timeCandidates = metricTimeCompatibility.constrained
+          ? compatibleTimeCandidates
+          : visibleCandidates();
+        const suppliedTimeReference = typeof args.timeDimensionId === 'string'
+          ? args.timeDimensionId.trim()
+          : '';
+        const allTimeCandidates = visibleCandidates().filter((candidate) => v2SemanticCandidateMatchesRole(candidate, 'time_dimension'));
+        const compatibleSemanticTimeCandidates = timeCandidates.filter((candidate) => v2SemanticCandidateMatchesRole(candidate, 'time_dimension'));
+        const directTimeCandidate = suppliedTimeReference
+          ? allTimeCandidates.find((candidate) => {
+              const candidateId = v2CandidateId(candidate);
+              return candidateId === suppliedTimeReference
+                && v2SemanticCapabilityMatchesCandidate(
+                  semanticCapabilities?.get(candidateId),
+                  candidate,
+                  'time_dimension',
+                );
+            })
+          : undefined;
+        // A provider may send a current opaque ID, a backward-compatible
+        // legacy opaque alias, or the compiler runtime name. Only the first
+        // is globally unique. Once a metric declares more than one compatible
+        // time axis, either of the latter must produce a typed ambiguity
+        // rather than an arbitrary winner or a generic invalid-ID error.
+        const matchingCompatibleTimeCandidates = suppliedTimeReference && !directTimeCandidate
+          ? compatibleSemanticTimeCandidates.filter((candidate) => {
+              const candidateId = v2CandidateId(candidate);
+              const capability = semanticCapabilities?.get(candidateId);
+              return v2SemanticCapabilityMatchesCandidate(capability, candidate, 'time_dimension')
+                && (
+                  (candidate.aliases ?? []).some((alias) => alias === suppliedTimeReference)
+                  || normalizeV2SemanticRuntimeName(capability.runtimeName) === normalizeV2SemanticRuntimeName(suppliedTimeReference)
+                );
+            })
+          : [];
+        const timeReferenceAmbiguous = new Set(matchingCompatibleTimeCandidates.map(v2CandidateId)).size > 1;
+        const timeReferenceIncompatible = Boolean(
+          metricTimeCompatibility.constrained
+          && suppliedTimeReference
+          && ((directTimeCandidate && !compatibleTimeCandidateIds.has(v2CandidateId(directTimeCandidate)))
+            || (!directTimeCandidate
+              && allTimeCandidates.some((candidate) => {
+                const candidateId = v2CandidateId(candidate);
+                const capability = semanticCapabilities?.get(candidateId);
+                return v2SemanticCapabilityMatchesCandidate(capability, candidate, 'time_dimension')
+                  && normalizeV2SemanticRuntimeName(capability.runtimeName) === normalizeV2SemanticRuntimeName(suppliedTimeReference);
+              })
+              && matchingCompatibleTimeCandidates.length === 0)),
+        );
+        const explicitTimeRequirement = v2ExplicitTimeRequirement(input.question);
+        let timeDimensionIdForValidation: unknown = args.timeDimensionId;
+        let timeGrainForValidation: unknown = args.timeGrain;
+        let timeBindingCompletion:
+          | {
+              timeId: string;
+              timeGrain: string;
+              inputFingerprint: string;
+              outputFingerprint: string;
+            }
+          | undefined;
+        let timeBindingCompletionFailure:
+          | { outcome: 'ineligible' | 'unavailable' | 'ambiguous'; reasonCode: string }
+          | undefined;
+        const fiscalCalendar = explicitTimeRequirement.requiresDeclaredFiscalCalendar
+          ? workspace?.fiscalCalendar
+          : undefined;
+        const hasDeclaredFiscalCalendar = Boolean(
+          fiscalCalendar?.id?.trim()
+          && fiscalCalendar.fiscalPeriodFieldId?.trim()
+          && fiscalCalendar.dateRoleId?.trim()
+          && explicitTimeRequirement.fiscalPeriod,
+        );
+        const recordTimeBindingCompletion = (input: {
+          timeId: string;
+          timeGrain: string;
+          reason: 'explicit_question_time_axis' | 'explicit_question_time_grain';
+        }) => {
+          const inputFingerprint = v2ExecutionBindingFingerprint({
+            state,
+            tier: 'semantic',
+            candidateIds: metricIds ?? [],
+            bindings: {
+              metricIds: metricIds ?? [],
+              dimensionIds: dimensionIds ?? [],
+              timeDimensionId: typeof args.timeDimensionId === 'string' ? args.timeDimensionId.trim() : '',
+              timeGrain: typeof args.timeGrain === 'string' ? args.timeGrain.trim() : '',
+              reason: input.reason,
+            },
+          });
+          const outputFingerprint = v2ExecutionBindingFingerprint({
+            state,
+            tier: 'semantic',
+            candidateIds: [...(metricIds ?? []), input.timeId],
+            bindings: {
+              metricIds: metricIds ?? [],
+              dimensionIds: dimensionIds ?? [],
+              timeDimensionId: input.timeId,
+              timeGrain: input.timeGrain,
+              reason: input.reason,
+            },
+          });
+          semanticArgumentCompletionCount += 1;
+          timeDimensionIdForValidation = input.timeId;
+          timeGrainForValidation = input.timeGrain;
+          timeBindingCompletion = { ...input, inputFingerprint, outputFingerprint };
+        };
+        // The current question is the only authority for this recovery. Do
+        // not repair a malformed/invented time argument, infer a fiscal
+        // calendar, or fill a general dimension/entity role. A full omitted
+        // axis can be selected only when every chosen metric declares the
+        // same admitted compatibility closure. A provider-selected opaque
+        // axis is different: its omitted grain may be mechanically supplied
+        // from the immutable question, never from declaredGrains[0].
+        if (explicitTimeRequirement.requiresDeclaredFiscalCalendar && !hasDeclaredFiscalCalendar) {
+          timeBindingCompletionFailure = {
+            outcome: 'unavailable',
+            reasonCode: 'SEMANTIC_FISCAL_CALENDAR_REQUIRED',
+          };
+        } else if (!suppliedTimeReference && explicitTimeRequirement.grain) {
+          const suppliedGrain = typeof args.timeGrain === 'string'
+            ? args.timeGrain.trim().toLowerCase()
+            : undefined;
+          // When an immutable question explicitly says "by month", a
+          // controller-supplied different grain is not a harmless default.
+          // Report the conflict before considering an otherwise-unique axis.
+          if (suppliedGrain && suppliedGrain !== explicitTimeRequirement.grain) {
+            timeBindingCompletionFailure = {
+              outcome: 'ineligible',
+              reasonCode: 'SEMANTIC_TIME_GRAIN_MISMATCH',
+            };
+          } else if (args.timeGrain !== undefined && !suppliedGrain) {
+            // Leave malformed non-string/empty values to the canonical
+            // normalizer below, rather than treating them as an omitted axis.
+          } else if (!compatibleTimeResolution.allMetricsDeclareTimeDimensions) {
+            timeBindingCompletionFailure = {
+              outcome: 'ineligible',
+              reasonCode: 'SEMANTIC_TIME_DIMENSION_COMPATIBILITY_UNDECLARED',
+            };
+          } else {
+            const candidatesById = new Map<string, AgentEvidenceCandidate>();
+            for (const candidate of compatibleSemanticTimeCandidates) {
+              const candidateId = v2CandidateId(candidate);
+              const capability = semanticCapabilities?.get(candidateId);
+              const matchingGrain = (candidate.timeGrains ?? []).find((grain) => (
+                grain.trim().toLowerCase() === explicitTimeRequirement.grain
+              ));
+              if (matchingGrain
+                && v2SemanticCapabilityMatchesCandidate(capability, candidate, 'time_dimension')) {
+                candidatesById.set(candidateId, candidate);
+              }
+            }
+            const completionCandidates = [...candidatesById.values()];
+            if (completionCandidates.length === 1) {
+              if (semanticArgumentCompletionCount === 0) {
+                const completedTime = completionCandidates[0]!;
+                const timeId = v2CandidateId(completedTime);
+                const timeGrain = (completedTime.timeGrains ?? []).find((grain) => (
+                  grain.trim().toLowerCase() === explicitTimeRequirement.grain
+                ))!;
+                recordTimeBindingCompletion({ timeId, timeGrain, reason: 'explicit_question_time_axis' });
+              } else {
+                timeBindingCompletionFailure = {
+                  outcome: 'unavailable',
+                  reasonCode: 'SEMANTIC_TIME_BINDING_COMPLETION_EXHAUSTED',
+                };
+              }
+            } else {
+              timeBindingCompletionFailure = completionCandidates.length === 0
+                ? { outcome: 'unavailable', reasonCode: 'SEMANTIC_TIME_DIMENSION_UNAVAILABLE' }
+                : { outcome: 'ambiguous', reasonCode: 'SEMANTIC_TIME_DIMENSION_AMBIGUOUS' };
+            }
+          }
+        } else if (suppliedTimeReference && args.timeGrain === undefined && explicitTimeRequirement.grain) {
+          const canonicalTimeId = resolveV2SemanticCapabilityReference({
+            reference: suppliedTimeReference,
+            role: 'time_dimension',
+            candidates: timeCandidates,
+            capabilities: semanticCapabilities,
+          });
+          const selectedTime = canonicalTimeId
+            ? resolveCandidates([canonicalTimeId], (candidate) => v2SemanticCandidateMatchesRole(candidate, 'time_dimension'))?.[0]
+            : undefined;
+          const requiredGrain = selectedTime?.timeGrains?.find((grain) => (
+            grain.trim().toLowerCase() === explicitTimeRequirement.grain
+          ));
+          if (!selectedTime || !requiredGrain) {
+            timeBindingCompletionFailure = {
+              outcome: 'ineligible',
+              reasonCode: 'SEMANTIC_TIME_GRAIN_NOT_DECLARED',
+            };
+          } else if (semanticArgumentCompletionCount === 0) {
+            recordTimeBindingCompletion({
+              timeId: canonicalTimeId!,
+              timeGrain: requiredGrain,
+              reason: 'explicit_question_time_grain',
+            });
+          } else {
+            timeBindingCompletionFailure = {
+              outcome: 'unavailable',
+              reasonCode: 'SEMANTIC_TIME_BINDING_COMPLETION_EXHAUSTED',
+            };
+          }
+        }
+        const fiscalDateRoleId = hasDeclaredFiscalCalendar && fiscalCalendar?.dateRoleId
+          ? resolveV2SemanticCapabilityReference({
+            reference: fiscalCalendar.dateRoleId,
+            role: 'time_dimension',
+            candidates: allTimeCandidates,
+            capabilities: semanticCapabilities,
+          })
+          : undefined;
+        const fiscalPeriodFieldId = hasDeclaredFiscalCalendar && fiscalCalendar?.fiscalPeriodFieldId
+          ? resolveV2SemanticCapabilityReference({
+            reference: fiscalCalendar.fiscalPeriodFieldId,
+            role: 'filter_dimension',
+            candidates: visibleCandidates(),
+            capabilities: semanticCapabilities,
+          })
+          : undefined;
+        const fiscalPeriod = explicitTimeRequirement.fiscalPeriod?.trim().toUpperCase();
+        const normalizedFilters = normalizeV2SemanticFilters(args.filters);
+        // Filter references cross the provider boundary in multiple safe
+        // representations (current opaque ID, legacy opaque alias, and a
+        // unique compiler runtime name). Resolve every reference to the
+        // immutable capability identity before deciding whether it is unique.
+        // Raw-string dedupe would let two spellings of the same fiscal field
+        // through with contradictory values and freeze an ambiguous plan.
+        const canonicalFilterResolution: (
+          | { ok: true; filters: Array<{ dimensionId: string; value: string | number | boolean }> }
+          | { ok: false; reasonCode: 'SEMANTIC_FILTERS_INVALID' | 'SEMANTIC_IDENTIFIER_NOT_ADMITTED_TO_SNAPSHOT' }
+        ) = !normalizedFilters.ok
+          ? { ok: false, reasonCode: normalizedFilters.reasonCode }
+          : (() => {
+              const filters: Array<{ dimensionId: string; value: string | number | boolean }> = [];
+              const seenCanonicalIds = new Set<string>();
+              for (const filter of normalizedFilters.filters) {
+                const dimensionId = resolveV2SemanticCapabilityReference({
+                  reference: filter.dimensionId,
+                  role: 'filter_dimension',
+                  candidates: visibleCandidates(),
+                  capabilities: semanticCapabilities,
+                });
+                if (!dimensionId) {
+                  return { ok: false as const, reasonCode: 'SEMANTIC_IDENTIFIER_NOT_ADMITTED_TO_SNAPSHOT' as const };
+                }
+                // Duplicate canonical filter bindings are never harmless:
+                // their order/value is provider-controlled and the compiler
+                // could interpret them differently. Reject even identical
+                // values rather than selecting one at random.
+                if (seenCanonicalIds.has(dimensionId)) {
+                  return { ok: false as const, reasonCode: 'SEMANTIC_FILTERS_INVALID' as const };
+                }
+                seenCanonicalIds.add(dimensionId);
+                filters.push({ ...filter, dimensionId });
+              }
+              return { ok: true as const, filters };
+            })();
+        const semanticFilters = canonicalFilterResolution.ok
+          ? canonicalFilterResolution.filters
+          : [];
+        const filtersBound = normalizedFilters.ok && canonicalFilterResolution.ok;
+        const filterIds = semanticFilters.map((filter) => filter.dimensionId);
+        const normalizedTime = normalizeV2SemanticTimeBinding({
+          timeDimensionId: timeDimensionIdForValidation,
+          timeGrain: timeGrainForValidation,
+          ...(explicitTimeRequirement.grain ? { requiredTimeGrain: explicitTimeRequirement.grain } : {}),
+          resolveTimeCandidate: (id) => {
+            const candidateId = resolveV2SemanticCapabilityReference({
+              reference: id,
+              role: 'time_dimension',
+              candidates: timeCandidates,
+              capabilities: semanticCapabilities,
+            });
+            return candidateId
+              ? resolveCandidates([candidateId], (candidate) => (candidate.timeGrains?.length ?? 0) > 0)?.[0]
+              : undefined;
+          },
+        });
+        const timeId = normalizedTime.ok ? normalizedTime.timeId : undefined;
+        const time = normalizedTime.ok ? normalizedTime.time : undefined;
+        // Fiscal tokens are executable only when this same snapshot declared
+        // the calendar, its date role, and its period field, and the selected
+        // compiler filter binds that exact fiscal value. Passing a valid
+        // ordinary time axis must never bypass this guard.
+        const fiscalPeriodFilters = fiscalPeriodFieldId
+          ? semanticFilters.filter((filter) => filter.dimensionId === fiscalPeriodFieldId)
+          : [];
+        const fiscalFilterBound = Boolean(
+          fiscalPeriodFieldId
+          && fiscalPeriod
+          && fiscalPeriodFilters.length === 1
+          && String(fiscalPeriodFilters[0]!.value).trim().toUpperCase() === fiscalPeriod,
+        );
+        const fiscalBindingCandidateIds = explicitTimeRequirement.requiresDeclaredFiscalCalendar
+          ? [fiscalDateRoleId, fiscalPeriodFieldId].filter((id): id is string => Boolean(id))
+          : [];
+        const semanticCandidateIds = [
+          ...(metricIds ?? []),
+          ...(dimensionIds ?? []),
+          ...(timeId ? [timeId] : []),
+          ...filterIds,
+          ...fiscalBindingCandidateIds,
+        ];
+        const semanticPreFreeze = (
+          outcome: 'ineligible' | 'unavailable' | 'ambiguous',
+          reasonCode: string,
+          candidateIds = semanticCandidateIds,
+          safeNextTools: AskToolNameV2[] = [],
+        ) => {
+          setAskV2TierState(state, 'semantic', {
+            status: outcome,
+            candidateIds: [...new Set(candidateIds)].filter((id) => state.retainedCandidateIds.includes(id)),
+            reasonCode,
+            ...(safeNextTools.length ? { safeNextTools } : {}),
+          });
+          // A same-tier correction remains a controller commitment. A true
+          // unavailable/ineligible semantic capability releases the
+          // pre-freeze route so the normal cascade can continue; it never
+          // freezes or silently executes a lower tier.
+          if (state.controllerTier === 'semantic'
+            && !safeNextTools.includes('compile_and_run_semantic')
+            && !safeNextTools.includes('request_clarification')) {
+            state.controllerTier = undefined;
+          }
+          observe('compile_and_run_semantic', outcome, reasonCode, {
+            tier: 'semantic',
+            candidateIds,
+            origin: 'validation',
+            ...(safeNextTools.length ? { safeAction: `use:${safeNextTools.join(',')}` } : {}),
+          });
+          return denied('compile_and_run_semantic', reasonCode);
+        };
+        if (directlyRequestedCollisionIds.length > 0) {
+          return semanticPreFreeze('unavailable', 'SEMANTIC_CAPABILITY_ID_COLLISION', directlyRequestedCollisionIds);
+        }
+        if (directlyRequestedBindingMismatches.length > 0) {
+          return semanticPreFreeze('ineligible', 'SEMANTIC_CAPABILITY_NOT_BOUND_OR_STALE', directlyRequestedBindingMismatches);
+        }
+        if (!normalizedFilters.ok) return semanticPreFreeze('ineligible', normalizedFilters.reasonCode);
+        if (!canonicalFilterResolution.ok) {
+          // A fiscal request has a stricter immutable binding contract. Once
+          // calendar metadata is declared, a filter that fails canonical
+          // admission or uniqueness is not generic missing context; it is an
+          // invalid fiscal-period binding and must not reach the compiler.
+          return semanticPreFreeze(
+            'ineligible',
+            explicitTimeRequirement.requiresDeclaredFiscalCalendar && hasDeclaredFiscalCalendar
+              ? 'SEMANTIC_FISCAL_FILTER_INVALID'
+              : canonicalFilterResolution.reasonCode,
+            metricIds ?? [],
+            ['compile_and_run_semantic'],
+          );
+        }
+        if (explicitTimeRequirement.requiresDeclaredFiscalCalendar
+          && hasDeclaredFiscalCalendar
+          && !fiscalFilterBound) {
+          return semanticPreFreeze(
+            'ineligible',
+            'SEMANTIC_FISCAL_FILTER_INVALID',
+            [...new Set([...semanticCandidateIds, ...(metricIds ?? [])])],
+            ['compile_and_run_semantic'],
+          );
+        }
+        if (!filtersBound || !metricIds || !dimensionIds) return semanticPreFreeze('ineligible', 'SEMANTIC_IDENTIFIER_NOT_ADMITTED_TO_SNAPSHOT');
+        if (timeBindingCompletionFailure) {
+          return semanticPreFreeze(
+            timeBindingCompletionFailure.outcome,
+            timeBindingCompletionFailure.reasonCode,
+            metricIds ?? [],
+            ['compile_and_run_semantic'],
+          );
+        }
+        if (timeBindingCompletion) {
+          // This records the host-only, one-shot binding correction in V8
+          // without charging it as a second model tool call or freezing a
+          // plan. The later authorization still binds the exact completed
+          // opaque ID and declared grain before compiler execution.
+          observe('compile_and_run_semantic', 'eligible', 'SEMANTIC_TIME_BINDING_COMPLETED', {
+            tier: 'semantic',
+            candidateIds: [...(metricIds ?? []), timeBindingCompletion.timeId],
+            origin: 'validation',
+            inputFingerprint: timeBindingCompletion.inputFingerprint,
+            outputFingerprint: timeBindingCompletion.outputFingerprint,
+            safeAction: 'host_completed_explicit_time_binding',
+          });
+        }
+        if (timeReferenceAmbiguous) return semanticPreFreeze('ambiguous', 'SEMANTIC_TIME_DIMENSION_AMBIGUOUS', metricIds);
+        if (timeReferenceIncompatible) return semanticPreFreeze('ineligible', 'SEMANTIC_TIME_DIMENSION_INCOMPATIBLE', metricIds);
+        if (!normalizedTime.ok) return semanticPreFreeze('ineligible', normalizedTime.reasonCode);
+        if (explicitTimeRequirement.requiresDeclaredFiscalCalendar && (
+          !hasDeclaredFiscalCalendar
+          || !fiscalDateRoleId
+          || !fiscalPeriodFieldId
+          || !fiscalFilterBound
+          || (timeId !== undefined && timeId !== fiscalDateRoleId)
+        )) {
+          return semanticPreFreeze(
+            'unavailable',
+            'SEMANTIC_FISCAL_CALENDAR_REQUIRED',
+            [...new Set([...semanticCandidateIds, ...(metricIds ?? [])])],
+            ['compile_and_run_semantic'],
+          );
+        }
+        if (semanticCandidateIds.some((candidateId) => semanticCapabilityCollisionIds.has(candidateId))) {
+          return semanticPreFreeze('unavailable', 'SEMANTIC_CAPABILITY_ID_COLLISION');
+        }
+        const metrics = metricsForTime;
+        const dimensions = dimensionIds.length === 0 ? [] : resolveCandidates(dimensionIds, (candidate) => v2SemanticCandidateMatchesRole(candidate, 'dimension'));
+        const filterCandidates = filterIds.length ? resolveCandidates(filterIds, (candidate) => v2SemanticCandidateMatchesRole(candidate, 'filter_dimension')) : [];
+        if (!metrics || !dimensions || (timeId && !time) || !filterCandidates) {
+          return semanticPreFreeze('ineligible', 'SEMANTIC_IDENTIFIER_NOT_ADMITTED_TO_SNAPSHOT');
+        }
+        if (!input.semanticQueryCompiler || !input.executeGeneratedSql) {
+          return semanticPreFreeze('unavailable', 'SEMANTIC_EXECUTION_UNAVAILABLE');
+        }
+        // The provider selects opaque evidence IDs.  The real compiler must
+        // never receive those IDs as authored MetricFlow/dbt field names: it
+        // resolves them through the immutable capability captured with this
+        // retrieval snapshot.  That keeps admission/receipts opaque while
+        // letting the live compiler operate on its actual runtime names.
+        const capabilities = semanticCapabilities;
+        const resolveCapabilities = (
+          ids: readonly string[],
+          role: 'metric' | 'dimension' | 'time_dimension' | 'filter_dimension',
+        ) => {
+          if (!capabilities) return undefined;
+          const handles = ids.map((id) => capabilities.get(id));
+          const candidateFingerprints = ids.map((id) => new Set(
+            visibleCandidates()
+              .filter((candidate) => v2CandidateId(candidate) === id && v2SemanticCandidateMatchesRole(candidate, role))
+              .map(askV2SemanticCandidateAuthorityFingerprint),
+          ));
+          if (handles.some((handle, index) => (
+            !handle
+            || handle.candidateId !== ids[index]
+            || !handle.roles.includes(role)
+            || !handle.isCurrent()
+            || candidateFingerprints[index]!.size !== 1
+            || !candidateFingerprints[index]!.has(handle.fingerprint)
+          ))) return undefined;
+          return handles as NonNullable<typeof handles[number]>[];
+        };
+        const metricCapabilities = resolveCapabilities(metricIds, 'metric');
+        const dimensionCapabilities = resolveCapabilities(dimensionIds, 'dimension');
+        const timeCapabilities = timeId ? resolveCapabilities([timeId], 'time_dimension') : [];
+        const fiscalDateRoleCapabilities = fiscalDateRoleId
+          ? resolveCapabilities([fiscalDateRoleId], 'time_dimension')
+          : [];
+        const filterCapabilities = resolveCapabilities(filterIds, 'filter_dimension');
+        if (!metricCapabilities || !dimensionCapabilities || !timeCapabilities || !filterCapabilities
+          || (explicitTimeRequirement.requiresDeclaredFiscalCalendar && !fiscalDateRoleCapabilities)) {
+          return semanticPreFreeze('ineligible', 'SEMANTIC_CAPABILITY_NOT_BOUND_OR_STALE');
+        }
+        const fiscalDateRoleCapabilityHandles = fiscalDateRoleCapabilities ?? [];
+        const resolvedEngine = selectV2SemanticEngine({ metricCapabilities });
+        if (!resolvedEngine.ok) {
+          return semanticPreFreeze(
+            resolvedEngine.outcome,
+            resolvedEngine.reasonCode,
+            semanticCandidateIds,
+          );
+        }
+        const semanticEngine = resolvedEngine.engine;
+        // Older text/native transcripts can still send an `engine` field from
+        // the pre-V2 contract. It is intentionally ignored: the immutable
+        // capability above has already selected the only host-approved engine.
+        // Do not turn a stale provider argument into a second semantic retry.
+        state.semanticRuntime = {
+          version: 1,
+          preference: workspace?.semanticRuntime?.preference ?? 'auto',
+          selectedEngine: semanticEngine,
+          readiness: 'ready',
+        };
+        const selectedCandidateIds = semanticCandidateIds;
+        const bindingFingerprint = v2ExecutionBindingFingerprint({
+          state,
+          tier: 'semantic',
+          candidateIds: selectedCandidateIds,
+          bindings: {
+            metricIds,
+            dimensionIds,
+            timeDimensionId: timeId ?? '',
+            timeGrain: normalizedTime.timeGrain ?? '',
+            ...(explicitTimeRequirement.requiresDeclaredFiscalCalendar ? {
+              fiscalCalendar: {
+                id: fiscalCalendar!.id,
+                dateRoleId: fiscalDateRoleId!,
+                fiscalPeriodFieldId: fiscalPeriodFieldId!,
+                fiscalPeriod: fiscalPeriod!,
+              },
+            } : {}),
+            engine: semanticEngine ?? '',
+            filters: semanticFilters,
+            limit: typeof args.limit === 'number' ? args.limit : null,
+            capabilityFingerprints: [
+              ...metricCapabilities,
+              ...dimensionCapabilities,
+              ...timeCapabilities,
+              ...fiscalDateRoleCapabilityHandles,
+              ...filterCapabilities,
+            ].map((handle) => handle.fingerprint),
+          },
+        });
+        const repair = args.repair === true;
+        const authorization = authorizeExecution({
+          tool: 'compile_and_run_semantic',
+          tier: 'semantic',
+          candidateIds: selectedCandidateIds,
+          bindingFingerprint,
+          planId: `ask-v2:semantic:${bindingFingerprint.slice(-24)}`,
+          repair,
+        });
+        if (!authorization.ok) return denied('compile_and_run_semantic', authorization.reasonCode);
+        const selection = {
+          metrics: metricCapabilities.map((handle) => handle.runtimeName),
+          ...(semanticEngine ? { engine: semanticEngine } : {}),
+          ...(dimensionCapabilities.length ? { dimensions: dimensionCapabilities.map((handle) => handle.runtimeName) } : {}),
+          ...(timeCapabilities.length ? {
+            timeDimension: {
+              name: timeCapabilities[0]!.runtimeName,
+              granularity: normalizedTime.timeGrain!,
+            },
+          } : {}),
+          ...(filterCapabilities.length ? {
+            filters: filterCapabilities.map((handle, index) => ({
+              dimension: handle.runtimeName,
+              operator: '=',
+              values: [String(semanticFilters[index]!.value)],
+            })),
+          } : {}),
+          ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
+        };
+        try {
+          const compiled = await input.semanticQueryCompiler(selection);
+          // The compiler is not an authority to switch adapters. The host
+          // froze `semanticEngine` from the project preference and the
+          // snapshot-bound capability before compilation; executing SQL that
+          // reports a different engine would silently cross that frozen
+          // target. This is a terminal execution-boundary incident, not a
+          // pre-freeze engine observation and not a same-plan repair.
+          if (compiled.engine !== semanticEngine) {
+            executionFailure = { reasonCode: 'SEMANTIC_EXECUTION_TARGET_MISMATCH', origin: 'execution' };
+            observe('compile_and_run_semantic', 'error', executionFailure.reasonCode, {
+              tier: 'semantic',
+              candidateIds: selectedCandidateIds,
+              origin: 'execution',
+              planId: state.resolvedPlan?.id,
+            });
+            finishAskAgentV2Turn(state, {
+              version: 2,
+              kind: 'execution_failure',
+              reasonCode: executionFailure.reasonCode,
+              origin: executionFailure.origin,
+              safeAction: 'inspect_execution_target',
+            });
+            return denied('compile_and_run_semantic', executionFailure.reasonCode);
+          }
+          try {
+            const result = await input.executeGeneratedSql(compiled.sql);
+            completed = { tier: 'semantic', result: { ...result, trustState: 'governed', answerTier: 'semantic_metric', semanticTrace: compiled.trace } };
+            observe('compile_and_run_semantic', 'executed', 'SEMANTIC_RESULT_VALIDATED', { tier: 'semantic', candidateIds: selectedCandidateIds, origin: 'execution', planId: state.resolvedPlan?.id });
+            return { executed: true, tier: 'semantic', rowCount: result.rowCount, engine: compiled.engine };
+          } catch {
+            executionFailure = { reasonCode: 'SEMANTIC_EXECUTION_FAILED', origin: 'execution' };
+            observe('compile_and_run_semantic', 'error', executionFailure.reasonCode, { tier: 'semantic', candidateIds: selectedCandidateIds, origin: 'execution', planId: state.resolvedPlan?.id });
+            return denied('compile_and_run_semantic', executionFailure.reasonCode);
+          }
+        } catch {
+          // Compilation happens after the host has frozen the exact semantic
+          // capability. It is therefore a terminal same-plan failure, not a
+          // pre-freeze signal to silently select a different route.
+          executionFailure = { reasonCode: 'SEMANTIC_COMPILATION_FAILED', origin: 'execution' };
+          observe('compile_and_run_semantic', 'error', executionFailure.reasonCode, { tier: 'semantic', candidateIds: selectedCandidateIds, origin: 'execution', planId: state.resolvedPlan?.id });
+          return denied('compile_and_run_semantic', executionFailure.reasonCode);
+        }
+      }),
+      safeTool('inspect_relational_context', 'Inspect admitted qualified relation/column cards and atomic relationship path handles.', {
+        type: 'object', properties: {}, additionalProperties: false,
+      }, async () => {
+        const candidates = visibleCandidates().filter((candidate) => candidate.kind === 'dql_modeling' || candidate.kind === 'dbt_model' || candidate.kind === 'dbt_source' || candidate.kind === 'sql_column' || candidate.kind === 'sql_table' || (candidate.relationshipEvidence?.length ?? 0) > 0);
+        const paths = state.relationshipPathHandles.map((path) => ({
+          id: path.id,
+          edgeIds: path.edgeIds,
+          ...(path.candidateIds?.length ? { candidateIds: path.candidateIds } : {}),
+        }));
+        // Relationship cards are evidence, not an executable governed-DQL
+        // route by themselves.  Report them to the planner, but only retain
+        // an `available` governed tier when this invocation has the bound
+        // executor that can consume the immutable path closure. Otherwise
+        // the same snapshot may advance safely to exploratory SQL.
+        const hasBoundRelationalExecutor = Boolean(
+          (input.authorizeAskV2DqlArtifact && input.executeAskV2DqlArtifact)
+          || (!input.askAgentV2Workspace && input.executeDqlArtifact),
+        );
+        const hasRelationalEvidence = candidates.length > 0 || paths.length > 0;
+        setV2TierStateFromWorkspace(state, workspace, 'governed_relational', {
+          status: hasRelationalEvidence && hasBoundRelationalExecutor ? 'available' : 'unavailable',
+          candidateIds: candidates.map(v2CandidateId),
+          reasonCode: hasRelationalEvidence
+            ? hasBoundRelationalExecutor
+              ? 'GOVERNED_RELATIONAL_CONTEXT_AVAILABLE'
+              : 'GOVERNED_RELATIONAL_EXECUTION_UNAVAILABLE'
+            : 'GOVERNED_RELATIONAL_CONTEXT_EMPTY',
+        });
+        if (!state.controllerTier && hasRelationalEvidence && hasBoundRelationalExecutor) {
+          state.controllerTier = 'governed_relational';
+        }
+        observe('inspect_relational_context', candidates.length || paths.length ? 'eligible' : 'unavailable', candidates.length || paths.length ? 'relationship_paths_available' : 'relationship_paths_empty', { candidateIds: candidates.map(v2CandidateId), origin: 'retrieval' });
+        return { cards: candidates.map((candidate) => v2SafeCard(candidate, workspace)), relationshipPathHandles: paths };
+      }),
+      safeTool('compile_and_run_dql', 'Compile one DQL program only from admitted qualified IDs and atomic relationship path handles, then execute it as governed relational.', {
+        type: 'object', properties: {
+          dqlProgram: { type: 'string', minLength: 1, maxLength: 30000 },
+          measureIds: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 8 },
+          dimensionIds: { type: 'array', items: { type: 'string' }, maxItems: 16 },
+          relationshipPathIds: { type: 'array', items: { type: 'string' }, maxItems: 8 },
+          expectedOutputIds: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 24 }, repair: { type: 'boolean' },
+        }, required: ['dqlProgram', 'measureIds', 'expectedOutputIds'], additionalProperties: false,
+      }, async (args) => {
+        if (!requireInspections('compile_and_run_dql', ['inspect_certified_candidates', 'inspect_semantic_candidates', 'inspect_relational_context'])) return denied('compile_and_run_dql', 'REQUIRED_TIER_INSPECTION_MISSING');
+        const program = typeof args.dqlProgram === 'string' ? args.dqlProgram.trim() : '';
+        const measureIds = v2StringArray(args.measureIds, 8);
+        const dimensionIds = v2StringArray(args.dimensionIds, 16);
+        const outputIds = v2StringArray(args.expectedOutputIds, 24);
+        const pathIds = v2StringArray(args.relationshipPathIds, 8);
+        const selectedCandidateIds = [...new Set([...measureIds, ...dimensionIds, ...outputIds])];
+        const selected = resolveCandidates([...measureIds, ...dimensionIds, ...outputIds]);
+        const selectedPaths = state.relationshipPathHandles.filter((path) => pathIds.includes(path.id));
+        const allowedPaths = new Set(state.relationshipPathHandles.map((path) => path.id));
+        const pathCandidateIds = new Set(selectedPaths.flatMap((path) => path.candidateIds ?? []));
+        const relationLike = (candidate: AgentEvidenceCandidate) => candidate.kind === 'dql_modeling'
+          || candidate.kind === 'dbt_model'
+          || candidate.kind === 'dbt_source'
+          || candidate.kind === 'sql_column'
+          || candidate.kind === 'sql_table';
+        const unboundRelation = selected?.some((candidate) => relationLike(candidate)
+          && pathIds.length > 0
+          && pathCandidateIds.size > 0
+          && !pathCandidateIds.has(v2CandidateId(candidate)));
+        const v2DqlExecutor = input.executeAskV2DqlArtifact;
+        const v2DqlAuthorizer = input.authorizeAskV2DqlArtifact;
+        const legacyDqlExecutor = !input.askAgentV2Workspace ? input.executeDqlArtifact : undefined;
+        const v2DqlHostAvailable = Boolean(v2DqlAuthorizer && v2DqlExecutor);
+        const legacyDqlHostAvailable = Boolean(!input.askAgentV2Workspace && legacyDqlExecutor);
+        if (!program || !selected || pathIds.some((id) => !allowedPaths.has(id)) || unboundRelation || (!v2DqlHostAvailable && !legacyDqlHostAvailable)) {
+          const reason = !selected || pathIds.some((id) => !allowedPaths.has(id)) || unboundRelation
+            ? 'GOVERNED_RELATIONAL_IDENTIFIER_OR_PATH_NOT_ADMITTED'
+            : 'GOVERNED_RELATIONAL_EXECUTION_UNAVAILABLE';
+          observe('compile_and_run_dql', 'ineligible', reason, { tier: 'governed_relational', candidateIds: selectedCandidateIds, origin: 'validation' });
+          return denied('compile_and_run_dql', reason);
+        }
+        // The local host mints a V2-only authorization before compiling the
+        // DQL program.  This is the frozen boundary: the compiler and
+        // warehouse may not cause the model to switch route afterwards. A
+        // tiny in-memory adapter remains for host-neutral unit tests only;
+        // the production local runtime always supplies the authorizer.
+        try {
+          const artifact = {
+            kind: 'sql_block', source: program, name: 'V2 governed relational program',
+            metrics: measureIds, dimensions: dimensionIds, trustState: 'governed',
+          } as const;
+          const bindingFingerprint = v2ExecutionBindingFingerprint({
+            state,
+            tier: 'governed_relational',
+            candidateIds: selectedCandidateIds,
+            pathIds,
+            bindings: {
+              measureIds,
+              dimensionIds,
+              outputIds,
+              // A repair cannot change DQL semantics under the same frozen
+              // candidate/path closure. This digest covers the normalized
+              // complete DQL program plus the selected output binding.
+              logicalPlanFingerprint: v2GovernedDqlLogicalPlanFingerprint({
+                dqlProgram: program,
+                measureIds,
+                dimensionIds,
+                outputIds,
+              }),
+            },
+          });
+          const repair = args.repair === true;
+          // The host capability is the freeze boundary, but it must never be
+          // minted for a request the V2 kernel has already rejected (most
+          // importantly, a widened relationship closure after the first
+          // governed plan freezes).  This non-mutating preflight deliberately
+          // precedes host authorization; `authorizeExecution` below remains
+          // the single place that records the authorization/freeze receipt.
+          const preflight = kernel.canCall('compile_and_run_dql', {
+            repair,
+            candidateIds: selectedCandidateIds,
+            relationshipPathIds: pathIds,
+            bindingFingerprint,
+          });
+          if (!preflight.ok) {
+            observe('compile_and_run_dql', 'denied', preflight.reasonCode ?? 'ASK_V2_TOOL_DENIED', {
+              tier: 'governed_relational',
+              candidateIds: selectedCandidateIds,
+              origin: 'validation',
+              ...(preflight.safeNextTools?.length ? { safeAction: `use:${preflight.safeNextTools.join(',')}` } : {}),
+            });
+            return denied('compile_and_run_dql', preflight.reasonCode ?? 'ASK_V2_TOOL_DENIED');
+          }
+          const hostAuthorization = v2DqlHostAvailable
+            ? await v2DqlAuthorizer!({
+                version: 2,
+                candidateIds: selectedCandidateIds,
+                expectedOutputIds: outputIds,
+                relationshipPathIds: pathIds,
+                snapshotId: state.snapshotId,
+                planFingerprint: bindingFingerprint,
+                repair,
+              })
+            : undefined;
+          const authorization = authorizeExecution({
+            tool: 'compile_and_run_dql',
+            tier: 'governed_relational',
+            candidateIds: selectedCandidateIds,
+            relationshipPathIds: pathIds,
+            bindingFingerprint,
+            planId: hostAuthorization?.planId ?? `ask-v2:governed:${bindingFingerprint.slice(-24)}`,
+            repair,
+            ...(hostAuthorization?.targetFingerprint ? { targetFingerprint: hostAuthorization.targetFingerprint } : {}),
+          });
+          if (!authorization.ok) return denied('compile_and_run_dql', authorization.reasonCode);
+          const result = v2DqlHostAvailable
+            ? await v2DqlExecutor!({
+                version: 2,
+                artifact,
+                candidateIds: selectedCandidateIds,
+                expectedOutputIds: outputIds,
+                relationshipPathIds: pathIds,
+                snapshotId: state.snapshotId,
+                planFingerprint: bindingFingerprint,
+                ...(hostAuthorization ? { authorizationPlanId: hostAuthorization.planId } : {}),
+                repair,
+              })
+            : await legacyDqlExecutor!(artifact);
+          completed = { tier: 'governed_relational', result: { ...result, trustState: 'governed', answerTier: 'governed_relational' } };
+          observe('compile_and_run_dql', 'executed', 'GOVERNED_RELATIONAL_RESULT_VALIDATED', { tier: 'governed_relational', candidateIds: selectedCandidateIds, relationshipPathIds: pathIds, origin: 'execution', planId: state.resolvedPlan?.id });
+          return { executed: true, tier: 'governed_relational', rowCount: result.rowCount, relationshipPathIds: pathIds };
+        } catch (error) {
+          executionFailure = v2ExecutionFailureFromError(error, 'GOVERNED_RELATIONAL_EXECUTION_FAILED');
+          observe('compile_and_run_dql', 'error', executionFailure.reasonCode, { tier: 'governed_relational', candidateIds: selectedCandidateIds, relationshipPathIds: pathIds, origin: executionFailure.origin, planId: state.resolvedPlan?.id });
+          return denied('compile_and_run_dql', executionFailure.reasonCode);
+        }
+      }),
+      safeTool('validate_and_run_sql', 'Validate one read-only SQL proposal against admitted output IDs, mint a one-use capability, and execute it as review-required.', {
+        type: 'object', properties: { sql: { type: 'string', minLength: 1, maxLength: 30000 }, expectedOutputIds: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 24 }, repair: { type: 'boolean' } }, required: ['sql', 'expectedOutputIds'], additionalProperties: false,
+      }, async (args) => {
+        if (!requireInspections('validate_and_run_sql', ['inspect_certified_candidates', 'inspect_semantic_candidates', 'inspect_relational_context'])) return denied('validate_and_run_sql', 'REQUIRED_TIER_INSPECTION_MISSING');
+        const sql = typeof args.sql === 'string' ? args.sql : '';
+        const outputIds = v2StringArray(args.expectedOutputIds, 24);
+        const outputs = resolveCandidates(outputIds);
+        const validation = sql && input.contextPack ? validateSqlAgainstLocalContext(sql, input.contextPack) : { ok: false };
+        const v2Prepare = input.prepareAskV2ExploratorySqlExecution;
+        const legacyPrepare = !input.askAgentV2Workspace ? input.prepareExploratorySqlExecution : undefined;
+        if (!outputs || !validation.ok || (!v2Prepare && !legacyPrepare) || !input.executeAgenticGeneratedSql) {
+          const reason = !outputs ? 'EXPLORATORY_OUTPUT_IDENTIFIER_NOT_ADMITTED' : validation.ok ? 'EXPLORATORY_EXECUTION_CAPABILITY_UNAVAILABLE' : 'EXPLORATORY_SQL_VALIDATION_FAILED';
+          observe('validate_and_run_sql', 'ineligible', reason, { tier: 'exploratory_sql', candidateIds: outputIds, origin: 'validation' });
+          return denied('validate_and_run_sql', reason);
+        }
+        try {
+          const selectedCandidateIds = [...new Set(outputIds)];
+          const repair = args.repair === true;
+          const bindingFingerprint = v2ExecutionBindingFingerprint({
+            state,
+            tier: 'exploratory_sql',
+            candidateIds: selectedCandidateIds,
+            bindings: { outputIds },
+          });
+          const prepared = v2Prepare
+            ? await v2Prepare({
+                version: 2,
+                sql,
+                expectedOutputIds: outputIds,
+                selectedCandidateIds,
+                snapshotId: state.snapshotId,
+                planFingerprint: bindingFingerprint,
+                repair,
+              })
+            : await legacyPrepare!(sql);
+          const authorization = authorizeExecution({
+            tool: 'validate_and_run_sql',
+            tier: 'exploratory_sql',
+            candidateIds: selectedCandidateIds,
+            bindingFingerprint,
+            planId: prepared.freeze?.planId ?? `ask-v2:exploratory:${bindingFingerprint.slice(-24)}`,
+            repair,
+            ...(prepared.freeze?.targetFingerprint ? { targetFingerprint: prepared.freeze.targetFingerprint } : {}),
+          });
+          if (!authorization.ok) return denied('validate_and_run_sql', authorization.reasonCode);
+          const result = await input.executeAgenticGeneratedSql(prepared.capability, sql);
+          completed = { tier: 'exploratory_sql', result: { ...result, trustState: 'review_required', answerTier: 'exploratory_sql' } };
+          observe('validate_and_run_sql', 'executed', 'EXPLORATORY_RESULT_VALIDATED', { tier: 'exploratory_sql', candidateIds: outputIds, origin: 'execution', planId: state.resolvedPlan?.id });
+          return { executed: true, tier: 'exploratory_sql', rowCount: result.rowCount, reviewRequired: true };
+        } catch (error) {
+          executionFailure = v2ExecutionFailureFromError(error, 'EXPLORATORY_EXECUTION_FAILED');
+          observe('validate_and_run_sql', 'error', executionFailure.reasonCode, { tier: 'exploratory_sql', candidateIds: outputIds, origin: executionFailure.origin, planId: state.resolvedPlan?.id });
+          return denied('validate_and_run_sql', executionFailure.reasonCode);
+        }
+      }),
+      safeTool('search_values', 'Search one host-approved value index to resolve a member. It never reads result rows.', {
+        type: 'object', properties: { candidateId: { type: 'string' }, query: { type: 'string', minLength: 1, maxLength: 200 } }, required: ['candidateId', 'query'], additionalProperties: false,
+      }, async (args) => {
+        const candidateId = typeof args.candidateId === 'string' ? args.candidateId : '';
+        const candidate = resolveCandidates([candidateId])?.[0];
+        const reason = candidate ? 'VALUE_SEARCH_ADAPTER_NOT_BOUND' : 'VALUE_SEARCH_IDENTIFIER_NOT_ADMITTED';
+        observe('search_values', candidate ? 'unavailable' : 'ineligible', reason, { candidateIds: candidateId ? [candidateId] : [], origin: 'retrieval' });
+        return denied('search_values', reason);
+      }),
+      safeTool('request_clarification', 'Request one stable clarification only when multiple executable business meanings remain.', {
+        type: 'object', properties: { message: { type: 'string', minLength: 1, maxLength: 1000 }, options: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, label: { type: 'string' } }, required: ['id', 'label'], additionalProperties: false }, minItems: 2, maxItems: 8 } }, required: ['message', 'options'], additionalProperties: false,
+      }, async (args) => {
+        const message = typeof args.message === 'string' ? args.message.trim() : '';
+        const options = Array.isArray(args.options) ? args.options.slice(0, 8).flatMap((option) => option && typeof option === 'object' && typeof (option as Record<string, unknown>).id === 'string' && typeof (option as Record<string, unknown>).label === 'string'
+          ? [{ id: String((option as Record<string, unknown>).id), label: String((option as Record<string, unknown>).label) }]
+          : []) : [];
+        const issued = materialClarificationChoices();
+        const issuedIds = new Set(issued.map((choice) => choice.id));
+        const requestedIds = options.map((option) => option.id);
+        const requestedUniqueIds = new Set(requestedIds);
+        const exactIssuedSet = issued.length >= 2
+          && requestedIds.length === issued.length
+          && requestedUniqueIds.size === issued.length
+          && requestedIds.every((id) => issuedIds.has(id));
+        if (!issued.length) {
+          const safeNextTools = kernel.toolPolicy().allowedToolNames.filter((tool) => tool !== 'request_clarification');
+          observe('request_clarification', 'ineligible', 'ASK_V2_CLARIFICATION_NOT_MATERIALLY_AMBIGUOUS', {
+            origin: 'validation',
+            candidateIds: [],
+            ...(safeNextTools.length ? { safeAction: `use:${safeNextTools.join(',')}` } : {}),
+          });
+          return denied('request_clarification', 'ASK_V2_CLARIFICATION_NOT_MATERIALLY_AMBIGUOUS', safeNextTools);
+        }
+        if (!message) {
+          observe('request_clarification', 'ineligible', 'ASK_V2_CLARIFICATION_MESSAGE_INVALID', {
+            origin: 'validation',
+            candidateIds: issued.flatMap((choice) => choice.candidateIds),
+            safeAction: 'use:request_clarification',
+          });
+          return denied('request_clarification', 'ASK_V2_CLARIFICATION_MESSAGE_INVALID', ['request_clarification']);
+        }
+        if (!exactIssuedSet) {
+          observe('request_clarification', 'ineligible', 'ASK_V2_CLARIFICATION_OPTIONS_INVALID', {
+            origin: 'validation',
+            candidateIds: issued.flatMap((choice) => choice.candidateIds),
+            safeAction: 'use:request_clarification',
+          });
+          return denied('request_clarification', 'ASK_V2_CLARIFICATION_OPTIONS_INVALID', ['request_clarification']);
+        }
+        // The LLM supplies only opaque IDs. Labels are re-bound to the
+        // host-issued stable set, so an invented/reworded option can never
+        // become a persisted conversational selection.
+        const stableOptions = issued.map((choice) => ({ id: choice.id, label: choice.label }));
+        clarification = { message, options: stableOptions };
+        observe('request_clarification', 'needs_input', 'ASK_V2_CLARIFICATION_REQUESTED', {
+          origin: 'agent_control',
+          candidateIds: issued.flatMap((choice) => choice.candidateIds),
+        });
+        // The transport may stop only after the host has recorded this stable
+        // clarification outcome.  A rejected clarification returns the normal
+        // denied shape from `safeTool` and must remain a pre-freeze observation
+        // so the controller can take its declared safe-next action.
+        return { finished: true, clarificationId: `clarification:${state.snapshotId ?? 'snapshot'}`, options: stableOptions };
+      }),
+      safeTool('finish_answer', 'Finish after an execution tool completed, or finish a definition/business/general answer from retrieved context only.', {
+        type: 'object', properties: {
+          answer: { type: 'string', minLength: 1, maxLength: 8000 },
+          /** Required only for a governed business-context answer. */
+          evidenceIds: { type: 'array', items: { type: 'string' }, maxItems: 24 },
+      }, required: ['answer'], additionalProperties: false,
+      }, async (args) => {
+        const answer = typeof args.answer === 'string' ? args.answer : undefined;
+        const evidenceIds = v2StringArray(args.evidenceIds, 24);
+        const contextual = state.turnClass === 'definition' || state.turnClass === 'business_context';
+        const inspected = state.observations.some((observation) => observation.tool === 'inspect_business_context'
+          && observation.outcome === 'eligible');
+        const selectedBusinessEvidence = evidenceIds?.filter((id) => inspectedBusinessContextIds.includes(id)) ?? [];
+        if (!completed && contextual && (!inspected || selectedBusinessEvidence.length === 0)) {
+          observe('finish_answer', 'ineligible', 'BUSINESS_CONTEXT_EVIDENCE_REQUIRED', {
+            origin: 'validation',
+            candidateIds: selectedBusinessEvidence,
+            safeAction: 'inspect_business_context_then_select_evidence',
+          });
+          return denied('finish_answer', 'BUSINESS_CONTEXT_EVIDENCE_REQUIRED');
+        }
+        observe('finish_answer', 'eligible', completed ? 'ASK_V2_RESULT_NARRATED' : 'ASK_V2_CONTEXTUAL_ANSWER', {
+          origin: completed ? 'narration' : 'agent_control',
+          candidateIds: completed ? [] : selectedBusinessEvidence,
+        });
+        // Do not retain narration from a rejected early finish proposal. A
+        // later validated execution must either receive a new host-approved
+        // finish narration or fall back to its deterministic fact narration.
+        finalText = answer;
+        return { finished: true, hasResult: Boolean(completed), evidenceIds: selectedBusinessEvidence };
+      }),
+    ];
+    // `finish_answer` is an authoritative host control boundary.  Text-only
+    // provider adapters normally stop in the agent loop immediately after the
+    // tool returns, but keep the boundary at this higher layer as well: a
+    // transport wrapper must never send another planner request after the
+    // validated result and its narration have both been recorded.
+    const terminalNarrationReady = () => Boolean(completed && state.observations.some((observation) => (
+      observation.tool === 'finish_answer'
+      && observation.outcome === 'eligible'
+      && observation.reasonCode === 'ASK_V2_RESULT_NARRATED'
+    )));
+    const terminalAwareProvider: AgentProvider = {
+      name: input.provider.name,
+      available: () => input.provider.available(),
+      generate: async (...args) => {
+        if (terminalNarrationReady()) return finalText ?? '';
+        return input.provider.generate(...args);
+      },
+      ...(input.provider.generateWithTools ? {
+        generateWithTools: async (...args: Parameters<NonNullable<AgentProvider['generateWithTools']>>) => {
+          if (terminalNarrationReady()) return finalText ?? '';
+          return input.provider.generateWithTools!(...args);
+        },
+      } : {}),
+    };
+    let loop: Awaited<ReturnType<typeof runAgenticToolLoopDetailed>>;
+    try {
+      loop = await runAgenticToolLoopDetailed(terminalAwareProvider, [
+        { role: 'system', content: 'Use only the supplied canonical Ask tools. First inspect context. Choose certified, then semantic, then governed relational/DQL, then review-required exploratory SQL. For a semantic time question, compile_and_run_semantic must include both an admitted timeDimensionId and its declared timeGrain. Never write SQL outside validate_and_run_sql. Do not claim a result until a run tool returns executed.' },
+        { role: 'user', content: input.question },
+      ], tools, {
+        ...(input.signal ? { signal: input.signal } : {}),
+        // The V2 tool runtime owns one initial agent-control transport and
+        // then bounded follow-ups.  The text loop advances the additive
+        // phase after the first send; native transports do the same at their
+        // physical attempt boundary in the provider wrapper.
+        dispatchPhase: 'agent_control',
+        egressPurpose: 'answer_generation',
+        maxToolCalls: limits?.maxToolCalls ?? (state.turnClass === 'research' ? 24 : state.turnClass === 'analytics' || state.turnClass === 'prior_result' ? 8 : 4),
+        maxProviderDispatches: limits?.maxProviderDispatches ?? (state.turnClass === 'research' ? 12 : state.turnClass === 'analytics' || state.turnClass === 'prior_result' ? 6 : 2),
+        // The kernel owns current availability. Native transports evaluate it
+        // before each API tool declaration; text transports receive the same
+        // update after every observation. This reserves a final *LLM action*
+        // when discovery has already established a compatible semantic tier.
+        getCurrentToolPolicy: () => kernel.toolPolicy(),
+        // Native OpenAI/Claude loops and text-protocol turns both pass through
+        // the same provider wrapper. It calls this for every physical send;
+        // a provider cannot label its own discovery/execution request as
+        // narration because `completed` changes only after the host validates
+        // an execution result above.
+        resolvePhysicalDispatchPhase: () => (
+          requiredNarrationControl() ? 'narration' : undefined
+        ),
+        providerPayloadGuard: input.providerPayloadGuard,
+      });
+    } catch (error) {
+      // A physical provider failure that arrives after a validated result must
+      // not erase that result.  Prefer the explicit host `finish_answer`, but
+      // if its transport turn fails, close with deterministic result facts.
+      const code = error && typeof error === 'object' && 'code' in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+      const reasonCode = code === 'RUN_SOFT_TARGET_EXCEEDED' || code === 'RUN_DEADLINE_INSUFFICIENT'
+        ? code
+        : 'ASK_V2_PROVIDER_AGENT_CONTROL_FAILED';
+      const preserved = preserveCompletedResult(reasonCode, reasonCode === 'ASK_V2_PROVIDER_AGENT_CONTROL_FAILED' ? 'provider' : 'narration');
+      if (preserved) return preserved;
+      observe('finish_answer', 'error', reasonCode, {
+        origin: reasonCode === 'ASK_V2_PROVIDER_AGENT_CONTROL_FAILED' ? 'provider' : 'narration',
+        ...(reasonCode === 'ASK_V2_PROVIDER_AGENT_CONTROL_FAILED' ? {} : {
+          provider: {
+            phase: 'narration' as const,
+            cause: 'run_deadline' as const,
+            retryable: false,
+            safeAction: 'retry_after_run_deadline',
+          },
+        }),
+      });
+      return askV2NoAnswer(input, 'provider_failure', reasonCode, reasonCode === 'ASK_V2_PROVIDER_AGENT_CONTROL_FAILED' ? 'provider' : 'narration');
+    }
+    // A native provider can report a tool-loop budget terminal after it has
+    // already completed the canonical host `finish_answer` callback. The
+    // callback owns the final narration and validated result; do not let a
+    // transport's attempt to obtain another planner turn overwrite it with a
+    // synthetic budget failure. Text transports stop at the same boundary in
+    // `runTextProtocolToolLoopDetailed`.
+    const completedAndNarrated = Boolean(completed && state.observations.some((observation) => (
+      observation.tool === 'finish_answer'
+      && observation.outcome === 'eligible'
+      && observation.reasonCode === 'ASK_V2_RESULT_NARRATED'
+    )));
+    if (completedAndNarrated) return askV2ExecutedAnswer(input, completed!, finalText ?? loop.text);
+    // A typed semantic validation observation is more useful than a generic
+    // no-result when the controller has no remaining correction turn. This
+    // includes a missing/ambiguous explicit time axis as well as host-owned
+    // engine readiness. A frozen execution boundary still takes precedence.
+    const terminalSemanticValidationReasonCodes = new Set([
+      'SEMANTIC_ENGINE_UNAVAILABLE',
+      'SEMANTIC_TIME_DIMENSION_INVALID',
+      'SEMANTIC_TIME_GRAIN_WITHOUT_TIME_DIMENSION',
+      'SEMANTIC_TIME_GRAIN_NOT_DECLARED',
+      'SEMANTIC_TIME_GRAIN_MISMATCH',
+      'SEMANTIC_TIME_DIMENSION_INCOMPATIBLE',
+      'SEMANTIC_TIME_DIMENSION_COMPATIBILITY_UNDECLARED',
+      'SEMANTIC_TIME_DIMENSION_UNAVAILABLE',
+      'SEMANTIC_TIME_DIMENSION_AMBIGUOUS',
+      'SEMANTIC_TIME_BINDING_COMPLETION_EXHAUSTED',
+      'SEMANTIC_FISCAL_CALENDAR_REQUIRED',
+      'SEMANTIC_FISCAL_FILTER_INVALID',
+    ]);
+    const semanticValidationObservation = [...state.observations].reverse().find((observation) => (
+      observation.tool === 'compile_and_run_semantic'
+      && observation.origin === 'validation'
+      && terminalSemanticValidationReasonCodes.has(observation.reasonCode)
+    ));
+    const terminalSemanticValidationObservation = () => {
+      // Once a plan has frozen, a historical pre-freeze engine selection
+      // rejection is no longer the terminal truth. The compiler/connection/
+      // result boundary owns the incident, and may allow only its same-plan
+      // repair. Never let a stale validation observation mask it.
+      if (!semanticValidationObservation || state.resolvedPlan?.frozen || executionFailure) return undefined;
+      const safeAction = semanticValidationObservation.safeAction ?? 'use:compile_and_run_semantic';
+      finishAskAgentV2Turn(state, {
+        version: 2,
+        kind: 'gap',
+        reasonCode: semanticValidationObservation.reasonCode,
+        origin: 'validation',
+        safeAction,
+      });
+      return askV2NoAnswer(input, 'gap', semanticValidationObservation.reasonCode, 'validation');
+    };
+    if (loop.stop !== 'final') {
+      const reasonCode = loop.stop === 'tool_budget_exhausted'
+        ? 'ASK_TOOL_BUDGET_EXHAUSTED'
+        : loop.stop === 'provider_dispatch_budget_exhausted'
+          ? 'ASK_PROVIDER_DISPATCH_BUDGET_EXHAUSTED'
+          : loop.stop === 'invalid_tool_response'
+            ? 'ASK_V2_INVALID_TOOL_RESPONSE'
+          : loop.stop === 'run_soft_target_exceeded'
+            ? 'RUN_SOFT_TARGET_EXCEEDED'
+            : 'RUN_DEADLINE_INSUFFICIENT';
+      const narrationDeadline = loop.stop === 'run_soft_target_exceeded' || loop.stop === 'run_deadline_insufficient';
+      const providerDispatchBudget = loop.stop === 'provider_dispatch_budget_exhausted';
+      const invalidToolResponse = loop.stop === 'invalid_tool_response';
+      const terminalOrigin = narrationDeadline
+        ? 'narration' as const
+        : providerDispatchBudget || invalidToolResponse
+          ? 'provider' as const
+          : 'agent_control' as const;
+      const preserved = preserveCompletedResult(reasonCode, terminalOrigin);
+      if (preserved) return preserved;
+      // Execution is already frozen and has reached a physical boundary. Its
+      // typed failure remains authoritative even if the provider later uses
+      // its remaining dispatches without producing a finish control.
+      if (executionFailure) {
+        finishAskAgentV2Turn(state, {
+          version: 2,
+          kind: 'execution_failure',
+          reasonCode: executionFailure.reasonCode,
+          origin: executionFailure.origin,
+          safeAction: executionFailure.reasonCode === 'SEMANTIC_EXECUTION_TARGET_MISMATCH'
+            ? 'inspect_execution_target'
+            : 'retry_same_frozen_plan',
+        });
+        return askV2NoAnswer(
+          input,
+          'execution_failure',
+          executionFailure.reasonCode,
+          executionFailure.origin,
+          executionFailure.reasonCode === 'SEMANTIC_EXECUTION_TARGET_MISMATCH'
+            ? 'inspect_execution_target'
+            : undefined,
+        );
+      }
+      // The engine binding itself is the highest-fidelity terminal incident.
+      // Do not overwrite it with a later transport budget marker merely
+      // because the controller did not correct the allowed same-tool input.
+      const semanticTerminal = terminalSemanticValidationObservation();
+      if (semanticTerminal) return semanticTerminal;
+      observe('finish_answer', 'error', reasonCode, {
+        origin: terminalOrigin,
+        ...(narrationDeadline ? {
+          provider: {
+            phase: 'narration' as const,
+            cause: 'run_deadline' as const,
+            retryable: false,
+            safeAction: 'retry_after_run_deadline',
+          },
+        } : providerDispatchBudget ? {
+          provider: {
+            phase: 'tool_followup' as const,
+            cause: 'dispatch_budget' as const,
+            retryable: false,
+            safeAction: 'inspect_run',
+          },
+        } : invalidToolResponse ? {
+          provider: {
+            phase: 'tool_followup' as const,
+            cause: 'unknown' as const,
+            retryable: false,
+            safeAction: 'retry_with_required_tool',
+          },
+        } : {}),
+      });
+      finishAskAgentV2Turn(state, {
+        version: 2,
+        kind: invalidToolResponse ? 'provider_failure' : 'budget_exhausted',
+        reasonCode,
+        origin: terminalOrigin,
+        safeAction: narrationDeadline
+          ? 'retry_after_run_deadline'
+          : invalidToolResponse
+            ? 'retry_with_required_tool'
+          : loop.stop === 'tool_budget_exhausted'
+          ? 'inspect_tool_progression_then_retry'
+          : 'retry_within_provider_dispatch_budget',
+      });
+      return askV2NoAnswer(input, invalidToolResponse ? 'provider_failure' : 'budget_exhausted', reasonCode, terminalOrigin, invalidToolResponse ? 'retry_with_required_tool' : undefined);
+    }
+    if (clarification) return {
+      kind: 'no_answer', sourceTier: 'no_answer', certification: 'analyst_review_required', reviewStatus: 'analyst_review_required',
+      refusalCode: 'ambiguous', text: clarification.message, answer: clarification.message, citations: [], considered: [],
+      clarificationOptions: clarification.options.map((option) => ({ id: option.id, label: option.label })),
+      contextPack: input.contextPack,
+      askAgentV2Outcome: { version: 2, kind: 'clarification', reasonCode: 'ASK_V2_CLARIFICATION_REQUESTED', origin: 'agent_control' },
+    };
+    // The dynamic tool policy requires a host-validated `finish_answer`
+    // after execution. This is a defensive fallback for a legacy/custom
+    // transport that incorrectly returns a final prose turn instead: retain
+    // the validated result with deterministic facts rather than accepting
+    // unvalidated narration or turning it into a no-answer.
+    if (completed) {
+      return preserveCompletedResult('ASK_V2_TERMINAL_NARRATION_REQUIRED', 'agent_control')!;
+    }
+    // A tool that reached a physical execution boundary owns this terminal
+    // incident.  Do not convert it into a vague coverage gap or let a later
+    // contextual branch hide the connection/validation failure.
+    if (executionFailure) {
+      finishAskAgentV2Turn(state, {
+        version: 2,
+        kind: 'execution_failure',
+        reasonCode: executionFailure.reasonCode,
+        origin: executionFailure.origin,
+        safeAction: executionFailure.reasonCode === 'SEMANTIC_EXECUTION_TARGET_MISMATCH'
+          ? 'inspect_execution_target'
+          : 'retry_same_frozen_plan',
+      });
+      return askV2NoAnswer(
+        input,
+        'execution_failure',
+        executionFailure.reasonCode,
+        executionFailure.origin,
+        executionFailure.reasonCode === 'SEMANTIC_EXECUTION_TARGET_MISMATCH'
+          ? 'inspect_execution_target'
+          : undefined,
+      );
+    }
+    // A final no-tool response after this validation failure retains the same
+    // precise semantic contract terminal rather than becoming a generic
+    // no-executable-result response.
+    const semanticTerminal = terminalSemanticValidationObservation();
+    if (semanticTerminal) return semanticTerminal;
+    if (state.turnClass === 'definition' || state.turnClass === 'business_context' || state.turnClass === 'general') {
+      const text = (finalText ?? loop.text).trim() || 'I could not find enough retrieved context to answer that definition or business-context question.';
+      const contextualEvidenceBound = (state.turnClass === 'definition' || state.turnClass === 'business_context')
+        && state.observations.some((observation) => observation.tool === 'inspect_business_context'
+          && observation.outcome === 'eligible')
+        && state.observations.some((observation) => observation.tool === 'finish_answer'
+          && observation.outcome === 'eligible'
+          && observation.candidateIds.length > 0);
+      return {
+        kind: 'uncertified',
+        sourceTier: 'business_context',
+        certification: contextualEvidenceBound ? 'governed' : 'analyst_review_required',
+        reviewStatus: contextualEvidenceBound ? 'governed' : 'analyst_review_required',
+        text, answer: text, citations: [], considered: [], contextPack: input.contextPack,
+        askAgentV2Outcome: { version: 2, kind: 'finish_answer', reasonCode: contextualEvidenceBound ? 'ASK_V2_CONTEXTUAL_ANSWER' : 'ASK_V2_GENERAL_UNGROUNDED_ANSWER', origin: 'narration' },
+      };
+    }
+    const progress = kernel.toolPolicy();
+    if (progress.terminalActionToolNames?.length) {
+      observe('finish_answer', 'ineligible', 'ASK_V2_TOOL_PROGRESSION_REQUIRED', {
+        origin: 'agent_control',
+        safeAction: `use:${progress.terminalActionToolNames.join(',')}`,
+      });
+      return askV2NoAnswer(input, 'gap', 'ASK_V2_TOOL_PROGRESSION_REQUIRED', 'agent_control');
+    }
+    return askV2NoAnswer(input, 'gap', 'ASK_V2_NO_EXECUTABLE_TOOL_RESULT', 'tool');
+  };
+}
+
+interface AskV2ResearchHypothesis {
+  id: string;
+  kind: 'analytical' | 'lineage';
+  question: string;
+  /** Optional opaque host handle for an already-frozen analytical child. */
+  frozenChildId?: string;
+}
+
+/**
+ * Parse only a provider-authored explicit research plan.  There is no
+ * heuristic branch generation here: a malformed or too-thin plan remains a
+ * limited-scope observation instead of pretending that several hypotheses
+ * were investigated.
+ */
+function parseAskV2ResearchHypotheses(text: string): AskV2ResearchHypothesis[] {
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text)?.[1] ?? text;
+  let value: unknown;
+  try {
+    value = JSON.parse(fenced.trim());
+  } catch {
+    return [];
+  }
+  const raw = value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as { hypotheses?: unknown }).hypotheses
+    : undefined;
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 6).flatMap((entry, index) => {
+    if (!entry || typeof entry !== 'object') return [];
+    const record = entry as Record<string, unknown>;
+    const kind = record.kind === 'lineage' ? 'lineage' : record.kind === 'analytical' ? 'analytical' : undefined;
+    const question = typeof record.question === 'string' ? record.question.trim() : '';
+    if (!kind || !question || question.length > 1_000) return [];
+    const frozenChildId = kind === 'analytical' && typeof record.frozenChildId === 'string'
+      && record.frozenChildId.trim().length > 0
+      ? record.frozenChildId.trim()
+      : undefined;
+    // Do not persist provider-controlled labels as durable receipt IDs.
+    return [{ id: `research:branch:${index + 1}`, kind, question, ...(frozenChildId ? { frozenChildId } : {}) }];
+  });
+}
+
+function createResearchBranchState(
+  root: AskAgentStateV4,
+): AskAgentStateV4 {
+  return {
+    ...root,
+    // A child operates the ordinary V2 cascade against the exact same
+    // snapshot/workspace. It has no parent observations or frozen plan to
+    // inherit, which prevents an analytical result from becoming lineage
+    // evidence or from silently choosing a parent route.
+    turnClass: 'analytics',
+    observations: [],
+    tierAttempts: [],
+    resolvedPlan: undefined,
+    terminal: undefined,
+    terminalOutcome: undefined,
+  };
+}
+
+/**
+ * Execute a root-frozen Research child without a provider turn. The callback
+ * is a host capability captured alongside the root V2 snapshot—not a generic
+ * route/plan replay—and must return a fully frozen child receipt. This keeps a
+ * selected certified/semantic child from entering either the V1 controller or
+ * another V2 planner loop after its business meaning is already settled.
+ */
+async function runAskV2FrozenResearchChild(
+  input: AnswerLoopInput,
+  root: AskAgentStateV4,
+  workspace: AskAgentToolWorkspaceV2,
+  frozenChildId: string,
+): Promise<{ child: AskAgentStateV4; answer: AgentAnswer }> {
+  const fallback = createResearchBranchState(root);
+  const handle = workspace.frozenResearchChildren?.get(frozenChildId);
+  const fail = (reasonCode: string): { child: AskAgentStateV4; answer: AgentAnswer } => {
+    observeAskAgentV2Tool(fallback, {
+      version: 1,
+      tool: 'inspect_ask_context',
+      outcome: 'denied',
+      reasonCode,
+      candidateIds: [],
+      origin: 'validation',
+    });
+    return {
+      child: fallback,
+      answer: askV2NoAnswer(input, 'denied', reasonCode, 'validation'),
+    };
+  };
+  const retained = new Set(root.retainedCandidateIds);
+  if (!handle
+    || handle.version !== 1
+    || handle.snapshotId !== root.snapshotId
+    || handle.sourceFingerprint !== root.sourceFingerprint
+    || handle.candidateIds.length === 0
+    || handle.candidateIds.some((id) => !retained.has(id))
+    || handle.binding?.version !== 1
+    || !handle.binding.planFingerprint
+    || (handle.tier === 'certified' && (handle.binding.trustState !== 'certified' || !handle.binding.artifactRevisionFingerprint))
+    || (handle.tier === 'semantic' && (handle.binding.trustState !== 'governed' || !(handle.binding.capabilityFingerprints?.length)))) {
+    return fail('RESEARCH_FROZEN_CHILD_NOT_ADMITTED_TO_SNAPSHOT');
+  }
+  if (!handle.isCurrent()) return fail('RESEARCH_FROZEN_CHILD_CAPABILITY_STALE');
+  try {
+    const result = await handle.execute(root);
+    const child = result?.state;
+    const answer = result?.answer as AgentAnswer | undefined;
+    const plan = child?.resolvedPlan;
+    const exactCandidateSet = plan
+      && plan.candidateIds.length === handle.candidateIds.length
+      && plan.candidateIds.every((id) => handle.candidateIds.includes(id));
+    if (!child
+      || child.mode !== 'authoritative_v2'
+      || child.snapshotId !== root.snapshotId
+      || child.sourceFingerprint !== root.sourceFingerprint
+      || !plan?.frozen
+      || plan.tier !== handle.tier
+      || !exactCandidateSet
+      || plan.fingerprint !== handle.binding.planFingerprint
+      || !answer) {
+      return fail('RESEARCH_FROZEN_CHILD_CAPABILITY_MISMATCH');
+    }
+    return { child, answer };
+  } catch {
+    return fail('RESEARCH_FROZEN_CHILD_EXECUTION_FAILED');
+  }
+}
+
+/** Dedicated, read-only lineage branch. It never reuses an analytical result. */
+function runAskV2DedicatedLineageBranch(
+  state: AskAgentStateV4,
+  workspace: AskAgentToolWorkspaceV2,
+): Promise<AskV2ResearchBranchReceiptInput> {
+  const relationCandidates = workspace.candidates
+    .filter((candidate) => state.retainedCandidateIds.includes(v2CandidateId(candidate)))
+    .filter((candidate) => candidate.kind === 'dql_modeling'
+      || candidate.kind === 'dbt_model'
+      || candidate.kind === 'dbt_source'
+      || candidate.kind === 'sql_column'
+      || candidate.kind === 'sql_table');
+  const paths = state.relationshipPathHandles;
+  const evidenceHandleIds = paths.length > 0
+    ? paths.map((path) => path.id)
+    : relationCandidates.map(v2CandidateId).slice(0, 24);
+  const hostProgram = workspace.runDedicatedLineageProgram;
+  if (hostProgram) {
+    // The root-frozen program only accepts one exact admitted graph target.
+    // A broad relation list is context, not authority to pick a branch target
+    // by lexical order; report it as limited/ambiguous rather than inventing a
+    // structural path.
+    const targetCandidateIds = relationCandidates.length === 1
+      ? [v2CandidateId(relationCandidates[0]!)]
+      : [];
+    if (targetCandidateIds.length === 0) {
+      observeAskAgentV2Tool(state, {
+        version: 1,
+        tool: 'inspect_relational_context',
+        outcome: 'ambiguous',
+        tier: 'governed_relational',
+        reasonCode: 'RESEARCH_LINEAGE_TARGET_AMBIGUOUS',
+        candidateIds: relationCandidates.map(v2CandidateId),
+        origin: 'validation',
+      });
+      return Promise.resolve({
+        id: 'pending',
+        verdict: 'inconclusive',
+        evidenceHandleIds: [],
+        lineageProgram: 'dedicated',
+      });
+    }
+    try {
+      const lineage = hostProgram({
+        snapshotId: state.snapshotId,
+        targetCandidateIds,
+        relationshipPathIds: paths.map((path) => path.id),
+      });
+      const terminallyUnavailable = lineage.status === 'missing'
+        || lineage.status === 'ambiguous'
+        || lineage.status === 'stale'
+        || lineage.status === 'unavailable';
+      observeAskAgentV2Tool(state, {
+        version: 1,
+        tool: 'inspect_relational_context',
+        outcome: terminallyUnavailable ? 'unavailable' : 'executed',
+        tier: 'governed_relational',
+        reasonCode: terminallyUnavailable
+          ? `RESEARCH_LINEAGE_${lineage.status.toUpperCase()}`
+          : 'RESEARCH_DEDICATED_LINEAGE_EVIDENCE',
+        candidateIds: targetCandidateIds,
+        origin: 'tool',
+      });
+      return Promise.resolve({
+        id: 'pending',
+        // A structural graph is deliberately not a causal analytic claim. A
+        // completed lineage receipt remains inconclusive even when it found
+        // dependencies; its validator handles are carried for synthesis.
+        verdict: 'inconclusive',
+        evidenceHandleIds: lineage.evidenceHandleIds.slice(0, 24),
+        ...(lineage.validatorEvidenceHandleIds?.length
+          ? { validatorEvidenceHandleIds: lineage.validatorEvidenceHandleIds.slice(0, 24) }
+          : {}),
+        ...(lineage.counterEvidenceHandleIds?.length
+          ? { counterEvidenceHandleIds: lineage.counterEvidenceHandleIds.slice(0, 24) }
+          : {}),
+        ...(lineage.receiptFingerprint ? { childReceiptFingerprint: lineage.receiptFingerprint } : {}),
+        lineageProgram: 'dedicated',
+      });
+    } catch {
+      observeAskAgentV2Tool(state, {
+        version: 1,
+        tool: 'inspect_relational_context',
+        outcome: 'unavailable',
+        tier: 'governed_relational',
+        reasonCode: 'RESEARCH_LINEAGE_PROGRAM_UNAVAILABLE',
+        candidateIds: targetCandidateIds,
+        origin: 'tool',
+      });
+      return Promise.resolve({ id: 'pending', verdict: 'inconclusive', evidenceHandleIds: [], lineageProgram: 'dedicated' });
+    }
+  }
+  observeAskAgentV2Tool(state, {
+    version: 1,
+    tool: 'inspect_relational_context',
+    outcome: evidenceHandleIds.length > 0 ? 'executed' : 'unavailable',
+    tier: 'governed_relational',
+    reasonCode: evidenceHandleIds.length > 0 ? 'RESEARCH_DEDICATED_LINEAGE_EVIDENCE' : 'RESEARCH_LINEAGE_EVIDENCE_UNAVAILABLE',
+    candidateIds: relationCandidates.map(v2CandidateId),
+    origin: 'tool',
+  });
+  return Promise.resolve({
+    id: 'pending',
+    verdict: evidenceHandleIds.length > 0 ? 'inconclusive' : 'inconclusive',
+    evidenceHandleIds,
+    lineageProgram: 'dedicated',
+  });
+}
+
+/**
+ * A Research analytical branch is supported only when a host execution has a
+ * complete, internally consistent receipt or an already-built deterministic
+ * fact set.  A tool merely returning `executed` is not evidence: that fact
+ * can exist before a result contract is persisted, and it must not turn an
+ * empty/failed/cancelled branch into a research conclusion.
+ */
+function askV2ResearchAnalyticalBranchReceipt(
+  input: {
+    id: string;
+    child: AskAgentStateV4;
+    answer: AgentAnswer;
+  },
+): AskV2ResearchBranchReceiptInput {
+  const { child, answer } = input;
+  const result = answer.result;
+  const receipt = result?.executionReceipt;
+  const isFingerprint = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value);
+  const resultFingerprint = isFingerprint(result?.resultFingerprint)
+    ? result!.resultFingerprint!.toLowerCase()
+    : isFingerprint(receipt?.resultFingerprint)
+      ? receipt!.resultFingerprint.toLowerCase()
+      : undefined;
+  const receiptValid = Boolean(
+    receipt
+    && isFingerprint(receipt.sourceFingerprint)
+    && isFingerprint(receipt.compiledSqlFingerprint)
+    && isFingerprint(receipt.parameterFingerprint)
+    && isFingerprint(receipt.resultFingerprint)
+    && resultFingerprint === receipt.resultFingerprint.toLowerCase(),
+  );
+  const factSet = answer.analyticalFacts;
+  const factsValid = Boolean(
+    factSet
+    && resultFingerprint
+    && factSet.resultFingerprint.toLowerCase() === resultFingerprint
+    && factSet.facts.every((fact) => fact.resultFingerprint.toLowerCase() === resultFingerprint),
+  );
+  const physicalExecution = child.observations.some((observation) => observation.outcome === 'executed' && observation.origin === 'execution');
+  const validated = physicalExecution && (receiptValid || factsValid);
+  const terminalFailure = answer.askAgentV2Outcome?.kind === 'provider_failure'
+    || answer.askAgentV2Outcome?.kind === 'execution_failure'
+    || answer.askAgentV2Outcome?.kind === 'denied';
+  const candidateIds = [...new Set(child.observations.flatMap((observation) => observation.candidateIds))].slice(0, 24);
+  const validatorEvidenceHandleIds = [
+    ...(receiptValid && receipt ? [`receipt:${receipt.resultFingerprint.toLowerCase()}`] : []),
+    ...(factsValid && factSet ? [`fact-set:${factSet.factSetId}`] : []),
+  ];
+  // A caveat fact is preserved as counter-evidence, but does not by itself
+  // imply contradiction or causality.  We never manufacture a counter claim
+  // from an executed row set.
+  const counterEvidenceHandleIds = factsValid && factSet
+    ? factSet.facts.filter((fact) => fact.kind === 'caveat').map((fact) => `fact:${fact.factId}`).slice(0, 24)
+    : [];
+  const childReceiptFingerprint = runtimeFingerprint(JSON.stringify({
+    snapshotId: child.snapshotId,
+    terminal: answer.askAgentV2Outcome?.kind ?? 'none',
+    observations: child.observations.map((observation) => ({
+      tool: observation.tool,
+      outcome: observation.outcome,
+      reasonCode: observation.reasonCode,
+      origin: observation.origin,
+    })),
+    ...(resultFingerprint ? { resultFingerprint } : {}),
+  }));
+  return {
+    id: input.id,
+    verdict: validated ? 'supported' : terminalFailure ? 'failed' : 'inconclusive',
+    evidenceHandleIds: [
+      ...candidateIds,
+      ...(validated && resultFingerprint ? [`result:${resultFingerprint}`] : []),
+    ].slice(0, 24),
+    ...(validatorEvidenceHandleIds.length ? { validatorEvidenceHandleIds } : {}),
+    ...(counterEvidenceHandleIds.length ? { counterEvidenceHandleIds } : {}),
+    childReceiptFingerprint,
+    lineageProgram: 'not_run',
+  };
+}
+
+/**
+ * Explicit Research remains one V2 runtime: the provider first proposes real
+ * hypotheses from the immutable safe cards, each analytical child runs an
+ * isolated V2 cascade, and lineage receives its own snapshot program.  No
+ * legacy research controller, V1 answer loop, or fabricated branch list is
+ * involved.
+ */
+function createAskV2ResearchLaneHandler(state: AskAgentStateV4) {
+  return async (input: AnswerLoopInput): Promise<AgentAnswer> => {
+    const workspace = v2WorkspaceForInput(input, state);
+    if (!workspace) {
+      observeAskAgentV2Tool(state, {
+        version: 1, tool: 'inspect_ask_context', outcome: 'unavailable',
+        reasonCode: 'V2_WORKSPACE_SNAPSHOT_MISMATCH', candidateIds: [], origin: 'retrieval',
+      });
+      return askV2NoAnswer(input, 'gap', 'V2_WORKSPACE_SNAPSHOT_MISMATCH', 'retrieval');
+    }
+    const initialCards = workspace.candidates
+      .filter((candidate) => state.initialCandidateIds.includes(v2CandidateId(candidate)))
+      .map((candidate) => v2SafeCard(candidate, workspace));
+    observeAskAgentV2Tool(state, {
+      version: 1,
+      tool: 'inspect_ask_context',
+      outcome: initialCards.length > 0 ? 'eligible' : 'unavailable',
+      reasonCode: initialCards.length > 0 ? 'RESEARCH_SNAPSHOT_CONTEXT_AVAILABLE' : 'RESEARCH_SNAPSHOT_CONTEXT_EMPTY',
+      candidateIds: state.initialCandidateIds,
+      origin: 'retrieval',
+    });
+
+    let planText: string;
+    try {
+      planText = await input.provider.generate([
+        {
+          role: 'system',
+          content: 'Plan explicit analytics research from only the supplied immutable snapshot cards. Return JSON only: {"hypotheses":[{"kind":"analytical"|"lineage","question":"...","frozenChildId?":"opaque host handle"}]}. Produce 3 to 6 hypotheses only when the cards ground them. Include at most one lineage hypothesis. When a listed root-frozen child exactly matches an analytical hypothesis, echo its frozenChildId unchanged; otherwise omit it. Never invent identifiers, SQL, facts, or causal claims.',
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            question: input.question,
+            snapshotId: state.snapshotId,
+            cards: initialCards,
+            relationshipPathHandles: state.relationshipPathHandles.map((path) => ({ id: path.id, edgeIds: path.edgeIds, candidateIds: path.candidateIds })),
+            // These are opaque, host-authorized child capabilities. They are
+            // only meaningful for an analytical hypothesis and must be echoed
+            // as `frozenChildId`; the host rejects any invented/stale ID.
+            frozenResearchChildren: [...(workspace.frozenResearchChildren?.values() ?? [])]
+              .filter((child) => child.snapshotId === state.snapshotId && child.sourceFingerprint === state.sourceFingerprint)
+              .map((child) => ({ id: child.id, tier: child.tier, candidateIds: child.candidateIds })),
+          }),
+        },
+      ], {
+        ...(input.signal ? { signal: input.signal } : {}),
+        maxProviderDispatches: 1,
+      });
+    } catch {
+      observeAskAgentV2Tool(state, {
+        version: 1, tool: 'finish_answer', outcome: 'error', reasonCode: 'RESEARCH_HYPOTHESIS_PROVIDER_FAILED', candidateIds: [], origin: 'provider',
+      });
+      return askV2NoAnswer(input, 'provider_failure', 'RESEARCH_HYPOTHESIS_PROVIDER_FAILED', 'provider');
+    }
+
+    const hypotheses = parseAskV2ResearchHypotheses(planText);
+    if (hypotheses.length === 0) {
+      recordAskV2ResearchLedger(state, []);
+      observeAskAgentV2Tool(state, {
+        version: 1, tool: 'finish_answer', outcome: 'unavailable', reasonCode: 'RESEARCH_HYPOTHESES_NOT_GROUNDABLE', candidateIds: [], origin: 'agent_control',
+      });
+      return askV2NoAnswer(input, 'gap', 'RESEARCH_HYPOTHESES_NOT_GROUNDABLE', 'agent_control');
+    }
+
+    const branchReceipts: AskV2ResearchBranchReceiptInput[] = [];
+    // The hypothesis proposal already consumed one of Research's twelve
+    // physical provider sends. Divide the remaining budget across actual
+    // analytical children before any child starts, so independently bounded
+    // child loops cannot add up to an unbounded parent Research run.
+    const analyticalBranchCount = hypotheses.filter((hypothesis) => hypothesis.kind === 'analytical').length;
+    const perAnalyticalBranchDispatches = analyticalBranchCount > 0
+      ? Math.max(1, Math.floor((ASK_V2_BUDGETS.research.providerDispatches - 1) / analyticalBranchCount))
+      : 0;
+    const perAnalyticalBranchTools = Math.min(6, Math.max(0, perAnalyticalBranchDispatches - 1));
+    for (const hypothesis of hypotheses) {
+      const child = createResearchBranchState(state);
+      if (hypothesis.kind === 'lineage') {
+        const lineage = await runAskV2DedicatedLineageBranch(child, workspace);
+        branchReceipts.push({ ...lineage, id: hypothesis.id });
+        continue;
+      }
+      if (hypothesis.frozenChildId) {
+        // A root-frozen child is a provider-free execution capability. It
+        // cannot reroute through V1 or issue a second agent-control request.
+        const frozen = await runAskV2FrozenResearchChild(input, state, workspace, hypothesis.frozenChildId);
+        branchReceipts.push(askV2ResearchAnalyticalBranchReceipt({
+          id: hypothesis.id,
+          child: frozen.child,
+          answer: frozen.answer,
+        }));
+        continue;
+      }
+      const childInput: AnswerLoopInput = { ...input, question: hypothesis.question };
+      const childAnswer = await createAskV2LaneHandler(child, {
+        maxToolCalls: perAnalyticalBranchTools,
+        maxProviderDispatches: perAnalyticalBranchDispatches,
+      })(childInput);
+      branchReceipts.push(askV2ResearchAnalyticalBranchReceipt({
+        id: hypothesis.id,
+        child,
+        answer: childAnswer,
+      }));
+    }
+    const ledger = recordAskV2ResearchLedger(state, branchReceipts)!;
+    // Synthesis is deliberately receipt-backed.  It does not repeat branch
+    // counts as a pretend answer and it never promotes a returned row set or
+    // structural lineage edge into a causal conclusion.  The branch question
+    // is a user-visible hypothesis; the supporting/limiting wording comes
+    // only from its durable validator/counter-evidence receipt.
+    const hypothesisById = new Map(hypotheses.map((hypothesis) => [hypothesis.id, hypothesis] as const));
+    const supportedBranches = ledger.branches.filter((branch) => branch.verdict === 'supported');
+    const contradictedBranches = ledger.branches.filter((branch) => branch.verdict === 'contradicted');
+    const counterEvidenceBranches = ledger.branches.filter((branch) => (branch.counterEvidenceHandleIds?.length ?? 0) > 0);
+    const limitedBranches = ledger.branches.filter((branch) => branch.verdict === 'failed'
+      || branch.verdict === 'inconclusive'
+      || branch.verdict === 'skipped');
+    const label = (branch: typeof ledger.branches[number]) => hypothesisById.get(branch.id)?.question
+      ?? `research branch ${branch.id.replace(/^research:branch:/, '')}`;
+    const findings = supportedBranches.length > 0
+      ? supportedBranches.map((branch) => `- Validated result evidence was retained for: ${label(branch)}.`).join('\n')
+      : '- No branch produced a fully validated analytical finding.';
+    const counterEvidence = [...contradictedBranches, ...counterEvidenceBranches]
+      .filter((branch, index, values) => values.findIndex((value) => value.id === branch.id) === index)
+      .map((branch) => `- ${label(branch)} has recorded counter-evidence or a contradictory validator result.`)
+      .join('\n') || '- No deterministic counter-evidence was retained; absence of counter-evidence is not proof of causality.';
+    const limitations = [
+      ...(ledger.limitedScope ? ['- Limited research scope: fewer than three groundable hypotheses were available from this snapshot.'] : []),
+      ...limitedBranches.map((branch) => `- ${label(branch)} remained ${branch.verdict}; it is not used as a conclusion.`),
+    ].join('\n') || '- Findings are limited to the validated receipts and the immutable retrieval snapshot for this run.';
+    const followUps = supportedBranches.length > 0
+      ? '- Open a validated branch result to inspect its data and ask a scoped follow-up on the same result binding.'
+      : '- Refine the business metric, entity, or time frame, then rerun Research against a refreshed snapshot.';
+    const text = `Research summary\n\nFindings\n${findings}\n\nCounter-evidence\n${counterEvidence}\n\nLimitations\n${limitations}\n\nFollow-up\n${followUps}`;
+    observeAskAgentV2Tool(state, {
+      version: 1, tool: 'finish_answer', outcome: 'eligible', reasonCode: 'RESEARCH_BRANCHES_COMPLETED', candidateIds: [], origin: 'narration',
+    });
+    finishAskAgentV2Turn(state, { version: 2, kind: 'finish_answer', reasonCode: 'RESEARCH_BRANCHES_COMPLETED', origin: 'narration' });
+    return {
+      kind: 'uncertified',
+      sourceTier: 'business_context',
+      certification: 'analyst_review_required',
+      reviewStatus: 'analyst_review_required',
+      text,
+      answer: text,
+      citations: [],
+      considered: [],
+      contextPack: input.contextPack,
+      askAgentV2Outcome: { version: 2, kind: 'finish_answer', reasonCode: 'RESEARCH_BRANCHES_COMPLETED', origin: 'narration' },
+    };
+  };
+}
+
+function askV2NoAnswer(
+  input: AnswerLoopInput,
+  kind: NonNullable<AgentAnswer['askAgentV2Outcome']>['kind'],
+  reasonCode: string,
+  origin: NonNullable<AgentAnswer['askAgentV2Outcome']>['origin'],
+  safeActionOverride?: string,
+): AgentAnswer {
+  const dispatchBudget = kind === 'budget_exhausted' && reasonCode === 'ASK_PROVIDER_DISPATCH_BUDGET_EXHAUSTED';
+  const semanticToolContract = reasonCode === 'SEMANTIC_ENGINE_UNAVAILABLE';
+  const semanticExecutionTargetMismatch = reasonCode === 'SEMANTIC_EXECUTION_TARGET_MISMATCH';
+  const semanticFailure = semanticToolContract
+    ? createAnalyticalFailure({
+      code: 'COMPILATION_FAILED',
+      phase: 'validation',
+      snapshotId: input.askAgentV2Workspace?.getToolWorkspace?.()?.snapshotId
+        ?? input.contextPack?.knowledgeLens?.snapshotId
+        ?? 'snapshot-unavailable',
+      error: { code: reasonCode, message: 'The configured semantic runtime is not ready for the snapshot-bound metric.' },
+      failedBindings: [{ role: 'semantic_engine', reasonCode }],
+    })
+    : undefined;
+  const text = semanticToolContract
+    ? 'The configured semantic runtime is not ready for the selected snapshot-bound metric. Review semantic adapter readiness, then retry.'
+    : semanticExecutionTargetMismatch
+    ? 'DQL stopped before execution because the compiled semantic query did not match the frozen execution target. Review the execution target and trace; no query was run.'
+    : dispatchBudget
+    ? 'The Ask runtime reached its bounded provider-dispatch limit before it could execute a plan. No query was run. Review the trace, then retry.'
+    : kind === 'provider_failure'
+    ? 'The AI provider could not complete this Ask step. Check provider readiness, then retry.'
+    : kind === 'execution_failure'
+      ? 'The selected governed query did not complete on the current connection. Review the connection and trace, then retry.'
+      : 'DQL could not complete a safe analytical tool path from the current metadata snapshot.';
+  return {
+    kind: 'no_answer',
+    sourceTier: 'no_answer',
+    certification: 'analyst_review_required',
+    reviewStatus: 'analyst_review_required',
+    // A physical-dispatch ceiling is provider/runtime control, not missing
+    // business evidence.  Project it as a provider failure for old readers so
+    // no legacy cascade turns it into ANALYTICAL_COVERAGE_GAP.
+    refusalCode: dispatchBudget || kind === 'provider_failure'
+      ? 'provider_error'
+      : kind === 'execution_failure'
+        ? 'execution_error'
+        : 'grounding_gap',
+    text,
+    answer: text,
+    citations: [],
+    considered: [],
+    contextPack: input.contextPack,
+    ...(semanticFailure ? { analyticalFailure: semanticFailure } : {}),
+    askAgentV2Outcome: {
+      version: 2,
+      kind,
+      reasonCode,
+      origin,
+      safeAction: safeActionOverride ?? (kind === 'provider_failure'
+        ? 'check_provider_readiness'
+        : semanticToolContract
+          ? 'use:compile_and_run_semantic'
+        : dispatchBudget
+          ? 'retry_within_provider_dispatch_budget'
+          : 'inspect_recorded_observations_then_retry'),
+    },
+  };
+}
+
+type AskV2CompletedExecution = {
+  tier: 'certified' | 'semantic' | 'governed_relational' | 'exploratory_sql';
+  result: NonNullable<AgentAnswer['result']>;
+  block?: KGNode;
+};
+
+/**
+ * Provider narration is optional after the host has already validated the
+ * execution result. This sentence is deliberately derived only from the
+ * result contract (tier, row count, and column count), so it is safe to use
+ * when a final provider dispatch fails, exhausts its budget, or returns no
+ * host-validated `finish_answer`.
+ */
+function deterministicAskV2ResultNarration(completed: AskV2CompletedExecution): string {
+  const rows = Math.max(0, completed.result.rowCount);
+  const columns = Array.isArray(completed.result.columns) ? completed.result.columns.length : 0;
+  const tier = completed.tier.replace(/_/g, ' ');
+  const columnClause = columns > 0
+    ? ` across ${columns} returned column${columns === 1 ? '' : 's'}`
+    : '';
+  return `The validated ${tier} query completed with ${rows} row${rows === 1 ? '' : 's'}${columnClause}. The validated result is retained below.`;
+}
+
+function askV2ExecutedAnswer(
+  input: AnswerLoopInput,
+  completed: AskV2CompletedExecution,
+  narration: string,
+  terminalOutcome?: NonNullable<AgentAnswer['askAgentV2Outcome']>,
+): AgentAnswer {
+  const certified = completed.tier === 'certified';
+  const exploratory = completed.tier === 'exploratory_sql';
+  const text = narration.trim() || `The ${completed.tier.replace(/_/g, ' ')} query completed with ${completed.result.rowCount} row${completed.result.rowCount === 1 ? '' : 's'}.`;
+  return {
+    kind: certified ? 'certified' : 'uncertified',
+    sourceTier: certified ? 'certified_artifact' : completed.tier === 'semantic' ? 'semantic_layer' : 'dbt_manifest',
+    certification: certified ? 'certified' : exploratory ? 'analyst_review_required' : 'governed',
+    reviewStatus: certified ? 'certified' : exploratory ? 'analyst_review_required' : 'governed',
+    text, answer: text, result: completed.result, ...(completed.block ? { block: completed.block } : {}), citations: [], considered: [], contextPack: input.contextPack,
+    askAgentV2Outcome: terminalOutcome ?? { version: 2, kind: 'finish_answer', reasonCode: 'ASK_V2_VALIDATED_RESULT', origin: 'execution' },
+  };
+}
+
+function observeV2ProviderFailure(
+  state: AskAgentStateV4 | undefined,
+  diagnostic: ProviderFailureDiagnosticV1,
+  terminal = false,
+): void {
+  if (!state) return;
+  observeAskAgentV2Tool(state, {
+    version: 1,
+    tool: 'finish_answer',
+    outcome: 'error',
+    reasonCode: `provider_${diagnostic.cause}`,
+    candidateIds: [],
+    origin: 'provider',
+    provider: {
+      phase: diagnostic.phase === 'generation' ? 'agent_control' : diagnostic.phase,
+      cause: diagnostic.cause,
+      retryable: diagnostic.retryable,
+      safeAction: diagnostic.safeAction,
+    },
+  });
+  if (terminal) {
+    finishAskAgentV2Turn(state, {
+      version: 2,
+      kind: 'provider_failure',
+      reasonCode: `provider_${diagnostic.cause}`,
+      safeAction: diagnostic.safeAction,
+      origin: 'provider',
+    });
+  }
+}
+
+function createAskV2TraceToolCallback(
+  observer: AskTraceObserverV1,
+  state: AskAgentStateV4 | undefined,
+): TraceAwareToolCallback {
+  const trace = createAskTraceToolCallback(observer);
+  const callback: TraceAwareToolCallback = (event) => {
+    trace(event);
+    observeV2ToolCall(state, event);
   };
   Object.defineProperty(callback, ASK_TRACE_TOOL_CALLBACK, {
     value: true,
@@ -669,6 +4052,24 @@ function valueLookupEnabled(projectRoot: string): boolean {
 }
 
 /**
+ * V2 rows are local-only unless the project explicitly opts a remote provider
+ * in. The setting is read server-side and cannot be supplied by a prompt or
+ * browser request. Existing Research egress remains unchanged.
+ */
+function askV2ProviderResultEgress(projectRoot: string, providerId: SimpleProviderId) {
+  const setting = readAgentConfig(projectRoot)?.providerResultEgress;
+  const allowRemoteRows = Boolean(
+    setting
+    && typeof setting === 'object'
+    && (setting as { allowRemoteRows?: unknown }).allowRemoteRows === true,
+  );
+  return defaultProviderResultEgressPolicyV2({
+    transport: providerId === 'ollama' ? 'local' : 'remote',
+    allowRemoteRows,
+  });
+}
+
+/**
  * Which migration lane this turn belongs to.
  *
  * Research is identified by the server-resolved `orchestrationMode`, not by
@@ -681,7 +4082,29 @@ function valueLookupEnabled(projectRoot: string): boolean {
  * retrieval evidence lives.
  */
 function agenticLaneForRequest(req: AgentRunRequest): AgenticLane {
+  if (req.askAgentRuntimeMode === 'authoritative_v2') return req.orchestrationMode === 'research' ? 'research' : 'ask_v2';
   return req.orchestrationMode === 'research' ? 'research' : 'generated';
+}
+
+/**
+ * V2 is selected by the server-side Ask runtime, not a project setting or a
+ * browser request.  This is the single handoff that makes the bounded analyst
+ * tool loop authoritative for a V2 free-text turn while preserving V1's
+ * explicit project-config migration behaviour.
+ */
+function orchestratorPolicyForRequest(req: AgentRunRequest): OrchestratorPolicy {
+  if (req.askAgentRuntimeMode === 'authoritative_v2') {
+    return {
+      mode: 'agentic',
+      lanes: new Set<AgenticLane>([req.orchestrationMode === 'research' ? 'research' : 'ask_v2']),
+      maxIterations: req.orchestrationMode === 'research' ? 24 : 8,
+      // A V2 error is a typed terminal observation. Falling through to V1
+      // would re-interpret business meaning or issue a fresh generation after
+      // the bounded V2 tool runtime already stopped.
+      fallbackOnError: false,
+    };
+  }
+  return resolveOrchestratorPolicy({ config: readOrchestratorConfig(req.projectRoot) });
 }
 
 export function applyEvalCassette(provider: AgentProvider, projectRoot: string): AgentProvider {
@@ -755,6 +4178,27 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
       const spec = SPECS[id];
       const rawProvider = applyEvalCassette(providerOverride ?? spec.create(req.projectRoot), req.projectRoot);
       const askTrace = askTraceObserverForV1(req);
+      const v2Authoritative = req.askAgentRuntimeMode === 'authoritative_v2';
+      const v2State = v2Authoritative ? req.askAgentV2State : undefined;
+      // The final answer lives inside a provider-owned lexical scope below.
+      // Keep only its result identity here so the runner can mint the
+      // process-local execution receipt after the resource cleanup block.
+      let terminalAnswer: AgentAnswer | undefined;
+      const v2Workspace = v2Authoritative && askAgentV2WorkspaceMatches(v2State, req.askAgentV2Workspace)
+        ? req.askAgentV2Workspace
+        : undefined;
+      const v2ToolWorkspace = v2Workspace?.getToolWorkspace?.();
+      // AgentRunner receives normalized messages, not the HTTP request shape;
+      // derive the current user question from that authoritative envelope.
+      // Reading `req.question` here made exact V2 routes crash before their
+      // proof could run because AgentRunRequest deliberately has no such
+      // field.
+      const v2Question = v2Authoritative ? resolveEffectiveQuestion(req) : undefined;
+      const v2ExactCertified = v2ExactCertifiedCandidate(
+        v2State,
+        v2ToolWorkspace,
+        v2Question ? buildAnalysisQuestionPlan(v2Question) : undefined,
+      );
       // A router-frozen exact certified block is a deterministic execution
       // lane. It may not probe provider readiness merely because it shares the
       // answer-loop adapter with provider-dependent routes. The flag is
@@ -762,7 +4206,11 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
       // branch accidentally tries to generate text, so this cannot create a
       // silent provider fallback.
       const providerPreflightRequired = req.providerPreflightRequired !== false
-        && !req.deterministicExploratoryProposal;
+        && !req.deterministicExploratoryProposal
+        // The immutable V2 workspace proves this unique artifact already. A
+        // readiness probe would be a provider call in disguise and violate
+        // the Tier 1 zero-call contract.
+        && !v2ExactCertified;
       const isResearch = req.orchestrationMode === 'research';
       const frozenExploratoryRepairRoute = frozenExploratoryRepairAuthorityForRequest(req);
       // Ordinary analytical Ask has one candidate-ID interpretation, one
@@ -772,7 +4220,10 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
       // direct callers in the same bounded shape.  A legacy text-tool run is
       // not an analytical repair route and retains its established three-tool
       // plus final-response wrapper cap; it cannot acquire the repair phase.
-      const maxProviderDispatches = isResearch ? 8 : frozenExploratoryRepairRoute ? 3 : 4;
+      const v2ResultEgress = v2Authoritative ? askV2ProviderResultEgress(req.projectRoot, id) : undefined;
+      const maxProviderDispatches = isResearch
+        ? (v2Authoritative ? 12 : 8)
+        : frozenExploratoryRepairRoute ? 3 : v2Authoritative ? 6 : 4;
       const researchRowsOptIn = isResearch && req.researchResultRowsOptIn === true;
       const sharedDispatchEvidence = req.providerDispatchEvidenceSink;
       let providerRoundTrips = 0;
@@ -879,6 +4330,31 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
        * accepts the frozen-plan repair marker; every other Ask transport is
        * answer generation.
        */
+      const v2NarrationPhaseForPhysicalEvent = (
+        options: ProviderToolLoopOptions | undefined,
+        event: Pick<ProviderDispatchEvent, 'operation' | 'attemptIndex'>,
+      ): boolean => {
+        if (!v2Authoritative || isResearch || options?.egressPurpose !== 'answer_generation') return false;
+        const requestedPhase = options?.dispatchPhase;
+        if (requestedPhase !== 'agent_control'
+          && requestedPhase !== 'tool_followup'
+          && requestedPhase !== 'narration') return false;
+        try {
+          // The resolver closes over process-local V2 state. It can return
+          // narration only after a host-validated result has narrowed the
+          // current policy to the one required finish_answer action.
+          return options.resolvePhysicalDispatchPhase?.({
+            operation: event.operation,
+            attemptIndex: event.attemptIndex,
+            requestedPhase,
+          }) === 'narration';
+        } catch {
+          // A lifecycle resolver is admission authority, never best effort.
+          // If it fails, retain normal discovery accounting rather than
+          // minting a narration exemption.
+          return false;
+        }
+      };
       const providerDispatchIdentity = (options?: ProviderToolLoopOptions): {
         dispatchPhase: ProviderDispatchPhaseV1;
         purpose: ProviderEgressPurpose;
@@ -886,6 +4362,8 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
         ordinaryRepairAuthorized: boolean;
         ordinaryPlanningRequested: boolean;
         ordinaryPlanningAuthorized: boolean;
+        v2NarrationRequested: boolean;
+        v2NarrationAuthorized: boolean;
         retryRequested: boolean;
         retryAuthorized: boolean;
       } => {
@@ -915,6 +4393,26 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           && (options?.analyticalPlanningKind === 'initial' || options?.analyticalPlanningKind === 'targeted_revision')
           && options?.maxProviderDispatches === 1
           && options?.retryOfAttemptIndex === undefined;
+        // Only a server-selected authoritative V2 runtime may use these
+        // additive phases.  They distinguish the first agent-control turn
+        // from bounded tool-followups in the physical ledger; they do not
+        // create a client-selectable route or an additional egress purpose.
+        const v2AgentControlRequested = v2Authoritative
+          && (requestedPhase === 'agent_control' || requestedPhase === 'tool_followup')
+          && requestedPurpose === 'answer_generation';
+        // A text-protocol final turn carries `narration` as its requested
+        // phase. Do not accept that label by itself: the same live resolver
+        // used below for each native physical attempt must prove the
+        // post-execution required finish_answer state here too.
+        const v2NarrationRequested = v2Authoritative
+          && !isResearch
+          && requestedPhase === 'narration'
+          && requestedPurpose === 'answer_generation';
+        const v2NarrationAuthorized = v2NarrationRequested
+          && v2NarrationPhaseForPhysicalEvent(options, {
+            operation: 'generate',
+            attemptIndex: 1,
+          });
         const researchPhase = requestedPhase === 'classification'
           || requestedPhase === 'meaning_resolution'
           || requestedPhase === 'planning'
@@ -923,6 +4421,10 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           || requestedPhase === 'repair';
         const dispatchPhase: ProviderDispatchPhaseV1 = isResearch && researchPhase
           ? requestedPhase
+          : v2NarrationAuthorized
+            ? 'narration'
+          : v2AgentControlRequested
+            ? requestedPhase
           : ordinaryPlanningAuthorized
             ? 'planning'
           : ordinaryRepairRequested
@@ -955,12 +4457,18 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           ordinaryRepairAuthorized,
           ordinaryPlanningRequested,
           ordinaryPlanningAuthorized,
+          v2NarrationRequested,
+          v2NarrationAuthorized,
           retryRequested,
           retryAuthorized,
         };
       };
       const withPhysicalDispatchObserver = (options?: ProviderToolLoopOptions): {
         options: ProviderToolLoopOptions;
+        admitInvocation(input: {
+          operation: ProviderDispatchEvent['operation'];
+          messages: ReadonlyArray<{ role: string; content: string }>;
+        }): Record<string, unknown>;
         settle(outcome: 'ok' | 'error' | 'cancelled', error?: unknown): void;
       } => {
         // The answer loop can label exactly one frozen-plan correction as a
@@ -974,6 +4482,8 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           ordinaryRepairAuthorized,
           ordinaryPlanningRequested,
           ordinaryPlanningAuthorized,
+          v2NarrationRequested,
+          v2NarrationAuthorized,
           retryRequested,
           retryAuthorized,
         } = identity;
@@ -988,6 +4498,19 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
         const physicalDispatchCap = dispatchPhase === 'repair'
           ? 1
           : Math.min(maxProviderDispatches, requestedPhysicalCap);
+        // A native provider may make several sends inside one wrapper call.
+        // The wrapper admits attempt 1 before entering the raw provider; its
+        // first callback deduplicates that admission.  Attempts 2+ are real
+        // tool-followups, not duplicate initial control calls.  Derive the
+        // physical phase at the one boundary that sees the actual attempt
+        // index so the shared ledger can enforce one control call plus the
+        // bounded follow-up budget for native and text providers alike.
+        const dispatchPhaseForEvent = (event: Pick<ProviderDispatchEvent, 'operation' | 'attemptIndex'>): ProviderDispatchPhaseV1 => {
+          if (v2NarrationPhaseForPhysicalEvent(options, event)) return 'narration';
+          return v2Authoritative && dispatchPhase === 'agent_control' && event.attemptIndex > 1
+            ? 'tool_followup'
+            : dispatchPhase;
+        };
         const onToolCall = options?.onToolCall;
         const onProviderDispatch = options?.onProviderDispatch;
         const onProviderDispatchComplete = options?.onProviderDispatchComplete;
@@ -1020,7 +4543,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           }
           const diagnostic = providerDiagnosticForTrace(
             error ?? (typeof httpStatus === 'number' ? Object.assign(new Error(`HTTP ${httpStatus}`), { code: `HTTP_${httpStatus}` }) : undefined),
-            dispatchPhase,
+            entry.attempt.phase,
           );
           const failureAttempt = {
             ...entry.attempt,
@@ -1036,21 +4559,26 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           });
           lastFailedProviderSpanId = entry.spanId;
         };
-        const physicalOptions: ProviderToolLoopOptions = {
-        ...(options ?? {}),
-        // The raw provider loop has the same outer ceiling as the local Ask
-        // contract. The run-scoped ledger is the authority for phase limits:
-        // one planning/generation transport plus, only when the answer loop
-        // presents a frozen exploratory repair marker, one repair transport.
-        maxProviderDispatches: physicalDispatchCap,
-        ...(sharedDispatchEvidence?.mayStartToolCall
-          ? { mayStartToolCall: () => sharedDispatchEvidence.mayStartToolCall!() }
-          : {}),
-        onProviderDispatch: (event: ProviderDispatchEvent) => {
+        /**
+         * Admit one provider send at the runner boundary.  Built-in providers
+         * call `onProviderDispatch` immediately before their HTTP request;
+         * custom/subscription providers are allowed to be callback-silent.
+         * In the latter case `invokePhysicalProvider` supplies a synthetic,
+         * content-safe envelope before entering `rawProvider`, so a physical
+         * provider invocation can never evade budget/egress receipts.
+         *
+         * The first native callback for a wrapper invocation shares the same
+         * operation/attempt key and is therefore only wire-sanitized below;
+         * it does not create a second receipt or consume a second budget slot.
+         * Subsequent native loop sends use attempt 2+ and are independently
+         * admitted, as they must be.
+         */
+        const admit = (event: ProviderDispatchEvent, notifySource: boolean): Record<string, unknown> => {
           try {
+            const eventDispatchPhase = dispatchPhaseForEvent(event);
             // This is the last synchronous boundary before a native provider
-            // serializes bytes.  A caller cannot mint an ordinary Ask repair
-            // merely by placing lifecycle labels in `ProviderToolLoopOptions`.
+            // serializes bytes. A caller cannot mint an ordinary Ask repair
+            // merely by placing lifecycle labels in ProviderToolLoopOptions.
             if (ordinaryRepairRequested && !ordinaryRepairAuthorized) {
               throw repairAuthorityAdmissionError();
             }
@@ -1060,123 +4588,108 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
                 { code: 'PROVIDER_DISPATCH_PLANNING_NOT_ALLOWED' },
               );
             }
-            // Retry correlation is likewise host-owned. The shared ledger
-            // validates the parent receipt too, but this marker prevents a
-            // caller from claiming an arbitrary earlier attempt before that
-            // receipt check can admit a wire body.
-            if (retryRequested && !retryAuthorized) {
-              throw retryLineageAdmissionError();
+            if (v2NarrationRequested && !v2NarrationAuthorized) {
+              throw Object.assign(
+                new Error('Ask V2 narration dispatch requires a host-validated result and the required finish_answer terminal policy.'),
+                { code: 'PROVIDER_DISPATCH_NARRATION_NOT_ALLOWED' },
+              );
             }
-            if (sharedDispatchEvidence) {
-              const envelope = sharedDispatchEvidence.observe(event, {
-                purpose,
-                dispatchPhase,
-                optIn: pendingResultRowCount > 0 && researchRowsOptIn,
-                serializedResultShape: {
-                  resultRowCount: pendingResultRowCount,
-                  columnCount: pendingColumnCount,
-                },
-                ...(pendingCumulativeResultRowCount > 0
-                  ? { cumulativeResultRowCount: pendingCumulativeResultRowCount }
-                  : {}),
-                ...(options?.retryOfAttemptIndex !== undefined
-                  ? { retryOfAttemptIndex: options.retryOfAttemptIndex }
-                  : {}),
-                ...(dispatchPhase === 'planning' && options?.analyticalPlanningKind
-                  ? { planningKind: options.analyticalPlanningKind }
-                  : {}),
-              });
-              pendingResultRowCount = 0;
-              pendingColumnCount = 0;
-              pendingCumulativeResultRowCount = 0;
-              pendingResearchPurpose = 'research_narration';
-              const observedEnvelope = onProviderDispatch?.(event) ?? envelope;
-              const attempt = providerAttemptPayload(event, {
-                admission: 'admitted',
-                phase: dispatchPhase,
-                purpose,
-                retryOfSpanId: lastFailedProviderSpanId,
-              });
-              const spanId = askTrace.startSpan({ name: 'provider.attempt', stage: 'provider', reasonCode: 'started', payload: { kind: 'provider', attempt } });
-              const key = keyForDispatch(event);
-              lastAdmittedPhysicalDispatch = {
-                sequence: ++physicalDispatchSequence,
-                attemptIndex: event.attemptIndex,
-                phase: dispatchPhase,
-                purpose,
-              };
-              admittedKeys.add(key);
-              pending.set(key, [...(pending.get(key) ?? []), { spanId, attempt }]);
-              return observedEnvelope;
-            }
-          // Fallback path only (CLI/MCP-direct runs carry no shared ledger).
-          // Kept in step with `maxProviderDispatches` above so the same question
-          // does not get a different budget depending on which surface asked it.
-          if (!isResearch && providerRoundTrips >= physicalDispatchCap) {
-            throw Object.assign(new Error(`Provider dispatch budget exhausted after ${physicalDispatchCap} ordinary Ask attempts.`), {
-              code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED',
+            if (retryRequested && !retryAuthorized) throw retryLineageAdmissionError();
+
+            const envelope = sharedDispatchEvidence
+              ? sharedDispatchEvidence.observe(event, {
+                  purpose,
+                  dispatchPhase: eventDispatchPhase,
+                  optIn: pendingResultRowCount > 0 && researchRowsOptIn,
+                  serializedResultShape: {
+                    resultRowCount: pendingResultRowCount,
+                    columnCount: pendingColumnCount,
+                  },
+                  ...(pendingCumulativeResultRowCount > 0
+                    ? { cumulativeResultRowCount: pendingCumulativeResultRowCount }
+                    : {}),
+                  ...(options?.retryOfAttemptIndex !== undefined
+                    ? { retryOfAttemptIndex: options.retryOfAttemptIndex }
+                    : {}),
+                  ...(eventDispatchPhase === 'planning' && options?.analyticalPlanningKind
+                    ? { planningKind: options.analyticalPlanningKind }
+                    : {}),
+                })
+              : (() => {
+                  // Fallback path only (CLI/MCP-direct runs carry no shared
+                  // ledger). Keep it at the same physical cap as the server
+                  // ledger so callback-silent providers cannot bypass it.
+                  if (!isResearch && providerRoundTrips >= physicalDispatchCap) {
+                    throw Object.assign(new Error(`Provider dispatch budget exhausted after ${physicalDispatchCap} ordinary Ask attempts.`), {
+                      code: 'PROVIDER_DISPATCH_BUDGET_EXHAUSTED',
+                    });
+                  }
+                  const normalized = prepareProviderWireEnvelopeForDispatch(rawProvider.name, event.envelope);
+                  assertProviderPayloadAllowed(normalized, {
+                    allowResultRows: false,
+                    maxResultRows: 0,
+                    purpose,
+                  });
+                  providerRoundTrips += 1;
+                  providerEgressReceipts.push(createProviderDispatchEgressReceipt({
+                    purpose,
+                    dispatchPhase: eventDispatchPhase,
+                    provider: rawProvider.name,
+                    operation: event.operation,
+                    attemptIndex: event.attemptIndex,
+                    ...(event.model ? { model: event.model } : {}),
+                    ...(options?.retryOfAttemptIndex !== undefined
+                      ? { retryOfAttemptIndex: options.retryOfAttemptIndex }
+                      : {}),
+                    permittedCategories: pendingResultRowCount > 0
+                      ? ['instructions', 'question', 'schema_metadata', 'governed_context', 'result_rows']
+                      : ['instructions', 'question', 'schema_metadata', 'governed_context'],
+                    optIn: pendingResultRowCount > 0 && researchRowsOptIn,
+                    envelope: normalized,
+                    serializedResultShape: {
+                      resultRowCount: pendingResultRowCount,
+                      columnCount: pendingColumnCount,
+                    },
+                    ...(pendingCumulativeResultRowCount > 0
+                      ? { cumulativeResultRowCount: pendingCumulativeResultRowCount }
+                      : {}),
+                  }));
+                  return normalized;
+                })();
+
+            pendingResultRowCount = 0;
+            pendingColumnCount = 0;
+            pendingCumulativeResultRowCount = 0;
+            pendingResearchPurpose = 'research_narration';
+            const attempt = providerAttemptPayload(event, {
+              admission: 'admitted',
+              phase: eventDispatchPhase,
+              purpose,
+              retryOfSpanId: lastFailedProviderSpanId,
             });
-          }
-          const envelope = prepareProviderWireEnvelopeForDispatch(rawProvider.name, event.envelope);
-          assertProviderPayloadAllowed(envelope, {
-            allowResultRows: false,
-            maxResultRows: 0,
-            purpose,
-          });
-          providerRoundTrips += 1;
-          providerEgressReceipts.push(createProviderDispatchEgressReceipt({
-            purpose,
-            dispatchPhase,
-            provider: rawProvider.name,
-            ...(options?.retryOfAttemptIndex !== undefined
-              ? { retryOfAttemptIndex: options.retryOfAttemptIndex }
-              : {}),
-            permittedCategories: pendingResultRowCount > 0
-              ? ['instructions', 'question', 'schema_metadata', 'governed_context', 'result_rows']
-              : ['instructions', 'question', 'schema_metadata', 'governed_context'],
-            optIn: pendingResultRowCount > 0 && researchRowsOptIn,
-            envelope,
-            serializedResultShape: {
-              resultRowCount: pendingResultRowCount,
-              columnCount: pendingColumnCount,
-            },
-            ...(pendingCumulativeResultRowCount > 0
-              ? { cumulativeResultRowCount: pendingCumulativeResultRowCount }
-              : {}),
-          }));
-          pendingResultRowCount = 0;
-          pendingColumnCount = 0;
-          pendingCumulativeResultRowCount = 0;
-          pendingResearchPurpose = 'research_narration';
-          const observedEnvelope = onProviderDispatch?.(event) ?? envelope;
-          const attempt = providerAttemptPayload(event, {
-            admission: 'admitted',
-            phase: dispatchPhase,
-            purpose,
-            retryOfSpanId: lastFailedProviderSpanId,
-          });
-          const spanId = askTrace.startSpan({ name: 'provider.attempt', stage: 'provider', reasonCode: 'started', payload: { kind: 'provider', attempt } });
-          const key = keyForDispatch(event);
-          lastAdmittedPhysicalDispatch = {
-            sequence: ++physicalDispatchSequence,
-            attemptIndex: event.attemptIndex,
-            phase: dispatchPhase,
-            purpose,
-          };
-          admittedKeys.add(key);
-          pending.set(key, [...(pending.get(key) ?? []), { spanId, attempt }]);
-          return observedEnvelope;
+            const spanId = askTrace.startSpan({ name: 'provider.attempt', stage: 'provider', reasonCode: 'started', payload: { kind: 'provider', attempt } });
+            const key = keyForDispatch(event);
+            lastAdmittedPhysicalDispatch = {
+              sequence: ++physicalDispatchSequence,
+              attemptIndex: event.attemptIndex,
+              phase: eventDispatchPhase,
+              purpose,
+            };
+            admittedKeys.add(key);
+            pending.set(key, [...(pending.get(key) ?? []), { spanId, attempt }]);
+            // Source callbacks are observational/normalization hooks, never
+            // receipt authority. They see actual native sends once; a
+            // callback-silent provider has no fabricated raw envelope exposed.
+            return notifySource ? onProviderDispatch?.(event) ?? envelope : envelope;
           } catch (error) {
-            // The send was denied before an HTTP attempt. Preserve that
-            // distinction so support does not misread a budget/admission guard
-            // as a provider outage.
+            const eventDispatchPhase = dispatchPhaseForEvent(event);
             const key = keyForDispatch(event);
             if (!admittedKeys.has(key) && !deniedKeys.has(key)) {
               deniedKeys.add(key);
-              const diagnostic = providerDiagnosticForTrace(error, dispatchPhase);
+              const diagnostic = providerDiagnosticForTrace(error, eventDispatchPhase);
               const attempt = providerAttemptPayload(event, {
                 admission: 'denied',
-                phase: dispatchPhase,
+                phase: eventDispatchPhase,
                 purpose,
                 diagnostic,
                 retryOfSpanId: lastFailedProviderSpanId,
@@ -1203,6 +4716,32 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             }
             throw error;
           }
+        };
+        const physicalOptions: ProviderToolLoopOptions = {
+        ...(options ?? {}),
+        // The raw provider loop has the same outer ceiling as the local Ask
+        // contract. The run-scoped ledger is the authority for phase limits:
+        // one planning/generation transport plus, only when the answer loop
+        // presents a frozen exploratory repair marker, one repair transport.
+        maxProviderDispatches: physicalDispatchCap,
+        ...(sharedDispatchEvidence?.mayStartToolCall
+          ? { mayStartToolCall: () => sharedDispatchEvidence.mayStartToolCall!() }
+          : {}),
+        onProviderDispatch: (event: ProviderDispatchEvent) => {
+          const key = keyForDispatch(event);
+          if (admittedKeys.has(key)) {
+            // The wrapper already admitted this invocation before control
+            // entered rawProvider. Preserve real-envelope validation without
+            // duplicating the receipt/count/trace span.
+            const envelope = prepareProviderWireEnvelopeForDispatch(rawProvider.name, event.envelope);
+            assertProviderPayloadAllowed(envelope, {
+              allowResultRows: false,
+              maxResultRows: 0,
+              purpose,
+            });
+            return onProviderDispatch?.(event) ?? envelope;
+          }
+          return admit(event, true);
         },
         onProviderDispatchComplete: (event: ProviderDispatchCompletionEvent) => {
           const key = keyForDispatch(event);
@@ -1231,10 +4770,11 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           const key = keyForDispatch(event);
           if (!admittedKeys.has(key) && !deniedKeys.has(key)) {
             deniedKeys.add(key);
-            const diagnostic = providerDiagnosticForTrace(event.error, dispatchPhase);
+            const eventDispatchPhase = dispatchPhaseForEvent(event);
+            const diagnostic = providerDiagnosticForTrace(event.error, eventDispatchPhase);
             const attempt = providerAttemptPayload(event, {
               admission: 'denied',
-              phase: dispatchPhase,
+              phase: eventDispatchPhase,
               purpose,
               diagnostic,
               retryOfSpanId: lastFailedProviderSpanId,
@@ -1266,6 +4806,21 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
         };
         return {
           options: physicalOptions,
+          admitInvocation: (input: {
+            operation: ProviderDispatchEvent['operation'];
+            messages: ReadonlyArray<{ role: string; content: string }>;
+          }) => admit({
+            provider: rawProvider.name,
+            operation: input.operation,
+            // This is attempt one within the raw-provider method call. Native
+            // callbacks for its first send use the same key and deduplicate;
+            // later native sends report attempt 2+ and are admitted normally.
+            attemptIndex: 1,
+            ...(options?.model ? { model: options.model } : {}),
+            envelope: {
+              messages: input.messages.map((message) => ({ role: message.role, content: message.content })),
+            },
+          }, false),
           settle: (outcome, error) => {
             for (const entries of pending.values()) {
               for (const entry of entries) finish(entry, outcome, error);
@@ -1340,10 +4895,17 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
       };
       const invokePhysicalProvider = async <T>(
         sourceOptions: ProviderToolLoopOptions | undefined,
+        operation: ProviderDispatchEvent['operation'],
+        messages: ReadonlyArray<{ role: string; content: string }>,
         invoke: (options: ProviderToolLoopOptions) => Promise<T>,
       ): Promise<T> => {
         const observed = withPhysicalDispatchObserver(sourceOptions);
         try {
+          // Own admission/receipt at the only wrapper boundary shared by
+          // built-ins, subscription clients, and test/custom providers. A
+          // callback-silent implementation cannot reach rawProvider before
+          // this succeeds; built-ins deduplicate their first native callback.
+          observed.admitInvocation({ operation, messages });
           const result = await invoke(observed.options);
           // Built-in HTTP providers close each span via
           // `onProviderDispatchComplete`; this only closes a custom provider
@@ -1360,16 +4922,16 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
         available: () => rawProvider.available(),
         generate: (...args) => retrySameProviderOnce(
           args[1],
-          (sourceOptions) => invokePhysicalProvider(sourceOptions, (options) => rawProvider.generate(args[0], options)),
+          (sourceOptions) => invokePhysicalProvider(sourceOptions, 'generate', args[0], (options) => rawProvider.generate(args[0], options)),
         ),
         ...(rawProvider.generateWithTools ? {
           generateWithTools: (...args: Parameters<NonNullable<AgentProvider['generateWithTools']>>) => retrySameProviderOnce(
             args[2],
-            (sourceOptions) => invokePhysicalProvider(sourceOptions, (options) => rawProvider.generateWithTools!(args[0], args[1], options)),
+            (sourceOptions) => invokePhysicalProvider(sourceOptions, 'generate_with_tools', args[0], (options) => rawProvider.generateWithTools!(args[0], args[1], options)),
           ),
         } : {}),
         ...(rawProvider.generateStream ? {
-          generateStream: (...args: Parameters<NonNullable<AgentProvider['generateStream']>>) => invokePhysicalProvider(args[1], (options) => rawProvider.generateStream!(args[0], options, args[2])),
+          generateStream: (...args: Parameters<NonNullable<AgentProvider['generateStream']>>) => invokePhysicalProvider(args[1], 'generate_stream', args[0], (options) => rawProvider.generateStream!(args[0], options, args[2])),
         } : {}),
       };
       if (providerPreflightRequired) {
@@ -1402,17 +4964,28 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
         }
         if (!available) {
           const message = `${spec.label} is not configured or reachable. ${spec.setup}`;
-          const diagnostic = providerBoundaryDiagnostic({
+          const typedReadinessError = preflightError && typeof preflightError === 'object';
+          const classifiedDiagnostic = providerBoundaryDiagnostic({
             providerId: id,
             projectRoot: req.projectRoot,
             phase: 'preflight',
             error: preflightError ?? message,
-            // Local Ollama readiness is a reachability concern; configured
-            // remote providers missing credentials are authentication issues.
-            code: preflightError && typeof preflightError === 'object'
+            // A bare `available() === false` carries no credential, model, or
+            // network evidence.  Preserve it as an unconfigured/readiness
+            // observation instead of inventing authentication advice.  Typed
+            // adapter errors remain authoritative and retain their exact code.
+            code: typedReadinessError
               ? String((preflightError as { code?: unknown }).code ?? '')
-              : id === 'ollama' ? 'NETWORK_FAILURE' : 'AUTHENTICATION_FAILED',
+              : 'PROVIDER_CONFIGURATION_UNAVAILABLE',
           });
+          const diagnostic = typedReadinessError
+            ? classifiedDiagnostic
+            : {
+                ...classifiedDiagnostic,
+                cause: 'unknown' as const,
+                retryable: false,
+                safeAction: 'fix_provider_configuration' as const,
+              };
           askTrace.finishSpan(preflightSpan, {
             outcome: 'unavailable',
             reasonCode: 'provider_preflight',
@@ -1434,6 +5007,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
               },
             },
           });
+          observeV2ProviderFailure(v2State, diagnostic, true);
           emit({
             kind: 'error',
             message,
@@ -1483,6 +5057,23 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           emit({ kind: 'error', message: 'No user question found.' });
           return;
         }
+        // V2 may not silently acquire a second context pack if the bridge was
+        // lost during request handoff.  A stale or missing bridge is a typed
+        // gap, not a reason to re-run retrieval against a newer snapshot.
+        if (v2Authoritative && v2State?.snapshotId && !v2Workspace) {
+          finishAskAgentV2Turn(v2State, {
+            version: 2,
+            kind: 'gap',
+            reasonCode: 'ASK_V2_SNAPSHOT_BRIDGE_UNAVAILABLE',
+            safeAction: 'retry_after_metadata_refresh',
+            origin: 'retrieval',
+          });
+          emit({
+            kind: 'error',
+            message: 'The retrieved Ask context is no longer available for this immutable snapshot, so DQL did not re-retrieve or execute a query. Refresh metadata and retry.',
+          });
+          return;
+        }
 
         const memory = new MemoryStore(defaultMemoryPath(req.projectRoot));
         const kg = new KGStore(kgPath);
@@ -1520,7 +5111,19 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           const selectedContext = selectedContextForMetadata(req, question);
           emit({ kind: 'thinking', text: 'Searching certified blocks, semantic metrics, relevant domains, and skills.' });
           const contextStartedAt = Date.now();
-          const contextPack = req.preparedContextPack ?? await buildLocalContextPack(req.projectRoot, {
+          const bridgedContextPack = v2Workspace
+            ? (() => {
+                try { return v2Workspace.getContextPack() as LocalContextPack | undefined; } catch { return undefined; }
+              })()
+            : undefined;
+          // In authoritative V2 the bridge is the immutable retrieval boundary.
+          // Falling back to a newly built pack here would let a post-planner
+          // retrieval silently change candidate identity, which is exactly the
+          // double-context failure V2 is meant to remove. Legacy/shadow keeps
+          // its existing prepared/local retrieval compatibility path.
+          const contextPack = v2Authoritative
+            ? bridgedContextPack
+            : bridgedContextPack ?? req.preparedContextPack ?? await buildLocalContextPack(req.projectRoot, {
             question,
             surface: 'notebook',
             followUp,
@@ -1547,8 +5150,24 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             conversationTopicRelation: conversationSnapshot?.topicRelation,
             domainContext: req.domainContext,
             preparedMetadataFingerprint: projectState.metadataFingerprint,
-          })
-            .catch(() => undefined);
+            })
+              .catch(() => undefined);
+          if (v2Authoritative && !contextPack) {
+            const text = 'The immutable Ask snapshot could not supply its bound context pack. DQL did not re-retrieve or execute a query.';
+            finishAskAgentV2Turn(v2State!, {
+              version: 2,
+              kind: 'gap',
+              reasonCode: 'ASK_V2_BOUND_CONTEXT_UNAVAILABLE',
+              origin: 'retrieval',
+              safeAction: 'refresh_snapshot_then_retry',
+            });
+            emit({
+              kind: 'tool_result',
+              id: 'governed_answer',
+              output: askV2NoAnswer({ contextPack: undefined } as AnswerLoopInput, 'gap', 'ASK_V2_BOUND_CONTEXT_UNAVAILABLE', 'retrieval'),
+            });
+            return;
+          }
           // CTX-002/SKILL-003: the immutable context pack is the single skill
           // selection for this turn. Never re-read mutable skill files after
           // the project snapshot has been acquired.
@@ -1706,6 +5325,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           // even though provider, router, and SQL evidence was recorded.
           const answerLoopInput: Parameters<typeof answer>[0] = attachAskTraceObserverV1<Parameters<typeof answer>[0]>({
             question,
+            ...(v2Workspace ? { askAgentV2Workspace: v2Workspace } : {}),
             ...(req.skipCrossResultComputation
               ? { skipCrossResultComputation: true }
               : {}),
@@ -1809,6 +5429,22 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
                   return req.prepareExploratorySqlExecution!(sql, ...args);
                 }
               : undefined,
+            // Authoritative V2 deliberately bypasses the legacy routeDecision
+            // authorization callback above.  These two host callbacks consume
+            // only the immutable V2 workspace/state carried on this request;
+            // they cannot reopen a V1 cascade or mint a second plan.
+            prepareAskV2ExploratorySqlExecution: req.prepareAskV2ExploratorySqlExecution
+              ? async (proposal) => {
+                  guardSnapshot();
+                  return req.prepareAskV2ExploratorySqlExecution!(proposal);
+                }
+              : undefined,
+            authorizeAskV2DqlArtifact: req.authorizeAskV2DqlArtifact
+              ? async (proposal) => {
+                  guardSnapshot();
+                  return req.authorizeAskV2DqlArtifact!(proposal);
+                }
+              : undefined,
             executeAgenticGeneratedSql: req.executeAgenticGeneratedSql
               ? async (capability, sql, artifact) => {
                   guardSnapshot();
@@ -1827,22 +5463,52 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
                   return executeAtSqlBoundary(() => req.executeDqlArtifact!(...args));
                 }
               : undefined,
+            executeAskV2DqlArtifact: req.executeAskV2DqlArtifact
+              ? async (proposal) => {
+                  guardSnapshot();
+                  return executeAtSqlBoundary(() => req.executeAskV2DqlArtifact!(proposal));
+                }
+              : undefined,
             expandGroundingContext: createGroundingContextExpander(req.projectRoot, req.probeNamedRelations),
             answerLoopTools,
             providerPayloadGuard: {
-              purpose: 'research_tool',
-              allowedResultRowTools: researchRowsOptIn
-                ? { sample_notebook_dataset: 20, execute_local_analysis: 200 }
-                : {},
+              purpose: v2Authoritative ? 'answer_generation' : 'research_tool',
+              allowedResultRowTools: v2Authoritative
+                ? (v2ResultEgress?.allowRows
+                  ? { sample_notebook_dataset: 20, execute_local_analysis: 20, preview_query: 20 }
+                  : {})
+                : researchRowsOptIn
+                  ? { sample_notebook_dataset: 20, execute_local_analysis: 200 }
+                  : {},
               resultRowBudgetGroupByTool: {
                 sample_notebook_dataset: 'research_sample',
                 execute_local_analysis: 'research_local_analysis',
+                ...(v2Authoritative ? { preview_query: 'ask_v2_result' } : {}),
               },
               cumulativeResultRowBudgets: {
-                research_sample: 20,
-                research_local_analysis: 200,
+                ...(v2Authoritative
+                  ? { research_sample: 20, research_local_analysis: 20, ask_v2_result: 20 }
+                  : { research_sample: 20, research_local_analysis: 200 }),
               },
+              ...(v2Authoritative ? {
+                maxResultColumns: v2ResultEgress?.maximumColumns,
+                maxResultCells: v2ResultEgress?.maximumCells,
+              } : {}),
               onPayload: ({ toolName, output, resultRowCount, columnCount, cumulativeResultRowCount }) => {
+                if (v2Authoritative) {
+                  if (resultRowCount === 0) return;
+                  providerEgressReceipts.push(createProviderEgressReceipt({
+                    purpose: 'answer_generation',
+                    provider: provider.name,
+                    permittedCategories: ['question', 'schema_metadata', 'result_rows'],
+                    optIn: v2ResultEgress?.allowRows === true,
+                    payload: { toolName, output },
+                    resultRowCount,
+                    columnCount,
+                    cumulativeResultRowCount,
+                  }));
+                  return;
+                }
                 pendingResearchPurpose = researchDispatchPurposeForTool(toolName);
                 pendingResultRowCount += resultRowCount;
                 pendingColumnCount = Math.max(pendingColumnCount, columnCount);
@@ -1864,12 +5530,45 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             // auto-write a draft into the blocks space. A draft is created only when the user
             // explicitly acts (the "Create DQL draft" action → the dql_block_draft route).
           } as Parameters<typeof answer>[0], askTrace);
-          const result = req.deterministicExploratoryProposal
+          let result: AgentAnswer;
+          if (v2Authoritative) {
+            // Tier 1 completes before provider planning.  The direct path is
+            // still fully V2-owned: it uses the same immutable workspace,
+            // freezes at capability minting, calls the same host executor,
+            // and records the same typed tool/fact receipt.  It never calls
+            // the V1 answer loop or a provider merely to rediscover an exact
+            // certified artifact already proven by retrieval.
+            const exactCertified = await executeAskV2ExactCertifiedFastPath(answerLoopInput, v2State);
+            if (exactCertified) {
+              result = exactCertified;
+            } else {
+            // The V2 lane is a real handler, not a post-hoc label for the
+            // generated analyst loop. Its legacy function is an assertion: it
+            // must never be called because the V2 policy has no fallback.
+            result = await answerAgentic(answerLoopInput, {
+              policy: orchestratorPolicyForRequest(req),
+              lane: agenticLaneForRequest(req),
+              legacy: async () => {
+                throw new Error('ASK_V2_LEGACY_CONTROLLER_MUST_NOT_RUN');
+              },
+              // Research is an explicit V2 handler on the same snapshot and
+              // tool kernel. It never falls through to the legacy research
+              // controller when the provider chooses a branch/tool.
+              handlers: {
+                ask_v2: createAskV2LaneHandler(v2State!),
+                research: createAskV2ResearchLaneHandler(v2State!),
+              },
+            });
+            }
+          } else {
+          result = req.deterministicExploratoryProposal
             ? await answer(answerLoopInput)
             : await answerAgentic(answerLoopInput, {
-            policy: resolveOrchestratorPolicy({
-              config: readOrchestratorConfig(req.projectRoot),
-            }),
+            // V2 is an explicit host-owned runtime selection, not a project
+            // config accident.  It sends the immutable retrieved workspace to
+            // the bounded analyst tool loop even when an older project still
+            // has the migration policy set to legacy.  Shadow never serves.
+            policy: orchestratorPolicyForRequest(req),
             lane: agenticLaneForRequest(req),
             legacy: answer,
             // The generated lane runs the analyst loop: it verifies every
@@ -1880,6 +5579,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
             handlers: {
               generated: createAnalystLaneHandler({
                 legacy: answer,
+                authoritativeV2: v2Authoritative,
                 buildDeps: (loopInput) => {
                   const execute = loopInput.executeGeneratedSql;
                   const valuesEnabled = valueLookupEnabled(req.projectRoot);
@@ -1901,7 +5601,10 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
                     // Scaled by the same knob as every other agent deadline, so
                     // a local model that needs seconds per call is not planned
                     // out of existence by a budget calibrated for a hosted one.
-                    ...(turnPlanningEnabled(req.projectRoot, req.orchestrationMode) ? {
+                    // V2 deliberately uses one bounded turn plan after
+                    // retrieval.  V1 keeps its historical research-only
+                    // planning policy so this does not broaden legacy calls.
+                    ...(turnPlanningEnabled(req.projectRoot, req.orchestrationMode) || v2Authoritative ? {
                     planTurn: async (question: string, toolNames: string[]) => {
                       const plan = await planAnalystTurn(
                         loopInput.provider,
@@ -1924,7 +5627,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
                     // provider transport, so carry the same physical-boundary
                     // observer through the loop. The marker prevents the
                     // provider wrapper from duplicating native tool records.
-                    onToolCall: createAskTraceToolCallback(askTraceObserverForV1(loopInput)),
+                    onToolCall: v2Authoritative
+                      ? createAskV2TraceToolCallback(askTraceObserverForV1(loopInput), v2State)
+                      : createAskTraceToolCallback(askTraceObserverForV1(loopInput)),
                     // The loop's trace, on the channel the provider already uses
                     // for progress. `thinking` turns become `onProgress`, which
                     // the run engine emits as `executor.started` over SSE — so
@@ -1984,6 +5689,9 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
               }
             },
           });
+          }
+          if (v2Authoritative) finishV2AnswerFromResult(v2State, result);
+          terminalAnswer = result;
           const answerDurationMs = Date.now() - answerStartedAt;
           // CTX-002: an answer built from one snapshot must never be published
           // after the runtime has advanced to another snapshot.
@@ -2043,6 +5751,13 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
           memory.close();
         }
         emit({ kind: 'done', stopReason: 'stop' });
+        // The terminal V2 state belongs to this provider-runner invocation.
+        // Return its sanitized execution receipt directly to the host instead
+        // of asking a caller to observe mutation through a cloned request.
+        const terminalReceipt = v2Authoritative
+          ? askV2ExecutionReceiptFromTerminalState(v2State, req.askAgentV2ExecutionCapability, terminalAnswer)
+          : undefined;
+        return terminalReceipt ? { askAgentV2ExecutionReceipt: terminalReceipt } : undefined;
       } catch (err) {
         // A deadline/cancellation is NOT a provider failure. Rethrow it intact so
         // the engine renders its graceful bounded-deadline message instead of a
@@ -2071,6 +5786,18 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
         // failed sends them to re-authenticate a provider that worked fine.
         const snapshotDrift = budgetCode === 'PROJECT_SNAPSHOT_MISMATCH';
         const setupHint = shouldShowProviderSetupHint(message) ? ` ${spec.setup}` : '';
+        const diagnostic = providerBoundaryDiagnostic({
+          providerId: id,
+          projectRoot: req.projectRoot,
+          phase: orchestrationBudgetExhausted ? 'planning' : 'generation',
+          error: err,
+          code: orchestrationBudgetExhausted
+            ? 'PROVIDER_DISPATCH_BUDGET'
+            : snapshotDrift
+              ? 'ADMISSION_DENIED'
+              : budgetCode,
+        });
+        observeV2ProviderFailure(v2State, diagnostic, true);
         emit({
           kind: 'error',
           message: orchestrationBudgetExhausted
@@ -2083,19 +5810,7 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
               : snapshotDrift ? 'project_snapshot_mismatch'
               : 'provider_error',
           ),
-          providerDiagnostic: providerBoundaryDiagnostic({
-            providerId: id,
-            projectRoot: req.projectRoot,
-            phase: orchestrationBudgetExhausted
-              ? 'planning'
-              : 'generation',
-            error: err,
-            code: orchestrationBudgetExhausted
-              ? 'PROVIDER_DISPATCH_BUDGET'
-              : snapshotDrift
-                ? 'ADMISSION_DENIED'
-                : budgetCode,
-          }),
+          providerDiagnostic: diagnostic,
         });
       }
     },
@@ -3405,6 +7120,7 @@ function normalizePriorValueDimension(value: string): string {
 
 export const __test__ = {
   agenticLaneForRequest,
+  orchestratorPolicyForRequest,
   applyTopicShiftGuard,
   isDrilldownFollowUp,
   buildAnswerLoopTools,
@@ -3420,6 +7136,10 @@ export const __test__ = {
   researchDispatchPurposeForTool,
   readAgentConfig,
   providerBoundaryDiagnostic,
+  createAskV2LaneHandler,
+  createAskV2ResearchLaneHandler,
+  parseAskV2ResearchHypotheses,
+  askV2ResearchAnalyticalBranchReceipt,
 };
 
 function researchDispatchPurposeForTool(toolName: string): 'research_narration' | 'research_tool' {

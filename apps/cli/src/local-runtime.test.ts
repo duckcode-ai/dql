@@ -135,6 +135,9 @@ import {
   serializeJSON,
   staticResponseCacheControl,
   startLocalServer,
+  askV2RelationshipPathHandleId,
+  assertAskV2BoundRelationshipPathsForSql,
+  captureAskV2SemanticCapabilities,
   captureResearchLineageRootSnapshotV1,
   researchLineageRootSnapshotIsCurrentV1,
   validateBlockStudioSource,
@@ -316,6 +319,251 @@ describe('local cold-literal probe capability registry', () => {
     }
 
     expect(execute).not.toHaveBeenCalled();
+  });
+});
+
+describe('authoritative Ask V2 governed relationship-path closure', () => {
+  const admittedPath = {
+    leftRelation: 'analytics.fct_orders',
+    leftColumn: 'customer_id',
+    rightRelation: 'analytics.dim_customers',
+    rightColumn: 'customer_id',
+  };
+  const admittedPathId = askV2RelationshipPathHandleId(admittedPath);
+  const exactJoin = `
+    SELECT orders.order_id, customers.customer_name
+    FROM analytics.fct_orders AS orders
+    JOIN analytics.dim_customers AS customers
+      ON orders.customer_id = customers.customer_id
+  `;
+
+  it('accepts a compiled multi-relation query only when its exact admitted path was selected', () => {
+    expect(() => assertAskV2BoundRelationshipPathsForSql({
+      sql: exactJoin,
+      relationshipPathIds: [admittedPathId],
+      paths: [admittedPath],
+    })).not.toThrow();
+  });
+
+  it('denies a multi-relation query before execution when no path handle was selected', () => {
+    expect(() => assertAskV2BoundRelationshipPathsForSql({
+      sql: exactJoin,
+      relationshipPathIds: [],
+      paths: [admittedPath],
+    })).toThrow(/requires an admitted relationship-path handle/i);
+  });
+
+  it('denies a valid path handle when the compiled query joins an unrelated relation', () => {
+    const unrelatedJoin = `
+      SELECT orders.order_id, products.product_name
+      FROM analytics.fct_orders AS orders
+      JOIN analytics.dim_products AS products
+        ON orders.product_id = products.product_id
+    `;
+    expect(() => assertAskV2BoundRelationshipPathsForSql({
+      sql: unrelatedJoin,
+      relationshipPathIds: [admittedPathId],
+      paths: [admittedPath],
+    })).toThrow(/outside the selected immutable relationship-path closure/i);
+  });
+});
+
+describe('authoritative Ask V2 semantic capability capture', () => {
+  const semanticCandidate = (input: {
+    id: string;
+    qualifiedId: string;
+    runtimeName: string;
+  }): AgentEvidenceCandidate => ({
+    id: input.id,
+    qualifiedId: input.qualifiedId,
+    kind: 'semantic_metric',
+    semanticObjectType: 'metric',
+    trustTier: 'semantic',
+    name: input.runtimeName,
+    semanticRuntimeName: input.runtimeName,
+    relevanceScore: 1,
+    matchReasons: ['exact'],
+    compatibility: 'compatible',
+  });
+
+  it('keys handles only by canonical qualified IDs when another card reuses a legacy ID', () => {
+    const first = semanticCandidate({
+      id: 'legacy:metric:revenue_a',
+      qualifiedId: 'semantic:metric:revenue_a',
+      runtimeName: 'runtime_revenue_a',
+    });
+    // This legacy ID deliberately collides with the first card's canonical
+    // opaque V2 ID. It must not overwrite the first handle through a legacy
+    // alias, even though its own canonical ID is distinct.
+    const second = semanticCandidate({
+      id: first.qualifiedId!,
+      qualifiedId: 'semantic:metric:revenue_b',
+      runtimeName: 'runtime_revenue_b',
+    });
+
+    const captured = captureAskV2SemanticCapabilities({
+      candidates: [first, second],
+      snapshotId: 'snapshot:semantic-collision',
+      isCurrent: () => true,
+    });
+
+    expect(captured.collisionIds).toEqual([]);
+    expect(captured.capabilities.get(first.qualifiedId!)?.candidateId).toBe(first.qualifiedId);
+    expect(captured.capabilities.get(first.qualifiedId!)?.runtimeName).toBe('runtime_revenue_a');
+    expect(captured.capabilities.get(second.qualifiedId!)?.candidateId).toBe(second.qualifiedId);
+    expect(captured.capabilities.get(second.qualifiedId!)?.runtimeName).toBe('runtime_revenue_b');
+  });
+
+  it('withholds duplicate canonical semantic IDs instead of retaining an arbitrary compiler handle', () => {
+    const shared = 'semantic:metric:duplicate_revenue';
+    const captured = captureAskV2SemanticCapabilities({
+      candidates: [
+        semanticCandidate({ id: 'legacy:metric:one', qualifiedId: shared, runtimeName: 'runtime_revenue_one' }),
+        semanticCandidate({ id: 'legacy:metric:two', qualifiedId: shared, runtimeName: 'runtime_revenue_two' }),
+      ],
+      snapshotId: 'snapshot:semantic-duplicate',
+      isCurrent: () => true,
+    });
+
+    expect(captured.collisionIds).toEqual([shared]);
+    expect(captured.capabilities.has(shared)).toBe(false);
+  });
+
+  it('deduplicates only exact same-owner MetricFlow time cards without conflating sibling metric_time axes', () => {
+    const metricTime: AgentEvidenceCandidate = {
+      id: 'retrieval:order-item-metric-time:one',
+      qualifiedId: 'semantic:commerce:dimension:order_item.metric_time',
+      kind: 'semantic_member',
+      semanticObjectType: 'dimension',
+      trustTier: 'semantic',
+      name: 'metric_time',
+      semanticRuntimeName: 'metric_time',
+      semanticModel: 'order_item',
+      timeGrains: ['day', 'month'],
+      sourceObjects: ['order_item'],
+      relevanceScore: 1,
+      matchReasons: ['exact'],
+      compatibility: 'compatible',
+    };
+    const duplicate = { ...metricTime, id: 'retrieval:order-item-metric-time:two' };
+    const sibling: AgentEvidenceCandidate = {
+      ...metricTime,
+      id: 'retrieval:orders-metric-time',
+      qualifiedId: 'semantic:commerce:dimension:orders.metric_time',
+      semanticModel: 'orders',
+      sourceObjects: ['orders'],
+    };
+
+    const captured = captureAskV2SemanticCapabilities({
+      candidates: [metricTime, duplicate, sibling],
+      snapshotId: 'snapshot:semantic-time-owner',
+      isCurrent: () => true,
+    });
+
+    expect(captured.collisionIds).toEqual([]);
+    expect([...captured.capabilities.keys()]).toEqual([
+      'semantic:commerce:dimension:order_item.metric_time',
+      'semantic:commerce:dimension:orders.metric_time',
+    ]);
+    expect(captured.capabilities.get('semantic:commerce:dimension:order_item.metric_time')?.runtimeName).toBe('metric_time');
+  });
+
+  it('captures only bindable semantic fields and never promotes model or saved-query cards by name', () => {
+    const containers: AgentEvidenceCandidate[] = [
+      {
+        id: 'semantic:commerce:model:revenue', qualifiedId: 'semantic:commerce:model:revenue',
+        kind: 'semantic_member', semanticObjectType: 'model', trustTier: 'semantic',
+        name: 'revenue', semanticRuntimeName: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      },
+      {
+        id: 'semantic:commerce:saved_query:revenue', qualifiedId: 'semantic:commerce:saved_query:revenue',
+        kind: 'semantic_member', semanticObjectType: 'saved_query', trustTier: 'semantic',
+        name: 'revenue', semanticRuntimeName: 'revenue', relevanceScore: 1, matchReasons: ['exact'], compatibility: 'compatible',
+      },
+    ];
+
+    const captured = captureAskV2SemanticCapabilities({
+      candidates: containers,
+      snapshotId: 'snapshot:semantic-containers',
+      isCurrent: () => true,
+    });
+
+    expect(captured.capabilities.size).toBe(0);
+    expect(captured.collisionIds).toEqual([]);
+  });
+
+  it('intersects advertised semantic engines with exact target-bound candidate readiness', () => {
+    const metric = {
+      ...semanticCandidate({
+        id: 'semantic:metric:metricflow_revenue',
+        qualifiedId: 'semantic:metric:metricflow_revenue',
+        runtimeName: 'metricflow_revenue',
+      }),
+      analyticalCapability: {
+        executionCapabilities: [
+          { route: 'semantic', adapterId: 'metricflow' },
+          { route: 'semantic', adapterId: 'native' },
+        ],
+      } as never,
+    } satisfies AgentEvidenceCandidate;
+
+    const mixed = captureAskV2SemanticCapabilities({
+      candidates: [metric],
+      snapshotId: 'snapshot:semantic-target-bound',
+      isCurrent: () => true,
+      semanticCandidateReadiness: [{
+        candidateId: metric.qualifiedId!, status: 'ready', engines: ['native'],
+      }],
+    });
+    const unavailable = captureAskV2SemanticCapabilities({
+      candidates: [metric],
+      snapshotId: 'snapshot:semantic-target-unavailable',
+      isCurrent: () => true,
+      semanticCandidateReadiness: [{
+        candidateId: metric.qualifiedId!, status: 'unavailable', engines: [],
+      }],
+    });
+
+    expect(mixed.capabilities.get(metric.qualifiedId!)?.engines).toEqual(['native']);
+    expect(unavailable.capabilities.get(metric.qualifiedId!)?.engines).toEqual([]);
+  });
+
+  it('binds the project-selected ready semantic engine and never lets a capability choose among engines', () => {
+    const metric = {
+      ...semanticCandidate({
+        id: 'semantic:metric:host_selected_revenue',
+        qualifiedId: 'semantic:metric:host_selected_revenue',
+        runtimeName: 'host_selected_revenue',
+      }),
+      analyticalCapability: {
+        executionCapabilities: [
+          { route: 'semantic', adapterId: 'native' },
+          { route: 'semantic', adapterId: 'metricflow' },
+        ],
+      } as never,
+    } satisfies AgentEvidenceCandidate;
+    const selectedNative = captureAskV2SemanticCapabilities({
+      candidates: [metric],
+      snapshotId: 'snapshot:host-selected-native',
+      isCurrent: () => true,
+      semanticRuntime: { version: 1, preference: 'auto', selectedEngine: 'native', readiness: 'ready' },
+      semanticCandidateReadiness: [{
+        candidateId: metric.qualifiedId!, status: 'ready', engines: ['native', 'metricflow-cli'],
+      }],
+    });
+    const explicitlyUnavailable = captureAskV2SemanticCapabilities({
+      candidates: [metric],
+      snapshotId: 'snapshot:host-selected-unavailable',
+      isCurrent: () => true,
+      semanticRuntime: { version: 1, preference: 'dbt-cloud', selectedEngine: 'dbt-cloud', readiness: 'unavailable' },
+      semanticCandidateReadiness: [{
+        candidateId: metric.qualifiedId!, status: 'ready', engines: ['native', 'metricflow-cli'],
+      }],
+    });
+
+    expect(selectedNative.capabilities.get(metric.qualifiedId!)?.selectedEngine).toBe('native');
+    expect(explicitlyUnavailable.capabilities.get(metric.qualifiedId!)?.selectedEngine).toBeUndefined();
+    expect(explicitlyUnavailable.capabilities.get(metric.qualifiedId!)?.engines).toEqual(['metricflow-cli', 'native']);
   });
 });
 
@@ -5903,7 +6151,7 @@ LIMIT \${top_n}
     cpSync(join(fixtureRoot, 'target'), join(projectRoot, 'target'), { recursive: true });
     writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
       project: 'jaffle-shop',
-      connections: { default: { driver: 'file' } },
+    connections: { default: { driver: 'file' } },
     }, null, 2));
     const executeQuery = vi.fn(async (sql: string) => sql.includes('product_type')
       ? ({ columns: ['category', 'revenue'], rows: [{ category: 'Food', revenue: 100 }], rowCount: 1, sql })
@@ -5954,7 +6202,7 @@ LIMIT \${top_n}
     }
   });
 
-  it('AGT-035 executes an exact certified customer profile without a planner when descriptive profile outputs do not alter the authored grain', async () => {
+  it('AGT-047 executes a host-proven exact certified customer profile in authoritative V2 with zero provider dispatches', async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-certified-profile-fast-path-'));
     tempDirs.push(projectRoot);
     const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/jaffle-supply-chain');
@@ -5970,19 +6218,24 @@ block "customer_profile" {
   domain = "customers"
   type = "custom"
   status = "certified"
-  description = "Top customers with profile attributes and lifetime measures."
+  description = "Top customers by revenue with profile attributes."
   tags = ["customers", "ranking"]
   owner = "analytics@example.com"
   grain = "one row per customer"
   entities = ["Customer"]
-  outputs = ["customer_name", "customer_type", "count_lifetime_orders", "lifetime_spend"]
+  outputs = ["customer_name", "customer_type", "count_lifetime_orders", "revenue"]
   dimensions = ["customer_name", "customer_type"]
+  // Keep the exact implicit authored question in the source form the
+  // retrieval catalog captures for the zero-provider contract. The explicit
+  // revenue request below remains covered by the declared output contract.
   examples = [{ question = "Who are the top customers?" }]
+  params { top_n: number = 10 }
+  parameterPolicy { top_n = "dynamic" }
   query = """
-    SELECT customer_name, 'returning' AS customer_type, count_lifetime_orders, lifetime_spend
+    SELECT customer_name, 'returning' AS customer_type, count_lifetime_orders, lifetime_spend AS revenue
     FROM dim_customers
-    ORDER BY lifetime_spend DESC
-    LIMIT 10
+    ORDER BY revenue DESC
+    LIMIT \${top_n}
   """
 }
 `);
@@ -5990,10 +6243,50 @@ block "customer_profile" {
       project: 'jaffle-shop',
       connections: { default: { driver: 'file' } },
     }, null, 2));
-    const executeQuery = vi.fn(async (sql: string) => ({
-      columns: ['customer_name', 'customer_type', 'count_lifetime_orders', 'lifetime_spend'],
-      rows: [{ customer_name: 'Ada', customer_type: 'returning', count_lifetime_orders: 3, lifetime_spend: 100 }],
-      rowCount: 1,
+    // Bridge assertion: the catalog fit retains the direct authored-example
+    // fact by metadata object key, then the retrieval adapter exposes that
+    // same candidate under its canonical qualified execution ID. The local
+    // runtime must perform this translation rather than comparing namespace
+    // prefixes (`dql:block:*` vs `customers::block::*`).
+    const implicitPack = await buildLocalContextPack(projectRoot, {
+      question: 'who are the top customers',
+      mode: 'question',
+      strictness: 'balanced',
+      limit: 80,
+    });
+    const directFit = implicitPack.retrievalDiagnostics.certifiedCandidateFits.find((fit) =>
+      fit.directQuestionContract === 'exact_example');
+    expect(directFit).toMatchObject({ objectKey: 'dql:block:customer_profile' });
+    const implicitEvidence = toAgentRetrievalEvidence(
+      implicitPack.retrievalDiagnostics.meaningEvidence!,
+      implicitPack.questionPlan,
+      {
+        snapshotId: implicitPack.knowledgeLens.snapshotId,
+        sourceFingerprint: implicitPack.freshness.fingerprint ?? undefined,
+        knowledgeLens: implicitPack.knowledgeLens,
+        contextObjects: implicitPack.objects,
+        retrievalLanes: implicitPack.retrievalDiagnostics.lanes,
+        preferSnapshotCandidates: true,
+      },
+    );
+    const directCandidate = implicitEvidence.candidates.find((candidate) => candidate.id === directFit?.objectKey);
+    expect(directCandidate?.qualifiedId).toBe('customers::block::customer_profile');
+    const executeQuery = vi.fn(async (
+      sql: string,
+      _parameterSpecs?: unknown,
+      _parameters?: Record<string, unknown>,
+    ) => ({
+      columns: ['customer_name', 'customer_type', 'count_lifetime_orders', 'revenue'],
+      // The connector stub deliberately returns a broader result. The exact
+      // V2 certified lane must still pass the typed top_n binding and retain
+      // the ordinary certified top-N shape before publishing its answer.
+      rows: Array.from({ length: 935 }, (_, index) => ({
+        customer_name: `Customer ${index + 1}`,
+        customer_type: 'returning',
+        count_lifetime_orders: index + 1,
+        revenue: 1_000 - index,
+      })),
+      rowCount: 935,
       sql,
     }));
     let server: Server | undefined;
@@ -6002,13 +6295,14 @@ block "customer_profile" {
         rootDir: projectRoot,
         projectRoot,
         executor: { executeQuery } as unknown as QueryExecutor,
-        connection: { driver: 'file' },
+        connection: { driver: 'duckdb', filepath: ':memory:' },
+        askAgentRuntimeMode: 'authoritative_v2',
         preferredPort: 0,
         captureServer: (created) => { server = created; },
       });
       const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: 'who are the top customers?', requestedMode: 'ask' }),
+        body: JSON.stringify({ question: 'who are the top customers by revenue', requestedMode: 'ask' }),
       });
       const payload = await response.json() as { run: any };
       expect(response.status, JSON.stringify(payload)).toBe(201);
@@ -6017,12 +6311,681 @@ block "customer_profile" {
         trustState: 'certified',
         stopReason: 'certified_answer_found',
         telemetry: { providerRoundTrips: 0 },
-        diagnosticReceiptV6: {
-          planning: { mode: 'deterministic_binding', plannerCalls: 0 },
-          cascade: { selectedTier: 'certified', planFrozen: true },
+        diagnosticReceiptV8: {
+          mode: 'authoritative_v2',
+          outcome: { connectionAttempted: true, executionAttempts: 1 },
+          activity: { providerDispatches: 0 },
+          planFrozen: true,
         },
       });
       expect(executeQuery).toHaveBeenCalledTimes(1);
+      expect(executeQuery.mock.calls[0]?.[2]).toMatchObject({ top_n: 10 });
+      expect(payload.run.artifacts?.[0]?.payload?.result?.rowCount).toBe(10);
+      expect(payload.run.artifacts?.[0]?.payload?.dqlArtifact?.parameterValues).toMatchObject({ top_n: 10 });
+      expect(payload.run.routeDecision?.askAgentV2Decision?.state).toMatchObject({
+        mode: 'authoritative_v2',
+        terminalOutcome: { kind: 'finish_answer', origin: 'execution' },
+        resolvedPlan: { tier: 'certified', frozen: true },
+      });
+      const v2State = payload.run.routeDecision.askAgentV2Decision.state;
+      expect(v2State.resolvedPlan.candidateIds.every((id: string) => v2State.retainedCandidateIds.includes(id))).toBe(true);
+      expect(v2State.observations).toEqual(expect.arrayContaining([
+        expect.objectContaining({ tool: 'run_certified', outcome: 'executed', origin: 'execution' }),
+      ]));
+      // The V2 terminal evaluation is authored by the engine before run
+      // finalization. Keeping this assertion separate from the aggregate run
+      // evaluation tells us whether a transport/finalizer projection can ever
+      // erase a completed frozen result.
+      expect(payload.run.steps?.[0]?.evaluations).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'ask-v2-terminal-result', passed: true }),
+      ]));
+      expect(payload.run.evaluations).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'ask-v2-terminal-result', passed: true }),
+      ]));
+      // A successful V2 certified execution must retain its result through
+      // finalization. The engine may add deterministic fact narration, but it
+      // must not route the already-frozen block back into a repair cycle.
+      expect(payload.run.businessAnswer).toMatchObject({
+        mode: 'facts_only',
+        trustState: 'certified',
+        resultFingerprint: expect.any(String),
+      });
+      expect(payload.run.businessAnswer.factIds.length).toBeGreaterThan(0);
+      expect(payload.run.answer).toContain('Customer 1');
+      expect((payload.run.nextActions ?? []).map((action: { id: string }) => action.id))
+        .not.toContain('retry-after-connection');
+      const traceId = payload.run.traceReference?.traceId;
+      expect(traceId).toMatch(/^[a-f0-9]{32}$/);
+      const traceResponse = await fetch(`http://127.0.0.1:${port}/api/ask-traces/${traceId}`);
+      const trace = await traceResponse.json() as {
+        envelope?: { selectedTier?: string; trustState?: string; candidateDecisionCount?: number };
+        runtimeReceiptV8?: { planFrozen?: boolean; tierAttempts?: Array<{ tier?: string; outcome?: string; frozen?: boolean }> };
+        candidateDecisions?: Array<{ candidateId: string; reasonCode: string }>;
+      };
+      expect(trace.envelope).toMatchObject({ selectedTier: 'certified', trustState: 'certified' });
+      expect(trace.envelope?.candidateDecisionCount).toBeGreaterThan(0);
+      expect(trace.runtimeReceiptV8).toMatchObject({
+        planFrozen: true,
+        tierAttempts: expect.arrayContaining([expect.objectContaining({ tier: 'certified', frozen: true })]),
+      });
+      expect(trace.candidateDecisions?.length).toBeGreaterThan(0);
+      expect(trace.candidateDecisions).toEqual(expect.arrayContaining([
+        expect.objectContaining({ reasonCode: 'exact_name_match' }),
+      ]));
+
+      // The user did not name a measure here. The zero-provider shortcut is
+      // still valid because this exact authored certified question was
+      // retrieved from the same snapshot and the artifact itself proves that
+      // its primary ranked output is revenue with a typed top_n limit.
+      const implicitResponse = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'who are the top customers', requestedMode: 'ask' }),
+      });
+      const implicit = await implicitResponse.json() as { run: any };
+      expect(implicitResponse.status, JSON.stringify(implicit)).toBe(201);
+      expect(implicit.run).toMatchObject({
+        route: 'certified_answer',
+        trustState: 'certified',
+        telemetry: { providerRoundTrips: 0 },
+        diagnosticReceiptV8: { mode: 'authoritative_v2', activity: { providerDispatches: 0 } },
+      });
+      expect(implicit.run.routeDecision?.askAgentV2Decision?.state).toMatchObject({
+        exactCertifiedCandidateId: 'customers::block::customer_profile',
+      });
+      expect(executeQuery).toHaveBeenCalledTimes(2);
+      expect(executeQuery.mock.calls[1]?.[2]).toMatchObject({ top_n: 10 });
+      expect(implicit.run.artifacts?.[0]?.payload?.result?.rowCount).toBe(10);
+
+      // A question-specified override remains a typed invocation binding; the
+      // V2 shortcut must not silently fall back to the authored default.
+      const overrideResponse = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'who are the top 3 customers by revenue', requestedMode: 'ask' }),
+      });
+      const override = await overrideResponse.json() as { run: any };
+      expect(overrideResponse.status, JSON.stringify(override)).toBe(201);
+      expect(override.run).toMatchObject({ route: 'certified_answer', trustState: 'certified' });
+      expect(executeQuery).toHaveBeenCalledTimes(3);
+      expect(executeQuery.mock.calls[2]?.[2]).toMatchObject({ top_n: 3 });
+      expect(override.run.artifacts?.[0]?.payload?.result?.rowCount).toBe(3);
+      expect(override.run.artifacts?.[0]?.payload?.dqlArtifact?.parameterValues).toMatchObject({ top_n: 3 });
+    } finally {
+      await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
+    }
+  });
+
+  it('AGT-047 fast-paths the real-shaped commerce customer_profile without a direct example when its one complete fit has a host-bound row limit', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-commerce-customer-profile-'));
+    tempDirs.push(projectRoot);
+    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/jaffle-supply-chain');
+    cpSync(join(fixtureRoot, 'target'), join(projectRoot, 'target'), { recursive: true });
+    mkdirSync(join(projectRoot, 'domains', 'commerce', 'blocks'), { recursive: true });
+    // This mirrors the installed jaffle-shop-duckdb customer_profile block:
+    // commerce namespace, profile outputs, lifetime_spend primary sort, and
+    // intentionally no example/parameter/SQL LIMIT. The fixture relation is
+    // the local manifest's dim_customers alias; all ranking contract fields
+    // remain identical to the real artifact.
+    writeFileSync(join(projectRoot, 'domains', 'commerce', 'blocks', 'customer_profile.dql'), `// dql-format: 1
+
+block "customer_profile" {
+  domain = "commerce"
+  type = "custom"
+  status = "certified"
+  description = "Customer lifetime profile. One row per customer."
+  owner = "analytics@jaffle.shop"
+  tags = ["customer", "profile", "lifetime-value"]
+  pattern = "entity_profile"
+  grain = "one row per customer"
+  entities = ["customer"]
+  terms = ["Customer", "Revenue", "Order"]
+  outputs = ["customer_name", "customer_type", "count_lifetime_orders", "lifetime_spend", "first_ordered_at", "last_ordered_at"]
+  dimensions = ["customer_name", "customer_type"]
+  allowedFilters = ["customer_name"]
+  sourceSystems = ["dbt:customers"]
+  replacementFor = []
+  reviewCadence = "monthly"
+  llmContext = "Use for a complete customer profile. Filter by a specific customer_name when the user provides one; return business-friendly lifetime attributes rather than a query plan."
+  examples = [
+    { question = "Give me the complete profile for Matthew Meyer." },
+    { question = "What is this customer's lifetime spend and order history?" }
+  ]
+
+  query = """
+    SELECT
+      customer_name,
+      customer_type,
+      count_lifetime_orders,
+      lifetime_spend,
+      first_ordered_at,
+      last_ordered_at
+    FROM dim_customers
+    ORDER BY lifetime_spend DESC, customer_name
+  """
+}
+`);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'jaffle-shop',
+      // Match the installed jaffle-shop customer-profile target. The `file`
+      // transport intentionally does not rewrite SQL, so it cannot prove the
+      // physical DuckDB LIMIT boundary exercised by this regression.
+      connections: { default: { driver: 'duckdb', filepath: ':memory:' } },
+    }, null, 2));
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'who are the top customers',
+      mode: 'question',
+      strictness: 'balanced',
+      limit: 80,
+    });
+    const fit = pack.retrievalDiagnostics.certifiedCandidateFits.find((candidate) =>
+      candidate.objectKey === 'dql:block:customer_profile');
+    expect(fit).toMatchObject({ completeForRequest: true });
+    expect(fit?.directQuestionContract).toBeUndefined();
+    const executeQuery = vi.fn(async (sql: string) => ({
+      columns: [
+        'customer_name',
+        'customer_type',
+        'count_lifetime_orders',
+        'lifetime_spend',
+        'first_ordered_at',
+        'last_ordered_at',
+      ],
+      rows: Array.from({ length: 20 }, (_, index) => ({
+        customer_name: `Customer ${index + 1}`,
+        customer_type: 'returning',
+        count_lifetime_orders: 20 - index,
+        lifetime_spend: 2_000 - index,
+        first_ordered_at: '2024-01-01',
+        last_ordered_at: '2024-12-31',
+      })),
+      rowCount: 20,
+      sql,
+    }));
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery } as unknown as QueryExecutor,
+        connection: { driver: 'duckdb', filepath: ':memory:' },
+        askAgentRuntimeMode: 'authoritative_v2',
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'who are the top customers', requestedMode: 'ask' }),
+      });
+      const payload = await response.json() as { run: any };
+      expect(response.status, JSON.stringify(payload)).toBe(201);
+      expect(payload.run).toMatchObject({
+        route: 'certified_answer',
+        trustState: 'certified',
+        telemetry: { providerRoundTrips: 0 },
+        diagnosticReceiptV8: {
+          mode: 'authoritative_v2',
+          planFrozen: true,
+          activity: { providerDispatches: 0 },
+          outcome: { executionAttempts: 1 },
+        },
+      });
+      expect(payload.run.routeDecision?.askAgentV2Decision?.state).toMatchObject({
+        exactCertifiedCandidateId: 'commerce::block::customer_profile',
+        resolvedPlan: { tier: 'certified', frozen: true },
+      });
+      expect(payload.run.artifacts?.[0]?.payload?.dqlArtifact?.limit).toBe(10);
+      expect(executeQuery).toHaveBeenCalledTimes(1);
+      expect(executeQuery.mock.calls[0]?.[0]).toMatch(/ORDER BY lifetime_spend DESC, customer_name\s+LIMIT 10/i);
+      expect(payload.run.artifacts?.[0]?.payload?.result?.rowCount).toBe(10);
+      expect(payload.run.artifacts?.[0]?.payload?.dqlArtifact?.parameterValues ?? {}).toEqual({});
+    } finally {
+      await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
+    }
+  });
+
+  it('AGT-047 does not advertise a physical certified row bound on the file target', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-certified-profile-file-row-bound-'));
+    tempDirs.push(projectRoot);
+    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/jaffle-supply-chain');
+    cpSync(join(fixtureRoot, 'target'), join(projectRoot, 'target'), { recursive: true });
+    mkdirSync(join(projectRoot, 'domains', 'commerce', 'blocks'), { recursive: true });
+    // This is one complete, ordered customer ranking fit, but intentionally
+    // has no authored LIMIT or parameter. A file target cannot append a
+    // physical SQL LIMIT before rows reach host-side normalization, so V2
+    // must hand this to the planner rather than call it certified top-N.
+    writeFileSync(join(projectRoot, 'domains', 'commerce', 'blocks', 'customer_profile.dql'), `// dql-format: 1
+
+block "customer_profile" {
+  domain = "commerce"
+  type = "custom"
+  status = "certified"
+  description = "Customer lifetime profile. One row per customer."
+  owner = "analytics@jaffle.shop"
+  tags = ["customer", "profile", "lifetime-value"]
+  pattern = "entity_profile"
+  grain = "one row per customer"
+  entities = ["customer"]
+  terms = ["Customer", "Revenue", "Order"]
+  outputs = ["customer_name", "customer_type", "count_lifetime_orders", "lifetime_spend", "first_ordered_at", "last_ordered_at"]
+  dimensions = ["customer_name", "customer_type"]
+  allowedFilters = ["customer_name"]
+  sourceSystems = ["dbt:customers"]
+  replacementFor = []
+  reviewCadence = "monthly"
+  llmContext = "Use for a complete customer profile."
+  examples = [
+    { question = "Give me the complete profile for Matthew Meyer." },
+    { question = "What is this customer's lifetime spend and order history?" }
+  ]
+
+  query = """
+    SELECT
+      customer_name,
+      customer_type,
+      count_lifetime_orders,
+      lifetime_spend,
+      first_ordered_at,
+      last_ordered_at
+    FROM dim_customers
+    ORDER BY lifetime_spend DESC, customer_name
+  """
+}
+`);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'jaffle-shop',
+      connections: { default: { driver: 'file' } },
+    }, null, 2));
+    const pack = await buildLocalContextPack(projectRoot, {
+      question: 'who are the top customers',
+      mode: 'question',
+      strictness: 'balanced',
+      limit: 80,
+    });
+    const fit = pack.retrievalDiagnostics.certifiedCandidateFits.find((candidate) =>
+      candidate.objectKey === 'dql:block:customer_profile');
+    expect(fit).toMatchObject({ completeForRequest: true });
+    const executeQuery = vi.fn(async () => ({
+      columns: ['customer_name', 'lifetime_spend'],
+      rows: [{ customer_name: 'Must not execute', lifetime_spend: 1 }],
+      rowCount: 1,
+    }));
+    const generate = vi.fn(async () => {
+      throw Object.assign(new Error('The V2 planner was reached because the file target cannot prove a physical row bound.'), {
+        code: 'ETIMEDOUT',
+      });
+    });
+    const planner: AgentProvider = { name: 'ollama', available: async () => true, generate };
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery } as unknown as QueryExecutor,
+        connection: { driver: 'file' },
+        askAgentRuntimeMode: 'authoritative_v2',
+        askAnalyticalPlannerProviderFactory: () => planner,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'who are the top customers', requestedMode: 'ask' }),
+      });
+      const payload = await response.json() as { run: any };
+      expect(response.status, JSON.stringify(payload)).toBe(201);
+      expect(generate).toHaveBeenCalledTimes(1);
+      expect(executeQuery).not.toHaveBeenCalled();
+      expect(payload.run).not.toMatchObject({ route: 'certified_answer', trustState: 'certified' });
+      expect(payload.run.diagnosticReceiptV8).toMatchObject({
+        mode: 'authoritative_v2',
+        planFrozen: false,
+        activity: { providerDispatches: 1 },
+        outcome: { executionAttempts: 0 },
+      });
+    } finally {
+      await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
+    }
+  });
+
+  it('AGT-047 sends an ambiguous implicit ranking to the V2 planner instead of choosing one certified block', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-certified-profile-non-exact-'));
+    tempDirs.push(projectRoot);
+    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/jaffle-supply-chain');
+    cpSync(join(fixtureRoot, 'target'), join(projectRoot, 'target'), { recursive: true });
+    mkdirSync(join(projectRoot, 'blocks'), { recursive: true });
+    // Both artifacts independently cover the tuple. A V2 zero-provider
+    // shortcut requires one snapshot-bound complete fit, so it must not choose
+    // a winner from broad retrieval relevance or an authored default ranking.
+    writeFileSync(join(projectRoot, 'blocks', 'customer_profile.dql'), `// dql-format: 1
+
+block "customer_profile" {
+  domain = "customers"
+  type = "custom"
+  status = "certified"
+  description = "Customer lifetime-revenue leaderboard for account reviews."
+  tags = ["customers", "ranking"]
+  owner = "analytics@example.com"
+  grain = "one row per customer"
+  entities = ["Customer"]
+  outputs = ["customer_name", "revenue"]
+  dimensions = ["customer_name"]
+  examples = [{ question = "Show the customer value leaderboard." }]
+  params { top_n: number = 10 }
+  parameterPolicy { top_n = "dynamic" }
+  query = """
+    SELECT customer_name, lifetime_spend AS revenue
+    FROM dim_customers
+    ORDER BY revenue DESC
+    LIMIT \${top_n}
+  """
+}
+`);
+    writeFileSync(join(projectRoot, 'blocks', 'customer_revenue_leaderboard.dql'), `// dql-format: 1
+
+block "customer_revenue_leaderboard" {
+  domain = "customers"
+  type = "custom"
+  status = "certified"
+  description = "Alternative customer lifetime-revenue leaderboard."
+  tags = ["customers", "ranking"]
+  owner = "analytics@example.com"
+  grain = "one row per customer"
+  entities = ["Customer"]
+  outputs = ["customer_name", "revenue"]
+  dimensions = ["customer_name"]
+  examples = [{ question = "Show the alternative customer leaderboard." }]
+  params { top_n: number = 10 }
+  parameterPolicy { top_n = "dynamic" }
+  query = """
+    SELECT customer_name, lifetime_spend AS revenue
+    FROM dim_customers
+    ORDER BY revenue DESC
+    LIMIT \${top_n}
+  """
+}
+`);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'jaffle-shop',
+      connections: { default: { driver: 'file' } },
+    }, null, 2));
+    const executeQuery = vi.fn(async () => ({
+      columns: ['customer_name', 'revenue'],
+      rows: [{ customer_name: 'Should not execute', revenue: 1 }],
+      rowCount: 1,
+    }));
+    const generate = vi.fn(async () => {
+      throw Object.assign(new Error('The V2 planner was reached for an ambiguous implicit ranking.'), {
+        code: 'ETIMEDOUT',
+      });
+    });
+    const planner: AgentProvider = { name: 'ollama', available: async () => true, generate };
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery } as unknown as QueryExecutor,
+        connection: { driver: 'file' },
+        askAgentRuntimeMode: 'authoritative_v2',
+        askAnalyticalPlannerProviderFactory: () => planner,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'who are the top customers', requestedMode: 'ask' }),
+      });
+      const payload = await response.json() as { run: any };
+      expect(response.status, JSON.stringify(payload)).toBe(201);
+      expect(generate).toHaveBeenCalledTimes(1);
+      expect(executeQuery).not.toHaveBeenCalled();
+      expect(payload.run).not.toMatchObject({ route: 'certified_answer', trustState: 'certified' });
+      expect(payload.run.diagnosticReceiptV8).toMatchObject({
+        mode: 'authoritative_v2',
+        planFrozen: false,
+        activity: { providerDispatches: 1 },
+        outcome: { executionAttempts: 0 },
+      });
+    } finally {
+      await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
+    }
+  });
+
+  it('AGT-047 does not fast-path an unordered certified artifact with no authored or host-proven ranking bound', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-certified-profile-unordered-'));
+    tempDirs.push(projectRoot);
+    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/jaffle-supply-chain');
+    cpSync(join(fixtureRoot, 'target'), join(projectRoot, 'target'), { recursive: true });
+    mkdirSync(join(projectRoot, 'blocks'), { recursive: true });
+    // Even when the natural-language request supplies a default top-N, a
+    // block with neither an outer ORDER BY nor an authored LIMIT has no
+    // certified ranking contract. The host must not append a bound to arbitrary
+    // connector order and label it certified.
+    writeFileSync(join(projectRoot, 'blocks', 'unordered_customer_profile.dql'), `// dql-format: 1
+
+block "unordered_customer_profile" {
+  domain = "customers"
+  type = "custom"
+  status = "certified"
+  description = "Unordered customer revenue output."
+  tags = ["customers", "ranking"]
+  owner = "analytics@example.com"
+  grain = "one row per customer"
+  entities = ["Customer"]
+  outputs = ["customer_name", "revenue"]
+  dimensions = ["customer_name"]
+  examples = [{ question = "Who are the top customers by revenue?" }]
+  query = """
+    SELECT customer_name, lifetime_spend AS revenue
+    FROM dim_customers
+  """
+}
+`);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'jaffle-shop',
+      connections: { default: { driver: 'file' } },
+    }, null, 2));
+    const executeQuery = vi.fn(async () => ({
+      columns: ['customer_name', 'revenue'],
+      rows: [{ customer_name: 'Arbitrary first connector row', revenue: 1 }],
+      rowCount: 1,
+    }));
+    const generate = vi.fn(async () => {
+      throw Object.assign(new Error('The planner was reached as expected for an unordered top-N block.'), {
+        code: 'ETIMEDOUT',
+      });
+    });
+    const planner: AgentProvider = { name: 'ollama', available: async () => true, generate };
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery } as unknown as QueryExecutor,
+        connection: { driver: 'file' },
+        askAgentRuntimeMode: 'authoritative_v2',
+        askAnalyticalPlannerProviderFactory: () => planner,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'who are the top 3 customers by revenue', requestedMode: 'ask' }),
+      });
+      const payload = await response.json() as { run: any };
+      expect(response.status, JSON.stringify(payload)).toBe(201);
+      expect(generate).toHaveBeenCalled();
+      expect(executeQuery).not.toHaveBeenCalled();
+      expect(payload.run).not.toMatchObject({ route: 'certified_answer', trustState: 'certified' });
+      expect(payload.run.diagnosticReceiptV8).toMatchObject({
+        mode: 'authoritative_v2',
+        planFrozen: false,
+        outcome: { executionAttempts: 0 },
+      });
+    } finally {
+      await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
+    }
+  });
+
+  it('AGT-047 does not fast-path a certified top-N artifact whose primary order key is not the requested revenue measure', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-certified-profile-mixed-order-'));
+    tempDirs.push(projectRoot);
+    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/jaffle-supply-chain');
+    cpSync(join(fixtureRoot, 'target'), join(projectRoot, 'target'), { recursive: true });
+    mkdirSync(join(projectRoot, 'blocks'), { recursive: true });
+    // Revenue appears in a secondary ORDER BY expression, but this block is
+    // primarily alphabetical. It must never receive the exact-certified top
+    // revenue label merely because a later sort key happens to name revenue.
+    writeFileSync(join(projectRoot, 'blocks', 'mixed_order_customer_profile.dql'), `// dql-format: 1
+
+block "mixed_order_customer_profile" {
+  domain = "customers"
+  type = "custom"
+  status = "certified"
+  description = "Alphabetical customer output with a secondary revenue sort."
+  tags = ["customers", "ranking"]
+  owner = "analytics@example.com"
+  grain = "one row per customer"
+  entities = ["Customer"]
+  outputs = ["customer_name", "revenue"]
+  dimensions = ["customer_name"]
+  examples = [{ question = "Who are the top customers by revenue?" }]
+  params { top_n: number = 10 }
+  parameterPolicy { top_n = "dynamic" }
+  query = """
+    SELECT customer_name, lifetime_spend AS revenue
+    FROM dim_customers
+    ORDER BY customer_name ASC, revenue DESC
+    LIMIT \${top_n}
+  """
+}
+`);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'jaffle-shop',
+      connections: { default: { driver: 'file' } },
+    }, null, 2));
+    const executeQuery = vi.fn(async () => ({
+      columns: ['customer_name', 'revenue'],
+      rows: [{ customer_name: 'Alphabetical first connector row', revenue: 1 }],
+      rowCount: 1,
+    }));
+    const generate = vi.fn(async () => {
+      throw Object.assign(new Error('The planner was reached as expected for a non-revenue primary order.'), {
+        code: 'ETIMEDOUT',
+      });
+    });
+    const planner: AgentProvider = { name: 'ollama', available: async () => true, generate };
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery } as unknown as QueryExecutor,
+        connection: { driver: 'file' },
+        askAgentRuntimeMode: 'authoritative_v2',
+        askAnalyticalPlannerProviderFactory: () => planner,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'who are the top 3 customers by revenue', requestedMode: 'ask' }),
+      });
+      const payload = await response.json() as { run: any };
+      expect(response.status, JSON.stringify(payload)).toBe(201);
+      expect(generate).toHaveBeenCalled();
+      expect(executeQuery).not.toHaveBeenCalled();
+      expect(payload.run).not.toMatchObject({ route: 'certified_answer', trustState: 'certified' });
+      expect(payload.run.diagnosticReceiptV8).toMatchObject({
+        mode: 'authoritative_v2',
+        planFrozen: false,
+        outcome: { executionAttempts: 0 },
+      });
+    } finally {
+      await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
+    }
+  });
+
+  it('AGT-047 ignores an unused inner revenue top-N CTE when the outer query is alphabetical and fixed-limit', async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'dql-agent-run-certified-profile-inner-top-n-'));
+    tempDirs.push(projectRoot);
+    const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../test/fixtures/jaffle-supply-chain');
+    cpSync(join(fixtureRoot, 'target'), join(projectRoot, 'target'), { recursive: true });
+    mkdirSync(join(projectRoot, 'blocks'), { recursive: true });
+    // The inner CTE looks like a valid revenue ranking, but it is unused. The
+    // returned rows come from the outer query, which is alphabetical and has
+    // a fixed limit. A textual ORDER BY/LIMIT scan would falsely certify it.
+    writeFileSync(join(projectRoot, 'blocks', 'inner_top_n_customer_profile.dql'), `// dql-format: 1
+
+block "inner_top_n_customer_profile" {
+  domain = "customers"
+  type = "custom"
+  status = "certified"
+  description = "Customer output with an unused inner revenue ranking CTE."
+  tags = ["customers", "ranking"]
+  owner = "analytics@example.com"
+  grain = "one row per customer"
+  entities = ["Customer"]
+  outputs = ["customer_name", "revenue"]
+  dimensions = ["customer_name"]
+  examples = [{ question = "Who are the top customers by revenue?" }]
+  params { top_n: number = 10 }
+  parameterPolicy { top_n = "dynamic" }
+  query = """
+    WITH unused_ranked_customers AS (
+      SELECT customer_name, lifetime_spend AS revenue
+      FROM dim_customers
+      ORDER BY revenue DESC
+      LIMIT \${top_n}
+    )
+    SELECT customer_name, lifetime_spend AS revenue
+    FROM dim_customers
+    ORDER BY customer_name ASC
+    LIMIT 100
+  """
+}
+`);
+    writeFileSync(join(projectRoot, 'dql.config.json'), JSON.stringify({
+      project: 'jaffle-shop',
+      connections: { default: { driver: 'file' } },
+    }, null, 2));
+    const executeQuery = vi.fn(async () => ({
+      columns: ['customer_name', 'revenue'],
+      rows: [{ customer_name: 'Outer alphabetical row', revenue: 1 }],
+      rowCount: 1,
+    }));
+    const generate = vi.fn(async () => {
+      throw Object.assign(new Error('The planner was reached as expected for an outer non-top-N query.'), {
+        code: 'ETIMEDOUT',
+      });
+    });
+    const planner: AgentProvider = { name: 'ollama', available: async () => true, generate };
+    let server: Server | undefined;
+    try {
+      const port = await startLocalServer({
+        rootDir: projectRoot,
+        projectRoot,
+        executor: { executeQuery } as unknown as QueryExecutor,
+        connection: { driver: 'file' },
+        askAgentRuntimeMode: 'authoritative_v2',
+        askAnalyticalPlannerProviderFactory: () => planner,
+        preferredPort: 0,
+        captureServer: (created) => { server = created; },
+      });
+      const response = await fetch(`http://127.0.0.1:${port}/api/agent-runs`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: 'who are the top 3 customers by revenue', requestedMode: 'ask' }),
+      });
+      const payload = await response.json() as { run: any };
+      expect(response.status, JSON.stringify(payload)).toBe(201);
+      expect(generate).toHaveBeenCalled();
+      expect(executeQuery).not.toHaveBeenCalled();
+      expect(payload.run).not.toMatchObject({ route: 'certified_answer', trustState: 'certified' });
+      expect(payload.run.diagnosticReceiptV8).toMatchObject({
+        mode: 'authoritative_v2',
+        planFrozen: false,
+        outcome: { executionAttempts: 0 },
+      });
     } finally {
       await new Promise<void>((resolveClose) => server ? server.close(() => resolveClose()) : resolveClose());
     }

@@ -11,10 +11,27 @@ import {
   prepareServerOwnedProviderSchemaContext,
   RESEARCH_ROW_EGRESS_POLICY,
   redactProviderResultRows,
+  boundProviderResultRows,
   resolveProviderResultRowEgressPolicy,
 } from './provider-egress.js';
 
 describe('provider egress guard (SEC-004)', () => {
+  it('API-017 bounds a local V2 result payload to 20 x 20 / 400 cells', () => {
+    const rows = Array.from({ length: 24 }, (_, row) => Object.fromEntries(
+      Array.from({ length: 24 }, (_, column) => [`c${column}`, `${row}:${column}`]),
+    ));
+    const bounded = boundProviderResultRows({ rows }, 20, 20, 400);
+    expect(bounded.shape).toEqual({ resultRowCount: 20, columnCount: 20 });
+    expect(bounded.exhausted).toBe(true);
+    expect(() => assertProviderPayloadAllowed(bounded.value, {
+      allowResultRows: true,
+      maxResultRows: 20,
+      maxResultColumns: 20,
+      maxResultCells: 400,
+      purpose: 'answer_generation',
+    })).not.toThrow();
+  });
+
   it('mints result-row authority only for explicit Research with one-run consent', () => {
     const projectSetting = { mode: 'bounded_sample' as const, maxNarrationRows: 13 };
 

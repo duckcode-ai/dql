@@ -131,6 +131,7 @@ const HELP = `
     --to <layout>                   Target layout for "migrate layout" (domain-first)
                                     For "promote": shared
     --port <number>                 Preferred local port for "preview" or "serve"
+    --ask-runtime-mode <mode>       Notebook Ask runtime: legacy_v1, shadow_v2 (default), or authoritative_v2
     --chart <type>                  Primary chart type for "new" scaffolds (default: bar)
     --domain <name>                 Domain for new block scaffolds (default: general)
     --area <id>                     Model Area for modeling import and authoring

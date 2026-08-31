@@ -503,8 +503,8 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
         ? deterministicStructuredContinuationBinding({
             request,
             evidence,
-            requirements,
-            requirementSeed,
+          requirements,
+          requirementSeed,
             relationshipClosure: requiredRelationshipClosure,
           })
         : undefined;
@@ -514,7 +514,17 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
             evidence,
             requirements,
             requirementSeed,
-            allowDeterministicNaturalLanguageBinding: options.allowDeterministicNaturalLanguageBinding === true,
+            // A Research child is not a new free-form Ask. Its parent has
+            // already admitted one typed hypothesis and supplied a
+            // same-question requirement seed. When that seed proves one
+            // snapshot-bound certified/semantic program, preserve the
+            // documented zero-provider frozen-child path instead of asking a
+            // second meaning model to repeat the parent decision. This stays
+            // narrower than the offline host flag: no seed, ambiguity, join
+            // composition, or incomplete tuple can use this shortcut.
+            allowDeterministicNaturalLanguageBinding: options.allowDeterministicNaturalLanguageBinding === true
+              || Boolean(request.researchBranch && request.hostRequirementSeed),
+            allowEquivalentResearchMeasureAliases: Boolean(request.researchBranch && request.hostRequirementSeed),
           })
         : undefined);
       // A role-balanced 32-card workspace is intentionally not a raw search
@@ -785,6 +795,46 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
             ordinaryRoleEntityContext,
           })
         : undefined;
+
+      // A declared attribution boundary is stronger than a generic role
+      // ambiguity or relationship-coverage observation.  Evaluate it before
+      // those convenience guards so an explicit request for an un-attributed
+      // signal retains its typed relationship witness/cascade denial instead
+      // of being reduced to a generic modelling gap or a metric picker.
+      // This is still pre-provider and pre-execution: it merely preserves the
+      // existing router safety decision through the Ask runtime seam.
+      const attributionGap = evidence
+        ? attributionRequiredRelationshipGapDecision({
+            request,
+            base,
+            evidence,
+            requirements,
+          })
+        : undefined;
+      if (attributionGap) {
+        const blocked = transitionState(initialState, 'blocked', {
+          workspace: {
+            ...initialState.workspace,
+            tools: [
+              ...initialState.workspace.tools,
+              {
+                version: 1 as const,
+                id: 'tool:compiler_broker',
+                kind: 'compiler_broker' as const,
+                status: 'completed' as const,
+                candidateIds: attributionGap.terminalOutcome?.candidateIds ?? [],
+                reasonCode: 'attribution_relationship_denied',
+              },
+            ].slice(0, MAX_TOOLS),
+          },
+        });
+        checkpoint(request, blocked);
+        return {
+          ...attributionGap,
+          askAnalystDecision: { version: 1, mode, state: blocked },
+        };
+      }
+
       if (displayKeyAmbiguity) {
         const clarificationState = transitionState(initialState, 'clarify', {
           planningMode: 'deterministic_binding',
@@ -1000,42 +1050,6 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
           clarifyingQuestion: 'Which up to three analytical questions should I run first, or would you like to use Research?',
           clarificationOptions: [],
           askAnalystDecision: { version: 1, mode, state: scopeState },
-        };
-      }
-
-      // A declared attribution boundary is a deterministic safety decision.
-      // Do not hide it behind an unavailable provider or degrade it into a
-      // generic modeling gap: the same snapshot already proves that the
-      // requested relationship cannot be inferred or executed.
-      const attributionGap = evidence
-        ? attributionRequiredRelationshipGapDecision({
-            request,
-            base,
-            evidence,
-            requirements,
-          })
-        : undefined;
-      if (attributionGap) {
-        const blocked = transitionState(initialState, 'blocked', {
-          workspace: {
-            ...initialState.workspace,
-            tools: [
-              ...initialState.workspace.tools,
-              {
-                version: 1 as const,
-                id: 'tool:compiler_broker',
-                kind: 'compiler_broker' as const,
-                status: 'completed' as const,
-                candidateIds: attributionGap.terminalOutcome?.candidateIds ?? [],
-                reasonCode: 'attribution_relationship_denied',
-              },
-            ].slice(0, MAX_TOOLS),
-          },
-        });
-        checkpoint(request, blocked);
-        return {
-          ...attributionGap,
-          askAnalystDecision: { version: 1, mode, state: blocked },
         };
       }
 
@@ -1752,11 +1766,19 @@ export function createAskAnalystRuntimeV1(options: AskAnalystRuntimeOptionsV1): 
       // now sees runtime-owned state before planner/executor selection.
       return {
         ...compilerDecision,
-        // The broker may retain an older compatibility resolution on its
-        // envelope. Publish the runtime-verified, compiler-consumed binding
-        // so downstream engine, persistence, and trace consumers see the
-        // same canonical metric/entity/dimension tuple.
-        meaningResolution: taskExecutions[0]!.meaningResolution,
+        // The compiler compatibility carrier deliberately replaces the
+        // source-qualified semantic handle with the adapter's local execution
+        // ID. That local ID belongs in the frozen plan, not in the meaning
+        // receipt. Keep the planner-selected snapshot handle in the durable
+        // decision so a reader can correlate the LLM choice with its evidence
+        // card while the compiled plan continues to execute its canonical
+        // MetricFlow ID.
+        meaningResolution: {
+          ...taskExecutions[0]!.meaningResolution,
+          ...(boundValidation.resolution.recommendedExecutionId
+            ? { recommendedExecutionId: boundValidation.resolution.recommendedExecutionId }
+            : {}),
+        },
         askAnalystDecision: {
           version: 1,
           mode,
@@ -2214,7 +2236,7 @@ function meaningResolutionFromPlannerProposal(input: {
     // operation and revert to a lexical question-type guess.
     questionType: questionTypeFromPlannerProposal(proposal, input.requirementSeed.sourceQuestion),
     selectedConceptIds: selectedCandidates.map((candidate) => candidate.id),
-    recommendedExecutionId: primary.id,
+    recommendedExecutionId: semanticMeaningExecutionId(primary),
     queryIntent: { ...input.requirementSeed.queryIntent, filters: input.requirementSeed.queryIntent.filters.map((filter) => ({ ...filter })) },
     rejectedCandidates: [],
     confidence: proposal.confidence ?? 'medium',
@@ -3471,7 +3493,7 @@ function canonicalSetResolution(
     interpretedQuestion: seed.sourceQuestion,
     questionType: questionTypeFromText(seed.sourceQuestion),
     selectedConceptIds: candidates.map((candidate) => candidate.id),
-    recommendedExecutionId: primary.id,
+    recommendedExecutionId: semanticMeaningExecutionId(primary),
     queryIntent: { ...seed.queryIntent, filters: seed.queryIntent.filters.map((filter) => ({ ...filter })) },
     rejectedCandidates: [],
     confidence: 'high',
@@ -3957,6 +3979,8 @@ function deterministicUniqueProgramBinding(input: {
   requirements: AnalyticalRequirementSetV1;
   requirementSeed: ReturnType<typeof buildAnalyticalRequirementSeedV1>;
   allowDeterministicNaturalLanguageBinding?: boolean;
+  /** A host-owned Research child can carry a parser-expanded alias of its sole root metric. */
+  allowEquivalentResearchMeasureAliases?: boolean;
 }): DeterministicProgramBindingV1 | undefined {
   const eligible = input.evidence.candidates.filter((candidate) =>
     candidate.eligible !== false && candidate.compatibility !== 'incompatible');
@@ -3998,6 +4022,7 @@ function deterministicUniqueProgramBinding(input: {
     candidates: eligible,
     requirements: input.requirements,
     requirementSeed: input.requirementSeed,
+    allowEquivalentMeasureAliases: input.allowEquivalentResearchMeasureAliases === true,
   });
   // A generic display-key ambiguity is also a deterministic outcome. Retain
   // its tiny selected semantic tuple long enough for the caller to emit
@@ -4064,18 +4089,34 @@ function deterministicSemanticProgramBinding(input: {
   candidates: AgentEvidenceCandidate[];
   requirements: AnalyticalRequirementSetV1;
   requirementSeed: ReturnType<typeof buildAnalyticalRequirementSeedV1>;
+  allowEquivalentMeasureAliases?: boolean;
 }): DeterministicProgramBindingV1 | undefined {
   // A multi-measure request is not a shortcut: compatibility/additivity belong
   // to the semantic compiler and a provider-backed interpretation remains the
-  // normal route. This only binds a single, explicitly named business metric.
-  if (input.requirements.measures.length !== 1) return undefined;
-  const requestedMeasure = input.requirements.measures[0]!;
+  // normal route. The one exception is a parser-expanded generic count such
+  // as `count`, `count for each customer`: it describes one aggregate, not two
+  // business measures. That exception is proven per candidate below; it never
+  // collapses a material measure such as `revenue` into a count request.
+  if (input.requirements.measures.length === 0) return undefined;
+  const parserExpandedGenericCount = equivalentGenericCountAliasRequest(input.requirements);
+  if (input.requirements.measures.length > 1
+    && !input.allowEquivalentMeasureAliases
+    && !parserExpandedGenericCount) return undefined;
+  const requestedMeasures = input.requirements.measures;
   const scoredMatches = input.candidates
     .filter((candidate) => candidate.kind === 'semantic_metric'
       && candidate.eligible !== false
       && candidate.compatibility !== 'incompatible')
     .map((candidate) => {
-      const directScore = semanticMetricTermMatchScore(requestedMeasure, candidate);
+      const directScores = requestedMeasures.map((measure) => semanticMetricTermMatchScore(measure, candidate));
+      // A Research child may inherit both an exact root metric phrase and a
+      // parser-expanded leaf alias (for example `gross revenue`, `revenue`).
+      // It is still a single measure only when every retained term maps to
+      // this exact snapshot metric. Any competing candidate or unmatched term
+      // remains a provider/planner problem rather than a silent collapse.
+      const directScore = directScores.every((score) => score > 0)
+        ? Math.min(...directScores)
+        : 0;
       // An authored semantic measure and its public metric intentionally have
       // different identities in MetricFlow. For example, the user-facing
       // `order count` measure is executed through the unfiltered `Orders`
@@ -4083,13 +4124,26 @@ function deterministicSemanticProgramBinding(input: {
       // identities and the generic metric description prove it. This is not a
       // broad `count` synonym: scoped `Drink Orders` / `Food Orders` metrics
       // cannot qualify because their metric identity is not exactly `orders`.
-      const measureBackedScore = directScore > 0
-        ? 0
-        : nativeSemanticMeasureBackedMetricScore({
-            requestedMeasure,
+      const genericCountAliasMeasure = parserExpandedGenericCount
+        ? genericCountAliasCanonicalMeasureForMetric({
             metric: candidate,
             candidates: input.candidates,
-          });
+            parserExpandedGenericCount,
+          })
+        : undefined;
+      const measureBackedScore = genericCountAliasMeasure
+        ? nativeSemanticMeasureBackedMetricScore({
+            requestedMeasure: genericCountAliasMeasure,
+            metric: candidate,
+            candidates: input.candidates,
+          })
+        : requestedMeasures.length === 1 && directScore === 0
+          ? nativeSemanticMeasureBackedMetricScore({
+              requestedMeasure: requestedMeasures[0]!,
+              metric: candidate,
+              candidates: input.candidates,
+            })
+          : 0;
       return { candidate, score: Math.max(directScore, measureBackedScore) };
     })
     .filter((match) => match.score > 0);
@@ -4446,6 +4500,103 @@ function nativeSemanticMeasureBackedMetricScore(input: {
   return capabilityMeasureIds.some((identity) => referencedMeasureIds.has(canonicalSemanticMeasureIdentity(identity)))
     ? 3
     : 0;
+}
+
+/**
+ * The request parser may retain both the aggregate and its grouped prose as
+ * measure terms (`count`, `count for each customer`).  This is not a general
+ * synonym table: accept it only when every retained measure has one of those
+ * two exact forms, both forms are present, and the grouped entity is already
+ * a separately requested output role.  A material second measure therefore
+ * remains provider-owned compatibility work.
+ */
+function equivalentGenericCountAliasRequest(
+  requirements: AnalyticalRequirementSetV1,
+): { entity: string } | undefined {
+  if (requirements.measures.length < 2) return undefined;
+  let sawBareCount = false;
+  const groupedEntities = new Set<string>();
+  for (const measure of requirements.measures) {
+    const tokens = normalizedIdentityTokens(measure);
+    if (tokens.length === 1 && tokens[0] === 'count') {
+      sawBareCount = true;
+      continue;
+    }
+    if (tokens.length === 4 && tokens[0] === 'count' && tokens[1] === 'for' && tokens[2] === 'each') {
+      groupedEntities.add(singularIdentityToken(tokens[3]!));
+      continue;
+    }
+    return undefined;
+  }
+  if (!sawBareCount || groupedEntities.size !== 1) return undefined;
+  const entity = [...groupedEntities][0]!;
+  const requestedEntityTerms = [
+    ...requirements.dimensions,
+    ...requirements.entityTerms,
+    ...requirements.entityDisplayTerms,
+    ...(requirements.outputTerms ?? []),
+  ];
+  // Do not infer a customer/entity role from the count phrase itself. The
+  // parser must have independently retained the same compact entity term.
+  if (!requestedEntityTerms.some((term) => {
+    const tokens = normalizedIdentityTokens(term);
+    return tokens.length === 1 && singularIdentityToken(tokens[0]!) === entity;
+  })) return undefined;
+  return { entity };
+}
+
+/**
+ * Prove that the parser-expanded aliases map to the one generic MetricFlow
+ * metric in this immutable workspace. The generic metric must own exactly one
+ * admitted semantic measure, and that measure must be the metric's authored
+ * `<subject> count` measure. Scoped metrics or multiple backing measures stay
+ * on the provider path.
+ */
+function genericCountAliasCanonicalMeasureForMetric(input: {
+  metric: AgentEvidenceCandidate;
+  candidates: AgentEvidenceCandidate[];
+  parserExpandedGenericCount: { entity: string };
+}): string | undefined {
+  const subjects = genericMetricCountSubjects(input.metric);
+  if (subjects.length !== 1) return undefined;
+  const subject = subjects[0]!;
+  const capabilityMeasureIds = new Set((input.metric.analyticalCapability?.measureIds ?? [])
+    .map(canonicalSemanticMeasureIdentity));
+  if (capabilityMeasureIds.size !== 1) return undefined;
+  const referencedMeasures = input.candidates.filter((candidate) =>
+    candidate.kind === 'semantic_member'
+    && candidate.semanticObjectType === 'measure'
+    && semanticMeasureIdentityVariants(candidate).some((identity) => capabilityMeasureIds.has(identity)));
+  if (referencedMeasures.length !== 1) return undefined;
+  const canonicalMeasure = `${subject} count`;
+  if (!semanticMeasureMatchesExplicitCountTerm(referencedMeasures[0]!, canonicalMeasure)) return undefined;
+
+  // The grouped phrase cannot silently bind an order-number or similarly
+  // named attribute. Its requested entity must be an admitted capability
+  // display/group role on this one metric.
+  const entity = input.parserExpandedGenericCount.entity;
+  const compatibleEntity = (input.metric.analyticalCapability?.dimensions ?? []).some((dimension) => {
+    const identities = [dimension.label, ...(dimension.aliases ?? [])]
+      .filter((identity): identity is string => typeof identity === 'string' && identity.length > 0);
+    return identities.some((identity) => {
+      const tokens = normalizedIdentityTokens(identity);
+      return tokens.length > 0 && singularIdentityToken(tokens[0]!) === entity;
+    }) && dimension.supportedRoles.some((role) => role === 'group_by' || role === 'display' || role === 'rank_entity');
+  });
+  return compatibleEntity ? canonicalMeasure : undefined;
+}
+
+function genericMetricCountSubjects(candidate: AgentEvidenceCandidate): string[] {
+  const subjects = new Set<string>();
+  for (const identity of [candidate.name, candidate.qualifiedId, candidate.id, ...(candidate.aliases ?? [])]) {
+    if (!identity) continue;
+    const leaf = identity.split(/[.:/]/).at(-1) ?? identity;
+    const tokens = normalizedIdentityTokens(leaf);
+    if (tokens.length !== 1) continue;
+    const subject = singularIdentityToken(tokens[0]!);
+    if (metricHasGenericCountSubject(candidate, subject)) subjects.add(subject);
+  }
+  return [...subjects];
 }
 
 function explicitCountMeasureSubject(term: string): string | undefined {
@@ -5426,14 +5577,20 @@ function deterministicResolution(input: {
   recommendedRoute: MeaningResolution['recommendedRoute'];
   recommendedExecutionId?: string;
 }): MeaningResolution {
-  const primary = input.candidates.find((candidate) => candidate.id === input.recommendedExecutionId)
+  const primary = input.candidates.find((candidate) => candidate.id === input.recommendedExecutionId
+    || candidate.qualifiedId === input.recommendedExecutionId)
     ?? input.candidates.find((candidate) => candidate.kind === 'semantic_metric')
     ?? input.candidates[0]!;
   return {
     interpretedQuestion: input.seed.sourceQuestion,
     questionType: questionTypeFromText(input.seed.sourceQuestion),
     selectedConceptIds: input.candidates.map((candidate) => candidate.id),
-    recommendedExecutionId: input.recommendedExecutionId ?? primary.id,
+    // Keep the exact source-qualified semantic handle that was admitted into
+    // the immutable meaning workspace.  The downstream frozen compiler plan
+    // deliberately normalizes that handle to its canonical MetricFlow
+    // execution ID, but the meaning receipt must not lose provenance before
+    // the plan binding boundary.
+    recommendedExecutionId: semanticMeaningExecutionId(primary),
     queryIntent: { ...input.seed.queryIntent, filters: input.seed.queryIntent.filters.map((filter) => ({ ...filter })) },
     rejectedCandidates: [],
     confidence: 'high',
@@ -5441,6 +5598,18 @@ function deterministicResolution(input: {
     recommendedRoute: input.recommendedRoute,
     hostRequirementSeed: input.seed,
   };
+}
+
+/**
+ * Meaning is allowed to retain the source-qualified semantic identity; plans
+ * normalize it only when binding an executable MetricFlow metric.  Keeping
+ * these stages separate prevents a canonical plan ID from overwriting the
+ * evidence handle selected by the planner/deterministic fast path.
+ */
+function semanticMeaningExecutionId(candidate: AgentEvidenceCandidate): string {
+  return candidate.kind === 'semantic_metric'
+    ? candidate.qualifiedId ?? candidate.id
+    : candidate.id;
 }
 
 function physicalRelationKey(candidate: AgentEvidenceCandidate): string {

@@ -5,6 +5,7 @@ RFCs: [RFC 0002](../../rfcs/0002-dbt-first-domain-modeling.md),
 [RFC 0003](../../rfcs/0003-domain-context-and-shared-products.md), and
 [RFC 0004](../../rfcs/0004-plan-first-governed-answer-engine.md), amended by
 [RFC 0005](../../rfcs/0005-analytical-composition-and-transparent-repair.md)
+and [RFC 0006](../../rfcs/0006-ask-agent-runtime-v2.md)
 Integration branch: `codex/dql-2-dbt-first-modeling`
 
 This directory is the implementation truth for the unified DQL 2.0 domain

@@ -174,13 +174,17 @@ export function withLedgerHarvest(
  * first, then assemble over only those names.
  */
 export const ANALYST_TOOL_POLICY = [
-  'Work in two phases.',
+  'You are the bounded Ask agent. Work in two phases and use tools before claiming a data answer.',
   '',
   'EXPLORE — establish what actually exists before writing any SQL:',
   '  · search for the governed metrics and dimensions the question needs',
   '  · check compatibility before assuming a breakdown is reachable; when it is not,',
   '    the tool tells you which dimensions ARE reachable — use one of those rather',
   '    than stopping',
+  '  · inspect certified candidates first; use a complete certified result when one exists',
+  '  · inspect semantic candidates next and compile MetricFlow/dbt only when the requested tuple is compatible',
+  '  · when an earlier tier is ineligible or unavailable, treat that tool result as an observation and continue to the next safe tier',
+  '  · inspect relationships/schema before exploratory SQL; never guess a join or identifier',
   '  · compile a governed query and read back the identifiers it returns',
   '',
   'COMPOSE — assemble the final query using ONLY names a tool returned to you.',
@@ -189,6 +193,9 @@ export const ANALYST_TOOL_POLICY = [
   'a bare leaf is not enough when multiple relations can contain the same name. A name that merely looks plausible is the single most common',
   'way these queries go wrong: if you need a column you have not seen, inspect it',
   'first rather than guessing its spelling.',
+  '',
+  'Do not call ask_dql, answer_question, or recursively ask another agent. Do not invent a trust label.',
+  'If the question is definitional, contextual, or general and no data execution is needed, answer directly from retrieved context and say what is known. Ask one clarification only when distinct safe meanings would materially change the result.',
 ].join('\n');
 
 /**

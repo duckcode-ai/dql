@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse, SemanticLayer, type DQLManifest, type MetricCapabilityContract } from "@duckcodeailabs/dql-core";
 import { KGStore } from "./kg/sqlite-fts.js";
-import { answer as answerBase, inferAnalyticalEntityIds, renderContextValidationRefusalForUser, missingRankedGrainOutput, parseProposal, probeSemanticJoinFanout, compactSemanticRuntimeFailure, normalizeWarehouseSqlFailure, repairAmbiguousColumn, semanticTraceAfterExecution, tightenSourceTargetFlowProjection } from "./answer-loop.js";
+import { answer as answerBase, certifiedBlockProvesRequestedTopN, inferAnalyticalEntityIds, renderContextValidationRefusalForUser, missingRankedGrainOutput, parseProposal, probeSemanticJoinFanout, compactSemanticRuntimeFailure, normalizeWarehouseSqlFailure, repairAmbiguousColumn, semanticTraceAfterExecution, tightenSourceTargetFlowProjection } from "./answer-loop.js";
 import { analyticalError } from "./analytical-error.js";
 import { buildLocalContextPack } from "./metadata/catalog.js";
 import { buildResolvedAnalyticalPlan } from "./resolved-analytical-plan.js";
@@ -93,6 +93,118 @@ function answer(input: Parameters<typeof answerBase>[0]) {
 
 let dir: string;
 let kg: KGStore;
+
+function certifiedRevenueTopNBlock(limitExpression: string): KGNode {
+  return {
+    nodeId: "block:certified_revenue_top_n",
+    kind: "block",
+    name: "certified_revenue_top_n",
+    status: "certified",
+    declaredOutputs: ["customer_name", "revenue"],
+    dimensions: ["customer_name"],
+    parameters: [{
+      name: "top_n",
+      type: "number",
+      required: false,
+      policy: "dynamic",
+      binding: { kind: "limit" },
+    }],
+    sql: [
+      "SELECT customer_name, SUM(revenue) AS revenue",
+      "FROM customer_revenue",
+      "GROUP BY customer_name",
+      "ORDER BY revenue DESC",
+      `LIMIT ${limitExpression}`,
+    ].join("\n"),
+  };
+}
+
+describe("certified top-N DQL interpolation proof", () => {
+  const revenuePlan = buildAnalysisQuestionPlan("who are the top 3 customers by revenue");
+  const implicitCustomerPlan = buildAnalysisQuestionPlan("who are the top customers");
+
+  it("accepts the DQL ${name} interpolation", () => {
+    expect(certifiedBlockProvesRequestedTopN(
+      certifiedRevenueTopNBlock("${top_n}"),
+      revenuePlan,
+    )).toBe(true);
+  });
+
+  it("accepts the DQL {name} interpolation", () => {
+    expect(certifiedBlockProvesRequestedTopN(
+      certifiedRevenueTopNBlock("{top_n}"),
+      revenuePlan,
+    )).toBe(true);
+  });
+
+  it("rejects a colon driver placeholder", () => {
+    expect(certifiedBlockProvesRequestedTopN(
+      certifiedRevenueTopNBlock(":top_n"),
+      revenuePlan,
+    )).toBe(false);
+  });
+
+  it("rejects a dollar driver placeholder", () => {
+    expect(certifiedBlockProvesRequestedTopN(
+      certifiedRevenueTopNBlock("$top_n"),
+      revenuePlan,
+    )).toBe(false);
+  });
+
+  it("rejects bare, fixed, and compound LIMIT expressions", () => {
+    for (const expression of ["top_n", "10", "${top_n} + 1"]) {
+      expect(certifiedBlockProvesRequestedTopN(
+        certifiedRevenueTopNBlock(expression),
+        revenuePlan,
+      )).toBe(false);
+    }
+  });
+
+  it("allows an authored primary metric only for a host-proven exact implicit certified question", () => {
+    const block = certifiedRevenueTopNBlock("${top_n}");
+    expect(certifiedBlockProvesRequestedTopN(block, implicitCustomerPlan)).toBe(false);
+    expect(certifiedBlockProvesRequestedTopN(block, implicitCustomerPlan, {
+      exactCertifiedQuestionMatch: true,
+    })).toBe(true);
+  });
+
+  it("allows a unique snapshot-complete implicit certified fit when the host freezes the outer row bound", () => {
+    // Mirrors the real commerce::block::customer_profile contract: its
+    // authored query ranks lifetime spend, but intentionally leaves limiting
+    // to the governed execution invocation rather than a block parameter.
+    const block: KGNode = {
+      nodeId: "block:customer_profile",
+      kind: "block",
+      name: "customer_profile",
+      domain: "commerce",
+      status: "certified",
+      declaredOutputs: [
+        "customer_name",
+        "customer_type",
+        "count_lifetime_orders",
+        "lifetime_spend",
+        "first_ordered_at",
+        "last_ordered_at",
+      ],
+      dimensions: ["customer_name", "customer_type"],
+      sql: [
+        "SELECT customer_name, customer_type, count_lifetime_orders, lifetime_spend, first_ordered_at, last_ordered_at",
+        "FROM dev.customers",
+        "ORDER BY lifetime_spend DESC, customer_name",
+      ].join("\n"),
+    };
+
+    expect(certifiedBlockProvesRequestedTopN(block, implicitCustomerPlan)).toBe(false);
+    expect(certifiedBlockProvesRequestedTopN(block, implicitCustomerPlan, {
+      uniqueCompleteCertifiedFit: true,
+      hostEnforcedRowLimit: 10,
+    })).toBe(true);
+    expect(certifiedBlockProvesRequestedTopN(block, implicitCustomerPlan, {
+      uniqueCompleteCertifiedFit: true,
+      hostEnforcedRowLimit: 3,
+    })).toBe(false);
+  });
+});
 
 function revenueSegmentBlock(): KGNode {
   return {

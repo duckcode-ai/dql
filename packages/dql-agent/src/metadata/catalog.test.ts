@@ -127,7 +127,9 @@ describe('local metadata catalog', () => {
     const capability = snapshot.objects.find((object) => object.objectKey === 'dql:block:revenue_by_customer')
       ?.payload?.analyticalCapability;
     expect(capability).toMatchObject({
-      metricId: 'semantic:sales:revenue',
+      // Execution uses the canonical metric-qualified identity; the former
+      // domain-scoped form is retained only as a lookup alias.
+      metricId: 'semantic:metric:orders.revenue',
       defaultResultGrainId: 'semantic:sales:entity:orders.order',
       dimensions: [{
         dimensionId: 'semantic:sales:dimension:orders.customer_name',

@@ -5,11 +5,12 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { QueryExecutor } from '@duckcodeailabs/dql-connectors';
 import type { CLIFlags } from '../args.js';
-import type { ProjectConfig } from '../local-runtime.js';
+import type { AskAgentRuntimeMode, ProjectConfig } from '../local-runtime.js';
 import {
   findProjectRoot,
   loadProjectConfig,
   normalizeProjectConnection,
+  resolveAskAgentRuntimeMode,
   startLocalServer,
 } from '../local-runtime.js';
 import { maybeOpenBrowser } from '../open-browser.js';
@@ -42,7 +43,7 @@ export interface ProjectRuntimeHandle {
  */
 export async function startProjectRuntime(
   projectRoot: string,
-  opts: { preferredPort?: number; host?: string } = {},
+  opts: { preferredPort?: number; host?: string; askAgentRuntimeMode?: AskAgentRuntimeMode } = {},
 ): Promise<ProjectRuntimeHandle> {
   const config = loadProjectConfig(projectRoot);
   const executor = new QueryExecutor();
@@ -57,6 +58,7 @@ export async function startProjectRuntime(
     connection,
     preferredPort: opts.preferredPort ?? 0,
     host,
+    askAgentRuntimeMode: opts.askAgentRuntimeMode,
     trustedCliTraceToken: askTraceCapability,
     captureServer: (created) => { server = created; },
   });
@@ -82,9 +84,11 @@ export async function runNotebook(targetArg: string | null, flags: CLIFlags): Pr
   }
   const config = loadProjectConfig(projectRoot);
   const host = flags.host ?? process.env.DQL_HOST ?? '127.0.0.1';
+  const askAgentRuntimeMode = resolveAskAgentRuntimeMode(flags.askRuntimeMode);
   const { port, url } = await startProjectRuntime(projectRoot, {
     preferredPort: flags.port ?? config.preview?.port ?? 3474,
     host,
+    askAgentRuntimeMode,
   });
 
   // Auto-open only on loopback. In a container or on a remote host, opening

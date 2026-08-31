@@ -1374,6 +1374,9 @@ function semanticIdentityPayload(
     label?: string;
     domain?: string;
     cube?: string;
+    isTimeDimension?: boolean;
+    type?: string;
+    granularities?: string[];
     source?: { objectId?: string; extra?: Record<string, unknown> };
   },
 ): Record<string, unknown> {
@@ -1389,10 +1392,34 @@ function semanticIdentityPayload(
     ? qualifiedSemanticName(item.cube, item.name)
     : item.name;
   const localName = normalizeSemanticIdentityPart(item.name);
+  const legacyDomainScopedDimensionId = `semantic:${domain}:dimension:${localName}`;
+  // MetricFlow synthesizes a `metric_time` dimension for every semantic
+  // model. A domain + local-name ID made all of those distinct compiler
+  // capabilities collide in the retrieved Ask workspace. A time dimension
+  // with a declared owning model therefore has the same model-qualified
+  // canonical identity as the registry. The old domain/leaf form is retained
+  // as a bounded alias below for persisted V1/V2 readers, never as a second
+  // current capability.
+  const declaredTimeDimension = item.isTimeDimension === true
+    || item.type?.toLowerCase() === 'time'
+    || item.type?.toLowerCase() === 'date'
+    || (item.granularities?.length ?? 0) > 0;
+  const modelQualifiedTimeDimensionId = kind === 'dimension'
+    && declaredTimeDimension
+    && item.cube
+    ? `semantic:${domain}:dimension:${normalizeSemanticIdentityPart(registryReference)}`
+    : undefined;
+  // Metric IDs are execution identities carried by meaning resolution,
+  // frozen plans, and MetricFlow/dbt capability receipts. Keep their
+  // established `semantic:metric:<model>.<metric>` shape; rewriting them to
+  // a domain-scoped shorthand breaks the handoff between retrieval and the
+  // planner even though both strings describe the same metric.
+  const legacyDomainScopedMetricId = `semantic:${domain}:${localName}`;
   const qualifiedId = authoredConceptId
     ?? (kind === 'metric'
-      ? `semantic:${domain}:${localName}`
-      : `semantic:${domain}:${kind}:${localName}`);
+      ? `semantic:metric:${normalizeSemanticIdentityPart(registryReference)}`
+      : modelQualifiedTimeDimensionId
+        ?? `semantic:${domain}:${kind}:${localName}`);
   const sourceNativeId = stringValue(item.source?.objectId);
   const registryQualifiedId = kind === 'metric' || kind === 'saved_query' || kind === 'model'
     ? qualifiedId
@@ -1402,6 +1429,12 @@ function semanticIdentityPayload(
     item.label,
     item.cube ? qualifiedSemanticName(item.cube, item.name) : undefined,
     sourceNativeId,
+    kind === 'metric' && legacyDomainScopedMetricId !== qualifiedId
+      ? legacyDomainScopedMetricId
+      : undefined,
+    kind === 'dimension' && legacyDomainScopedDimensionId !== qualifiedId
+      ? legacyDomainScopedDimensionId
+      : undefined,
     // Upgrade bridge: prior snapshots persisted this domain-scoped identity.
     // It remains an exact alias, but only resolves when it is unique.
     registryQualifiedId !== qualifiedId ? qualifiedId : undefined,

@@ -40,6 +40,8 @@ export interface MetadataMeaningCandidate {
   definition?: string;
   formula?: string;
   semanticModel?: string;
+  /** Immutable semantic compiler field identity, not a provider-facing alias. */
+  semanticRuntimeName?: string;
   /** Source-authored semantic/member or physical column type. */
   dataType?: string;
   relevanceReasons: string[];
@@ -656,6 +658,7 @@ function agentCandidateFromMeaning(
       provenance: candidate.provenance,
       domain: candidate.domain,
       semanticModel: candidate.semanticModel,
+      ...(candidate.semanticRuntimeName ? { semanticRuntimeName: candidate.semanticRuntimeName } : {}),
       dataType: candidate.dataType,
       primaryEntity: candidate.businessShape.entities[0],
       dimensions: dimensionLookupAliases(candidate.businessShape.dimensions),
@@ -1490,6 +1493,9 @@ function candidateCard(
     typeParams.timeGranularity,
     typeParams.time_granularity,
   );
+  const semanticRuntimeName = evidenceClass === 'semantic'
+    ? firstString(payload.localId, payload.local_id)
+    : undefined;
   const analyticalCapability = normalizeMetricCapabilityContract(
     payload.analyticalCapability,
   );
@@ -1501,8 +1507,16 @@ function candidateCard(
   // not freeze an exact output contract.  Keep the parent relation in
   // `sourceRelations`; give a column its source-qualified field identity.
   const columnObject = object.objectType.endsWith('_column');
+  // Semantic registry IDs are model-qualified execution identities.  The
+  // historic `qualifiedId` field on a MetricFlow time dimension was only
+  // domain + local name (`semantic:uncategorized:dimension:metric_time`), so
+  // every model's synthesized global axis collapsed into one V2 capability.
+  // Prefer the registry-qualified identity captured by the KG for semantic
+  // cards; retain the older value in aliases for bounded backward reads.
+  // Physical columns intentionally preserve their own source-qualified rule.
   const qualifiedId =
     firstString(
+      ...(evidenceClass === 'semantic' ? [payload.registryQualifiedId] : []),
       payload.qualifiedId,
       ...(columnObject ? [object.fullName] : []),
       payload.uniqueId,
@@ -1552,6 +1566,11 @@ function candidateCard(
       ? truncate(firstString(payload.formula, payload.expr, payload.sql), 320)
       : undefined,
     semanticModel: firstString(payload.semanticModel, payload.cube),
+    // dbt/MetricFlow semantic objects often use a model-qualified display
+    // name (`order_item.metric_time`) while the compiler accepts their local
+    // declaration (`metric_time`). Preserve the latter only as host-side
+    // capability data. It must never become a fuzzy retrieval alias.
+    ...(semanticRuntimeName ? { semanticRuntimeName } : {}),
     ...(dataType ? { dataType } : {}),
     relevanceReasons,
     compatibilityFacts,
@@ -1563,6 +1582,13 @@ function candidateCard(
       timeGrains: uniqueStrings([
         ...stringArray(payload.timeGrains),
         ...stringArray(payload.supportedTimeGrains),
+        // MetricFlow/dbt semantic dimensions are indexed with their authored
+        // `granularities` array.  Keep that declaration in the bounded
+        // retrieval card: Ask V2 validates a selected time grain against this
+        // exact snapshot-local capability and must not infer one from a name.
+        ...stringArray(payload.granularities),
+        ...stringArray(payload.queryableGranularities),
+        ...stringArray(payload.queryable_granularities),
         declaredTimeGrain ?? '',
       ]).slice(0, 8),
       parameters: parameters.slice(0, 12),

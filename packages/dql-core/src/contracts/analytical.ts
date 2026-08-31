@@ -360,7 +360,16 @@ export type ProviderDispatchPhaseV1 =
   | 'planning'
   | 'generation'
   | 'narration'
-  | 'repair';
+  | 'repair'
+  /**
+   * The first provider turn of the authoritative Ask V2 tool runtime.  This
+   * is distinct from legacy free-form generation so the physical-send ledger
+   * can reserve the bounded agent-control turn without granting an extra V1
+   * generation lane.
+   */
+  | 'agent_control'
+  /** A later bounded V2 tool observation/follow-up turn in the same Ask run. */
+  | 'tool_followup';
 
 /** Content-free evidence for one provider-bound payload class. */
 export interface ProviderEgressReceiptV1 {

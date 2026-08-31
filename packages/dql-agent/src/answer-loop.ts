@@ -142,6 +142,7 @@ import type {
   ExploratoryExecutionFreezeV1,
   ExploratoryRequiredOutputBindingProofV1,
 } from './analytical-orchestration.js';
+import type { AskAgentRuntimeWorkspaceBridgeV2 } from './ask-runtime/ask-agent-runtime-v2.js';
 import { shouldClarifyBeforeGeneration } from './cascade/triage.js';
 import { stampTrustLabel } from './trust/stamp.js';
 import { buildResolvedAnalyticalPlan, deriveResolvedAnalyticalPlan, type ResolvedAnalyticalPlan, type ResolvedAnalyticalPlanDelta } from './resolved-analytical-plan.js';
@@ -818,6 +819,609 @@ function certifiedInvocationInputs(
 }
 
 /**
+ * Build the one typed certified-block invocation used by both the ordinary
+ * answer loop and the authoritative V2 exact-fit path.  Keeping this at the
+ * DQL boundary is important: a zero-provider Tier 1 shortcut may avoid
+ * conversational planning, but it must not avoid declared parameter binding,
+ * validation, or the normal overall top-N execution bound.
+ */
+export function buildCertifiedBlockInvocationInput(
+  block: KGNode,
+  plan: AnalysisQuestionPlan,
+  question: string,
+): CertifiedBlockInvocationInput {
+  return {
+    question,
+    ...certifiedInvocationInputs(block, plan),
+    ...(plan.requestedShape.topN?.scope === 'per_group'
+      ? {}
+      : plan.requestedShape.topN?.n
+        ? { rowLimit: plan.requestedShape.topN.n }
+        : {}),
+  };
+}
+
+/**
+ * Prove that an immutable certified block may satisfy a question-driven
+ * overall top-N result contract without conversational planning.  A declared
+ * limit parameter alone is not enough: the authored SQL must order rows and
+ * consume that exact parameter in its LIMIT clause.  This prevents a host
+ * from slicing arbitrary connector order and presenting it as certified.
+ */
+export function certifiedBlockProvesRequestedTopN(
+  block: KGNode,
+  plan: AnalysisQuestionPlan,
+  options: {
+    /**
+     * Direct, snapshot-local authored question/title/alias evidence. This is
+     * still useful evidence, but is not the only way a uniquely complete
+     * certified fit may use its authored ranking default.
+     */
+    exactCertifiedQuestionMatch?: boolean;
+    /**
+     * The host proved that exactly one admitted certified artifact covers the
+     * requested tuple in this immutable snapshot. Provider text cannot set
+     * this; it is a retrieval/capability fact.
+     */
+    uniqueCompleteCertifiedFit?: boolean;
+    /**
+     * Server-owned execution capability: the typed invocation row limit is
+     * frozen into the plan and enforced at the read-only SQL boundary before
+     * result normalisation. It only substitutes for an authored SQL LIMIT
+     * when the immutable query has no outer LIMIT of its own.
+     */
+    hostEnforcedRowLimit?: number;
+  } = {},
+): boolean {
+  const topN = plan.requestedShape.topN;
+  if (!topN) return true;
+  // The artifact is loaded from the snapshot-bound KG, but that persisted
+  // payload still crosses an older JSON schema boundary. Treat a malformed
+  // parameter contract as *not proved*, never as a reason to crash the Ask
+  // run or to infer an unordered ranking from connector row order.
+  if (topN.scope !== 'overall' || !block || block.kind !== 'block') return false;
+
+  const limitParameters = (Array.isArray(block.parameters) ? block.parameters : []).flatMap((parameter) => {
+    if (!parameter || typeof parameter.name !== 'string' || parameter.name.trim() === '') return [];
+    return parameter.name === 'top_n' || parameter.binding?.kind === 'limit'
+      ? [parameter]
+      : [];
+  });
+  if (typeof block.sql !== 'string') return false;
+  const outerClauses = scanOutermostTopNClauses(block.sql);
+  if (!outerClauses) return false;
+  const { orderBy, limitValue } = outerClauses;
+
+  // There are exactly two safe ways to prove the overall row bound:
+  //
+  // 1. The immutable artifact consumes its own declared top-N parameter in
+  //    the outer LIMIT clause (the ordinary certified contract); or
+  // 2. The artifact intentionally has no outer LIMIT and the local host owns
+  //    a frozen, typed execution row limit at the read-only SQL boundary.
+  //
+  // We never treat a fixed, driver-style, compound, or stale outer LIMIT as
+  // equivalent to the requested value. In particular, an existing fixed
+  // LIMIT prevents the host executor from appending the frozen limit, so it
+  // cannot prove a different user-requested top N.
+  const limitUsesDeclaredParameter = limitParameters.length === 1
+    && typeof limitValue === 'string'
+    && outerLimitUsesDeclaredTopNParameter(limitValue, limitParameters[0]!.name);
+  const hostOwnsFrozenRowLimit = limitValue === undefined
+    && Number.isInteger(options.hostEnforcedRowLimit)
+    && options.hostEnforcedRowLimit === topN.n
+    && options.hostEnforcedRowLimit! > 0;
+  if (!limitUsesDeclaredParameter && !hostOwnsFrozenRowLimit) return false;
+
+  // A question-driven ranking is only exact when the *primary* authored sort
+  // expression proves the requested measure.  Finding `revenue DESC` later in
+  // `ORDER BY customer_name ASC, revenue DESC` is not sufficient: the result
+  // is primarily alphabetical, not a top-revenue result.  Do not infer a
+  // ranking measure from row shape or candidate tags; that would turn an
+  // unproven certified artifact into a false exact answer.
+  const requestedMeasures = plan.requestedShape.measures
+    .map(normalizedTopNMetricId)
+    .filter(Boolean);
+  // An omitted measure is not normally a license to infer a ranking from a
+  // certified block. The narrow exception is server-owned evidence that this
+  // is either a direct certified question/title/alias match *or* the one
+  // complete certified tuple admitted by this immutable retrieval snapshot.
+  // In both cases the artifact's own primary non-dimension output supplies
+  // the authored default ranking contract. A provider cannot manufacture
+  // either flag from text or a card count.
+  const useAuthoredRankingDefault = requestedMeasures.length === 0
+    && (options.exactCertifiedQuestionMatch === true
+      || options.uniqueCompleteCertifiedFit === true);
+  if (requestedMeasures.length === 0 && !useAuthoredRankingDefault) return false;
+
+  const firstOrderExpression = splitTopLevelSqlList(orderBy)[0];
+  if (!firstOrderExpression) return false;
+
+  const firstOrder = parseTopNOrderExpression(firstOrderExpression);
+  if (!firstOrder) return false;
+
+  const requiredDirection = plan.requestedShape.rankingDirection === 'bottom' ? 'asc' : 'desc';
+  if (firstOrder.direction !== requiredDirection) return false;
+
+  const orderMetricIds = topNOrderMetricIds(firstOrder.expression, block);
+  if (requestedMeasures.length > 0) {
+    return requestedMeasures.some((measure) => orderMetricIds.has(measure));
+  }
+  return [...authoredTopNRankingMetricIds(block)].some((metric) => orderMetricIds.has(metric));
+}
+
+/**
+ * The implicit-ranking exception still needs an authored metric, not merely a
+ * sortable dimension.  Keep this proof inside the immutable block contract:
+ * declared outputs, compiler output lineage, and typed output roles are all
+ * captured with the artifact.  If an older block cannot distinguish its
+ * measures from dimensions, fail closed into the Ask planner.
+ */
+function authoredTopNRankingMetricIds(block: KGNode): Set<string> {
+  const dimensionIds = new Set((block.dimensions ?? []).map(normalizedTopNMetricId).filter(Boolean));
+  const outputRoles = new Map(
+    (block.outputContract ?? [])
+      .filter((output) => typeof output?.name === 'string')
+      .map((output) => [normalizedTopNMetricId(output.name), String(output.role ?? '').toLowerCase()]),
+  );
+  const outputIds = new Set([
+    ...(block.declaredOutputs ?? []),
+    ...(block.outputs ?? []).map((output) => output.name),
+    ...(block.outputContract ?? []).map((output) => output.name),
+  ].map(normalizedTopNMetricId).filter(Boolean));
+  const metrics = new Set<string>();
+  for (const outputId of outputIds) {
+    const role = outputRoles.get(outputId) ?? '';
+    if (dimensionIds.has(outputId) || /(?:dimension|entity|label|attribute)/.test(role)) continue;
+    metrics.add(outputId);
+  }
+  return metrics;
+}
+
+function outerLimitUsesDeclaredTopNParameter(limitValue: string, parameterName: string): boolean {
+  const escapedParameter = parameterName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // This proof is about an authored DQL artifact, not a connector SQL
+  // statement. Accept only the two compiler-recognized interpolation forms
+  // (`${name}` and `{name}`); driver placeholders, bare identifiers, fixed
+  // values, and compound expressions do not prove that the requested typed
+  // top-N binding controls the outer result contract.
+  return new RegExp(
+    `^(?:\\$\\{\\s*${escapedParameter}\\s*\\}|\\{\\s*${escapedParameter}\\s*\\})$`,
+    'i',
+  ).test(topNVisibleSql(limitValue).trim());
+}
+
+interface TopLevelSqlToken {
+  text: string;
+  start: number;
+  end: number;
+}
+
+interface OutermostTopNClauses {
+  /** The outer SELECT projection list, retained for alias resolution. */
+  selectList: string;
+  /** The outer ORDER BY expression list only. */
+  orderBy: string;
+  /** The outer LIMIT expression only, excluding OFFSET/FETCH/etc. */
+  limitValue?: string;
+}
+
+/**
+ * Locate the outer SELECT/ORDER BY/LIMIT clauses without treating text in a
+ * CTE, subquery, quoted identifier/string, or comment as part of the answer
+ * contract. A ranking proof must be about the query that actually returns the
+ * block rows, never an unused inner query that happens to mention revenue.
+ */
+function scanOutermostTopNClauses(sql: string): OutermostTopNClauses | undefined {
+  const tokens = topLevelSqlTokens(sql);
+  if (!tokens) return undefined;
+
+  let orderByIndex = -1;
+  for (let index = 0; index + 1 < tokens.length; index += 1) {
+    if (tokens[index]!.text === 'order' && tokens[index + 1]!.text === 'by') orderByIndex = index;
+  }
+  if (orderByIndex < 0) return undefined;
+
+  let selectIndex = -1;
+  for (let index = 0; index < orderByIndex; index += 1) {
+    if (tokens[index]!.text === 'select') selectIndex = index;
+  }
+  if (selectIndex < 0) return undefined;
+
+  let fromIndex = -1;
+  for (let index = selectIndex + 1; index < orderByIndex; index += 1) {
+    if (tokens[index]!.text === 'from') {
+      fromIndex = index;
+      break;
+    }
+  }
+  if (fromIndex < 0) return undefined;
+
+  let limitIndex = -1;
+  for (let index = orderByIndex + 2; index < tokens.length; index += 1) {
+    if (tokens[index]!.text === 'limit') {
+      limitIndex = index;
+      break;
+    }
+  }
+  const orderByEnd = limitIndex >= 0 ? tokens[limitIndex]!.start : sql.length;
+  // The outer ORDER BY must directly govern the outer LIMIT when one exists.
+  // A set operation, second SELECT, or a second ORDER BY in between is too
+  // complex for this exact shortcut and correctly falls back to the bounded
+  // Ask tool runtime. The same guard applies through end-of-query for an
+  // intentionally unbounded artifact whose host owns the frozen row limit.
+  if (tokens.slice(orderByIndex + 2, limitIndex >= 0 ? limitIndex : tokens.length).some((token) =>
+    token.text === 'select' || token.text === 'union' || token.text === 'intersect' || token.text === 'except')) {
+    return undefined;
+  }
+
+  const afterLimit = limitIndex >= 0 ? tokens.find((token, index) => index > limitIndex && (
+    token.text === 'offset' || token.text === 'fetch' || token.text === 'for'
+  ))?.start ?? sql.length : sql.length;
+  const selectList = sql.slice(tokens[selectIndex]!.end, tokens[fromIndex]!.start).trim();
+  const orderBy = sql.slice(tokens[orderByIndex + 1]!.end, orderByEnd).trim();
+  const limitValue = limitIndex >= 0
+    ? sql.slice(tokens[limitIndex]!.end, afterLimit).replace(/;\s*$/, '').trim()
+    : undefined;
+  if (!selectList || !orderBy || (limitIndex >= 0 && !limitValue)) return undefined;
+  return {
+    selectList,
+    orderBy,
+    ...(limitValue ? { limitValue } : {}),
+  };
+}
+
+/**
+ * Tokenize only depth-zero SQL words. The state machine deliberately removes
+ * comments and literals from consideration while retaining positional ranges
+ * against the original SQL for clause slicing.
+ */
+function topLevelSqlTokens(sql: string): TopLevelSqlToken[] | undefined {
+  const tokens: TopLevelSqlToken[] = [];
+  let depth = 0;
+  let quote: "'" | '"' | '`' | ']' | undefined;
+  let lineComment = false;
+  let blockCommentDepth = 0;
+
+  for (let index = 0; index < sql.length; index += 1) {
+    const character = sql[index]!;
+    const next = sql[index + 1];
+
+    if (lineComment) {
+      if (character === '\n' || character === '\r') lineComment = false;
+      continue;
+    }
+    if (blockCommentDepth > 0) {
+      if (character === '/' && next === '*') {
+        blockCommentDepth += 1;
+        index += 1;
+      } else if (character === '*' && next === '/') {
+        blockCommentDepth -= 1;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (quote === ']' && character === ']') {
+        if (next === ']') index += 1;
+        else quote = undefined;
+      } else if (quote !== ']' && character === quote) {
+        if (next === quote) index += 1;
+        else quote = undefined;
+      }
+      continue;
+    }
+    if (character === '-' && next === '-') {
+      lineComment = true;
+      index += 1;
+      continue;
+    }
+    if (character === '/' && next === '*') {
+      blockCommentDepth = 1;
+      index += 1;
+      continue;
+    }
+    if (character === "'" || character === '"' || character === '`') {
+      quote = character;
+      continue;
+    }
+    if (character === '[') {
+      quote = ']';
+      continue;
+    }
+    if (character === '(') {
+      depth += 1;
+      continue;
+    }
+    if (character === ')') {
+      if (depth === 0) return undefined;
+      depth -= 1;
+      continue;
+    }
+    if (depth !== 0 || !/[A-Za-z_]/.test(character)) continue;
+
+    const start = index;
+    index += 1;
+    while (index < sql.length && /[A-Za-z0-9_$]/.test(sql[index]!)) index += 1;
+    tokens.push({ text: sql.slice(start, index).toLowerCase(), start, end: index });
+    index -= 1;
+  }
+
+  // A line comment is valid through EOF. Unterminated string, bracket, block
+  // comment, or parenthesis state is not a trustworthy exact-proof input.
+  return depth === 0 && !quote && blockCommentDepth === 0 ? tokens : undefined;
+}
+
+/**
+ * Split an authored comma-separated SQL list without treating a function
+ * argument, quoted string, or quoted identifier as a second ORDER BY key.
+ * This intentionally stays small and fails closed for malformed SQL; DQL's
+ * compiler is still the authority for execution syntax.
+ */
+function splitTopLevelSqlList(value: string): string[] {
+  const expressions: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote: "'" | '"' | '`' | ']' | undefined;
+  let lineComment = false;
+  let blockCommentDepth = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]!;
+    const next = value[index + 1];
+    if (lineComment) {
+      if (character === '\n' || character === '\r') lineComment = false;
+      continue;
+    }
+    if (blockCommentDepth > 0) {
+      if (character === '/' && next === '*') {
+        blockCommentDepth += 1;
+        index += 1;
+      } else if (character === '*' && next === '/') {
+        blockCommentDepth -= 1;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (quote === ']' && character === ']') {
+        if (next === ']') index += 1;
+        else quote = undefined;
+      } else if (quote !== ']' && character === quote) {
+        // SQL escapes an in-string quote by doubling it. Keep scanning inside
+        // the quoted value rather than mistaking a later comma for a list
+        // separator.
+        if (value[index + 1] === quote) {
+          index += 1;
+        } else {
+          quote = undefined;
+        }
+      }
+      continue;
+    }
+    if (character === '-' && next === '-') {
+      lineComment = true;
+      index += 1;
+      continue;
+    }
+    if (character === '/' && next === '*') {
+      blockCommentDepth = 1;
+      index += 1;
+      continue;
+    }
+    if (character === "'" || character === '"' || character === '`') {
+      quote = character;
+      continue;
+    }
+    if (character === '[') {
+      quote = ']';
+      continue;
+    }
+    if (character === '(') {
+      depth += 1;
+      continue;
+    }
+    if (character === ')' && depth > 0) {
+      depth -= 1;
+      continue;
+    }
+    if (character === ',' && depth === 0) {
+      const expression = value.slice(start, index).trim();
+      if (!expression) return [];
+      expressions.push(expression);
+      start = index + 1;
+    }
+  }
+
+  if (quote || blockCommentDepth > 0 || depth !== 0) return [];
+  const finalExpression = value.slice(start).trim();
+  return finalExpression ? [...expressions, finalExpression] : [];
+}
+
+function parseTopNOrderExpression(expression: string): { expression: string; direction: 'asc' | 'desc' } | undefined {
+  const visible = topNVisibleSql(expression);
+  const match = visible.match(/^(.*?)(?:\s+(asc|desc))(?:\s+nulls\s+(?:first|last))?\s*$/i);
+  if (!match?.[1] || !match[2]) return undefined;
+  return {
+    expression: expression.slice(0, match[1].length).trim(),
+    direction: match[2].toLowerCase() as 'asc' | 'desc',
+  };
+}
+
+/** Preserve SQL positions while blanking literals/comments that cannot prove a ranking contract. */
+function topNVisibleSql(value: string): string {
+  let output = '';
+  let quote: "'" | '"' | '`' | ']' | undefined;
+  let lineComment = false;
+  let blockCommentDepth = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index]!;
+    const next = value[index + 1];
+    const blank = () => { output += character === '\n' || character === '\r' ? character : ' '; };
+    if (lineComment) {
+      blank();
+      if (character === '\n' || character === '\r') lineComment = false;
+      continue;
+    }
+    if (blockCommentDepth > 0) {
+      blank();
+      if (character === '/' && next === '*') {
+        blockCommentDepth += 1;
+        index += 1;
+        output += ' ';
+      } else if (character === '*' && next === '/') {
+        blockCommentDepth -= 1;
+        index += 1;
+        output += ' ';
+      }
+      continue;
+    }
+    if (quote === "'") {
+      blank();
+      if (character === "'") {
+        if (next === "'") {
+          index += 1;
+          output += ' ';
+        } else {
+          quote = undefined;
+        }
+      }
+      continue;
+    }
+    if (quote) {
+      // Keep quoted identifiers intact for identifier normalization while the
+      // outer-clause scanner itself ignores their contents.
+      output += character;
+      if (quote === ']' && character === ']') {
+        if (next === ']') {
+          index += 1;
+          output += next;
+        } else {
+          quote = undefined;
+        }
+      } else if (quote !== ']' && character === quote) {
+        if (next === quote) {
+          index += 1;
+          output += next;
+        } else {
+          quote = undefined;
+        }
+      }
+      continue;
+    }
+    if (character === '-' && next === '-') {
+      output += '  ';
+      index += 1;
+      lineComment = true;
+      continue;
+    }
+    if (character === '/' && next === '*') {
+      output += '  ';
+      index += 1;
+      blockCommentDepth = 1;
+      continue;
+    }
+    if (character === "'") {
+      output += ' ';
+      quote = character;
+      continue;
+    }
+    if (character === '"' || character === '`') {
+      output += character;
+      quote = character;
+      continue;
+    }
+    if (character === '[') {
+      output += character;
+      quote = ']';
+      continue;
+    }
+    output += character;
+  }
+  return output;
+}
+
+/** Normalize an identifier or business measure into its opaque-free SQL key. */
+function normalizedTopNMetricId(value: string): string {
+  return value
+    .trim()
+    .replace(/^['"`\[]|['"`\]]$/g, '')
+    .split('.')
+    .at(-1)!
+    .trim()
+    .replace(/^['"`\[]|['"`\]]$/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+/**
+ * Resolve the primary ORDER BY expression through selected-output aliases and
+ * captured output lineage.  Qualified columns (`c.revenue`), SQL aliases
+ * (`SUM(o.revenue) AS revenue` / `ORDER BY revenue`), and compiler-captured
+ * output sources all converge on the same normalized key.  Unknown or
+ * ambiguous expressions deliberately yield no proof.
+ */
+function topNOrderMetricIds(expression: string, block: KGNode): Set<string> {
+  const keys = topNIdentifierIds(expression);
+  const selectedAliases = selectedSqlOutputAliases(block.sql);
+  const outputLineage = block.outputs ?? [];
+
+  for (const key of [...keys]) {
+    const selectedExpression = selectedAliases.get(key);
+    if (selectedExpression) {
+      for (const selectedKey of topNIdentifierIds(selectedExpression)) keys.add(selectedKey);
+    }
+    for (const output of outputLineage) {
+      if (normalizedTopNMetricId(output.name) !== key) continue;
+      for (const source of output.sources ?? []) {
+        const sourceKey = normalizedTopNMetricId(source.column);
+        if (sourceKey) keys.add(sourceKey);
+      }
+    }
+  }
+
+  return keys;
+}
+
+function topNIdentifierIds(expression: string): Set<string> {
+  const keys = new Set<string>();
+  // Quoted identifiers remain intact, while literals/comments were blanked.
+  // Therefore a string such as `'revenue'` cannot prove a ranking measure.
+  const identifierPattern = /(?:\[[^\]]+\]|"(?:""|[^"])+"|`(?:``|[^`])+`|[A-Za-z_][A-Za-z0-9_$]*)/g;
+  for (const identifier of topNVisibleSql(expression).match(identifierPattern) ?? []) {
+    const key = normalizedTopNMetricId(identifier);
+    if (key && !TOP_N_SQL_WORDS.has(key)) keys.add(key);
+  }
+  return keys;
+}
+
+function selectedSqlOutputAliases(sql: string | undefined): Map<string, string> {
+  if (!sql) return new Map();
+  const select = scanOutermostTopNClauses(sql)?.selectList;
+  if (!select) return new Map();
+
+  const aliases = new Map<string, string>();
+  for (const projection of splitTopLevelSqlList(select)) {
+    const visibleProjection = topNVisibleSql(projection);
+    const explicitAlias = visibleProjection.match(/^(.*?)\s+as\s+((?:\[[^\]]+\])|(?:"(?:""|[^"])+")|(?:`(?:``|[^`])+`)|(?:[A-Za-z_][A-Za-z0-9_$]*))\s*$/i);
+    const implicitAlias = explicitAlias
+      ? undefined
+      : visibleProjection.match(/^(.*?)\s+((?:\[[^\]]+\])|(?:"(?:""|[^"])+")|(?:`(?:``|[^`])+`)|(?:[A-Za-z_][A-Za-z0-9_$]*))\s*$/i);
+    const expressionLength = (explicitAlias?.[1] ?? implicitAlias?.[1] ?? visibleProjection).length;
+    const expression = projection.slice(0, expressionLength).trim();
+    const alias = (explicitAlias?.[2] ?? implicitAlias?.[2] ?? projection).trim();
+    const aliasId = normalizedTopNMetricId(alias);
+    if (aliasId) aliases.set(aliasId, expression);
+  }
+  return aliases;
+}
+
+const TOP_N_SQL_WORDS = new Set([
+  'asc', 'desc', 'nulls', 'first', 'last', 'sum', 'avg', 'average', 'count',
+  'min', 'max', 'cast', 'coalesce', 'case', 'when', 'then', 'else', 'end',
+]);
+
+/**
  * Return only output aliases that the selected certified artifact itself
  * declares.  This is deliberately built after the router has frozen the plan:
  * retrieval context, tags, examples, and sibling metrics never enter the
@@ -1335,6 +1939,18 @@ export interface AgentAnswer {
    * stable public payload.
    */
   _semanticMetricMatch?: MetricMatch;
+  /**
+   * Additive terminal projection from the authoritative Ask V2 tool runtime.
+   * It carries a typed stop boundary so callers do not re-enter legacy business
+   * interpretation after the V2 tool loop has ended.
+   */
+  askAgentV2Outcome?: {
+    version: 2;
+    kind: 'finish_answer' | 'clarification' | 'gap' | 'provider_failure' | 'execution_failure' | 'denied' | 'budget_exhausted';
+    reasonCode: string;
+    safeAction?: string;
+    origin: 'retrieval' | 'agent_control' | 'tool' | 'validation' | 'freeze' | 'execution' | 'provider' | 'narration';
+  };
 }
 
 export interface AgentResultPayload {
@@ -1448,6 +2064,12 @@ export interface CertifiedBlockInvocationInput {
 
 export interface AnswerLoopInput {
   question: string;
+  /**
+   * Authoritative V2-only, function-bearing retrieval workspace.  It is never
+   * accepted from JSON and only the V2 provider tool adapter consumes it;
+   * legacy answer() deliberately ignores it.
+   */
+  askAgentV2Workspace?: AskAgentRuntimeWorkspaceBridgeV2;
   /**
    * Server-owned continuation guard for a plural prior-result member binding.
    * Such a follow-up must execute its already-frozen analytical program with
@@ -1594,6 +2216,25 @@ export interface AnswerLoopInput {
     freeze: ExploratoryExecutionFreezeV1;
   }>;
   /**
+   * Authoritative Ask V2 exploratory boundary.  It is intentionally separate
+   * from the V1 router-plan callback above: the host derives this capability
+   * from the live V2 snapshot, admitted output closure, SQL bytes, connection
+   * policy and a V2 plan fingerprint.  It must not read `resolvedAnalyticalPlan`
+   * or a legacy route decision.
+   */
+  prepareAskV2ExploratorySqlExecution?: (input: {
+    version: 2;
+    sql: string;
+    expectedOutputIds: string[];
+    selectedCandidateIds: string[];
+    snapshotId?: string;
+    planFingerprint: string;
+    repair?: boolean;
+  }) => Promise<{
+    capability: AgenticSqlExecutionCapabilityV1;
+    freeze: ExploratoryExecutionFreezeV1;
+  }>;
+  /**
    * Server-only exact analyst proposal. When present, the ordinary generated
    * lane must execute this SQL through `executeAgenticGeneratedSql`, not ask a
    * second model to regenerate a replacement. It is intentionally excluded
@@ -1623,6 +2264,39 @@ export interface AnswerLoopInput {
   ) => Promise<AgentResultPayload>;
   /** Execute an already-finalized governed artifact without translating it back through generated SQL. */
   executeDqlArtifact?: (artifact: DqlArtifactReference) => Promise<AgentResultPayload>;
+  /**
+   * V2-only governed-relational authorization. The local host freezes the
+   * selected qualified closure and connection target before DQL compilation;
+   * this path is independent of legacy router decisions and resolved plans.
+   */
+  authorizeAskV2DqlArtifact?: (input: {
+    version: 2;
+    candidateIds: string[];
+    expectedOutputIds: string[];
+    relationshipPathIds: string[];
+    snapshotId?: string;
+    planFingerprint: string;
+    repair?: boolean;
+  }) => Promise<{
+    planId: string;
+    targetFingerprint?: string;
+  }>;
+  /**
+   * Authoritative Ask V2 governed-DQL boundary.  The host compiles the
+   * provider-supplied program only after binding every selected candidate and
+   * relationship path to the immutable workspace closure.
+   */
+  executeAskV2DqlArtifact?: (input: {
+    version: 2;
+    artifact: DqlArtifactReference;
+    candidateIds: string[];
+    expectedOutputIds: string[];
+    relationshipPathIds: string[];
+    snapshotId?: string;
+    planFingerprint: string;
+    authorizationPlanId?: string;
+    repair?: boolean;
+  }) => Promise<AgentResultPayload>;
   captureGeneratedDraft?: (proposal: {
     question: string;
     sql: string;
@@ -3305,14 +3979,11 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     let executionFailureDetail: AnalyticalErrorDetailV1 | undefined;
     if (artifactHit.node.kind === 'block' && input.executeCertifiedBlock) {
       try {
-        result = await input.executeCertifiedBlock(artifactHit.node, {
-          question,
-          ...certifiedInvocationInputs(artifactHit.node, questionPlan),
-          rowLimit: questionPlan.requestedShape.topN?.scope === 'per_group'
-            ? undefined
-            : questionPlan.requestedShape.topN?.n,
-        });
-        result = trimResultToRequestedTopN(result, questionPlan);
+        result = await input.executeCertifiedBlock(
+          artifactHit.node,
+          buildCertifiedBlockInvocationInput(artifactHit.node, questionPlan, question),
+        );
+        result = trimCertifiedBlockResultToRequestedTopN(result, questionPlan);
       } catch (err) {
         executionFailureDetail = analyticalErrorDetail(err);
         executionError = err instanceof Error ? err.message : String(err);
@@ -5460,11 +6131,11 @@ async function runAnswerLoop(input: AnswerLoopInput): Promise<AgentAnswer> {
     // Global top-N asks must return exactly N rows even when the generated SQL
     // returned more (missing/oversized LIMIT) — mirrors the certified path so a
     // "top 10" question never shows 200 rows. per_group scope is left intact by
-    // trimResultToRequestedTopN. Domain-agnostic.
+    // trimCertifiedBlockResultToRequestedTopN. Domain-agnostic.
     let topNTrimNote: string | undefined;
     if (result) {
       const beforeRows = Array.isArray(result.rows) ? result.rows.length : result.rowCount;
-      result = trimResultToRequestedTopN(result, questionPlan);
+      result = trimCertifiedBlockResultToRequestedTopN(result, questionPlan);
       const afterRows = Array.isArray(result.rows) ? result.rows.length : result.rowCount;
       if (afterRows < beforeRows) {
         topNTrimNote = `Showed the top ${questionPlan.requestedShape.topN?.n ?? afterRows} of ${beforeRows} rows the query returned.`;
@@ -5699,7 +6370,13 @@ function renderExecutionSchemaForRepair(schemaContext: RuntimeSchemaTable[]): st
     : 'No execution-target columns were available; do not invent a replacement column.';
 }
 
-function trimResultToRequestedTopN(result: AgentResultPayload, plan: AnalysisQuestionPlan): AgentResultPayload {
+/**
+ * Preserve the declared answer shape even when an authored certified block
+ * returns a broader result set than its typed `top_n` input.  The V2 exact
+ * path uses this same normalization so a provider-free execution cannot
+ * present a different result than the ordinary certified route.
+ */
+export function trimCertifiedBlockResultToRequestedTopN(result: AgentResultPayload, plan: AnalysisQuestionPlan): AgentResultPayload {
   const topN = plan.requestedShape.topN;
   if (!topN || topN.scope === 'per_group' || !Array.isArray(result.rows) || result.rows.length <= topN.n) return result;
   return {

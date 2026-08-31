@@ -46,7 +46,9 @@ let researchToolRowsConsentTitle: typeof UnifiedAgentRunPanelModule.RESEARCH_TOO
 let providerEgressSummary: typeof UnifiedAgentRunPanelModule.providerEgressSummary;
 let researchVerdictSummary: typeof UnifiedAgentRunPanelModule.researchVerdictSummary;
 let researchVerdictSummaryForRun: typeof UnifiedAgentRunPanelModule.researchVerdictSummaryForRun;
+let authoritativeV8CompactInspectorProjection: typeof UnifiedAgentRunPanelModule.authoritativeV8CompactInspectorProjection;
 let InspectorDecisionStory: typeof UnifiedAgentRunPanelModule.InspectorDecisionStory;
+let InspectorAuthoritativeV8DecisionStory: typeof UnifiedAgentRunPanelModule.InspectorAuthoritativeV8DecisionStory;
 let ResearchPartialFailureRepair: typeof UnifiedAgentRunPanelModule.ResearchPartialFailureRepair;
 let InspectorDecisionSummaryUnavailable: typeof UnifiedAgentRunPanelModule.InspectorDecisionSummaryUnavailable;
 let inspectorLegacySummaryNotice: typeof UnifiedAgentRunPanelModule.CANONICAL_DECISION_SUMMARY_UNAVAILABLE;
@@ -96,7 +98,9 @@ beforeAll(async () => {
     providerEgressSummary = module.providerEgressSummary;
     researchVerdictSummary = module.researchVerdictSummary;
     researchVerdictSummaryForRun = module.researchVerdictSummaryForRun;
+    authoritativeV8CompactInspectorProjection = module.authoritativeV8CompactInspectorProjection;
     InspectorDecisionStory = module.InspectorDecisionStory;
+    InspectorAuthoritativeV8DecisionStory = module.InspectorAuthoritativeV8DecisionStory;
     ResearchPartialFailureRepair = module.ResearchPartialFailureRepair;
     InspectorDecisionSummaryUnavailable = module.InspectorDecisionSummaryUnavailable;
     inspectorLegacySummaryNotice = module.CANONICAL_DECISION_SUMMARY_UNAVAILABLE;
@@ -644,6 +648,180 @@ describe('UnifiedAgentRunPanel DQL-first artifact display helpers', () => {
       ['Artifact IDs', 'artifact-1'],
     ]));
     expect(agentRunPerformanceRows({} as Parameters<typeof agentRunPerformanceRows>[0])).toBeUndefined();
+  });
+
+  it('OBS-017 uses the one authoritative V8 receipt for compact call counts instead of independently counted spans', () => {
+    const trace = {
+      envelope: {
+        version: 1, traceId: 'v'.repeat(32), rootSpanId: 'w'.repeat(16), runId: 'v8-counts', surface: 'browser', mode: 'ask',
+        questionFingerprint: 'sha256:question', status: 'completed', recordingStatus: 'complete', startedAt: '2026-08-30T12:00:00.000Z', durationMs: 30,
+        spanCount: 3, candidateDecisionCount: 0, droppedRecordCount: 0,
+      },
+      // Deliberately stale/over-counted physical spans. V8 is the one runtime
+      // authority for an authoritative V2 run.
+      spans: [
+        { version: 1, traceId: 'v'.repeat(32), spanId: 'w'.repeat(16), ordinal: 0, name: 'provider.attempt', stage: 'provider', startedAt: '2026-08-30T12:00:00.000Z', outcome: 'ok', reasonCode: 'ok', payload: { kind: 'provider' } },
+        { version: 1, traceId: 'v'.repeat(32), spanId: 'x'.repeat(16), ordinal: 1, name: 'tool.call', stage: 'tool', startedAt: '2026-08-30T12:00:00.001Z', outcome: 'ok', reasonCode: 'ok', payload: { kind: 'tool' } },
+        { version: 1, traceId: 'v'.repeat(32), spanId: 'y'.repeat(16), ordinal: 2, name: 'sql.execute', stage: 'sql', startedAt: '2026-08-30T12:00:00.002Z', outcome: 'ok', reasonCode: 'ok', payload: { kind: 'sql' } },
+      ],
+      candidateDecisions: [], links: [], runtimeMode: 'authoritative_v2',
+      runtimeReceiptV8: {
+        version: 8, mode: 'authoritative_v2', turnClass: 'analytics', retainedCandidateCount: 0, initialCandidateCount: 0,
+        expansionCount: 0, objective: 'analytics', contextCoverage: [], excludedCandidateCount: 0, exclusionReasonCodes: [], observations: [], tierAttempts: [],
+        planFrozen: true, outcome: { connectionAttempted: true, executionAttempts: 1, factCount: 1, narration: 'fact_bound' },
+        activity: { providerDispatches: 0, toolCalls: 4, executionAttempts: 1, repairs: 1 }, toolDurationMs: 0, finalStopReason: 'completed',
+      },
+    } as unknown as AskTraceDataV1;
+    const run = { requestedMode: 'ask', providerEgressReceipts: [] } as unknown as Parameters<typeof agentRunPerformanceRows>[0];
+
+    expect(agentRunPerformanceRows(run, trace)).toEqual(expect.arrayContaining([
+      ['Calls', '0 provider · 4 tool · 1 SQL · 1 repair'],
+      ['Trace evidence', 'Authoritative V2 receipt (canonical physical egress and execution counts)'],
+      ['Ask runtime', 'Authoritative V2 receipt'],
+    ]));
+  });
+
+  it('OBS-017 makes the compact authoritative V8 story win over contradictory legacy planning placeholders', () => {
+    const v8 = {
+      version: 8 as const,
+      mode: 'authoritative_v2' as const,
+      turnClass: 'analytics' as const,
+      snapshotId: 'snapshot-v8',
+      retainedCandidateCount: 80,
+      initialCandidateCount: 24,
+      expansionCount: 0,
+      objective: 'analytics' as const,
+      contextCoverage: [{
+        version: 2 as const,
+        source: 'certified',
+        status: 'available' as const,
+        admittedCandidateCount: 4,
+        excludedCandidateCount: 0,
+        reasonCodes: ['SOURCE_AVAILABLE'],
+      }],
+      excludedCandidateCount: 0,
+      exclusionReasonCodes: [],
+      observations: [{
+        version: 1 as const,
+        tool: 'run_certified',
+        outcome: 'eligible' as const,
+        tier: 'certified',
+        reasonCode: 'ASK_V2_EXECUTION_AUTHORIZED',
+        candidateIds: ['commerce::block::customer_profile'],
+        planId: 'ask-v2:certified:plan-4503',
+        frozen: true,
+        inputFingerprint: 'sha256:frozen-plan-4503',
+        origin: 'freeze',
+      }, {
+        version: 1 as const,
+        tool: 'run_certified',
+        outcome: 'executed' as const,
+        tier: 'certified',
+        reasonCode: 'CERTIFIED_EXECUTED',
+        candidateIds: ['commerce::block::customer_profile'],
+        planId: 'ask-v2:certified:plan-4503',
+        origin: 'execution',
+      }],
+      tierAttempts: [{
+        version: 2 as const,
+        tier: 'certified',
+        outcome: 'eligible' as const,
+        reasonCode: 'ASK_V2_EXECUTION_AUTHORIZED',
+        candidateIds: ['commerce::block::customer_profile'],
+        frozen: true,
+      }, {
+        version: 2 as const,
+        tier: 'certified',
+        outcome: 'executed' as const,
+        reasonCode: 'CERTIFIED_EXECUTED',
+        candidateIds: ['commerce::block::customer_profile'],
+        frozen: true,
+      }],
+      planFrozen: true,
+      terminalOutcome: { version: 2 as const, kind: 'finish_answer', reasonCode: 'ASK_V2_VALIDATED_RESULT', origin: 'execution' },
+      outcome: { connectionAttempted: true, executionAttempts: 1, factCount: 11, narration: 'fact_bound' as const },
+      activity: { providerDispatches: 0, toolCalls: 2, executionAttempts: 1, repairs: 0 },
+      toolDurationMs: 0,
+      finalStopReason: 'certified_answer_found',
+    };
+    const contradictoryLegacy = analyticalInspectorContract({
+      diagnosticReceiptV3: {
+        version: 3,
+        runId: 'legacy-planning-copy',
+        planFrozen: false,
+        finalStopReason: 'coverage_gap',
+        sourceCoverage: [],
+        cascade: { attempts: [] },
+        provider: { phase: 'generation', cause: 'unknown', safeAction: 'retry_after_connection' },
+      },
+      diagnosticReceiptV8: v8,
+    });
+    expect(contradictoryLegacy?.runtimeReceiptV8).toMatchObject({ mode: 'authoritative_v2', planFrozen: true });
+
+    const projection = authoritativeV8CompactInspectorProjection(v8);
+    expect(projection).toMatchObject({
+      selectedTier: 'certified',
+      planId: 'ask-v2:certified:plan-4503',
+      frozenPlanFingerprint: 'sha256:frozen-plan-4503',
+      candidateAdmissionCount: 24,
+      retainedCandidateCount: 80,
+    });
+    const markup = renderToStaticMarkup(createElement(InspectorAuthoritativeV8DecisionStory, {
+      projection: projection!,
+      t: themes.paper,
+    }));
+    expect(markup).toContain('Authoritative Ask decision story');
+    expect(markup).toContain('certified');
+    expect(markup).toContain('ask-v2:certified:plan-4503');
+    expect(markup).toContain('24 initial');
+    expect(markup).toContain('11 validated facts');
+    expect(markup).not.toContain('No cascade tier receipt was recorded');
+    expect(markup).not.toContain('analytical planning did not complete');
+    expect(markup).not.toContain('0 measures');
+  });
+
+  it('AGT-047 uses the controller-owned semantic progression for an unfrozen compact story', () => {
+    const v8 = {
+      version: 8 as const, mode: 'authoritative_v2' as const, turnClass: 'analytics' as const,
+      retainedCandidateCount: 80, initialCandidateCount: 24, expansionCount: 0, objective: 'analytics' as const,
+      contextCoverage: [], excludedCandidateCount: 0, exclusionReasonCodes: [], observations: [],
+      tierAttempts: [
+        { version: 2 as const, tier: 'semantic' as const, outcome: 'eligible' as const, reasonCode: 'SEMANTIC_CANDIDATES_AVAILABLE', candidateIds: ['semantic:metric:revenue'], frozen: false },
+        { version: 2 as const, tier: 'certified' as const, outcome: 'eligible' as const, reasonCode: 'CERTIFIED_CANDIDATES_AVAILABLE', candidateIds: [], frozen: false },
+      ],
+      controllerTier: 'semantic' as const,
+      planFrozen: false,
+      terminalOutcome: { version: 2 as const, kind: 'gap' as const, reasonCode: 'ASK_V2_TOOL_PROGRESSION_REQUIRED', origin: 'agent_control' as const },
+      outcome: { connectionAttempted: false, executionAttempts: 0, factCount: 0, narration: 'not_retained' as const },
+      activity: { providerDispatches: 6, toolCalls: 5, executionAttempts: 0, repairs: 0 }, toolDurationMs: 0,
+      finalStopReason: 'ASK_V2_TOOL_PROGRESSION_REQUIRED',
+    };
+    expect(authoritativeV8CompactInspectorProjection(v8)).toMatchObject({
+      selectedTier: 'semantic',
+      candidateAdmissionCount: 24,
+    });
+  });
+
+  it('AGT-047 projects the current exploratory controller tier after semantic compilation became unavailable', () => {
+    const v8 = {
+      version: 8 as const, mode: 'authoritative_v2' as const, turnClass: 'analytics' as const,
+      retainedCandidateCount: 80, initialCandidateCount: 24, expansionCount: 0, objective: 'analytics' as const,
+      contextCoverage: [], excludedCandidateCount: 0, exclusionReasonCodes: [], observations: [],
+      tierAttempts: [
+        { version: 2 as const, tier: 'semantic' as const, outcome: 'eligible' as const, reasonCode: 'SEMANTIC_CANDIDATES_AVAILABLE', candidateIds: ['semantic:metric:revenue'], frozen: false },
+        { version: 2 as const, tier: 'semantic' as const, outcome: 'unavailable' as const, reasonCode: 'SEMANTIC_EXECUTION_UNAVAILABLE', candidateIds: ['semantic:metric:revenue'], frozen: false },
+        { version: 2 as const, tier: 'governed_relational' as const, outcome: 'unavailable' as const, reasonCode: 'GOVERNED_RELATIONAL_EXECUTION_UNAVAILABLE', candidateIds: [], frozen: false },
+      ],
+      controllerTier: 'exploratory_sql' as const,
+      planFrozen: false,
+      terminalOutcome: { version: 2 as const, kind: 'gap' as const, reasonCode: 'ASK_V2_TOOL_PROGRESSION_REQUIRED', origin: 'agent_control' as const },
+      outcome: { connectionAttempted: false, executionAttempts: 0, factCount: 0, narration: 'not_retained' as const },
+      activity: { providerDispatches: 4, toolCalls: 4, executionAttempts: 0, repairs: 0 }, toolDurationMs: 0,
+      finalStopReason: 'ASK_V2_TOOL_PROGRESSION_REQUIRED',
+    };
+    expect(authoritativeV8CompactInspectorProjection(v8)).toMatchObject({
+      selectedTier: 'exploratory_sql',
+    });
   });
 
   it('OBS-010 projects ordinary Ask egress from its actual meaning receipt without calling it Research', () => {

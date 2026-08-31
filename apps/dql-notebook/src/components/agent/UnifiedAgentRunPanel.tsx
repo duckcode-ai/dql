@@ -2417,7 +2417,7 @@ function lineageEntriesFromRun(run: AgentRun): AskLineageEntry[] {
 
 export function preferredAskInspectorTab(run: AgentRun, artifact: AgentRunArtifact): AskInspectorTab {
   const payload = payloadOf(artifact);
-  if (hasAnalyticalInspectorContract(payload)) return 'how';
+  if (run.diagnosticReceiptV8?.mode === 'authoritative_v2' || hasAnalyticalInspectorContract(payload)) return 'how';
   if ((answerDqlArtifactFromRun(run) ?? resolveArtifactDqlView(payload))?.source) return 'dql';
   if (answerSqlFromRun(run) ?? (typeof payload.sql === 'string' ? payload.sql : undefined)) return 'sql';
   if (lineageEntriesFromRun(run).length > 0) return 'lineage';
@@ -2871,6 +2871,22 @@ interface AnalyticalInspectorContract {
   decisionSummary?: AskDecisionSummaryV1;
   /** V1.15 concise runtime story shown before the advanced local trace. */
   runtimeDecisionSummary?: AskDecisionSummaryV2;
+  /**
+   * V8 is the compact inspector authority only when the server served the
+   * run in authoritative V2 mode. Earlier diagnostic receipts remain the
+   * reader for legacy and shadow runs.
+   */
+  runtimeReceiptV8?: NonNullable<AgentRun['diagnosticReceiptV8']>;
+}
+
+function isAgentRunDiagnosticReceiptV8(value: unknown): value is NonNullable<AgentRun['diagnosticReceiptV8']> {
+  const receipt = recordOf(value);
+  return receipt?.version === 8
+    && (receipt.mode === 'legacy_v1' || receipt.mode === 'shadow_v2' || receipt.mode === 'authoritative_v2')
+    && Array.isArray(receipt.contextCoverage)
+    && Array.isArray(receipt.observations)
+    && Array.isArray(receipt.tierAttempts)
+    && recordOf(receipt.outcome) !== undefined;
 }
 
 /**
@@ -2912,6 +2928,7 @@ export function hasAnalyticalInspectorContract(payload: Record<string, unknown>)
     || recordOf(payload.diagnosticReceiptV3)
     || recordOf(payload.diagnosticReceiptV4)
     || recordOf(payload.diagnosticReceiptV5)
+    || isAgentRunDiagnosticReceiptV8(payload.diagnosticReceiptV8)
     || fallbackAnalyticalFailure(payload),
   );
 }
@@ -2925,6 +2942,9 @@ export function analyticalInspectorContract(payload: Record<string, unknown>): A
   const v3Diagnostic = recordOf(payload.diagnosticReceiptV3);
   const v4Diagnostic = recordOf(payload.diagnosticReceiptV4);
   const v5Diagnostic = recordOf(payload.diagnosticReceiptV5);
+  const v8Diagnostic = isAgentRunDiagnosticReceiptV8(payload.diagnosticReceiptV8)
+    ? payload.diagnosticReceiptV8
+    : undefined;
   const diagnostic = v5Diagnostic || v4Diagnostic || v3Diagnostic
     ? {
         ...legacyDiagnostic,
@@ -2953,6 +2973,7 @@ export function analyticalInspectorContract(payload: Record<string, unknown>): A
     diagnostic,
     ...(isAskDecisionSummaryV1(v4Diagnostic?.summary) ? { decisionSummary: v4Diagnostic.summary } : {}),
     ...(isAskDecisionSummaryV2(v5Diagnostic?.summary) ? { runtimeDecisionSummary: v5Diagnostic.summary } : {}),
+    ...(v8Diagnostic ? { runtimeReceiptV8: v8Diagnostic } : {}),
   };
 }
 
@@ -3076,6 +3097,115 @@ function canonicalPhysicalTraceFacts(trace: Pick<AskTraceDataV1, 'envelope' | 's
   };
 }
 
+/**
+ * Authoritative V2 records the selected/frozen execution directly in V8. The
+ * compact inspector must read that receipt instead of combining a completed
+ * V8 execution with an earlier V1/V3 planning envelope. Those envelopes are
+ * retained for compatibility, but describe a different authority boundary.
+ */
+export interface AuthoritativeV8CompactInspectorProjection {
+  receipt: NonNullable<AgentRun['diagnosticReceiptV8']>;
+  selectedTier?: string;
+  planId?: string;
+  frozenPlanFingerprint?: string;
+  candidateIds: string[];
+  candidateAdmissionCount: number;
+  retainedCandidateCount: number;
+  tierAttempts: NonNullable<AgentRun['diagnosticReceiptV8']>['tierAttempts'];
+}
+
+export function authoritativeV8CompactInspectorProjection(
+  receipt: AgentRun['diagnosticReceiptV8'] | AskTraceDataV1['runtimeReceiptV8'] | undefined,
+): AuthoritativeV8CompactInspectorProjection | undefined {
+  if (receipt?.mode !== 'authoritative_v2') return undefined;
+
+  // A freeze observation is the only source of the immutable plan identity.
+  // Prefer the last one because a same-plan repair, when permitted, retains
+  // the same plan identity while adding a later execution observation.
+  const observations = [...receipt.observations];
+  const frozenPlanObservation = observations.slice().reverse().find((observation) =>
+    observation.frozen === true && (typeof observation.planId === 'string' || typeof observation.inputFingerprint === 'string'),
+  ) ?? observations.slice().reverse().find((observation) => observation.frozen === true);
+  const executedObservation = observations.slice().reverse().find((observation) => observation.outcome === 'executed');
+  const selectedAttempt = receipt.tierAttempts.slice().reverse().find((attempt) => attempt.frozen)
+    ?? receipt.tierAttempts.slice().reverse().find((attempt) => attempt.outcome === 'executed')
+    ?? undefined;
+  // An eligible inspection is evidence, not controller authority. For an
+  // unfrozen V8 turn, use the kernel's current progression instead of the
+  // first card that happened to be inspected.
+  const selectedTier = frozenPlanObservation?.tier
+    ?? executedObservation?.tier
+    ?? selectedAttempt?.tier
+    ?? receipt.controllerTier;
+  const candidateIds = frozenPlanObservation?.candidateIds?.length
+    ? frozenPlanObservation.candidateIds
+    : executedObservation?.candidateIds?.length
+      ? executedObservation.candidateIds
+      : selectedAttempt?.candidateIds ?? [];
+
+  return {
+    receipt,
+    selectedTier,
+    ...(typeof frozenPlanObservation?.planId === 'string' ? { planId: frozenPlanObservation.planId } : {}),
+    ...(typeof frozenPlanObservation?.inputFingerprint === 'string'
+      ? { frozenPlanFingerprint: frozenPlanObservation.inputFingerprint }
+      : {}),
+    candidateIds,
+    candidateAdmissionCount: receipt.initialCandidateCount,
+    retainedCandidateCount: receipt.retainedCandidateCount,
+    tierAttempts: receipt.tierAttempts,
+  };
+}
+
+function authoritativeV8PlanLabel(projection: AuthoritativeV8CompactInspectorProjection): string {
+  if (projection.planId) return `${projection.planId}${projection.receipt.planFrozen ? ' · frozen' : ''}`;
+  return projection.receipt.planFrozen ? 'Frozen plan ID not retained' : 'No plan frozen';
+}
+
+function authoritativeV8TierAttemptsLabel(projection: AuthoritativeV8CompactInspectorProjection): string {
+  if (projection.tierAttempts.length === 0) return 'No V2 tier attempt was retained.';
+  return projection.tierAttempts.map((attempt) =>
+    `${attempt.tier}: ${attempt.outcome}${attempt.frozen ? ' (frozen)' : ''}`,
+  ).join(' · ');
+}
+
+function authoritativeV8CoverageLabel(projection: AuthoritativeV8CompactInspectorProjection): string {
+  if (projection.receipt.contextCoverage.length === 0) return 'No source coverage was retained.';
+  return projection.receipt.contextCoverage.map((coverage) =>
+    `${coverage.source}: ${coverage.status} (${coverage.admittedCandidateCount} admitted${coverage.excludedCandidateCount ? `, ${coverage.excludedCandidateCount} excluded` : ''})`,
+  ).join('\n');
+}
+
+function authoritativeV8ExecutionLabel(projection: AuthoritativeV8CompactInspectorProjection): string {
+  const outcome = projection.receipt.outcome;
+  return `${outcome.connectionAttempted ? 'Connection attempted' : 'No connection attempted'} · ${outcome.executionAttempts} execution attempt${outcome.executionAttempts === 1 ? '' : 's'}`;
+}
+
+function authoritativeV8FactsLabel(projection: AuthoritativeV8CompactInspectorProjection): string {
+  const outcome = projection.receipt.outcome;
+  return `${outcome.factCount} validated fact${outcome.factCount === 1 ? '' : 's'} · ${outcome.narration.replace(/_/g, ' ')}`;
+}
+
+/**
+ * Authoritative V2 runs carry one durable, server-owned V8 counter receipt.
+ * Prefer it over independently counted spans/legacy telemetry so the compact
+ * story and inspector cannot disagree about provider/tool/execution totals.
+ */
+function authoritativeV8Activity(
+  run: AgentRun,
+  trace?: Pick<AskTraceDataV1, 'runtimeReceiptV8'>,
+): NonNullable<AskTraceDataV1['runtimeReceiptV8']>['activity'] | undefined {
+  const receipt = trace?.runtimeReceiptV8 ?? run.diagnosticReceiptV8;
+  return receipt?.mode === 'authoritative_v2' ? receipt.activity : undefined;
+}
+
+function askRuntimeEvidenceLabel(mode: AgentRun['askAgentRuntimeMode'] | AskTraceDataV1['runtimeMode'] | undefined): string | undefined {
+  if (mode === 'authoritative_v2') return 'Authoritative V2 receipt';
+  if (mode === 'shadow_v2') return 'Shadow V2 observation only — legacy V1 served this answer.';
+  if (mode === 'legacy_v1') return 'Legacy V1 runtime';
+  return undefined;
+}
+
 function traceDurationMs(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
@@ -3086,21 +3216,30 @@ function traceDurationMs(value: unknown): number | undefined {
  */
 export function agentRunPerformanceRows(
   run: AgentRun,
-  trace?: Pick<AskTraceDataV1, 'envelope' | 'spans'>,
+  trace?: Pick<AskTraceDataV1, 'envelope' | 'spans' | 'runtimeReceiptV8' | 'runtimeMode'>,
 ): Array<[string, string]> | undefined {
   if (trace) {
     const physical = canonicalPhysicalTraceFacts(trace);
-    const providerRows = providerEgressSummary(run, physical.providerAttempts);
+    const v8Activity = authoritativeV8Activity(run, trace);
+    const v8Projection = authoritativeV8CompactInspectorProjection(trace.runtimeReceiptV8 ?? run.diagnosticReceiptV8);
+    const providerAttempts = v8Activity?.providerDispatches ?? physical.providerAttempts;
+    const toolCalls = v8Activity?.toolCalls ?? physical.toolCalls;
+    const executions = v8Activity?.executionAttempts ?? physical.sqlExecutions;
+    const repairs = v8Activity?.repairs ?? physical.repairs;
+    const providerRows = providerEgressSummary(run, providerAttempts);
     const orchestrationDurationMs = physical.totalDurationMs === undefined
       ? undefined
       : Math.max(0, physical.totalDurationMs - (physical.sqlExecutionDurationMs ?? 0));
-    const planIds = Array.from(new Set((run.artifacts ?? []).flatMap((artifact) => {
+    const planIds = Array.from(new Set([
+      ...(v8Projection?.planId ? [v8Projection.planId] : []),
+      ...(run.artifacts ?? []).flatMap((artifact) => {
       const payload = payloadOf(artifact);
       const plan = recordOf(payload.resolvedAnalyticalPlan)
         ?? recordOf(recordOf(payload.diagnosticReceipt)?.resolvedAnalyticalPlan);
       const receipt = recordOf(payload.analyticalExecutionReceipt);
       return [plan?.planId, receipt?.planId].filter((value): value is string => typeof value === 'string' && value.length > 0);
-    })));
+      }),
+    ]));
     const artifactIds = Array.from(new Set((run.artifacts ?? [])
       .map((artifact) => artifact.id)
       .filter((value): value is string => typeof value === 'string' && value.length > 0)));
@@ -3109,9 +3248,12 @@ export function agentRunPerformanceRows(
       ['Warehouse', physical.sqlExecutionDurationMs === undefined ? 'Not recorded' : formatTelemetryDuration(physical.sqlExecutionDurationMs)],
       ['Orchestration', orchestrationDurationMs === undefined ? 'Not recorded' : formatTelemetryDuration(orchestrationDurationMs)],
       ['Stages', physical.stages],
-      ['Calls', `${physical.providerAttempts} provider · ${physical.toolCalls} tool · ${physical.sqlExecutions} SQL · ${physical.repairs} repair`],
+      ['Calls', `${providerAttempts} provider · ${toolCalls} tool · ${executions} SQL · ${repairs} repair`],
       ['Provider rows', providerRows],
-      ['Trace evidence', 'Canonical local physical trace'],
+      ['Trace evidence', v8Activity ? 'Authoritative V2 receipt (canonical physical egress and execution counts)' : 'Canonical local physical trace'],
+      ...(askRuntimeEvidenceLabel(trace.runtimeMode ?? run.askAgentRuntimeMode)
+        ? [['Ask runtime', askRuntimeEvidenceLabel(trace.runtimeMode ?? run.askAgentRuntimeMode)!] as [string, string]]
+        : []),
       ...(run.narrationIntegrityReceipt ? [['Narration', narrationIntegritySummary(run.narrationIntegrityReceipt)] as [string, string]] : []),
       ['Plan ID', planIds.length > 0 ? planIds.join(', ') : 'Not recorded'],
       ['Artifact IDs', artifactIds.length > 0 ? artifactIds.join(', ') : 'None'],
@@ -3120,18 +3262,23 @@ export function agentRunPerformanceRows(
   }
   const telemetry = run.telemetry;
   if (!telemetry) return undefined;
+  const v8Activity = authoritativeV8Activity(run);
+  const v8Projection = authoritativeV8CompactInspectorProjection(run.diagnosticReceiptV8);
   const totalDurationMs = telemetry.stageDurationsMs.total;
   const warehouseDurationMs = telemetry.warehouseDurationMs;
   const orchestrationDurationMs = totalDurationMs === undefined || warehouseDurationMs === undefined
     ? undefined
     : Math.max(0, totalDurationMs - warehouseDurationMs);
-  const planIds = Array.from(new Set((run.artifacts ?? []).flatMap((artifact) => {
+  const planIds = Array.from(new Set([
+    ...(v8Projection?.planId ? [v8Projection.planId] : []),
+    ...(run.artifacts ?? []).flatMap((artifact) => {
     const payload = payloadOf(artifact);
     const plan = recordOf(payload.resolvedAnalyticalPlan)
       ?? recordOf(recordOf(payload.diagnosticReceipt)?.resolvedAnalyticalPlan);
     const receipt = recordOf(payload.analyticalExecutionReceipt);
     return [plan?.planId, receipt?.planId].filter((value): value is string => typeof value === 'string' && value.length > 0);
-  })));
+    }),
+  ]));
   const artifactIds = Array.from(new Set((run.artifacts ?? [])
     .map((artifact) => artifact.id)
     .filter((value): value is string => typeof value === 'string' && value.length > 0)));
@@ -3143,8 +3290,12 @@ export function agentRunPerformanceRows(
       .filter(([stage]) => stage !== 'total')
       .map(([stage, duration]) => `${stage}: ${formatTelemetryDuration(duration)}`)
       .join(' · ')],
-    ['Calls', `${telemetry.providerRoundTrips} provider · ${telemetry.toolCalls} tool · ${telemetry.sqlExecutions} SQL · ${telemetry.repairs} repair`],
-    ['Provider rows', providerEgressSummary(run, telemetry.providerRoundTrips)],
+    ['Calls', `${v8Activity?.providerDispatches ?? telemetry.providerRoundTrips} provider · ${v8Activity?.toolCalls ?? telemetry.toolCalls} tool · ${v8Activity?.executionAttempts ?? telemetry.sqlExecutions} SQL · ${v8Activity?.repairs ?? telemetry.repairs} repair`],
+    ['Provider rows', providerEgressSummary(run, v8Activity?.providerDispatches ?? telemetry.providerRoundTrips)],
+    ...(v8Activity ? [['Trace evidence', 'Authoritative V2 receipt (canonical physical egress and execution counts)'] as [string, string]] : []),
+    ...(askRuntimeEvidenceLabel(run.askAgentRuntimeMode)
+      ? [['Ask runtime', askRuntimeEvidenceLabel(run.askAgentRuntimeMode)!] as [string, string]]
+      : []),
     ...(run.narrationIntegrityReceipt ? [['Narration', narrationIntegritySummary(run.narrationIntegrityReceipt)] as [string, string]] : []),
     ['Plan ID', planIds.length > 0 ? planIds.join(', ') : 'Not recorded'],
     ['Artifact IDs', artifactIds.length > 0 ? artifactIds.join(', ') : 'None'],
@@ -3292,7 +3443,14 @@ function AnalyticalHowAnswered({
   const receipt = contract.receipt;
   const semantic = contract.semantic;
   const semanticFailure = recordOf(semantic?.failure);
-  const failure = contract.failure ?? semanticFailure;
+  const authoritativeV8 = authoritativeV8CompactInspectorProjection(
+    run.diagnosticReceiptV8 ?? contract.runtimeReceiptV8,
+  );
+  // A completed V8 finish_answer is the server-owned terminal outcome. A
+  // stale legacy planning failure in the answer artifact must not turn that
+  // validated execution back into a compact-panel failure.
+  const v8FinishedAnswer = authoritativeV8?.receipt.terminalOutcome?.kind === 'finish_answer';
+  const failure = v8FinishedAnswer ? undefined : contract.failure ?? semanticFailure;
   // V4 is a durable, server-produced story. Prefer the run-level receipt
   // because it survives an artifact shape change; an artifact copy is only a
   // backwards-compatible transport fallback. The inspector must not infer a
@@ -3343,6 +3501,87 @@ function AnalyticalHowAnswered({
       ? agentRunPerformanceRows(run)
       : undefined;
   const sourceTitle = dqlArtifact?.name ?? run.question;
+  const planRows: Array<[string, string]> = authoritativeV8 ? [
+    ['Objective', authoritativeV8.receipt.objective.replace(/_/g, ' ')],
+    ['Selected tier', authoritativeV8.selectedTier ?? 'No executable tier selected'],
+    ['Frozen plan', authoritativeV8PlanLabel(authoritativeV8)],
+    ['Frozen plan fingerprint', authoritativeV8.frozenPlanFingerprint ?? 'Not retained'],
+    ['Candidate admissions', `${authoritativeV8.candidateAdmissionCount} initial · ${authoritativeV8.retainedCandidateCount} retained`],
+    ['Context expansions', String(authoritativeV8.receipt.expansionCount)],
+    ['Tier attempts', authoritativeV8TierAttemptsLabel(authoritativeV8)],
+  ] : [
+    ['Question type', displayValue(frame?.questionType ?? plan?.questionType)],
+    ['Selected route', displayValue(graph?.route ?? plan?.recommendedRoute)],
+    ['Metric', stringList(frame?.metricConceptIds).join(', ')],
+    ['Entity grain', stringList(frame?.entityGrainIds).join(', ')],
+    ['Dimensions', dimensions.map((item) => `${displayValue(item.dimensionId)} (${displayValue(item.role)})`).join(', ')],
+    ['Member filters', members.map((item) => `${displayValue(item.dimensionId)}: ${Array.isArray(item.canonicalValues) ? item.canonicalValues.length : 0} bound value(s)`).join(', ')],
+    ['Time policy', [timeContext?.timeRole, timeContext?.grain, timeContext?.timezone, timeContext?.completenessPolicy].map(displayValue).filter(Boolean).join(' · ')],
+    ['Periods', periods.map((item) => `${displayValue(item.id)}: ${displayValue(item.start)} → ${displayValue(item.end)}`).join('\n')],
+    ['Comparison', comparison ? `${displayValue(comparison.basePeriodId)} vs ${stringList(comparison.comparisonPeriodIds).join(', ')} · ${displayValue(comparison.alignment)}` : frame ? 'Not requested' : 'Not available — analytical planning did not complete'],
+    ['Ranking', ranking ? `${displayValue(ranking.direction)} · top ${displayValue(ranking.limit)} · ${displayValue(ranking.tiePolicy)}` : frame ? 'Not requested' : 'Not available — analytical planning did not complete'],
+    ['Outputs', outputs.map((item) => `${displayValue(item.id)} (${displayValue(item.kind)})`).join(', ')],
+    ['Semantic metrics', stringList(semanticAuthoringRequest?.metrics).join(', ')],
+    ['Semantic dimensions', stringList(semanticAuthoringRequest?.dimensions).join(', ')],
+    ['Review assumption', run.diagnosticReceiptV7?.inspector.route.reviewRequired
+      && run.diagnosticReceiptV7.inspector.route.selectedTier === 'semantic'
+      ? 'Sole declared MetricFlow grouping was inferred for the requested dimension; verify before reuse.'
+      : 'None'],
+  ];
+  const trustRows: Array<[string, string]> = authoritativeV8 ? [
+    ['Trust state', run.trustState],
+    ['Snapshot', authoritativeV8.receipt.snapshotId ?? 'Not retained'],
+    ['Frozen plan', authoritativeV8PlanLabel(authoritativeV8)],
+    ['Frozen plan fingerprint', authoritativeV8.frozenPlanFingerprint ?? 'Not retained'],
+    ['Candidate admissions', `${authoritativeV8.candidateAdmissionCount} initial · ${authoritativeV8.retainedCandidateCount} retained`],
+    ['Selected candidates', authoritativeV8.candidateIds.join(', ') || 'Not retained'],
+    ['Cascade', authoritativeV8.selectedTier ?? 'No executable tier selected'],
+    ['Plan frozen', authoritativeV8.receipt.planFrozen ? 'true' : 'false'],
+    ['Tier attempts', authoritativeV8TierAttemptsLabel(authoritativeV8)],
+    ['Connection & execution', authoritativeV8ExecutionLabel(authoritativeV8)],
+    ['Validated facts', authoritativeV8FactsLabel(authoritativeV8)],
+    ['Source coverage', authoritativeV8CoverageLabel(authoritativeV8)],
+    ['Final stop', authoritativeV8.receipt.finalStopReason.replace(/_/g, ' ')],
+  ] : [
+    ['Trust state', run.trustState],
+    ['Snapshot', displayValue(plan?.snapshotId ?? graph?.snapshotId)],
+    ['Plan fingerprint', displayValue(plan?.fingerprint ?? graph?.planFingerprint)],
+    ['Graph fingerprint', displayValue(graph?.fingerprint)],
+    ['Receipt', displayValue(receipt?.receiptId)],
+    ['Result fingerprint', displayValue(receipt?.resultFingerprint)],
+    ['Freshness observed through', displayValue(contract.freshness?.observedThrough)],
+    ['Fact set', displayValue(contract.facts?.fingerprint)],
+    ['Semantic adapter', displayValue(semantic?.adapter)],
+    ['Semantic compile status', displayValue(semantic?.status)],
+    ['Target proof', displayValue(recordOf(semanticTargetBinding?.proof)?.status)],
+    ['Target binding', displayValue(semanticTargetBinding?.bindingFingerprint)],
+    ['Compile target', displayValue(semanticCompileTarget?.kind)],
+    ['Local semantic snapshot', displayValue(semanticSnapshot?.semanticCatalogFingerprint ?? semanticSnapshot?.sourceFingerprint)],
+    ['Runtime metric inventory proof', displayValue(semanticCompileTarget?.semanticCatalogFingerprint)],
+    ['Execution target', [
+      semanticExecutionTarget?.driver,
+      semanticTargetContext?.account,
+      semanticTargetContext?.database,
+      semanticTargetContext?.schema,
+      semanticTargetContext?.role,
+      semanticTargetContext?.warehouse,
+    ].map(displayValue).filter(Boolean).join(' · ')],
+    ['Semantic receipt', displayValue(semanticReceipt?.receiptId)],
+    ['Warehouse query ID', displayValue(semanticReceipt?.queryId)],
+    ['Executed SQL proof', displayValue(semanticReceipt?.executedSqlFingerprint)],
+    ['Runtime metrics', stringList(semanticRuntimeRequest?.metrics).join(', ')],
+    ['Runtime dimensions', stringList(semanticRuntimeRequest?.dimensions).join(', ')],
+    ['Member bindings', semanticBindings.map((binding) =>
+      `${displayValue(binding.authoringReference)} → ${displayValue(binding.runtimeReference)}`
+      + `${stringList(binding.entityPath).length ? ` via ${stringList(binding.entityPath).join(' → ')}` : ''}`
+      + ` (${displayValue(binding.status)})`).join('\n')],
+    ['Cascade', displayValue(cascade?.selectedTier) || displayValue(cascade?.stopReason)],
+    ['Plan frozen', displayValue(contract.diagnostic?.planFrozen)],
+    ['Provider phase/cause', [displayValue(providerDiagnostic?.phase), displayValue(providerDiagnostic?.cause)].filter(Boolean).join(' · ')],
+    ['Provider recovery', displayValue(providerDiagnostic?.safeAction)],
+    ['Source coverage', sourceCoverage.map((entry) => `${displayValue(entry.source)}: ${displayValue(entry.status)}`).join('\n')],
+  ];
+  const displayedCascadeAttempts = authoritativeV8?.tierAttempts ?? cascadeAttempts;
   const [repairMessage, setRepairMessage] = useState<string | null>(null);
   const repairResultMessage = (
     label: string,
@@ -3470,11 +3709,13 @@ function AnalyticalHowAnswered({
         </button>
       ) : null}
 
-      {runtimeDecisionSummary
-        ? <InspectorRuntimeDecisionStory summary={runtimeDecisionSummary} t={t} />
-        : decisionSummary
-          ? <InspectorDecisionStory summary={decisionSummary} t={t} />
-          : <InspectorDecisionSummaryUnavailable t={t} />}
+      {authoritativeV8
+        ? <InspectorAuthoritativeV8DecisionStory projection={authoritativeV8} t={t} />
+        : runtimeDecisionSummary
+          ? <InspectorRuntimeDecisionStory summary={runtimeDecisionSummary} t={t} />
+          : decisionSummary
+            ? <InspectorDecisionStory summary={decisionSummary} t={t} />
+            : <InspectorDecisionSummaryUnavailable t={t} />}
 
       <AnalyticalInspectorSection index={1} label="Performance & provider egress" t={t} open>
         {performanceTrace.state === 'loading' ? (
@@ -3494,25 +3735,7 @@ function AnalyticalHowAnswered({
       </AnalyticalInspectorSection>
 
       <AnalyticalInspectorSection index={2} label="Plan" t={t} open={!failure}>
-        <InspectorRows rows={[
-          ['Question type', displayValue(frame?.questionType ?? plan?.questionType)],
-          ['Selected route', displayValue(graph?.route ?? plan?.recommendedRoute)],
-          ['Metric', stringList(frame?.metricConceptIds).join(', ')],
-          ['Entity grain', stringList(frame?.entityGrainIds).join(', ')],
-          ['Dimensions', dimensions.map((item) => `${displayValue(item.dimensionId)} (${displayValue(item.role)})`).join(', ')],
-          ['Member filters', members.map((item) => `${displayValue(item.dimensionId)}: ${Array.isArray(item.canonicalValues) ? item.canonicalValues.length : 0} bound value(s)`).join(', ')],
-          ['Time policy', [timeContext?.timeRole, timeContext?.grain, timeContext?.timezone, timeContext?.completenessPolicy].map(displayValue).filter(Boolean).join(' · ')],
-          ['Periods', periods.map((item) => `${displayValue(item.id)}: ${displayValue(item.start)} → ${displayValue(item.end)}`).join('\n')],
-          ['Comparison', comparison ? `${displayValue(comparison.basePeriodId)} vs ${stringList(comparison.comparisonPeriodIds).join(', ')} · ${displayValue(comparison.alignment)}` : frame ? 'Not requested' : 'Not available — analytical planning did not complete'],
-          ['Ranking', ranking ? `${displayValue(ranking.direction)} · top ${displayValue(ranking.limit)} · ${displayValue(ranking.tiePolicy)}` : frame ? 'Not requested' : 'Not available — analytical planning did not complete'],
-          ['Outputs', outputs.map((item) => `${displayValue(item.id)} (${displayValue(item.kind)})`).join(', ')],
-          ['Semantic metrics', stringList(semanticAuthoringRequest?.metrics).join(', ')],
-          ['Semantic dimensions', stringList(semanticAuthoringRequest?.dimensions).join(', ')],
-          ['Review assumption', run.diagnosticReceiptV7?.inspector.route.reviewRequired
-            && run.diagnosticReceiptV7.inspector.route.selectedTier === 'semantic'
-            ? 'Sole declared MetricFlow grouping was inferred for the requested dimension; verify before reuse.'
-            : 'None'],
-        ]} t={t} />
+        <InspectorRows rows={planRows} t={t} />
       </AnalyticalInspectorSection>
 
       {/*
@@ -3522,50 +3745,12 @@ function AnalyticalHowAnswered({
         panel should remove. Diagnostics that exist nowhere else stay below.
       */}
       <AnalyticalInspectorSection index={3} label="Trust & evidence" t={t}>
-        <InspectorRows rows={[
-          ['Trust state', run.trustState],
-          ['Snapshot', displayValue(plan?.snapshotId ?? graph?.snapshotId)],
-          ['Plan fingerprint', displayValue(plan?.fingerprint ?? graph?.planFingerprint)],
-          ['Graph fingerprint', displayValue(graph?.fingerprint)],
-          ['Receipt', displayValue(receipt?.receiptId)],
-          ['Result fingerprint', displayValue(receipt?.resultFingerprint)],
-          ['Freshness observed through', displayValue(contract.freshness?.observedThrough)],
-          ['Fact set', displayValue(contract.facts?.fingerprint)],
-          ['Semantic adapter', displayValue(semantic?.adapter)],
-          ['Semantic compile status', displayValue(semantic?.status)],
-          ['Target proof', displayValue(recordOf(semanticTargetBinding?.proof)?.status)],
-          ['Target binding', displayValue(semanticTargetBinding?.bindingFingerprint)],
-          ['Compile target', displayValue(semanticCompileTarget?.kind)],
-          ['Local semantic snapshot', displayValue(semanticSnapshot?.semanticCatalogFingerprint ?? semanticSnapshot?.sourceFingerprint)],
-          ['Runtime metric inventory proof', displayValue(semanticCompileTarget?.semanticCatalogFingerprint)],
-          ['Execution target', [
-            semanticExecutionTarget?.driver,
-            semanticTargetContext?.account,
-            semanticTargetContext?.database,
-            semanticTargetContext?.schema,
-            semanticTargetContext?.role,
-            semanticTargetContext?.warehouse,
-          ].map(displayValue).filter(Boolean).join(' · ')],
-          ['Semantic receipt', displayValue(semanticReceipt?.receiptId)],
-          ['Warehouse query ID', displayValue(semanticReceipt?.queryId)],
-          ['Executed SQL proof', displayValue(semanticReceipt?.executedSqlFingerprint)],
-          ['Runtime metrics', stringList(semanticRuntimeRequest?.metrics).join(', ')],
-          ['Runtime dimensions', stringList(semanticRuntimeRequest?.dimensions).join(', ')],
-          ['Member bindings', semanticBindings.map((binding) =>
-            `${displayValue(binding.authoringReference)} → ${displayValue(binding.runtimeReference)}`
-            + `${stringList(binding.entityPath).length ? ` via ${stringList(binding.entityPath).join(' → ')}` : ''}`
-            + ` (${displayValue(binding.status)})`).join('\n')],
-          ['Cascade', displayValue(cascade?.selectedTier) || displayValue(cascade?.stopReason)],
-          ['Plan frozen', displayValue(contract.diagnostic?.planFrozen)],
-          ['Provider phase/cause', [displayValue(providerDiagnostic?.phase), displayValue(providerDiagnostic?.cause)].filter(Boolean).join(' · ')],
-          ['Provider recovery', displayValue(providerDiagnostic?.safeAction)],
-          ['Source coverage', sourceCoverage.map((entry) => `${displayValue(entry.source)}: ${displayValue(entry.status)}`).join('\n')],
-        ]} t={t} mono />
+        <InspectorRows rows={trustRows} t={t} mono />
       </AnalyticalInspectorSection>
 
       <AnalyticalInspectorSection index={4} label="Actual steps" t={t}>
         <div style={{ display: 'grid', gap: 6 }}>
-          {semanticSteps.map((step, index) => (
+          {!authoritativeV8 && semanticSteps.map((step, index) => (
             <div key={`semantic:${displayValue(step.id) || index}`} style={{ fontSize: 11.5, color: t.textSecondary }}>
               <strong style={{ color: displayValue(step.status) === 'failed' ? 'var(--status-error)' : t.textPrimary }}>
                 {index + 1}. {displayValue(step.label)}
@@ -3573,24 +3758,25 @@ function AnalyticalHowAnswered({
               {' '}— {displayValue(step.status)} · {displayValue(step.detail)}
             </div>
           ))}
-          {run.steps.map((step) => (
+          {!authoritativeV8 && run.steps.map((step) => (
             <div key={step.id} style={{ fontSize: 11.5, color: t.textSecondary }}>
               <strong style={{ color: t.textPrimary }}>{step.index + 1}. {step.goal}</strong> — {step.status}, {step.attempts} attempt{step.attempts === 1 ? '' : 's'}
             </div>
           ))}
-          {graphNodes.map((node, index) => (
+          {!authoritativeV8 && graphNodes.map((node, index) => (
             <div key={displayValue(node.id) || index} style={{ fontSize: 11.5, color: t.textSecondary }}>
               <span style={{ color: t.accent, fontFamily: t.fontMono }}>{index + 1}. {displayValue(node.kind)}</span>
               {' '}· {displayValue(node.id)}
             </div>
           ))}
-          {cascadeAttempts.map((attempt, index) => (
+          {displayedCascadeAttempts.map((attempt, index) => (
             <div key={`cascade:${displayValue(attempt.tier)}:${index}`} style={{ fontSize: 11.5, color: t.textSecondary }}>
               <span style={{ color: t.accent, fontFamily: t.fontMono }}>{index + 1}. {displayValue(attempt.tier)}</span>
-              {' '}— {displayValue(attempt.outcome)} · {displayValue(attempt.reason)}
+              {' '}— {displayValue(attempt.outcome)} · {displayValue(attempt.reasonCode) || displayValue(recordOf(attempt)?.reason)}{attempt.frozen === true ? ' · frozen' : ''}
             </div>
           ))}
-          {semanticSteps.length === 0 && run.steps.length === 0 && graphNodes.length === 0 && cascadeAttempts.length === 0 ? <InspectorEmpty t={t}>No executable steps were recorded.</InspectorEmpty> : null}
+          {authoritativeV8 && displayedCascadeAttempts.length === 0 ? <InspectorEmpty t={t}>No authoritative V2 tier attempt was retained.</InspectorEmpty> : null}
+          {!authoritativeV8 && semanticSteps.length === 0 && run.steps.length === 0 && graphNodes.length === 0 && displayedCascadeAttempts.length === 0 ? <InspectorEmpty t={t}>No executable steps were recorded.</InspectorEmpty> : null}
         </div>
       </AnalyticalInspectorSection>
 
@@ -3666,6 +3852,53 @@ function AnalyticalHowAnswered({
       </AnalyticalInspectorSection>
       {repairMessage ? <div role="status" style={{ fontSize: 10.5, color: repairMessage.toLowerCase().includes('created') ? 'var(--status-success)' : 'var(--status-error)' }}>{repairMessage}</div> : null}
     </div>
+  );
+}
+
+/**
+ * The authoritative V2 compact story is deliberately V8-only. In particular,
+ * it never reports a V1/V3 frame count or cascade placeholder beside a V8
+ * frozen/executed plan because those records can describe the pre-V2 path.
+ */
+export function InspectorAuthoritativeV8DecisionStory({
+  projection,
+  t,
+}: {
+  projection: AuthoritativeV8CompactInspectorProjection;
+  t: Theme;
+}): JSX.Element {
+  const terminal = projection.receipt.terminalOutcome;
+  const successful = terminal?.kind === 'finish_answer';
+  const rows: Array<[string, string]> = [
+    ['Objective', projection.receipt.objective.replace(/_/g, ' ')],
+    ['Candidate admissions', `${projection.candidateAdmissionCount} initial · ${projection.retainedCandidateCount} retained`],
+    ['Selected tier', projection.selectedTier ?? 'No executable tier selected'],
+    ['Frozen plan', authoritativeV8PlanLabel(projection)],
+    ['Frozen plan fingerprint', projection.frozenPlanFingerprint ?? 'Not retained'],
+    ['Tier attempts', authoritativeV8TierAttemptsLabel(projection)],
+    ['Connection & execution', authoritativeV8ExecutionLabel(projection)],
+    ['Validated facts', authoritativeV8FactsLabel(projection)],
+    ['Final outcome', terminal
+      ? `${terminal.kind.replace(/_/g, ' ')} · ${terminal.reasonCode.replace(/_/g, ' ')}`
+      : projection.receipt.finalStopReason.replace(/_/g, ' ')],
+    ['Safe next action', terminal?.safeAction ? inspectorSafeNextAction(terminal.safeAction as AskDecisionSummaryV1['safeNextAction']) : 'None'],
+  ];
+  return (
+    <section
+      aria-label="Authoritative Ask decision story"
+      style={{
+        padding: '10px 12px',
+        borderRadius: 8,
+        border: `1px solid ${successful ? 'var(--status-success-border)' : 'var(--status-warning-border)'}`,
+        background: successful ? 'var(--status-success-bg)' : 'var(--status-warning-bg)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: successful ? 'var(--status-success)' : 'var(--status-warning)', fontSize: 12, fontWeight: 750, marginBottom: 8 }}>
+        {successful ? <ShieldCheck size={13} /> : <ShieldAlert size={13} />}
+        Authoritative Ask decision story
+      </div>
+      <InspectorRows rows={rows} t={t} mono />
+    </section>
   );
 }
 
@@ -3978,7 +4211,10 @@ function AskInspector({
   const cancelled = run.status === 'cancelled' || run.stopReason === 'cancelled' || run.route === 'cancelled';
   const blocked = !cancelled && (run.status === 'blocked' || artifact.trustState === 'blocked');
   const pinnable = isAgentRunPinnable(run);
-  const analytical = analyticalInspectorContract(payload);
+  // V8 is persisted at the run boundary. An older answer artifact may not
+  // duplicate it, but it still deserves the compact authoritative story.
+  const analytical = analyticalInspectorContract(payload)
+    ?? (run.diagnosticReceiptV8?.mode === 'authoritative_v2' ? {} : undefined);
 
   const tabs = askInspectorTabsForState({
     analytical: Boolean(analytical),

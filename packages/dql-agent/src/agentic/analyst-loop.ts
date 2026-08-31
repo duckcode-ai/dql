@@ -249,6 +249,8 @@ export async function runAnalystLoop(
 export function createAnalystLaneHandler(deps: {
   legacy: (input: AnswerLoopInput) => Promise<AgentAnswer>;
   buildDeps: (input: AnswerLoopInput) => AnalystLoopDeps | undefined;
+  /** V2 owns business meaning; V1 is only the forced-plan execution adapter. */
+  authoritativeV2?: boolean;
 }) {
   return async (input: AnswerLoopInput): Promise<AgentAnswer> => {
     const noGeneratedExecution = {
@@ -259,6 +261,7 @@ export function createAnalystLaneHandler(deps: {
       executeAgenticGeneratedSql: undefined,
     } satisfies AnswerLoopInput;
     const safeLegacy = async (outcome: AnalystOutcome): Promise<AgentAnswer> => {
+      if (deps.authoritativeV2) return analystV2TerminalAnswer(input, outcome);
       try {
         return await deps.legacy(noGeneratedExecution);
       } catch {
@@ -354,7 +357,7 @@ export function createAnalystLaneHandler(deps: {
       // legacy path to take another generation turn: it would conceal the
       // terminal reason and could turn an explicit bounded stop into an
       // unrelated answer. This remains deliberately non-executing.
-      ? analystNonExecutingAnswer(input, outcome)
+      ? (deps.authoritativeV2 ? analystV2TerminalAnswer(input, outcome) : analystNonExecutingAnswer(input, outcome))
       // A router-owned exploratory closure is an execution boundary, not a
       // retrieval hint. If the analyst loop cannot compose SQL that passes
       // that closure's identifiers and relationship proof, returning through
@@ -362,7 +365,7 @@ export function createAnalystLaneHandler(deps: {
       // Keep this pre-capability failure terminal and preserve the router's
       // frozen tier rather than retrying meaning or generating new SQL.
       : routerSelectedExploratory && (outcome.stop !== 'composed' || !composedSql)
-        ? analystNonExecutingAnswer(input, outcome)
+        ? (deps.authoritativeV2 ? analystV2TerminalAnswer(input, outcome) : analystNonExecutingAnswer(input, outcome))
       : outcome.stop === 'composed' && composedSql && (capability || routerSelectedExploratory)
         ? await (async (): Promise<AgentAnswer> => {
             try {
@@ -386,11 +389,14 @@ export function createAnalystLaneHandler(deps: {
             } catch {
               // Do not rethrow into `answerAgentic`: its compatibility fallback
               // executes the original legacy input, which lacks this capability.
-              return analystNonExecutingAnswer(input, {
+              const failed: AnalystOutcome = {
                 ...outcome,
                 stop: 'unverified',
                 terminal: 'tool_loop_error',
-              });
+              };
+              return deps.authoritativeV2
+                ? analystV2TerminalAnswer(input, failed, 'execution_failure')
+                : analystNonExecutingAnswer(input, failed);
             }
           })()
         : await safeLegacy(outcome);
@@ -566,6 +572,43 @@ function analystNonExecutingAnswer(input: AnswerLoopInput, outcome: AnalystOutco
     citations: [],
     considered: [],
     ...(input.contextPack ? { contextPack: input.contextPack } : {}),
+  };
+}
+
+/**
+ * A V2 non-executing outcome is final for this turn.  It intentionally wraps
+ * the existing user-safe prose but records a machine-readable origin rather
+ * than routing back through the broad V1 answer path.
+ */
+function analystV2TerminalAnswer(
+  input: AnswerLoopInput,
+  outcome: AnalystOutcome,
+  forcedKind?: NonNullable<AgentAnswer['askAgentV2Outcome']>['kind'],
+): AgentAnswer {
+  const kind = forcedKind
+    ?? (outcome.stop === 'budget_exhausted'
+      ? 'budget_exhausted'
+      : outcome.terminal === 'missing_execution_binding'
+        ? 'denied'
+        : 'gap');
+  const origin: NonNullable<AgentAnswer['askAgentV2Outcome']>['origin'] = forcedKind === 'execution_failure'
+    ? 'execution'
+    : outcome.terminal === 'missing_execution_binding'
+      ? 'freeze'
+      : outcome.stop === 'budget_exhausted'
+        ? 'agent_control'
+        : outcome.terminal === 'tool_loop_error'
+          ? 'tool'
+          : 'validation';
+  return {
+    ...analystNonExecutingAnswer(input, outcome),
+    askAgentV2Outcome: {
+      version: 2,
+      kind,
+      reasonCode: outcome.terminal ?? `ANALYST_${outcome.stop.toUpperCase()}`,
+      safeAction: kind === 'denied' ? 'inspect_frozen_plan' : 'review_recorded_observations_then_retry',
+      origin,
+    },
   };
 }
 

@@ -737,6 +737,20 @@ export interface LocalContextPack {
       applicabilityKind: CertifiedBlockApplicability['kind'];
       applicabilityScore: number;
       action: 'certified_answer' | 'context_only' | 'eligible_not_selected' | 'rejected_for_fit';
+      /**
+       * This candidate's own captured output/grain/filter contract proves the
+       * complete requested tuple, independently of which catalog route won.
+       * The V2 runtime uses the full set to reject ambiguous zero-provider
+       * certified shortcuts instead of mistaking a route winner for unique
+       * business meaning.
+       */
+      completeForRequest?: boolean;
+      /**
+       * Direct, snapshot-local authored question evidence. This remains
+       * distinct from a complete tuple fit so an omitted ranking metric never
+       * gains fast-path authority from broad relevance alone.
+       */
+      directQuestionContract?: 'exact_example' | 'title_or_alias';
       fit: CertifiedBlockFit;
     }>;
     candidateConflicts: MetadataCandidateConflict[];
@@ -6121,12 +6135,14 @@ function buildCertifiedCandidateFitDiagnostics(input: {
     .filter((object) => object.objectType === 'dql_block' && isCertifiedMetadataObject(object))
     .map((object) => {
       const applicability = certifiedApplicabilityForObject(object, input.questionPlan);
+      const exactExampleContract = hasUniqueExactCertifiedExample(input.request.question, input.objects, object);
+      const titleOrAliasContract = hasExactCertifiedTitleOrAliasQuestion(input.request.question, object);
       const fit = evaluateCertifiedBlockFit({
         question: input.request.question,
         plan: input.questionPlan,
         block: object,
         exactExampleMatch: hasExactExampleQuestion(input.request.question, object),
-        uniqueExactExampleContract: hasUniqueExactCertifiedExample(input.request.question, input.objects, object),
+        uniqueExactExampleContract: exactExampleContract,
         definitionLookup: input.routeDecision.intent === 'definition_lookup',
       });
       return {
@@ -6135,6 +6151,19 @@ function buildCertifiedCandidateFitDiagnostics(input: {
         applicabilityKind: applicability.kind,
         applicabilityScore: applicability.score,
         action: certifiedCandidateFitAction(object.objectKey, applicability, fit, input.routeDecision),
+        // Applicability is a retrieval/routing score, not an independent
+        // statement about the block's output tuple. The fit is the authority
+        // here: a real certified artifact may be retrieved as context-only
+        // while still proving every requested output, grain, filter and
+        // ranking shape. V2 retains all such fits, then requires that exactly
+        // one snapshot-bound candidate remains before the zero-provider lane.
+        completeForRequest: certifiedFitAllowsTier1(fit)
+          && (fit.missingMeasures?.length ?? 0) === 0,
+        ...(exactExampleContract
+          ? { directQuestionContract: 'exact_example' as const }
+          : titleOrAliasContract
+            ? { directQuestionContract: 'title_or_alias' as const }
+            : {}),
         fit,
       };
     })
@@ -6316,6 +6345,18 @@ function hasExactExampleQuestion(question: string, object: MetadataObject): bool
     typeof example === 'object' &&
     normalizeSearchText(String((example as { question?: unknown }).question ?? '')) === q,
   );
+}
+
+function hasExactCertifiedTitleOrAliasQuestion(question: string, object: MetadataObject): boolean {
+  const normalizedQuestion = normalizeSearchText(question);
+  if (!normalizedQuestion) return false;
+  const aliases = Array.isArray(object.payload?.aliases)
+    ? object.payload.aliases.filter((value): value is string => typeof value === 'string')
+    : [];
+  return [object.name, object.fullName ?? '', ...aliases]
+    .map(normalizeSearchText)
+    .filter(Boolean)
+    .some((candidate) => candidate === normalizedQuestion);
 }
 
 /**

@@ -811,7 +811,7 @@ export type ProviderFailureCauseV1 =
 export interface ProviderFailureDiagnosticV1 {
   version: 1;
   cause: ProviderFailureCauseV1;
-  phase: 'preflight' | 'classification' | 'meaning_resolution' | 'planning' | 'generation' | 'repair' | 'narration' | 'unknown';
+  phase: 'preflight' | 'classification' | 'meaning_resolution' | 'planning' | 'generation' | 'repair' | 'narration' | 'agent_control' | 'tool_followup' | 'unknown';
   retryable: boolean;
   safeAction: 'retry_same_provider' | 'fix_provider_configuration' | 'wait_and_retry' | 'inspect_run' | 'none';
   httpStatusClass?: '4xx' | '5xx';
@@ -2216,18 +2216,28 @@ export function evidenceCandidateRoles(candidate: RoleBalancedEvidenceCandidate)
   const identity = intrinsicCandidateIdentity(candidate);
   const roles = new Set<EvidenceCandidateRoleV1>();
   const physicalColumn = candidate.kind === 'sql_column';
-  const metricCandidate = candidate.kind === 'semantic_metric'
+  // An explicit semantic metric remains a metric even if an old index also
+  // carries an imprecise type. Conversely, a typed semantic time dimension
+  // such as `metric_time` must not become a metric merely because its local
+  // compiler name contains the word "metric". The latter was causing V2 to
+  // admit the time card as a metric and discard its declared grains before
+  // semantic validation.
+  const explicitMetricCandidate = candidate.kind === 'semantic_metric'
     || candidate.semanticObjectType === 'metric'
-    || candidate.semanticObjectType === 'measure'
-    || /\bmetric\b/.test(identity)
-    || (physicalColumn && /\b(?:revenue|amount|count|rate|bcm|spend|cost|margin|total)\b/.test(identity));
+    || candidate.semanticObjectType === 'measure';
+  const sourceDeclaredTimeRole = !explicitMetricCandidate && candidateHasDeclaredTimeRole(candidate);
+  const metricCandidate = explicitMetricCandidate
+    || (!sourceDeclaredTimeRole && (
+      /\bmetric\b/.test(identity)
+      || (physicalColumn && /\b(?:revenue|amount|count|rate|bcm|spend|cost|margin|total)\b/.test(identity))
+    ));
   // A temporal type/grain is stronger than an authored compatibility-role
   // label. Index migrations can leave an old `roles categorical dimension`
   // fact on a date field, but allowing that contradictory fact back into the
   // ordinary inference lane turns time fields into false geography choices.
   // Metrics retain their explicit compatibility roles because capability
   // metadata is not the metric object's own temporal identity.
-  const declaredTimeRole = !metricCandidate && candidateHasDeclaredTimeRole(candidate);
+  const declaredTimeRole = !metricCandidate && sourceDeclaredTimeRole;
   const legacyTimeName = !metricCandidate
     && !declaredTimeRole
     && candidateUsesLegacyTimeNameFallback(candidate);

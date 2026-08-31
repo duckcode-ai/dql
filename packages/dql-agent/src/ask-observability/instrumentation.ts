@@ -7,6 +7,7 @@ import type { IntentDecision } from '../intent-controller.js';
 import type { AnalyticalCascadeDecisionV1 } from '../analytical-orchestration.js';
 import type { AskTraceObserverV1 } from './observer.js';
 import type {
+  AskTraceEnvelopeV1,
   AskTraceSafeActionV1,
   AskTraceSpanNameV1,
   AskTraceTerminalFailureCodeV1,
@@ -31,6 +32,24 @@ const tierSpan = {
  */
 const safeCascadeDecisionCache = new WeakMap<object, SafeCascadeDecisionTraceV1>();
 const safeCascadeAttemptCache = new WeakMap<object, SafeCascadeDecisionTraceV1['attempts'][number]>();
+
+/**
+ * V8 is the terminal authority for an authoritative-V2 run. The trace
+ * envelope is intentionally a small indexed projection, so it needs this
+ * explicit bridge rather than falling back to a stale V1/V3 cascade field.
+ */
+function selectedTierFromAuthoritativeV8(run: AgentRun): AskTraceEnvelopeV1['selectedTier'] | undefined {
+  const receipt = run.diagnosticReceiptV8;
+  if (receipt?.mode !== 'authoritative_v2') return undefined;
+  return receipt.tierAttempts.find((attempt) => attempt.frozen)?.tier
+    ?? receipt.tierAttempts.find((attempt) => attempt.outcome === 'executed')?.tier
+    ?? (receipt.planFrozen ? run.routeDecision?.askAgentV2Decision?.state.resolvedPlan?.tier : undefined)
+    // An unfrozen V2 run still has one authoritative controller position.
+    // Preserve it in the indexed envelope instead of inheriting a stale V1
+    // cascade selection (for example, semantic after the controller has
+    // already advanced to governed relational or exploratory SQL).
+    ?? receipt.controllerTier;
+}
 
 export function recordAuthoritativeRouterDecisionV1(observer: AskTraceObserverV1, decision: IntentDecision): void {
   if (!observer.enabled) return;
@@ -88,6 +107,37 @@ export function recordAuthoritativeRouterDecisionV1(observer: AskTraceObserverV1
   // `conversation/context` role simply because this adapter runs after the
   // decision has frozen.
   const metadata = new Map((evidence?.candidateTraceMetadata ?? []).map((entry) => [`${entry.candidateId}\u0000${entry.role}`, entry] as const));
+  // Authoritative V2 intentionally has no pre-tool model meaning selection.
+  // Its retrieved cards are still real snapshot admission decisions, not an
+  // empty trace.  Record the bounded initial package as admitted and the
+  // retained server-side workspace as reserved so the header and decision
+  // story distinguish "not shown to the model yet" from "not retrieved".
+  // Shadow keeps the legacy projection alone to avoid double-counting an
+  // answer it does not serve.
+  const v2State = decision.askAgentV2Decision?.mode === 'authoritative_v2'
+    ? decision.askAgentV2Decision.state
+    : undefined;
+  if (v2State) {
+    const retained = new Set(v2State.retainedCandidateIds);
+    const initial = new Set(v2State.initialCandidateIds);
+    for (const entry of metadata.values()) {
+      if (!retained.has(entry.candidateId)) continue;
+      const exactCertified = entry.candidateId === v2State.exactCertifiedCandidateId;
+      observer.recordCandidateDecision({
+        candidateId: entry.candidateId,
+        role: entry.role,
+        source: entry.source,
+        ...(entry.lanes?.length ? { lanes: entry.lanes, lane: entry.lanes[0]?.lane, laneRank: entry.lanes[0]?.rank } : {}),
+        decision: initial.has(entry.candidateId) ? 'admitted' : 'reserved',
+        reasonCode: exactCertified
+          ? 'exact_name_match'
+          : initial.has(entry.candidateId)
+            ? 'role_reserved'
+            : 'fused_relevance_fill',
+        compatibilityCode: 'unknown',
+      });
+    }
+  }
   const recordMeaningCandidates = (candidateIds: string[], decisionKind: 'model_selected' | 'model_rejected') => {
     for (const candidateId of uniqueIds(candidateIds)) {
       for (const entry of [...metadata.values()].filter((item) => item.candidateId === candidateId)) {
@@ -299,7 +349,8 @@ export function finalizeAgentRunTraceV1(observer: AskTraceObserverV1, run: Agent
     status,
     terminalOutcome: run.status,
     trustState: run.trustState,
-    selectedTier: run.diagnosticReceiptV3?.cascade?.selectedTier,
+    selectedTier: selectedTierFromAuthoritativeV8(run)
+      ?? run.diagnosticReceiptV3?.cascade?.selectedTier,
     completedAt: run.completedAt,
   });
   if (reference) run.traceReference = reference;

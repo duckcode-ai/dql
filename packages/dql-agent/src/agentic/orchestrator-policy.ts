@@ -24,10 +24,12 @@ export type AgenticLane =
   | 'certified'
   | 'semantic'
   | 'generated'
-  | 'research';
+  | 'research'
+  /** The authoritative V2 controller owns all V2 tool/tier choices. */
+  | 'ask_v2';
 
 export const AGENTIC_LANES: readonly AgenticLane[] = [
-  'conversational', 'definition', 'certified', 'semantic', 'generated', 'research',
+  'conversational', 'definition', 'certified', 'semantic', 'generated', 'research', 'ask_v2',
 ];
 
 export interface OrchestratorPolicy {

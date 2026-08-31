@@ -25,7 +25,11 @@ export type {
   ProviderDispatchObserver,
   ProviderDispatchOperation,
   ProviderRunOptions,
+  ProviderCurrentToolPolicy,
+  ProviderPhysicalDispatchPhaseResolver,
   ProviderToolLoopOptions,
+  NativeToolLoopStop,
+  NativeToolLoopResult,
 } from './types.js';
 export { streamOrGenerate } from './types.js';
 export { DEFAULT_PROVIDER_DISPATCH_LIMIT, prepareProviderHttpDispatch, completeProviderHttpDispatch, fetchProviderHttpDispatch } from './dispatch.js';

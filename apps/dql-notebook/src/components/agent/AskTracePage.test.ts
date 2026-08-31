@@ -11,6 +11,7 @@ let stageLabel: typeof AskTracePageModule.stageLabel;
 let traceInitialExpanded: typeof AskTracePageModule.traceInitialExpanded;
 let incidentSummaryForTrace: typeof AskTracePageModule.incidentSummaryForTrace;
 let incidentSummaryFromDecisionSummary: typeof AskTracePageModule.incidentSummaryFromDecisionSummary;
+let incidentSummaryFromRuntimeReceiptV8: typeof AskTracePageModule.incidentSummaryFromRuntimeReceiptV8;
 let traceGraph: typeof AskTracePageModule.traceGraph;
 let traceTimelinePresentation: typeof AskTracePageModule.traceTimelinePresentation;
 let formatMs: typeof AskTracePageModule.formatMs;
@@ -19,11 +20,12 @@ let askTraceFocusFromSearch: typeof AskTracePageModule.askTraceFocusFromSearch;
 let researchFocusSpanForTrace: typeof AskTracePageModule.researchFocusSpanForTrace;
 let lineageResearchStoryForSpan: typeof AskTracePageModule.lineageResearchStoryForSpan;
 let TraceDecisionStory: typeof AskTracePageModule.TraceDecisionStory;
+let traceHeaderFacts: typeof AskTracePageModule.traceHeaderFacts;
 let traceLegacySummaryNotice: typeof AskTracePageModule.CANONICAL_DECISION_SUMMARY_UNAVAILABLE;
 
 beforeAll(async () => {
   vi.stubGlobal('window', { location: { origin: 'http://localhost', pathname: '/ask/traces/run-local' } });
-  ({ buildSpanTree, flattenVisibleTree, stageLabel, traceInitialExpanded, incidentSummaryForTrace, incidentSummaryFromDecisionSummary, traceGraph, traceTimelinePresentation, formatMs, TraceTimeline, askTraceFocusFromSearch, researchFocusSpanForTrace, lineageResearchStoryForSpan, TraceDecisionStory, CANONICAL_DECISION_SUMMARY_UNAVAILABLE: traceLegacySummaryNotice } = await import('./AskTracePage'));
+  ({ buildSpanTree, flattenVisibleTree, stageLabel, traceInitialExpanded, incidentSummaryForTrace, incidentSummaryFromDecisionSummary, incidentSummaryFromRuntimeReceiptV8, traceGraph, traceTimelinePresentation, formatMs, TraceTimeline, askTraceFocusFromSearch, researchFocusSpanForTrace, lineageResearchStoryForSpan, TraceDecisionStory, traceHeaderFacts, CANONICAL_DECISION_SUMMARY_UNAVAILABLE: traceLegacySummaryNotice } = await import('./AskTracePage'));
 });
 
 const root = (overrides: Partial<AskTraceSpanV1> = {}): AskTraceSpanV1 => ({
@@ -214,6 +216,206 @@ describe('AskTracePage presentation model', () => {
     expect(markup).toContain('2 tier attempts · semantic · frozen.');
     expect(markup).toContain('fact bound.');
     expect(markup).not.toContain('Decision path');
+  });
+
+  it('OBS-017 projects the authoritative V8 tool-runtime story before legacy summaries', () => {
+    const rootSpan = root();
+    const trace: AskTraceDataV1 = {
+      envelope: {
+        version: 1, traceId: '8'.repeat(32), rootSpanId: rootSpan.spanId, runId: 'run-v8-story', surface: 'browser', mode: 'ask', questionFingerprint: 'sha256:question',
+        status: 'blocked', recordingStatus: 'complete', startedAt: rootSpan.startedAt, spanCount: 1, candidateDecisionCount: 3, droppedRecordCount: 0,
+      },
+      spans: [rootSpan], candidateDecisions: [], links: [],
+      runtimeDecisionSummary: {
+        version: 2, summaryFingerprint: 'old'.repeat(16), runtimeMode: 'authoritative', whatHappened: 'legacy', why: 'legacy', impact: 'legacy',
+        nextAction: 'inspect_failure', programTaskCount: 1, admittedCandidateCount: 3, toolCallCount: 1, executionAttempts: 0,
+      },
+      runtimeReceiptV8: {
+        version: 8,
+        mode: 'authoritative_v2',
+        turnClass: 'prior_result',
+        snapshotId: 'snapshot:v8',
+        retainedCandidateCount: 32,
+        initialCandidateCount: 24,
+        expansionCount: 1,
+        objective: 'prior_result',
+        contextCoverage: [
+          { version: 2, source: 'semantic', status: 'available', admittedCandidateCount: 2, excludedCandidateCount: 0, reasonCodes: ['SOURCE_AVAILABLE'] },
+          { version: 2, source: 'runtime_schema', status: 'available', admittedCandidateCount: 22, excludedCandidateCount: 4, reasonCodes: ['WORKSPACE_CANDIDATE_CAP'] },
+        ],
+        excludedCandidateCount: 4,
+        exclusionReasonCodes: ['WORKSPACE_CANDIDATE_CAP'],
+        observations: [
+          { version: 1, tool: 'inspect_ask_context', outcome: 'unavailable', reasonCode: 'SEMANTIC_TUPLE_INCOMPLETE', candidateIds: [], origin: 'validation' },
+          { version: 1, tool: 'validate_and_run_sql', tier: 'exploratory_sql', outcome: 'executed', reasonCode: 'ASK_V2_VALIDATED_RESULT', candidateIds: ['sql:column:orders.revenue'], origin: 'execution' },
+        ],
+        tierAttempts: [
+          { version: 2, tier: 'semantic', outcome: 'ineligible', reasonCode: 'SEMANTIC_TUPLE_INCOMPLETE', candidateIds: [], frozen: false },
+          { version: 2, tier: 'exploratory_sql', outcome: 'executed', reasonCode: 'ASK_V2_VALIDATED_RESULT', candidateIds: ['sql:column:orders.revenue'], frozen: true },
+        ],
+        planFrozen: true,
+        terminalOutcome: { version: 2, kind: 'finish_answer', reasonCode: 'ASK_V2_VALIDATED_RESULT', origin: 'execution' },
+        outcome: { connectionAttempted: true, executionAttempts: 1, factCount: 3, narration: 'fact_bound' },
+        activity: { providerDispatches: 1, toolCalls: 4, executionAttempts: 1, repairs: 0 },
+        toolDurationMs: 14,
+        finalStopReason: 'governed_answer_found',
+      },
+    };
+    const markup = renderToStaticMarkup(createElement(TraceDecisionStory, { trace, t: themes.paper, onSelectSpan: () => undefined }));
+    expect(markup).toContain('Objective');
+    expect(markup).toContain('prior result turn');
+    expect(markup).toContain('Context coverage');
+    expect(markup).toContain('runtime schema: available (22 admitted, 4 outside workspace)');
+    expect(markup).toContain('Validation &amp; correction');
+    expect(markup).toContain('4 tool calls · 1 physical provider dispatch · 1 same-snapshot expansion.');
+    expect(markup).toContain('Cascade &amp; freeze');
+    expect(markup).toContain('exploratory sql · frozen');
+    expect(markup).toContain('Facts &amp; narration');
+    expect(markup).toContain('3 validated facts · fact bound.');
+    expect(markup).not.toContain('sql:column:orders.revenue');
+    expect(incidentSummaryForTrace(trace).whatHappened).toBe('The bounded Ask tool runtime completed this answer.');
+    expect(incidentSummaryFromRuntimeReceiptV8(trace.runtimeReceiptV8!).state).toBe('healthy');
+  });
+
+  it('OBS-017 projects a frozen authoritative-V2 tier and admissions over stale legacy trace placeholders', () => {
+    const rootSpan = root();
+    const trace: AskTraceDataV1 = {
+      envelope: {
+        version: 1, traceId: 'h'.repeat(32), rootSpanId: rootSpan.spanId, runId: 'run-v8-frozen-certified', surface: 'browser', mode: 'ask', questionFingerprint: 'sha256:question',
+        // A legacy pre-V2 trace can record many more candidate decisions than
+        // the bounded V8 workspace admitted. The header must not merge these
+        // into an authoritative admission count.
+        status: 'completed', recordingStatus: 'complete', startedAt: rootSpan.startedAt, spanCount: 1, candidateDecisionCount: 116, droppedRecordCount: 0,
+      },
+      spans: [rootSpan], candidateDecisions: [], links: [],
+      runtimeReceiptV8: {
+        version: 8, mode: 'authoritative_v2', turnClass: 'analytics', snapshotId: 'snapshot:certified',
+        retainedCandidateCount: 32, initialCandidateCount: 16, expansionCount: 0, objective: 'analytics', contextCoverage: [], excludedCandidateCount: 0, exclusionReasonCodes: [], observations: [],
+        tierAttempts: [
+          { version: 2, tier: 'certified', outcome: 'executed', reasonCode: 'CERTIFIED_EXECUTED', candidateIds: ['block:customer_profile'], frozen: true },
+        ],
+        planFrozen: true,
+        terminalOutcome: { version: 2, kind: 'finish_answer', reasonCode: 'CERTIFIED_EXECUTED', origin: 'execution' },
+        outcome: { connectionAttempted: true, executionAttempts: 1, factCount: 11, narration: 'fact_bound' },
+        activity: { providerDispatches: 0, toolCalls: 1, executionAttempts: 1, repairs: 0 }, toolDurationMs: 4, finalStopReason: 'certified_answer_found',
+      },
+    };
+    expect(traceHeaderFacts(trace)).toEqual({
+      selectedTier: 'certified', candidateCount: 16, candidateLabel: 'candidate admissions',
+    });
+  });
+
+  it('AGT-047 keeps an unfrozen authoritative semantic progression from inheriting a stale certified tier', () => {
+    const rootSpan = root();
+    const trace: AskTraceDataV1 = {
+      envelope: {
+        version: 1, traceId: 's'.repeat(32), rootSpanId: rootSpan.spanId, runId: 'run-v8-semantic-progress', surface: 'browser', mode: 'ask', questionFingerprint: 'sha256:question',
+        // This is an old envelope placeholder. V8 owns the live route story.
+        selectedTier: 'certified', status: 'blocked', recordingStatus: 'complete', startedAt: rootSpan.startedAt, spanCount: 1, candidateDecisionCount: 116, droppedRecordCount: 0,
+      },
+      spans: [rootSpan], candidateDecisions: [], links: [],
+      runtimeReceiptV8: {
+        version: 8, mode: 'authoritative_v2', turnClass: 'analytics', snapshotId: 'snapshot:semantic', retainedCandidateCount: 80, initialCandidateCount: 24,
+        expansionCount: 0, objective: 'analytics', contextCoverage: [], excludedCandidateCount: 0, exclusionReasonCodes: [], observations: [],
+        tierAttempts: [
+          { version: 2, tier: 'semantic', outcome: 'eligible', reasonCode: 'SEMANTIC_CANDIDATES_AVAILABLE', candidateIds: ['semantic:metric:revenue'], frozen: false },
+          { version: 2, tier: 'governed_relational', outcome: 'eligible', reasonCode: 'RELATIONAL_CONTEXT_AVAILABLE', candidateIds: [], frozen: false },
+          { version: 2, tier: 'certified', outcome: 'eligible', reasonCode: 'CERTIFIED_CANDIDATES_AVAILABLE', candidateIds: [], frozen: false },
+        ],
+        controllerTier: 'semantic',
+        planFrozen: false,
+        terminalOutcome: { version: 2, kind: 'gap', reasonCode: 'ASK_V2_TOOL_PROGRESSION_REQUIRED', origin: 'agent_control' },
+        outcome: { connectionAttempted: false, executionAttempts: 0, factCount: 0, narration: 'not_retained' },
+        activity: { providerDispatches: 6, toolCalls: 5, executionAttempts: 0, repairs: 0 }, toolDurationMs: 1, finalStopReason: 'ASK_V2_TOOL_PROGRESSION_REQUIRED',
+      },
+    };
+    expect(traceHeaderFacts(trace)).toEqual({
+      selectedTier: 'semantic', candidateCount: 24, candidateLabel: 'candidate admissions',
+    });
+  });
+
+  it('AGT-047 trace header follows V8 controller progression after semantic compiler unavailability', () => {
+    const rootSpan = root();
+    const trace: AskTraceDataV1 = {
+      envelope: {
+        version: 1, traceId: 'p'.repeat(32), rootSpanId: rootSpan.spanId, runId: 'run-v8-progressed-sql', surface: 'browser', mode: 'ask', questionFingerprint: 'sha256:question',
+        selectedTier: 'semantic', status: 'blocked', recordingStatus: 'complete', startedAt: rootSpan.startedAt, spanCount: 1, candidateDecisionCount: 116, droppedRecordCount: 0,
+      },
+      spans: [rootSpan], candidateDecisions: [], links: [],
+      runtimeReceiptV8: {
+        version: 8, mode: 'authoritative_v2', turnClass: 'analytics', snapshotId: 'snapshot:progress', retainedCandidateCount: 32, initialCandidateCount: 16,
+        expansionCount: 0, objective: 'analytics', contextCoverage: [], excludedCandidateCount: 0, exclusionReasonCodes: [], observations: [],
+        tierAttempts: [
+          { version: 2, tier: 'semantic', outcome: 'eligible', reasonCode: 'SEMANTIC_CANDIDATES_AVAILABLE', candidateIds: ['semantic:metric:revenue'], frozen: false },
+          { version: 2, tier: 'semantic', outcome: 'unavailable', reasonCode: 'SEMANTIC_EXECUTION_UNAVAILABLE', candidateIds: ['semantic:metric:revenue'], frozen: false },
+          { version: 2, tier: 'governed_relational', outcome: 'unavailable', reasonCode: 'GOVERNED_RELATIONAL_EXECUTION_UNAVAILABLE', candidateIds: [], frozen: false },
+        ],
+        controllerTier: 'exploratory_sql',
+        planFrozen: false,
+        terminalOutcome: { version: 2, kind: 'gap', reasonCode: 'ASK_V2_TOOL_PROGRESSION_REQUIRED', origin: 'agent_control' },
+        outcome: { connectionAttempted: false, executionAttempts: 0, factCount: 0, narration: 'not_retained' },
+        activity: { providerDispatches: 4, toolCalls: 4, executionAttempts: 0, repairs: 0 }, toolDurationMs: 1, finalStopReason: 'ASK_V2_TOOL_PROGRESSION_REQUIRED',
+      },
+    };
+    expect(traceHeaderFacts(trace)).toEqual({
+      selectedTier: 'exploratory_sql', candidateCount: 16, candidateLabel: 'candidate admissions',
+    });
+    const markup = renderToStaticMarkup(createElement(TraceDecisionStory, { trace, t: themes.paper, onSelectSpan: () => undefined }));
+    expect(markup).toContain('exploratory sql · not frozen');
+    expect(markup).not.toContain('semantic · not frozen');
+  });
+
+  it('AGT-047 keeps a semantic engine contract failure out of the generic coverage story', () => {
+    const receipt = {
+      version: 8,
+      mode: 'authoritative_v2',
+      turnClass: 'analytics',
+      snapshotId: 'snapshot:semantic-engine-invalid',
+      retainedCandidateCount: 32,
+      initialCandidateCount: 16,
+      expansionCount: 0,
+      objective: 'analytics',
+      contextCoverage: [],
+      excludedCandidateCount: 0,
+      exclusionReasonCodes: [],
+      observations: [{
+        version: 1,
+        tool: 'compile_and_run_semantic',
+        tier: 'semantic',
+        outcome: 'ineligible',
+        reasonCode: 'SEMANTIC_ENGINE_INVALID',
+        candidateIds: ['semantic:metric:order_item.revenue'],
+        origin: 'validation',
+        safeAction: 'use:compile_and_run_semantic',
+      }],
+      tierAttempts: [{
+        version: 2,
+        tier: 'semantic',
+        outcome: 'ineligible',
+        reasonCode: 'SEMANTIC_ENGINE_INVALID',
+        candidateIds: ['semantic:metric:order_item.revenue'],
+        frozen: false,
+      }],
+      controllerTier: 'semantic',
+      planFrozen: false,
+      terminalOutcome: {
+        version: 2,
+        kind: 'gap',
+        reasonCode: 'SEMANTIC_ENGINE_INVALID',
+        origin: 'validation',
+        safeAction: 'use:compile_and_run_semantic',
+      },
+      outcome: { connectionAttempted: false, executionAttempts: 0, factCount: 0, narration: 'not_retained' },
+      activity: { providerDispatches: 4, toolCalls: 3, executionAttempts: 0, repairs: 0 },
+      toolDurationMs: 4,
+      finalStopReason: 'SEMANTIC_ENGINE_INVALID',
+    } as const;
+
+    const summary = incidentSummaryFromRuntimeReceiptV8(receipt as never);
+    expect(summary.whatHappened).toBe('The Ask rejected the selected semantic tool binding before execution.');
+    expect(summary.impact).toBe('No warehouse execution was started because the snapshot-bound semantic contract was not valid.');
+    expect(summary.why).toContain('semantic engine invalid');
+    expect(summary.whatHappened).not.toContain('safe executable route');
   });
 
   it('renders the recorded limited-Research incident with its branch-focused recovery action', () => {
