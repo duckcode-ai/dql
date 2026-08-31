@@ -106,6 +106,41 @@ describe('runAgenticToolLoop — text protocol (no native tools)', () => {
     expect(provider.calls[1].some((m) => m.content.includes('Tool budget reached'))).toBe(true);
   });
 
+  // A lane where the host owns execution cannot accept the default contract's
+  // second response shape. That shape has no `tool` key, so it does not parse
+  // as a tool call and can only be read as prose — which is how a model doing
+  // exactly what it was told to do produced zero tool calls and a terminal
+  // "invalid tool response" on every question needing more than a certified
+  // exact match.
+  it('lets a lane replace the response contract when a raw-SQL final answer is illegal', async () => {
+    const contract = (tools: readonly AgentToolDefinition[], maxToolCalls: number): string =>
+      `Every response is a tool call. At most ${maxToolCalls}. Tools: ${tools.map((t) => t.name).join(', ')}`;
+    const provider = new ScriptedTextProvider([
+      '```json\n{"tool":"t","input":{}}\n```',
+      '```json\n{"tool":"finish","input":{}}\n```',
+    ]);
+    await runAgenticToolLoop(
+      provider,
+      [{ role: 'user', content: 'q' }],
+      [echoTool('t', { ok: true }), echoTool('finish', { done: true })],
+      { maxToolCalls: 4, textToolContract: contract },
+    );
+
+    const system = provider.calls[0].map((m) => m.content).join('\n');
+    expect(system).toContain('Every response is a tool call.');
+    // The default contract's raw-SQL escape hatch must be gone: it is the
+    // thing the model was following into a dead turn.
+    expect(system).not.toContain('"sql"');
+    expect(system).not.toContain('Your FINAL answer');
+  });
+
+  it('still offers the default final-answer shape to ordinary tool users', async () => {
+    const provider = new ScriptedTextProvider(['```json\n{"summary":"done","sql":"SELECT 1"}\n```']);
+    await runAgenticToolLoop(provider, [{ role: 'user', content: 'q' }], [echoTool('t', {})], { maxToolCalls: 2 });
+    const system = provider.calls[0].map((m) => m.content).join('\n');
+    expect(system).toContain('Your FINAL answer');
+  });
+
   it('executes three sequential tool calls and reserves a fourth dispatch for final composition', async () => {
     const provider = new ScriptedTextProvider([
       '```json\n{"tool":"first","input":{}}\n```',

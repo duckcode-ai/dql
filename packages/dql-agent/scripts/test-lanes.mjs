@@ -55,10 +55,11 @@ const EXPECTED_TEST_FILES = 154;
 // lifecycle/provenance regression, plus the pronoun/named-member follow-up
 // continuity regressions (third-person topic classification, prior-result
 // member clarification, unmodeled-dimension truthfulness, and honest
-// orchestration-budget labelling), total 2,268 non-skipped
+// orchestration-budget labelling), plus the V2 lane response-contract and
+// narrowed-tool-availability regressions, total 2,270 non-skipped
 // tests; a
 // future accidental skip must not be hidden by a broad package pass.
-const EXPECTED_TESTS = 2268;
+const EXPECTED_TESTS = 2270;
 
 function discoverTestFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {

@@ -5048,6 +5048,62 @@ function businessAnswerForRun(run: AgentRun): BusinessAnswer {
  * surface a raw connector, provider, SQL, or model error through the answer
  * field.  The trace retains the redacted diagnostic receipt for operators.
  */
+/** Words that carry no business meaning when matching a question to a field. */
+const UNMODELED_STOP_WORDS = new Set([
+  'what', 'which', 'who', 'whom', 'whose', 'where', 'when', 'why', 'how', 'the', 'a', 'an',
+  'is', 'are', 'was', 'were', 'be', 'been', 'do', 'does', 'did', 'has', 'have', 'had',
+  'for', 'from', 'with', 'and', 'or', 'of', 'in', 'on', 'at', 'to', 'by', 'per', 'each',
+  'me', 'my', 'our', 'his', 'her', 'their', 'them', 'they', 'he', 'she', 'it', 'that', 'this',
+  'show', 'list', 'give', 'find', 'tell', 'belongs', 'belong', 'get', 'top', 'most', 'many',
+]);
+
+/** The identifier leaves the snapshot actually admitted, as plain labels. */
+function modeledFieldLabels(run: AgentRun): string[] {
+  const state = run.askAnalystState ?? run.routeDecision?.askAnalystDecision?.state;
+  const ids = [
+    ...(state?.workspace?.workspaceCandidateIds ?? []),
+    ...(state?.workspace?.admittedCandidateIds ?? []),
+  ];
+  const labels = ids.map((id) => {
+    const leaf = id.split(':').pop() ?? id;
+    return (leaf.split('.').pop() ?? leaf).replace(/_/g, ' ').trim().toLowerCase();
+  }).filter((label) => label.length > 2);
+  return [...new Set(labels)];
+}
+
+/**
+ * Say what is missing, and what exists instead.
+ *
+ * "DQL could not prove one safe analytical path" is true and useless: it does
+ * not say which part of the question could not be served, so the reader cannot
+ * tell a modeling gap from a bug and has nothing to try next. When a term in
+ * the question matches nothing the snapshot admitted — asking for "region"
+ * where only locations are modeled — naming that term and the nearest governed
+ * fields turns a dead end into a next step.
+ */
+function unmodeledRequestAnswer(run: AgentRun): string | undefined {
+  const question = typeof run.question === 'string' ? run.question : '';
+  if (!question.trim()) return undefined;
+  const labels = modeledFieldLabels(run);
+  if (labels.length === 0) return undefined;
+  const haystack = labels.join(' ');
+  const unmodeled = question
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]+/g, ' ')
+    .split(/\s+/)
+    .filter((word) => word.length > 3 && !UNMODELED_STOP_WORDS.has(word))
+    // A term the admitted snapshot never mentions, in any field, anywhere.
+    .find((word) => !haystack.includes(word) && !haystack.includes(word.replace(/s$/, '')));
+  if (!unmodeled) return undefined;
+  const alternatives = labels.filter((label) => !/^\d/.test(label)).slice(0, 5);
+  return `"${unmodeled}" is not modeled in this project, so no governed query can answer it.`
+    + (alternatives.length
+      ? ` The fields that are modeled here include ${alternatives.join(', ')}.`
+        + ' Ask again using one of those, or tell me which should stand in for'
+        + ` "${unmodeled}".`
+      : '');
+}
+
 function deterministicTerminalAnswerForRun(run: AgentRun): string {
   const incident = terminalIncidentForRun(
     run,
@@ -5063,7 +5119,8 @@ function deterministicTerminalAnswerForRun(run: AgentRun): string {
     case 'RESULT_CONTRACT_MISMATCH':
       return 'The query ran, but its result did not match the frozen plan. Review the result contract and trace, then retry.';
     case 'ANALYTICAL_COVERAGE_GAP':
-      return 'DQL could not prove one safe analytical path from the current metadata snapshot. Review the available modeled fields, then retry.';
+      return unmodeledRequestAnswer(run)
+        ?? 'DQL could not prove one safe analytical path from the current metadata snapshot. Review the available modeled fields, then retry.';
     case 'ANALYTICAL_EXECUTION_FAILED':
       return 'The selected governed query did not complete on the current connection. Review the connection and trace, then retry.';
     case 'CANCELLED':

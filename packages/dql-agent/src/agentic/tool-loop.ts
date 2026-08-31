@@ -36,6 +36,18 @@ export interface AgenticToolLoopOptions extends ProviderToolLoopOptions {
    * semantic compile before deep warehouse search"). Applies to both transports.
    */
   toolPolicy?: string;
+  /**
+   * Replace the text-protocol response contract for a lane whose legal
+   * responses differ from the default.
+   *
+   * The default contract offers the model two shapes: a tool call, or a final
+   * answer carrying raw SQL. In a lane where the host owns execution, that
+   * second shape is not merely unnecessary — it is unrepresentable: it has no
+   * `tool` key, so it does not parse as a tool call, and the loop can only
+   * read it as prose. A model that follows the instructions it was given then
+   * fails the turn. A lane whose tools own the terminal must be able to say so.
+   */
+  textToolContract?: (tools: readonly AgentToolDefinition[], maxToolCalls: number) => string;
 }
 
 /**
@@ -175,10 +187,26 @@ function renderCurrentToolPolicy(
   const allowed = [...allowedToolNames];
   const terminal = [...terminalActionToolNames];
   const instruction = policy.instruction?.trim();
+  // Re-state the SIGNATURES of the tools still on the table, not just their
+  // names. The response contract is sent once, at the start, listing every
+  // tool; a model reading it later has no way to tell that the host has since
+  // narrowed the set, so it keeps proposing a tool that can only be refused —
+  // and each refusal costs a dispatch until the turn dies with nothing run.
+  // Naming the remaining options in full makes the next legal move the
+  // easiest one to make.
+  const allowedSignatures = allowed.length && allowed.length < tools.length
+    ? tools
+      .filter((tool) => allowedToolNames.has(tool.name))
+      .map((tool) => {
+        const props = (tool.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+        return `- ${tool.name}(${props ? Object.keys(props).join(', ') : ''}): ${tool.description}`;
+      })
+    : [];
   return [
     `Runtime tool availability update. You may call only: ${allowed.length ? allowed.join(', ') : 'no tools'}.`,
     terminal.length ? `If this is the final controller turn, use only: ${terminal.join(', ')}.` : undefined,
     instruction,
+    allowedSignatures.length ? `\nStill available to you:\n${allowedSignatures.join('\n')}` : undefined,
   ].filter((part): part is string => Boolean(part)).join(' ');
 }
 
@@ -297,7 +325,7 @@ export async function runTextProtocolToolLoopDetailed(
     ...baseMessages,
     // Tell the model the *effective* ceiling, not a larger policy cap that
     // cannot physically leave room for its final response.
-    { role: 'system', content: buildTextToolContract(tools, effectiveToolBudget) },
+    { role: 'system', content: (options.textToolContract ?? buildTextToolContract)(tools, effectiveToolBudget) },
   ];
   const initialPolicy = renderCurrentToolPolicy(options, tools);
   if (initialPolicy) messages.push({ role: 'system', content: initialPolicy });

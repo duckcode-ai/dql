@@ -15,7 +15,49 @@
  * would refuse.
  */
 
-import type { AskAgentStateV4 } from '@duckcodeailabs/dql-agent';
+import type { AgentToolDefinition, AskAgentStateV4 } from '@duckcodeailabs/dql-agent';
+
+/**
+ * The text-protocol response contract for the V2 analyst.
+ *
+ * The default contract offers two response shapes, and the second is a final
+ * answer carrying raw SQL. In V2 that shape is illegal — the host owns
+ * execution — and it is also unparseable: it has no `tool` key, so the loop
+ * reads it as prose, retries once, and terminates the turn as
+ * ASK_V2_INVALID_TOOL_RESPONSE. A model doing exactly what it was told to do
+ * failed every question that needed more than an exact certified match, with
+ * zero tool calls recorded. Every legal V2 response is a tool call, so this
+ * contract offers exactly that and names the tool that ends the turn.
+ */
+export function buildAskV2TextToolContract(
+  tools: readonly AgentToolDefinition[],
+  maxToolCalls: number,
+): string {
+  const toolLines = tools.map((tool) => {
+    const props = (tool.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+    const params = props ? Object.keys(props).join(', ') : '';
+    return `- ${tool.name}(${params}): ${tool.description}`;
+  });
+  return [
+    'Every response you give is a tool call. Respond with a single ```json fenced object:',
+    '',
+    '{"tool": "<name>", "input": { ... }}',
+    '',
+    'Rules:',
+    `- You may make at most ${maxToolCalls} tool call(s) this turn.`,
+    '- Never answer in prose, and never return SQL as your response. DQL executes;'
+      + ' you decide what to execute by calling a tool.',
+    '- Reach the answer with a run tool (run_certified, compile_and_run_semantic,'
+      + ' compile_and_run_dql, or validate_and_run_sql), then call finish_answer to close the turn.',
+    '- finish_answer is only for a turn that has already executed or has genuinely exhausted the tiers.'
+      + ' If a tool returns ok:false with safeNextTools, call one of those instead.',
+    '- Use request_clarification when a choice genuinely changes the result.',
+    '- Only reference identifiers a tool has returned to you. Do not invent them.',
+    '',
+    'Available tools:',
+    ...toolLines,
+  ].join('\n');
+}
 
 /** The turn classes that carry prior-result context worth naming explicitly. */
 const CONVERSATIONAL_TURN_CLASSES = new Set(['prior_result', 'clarification_response']);
@@ -49,10 +91,31 @@ export function buildAskV2AnalystSystemPrompt(state: AskAgentStateV4): string {
     ].join(' '),
 
     [
-      'BE TRUTHFUL ABOUT WHAT IS MISSING. If the business has not modeled what was asked for, say exactly that and name',
-      'the closest governed alternative — never imply the data merely could not be retrieved, and never claim something',
-      'is unmodeled when it was only pruned from the candidates you were shown. Do not claim any result until a run tool',
-      'has actually returned an executed result.',
+      'WHEN A TOOL RETURNS ok:false, READ safeNextTools AND CALL ONE OF THEM ON YOUR NEXT TURN.',
+      'That field is the host telling you the one move that can still succeed. Never repeat a call that was just',
+      'refused — repeating it cannot change the answer and spends the budget the working path needed.',
+      'A refused finish_answer means the turn is NOT finished: you have not yet reached a tier that can execute.',
+    ].join(' '),
+
+    [
+      'WORK DOWN THE LADDER BEFORE CONCLUDING ANYTHING IS MISSING. One tier failing says nothing about the next:',
+      'a metric that will not compile semantically is very often answerable through governed relational/DQL, and',
+      'failing that, through review-required exploratory SQL. Only after the lower tiers have actually been tried',
+      'and refused may you report a gap. Reporting "not modeled" while an untried tier remains is a wrong answer,',
+      'not a cautious one.',
+    ].join(' '),
+
+    [
+      'USE IDENTIFIERS EXACTLY AS A TOOL RETURNED THEM. Copy metric, dimension, relation and path IDs verbatim from',
+      'the inspect results — never abbreviate, re-case, guess, or construct one that looks plausible. An identifier',
+      'the snapshot did not admit is refused, and that refusal costs a turn.',
+    ].join(' '),
+
+    [
+      'BE TRUTHFUL ABOUT WHAT IS MISSING, once you have earned that conclusion. If the business has not modeled what',
+      'was asked for, say exactly that and name the closest governed alternative — never imply the data merely could',
+      'not be retrieved, and never claim something is unmodeled when it was only pruned from the candidates you were',
+      'shown. Do not claim any result until a run tool has actually returned an executed result.',
     ].join(' '),
 
     [

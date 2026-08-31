@@ -11,7 +11,7 @@ import {
   type ProviderFailureDiagnosticV1,
 } from '@duckcodeailabs/dql-agent';
 import { buildAnalystLoopTools } from '../analyst-loop-tools.js';
-import { buildAskV2AnalystSystemPrompt } from './ask-v2-analyst-prompt.js';
+import { buildAskV2AnalystSystemPrompt, buildAskV2TextToolContract } from './ask-v2-analyst-prompt.js';
 import {
   ClaudeProvider,
   KGStore,
@@ -1517,6 +1517,39 @@ function createAskV2LaneHandler(
     ]);
     const visibleCandidates = () => (workspace?.candidates ?? [])
       .filter((candidate) => visibleIds().has(v2CandidateId(candidate)));
+    /**
+     * The admitted semantic identifiers, grouped by the role each may play.
+     *
+     * This is the ONLY vocabulary `compile_and_run_semantic` accepts, so it is
+     * the vocabulary inspection has to hand back. The cards describe a metric's
+     * compatible dimensions by display name ("customer_name"), which reads like
+     * an identifier and is not one — so a model that used what it was shown got
+     * a bare "identifier not admitted" refusal and no way to do better. Naming
+     * the accepted IDs is not a loosening of governance: these are exactly the
+     * IDs the host had already agreed to execute.
+     */
+    const admittedSemanticIdentifiers = (): Record<string, string[]> | undefined => {
+      const byRole: Record<string, string[]> = {};
+      const add = (role: string, id: string): void => {
+        const bucket = byRole[role] ?? (byRole[role] = []);
+        if (bucket.length < 24 && !bucket.includes(id)) bucket.push(id);
+      };
+      for (const candidate of visibleCandidates()) {
+        const id = v2CandidateId(candidate);
+        // Roles come from the CANDIDATE, not only from a capability handle.
+        // Handles are minted for executable metrics; dimensions have none, so
+        // a capability-only list handed back metric IDs and an empty dimension
+        // list. The model then had nothing to copy for the breakdown and fell
+        // back to the card's display label ("customer"), which is refused —
+        // every time, no matter how often it retried.
+        for (const role of ['metric', 'dimension', 'filter_dimension', 'time_dimension'] as const) {
+          if (v2SemanticCandidateMatchesRole(candidate, role === 'filter_dimension' ? 'dimension' : role)) {
+            add(role === 'filter_dimension' ? 'dimension' : role, id);
+          }
+        }
+      }
+      return Object.keys(byRole).length > 0 ? byRole : undefined;
+    };
     const resolveCandidates = (ids: string[], predicate?: (candidate: AgentEvidenceCandidate) => boolean): AgentEvidenceCandidate[] | undefined => {
       if (ids.length === 0 || !workspace) return undefined;
       const byId = new Map(visibleCandidates().map((candidate) => [v2CandidateId(candidate), candidate] as const));
@@ -1847,7 +1880,16 @@ function createAskV2LaneHandler(
           state.controllerTier = 'semantic';
         }
         observe('inspect_semantic_candidates', semanticStatus === 'available' || semanticStatus === 'complete' ? 'eligible' : semanticStatus, semanticReasonCode, { candidateIds: ids, origin: 'retrieval' });
-        return { cards: candidates.map((candidate) => v2SafeCard(candidate, workspace)) };
+        const admitted = admittedSemanticIdentifiers();
+        return {
+          cards: candidates.map((candidate) => v2SafeCard(candidate, workspace)),
+          // The exact identifiers compile_and_run_semantic accepts, by role.
+          // A card's `dimensions` are human labels; these are the IDs.
+          ...(admitted ? { admittedIdentifiers: admitted } : {}),
+          ...(admitted
+            ? { usage: 'Pass metricIds/dimensionIds/timeDimensionId using admittedIdentifiers values verbatim. A card\'s "dimensions" are display labels, not identifiers.' }
+            : {}),
+        };
       }),
       safeTool('compile_and_run_semantic', 'Compile admitted semantic metric, dimension, time, and filter IDs through the configured MetricFlow/dbt compiler, then execute once. When the question requests day, week, month, quarter, or year, provide both the opaque admitted timeDimensionId and its declared timeGrain.', {
         type: 'object', properties: {
@@ -1902,8 +1944,22 @@ function createAskV2LaneHandler(
             ? [...new Set(canonical)]
             : undefined;
         };
-        const metricIds = canonicalSemanticIds(v2StringArray(args.metricIds, 8), 'metric');
-        const dimensionIds = canonicalSemanticIds(v2StringArray(args.dimensionIds, 16), 'dimension');
+        const requestedMetricIds = v2StringArray(args.metricIds, 8);
+        const requestedDimensionIds = v2StringArray(args.dimensionIds, 16);
+        const metricIds = canonicalSemanticIds(requestedMetricIds, 'metric');
+        const dimensionIds = canonicalSemanticIds(requestedDimensionIds, 'dimension');
+        // Which references failed to resolve, so a refusal can name them.
+        // "identifier not admitted" without saying WHICH one leaves the model
+        // re-sending the same call, and leaves an operator reading the trace
+        // with no idea what was actually wrong.
+        const unresolvedReferences = [
+          ...(metricIds ? [] : requestedMetricIds.filter((reference) => !resolveV2SemanticCapabilityReference({
+            reference, role: 'metric', candidates: visibleCandidates(), capabilities: semanticCapabilities,
+          }))),
+          ...(dimensionIds ? [] : requestedDimensionIds.filter((reference) => !resolveV2SemanticCapabilityReference({
+            reference, role: 'dimension', candidates: visibleCandidates(), capabilities: semanticCapabilities,
+          }))),
+        ].slice(0, 8);
         const metricsForTime = metricIds
           ? resolveCandidates(metricIds, (candidate) => v2SemanticCandidateMatchesRole(candidate, 'metric'))
           : undefined;
@@ -2244,11 +2300,35 @@ function createAskV2LaneHandler(
           }
           observe('compile_and_run_semantic', outcome, reasonCode, {
             tier: 'semantic',
+            ...(unresolvedReferences.length ? { rejectedIdentifiers: unresolvedReferences } : {}),
             candidateIds,
             origin: 'validation',
             ...(safeNextTools.length ? { safeAction: `use:${safeNextTools.join(',')}` } : {}),
           });
-          return denied('compile_and_run_semantic', reasonCode);
+          // Name the identifiers that WOULD be accepted.
+          //
+          // A bare "identifier not admitted" refusal is unactionable: the
+          // model has just been shown metric cards whose `dimensions` are
+          // display names, and is required to answer in admitted candidate
+          // IDs. Told only that its choice was wrong, it cannot do better on
+          // the next turn, so it burns the dispatch budget guessing or gives
+          // up and reports a modeling gap that does not exist. The host knows
+          // the admitted set; withholding it serves no safety purpose,
+          // because these are exactly the IDs it already agreed to accept.
+          const admissible = reasonCode === 'SEMANTIC_IDENTIFIER_NOT_ADMITTED_TO_SNAPSHOT'
+            ? admittedSemanticIdentifiers()
+            : undefined;
+          return {
+            ...denied('compile_and_run_semantic', reasonCode, safeNextTools),
+            ...(admissible ? { admittedIdentifiers: admissible } : {}),
+            ...(admissible && unresolvedReferences.length
+              ? {
+                rejectedIdentifiers: unresolvedReferences,
+                usage: 'Re-send compile_and_run_semantic using values from admittedIdentifiers verbatim.'
+                  + ' The rejectedIdentifiers above are not identifiers this snapshot admits.',
+              }
+              : {}),
+          };
         };
         if (directlyRequestedCollisionIds.length > 0) {
           return semanticPreFreeze('unavailable', 'SEMANTIC_CAPABILITY_ID_COLLISION', directlyRequestedCollisionIds);
@@ -2281,7 +2361,20 @@ function createAskV2LaneHandler(
             ['compile_and_run_semantic'],
           );
         }
-        if (!filtersBound || !metricIds || !dimensionIds) return semanticPreFreeze('ineligible', 'SEMANTIC_IDENTIFIER_NOT_ADMITTED_TO_SNAPSHOT');
+        // A mis-specified identifier is a MALFORMED REQUEST, not proof that
+        // this tier cannot serve the question. Closing the semantic tier here
+        // meant one wrong argument permanently removed the only path that
+        // could have answered — the model was handed the admitted IDs and
+        // then forbidden from using them. Keep the tier open for one
+        // corrected call; the identifiers themselves are still validated.
+        if (!filtersBound || !metricIds || !dimensionIds) {
+          return semanticPreFreeze(
+            'ineligible',
+            'SEMANTIC_IDENTIFIER_NOT_ADMITTED_TO_SNAPSHOT',
+            semanticCandidateIds,
+            ['compile_and_run_semantic'],
+          );
+        }
         if (timeBindingCompletionFailure) {
           return semanticPreFreeze(
             timeBindingCompletionFailure.outcome,
@@ -2328,7 +2421,12 @@ function createAskV2LaneHandler(
         const dimensions = dimensionIds.length === 0 ? [] : resolveCandidates(dimensionIds, (candidate) => v2SemanticCandidateMatchesRole(candidate, 'dimension'));
         const filterCandidates = filterIds.length ? resolveCandidates(filterIds, (candidate) => v2SemanticCandidateMatchesRole(candidate, 'filter_dimension')) : [];
         if (!metrics || !dimensions || (timeId && !time) || !filterCandidates) {
-          return semanticPreFreeze('ineligible', 'SEMANTIC_IDENTIFIER_NOT_ADMITTED_TO_SNAPSHOT');
+          return semanticPreFreeze(
+            'ineligible',
+            'SEMANTIC_IDENTIFIER_NOT_ADMITTED_TO_SNAPSHOT',
+            semanticCandidateIds,
+            ['compile_and_run_semantic'],
+          );
         }
         if (!input.semanticQueryCompiler || !input.executeGeneratedSql) {
           return semanticPreFreeze('unavailable', 'SEMANTIC_EXECUTION_UNAVAILABLE');
@@ -2526,7 +2624,16 @@ function createAskV2LaneHandler(
           state.controllerTier = 'governed_relational';
         }
         observe('inspect_relational_context', candidates.length || paths.length ? 'eligible' : 'unavailable', candidates.length || paths.length ? 'relationship_paths_available' : 'relationship_paths_empty', { candidateIds: candidates.map(v2CandidateId), origin: 'retrieval' });
-        return { cards: candidates.map((candidate) => v2SafeCard(candidate, workspace)), relationshipPathHandles: paths };
+        return {
+          cards: candidates.map((candidate) => v2SafeCard(candidate, workspace)),
+          relationshipPathHandles: paths,
+          // `compile_and_run_dql` accepts these IDs and no others. Listing them
+          // here is what lets the next call be built rather than guessed.
+          admittedIdentifiers: candidates.map(v2CandidateId),
+          admittedRelationshipPathIds: paths.map((path) => path.id),
+          usage: 'Pass measureIds/dimensionIds/expectedOutputIds from admittedIdentifiers verbatim,'
+            + ' and relationshipPathIds from admittedRelationshipPathIds. A card\'s "name" is a label, not an identifier.',
+        };
       }),
       safeTool('compile_and_run_dql', 'Compile one DQL program only from admitted qualified IDs and atomic relationship path handles, then execute it as governed relational.', {
         type: 'object', properties: {
@@ -2853,6 +2960,10 @@ function createAskV2LaneHandler(
         // physical attempt boundary in the provider wrapper.
         dispatchPhase: 'agent_control',
         egressPurpose: 'answer_generation',
+        // V2's legal responses are tool calls only. The default contract
+        // invites a raw-SQL final answer, which this lane cannot accept and
+        // the parser cannot even read as a tool call.
+        textToolContract: buildAskV2TextToolContract,
         maxToolCalls: limits?.maxToolCalls ?? (state.turnClass === 'research' ? 24 : state.turnClass === 'analytics' || state.turnClass === 'prior_result' ? 8 : 4),
         maxProviderDispatches: limits?.maxProviderDispatches ?? (state.turnClass === 'research' ? 12 : state.turnClass === 'analytics' || state.turnClass === 'prior_result' ? 6 : 2),
         // The kernel owns current availability. Native transports evaluate it
@@ -4235,9 +4346,18 @@ export function createDqlAgentProviderRunner(id: SimpleProviderId, providerOverr
       // not an analytical repair route and retains its established three-tool
       // plus final-response wrapper cap; it cannot acquire the repair phase.
       const v2ResultEgress = v2Authoritative ? askV2ProviderResultEgress(req.projectRoot, id) : undefined;
+      // The authoritative V2 analyst walks a tier ladder: inspect certified,
+      // inspect semantic, attempt it, inspect relational, attempt that, and
+      // only then exploratory SQL — with a finish control reserved at the end.
+      // At six dispatches a single mis-specified argument anywhere in that
+      // sequence ended the turn with nothing executed, which read to users as
+      // "the AI could not answer" when it had simply run out of turns partway
+      // down a path it was following correctly. Ten leaves room to be wrong
+      // once per tier and still finish; the tool-call ceiling and the run
+      // deadline remain the real bounds.
       const maxProviderDispatches = isResearch
         ? (v2Authoritative ? 12 : 8)
-        : frozenExploratoryRepairRoute ? 3 : v2Authoritative ? 6 : 4;
+        : frozenExploratoryRepairRoute ? 3 : v2Authoritative ? 10 : 4;
       const researchRowsOptIn = isResearch && req.researchResultRowsOptIn === true;
       const sharedDispatchEvidence = req.providerDispatchEvidenceSink;
       let providerRoundTrips = 0;
